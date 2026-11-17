@@ -672,10 +672,22 @@ claim or union of the group. Groups are metadata in the plan, not new review-pag
 controls. A possible prose label vetoes a selection without deleting any evidence
 or canonical text. Unlabelled prose can still pass this filter.
 
-Only explicit, uniquely owned and verified caption references suggest expansion.
-The union of that owner and its linked captions must pass the raster/glyph checks;
-intervening glyphs outside those parts or a prose veto block it. Missing, shared,
-duplicate or ambiguous references never establish ownership by proximity.
+Only explicit, uniquely owned and verified caption/note references suggest expansion.
+`object_label_groups` preserves the role, region and exact ranges of each caption
+and `footnote_refs` target within one conversion scope and page. Missing, shared,
+duplicate, wrong-role or ambiguous references reject the entire group, with no
+partial expansion. The union of that owner and all linked parts must pass the
+raster/glyph checks; intervening glyphs outside those parts or a prose veto block
+it. A verified footnote is exempt from the prose veto only for its own object;
+unowned footnotes remain prose. Ownership is never inferred from proximity.
+
+A note box that clips a glyph edge may be expanded by at most 4pt per edge to
+contain the intersecting glyphs. This requires current safe geometry, no page
+gaps, a complete mapping, and canonical slices equal to the full model note text
+after whitespace removal. No text search or next-line inference is used. The
+original block remains unchanged; the adjusted part records its exact ranges and
+`bounded_glyph_envelope_exact_note_text` evidence. This checks local mapping, not
+whether the model found every note or source line.
 `complete_object_labels_unverified` remains on **every** item, even with explicit
 links: model links can omit notes, sources or credits. Missing links additionally
 carry `labels_not_established`. These are warnings, not completeness decisions.
@@ -731,6 +743,28 @@ approvals/imports. All six prior caption expansions remain, including the five
 tables still missing notes/source lines. Historical candidate/visual classifications
 are unchanged. This correction improves refusal alignment, not object coverage.
 
+### Explicit object notes: private follow-up
+
+Fresh offline Docling conversions of three pages retained 6 explicit note links
+for 4 owners. The other 17 historical layouts were reused. Removing the newly
+retained note references, per-conversion scopes and result-level confidence left
+the three layouts otherwise equal to their prior versions; the saved native
+documents do not contain result-level confidence, so those three scores are null.
+All 20 canonical page texts remained unchanged. The plan had 193 input candidates,
+58 ordinary boundary passes, 201 total proposals and 36 pending selections. Of the
+previous 34 selections, 32 were byte-identical, 2 caption-only selections were
+replaced, and 4 selections were new/expanded. Fresh individual production previews
+accepted all 36 on 11 pages, with zero approvals/imports. These used unchanged,
+previously compiled production preview classes, not a new Kotlin build.
+
+Executor inspection of the four full-size crops against their three source pages
+found the explicit notes included and no adjacent body text. Three crops still
+omit source lines. Only 2 of the 5 previously incomplete table expansions had
+explicit note links; 4 of those 5 still lack source lines. This is not independent
+review or a completeness rate. Every selection remains pending. Semantic
+deduplication, missing source/credit association and untagged cross-page tables
+remain unresolved; the old 66-candidate classification is not replaced.
+
 ### Regression commands
 
 ```sh
@@ -738,6 +772,8 @@ python3 -I -m unittest discover -s tools/reader-v2/reflow -v
 tools/dev/heavy --local python3 tools/reader-v2/reflow/verify_probe_geometry.py \
   --pdfbox-classpath "$PDFBOX_CLASSPATH"
 tools/dev/heavy --local "$DOCLING_PYTHON" tools/reader-v2/reflow/verify_object_review_plan.py \
+  --pdfbox-classpath "$PDFBOX_CLASSPATH"
+tools/dev/heavy --local "$DOCLING_PYTHON" tools/reader-v2/reflow/verify_explicit_notes.py \
   --pdfbox-classpath "$PDFBOX_CLASSPATH"
 tools/dev/heavy --local "$DOCLING_PYTHON" tools/reader-v2/reflow/verify_crop_candidates.py \
   --pdfbox-classpath "$PDFBOX_CLASSPATH"
@@ -752,7 +788,7 @@ DOCLING_ARTIFACTS_PATH="$DOCLING_MODELS" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
   -m unittest discover -s tools/reader-v2/layout/tests -v
 ```
 
-The 90 reflow tests (Pillow required for the 16 workspace/edit tests) cover diff accounting, private-output guards, stale identities,
+The 107 reflow tests (Pillow required for the 16 workspace/edit tests) cover diff accounting, private-output guards, stale identities,
 UTF-16/surrogate mappings, discontiguous ranges, table cuts/headers/rowspans,
 exact cell/glyph evidence and its refusal cases, touching vs gapped PDF rules,
 caption fragment references, scoped cross-page table partitions and header copies,
@@ -785,6 +821,14 @@ pages: normal, zero-width, zero-height and two CropBox-clamped gaps. It compares
 canonical text against an independent stripper, checks exact UTF-16 gap slices
 and retains only the normal pending selection. It uses known layout/raster
 evidence to isolate the gap contract, without models or recognition claims.
+Seventeen note tests add explicit ownership/role/scope refusal, precise separate
+source ranges, prose/unowned-note vetoes, bounded edge repair and exact-text
+refusal, stale/unsafe geometry, and native Docling reference serialization. The
+previous 90 tests are unchanged. `verify_explicit_notes.py` uses actual PDFBox
+glyphs and PDFium rasters on the existing four-page fixture: canonical pages
+remain unchanged, a clipped note edge yields one pending expansion, and changed,
+incomplete or elsewhere text plus intervening unowned glyphs are refused. Known
+layout roles isolate mapping; this does not test note recognition or completeness.
 The Java integration compiles with `--release 17`, generates four self-authored
 PDF pages and compares against an independent plain PDFTextStripper baseline:
 120 glyph spans, segmented table rules, borderless table/header evidence,

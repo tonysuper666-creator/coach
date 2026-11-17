@@ -243,6 +243,86 @@ def table_payload(block, layout, probe, geometry_safe=True):
     return result
 
 
+def explicit_note_part(note, original, layout, probe):
+    """Repair only a clipped glyph edge, using exact note text as a cross-check.
+
+    No string search, next-line inference or rewriting of the original block.
+    The bounded envelope must map completely and reproduce the model note text
+    from canonical slices, ignoring whitespace only. This is not completeness.
+    """
+    part = {k: original[k] for k in ("id", "source_region", "source_ranges", "mapping_status")}
+    if (part["mapping_status"] != "ambiguous" or part["source_region"] is None or
+            not isinstance(note.get("text"), str) or not note["text"].strip() or
+            probe.get("glyph_geometry_checked") is not True or probe.get("unmapped_ranges")):
+        return part
+    box = crop_rect(note["bbox"], layout)
+    glyphs = [g for g in probe["glyphs"] if intersects(box, g["bbox"])]
+    if not glyphs:
+        return part
+    envelope = [min([box[0]] + [g["bbox"][0] for g in glyphs]),
+                min([box[1]] + [g["bbox"][1] for g in glyphs]),
+                max([box[2]] + [g["bbox"][2] for g in glyphs]),
+                max([box[3]] + [g["bbox"][3] for g in glyphs])]
+    if (any(abs(a - b) > 4 for a, b in zip(box, envelope)) or
+            not contains([0, 0, probe["width"], probe["height"]], envelope, epsilon=0)):
+        return part
+    mapped = source_mapping(envelope, probe)
+    if mapped["mapping_status"] not in ("mapped", "discontiguous"):
+        return part
+    text = utf16(probe["text"])
+    actual = "".join(text[a*2:b*2].decode("utf-16-le") for a, b in mapped["source_ranges"])
+    if "".join(actual.split()) != "".join(note["text"].split()):
+        return part
+    return {**part, "source_region": normalized(envelope, layout),
+            "source_ranges": mapped["source_ranges"], "mapping_status": mapped["mapping_status"],
+            "geometry_evidence": "bounded_glyph_envelope_exact_note_text"}
+
+
+def object_label_groups(layout, indexed, probe):
+    """Keep explicit captions AND table/picture notes; never infer ownership.
+
+    A model link is extraction evidence for human review, not proof of semantic
+    completeness. Resolve within one conversion scope and one physical page.
+    """
+    refs, claims = {}, {}
+    roles = (("caption", "caption_refs"), ("footnote", "footnote_refs"))
+    for b in layout["blocks"]:
+        scope = b.get("source_scope")
+        if b.get("source_ref"):
+            refs.setdefault((scope, b["source_ref"]), []).append(b)
+        for _, field in roles:
+            for ref in b.get(field, []):
+                claims.setdefault((scope, ref), []).append(b["id"])
+    groups = []
+    for b in layout["blocks"]:
+        if b["kind"] not in ("table", "figure"):
+            continue
+        requested = [(role, ref) for role, field in roles for ref in b.get(field, [])]
+        parts = []
+        valid = bool(requested) and b.get("provenance_count", 1) == 1
+        for role, ref in requested:
+            key = (b.get("source_scope"), ref)
+            matches = refs.get(key, [])
+            if (len(matches) != 1 or matches[0]["kind"] != role or
+                    claims[key] != [b["id"]] or
+                    matches[0].get("provenance_count", 1) != 1):
+                valid = False
+                continue
+            target = matches[0]
+            part = indexed[target["id"]]
+            source = (explicit_note_part(target, part, layout, probe) if role == "footnote" else
+                      {k: part[k] for k in ("id", "source_region", "source_ranges", "mapping_status")})
+            parts.append(dict(role=role, **source))
+        verified = (valid and not layout.get("fallback") and
+                    all(p["source_region"] is not None and
+                        p["mapping_status"] in ("mapped", "discontiguous") for p in parts))
+        groups.append({"owner_id": b["id"], "status": "linked" if valid else "unresolved",
+                       "placement_status": "source_parts_verified" if verified else "unverified",
+                       "source_parts": parts if valid else [], "replacement_range": None,
+                       "hide_source_allowed": False, "import_allowed": False})
+    return groups
+
+
 def build_payload(probe, layout):
     if (probe.get("doc_sha256") != layout["doc_sha256"] or not probe.get("doc_sha256") or
             probe["page"] != layout["page_number"] or probe.get("offset_unit") != "utf16"):
@@ -314,6 +394,7 @@ def build_payload(probe, layout):
                                           for part in parts) else "unverified")
         group["replacement_range"] = None
         payload["caption_groups"].append(group)
+    payload["object_label_groups"] = object_label_groups(layout, indexed, probe)
     return payload
 
 

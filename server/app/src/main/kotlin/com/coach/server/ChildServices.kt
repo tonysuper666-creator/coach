@@ -11,15 +11,13 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
-/** Opt-in for the installed service. Standalone servers and isolated tests own no children. */
+/** Opt-in child ownership for installed services and isolated managed previews. */
 internal class ChildServices(private val scope: CoroutineScope, private val env: Map<String, String> = System.getenv()) {
     private val root = Path.of(env.getValue("COACH_SERVICE_ROOT"))
     private val run = Files.createDirectories(Path.of(env.getValue("COACH_RUN_DIR")))
     private val logs = Path.of(env.getValue("COACH_LOG_DIR"))
     private val python = env.getValue("COACH_PYTHON")
-    private val bridgePort = (env["BRIDGE_PORT"] ?: "8791").toInt().also {
-        require(it == 8791) { "The managed bridge must use the isolated Coach port 8791" }
-    }
+    private val bridgePort = managedBridgePort(env)
     private val jobs = mutableListOf<Job>()
 
     fun start() {

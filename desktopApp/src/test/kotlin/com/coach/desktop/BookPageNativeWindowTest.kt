@@ -14,20 +14,30 @@ import org.apache.pdfbox.pdmodel.PDPage
 import org.apache.pdfbox.pdmodel.PDPageContentStream
 import org.apache.pdfbox.pdmodel.font.PDType0Font
 import org.junit.Assume.assumeTrue
+import com.sun.jna.Native
+import com.sun.jna.Pointer
+import com.sun.jna.WString
+import com.sun.jna.win32.StdCallLibrary
+import java.awt.AWTEvent
 import java.awt.GraphicsEnvironment
-import java.awt.Robot
 import java.awt.Point
+import java.awt.Robot
+import java.awt.Toolkit
+import java.awt.Window
+import java.awt.event.AWTEventListener
 import java.awt.event.InputEvent
 import java.awt.event.KeyEvent
 import java.nio.file.Files
 import java.nio.file.Path
-import javax.swing.SwingUtilities
+import java.util.concurrent.atomic.AtomicInteger
 import javax.imageio.ImageIO
+import javax.swing.SwingUtilities
 import kotlin.test.*
 
 /** Real Windows window, OS keyboard and an imported, self-authored PDF. No paired service. */
 @OptIn(InternalComposeUiApi::class, ExperimentalComposeUiApi::class, ComposeToolingApi::class)
 class BookPageNativeWindowTest {
+    private var diagnostics: () -> String = { "not initialized" }
     @Test fun keyboardReflowSourceAndPdfViewsPreserveAnchors() {
         assumeTrue(System.getProperty("os.name").startsWith("Windows"))
         val root = Files.createTempDirectory("coach-pagination-native-")
@@ -86,6 +96,17 @@ class BookPageNativeWindowTest {
                     isVisible = true
                     toFront(); requestFocus()
                 } }
+                val keysHere = AtomicInteger()
+                val keyListener = AWTEventListener { event ->
+                    if (event is KeyEvent && event.id == KeyEvent.KEY_PRESSED &&
+                        event.keyCode in listOf(KeyEvent.VK_PAGE_DOWN, KeyEvent.VK_PAGE_UP) &&
+                        (event.source as? java.awt.Component)?.let { SwingUtilities.getWindowAncestor(it) ?: it } === window) {
+                        keysHere.incrementAndGet()
+                        println("KEY_ARRIVAL key=${event.keyCode} ${diagnostics()}")
+                    }
+                }
+                Toolkit.getDefaultToolkit().addAWTEventListener(keyListener, AWTEvent.KEY_EVENT_MASK)
+                diagnostics = { "windowFocused=${window.isFocused}, pageFocused=${node(window, "reader-page")?.config?.getOrNull(SemanticsProperties.Focused)}, busy=${controller.state.value.busy}, importPage=${controller.state.value.page}, receivedKeys=${keysHere.get()}" }
                 try {
                     waitFor("PDF original") { node(window, "book-original-toggle") != null }
                     shot(window, dark, "pdf-original")
@@ -95,28 +116,14 @@ class BookPageNativeWindowTest {
                     val robot = Robot().apply { autoDelay = 50 }
                     // A semantics click does not activate the OS window. Take keyboard foreground
                     // with a real click, then focus the reader rather than the view toggle.
-                    val target = edt {
-                        window.toFront()
-                        val bounds = node(window, "reader-page")!!.boundsInRoot
-                        val origin = window.contentPane.locationOnScreen
-                        val scale = window.graphicsConfiguration.defaultTransform
-                        Point(origin.x + (bounds.center.x / scale.scaleX).toInt(),
-                            origin.y + ((bounds.bottom - 30) / scale.scaleY).toInt())
-                    }
-                    robot.mouseMove(target.x, target.y)
-                    robot.mousePress(InputEvent.BUTTON1_DOWN_MASK); robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
-                    robot.waitForIdle()
-                    edt { assertTrue(node(window, "reader-page")!!.config[SemanticsActions.RequestFocus].action!!.invoke()) }
-                    waitFor("native reader keyboard focus") {
-                        edt { window.isFocused && node(window, "reader-page")!!.config.getOrNull(SemanticsProperties.Focused) == true }
-                    }
+                    focusReader(window, robot)
                     val seen = mutableSetOf<String>()
                     fun text() = edt { node(window, "reader-text")!!.config[SemanticsProperties.Text].single().text }
                     seen += text()
                     repeat(10) { index ->
                         val previous = text()
-                        robot.keyPress(KeyEvent.VK_PAGE_DOWN); robot.keyRelease(KeyEvent.VK_PAGE_DOWN)
-                        waitFor("keyboard layout page ${index + 2}") { text() != previous }
+                        pressReaderKey(window, robot, KeyEvent.VK_PAGE_DOWN, keysHere)
+                        waitFor("keyboard layout page ${index + 2}") { controller.state.value.page == index + 2 && text() != previous }
                         seen += text()
                     }
                     assertEquals(11, seen.size)
@@ -132,7 +139,10 @@ class BookPageNativeWindowTest {
                     assertEquals(originals.getValue(beforeResize).substring(passage.start, passage.end), passage.text)
                     assertEquals(passage.text, edt { node(window, "book-passage-source")!!.config[SemanticsProperties.Text].single().text })
                     shot(window, dark, "exact-source")
-                    robot.keyPress(KeyEvent.VK_ESCAPE); robot.keyRelease(KeyEvent.VK_ESCAPE)
+                    foreground {
+                        activate(frontWindow(window))
+                        robot.keyPress(KeyEvent.VK_ESCAPE); robot.keyRelease(KeyEvent.VK_ESCAPE)
+                    }
                     waitFor("source closed") { node(window, "book-passage-source") == null }
                     click(window, "book-passage-close")
                     waitFor("reader restored") { node(window, "book-passage-dialog") == null }
@@ -146,10 +156,10 @@ class BookPageNativeWindowTest {
                     println("NATIVE_PAGINATION theme=${if (dark) "dark" else "light"} keyboardTurns=10 sourceExact=true viewRoundTrip=true; checking spread resize next")
                     // Leave a following chapter available, so two sheets means two
                     // actual bodies rather than an empty final right-hand sheet.
-                    edt { assertTrue(node(window, "reader-page")!!.config[SemanticsActions.RequestFocus].action!!.invoke()) }
+                    focusReader(window, robot)
                     val lastText = text()
-                    robot.keyPress(KeyEvent.VK_PAGE_UP); robot.keyRelease(KeyEvent.VK_PAGE_UP)
-                    waitFor("chapter before final page") { text() != lastText }
+                    pressReaderKey(window, robot, KeyEvent.VK_PAGE_UP, keysHere)
+                    waitFor("chapter before final page") { controller.state.value.page == beforeResize - 1 && text() != lastText }
                     val anchorBeforeResize = controller.state.value.page
                     edt { window.setSize(2500, minOf(window.height, 1000)) }
                     waitFor("actual reader reaches spread threshold") {
@@ -172,7 +182,10 @@ class BookPageNativeWindowTest {
                     assertEquals(anchorBeforeResize, controller.state.value.page)
                     shot(window, dark, "narrow-single-page")
 
-                } finally { edt { window.dispose() } }
+                } finally {
+                    Toolkit.getDefaultToolkit().removeAWTEventListener(keyListener)
+                    edt { window.dispose() }
+                }
                 assertEquals(originals, controller.library.book(controller.state.value.book!!.id).pages.associate { it.number to it.text })
                 println("NATIVE_PAGINATION theme=${if (dark) "dark" else "light"} keyboardTurns=10 sourceExact=true sourceOffsetsUnchanged=true spreadResize=true viewRoundTrip=true")
             }
@@ -199,21 +212,87 @@ class BookPageNativeWindowTest {
     }
     private fun shot(window: ComposeWindow, dark: Boolean, name: String) {
         Thread.sleep(400)
-        edt {
-            val path = Path.of("build/screens/pagination-native", if (dark) "dark" else "light")
-            Files.createDirectories(path)
-            window.renderImmediately()
-            VerifyHooks.capture(window, path.resolve("$name.png").toFile())
-            ImageIO.write(Robot().createScreenCapture(window.bounds), "png", path.resolve("$name-window.png").toFile())
-            window.ownedWindows.filterIsInstance<ComposeDialog>().filter { it.isVisible }.forEachIndexed { i, dialog ->
-                dialog.renderImmediately()
-                VerifyHooks.capture(dialog, path.resolve("$name-dialog-$i.png").toFile())
+        foreground {
+            val active = frontWindow(window)
+            activate(active)
+            edt {
+                val path = Path.of("build/screens/pagination-native", if (dark) "dark" else "light")
+                Files.createDirectories(path)
+                window.renderImmediately()
+                VerifyHooks.capture(window, path.resolve("$name.png").toFile())
+                ImageIO.write(Robot().createScreenCapture(window.bounds), "png", path.resolve("$name-window.png").toFile())
+                window.ownedWindows.filterIsInstance<ComposeDialog>().filter { it.isVisible }.forEachIndexed { i, dialog ->
+                    dialog.renderImmediately()
+                    VerifyHooks.capture(dialog, path.resolve("$name-dialog-$i.png").toFile())
+                }
             }
         }
     }
+    private fun frontWindow(window: Window): Window = edt {
+        window.ownedWindows.lastOrNull { it.isVisible && it.isFocusableWindow }?.let(::frontWindow) ?: window
+    }
+    private fun focusReader(window: ComposeWindow, robot: Robot) {
+        foreground {
+            activate(window)
+            val target = edt {
+                val bounds = node(window, "reader-page")!!.boundsInRoot
+                val origin = window.contentPane.locationOnScreen
+                val scale = window.graphicsConfiguration.defaultTransform
+                Point(origin.x + (bounds.center.x / scale.scaleX).toInt(),
+                    origin.y + ((bounds.bottom - 30) / scale.scaleY).toInt())
+            }
+            robot.mouseMove(target.x, target.y)
+            robot.mousePress(InputEvent.BUTTON1_DOWN_MASK); robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
+            robot.waitForIdle()
+            edt { assertTrue(node(window, "reader-page")!!.config[SemanticsActions.RequestFocus].action!!.invoke()) }
+            assertTrue(window.isFocused, diagnostics())
+        }
+        waitFor("Compose reader keyboard focus") {
+            node(window, "reader-page")!!.config.getOrNull(SemanticsProperties.Focused) == true
+        }
+    }
+    private fun pressReaderKey(window: ComposeWindow, robot: Robot, key: Int, keysHere: AtomicInteger) {
+        val before = keysHere.get()
+        foreground {
+            activate(window)
+            // Reclaiming OS foreground must preserve the reader's Compose focus.
+            assertTrue(node(window, "reader-page")!!.config.getOrNull(SemanticsProperties.Focused) == true, diagnostics())
+            robot.keyPress(key); robot.keyRelease(key)
+            robot.waitForIdle()
+        }
+        waitFor("OS key $key reaches this window") { keysHere.get() > before }
+        println("KEY_DELIVERED key=$key; ${diagnostics()}")
+    }
+    private fun activate(window: Window) {
+        val handle = Native.getComponentPointer(window)
+        val user = NativeUser
+        if (user.GetForegroundWindow() != handle) {
+            val thread = user.GetWindowThreadProcessId(user.GetForegroundWindow(), null)
+            val caller = NativeKernel.GetCurrentThreadId()
+            user.GetQueueStatus(0x04ff)
+            val attached = thread != 0 && caller != thread && user.AttachThreadInput(caller, thread, true)
+            try {
+                user.BringWindowToTop(handle)
+                user.SetForegroundWindow(handle)
+            } finally { if (attached) user.AttachThreadInput(caller, thread, false) }
+        }
+        Thread.sleep(150)
+        assertEquals(handle, user.GetForegroundWindow(), "Our window must own OS foreground; ${diagnostics()}")
+    }
+    private fun <T> foreground(block: () -> T): T {
+        // Same short action mutex as Win-Drive. Never hold it while waiting for reflow or saving.
+        val mutex = NativeKernel.CreateMutexW(null, false, WString("Global\\Coach.WinDrive.Foreground"))!!
+        var held = false
+        try {
+            val result = NativeKernel.WaitForSingleObject(mutex, 30_000)
+            held = result == 0 || result == 0x80 // An abandoned mutex also grants ownership.
+            check(held) { "Foreground action mutex failed: $result" }
+            return block()
+        } finally { if (held) NativeKernel.ReleaseMutex(mutex); NativeKernel.CloseHandle(mutex) }
+    }
     private fun waitFor(label: String, condition: () -> Boolean) {
         val deadline = System.nanoTime() + 20_000_000_000L
-        while (!condition()) { check(System.nanoTime() < deadline) { "Timed out: $label" }; Thread.sleep(100) }
+        while (!condition()) { check(System.nanoTime() < deadline) { "Timed out: $label; ${diagnostics()}" }; Thread.sleep(100) }
     }
     private fun <T> edt(block: () -> T): T {
         if (SwingUtilities.isEventDispatchThread()) return block()
@@ -222,3 +301,21 @@ class BookPageNativeWindowTest {
         return checkNotNull(result).getOrThrow()
     }
 }
+
+private interface Kernel : StdCallLibrary {
+    fun CreateMutexW(attributes: Pointer?, owner: Boolean, name: WString): Pointer?
+    fun WaitForSingleObject(handle: Pointer, timeout: Int): Int
+    fun ReleaseMutex(handle: Pointer): Boolean
+    fun CloseHandle(handle: Pointer): Boolean
+    fun GetCurrentThreadId(): Int
+}
+private interface User : StdCallLibrary {
+    fun GetForegroundWindow(): Pointer
+    fun GetWindowThreadProcessId(window: Pointer, process: Pointer?): Int
+    fun GetQueueStatus(flags: Int): Int
+    fun AttachThreadInput(from: Int, to: Int, attach: Boolean): Boolean
+    fun BringWindowToTop(window: Pointer): Boolean
+    fun SetForegroundWindow(window: Pointer): Boolean
+}
+private val NativeKernel by lazy { Native.load("kernel32", Kernel::class.java) }
+private val NativeUser by lazy { Native.load("user32", User::class.java) }

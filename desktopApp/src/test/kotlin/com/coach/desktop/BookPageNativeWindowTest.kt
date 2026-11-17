@@ -229,7 +229,7 @@ class BookPageNativeWindowTest {
         }
     }
     private fun frontWindow(window: Window): Window = edt {
-        window.ownedWindows.lastOrNull { it.isVisible && it.isFocusableWindow }?.let(::frontWindow) ?: window
+        window.ownedWindows.filterIsInstance<ComposeDialog>().lastOrNull { it.isVisible }?.let(::frontWindow) ?: window
     }
     private fun focusReader(window: ComposeWindow, robot: Robot) {
         foreground {
@@ -266,19 +266,27 @@ class BookPageNativeWindowTest {
     private fun activate(window: Window) {
         val handle = Native.getComponentPointer(window)
         val user = NativeUser
-        if (user.GetForegroundWindow() != handle) {
-            val thread = user.GetWindowThreadProcessId(user.GetForegroundWindow(), null)
-            val caller = NativeKernel.GetCurrentThreadId()
-            user.GetQueueStatus(0x04ff)
-            val attached = thread != 0 && caller != thread && user.AttachThreadInput(caller, thread, true)
-            try {
-                user.BringWindowToTop(handle)
-                user.SetForegroundWindow(handle)
-            } finally { if (attached) user.AttachThreadInput(caller, thread, false) }
+        repeat(10) { attempt ->
+            if (user.IsIconic(handle)) user.ShowWindow(handle, 9)
+            if (user.GetForegroundWindow() != handle) {
+                val thread = user.GetWindowThreadProcessId(user.GetForegroundWindow(), null)
+                val caller = NativeKernel.GetCurrentThreadId()
+                user.GetQueueStatus(0x04ff)
+                val attached = thread != 0 && caller != thread && user.AttachThreadInput(caller, thread, true)
+                try {
+                    user.BringWindowToTop(handle)
+                    user.SetForegroundWindow(handle)
+                } finally { if (attached) user.AttachThreadInput(caller, thread, false) }
+            }
+            Thread.sleep(150)
+            if (user.GetForegroundWindow() == handle) return
+            val title = CharArray(256)
+            user.GetWindowTextW(user.GetForegroundWindow(), title, title.size)
+            println("FOREGROUND_RETRY attempt=${attempt + 1} target=${window.javaClass.simpleName}:$handle foreground=${user.GetForegroundWindow()}:${Native.toString(title)}; ${diagnostics()}")
         }
-        Thread.sleep(150)
         assertEquals(handle, user.GetForegroundWindow(), "Our window must own OS foreground; ${diagnostics()}")
     }
+
     private fun <T> foreground(block: () -> T): T {
         // Same short action mutex as Win-Drive. Never hold it while waiting for reflow or saving.
         val mutex = NativeKernel.CreateMutexW(null, false, WString("Global\\Coach.WinDrive.Foreground"))!!
@@ -310,6 +318,9 @@ private interface Kernel : StdCallLibrary {
     fun GetCurrentThreadId(): Int
 }
 private interface User : StdCallLibrary {
+    fun IsIconic(window: Pointer): Boolean
+    fun ShowWindow(window: Pointer, command: Int): Boolean
+    fun GetWindowTextW(window: Pointer, text: CharArray, count: Int): Int
     fun GetForegroundWindow(): Pointer
     fun GetWindowThreadProcessId(window: Pointer, process: Pointer?): Int
     fun GetQueueStatus(flags: Int): Int

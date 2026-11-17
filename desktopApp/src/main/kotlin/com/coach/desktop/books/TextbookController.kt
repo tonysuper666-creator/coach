@@ -40,7 +40,8 @@ internal class TextbookController(val library: TextbookLibrary) {
         try { withContext(Dispatchers.IO) { block() } }
         catch (cancel: CancellationException) { throw cancel }
         catch (failure: Exception) {
-            mutable.update { it.copy(error = if (failure is IllegalArgumentException) failure.message else "暂时无法读取或保存教材，请确认文件完整、未加密，然后重试。") }
+            mutable.update { it.copy(error = failure.message.takeIf { failure is IllegalArgumentException && ReadableText.readsAsChinese(it) }
+                ?: "暂时无法读取或保存教材，请确认文件完整、未加密，然后重试。") }
         } finally { mutable.update { it.copy(busy = false) } }
     }
 

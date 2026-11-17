@@ -77,7 +77,7 @@ internal class PairedBookExplainSupport(
                             BookPassage(request.book, block.page, block.start, block.end, block.text)
                         }
                     }
-                    BookLearningReply.Text(withShortIds(result.explanation.text, result.explanation.citations), cited)
+                    BookLearningReply.Text(ReadableText.withoutCitationMarks(result.explanation.text), cited)
                 }
                 is ExplainResult.Refused -> BookLearningReply.Unavailable(result.message, result.trouble)
             }
@@ -95,12 +95,6 @@ internal class PairedBookExplainSupport(
         const val CONSENT_FIRST = "讲解要先得到你的允许：在原文页点「讲解」并允许一次，或在这里直接允许。"
     }
 }
-
-/** `【anchor】` in the server's reply becomes the short block id the reader can point at. */
-private fun withShortIds(text: String, citations: List<Citation>): String =
-    citations.fold(text) { shown, citation ->
-        shown.replace("【${citation.anchor}】", "【${ExplainWire.shortId(citation.blockId)}】")
-    }
 
 /**
  * 答完题之后的这一块：没配对就指路，没允许就问一次，都齐了才真的去取讲解。

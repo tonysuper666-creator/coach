@@ -8,7 +8,11 @@
 
 Windows 可能会弹出「Windows 已保护你的电脑」。这时点「更多信息」，再点「仍要运行」就能装。
 
-[SmartScreen 截图待补，等 TON-1695 提供]
+![第一屏：Windows 已保护你的电脑](acceptance/TON-1696-smartscreen-1.png)
+
+点「更多信息」，会多出应用名和「发布者未知」，这时点「仍要运行」。
+
+![点完「更多信息」后：仍要运行](acceptance/TON-1696-smartscreen-2.png)
 
 ## 2. 配对
 

@@ -1,9 +1,12 @@
 package com.coach.desktop.books
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -12,6 +15,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.Dp
@@ -92,13 +99,37 @@ private fun EntryCard(title: String, description: String, tag: String, enabled: 
     }
 }
 
+/**
+ * 一组单选里的一格（这次怎么读、出题）。没选是 surface1 的纸配细描边；选中是松绿描边、松绿淡底、松绿字，
+ * 左边一个画出来的对勾，和笔记导出、答对的选项同一套颜色。对勾的位置每格都留着，选中时文字不跳。
+ */
+@Composable
+private fun V7Choice(label: String, selected: Boolean, enabled: Boolean, tag: String, onClick: () -> Unit) {
+    val colors = CoachTheme.colors
+    val shape = RoundedCornerShape(CoachV7.Radius.btn)
+    val pine = v7Pine()
+    val wash = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
+    Row(Modifier.testTag(tag).v7FocusRing(shape).clip(shape).background(if (selected) wash else colors.surface1)
+        .border(1.dp, if (selected) pine else colors.borderSubtle, shape)
+        .selectable(selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
+        .alpha(if (enabled) 1f else .5f).heightIn(min = 36.dp).padding(start = 10.dp, end = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Canvas(Modifier.size(14.dp)) {
+            if (!selected) return@Canvas
+            val w = size.width
+            drawPath(Path().apply { moveTo(w * 0.12f, w * 0.52f); lineTo(w * 0.40f, w * 0.78f); lineTo(w * 0.88f, w * 0.24f) },
+                pine, style = Stroke(1.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+        }
+        Text(label, style = MaterialTheme.typography.labelLarge, color = if (selected) pine else colors.fgPrimary)
+    }
+}
+
 @Composable
 private fun QuestionModePicker(selected: QuestionMode, enabled: Boolean, onMode: (QuestionMode) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("出题", style = MaterialTheme.typography.titleSmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            for (mode in QuestionMode.entries) FilterChip(selected = selected == mode, onClick = { onMode(mode) },
-                enabled = enabled, label = { Text(mode.label) }, modifier = Modifier.testTag("question-mode-${mode.name}"))
+            for (mode in QuestionMode.entries) V7Choice(mode.label, selected == mode, enabled, "question-mode-${mode.name}") { onMode(mode) }
         }
         Text(when (selected) {
             QuestionMode.NONE -> "只学教材内容，随时可以再开启练习。"
@@ -132,14 +163,13 @@ internal fun BookEntryPrompt(ui: LibraryUi, onDismiss: () -> Unit, onRead: () ->
                     Text("这次怎么读", style = MaterialTheme.typography.titleSmall)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         LearningPath.entries.forEach { path ->
-                            FilterChip(selected = ui.learningPath == path, onClick = { onPath(path) }, enabled = !ui.busy,
-                                label = { Text(path.label) }, modifier = Modifier.testTag("learning-path-${path.name}"))
+                            V7Choice(path.label, ui.learningPath == path, !ui.busy, "learning-path-${path.name}") { onPath(path) }
                         }
                     }
                 }
                 if (ui.learningPath != LearningPath.READ) QuestionModePicker(book.questionMode, !ui.busy, onMode)
                 if (book.pages.any { it.text.isBlank() }) Text("部分页面没有可提取文字，仍可在阅读器查看原页。学的时候只用能提取出文字的部分。", style = MaterialTheme.typography.bodySmall)
-                ui.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                ui.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = v7Alert()) }
             }
         }, confirmButton = {
             V7TextButton(onClick = if (settings) onDismiss else onEnable, enabled = !ui.busy,

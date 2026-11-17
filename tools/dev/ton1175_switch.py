@@ -254,15 +254,16 @@ def prepare(c, apply):
 
 
 def friend_environment(c, env, info):
-    """Opt-in first cutover; require the durable start interlock before staging."""
+    """First cutover. Two-field input uses credential-domain isolation.
+
+    The historical three-field policy input is retained for old staged recovery;
+    it must never silently become a policy-free transaction.
+    """
     friend = c.get('friendAccess')
     if friend is None:
         return env
-    require(set(friend) == {'publicPort', 'config', 'policy'}, 'invalid friend configuration')
-    try:
-        from . import friend_service_guard as guard
-    except ImportError:
-        import friend_service_guard as guard
+    require(set(friend) in ({'publicPort', 'config'}, {'publicPort', 'config', 'policy'}),
+            'invalid friend configuration')
     port = friend['publicPort']
     require(type(port) is int and 1 <= port <= 65535
             and port not in (18791, 8790, 8791, 3790, 19540, int(info.get('port', 18791))),
@@ -270,13 +271,32 @@ def friend_environment(c, env, info):
     require('COACH_PUBLIC_PORT' not in env and 'COACH_FRIEND_CONFIG' not in env,
             'friend migration already configured; rebind a separate upgrade plan')
     try:
-        policy_path = guard.private_file(friend['policy'])
-        policy = guard.policy_at(policy_path)
-        config_path = guard.private_file(friend['config'])
+        config_path = Path(friend['config'])
+        require(config_path.is_absolute() and config_path.resolve(strict=True) == config_path,
+                'friend config must be a canonical private file')
+        config_stat = config_path.lstat()
+        require(stat.S_ISREG(config_stat.st_mode) and config_stat.st_uid == os.getuid()
+                and stat.S_IMODE(config_stat.st_mode) == 0o600,
+                'friend config must be a canonical private file')
         limits = load(config_path)
         require(limits.get('paused') is True and all(type(limits.get('defaults', {}).get(key)) is int
                 and limits['defaults'][key] > 0 for key in ('daily_calls', 'daily_tokens')),
                 'friend config must start paused with explicit limits')
+        if 'policy' not in friend:
+            with socket.socket() as listener:
+                listener.bind(('127.0.0.1', port))
+            return dict(env, COACH_PUBLIC_PORT=str(port), COACH_FRIEND_CONFIG=str(config_path))
+        # Historical guard mode only. New domain-based plans do not read a
+        # policy, run a guard, deploy helpers, or revoke credentials on startup.
+        try:
+            from . import friend_service_guard as guard
+        except ImportError:
+            import friend_service_guard as guard
+        try:
+            policy_path = guard.private_file(friend['policy'])
+            policy = guard.policy_at(policy_path)
+        except guard.GateError as error:
+            raise GateError('friend historical policy preflight failed') from error
         require(policy['publicPort'] == port and c['candidateHead'] in policy['capableHeads'],
                 'friend policy candidate/port mismatch')
         require(Path(policy['binding']['database']) == Path(info['dataDir']).resolve(strict=True) / 'coach.sqlite',
@@ -292,7 +312,7 @@ def friend_environment(c, env, info):
         require(not (base / 'friend-start-blocked.json').exists(), 'friend start gate latched closed')
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', port))
-    except (OSError, ValueError, KeyError, TypeError, guard.GateError) as error:
+    except (OSError, ValueError, KeyError, TypeError) as error:
         raise GateError('friend stage preflight failed') from error
     return dict(env, COACH_PUBLIC_PORT=str(port), COACH_FRIEND_CONFIG=str(config_path))
 
@@ -339,10 +359,18 @@ def stage(c, apply):
              'plistMode': stat.S_IMODE(Path(c['plist']).stat().st_mode),
              'installationMode': stat.S_IMODE(Path(c['installation']).stat().st_mode)}
     if c.get('friendAccess') is not None:
-        policy = Path(c['friendAccess']['policy'])
-        state['friendGuardFiles'] = {str(path): file_hash(path) for path in
-            (policy, policy.parent / 'control.py', policy.parent / 'friend_service_guard.py',
-             policy.parent / 'friend_revoke_offline.py')}
+        if 'policy' in c['friendAccess']:
+            policy = Path(c['friendAccess']['policy'])
+            state['friendGuardFiles'] = {str(path): file_hash(path) for path in
+                (policy, policy.parent / 'control.py', policy.parent / 'friend_service_guard.py',
+                 policy.parent / 'friend_revoke_offline.py')}
+        else:
+            # The frozen candidate verifier/review must prove friend-v1 support.
+            # This marker binds the transaction mode, not binary capability.
+            state['friendCredentialDomain'] = 'coach-friend-v1'
+            state['friendControllerFiles'] = {str(Path(part).resolve()): file_hash(part)
+                for part in c['controller'] if Path(part).is_file()}
+            require(bool(state['friendControllerFiles']), 'controller file binding missing')
         state['friendInitialConfigSha256'] = file_hash(c['friendAccess']['config'])
     if not apply:
         print('stage dry-run: gates passed; no files written')
@@ -363,9 +391,15 @@ def stage(c, apply):
 def operate(c, action, apply):
     ops, state = load_state(c)
     if c.get('friendAccess') is not None:
-        require(bool(state.get('friendGuardFiles')), 'friend guard bindings missing')
-        require(all(file_hash(path) == expected for path, expected in state['friendGuardFiles'].items()),
-                'friend guard policy or controller changed; re-review required')
+        if 'policy' in c['friendAccess']:
+            bindings = state.get('friendGuardFiles')
+        else:
+            require(state.get('friendCredentialDomain') == 'coach-friend-v1',
+                    'friend credential domain binding missing; create a new stage')
+            bindings = state.get('friendControllerFiles')
+        require(bool(bindings), 'friend controller bindings missing')
+        require(all(file_hash(path) == expected for path, expected in bindings.items()),
+                'friend controller or historical policy changed; re-review required')
     lock = open(ops / 'lock', 'rb')
     with lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -382,6 +416,12 @@ def operate(c, action, apply):
             if c.get('friendAccess') is not None:
                 require(file_hash(c['friendAccess']['config']) == state['friendInitialConfigSha256'],
                         'friend config must remain paused until owner acceptance')
+                if 'policy' not in c['friendAccess']:
+                    # Recheck permissions, paused limits and port availability
+                    # immediately before stopping. Recovery never depends on
+                    # the current friend configuration or on a free friend port.
+                    friend_environment(c, plistlib.loads((ops / 'old.plist').read_bytes())['EnvironmentVariables'],
+                                       load(ops / 'old.json'))
             require(tree_hash(c['release']) == state['candidateTreeSha256'], 'candidate release changed')
             run(c['candidateVerifier'] + [c['release'], c['candidateHead'], c['plist']])
             check_idle(c, c['expectedSourceHead'])

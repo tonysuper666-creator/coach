@@ -48,10 +48,14 @@ class ReaderEntryParityTest {
             onNodeWithText("看文字").performClick()
             val shelfText = onNodeWithTag("reader-text").fetchSemanticsNode()
                 .config[SemanticsProperties.Text].single().text
-            assertEquals(book.pages[1].text, shelfText, "书架读到的是第 2 页正文")
+            val shelfSources = onNodeWithTag("reader-text").fetchSemanticsNode().config[BookPageSources]
+            assertTrue(shelfSources.any { it.importPage == 2 && it.startUtf16 == 0 })
+            assertEquals(shelfSources.joinToString("") { book.page(it.importPage)!!.text.substring(it.startUtf16, it.endUtf16) }, shelfText)
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.page == shelfSources.first().importPage && !controller.state.value.busy }
             onNodeWithText("返回书架").performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.HOME && !controller.state.value.busy }
-            assertEquals(2, library.book(book.id).readingPage, "书架翻页会记住读到第 2 页")
+            val readingBookmark = shelfSources.first().importPage
+            assertEquals(readingBookmark, library.book(book.id).readingPage, "书签保存排版页首字的来源页")
 
             // 题目出处入口：同一本书、同一页、同一个阅读器，只多一个当前节。
             onNodeWithTag("home-question").performClick()  // 看书已保存为当前走法，「继续」会回到看书；题目出处走显式的「做题学」入口
@@ -75,6 +79,8 @@ class ReaderEntryParityTest {
             val sourceText = onNodeWithTag("reader-text").fetchSemanticsNode()
                 .config[SemanticsProperties.Text].single().text
             assertEquals(shelfText, sourceText, "两个入口渲染的是同一页正文")
+            assertEquals(shelfSources, onNodeWithTag("reader-text").fetchSemanticsNode().config[BookPageSources])
+            assertEquals(readingBookmark, library.book(book.id).readingPage, "出处重排不移动看书书签")
             onNodeWithText("学习原文 · ${lesson.title}").assertExists()
             onNodeWithText("返回学习").performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }

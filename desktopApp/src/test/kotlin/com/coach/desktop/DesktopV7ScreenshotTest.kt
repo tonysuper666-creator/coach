@@ -110,7 +110,14 @@ A second English paragraph lets us inspect the space between paragraphs and the 
                 onNodeWithTag("reader-text").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts)
                 val laid = layouts.single()
                 val stored = controller.state.value.book!!.pages.first().text
-                val paragraphs = com.coach.desktop.books.bookParagraphs(stored, false).paragraphs
+                val node = onNodeWithTag("reader-text").fetchSemanticsNode()
+                val sources = node.config[com.coach.desktop.books.BookPageSources]
+                val visible = sources.joinToString("") { piece ->
+                    controller.state.value.book!!.page(piece.importPage)!!.text.substring(piece.startUtf16, piece.endUtf16)
+                }
+                kotlin.test.assertEquals(visible, node.config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().text)
+                kotlin.test.assertEquals(visible.length, laid.layoutInput.text.length)
+                val paragraphs = com.coach.desktop.books.bookParagraphs(visible, false).paragraphs
                 println("ACTUAL paragraphs=$paragraphs styles=${laid.layoutInput.text.paragraphStyles}")
                 paragraphs.forEach { println("ACTUAL start=${it.start} left=${laid.getBoundingBox(it.start).left} top=${laid.getBoundingBox(it.start).top}") }
                 capture("reader-ton1666", screen, dark)

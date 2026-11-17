@@ -27,6 +27,7 @@ import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.asAwtTransferable
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.SemanticsPropertyKey
 import androidx.compose.ui.semantics.text
 import androidx.compose.ui.text.*
 import androidx.compose.ui.unit.*
@@ -39,6 +40,7 @@ import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.StringSelection
 
 private const val PAGE_BODY = "coach.book.page-body"
+internal val BookPageSources = SemanticsPropertyKey<List<BookPageSlice>>("BookPageSources")
 
 /** Compose inserts a separator between selectable nodes; that separator is not source text. */
 internal fun originalPagedBookSelection(selected: AnnotatedString): String {
@@ -192,6 +194,7 @@ private fun BoxScope.BookSheet(bookTitle: String, page: BookLaidPage, typography
     Text(selectable, style = typography.body, inlineContent = inline,
         modifier = Modifier.padding(start = inset, top = 52.dp + top).width(column)
             .semantics {
+                this[BookPageSources] = page.sources
                 // Expose original heading/citation ranges, as the reader did before
                 // pagination; the rendering-only base typography is not a source mark.
                 text = AnnotatedString(originalBookSelection(page.text),

@@ -257,7 +257,7 @@ class SourceRoundTripTest {
             onNodeWithTag("remote-image").assertContentDescriptionEquals("${book.title} 第 ${lesson.firstPage} 页")
             onNodeWithTag("remote-highlight").assertDoesNotExist()
             onNodeWithText("看文字").performClick()
-            assertTrue(onNodeWithTag("reader-text").fetchSemanticsNode().config[SemanticsProperties.Text].single().spanStyles.isEmpty())
+            assertTrue(onNodeWithTag("reader-text").fetchSemanticsNode().config[SemanticsProperties.Text].single().spanStyles.none { it.item.background != androidx.compose.ui.graphics.Color.Unspecified })
             onNodeWithText("无法确认原句：这一页有多处相同内容。").assertIsDisplayed()
             onNodeWithText("看原页").performClick()
             onNodeWithText("下一页").performClick()

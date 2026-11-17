@@ -54,8 +54,11 @@ class ReaderKeyboardPagingTest {
         runComposeUiTest {
             openReader(controller)
             fun press(key: Key) = onNodeWithTag("reader-page").performKeyInput { pressKey(key) }
-            fun expectPage(number: Int) =
+            fun expectPage(number: Int) {
                 waitUntil(timeoutMillis = 20_000) { controller.state.value.page == number && !controller.state.value.busy }
+                // Controller state is published before Compose installs the next key handler.
+                waitForIdle()
+            }
 
             press(Key.DirectionRight); expectPage(2)
             press(Key.PageDown); expectPage(3)

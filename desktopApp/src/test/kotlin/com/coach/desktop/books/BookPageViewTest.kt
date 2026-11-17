@@ -13,7 +13,9 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import com.coach.ui.CoachTheme
+import com.coach.ui.v7.Desk
 import com.coach.desktop.WindowsTextbookHost
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
@@ -23,9 +25,35 @@ import org.apache.pdfbox.pdmodel.font.Standard14Fonts
 import java.nio.file.Files
 import kotlin.test.*
 
-/** Separates the sheet component's reflow contract from Desk's existing width cap. */
+/** Source anchors survive both component reflow and Desk's opt-in width. */
 @OptIn(ExperimentalTestApi::class)
 class BookPageViewTest {
+    @Test fun deskKeepsItsDefaultWidthAndAllowsAnExplicitSpread() = runSkikoComposeUiTest(
+        size = Size(1900f, 1000f), density = Density(1f),
+    ) {
+        val book = Textbook("desk-spread", "阅读", "md", listOf(BookPage(1, "阅读证据。".repeat(1000))))
+        val state = BookPagingState(BookPageAnchor(1))
+        var wide by mutableStateOf(false)
+        setContent { CoachTheme {
+            Desk(crumb = "阅读", hasMargin = false, paperMaxWidth = if (wide) Dp.Infinity else Dp.Unspecified) {
+                BookPageView(book, state, emptyMap(), onTurn = { state.move(it) })
+            }
+        } }
+        waitForIdle()
+        assertEquals(1046f, onNodeWithTag("book-page-layout").fetchSemanticsNode().size.width.toFloat(), 1f)
+        onNodeWithTag("book-sheet-1").assertDoesNotExist()
+        val anchor = state.pages[2].anchor
+        runOnIdle { state.anchor = anchor; wide = true }
+        waitForIdle()
+        assertTrue(onNodeWithTag("book-page-layout").fetchSemanticsNode().size.width >= 1460)
+        onNodeWithTag("book-sheet-1").assertExists()
+        assertEquals(anchor, state.anchor)
+        runOnIdle { wide = false }
+        waitForIdle()
+        onNodeWithTag("book-sheet-1").assertDoesNotExist()
+        assertEquals(anchor, state.anchor)
+    }
+
     @Test fun originalViewRoundTripKeepsPositionWithinOneImportPage() {
         val root = Files.createTempDirectory("coach-page-view-anchor-")
         try {

@@ -17,20 +17,19 @@ public class WD {
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int command);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
-  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
-  [DllImport("user32.dll")] public static extern uint GetQueueStatus(uint flags);
-  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
-  public static void Activate(IntPtr h) {
-    if (IsIconic(h)) ShowWindow(h, 9); // SW_RESTORE, before requesting foreground
-    if (GetForegroundWindow() == h) return;
-    uint ignored;
-    uint foreground = GetWindowThreadProcessId(GetForegroundWindow(), out ignored);
-    uint caller = GetCurrentThreadId();
-    GetQueueStatus(0x04FF); // Ensure the driving thread has an input queue.
-    bool attached = foreground != 0 && foreground != caller && AttachThreadInput(caller, foreground, true);
-    try { BringWindowToTop(h); SetForegroundWindow(h); }
-    finally { if (attached) AttachThreadInput(caller, foreground, false); }
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int command);
+  [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessageTimeout(
+    IntPtr h, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeoutMs, out UIntPtr result);
+  public static bool Activate(IntPtr h) {
+    // Keep the automation queue independent: attaching to a busy foreground
+    // thread can block BringWindowToTop/SetForegroundWindow while holding our mutex.
+    if (IsIconic(h)) ShowWindowAsync(h, 9); // SW_RESTORE
+    SetForegroundWindow(h);
+    UIntPtr ignored;
+    // WM_NULL confirms the asynchronous activation has been processed. Never
+    // wait indefinitely for a hung UI, and never bypass foreground ownership.
+    if (SendMessageTimeout(h, 0, UIntPtr.Zero, IntPtr.Zero, 0x23, 500, out ignored) == IntPtr.Zero) return false;
+    return GetForegroundWindow() == h;
   }
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, IntPtr e);
@@ -135,7 +134,7 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
             try {
                 try { $held = $mutex.WaitOne(30000) } catch [Threading.AbandonedMutexException] { $held = $true }
                 if (-not $held) { throw 'WIN_DRIVE_TIMEOUT: waiting for one foreground action' }
-                [WD]::Activate($Window)
+                if (-not [WD]::Activate($Window)) { throw 'WIN_DRIVE_FOCUS_LOST: foreground activation not confirmed' }
                 Start-Sleep -Milliseconds 150
                 Assert-OurForeground
                 & $Action

@@ -210,7 +210,7 @@ private fun BoxScope.BookSheet(bookTitle: String, page: BookLaidPage, typography
             Text(page.sourceLabel, color = colors.fgSecondary, style = MaterialTheme.typography.labelSmall, fontFamily = LocalV7Fonts.current.numbers)
         } else {
             Text(page.sourceLabel, color = colors.fgSecondary, style = MaterialTheme.typography.labelSmall, fontFamily = LocalV7Fonts.current.numbers)
-            if (!spread) Text(rest, color = colors.fgTertiary, style = MaterialTheme.typography.labelSmall)
+            Text(rest, color = colors.fgTertiary, style = MaterialTheme.typography.labelSmall)
         }
     } }
 }

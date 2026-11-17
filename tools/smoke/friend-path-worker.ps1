@@ -96,7 +96,7 @@ try {
 
     # ② 上传一本书
     Click-Label 2 @('上传教材') '找不到上传按钮'
-    if (-not (Choose-File '上传教材' $Book)) { Fail 2 '没有弹出选书对话框' }
+    if (-not (Choose-File '上传教材' $Book)) { Fail 2 $script:ChooseFileWhy }
     $m = Await-Text 2 'shelf' @('教材已加入书架', '先读') 120
     if (-not $m) { Fail 2 '选了书但 120 秒内书架里没出现这本书' }
     Pass 2 '书出现在书架'

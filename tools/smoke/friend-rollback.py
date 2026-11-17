@@ -4,7 +4,9 @@
 --config is a private JSON file containing oldApp, candidateApp (bin/app paths),
 oldHead, candidateHead and tailscale. It never contains credentials or URLs.
 Funnel must already have an empty configuration; this script never enables it.
-This does not exercise LaunchAgent pointer transactions or native clients.
+No start policy or offline revocation is used: old binaries must reject the
+friend hash domain directly. This does not exercise LaunchAgent pointer
+transactions or native clients.
 """
 import argparse
 import hashlib
@@ -119,12 +121,6 @@ def rehearse(config):
         try:
             owner, initial = launch(old)
             database = data / 'coach.sqlite'
-            identity = database.stat()
-            policy = root / 'friend-start-policy.json'
-            policy.write_text(json.dumps({'version': 1, 'binding': {'database': str(database), 'device': identity.st_dev,
-                'inode': identity.st_ino, 'epoch': initial['epoch']}, 'capableHeads': [config['candidateHead']],
-                'tailscale': config['tailscale'], 'publicPort': public}))
-            policy.chmod(0o600)
             status, _ = owner_client.request('/v1/pairing-code', 'POST', owner, {})
             require(status == 200)
             with sqlite3.connect(database) as db:
@@ -132,19 +128,19 @@ def rehearse(config):
                             for table in ('devices', 'pairing_code')))
                 owner_code = db.execute('SELECT * FROM pairing_code').fetchall()
                 require(owner_code)
-            # First policy activation while the real old binary still owns an
-            # unmigrated database must not strand the owner behind a latch.
-            restored = []
-            guard.start(policy, config['oldHead'], database, stop, lambda: restored.append(launch(old)))
-            require(restored[-1][0] == owner and restored[-1][1]['epoch'] == initial['epoch'])
+            # Old startup and pre-migration failure recovery do not require a
+            # policy, entry retirement or a persistent latch.
+            stop()
+            restored = launch(old)
+            require(restored[0] == owner and restored[1]['epoch'] == initial['epoch'])
             stop()
             # Fail the real candidate JVM before LedgerStore can migrate. The
-            # following legacy start must still work through the same guard.
+            # following direct legacy start must still preserve the owner.
             previous_options = env['JAVA_OPTS']
             env['JAVA_OPTS'] += ' -XX:CoachRehearsalInvalidOption=1'
             try:
                 try:
-                    guard.start(policy, config['candidateHead'], database, stop, lambda: launch(candidate))
+                    launch(candidate)
                 except RuntimeError:
                     require(process is not None and process.poll() is not None)
                 else:
@@ -152,8 +148,8 @@ def rehearse(config):
             finally:
                 env['JAVA_OPTS'] = previous_options
                 stop()
-            guard.start(policy, config['oldHead'], database, stop, lambda: restored.append(launch(old)))
-            require(restored[-1][0] == owner and restored[-1][1]['epoch'] == initial['epoch'])
+            restored = launch(old)
+            require(restored[0] == owner and restored[1]['epoch'] == initial['epoch'])
             stop()
             with sqlite3.connect(database) as db:
                 require(all('friend_name' not in {row[1] for row in db.execute(f'PRAGMA table_info({table})')}
@@ -202,27 +198,39 @@ def rehearse(config):
             budget.parent.mkdir(exist_ok=True)
             budget.write_text('{"cycles":{"rehearsal":{"spent":17,"limit":123,"reserved":{"pending":9}}},"months":{"rehearsal":17}}')
             budget_bytes = budget.read_bytes()
-            identity = database.stat()
-            policy = root / 'friend-start-policy.json'
-            policy.write_text(json.dumps({'version': 1, 'binding': {'database': str(database), 'device': identity.st_dev,
-                'inode': identity.st_ino, 'epoch': epoch}, 'capableHeads': [config['candidateHead']],
-                'tailscale': config['tailscale'], 'publicPort': public}))
-            policy.chmod(0o600)
-            restored = []
-            guard.start(policy, config['oldHead'], database, stop, lambda: restored.append(launch(old)))
-            require(restored[0][0] == owner and restored[0][1]['epoch'] == initial['epoch'])
+            # Direct downgrade, deliberately without revoking anything. This
+            # tests the data format rather than a protected startup entry.
+            stop()
+            restored = launch(old)
+            require(restored[0] == owner and restored[1]['epoch'] == initial['epoch'])
             require(owner_client.request('/v1/hello', auth=friend)[0] == 401)
             require(owner_client.request('/v1/pair', 'POST', body={'code': pending, 'name': 'never enrolled'})[0] == 401)
-            stop()
             with sqlite3.connect(database) as db:
                 require(db.execute('SELECT * FROM events ORDER BY seq').fetchall() == events)
-                require(db.execute('SELECT count(*) FROM devices WHERE friend_name IS NOT NULL AND revoked_at IS NULL').fetchone()[0] == 0)
-                require(db.execute('SELECT count(*) FROM pairing_code WHERE friend_name IS NOT NULL').fetchone()[0] == 0)
+                require(db.execute('SELECT count(*) FROM devices WHERE friend_name IS NOT NULL AND revoked_at IS NULL').fetchone()[0] == 1)
+                require(db.execute('SELECT count(*) FROM pairing_code WHERE friend_name IS NOT NULL').fetchone()[0] == 1)
+            # Old owner-code upsert leaves the pending friend_name in place.
+            status, body = owner_client.request('/v1/pairing-code', 'POST', owner, {})
+            require(status == 200)
+            stale_owner_code = json.loads(body)['code']
+            stop()
+            same_owner, _ = launch(candidate, expose=True)
+            require(same_owner == owner)
+            require(friend_client.request('/v1/public/status', auth=friend)[0] == 200)
+            for client in (owner_client, friend_client):
+                require(client.request('/v1/pair', 'POST', body={'code': stale_owner_code, 'name': 'must not become friend'})[0] == 401)
+            # New owner code explicitly clears the stale friend metadata.
+            status, body = owner_client.request('/v1/pairing-code', 'POST', owner, {})
+            require(status == 200)
+            status, body = owner_client.request('/v1/pair', 'POST', body={'code': json.loads(body)['code'], 'name': 'isolated owner'})
+            require(status == 200 and json.loads(body).get('role') == 'owner')
+            stop()
             require(budget.read_bytes() == budget_bytes)
             require(before == {key: manifest(binary) for key, binary in [('old', old), ('candidate', candidate)]})
             return {'forbidden_paths': checks - len(protocol.WRONG_METHODS), 'wrong_methods': len(protocol.WRONG_METHODS),
                     'unmigrated_old_starts': 2, 'candidate_pre_migration_failure': 1, 'owner_pending_code_preserved': 1,
-                    'revoked_tokens_rejected': 1, 'pending_codes_rejected': 1, 'owner_preserved': 1,
+                    'unrevoked_friend_rejected_by_old': 1, 'pending_codes_rejected': 1, 'owner_preserved': 1,
+                    'friend_survives_candidate_restart': 1, 'stale_old_owner_code_rejected': 1, 'guard_policy_used': 0,
                     'events_preserved': 1, 'budget_bytes_preserved': 1, 'artifacts_unchanged': 1}
         finally:
             try:

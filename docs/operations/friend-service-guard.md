@@ -1,4 +1,6 @@
-# 朋友入口切换的旧版启动门禁
+# 旧版启动门禁（历史方案，不启用）
+
+2026-11-17 Architect 已停止推进本方案。当前采用[朋友凭据哈希域](friend-cutover-plan.md#回滚隔离朋友凭据使用独立哈希域)，不创建策略、不 arm guard、不部署 launcher；历史入口退役独立排 backlog，不再是朋友上线门禁。下文只记录既有代码行为和历史演练，所有“必须启用/退役”的描述仅适用于该旧方案，不能作为当前生产步骤。现有生产未启用它；若发现其他环境已经启用，不得擅自删除锁、策略或闭锁标记，须另审恢复。
 
 `friend_service_guard.py` 接在持久 `coach-service.py start` 中，供所有经该控制器启动的旧 stage、桌面快捷入口和当前执行器共用。它保护运维入口，不是对同一系统用户手动执行 JVM 或 `launchctl` 的权限隔离。生产启用前必须盘点旧入口，确认全部调用同一个持久控制器；不得直接 bootstrap、替换控制器或删锁文件绕开门禁。
 
@@ -66,8 +68,4 @@ stage 记录策略和持久代码哈希，switch/rollback/recover 都重新校�
 python3 -m unittest tools.dev.test_friend_service_guard tools.dev.test_friend_revoke_offline tools.dev.test_ton1175_switch tools.dev.test_ton1175_supervise -v
 ```
 
-实际 JVM 演练另用 `tools/smoke/friend-rollback.py --config "$COACH_ROLLBACK_CONFIG"`。该变量是当前用户所有、0600 私有配置的规范绝对路径；字段仅 `oldApp`、`candidateApp`（两个 `bin/app` 路径）、完整 `oldHead`、`candidateHead`、`tailscale`。不含地址、凭据或配对身份；源码与产物的对应关系由冻结记录另证。不要开启 shell trace。
-
-演练要求实际 Funnel 配置为空，绝不新增规则。使用临时 HOME、独立端口和空阅读目录，关闭受管子服务，bridge 指向不可用回环端口，不发付费请求。实际旧版创建 owner 和 owner 待用码，先验未迁移库启用策略后重启，再用无效 JVM 选项让真实候选在迁移前失败，验证经门禁恢复旧版且原码保留。然后候选正常迁移，写入自写笔记并建朋友/待用码；检查 20 条私有路径、4 组错误方法和匿名请求，再经同一启动门禁停候选、离线吊销、起旧版，验证 owner 与新增事件保留、朋友 token/待用码拒绝、非零预算文件和两个安装产物不变。正常只输出固定标签和计数，失败退出 1，不打印 JVM 日志、身份或路径。
-
-这不是 LaunchAgent 指针事务、完整 bridge 费用结算、真实教材/API、Windows、外网或生产验收。预算文件是隔离 fixture，只证明没有被回滚覆盖；真实预留及费用仍须按切换方案实测。演练不读取生产资料或数据库。
+当前 `tools/smoke/friend-rollback.py` 已改为哈希域演练，不再调用本门禁或离线吊销。它使用实际旧/新 JVM、临时 HOME 和独立端口，验证未撤销的新格式朋友 token/待用码被旧版拒绝、owner 及新增事件保留、回到候选朋友仍可用，以及旧版签 owner 码的残留朋友名不会被候选接受。运行形式与证据边界见[当前切换方案](friend-cutover-plan.md#执行器适配与隔离演练)。旧门禁的历史演练不能替代当前候选结果。

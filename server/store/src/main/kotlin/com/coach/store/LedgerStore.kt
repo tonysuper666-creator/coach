@@ -19,6 +19,9 @@ import kotlin.random.Random
 fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 private val idRandom = java.security.SecureRandom()
 private val ledgerLogger = Logger.getLogger(LedgerStore::class.java.name)
+// Owner hashes remain compatible with existing devices and old server binaries.
+private fun credentialHash(secret: String, friend: Boolean): String =
+    sha256((if (friend) "coach-friend-v1:$secret" else secret).toByteArray(Charsets.UTF_8))
 private fun uid() = ulid(System.currentTimeMillis(),ByteArray(10).also(idRandom::nextBytes))
 data class Fence(val epoch: String, val value: Long, val id: String)
 data class PairedDevice(val id: String, val name: String, val createdAt: Long, val revokedAt: Long?, val friendName: String? = null, val lastUsedAt: Long? = null)
@@ -111,6 +114,17 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             sql("ALTER TABLE devices ADD COLUMN last_used_at INTEGER")
         if (query("PRAGMA table_info(pairing_code)") { it.getString("name") }.none { it == "friend_name" })
             sql("ALTER TABLE pairing_code ADD COLUMN friend_name TEXT")
+        // A digest alone cannot reveal its hash domain. Old inserts default to version 0;
+        // only this implementation issues version 1 friend credentials. Never accept legacy
+        // friend hashes through the owner path, including after an old binary writes the DB.
+        transaction {
+            for (table in listOf("devices", "pairing_code")) {
+                if ("friend_hash_version" !in query("PRAGMA table_info($table)") { it.getString("name") })
+                    sql("ALTER TABLE $table ADD COLUMN friend_hash_version INTEGER NOT NULL DEFAULT 0")
+            }
+            sql("UPDATE devices SET revoked_at=? WHERE friend_name IS NOT NULL AND friend_hash_version<>1 AND revoked_at IS NULL", clock())
+            sql("DELETE FROM pairing_code WHERE friend_name IS NOT NULL AND friend_hash_version<>1")
+        }
         sql("CREATE TABLE IF NOT EXISTS offline_packs(pack_id TEXT PRIMARY KEY,course_id TEXT NOT NULL,device_id TEXT NOT NULL,expires_at INTEGER NOT NULL,pack_json TEXT NOT NULL)")
         sql("CREATE TABLE IF NOT EXISTS offline_reservations(question_id TEXT PRIMARY KEY,pack_id TEXT NOT NULL,expires_at INTEGER NOT NULL)")
         sql("CREATE TABLE IF NOT EXISTS choice_allocations(id INTEGER PRIMARY KEY AUTOINCREMENT,course_id TEXT NOT NULL,correct_letter TEXT NOT NULL)")
@@ -660,9 +674,13 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
 
     fun authorize(device: String, token: String): Boolean {
         if (device.length > 128 || token.length !in 32..256) return false
-        val expected = query("SELECT token_sha256 FROM devices WHERE device_id=? AND revoked_at IS NULL",device) { it.getString(1) }.singleOrNull()
-            ?: "0".repeat(64)
-        val valid = MessageDigest.isEqual(expected.toByteArray(), sha256(token.toByteArray(Charsets.UTF_8)).toByteArray())
+        val row = query("SELECT token_sha256,friend_name,friend_hash_version FROM devices WHERE device_id=? AND revoked_at IS NULL",device) {
+            Triple(it.getString(1), it.getString(2), it.getInt(3))
+        }.singleOrNull()
+        val friend = row?.second != null
+        val expected = row?.first ?: "0".repeat(64)
+        val matches = MessageDigest.isEqual(expected.toByteArray(), credentialHash(token, friend).toByteArray())
+        val valid = row != null && (!friend || row.third == 1) && matches
         if (valid) sql("UPDATE devices SET last_used_at=? WHERE device_id=?", clock(), device)
         return valid
     }
@@ -675,14 +693,16 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         require(friend == null || (friend.isNotBlank() && friend.length <= 80 && friend.none { it.isISOControl() }))
         val code = idRandom.nextInt(1_000_000).toString().padStart(6, '0')
         val expires = clock() + 300_000
-        sql("INSERT INTO pairing_code(singleton,code_sha256,expires_at,attempts) VALUES(1,?,?,0) ON CONFLICT(singleton) DO UPDATE SET code_sha256=excluded.code_sha256,expires_at=excluded.expires_at,attempts=0", sha256(code.toByteArray()), expires)
-        sql("UPDATE pairing_code SET friend_name=? WHERE singleton=1", friend)
+        sql("INSERT INTO pairing_code(singleton,code_sha256,expires_at,attempts,friend_name,friend_hash_version) VALUES(1,?,?,0,?,?) ON CONFLICT(singleton) DO UPDATE SET code_sha256=excluded.code_sha256,expires_at=excluded.expires_at,attempts=0,friend_name=excluded.friend_name,friend_hash_version=excluded.friend_hash_version",
+            credentialHash(code, friend != null), expires, friend, if (friend == null) 0 else 1)
         return PairingCode(code, expires)
     }
 
     /** Wall clock expiry, five total guesses, single use across both listeners/restarts. */
     fun pair(code: String, name: String, friendsOnly: Boolean = false): DeviceCredential? = transaction {
-        val friend = query("SELECT friend_name FROM pairing_code WHERE singleton=1") { it.getString(1) }.singleOrNull()
+        val scope = query("SELECT friend_name,friend_hash_version FROM pairing_code WHERE singleton=1") { it.getString(1) to it.getInt(2) }.singleOrNull()
+        val friend = scope?.first
+        if (friend != null && scope?.second != 1) return@transaction null
         if (friendsOnly && friend == null) return@transaction null
         val active = query("SELECT code_sha256,expires_at,attempts FROM pairing_code WHERE singleton=1") {
             Triple(it.getString(1), it.getLong(2), it.getInt(3))
@@ -690,12 +710,12 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         if (clock() >= active.second || active.third >= 5) return@transaction null
         sql("UPDATE pairing_code SET attempts=attempts+1 WHERE singleton=1")
         if (!code.matches(Regex("[0-9]{6}")) || name.isBlank() || name.length > 80 ||
-            !MessageDigest.isEqual(active.first.toByteArray(), sha256(code.toByteArray()).toByteArray())) return@transaction null
+            !MessageDigest.isEqual(active.first.toByteArray(), credentialHash(code, friend != null).toByteArray())) return@transaction null
         val token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32).also(idRandom::nextBytes))
         val device = uid()
-        sql("INSERT INTO devices(device_id,name,token_sha256,created_at) VALUES(?,?,?,?)", device, name, sha256(token.toByteArray()), clock())
+        sql("INSERT INTO devices(device_id,name,token_sha256,created_at,friend_name,friend_hash_version) VALUES(?,?,?,?,?,?)",
+            device, name, credentialHash(token, friend != null), clock(), friend, if (friend == null) 0 else 1)
         sql("DELETE FROM pairing_code WHERE singleton=1")
-        sql("UPDATE devices SET friend_name=? WHERE device_id=?", friend, device)
         DeviceCredential(device, token, if (friend == null) "owner" else "friend")
     }
 

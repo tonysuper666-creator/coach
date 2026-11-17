@@ -1,6 +1,6 @@
 # 朋友讲解入口
 
-TON-1686；父卡 TON-1685 决策 13。上线和外网 Windows 实测由 TON-1688 执行，本卡没有启用生产监听、Funnel 或 LaunchAgent。
+TON-1686；父卡 TON-1685 决策 13。生产上线和外网 Windows 实测由 TON-1688 执行。本卡已启用只读花费监控的 LaunchAgent，没有启用朋友生产监听或 Funnel。
 
 ## 服务与配对
 
@@ -59,15 +59,41 @@ app revoke-friend '朋友甲'
 
 固定错误：日额度/月额度用完为 HTTP 429，API 或费用状态不可用为 503；`error` 是中文提示，`code` 只供程序判断。
 
-## 八成提醒的启用交接
+## 八成提醒的部署与停用
 
 `tools/bridge/friend_spend_watch.py` 在文件锁下读取账本，把各家本月已结算费用和所有未决预留与月上限比较，再写 TON-740 的 string 元数据 `coach.api-spend`，内容为 `{status,since,detail}`。达到八成含预留即 warn。相同状态保留起始时间，不携带原文或密钥。
 
-当前未找到可验证的 Butler 客户端实现来证明该键会显示，故默认同时在 TON-1686 写受支持的 ask，一月一次：朋友讲解花到本月上限的八成了，要不要继续？选项为继续，到上限自动停/现在停掉朋友讲解。已有其他待答问题时保留它，下次检查再尝试。不会发送聊天消息。只有实际看到面板显示后，才传 `--panel-support` 关闭 fallback ask。人选择现在停时，由接到 ask_answer 的管家把私有配置的全局 paused 改为 true；继续则保持月硬上限。
+已核对 Butler「系统状态」的实现：它只渲染通道和 Sable，不显示这个键，因此走 ask 备用，不传 `--panel-support`。达到八成时默认同时在 TON-1686 写一次 ask，每月一次：朋友讲解花到本月上限的八成了，要不要继续？选项为继续，到上限自动停/现在停掉朋友讲解。已有其他待答问题时保留它，下次检查再尝试。不会发送聊天消息。人选择现在停时，由接到 ask_answer 的管家把私有配置的全局 paused 改为 true；继续则保持月硬上限。
 
-TON-1688 在生产发布后渲染 `tools/bridge/com.tony.coach-api-spend.plist.in` 的占位值（用 plistlib 写入实际值，避免路径 XML 转义问题）：Python 必须指向桥 venv，脚本路径指向已部署仓库，state 与生产桥相同，MULTICA_CLI_PATH 为 daemon 提供的 CLI 绝对路径，log 目录预建且私有。LaunchAgent 每两小时及登录时运行。当前模板没有在本机安装；不得把未渲染模板直接 launchctl bootstrap。
+用 plistlib 渲染 `tools/bridge/com.tony.coach-api-spend.plist.in` 的占位值，避免路径 XML 转义问题：Python 必须指向生产桥 venv，脚本放在持久部署目录并带上 `api_budget.py` 和 `model_routes.json`，state 与生产桥相同，log 目录预建且私有（目录 0700、文件 0600，plist 的 `Umask` 设为 077）。不得直接 bootstrap 未渲染的模板。
 
-安装后先手工执行同一命令，核对 TON-740 的键以及 fallback ask，再在 macOS 用户域启用。停用为 `launchctl bootout gui/$(id -u)/com.tony.coach-api-spend`；取消公开入口则去掉 COACH_PUBLIC_PORT 后重启部署服务（Funnel 同时由 TON-1688 收回）。这些操作本卡未执行。
+常驻监控沿用 `coach-logscan` 的 Mac 用户身份。在部署目录创建权限 0700 的包装脚本 `multica-monitor`，内容为：
+
+```sh
+#!/bin/sh
+exec /Applications/Multica.app/Contents/Resources/app.asar.unpacked/resources/bin/multica --profile desktop-api.multica.ai "$@"
+```
+
+将 plist 的 `EnvironmentVariables.MULTICA_CLI_PATH`（模板的 `@MULTICA_CLI@`）设为此包装脚本的绝对路径，并添加 `MULTICA_WORKSPACE_ID=e23f0185-81fc-4ad9-ae17-aaec464139a7`。这是常驻监控的配置；任务内的 Multica 调用仍使用 daemon 注入的 CLI 和任务身份。不要把任务 token 存进 plist，也不需要读取 profile 内容。
+
+本机部署目录为 `~/Coach/service/monitors/friend-spend-dd2f1f7d`，Python 使用 `~/Coach/service/releases/ton1632-batch-eb2d87a7/tools/bridge/.venv/bin/python`，state 为 `~/Coach/state`，日志为 `~/Coach/logs/api-spend/api-spend{,-error}.log`。2026-11-17 已手工核对实际状态，并通过用户域 LaunchAgent 的启动及 kickstart 验证，退出码均为 0。状态持续为 ok 时 `since` 保持不变，应结合 `friend-spend-watch.json` 修改时间及日志确认最近写入。
+
+将渲染后的 plist 以 0600 安装到 `~/Library/LaunchAgents/`，并在 `~/.config/ai-channel-watch/launchagents/` 保存同一份供现有恢复脚本使用。用户登录时及每两小时运行；首次启用命令：
+
+```sh
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.tony.coach-api-spend.plist"
+launchctl kickstart -k "gui/$(id -u)/com.tony.coach-api-spend"
+launchctl print "gui/$(id -u)/com.tony.coach-api-spend"
+```
+
+停用先禁用再卸载，保留禁用状态可避免恢复脚本重新启动它：
+
+```sh
+launchctl disable "gui/$(id -u)/com.tony.coach-api-spend"
+launchctl bootout "gui/$(id -u)/com.tony.coach-api-spend"
+```
+
+恢复时先 `launchctl enable "gui/$(id -u)/com.tony.coach-api-spend"`，再执行上面的 bootstrap 和 kickstart。停用监控只停止费用状态和提醒检查。朋友生产入口的启用或收回、生产桥升级及 Funnel 仍由 TON-1688 执行。
 
 ## 一条命令验收
 

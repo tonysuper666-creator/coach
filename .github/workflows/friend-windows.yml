@@ -78,6 +78,13 @@ jobs:
           path: bundle
           run-id: ${{ inputs.package_run }}
           github-token: ${{ github.token }}
+      - name: Verify public hostname routes before API traffic
+        shell: pwsh
+        env:
+          COACH_FRIEND_URL: ${{ secrets.COACH_EXTERNAL_URL }}
+        run: |
+          python tools/smoke/friend-public.py transport
+          exit $LASTEXITCODE
       - name: Install development MSI and launch installed executable
         shell: pwsh
         run: ./tools/smoke/external-friend.ps1 -Phase Install

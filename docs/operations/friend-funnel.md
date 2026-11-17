@@ -91,11 +91,16 @@ probe 使用 `friend-public` environment；先按协议探针手册将该 enviro
    同名 B 的朋友日账本会保留，换设备不能恢复额度；不得清零账本、延长码有效期
    或拿 B 令牌代替 A 的一次性码。
    environment secrets 在 job 开始时读取（[官方说明](https://docs.github.com/en/actions/reference/security/secrets)）；不要试图在运行中换 secret 修复该 run。
-5. Probe 验证 MSI 安装退出 0、安装版窗口可见并正常关闭，然后在独立 JVM 中驱动
+5. Probe 在安装和任何计费请求之前，先运行同一 commit 的
+   `python tools/smoke/friend-public.py transport`：仅步骤 env 传 URL，不传配对码或令牌。
+   必须通过公网 DNS、匿名 HTTPS 401 和 80/8443/10000/18791 主机路由检查；契约见
+   `friend-public.md`，共享边缘接受 TCP 不等于该主机存在服务，不能替换成纯 TCP 扫描。
+   失败立即结束，不安装或调用 API。随后验证 MSI 安装退出 0、安装版窗口可见并正常关闭，然后在独立 JVM 中驱动
    同一 commit 的生产 `WindowsTextbookHost`、原生导入核心、配对 UI、逐书同意和
    选段提问。**窗口驱动不是安装版 exe 进程，导入调用核心而非文件选择/拖放手势**；
    这两项限制必须与结果一并披露，不能称为完整的安装版用户操作录制。
    只生成自写样例，不上传任何真实教材。实际讲解走已配置的朋友 API，不用 mock。
+   驱动在配对和计费之前另验 8791 TCP 不可达，保留桥端口边界。
 6. `friend-windows-evidence` artifact 出现后，先在 Mac 确认 B 的账本恰好一次真实调用，
    对照 input/output token、设备归属及无残留 reservation；格式重试若多调用则测试应
    失败，不能改账本凑数。然后用 `app revoke-friend NAME_A` 撤销 A。
@@ -126,5 +131,7 @@ macOS 上仅 `security` 读取子进程的 HOME 使用当前 UID 的账号主目
 
 记录候选 head、两个独立审核结论、隔离门禁命令/退出码、切换/五分钟内验证结果、
 Funnel 规则数量（不含地址）、Actions 链接、截图、撤销 A/B、B 一次调用的 token
-计数和清理结果。端口扫描只覆盖 18791/8791/8443/10000 四个采样端口，不能写成
-全部 65535 端口均已验证。任一步未跑写「未验证」；工作流文件存在不代表上线完成。
+计数和清理结果。协议步骤只验证 80/8443/10000/18791 四个主机路由，驱动另验
+8791 TCP；不能写成全部 65535 端口均已验证或所有采样端口均 TCP 关闭。
+`ready-for-revoke.json` 的 `bridgePortClosed=true` 只指 8791；主机路由证据来自前置步骤日志，
+不再输出旧的 `otherPorts=4`。任一步未跑写「未验证」；工作流文件存在不代表上线完成。

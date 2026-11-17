@@ -278,6 +278,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             for (lesson in book.lessons) TextButton(onClick = { turnTo(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
         }) {
         val colors = CoachTheme.colors
+        val highlight = if (colors.dark) CoachV7.Dark.hl else CoachV7.Light.hl
         Column(Modifier.fillMaxSize().padding(20.dp).testTag("textbook-reader"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(if (source != null) "学习原文 · ${source.title}" else "教材阅读", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)

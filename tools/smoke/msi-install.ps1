@@ -38,12 +38,28 @@ function Save-Result {
     } | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 (Join-Path $OutDir 'result.json')
     "$(@($results | Where-Object { $_.Ok }).Count)/$($results.Count)（截图与日志：$OutDir）"
 }
-function Fail([string]$name, [string]$why) { [void]$results.Add([pscustomobject]@{ Step = $name; Ok = $false; Why = $why }); Note "$name 失败：$why"; Stop-OwnClients; Save-Result; exit 1 }
+function Fail([string]$name, [string]$why) { [void]$results.Add([pscustomobject]@{ Step = $name; Ok = $false; Why = $why }); Note "$name 失败：$why"; Stop-OwnClients; Undo-Install; Save-Result; exit 1 }
 # 意料之外的终止错误也要落盘并退出，否则外层 Run-Interactive 只能等到超时
-trap { Note "中断：$_"; Stop-OwnClients; Save-Result; exit 1 }
+trap { Note "中断：$_"; Stop-OwnClients; Undo-Install; Save-Result; exit 1 }
 function Stop-OwnClients { foreach ($own in @($script:TargetPids)) { Stop-Process -Id $own -Force -ErrorAction SilentlyContinue } }
-# 窗口截图必须是它自己：先抢前台（后台进程直接 SetForegroundWindow 会被系统挡住，先按一下 Alt 解锁），
-# 抢不到就报错，宁可不截图也不拿别人的窗口冒充。SendKeys 不认 Win 键，开始菜单用真的 Win 键。
+# 半路失败也要把机器还原：已经装上的 LearningCoach 卸掉，卸载日志留档，下次从干净状态开始。
+function Undo-Install {
+    $installed = Get-LearningCoachProducts
+    if (-not $installed) { return }
+    if ($KeepInstalled) { Note 'KeepInstalled：失败也不卸载'; return }
+    try {
+        $code = $installed[0].PSChildName
+        $log = Join-Path $OutDir 'msiexec-uninstall.log'
+        $u = Start-Process msiexec.exe -ArgumentList @('/x', $code, '/qn', '/norestart', '/l*v', "`"$log`"") -Wait -PassThru
+        $left = if (Get-LearningCoachProducts) { '卸载列表里还有 LearningCoach' } else { '没有残留' }
+        Note "失败后清理：msiexec /x 退出码 $($u.ExitCode)，$left"
+        "残留：$left（失败后清理）" | Set-Content -Encoding utf8 (Join-Path $OutDir 'uninstall-leftovers.txt')
+    } catch {
+        Note "失败后清理没做完：$_"
+    }
+}
+# 窗口截图走共享驱动 Win-Drive 的 Save-Shot：它只在自己抢到前台、且窗口属于本次进程时才截，
+# 抢不到就报错，不拿别人的窗口冒充。SendKeys 不认 Win 键，开始菜单用真的 Win 键。
 if (-not ('CoachWin' -as [type])) {
     Add-Type @"
 using System; using System.Runtime.InteropServices;
@@ -73,41 +89,6 @@ public class CoachWin {
 }
 "@
 }
-function Focus-OurWindow([IntPtr]$h, [int]$timeoutSec = 6) {
-    $deadline = (Get-Date).AddSeconds($timeoutSec)
-    do {
-        $fg = [CoachWin]::GetForegroundWindow()
-        if ($fg -eq $h) { return $true }
-        # 把自己的输入队列挂到前台线程上：后台进程的 SetForegroundWindow 会被前台锁挡住
-        $fgThread = [CoachWin]::GetWindowThreadProcessId($fg, [IntPtr]::Zero)
-        [CoachWin]::AttachThreadInput([CoachWin]::GetCurrentThreadId(), $fgThread, $true) | Out-Null
-        [CoachWin]::SetForegroundWindow($h) | Out-Null
-        [CoachWin]::AttachThreadInput([CoachWin]::GetCurrentThreadId(), $fgThread, $false) | Out-Null
-        Start-Sleep -Milliseconds 400
-        if ([CoachWin]::GetForegroundWindow() -eq $h) { return $true }
-    } while ((Get-Date) -lt $deadline)
-    return $false
-}
-# 抢不到前台（系统通知、覆盖层之类随时会抢）时离屏抓自己的窗口：内容还是这个窗口，
-# 不是拿别人的窗口冒充；全黑说明离屏抓不到，才报失败。
-function Save-WindowShot([string]$path) {
-    $r = Get-Rect
-    $w = $r.R - $r.L; $h = $r.B - $r.T
-    if ($w -le 0 -or $h -le 0) { return $false }
-    $bmp = New-Object System.Drawing.Bitmap $w, $h
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $hdc = $g.GetHdc()
-    $ok = [CoachWin]::PrintWindow($script:Win, $hdc, 2)
-    $g.ReleaseHdc($hdc); $g.Dispose()
-    $ink = 0
-    foreach ($x in @(0, [int]($w / 2), ($w - 1))) {
-        foreach ($y in @(0, [int]($h / 2), ($h - 1))) {
-            $c = $bmp.GetPixel($x, $y); if (($c.R + $c.G + $c.B) -gt 30) { $ink++ }
-        }
-    }
-    if (-not $ok -or $ink -eq 0) { $bmp.Dispose(); return $false }
-    $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose(); return $true
-}
 function Open-StartMenu {
     [CoachWin]::keybd_event(0x5B, 0, 0, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 80
@@ -136,6 +117,17 @@ function Save-Crop([string]$src, [string]$dst, [int]$x, [int]$y, [int]$w, [int]$
         Save-Png $dst $bmp
     } finally { $img.Dispose() }
 }
+# 桌面整屏：任务栏和开始菜单由系统绘制，只有全屏实拍才含它们。这里只读屏、不激活任何窗口，
+# 所以不会把别人的窗口抢成前台；拍到的就是我们这张桌面的真实样子。
+function Save-Desktop([string]$path) {
+    $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    $bmp = New-Object System.Drawing.Bitmap $vs.Width, $vs.Height
+    try {
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        try { $g.CopyFromScreen($vs.X, $vs.Y, 0, 0, $bmp.Size) } finally { $g.Dispose() }
+        $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+    } finally { $bmp.Dispose() }
+}
 
 # 只认这次装的 exe 起的窗口。jpackage 的启动器会把 JVM 交给一个子进程，窗口挂在子进程上，
 # 所以按“启动后新出现的 LearningCoach.exe”认人；进程集合存脚本作用域，EnumWindows 的回调看不见函数的局部变量。
@@ -148,6 +140,9 @@ function Find-InstalledWindow {
             if ([CoachWin]::Text($h) -eq 'LearningCoach') { $script:Win = $h; $script:WinPid = $p }
         }
         return $true }, [IntPtr]::Zero) | Out-Null
+    # Win-Drive 的窗口归属保护认 $script:AppPid：把这次起的、真正拥有窗口的那个进程绑上去。
+    # 不绑就是 0，Save-Shot 会以“window does not belong to this run”拒绝，等于没保护也没截图。
+    if ($script:Win -ne [IntPtr]::Zero) { $script:AppPid = $script:WinPid }
     return $script:Win
 }
 
@@ -214,42 +209,34 @@ Pass '启动' "窗口出来了（启动器 pid $($app.Id)，窗口进程 $($scri
 $dpi = try { [int][CoachWin]::GetDpiForWindow($hwnd) } catch { 0 }
 if ($dpi -gt 0) { "Dpi: $dpi ($([math]::Round(100 * $dpi / 96))%)" | Add-Content -Encoding utf8 (Join-Path $OutDir 'environment.txt') }
 
-$script:Win = $hwnd
-function Shot-Window([string]$name) {
-    $path = Join-Path $OutDir "$name.png"
-    if (Focus-OurWindow $script:Win) {
-        Start-Sleep -Seconds 2
-        $r = Get-Rect
-        $bmp = New-Object System.Drawing.Bitmap ($r.R - $r.L), ($r.B - $r.T)
-        $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size); $g.Dispose()
-        Save-Png $path $bmp
-        return $r
-    }
-    Note "窗口抢不到前台（前台是 $([CoachWin]::GetForegroundWindow())），改为离屏抓它自己的窗口"
-    if (-not (Save-WindowShot $path)) { Fail '截图' '窗口既抢不到前台，也抓不到自己的画面' }
-    return (Get-Rect)
-}
-$r = Shot-Window '01-window'
-Save-Screen (Join-Path $OutDir '02-desktop-taskbar.png')
+Start-Sleep -Seconds 2
+try { Save-Shot (Join-Path $OutDir '01-window.png') } catch { Fail '截图' "整窗实拍失败：$($_.Exception.Message)" }
+$r = Get-Rect
+# 桌面整屏 + 任务栏。裁剪按这次运行机的实际屏幕尺寸算，不写死 winbox 的 5120×2160 坐标。
+$vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$taskbar = [int][Math]::Max(40, [Math]::Min(72, [Math]::Round($vs.Height * 0.04)))
+$zoom = if ($vs.Width -le 1400) { 3 } else { 2 }
+Save-Desktop (Join-Path $OutDir '02-desktop-taskbar.png')
 # 标题栏左上角那枚 16/24/32px 图标放大 4 倍看，边缘糊不糊一眼就知道
 Save-Crop (Join-Path $OutDir '01-window.png') (Join-Path $OutDir '03-titlebar-icon-x4.png') 0 0 ([Math]::Min(220, $r.R - $r.L)) ([Math]::Min(36, $r.B - $r.T)) 4
 # 任务栏：运行中的应用按钮用同一枚图标
-$vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
-$taskbar = [Math]::Min(72, $vs.Height)
-Save-Crop (Join-Path $OutDir '02-desktop-taskbar.png') (Join-Path $OutDir '04-taskbar-x3.png') 0 ($vs.Height - $taskbar) $vs.Width $taskbar 3
-Pass '截图' '窗口、桌面（含任务栏）、标题栏图标放大、任务栏放大'
+Save-Crop (Join-Path $OutDir '02-desktop-taskbar.png') (Join-Path $OutDir "04-taskbar-x$zoom.png") 0 ($vs.Height - $taskbar) $vs.Width $taskbar $zoom
+Pass '截图' "窗口、桌面整屏 $($vs.Width)x$($vs.Height)（含任务栏）、标题栏图标放大、任务栏放大"
 
 # ---- 3. 开始菜单搜索里看到的图标和名字 ----
 Open-StartMenu
 Start-Sleep -Seconds 2
 [System.Windows.Forms.SendKeys]::SendWait('LearningCoach')
 Start-Sleep -Seconds 3
-Save-Screen (Join-Path $OutDir '05-start-menu.png')
-Save-Crop (Join-Path $OutDir '05-start-menu.png') (Join-Path $OutDir '06-start-menu-result-x2.png') 1900 980 1100 400 2
+Save-Desktop (Join-Path $OutDir '05-start-menu.png')
+# 搜索结果贴在任务栏上方。按实际屏幕裁任务栏以上的一条横带：左对齐（Win10）和居中（Win11）都在里面。
+$band = [int][Math]::Min([Math]::Round($vs.Height * 0.55), $vs.Height - $taskbar)
+$bandZoom = if ($vs.Width -le 1400) { 2 } else { 1 }
+Save-Crop (Join-Path $OutDir '05-start-menu.png') (Join-Path $OutDir '06-start-menu-result.png') 0 ($vs.Height - $taskbar - $band) $vs.Width $band $bandZoom
 [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
 Start-Sleep -Seconds 1
 [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
-Pass '开始菜单' '搜索 LearningCoach 的截图（图标 + 名字）'
+Pass '开始菜单' '开始菜单打开时的整屏 + 任务栏以上横带（图标 + 名字）'
 
 # ---- 4. 关窗口、卸载 ----
 $client = Get-Process -Id $script:WinPid -ErrorAction SilentlyContinue

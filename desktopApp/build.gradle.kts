@@ -109,6 +109,10 @@ compose.desktop {
             vendor = "LearningCoach"
             modules("java.sql")
             windows {
+                // Same artwork as Window(icon = AppIcon.window()); the ICO carries 16..256 so the
+                // installer, exe, Start menu shortcut and taskbar pick a pre-rendered size instead
+                // of scaling one bitmap. See docs/design/desktop-polish.md section 2.
+                iconFile.set(project.file("icons/LearningCoach.ico"))
                 // Per-user so the installer needs no administrator prompt on the target PC.
                 // upgradeUuid stays fixed: a newer MSI replaces program files in place and
                 // leaves the user's ~/Coach data (ledger copy, token, state) untouched.

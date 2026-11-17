@@ -44,6 +44,7 @@ import androidx.compose.ui.semantics.text
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coach.design.tokens.CoachV7
@@ -282,7 +283,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                         append(page.text.ifBlank { "这一页没有可提取文字，请切换到原页阅读。" })
                         // 原文里的 Markdown 标题：井号隐去、标题用宋体排大一号。字符不删，块范围和出处偏移照旧对得上原文。
                         for (heading in markdownHeadings(page.text)) {
-                            addStyle(SpanStyle(color = Color.Transparent, fontSize = 0.1.sp), heading.marks.first, heading.marks.last + 1)
+                            addStyle(SpanStyle(color = Color.Transparent, fontSize = 1.sp), heading.marks.first, heading.marks.last + 1)
                             addStyle(if (heading.level == 1) chapterStyle else sectionStyle, heading.title.first, heading.title.last + 1)
                         }
                         val blocks = source?.blocks.orEmpty().filter { it.page == ui.page }
@@ -330,8 +331,9 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                         BookSelectionClipboard { SelectionContainer {
                             Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(22.dp).testTag("reader-scroll"),
                                 contentAlignment = Alignment.TopCenter) {
-                                Text(displayText, style = if (paragraphLayout.paragraphs.isEmpty()) bodyStyle
-                                    else bodyStyle.copy(fontSize = 0.1.sp, lineHeight = 0.1.sp), onTextLayout = { layout = it },
+                                Text(displayText, style = bodyStyle,
+                                    inlineContent = with(LocalDensity.current) { bookParagraphInlineContent(displayText, paragraphLayout, bodyStyle, 12.dp.toSp(), 32.dp.toSp()) },
+                                    onTextLayout = { layout = it },
                                     modifier = Modifier.widthIn(max = measure).fillMaxWidth().padding(top = topGap, bottom = bottomGap)
                                         // Accessibility reads the stored text; layout/selection keep the same offsets.
                                         .semantics { text = marked }.testTag("reader-text")

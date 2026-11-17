@@ -20,7 +20,7 @@ import kotlin.test.*
 @OptIn(ExperimentalTestApi::class)
 class BookParagraphCopyTest {
     @Test fun realSelectionCopyRestoresParagraphAndPdfNewlines() = runSkikoComposeUiTest {
-        val source = "中文段落接\r\n下文。\r\n\r\nEnglish words\ncontinue here."
+        val source = "# 章节\r\n\r\n中文段落接\r\n下文。\r\n\r\nEnglish words\ncontinue here."
         val model = bookParagraphs(source, true)
         val displayed = bookParagraphText(AnnotatedString(source), model,
             TextStyle(fontSize=18.sp,lineHeight=33.3.sp),12.sp,32.sp,40.sp,32.sp)
@@ -32,7 +32,7 @@ class BookParagraphCopyTest {
         }
         setContent { CompositionLocalProvider(LocalClipboard provides clipboard) {
             BookSelectionClipboard { SelectionContainer(state) {
-                Text(displayed, fontSize=0.1.sp,lineHeight=0.1.sp,modifier=Modifier.width(594.dp).testTag("copy-text"))
+                Text(displayed, fontSize=18.sp,lineHeight=33.3.sp,inlineContent=bookParagraphInlineContent(displayed,model,TextStyle(fontSize=18.sp,lineHeight=33.3.sp),12.sp,32.sp),modifier=Modifier.width(594.dp).testTag("copy-text"))
             } }
         } }
         onNodeWithTag("copy-text").performMouseInput { click(Offset(45f,15f)) }

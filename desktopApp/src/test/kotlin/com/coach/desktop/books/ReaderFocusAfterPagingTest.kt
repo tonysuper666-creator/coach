@@ -12,7 +12,10 @@ import kotlin.test.*
 /**
  * 翻页后阅读器焦点的恢复必须发生在组合所在的 UI 上下文：控制器动作在 IO 上完成，续体可能在后台线程恢复，
  * 在那里直接请求 Compose 焦点会触发 SnapshotStateObserver 的多线程访问错误。这里在同一个组合里连续前翻/后翻，
- * 每次都要求页码如实变化、阅读器重新拿到焦点、草稿仍在，且全程没有 Compose 抛错。
+ * 每次都要求页码如实变化、阅读区重新拿到键盘焦点、草稿仍在，且全程没有 Compose 抛错。
+ *
+ * 焦点核的是阅读区本身（`reader-page`）：翻页键要在阅读区里才收得到，焦点留在外壳上方向键就收不到。
+ * 外壳的 Esc / 批注键走预览路径，焦点在子节点时照样先经过外壳，不受影响。
  */
 @OptIn(ExperimentalTestApi::class)
 class ReaderFocusAfterPagingTest {
@@ -59,10 +62,10 @@ class ReaderFocusAfterPagingTest {
             repeat(2) {
                 onNodeWithText("下一页").performMouseInput { click() }
                 waitUntil(timeoutMillis = 20_000) { controller.state.value.page == 2 && !controller.state.value.busy }
-                waitUntil(timeoutMillis = 20_000) { runCatching { onNodeWithTag("windows-textbooks").assertIsFocused() }.isSuccess }
+                waitUntil(timeoutMillis = 20_000) { runCatching { onNodeWithTag("reader-page").assertIsFocused() }.isSuccess }
                 onNodeWithText("上一页").performMouseInput { click() }
                 waitUntil(timeoutMillis = 20_000) { controller.state.value.page == 1 && !controller.state.value.busy }
-                waitUntil(timeoutMillis = 20_000) { runCatching { onNodeWithTag("windows-textbooks").assertIsFocused() }.isSuccess }
+                waitUntil(timeoutMillis = 20_000) { runCatching { onNodeWithTag("reader-page").assertIsFocused() }.isSuccess }
             }
             assertEquals(PracticeAnswer("Focus draft"), controller.state.value.answer)
             assertEquals(book.id, controller.state.value.book!!.id)

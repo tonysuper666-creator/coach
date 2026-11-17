@@ -31,9 +31,11 @@ internal fun BookLessonExplanation(
 ) {
     // A caller may hold this across a screen switch so returning does not re-ask the provider.
     var attempt by remember(book.id, lesson.id, support) { mutableIntStateOf(0) }
-    // 外面清掉旧结果（比如重新配对之后）也会重新取一次。
-    LaunchedEffect(book.id, lesson.id, support, attempt, reply.value == null) {
-        if (reply.value != null) return@LaunchedEffect
+    // 外面清掉旧结果（比如重新配对之后）也会重新取一次。只认这一帧看到的「空」：外面刚清掉、key 还没跟上时
+    // 先不发，等 key 变过来再发，免得同一次重新配对发两遍、多扣一次额度。
+    val waiting = reply.value == null
+    LaunchedEffect(book.id, lesson.id, support, attempt, waiting) {
+        if (!waiting || reply.value != null) return@LaunchedEffect
         reply.value = try {
             val result = support.explain(BookExplanationRequest(book.id, lesson.id, lesson.blocks))
             coroutineContext.ensureActive()

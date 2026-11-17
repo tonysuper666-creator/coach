@@ -106,6 +106,27 @@ class BookLessonLiveWindowTest {
                     assertTrue(text(node(window, "reader-page-number")).contains(page.toString()))
                     shot(window, theme, "source")
                     println("REAL_LESSON_WINDOW theme=$theme pages=${book.pages.size} lessonIndex=$index blocks=${lesson.blocks.count { !it.heading }} sourcePage=$page nativeImport=true pageTurn=true body=true pageCitation=true exactUtf16=true sourceRoundTrip=true defaultProvider=true")
+                    click(window, "book-explain-toggle")
+                    click(window, "explain-button")
+                    waitFor("real inline explanation") {
+                        check(node(window, "explain-failed") == null) { "Real inline request refused; original text omitted" }
+                        node(window, "explain-text") != null && node(window, "explain-citation") != null
+                    }
+                    assertTrue(text(node(window, "explain-text")).isNotBlank())
+                    val inlineCitation = text(node(window, "explain-citation"))
+                    assertTrue(inlineCitation.contains("页"))
+                    shot(window, theme, "inline-explanation")
+                    click(window, "explain-citation")
+                    waitFor("inline original card") { node(window, "explain-source-card") != null }
+                    val inlineOriginal = text(node(window, "explain-source-text"))
+                    assertTrue(inlineOriginal.isNotBlank())
+                    assertTrue(book.lessons.flatMap { it.blocks }.any { block ->
+                        block.text == inlineOriginal && inlineCitation.contains(book.pageLabel(block.page))
+                    }, "Inline original and page must match the imported textbook; original text omitted")
+                    shot(window, theme, "inline-source")
+                    click(window, "explain-source-close")
+                    click(window, "book-explain-toggle")
+                    println("REAL_LESSON_WINDOW theme=$theme inlineExplanation=true inlineCitation=true inlineOriginalCard=true sameRound=true")
                     click(window, "ask-book-passage")
                     click(window, "ask-paragraph-0")
                     edt { assertTrue(node(window, "book-passage-question")!!.config[SemanticsActions.SetText].action!!

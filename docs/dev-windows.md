@@ -5,11 +5,13 @@
 ## 真窗口验收的准备与收尾
 
 朋友路径的窗口预算仍为 150 秒。冷检出先从 Mac 的默认入口运行
-`tools/dev/heavy ./gradlew :desktopApp:smokeRuntime --no-daemon --console=plain`，
+`tools/dev/heavy ./gradlew :desktopApp:test -Pcoach.smoke.prepare=true --no-daemon --console=plain`，
 再将该 heavy 任务产出的 `desktopApp/build/outputs/smoke-runtime` 放到同一干净 revision 的
 winbox 验收检出内。给 `friend-path.ps1` 传 `-Runtime <该目录>`，把编译准备与真实七步分开。
 不传 `-Background` 时启动正式的 `MainKt`；传入时才启动开发专用 `SmokeMain`。
 两种入口都核对运行时的 revision/dirty 收据。准备失败不计为七步结果，不放宽步骤判定。
+先确认 heavy 日志为 `host=winbox`；单独的 `smokeRuntime` 任务目前会路由到 Mac，
+产物含当前宿主的原生依赖，不能直接拿 Mac 运行时在 Windows 验收。
 
 `Run-Interactive.ps1` 在启动 worker 前建立本轮 Windows Job Object；超时或父调用退出会回收
 本轮后代进程，包括窗口尚未出现、父启动器已经退出的情况。worker 的 Gradle 回退路径使用

@@ -1,12 +1,14 @@
 package com.coach.desktop.books
 
 import androidx.compose.material3.Text
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.test.*
 import androidx.compose.ui.text.*
 import androidx.compose.ui.unit.*
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import com.coach.ui.CoachTheme
 import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
@@ -14,14 +16,16 @@ class BookParagraphLayoutTest {
     @Test fun paragraphBoundariesHaveIndentsWithoutEmptyLines() = runSkikoComposeUiTest {
         val source = "第一段中文内容。\n\n第二段中文内容。\n\n- 特殊块\n- 第二行\n\n第三段正文。\n\n# Heading\n\nFirst English paragraph.\n\nSecond English paragraph."
         val model = bookParagraphs(source, false)
-        val marked = bookParagraphText(AnnotatedString(source), model,
-            TextStyle(fontSize=18.sp,lineHeight=33.3.sp),12.sp,32.sp,40.sp,32.sp)
+        var marked = AnnotatedString("")
         var laid:TextLayoutResult? = null
         var normal: List<TextLayoutResult> = emptyList()
-        setContent {
+        setContent { CoachTheme(dark = false) {
+            val body = MaterialTheme.typography.bodyLarge.copy(fontSize=18.sp, lineHeight=33.3.sp,
+                fontFeatureSettings="'chws'")
+            marked = bookParagraphText(AnnotatedString(source), model, body,12.sp,32.sp,40.sp,32.sp)
             val measurer = rememberTextMeasurer()
-            normal = model.paragraphs.map { measurer.measure(marked.subSequence(it.start,it.end), TextStyle(fontSize=18.sp,lineHeight=33.3.sp)) }
-            Text(marked, fontSize=18.sp, lineHeight=33.3.sp, inlineContent=bookParagraphInlineContent(marked,model,TextStyle(fontSize=18.sp,lineHeight=33.3.sp),12.sp,32.sp), modifier=Modifier.width(594.dp), onTextLayout={laid=it}) }
+            normal = model.paragraphs.map { measurer.measure(marked.subSequence(it.start,it.end), body) }
+            Text(marked, style=body, inlineContent=bookParagraphInlineContent(marked,model,body,12.sp,32.sp), modifier=Modifier.width(594.dp), onTextLayout={laid=it}) } }
         waitForIdle()
         val l=laid!!
         // Exclude the first-line spacer from each normal paragraph's content box.
@@ -53,11 +57,16 @@ class BookParagraphLayoutTest {
         val paragraph = "文".repeat(90)
         val source = "$paragraph\n\n$paragraph\n\n# Heading\n\n$paragraph"
         val model = bookParagraphs(source, false)
-        val marked = bookParagraphText(AnnotatedString(source), model,
-            TextStyle(fontSize=18.sp,lineHeight=33.3.sp),12.sp,32.sp,40.sp,32.sp)
+        var marked = AnnotatedString("")
         var laid: TextLayoutResult? = null
-        setContent { Text(marked, fontSize=18.sp, lineHeight=33.3.sp, inlineContent=bookParagraphInlineContent(marked,model,TextStyle(fontSize=18.sp,lineHeight=33.3.sp),12.sp,32.sp),
-            modifier=Modifier.width(594.dp), onTextLayout={laid=it}) }
+        setContent { CoachTheme(dark = false) {
+            // Use the reader's bundled Literata/Noto Serif SC family. The system
+            // default's CJK fallback has different ascent/descent on each host.
+            val body = MaterialTheme.typography.bodyLarge.copy(fontSize=18.sp, lineHeight=33.3.sp,
+                fontFeatureSettings="'chws'")
+            marked = bookParagraphText(AnnotatedString(source), model, body,12.sp,32.sp,40.sp,32.sp)
+            Text(marked, style=body, inlineContent=bookParagraphInlineContent(marked,model,body,12.sp,32.sp),
+                modifier=Modifier.width(594.dp), onTextLayout={laid=it}) } }
         waitForIdle()
         val layout = laid!!
         val leading = layout.getLineBaseline(1) - layout.getLineBaseline(0)

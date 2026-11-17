@@ -39,11 +39,12 @@ class BookParagraphCopyTest {
         runOnIdle { state.selectAll() }
         waitForIdle()
         assertTrue(state.selectedTexts.isNotEmpty())
-        onNodeWithTag("copy-text").performKeyInput { keyDown(Key.CtrlLeft); pressKey(Key.C); keyUp(Key.CtrlLeft) }
+        val copyModifier = if (System.getProperty("os.name").startsWith("Mac")) Key.MetaLeft else Key.CtrlLeft
+        onNodeWithTag("copy-text").performKeyInput { keyDown(copyModifier); pressKey(Key.C); keyUp(copyModifier) }
         waitUntil { copied != null }
         val plain = copied!!.asAwtTransferable!!.getTransferData(DataFlavor.stringFlavor) as String
         assertEquals(source, plain)
         assertEquals(source,originalBookSelection(state.selectedTexts.single()))
-        println("PASS real Compose selection + Ctrl+C: CRLF, paragraph separators, Han and western PDF joins restored")
+        println("PASS real Compose selection + $copyModifier+C: CRLF, paragraph separators, Han and western PDF joins restored")
     }
 }

@@ -1,5 +1,9 @@
 package com.coach.desktop.books
 
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -10,7 +14,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -32,23 +35,16 @@ import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.input.pointer.PointerIcon
-import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.text
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextLayoutResult
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import coach.design.tokens.CoachV7
-import com.coach.ui.LocalV7TextScale
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.Desk
 import com.coach.ui.v7.LocalV7Fonts
@@ -65,7 +61,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import java.awt.Cursor
 
 /**
  * 出处打开后这一页要标什么。练习依据只有页 + 原句；讲解出处还带着解析器核对过的块范围，
@@ -80,7 +75,7 @@ private sealed interface PageImage {
 }
 
 @Composable
-internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: BookLearningSupport, practiceSource: PracticeSource?, onNoteSession: (ReaderSession?) -> Unit, onPage: (Int) -> Unit, onBack: () -> Unit, onLearn: () -> Unit) {
+internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: BookLearningSupport, practiceSource: PracticeSource?, pageFocus: FocusRequester, onNoteSession: (ReaderSession?) -> Unit, onPage: (Int) -> Unit, onBack: () -> Unit, onLearn: () -> Unit) {
     val book = checkNotNull(ui.book)
     val page = book.page(ui.page)
     if (page == null) {
@@ -93,6 +88,11 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     val previousPage = book.pages.filter { it.number < ui.page }.maxByOrNull { it.number }?.number
     val nextPage = book.pages.filter { it.number > ui.page }.minByOrNull { it.number }?.number
     var textView by remember(book.id) { mutableStateOf(!hasOriginal || page.ocr) }
+    val paging = remember(book.id) { BookPagingState(BookPageAnchor(ui.page)) }
+    LaunchedEffect(ui.page) {
+        paging.followImportPage(ui.page)
+    }
+    var editingJump by remember(book.id) { mutableStateOf(false) }
     var jump by remember(book.id, ui.page) { mutableStateOf(ui.page.toString()) }
     var retry by remember { mutableIntStateOf(0) }
     var notesOpen by remember(book.id) { mutableStateOf(false) }
@@ -100,6 +100,36 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     val explainer = remember(library) { BookExplainer(library = library) }
     val explainConsent = remember(library) { ExplainConsent(library.directory) }
     val source = ui.source
+    LaunchedEffect(book.id, source, practiceSource) {
+        if (source == null && practiceSource == null) return@LaunchedEffect
+        val target = practiceSource?.target
+        val number = target?.pdfPage ?: practiceSource?.page ?: ui.page
+        val stored = book.page(number)?.text.orEmpty()
+        val blocks = source?.blocks.orEmpty().filter {
+            it.page == number && it.start >= 0 && it.end > it.start && it.end <= stored.length
+        }
+        // A lesson opens at its body evidence. Imported physical-page markers and
+        // chapter titles can precede that evidence on a different laid-out page.
+        val physicalMarker = Regex("<!--\\s*PDF 第 (\\d+) 页 · 书第 (.*?) 页\\s*-->")
+        val block = blocks.firstOrNull { !it.heading && !physicalMarker.matches(it.text.trim()) }
+            ?: blocks.firstOrNull { !physicalMarker.matches(it.text.trim()) }
+        // Older imported lessons can consist only of the physical-page marker.
+        // Keep their source page and highlight, but open the page's body context
+        // rather than a metadata-only preamble sheet. Exact citations still win.
+        val bodyContext = if (block == null && blocks.isNotEmpty()) bookParagraphs(stored, pdf = false)
+            .paragraphs.firstOrNull { it.kind == BookParagraph.Kind.BODY &&
+                !physicalMarker.matches(stored.substring(it.start, it.end).trim()) }?.start else null
+        val offset = when {
+            target != null && target.start >= 0 && target.end > target.start && target.end <= stored.length &&
+                stored.substring(target.start, target.end) == target.quote -> target.start
+            block != null -> block.start
+            bodyContext != null -> bodyContext
+            else -> practiceSource?.quote?.let { quote -> stored.indexOf(quote).takeIf {
+                it >= 0 && stored.indexOf(quote, it + 1) < 0
+            } } ?: 0
+        }
+        paging.anchor = BookPageAnchor(number, offset)
+    }
     // 从答后讲解的「去原文页配对」过来、这台电脑的连接已停用：原文页直接摊开配对，不用再去找「讲解」。
     LaunchedEffect(explainer, source != null) {
         if (source == null) return@LaunchedEffect
@@ -133,24 +163,49 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     // 翻页键只到得了拿着键盘焦点的那棵子树，外壳的 Surface 只处理 Esc，所以阅读区自己是一个焦点目标：
     // 换页、合上批注编辑区、离开页码框之后把焦点收回来，方向键马上又能用。
     // 正在输入文字时不接管：提问弹窗、页码框、批注编辑区自己要用方向键。
-    val pageFocus = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
     var jumpFocused by remember { mutableStateOf(false) }
     var pageFocused by remember { mutableStateOf(false) }
     val typing = readerTyping(asking, jumpFocused, notesOpen, session.noting)
     LaunchedEffect(book.id, ui.page, typing) {
         if (typing) return@LaunchedEffect
-        // 进阅读屏那一帧焦点节点可能才刚挂上，第一次请求会被丢掉；等几帧再确认一次，最多试几回。
+        // A successful request already owns focus. Do not leave another frame's
+        // request pending: it could steal focus from a newly clicked page field.
         repeat(5) {
-            if (pageFocused) return@LaunchedEffect
             withFrameNanos { }
-            runCatching { pageFocus.requestFocus() }
+            // Mouse-up can finish moving focus to the paging button after its
+            // click changed ui.page. Inspect focus once that frame has settled.
+            if (pageFocused) return@LaunchedEffect
+            val requested = runCatching { pageFocus.requestFocus() }.getOrDefault(false)
+            if (requested) return@LaunchedEffect
         }
     }
-    fun turnTo(pageNumber: Int?) {
-        pageNumber ?: return
-        onPage(pageNumber)
-        session.goToPage(pageNumber)
+    val turnTo: (Int?) -> Unit = { pageNumber ->
+        if (pageNumber != null && book.page(pageNumber) != null) {
+            paging.anchor = BookPageAnchor(pageNumber)
+            val visiblePage = if (textView && paging.pages.isNotEmpty())
+                paging.pages[paging.index].anchor.importPage else pageNumber
+            if (paging.publishImportPage(visiblePage)) onPage(visiblePage)
+            session.goToPage(visiblePage)
+        }
+    }
+
+    // Keep the event handler connected to the current neighbours after recomposition.
+    // A remembered key callback must not retain a local function's old page captures.
+    val turnLayout by rememberUpdatedState<(ReaderTurn) -> Unit> { turn ->
+        if (!textView) {
+            when (turn) {
+                ReaderTurn.Previous -> turnTo(previousPage)
+                ReaderTurn.Next -> turnTo(nextPage)
+                ReaderTurn.First -> turnTo(book.pages.first().number)
+                ReaderTurn.Last -> turnTo(lastPage)
+            }
+        } else paging.move(turn)?.let { anchor ->
+            if (paging.publishImportPage(anchor.importPage)) {
+                onPage(anchor.importPage)
+                session.goToPage(anchor.importPage)
+            }
+        }
     }
 
     val quoteAnchor = remember(ui.page, source, practiceSource) {
@@ -197,7 +252,17 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     val loadedImage = (image as? PageImage.Ready)?.image
     val aspectOk = boxes != null && loadedImage != null &&
         kotlin.math.abs(loadedImage.width.toDouble() / loadedImage.height - boxes.width / boxes.height) < 0.05
+    val textTarget = practiceSource?.target
+    val textTargetValid = textTarget?.let { target -> book.page(target.pdfPage)?.text?.let { stored ->
+        target.start >= 0 && target.end > target.start && target.end <= stored.length &&
+            stored.substring(target.start, target.end) == target.quote
+    } } == true
     val sourceWarning = if (source == null) null else when {
+        textView && practiceSource?.warning != null -> practiceSource.warning
+        textView && textTarget != null && !textTargetValid -> "无法确认原句：这一页的内容变了，这条出处无法定位。"
+        textView && citedRange == null && !quoteAnchor.isNullOrEmpty() &&
+            page.text.indexOf(quoteAnchor) != page.text.lastIndexOf(quoteAnchor) -> "无法确认原句：这一页有多处相同内容。"
+        textView -> null
         practiceSource?.warning != null -> practiceSource.warning
         practiceSource?.page != null && practiceSource.page != ui.page -> "无法确认原句：本题依据在第 ${practiceSource.page} 页。"
         practiceSource?.target != null && citedRange == null -> "无法确认原句：这一页的内容变了，这条出处无法定位。"
@@ -229,16 +294,19 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     }
 
     Desk(crumb = book.title, onBack = onBack, backLabel = if (source != null) { if (ui.review != null) "返回复习" else "返回学习" } else "返回书架", showNavigation = false, hasMargin = false,
+        paperMaxWidth = if (textView) Dp.Infinity else Dp.Unspecified,
         status = "${book.pageLabel(ui.page)} · 共 $lastPage ${if (book.format == "pptx") "张" else "页"}", directory = {
             Text("教材目录", style = MaterialTheme.typography.titleMedium)
-            for (lesson in book.lessons) TextButton(onClick = { onPage(lesson.firstPage); session.goToPage(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
+            for (lesson in book.lessons) TextButton(onClick = { turnTo(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
         }) {
         val colors = CoachTheme.colors
         val highlight = if (colors.dark) CoachV7.Dark.hl else CoachV7.Light.hl
         Column(Modifier.fillMaxSize().padding(20.dp).testTag("textbook-reader"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(if (source != null) "学习原文 · ${source.title}" else "教材阅读", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                if (hasOriginal) V7TextButton(onClick = { textView = !textView }, modifier = Modifier.testTag("book-original-toggle")) { Text(if (textView) "看原页" else "看文字") }
+                if (hasOriginal) V7TextButton(onClick = {
+                    textView = !textView
+                }, modifier = Modifier.testTag("book-original-toggle")) { Text(if (textView) "看原页" else "看文字") }
                 V7TextButton(onClick = { asking = true }, modifier = Modifier.testTag("ask-book-passage")) { Text("选段提问") }
                 V7TextButton(onClick = { explainOpen = !explainOpen }, enabled = !ui.busy, modifier = Modifier.testTag("book-explain-toggle")) {
                     Text(if (explainOpen) "回到原文" else "讲解")
@@ -256,93 +324,53 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             sourceWarning?.let { Text(it, color = v7Alert(), style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("source-anchor-status")) }
             Box(Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surface).testTag("reader-page")
-                .focusRequester(pageFocus).focusable().onFocusChanged { pageFocused = it.hasFocus }
+                .focusRequester(pageFocus).onFocusChanged { pageFocused = it.isFocused }
                 .onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                     // Ctrl/Alt/Win 组合留给系统；纯方向键才翻页。
                     if (event.isCtrlPressed || event.isAltPressed || event.isMetaPressed) return@onPreviewKeyEvent false
-                    when (readerPagingTurn(event.key, typing)) {
-                        ReaderTurn.Previous -> previousPage?.let(::turnTo)
-                        ReaderTurn.Next -> nextPage?.let(::turnTo)
-                        ReaderTurn.First -> turnTo(book.pages.first().number)
-                        ReaderTurn.Last -> turnTo(lastPage)
-                        null -> return@onPreviewKeyEvent false
-                    }
+                    val turn = if (textView && !typing && event.key == Key.Spacebar) ReaderTurn.Next
+                        else readerPagingTurn(event.key, typing)
+                    turn?.let(turnLayout) ?: return@onPreviewKeyEvent false
                     true
-                }) {
+                }.focusable()) {
                 if (explainOpen) BookExplainPanel(book, ui.page, explainConsent, explainer)
                 else if (textView) {
-                    // 标题字号取 V7 typography（随 Aa 缩放）：一级用 headlineLarge，其余用 titleLarge，字体换成宋体。
-                    val headingFont = LocalV7Fonts.current.display
-                    val chapterStyle = MaterialTheme.typography.headlineLarge.toSpanStyle().copy(fontFamily = headingFont)
-                    val sectionStyle = MaterialTheme.typography.titleLarge.toSpanStyle().copy(fontFamily = headingFont)
-                    val textScale = LocalV7TextScale.current.value
-                    val bodySize = CoachV7.Size.body * textScale
-                    val paragraphLayout = remember(page.text, book.format) { bookParagraphs(page.text, book.format == "pdf") }
-                    val marked = buildAnnotatedString {
-                        append(page.text.ifBlank { "这一页没有可提取文字，请切换到原页阅读。" })
-                        // 原文里的 Markdown 标题：井号隐去、标题用宋体排大一号。字符不删，块范围和出处偏移照旧对得上原文。
-                        for (heading in markdownHeadings(page.text)) {
-                            addStyle(SpanStyle(color = Color.Transparent, fontSize = 1.sp), heading.marks.first, heading.marks.last + 1)
-                            addStyle(if (heading.level == 1) chapterStyle else sectionStyle, heading.title.first, heading.title.last + 1)
-                        }
-                        val blocks = source?.blocks.orEmpty().filter { it.page == ui.page }
-                        val confirmedBlocks = if (practiceSource != null) emptyList() else if (textOnlySource) blocks else if (located is com.coach.desktop.reader.Located.Found && aspectOk) {
-                            blocks.filter { !it.heading && it.text == quoteAnchor }.take(1)
-                        } else emptyList()
-                        for (block in confirmedBlocks) {
-                            if (block.start >= 0 && block.end <= length) addStyle(SpanStyle(background = highlight), block.start, block.end)
-                        }
-                        if (practiceSource != null) {
-                            val markedRange = if (practiceSource.target != null) citedRange else if (quoteAnchor != null &&
-                                (textOnlySource || located is com.coach.desktop.reader.Located.Found && aspectOk)) {
-                                val start = page.text.indexOf(quoteAnchor)
-                                if (start >= 0 && page.text.indexOf(quoteAnchor, start + 1) < 0) start until start + quoteAnchor.length else null
-                            } else null
-                            if (markedRange != null && markedRange.last + 1 <= length)
-                                addStyle(SpanStyle(background = highlight), markedRange.first, markedRange.last + 1)
-                        }
-                    }
-                    // 正文字号、行距取 V7 内屏 token（18 × 1.85，对照 inner-read 参考图量过），随 Aa 小/中/大缩放。
-                    val bodyStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = bodySize,
-                        lineHeight = CoachV7.Size.body * (CoachV7.LineHeight.body * textScale), fontFeatureSettings = "'chws'")
-                    val displayText = if (paragraphLayout.paragraphs.isEmpty()) marked else with(LocalDensity.current) {
-                        bookParagraphText(marked, paragraphLayout, bodyStyle, 12.dp.toSp(), 32.dp.toSp(),
-                            MaterialTheme.typography.headlineLarge.lineHeight, MaterialTheme.typography.titleLarge.lineHeight)
-                    }
-                    val firstKind = paragraphLayout.paragraphs.firstOrNull()?.kind
-                    val lastKind = paragraphLayout.paragraphs.lastOrNull()?.kind
-                    val topGap = when (firstKind) { BookParagraph.Kind.HEADING -> 32.dp; BookParagraph.Kind.SPECIAL -> 12.dp; else -> 0.dp }
-                    val bottomGap = if (lastKind != null && lastKind != BookParagraph.Kind.BODY) 12.dp else 0.dp
-                    // 正文栏按 V7 measure 33em 限宽（中号 18sp → 594dp），在纸面内居中；窄窗口照旧占满可用宽度。
-                    // 只改显示：分页在导入时按文字块固定，页码、原文字符和出处偏移都不受栏宽影响。
-                    // 滚动留在整张纸上，鼠标停在栏外两侧也能滚。
-                    val measure = with(LocalDensity.current) { (CoachV7.Size.body * (33f * textScale)).toDp() }
-                    // 换页从顶部读起；打开出处时滚到标记那一段（栏收窄后正文更长，标记常落在首屏以下）。
-                    val scroll = remember(book.id, ui.page) { ScrollState(0) }
-                    var layout by remember(book.id, ui.page) { mutableStateOf<TextLayoutResult?>(null) }
-                    val markStart = marked.spanStyles.filter { it.item.background == highlight }.minOfOrNull { it.start }
-                    LaunchedEffect(book.id, ui.page, markStart, layout != null) {
-                        val laid = layout ?: return@LaunchedEffect
-                        if (markStart != null && markStart <= laid.layoutInput.text.length)
-                            scroll.scrollTo(laid.getLineTop(laid.getLineForOffset(markStart)).toInt())
-                    }
-                    Box(Modifier.fillMaxSize()) {
-                        BookSelectionClipboard { SelectionContainer {
-                            Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(22.dp).testTag("reader-scroll"),
-                                contentAlignment = Alignment.TopCenter) {
-                                Text(displayText, style = bodyStyle,
-                                    inlineContent = with(LocalDensity.current) { bookParagraphInlineContent(displayText, paragraphLayout, bodyStyle, 12.dp.toSp(), 32.dp.toSp()) },
-                                    onTextLayout = { layout = it },
-                                    modifier = Modifier.widthIn(max = measure).fillMaxWidth().padding(top = topGap, bottom = bottomGap)
-                                        // Accessibility reads the stored text; layout/selection keep the same offsets.
-                                        .semantics { text = marked }.testTag("reader-text")
-                                        .pointerHoverIcon(PointerIcon(Cursor.getPredefinedCursor(Cursor.TEXT_CURSOR))))
+                    val ranges = remember(book.pages, source, practiceSource, ui.page, quoteAnchor, located, aspectOk) {
+                        val result = mutableMapOf<Int, List<IntRange>>()
+                        if (practiceSource == null) {
+                            source?.blocks.orEmpty().groupBy { it.page }.forEach { (number, blocks) ->
+                                val stored = book.page(number)?.text.orEmpty()
+                                val confirmed = if (book.format != "pdf" || book.page(number)?.ocr == true) blocks
+                                    else if (number == ui.page && located is com.coach.desktop.reader.Located.Found && aspectOk)
+                                        blocks.filter { !it.heading && it.text == quoteAnchor }.take(1)
+                                    else emptyList()
+                                result[number] = confirmed.filter { it.start >= 0 && it.end > it.start &&
+                                    it.end <= stored.length && stored.substring(it.start, it.end) == it.text }
+                                    .map { it.start until it.end }
                             }
+                        } else {
+                            val target = practiceSource.target
+                            val number = target?.pdfPage ?: practiceSource.page
+                            val stored = number?.let { book.page(it)?.text }.orEmpty()
+                            val range = if (target != null) {
+                                if (target.start >= 0 && target.end > target.start && target.end <= stored.length &&
+                                    stored.substring(target.start, target.end) == target.quote) target.start until target.end else null
+                            } else practiceSource.quote?.takeIf { it.isNotEmpty() }?.let { quote ->
+                                val at = stored.indexOf(quote)
+                                if (at >= 0 && stored.indexOf(quote, at + 1) < 0) at until at + quote.length else null
+                            }
+                            if (number != null && range != null) result[number] = listOf(range)
                         }
-                        }
-                        ReaderScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                        result
                     }
+                    BookPageView(book, paging, ranges, turnLayout, onPosition = { number ->
+                        if (paging.publishImportPage(number)) {
+                            onPage(number)
+                            session.goToPage(number)
+                        }
+                    })
+
                 } else {
                     // 页图就位前先铺一张同尺寸的纸（纸面底色、一道细边），图到了原地换掉：
                     // 不出现转圈，下面的按钮和批注也不被推下去。打不开时同一张纸上给重试。
@@ -405,6 +433,43 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                     }
                 }
             }
+            if (textView) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center) {
+                V7Tooltip("上一页", shortcut = "←  PageUp") {
+                    PaperButton({ turnLayout(ReaderTurn.Previous) }, enabled = paging.canPrevious,
+                        modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
+                }
+                Spacer(Modifier.width(20.dp))
+                if (!editingJump) Text(paging.pages.getOrNull(paging.index)?.sourceLabel ?: "第 ${ui.page} 页",
+                    style = MaterialTheme.typography.bodyMedium, fontFamily = LocalV7Fonts.current.numbers,
+                    modifier = Modifier.testTag("reader-page-number").clickable { editingJump = true })
+                else {
+                    val jumpFocus = remember { FocusRequester() }
+                    fun submitJump() {
+                        jump.toIntOrNull()?.takeIf { book.page(it) != null }?.let {
+                            turnTo(it); editingJump = false; focusManager.clearFocus()
+                        }
+                    }
+                    BasicTextField(jump, { jump = it.filter(Char::isDigit).take(5) }, singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.fgPrimary, textAlign = TextAlign.Center),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                        keyboardActions = KeyboardActions(onGo = { submitJump() }),
+                        modifier = Modifier.width(80.dp).testTag("page-jump").focusRequester(jumpFocus)
+                            .onFocusChanged { jumpFocused = it.isFocused }
+                            .onPreviewKeyEvent { event ->
+                                if (event.type == KeyEventType.KeyDown && event.key == Key.Enter) { submitJump(); true }
+                                else if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                                    editingJump = false; focusManager.clearFocus(); true
+                                } else false
+                            }.background(colors.surface2).padding(9.dp))
+                    LaunchedEffect(Unit) { jumpFocus.requestFocus() }
+                }
+                Spacer(Modifier.width(20.dp))
+                V7Tooltip("下一页", shortcut = "→  PageDown") {
+                    PaperButton({ turnLayout(ReaderTurn.Next) }, enabled = paging.canNext,
+                        modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
+                }
+            } else
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 // 快捷键写在悬停提示里：不用记，也不用在页面上多一行说明。提示用共享的 V7Tooltip，
                 // 快捷键那半截走数字字体，跟面板上的其他提示一致。

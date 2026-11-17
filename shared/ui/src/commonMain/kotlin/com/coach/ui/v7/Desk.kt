@@ -82,6 +82,8 @@ fun Desk(
     /** 本页有没有页边内容。false 时不留空的页边栏、不出「出处与批注」开关，纸面居中（V7 三栏版心）。 */
     hasMargin: Boolean = true,
     footer: (@Composable RowScope.() -> Unit)? = null,
+    /** Opt in to a wider paper, for example a reader's two facing pages. */
+    paperMaxWidth: Dp = Dp.Unspecified,
     content: @Composable () -> Unit,
 ) {
     val managed = com.coach.ui.LocalAppManagedNavigation.current
@@ -181,7 +183,8 @@ fun Desk(
                     .then(if (centered) Modifier.padding(horizontal = 16.dp) else Modifier)) {
                     // Keep the paper in place so a resize never recreates the reading composition.
                     Box(Modifier.weight(1f).fillMaxHeight()
-                        .then(if (centered) Modifier.wrapContentWidth(Alignment.CenterHorizontally).widthIn(max = deskPaperMax).fillMaxWidth() else Modifier)
+                        .then(if (centered) Modifier.wrapContentWidth(Alignment.CenterHorizontally)
+                            .widthIn(max = if (paperMaxWidth.isSpecified) paperMaxWidth else deskPaperMax).fillMaxWidth() else Modifier)
                         .padding(top = if (inner && !focused) 4.dp else 0.dp)
                         .then(if (inner && !focused) Modifier.paperShadow("sheet", colors.dark) else Modifier)
                         .clip(if (focused) RoundedCornerShape(0.dp) else if (!inner) RoundedCornerShape(bottomStart = CoachV7.Radius.sheet, bottomEnd = CoachV7.Radius.sheet) else RoundedCornerShape(CoachV7.Radius.sheet))

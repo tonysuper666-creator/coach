@@ -241,8 +241,9 @@ class BookCitationWorkspaceTest {
             onNodeWithText("看文字").performClick()
             waitForIdle()
             val marked = onNodeWithTag("reader-text").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text].single()
-            assertEquals(1, marked.spanStyles.size)
-            val span = marked.spanStyles.single()
+            val sourceSpans = marked.spanStyles.filter { it.item.background != androidx.compose.ui.graphics.Color.Unspecified }
+            assertEquals(1, sourceSpans.size)
+            val span = sourceSpans.single()
             assertEquals(cited.start, span.start)
             assertEquals(cited.end, span.end)
             assertEquals(sentence, marked.text.substring(span.start, span.end))
@@ -260,7 +261,7 @@ class BookCitationWorkspaceTest {
             onNodeWithText("看文字").performClick()
             waitForIdle()
             assertTrue(onNodeWithTag("reader-text").fetchSemanticsNode()
-                .config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().spanStyles.isEmpty())
+                .config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().spanStyles.none { it.item.background != androidx.compose.ui.graphics.Color.Unspecified })
         }
     }
 }

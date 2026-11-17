@@ -3,6 +3,9 @@
 # 输出 N/7，每步一张截图在 D:\agent\evidence\friend-path\<时间>\（含教材原文，只留在 winbox，不上传）。
 param(
     [string]$Url = '', [string]$PairCode = '', [string]$ClientSeed = '', [string]$Selection = '', [switch]$KeepGoing,
+    [switch]$Background,
+    [string]$Runtime = '',
+    [ValidatePattern('^[\p{L}\p{N}_-]{1,32}$')][string]$Marker = '',
     [string]$Book = 'D:\agent\friend-path-books\health-economics.pdf',   # 健康经济学教材，不进 Git
     [string]$Evidence = 'D:\agent\evidence\friend-path', [int]$TimeoutSec = 600
 )
@@ -14,6 +17,9 @@ $out = (Resolve-Path $out).Path
 $args2 = "-Repo '$repo' -OutDir '$out' -Book '$Book'"
 if ($Url) { $args2 += " -Url '$Url'" }
 if ($KeepGoing) { $args2 += ' -KeepGoing' }
+if ($Background) { $args2 += ' -Background' }
+if ($Runtime) { $args2 += " -Runtime '$($Runtime.Replace("'", "''"))'" }
+if ($Marker) { $args2 += " -Marker '$Marker'" }
 if ($ClientSeed) { $args2 += " -ClientSeed '$ClientSeed'" }
 if ($Selection) { $args2 += " -Selection '$Selection'" }
 if ($PairCode) { $args2 += " -PairCode '$PairCode'" }

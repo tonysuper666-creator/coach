@@ -58,12 +58,17 @@ $script:Known = @()
 $script:RepoMarker = ''   # 本次检出的目录；设置后只认命令行里带这个目录的客户端进程（别人的 Coach 窗口永远不是我的）
 function Get-ClientPids([switch]$Mine) {
     @(Get-CimInstance Win32_Process -Filter "Name='java.exe'" | Where-Object {
-        $_.CommandLine -like '*com.coach.desktop.MainKt*' -and (-not $Mine -or -not $script:RepoMarker -or $_.CommandLine.Replace('\','/').Contains($script:RepoMarker.TrimEnd([char[]]'\/').Replace('\','/') + '/desktopApp/build/')) } | ForEach-Object { [int]$_.ProcessId })
+        ($_.CommandLine -like '*com.coach.desktop.MainKt*' -or $_.CommandLine -like '*com.coach.desktop.smoke.SmokeMain*') -and (-not $Mine -or -not $script:RepoMarker -or $_.CommandLine.Replace('\','/').Contains($script:RepoMarker.TrimEnd([char[]]'\/').Replace('\','/') + '/desktopApp/build/')) } | ForEach-Object { [int]$_.ProcessId })
 }
 function Mark-ExistingClients { $script:Known = Get-ClientPids }
 function Find-CoachWindow {
     $script:Win = [IntPtr]::Zero
     $mine = @(Get-ClientPids -Mine | Where-Object { $script:Known -notcontains $_ })
+    if (Has-BackgroundDriver) {
+        if (-not (Test-Path -LiteralPath $env:COACH_SMOKE_CONTROL_FILE)) { return $false }
+        $control = Get-Content -LiteralPath $env:COACH_SMOKE_CONTROL_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
+        $mine = @($mine | Where-Object { $_ -eq [int]$control.pid })
+    }
     if (-not $mine) { return $false }
     $script:AppPid = $mine[0]
     [WD]::EnumWindows({ param($x, $l)
@@ -76,6 +81,45 @@ function Find-CoachWindow {
 }
 function Stop-MyClient { if ($script:AppPid) { Stop-Process -Id $script:AppPid -Force -ErrorAction SilentlyContinue } }
 
+# The development launcher owns its port/token. No foreground, cursor,
+# clipboard or screen resource is used by this backend.
+function Has-BackgroundDriver { $env:COACH_SMOKE_ENABLED -eq '1' }
+function Invoke-BackgroundAction([string]$path, [string]$value = '', [string]$save = '') {
+    $control = Get-Content -LiteralPath $env:COACH_SMOKE_CONTROL_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
+    $uri = [uri]$control.url
+    if ($uri.Scheme -ne 'http' -or $uri.Host -ne '127.0.0.1' -or $control.pid -ne $script:AppPid -or -not $control.token) {
+        throw 'WIN_DRIVE_TARGET: background control does not belong to this run'
+    }
+    $deadline = (Get-Date).AddSeconds(15)
+    while ($true) {
+        $request = [Net.HttpWebRequest]::Create($control.url + $path)
+        $request.Proxy = $null
+        $request.Timeout = 15000; $request.ReadWriteTimeout = 15000
+        $request.Headers['Authorization'] = 'Bearer ' + $control.token
+        if (-not $save) {
+            $request.Method = 'POST'; $request.ContentType = 'text/plain; charset=utf-8'
+            $bytes = [Text.Encoding]::UTF8.GetBytes($value)
+            $request.ContentLength = $bytes.Length
+            $stream = $request.GetRequestStream()
+            try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+        }
+        $response = $null
+        try {
+            $response = $request.GetResponse()
+            if ($save) {
+                $stream = $response.GetResponseStream()
+                $file = [IO.File]::Create($save)
+                try { $stream.CopyTo($file) } finally { $file.Dispose(); $stream.Dispose() }
+            }
+            return
+        } catch [Net.WebException] {
+            $failed = $_.Exception.Response
+            if (-not $failed -or [int]$failed.StatusCode -ne 503 -or (Get-Date) -ge $deadline) { throw }
+            $failed.Dispose()
+        } finally { if ($response) { $response.Dispose() } }
+        Start-Sleep -Milliseconds 200
+    }
+}
 function Get-Rect { $r = New-Object WD+RECT; [WD]::GetWindowRect($script:Win, [ref]$r) | Out-Null; $r }
 
 # All drivers share this mutex, but hold it for one input/capture only.
@@ -110,6 +154,7 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
     } finally { $mutex.Dispose() }
 }
 function Save-Shot([string]$path, [IntPtr]$Window = [IntPtr]::Zero) {
+    if (Has-BackgroundDriver) { Invoke-BackgroundAction -path "/shot" -save $path; return }
     if ($Window -eq [IntPtr]::Zero) { $Window = $script:Win }
     Invoke-ForegroundStep -Window $Window -Action {
         $r = New-Object WD+RECT; [WD]::GetWindowRect($Window, [ref]$r) | Out-Null; $w = $r.R - $r.L; $h = $r.B - $r.T
@@ -133,6 +178,7 @@ function Save-Shot([string]$path, [IntPtr]$Window = [IntPtr]::Zero) {
 # OCR a saved PNG; returns lines as objects { Text, Words } in window coordinates.
 # Dark themes lose small low-contrast labels, so the picture is read twice (as is and inverted) and the lines are merged.
 function Read-Bitmap([string]$png) {
+    $png = [IO.Path]::GetFullPath($png)
     $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($png)) ([Windows.Storage.StorageFile])
     $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
     $dec = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
@@ -193,6 +239,7 @@ function Assert-OurForeground {
     }
 }
 function Click-At([int]$x, [int]$y) {
+    if (Has-BackgroundDriver) { Invoke-BackgroundAction "/click?x=$x&y=$y"; return }
     Invoke-ForegroundStep {
         $r = Get-Rect
         [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null
@@ -203,6 +250,7 @@ function Click-At([int]$x, [int]$y) {
 }
 # A drag is one action: release the button even if foreground is interrupted.
 function Drag-Between([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
+    if (Has-BackgroundDriver) { Invoke-BackgroundAction "/drag?x1=$x1&y1=$y1&x2=$x2&y2=$y2"; return }
     Invoke-ForegroundStep {
         $r = Get-Rect
         [WD]::SetCursorPos($r.L + $x1, $r.T + $y1) | Out-Null
@@ -218,6 +266,7 @@ function Drag-Between([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
     }
 }
 function Send-Keys([string]$keys) {
+    if (Has-BackgroundDriver) { Invoke-BackgroundAction "/keys" $keys; return }
     Invoke-ForegroundStep { Assert-OurForeground; [System.Windows.Forms.SendKeys]::SendWait($keys) }
 }
 
@@ -249,6 +298,7 @@ function Find-AppWindowByTitle([string]$prefix) {
 # Dialog discovery and waiting do not hold the mutex. Filename filling is
 # idempotent on retry; each Enter is followed by an unlocked wait.
 function Choose-File([string]$dialogTitlePrefix, [string]$path, [int]$timeoutSec = 20) {
+    if (Has-BackgroundDriver) { Invoke-BackgroundAction "/choose-file" $path; return $true }
     $deadline = (Get-Date).AddSeconds($timeoutSec); $h = [IntPtr]::Zero
     while ($h -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500; $h = Find-AppWindowByTitle $dialogTitlePrefix }
     if ($h -eq [IntPtr]::Zero) { return $false }
@@ -290,6 +340,7 @@ function List-AppWindows {
 
 # Mouse-wheel inside the window; negative delta scrolls down.
 function Scroll-At([int]$x, [int]$y, [int]$notches) {
+    if (Has-BackgroundDriver) { Invoke-BackgroundAction "/scroll?x=$x&y=$y&notches=$notches"; return }
     Invoke-ForegroundStep {
         $r = Get-Rect
         [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null
@@ -300,6 +351,7 @@ function Scroll-At([int]$x, [int]$y, [int]$notches) {
 }
 # Clipboard write and paste are one action. Keep it stable until consumed.
 function Paste-Text([string]$text) {
+    if (Has-BackgroundDriver) { Invoke-BackgroundAction "/text" $text; return }
     Invoke-ForegroundStep {
         [System.Windows.Forms.Clipboard]::SetText($text)
         Assert-OurForeground

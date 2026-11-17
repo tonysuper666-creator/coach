@@ -8,6 +8,9 @@ param(
     [string]$PairCode = '',
     [string]$ClientSeed = '',                   # an already paired private client dir; copied per run, never modified
     [string]$Selection = '',                    # private JSON {selection, blocks[id=<sha>:p<page>:0]}; stays on winbox
+    [switch]$Background,
+    [string]$Runtime = '',
+    [ValidatePattern('^[\p{L}\p{N}_-]{1,32}$')][string]$Marker = '',
     [int]$StartTimeoutSec = 150,
     [switch]$KeepGoing                          # 某步失败后仍尝试后面不依赖它的步骤（默认停在第一个失败）
 )
@@ -55,8 +58,30 @@ if ($serverPort -in 18791, 8791, 8790) { throw "拒绝：$serverPort 是生产�
 $script:RepoMarker = $Repo
 # Other Coach windows/heavy jobs may coexist; only input/capture is serialized.
 Mark-ExistingClients
-$gradle = Start-Process (Join-Path $Repo 'gradlew.bat') -ArgumentList ':desktopApp:run', '-Pcoach.course=', '--console=plain', '--offline' -WorkingDirectory $Repo `
+$runTask = ':desktopApp:run'
+if ($Background) {
+    $runTask = ':desktopApp:smokeRun'
+    $env:COACH_SMOKE_ENABLED = '1'
+    $env:COACH_SMOKE_CONTROL_FILE = Join-Path $OutDir 'control.private.json'
+} else {
+    $env:COACH_SMOKE_ENABLED = $null
+    $env:COACH_SMOKE_CONTROL_FILE = $null
+}
+$launchArgs = @($runTask, '-Pcoach.course=', '--console=plain', '--offline')
+if ($Background) { $launchArgs += '--no-daemon' }
+$gradle = $null
+if ($Runtime) {
+    if (-not $Background) { throw '-Runtime requires -Background' }
+    $Runtime = (Resolve-Path -LiteralPath $Runtime).Path
+    $revision = (& git -C $Repo rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or (Get-Content (Join-Path $Runtime 'revision.txt') -Raw).Trim() -ne $revision) { throw 'Runtime source revision differs from checkout' }
+    if ((Get-Content (Join-Path $Runtime 'dirty.txt') -Raw).Trim()) { throw 'Runtime was built from uncommitted source' }
+    $classpath = ((Get-Content (Join-Path $Runtime 'classpath.txt')) | ForEach-Object { Join-Path $Runtime $_ }) -join ';'
+    $gradle = Start-Process "$env:JAVA_HOME/bin/java.exe" -ArgumentList ('-cp "' + $classpath + '" com.coach.desktop.smoke.SmokeMain') -WorkingDirectory $Repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
+} else {
+    $gradle = Start-Process (Join-Path $Repo 'gradlew.bat') -ArgumentList $launchArgs -WorkingDirectory $Repo `
     -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
+}
 try {
     # ① 启动
     $deadline = (Get-Date).AddSeconds($StartTimeoutSec)
@@ -168,18 +193,35 @@ try {
         if (-not $pp) { throw '提问对话框里找不到可信选段所在的段落' }
         Click-At $pp.X $pp.Y; Start-Sleep -Seconds 2
         $lines = Shot 4 'ask-picked'
-        $ctr = Has $lines @('0/500', '/500'); $lab = Has $lines @('想问什么')
-        if ($ctr) { Click-At ($ctr.X + 300) ($ctr.Y - 100) } elseif ($lab) { Click-At ($lab.X + 300) ($lab.Y + 90) } else { throw '找不到提问输入框' }
-        Paste-Text '用大白话解释一下，这里的专用人力资本是什么意思？'; Start-Sleep -Seconds 1
-        # 发送按钮在字数计数「n/500」下面约 57 像素；对话框内容可能滚动，按钮被挤出视野时先滚一下再点
+        # A long selected paragraph pushes the field below the dialog viewport.
+        # Require both edges of the input region before clicking inside it.
+        $ctr = $null; $lab = $null
+        foreach ($scrollTry in 0..10) {
+            $ctr = Has $lines @('0/500', '/500'); $lab = Has $lines @('想问什么')
+            if ($ctr -and $lab) { break }
+            $title = Has $lines @('就这段问一句')
+            if (-not $title) { throw '找不到提问对话框' }
+            Scroll-At ($title.X + 200) ($title.Y + 300) -3
+            Start-Sleep -Milliseconds 700
+            $lines = Shot 4 "ask-input-$scrollTry"
+        }
+        if (-not $ctr -or -not $lab -or $ctr.Y -le $lab.Y) { throw '找不到完整可见的提问输入框' }
+        Click-At ($lab.X + 100) ([int](($lab.Y + $ctr.Y) / 2))
+        $question = '用大白话解释一下，这里的专用人力资本是什么意思？'
+        if ($Marker) { $question = "$Marker $question" }
+        Paste-Text $question; Start-Sleep -Seconds 1
+        if ($Marker) {
+            $typed = Shot 4 'ask-marker'
+            if (-not (Has $typed @($Marker))) { throw '本轮标记没有出现在自己的提问框中' }
+        }
+        # Locate the visible button after scrolling; the input may have reflowed.
         $sent = $false
         Scroll-At 1080 700 -3; Start-Sleep -Milliseconds 800   # 先滚一下让对话框布局稳定，再按截图定位
         foreach ($try in 1..4) {
-            $lines = Shot 4 'ask-send'; $c2 = Has $lines @('/500')
-            if (-not $c2) { Start-Sleep -Seconds 1; continue }
-            if ($c2.Y + 57 -gt 1075) { Scroll-At 1080 700 -3; Start-Sleep -Milliseconds 600; continue }
+            $lines = Shot 4 'ask-send'; $send = Has $lines @('发送')
+            if (-not $send) { Scroll-At 1080 700 -3; Start-Sleep -Milliseconds 600; continue }
             Start-Sleep -Milliseconds 500
-            Click-At ($c2.X1 + 45) ($c2.Y + 57); $sent = $true; break
+            Click-At $send.X $send.Y; $sent = $true; break
         }
         if (-not $sent) { throw '找不到「发送」按钮的位置' }
         $deadline = (Get-Date).AddSeconds(120); $got = $null; $i = 0
@@ -275,10 +317,19 @@ try {
     elseif ("$_" -ne 'STEP_FAILED') { Note "脚本异常：$_"; [void]$results.Add([pscustomobject]@{ Step = $results.Count + 1; Name = $steps[[Math]::Min($results.Count, 6)]; Ok = $false; Why = "脚本异常：$_" }) }
 } finally {
     $passed = @($results | Where-Object Ok).Count
-    $summary = [pscustomobject]@{ passed = $passed; total = 7; time = (Get-Date -Format 'o'); outDir = $OutDir; server = $env:COACH_URL; steps = $results }
+    $summary = [pscustomobject]@{ passed = $passed; total = 7; marker = $Marker; time = (Get-Date -Format 'o'); outDir = $OutDir; server = $env:COACH_URL; steps = $results }
     $summary | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $OutDir 'result.json')
     Stop-MyClient
     if ($ClientSeed) { Remove-Item -Recurse -Force $client -ErrorAction SilentlyContinue }   # 配对凭据只在运行期存在
-    Stop-Process -Id $gradle.Id -Force -ErrorAction SilentlyContinue
+    # Kill only the exact launcher tree this worker created; its Java wrapper
+    # must not survive a startup failure and launch an orphan window later.
+    $launcher = Get-Process -Id $gradle.Id -ErrorAction SilentlyContinue
+    if ($launcher -and $launcher.StartTime -eq $gradle.StartTime) {
+        $killer = Start-Process taskkill.exe -ArgumentList "/PID $($gradle.Id) /T /F" -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'cleanup.out.log') -RedirectStandardError (Join-Path $OutDir 'cleanup.err.log')
+        if (-not $killer.WaitForExit(10000)) {
+            Stop-Process -Id $killer.Id -Force -ErrorAction SilentlyContinue
+            throw 'Owned launcher cleanup timed out'
+        }
+    }
     Note "结果 $passed/7"
 }

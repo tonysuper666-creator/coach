@@ -36,6 +36,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -67,6 +68,30 @@ import kotlinx.coroutines.withTimeoutOrNull
  * 所以同一页出现两句相同原文时，标的是被点的那一块，而不是第一次字符串命中。
  */
 internal data class PracticeSource(val page: Int?, val quote: String?, val warning: String?, val target: BookSourceTarget? = null)
+
+internal data class CitedPdfLocation(val boxes: com.coach.desktop.reader.PageBoxes, val located: com.coach.desktop.reader.Located)
+
+/** Only called after the citation's exact UTF-16 range has been checked against the imported page. */
+internal fun locateCitedPdfRange(page: PdfPageText, text: String, range: IntRange): CitedPdfLocation {
+    val width = page.frame.cropBox.right - page.frame.cropBox.left
+    val height = page.frame.cropBox.top - page.frame.cropBox.bottom
+    val sideways = page.frame.rotationClockwise in listOf(90, 270)
+    val displayWidth = if (sideways) height else width
+    val displayHeight = if (sideways) width else height
+    val valid = page.unit.text == text && range.first >= 0 && !range.isEmpty() && range.last < text.length
+    val rects = if (valid) PdfTextSelection.boxesForVerifiedRange(page.unit, text,
+        com.coach.domain.reader.ReaderTextRange(range.first, range.last + 1)).map { box ->
+        com.coach.desktop.reader.WordBox(box.x * displayWidth, box.y * displayHeight,
+            (box.x + box.width) * displayWidth, (box.y + box.height) * displayHeight, "")
+    } else emptyList()
+    val located = when {
+        !valid -> com.coach.desktop.reader.Located.NotFound
+        page.unit.spans.isEmpty() -> com.coach.desktop.reader.Located.NoTextLayer
+        rects.isEmpty() -> com.coach.desktop.reader.Located.NotFound
+        else -> com.coach.desktop.reader.Located.Found(rects)
+    }
+    return CitedPdfLocation(com.coach.desktop.reader.PageBoxes(displayWidth, displayHeight, rects), located)
+}
 
 private sealed interface PageImage {
     data object Loading : PageImage
@@ -220,6 +245,19 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
         if (target.start >= 0 && target.end > target.start && target.end <= page.text.length &&
             page.text.substring(target.start, target.end) == target.quote) target.start until target.end else null
     }
+    val citedLocation by key(library, book.id, page, citedRange, retry) { produceState<Result<CitedPdfLocation>?>(null) {
+        value = null
+        val range = citedRange ?: return@produceState
+        if (book.format != "pdf" || page.ocr) return@produceState
+        value = try {
+            Result.success(withContext(Dispatchers.IO) {
+                org.apache.pdfbox.Loader.loadPDF(library.directory.resolve("${book.id}.pdf").toFile()).use { pdf ->
+                    locateCitedPdfRange(PdfPageTextExtraction.extract(pdf, page.number), page.text, range)
+                }
+            })
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (error: Exception) { Result.failure(error) }
+    } }
     val image by produceState<PageImage>(PageImage.Loading, book.id, ui.page, retry) {
         value = PageImage.Loading
         if (hasOriginal) {
@@ -235,20 +273,15 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
         (image as? PageImage.Ready)?.let { paperAspect = it.image.width.toFloat() / it.image.height }
     }
     val imageScroll = remember(book.id, ui.page) { ScrollState(0) }
+    var imageHeight by remember(book.id, ui.page) { mutableIntStateOf(0) }
     val view = (remote.page as? com.coach.desktop.reader.PageState.Ready)?.view
     val samePage = remote.current?.id == book.id && remote.current?.version == "1" &&
         view?.document == book.id && view.pdfPage == ui.page
-    val boxes = if (samePage) (remote.boxes as? com.coach.desktop.reader.BoxesState.Ready)?.boxes else null
-    // 同一页有多处相同原文时，用块范围在这一页里的序号挑出被点的那一处；序号算不出来就不猜。
-    val citedOccurrence = remember(citedRange, quoteAnchor, page.text) {
-        val range = citedRange ?: return@remember null
-        val quote = quoteAnchor ?: return@remember null
-        var ordinal = 0
-        var at = page.text.indexOf(quote)
-        while (at in 0 until range.first) { ordinal++; at = page.text.indexOf(quote, at + 1) }
-        if (at == range.first) ordinal else null
-    }
-    val located = if (boxes != null && quoteAnchor != null) com.coach.desktop.reader.QuoteLocator.locate(boxes, quoteAnchor, citedOccurrence) else null
+    val rangeLocation = citedLocation?.getOrNull()
+    val boxes = if (citedRange != null) rangeLocation?.boxes
+        else if (samePage) (remote.boxes as? com.coach.desktop.reader.BoxesState.Ready)?.boxes else null
+    val located = if (citedRange != null) rangeLocation?.located
+        else if (boxes != null && quoteAnchor != null) com.coach.desktop.reader.QuoteLocator.locate(boxes, quoteAnchor) else null
     val loadedImage = (image as? PageImage.Ready)?.image
     val aspectOk = boxes != null && loadedImage != null &&
         kotlin.math.abs(loadedImage.width.toDouble() / loadedImage.height - boxes.width / boxes.height) < 0.05
@@ -268,15 +301,24 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
         practiceSource?.target != null && citedRange == null -> "无法确认原句：这一页的内容变了，这条出处无法定位。"
         textOnlySource -> null
         image is PageImage.Failed -> "无法确认原句：这一页的图像打不开。"
+        citedRange != null && citedLocation?.isFailure == true -> "无法确认原句：无法读取这一页的文字位置。"
         remote.failure != null || remote.page is com.coach.desktop.reader.PageState.Failed -> "无法确认原句：无法读取这一页的定位信息。"
         remote.current != null && (remote.current?.id != book.id || remote.current?.version != "1") -> "无法确认原句：教材版本不一致。"
-        samePage && remote.boxes is com.coach.desktop.reader.BoxesState.Failed -> "无法确认原句：无法读取这一页的文字位置。"
+        citedRange == null && samePage && remote.boxes is com.coach.desktop.reader.BoxesState.Failed -> "无法确认原句：无法读取这一页的文字位置。"
         samePage && quoteAnchor.isNullOrBlank() -> "无法确认原句：没有可定位的原文。"
         located == com.coach.desktop.reader.Located.NoTextLayer -> "无法确认原句：这一页没有可定位的文字。"
         located == com.coach.desktop.reader.Located.NotFound -> "无法确认原句：这一页没有找到对应内容。"
         located == com.coach.desktop.reader.Located.Ambiguous -> "无法确认原句：这一页有多处相同内容。"
         located is com.coach.desktop.reader.Located.Found && loadedImage != null && !aspectOk -> "无法确认原句：页面图像与文字位置不一致。"
         else -> null
+    }
+
+    LaunchedEffect(citedRange, located, aspectOk, imageHeight, imageScroll.maxValue, textView, explainOpen) {
+        if (citedRange != null && located is com.coach.desktop.reader.Located.Found && boxes != null &&
+            aspectOk && imageHeight > 0 && imageScroll.maxValue != Int.MAX_VALUE && !textView && !explainOpen) {
+            val top = located.rects.minOf { it.y0 } / boxes.height * imageHeight
+            imageScroll.scrollTo((top - 24).toInt().coerceIn(0, imageScroll.maxValue))
+        }
     }
 
     LaunchedEffect(book.id, ui.page, quoteAnchor) {
@@ -394,7 +436,8 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                                     }
                                     is PageImage.Ready -> {
                                         Image(loaded.image, "${book.title} 第 ${ui.page} 页", contentScale = ContentScale.FillWidth,
-                                            modifier = Modifier.fillMaxWidth().aspectRatio(loaded.image.width.toFloat() / loaded.image.height).testTag("remote-image"))
+                                            modifier = Modifier.fillMaxWidth().aspectRatio(loaded.image.width.toFloat() / loaded.image.height)
+                                                .onSizeChanged { imageHeight = it.height }.testTag("remote-image"))
                                         if (located is com.coach.desktop.reader.Located.Found && aspectOk && boxes != null) {
                                             androidx.compose.foundation.Canvas(Modifier.testTag("remote-highlight").semantics { contentDescription = "原句：$quoteAnchor" }.matchParentSize()) {
                                                 val k = size.width / boxes.width.toFloat()

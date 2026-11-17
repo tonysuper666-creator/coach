@@ -115,6 +115,7 @@ public final class SmokeMain implements AutoCloseable {
                 switch (route) {
                     case "/click" -> {
                         double x = number(query, "x"), y = number(query, "y");
+                        pointer(x, y, MouseEvent.MOUSE_MOVED, 0, MouseEvent.NOBUTTON);
                         pointer(x, y, MouseEvent.MOUSE_PRESSED, InputEvent.BUTTON1_DOWN_MASK, MouseEvent.BUTTON1);
                         pointer(x, y, MouseEvent.MOUSE_RELEASED, 0, MouseEvent.BUTTON1);
                         pointer(x, y, MouseEvent.MOUSE_CLICKED, 0, MouseEvent.BUTTON1);
@@ -122,6 +123,7 @@ public final class SmokeMain implements AutoCloseable {
                     case "/drag" -> {
                         double x1 = number(query, "x1"), y1 = number(query, "y1");
                         double x2 = number(query, "x2"), y2 = number(query, "y2");
+                        pointer(x1, y1, MouseEvent.MOUSE_MOVED, 0, MouseEvent.NOBUTTON);
                         pointer(x1, y1, MouseEvent.MOUSE_PRESSED, InputEvent.BUTTON1_DOWN_MASK, MouseEvent.BUTTON1);
                         pointer((x1+x2)/2, (y1+y2)/2, MouseEvent.MOUSE_DRAGGED, InputEvent.BUTTON1_DOWN_MASK, MouseEvent.NOBUTTON);
                         pointer(x2, y2, MouseEvent.MOUSE_DRAGGED, InputEvent.BUTTON1_DOWN_MASK, MouseEvent.NOBUTTON);

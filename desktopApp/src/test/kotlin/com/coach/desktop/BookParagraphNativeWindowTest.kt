@@ -95,25 +95,34 @@ class BookParagraphNativeWindowTest {
                     val robot = Robot().apply { autoDelay = 50 }
                     // A semantics click does not activate the OS window. Take keyboard foreground
                     // with a real click, then focus the reader rather than the view toggle.
-                    val target = edt {
-                        window.toFront()
-                        val bounds = node(window, "reader-page")!!.boundsInRoot
-                        val origin = window.contentPane.locationOnScreen
-                        val scale = window.graphicsConfiguration.defaultTransform
-                        Point(origin.x + (bounds.center.x / scale.scaleX).toInt(),
-                            origin.y + ((bounds.bottom - 30) / scale.scaleY).toInt())
-                    }
-                    robot.mouseMove(target.x, target.y)
-                    robot.mousePress(InputEvent.BUTTON1_DOWN_MASK); robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
-                    robot.waitForIdle()
-                    edt { assertTrue(node(window, "reader-page")!!.config[SemanticsActions.RequestFocus].action!!.invoke()) }
+                    focusReader(window, robot)
                     waitFor("native reader keyboard focus") {
                         edt { window.isFocused && node(window, "reader-page")!!.config.getOrNull(SemanticsProperties.Focused) == true }
                     }
-                    repeat(10) { index ->
-                        robot.keyPress(KeyEvent.VK_PAGE_DOWN); robot.keyRelease(KeyEvent.VK_PAGE_DOWN)
-                        waitFor("keyboard page ${index + 2}") { controller.state.value.page == index + 2 }
-                    }
+                    // 十次翻页之间前台可能被另一道作业拿走（winbox 两个槽共用一个控制台会话），
+                    // 被吃掉的那次按键根本进不了这个进程。所以每次按键都在前台互斥量里送到本窗口，
+                    // 并核对键真的到过这里：没到就重发（它没到过应用，不算产品没翻页）；到了却没翻页才是产品问题。
+                    val arrivals = WindowKeyArrivals(window).start()
+                    try {
+                        repeat(10) { index ->
+                            val page = index + 2
+                            var resends = 0
+                            while (true) {
+                                val before = arrivals.count
+                                NativeWindowForeground.action {
+                                    NativeWindowForeground.activate(window) { diagnostics(window) }
+                                    assertTrue(edt { node(window, "reader-page")!!.config.getOrNull(SemanticsProperties.Focused) == true },
+                                        "reader lost Compose focus before page $page; ${diagnostics(window)}")
+                                    robot.keyPress(KeyEvent.VK_PAGE_DOWN); robot.keyRelease(KeyEvent.VK_PAGE_DOWN)
+                                    robot.waitForIdle()
+                                }
+                                if (awaitArrival(arrivals, before)) break
+                                if (resends++ >= 2) fail("PageDown never reached this window for page $page; ${diagnostics(window)}")
+                                println("TON-1700 keyboard page $page: PageDown went to another window; re-sending")
+                            }
+                            waitFor("keyboard page $page", { diagnostics(window) }) { controller.state.value.page == page }
+                        }
+                    } finally { arrivals.stop() }
                     assertEquals(11, controller.state.value.page)
                     shot(window, dark, "keyboard-page-11")
                     // Resize the actual window; this card still uses the existing single column.
@@ -167,21 +176,59 @@ class BookParagraphNativeWindowTest {
     }
     private fun shot(window: ComposeWindow, dark: Boolean, name: String) {
         Thread.sleep(400)
-        edt {
-            val path = Path.of("build/screens/paragraph-native", if (dark) "dark" else "light")
-            Files.createDirectories(path)
-            window.renderImmediately()
-            VerifyHooks.capture(window, path.resolve("$name.png").toFile())
-            ImageIO.write(Robot().createScreenCapture(window.bounds), "png", path.resolve("$name-window.png").toFile())
-            window.ownedWindows.filterIsInstance<ComposeDialog>().filter { it.isVisible }.forEachIndexed { i, dialog ->
-                dialog.renderImmediately()
-                VerifyHooks.capture(dialog, path.resolve("$name-dialog-$i.png").toFile())
+        // 截图和置顶窗口的前台一起拿：别的作业的窗口压在上面时，拍到的就不是这一页。
+        NativeWindowForeground.action {
+            NativeWindowForeground.activate(window) { diagnostics(window) }
+            edt {
+                val path = Path.of("build/screens/paragraph-native", if (dark) "dark" else "light")
+                Files.createDirectories(path)
+                window.renderImmediately()
+                VerifyHooks.capture(window, path.resolve("$name.png").toFile())
+                ImageIO.write(Robot().createScreenCapture(window.bounds), "png", path.resolve("$name-window.png").toFile())
+                window.ownedWindows.filterIsInstance<ComposeDialog>().filter { it.isVisible }.forEachIndexed { i, dialog ->
+                    dialog.renderImmediately()
+                    VerifyHooks.capture(dialog, path.resolve("$name-dialog-$i.png").toFile())
+                }
             }
         }
     }
-    private fun waitFor(label: String, condition: () -> Boolean) {
+    private fun focusReader(window: ComposeWindow, robot: Robot) {
+        NativeWindowForeground.action {
+            NativeWindowForeground.activate(window) { diagnostics(window) }
+            val target = edt {
+                val bounds = node(window, "reader-page")!!.boundsInRoot
+                val origin = window.contentPane.locationOnScreen
+                val scale = window.graphicsConfiguration.defaultTransform
+                Point(origin.x + (bounds.center.x / scale.scaleX).toInt(),
+                    origin.y + ((bounds.bottom - 30) / scale.scaleY).toInt())
+            }
+            robot.mouseMove(target.x, target.y)
+            robot.mousePress(InputEvent.BUTTON1_DOWN_MASK); robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
+            robot.waitForIdle()
+            edt { assertTrue(node(window, "reader-page")!!.config[SemanticsActions.RequestFocus].action!!.invoke()) }
+            assertTrue(window.isFocused, "the click did not leave this window with the keyboard foreground; ${diagnostics(window)}")
+        }
+    }
+    private fun awaitArrival(arrivals: WindowKeyArrivals, before: Int, timeoutMillis: Long = 2_000): Boolean {
+        val deadline = System.nanoTime() + timeoutMillis * 1_000_000
+        while (arrivals.count <= before) {
+            if (System.nanoTime() >= deadline) return false
+            Thread.sleep(20)
+        }
+        return true
+    }
+    private fun diagnostics(window: ComposeWindow): String = runCatching {
+        "${NativeWindowForeground.describe(window)} readerFocused=${node(window, "reader-page")?.config?.getOrNull(SemanticsProperties.Focused)}"
+    }.getOrElse { "diagnostics unavailable: $it" }
+    private fun waitFor(label: String, diagnose: () -> String = { "" }, condition: () -> Boolean) {
         val deadline = System.nanoTime() + 20_000_000_000L
-        while (!condition()) { check(System.nanoTime() < deadline) { "Timed out: $label" }; Thread.sleep(100) }
+        while (!condition()) {
+            check(System.nanoTime() < deadline) {
+                val detail = diagnose().takeIf { it.isNotBlank() }?.let { "; $it" }.orEmpty()
+                "Timed out: $label$detail"
+            }
+            Thread.sleep(100)
+        }
     }
     private fun <T> edt(block: () -> T): T {
         if (SwingUtilities.isEventDispatchThread()) return block()

@@ -54,6 +54,9 @@ class V7ButtonWindowTest {
         val robot = Robot().apply { autoDelay = 60 }
         val out = File("build/screens/ton1657/native").apply { mkdirs() }
         for (dark in listOf(false, true)) {
+            // 批量里前一个用例（原生段落）超时后，它的置顶窗口可能还在关闭的路上。两个置顶窗口叠着，
+            // 真实点击和像素截图都会落到上面那个，所以等它真的关掉再摆这一轮的窗口。
+            NativeWindowForeground.awaitOtherWindowsClosed(keep = null)
             val start = FocusRequester()
             val button = AtomicReference<Rectangle>()
             val buttonFocused = AtomicBoolean(false)
@@ -113,39 +116,59 @@ class V7ButtonWindowTest {
                     shots[state] = image
                     ImageIO.write(image, "png", File(out, "$mode-$state.png"))
                 }
-                robot.mouseMove(neutral.x, neutral.y)
-                shot("normal")
-                robot.mouseMove(x, y)
-                shot("hover")
-                robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
-                shot("pressed")
-                robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
-                robot.mouseMove(neutral.x, neutral.y)
+                // 每一次真实输入都放进 Win-Drive 的前台互斥量：先拿回前台再送鼠标/键盘。
+                // 批量里另一道作业的置顶窗口会在两条命令之间抢走前台，鼠标事件就落到别人窗口上了。
+                fun withForeground(block: () -> Unit) = NativeWindowForeground.action {
+                    NativeWindowForeground.activate(window) { NativeWindowForeground.describe(window) }
+                    block()
+                }
+                withForeground {
+                    robot.mouseMove(neutral.x, neutral.y)
+                    shot("normal")
+                    robot.mouseMove(x, y)
+                    shot("hover")
+                    robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
+                    shot("pressed")
+                    robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
+                    robot.mouseMove(neutral.x, neutral.y)
+                }
                 // From the 1dp start target, one real Tab must land on the button.
                 var foreignForeground = 0
                 while (true) {
-                    EventQueue.invokeAndWait { start.requestFocus() }
-                    robot.waitForIdle(); robot.delay(200)
                     val before = tabsHere.get()
-                    robot.keyPress(KeyEvent.VK_TAB); robot.keyRelease(KeyEvent.VK_TAB)
-                    robot.waitForIdle(); robot.delay(200)
+                    withForeground {
+                        EventQueue.invokeAndWait { start.requestFocus() }
+                        robot.waitForIdle(); robot.delay(200)
+                        robot.keyPress(KeyEvent.VK_TAB); robot.keyRelease(KeyEvent.VK_TAB)
+                        robot.waitForIdle(); robot.delay(200)
+                    }
                     if (tabsHere.get() > before) {
                         assertTrue(buttonFocused.get(), "OS Tab reached the $mode window but did not focus the button")
                         break
                     }
-                    // Another process holds the keyboard foreground; a real click on empty canvas takes it back.
-                    if (++foreignForeground > 3) fail("OS Tab never reached the $mode window: keyboard foreground held by another process")
+                    // 前台在别处：这次 Tab 根本没进这个进程，是外部干扰，重新拿前台再发。
+                    if (++foreignForeground > 3) fail("OS Tab never reached the $mode window: keyboard foreground held by another process; ${NativeWindowForeground.describe(window)}")
                     println("TON-1657 native $mode Tab went to another window; re-activating ($foreignForeground)")
-                    EventQueue.invokeAndWait { window.toFront() }
-                    robot.mouseMove(neutral.x, neutral.y)
-                    robot.mousePress(InputEvent.BUTTON1_DOWN_MASK); robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
-                    robot.waitForIdle(); robot.delay(300)
                 }
-                shot("keyboard")
-                robot.mouseMove(x, y)
-                robot.mousePress(InputEvent.BUTTON1_DOWN_MASK); robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
-                robot.mouseMove(neutral.x, neutral.y)
-                shot("mouse-after")
+                withForeground { shot("keyboard") }
+                // 这次点击也核对真的落在按钮上：没落到（前台被抢、点到别人窗口）就重发，最多 3 次；
+                // 落到了却数不对才是产品问题。断言仍是恰好 2 次。
+                var missedClicks = 0
+                while (true) {
+                    withForeground {
+                        robot.mouseMove(x, y)
+                        robot.mousePress(InputEvent.BUTTON1_DOWN_MASK); robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
+                        robot.waitForIdle(); robot.delay(300)
+                        robot.mouseMove(neutral.x, neutral.y)
+                    }
+                    val reached = AtomicInteger()
+                    EventQueue.invokeAndWait { reached.set(clicks) }
+                    if (reached.get() == 2) break
+                    if (reached.get() > 2) fail("$mode button received ${reached.get()} OS clicks instead of 2")
+                    if (++missedClicks > 3) fail("OS click never reached the $mode button: clicks=${reached.get()}; ${NativeWindowForeground.describe(window)}")
+                    println("TON-1657 native $mode click went to another window; re-sending ($missedClicks)")
+                }
+                withForeground { shot("mouse-after") }
                 EventQueue.invokeAndWait {
                     assertEquals(2, clicks, "OS clicks must reach the actual button")
                     assertTrue(buttonFocused.get(), "the clicked button keeps focus, so a missing ring is the mouse rule, not lost focus")

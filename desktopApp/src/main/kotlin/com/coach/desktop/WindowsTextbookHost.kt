@@ -106,7 +106,10 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
     }
     fun select(picked: AppTab) { origin = null; tab = picked.hostDestination }
     val destination = tab.hostDestination
-    val highlighted = if (destination == AppTab.RESOURCES && !onShelf) origin ?: destination else destination
+    // Reading a book is the shelf's own page, wherever it was opened from (TON-1698); learning and its
+    // source detour keep pointing at the entry they came from.
+    val reading = ui.screen == BookScreen.READER && ui.source == null
+    val highlighted = if (destination == AppTab.RESOURCES && !onShelf && !reading) origin ?: destination else destination
     // Reader, learning and reviews draw their own V7 desk bar; the host bar would be a second "Coach" row above it.
     val deskPage = destination == AppTab.RESOURCES && book != null && ui.screen != BookScreen.HOME
     val systemDark = isSystemInDarkTheme()

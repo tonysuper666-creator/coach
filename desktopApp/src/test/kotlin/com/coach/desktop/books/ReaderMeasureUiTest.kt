@@ -101,8 +101,8 @@ class ReaderMeasureUiTest {
                 ready(controller) { it.screen == BookScreen.READER && it.prompt == null && it.page == 1 }
                 for ((label, scale) in listOf("小" to .9f, "大" to 1.15f, "中" to 1f)) {
                     typeSize(label)
-                    while (isEnabled().matches(onNodeWithText("上一页").fetchSemanticsNode())) {
-                        onNodeWithText("上一页").performClick(); waitForIdle()
+                    while (isEnabled().matches(onNodeWithTag("previous-page").fetchSemanticsNode())) {
+                        onNodeWithTag("previous-page").performClick(); waitForIdle()
                     }
                     val rebuilt = StringBuilder()
                     val seen = mutableSetOf<List<BookPageSlice>>()
@@ -124,13 +124,13 @@ class ReaderMeasureUiTest {
                         }
                         narrowSeen = assertColumn(scale, window.name + label, window.density) || narrowSeen
                         lastText = nodes.first().config[SemanticsProperties.Text].single().text
-                        if (!isEnabled().matches(onNodeWithText("下一页").fetchSemanticsNode())) break
-                        onNodeWithText("下一页").performClick(); waitForIdle()
+                        if (!isEnabled().matches(onNodeWithTag("next-page").fetchSemanticsNode())) break
+                        onNodeWithTag("next-page").performClick(); waitForIdle()
                     }
                     assertEquals(pages.joinToString(""), rebuilt.toString(), "${window.name} Aa $label: lossless UTF16 traversal")
                     assertTrue(rebuilt.trimEnd().endsWith("全段最后一句在这里结束。"))
-                    onNodeWithText("下一页").assertIsNotEnabled()
-                    onNodeWithText("上一页").performClick(); waitForIdle()
+                    onNodeWithTag("next-page").assertIsNotEnabled()
+                    onNodeWithTag("previous-page").performClick(); waitForIdle()
                     assertNotEquals(lastText, visible().first().config[SemanticsProperties.Text].single().text)
                     val previous = visible().first().config[BookPageSources].first()
                     ready(controller) { it.page == previous.importPage && it.book?.readingPage == previous.importPage }
@@ -140,6 +140,7 @@ class ReaderMeasureUiTest {
                 }
             }
             if (window.name == "narrow") assertTrue(narrowSeen)
+            else assertFalse(narrowSeen, "${window.name}: each sheet has room for the full 33em column")
         }
     }
 
@@ -207,7 +208,7 @@ class ReaderMeasureUiTest {
                     }
                 }
                 if (covered.size == cited.end - cited.start) break
-                onNodeWithText("下一页").assertIsEnabled().performClick(); waitForIdle()
+                onNodeWithTag("next-page").assertIsEnabled().performClick(); waitForIdle()
             }
             assertEquals((cited.start until cited.end).toSet(), covered)
             assertEquals(1, library.book(imported.id).readingPage, "source navigation keeps reading bookmark")

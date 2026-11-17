@@ -80,7 +80,9 @@ if ($Runtime) {
     # Preparation is a separate Mac heavy call. The foreground path still runs
     # the production MainKt entry; only -Background selects development controls.
     $entry = if ($Background) { 'com.coach.desktop.smoke.SmokeMain' } else { 'com.coach.desktop.MainKt' }
-    $gradle = Start-Process "$env:JAVA_HOME/bin/java.exe" -ArgumentList ('-cp "' + $classpath + '" ' + $entry) -WorkingDirectory $Repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
+    # javaw has no console for Windows Terminal to activate during background startup.
+    $java = if ($Background) { 'javaw.exe' } else { 'java.exe' }
+    $gradle = Start-Process "$env:JAVA_HOME/bin/$java" -ArgumentList ('-cp "' + $classpath + '" ' + $entry) -WorkingDirectory $Repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
 } else {
     $gradle = Start-Process (Join-Path $Repo 'gradlew.bat') -ArgumentList $launchArgs -WorkingDirectory $Repo `
     -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
@@ -142,8 +144,10 @@ try {
     if (-not $g) { Fail 4 '找不到页码跳转的「前往」' }
     Click-At ($g.X - 106) $g.Y; Send-Keys '^a'; Send-Keys "$physPage"; Start-Sleep -Milliseconds 500
     Click-At $g.X $g.Y; Start-Sleep -Seconds 3
-    Click-Label 4 @('看文字') '找不到「看文字」'; Start-Sleep -Seconds 2
-    Click-Label 4 @('讲解') '找不到「讲解」'; Start-Sleep -Seconds 3
+    Click-Label 4 @('看文字') '找不到「看文字」'
+    if (-not (Await-Text 4 'text-mode' @('看原页') 15)) { Fail 4 '点击「看文字」后没有切换到文字视图' }
+    Click-Label 4 @('讲解') '找不到「讲解」'
+    if (-not (Await-Text 4 'explain-mode' @('回到原文') 15)) { Fail 4 '点击「讲解」后没有进入讲解模式' }
     $lines = Shot 4 'blocks'
     # 可信选段所在的段落：用它开头的几个词在屏幕上定位，再取它下面最近的「讲解这段」
     $words = (($sel.selection -replace '[^A-Za-z ]', ' ').Trim() -split '\s+' | Select-Object -First 4) -join ''

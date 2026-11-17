@@ -61,6 +61,7 @@ public final class SmokeMain implements AutoCloseable {
             hook.window.setTitle("LearningCoach");
             hook.window.setBounds(WindowsWindowGeometryKt.windowsInitialWindowBounds());
             // Logical Compose input is independent of the shared desktop focus.
+            hook.window.setAutoRequestFocus(false);
             hook.window.setFocusableWindowState(false);
             hook.window.setContent((scope, composer, changed) -> {
                 WindowsTextbooksKt.WindowsTextbooksContent(directory, continuation -> {
@@ -258,6 +259,9 @@ public final class SmokeMain implements AutoCloseable {
     }
 
     private void scroll(double x, double y, int notches) throws Exception {
+        // Compose hit-tests wheel input against the pointer's last position.
+        // A background caller has no preceding native mouse move at this point.
+        pointer(x, y, MouseEvent.MOUSE_MOVED, 0, MouseEvent.NOBUTTON);
         Target target = target(x, y);
         lastTarget = target;
         MouseWheelEvent event = new MouseWheelEvent(target.layer.getCanvas(), MouseEvent.MOUSE_WHEEL,

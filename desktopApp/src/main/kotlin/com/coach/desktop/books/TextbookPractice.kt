@@ -25,7 +25,7 @@ import com.coach.ui.v7.v7FocusRing
 
 @Composable
 internal fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practice, answer: PracticeAnswer, onAnswer: (PracticeAnswer) -> Unit, onSource: () -> Unit, sourceEnabled: Boolean, sourceFocus: FocusRequester,
-    showReference: Boolean = true) {
+    showReference: Boolean = true, temporary: Boolean = false) {
     var draft by remember(lesson, mode) { mutableStateOf(answer.text) }
     var typing by remember(lesson, mode) { mutableStateOf(false) }
     // Coming back from 今天/课程 rebuilds this screen with the answer the queue has already saved.
@@ -59,8 +59,9 @@ internal fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practi
             val right = answer.text == practice.answer
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("你选择：${answer.text}", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
-                Text(if (right && answer.guessed) "这次选对了，但标记为猜的；仍会在复习里再答。"
-                    else if (right) "与原文一致。" else "再对照一下原文：${practice.answer}",
+                Text(if (right && answer.guessed) if (temporary) "这次选对了，但标记为猜的；不计作独立答对。" else "这次选对了，但标记为猜的；仍会在复习里再答。"
+                    else if (right) if (temporary) "与本题答案一致。" else "与原文一致。"
+                    else if (temporary) "本题答案是：${practice.answer}" else "再对照一下原文：${practice.answer}",
                     style = MaterialTheme.typography.bodySmall, color = if (right && !answer.guessed) colors.successFg else colors.fgSecondary,
                     modifier = Modifier.weight(1f))
                 V7TextButton({ draft = ""; onAnswer(PracticeAnswer()) }) { Text("重新作答") }

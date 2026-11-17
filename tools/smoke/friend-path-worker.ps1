@@ -214,10 +214,55 @@ try {
     } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $five = 'failed' }
     if ($five -and -not $KeepGoing) { throw 'STEP_FAILED' }
 
-    # ⑥ 做题学：需要同一本书已准入的选择题；缺题不算通过
+    # ⑥ 朋友自己的书：按节现出题，真实点一个选项，再等答后讲解和小结；不依赖整理题库准入。
     $six = $null
-    try { Fail 6 '尚未实现：做题（需要该书已准入的选择题，TON-1453 未签前缺题不记成功）' } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $six = 'failed' }
-    if (-not $KeepGoing) { throw 'STEP_FAILED' }
+    try {
+        Scroll-At 900 700 30; Start-Sleep -Seconds 1
+        Click-Label 6 @('返回书架') '无法从学习页返回书架'
+        Click-Label 6 @('做题学') '书架没有做题学入口'
+        # 已开启的书直接进入学习页；出题方式仍沿用这本书的设置。
+        Click-Label 6 @('出题：', '出题:') '找不到出题设置'
+        Click-Label 6 @('选择') '找不到选择题设置'
+        Click-Label 6 @('确定') '无法确认选择题设置'
+        $deadline = (Get-Date).AddSeconds(120); $question = $false; $picked = $null
+        while ((Get-Date) -lt $deadline -and -not $question) {
+            $lines = Shot 6 'question'
+            $allow = Has $lines @('允许并出题')
+            if ($allow) { Click-At $allow.X $allow.Y; Start-Sleep -Seconds 2; continue }
+            if (Has $lines @('格式完整', '出题暂时读不到', '没有足够的正文', '需要连上', '尚未核实', '额度', '重新配对')) {
+                Fail 6 '本节出题被拒绝或不可用，见 winbox 私有截图 6-question.png'
+            }
+            $anchor = Has $lines @('查看对应原文')
+            if ((Has $lines @('本次练习')) -and $anchor) {
+                # 只在题目原文按钮下找独立的 A 字母；不以固定屏幕位置或「猜的」芯片当成作答。
+                foreach ($line in $lines) { foreach ($word in $line.Words) {
+                    if ($word.Text -eq 'A' -and $word.BoundingRect.Y -gt $anchor.Y) {
+                        $picked = $word.BoundingRect; break
+                    }
+                }; if ($picked) { break } }
+                if ($picked) { $question = $true }
+            }
+            if (-not $question) { Start-Sleep -Seconds 3 }
+        }
+        if (-not $question) { Fail 6 '120 秒内没有出现可作答的本次练习选择题' }
+        Click-At ([int]$picked.X + 45) ([int]$picked.Y + 12)
+        Start-Sleep -Seconds 2
+        $selected = $false; $explained = $false; $cited = $false; $summary = $false
+        foreach ($view in 0..8) {
+            $lines = Shot 6 "answered-$view"
+            if (Has $lines @('你选择：', '你选择:')) { $selected = $true }
+            if (Has $lines @('答后讲解')) { $explained = $true }
+            if (Has $lines @('出处')) { $cited = $true }
+            if (Has $lines @('小结')) { $summary = $true }
+            if ($selected -and $explained -and $cited -and $summary) { break }
+            Scroll-At 900 700 -2; Start-Sleep -Seconds 1
+        }
+        if (-not $selected) { Fail 6 '点击选项后没有看到已选答案' }
+        if (-not $explained -or -not $cited) { Fail 6 '已作答，但没有看到带出处的答后讲解' }
+        if (-not $summary) { Fail 6 '已作答并看到讲解，但没有小结' }
+        Pass 6 '本节现出选择题，真实作答后出现已选答案、带出处的答后讲解和小结（6-question、6-answered 私有截图）'
+    } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $six = 'failed' }
+    if ($six -and -not $KeepGoing) { throw 'STEP_FAILED' }
 
     if ($cardOk) { Fail 7 $cardOk } else { Pass 7 "点出处弹出第 $physPage 页原文卡" }
 } catch {

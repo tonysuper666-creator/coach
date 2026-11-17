@@ -1,0 +1,51 @@
+# 朋友入口切换的旧版启动门禁
+
+`friend_service_guard.py` 接在持久 `coach-service.py start` 中，供所有经该控制器启动的旧 stage、桌面快捷入口和当前执行器共用。它保护运维入口，不是对同一系统用户手动执行 JVM 或 `launchctl` 的权限隔离。生产启用前必须盘点旧入口，确认全部调用同一个持久控制器；不得直接 bootstrap、替换控制器或删锁文件绕开门禁。
+
+本文描述代码能力，不代表生产已经启用或取得生产审批。原有冻结 stage 和 TON-1663 审批文件保持原样；新候选、控制器和回滚设计必须重新审查。
+
+## 私有策略与启用
+
+策略固定为持久控制器同目录的 `friend-start-policy.json`，位于所有 release 和 stage 之外。只接受当前用户所有、权限 0600、规范绝对路径的普通文件。内容如下表；真实值只放受限证据目录。
+
+| 字段 | 约束 |
+| --- | --- |
+| `version` | 整数 1 |
+| `binding` | 与离线吊销工具相同的 `database`、`device`、`inode`、`epoch`；绑定唯一现存数据库，不复制或恢复旧库 |
+| `capableHeads` | 经审查具备朋友隔离的完整源码 SHA 数组；不是任意允许启动名单，不得加入旧版 SHA 来跳过吊销 |
+| `tailscale` | 已核对的 Tailscale CLI 绝对文件路径 |
+| `publicPort` | 朋友回环端口，排除正常端口及 18791、8790、8791、3790、19540 |
+
+部署策略之前，先私下备份并记录原持久控制器及全部入口哈希，经审查把同一候选的 `coach-service.py`、`friend_service_guard.py`、`friend_revoke_offline.py` 放入持久目录，分别对应 `control.py` 和两个同名 helper。策略也纳入 stage 哈希。此操作本身属于生产变更，不由本工具自动完成。复制到 release 内不能保护旧 stage。
+
+首次启用必须在签朋友码和公网开放之前完成。未迁移的旧数据库可通过文件身份检查，首次候选启动负责迁移；回退时则必须具备朋友列并通过离线吊销。启动曾经进入门禁后，持久 `friend-operation.lock` 的存在也会启用检查：即使策略被移走也不得退回无保护启动。已启用时通用 `install` 拒绝覆盖持久控制器。
+
+## 停机、持锁和失败闭锁
+
+每次受保护启动零等待取得同一 `flock` 操作锁。旧版启动先持久写入 `friend-start-blocked.json`，再关闭准确的 HTTPS 443 朋友规则。只接受根 handler 指向 `http://127.0.0.1:P` 的预期配置；不接受 owner 端口、不清空其他规则、不使用 `reset`。关闭命令及状态回包只在内存解析，不回显地址。其他端口的配置必须保持一致。
+
+关闭失败也调用停机。控制器先记录 LaunchAgent JVM、健康文件中的进程身份及当前子孙进程，再 disable/bootout，等待同 PID/启动时间的进程消失且 job 卸载；最后检查 release 目录下是否仍有残留进程。未停干净就报错，绝不按名字杀进程。SQLite 写锁不证明服务已停止。
+
+**同一操作锁连续覆盖停机确认、整个离线吊销调用和旧版启动就绪判断。** 吊销只用现存同一数据库，提交后再次只读核对，活跃朋友与待用朋友码都须为零。旧版就绪后才清除闭锁标记。旧版启动失败再次停机。
+
+关闭入口、停机、数据库身份、事务、提交后读回、旧版启动任一步失败或进程中断，闭锁标记保留，后续包括候选在内的所有受保护启动均拒绝。尤其不能把提交后读回失败当成可重试错误：再次读到零不证明上次完整成功。没有自动清标记命令；人工恢复须另取审批，重新核对入口关闭、停机、数据库身份、零朋友/待用码、owner 凭据、费用账本连续性和兼容证据后决定。不得删除锁或恢复旧库来消除闭锁。
+
+## 首次朋友切换的 stage 差异
+
+`ton1175_switch.py` 新增可选 `friendAccess`，仅含 `publicPort`、`config`、`policy`。未配置时沿用原流程。首次迁移拒绝已存在朋友变量的旧配置；后续升级须另绑定方案。
+
+stage 仅在原有三个 release 变量替换之外增加 `COACH_PUBLIC_PORT` 和 `COACH_FRIEND_CONFIG`。保留 HOME、API state 设置及其他变量。朋友配置必须私有、`paused: true`，并显式提供正整数 `defaults.daily_calls`、`defaults.daily_tokens`；不依赖缺省预算。校验端口空闲、策略数据库与数据目录一致、候选在已审查名单内，且 controller 必须指向上述持久 `control.py`，三个代码文件必须与当前源码逐字节一致。
+
+stage 记录策略和持久代码哈希，switch/rollback/recover 都重新校验；漂移须重新审查。switch 另核对最初暂停配置的哈希，防止 owner 验收前放开计费。之后合法额度调整不妨碍 rollback。所有回滚启动仍经过持久门禁，包括原 stage 的 rollback。费用账本不参与指针恢复。
+
+## 验证与边界
+
+```sh
+python3 -m unittest tools.dev.test_friend_service_guard tools.dev.test_friend_revoke_offline tools.dev.test_ton1175_switch tools.dev.test_ton1175_supervise -v
+```
+
+实际 JVM 演练另用 `tools/smoke/friend-rollback.py --config "$COACH_ROLLBACK_CONFIG"`。该变量是当前用户所有、0600 私有配置的规范绝对路径；字段仅 `oldApp`、`candidateApp`（两个 `bin/app` 路径）、完整 `oldHead`、`candidateHead`、`tailscale`。不含地址、凭据或配对身份；源码与产物的对应关系由冻结记录另证。不要开启 shell trace。
+
+演练要求实际 Funnel 配置为空，绝不新增规则。使用临时 HOME、独立端口和空阅读目录，关闭受管子服务，bridge 指向不可用回环端口，不发付费请求。实际旧版创建 owner，候选迁移后写入自写笔记并建朋友/待用码；检查 20 条私有路径、4 组错误方法和匿名请求，再经同一启动门禁停候选、离线吊销、起旧版，验证 owner 与新增事件保留、朋友 token/待用码拒绝、非零预算文件和两个安装产物不变。正常只输出固定标签和计数，失败退出 1，不打印 JVM 日志、身份或路径。
+
+这不是 LaunchAgent 指针事务、完整 bridge 费用结算、真实教材/API、Windows、外网或生产验收。预算文件是隔离 fixture，只证明没有被回滚覆盖；真实预留及费用仍须按切换方案实测。演练不读取生产资料或数据库。

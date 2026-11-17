@@ -15,6 +15,7 @@ from pathlib import Path
 import plistlib
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -252,6 +253,50 @@ def prepare(c, apply):
     print('release prepared; dependencies and provenance must be verified before stage')
 
 
+def friend_environment(c, env, info):
+    """Opt-in first cutover; require the durable start interlock before staging."""
+    friend = c.get('friendAccess')
+    if friend is None:
+        return env
+    require(set(friend) == {'publicPort', 'config', 'policy'}, 'invalid friend configuration')
+    try:
+        from . import friend_service_guard as guard
+    except ImportError:
+        import friend_service_guard as guard
+    port = friend['publicPort']
+    require(type(port) is int and 1 <= port <= 65535
+            and port not in (18791, 8790, 8791, 3790, 19540, int(info.get('port', 18791))),
+            'friend port conflicts with private service')
+    require('COACH_PUBLIC_PORT' not in env and 'COACH_FRIEND_CONFIG' not in env,
+            'friend migration already configured; rebind a separate upgrade plan')
+    try:
+        policy_path = guard.private_file(friend['policy'])
+        policy = guard.policy_at(policy_path)
+        config_path = guard.private_file(friend['config'])
+        limits = load(config_path)
+        require(limits.get('paused') is True and all(type(limits.get('defaults', {}).get(key)) is int
+                and limits['defaults'][key] > 0 for key in ('daily_calls', 'daily_tokens')),
+                'friend config must start paused with explicit limits')
+        require(policy['publicPort'] == port and c['candidateHead'] in policy['capableHeads'],
+                'friend policy candidate/port mismatch')
+        require(Path(policy['binding']['database']) == Path(info['dataDir']).resolve(strict=True) / 'coach.sqlite',
+                'friend policy bound to another data directory')
+        base = policy_path.parent
+        require(c['controller'] == [sys.executable, str(base / 'control.py')],
+                'friend cutover requires the durable controller')
+        for installed, source in (('control.py', 'coach-service.py'),
+                                  ('friend_service_guard.py', 'friend_service_guard.py'),
+                                  ('friend_revoke_offline.py', 'friend_revoke_offline.py')):
+            require(file_hash(base / installed) == file_hash(Path(__file__).parent / source),
+                    'durable friend controller/helper differs from reviewed code')
+        require(not (base / 'friend-start-blocked.json').exists(), 'friend start gate latched closed')
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', port))
+    except (OSError, ValueError, KeyError, TypeError, guard.GateError) as error:
+        raise GateError('friend stage preflight failed') from error
+    return dict(env, COACH_PUBLIC_PORT=str(port), COACH_FRIEND_CONFIG=str(config_path))
+
+
 def stage(c, apply):
     ops, release = Path(c['stateDir']), Path(c['release'])
     if ops.exists():
@@ -286,13 +331,19 @@ def stage(c, apply):
     env = dict(newplist['EnvironmentVariables'])
     env.update(COACH_SERVICE_ROOT=str(release), COACH_PYTHON=str(release / 'tools/bridge/.venv/bin/python'),
                COACH_MATHSVC=str(release / 'tools/mathsvc/src/server.mjs'))
-    newplist['EnvironmentVariables'] = env
+    newplist['EnvironmentVariables'] = friend_environment(c, env, info)
     files = {'old.plist': old_plist, 'old.json': old,
              'new.plist': plistlib.dumps(newplist), 'new.json': json.dumps(newinfo, indent=2).encode()}
     state = {'version': 2, 'configHash': digest(json.dumps(c, sort_keys=True).encode()), 'candidateTreeSha256': candidate_hash,
              'files': {name: digest(value) for name, value in files.items()},
              'plistMode': stat.S_IMODE(Path(c['plist']).stat().st_mode),
              'installationMode': stat.S_IMODE(Path(c['installation']).stat().st_mode)}
+    if c.get('friendAccess') is not None:
+        policy = Path(c['friendAccess']['policy'])
+        state['friendGuardFiles'] = {str(path): file_hash(path) for path in
+            (policy, policy.parent / 'control.py', policy.parent / 'friend_service_guard.py',
+             policy.parent / 'friend_revoke_offline.py')}
+        state['friendInitialConfigSha256'] = file_hash(c['friendAccess']['config'])
     if not apply:
         print('stage dry-run: gates passed; no files written')
         return
@@ -311,6 +362,10 @@ def stage(c, apply):
 
 def operate(c, action, apply):
     ops, state = load_state(c)
+    if c.get('friendAccess') is not None:
+        require(bool(state.get('friendGuardFiles')), 'friend guard bindings missing')
+        require(all(file_hash(path) == expected for path, expected in state['friendGuardFiles'].items()),
+                'friend guard policy or controller changed; re-review required')
     lock = open(ops / 'lock', 'rb')
     with lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -324,6 +379,9 @@ def operate(c, action, apply):
                 return
             require(phase in ('staged', 'rolled_back') and pointers == ['old', 'old'],
                     'incomplete transaction; use recover')
+            if c.get('friendAccess') is not None:
+                require(file_hash(c['friendAccess']['config']) == state['friendInitialConfigSha256'],
+                        'friend config must remain paused until owner acceptance')
             require(tree_hash(c['release']) == state['candidateTreeSha256'], 'candidate release changed')
             run(c['candidateVerifier'] + [c['release'], c['candidateHead'], c['plist']])
             check_idle(c, c['expectedSourceHead'])

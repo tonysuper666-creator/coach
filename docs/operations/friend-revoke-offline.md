@@ -1,12 +1,12 @@
 # 离线吊销朋友凭据
 
-`tools/dev/friend_revoke_offline.py` 是 [朋友切换方案](friend-cutover-plan.md) 中离线隔离步骤的独立工具。只操作已存在的 SQLite，不启动服务、不发 HTTP、不改安装记录、Funnel、API state 或费用账本。**尚未集成生产执行器和旧版启动旁路保护**，不能单靠本工具启动旧版本。
+`tools/dev/friend_revoke_offline.py` 是 [朋友切换方案](friend-cutover-plan.md) 中离线隔离步骤的独立工具。只操作已存在的 SQLite，不启动服务、不发 HTTP、不改安装记录、Funnel、API state 或费用账本。已由[持久启动门禁](friend-service-guard.md)源码集成，但生产尚未启用；不能单靠本工具启动旧版本。
 
 默认只读检查；只有显式 `--apply` 才写入。写入不可能在 SQLite 的只读连接上进行：工具先以 `mode=ro` 检查，再以 `mode=rw` 重开，且禁止创建新库。它不执行迁移；缺少 `devices.friend_name` 或 `pairing_code.friend_name` 就失败，不能把旧 schema 当作“没有朋友”。WAL 必须正常读取，不使用忽略 WAL 的 `immutable=1`。
 
 ## 调用前提与私有身份记录
 
-执行器必须先关闭精确的朋友公网规则，停止目标服务及其受管子进程，确认没有在途写入，并持有独占操作锁直到吊销验证完成及后续旧版启动。SQLite `BEGIN EXCLUSIVE` 在 WAL 模式下只排斥其他写事务，**不证明服务已停止，也不排斥 WAL 读连接**。本工具不接管进程和执行器锁；这一前置及所有旧版启动路径的保护仍待执行器适配。本轮只在临时测试数据库运行，不对生产执行。
+执行器必须先关闭精确的朋友公网规则，停止目标服务及其受管子进程，确认没有在途写入，并持有独占操作锁直到吊销验证完成及后续旧版启动。SQLite `BEGIN EXCLUSIVE` 在 WAL 模式下只排斥其他写事务，**不证明服务已停止，也不排斥 WAL 读连接**。本工具不接管进程和执行器锁；持久启动门禁承担这些前置及失败闭锁，部署前须盘点全部旧版启动路径。验证仅操作临时数据库，不对生产执行。
 
 在受控停止后由可信执行器采集并核对唯一数据库的身份，写入权限受限的私有 UTF-8 JSON。字段为：
 
@@ -42,4 +42,4 @@ python3 tools/dev/friend_revoke_offline.py --binding private-binding.json --appl
 python3 -m unittest tools.dev.test_friend_revoke_offline -v
 ```
 
-测试使用临时 SQLite，覆盖 owner/新写入/预算文件保留、幂等、待用码、WAL 中的新凭据、身份错配、缺列、锁冲突，以及第二条 SQL 失败时第一条更新回滚。旧版 SQL 查询检查仅佐证凭据失效，**尚未运行实际旧/新产物的隔离回滚，也不是生产 cross_review**。
+测试使用临时 SQLite，覆盖 owner/新写入/预算文件保留、幂等、待用码、WAL 中的新凭据、身份错配、缺列、锁冲突，以及第二条 SQL 失败时第一条更新回滚。旧版 SQL 查询检查仅佐证凭据失效；实际旧/新 JVM 的独立隔离回滚由 `tools/smoke/friend-rollback.py` 验证，边界见启动门禁手册，**不是完整执行器回滚或生产 cross_review**。

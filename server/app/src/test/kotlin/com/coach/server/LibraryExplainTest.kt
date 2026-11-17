@@ -20,6 +20,82 @@ class LibraryExplainTest {
     private fun request(selection: String, blocks: JsonArray) = json("requestId" to "ab12", "kind" to "explain", "selection" to selection, "blocks" to blocks)
     private val id = "0123abcd:p12:340"
 
+    private fun lesson(book: String, count: Int = 8, text: (Int) -> String = { "完整自写块 $it🌱" }): JsonObject =
+        json("requestId" to "ab12", "kind" to "lesson", "bookPages" to count,
+            "blocks" to blocks(*(1..count).map { "$book:p$it:0" to text(it) }.toTypedArray()),
+            "localSource" to json("schema" to 1, "book" to book, "format" to "pdf", "title" to "Self-authored lesson",
+                "consented" to true, "pages" to JsonArray((1..count).map { n ->
+                    json("number" to n, "length" to text(n).length, "ocr" to false, "sha256" to "a".repeat(64)) })))
+
+    @Test fun entirePersonalLessonKeepsMoreThanSixBlocksAndCitesLastPageInOneCall() = runBlocking {
+        Harness(local = true, personal = true).use { h ->
+            h.catalog()
+            h.stub.stream(1, """{"paragraphs":[{"text":"整节各部分相互关联。","anchors":["S1","S8"]}]}""",
+                StubTutor.terminal("complete"), StubTutor.DONE)
+            val input = lesson(h.version) { "  完整自写块 $it🌱  " }
+            val (status, body) = h.post(input)
+            assertEquals(200, status)
+            assertEquals(listOf(1L, 8L), body["sources"]!!.jsonArray.map { it.jsonObject.num("pdfPage") })
+            assertEquals(1, h.stub.requests)
+            val prompt = LedgerJson.parseToJsonElement(h.stub.requestBodies.single()).jsonObject
+            val messages = prompt.getValue("messages").jsonArray.map { it.jsonObject }
+            val packed = messages.single { it.str("role") == "system" }.str("content")
+            for (n in 1..8) assertTrue(packed.contains("  完整自写块 $n🌱  "))
+            assertTrue(messages.single { it.str("role") == "user" }.str("content").contains("all 8"))
+            val receipt = h.imports!!.register("phone", input, libraryExplainRequest(input))
+            assertEquals(8, receipt.blocks.size)
+            assertTrue(h.imports.isCurrent(receipt))
+            assertNull(h.store.learnerSourcePage(h.version, 8))
+        }
+    }
+
+    @Test fun lessonRequiresPersonalConsentAndCannotReclassifyCatalogOrForgePages() = runBlocking {
+        val lastPage = json("kind" to "lesson", "bookPages" to 100_000,
+            "blocks" to blocks("${"a".repeat(64)}:p100000:0" to "自写尾页。"))
+        assertEquals(100_000, libraryExplainRequest(lastPage).pages.single().pdfPage)
+        Harness(local = true, personal = true).use { h ->
+            val input = lesson(h.version)
+            assertEquals(409, h.post(input).first, "Known course version cannot become a personal lesson")
+            h.catalog()
+            assertEquals(409, h.post(JsonObject(input - "localSource")).first)
+            assertEquals(400, h.post(JsonObject(input + json("bookPages" to 7))).first)
+            val source = input["localSource"]!!.jsonObject
+            assertEquals(400, h.post(JsonObject(input + ("localSource" to JsonObject(source + json("consented" to false))))).first)
+            assertEquals(400, h.post(JsonObject(input + json("blocks" to blocks("course:p1:0" to "Synthetic")))).first)
+            assertEquals(0, h.stub.requests)
+        }
+    }
+
+    @Test fun oversizedLessonIsExplicitlyRefusedBeforeAnyProviderCall() = runBlocking {
+        Harness(local = true, personal = true).use { h ->
+            h.catalog()
+            for (input in listOf(lesson(h.version, 4) { "x".repeat(6_001) }, lesson(h.version, 129))) {
+                val (status, body) = h.post(input)
+                assertEquals(413, status)
+                assertEquals("这一节太长，先选一段问。", body.str("error"))
+            }
+            assertEquals(0, h.stub.requests)
+        }
+    }
+
+    @Test fun lessonRejectsUnknownAnchorsWithoutRetryingAndWithholdsRevokedSnapshots() = runBlocking {
+        Harness(local = true, personal = true).use { h ->
+            h.catalog()
+            h.stub.stream(1, """{"paragraphs":[{"text":"伪造的出处。","anchors":["S9"]}]}""",
+                StubTutor.terminal("complete"), StubTutor.DONE)
+            val (_, rejected) = h.post(lesson(h.version))
+            assertTrue(rejected["sources"]!!.jsonArray.isEmpty())
+            assertEquals(1, h.stub.requests)
+            h.reply(delayMs = 250)
+            val pending = async { h.post(lesson(h.version)) }
+            withTimeout(5_000) { while (h.stub.requests < 2) delay(5) }
+            DriverManager.getConnection("jdbc:sqlite:${h.dir.resolve("personal-imports/sources.sqlite")}").use { db ->
+                db.createStatement().use { it.executeUpdate("DELETE FROM blocks WHERE page=8") }
+            }
+            assertTrue(pending.await().second["sources"]!!.jsonArray.isEmpty())
+        }
+    }
+
     private fun personal(book: String, text: String = "自写🌱 Synthetic selected.", start: Int = 5,
         hash: String = "a".repeat(64)): JsonObject = JsonObject(request(text,
         blocks("$book:p1:$start" to text, "$book:p1:100" to "PRIVATE_NEIGHBOUR")) +

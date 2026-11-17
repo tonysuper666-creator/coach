@@ -225,7 +225,20 @@ try {
                 if ($body.Count -gt 0) { $res = 'ok' }
             }
         }
-        if ($res -eq 'ok') { Pass 5 '边看边学出了讲解正文和带页码的出处' } elseif ($res) { Fail 5 "边看边学的讲解没出来，界面说「$($res.Substring(3))」" } else { Fail 5 '90 秒内没有同时看到讲解正文和带页码的出处（见 5-learn.png）' }
+        if ($res -eq 'ok') {
+            $sourcePage = [regex]::Match($source.Text, '第\s*(\d+)\s*页').Groups[1].Value
+            Click-At $sourceBox.X $sourceBox.Y
+            $returned = Await-Text 5 'source' @('返回学习') 30
+            $openedPage = Page-Of $script:Last
+            if (-not $returned -or -not $openedPage -or ($openedPage -split '/')[0] -ne $sourcePage) {
+                Fail 5 '出处没有回到标注页的原文（见 5-source.png）'
+            }
+            if (Has $script:Last @('无法确认原句', '出处已过期', '无法定位')) {
+                Fail 5 '出处页打开了，但原句未能核对（见 5-source.png）'
+            }
+            Click-At $returned.X $returned.Y
+            Pass 5 '边看边学出了讲解正文和带页码的出处，点出处回到对应原文页'
+        } elseif ($res) { Fail 5 "边看边学的讲解没出来，界面说「$($res.Substring(3))」" } else { Fail 5 '90 秒内没有同时看到讲解正文和带页码的出处（见 5-learn.png）' }
     } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $five = 'failed' }
     if ($five -and -not $KeepGoing) { throw 'STEP_FAILED' }
 

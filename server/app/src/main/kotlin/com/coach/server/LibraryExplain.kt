@@ -25,10 +25,12 @@ import io.ktor.utils.io.readAvailable
  * are separate from this course authorization; they cannot create learned permissions.
  */
 internal class LibraryExplainRequest private constructor(val quote: String, val pages: List<SourcePage>, val scope: VisibleScope,
-    private val claimedBlock: String) {
-    val bookId: String get() = pages.single().docId.substringBefore(":p")
+    private val claimedBlock: String, val bookPages: Int? = null) {
+    val isLesson: Boolean get() = bookPages != null
+    val bookId: String get() = pages.first().docId.substringBefore(":p")
     val isLocalBook: Boolean get() = Regex("[0-9a-f]{64}").matches(bookId)
     fun authorize(store: LedgerStore, binding: ReaderDocument? = null): AuthorizedLibrarySelection {
+        if (isLesson) throw MockError(HttpStatusCode.Conflict, "整节讲解只支持个人导入的书。")
         val claimed = pages.single()
         if (isLocalBook && (binding == null || binding.version != bookId || binding.explainSourceId == null || claimed.pdfPage !in 1..binding.pages))
             throw MockError(HttpStatusCode.Conflict, "这段原文的来源或可见范围尚未核实，暂时无法讲解。")
@@ -47,6 +49,8 @@ internal class LibraryExplainRequest private constructor(val quote: String, val 
         fun selected(quote: String, page: SourcePage): LibraryExplainRequest {
             return LibraryExplainRequest(quote, listOf(page.copy(text = quote)), VisibleScope.NONE, page.text)
         }
+        fun lesson(pages: List<SourcePage>, bookPages: Int) =
+            LibraryExplainRequest("", pages, VisibleScope.NONE, "", bookPages)
     }
 }
 
@@ -68,28 +72,40 @@ private fun LearnerSourcePage.inLearnedScope(store: LedgerStore): Boolean = stor
 ).permits(page.docId, page.pdfPage, page.learnerVisible)
 
 private val blockId = Regex("[A-Za-z0-9._-]{1,80}:p([0-9]{1,5}):[0-9]{1,9}")
+private val lessonBlockId = Regex("[a-f0-9]{64}:p([0-9]{1,6}):[0-9]{1,9}")
 
 internal fun libraryExplainRequest(input: JsonObject): LibraryExplainRequest {
     fun bad(): Nothing = throw MockError(HttpStatusCode.BadRequest, "选中追问格式不对。")
+    val lesson = input.str("kind") == "lesson"
+    fun tooLong(): Nothing = throw MockError(HttpStatusCode.PayloadTooLarge, "这一节太长，先选一段问。")
     val quote = (input["selection"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim().orEmpty()
-    if (quote.isEmpty() || quote.length > 4_000) bad()
+    if (!lesson && (quote.isEmpty() || quote.length > 4_000)) bad()
+    val bookPages = if (lesson) input.num("bookPages").takeIf { it in 1L..100_000L }?.toInt() ?: bad() else null
     val blocks = input["blocks"] as? JsonArray ?: bad()
-    if (blocks.size !in 1..4) bad()
+    if (lesson && blocks.size > 128) tooLong()
+    if (blocks.isEmpty() || (!lesson && blocks.size > 4)) bad()
     val seen = HashSet<String>()
     var total = 0
     val pages = blocks.map { value ->
         val block = value as? JsonObject ?: bad()
         val id = (block["id"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: bad()
-        val text = (block["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim() ?: bad()
-        val match = blockId.matchEntire(id) ?: bad()
-        if (text.isEmpty() || text.length > 8_000 || !seen.add(id) || match.groupValues[1].toInt() < 1) bad()
+        val raw = (block["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: bad()
+        val text = if (lesson) raw else raw.trim()
+        val match = (if (lesson) lessonBlockId else blockId).matchEntire(id) ?: bad()
+        if (lesson && text.length > 8_000) tooLong()
+        val page = match.groupValues[1].toInt()
+        if (text.isBlank() || text.length > 8_000 || !seen.add(id) || page < 1 || (bookPages != null && page > bookPages)) bad()
         total += text.length
         SourcePage(id, match.groupValues[1].toInt(), text)
     }
-    if (total > 24_000) bad()
+    if (total > 24_000) { if (lesson) tooLong() else bad() }
     // One local book per request. No client "scope" / visibility / course metadata is trusted.
     val books = pages.map { it.docId.substringBefore(":p") }.toSet()
     if (books.size != 1 || !tutorSourceAllowed(books.single())) bad()
+    if (lesson) {
+        if (!books.single().matches(Regex("[0-9a-f]{64}"))) bad()
+        return LibraryExplainRequest.lesson(pages, checkNotNull(bookPages))
+    }
     val selected = pages.firstOrNull { containsReaderSelection(it.text, quote) } ?: bad()
     return LibraryExplainRequest.selected(quote, selected)
 }
@@ -116,7 +132,7 @@ fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanati
                 if (friend != null && (!parsed.isLocalBook || input["localSource"] == null))
                     throw MockError(HttpStatusCode.Forbidden, "请先导入自己的书，再选择原文讲解。")
                 val importStore = if (friend == null) imports else (friends ?: throw FriendServiceError()).imports(friend)
-                val binding = if (friend == null && parsed.isLocalBook) library?.explanationSource(parsed.bookId, parsed.pages.single().pdfPage) else null
+                val binding = if (friend == null && parsed.isLocalBook && !parsed.isLesson) library?.explanationSource(parsed.bookId, parsed.pages.single().pdfPage) else null
                 val personal = input["localSource"] != null && parsed.isLocalBook && (friend != null || withContext(Dispatchers.IO) {
                     // Unreadable catalogs fail closed, including while generating.
                     runCatching { library?.reservesVersion(parsed.bookId) != true }.getOrDefault(false)
@@ -127,11 +143,10 @@ fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanati
                         .register(call.attributes[observedDevice], input, parsed)
                 } else null
                 val request = if (receipt == null) actor.execute { parsed.authorize(this, binding) } else null
-                val scope = request?.scope ?: VisibleScope.learner().narrowToPages(parsed.pages.single().docId,
-                    parsed.pages.single().pdfPage..parsed.pages.single().pdfPage)
+                val scope = request?.scope ?: VisibleScope.learner().narrowToDocs(*parsed.pages.map { it.docId }.toTypedArray())
+                    .limitPages(parsed.pages.associate { it.docId to it.pdfPage..it.pdfPage })
                 if (friend != null && reader == null) throw FriendServiceError()
-                val body = reader?.explain(call.attributes[observedDevice], "library", input, parsed.quote, parsed.pages, scope,
-                    friend?.let(::friendId)) {
+                val current: suspend () -> Boolean = {
                     if (receipt != null) withContext(Dispatchers.IO) {
                         importStore!!.isCurrent(receipt) && (if (friend != null) actor.execute {
                             authorize(call.attributes[observedDevice], call.request.header("Authorization")!!.removePrefix("Bearer ")) &&
@@ -140,6 +155,10 @@ fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanati
                     } else (binding == null || library?.explanationSource(parsed.bookId, parsed.pages.single().pdfPage) == binding) &&
                         actor.execute { request!!.isCurrent(this) }
                 }
+                val body = (if (parsed.isLesson) reader?.explainLesson(call.attributes[observedDevice], input, parsed.pages, scope,
+                    friend?.let(::friendId), current)
+                else reader?.explain(call.attributes[observedDevice], "library", input, parsed.quote, parsed.pages, scope,
+                    friend?.let(::friendId), current))
                     ?: json("text" to "讲解服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
                 if (friend != null) withContext(Dispatchers.IO) {
                     try { friends!!.record(friend, call.attributes[observedDevice], requestId, "complete", body) }

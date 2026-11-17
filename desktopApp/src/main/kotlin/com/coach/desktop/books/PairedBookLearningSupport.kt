@@ -1,16 +1,55 @@
 package com.coach.desktop.books
 
-/** The passage composer uses the same paired, source-authorized service as the explain panel. */
+/** Lesson and passage requests use the paired, source-authorized service. */
 internal class PairedBookLearningSupport(
     private val library: TextbookLibrary,
     private val consent: ExplainConsent = ExplainConsent(library.directory),
+    private val sendLesson: suspend (List<SourceBlock>, Int) -> ExplainResult = { _, _ ->
+        ExplainResult.Refused("整节讲解正在接通。")
+    },
     private val send: suspend (SourceBlock, String) -> ExplainResult = { block, question ->
         BookExplainer(library = library).run { load(); ask(block, question) }
     },
 ) : BookLearningSupport {
     override fun consentRequired(book: String) = !consent.allowed(book)
     override fun allow(book: String) = consent.allow(book)
-    override suspend fun explain(request: BookExplanationRequest) = UnconnectedBookLearningSupport.explain(request)
+    override suspend fun explain(request: BookExplanationRequest): BookLearningReply {
+        var answer: BookLearningReply.Text? = null
+        var refused: ExplainResult.Refused? = null
+        val verified = OwnedBookLearningProvider(library) { prompt ->
+            require(consent.allowed(request.book))
+            val blocks = request.blocks.filterNot { it.heading }
+            if (!BookLessonWire.fits(blocks)) {
+                refused = ExplainResult.Refused(BookLessonWire.TOO_LONG)
+                throw IllegalArgumentException(BookLessonWire.TOO_LONG)
+            }
+            val bookPages = library.book(request.book).pages.size
+            when (val result = sendLesson(blocks, bookPages)) {
+                is ExplainResult.Refused -> { refused = result; throw IllegalStateException("refused") }
+                is ExplainResult.Done -> {
+                    val byId = blocks.zip(prompt.excerpts).associate { (block, excerpt) -> block.id to excerpt }
+                    val cited = result.explanation.citations.map { citation ->
+                        val excerpt = requireNotNull(byId[citation.blockId])
+                        require(citation.page == excerpt.citation.page)
+                        excerpt
+                    }.distinct()
+                    require(cited.isNotEmpty() && consent.allowed(request.book))
+                    val readable = result.explanation.citations.fold(result.explanation.text) { text, citation ->
+                        text.replace("【${citation.anchor}】", "")
+                    }.trim()
+                    answer = BookLearningReply.Text(readable, cited.map {
+                        val c = it.citation
+                        BookPassage(c.book, c.page, c.start, c.end, it.text)
+                    })
+                    OwnedBookAnswer(readable, cited.map { it.citation })
+                }
+            }
+        }
+        return when (val reply = verified.explain(request)) {
+            is BookLearningReply.Text -> checkNotNull(answer)
+            is BookLearningReply.Unavailable -> refused?.let { BookLearningReply.Unavailable(it.message, it.trouble) } ?: reply
+        }
+    }
     override suspend fun ask(request: BookPassageQuestion): BookLearningReply {
         var citedText: String? = null
         // The provider turns any failure into its own generic line; keep the server's sentence and kind here instead.

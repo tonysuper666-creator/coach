@@ -127,6 +127,35 @@ class FriendAccessTest {
         }
     }
 
+    @Test fun entireLessonUsesOneFriendCallAndOnlyStoresConsentedBlocks() = Harness().use { h ->
+        val friend = h.pair("整节测试")
+        val book = "c".repeat(64)
+        val input = json("requestId" to "ab12", "kind" to "lesson", "bookPages" to 8,
+            "blocks" to JsonArray((1..8).map { n -> json("id" to "$book:p$n:0", "text" to "Self-authored lesson block $n.") }),
+            "localSource" to json("schema" to 1, "book" to book, "format" to "txt", "title" to "Self-authored lesson",
+                "consented" to true, "pages" to JsonArray((1..8).map { n -> json("number" to n, "length" to 200,
+                    "ocr" to false, "sha256" to "d".repeat(64)) })))
+        h.stub.stream(1, """{"paragraphs":[{"text":"这一节的开头和结尾相互关联。","anchors":["S1","S8"]}]}""",
+            StubTutor.terminal("complete"), StubTutor.DONE)
+        val response = h.request("/v1/library/explain", "POST", friend, input.toString())
+        assertEquals(200, response.statusCode())
+        assertEquals(listOf(1L, 8L), parse(response)["sources"]!!.jsonArray.map { it.jsonObject.num("pdfPage") })
+        assertEquals(1, h.stub.requests)
+        assertEquals(0L, runBlocking { h.actor.execute { supplyCallCount() } })
+        val privateDir = h.root.resolve("friends").resolve(friendId("整节测试"))
+        DriverManager.getConnection("jdbc:sqlite:${privateDir.resolve("imports/sources.sqlite")}").use { db ->
+            db.createStatement().use { sql -> sql.executeQuery("SELECT count(*) FROM blocks").use { rows ->
+                rows.next(); assertEquals(8, rows.getInt(1))
+            } }
+        }
+        assertFalse(Files.readString(privateDir.resolve("requests.log")).contains("Self-authored"))
+        h.stub.stream(1, StubTutor.terminal("failed", "daily_quota"), StubTutor.DONE)
+        val limited = h.request("/v1/library/explain", "POST", friend, input.toString())
+        assertEquals(429, limited.statusCode())
+        assertEquals(FriendServiceError("daily_quota").body, parse(limited))
+        assertEquals(2, h.stub.requests, "No retry after the second manual request hits quota")
+    }
+
     @Test fun statusReportsOnlyOwnDeviceCallsAndSharedFriendRemainder() = Harness().use { h ->
         val b = h.pair("乙"); val b2 = h.pair("乙")
         Files.createDirectories(h.root.resolve("state"))

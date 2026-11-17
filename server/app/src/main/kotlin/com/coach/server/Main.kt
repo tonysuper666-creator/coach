@@ -24,7 +24,7 @@ import java.util.Base64
 fun main(args: Array<String>): Unit = runBlocking {
     val managed = System.getenv("COACH_MANAGE_SERVICES") == "1"
     val data = Path.of(System.getenv("COACH_DATA_DIR") ?: File(System.getProperty("user.home"),"Coach/data").path)
-    if (args.firstOrNull() in setOf("pair-code", "devices", "revoke")) {
+    if (args.firstOrNull() in setOf("pair-code", "devices", "revoke", "revoke-friend")) {
         pairingCommand(args, data)
         return@runBlocking
     }
@@ -116,7 +116,8 @@ fun main(args: Array<String>): Unit = runBlocking {
     val mainline=Mainline(library)
     val reader = ReaderLibrary.configured()
     val imports = ImportedBookSources(data.resolve("personal-imports"))
-    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); libraryExplainRoutes(actor,chat.reader,reader,imports); readerRoutes(actor,pushes,reader,mainline) }
+    val friends = FriendAccess(data.resolve("friends"))
+    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation,friends); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); libraryExplainRoutes(actor,chat.reader,reader,imports,friends); readerRoutes(actor,pushes,reader,mainline) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")
@@ -128,6 +129,13 @@ fun main(args: Array<String>): Unit = runBlocking {
     val tailHost = System.getenv("COACH_TAIL_HOST") ?: localConfig.getProperty("coach.tailHost")
     val local = embeddedServer(Netty, host = "127.0.0.1", port = port, module = module)
     local.engineConfig.apply { connectionGroupSize = 1; workerGroupSize = 1; callGroupSize = 2 }
+    val publicPort = System.getenv("COACH_PUBLIC_PORT")?.toInt()?.also {
+        require(it in 1..65535 && it != 18791 && it != port) { "COACH_PUBLIC_PORT must be a distinct non-production port" }
+    }
+    val public = publicPort?.let { p -> embeddedServer(Netty, host = "127.0.0.1", port = p) {
+        ledgerRoutes(actor,pushes,adminDevice=device,friends=friends,publicOnly=true)
+        libraryExplainRoutes(actor,chat.reader,friends=friends)
+    }.apply { engineConfig.apply { connectionGroupSize=1; workerGroupSize=1; callGroupSize=2 }; start(false) } }
     local.start(wait = false)
     println("COACH loopback ready http://127.0.0.1:$port/v1/hello")
     val supervisor = launch {
@@ -173,7 +181,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     }
     val shutdown = Thread {
         runBlocking {
-            children?.stop();supervisor.cancelAndJoin();local.stopSuspend(100,1000)
+            children?.stop();supervisor.cancelAndJoin();public?.stopSuspend(100,1000);local.stopSuspend(100,1000)
             maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close()
         }
     }
@@ -183,6 +191,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     try { awaitCancellation() } finally {
         withContext(NonCancellable) { children?.stop() }
         supervisor.cancelAndJoin()
+        public?.stop(100, 1000)
         local.stop(100, 1000)
         maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close();lock.release();fileLock.close()
     }

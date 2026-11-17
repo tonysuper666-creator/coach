@@ -21,9 +21,9 @@ private val idRandom = java.security.SecureRandom()
 private val ledgerLogger = Logger.getLogger(LedgerStore::class.java.name)
 private fun uid() = ulid(System.currentTimeMillis(),ByteArray(10).also(idRandom::nextBytes))
 data class Fence(val epoch: String, val value: Long, val id: String)
-data class PairedDevice(val id: String, val name: String, val createdAt: Long, val revokedAt: Long?)
+data class PairedDevice(val id: String, val name: String, val createdAt: Long, val revokedAt: Long?, val friendName: String? = null, val lastUsedAt: Long? = null)
 // Deliberately no generated toString: credentials must never reach logs.
-class DeviceCredential(val deviceId: String, val token: String)
+class DeviceCredential(val deviceId: String, val token: String, val role: String = "owner")
 class PairingCode(val code: String, val expiresAt: Long)
 
 class ReviewVariantRejected(val code: String) : IllegalArgumentException(code)
@@ -104,6 +104,13 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             }
         }
         sql("CREATE TABLE IF NOT EXISTS pairing_code(singleton INTEGER PRIMARY KEY CHECK(singleton=1), code_sha256 TEXT NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0)")
+        // Additive capabilities: old paired devices retain owner permissions.
+        if (query("PRAGMA table_info(devices)") { it.getString("name") }.none { it == "friend_name" })
+            sql("ALTER TABLE devices ADD COLUMN friend_name TEXT")
+        if (query("PRAGMA table_info(devices)") { it.getString("name") }.none { it == "last_used_at" })
+            sql("ALTER TABLE devices ADD COLUMN last_used_at INTEGER")
+        if (query("PRAGMA table_info(pairing_code)") { it.getString("name") }.none { it == "friend_name" })
+            sql("ALTER TABLE pairing_code ADD COLUMN friend_name TEXT")
         sql("CREATE TABLE IF NOT EXISTS offline_packs(pack_id TEXT PRIMARY KEY,course_id TEXT NOT NULL,device_id TEXT NOT NULL,expires_at INTEGER NOT NULL,pack_json TEXT NOT NULL)")
         sql("CREATE TABLE IF NOT EXISTS offline_reservations(question_id TEXT PRIMARY KEY,pack_id TEXT NOT NULL,expires_at INTEGER NOT NULL)")
         sql("CREATE TABLE IF NOT EXISTS choice_allocations(id INTEGER PRIMARY KEY AUTOINCREMENT,course_id TEXT NOT NULL,correct_letter TEXT NOT NULL)")
@@ -655,19 +662,28 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         if (device.length > 128 || token.length !in 32..256) return false
         val expected = query("SELECT token_sha256 FROM devices WHERE device_id=? AND revoked_at IS NULL",device) { it.getString(1) }.singleOrNull()
             ?: "0".repeat(64)
-        return MessageDigest.isEqual(expected.toByteArray(), sha256(token.toByteArray(Charsets.UTF_8)).toByteArray())
+        val valid = MessageDigest.isEqual(expected.toByteArray(), sha256(token.toByteArray(Charsets.UTF_8)).toByteArray())
+        if (valid) sql("UPDATE devices SET last_used_at=? WHERE device_id=?", clock(), device)
+        return valid
     }
     fun enroll(device: String, token: String) { require(token.length >= 32); sql("INSERT INTO devices(device_id,token_sha256,created_at) VALUES(?,?,?) ON CONFLICT(device_id) DO UPDATE SET token_sha256=excluded.token_sha256,revoked_at=NULL",device,sha256(token.toByteArray(Charsets.UTF_8)),clock()) }
 
-    fun createPairingCode(): PairingCode {
+    fun friendName(device: String): String? = query("SELECT friend_name FROM devices WHERE device_id=? AND revoked_at IS NULL", device) { it.getString(1) }.singleOrNull()
+    fun revokeFriend(name: String) { sql("UPDATE devices SET revoked_at=? WHERE friend_name=? AND revoked_at IS NULL", clock(), name) }
+
+    fun createPairingCode(friend: String? = null): PairingCode {
+        require(friend == null || (friend.isNotBlank() && friend.length <= 80 && friend.none { it.isISOControl() }))
         val code = idRandom.nextInt(1_000_000).toString().padStart(6, '0')
         val expires = clock() + 300_000
         sql("INSERT INTO pairing_code(singleton,code_sha256,expires_at,attempts) VALUES(1,?,?,0) ON CONFLICT(singleton) DO UPDATE SET code_sha256=excluded.code_sha256,expires_at=excluded.expires_at,attempts=0", sha256(code.toByteArray()), expires)
+        sql("UPDATE pairing_code SET friend_name=? WHERE singleton=1", friend)
         return PairingCode(code, expires)
     }
 
     /** Wall clock expiry, five total guesses, single use across both listeners/restarts. */
-    fun pair(code: String, name: String): DeviceCredential? = transaction {
+    fun pair(code: String, name: String, friendsOnly: Boolean = false): DeviceCredential? = transaction {
+        val friend = query("SELECT friend_name FROM pairing_code WHERE singleton=1") { it.getString(1) }.singleOrNull()
+        if (friendsOnly && friend == null) return@transaction null
         val active = query("SELECT code_sha256,expires_at,attempts FROM pairing_code WHERE singleton=1") {
             Triple(it.getString(1), it.getLong(2), it.getInt(3))
         }.singleOrNull() ?: return@transaction null
@@ -679,11 +695,12 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         val device = uid()
         sql("INSERT INTO devices(device_id,name,token_sha256,created_at) VALUES(?,?,?,?)", device, name, sha256(token.toByteArray()), clock())
         sql("DELETE FROM pairing_code WHERE singleton=1")
-        DeviceCredential(device, token)
+        sql("UPDATE devices SET friend_name=? WHERE device_id=?", friend, device)
+        DeviceCredential(device, token, if (friend == null) "owner" else "friend")
     }
 
-    fun pairedDevices(): List<PairedDevice> = query("SELECT device_id,name,created_at,revoked_at FROM devices ORDER BY created_at,device_id") {
-        PairedDevice(it.getString(1), it.getString(2) ?: it.getString(1), it.getLong(3), it.getObject(4)?.let { value -> (value as Number).toLong() })
+    fun pairedDevices(): List<PairedDevice> = query("SELECT device_id,name,created_at,revoked_at,friend_name,last_used_at FROM devices ORDER BY created_at,device_id") {
+        PairedDevice(it.getString(1), it.getString(2) ?: it.getString(1), it.getLong(3), it.getObject(4)?.let { value -> (value as Number).toLong() }, it.getString(5), it.getObject(6)?.let { value -> (value as Number).toLong() })
     }
     fun revokeDevice(device: String) { sql("UPDATE devices SET revoked_at=? WHERE device_id=? AND revoked_at IS NULL", clock(), device) }
 

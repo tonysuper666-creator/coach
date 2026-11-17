@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.tony.coach-api-spend</string>
+  <key>ProgramArguments</key><array>
+    <string>@PYTHON@</string><string>@COACH_REPO@/tools/bridge/friend_spend_watch.py</string>
+    <string>--state</string><string>@STATE_DIR@</string>
+  </array>
+  <key>EnvironmentVariables</key><dict><key>MULTICA_CLI_PATH</key><string>@MULTICA_CLI@</string></dict>
+  <key>RunAtLoad</key><true/><key>StartInterval</key><integer>7200</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>@LOG_DIR@/api-spend.log</string>
+  <key>StandardErrorPath</key><string>@LOG_DIR@/api-spend-error.log</string>
+</dict></plist>

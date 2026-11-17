@@ -48,7 +48,7 @@ internal class DesktopCredentials(clientDirectory: Path) {
         check(device.matches(Regex("[A-Za-z0-9_-]{1,128}")) && token.matches(Regex("[A-Za-z0-9_-]{43}"))) {
             "Invalid saved Coach pairing"
         }
-        return PairedCredentials(device, token)
+        return PairedCredentials(device, token, values.getProperty("role", "owner"))
     }
 
     @Synchronized fun save(serverUrl: String, credentials: PairedCredentials) {
@@ -61,6 +61,7 @@ internal class DesktopCredentials(clientDirectory: Path) {
                 setProperty("server", url)
                 setProperty("deviceId", credentials.deviceId)
                 setProperty("token", credentials.token)
+                setProperty("role", credentials.role)
             }.store(output, "Coach pairing; private to this user")
         }
     }

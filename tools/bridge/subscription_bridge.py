@@ -226,6 +226,23 @@ def err_response(e: BridgeError, *, x_coach: dict | None = None, headers: dict |
 
 def write_log(**kw: Any) -> None:
     """一行一个请求：时间 rid 请求模型 实际模型 流式 后台 强度 输入/输出字符 排队 首字 总时长 终态 物理调用。"""
+    if kw.get("friend"):
+        # A separate content-free audit, including when the managed bridge sends
+        # owner logs to stdout. Never log request headers, passages or errors here.
+        friend = kw["friend"]
+        if not re.fullmatch(r"[a-f0-9]{64}", friend):
+            return
+        root = Path(os.environ.get("COACH_API_STATE_DIR", str(Path.home() / "Coach/state"))) / "friends" / friend
+        try:
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            row = {"at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                   "device": kw.get("device"), "status": kw.get("status"),
+                   "calls": kw.get("physical_calls", 0), "transport": "api"}
+            with os.fdopen(os.open(root / "bridge.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a") as out:
+                out.write(json.dumps(row) + "\n")
+        except OSError:
+            pass
+        return
     line = (f"{datetime.now().astimezone().isoformat(timespec='seconds')} "
             f"rid={kw.get('request_id') or '-'} model={str(kw.get('model'))[:48]} "
             f"served={str(kw.get('served_by') or '-')[:48]} stream={int(bool(kw.get('stream')))} "
@@ -525,6 +542,8 @@ class ReqCtx:
     api_fallback: str | None = None
     stream_reset: bool = False
     batch_key: str = ""
+    friend_id: str | None = None
+    friend_device: str | None = None
 
     def queue_ms(self) -> float:
         if self.t_acq is None:
@@ -1300,7 +1319,16 @@ def build_req(body: dict, headers: Any) -> ReqCtx:
     tag = (headers.get("x-coach-traffic") or "unknown").strip().lower()
     trusted = production_source(headers)
     traffic = "test" if tag == "test" else "user" if tag == "user" and trusted else "unknown"
-    return ReqCtx(request_id=rid, model=model, spec=mspec, body=body, spec_data=spec_data,
+    friend = headers.get("x-coach-friend")
+    friend_device = headers.get("x-coach-friend-device")
+    if friend is not None:
+        if (not re.fullmatch(r"[a-f0-9]{64}", friend) or not isinstance(friend_device, str) or
+                not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", friend_device) or
+                headers.get("x-coach-task") != "READER_SELECTION" or mspec.backend != "claude" or
+                background or body.get("tools") or spec_data.json_mode):
+            raise BridgeError(403, "朋友讲解通道不可用", reason="unavailable")
+        fallback_enabled = False
+    return ReqCtx(friend_id=friend, friend_device=friend_device, request_id=rid, model=model, spec=mspec, body=body, spec_data=spec_data,
                   stream=bool(body.get("stream")), background=background,
                   fallback_enabled=fallback_enabled, effort=effort, t_req=t_req,
                   exact_model=(headers.get("x-coach-model-policy") or "").lower() == "exact",
@@ -1371,11 +1399,12 @@ async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
     """Keep the vendor fixed. Reset-aware callers replace interrupted content."""
     sent = False
     if api_model(req.task, model, req.format_attempt) is not None:
-        if req.format_attempt == 2:
+        if req.format_attempt == 2 and not req.friend_id:
             write_log(request_id=req.request_id, task=req.task, event="format_escalation", model=api_model(req.task, model, 2))
         try:
             async with aclosing(API_ROUTER.events(req.task, model, req.spec_data.system, req.spec_data.prompt,
-                                                 req.body.get("max_tokens"), req.format_attempt)) as events:
+                                                 req.body.get("max_tokens"), req.format_attempt,
+                                                 **({"friend": req.friend_id, "device": req.friend_device} if req.friend_id else {}))) as events:
                 async for event in events:
                     kind = event["kind"]
                     if kind == "attempt":
@@ -1400,6 +1429,11 @@ async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
             # These exceptions contain fixed codes only; upstream messages and keys
             # never enter the diagnostics. Retain ambiguous credit reservations.
             reason = str(error) if isinstance(error, (ApiFailure, Denied)) else "api_ledger_io"
+            if req.friend_id:
+                code = "monthly_quota" if reason in ("credit_limit_95_percent", "monthly_quota") else "daily_quota" if reason == "daily_quota" else "unavailable"
+                req.transport = "api"
+                yield {"kind": "end", "outcome": Outcome("failed", code, "error", req.served_by or model, started=sent)}
+                return
             req.api_fallback = reason
             write_log(request_id=req.request_id, task=req.task, event="api_fallback", reason=reason,
                       after_content=sent, physical_calls=req.physical_calls)
@@ -1411,6 +1445,9 @@ async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
             req.served_by = None
             req.ttft_ms = None
             req.transport = "subscription"
+    if req.friend_id:
+        yield {"kind": "end", "outcome": Outcome("failed", "unavailable", "error", model)}
+        return
     if req.stream and MODELS[model].backend == "claude" and not req.spec_data.json_mode:
         async for event in claude_stream(req, model, effort):
             yield event
@@ -1422,7 +1459,7 @@ async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
 
 
 async def dispatch(req: ReqCtx, model: str, effort: str | None) -> Outcome:
-    if api_model(req.task, model, req.format_attempt) is None:
+    if not req.friend_id and api_model(req.task, model, req.format_attempt) is None:
         return await dispatch_cli(req, model, effort)
     async for event in routed_events(req, model, effort):
         if event["kind"] == "end":
@@ -1456,7 +1493,7 @@ def terminal_frames(req: ReqCtx, cid: str, created: int, oc: Outcome, want_usage
 
 
 def log_req(req: ReqCtx, oc: Outcome) -> None:
-    write_log(request_id=req.request_id, model=req.model, served_by=oc.served_by or req.served_by,
+    write_log(friend=req.friend_id, device=req.friend_device, request_id=req.request_id, model=req.model, served_by=oc.served_by or req.served_by,
               stream=req.stream, background=req.background, effort=req.effort, traffic=req.traffic, source="production" if req.production_source else "unknown",
               in_chars=req.in_chars, out_chars=req.out_chars, queue_ms=req.queue_ms(),
               ttft_ms=req.ttft_ms, total_ms=req.total_ms(), status=oc.status, reason=oc.reason,
@@ -1769,7 +1806,7 @@ async def chat(request: Request):
     except Exception as e:  # 兜底：不把异常细节里的内容写进日志
         rid = req.request_id if req else (request.headers.get("x-request-id") or "-")
         if req:
-            write_log(request_id=req.request_id, model=req.model, served_by=req.served_by,
+            write_log(friend=req.friend_id, device=req.friend_device, request_id=req.request_id, model=req.model, served_by=req.served_by,
                       stream=req.stream, background=req.background, effort=req.effort, traffic=req.traffic, source="production" if req.production_source else "unknown",
                       in_chars=req.in_chars, out_chars=0, queue_ms=req.queue_ms(),
                       ttft_ms=req.ttft_ms, total_ms=req.total_ms(), status="failed",

@@ -8,6 +8,10 @@ import androidx.compose.ui.awt.ComposeWindow
 import androidx.compose.ui.semantics.*
 import com.coach.client.PairedCredentials
 import com.coach.desktop.books.*
+import com.sun.jna.Native
+import com.sun.jna.Pointer
+import com.sun.jna.WString
+import com.sun.jna.win32.StdCallLibrary
 import java.awt.GraphicsEnvironment
 import java.nio.file.Files
 import java.nio.file.Path
@@ -174,7 +178,8 @@ class BookLessonLiveWindowTest {
     }
 
     /** Exercise the production OS file-drop path using only a run-owned source window. */
-    private fun importThroughNativeDrop(window: ComposeWindow) {
+    private fun importThroughNativeDrop(window: ComposeWindow) = foregroundInput {
+        edt { window.toFront(); window.requestFocus() }
         val source = edt { javax.swing.JFrame("Coach · 本轮教材拖放源").apply {
             val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
             setBounds(screen.x + 30, screen.y + screen.height - 110, 260, 80)
@@ -208,6 +213,30 @@ class BookLessonLiveWindowTest {
                     from.y + (to.y - from.y) * (step + 1) / 30) }
             } finally { robot.mouseRelease(java.awt.event.InputEvent.BUTTON1_DOWN_MASK) }
         } finally { edt { source.dispose() } }
+    }
+
+    /** Share the smoke driver's per-action lock: a native drag moves the global mouse.
+     * Release before import, API or render waits so other Coach windows can progress. */
+    private fun foregroundInput(action: () -> Unit) {
+        val api = Native.load("kernel32", InputLock::class.java)
+        val handle = checkNotNull(api.CreateMutexW(null, false, WString("Global\\Coach.WinDrive.Foreground")))
+        var held = false
+        try {
+            val result = api.WaitForSingleObject(handle, 30_000)
+            held = result == 0 || result == 0x80 // WAIT_OBJECT_0 / WAIT_ABANDONED
+            check(held) { "Timed out acquiring the Coach foreground input lock" }
+            action()
+        } finally {
+            if (held) api.ReleaseMutex(handle)
+            api.CloseHandle(handle)
+        }
+    }
+
+    private interface InputLock : StdCallLibrary {
+        fun CreateMutexW(attributes: Pointer?, initialOwner: Boolean, name: WString): Pointer?
+        fun WaitForSingleObject(handle: Pointer, milliseconds: Int): Int
+        fun ReleaseMutex(handle: Pointer): Boolean
+        fun CloseHandle(handle: Pointer): Boolean
     }
 
     private fun nodes(window: ComposeWindow): List<SemanticsNode> {

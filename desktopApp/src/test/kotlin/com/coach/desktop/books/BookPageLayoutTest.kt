@@ -90,7 +90,7 @@ class BookPageLayoutTest {
             assertEquals(raw, pages.joinToString("") { originalBookSelection(it.text) })
             for ((j, page) in pages.withIndex()) {
                 val layout = layouts[i][j]
-                assertTrue(layout.lineCount >= 2, "no lone line at either end of a long paragraph")
+                assertTrue(layout.lineCount >= 2, "no lone line at either end of a long paragraph: widthIndex=$i page=$j source=${page.sources} text=${originalBookSelection(page.text).replace("\n", "<LF>")}")
                 assertTrue(layout.getLineBottom(layout.lineCount - 1) <= 230)
                 assertFalse(originalBookSelection(page.text).trim().endsWith("## 问题与证据"), "heading stays with body")
             }

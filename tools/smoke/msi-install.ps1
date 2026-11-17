@@ -1,0 +1,292 @@
+﻿# 安装包验收：装 MSI → 起真窗口 → 截图（标题栏、任务栏、开始菜单）→ 卸载 → 留日志和 result.json。
+#
+# 在 winbox 上必须经 tools/smoke/Run-Interactive.ps1 在登录会话里跑：智能体自己在 session 0，
+# 看不到也截不到窗口。CI 的 windows-2022 运行机直接跑。
+#   powershell -File tools\smoke\msi-install.ps1 -Msi <x.msi> -OutDir <目录>
+#
+# 只装 MSI、只起它装的 exe；书架和客户端目录指到 $OutDir 下，不碰使用者自己的书和配对身份。
+param(
+    [Parameter(Mandatory)][string]$Msi,
+    [Parameter(Mandatory)][string]$OutDir,
+    [switch]$KeepInstalled,
+    [int]$StartTimeoutSec = 180
+)
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Win-Drive.ps1')
+New-Item -ItemType Directory -Force $OutDir | Out-Null
+$msiPath = (Resolve-Path $Msi).Path
+$results = New-Object System.Collections.ArrayList
+$location = $null
+$script:TargetPids = @()
+function Note([string]$m) { "$(Get-Date -Format 'HH:mm:ss') $m" | Tee-Object -FilePath (Join-Path $OutDir 'install.log') -Append }
+function Pass([string]$name, [string]$what) { [void]$results.Add([pscustomobject]@{ Step = $name; Ok = $true; Why = $what }); Note "$name 通过：$what" }
+# 失败也要留下 result.json：调用方靠它判断，而不是靠退出码去猜哪一步断了
+function Save-Result {
+    $product = Get-LearningCoachProducts
+    $productInfo = $null
+    if ($product) {
+        $productInfo = [pscustomobject]@{ name = $product[0].DisplayName; version = $product[0].DisplayVersion; publisher = $product[0].Publisher }
+    }
+    [pscustomobject]@{
+        msi = $msiPath
+        msiBytes = (Get-Item $msiPath).Length
+        installedTo = $location
+        product = $productInfo
+        steps = $results
+        passed = @($results | Where-Object { $_.Ok }).Count
+        total = $results.Count
+    } | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 (Join-Path $OutDir 'result.json')
+    "$(@($results | Where-Object { $_.Ok }).Count)/$($results.Count)（截图与日志：$OutDir）"
+}
+function Fail([string]$name, [string]$why) { [void]$results.Add([pscustomobject]@{ Step = $name; Ok = $false; Why = $why }); Note "$name 失败：$why"; Stop-OwnClients; Save-Result; exit 1 }
+# 意料之外的终止错误也要落盘并退出，否则外层 Run-Interactive 只能等到超时
+trap { Note "中断：$_"; Stop-OwnClients; Save-Result; exit 1 }
+function Stop-OwnClients { foreach ($own in @($script:TargetPids)) { Stop-Process -Id $own -Force -ErrorAction SilentlyContinue } }
+# 窗口截图必须是它自己：先抢前台（后台进程直接 SetForegroundWindow 会被系统挡住，先按一下 Alt 解锁），
+# 抢不到就报错，宁可不截图也不拿别人的窗口冒充。SendKeys 不认 Win 键，开始菜单用真的 Win 键。
+if (-not ('CoachWin' -as [type])) {
+    Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class CoachWin {
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint attach, uint attachTo, bool on);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  // 别的窗口（哪怕是同名的旧实例）卡住时 GetWindowText 会把我们吊死；带超时地问，问不到就当没标题。
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr wParam, System.Text.StringBuilder lParam, uint flags, uint timeout, out IntPtr result);
+  public static string Text(IntPtr h) {
+    var sb = new System.Text.StringBuilder(512);
+    IntPtr result;
+    SendMessageTimeout(h, 0x000D /* WM_GETTEXT */, (IntPtr)sb.Capacity, sb, 0x0002 /* SMTO_ABORTIFHUNG */, 300, out result);
+    return sb.ToString();
+  }
+  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+  public static readonly IntPtr TOPMOST = new IntPtr(-1);
+  public static readonly IntPtr NOTOPMOST = new IntPtr(-2);
+}
+"@
+}
+function Focus-OurWindow([IntPtr]$h, [int]$timeoutSec = 6) {
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    do {
+        $fg = [CoachWin]::GetForegroundWindow()
+        if ($fg -eq $h) { return $true }
+        # 把自己的输入队列挂到前台线程上：后台进程的 SetForegroundWindow 会被前台锁挡住
+        $fgThread = [CoachWin]::GetWindowThreadProcessId($fg, [IntPtr]::Zero)
+        [CoachWin]::AttachThreadInput([CoachWin]::GetCurrentThreadId(), $fgThread, $true) | Out-Null
+        [CoachWin]::SetForegroundWindow($h) | Out-Null
+        [CoachWin]::AttachThreadInput([CoachWin]::GetCurrentThreadId(), $fgThread, $false) | Out-Null
+        Start-Sleep -Milliseconds 400
+        if ([CoachWin]::GetForegroundWindow() -eq $h) { return $true }
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+# 抢不到前台（系统通知、覆盖层之类随时会抢）时离屏抓自己的窗口：内容还是这个窗口，
+# 不是拿别人的窗口冒充；全黑说明离屏抓不到，才报失败。
+function Save-WindowShot([string]$path) {
+    $r = Get-Rect
+    $w = $r.R - $r.L; $h = $r.B - $r.T
+    if ($w -le 0 -or $h -le 0) { return $false }
+    $bmp = New-Object System.Drawing.Bitmap $w, $h
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $hdc = $g.GetHdc()
+    $ok = [CoachWin]::PrintWindow($script:Win, $hdc, 2)
+    $g.ReleaseHdc($hdc); $g.Dispose()
+    $ink = 0
+    foreach ($x in @(0, [int]($w / 2), ($w - 1))) {
+        foreach ($y in @(0, [int]($h / 2), ($h - 1))) {
+            $c = $bmp.GetPixel($x, $y); if (($c.R + $c.G + $c.B) -gt 30) { $ink++ }
+        }
+    }
+    if (-not $ok -or $ink -eq 0) { $bmp.Dispose(); return $false }
+    $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose(); return $true
+}
+function Open-StartMenu {
+    [CoachWin]::keybd_event(0x5B, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 80
+    [CoachWin]::keybd_event(0x5B, 0, 2, [IntPtr]::Zero)
+}
+
+function Get-LearningCoachProducts {
+    $paths = @('HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*')
+    @(Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'LearningCoach' })
+}
+function Get-StartMenuShortcuts {
+    @(Get-ChildItem (Join-Path ([Environment]::GetFolderPath('Programs')) 'LearningCoach') -Filter *.lnk -ErrorAction SilentlyContinue)
+}
+
+# 截图：窗口整张、标题栏左上角放大、任务栏条带放大，都是屏幕实拍，不是离屏渲染。
+function Save-Png([string]$path, [System.Drawing.Bitmap]$bmp) { $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose() }
+function Save-Crop([string]$src, [string]$dst, [int]$x, [int]$y, [int]$w, [int]$h, [int]$scale = 1) {
+    $img = [System.Drawing.Image]::FromFile($src)
+    try {
+        $bmp = New-Object System.Drawing.Bitmap ($w * $scale), ($h * $scale)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::NearestNeighbor
+        $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
+        $g.DrawImage($img, (New-Object System.Drawing.Rectangle 0, 0, ($w * $scale), ($h * $scale)), (New-Object System.Drawing.Rectangle $x, $y, $w, $h), [System.Drawing.GraphicsUnit]::Pixel)
+        $g.Dispose()
+        Save-Png $dst $bmp
+    } finally { $img.Dispose() }
+}
+
+# 只认这次装的 exe 起的窗口。jpackage 的启动器会把 JVM 交给一个子进程，窗口挂在子进程上，
+# 所以按“启动后新出现的 LearningCoach.exe”认人；进程集合存脚本作用域，EnumWindows 的回调看不见函数的局部变量。
+function Find-InstalledWindow {
+    $script:Win = [IntPtr]::Zero
+    $script:WinPid = 0
+    [WD]::EnumWindows({ param($h, $l)
+        $p = 0; [WD]::GetWindowThreadProcessId($h, [ref]$p) | Out-Null
+        if ($script:TargetPids -contains $p -and [WD]::IsWindowVisible($h)) {
+            if ([CoachWin]::Text($h) -eq 'LearningCoach') { $script:Win = $h; $script:WinPid = $p }
+        }
+        return $true }, [IntPtr]::Zero) | Out-Null
+    return $script:Win
+}
+
+# ---- 0. 装之前先把机器状态记下来，装完、卸完各自对照 ----
+"MSI: $msiPath" | Set-Content -Encoding utf8 (Join-Path $OutDir 'environment.txt')
+"MSI bytes: $((Get-Item $msiPath).Length)" | Add-Content -Encoding utf8 (Join-Path $OutDir 'environment.txt')
+$os = Get-CimInstance Win32_OperatingSystem
+"OS: $($os.Caption) $($os.Version)" | Add-Content -Encoding utf8 (Join-Path $OutDir 'environment.txt')
+"User: $([Security.Principal.WindowsIdentity]::GetCurrent().Name) session=$((Get-Process -Id $PID).SessionId)" | Add-Content -Encoding utf8 (Join-Path $OutDir 'environment.txt')
+$screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
+"Screen: $($screen.Width)x$($screen.Height)" | Add-Content -Encoding utf8 (Join-Path $OutDir 'environment.txt')
+"Admin: $((New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))" | Add-Content -Encoding utf8 (Join-Path $OutDir 'environment.txt')
+
+# ---- 1. 安装（静默，不要管理员）----
+$before = Get-LearningCoachProducts
+if ($before) {
+    Note "先卸掉机器上已有的 LearningCoach（$($before[0].DisplayVersion)），从干净状态开始"
+    $code = $before[0].PSChildName
+    Start-Process msiexec.exe -ArgumentList @('/x', $code, '/qn', '/norestart') -Wait | Out-Null
+}
+$installLog = Join-Path $OutDir 'msiexec-install.log'
+$p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msiPath`"", '/qn', '/norestart', '/l*v', "`"$installLog`"") -Wait -PassThru
+if ($p.ExitCode -ne 0) { Fail '安装' "msiexec 退出码 $($p.ExitCode)（日志：msiexec-install.log）" }
+$product = Get-LearningCoachProducts
+if (-not $product) { Fail '安装' '装完在卸载列表里找不到 LearningCoach' }
+$location = $product[0].InstallLocation.TrimEnd('\')
+$exe = Join-Path $location 'LearningCoach.exe'
+if (-not (Test-Path $exe)) { Fail '安装' "装完找不到 $exe" }
+$shortcut = Get-StartMenuShortcuts
+if (-not $shortcut) { Fail '安装' '开始菜单里没有 LearningCoach 快捷方式' }
+Pass '安装' "DisplayName=$($product[0].DisplayName) 版本=$($product[0].DisplayVersion) 发布者=$($product[0].Publisher)；装到 $location；快捷方式 $($shortcut[0].FullName)"
+
+# 装进去的启动配置：证明包是按没课的样子打的（朋友的机器没有 config/local.properties）
+$cfg = Join-Path $location 'app\LearningCoach.cfg'
+if (Test-Path $cfg) { Copy-Item $cfg (Join-Path $OutDir 'launcher.cfg') -Force }
+
+# exe 自带的图标是资源管理器、开始菜单、固定到任务栏时用的那张
+$appIcon = Join-Path $OutDir 'exe-icon.png'
+$icon = [System.Drawing.Icon]::ExtractAssociatedIcon($exe)
+if ($icon) { Save-Png $appIcon $icon.ToBitmap() }
+
+# ---- 2. 启动真窗口 ----
+$library = Join-Path $OutDir 'library'
+$clientDir = Join-Path $OutDir 'client'
+New-Item -ItemType Directory -Force $library, $clientDir | Out-Null
+$env:COACH_LIBRARY_DIR = $library
+$env:COACH_CLIENT_DIR = $clientDir
+$env:COACH_TOKEN_FILE = Join-Path $OutDir 'unused-token'
+$script:BeforePids = @(Get-CimInstance Win32_Process -Filter "Name='LearningCoach.exe'" -ErrorAction SilentlyContinue | ForEach-Object { [int]$_.ProcessId })
+$app = Start-Process $exe -PassThru
+$script:TargetPids = @()
+$script:WinPid = 0
+$deadline = (Get-Date).AddSeconds($StartTimeoutSec)
+$hwnd = [IntPtr]::Zero
+do {
+    Start-Sleep -Milliseconds 500
+    $script:TargetPids = @(Get-CimInstance Win32_Process -Filter "Name='LearningCoach.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $script:BeforePids -notcontains [int]$_.ProcessId } | ForEach-Object { [int]$_.ProcessId })
+    if ($app.HasExited -and $script:TargetPids.Count -eq 0) { Fail '启动' "装的 exe 启动后就退出了（退出码 $($app.ExitCode)）" }
+    $hwnd = Find-InstalledWindow
+} while ($hwnd -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline)
+if ($hwnd -eq [IntPtr]::Zero) { Fail '启动' "$StartTimeoutSec 秒内没有出现 LearningCoach 窗口（本次新起的进程：$($script:TargetPids -join ',')）" }
+Pass '启动' "窗口出来了（启动器 pid $($app.Id)，窗口进程 $($script:WinPid)，句柄 $hwnd）"
+$dpi = try { [int][CoachWin]::GetDpiForWindow($hwnd) } catch { 0 }
+if ($dpi -gt 0) { "Dpi: $dpi ($([math]::Round(100 * $dpi / 96))%)" | Add-Content -Encoding utf8 (Join-Path $OutDir 'environment.txt') }
+
+$script:Win = $hwnd
+function Shot-Window([string]$name) {
+    $path = Join-Path $OutDir "$name.png"
+    if (Focus-OurWindow $script:Win) {
+        Start-Sleep -Seconds 2
+        $r = Get-Rect
+        $bmp = New-Object System.Drawing.Bitmap ($r.R - $r.L), ($r.B - $r.T)
+        $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size); $g.Dispose()
+        Save-Png $path $bmp
+        return $r
+    }
+    Note "窗口抢不到前台（前台是 $([CoachWin]::GetForegroundWindow())），改为离屏抓它自己的窗口"
+    if (-not (Save-WindowShot $path)) { Fail '截图' '窗口既抢不到前台，也抓不到自己的画面' }
+    return (Get-Rect)
+}
+$r = Shot-Window '01-window'
+Save-Screen (Join-Path $OutDir '02-desktop-taskbar.png')
+# 标题栏左上角那枚 16/24/32px 图标放大 4 倍看，边缘糊不糊一眼就知道
+Save-Crop (Join-Path $OutDir '01-window.png') (Join-Path $OutDir '03-titlebar-icon-x4.png') 0 0 ([Math]::Min(220, $r.R - $r.L)) ([Math]::Min(36, $r.B - $r.T)) 4
+# 任务栏：运行中的应用按钮用同一枚图标
+$vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$taskbar = [Math]::Min(72, $vs.Height)
+Save-Crop (Join-Path $OutDir '02-desktop-taskbar.png') (Join-Path $OutDir '04-taskbar-x3.png') 0 ($vs.Height - $taskbar) $vs.Width $taskbar 3
+Pass '截图' '窗口、桌面（含任务栏）、标题栏图标放大、任务栏放大'
+
+# ---- 3. 开始菜单搜索里看到的图标和名字 ----
+Open-StartMenu
+Start-Sleep -Seconds 2
+[System.Windows.Forms.SendKeys]::SendWait('LearningCoach')
+Start-Sleep -Seconds 3
+Save-Screen (Join-Path $OutDir '05-start-menu.png')
+Save-Crop (Join-Path $OutDir '05-start-menu.png') (Join-Path $OutDir '06-start-menu-result-x2.png') 1900 980 1100 400 2
+[System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+Start-Sleep -Seconds 1
+[System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+Pass '开始菜单' '搜索 LearningCoach 的截图（图标 + 名字）'
+
+# ---- 4. 关窗口、卸载 ----
+$client = Get-Process -Id $script:WinPid -ErrorAction SilentlyContinue
+$closedByUser = $false
+if ($client) {
+    $null = $client.CloseMainWindow()
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while (-not $client.HasExited -and $sw.Elapsed.TotalSeconds -lt 20) { Start-Sleep -Milliseconds 300; $client.Refresh() }
+    $closedByUser = $client.HasExited
+}
+# 收掉这次自己起的进程（含启动器），别留在桌面上下一次误认
+foreach ($own in @($script:TargetPids + $app.Id)) { Stop-Process -Id $own -Force -ErrorAction SilentlyContinue }
+if (-not $closedByUser) { Fail '退出' "点关闭后窗口进程 $($script:WinPid) 20 秒内没退出" }
+Pass '退出' "点关闭后窗口进程 $($script:WinPid) 自己退出"
+
+if ($KeepInstalled) {
+    Note 'KeepInstalled：不卸载'
+} else {
+    $product = Get-LearningCoachProducts
+    $code = $product[0].PSChildName
+    $uninstallLog = Join-Path $OutDir 'msiexec-uninstall.log'
+    $u = Start-Process msiexec.exe -ArgumentList @('/x', $code, '/qn', '/norestart', '/l*v', "`"$uninstallLog`"") -Wait -PassThru
+    if ($u.ExitCode -ne 0) { Fail '卸载' "msiexec /x 退出码 $($u.ExitCode)（日志：msiexec-uninstall.log）" }
+    $leftovers = New-Object System.Collections.ArrayList
+    if (Get-LearningCoachProducts) { [void]$leftovers.Add('卸载列表里还有 LearningCoach') }
+    if (Get-StartMenuShortcuts) { [void]$leftovers.Add('开始菜单快捷方式没删') }
+    if (Test-Path (Join-Path $location 'LearningCoach.exe')) { [void]$leftovers.Add("程序文件没删：$location") }
+    $desktopLnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'LearningCoach.lnk'
+    if (Test-Path $desktopLnk) { [void]$leftovers.Add('桌面快捷方式没删') }
+    $leftoverText = if ($leftovers.Count -eq 0) { '没有残留' } else { $leftovers -join '；' }
+    "残留：$leftoverText" | Set-Content -Encoding utf8 (Join-Path $OutDir 'uninstall-leftovers.txt')
+    "安装目录还在：$(Test-Path $location)" | Add-Content -Encoding utf8 (Join-Path $OutDir 'uninstall-leftovers.txt')
+    if (Test-Path $location) { (Get-ChildItem $location -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName) | Add-Content -Encoding utf8 (Join-Path $OutDir 'uninstall-leftovers.txt') }
+    if ($leftovers.Count -gt 0) { Fail '卸载' $leftoverText }
+    Pass '卸载' '卸载列表、开始菜单、程序文件都清干净了'
+}
+
+$failed = @($results | Where-Object { -not $_.Ok }).Count
+Save-Result
+if ($failed -gt 0) { exit 1 }

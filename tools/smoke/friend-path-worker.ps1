@@ -16,6 +16,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Win-Drive.ps1')
+. (Join-Path $PSScriptRoot 'Smoke-Memory.ps1')
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $steps = @('启动', '上传一本书', '翻页', '选中就问出讲解', '边看边学出讲解', '做题（答完出讲解和小结）', '点出处弹原文卡')
 $results = New-Object System.Collections.ArrayList
@@ -50,7 +51,6 @@ function Click-Label([int]$n, [string[]]$labels, [string]$why, [int]$sec = 15) {
 $env:JAVA_HOME = 'C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot'; $env:GRADLE_USER_HOME = 'D:\agent\gradle-home'; $env:Path = "$env:JAVA_HOME\bin;$env:Path"
 $lib = Join-Path $OutDir 'bookshelf'; $client = Join-Path $OutDir 'client'
 New-Item -ItemType Directory -Force $lib, $client | Out-Null
-if ($ClientSeed) { Copy-Item -Recurse -Force (Join-Path $ClientSeed '*') $client }
 $env:COACH_LIBRARY_DIR = $lib; $env:COACH_CLIENT_DIR = $client; $env:COACH_TOKEN_FILE = (Join-Path $OutDir 'unused-token')
 $env:COACH_URL = if ($Url) { $Url } else { 'http://127.0.0.1:18999' }
 $serverPort = ([uri]$env:COACH_URL).Port
@@ -70,6 +70,9 @@ if ($Background) {
 # A shared Gradle daemon is outside the interactive invocation's process job.
 # Use a single-use daemon so even a timeout before AppPid discovery owns the tree.
 $launchArgs = @($runTask, '-Pcoach.course=', '--console=plain', '--offline', '--no-daemon')
+$memoryLease = Enter-SmokeMemory
+try {
+if ($ClientSeed) { Copy-Item -Recurse -Force (Join-Path $ClientSeed '*') $client }
 $gradle = $null
 if ($Runtime) {
     $Runtime = (Resolve-Path -LiteralPath $Runtime).Path
@@ -92,6 +95,7 @@ try {
     $deadline = (Get-Date).AddSeconds($StartTimeoutSec)
     while (-not (Find-CoachWindow) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
     if ($script:Win -eq [IntPtr]::Zero) { Fail 1 "客户端窗口 $StartTimeoutSec 秒内没有出现（见 client.err.log）" }
+    Set-SmokeMemoryClient $memoryLease $script:AppPid
     $m = Await-Text 1 'start' @('上传教材', '书架') 30
     if (-not $m) { Fail 1 '窗口出来了但没有看到书架' }
     Pass 1 '客户端窗口出现，书架可见'
@@ -366,7 +370,6 @@ try {
     $summary = [pscustomobject]@{ passed = $passed; total = 7; marker = $Marker; time = (Get-Date -Format 'o'); outDir = $OutDir; server = $env:COACH_URL; steps = $results }
     $summary | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $OutDir 'result.json')
     Stop-MyClient
-    if ($ClientSeed) { Remove-Item -Recurse -Force $client -ErrorAction SilentlyContinue }   # 配对凭据只在运行期存在
     # Kill only the exact launcher tree this worker created; its Java wrapper
     # must not survive a startup failure and launch an orphan window later.
     $launcher = Get-Process -Id $gradle.Id -ErrorAction SilentlyContinue
@@ -378,4 +381,8 @@ try {
         }
     }
     Note "结果 $passed/7"
+}
+} finally {
+    if ($ClientSeed) { Remove-Item -Recurse -Force $client -ErrorAction SilentlyContinue }   # 配对凭据只在运行期存在
+    Exit-SmokeMemory $memoryLease
 }

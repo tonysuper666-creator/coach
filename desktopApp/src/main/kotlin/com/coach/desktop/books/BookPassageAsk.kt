@@ -38,10 +38,13 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
         } catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { BookLearningReply.Unavailable("暂时读不到回答，可以保留阅读位置后再试。") }
     }
+    // 在段落列表里往下滚了再选，换成提问时要回到顶上，引用的原文整段看得见，不被弹窗顶边切掉一半。
+    val scroll = rememberScrollState()
+    LaunchedEffect(selected) { scroll.scrollTo(0) }
     val colors = CoachTheme.colors
     // V7：弹窗是 surface2 的纸；段落、选中的原文和输入框都是叠在上面的一层 surface1 纸，按钮走纸面按钮，不用 Material 描边。
     AlertDialog(modifier = Modifier.testTag("book-passage-dialog"), onDismissRequest = onClose, title = { Text("就这段问一句") }, text = {
-        Column(Modifier.heightIn(max = 500.dp).verticalScroll(rememberScrollState()).testTag("book-passage-ask"),
+        Column(Modifier.heightIn(max = 500.dp).verticalScroll(scroll).testTag("book-passage-ask"),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (selected == null) {
                 Text("选择要问的原文段落", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
@@ -49,14 +52,15 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
                 blocks.forEachIndexed { index, block ->
                     PaperButton({ selected = block }, Modifier.fillMaxWidth().testTag("ask-paragraph-$index"),
                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)) {
-                        Text(block.text, style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Start, modifier = Modifier.fillMaxWidth())
+                        Text(ReadableText.reflow(block.text), style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Start, modifier = Modifier.fillMaxWidth())
                     }
                 }
             } else {
                 val typed = question.trim().length
                 val tooLong = typed > BookPassageQuestion.MAX_QUESTION_LENGTH
                 PaperCard(color = colors.surface1) {
-                    Text(checkNotNull(selected).text, style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary,
+                    // PDF 抽出的段落每行硬断：按段重排再显示。发出去的、出处里核对的仍是原文一字不改。
+                    Text(ReadableText.reflow(checkNotNull(selected).text), style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary,
                         modifier = Modifier.testTag("book-selected-passage"))
                 }
                 // Nothing typed here is truncated: over-length text stays editable and copyable, and
@@ -83,7 +87,8 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
                 when (val result = reply) {
                     null -> if (request != null) Text("正在读这段问题…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                     is BookLearningReply.Text -> PaperCard(Modifier.testTag("book-passage-reply"), color = colors.surface1) {
-                        Text(result.text, style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
+                        // 回答里的【S1】是给程序的引用标记，读者看下面那行「出处 · 第 N 页」就够了。
+                        Text(ReadableText.withoutCitationMarks(result.text), style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
                         result.sources.forEach { passage ->
                             V7TextButton({ source = passage }, Modifier.testTag("book-passage-citation")) {
                                 Text("出处 · ${book.pageLabel(passage.page)}")

@@ -51,10 +51,7 @@ internal fun bookSourceStates(sources: List<BookPassage>, book: Textbook, resolv
 
 /** 「第 12 页 · “前 16 字…”」: no SHA, no offsets. Counts by code point so a surrogate pair is never split. */
 internal fun bookSourceLabel(p: BookPassage, book: Textbook? = null): String {
-    val flat = p.text.replace(Regex("""\s+"""), " ").trim()
-    val points = flat.codePointCount(0, flat.length)
-    val short = if (points <= 16) flat else flat.substring(0, flat.offsetByCodePoints(0, 16)) + "…"
-    return "${book?.pageLabel(p.page) ?: "第 ${p.page} 页"} · “$short”"
+    return "${book?.pageLabel(p.page) ?: "第 ${p.page} 页"} · ${shortQuote(p.text)}"
 }
 
 /**

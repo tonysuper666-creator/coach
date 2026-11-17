@@ -105,37 +105,43 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                         focus = { i -> citationFocus.getOrPut(i) { FocusRequester() } }, onOpen = onCitation,
                         onRefused = { onCitationRefused() })
                 }
-                // 边看边学：先看讲解，再动手做题。
-                if (ui.learningPath == LearningPath.READ_AND_LEARN) {
-                    BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow)
-                    if (!ui.questionsOpen && book.questionMode != QuestionMode.NONE) {
-                        PaperButton(onQuestions, enabled = !ui.busy, modifier = Modifier.testTag("guided-start-questions")) { Text("继续做题") }
+                if (ui.learningPath == LearningPath.QUESTION_FIRST && book.questionMode == QuestionMode.CHOICE && answerExplain?.ask != null) {
+                    GeneratedLessonPractice(book, lesson, answerExplain, practiceSourceFocus, sourceRow, onPracticeSource, onSource) {
+                        LessonNav(book, ui.busy, onLesson)
                     }
-                }
-                if (book.questionMode == QuestionMode.NONE) Text("当前已关闭出题，可在出题设置中重新选择。", Modifier.testTag("book-questions-off"))
-                else if (ui.questionsOpen) {
-                    if (practice == null) Text("这一节的原文太少，暂时无法生成选择题。可以继续学，或改为简答。")
-                    else {
-                        SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, { onPracticeSource(practice) }, !ui.busy, practiceSourceFocus, showReference = false)
-                        if (ui.reviews.any { it.book == book.id && it.lesson == lesson.id && it.mode == book.questionMode }) {
-                            Text("已加入复习，可在今天查看原题。", modifier = Modifier.testTag("local-review-saved"),
-                                style = MaterialTheme.typography.bodySmall, color = com.coach.ui.theme.CoachTheme.colors.fgSecondary)
-                            V7TextButton(onReviews, enabled = !ui.busy, modifier = Modifier.testTag("open-local-reviews")) { Text("查看复习") }
+                } else {
+                    // 边看边学：先看讲解，再动手做题。
+                    if (ui.learningPath == LearningPath.READ_AND_LEARN) {
+                        BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow)
+                        if (!ui.questionsOpen && book.questionMode != QuestionMode.NONE) {
+                            PaperButton(onQuestions, enabled = !ui.busy, modifier = Modifier.testTag("guided-start-questions")) { Text("继续做题") }
                         }
                     }
-                }
-                // 做题学：答完就讲，讲解在题下面；原文仍要点开才出现。讲完用小结点出下一步。
-                val question = practice
-                if (ui.learningPath == LearningPath.QUESTION_FIRST && ui.answer.revealed && question != null) {
-                    if (answerExplain != null) LessonAnswerExplanation(
-                        book, lesson, question, answerExplain, answerExplainReply, sources = sourceRow,
-                        onOpenSourcePage = onSource,
-                    ) else BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow)
-                    recap()
-                    LessonSummaryCard(book, lesson, question, ui.answer) { LessonNav(book, ui.busy, onLesson) }
-                } else {
-                    recap()
-                    LessonNav(book, ui.busy, onLesson)
+                    if (book.questionMode == QuestionMode.NONE) Text("当前已关闭出题，可在出题设置中重新选择。", Modifier.testTag("book-questions-off"))
+                    else if (ui.questionsOpen) {
+                        if (practice == null) Text("这一节的原文太少，暂时无法生成选择题。可以继续学，或改为简答。")
+                        else {
+                            SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, { onPracticeSource(practice) }, !ui.busy, practiceSourceFocus, showReference = false)
+                            if (ui.reviews.any { it.book == book.id && it.lesson == lesson.id && it.mode == book.questionMode }) {
+                                Text("已加入复习，可在今天查看原题。", modifier = Modifier.testTag("local-review-saved"),
+                                    style = MaterialTheme.typography.bodySmall, color = com.coach.ui.theme.CoachTheme.colors.fgSecondary)
+                                V7TextButton(onReviews, enabled = !ui.busy, modifier = Modifier.testTag("open-local-reviews")) { Text("查看复习") }
+                            }
+                        }
+                    }
+                    // 做题学：答完就讲，讲解在题下面；原文仍要点开才出现。讲完用小结点出下一步。
+                    val question = practice
+                    if (ui.learningPath == LearningPath.QUESTION_FIRST && ui.answer.revealed && question != null) {
+                        if (answerExplain != null) LessonAnswerExplanation(
+                            book, lesson, question, answerExplain, answerExplainReply, sources = sourceRow,
+                            onOpenSourcePage = onSource,
+                        ) else BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow)
+                        recap()
+                        LessonSummaryCard(book, lesson, question, ui.answer) { LessonNav(book, ui.busy, onLesson) }
+                    } else {
+                        recap()
+                        LessonNav(book, ui.busy, onLesson)
+                    }
                 }
             }
         }

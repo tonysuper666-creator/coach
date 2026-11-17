@@ -1,0 +1,111 @@
+name: Friend Windows acceptance
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Prepare package first; probe only after private Mac gates pass
+        type: choice
+        options: [package, probe]
+        required: true
+      package_run:
+        description: Successful package run ID from this exact commit (probe only)
+        type: string
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  group: friend-windows-${{ inputs.phase }}
+  cancel-in-progress: false
+jobs:
+  package:
+    if: github.ref == 'refs/heads/main' && inputs.phase == 'package'
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@7a445ee88d4e23b52c33c622418b4d868b651c98 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build development MSI and isolated UI driver
+        shell: bash
+        env:
+          COACH_HEAVY_HOST: local
+        run: tools/dev/heavy ./gradlew :desktopApp:packageMsi :desktopApp:externalFriendDriver --console=plain --max-workers=2
+      - name: Record commit and package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path bundle | Out-Null
+          Copy-Item desktopApp/build/compose/binaries/main/msi/*.msi bundle/
+          Copy-Item desktopApp/build/external-friend-driver bundle/driver -Recurse
+          Set-Content bundle/commit.txt $env:GITHUB_SHA -NoNewline
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: friend-windows-package
+          path: bundle/
+          retention-days: 3
+          if-no-files-found: error
+  probe:
+    if: github.ref == 'refs/heads/main' && inputs.phase == 'probe'
+    runs-on: windows-2022
+    environment: friend-public
+    timeout-minutes: 12
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@7a445ee88d4e23b52c33c622418b4d868b651c98 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Check package provenance
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_RUN: ${{ inputs.package_run }}
+        run: |
+          if ($env:PACKAGE_RUN -notmatch '^[0-9]+$') { throw 'Invalid package run' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:PACKAGE_RUN" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.conclusion -ne 'success' -or $run.head_sha -ne $env:GITHUB_SHA -or $run.event -ne 'workflow_dispatch' -or $run.path -ne '.github/workflows/friend-windows.yml') { throw 'Package provenance rejected' }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: friend-windows-package
+          path: bundle
+          run-id: ${{ inputs.package_run }}
+          github-token: ${{ github.token }}
+      - name: Install development MSI and launch installed executable
+        shell: pwsh
+        run: ./tools/smoke/external-friend.ps1 -Phase Install
+      - name: Pair, import and ask through production Windows host
+        shell: pwsh
+        env:
+          COACH_EXTERNAL_URL: ${{ secrets.COACH_EXTERNAL_URL }}
+          COACH_EXTERNAL_CODE_A: ${{ secrets.COACH_EXTERNAL_CODE_A }}
+          COACH_EXTERNAL_CODE_B: ${{ secrets.COACH_EXTERNAL_CODE_B }}
+        run: ./tools/smoke/external-friend.ps1 -Phase Probe
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: friend-windows-evidence
+          path: evidence/
+          retention-days: 3
+          if-no-files-found: error
+      - name: Verify Mac revocation of A while B stays available
+        shell: pwsh
+        env:
+          COACH_EXTERNAL_URL: ${{ secrets.COACH_EXTERNAL_URL }}
+        run: ./tools/smoke/external-friend.ps1 -Phase Revoke
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: friend-windows-revocation
+          path: evidence/revocation.json
+          retention-days: 3
+          if-no-files-found: error
+      - name: Erase runner identities
+        if: always()
+        shell: pwsh
+        run: Remove-Item "$env:RUNNER_TEMP/coach-external-private" -Force -Recurse -ErrorAction SilentlyContinue

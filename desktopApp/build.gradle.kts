@@ -155,3 +155,21 @@ tasks.register<JavaExec>("pairingSmoke") {
     mainClass.set("com.coach.desktop.DesktopPairingSmoke")
     args(rootDir.absolutePath)
 }
+
+// Manual external acceptance only. Keep the driver out of shipped application jars.
+tasks.register<Sync>("externalFriendDriver") {
+    group = "verification"
+    dependsOn(tasks.testClasses, configurations.named("testRuntimeClasspath"))
+    from(sourceSets.test.get().output) { into("classes") }
+    val jars = sourceSets.test.get().runtimeClasspath.filter { it.extension == "jar" }.toList()
+    val names = jars.mapIndexed { index, jar -> "%04d-%s".format(index, jar.name) }
+    jars.forEachIndexed { index, jar ->
+        from(jar) { into("lib"); rename { names[index] } }
+    }
+    from(sourceSets.main.get().output) { into("classes") }
+    into(layout.buildDirectory.dir("external-friend-driver"))
+    doLast {
+        // Preserve Gradle's classpath order, including distinct jars with the same basename.
+        destinationDir.resolve("classpath.txt").writeText((listOf("classes") + names.map { "lib/$it" }).joinToString("\n"))
+    }
+}

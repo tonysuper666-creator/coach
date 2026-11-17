@@ -67,6 +67,14 @@ object ExternalFriendSmoke {
     }
 
     private fun probe() {
+        // The workflow checks shared ingress hostname routes with friend-public.py
+        // before installing. Keep the separate bridge TCP check before any API use.
+        stage = "bridge-port"
+        var connected = false
+        try { Socket().use { it.connect(InetSocketAddress(URI(url).host, 8791), 3000); connected = true } }
+        catch (_: java.io.IOException) { }
+        check(!connected)
+        pass("bridgePortClosed=1")
         stage = "prepaired-b"
         // B was paired on the Mac before A's code was signed. It is a quota and
         // revocation control, not a second Windows native pairing acceptance.
@@ -139,15 +147,8 @@ object ExternalFriendSmoke {
             val reply = request(a, path)
             check(reply.statusCode() == 404 && reply.body().isEmpty())
         }
-        stage = "ports"
-        for (port in listOf(18791, 8791, 8443, 10000)) {
-            var connected = false
-            try { Socket().use { it.connect(InetSocketAddress(URI(url).host, port), 3000); connected = true } }
-            catch (_: java.io.IOException) { }
-            check(!connected)
-        }
-        Files.writeString(evidence.resolve("ready-for-revoke.json"), """{"ready":true,"forbiddenPaths":13,"otherPorts":4,"bCalls":1}""")
-        pass("forbiddenEmpty404=13 otherPortsClosed=4 readyForMacRevoke=1")
+        Files.writeString(evidence.resolve("ready-for-revoke.json"), """{"ready":true,"forbiddenPaths":13,"bridgePortClosed":true,"bCalls":1}""")
+        pass("forbiddenEmpty404=13 readyForMacRevoke=1")
     }
 
     private fun revoke() {

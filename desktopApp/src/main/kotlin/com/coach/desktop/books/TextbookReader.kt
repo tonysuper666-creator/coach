@@ -90,10 +90,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     var textView by remember(book.id) { mutableStateOf(!hasOriginal || page.ocr) }
     val paging = remember(book.id) { BookPagingState(BookPageAnchor(ui.page)) }
     LaunchedEffect(ui.page) {
-        if (ui.page != paging.publishedImportPage) {
-            paging.anchor = BookPageAnchor(ui.page)
-            paging.publishedImportPage = ui.page
-        }
+        paging.followImportPage(ui.page)
     }
     var editingJump by remember(book.id) { mutableStateOf(false) }
     var jump by remember(book.id, ui.page) { mutableStateOf(ui.page.toString()) }
@@ -188,8 +185,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             paging.anchor = BookPageAnchor(pageNumber)
             val visiblePage = if (textView && paging.pages.isNotEmpty())
                 paging.pages[paging.index].anchor.importPage else pageNumber
-            paging.publishedImportPage = visiblePage
-            onPage(visiblePage)
+            if (paging.publishImportPage(visiblePage)) onPage(visiblePage)
             session.goToPage(visiblePage)
         }
     }
@@ -205,8 +201,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                 ReaderTurn.Last -> turnTo(lastPage)
             }
         } else paging.move(turn)?.let { anchor ->
-            if (paging.publishedImportPage != anchor.importPage) {
-                paging.publishedImportPage = anchor.importPage
+            if (paging.publishImportPage(anchor.importPage)) {
                 onPage(anchor.importPage)
                 session.goToPage(anchor.importPage)
             }
@@ -370,8 +365,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                         result
                     }
                     BookPageView(book, paging, ranges, turnLayout, onPosition = { number ->
-                        if (paging.publishedImportPage != number) {
-                            paging.publishedImportPage = number
+                        if (paging.publishImportPage(number)) {
                             onPage(number)
                             session.goToPage(number)
                         }
@@ -442,7 +436,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             if (textView) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center) {
                 V7Tooltip("上一页", shortcut = "←  PageUp") {
-                    PaperButton({ turnLayout(ReaderTurn.Previous) }, enabled = !ui.busy && paging.canPrevious,
+                    PaperButton({ turnLayout(ReaderTurn.Previous) }, enabled = paging.canPrevious,
                         modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
                 }
                 Spacer(Modifier.width(20.dp))
@@ -472,7 +466,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                 }
                 Spacer(Modifier.width(20.dp))
                 V7Tooltip("下一页", shortcut = "→  PageDown") {
-                    PaperButton({ turnLayout(ReaderTurn.Next) }, enabled = !ui.busy && paging.canNext,
+                    PaperButton({ turnLayout(ReaderTurn.Next) }, enabled = paging.canNext,
                         modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
                 }
             } else

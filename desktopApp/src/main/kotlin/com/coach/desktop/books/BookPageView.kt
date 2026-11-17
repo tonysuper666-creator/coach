@@ -67,6 +67,26 @@ internal class BookPagingState(initial: BookPageAnchor) {
     var pages by mutableStateOf(emptyList<BookLaidPage>())
     var spread by mutableStateOf(false)
     var publishedImportPage = initial.importPage
+        private set
+    private val pendingImportPages = mutableListOf<Int>()
+    fun publishImportPage(number: Int): Boolean {
+        if (publishedImportPage == number) return false
+        publishedImportPage = number
+        pendingImportPages += number
+        return true
+    }
+    fun followImportPage(number: Int) {
+        val acknowledged = pendingImportPages.indexOf(number)
+        if (acknowledged >= 0) {
+            // Saves are serialized, but their UI acknowledgements can arrive
+            // after another local turn. They must not rewind its UTF-16 anchor.
+            pendingImportPages.subList(0, acknowledged + 1).clear()
+        } else if (number != publishedImportPage) {
+            anchor = BookPageAnchor(number)
+            publishedImportPage = number
+            pendingImportPages.clear()
+        }
+    }
     val index get() = pages.pageContaining(anchor)
     val canPrevious get() = index > 0
     val canNext get() = index + (if (spread) 2 else 1) < pages.size

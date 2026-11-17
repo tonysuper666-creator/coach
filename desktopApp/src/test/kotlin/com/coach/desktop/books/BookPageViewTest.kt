@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
@@ -28,6 +29,48 @@ import kotlin.test.*
 /** Source anchors survive both component reflow and Desk's opt-in width. */
 @OptIn(ExperimentalTestApi::class)
 class BookPageViewTest {
+    @Test fun pendingBookmarkAllowsContinuousTurnsAndLateAcknowledgementsKeepTheVisibleText() {
+        val root = Files.createTempDirectory("coach-page-bookmark-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val book = library.importBook(root.resolve("Reading.md").also {
+                Files.writeString(it, "# Reading\n\n" + "Reading evidence is preserved through every page turn. ".repeat(180))
+            })
+            assertEquals(3, book.pages.size)
+            var ui by mutableStateOf(LibraryUi(book = book, screen = BookScreen.READER, busy = true))
+            val writes = mutableListOf<Int>()
+            runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
+                val focus = FocusRequester()
+                setContent { CoachTheme {
+                    TextbookReader(ui, library, UnconnectedBookLearningSupport, null, focus,
+                        onNoteSession = {}, onPage = { writes += it }, onBack = {}, onLearn = {})
+                } }
+                waitForIdle()
+                fun sources() = onNodeWithTag("reader-text").fetchSemanticsNode().config[BookPageSources]
+                val first = sources()
+                while (sources().first().importPage < 3) {
+                    onNodeWithText("下一页").assertIsEnabled().performClick()
+                    waitForIdle()
+                }
+                assertEquals(listOf(2, 3), writes)
+                val latest = sources()
+                runOnIdle { ui = ui.copy(page = 2) }
+                waitForIdle()
+                assertEquals(latest, sources(), "an older bookmark acknowledgement cannot rewind the current sheet")
+                runOnIdle { ui = ui.copy(page = 3) }
+                waitForIdle()
+                assertEquals(latest, sources())
+                while (isEnabled().matches(onNodeWithText("上一页").fetchSemanticsNode())) {
+                    onNodeWithText("上一页").performClick()
+                    waitForIdle()
+                }
+                assertEquals(first, sources(), "pending saves cannot stop a continuous reverse traversal")
+                assertEquals(listOf(2, 3, 2, 1), writes)
+                onNodeWithText("上一页").assertIsNotEnabled()
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun deskKeepsItsDefaultWidthAndAllowsAnExplicitSpread() = runSkikoComposeUiTest(
         size = Size(1900f, 1000f), density = Density(1f),
     ) {

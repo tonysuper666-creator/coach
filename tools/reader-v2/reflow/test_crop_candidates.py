@@ -10,7 +10,7 @@ class CropCandidateTests(unittest.TestCase):
     def setUp(self):
         self.probe, self.layout = fixture("ABcdEF")
         self.probe.update(regions=[], clip_unverified=False, graphics_unsupported=False,
-                          rotated_glyphs=0, unmapped_ranges=[])
+                          rotated_glyphs=0, unmapped_ranges=[], glyph_geometry_checked=True)
         self.probe["glyphs"] = [glyph("AB", 0, 2, [25, 25, 35, 35]),
                                 glyph("cd", 2, 4, [140, 25, 150, 35]),
                                 glyph("EF", 4, 6, [25, 45, 35, 55])]

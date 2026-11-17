@@ -15,7 +15,7 @@ from pathlib import Path
 import shutil
 
 from benchmark import outside_repo
-from crop_candidates import boundary, prepare, SCALE
+from crop_candidates import boundary, prepare, preview_geometry_safe, SCALE
 from source_payload import build_payload, contains, crop_rect, intersects, utf16
 
 PROSE = {"text", "paragraph", "heading", "list", "footnote"}
@@ -87,9 +87,7 @@ def plan_page(probe, layout, pixels, width, height, scale=SCALE):
         evidence = {k: v for k, v in candidate.items() if k not in
                     ("replacement_range", "hide_source_allowed", "import_allowed", "semantic_status")}
         rows.append(annotate(f"candidate-{i:03d}", evidence, owners))
-    safe = (payload["geometry_status"] == "mapped" and
-            all(k in probe for k in ("clip_unverified", "graphics_unsupported", "rotated_glyphs", "unmapped_ranges")) and
-            not probe["unmapped_ranges"])
+    safe = preview_geometry_safe(probe, payload)
     for group in payload["caption_groups"]:
         if group["placement_status"] != "source_parts_verified" or not safe:
             continue

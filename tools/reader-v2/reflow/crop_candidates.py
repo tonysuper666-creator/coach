@@ -21,6 +21,14 @@ SCALE = 2
 SPECIAL = {"figure", "table", "formula", "unknown"}
 
 
+def preview_geometry_safe(probe, payload):
+    # Old probes omitted degenerate/clamped glyphs from unmapped_ranges. Their
+    # empty gap list cannot establish production eligibility: regenerate them.
+    required = ("clip_unverified", "graphics_unsupported", "rotated_glyphs", "unmapped_ranges")
+    return (payload["geometry_status"] == "mapped" and all(k in probe for k in required) and
+            probe.get("glyph_geometry_checked") is True and not probe["unmapped_ranges"])
+
+
 def proposals(probe, layout):
     """Keep B, C and pairwise union alternatives; never call a union consensus."""
     b = [("B:" + str(i), crop_rect(row["bbox"], layout))
@@ -104,9 +112,7 @@ def prepare(probe, layout, pixels, width, height, scale=SCALE):
             len(pixels) != width * height):
         raise ValueError("raster/frame mismatch or raster budget exceeded")
     # Older probe files cannot establish these facts. Regenerate them, do not assume safe.
-    required = ("clip_unverified", "graphics_unsupported", "rotated_glyphs", "unmapped_ranges")
-    safe = (payload["geometry_status"] == "mapped" and all(k in probe for k in required) and
-            not probe["unmapped_ranges"])
+    safe = preview_geometry_safe(probe, payload)
     rows = []
     for ids, box in proposals(probe, layout):
         row = {"proposers": ids, "proposal_box": box, "semantic_status": "unverified",

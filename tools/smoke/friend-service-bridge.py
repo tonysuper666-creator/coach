@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Explicit Codex subscription route for the friend-service test instance only.
-
-The server explicitly requests Codex. This adapter rejects other models;
-terminal served_by records the actual model. No API transport or fallback.
-"""
+"""Explicit subscription or opt-in gift API route for the private test instance."""
 import json
 import os
 from pathlib import Path
+import re
+import subprocess
 import sys
 
 
 class SubscriptionOnly:
+    json_response_format = True
+
+    def configure(self, body, headers):
+        if body.get("model") != "gpt-6.1-sol":
+            raise ValueError("Only explicit Codex requests are supported")
+
     def __init__(self, app):
         self.app = app
 
@@ -31,9 +35,10 @@ class SubscriptionOnly:
                 break
         try:
             body = json.loads(payload)
-            if not isinstance(body, dict) or body.get("model") != "gpt-6.1-sol":
-                raise ValueError("Only explicit Codex requests are supported")
-            if headers.get(b"x-coach-task") == b"READER_SELECTION":
+            if not isinstance(body, dict):
+                raise ValueError("Invalid request")
+            self.configure(body, headers)
+            if self.json_response_format and headers.get(b"x-coach-task") == b"READER_SELECTION":
                 body["response_format"] = {"type": "json_object"}
             payload = json.dumps(body).encode()
         except (ValueError, TypeError):
@@ -52,14 +57,43 @@ class SubscriptionOnly:
         await self.app(scope, replay, send)
 
 
+class FriendApiOnly(SubscriptionOnly):
+    """Only authenticated server friend requests can consume the existing gift."""
+    # The reader prompt supplies its JSON contract. The shared friend API route
+    # deliberately rejects response_format/tools; do not rewrite that boundary.
+    json_response_format = False
+
+    def configure(self, body, headers):
+        if (body.get("model") != "claude-sonnet-5-5" or
+                body.get("response_format") or body.get("tools") or
+                headers.get(b"x-coach-task") != b"READER_SELECTION" or
+                not re.fullmatch(rb"[a-f0-9]{64}", headers.get(b"x-coach-friend", b"")) or
+                not re.fullmatch(rb"[A-Za-z0-9_-]{1,128}", headers.get(b"x-coach-friend-device", b""))):
+            raise ValueError("Explicit friend reader request required")
+
+
+def existing_gift_key():
+    # Same existing Keychain item as tools/bridge/run.sh. Never a command argument,
+    # inherited key, file, diagnostic or environment variable of the server JVM.
+    result = subprocess.run(["security", "find-generic-password", "-s", "coach-anthropic-api", "-w"],
+                            capture_output=True, timeout=20)
+    if result.returncode != 0 or not result.stdout.strip():
+        raise ValueError("Existing gift key unavailable")
+    return result.stdout.decode().strip()
+
+
 def main():
     port = int(os.environ.get("BRIDGE_PORT", "0"))
     if not 1024 <= port <= 65535 or port in {18791, 8790, 8791}:
         raise SystemExit("An isolated bridge port is required")
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bridge"))
+    friend_api = os.environ.get("COACH_FRIEND_API_ONLY") == "1"
+    if friend_api:
+        os.environ["COACH_ANTHROPIC_API_KEY"] = existing_gift_key()
     import subscription_bridge as bridge
-    # Disables the API routing branch altogether, including background batch requests.
-    bridge.api_model = lambda *args: None
+    if not friend_api:
+        # Legacy owner snapshot mode never consumes API credit.
+        bridge.api_model = lambda *args: None
     # The shared CLI note asks for plain text after the reader's JSON contract.
     # Preserve the no-tools boundary while honoring the caller's output format.
     bridge.NO_TOOLS_NOTE = (
@@ -67,7 +101,8 @@ def main():
         "Do not use any built-in tools (shell, files, browser, web search); "
         "you have no access to the user's machine."
     )
-    bridge.uvicorn.run(SubscriptionOnly(bridge.app), host="127.0.0.1", port=port,
+    application = FriendApiOnly(bridge.app) if friend_api else SubscriptionOnly(bridge.app)
+    bridge.uvicorn.run(application, host="127.0.0.1", port=port,
                        log_level="warning", access_log=False)
 
 

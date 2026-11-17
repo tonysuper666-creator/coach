@@ -4,6 +4,9 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 try {
     $inputConfig = [Console]::In.ReadToEnd() | ConvertFrom-Json
+    if ($inputConfig.role -notin @('owner', 'friend') -or $inputConfig.code -notmatch '^[0-9]{6}$') {
+        throw 'Explicit role and single-use code required'
+    }
     $url = [uri]$inputConfig.url
     $octets = $url.Host.Split('.')
     if ($url.Scheme -ne 'http' -or $octets.Count -ne 4 -or $octets[0] -ne '100' -or
@@ -58,16 +61,23 @@ try {
     if ($unauth.status -ne 401) { throw 'Unauthenticated request must fail' }
     $paired = Call-Service '/v1/pair' @{code=$inputConfig.code; name='TON-1649 isolated Windows QA'}
     if ($paired.status -ne 200 -or $paired.body.token -notmatch '^[A-Za-z0-9_-]{43}$' -or
-        $paired.body.deviceId -notmatch '^[A-Za-z0-9_-]{1,128}$') { throw 'Pairing failed' }
+        $paired.body.deviceId -notmatch '^[A-Za-z0-9_-]{1,128}$' -or
+        $paired.body.role -ne $inputConfig.role) { throw 'Pairing role mismatch' }
     $reuse = Call-Service '/v1/pair' @{code=$inputConfig.code; name='TON-1649 replay check'}
     if ($reuse.status -ne 401) { throw 'Code reuse must fail' }
     $http.DefaultRequestHeaders.Add('Authorization', "Bearer $($paired.body.token)")
     $http.DefaultRequestHeaders.Add('X-Coach-Device', [string]$paired.body.deviceId)
-    $hello = Call-Service '/v1/hello'
+    $healthPath = if ($inputConfig.role -eq 'friend') { '/v1/public/status' } else { '/v1/hello' }
+    $hello = Call-Service $healthPath
     if ($hello.status -ne 200) { throw 'Authenticated health failed' }
+    if ($inputConfig.role -eq 'friend') {
+        $private = Call-Service '/v1/hello'
+        if ($private.status -ne 404) { throw 'Friend private path must be hidden' }
+    }
     Save-Private "$client/pairing/credentials.properties" ("server=$($inputConfig.url)`ndeviceId=$($paired.body.deviceId)`ntoken=$($paired.body.token)`n")
     Save-Private "$client/pairing/server-url" $inputConfig.url
     $receipt = @{passed=$true; unauthenticated=401; paired=200; replay=401; authenticated=200;
+        friendRole=($paired.body.role -eq 'friend'); privatePathHidden=($inputConfig.role -eq 'friend');
         elapsedMs=$clock.ElapsedMilliseconds; clientDir=$client; url=$inputConfig.url}
     Save-Private "$root/connection.json" (($receipt + @{deviceId=$paired.body.deviceId; token=$paired.body.token}) | ConvertTo-Json)
     Save-Private "$root/result.json" ($receipt | ConvertTo-Json)

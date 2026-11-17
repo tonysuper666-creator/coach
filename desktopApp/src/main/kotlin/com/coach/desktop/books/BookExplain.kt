@@ -2,6 +2,10 @@ package com.coach.desktop.books
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -14,6 +18,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -21,8 +29,9 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
 import com.coach.ui.theme.CoachTheme
-import com.coach.ui.v7.LocalV7Fonts
+import com.coach.ui.v7.LocalDeskMetrics
 import com.coach.ui.v7.PaperButton
+import com.coach.ui.v7.paperShadow
 import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.V7TextButton
 import com.coach.ui.v7.v7FocusRing
@@ -99,9 +108,6 @@ internal object ExplainWire {
         val elapsed = (body["elapsedMs"] as? JsonPrimitive)?.longOrNull ?: 0L
         return ExplainResult.Done(Explanation(text, citations, elapsed))
     }
-
-    /** `0123abcd…:p12:340` — short enough to read, the dialog shows the full id. */
-    fun shortId(id: String): String = id.substringBefore(':').let { if (it.length > 8) it.take(8) + "…" else it } + ":" + id.substringAfter(':')
 }
 
 /**
@@ -224,7 +230,6 @@ internal fun BookExplainPanel(book: Textbook, page: Int, consent: ExplainConsent
     }
 
     val colors = CoachTheme.colors
-    val numbers = LocalV7Fonts.current.numbers
     Column(modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp).testTag("book-explain"), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         val paired = explainer.identity
         if (paired == null && explainer.loaded) Column(Modifier.testTag("explain-pairing"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -254,11 +259,11 @@ internal fun BookExplainPanel(book: Textbook, page: Int, consent: ExplainConsent
         } else if (paired != null) Text("已连上 Mac。点一段原文旁的「讲解这段」。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
         if (onPage.isEmpty()) Text("这一页没有可讲的正文。", style = MaterialTheme.typography.bodyMedium, color = colors.fgSecondary)
         for (block in onPage) Column(Modifier.fillMaxWidth().testTag("explain-block-${block.id}"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(block.text, style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary)
+            Text(ReadableText.reflow(block.text), style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary)
             val state = states[block.id]
             val failed = state as? BlockState.Failed
             // 状态行固定在按钮这一行：失败时按钮就地换成下一步（再试一次 / 重新配对），
-            // 右边的块编号换成那句话，下面的段落不被推下去（desktop-polish D3、E3）。
+            // 右边写那句话，下面的段落不被推下去（desktop-polish D3、E3）。块编号是内部的，不给读者看。
             Row(Modifier.heightIn(min = 40.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 when (failed?.trouble) {
@@ -270,15 +275,14 @@ internal fun BookExplainPanel(book: Textbook, page: Int, consent: ExplainConsent
                     }, enabled = paired != null && state != BlockState.Waiting, modifier = Modifier.testTag("explain-button")) {
                         Text(if (state == BlockState.Waiting) "讲解中…" else "讲解这段")
                     }
-                    else -> PaperButton(onClick = { start(block) }, enabled = paired != null,
-                        modifier = Modifier.testTag("explain-retry")) { Text("再试一次") }
+                    else -> QuietButton("再试一次", enabled = paired != null, modifier = Modifier.testTag("explain-retry")) { start(block) }
                 }
-                if (failed == null) Text(ExplainWire.shortId(block.id), style = MaterialTheme.typography.labelMedium, fontFamily = numbers, color = colors.fgSecondary)
-                else Text(failed.message, style = MaterialTheme.typography.bodySmall, maxLines = 2,
-                    color = if (failed.trouble == ExplainTrouble.Quota) colors.fgSecondary else v7Alert(),
+                // 连不上、超时、暂时读不到都是会自己好的：中性灰字。只有要用户动手的（连接被停用、要重新配对）才用朱色。
+                if (failed != null) Text(failed.message, style = MaterialTheme.typography.bodySmall, maxLines = 2,
+                    color = if (failed.trouble.needsReader) v7Alert() else colors.fgSecondary,
                     modifier = Modifier.weight(1f).testTag("explain-failed"))
             }
-            if (state is BlockState.Done) ExplanationView(state.explanation) { citation ->
+            if (state is BlockState.Done) ExplanationView(book, state.explanation, state.context) { citation ->
                 state.context.firstOrNull { it.id == citation.blockId }?.let { opened = citation to it }
             }
         }
@@ -295,8 +299,6 @@ internal fun BookExplainPanel(book: Textbook, page: Int, consent: ExplainConsent
         AlertDialog(onDismissRequest = { opened = null }, title = { Text("原文 · ${book.pageLabel(citation.page)}") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.testTag("explain-source-card")) {
-                    Text(citation.blockId, style = MaterialTheme.typography.labelMedium, fontFamily = numbers, color = colors.fgSecondary,
-                        modifier = Modifier.testTag("explain-source-id"))
                     Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
                         Text(block.text, style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary, modifier = Modifier.testTag("explain-source-text"))
                     }
@@ -306,21 +308,52 @@ internal fun BookExplainPanel(book: Textbook, page: Int, consent: ExplainConsent
 }
 
 @Composable
-private fun ExplanationView(explanation: Explanation, onOpen: (Citation) -> Unit) {
-    val shown = explanation.citations.fold(explanation.text) { text, c -> text.replace("【${c.anchor}】", "【${ExplainWire.shortId(c.blockId)}】") }
-    // V7：讲解是一张纸卡；块编号是主色下划线的「出处」小字，像页边注，不再是一排描边按钮。
+private fun ExplanationView(book: Textbook, explanation: Explanation, context: List<SourceBlock>, onOpen: (Citation) -> Unit) {
+    val citations = explanation.citations
+    // 正文里的【S1】换成主色小号上标数字，点它和点下面「出处 1」一样打开原文；读者看不到任何块编号。
+    val shown = ReadableText.cited(explanation.text, citations.map { it.anchor }, v7LinkStyles()) { index -> onOpen(citations[index]) }
+    // V7：讲解是一张纸卡；出处是主色下划线的小字，像页边注：第几条 · 第几页 · 开头几个字。
     com.coach.ui.v7.PaperCard(Modifier.testTag("explain-answer"), contentPadding = PaddingValues(16.dp)) {
         Text(shown, style = MaterialTheme.typography.bodyMedium, color = CoachTheme.colors.fgPrimary, modifier = Modifier.testTag("explain-text"))
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-            for (c in explanation.citations) V7TextButton({ onOpen(c) }, modifier = Modifier.testTag("explain-citation")) {
-                Text("出处 · " + ExplainWire.shortId(c.blockId), style = MaterialTheme.typography.labelLarge, color = v7Pine(),
-                    textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
+        Column {
+            citations.forEachIndexed { index, c ->
+                val quote = context.firstOrNull { it.id == c.blockId }?.let { " · " + shortQuote(it.text) }.orEmpty()
+                V7TextButton({ onOpen(c) }, modifier = Modifier.testTag("explain-citation")) {
+                    Text("出处 ${index + 1} · ${book.pageLabel(c.page)}$quote", style = MaterialTheme.typography.labelLarge, color = v7Pine(),
+                        maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
+                }
             }
         }
     }
 }
 
 /** V7 提醒色：朱 zhu，随明暗取 token。讲解面板和选段就问里「没配上、超字数、暂时读不到」都用它，不用 Material 红。 */
+/** 要读者自己动手才过得去的（连接被停用，只能重新配对）；其余都是等一下或再试就好的。 */
+private val ExplainTrouble.needsReader: Boolean get() = this == ExplainTrouble.Revoked
+
+/**
+ * 「再试一次」：和「讲解这段」同样的纸面按钮，但悬停只加一层中性灰，不用朱色的底——
+ * 失败后鼠标还停在原处，粉底会把一件可恢复的事看成报错。
+ */
+@Composable
+private fun QuietButton(label: String, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val c = CoachTheme.colors
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val shape = RoundedCornerShape(CoachV7.Radius.btn)
+    val base = if (c.dark) CoachV7.Dark.btnBg else CoachV7.Light.btnBg
+    Row(modifier.v7FocusRing(shape).paperShadow("button", c.dark).clip(shape)
+        .background(if (enabled && hovered) c.borderSubtle.copy(alpha = .16f).compositeOver(base) else base)
+        .hoverable(interaction, enabled)
+        .clickable(interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
+        .pointerHoverIcon(if (enabled) PointerIcon.Hand else PointerIcon.Default)
+        .defaultMinSize(minHeight = if (LocalDeskMetrics.current.inner) 36.dp else 44.dp).padding(horizontal = 16.dp),
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        Text(label, style = MaterialTheme.typography.labelLarge, color = c.fgPrimary.copy(alpha = if (enabled) 1f else .4f))
+    }
+}
+
 @Composable
 internal fun v7Alert(): Color = if (CoachTheme.colors.dark) CoachV7.Dark.zhu else CoachV7.Light.zhu
 

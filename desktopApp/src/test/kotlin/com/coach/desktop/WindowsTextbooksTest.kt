@@ -10,6 +10,10 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import javax.imageio.ImageIO
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.math.abs
 import kotlin.test.*
 
@@ -293,9 +297,9 @@ class WindowsTextbooksTest {
     }
 
     /**
-     * TON-1650 D4 / D9: a page has one top bar, and the rail points where the book was opened from.
-     * 今天 / 课程 open their book inside 书架's workspace; before, the rail jumped to 书架 and the reader showed
-     * the host's "Coach" row above the desk's own one.
+     * TON-1650 D4 / D9: a page has one top bar, and learning points where it was opened from.
+     * 今天 / 课程 open their book inside 书架's workspace; before, the reader showed the host's "Coach" row above
+     * the desk's own one. TON-1698: reading itself is the shelf's page, so the reader always lights 书架.
      */
     @Test fun railFollowsWhereTheBookWasOpenedFromAndEachPageHasOneBar() {
         val root = Files.createTempDirectory("coach-windows-host-origin-")
@@ -325,8 +329,9 @@ class WindowsTextbooksTest {
             nav("今天").performClick()
             highlighted("今天")
             onNodeWithTag("host-crumb").assertTextEquals("今天")
+            // TON-1698: reading is the shelf's page, so the rail says 书架 even when 今天 opened the book.
             readFrom("host-today-read")
-            highlighted("今天")
+            highlighted("书架")
             onAllNodesWithTag("host-bar").assertCountEquals(0)
             assertEquals(1, coachMarks())
             onNodeWithTag("open-settings").assertIsDisplayed()
@@ -342,11 +347,181 @@ class WindowsTextbooksTest {
             nav("课程").performClick()
             highlighted("课程")
             readFrom("host-course-read")
-            highlighted("课程")
+            highlighted("书架")
             nav("书架").performClick()
             highlighted("书架")
             onNodeWithTag("textbook-reader").assertIsDisplayed()
         }
+    }
+
+    /**
+     * TON-1698: the explain panel opens inside the reader's own shell. In every state it reaches — connected,
+     * the Mac gone, the connection stopped, the day's quota used — the rail, the desk bar (Coach · 目录 · 返回书架)
+     * and the desk stay where the plain reader had them, the rail lights 书架, and 返回书架 leads back to the shelf.
+     *
+     * Same trick as [ExplainTroubleLiveWindowTest]: the host keeps its default explainer and pairing files; only this
+     * process's `user.home` points at a temp directory, with `jpackage.app-path` set the way an installed copy has it.
+     * The Mac is a loopback stub on a random port, never a production one; the book is the synthetic sample.
+     */
+    @Test fun explainPanelKeepsTheReaderShellInEveryStateInBothThemes() {
+        // These would point the client directory, server or credentials elsewhere; with them set the run is no longer isolated.
+        for (name in listOf("COACH_URL", "COACH_CLIENT_DIR", "COACH_TOKEN_FILE", "COACH_ACCEPTANCE_REPLAY", "COACH_AGENT_RUN_ID"))
+            org.junit.Assume.assumeTrue("$name is set", System.getenv(name).isNullOrBlank())
+        val saved = listOf("user.home", "jpackage.app-path", "coach.windows.theme").associateWith { System.getProperty(it) }
+        val root = Files.createTempDirectory("coach-explain-shell-")
+        try {
+            for (dark in listOf(false, true)) {
+                val theme = if (dark) "dark" else "light"
+                val home = Files.createDirectories(root.resolve("$theme-home"))
+                System.setProperty("user.home", home.toString())
+                System.setProperty("jpackage.app-path", home.resolve("LearningCoach.exe").toString())
+                System.setProperty("coach.windows.theme", theme)
+                assertEquals(home.resolve("Coach/client"), DesktopConnectionSettings().clientDirectory)
+                ExplainShellMac(if (dark) 'd' else 'l').use { mac -> explainShellWalk(root.resolve(theme), theme, mac) }
+            }
+        } finally {
+            for ((key, value) in saved) if (value == null) System.clearProperty(key) else System.setProperty(key, value)
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    private fun explainShellWalk(root: Path, theme: String, mac: ExplainShellMac) {
+        val library = TextbookLibrary(root.resolve("library"))
+        val stored = library.importBook(syntheticTextbook(root.resolve("friend")))
+        ExplainConsent(library.directory).allow(stored.id)
+        val controller = TextbookController(library)
+        runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
+            setContent { WindowsTextbookHost(controller) { null } }
+            ready(controller) { it.book?.id == stored.id }
+            fun nav(label: String) = onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText(label))
+            fun highlighted(label: String) = onNodeWithTag("host-navigation")
+                .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, label))
+            fun waitTag(tag: String) = waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty() }
+            fun shell() = mapOf(
+                "rail" to onNodeWithTag("host-navigation").getBoundsInRoot(),
+                "settings" to onNodeWithTag("open-settings").getBoundsInRoot(),
+                "desk" to onNodeWithTag("v7-desk").getBoundsInRoot(),
+                "Coach" to onNode(hasText("Coach") and hasAnyAncestor(hasTestTag("v7-desk"))).getBoundsInRoot(),
+                "目录" to onNodeWithTag("v7-directory-toggle").getBoundsInRoot(),
+                "返回书架" to onNode(hasText("返回书架") and hasAnyAncestor(hasTestTag("v7-desk"))).getBoundsInRoot(),
+            )
+            fun shot(name: String) = capture("ton1698-$name-$theme", "windows-host")
+
+            // Read from 今天: the reader is the shelf's page, so the rail says 书架.
+            nav("今天").performClick()
+            onNodeWithTag("host-today-read").performClick()
+            ready(controller) { it.screen == BookScreen.READER }
+            if (controller.state.value.prompt == BookPrompt.AFTER_READING) {
+                onNodeWithTag("read-only").performClick()
+                ready(controller) { it.prompt == null }
+            }
+            highlighted("书架")
+            onAllNodesWithTag("host-bar").assertCountEquals(0)
+            val reader = shell()
+            shot("reader")
+            fun sameShell(state: String) {
+                waitForIdle()
+                assertEquals(reader, shell(), "explain panel $state ($theme) moved the shell")
+                highlighted("书架")
+                onAllNodesWithTag("host-bar").assertCountEquals(0)
+            }
+
+            // 连上: pair from the panel, then one passage explained.
+            onNodeWithTag("book-explain-toggle").performClick()
+            waitTag("explain-pairing")
+            sameShell("pairing")
+            onNodeWithTag("explain-address").performTextClearance()
+            onNodeWithTag("explain-address").performTextInput(mac.url)
+            onNodeWithTag("explain-code").performTextInput("246810")
+            onNodeWithTag("explain-pair").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
+            onAllNodesWithTag("explain-button")[0].performScrollTo().performClick()
+            waitTag("explain-answer")
+            sameShell("connected")
+            shot("explain-connected")
+
+            // 连不上: the Mac is gone; the same passage says so and offers 再试一次 in place of its button.
+            mac.mode = ExplainShellMac.Mode.OFFLINE
+            onAllNodesWithTag("explain-button")[0].performScrollTo().performClick()
+            waitTag("explain-retry")
+            onAllNodesWithTag("explain-failed")[0].assertTextEquals(ExplainTrouble.UNREACHABLE)
+            sameShell("offline")
+            shot("explain-offline")
+
+            // 被停用: the connection was stopped on the Mac; the panel goes back to pairing, shell unchanged.
+            mac.mode = ExplainShellMac.Mode.REVOKED
+            onAllNodesWithTag("explain-retry")[0].performScrollTo().performClick()
+            waitTag("explain-revoked")
+            sameShell("revoked")
+            shot("explain-revoked")
+
+            // 额度用完: re-pair, then the day's quota is used; the button closes and there is no retry.
+            mac.mode = ExplainShellMac.Mode.QUOTA
+            onNodeWithTag("explain-address").performTextClearance()
+            onNodeWithTag("explain-address").performTextInput(mac.url)
+            onNodeWithTag("explain-code").performTextInput("135791")
+            onNodeWithTag("explain-pair").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
+            onAllNodesWithTag("explain-button")[0].performScrollTo().performClick()
+            waitTag("explain-failed")
+            onAllNodesWithTag("explain-failed")[0].assertTextEquals(ExplainShellMac.QUOTA)
+            onAllNodesWithTag("explain-retry").assertCountEquals(0)
+            sameShell("quota")
+            shot("explain-quota")
+            assertEquals(2, mac.pairs.get())
+
+            // Leaving the panel does not move anything either, and 返回书架 is the way back to the shelf.
+            onNodeWithTag("book-explain-toggle").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-explain").fetchSemanticsNodes().isEmpty() }
+            sameShell("closed")
+            onNode(hasText("返回书架") and hasAnyAncestor(hasTestTag("v7-desk"))).performClick()
+            ready(controller) { it.screen == BookScreen.HOME }
+            highlighted("书架")
+            onNodeWithTag("host-bar").assertIsDisplayed()
+            shot("back-on-shelf")
+        }
+    }
+
+    /** Loopback stand-in for the Mac: pairing hands out credentials, explain answers by [mode]. */
+    private class ExplainShellMac(prefix: Char) : AutoCloseable {
+        enum class Mode { OK, OFFLINE, REVOKED, QUOTA }
+        companion object { const val QUOTA = "今天的讲解额度用完了，明天再来。" }
+        @Volatile var mode = Mode.OK
+        val pairs = java.util.concurrent.atomic.AtomicInteger()
+        private val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        val url: String
+
+        init {
+            server.createContext("/") { exchange ->
+                val sent = exchange.requestBody.use { it.readBytes() }.decodeToString()
+                var type = "application/json; charset=utf-8"
+                val (status, body) = when (exchange.requestURI.path) {
+                    "/v1/pair" -> 200 to """{"deviceId":"friend-pc","token":"$prefix${pairs.incrementAndGet()}${"x".repeat(41)}"}"""
+                    "/v1/hello" -> 200 to """{"epoch":"synthetic","lastSeq":0,"backedUpThroughSeq":0,"lastSeqBefore":0}"""
+                    "/v1/library/explain" -> when (mode) {
+                        // What a tunnel or proxy sends when the Mac behind it is asleep: not the Mac's own words.
+                        Mode.OFFLINE -> { type = "text/html"; 502 to "<html><body>502 Bad Gateway</body></html>" }
+                        Mode.REVOKED -> 401 to """{"error":"unauthorized"}"""
+                        Mode.QUOTA -> 429 to """{"error":"$QUOTA","code":"daily_quota"}"""
+                        Mode.OK -> {
+                            val id = Json.parseToJsonElement(sent).jsonObject.getValue("blocks").jsonArray.first().jsonObject.getValue("id").jsonPrimitive.content
+                            val page = Regex(":p(\\d+):").find(id)!!.groupValues[1]
+                            200 to """{"text":"This passage says light gives the plant its energy.【S1】","sources":[{"docId":"$id","pdfPage":$page,"anchor":"S1"}]}"""
+                        }
+                    }
+                    else -> 404 to "{}"
+                }
+                val bytes = body.toByteArray()
+                exchange.responseHeaders.add("Content-Type", type)
+                exchange.sendResponseHeaders(status, bytes.size.toLong())
+                exchange.responseBody.use { it.write(bytes) }
+            }
+            server.start()
+            check(server.address.port !in productionPorts) { "never a production port" }
+            url = "http://127.0.0.1:${server.address.port}"
+        }
+
+        override fun close() = server.stop(0)
     }
 
     private fun ComposeUiTest.ready(controller: TextbookController, condition: (LibraryUi) -> Boolean) {

@@ -164,6 +164,12 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         return send(ExplainWire.request(requestId, chosen, context), context, requestId)
     }
 
+    open suspend fun explainLesson(blocks: List<SourceBlock>, bookPages: Int,
+        requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult {
+        if (!BookLessonWire.fits(blocks)) return ExplainResult.Refused(BookLessonWire.TOO_LONG)
+        return send(BookLessonWire.request(requestId, blocks, bookPages), blocks, requestId)
+    }
+
     suspend fun ask(chosen: SourceBlock, question: String, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult =
         send(ExplainWire.question(requestId, chosen, question), listOf(chosen), requestId)
 
@@ -172,7 +178,12 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library")
         return try {
             val snapshot = withContext(Dispatchers.IO) { imports?.snapshot(context) }
-            val wire = if (snapshot == null) input else JsonObject(input + ("localSource" to snapshot))
+            val lesson = input["kind"]?.jsonPrimitive?.contentOrNull == "lesson"
+            val wire = if (lesson) {
+                if (snapshot == null) return ExplainResult.Refused("请先打开个人导入的书并允许讲解。")
+                try { BookLessonWire.withSource(input, snapshot) }
+                catch (_: IllegalArgumentException) { return ExplainResult.Refused(BookLessonWire.TOO_LONG) }
+            } else if (snapshot == null) input else JsonObject(input + ("localSource" to snapshot))
             val reply = http.explainLibrary(wire)
             if (snapshot != null && withContext(Dispatchers.IO) { imports!!.snapshot(context) } != snapshot)
                 return ExplainResult.Refused("保存的原文已变化，请重新打开这本书后重试。")

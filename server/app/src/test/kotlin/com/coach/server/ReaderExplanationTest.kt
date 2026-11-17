@@ -16,6 +16,26 @@ class ReaderExplanationTest {
         "paragraphs" to JsonArray(listOf(json("text" to text, "anchors" to JsonArray(anchors.map(::JsonPrimitive)))))
     ).toString()
 
+    @Test fun fullLessonRetainsNinetyFourBlocksThroughTheRealSourceSandbox(): Unit = runBlocking {
+        org.junit.Assume.assumeTrue(System.getProperty("os.name").startsWith("Mac"))
+        Harness().use { h ->
+            val pages = (1..94).map { n ->
+                val page = (n - 1) / 14 + 1
+                SourcePage("${"a".repeat(64)}:p$page:${n * 100}", page, "Self authored plant process $n.")
+            }
+            val reader = ReaderExplanation(h.actor, BridgeClient(BridgeConfig(h.stub.baseUrl)))
+            h.stub.stream(1, payload("这些过程共同组成这一节。", "S1", "S94"), StubTutor.terminal("complete"), StubTutor.DONE)
+            val result = reader.explainLesson("d", json("requestId" to "ab12", "kind" to "lesson"), pages,
+                com.coach.domain.scope.VisibleScope.learner(), sourcesCurrent = { true })
+            assertEquals(listOf(pages.first().docId, pages.last().docId),
+                result.getValue("sources").jsonArray.map { it.jsonObject.str("docId") })
+            assertEquals(1, h.stub.requests)
+            val system = Json.parseToJsonElement(h.stub.requestBodies.single()).jsonObject.getValue("messages").jsonArray
+                .single { it.jsonObject.str("role") == "system" }.jsonObject.str("content")
+            pages.forEach { assertTrue(system.contains(it.text)) }
+        }
+    }
+
     @Test fun rawTabMatchesFinalValidationWithoutCountingAsBodyProgress() {
         val prefix = "{\"paragraphs\":[{\"text\":\""
         val body = "的解释。"

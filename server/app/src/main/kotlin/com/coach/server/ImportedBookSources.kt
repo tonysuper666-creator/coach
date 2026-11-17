@@ -30,10 +30,11 @@ class ImportedBookSources internal constructor(directory: Path) {
             source.str("format") !in setOf("pdf", "epub", "md", "txt", "docx", "pptx", "html", "mobi", "azw3", "rtf", "odt", "png", "jpg") ||
             source.str("title").length !in 1..300 || !tutorSourceAllowed(source.str("title"))) bad()
         val pages = source["pages"] as? JsonArray ?: bad()
-        if (pages.size !in 1..4) bad()
+        if (pages.isEmpty() || pages.size > (if (parsed.isLesson) 128 else 4)) bad()
         val pageMap = pages.map { value ->
             val page = value as? JsonObject ?: bad()
             if (page.keys != setOf("number", "length", "ocr", "sha256") || page.num("number") !in 1L..100_000L ||
+                (parsed.bookPages != null && page.num("number") > parsed.bookPages) ||
                 page.num("length") !in 1L..2_000_000L || (page["ocr"] as? JsonPrimitive)?.booleanOrNull == null ||
                 !page.str("sha256").matches(Regex("[0-9a-f]{64}"))) bad()
             page.num("number").toInt() to page

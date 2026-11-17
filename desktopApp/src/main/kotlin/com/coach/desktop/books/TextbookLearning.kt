@@ -105,11 +105,8 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                         focus = { i -> citationFocus.getOrPut(i) { FocusRequester() } }, onOpen = onCitation,
                         onRefused = { onCitationRefused() })
                 }
-                if (ui.learningPath == LearningPath.QUESTION_FIRST && book.questionMode == QuestionMode.CHOICE && answerExplain?.ask != null) {
-                    GeneratedLessonPractice(book, lesson, answerExplain, practiceSourceFocus, sourceRow, onPracticeSource, onSource) {
-                        LessonNav(book, ui.busy, onLesson)
-                    }
-                } else {
+                // 配对只决定「按本节原文现出题」；没连上 Mac 时这一节仍用原文出的题，读书和做题不依赖配对。
+                val sourceSection: @Composable () -> Unit = {
                     // 边看边学：先看讲解，再动手做题。
                     if (ui.learningPath == LearningPath.READ_AND_LEARN) {
                         BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow)
@@ -142,6 +139,13 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                         recap()
                         LessonNav(book, ui.busy, onLesson)
                     }
+                }
+                val gate = answerExplain
+                if (ui.learningPath == LearningPath.QUESTION_FIRST && book.questionMode == QuestionMode.CHOICE && gate?.ask != null) {
+                    GeneratedLessonPractice(book, lesson, gate, practiceSourceFocus, sourceRow, onPracticeSource, onSource,
+                        fallback = sourceSection) { LessonNav(book, ui.busy, onLesson) }
+                } else {
+                    sourceSection()
                 }
             }
         }

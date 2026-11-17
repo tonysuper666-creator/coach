@@ -652,10 +652,67 @@ imported it after fresh approval. It adds workflow evidence, not new coverage;
 an expanded photograph was refused by production preview. Old B/C candidates
 remain unapproved, and no reader display acceptance follows from these checks.
 
+### Plan pending selections from B/C evidence
+
+`object_review_plan.py` requires pypdfium2 and Pillow. Use the current PDF, its
+matching canonical probe JSONL and layout files named by physical page as
+`00001.json`. Keep all inputs and output outside Git, local and unsynced:
+
+```sh
+tools/dev/heavy --local "$DOCLING_PYTHON" tools/reader-v2/reflow/object_review_plan.py \
+  --pdf "$PRIVATE_PDF" --probe "$PRIVATE_PROBE_JSONL" \
+  --layout "$PRIVATE_LAYOUT" --out "$PRIVATE_NEW_PLAN"
+```
+
+This regenerates raster boundaries instead of trusting old candidate receipts.
+The private per-page JSON preserves every proposal and its evidence. Only equal
+final pixel rectangles fold, retaining all aliases and vetoes. Connected overlap
+groups are alternatives for comparison: no largest-box winner, semantic duplicate
+claim or union of the group. Groups are metadata in the plan, not new review-page
+controls. A possible prose label vetoes a selection without deleting any evidence
+or canonical text. Unlabelled prose can still pass this filter.
+
+Only explicit, uniquely owned and verified caption references suggest expansion.
+The union of that owner and its linked captions must pass the raster/glyph checks;
+intervening glyphs outside those parts or a prose veto block it. Missing, shared,
+duplicate or ambiguous references never establish ownership by proximity.
+`complete_object_labels_unverified` remains on **every** item, even with explicit
+links: model links can omit notes, sources or credits. Missing links additionally
+carry `labels_not_established`. These are warnings, not completeness decisions.
+
+`selections/*.selection.json` contains only page, kind and integer pixel edges,
+with **zero approvals**. Read the plan, choose alternatives to inspect and copy
+their selection files into a fresh private directory. Run the existing
+`ReviewedPdfVisualsProbe preview` and `review_workspace.py prepare` commands above,
+then compare the complete source page and full-size crop. The production preview
+can reject a plan selection: the experimental PDFium/probe checks do not replace
+PDFBox production mapping. Its existing batch command fails on an invalid member;
+use a new directory with one selection to isolate refusal, and retain rejected
+plans separately. Do not turn a refused plan into an approved receipt. Overlapping
+alternatives can be reviewed together, but only a disjoint approved set can export
+and import. Missing labels require a manual edit and fresh production preview.
+
+Output must be new and outside all Git worktrees. Empty/duplicate/stale probe pages,
+frame mismatches or a later invalid layout fail before output; a write failure
+removes only the new directory. Limits are 64 pages, 4096px raster edges and
+128 pending selections, at most 32 per page. This is a planning aid, not automatic
+recognition, complete-object approval, import, text hiding or reader rendering.
+
+The private 20-page trial reproduced 193 proposals and 66 boundary passes, added
+8 explicit-link expansions and selected 41 pending rectangles. Zero rectangles
+were exactly equal, so this did not eliminate the semantic duplicates seen in
+independent review. Production preview accepted 34 and refused 7; the offline
+workspace prepared those 34 on 11 pages, all pending. Of 6 expanded crops that
+passed production preview, executor inspection found 5 table titles now included
+but all 5 still missing lower notes/source lines. This is not independent review,
+an object success rate or reader retention. No object was approved or imported.
+
 ### Regression commands
 
 ```sh
 python3 -I -m unittest discover -s tools/reader-v2/reflow -v
+tools/dev/heavy --local "$DOCLING_PYTHON" tools/reader-v2/reflow/verify_object_review_plan.py \
+  --pdfbox-classpath "$PDFBOX_CLASSPATH"
 tools/dev/heavy --local "$DOCLING_PYTHON" tools/reader-v2/reflow/verify_crop_candidates.py \
   --pdfbox-classpath "$PDFBOX_CLASSPATH"
 tools/dev/heavy --local python3 tools/reader-v2/reflow/verify_pdf_payload.py \
@@ -669,7 +726,7 @@ DOCLING_ARTIFACTS_PATH="$DOCLING_MODELS" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
   -m unittest discover -s tools/reader-v2/layout/tests -v
 ```
 
-The 79 reflow tests (Pillow required for the 16 workspace/edit tests) cover diff accounting, private-output guards, stale identities,
+The 88 reflow tests (Pillow required for the 16 workspace/edit tests) cover diff accounting, private-output guards, stale identities,
 UTF-16/surrogate mappings, discontiguous ranges, table cuts/headers/rowspans,
 exact cell/glyph evidence and its refusal cases, touching vs gapped PDF rules,
 caption fragment references, scoped cross-page table partitions and header copies,
@@ -686,7 +743,15 @@ mixed source identities, inert untrusted names/CSP and Git/symlink/overwrite gua
 Eight selection-edit tests additionally cover request/approval separation, exact
 batch/page identity, stale full-page context outside the old crop, integer edges,
 changed page/kind refusal, changed-rectangle approval refusal, overlap/touching,
-and output guards. The preceding 71 tests are unchanged.
+and output guards. Nine planning tests add explicit caption expansion/refusal,
+intervening prose/unowned glyph vetoes, lossless equal-rectangle folding,
+transitive overlap preservation, unlinked-label warnings and stale/rotated/duplicate
+layout refusal. The preceding 79 tests are unchanged. The planning CLI integration
+uses the same self-authored four-page PDF and known proposals: all canonical pages
+remain equal to an independent stripper baseline, 3 pending selections are emitted,
+CropBox/rotation are handled and late invalid, stale, duplicate or existing-output
+cases leave no partial output or overwrite. It does not run model recognition or
+grant approval and does not substitute for production preview.
 The Java integration compiles with `--release 17`, generates four self-authored
 PDF pages and compares against an independent plain PDFTextStripper baseline:
 120 glyph spans, segmented table rules, borderless table/header evidence,

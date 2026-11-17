@@ -187,7 +187,7 @@ Android actual 保留原填色和 LocalIndication，悬停叠色与无水波纹 
 | P0 按钮手感 | M1 M2 M3 K2 K5，以及 V7 细滚动条样式 | `shared/ui/.../v7/PaperButton.kt`、新文件 `shared/ui/.../v7/V7Tooltip.kt`、`V7Scrollbar.kt`（jvmMain） | 组件已实现，真窗口 Tab / 鼠标验收已过，TON-1657 |
 | P1 本机阅读 | K3 E2(页图) W5(阅读) M2(正文) A12 | `books/TextbookReader.kt` | PR #325（`agent/cb-flash2/024eba4a5560`），已 rebase 到 main `ac702387`，并已换用 P0 的 `V7Tooltip`/`V7Scrollbar`；占位的混排页冷加载一跳按二退裁决砍出本卡、记入「以后再说」。待串行窗口：新 head 的 `desktopApp:test`、K1 Tab 顺序、同向页占位与滚动条的浅深截图 |
 | P2 讲解卡 | A10 A11(出处) E3(讲解) D3 W5(讲解) K7 | `books/BookExplain.kt`、`books/AnswerExplain.kt`、`books/BookSourceRow.kt` | 本轮派 |
-| P3 书架 | A1(模式卡) E3(书架) W5(书架) | `books/TextbookShelf.kt` | 排队，P0 合并后 |
+| P3 书架 | A1(模式卡) E3(书架) W5(书架) | `books/TextbookShelf.kt` | TON-1668 书架入口、书目与滚动待验收；E3 不纳入本轮 |
 | P4 本地参考练习文案 | A7 A11(作答记录、出题) | `books/exam/LocalExamUi.kt`、`books/TextbookLearning.kt` | 排队，等 TON-1650 第 13 刀合并 |
 | P5 窗口外壳 | W3 W4 W6 E2(顶部细条) E3(外壳错误) | `WindowsTextbooks.kt`、`WindowsTextbookHost.kt`、`books/TextbookWorkspace.kt` | 排队，等 TON-1656 合并 |
 | P7 今天与课程页 | A13 B2 B6（第 5 节） | `WindowsHomeCards.kt` | 排队，等 P0 合并（按钮手感先落地，免得同一处改两次） |

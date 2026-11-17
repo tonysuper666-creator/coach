@@ -23,9 +23,9 @@ class ParagraphPageAnchorTest {
             val controller = TextbookController(library)
             runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
-                waitUntil(20_000) { controller.state.value.book != null && !controller.state.value.busy }
+                waitUntil(timeoutMillis = 20_000) { controller.state.value.book != null && !controller.state.value.busy }
                 onNodeWithTag("home-read").performClick()
-                waitUntil(20_000) { controller.state.value.screen == BookScreen.READER }
+                waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER }
                 waitForIdle()
                 onNodeWithTag("reader-page-number").assertTextEquals("第 5–6 页")
                 onNodeWithTag("reader-page-number").performClick()

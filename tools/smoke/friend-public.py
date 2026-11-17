@@ -5,6 +5,7 @@ No book, explanation, credentials, URL or server response is written to output.
 This is not native-client or real-material acceptance.
 """
 import argparse
+import html
 import http.client
 import ipaddress
 import json
@@ -174,8 +175,30 @@ def revocation(client, revoked, active):
     print("PASS revoked=401 other_friend=200")
 
 
+def https_redirect_only(connection, host):
+    # Funnel's shared edge also listens when this node has no Serve/Funnel rule.
+    # Accept only the edge's exact, credential-free HTTPS redirect, never an
+    # application response or a redirect to another host/port/path.
+    location = "https://" + host + "/v1/public/status"
+    connection.sendall(("GET /v1/public/status HTTP/1.1\r\nHost: " + host
+                        + "\r\nConnection: close\r\n\r\n").encode("ascii"))
+    with http.client.HTTPResponse(connection) as response:
+        response.begin()
+        headers = [(name.lower(), value) for name, value in response.getheaders()]
+        names = [name for name, _ in headers]
+        body = response.read(MAX_BODY + 1)
+        check(response.status == 302
+              and len(names) == len(set(names))
+              and set(names) <= {"content-type", "location", "date", "content-length", "connection"}
+              and response.getheader("Location") == location
+              and response.getheader("Content-Type") == "text/html; charset=utf-8"
+              and body == ('<a href="' + html.escape(location, quote=True) + '">Found</a>.\n\n').encode("ascii"),
+              "unexpected alternate listener port=80")
+
+
 def closed_ports(host):
-    # A bounded check of relevant ports, not a claim of scanning every TCP port.
+    # A bounded check of this hostname's routes, not a TCP scan of the shared
+    # ingress IP. An unconfigured Funnel port accepts TCP and rejects TLS SNI.
     for port in (80, 8443, 10000, 18791):
         try:
             connection = socket.create_connection((host, port), timeout=2)
@@ -185,9 +208,29 @@ def closed_ports(host):
             # DNS failures and routing errors are inconclusive, not a pass.
             raise CheckFailed("alternate port reachability inconclusive") from error
         else:
-            connection.close()
-            raise CheckFailed("unexpected alternate listener")
-    print("PASS alternate_ports=4 refused_or_timed_out")
+            try:
+                if port == 80:
+                    try:
+                        https_redirect_only(connection, host)
+                    except (OSError, http.client.HTTPException, ValueError, TypeError) as error:
+                        raise CheckFailed("unexpected alternate listener port=80") from error
+                elif port in (8443, 10000):
+                    try:
+                        # A verified TLS handshake on either port is a failure,
+                        # even if it would return an application 404 or 401.
+                        with ssl.create_default_context().wrap_socket(connection, server_hostname=host):
+                            raise CheckFailed("unexpected alternate listener port=" + str(port))
+                    except ssl.SSLEOFError:
+                        pass
+                    except (OSError, ValueError) as error:
+                        # A certificate error, timeout or unknown TLS alert is
+                        # inconclusive. Never disable verification to proceed.
+                        raise CheckFailed("alternate port TLS inconclusive port=" + str(port)) from error
+                else:
+                    raise CheckFailed("unexpected alternate listener port=18791")
+            finally:
+                connection.close()
+    print("PASS alternate_routes=4 https_redirect_or_tls_rejected_or_tcp_closed")
 
 
 def main(argv=None):

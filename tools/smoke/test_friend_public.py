@@ -10,7 +10,7 @@ import ssl
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location("friend_public", Path(__file__).with_name("friend-public.py"))
 probe = importlib.util.module_from_spec(spec)
@@ -189,6 +189,87 @@ class ProbeTests(unittest.TestCase):
         with patch.object(socket, "create_connection", side_effect=TimeoutError) as connect, contextlib.redirect_stdout(output):
             probe.closed_ports("unused")
         self.assertEqual(connect.call_count, 4)
+
+    @staticmethod
+    def edge_redirect(location="https://node.example.ts.net/v1/public/status", *, status=302,
+                      body=None, extra=""):
+        body = (('<a href="' + location + '">Found</a>.\n\n').encode() if body is None else body)
+        wire = (f"HTTP/1.1 {status} Found\r\nContent-Type: text/html; charset=utf-8\r\n"
+                f"Location: {location}\r\nContent-Length: {len(body)}\r\n{extra}\r\n").encode() + body
+        connection = Mock()
+        connection.makefile.return_value = io.BytesIO(wire)
+        return connection
+
+    def test_shared_edge_accepts_only_exact_https_redirect(self):
+        connection = self.edge_redirect()
+        output = io.StringIO()
+        with patch.object(socket, "create_connection", side_effect=[connection, TimeoutError(), TimeoutError(), TimeoutError()]), \
+                contextlib.redirect_stdout(output):
+            probe.closed_ports("node.example.ts.net")
+        connection.close.assert_called_once()
+        connection.sendall.assert_called_once_with(
+            b"GET /v1/public/status HTTP/1.1\r\nHost: node.example.ts.net\r\nConnection: close\r\n\r\n")
+        self.assertIn("PASS alternate_routes=4", output.getvalue())
+        self.assertNotIn("node.example.ts.net", output.getvalue())
+
+    def test_http_application_or_other_redirect_cannot_pass(self):
+        cases = (
+            {"status": 200}, {"status": 401},
+            {"location": "https://other.example.ts.net/v1/public/status"},
+            {"location": "https://node.example.ts.net:18791/v1/public/status"},
+            {"location": "https://node.example.ts.net/v1/devices"},
+            {"location": "http://node.example.ts.net/v1/public/status"},
+            {"body": b"private-material"},
+            {"extra": "Set-Cookie: private-token\r\n"},
+            {"extra": "Location: https://other.example.ts.net/\r\n"},
+        )
+        for options in cases:
+            with self.subTest(options=options):
+                connection = self.edge_redirect(**options)
+                with patch.object(socket, "create_connection", return_value=connection), \
+                        self.assertRaisesRegex(probe.CheckFailed, "unexpected alternate listener port=80"):
+                    probe.closed_ports("node.example.ts.net")
+                connection.close.assert_called_once()
+
+    def test_shared_tls_edge_must_reject_handshake_on_both_alternate_ports(self):
+        context = Mock()
+        context.wrap_socket.side_effect = ssl.SSLEOFError(8, "private-host")
+        connections = [Mock(), Mock()]
+        with patch.object(socket, "create_connection", side_effect=[TimeoutError(), *connections, TimeoutError()]), \
+                patch.object(ssl, "create_default_context", return_value=context), \
+                contextlib.redirect_stdout(io.StringIO()):
+            probe.closed_ports("node.example.ts.net")
+        self.assertEqual(context.wrap_socket.call_count, 2)
+        for connection in connections:
+            connection.close.assert_called_once()
+            connection.sendall.assert_not_called()
+        self.assertEqual(context.wrap_socket.call_args.kwargs, {"server_hostname": "node.example.ts.net"})
+
+    def test_alternate_tls_success_certificate_error_or_timeout_cannot_pass(self):
+        for port in (8443, 10000):
+            for error in (None, ssl.SSLCertVerificationError(1, "private-host"),
+                          ssl.SSLError(1, "private-host"), TimeoutError("private-host")):
+                with self.subTest(port=port, error=type(error).__name__):
+                    context = Mock()
+                    context.wrap_socket.side_effect = error
+                    if error is None:
+                        context.wrap_socket.return_value.__enter__ = Mock()
+                        context.wrap_socket.return_value.__exit__ = Mock(return_value=False)
+                    connection = Mock()
+                    outcomes = [TimeoutError()] * ((80, 8443, 10000, 18791).index(port)) + [connection]
+                    with patch.object(socket, "create_connection", side_effect=outcomes), \
+                            patch.object(ssl, "create_default_context", return_value=context), \
+                            self.assertRaises(probe.CheckFailed):
+                        probe.closed_ports("node.example.ts.net")
+                    connection.close.assert_called_once()
+
+    def test_owner_port_tcp_success_always_fails(self):
+        connection = Mock()
+        with patch.object(socket, "create_connection", side_effect=[TimeoutError(), TimeoutError(), TimeoutError(), connection]), \
+                self.assertRaisesRegex(probe.CheckFailed, "unexpected alternate listener port=18791"):
+            probe.closed_ports("node.example.ts.net")
+        connection.close.assert_called_once()
+        connection.sendall.assert_not_called()
 
 
 if __name__ == "__main__":

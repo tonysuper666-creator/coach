@@ -72,7 +72,7 @@ class BookLessonLiveWindowTest {
                     clickText(window, "上一页")
                     waitFor("page restored") { controller.state.value.page == 27 }
                     // Select a substantive, multi-block lesson from the actual book, never a fixture.
-                    val index = book.lessons.indexOfFirst { it.firstPage >= 27 && it.blocks.count { b -> !b.heading } > 6 }
+                    val index = book.lessons.indexOfFirst { it.firstPage >= 100 && it.blocks.count { b -> !b.heading && b.text.length >= 120 } > 6 }
                     assertTrue(index >= 0)
                     runBlocking { controller.learn(LearningPath.READ_AND_LEARN) }
                     click(window, "learning-path-READ_AND_LEARN")
@@ -106,8 +106,17 @@ class BookLessonLiveWindowTest {
                     assertTrue(text(node(window, "reader-page-number")).contains(page.toString()))
                     shot(window, theme, "source")
                     println("REAL_LESSON_WINDOW theme=$theme pages=${book.pages.size} lessonIndex=$index blocks=${lesson.blocks.count { !it.heading }} sourcePage=$page nativeImport=true pageTurn=true body=true pageCitation=true exactUtf16=true sourceRoundTrip=true defaultProvider=true")
+                    val pageBlocks = StudyCoachCourse.blocks(book.id, listOf(book.page(page)!!)).filterNot { it.heading }
+                    val paragraph = pageBlocks.indexOfFirst { it.text.length >= 120 }
+                    assertTrue(paragraph >= 0, "The cited page must contain a substantive paragraph")
                     click(window, "book-explain-toggle")
-                    click(window, "explain-button")
+                    edt {
+                        val block = node(window, "explain-block-${pageBlocks[paragraph].id}")!!
+                        fun button(parent: SemanticsNode): SemanticsNode? =
+                            parent.takeIf { it.config.getOrNull(SemanticsProperties.TestTag) == "explain-button" }
+                                ?: parent.children.firstNotNullOfOrNull(::button)
+                        assertTrue(button(block)!!.config[SemanticsActions.OnClick].action!!.invoke())
+                    }
                     waitFor("real inline explanation") {
                         check(node(window, "explain-failed") == null) { "Real inline request refused; original text omitted" }
                         node(window, "explain-text") != null && node(window, "explain-citation") != null
@@ -128,9 +137,9 @@ class BookLessonLiveWindowTest {
                     click(window, "book-explain-toggle")
                     println("REAL_LESSON_WINDOW theme=$theme inlineExplanation=true inlineCitation=true inlineOriginalCard=true sameRound=true")
                     click(window, "ask-book-passage")
-                    click(window, "ask-paragraph-0")
+                    click(window, "ask-paragraph-$paragraph")
                     edt { assertTrue(node(window, "book-passage-question")!!.config[SemanticsActions.SetText].action!!
-                        .invoke(androidx.compose.ui.text.AnnotatedString("请解释这个概念，并给一个例子。"))) }
+                        .invoke(androidx.compose.ui.text.AnnotatedString("请用自己的话解释这一段的主要意思。"))) }
                     click(window, "book-passage-send")
                     waitFor("real passage question") {
                         check(node(window, "book-passage-unavailable") == null) { "Real passage request refused; original text omitted" }

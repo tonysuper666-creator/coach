@@ -144,6 +144,13 @@ class BookPageNativeWindowTest {
                     assertEquals(beforeResize, controller.state.value.page)
                     shot(window, dark, "pdf-text-return")
                     println("NATIVE_PAGINATION theme=${if (dark) "dark" else "light"} keyboardTurns=10 sourceExact=true viewRoundTrip=true; checking spread resize next")
+                    // Leave a following chapter available, so two sheets means two
+                    // actual bodies rather than an empty final right-hand sheet.
+                    edt { assertTrue(node(window, "reader-page")!!.config[SemanticsActions.RequestFocus].action!!.invoke()) }
+                    val lastText = text()
+                    robot.keyPress(KeyEvent.VK_PAGE_UP); robot.keyRelease(KeyEvent.VK_PAGE_UP)
+                    waitFor("chapter before final page") { text() != lastText }
+                    val anchorBeforeResize = controller.state.value.page
                     edt { window.setSize(2500, minOf(window.height, 1000)) }
                     waitFor("actual reader reaches spread threshold") {
                         edt { val area = node(window, "book-page-layout")!!.boundsInRoot
@@ -155,11 +162,14 @@ class BookPageNativeWindowTest {
                         val area = node(window, "book-page-layout")!!.boundsInRoot
                         println("NATIVE_SIZE awtWidth=${window.width} scale=$scale readerPx=${area.width} readerDp=${area.width / scale}")
                     }
-                    waitFor("two touching sheets") { node(window, "book-sheet-1") != null }
+                    waitFor("two touching sheets with both bodies") {
+                        node(window, "book-sheet-1") != null && node(window, "reader-text-right") != null
+                    }
+                    assertTrue(edt { node(window, "reader-text-right")!!.config[SemanticsProperties.Text].single().text.isNotBlank() })
                     shot(window, dark, "wide-spread")
                     edt { window.setSize(1100, minOf(window.height, 850)) }
                     waitFor("single sheet after resize") { node(window, "book-sheet-1") == null }
-                    assertEquals(beforeResize, controller.state.value.page)
+                    assertEquals(anchorBeforeResize, controller.state.value.page)
                     shot(window, dark, "narrow-single-page")
 
                 } finally { edt { window.dispose() } }

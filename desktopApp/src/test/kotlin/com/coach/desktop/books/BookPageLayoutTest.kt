@@ -155,6 +155,26 @@ class BookPageLayoutTest {
         }
     }
 
+    @Test fun physicalPageMetadataTravelsWithItsChapterWithoutLosingSourceOffsets() = runSkikoComposeUiTest {
+        val sources = listOf(
+            BookPage(5, "<!-- PDF 第 5 页 · 书第 1 页 -->\n# Chapter 1 Light\n\n第五页独立正文\n"),
+            BookPage(6, "<!-- PDF 第 6 页 · 书第 2 页 -->\n# Chapter 2 Cells\n\n第六页独立正文\n"),
+        )
+        var pages = emptyList<BookLaidPage>()
+        setContent { CoachTheme {
+            pages = BookPageLayouter(rememberTextMeasurer(), LocalDensity.current, BookPageTypography(
+                MaterialTheme.typography.bodyLarge.copy(fontSize = 18.sp, lineHeight = 33.sp),
+                SpanStyle(), SpanStyle(), 40.sp, 32.sp, 12.sp, 32.sp)).layout(sources, 594, 600)
+        } }
+        waitForIdle()
+        assertEquals(listOf("Chapter 1 Light", "Chapter 2 Cells"), pages.map { it.title })
+        assertTrue(pages.all { it.opener })
+        assertEquals(listOf(BookPageAnchor(5), BookPageAnchor(6)), pages.map { it.anchor })
+        assertTrue(originalBookSelection(pages[0].text).contains("第五页独立正文"))
+        assertTrue(originalBookSelection(pages[1].text).contains("第六页独立正文"))
+        assertEquals(sources.joinToString("") { it.text }, pages.joinToString("") { originalBookSelection(it.text) })
+    }
+
     @Test fun imageAndCaptionMoveTogetherAndFormulaStaysInFlow() {
         val block = BookFigureBlock(BookPageAnchor(42, 8), 1000, 1200, 30)
         val placed = placeBookFigure(block, 594, 700, 100)

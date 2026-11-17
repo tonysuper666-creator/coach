@@ -7,7 +7,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -37,6 +36,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     var citationIndex by remember { mutableIntStateOf(0) }
     var readerHasFocus by remember { mutableStateOf(false) }
     var noteReader by remember { mutableStateOf<ReaderSession?>(null) }
+    // Both immediate and late restore requests target the page that handles
+    // paging keys. Focusing this outer Surface would take those keys away.
     val readerFocus = remember { FocusRequester() }
     // 翻页后恢复阅读器焦点：续体可能在后台线程恢复（控制器动作在 IO 上完成），不能在那里直接动 Compose 焦点；
     // 只发一张"焦点票"，由下面的 LaunchedEffect 在组合所在的 UI 上下文里核对票上的书和出处仍是当前的，才真正请求焦点。
@@ -114,7 +115,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                 returnFromReader(); true
             } else false
         }.onFocusChanged { readerHasFocus = it.hasFocus }
-            .focusRequester(readerFocus).focusable(enabled = ui.screen == BookScreen.READER && ui.source != null),
+            .focusable(enabled = ui.screen == BookScreen.READER && ui.source != null),
             color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
             Box(Modifier.fillMaxSize()) {
                 Column {
@@ -148,7 +149,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 onAnswer = { drafts.saveReview(review, it) })
                         }
                         ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library, learningSupport,
-                            practiceSource = practiceSource,
+                            practiceSource = practiceSource, pageFocus = readerFocus,
                             onNoteSession = { noteReader = it },
                             onPage = { page ->
                                 val restoreFocus = ui.source != null && readerHasFocus

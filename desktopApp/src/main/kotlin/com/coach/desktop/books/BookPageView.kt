@@ -128,7 +128,7 @@ internal fun BookPageView(
             return@BoxWithConstraints
         }
         val first = pages.pageContaining(state.anchor)
-        LaunchedEffect(pages, first) { onPosition(pages[first].anchor.importPage) }
+        LaunchedEffect(pages, first, state.anchor) { onPosition(pages[first].anchor.importPage) }
         val fade = remember { Animatable(1f) }
         LaunchedEffect(first, pages) { fade.snapTo(if (reduced) 1f else 0f); fade.animateTo(1f, tween(if (reduced) 0 else 150)) }
         var wheelAt by remember { mutableLongStateOf(0L) }

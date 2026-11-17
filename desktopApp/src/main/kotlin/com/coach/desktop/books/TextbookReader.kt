@@ -75,7 +75,7 @@ private sealed interface PageImage {
 }
 
 @Composable
-internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: BookLearningSupport, practiceSource: PracticeSource?, onNoteSession: (ReaderSession?) -> Unit, onPage: (Int) -> Unit, onBack: () -> Unit, onLearn: () -> Unit) {
+internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: BookLearningSupport, practiceSource: PracticeSource?, pageFocus: FocusRequester, onNoteSession: (ReaderSession?) -> Unit, onPage: (Int) -> Unit, onBack: () -> Unit, onLearn: () -> Unit) {
     val book = checkNotNull(ui.book)
     val page = book.page(ui.page)
     if (page == null) {
@@ -166,7 +166,6 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     // 翻页键只到得了拿着键盘焦点的那棵子树，外壳的 Surface 只处理 Esc，所以阅读区自己是一个焦点目标：
     // 换页、合上批注编辑区、离开页码框之后把焦点收回来，方向键马上又能用。
     // 正在输入文字时不接管：提问弹窗、页码框、批注编辑区自己要用方向键。
-    val pageFocus = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
     var jumpFocused by remember { mutableStateOf(false) }
     var pageFocused by remember { mutableStateOf(false) }
@@ -176,17 +175,22 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
         // A successful request already owns focus. Do not leave another frame's
         // request pending: it could steal focus from a newly clicked page field.
         repeat(5) {
-            if (pageFocused) return@LaunchedEffect
             withFrameNanos { }
-            if (runCatching { pageFocus.requestFocus() }.getOrDefault(false)) return@LaunchedEffect
+            // Mouse-up can finish moving focus to the paging button after its
+            // click changed ui.page. Inspect focus once that frame has settled.
+            if (pageFocused) return@LaunchedEffect
+            val requested = runCatching { pageFocus.requestFocus() }.getOrDefault(false)
+            if (requested) return@LaunchedEffect
         }
     }
     val turnTo: (Int?) -> Unit = { pageNumber ->
         if (pageNumber != null && book.page(pageNumber) != null) {
             paging.anchor = BookPageAnchor(pageNumber)
-            paging.publishedImportPage = pageNumber
-            onPage(pageNumber)
-            session.goToPage(pageNumber)
+            val visiblePage = if (textView && paging.pages.isNotEmpty())
+                paging.pages[paging.index].anchor.importPage else pageNumber
+            paging.publishedImportPage = visiblePage
+            onPage(visiblePage)
+            session.goToPage(visiblePage)
         }
     }
 
@@ -261,6 +265,8 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     val sourceWarning = if (source == null) null else when {
         textView && practiceSource?.warning != null -> practiceSource.warning
         textView && textTarget != null && !textTargetValid -> "无法确认原句：这一页的内容变了，这条出处无法定位。"
+        textView && citedRange == null && !quoteAnchor.isNullOrEmpty() &&
+            page.text.indexOf(quoteAnchor) != page.text.lastIndexOf(quoteAnchor) -> "无法确认原句：这一页有多处相同内容。"
         textView -> null
         practiceSource?.warning != null -> practiceSource.warning
         practiceSource?.page != null && practiceSource.page != ui.page -> "无法确认原句：本题依据在第 ${practiceSource.page} 页。"

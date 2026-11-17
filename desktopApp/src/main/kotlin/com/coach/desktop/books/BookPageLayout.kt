@@ -72,7 +72,7 @@ internal fun placeBookFigure(block: BookFigureBlock, columnPx: Int, bodyPx: Int,
         (block.widthPx * scale).toInt().coerceAtLeast(1), height, block.captionHeightPx)
 }
 
-private data class BookChapter(val start: Int, val end: Int, val title: String?)
+private data class BookChapter(val start: Int, val end: Int, val title: String?, val headingStart: Int)
 private data class BookPageText(val text: AnnotatedString, val placeholders: List<AnnotatedString.Range<Placeholder>>)
 
 /** TextMeasurer and Text receive identical styles, placeholders and integer column width. */
@@ -100,25 +100,38 @@ internal class BookPageLayouter(
         val headings = (lineHeadings + starts.mapNotNull { (base, page) ->
             BookText.chapterTitle(page.text.lineSequence().firstOrNull().orEmpty())?.let { base to it }
         }).distinctBy { it.first }.sortedBy { it.first }
-        val boundaries = (listOf(0) + headings.map { it.first } + source.length).distinct().sorted()
-        val chapters = boundaries.zipWithNext { start, end -> BookChapter(start, end, headings.firstOrNull { it.first == start }?.second) }
+        // Physical-page metadata belongs to the following heading. Keep its source
+        // coordinates, without manufacturing a separate preamble sheet for it.
+        val physicalMarker = Regex("<!--\\s*PDF 第 \\d+ 页 · 书第 .*? 页\\s*-->")
+        val chapterStarts = headings.map { (heading, title) ->
+            val base = starts.last { it.first <= heading }.first
+            val prefix = source.substring(base, heading)
+            val start = if (prefix.lineSequence().all { it.isBlank() || physicalMarker.matches(it.trim()) }) base else heading
+            Triple(start, heading, title)
+        }.distinctBy { it.first }
+        val boundaries = (listOf(0) + chapterStarts.map { it.first } + source.length).distinct().sorted()
+        val chapters = boundaries.zipWithNext { start, end ->
+            val heading = chapterStarts.firstOrNull { it.first == start }
+            BookChapter(start, end, heading?.third, heading?.second ?: start)
+        }
         val result = mutableListOf<BookLaidPage>()
         for ((chapterIndex, chapter) in chapters.withIndex()) {
             val raw = source.substring(chapter.start, chapter.end)
             // A recognized chapter title is a heading even in plain text/PDF. Do not
             // let PDF hard-line joining merge it into the first body paragraph.
-            val headingEnd = if (chapter.title != null) raw.indexOf('\n').let { if (it < 0) raw.length else it + 1 } else 0
+            val headingStart = chapter.headingStart - chapter.start
+            val headingEnd = if (chapter.title != null) raw.indexOf('\n', headingStart).let { if (it < 0) raw.length else it + 1 } else 0
             val head = bookParagraphs(raw.take(headingEnd), pdf = false)
             val tail = bookParagraphs(raw.substring(headingEnd), pdf = pdf)
             val model = BookParagraphs(head.display + tail.display,
-                head.paragraphs.map { it.copy(kind = BookParagraph.Kind.HEADING) } +
+                head.paragraphs.map { if (it.start >= headingStart) it.copy(kind = BookParagraph.Kind.HEADING) else it } +
                     tail.paragraphs.mapIndexed { i, p -> p.copy(start = p.start + headingEnd, end = p.end + headingEnd,
                         afterHeading = p.afterHeading || (i == 0 && headingEnd > 0)) })
             val original = buildAnnotatedString {
                 append(raw)
-                if (chapter.title != null && markdownHeadings(raw).none { it.marks.first == 0 }) {
-                    val end = raw.indexOf('\n').let { if (it < 0) raw.length else it }
-                    addStyle(typography.chapter, 0, end)
+                if (chapter.title != null && markdownHeadings(raw).none { it.marks.first == headingStart }) {
+                    val end = raw.indexOf('\n', headingStart).let { if (it < 0) raw.length else it }
+                    addStyle(typography.chapter, headingStart, end)
                 }
                 markdownHeadings(raw).forEach {
                     addStyle(if (it.level == 1) typography.chapter else typography.section, it.title.first, it.title.last + 1)

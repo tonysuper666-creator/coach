@@ -17,6 +17,7 @@ import shutil
 from benchmark import outside_repo
 from crop_candidates import boundary, prepare, preview_geometry_safe, SCALE
 from source_payload import build_payload, contains, crop_rect, intersects, utf16
+from source_line_candidates import proposals as source_line_proposals
 
 PROSE = {"text", "paragraph", "heading", "list", "footnote"}
 KINDS = {"table": "TABLE", "formula": "FORMULA", "figure": "ILLUSTRATION"}
@@ -45,12 +46,15 @@ def plan_page(probe, layout, pixels, width, height, scale=SCALE):
                                          for i, v in enumerate(part["source_region"])]
     rows = []
 
-    def annotate(identity, evidence, owners, allowed_parts=()):
+    def annotate(identity, evidence, owners, allowed_parts=(), candidate_notes=(), part_boxes=None):
+        regions = boxes if part_boxes is None else part_boxes
         row = {"id": identity, "evidence": evidence, "owners": sorted(owners),
                "semantic_status": "unverified", "import_allowed": False,
                "hide_source_allowed": False, "replacement_range": None,
                "blockers": [], "warnings": ["complete_object_labels_unverified"],
                "selection": None}
+        if candidate_notes:
+            row["warnings"].append("source_line_ownership_unverified")
         if evidence["status"] != "boundary_verified":
             row["blockers"].append(evidence["status"])
             return row
@@ -63,7 +67,10 @@ def plan_page(probe, layout, pixels, width, height, scale=SCALE):
         owned_notes = {p["id"] for o in owners for p in links.get(o, {}).get("source_parts", [])
                        if p["role"] == "footnote" and
                        links[o]["placement_status"] == "source_parts_verified"}
-        prose = [b["id"] for b in blocks if b["kind"] in PROSE and b["id"] not in owned_notes and
+        # The extra source-line alternative may include ONLY its exact candidate
+        # blocks. This does not change their role or exempt them in other rows.
+        prose = [b["id"] for b in blocks if b["kind"] in PROSE and
+                 b["id"] not in owned_notes and b["id"] not in candidate_notes and
                  any(intersects(boxes[b["id"]], g["bbox"]) for g in selected)]
         row["prose_block_ids"] = prose
         if prose:
@@ -82,11 +89,11 @@ def plan_page(probe, layout, pixels, width, height, scale=SCALE):
                 elif not all(contains(box, boxes[p["id"]], epsilon=0) for p in group["source_parts"]
                              if p["role"] == "footnote"):
                     row["blockers"].append("explicit_notes_outside_crop")
-        if allowed_parts and any(not any(contains(boxes[part], g["bbox"]) for part in allowed_parts)
+        if allowed_parts and any(not any(contains(regions[part], g["bbox"]) for part in allowed_parts)
                                  for g in selected):
             row["blockers"].append("unowned_glyph_in_expansion")
         # Even an explicit caption link does not establish complete notes/credits.
-        # Missing links are never filled from proximity or a caption-looking string.
+        # Missing trusted links are never filled from proximity or a label string.
         if not owners or any(not by_id[o].get("caption_refs") for o in owners):
             row["warnings"].append("labels_not_established")
         row["blockers"] = sorted(set(row["blockers"]))
@@ -114,6 +121,21 @@ def plan_page(probe, layout, pixels, width, height, scale=SCALE):
         evidence["adjusted_note_part_ids"] = [p["id"] for p in group["source_parts"]
                                               if p.get("geometry_evidence")]
         rows.append(annotate("labels-" + str(len(rows)), evidence, {group["owner_id"]}, parts))
+
+    # Source markers and alignment are hypotheses, not explicit model links.
+    # Preserve every original alternative; do not add these to verified groups.
+    if safe:
+        for proposal in source_line_proposals(probe, layout, payload, boxes):
+            notes = [p["id"] for p in proposal["source_parts"]]
+            parts = [*proposal["base_part_ids"], *notes]
+            regions = dict(boxes)
+            for part in proposal["source_parts"]:
+                regions[part["id"]] = [v * (probe["width"] if i % 2 == 0 else probe["height"])
+                                       for i, v in enumerate(part["source_region"])]
+            evidence = boundary(probe, union([regions[p] for p in parts]), pixels, width, height, scale)
+            evidence.update(source_line_hypothesis=proposal)
+            rows.append(annotate("source-lines-" + str(len(rows)), evidence,
+                                 {proposal["owner_id"]}, parts, notes, regions))
 
     # Lossless folding: only equal pixel rectangles; conflicting kinds stay generic.
     # Preserve all evidence and use the union of vetoes; a clean C proposal must

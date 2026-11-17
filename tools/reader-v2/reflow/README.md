@@ -765,6 +765,41 @@ review or a completeness rate. Every selection remains pending. Semantic
 deduplication, missing source/credit association and untagged cross-page tables
 remain unresolved; the old 66-candidate classification is not replaced.
 
+### Unlinked source lines: additional review alternatives
+
+`source_line_candidates.py` proposes a separate, explicitly **unverified**
+alternative when a whole model block starts with `Source:`, `Sources:`, `来源：`
+or `资料来源:`. The entire block must match its precise canonical glyph slices
+(ignoring whitespace only), have one provenance in the same conversion scope,
+and not be claimed by an explicit caption/note reference. A source below the
+object and its verified labels/notes must be within 24pt and overlap at least
+half the narrower width. Exactly one table/figure may be geometrically plausible;
+that owner must already have verified explicit labels. These are bounded
+candidate rules, not proof of ownership or completeness.
+
+The suggested region includes complete glyph envelopes within the existing
+mapper's 0.05pt precision tolerance; larger partial glyphs are refused. Each source
+part keeps its own exact ranges, including discontiguous ranges, and an
+`ownership_status: unverified` marker. The planner preserves the original
+alternatives and `object_label_groups` unchanged. It exempts only these exact
+source blocks from the prose veto in the additional alternative; intervening
+prose, unowned glyphs, unsafe geometry and raster boundaries still veto it.
+Every alternative retains the completeness warning, with an extra
+`source_line_ownership_unverified` warning. Output remains zero approvals,
+no import or text hiding permission, and no replacement range. Production preview
+and full-page human review remain necessary.
+
+On the same private 20 pages and reused layouts, this adds 5 source-line
+alternatives: 206 total proposals, 41 pending selections, all accepted by fresh
+individual production previews, with zero approvals/imports. The original 36
+selection files are byte-identical. Executor inspection of the 5 full-size crops
+against 3 full source pages found titles, explicit notes where present, and source
+lines included without adjacent body text. This is not independent review, a
+semantic deduplication result, an object completeness rate or reader retention.
+One other multiline source block does not match canonical text and stays refused.
+Historical 66-candidate decisions remain unchanged; no book-library write, native
+source persistence or hiding regression was performed in this follow-up.
+
 ### Regression commands
 
 ```sh
@@ -774,6 +809,8 @@ tools/dev/heavy --local python3 tools/reader-v2/reflow/verify_probe_geometry.py 
 tools/dev/heavy --local "$DOCLING_PYTHON" tools/reader-v2/reflow/verify_object_review_plan.py \
   --pdfbox-classpath "$PDFBOX_CLASSPATH"
 tools/dev/heavy --local "$DOCLING_PYTHON" tools/reader-v2/reflow/verify_explicit_notes.py \
+  --pdfbox-classpath "$PDFBOX_CLASSPATH"
+tools/dev/heavy --local "$DOCLING_PYTHON" tools/reader-v2/reflow/verify_source_lines.py \
   --pdfbox-classpath "$PDFBOX_CLASSPATH"
 tools/dev/heavy --local "$DOCLING_PYTHON" tools/reader-v2/reflow/verify_crop_candidates.py \
   --pdfbox-classpath "$PDFBOX_CLASSPATH"
@@ -788,7 +825,7 @@ DOCLING_ARTIFACTS_PATH="$DOCLING_MODELS" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
   -m unittest discover -s tools/reader-v2/layout/tests -v
 ```
 
-The 107 reflow tests (Pillow required for the 16 workspace/edit tests) cover diff accounting, private-output guards, stale identities,
+The 122 reflow tests (Pillow required for the 16 workspace/edit tests) cover diff accounting, private-output guards, stale identities,
 UTF-16/surrogate mappings, discontiguous ranges, table cuts/headers/rowspans,
 exact cell/glyph evidence and its refusal cases, touching vs gapped PDF rules,
 caption fragment references, scoped cross-page table partitions and header copies,
@@ -829,6 +866,15 @@ glyphs and PDFium rasters on the existing four-page fixture: canonical pages
 remain unchanged, a clipped note edge yields one pending expansion, and changed,
 incomplete or elsewhere text plus intervening unowned glyphs are refused. Known
 layout roles isolate mapping; this does not test note recognition or completeness.
+Fifteen source-line tests add marker/whole-text/scope/unique-owner checks,
+precision-envelope and discontiguous mappings, intervening prose/unowned glyph
+vetoes, preservation of original alternatives and explicit groups, and unsafe
+geometry refusal. The previous 107 tests are unchanged. `verify_source_lines.py`
+requires reportlab in addition to PDFium/Pillow and Java 17/PDFBox. It generates
+two own pages (normal/CropBox), checks exact canonical text and multiline source
+slices, preserves explicit groups/old alternatives, and refuses changed/incomplete
+text, ambiguous owners and body intrusions. It uses known fixture boxes, not model
+recognition, and grants no approval/import/hiding permission.
 The Java integration compiles with `--release 17`, generates four self-authored
 PDF pages and compares against an independent plain PDFTextStripper baseline:
 120 glyph spans, segmented table rules, borderless table/header evidence,

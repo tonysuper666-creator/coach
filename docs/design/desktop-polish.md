@@ -117,7 +117,7 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | --- | --- | --- | --- | --- |
 | M1 | 悬停状态 | 已对（共享按钮） | `PaperButton.kt`、`ButtonFeedback.jvm.kt`；TON-1657 真窗口 `before/` → `after/` | PaperButton / PrimaryButton 使用既有 token 叠色，悬停浅底、按下更强，无桌面水波纹；禁用不响应。选项行不在本卡范围 |
 | M2 | 指针形状 | 已对（按钮与正文） | `ButtonFeedback.jvm.kt:pointerHoverIcon`；`TextbookReader.kt:319` | 启用按钮为手形，禁用为默认指针；阅读页正文已是 I 形（`TEXT_CURSOR`）。desktopApp 内 `pointerHoverIcon` 0 → 1 处，选择与批注区仍是默认指针 |
-| M3 | 提示与延迟 | 已对（组件与导航示范） | `V7Tooltip.kt`、`DeskNavIcon.kt`；`V7DesktopFeedbackTest` | 导航图标悬停 500ms 出纸面提示，离开消失，细边及 UI 字体；阅读页底栏三处直接用同一个 `V7Tooltip`（500ms），本文件不再有私有的提示实现 |
+| M3 | 提示与延迟 | 已对（组件与导航示范） | `V7Tooltip.kt`、`DeskNavIcon.kt`；`V7DesktopFeedbackTest` | 导航图标悬停 500ms 出纸面提示，离开消失，细边及 UI 字体；阅读页底栏三处直接用同一个 `V7Tooltip`（500ms），本文件不再有私有的提示实现。提示固定放在锚点正上方、隔 6dp、水平居中并夹在窗口左右边内，上方真放不下才翻到下方，任何情况都不压住锚点（压住会当成离开，提示反复闪） |
 | M4 | 右键菜单 | 未验证 | `SelectionContainer` 4 处 | Compose 默认右键菜单的文字是否中文、是否只有「复制」，需真窗口核 |
 
 **排版**

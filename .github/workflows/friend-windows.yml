@@ -52,7 +52,7 @@ jobs:
       # 干净机器装通：装 MSI → 起真窗口 → 截图（标题栏、任务栏、开始菜单）→ 卸载，留日志。
       # 这台 runner 没有 tailnet、没有账号、没有教材，截图里只有空书架。
       - name: Install the MSI, launch it, then uninstall on this clean runner
-        shell: pwsh
+        shell: powershell
         run: |
           $msi = (Get-ChildItem desktopApp/build/compose/binaries/main/msi/*.msi | Select-Object -First 1).FullName
           ./tools/smoke/msi-install.ps1 -Msi $msi -OutDir evidence/install

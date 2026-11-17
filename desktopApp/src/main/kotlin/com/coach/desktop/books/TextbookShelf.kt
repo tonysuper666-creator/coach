@@ -4,6 +4,10 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
@@ -16,6 +20,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -26,6 +33,8 @@ import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.PrimaryButton
+import com.coach.ui.v7.LocalV7Fonts
+import com.coach.ui.v7.V7Scrollbar
 import com.coach.ui.v7.V7TextButton
 import com.coach.ui.v7.paperShadow
 import com.coach.ui.v7.v7FocusRing
@@ -35,47 +44,105 @@ internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String)
     onPath: (LearningPath) -> Unit) {
     val book = ui.book
     val colors = CoachTheme.colors
-    // V7 keeps every page on one sheet of paper with the desk showing around it, the same sheet the
-    // Today and Course pages sit on; layers are told apart by colour and space, never by outlines.
-    Box(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 12.dp), contentAlignment = Alignment.TopCenter) {
+    val scroll = rememberScrollState()
+    val line = if (colors.dark) CoachV7.Dark.line else CoachV7.Light.line
+    BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = CoachV7.Space.s6, vertical = CoachV7.Space.s3), contentAlignment = Alignment.TopCenter) {
+        val sectionSpacing = if (maxHeight < 560.dp) CoachV7.Space.s2 else CoachV7.Space.s5
         Box(Modifier.widthIn(max = 1000.dp).fillMaxWidth().fillMaxHeight().paperShadow("sheet", colors.dark)
             .clip(RoundedCornerShape(CoachV7.Radius.sheet)).background(colors.surface1).testTag("shelf-sheet")) {
-            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(36.dp),
-                verticalArrangement = Arrangement.spacedBy(22.dp)) {
-                Text("书架", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.testTag("library-title"))
+            Column(Modifier.fillMaxWidth().verticalScroll(scroll)
+                .padding(start = CoachV7.Space.s7, top = CoachV7.Space.s7, end = CoachV7.Space.s8, bottom = CoachV7.Space.s8),
+                verticalArrangement = Arrangement.spacedBy(sectionSpacing)) {
+                Text("书架", style = MaterialTheme.typography.titleLarge, modifier = Modifier.testTag("library-title"))
                 Text("带来一本教材，从想读的地方开始。", color = colors.fgSecondary)
-                PrimaryButton(onImport, enabled = !ui.busy, modifier = Modifier.testTag("upload-textbook")) { Text("上传教材") }
+                if (book == null) {
+                    PrimaryButton(onImport, enabled = !ui.busy, modifier = Modifier.testTag("upload-textbook")) { Text("上传教材") }
+                } else {
+                    V7TextButton(onImport, enabled = !ui.busy, modifier = Modifier.testTag("upload-textbook")) { Text("上传教材") }
+                }
                 Text("${BookFormats.description} · 教材和进度保存在这台电脑", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                 if (book == null) {
                     Text("书架还是空的", style = MaterialTheme.typography.titleLarge)
                     Text("上传后，可以直接开始学，也可以先当一本书读。", color = colors.fgSecondary)
                 } else {
-                    Text(book.title, style = MaterialTheme.typography.titleLarge)
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        EntryCard("看书", "翻开第 ${book.readingPage} 页，可就原文段落提问。", "home-read", !ui.busy, Modifier.weight(1f), onRead)
-                        EntryCard("边看边学", "先看讲解，再选择是否做题。", "home-guided", !ui.busy, Modifier.weight(1f)) { onPath(LearningPath.READ_AND_LEARN) }
-                        EntryCard("做题学", "先试题，答后看讲解；原文按需打开。", "home-question", !ui.busy, Modifier.weight(1f)) { onPath(LearningPath.QUESTION_FIRST) }
-                    }
+                    Text(book.title, style = MaterialTheme.typography.headlineLarge, fontFamily = LocalV7Fonts.current.display)
                     PrimaryButton(onLearn, enabled = !ui.busy, modifier = Modifier.testTag("home-learn")) {
-                        // An old book without a chosen walk starts learning here; saying "continue reading" while the
-                        // button opens the start-learning prompt is what this label used to get wrong.
                         Text(if (!ui.learningPathSaved && !book.learning) "开始学"
                         else "继续${ui.learningPath.label}" + if (ui.learningPath == LearningPath.READ) " · 第 ${book.readingPage} 页" else " · 第 ${book.lessonIndex + 1} 节")
                     }
-                    Spacer(Modifier.height(10.dp))
-                    Text("全部教材", style = MaterialTheme.typography.titleMedium)
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column {
+                        ShelfDivider(line)
+                        EntryRow("看书", "翻开第 ${book.readingPage} 页，可就原文段落提问。", "home-read", !ui.busy, onRead)
+                        ShelfDivider(line)
+                        EntryRow("边看边学", "先看讲解，再选择是否做题。", "home-guided", !ui.busy) { onPath(LearningPath.READ_AND_LEARN) }
+                        ShelfDivider(line)
+                        EntryRow("做题学", "先试题，答后看讲解；原文按需打开。", "home-question", !ui.busy) { onPath(LearningPath.QUESTION_FIRST) }
+                        ShelfDivider(line)
+                    }
+                    Text("全部教材", style = MaterialTheme.typography.titleMedium, fontFamily = LocalV7Fonts.current.display)
+                    Column {
+                        ShelfDivider(line)
                         for (item in ui.catalog) {
-                            PaperTile(!ui.busy, Modifier.fillMaxWidth().testTag("book-${item.id}"), { onSelect(item.id) },
-                                PaddingValues(horizontal = 18.dp, vertical = 12.dp), 4.dp) {
-                                Text(item.title)
-                                Text("${item.pageCount} 页 · 读到第 ${item.readingPage} 页${if (item.learning) " · 在学" else ""}",
-                                    style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
-                            }
+                            ShelfBookRow(item, current = item.id == book.id, enabled = !ui.busy) { onSelect(item.id) }
+                            ShelfDivider(line)
                         }
                     }
                 }
             }
+            V7Scrollbar(rememberScrollbarAdapter(scroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = CoachV7.Space.s4))
+        }
+    }
+}
+
+@Composable
+private fun ShelfDivider(color: androidx.compose.ui.graphics.Color) {
+    Spacer(Modifier.fillMaxWidth().height(1.dp).background(color))
+}
+
+/** Matches the shared V7 button hover, press, pointer and keyboard focus behavior on the sheet. */
+@Composable
+private fun Modifier.shelfClick(enabled: Boolean, onClick: () -> Unit): Modifier {
+    val colors = CoachTheme.colors
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val pressed by interaction.collectIsPressedAsState()
+    val wash = if (pressed) {
+        if (colors.dark) CoachV7.Dark.selBg else CoachV7.Light.selBg
+    } else {
+        if (colors.dark) CoachV7.Dark.zhuWash else CoachV7.Light.zhuWash
+    }
+    val shape = RoundedCornerShape(CoachV7.Radius.s)
+    return v7FocusRing(shape).clip(shape)
+        .background(if (enabled && (hovered || pressed)) wash.compositeOver(colors.surface1) else androidx.compose.ui.graphics.Color.Transparent)
+        .pointerHoverIcon(if (enabled) PointerIcon.Hand else PointerIcon.Default)
+        .clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
+        .alpha(if (enabled) 1f else .5f)
+}
+
+@Composable
+private fun EntryRow(title: String, description: String, tag: String, enabled: Boolean, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().testTag(tag).shelfClick(enabled, onClick)
+        .padding(horizontal = CoachV7.Space.s3, vertical = CoachV7.Space.s3),
+        horizontalArrangement = Arrangement.spacedBy(CoachV7.Space.s4), verticalAlignment = Alignment.CenterVertically) {
+        Text(title, modifier = Modifier.width(112.dp), style = MaterialTheme.typography.titleMedium, fontFamily = LocalV7Fonts.current.display)
+        Text(description, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = CoachTheme.colors.fgSecondary)
+    }
+}
+
+@Composable
+private fun ShelfBookRow(item: BookSummary, current: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    val colors = CoachTheme.colors
+    val wash = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
+    Row(Modifier.fillMaxWidth().testTag("book-${item.id}")
+        .background(if (current) wash else androidx.compose.ui.graphics.Color.Transparent)
+        .shelfClick(enabled, onClick).padding(horizontal = CoachV7.Space.s3, vertical = CoachV7.Space.s3),
+        horizontalArrangement = Arrangement.spacedBy(CoachV7.Space.s3), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.width(CoachV7.Space.s1).height(CoachV7.Space.s7)
+            .background(if (current) v7Pine() else androidx.compose.ui.graphics.Color.Transparent))
+        Column(verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s1)) {
+            Text(item.title, style = MaterialTheme.typography.titleMedium, fontFamily = LocalV7Fonts.current.display)
+            Text("${item.pageCount} 页 · 读到第 ${item.readingPage} 页${if (item.learning) " · 在学" else ""}",
+                style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, fontFamily = LocalV7Fonts.current.numbers)
         }
     }
 }
@@ -89,14 +156,6 @@ internal fun PaperTile(enabled: Boolean, modifier: Modifier, onClick: () -> Unit
     Column(modifier.v7FocusRing(shape).paperShadow("card", colors.dark).clip(shape).background(colors.surface2)
         .clickable(enabled = enabled, role = Role.Button, onClick = onClick).alpha(if (enabled) 1f else .5f).padding(padding),
         verticalArrangement = Arrangement.spacedBy(spacing), content = content)
-}
-
-@Composable
-private fun EntryCard(title: String, description: String, tag: String, enabled: Boolean, modifier: Modifier, onClick: () -> Unit) {
-    PaperTile(enabled, modifier.heightIn(min = 148.dp).testTag(tag), onClick, PaddingValues(20.dp), 12.dp) {
-        Text(title, style = MaterialTheme.typography.titleLarge)
-        Text(description, style = MaterialTheme.typography.bodyMedium, color = CoachTheme.colors.fgSecondary)
-    }
 }
 
 /**

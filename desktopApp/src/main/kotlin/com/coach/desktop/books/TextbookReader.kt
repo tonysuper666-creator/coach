@@ -112,13 +112,20 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
         }
         // A lesson opens at its body evidence. Imported physical-page markers and
         // chapter titles can precede that evidence on a different laid-out page.
-        val block = blocks.firstOrNull {
-            !it.heading && !Regex("<!--\\s*PDF 第 (\\d+) 页 · 书第 (.*?) 页\\s*-->").matches(it.text.trim())
-        } ?: blocks.firstOrNull()
+        val physicalMarker = Regex("<!--\\s*PDF 第 (\\d+) 页 · 书第 (.*?) 页\\s*-->")
+        val block = blocks.firstOrNull { !it.heading && !physicalMarker.matches(it.text.trim()) }
+            ?: blocks.firstOrNull { !physicalMarker.matches(it.text.trim()) }
+        // Older imported lessons can consist only of the physical-page marker.
+        // Keep their source page and highlight, but open the page's body context
+        // rather than a metadata-only preamble sheet. Exact citations still win.
+        val bodyContext = if (block == null && blocks.isNotEmpty()) bookParagraphs(stored, pdf = false)
+            .paragraphs.firstOrNull { it.kind == BookParagraph.Kind.BODY &&
+                !physicalMarker.matches(stored.substring(it.start, it.end).trim()) }?.start else null
         val offset = when {
             target != null && target.start >= 0 && target.end > target.start && target.end <= stored.length &&
                 stored.substring(target.start, target.end) == target.quote -> target.start
             block != null -> block.start
+            bodyContext != null -> bodyContext
             else -> practiceSource?.quote?.let { quote -> stored.indexOf(quote).takeIf {
                 it >= 0 && stored.indexOf(quote, it + 1) < 0
             } } ?: 0

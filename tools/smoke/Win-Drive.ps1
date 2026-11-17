@@ -8,7 +8,9 @@ public class WD {
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   public delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc p, IntPtr l);
-  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
@@ -121,6 +123,16 @@ function Invoke-BackgroundAction([string]$path, [string]$value = '', [string]$sa
 }
 function Get-Rect { $r = New-Object WD+RECT; [WD]::GetWindowRect($script:Win, [ref]$r) | Out-Null; $r }
 
+# Names who holds the foreground when we give up, so a timeout can be attributed
+# to another run or program. Process name and window class only; never titles.
+function Get-ForegroundSummary {
+    $fg = [WD]::GetForegroundWindow(); $owner = 0
+    [WD]::GetWindowThreadProcessId($fg, [ref]$owner) | Out-Null
+    $cls = New-Object Text.StringBuilder 128; [WD]::GetClassName($fg, $cls, 128) | Out-Null
+    $name = (Get-Process -Id $owner -ErrorAction SilentlyContinue).ProcessName
+    $whose = if ($owner -eq $script:AppPid) { 'this run' } else { 'other' }
+    "$name pid=$owner class=$($cls.ToString()) $whose"
+}
 # All drivers share this mutex, but hold it for one input/capture only.
 # OCR, network waits, compilation and whole smoke runs stay outside.
 function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]::Zero) {
@@ -149,7 +161,7 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
             }
             Start-Sleep -Milliseconds (Get-Random -Minimum 50 -Maximum 200)
         }
-        throw 'WIN_DRIVE_TIMEOUT: could not regain our foreground for this action'
+        throw "WIN_DRIVE_TIMEOUT: could not regain our foreground for this action (foreground: $(Get-ForegroundSummary))"
     } finally { $mutex.Dispose() }
 }
 function Save-Shot([string]$path, [IntPtr]$Window = [IntPtr]::Zero) {
@@ -283,24 +295,34 @@ function Wait-Text([string]$dir, [string]$name, [string[]]$needles, [int]$timeou
 }
 
 # Find a visible top-level window of the app's process whose title starts with $prefix (native file dialog etc.).
-function Find-AppWindowByTitle([string]$prefix) {
-    $script:Found = [IntPtr]::Zero
+function Find-AppWindowsByTitle([string]$prefix) {
+    $script:FoundAll = New-Object Collections.Generic.List[IntPtr]
     [WD]::EnumWindows({ param($x, $l)
         $p = 0; [WD]::GetWindowThreadProcessId($x, [ref]$p) | Out-Null
         if ($p -eq $script:AppPid -and [WD]::IsWindowVisible($x)) {
             $sb = New-Object Text.StringBuilder 256; [WD]::GetWindowText($x, $sb, 256) | Out-Null
-            if ($sb.ToString().StartsWith($prefix)) { $script:Found = $x } }
+            if ($sb.ToString().StartsWith($prefix)) { $script:FoundAll.Add($x) } }
         return $true }, [IntPtr]::Zero) | Out-Null
-    return $script:Found
+    return ,$script:FoundAll
+}
+function Find-AppWindowByTitle([string]$prefix) {
+    $all = Find-AppWindowsByTitle $prefix
+    if ($all.Count) { return $all[$all.Count - 1] }
+    return [IntPtr]::Zero
 }
 
 # Dialog discovery and waiting do not hold the mutex. Filename filling is
 # idempotent on retry; each Enter is followed by an unlocked wait.
+# $script:ChooseFileWhy says why it returned $false.
 function Choose-File([string]$dialogTitlePrefix, [string]$path, [int]$timeoutSec = 20) {
     if (Has-BackgroundDriver) { Invoke-BackgroundAction "/choose-file" $path; return $true }
+    # The native open dialog rejects 'D:/x/y.pdf' with a modal error box that
+    # carries the same title; give it the Windows form of the path.
+    $path = [IO.Path]::GetFullPath($path)
+    $script:ChooseFileWhy = $null
     $deadline = (Get-Date).AddSeconds($timeoutSec); $h = [IntPtr]::Zero
     while ($h -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500; $h = Find-AppWindowByTitle $dialogTitlePrefix }
-    if ($h -eq [IntPtr]::Zero) { return $false }
+    if ($h -eq [IntPtr]::Zero) { $script:ChooseFileWhy = '没有弹出选书对话框'; return $false }
     Invoke-ForegroundStep -Window $h -Action {
         [System.Windows.Forms.SendKeys]::SendWait('%n')
         Assert-OurForeground
@@ -309,14 +331,26 @@ function Choose-File([string]$dialogTitlePrefix, [string]$path, [int]$timeoutSec
         [System.Windows.Forms.SendKeys]::SendWait((ConvertTo-SendKeysLiteral $path))
     }
     for ($i = 0; $i -lt 3; $i++) {
-        $h = Find-AppWindowByTitle $dialogTitlePrefix
-        if ($h -eq [IntPtr]::Zero) { return $true }
-        Invoke-ForegroundStep -Window $h -Action {
+        $all = Find-AppWindowsByTitle $dialogTitlePrefix
+        if (-not $all.Count) { return $true }
+        if ($all.Count -gt 1 -or -not [WD]::IsWindowEnabled($all[0])) {
+            # The dialog answered with its own error box. Close both now: a modal
+            # box left behind keeps taking the foreground from every other run.
+            $script:ChooseFileWhy = '选书对话框弹出了错误提示，没有接受这本书的路径'
+            foreach ($w in @($all | Where-Object { [WD]::IsWindowEnabled($_) }) + @($all | Where-Object { -not [WD]::IsWindowEnabled($_) })) {
+                try { Invoke-ForegroundStep -Window $w -Action { [System.Windows.Forms.SendKeys]::SendWait('{ESC}') } } catch { }
+                Start-Sleep -Milliseconds 500
+            }
+            return $false
+        }
+        Invoke-ForegroundStep -Window $all[0] -Action {
             Assert-OurForeground; [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
         }
         Start-Sleep -Seconds 2
     }
-    return ((Find-AppWindowByTitle $dialogTitlePrefix) -eq [IntPtr]::Zero)
+    if ((Find-AppWindowByTitle $dialogTitlePrefix) -eq [IntPtr]::Zero) { return $true }
+    $script:ChooseFileWhy = '选书对话框按回车后没有关闭'
+    return $false
 }
 function ConvertTo-SendKeysLiteral([string]$text) {
     # One pass avoids corrupting brace escapes with later replacements.

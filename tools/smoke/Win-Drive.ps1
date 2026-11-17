@@ -14,6 +14,20 @@ public class WD {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern uint GetQueueStatus(uint flags);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  public static void Activate(IntPtr h) {
+    if (GetForegroundWindow() == h) return;
+    uint ignored;
+    uint foreground = GetWindowThreadProcessId(GetForegroundWindow(), out ignored);
+    uint caller = GetCurrentThreadId();
+    GetQueueStatus(0x04FF); // Ensure the driving thread has an input queue.
+    bool attached = foreground != 0 && foreground != caller && AttachThreadInput(caller, foreground, true);
+    try { BringWindowToTop(h); SetForegroundWindow(h); }
+    finally { if (attached) AttachThreadInput(caller, foreground, false); }
+  }
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, IntPtr e);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
@@ -60,12 +74,52 @@ function Stop-MyClient { if ($script:AppPid) { Stop-Process -Id $script:AppPid -
 
 function Get-Rect { $r = New-Object WD+RECT; [WD]::GetWindowRect($script:Win, [ref]$r) | Out-Null; $r }
 
-function Save-Shot([string]$path) {
-    [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 300
-    $r = Get-Rect; $w = $r.R - $r.L; $h = $r.B - $r.T
-    $bmp = New-Object System.Drawing.Bitmap $w, $h
-    $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size); $g.Dispose()
-    $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
+# All drivers share this mutex, but hold it for one input/capture only.
+# OCR, network waits, compilation and whole smoke runs stay outside.
+function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]::Zero) {
+    if ($Window -eq [IntPtr]::Zero) { $Window = $script:Win }
+    $owner = 0; [WD]::GetWindowThreadProcessId($Window, [ref]$owner) | Out-Null
+    if (-not $script:AppPid -or $owner -ne $script:AppPid) { throw 'WIN_DRIVE_TARGET: window does not belong to this run' }
+    $mutex = New-Object Threading.Mutex($false, 'Global\Coach.WinDrive.Foreground')
+    try {
+        foreach ($attempt in 1..20) {
+            $held = $false
+            try {
+                try { $held = $mutex.WaitOne(30000) } catch [Threading.AbandonedMutexException] { $held = $true }
+                if (-not $held) { throw 'WIN_DRIVE_TIMEOUT: waiting for one foreground action' }
+                [WD]::Activate($Window)
+                Start-Sleep -Milliseconds 150
+                Assert-OurForeground
+                & $Action
+                return
+            } catch {
+                if ($_.Exception.Message -notlike 'WIN_DRIVE_FOCUS_LOST*') { throw }
+                # Retry this action, never restart/reject the run for another window.
+                # Release first so the other driver can finish its action.
+                Write-Verbose "Foreground action retry $attempt/20"
+            } finally {
+                if ($held) { $mutex.ReleaseMutex() }
+            }
+            Start-Sleep -Milliseconds (Get-Random -Minimum 50 -Maximum 200)
+        }
+        throw 'WIN_DRIVE_TIMEOUT: could not regain our foreground for this action'
+    } finally { $mutex.Dispose() }
+}
+function Save-Shot([string]$path, [IntPtr]$Window = [IntPtr]::Zero) {
+    if ($Window -eq [IntPtr]::Zero) { $Window = $script:Win }
+    Invoke-ForegroundStep -Window $Window -Action {
+        $r = New-Object WD+RECT; [WD]::GetWindowRect($Window, [ref]$r) | Out-Null; $w = $r.R - $r.L; $h = $r.B - $r.T
+        $bmp = New-Object System.Drawing.Bitmap $w, $h
+        try {
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            try {
+                Assert-OurForeground
+                $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
+                Assert-OurForeground
+            } finally { $g.Dispose() }
+            $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+        } finally { $bmp.Dispose() }
+    }
 }
 
 # OCR a saved PNG; returns lines as objects { Text, Words } in window coordinates.
@@ -121,41 +175,43 @@ function Find-Text($lines, [string]$needle) {
 }
 
 
-# Other agents run their own Coach windows on this desktop. Never send input unless the foreground window is ours.
+# A notification or a non-Java window is not permission to type into it.
+# The caller holds the short mutex and retries only the interrupted action.
 function Assert-OurForeground {
-    foreach ($i in 1..5) {
-        $fg = [WD]::GetForegroundWindow(); $p = 0; [WD]::GetWindowThreadProcessId($fg, [ref]$p) | Out-Null
-        if ($p -eq $script:AppPid) { return }
-        $pn = (Get-Process -Id $p -ErrorAction SilentlyContinue).ProcessName
-        # 系统通知、搜索框等瞬时抢前台：夺回前台继续；只有别的 Java 客户端占着前台才停手
-        if ($pn -ne 'java' -and $pn -ne 'javaw') { [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 400; continue }
-        Start-Sleep -Milliseconds 600; [WD]::SetForegroundWindow($script:Win) | Out-Null
+    $fg = [WD]::GetForegroundWindow(); $owner = 0
+    [WD]::GetWindowThreadProcessId($fg, [ref]$owner) | Out-Null
+    if (-not $script:AppPid -or $owner -ne $script:AppPid) {
+        throw 'WIN_DRIVE_FOCUS_LOST: our client is no longer foreground'
     }
-    $fg = [WD]::GetForegroundWindow(); $p = 0; [WD]::GetWindowThreadProcessId($fg, [ref]$p) | Out-Null
-    if ($p -eq $script:AppPid) { return }
-    $pn = (Get-Process -Id $p -ErrorAction SilentlyContinue).ProcessName
-    if ($pn -ne 'java' -and $pn -ne 'javaw') { return }   # 通知之类的非客户端窗口，输入仍发往本客户端
-    throw "DESKTOP_BUSY：前台是别的 Java 客户端（进程 $p）而不是本次启动的客户端（$($script:AppPid)），为避免误点其他窗口，已停手"
 }
 function Click-At([int]$x, [int]$y) {
-    [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 150; Assert-OurForeground
-    $r = Get-Rect
-    [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null; Start-Sleep -Milliseconds 100
-    [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 60; [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
+    Invoke-ForegroundStep {
+        $r = Get-Rect
+        [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null
+        Assert-OurForeground
+        [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
+        try { Start-Sleep -Milliseconds 60 } finally { [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero) }
+    }
 }
-
-# Drag from (x1,y1) to (x2,y2) inside the window, e.g. to select text.
+# A drag is one action: release the button even if foreground is interrupted.
 function Drag-Between([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
-    [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 150; Assert-OurForeground
-    $r = Get-Rect
-    [WD]::SetCursorPos($r.L + $x1, $r.T + $y1) | Out-Null; Start-Sleep -Milliseconds 100
-    [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 120
-    [WD]::SetCursorPos($r.L + [int](($x1 + $x2) / 2), $r.T + [int](($y1 + $y2) / 2)) | Out-Null; Start-Sleep -Milliseconds 80
-    [WD]::SetCursorPos($r.L + $x2, $r.T + $y2) | Out-Null; Start-Sleep -Milliseconds 120
-    [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
+    Invoke-ForegroundStep {
+        $r = Get-Rect
+        [WD]::SetCursorPos($r.L + $x1, $r.T + $y1) | Out-Null
+        Assert-OurForeground
+        [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
+        try {
+            Start-Sleep -Milliseconds 120; Assert-OurForeground
+            [WD]::SetCursorPos($r.L + [int](($x1 + $x2) / 2), $r.T + [int](($y1 + $y2) / 2)) | Out-Null
+            Start-Sleep -Milliseconds 80; Assert-OurForeground
+            [WD]::SetCursorPos($r.L + $x2, $r.T + $y2) | Out-Null
+            Start-Sleep -Milliseconds 120; Assert-OurForeground
+        } finally { [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero) }
+    }
 }
-
-function Send-Keys([string]$keys) { [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 150; Assert-OurForeground; [System.Windows.Forms.SendKeys]::SendWait($keys) }
+function Send-Keys([string]$keys) {
+    Invoke-ForegroundStep { Assert-OurForeground; [System.Windows.Forms.SendKeys]::SendWait($keys) }
+}
 
 # Wait until a label shows on screen. Returns the match, or $null on timeout. Every poll leaves a PNG so a failure is inspectable.
 function Wait-Text([string]$dir, [string]$name, [string[]]$needles, [int]$timeoutSec) {
@@ -182,29 +238,38 @@ function Find-AppWindowByTitle([string]$prefix) {
     return $script:Found
 }
 
-# Pick a file in the app's native "open" dialog: focus the file-name box (Alt+N), type the full path, Enter.
+# Dialog discovery and waiting do not hold the mutex. Filename filling is
+# idempotent on retry; each Enter is followed by an unlocked wait.
 function Choose-File([string]$dialogTitlePrefix, [string]$path, [int]$timeoutSec = 20) {
     $deadline = (Get-Date).AddSeconds($timeoutSec); $h = [IntPtr]::Zero
     while ($h -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500; $h = Find-AppWindowByTitle $dialogTitlePrefix }
     if ($h -eq [IntPtr]::Zero) { return $false }
-    Start-Sleep -Seconds 1
-    [WD]::SetForegroundWindow($h) | Out-Null; Start-Sleep -Milliseconds 400
-    [System.Windows.Forms.SendKeys]::SendWait('%n'); Start-Sleep -Milliseconds 300
-    [System.Windows.Forms.SendKeys]::SendWait($path.Replace('{', '{{}').Replace('}', '{}}').Replace('+', '{+}').Replace('^', '{^}').Replace('%', '{%}').Replace('~', '{~}').Replace('(', '{(}').Replace(')', '{)}'))
-    Start-Sleep -Milliseconds 300
-    for ($i = 0; $i -lt 3; $i++) {
-        [System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep -Seconds 2
-        if ((Find-AppWindowByTitle $dialogTitlePrefix) -eq [IntPtr]::Zero) { break }
+    Invoke-ForegroundStep -Window $h -Action {
+        [System.Windows.Forms.SendKeys]::SendWait('%n')
+        Assert-OurForeground
+        [System.Windows.Forms.SendKeys]::SendWait('^a')
+        Assert-OurForeground
+        [System.Windows.Forms.SendKeys]::SendWait((ConvertTo-SendKeysLiteral $path))
     }
-    return $true
+    for ($i = 0; $i -lt 3; $i++) {
+        $h = Find-AppWindowByTitle $dialogTitlePrefix
+        if ($h -eq [IntPtr]::Zero) { return $true }
+        Invoke-ForegroundStep -Window $h -Action {
+            Assert-OurForeground; [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+        }
+        Start-Sleep -Seconds 2
+    }
+    return ((Find-AppWindowByTitle $dialogTitlePrefix) -eq [IntPtr]::Zero)
+}
+function ConvertTo-SendKeysLiteral([string]$text) {
+    # One pass avoids corrupting brace escapes with later replacements.
+    [regex]::Replace($text, '[+^%~(){}\[\]]', { param($m)
+        if ($m.Value -eq '{') { '{{}' } elseif ($m.Value -eq '}') { '{}}' } else { '{' + $m.Value + '}' }
+    })
 }
 
-function Save-Screen([string]$path) {
-    $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
-    $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-    $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size); $g.Dispose()
-    $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
-}
+function Save-Screen([string]$path) { Save-Shot $path }
+
 function List-AppWindows {
     $script:WinList = @()
     [WD]::EnumWindows({ param($x, $l)
@@ -217,15 +282,20 @@ function List-AppWindows {
 
 # Mouse-wheel inside the window; negative delta scrolls down.
 function Scroll-At([int]$x, [int]$y, [int]$notches) {
-    [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 150; Assert-OurForeground
-    $r = Get-Rect
-    [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null; Start-Sleep -Milliseconds 100
-    $delta = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int](120 * $notches)), 0)
-    [WD]::mouse_event(0x800, 0, 0, $delta, [IntPtr]::Zero)
+    Invoke-ForegroundStep {
+        $r = Get-Rect
+        [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null
+        $delta = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int](120 * $notches)), 0)
+        Assert-OurForeground
+        [WD]::mouse_event(0x800, 0, 0, $delta, [IntPtr]::Zero)
+    }
 }
-
-# Typing through SendKeys goes through the active IME (pinyin garbles Latin text); the clipboard avoids it.
+# Clipboard write and paste are one action. Keep it stable until consumed.
 function Paste-Text([string]$text) {
-    [System.Windows.Forms.Clipboard]::SetText($text)
-    Send-Keys '^v'
+    Invoke-ForegroundStep {
+        [System.Windows.Forms.Clipboard]::SetText($text)
+        Assert-OurForeground
+        [System.Windows.Forms.SendKeys]::SendWait('^v')
+        Start-Sleep -Milliseconds 150
+    }
 }

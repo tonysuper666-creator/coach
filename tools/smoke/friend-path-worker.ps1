@@ -53,16 +53,7 @@ $env:COACH_URL = if ($Url) { $Url } else { 'http://127.0.0.1:18999' }
 $serverPort = ([uri]$env:COACH_URL).Port
 if ($serverPort -in 18791, 8791, 8790) { throw "拒绝：$serverPort 是生产端口，冒烟只用隔离测试端口。" }
 $script:RepoMarker = $Repo
-Mark-ExistingClients
-# 桌面上已有别的 Coach 窗口（别的智能体的测试）时先等它走，等不到就如实报忙，不抢输入
-$busyUntil = (Get-Date).AddSeconds(180)
-while ((Get-ClientPids).Count -gt 0 -and (Get-Date) -lt $busyUntil) { Start-Sleep -Seconds 5 }
-if ((Get-ClientPids).Count -gt 0) {
-    $why = '桌面被别的 Coach 窗口占用 180 秒没空出来，没有启动（避免抢输入）'; Note "步骤1 失败：$why"
-    [pscustomobject]@{ passed = 0; total = 7; time = (Get-Date -Format 'o'); outDir = $OutDir; server = $env:COACH_URL; steps = @([pscustomobject]@{ Step = 1; Name = $steps[0]; Ok = $false; Why = $why }) } |
-        ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $OutDir 'result.json')
-    exit 1
-}
+# Other Coach windows/heavy jobs may coexist; only input/capture is serialized.
 Mark-ExistingClients
 $gradle = Start-Process (Join-Path $Repo 'gradlew.bat') -ArgumentList ':desktopApp:run', '-Pcoach.course=', '--console=plain', '--offline' -WorkingDirectory $Repo `
     -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')

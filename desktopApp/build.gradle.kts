@@ -177,3 +177,58 @@ tasks.register<Sync>("externalFriendDriver") {
         destinationDir.resolve("classpath.txt").writeText((listOf("classes") + names.map { "lib/$it" }).joinToString("\n"))
     }
 }
+
+// Development controls are compiled separately and absent from application jars.
+val smoke by sourceSets.creating {
+    compileClasspath += sourceSets.main.get().output + configurations.runtimeClasspath.get()
+    runtimeClasspath += output + compileClasspath
+}
+tasks.register<JavaExec>("smokeRun") {
+    group = "verification"
+    description = "Run the real Windows textbook content with private loopback controls"
+    dependsOn("smokeRuntime")
+    classpath = smoke.runtimeClasspath
+    mainClass.set("com.coach.desktop.smoke.SmokeMain")
+}
+val applicationJar = tasks.named<Jar>("jar")
+tasks.register("verifySmokeIsolation") {
+    group = "verification"
+    dependsOn(applicationJar)
+    doLast {
+        check(zipTree(applicationJar.get().archiveFile.get().asFile).matching {
+            include("com/coach/desktop/smoke/**")
+        }.isEmpty) { "Development smoke controls must not enter the shipped application jar" }
+    }
+}
+
+val smokeRuntime by tasks.registering(Sync::class) {
+    group = "verification"
+    dependsOn(smoke.classesTaskName, "verifySmokeIsolation")
+    from(sourceSets.main.get().output) { into("classes") }
+    from(smoke.output) { into("classes") }
+    val jars = smoke.runtimeClasspath.filter { it.extension == "jar" }.toList()
+    val names = jars.mapIndexed { index, jar -> "%04d-%s".format(index, jar.name) }
+    jars.forEachIndexed { index, jar ->
+        from(jar) { into("lib"); rename { names[index] } }
+    }
+    into(layout.buildDirectory.dir("outputs/smoke-runtime"))
+    // A receipt describes the actual checkout even when bytecode is up to date.
+    outputs.upToDateWhen { false }
+    doLast {
+        fun git(vararg args: String): String {
+            val process = ProcessBuilder(listOf("git", "-C", rootDir.absolutePath) + args)
+                .redirectErrorStream(true).start()
+            val text = process.inputStream.bufferedReader().use { it.readText() }
+            check(process.waitFor() == 0) { "Cannot identify smoke runtime source" }
+            return text.trim()
+        }
+        destinationDir.resolve("classpath.txt").writeText(
+            (listOf("classes") + names.map { "lib/$it" }).joinToString("\n"))
+        destinationDir.resolve("revision.txt").writeText(git("rev-parse", "HEAD") + "\n")
+        destinationDir.resolve("dirty.txt").writeText(git("status", "--porcelain") + "\n")
+    }
+}
+// The Mac heavy caller can prepare the same Windows runtime before test starts.
+tasks.test {
+    if (providers.gradleProperty("coach.smoke.prepare").orNull == "true") dependsOn(smokeRuntime)
+}

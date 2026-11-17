@@ -30,6 +30,14 @@ class BookParagraphsTest {
         assertTrue(bookParagraphs(samples[3], pdf = true).paragraphs.all { it.indentEm == 0 })
     }
 
+    @Test fun whitespaceOnlySeparatorsKeepOffsetsWithoutVisibleIndent() {
+        val source = "第一段含有😀。\n  \t\n第二段。"
+        val result = bookParagraphs(source, pdf = false)
+        assertEquals(source.length, result.display.length)
+        assertEquals("第一段含有😀。\u200b\u200b\u200b\u200b\n第二段。", result.display)
+        source.indices.filter { !source[it].isWhitespace() }.forEach { assertEquals(source[it], result.display[it]) }
+    }
+
     @Test fun windowsLineEndingsAndCodeArePreserved() {
         val source = "中文接\r\n下文\r\n\r\n```\r\n\r\n    代码\r\n```"
         val result = bookParagraphs(source, pdf = true)

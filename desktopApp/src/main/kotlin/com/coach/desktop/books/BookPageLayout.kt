@@ -189,6 +189,20 @@ internal class BookPageLayouter(
                     laid = pageText(original, model, start, end, titleInset)
                     height = measure(laid, widthPx).size.height
                 }
+                // A clipped paragraph is laid out again on the following page. Its
+                // final fragment can fit on one line even when the uncut layout's
+                // line indices predicted two. Check that actual continuation after
+                // fitting this page, using the same no-indent continuation style.
+                val continuing = model.paragraphs.firstOrNull {
+                    it.kind == BookParagraph.Kind.BODY && it.start < end && it.end > end
+                }
+                if (continuing != null && continuing.end <= lookAhead && lines > 2 &&
+                    measure(pageText(original, model, end, continuing.end, 0), widthPx).lineCount == 1) {
+                    lines--
+                    end = safeBookBoundary(raw, start + measured.getLineEnd(lines - 1))
+                    laid = pageText(original, model, start, end, titleInset)
+                    height = measure(laid, widthPx).size.height
+                }
                 result += BookLaidPage(slices(chapter.start + start, chapter.start + end), chapterIndex,
                     chapter.title, number, opener, laid.text, laid.placeholders, top, height)
                 start = end

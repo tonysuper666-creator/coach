@@ -18,7 +18,9 @@ concurrency:
   cancel-in-progress: false
 jobs:
   package:
-    if: github.ref == 'refs/heads/main' && inputs.phase == 'package'
+    # Package runs on the dispatched ref so a branch can prove its own installer on a clean runner;
+    # the friend gate stays in probe, which still only runs on main.
+    if: inputs.phase == 'package'
     runs-on: windows-2022
     timeout-minutes: 40
     steps:
@@ -47,6 +49,20 @@ jobs:
           path: bundle/
           retention-days: 3
           if-no-files-found: error
+      # 干净机器装通：装 MSI → 起真窗口 → 截图（标题栏、任务栏、开始菜单）→ 卸载，留日志。
+      # 这台 runner 没有 tailnet、没有账号、没有教材，截图里只有空书架。
+      - name: Install the MSI, launch it, then uninstall on this clean runner
+        shell: powershell
+        run: |
+          $msi = (Get-ChildItem desktopApp/build/compose/binaries/main/msi/*.msi | Select-Object -First 1).FullName
+          ./tools/smoke/msi-install.ps1 -Msi $msi -OutDir evidence/install
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: friend-windows-install-evidence
+          path: evidence/install/
+          retention-days: 3
+          if-no-files-found: warn
   probe:
     if: github.ref == 'refs/heads/main' && inputs.phase == 'probe'
     runs-on: windows-2022

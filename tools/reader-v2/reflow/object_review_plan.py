@@ -2,7 +2,7 @@
 """Prepare pending production selections from local B/C evidence.
 
 Only identical pixel rectangles are folded. Overlap groups are alternatives,
-not semantic duplicates. Explicit caption links can suggest a larger rectangle;
+not semantic duplicates. Explicit caption/note links can suggest a larger rectangle;
 all suggestions still require fresh production previews and human review.
 """
 from __future__ import annotations
@@ -36,7 +36,13 @@ def plan_page(probe, layout, pixels, width, height, scale=SCALE):
         raise ValueError("duplicate layout block IDs")
     by_id = {b["id"]: b for b in blocks}
     boxes = {b["id"]: crop_rect(b["bbox"], layout) for b in blocks}
-    links = {g["owner_id"]: g for g in payload["caption_groups"]}
+    links = {g["owner_id"]: g for g in payload["object_label_groups"]}
+    for group in links.values():
+        if group["placement_status"] == "source_parts_verified":
+            for part in group["source_parts"]:
+                if part.get("geometry_evidence") == "bounded_glyph_envelope_exact_note_text":
+                    boxes[part["id"]] = [v * (probe["width"] if i % 2 == 0 else probe["height"])
+                                         for i, v in enumerate(part["source_region"])]
     rows = []
 
     def annotate(identity, evidence, owners, allowed_parts=()):
@@ -54,7 +60,10 @@ def plan_page(probe, layout, pixels, width, height, scale=SCALE):
         if evidence["mapping_status"] not in ("mapped", "discontiguous"):
             row["blockers"].append("no_production_text_mapping")
         # Model labels are only a conservative veto, never permission to discard text.
-        prose = [b["id"] for b in blocks if b["kind"] in PROSE and
+        owned_notes = {p["id"] for o in owners for p in links.get(o, {}).get("source_parts", [])
+                       if p["role"] == "footnote" and
+                       links[o]["placement_status"] == "source_parts_verified"}
+        prose = [b["id"] for b in blocks if b["kind"] in PROSE and b["id"] not in owned_notes and
                  any(intersects(boxes[b["id"]], g["bbox"]) for g in selected)]
         row["prose_block_ids"] = prose
         if prose:
@@ -64,8 +73,15 @@ def plan_page(probe, layout, pixels, width, height, scale=SCALE):
             if by_id[owner].get("caption_refs"):
                 if not group or group["placement_status"] != "source_parts_verified":
                     row["blockers"].append("unresolved_explicit_caption")
-                elif not all(contains(box, boxes[c], epsilon=0) for c in group["caption_ids"]):
+                elif not all(contains(box, boxes[p["id"]], epsilon=0) for p in group["source_parts"]
+                             if p["role"] == "caption"):
                     row["blockers"].append("explicit_caption_outside_crop")
+            if by_id[owner].get("footnote_refs"):
+                if not group or group["placement_status"] != "source_parts_verified":
+                    row["blockers"].append("unresolved_explicit_notes")
+                elif not all(contains(box, boxes[p["id"]], epsilon=0) for p in group["source_parts"]
+                             if p["role"] == "footnote"):
+                    row["blockers"].append("explicit_notes_outside_crop")
         if allowed_parts and any(not any(contains(boxes[part], g["bbox"]) for part in allowed_parts)
                                  for g in selected):
             row["blockers"].append("unowned_glyph_in_expansion")
@@ -88,12 +104,15 @@ def plan_page(probe, layout, pixels, width, height, scale=SCALE):
                     ("replacement_range", "hide_source_allowed", "import_allowed", "semantic_status")}
         rows.append(annotate(f"candidate-{i:03d}", evidence, owners))
     safe = preview_geometry_safe(probe, payload)
-    for group in payload["caption_groups"]:
+    for group in payload["object_label_groups"]:
         if group["placement_status"] != "source_parts_verified" or not safe:
             continue
-        parts = [group["owner_id"], *group["caption_ids"]]
+        parts = [group["owner_id"], *[p["id"] for p in group["source_parts"]]]
         evidence = boundary(probe, union([boxes[p] for p in parts]), pixels, width, height, scale)
-        evidence["caption_part_ids"] = group["caption_ids"]
+        evidence["caption_part_ids"] = [p["id"] for p in group["source_parts"] if p["role"] == "caption"]
+        evidence["footnote_part_ids"] = [p["id"] for p in group["source_parts"] if p["role"] == "footnote"]
+        evidence["adjusted_note_part_ids"] = [p["id"] for p in group["source_parts"]
+                                              if p.get("geometry_evidence")]
         rows.append(annotate("labels-" + str(len(rows)), evidence, {group["owner_id"]}, parts))
 
     # Lossless folding: only equal pixel rectangles; conflicting kinds stay generic.

@@ -22,7 +22,7 @@ import time
 import uuid
 from pathlib import Path
 
-PIPELINE_VERSION = "6"   # bump on any behaviour change: it is part of the cache version key
+PIPELINE_VERSION = "7"   # bump on any behaviour change: it is part of the cache version key
 SCHEMA_VERSION = 1
 CHUNK_PAGES = 10
 
@@ -240,6 +240,7 @@ class DoclingEngine:
                        "source_ref": item.self_ref,
                        "source_scope": source_scope,
                        "caption_refs": [r.cref for r in getattr(item, "captions", [])],
+                       "footnote_refs": [r.cref for r in getattr(item, "footnotes", [])],
                        "provenance_count": len(item.prov)}
                 if label in ("table", "document_index"):
                     d = getattr(item, "data", None)
@@ -317,7 +318,7 @@ def build_page_json(page_no: int, raw: dict | None, meta: dict, doc_sha: str) ->
                "reading_order": i,
                "confidence": None,   # Docling gives no per-block score; only page layout_score
                "status": "ok"}
-        for key in ("source_ref", "source_scope", "caption_refs", "provenance_count"):
+        for key in ("source_ref", "source_scope", "caption_refs", "footnote_refs", "provenance_count"):
             if key in b:
                 blk[key] = b[key]
         if kind == "table":

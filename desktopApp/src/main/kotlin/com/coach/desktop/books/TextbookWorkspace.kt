@@ -116,88 +116,92 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
         }.onFocusChanged { readerHasFocus = it.hasFocus }
             .focusRequester(readerFocus).focusable(enabled = ui.screen == BookScreen.READER && ui.source != null),
             color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
-            Column {
-                if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-                ui.importing?.let { progress ->
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp).testTag("book-import-progress"),
-                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                        Text(if (progress.total == 0) "正在准备教材…" else
-                            "${if (progress.recognizing) "正在识别文字" else "正在读取教材"} · 第 ${progress.page} / ${progress.total} 页",
-                            Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                        TextButton(controller::cancelImport, Modifier.testTag("book-import-cancel")) { Text("取消导入") }
+            Box(Modifier.fillMaxSize()) {
+                Column {
+                    ui.importing?.let { progress ->
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp).testTag("book-import-progress"),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            Text(if (progress.total == 0) "正在准备教材…" else
+                                "${if (progress.recognizing) "正在识别文字" else "正在读取教材"} · 第 ${progress.page} / ${progress.total} 页",
+                                Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                            TextButton(controller::cancelImport, Modifier.testTag("book-import-cancel")) { Text("取消导入") }
+                        }
                     }
-                }
-                ui.error?.let { error -> Text(error, color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.fillMaxWidth().padding(12.dp).testTag("book-error")) }
-                val book = ui.book
-                when {
-                    ui.screen == BookScreen.HOME || book == null -> LibraryHome(ui,
-                        onImport = { run { chooseBook()?.let { controller.importBook(it) } } },
-                        onSelect = { run { controller.select(it) } }, onRead = { run { if (drafts.flush()) controller.learn(LearningPath.READ) } },
-                        onLearn = { run { if (drafts.flush()) controller.learn() } },
-                        onPath = { path -> run { if (drafts.flush()) controller.learn(path) } })
-                    ui.screen == BookScreen.REVIEWS -> LocalBookReviews(ui,
-                        onBack = { run { controller.back() } },
-                        onOpen = { entry -> run { if (drafts.flush()) controller.openReview(entry) } })
-                    ui.screen == BookScreen.REVIEWING && ui.review != null -> {
-                        val storedReview = checkNotNull(ui.review)
-                        val review = storedReview.copy(answer = drafts.currentReview(storedReview))
-                        LocalBookReviewQuestion(review, !ui.busy, practiceSourceFocus, returnFocus,
+                    ui.error?.let { error -> Text(error, color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.fillMaxWidth().padding(12.dp).testTag("book-error")) }
+                    val book = ui.book
+                    when {
+                        ui.screen == BookScreen.HOME || book == null -> LibraryHome(ui,
+                            onImport = { run { chooseBook()?.let { controller.importBook(it) } } },
+                            onSelect = { run { controller.select(it) } }, onRead = { run { if (drafts.flush()) controller.learn(LearningPath.READ) } },
+                            onLearn = { run { if (drafts.flush()) controller.learn() } },
+                            onPath = { path -> run { if (drafts.flush()) controller.learn(path) } })
+                        ui.screen == BookScreen.REVIEWS -> LocalBookReviews(ui,
+                            onBack = { run { controller.back() } },
+                            onOpen = { entry -> run { if (drafts.flush()) controller.openReview(entry) } })
+                        ui.screen == BookScreen.REVIEWING && ui.review != null -> {
+                            val storedReview = checkNotNull(ui.review)
+                            val review = storedReview.copy(answer = drafts.currentReview(storedReview))
+                            LocalBookReviewQuestion(review, !ui.busy, practiceSourceFocus, returnFocus,
+                                onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
+                                onSource = { openPracticeSource(review.practice) },
+                                onAnswer = { drafts.saveReview(review, it) })
+                        }
+                        ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library, learningSupport,
+                            practiceSource = practiceSource,
+                            onNoteSession = { noteReader = it },
+                            onPage = { page ->
+                                val restoreFocus = ui.source != null && readerHasFocus
+                                val startBookId = ui.book?.id; val startSource = ui.source
+                                run {
+                                    controller.page(page)
+                                    if (restoreFocus) awaitReaderFocusRestore(startBookId, startSource, { readerHasFocus }, { controller.state.value }) {
+                                        readerFocusTicket = it
+                                    }
+                                }
+                            }, onBack = { returnFromReader() },
+                            onLearn = { run { if (drafts.flush()) controller.learn(LearningPath.QUESTION_FIRST) } })
+                        else -> {
+                            val lesson = book.lessons.getOrNull(book.lessonIndex)
+                            val displayed = if (lesson == null) ui else ui.copy(
+                                answer = drafts.current(book.id, lesson.id, book.questionMode, ui.answer))
+                            TextbookLearning(displayed, learningSupport, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
+                            explanationReply, answerExplain, answerExplainReply, sourceResolver, citationFocus, citationIndex,
                             onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
-                            onSource = { openPracticeSource(review.practice) },
-                            onAnswer = { drafts.saveReview(review, it) })
-                    }
-                    ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library, learningSupport,
-                        practiceSource = practiceSource,
-                        onNoteSession = { noteReader = it },
-                        onPage = { page ->
-                            val restoreFocus = ui.source != null && readerHasFocus
-                            val startBookId = ui.book?.id; val startSource = ui.source
-                            run {
-                                controller.page(page)
-                                if (restoreFocus) awaitReaderFocusRestore(startBookId, startSource, { readerHasFocus }, { controller.state.value }) {
-                                    readerFocusTicket = it
+                            onSource = { practiceSource = null; sourceOrigin = SourceFocus.LESSON; run { controller.source() } },
+                            onCitation = { index, target ->
+                                val current = controller.state.value
+                                if (current.screen == BookScreen.LEARNING && current.book?.id == target.book &&
+                                    current.book.lessons.getOrNull(current.book.lessonIndex)?.id == lesson?.id && lesson != null) {
+                                    citationIndex = index
+                                    sourceOrigin = SourceFocus.CITATION
+                                    practiceSource = PracticeSource(target.pdfPage, target.quote, null, target)
+                                    run { controller.citationSource(target.book, lesson.id, target.pdfPage) }
                                 }
-                            }
-                        }, onBack = { returnFromReader() },
-                        onLearn = { run { if (drafts.flush()) controller.learn(LearningPath.QUESTION_FIRST) } })
-                    else -> {
-                        val lesson = book.lessons.getOrNull(book.lessonIndex)
-                        val displayed = if (lesson == null) ui else ui.copy(
-                            answer = drafts.current(book.id, lesson.id, book.questionMode, ui.answer))
-                        TextbookLearning(displayed, learningSupport, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
-                        explanationReply, answerExplain, answerExplainReply, sourceResolver, citationFocus, citationIndex,
-                        onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
-                        onSource = { practiceSource = null; sourceOrigin = SourceFocus.LESSON; run { controller.source() } },
-                        onCitation = { index, target ->
-                            val current = controller.state.value
-                            if (current.screen == BookScreen.LEARNING && current.book?.id == target.book &&
-                                current.book.lessons.getOrNull(current.book.lessonIndex)?.id == lesson?.id && lesson != null) {
-                                citationIndex = index
-                                sourceOrigin = SourceFocus.CITATION
-                                practiceSource = PracticeSource(target.pdfPage, target.quote, null, target)
-                                run { controller.citationSource(target.book, lesson.id, target.pdfPage) }
-                            }
-                        },
-                        onCitationRefused = {
-                            val current = controller.state.value
-                            if (current.screen == BookScreen.LEARNING && current.book?.id == book.id &&
-                                current.book.lessons.getOrNull(current.book.lessonIndex)?.id == lesson?.id) {
-                                runCatching { lessonSourceFocus.requestFocus() }
-                            }
-                        },
-                        onPracticeSource = { openPracticeSource(it) }, onLesson = { run { drafts.flush(); controller.lesson(it) } },
-                        onSettings = { run { controller.questionSettings() } }, onAnswer = { answer ->
-                            ui.book?.let { current ->
-                                current.lessons.getOrNull(current.lessonIndex)?.let { lesson ->
-                                    drafts.save(current.id, lesson.id, current.questionMode, answer)
+                            },
+                            onCitationRefused = {
+                                val current = controller.state.value
+                                if (current.screen == BookScreen.LEARNING && current.book?.id == book.id &&
+                                    current.book.lessons.getOrNull(current.book.lessonIndex)?.id == lesson?.id) {
+                                    runCatching { lessonSourceFocus.requestFocus() }
                                 }
-                            }
-                        }, onReviews = { run { if (drafts.flush()) controller.showReviews() } },
-                        onQuestions = { run { controller.beginQuestions() } },
-                        onRecapContinue = { run { controller.recapContinue() } })
+                            },
+                            onPracticeSource = { openPracticeSource(it) }, onLesson = { run { drafts.flush(); controller.lesson(it) } },
+                            onSettings = { run { controller.questionSettings() } }, onAnswer = { answer ->
+                                ui.book?.let { current ->
+                                    current.lessons.getOrNull(current.lessonIndex)?.let { lesson ->
+                                        drafts.save(current.id, lesson.id, current.questionMode, answer)
+                                    }
+                                }
+                            }, onReviews = { run { if (drafts.flush()) controller.showReviews() } },
+                            onQuestions = { run { controller.beginQuestions() } },
+                            onRecapContinue = { run { controller.recapContinue() } })
+                        }
                     }
                 }
+                // Saving a reading bookmark must not resize the page being paginated.
+                // Overlay activity so the desk's bounds stay intact.
+                if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             }
             if (ui.prompt != null && ui.book != null) BookEntryPrompt(ui,
                 onDismiss = { run { controller.dismissPrompt() } }, onRead = { run { controller.read() } },

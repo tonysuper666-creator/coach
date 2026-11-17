@@ -173,23 +173,26 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     val typing = readerTyping(asking, jumpFocused, notesOpen, session.noting)
     LaunchedEffect(book.id, ui.page, typing) {
         if (typing) return@LaunchedEffect
-        // 进阅读屏那一帧焦点节点可能才刚挂上，第一次请求会被丢掉；等几帧再确认一次，最多试几回。
+        // A successful request already owns focus. Do not leave another frame's
+        // request pending: it could steal focus from a newly clicked page field.
         repeat(5) {
             if (pageFocused) return@LaunchedEffect
             withFrameNanos { }
-            runCatching { pageFocus.requestFocus() }
+            if (runCatching { pageFocus.requestFocus() }.getOrDefault(false)) return@LaunchedEffect
         }
     }
-    fun turnTo(pageNumber: Int?) {
-        pageNumber ?: return
-        if (book.page(pageNumber) == null) return
-        paging.anchor = BookPageAnchor(pageNumber)
-        paging.publishedImportPage = pageNumber
-        onPage(pageNumber)
-        session.goToPage(pageNumber)
+    val turnTo: (Int?) -> Unit = { pageNumber ->
+        if (pageNumber != null && book.page(pageNumber) != null) {
+            paging.anchor = BookPageAnchor(pageNumber)
+            paging.publishedImportPage = pageNumber
+            onPage(pageNumber)
+            session.goToPage(pageNumber)
+        }
     }
 
-    fun turnLayout(turn: ReaderTurn) {
+    // Keep the event handler connected to the current neighbours after recomposition.
+    // A remembered key callback must not retain a local function's old page captures.
+    val turnLayout by rememberUpdatedState<(ReaderTurn) -> Unit> { turn ->
         if (!textView) {
             when (turn) {
                 ReaderTurn.Previous -> turnTo(previousPage)
@@ -198,9 +201,11 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                 ReaderTurn.Last -> turnTo(lastPage)
             }
         } else paging.move(turn)?.let { anchor ->
-            paging.publishedImportPage = anchor.importPage
-            onPage(anchor.importPage)
-            session.goToPage(anchor.importPage)
+            if (paging.publishedImportPage != anchor.importPage) {
+                paging.publishedImportPage = anchor.importPage
+                onPage(anchor.importPage)
+                session.goToPage(anchor.importPage)
+            }
         }
     }
 
@@ -325,7 +330,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                     if (event.isCtrlPressed || event.isAltPressed || event.isMetaPressed) return@onPreviewKeyEvent false
                     val turn = if (textView && !typing && event.key == Key.Spacebar) ReaderTurn.Next
                         else readerPagingTurn(event.key, typing)
-                    turn?.let(::turnLayout) ?: return@onPreviewKeyEvent false
+                    turn?.let(turnLayout) ?: return@onPreviewKeyEvent false
                     true
                 }.focusable()) {
                 if (explainOpen) BookExplainPanel(book, ui.page, explainConsent, explainer)
@@ -358,11 +363,8 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                         }
                         result
                     }
-                    BookPageView(book, paging, ranges, ::turnLayout, onPosition = { number ->
-                        // The workspace's busy indicator temporarily changes the available
-                        // height. Do not persist that transient reflow while a page save is
-                        // in flight, otherwise the new bookmark starts another save/reflow.
-                        if (!ui.busy && paging.publishedImportPage != number) {
+                    BookPageView(book, paging, ranges, turnLayout, onPosition = { number ->
+                        if (paging.publishedImportPage != number) {
                             paging.publishedImportPage = number
                             onPage(number)
                             session.goToPage(number)

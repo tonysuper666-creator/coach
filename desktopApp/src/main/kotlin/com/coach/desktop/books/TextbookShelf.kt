@@ -46,12 +46,13 @@ internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String)
     val colors = CoachTheme.colors
     val scroll = rememberScrollState()
     val line = if (colors.dark) CoachV7.Dark.line else CoachV7.Light.line
-    Box(Modifier.fillMaxSize().padding(horizontal = CoachV7.Space.s6, vertical = CoachV7.Space.s3), contentAlignment = Alignment.TopCenter) {
+    BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = CoachV7.Space.s6, vertical = CoachV7.Space.s3), contentAlignment = Alignment.TopCenter) {
+        val sectionSpacing = if (maxHeight < 560.dp) CoachV7.Space.s2 else CoachV7.Space.s5
         Box(Modifier.widthIn(max = 1000.dp).fillMaxWidth().fillMaxHeight().paperShadow("sheet", colors.dark)
             .clip(RoundedCornerShape(CoachV7.Radius.sheet)).background(colors.surface1).testTag("shelf-sheet")) {
             Column(Modifier.fillMaxWidth().verticalScroll(scroll)
                 .padding(start = CoachV7.Space.s7, top = CoachV7.Space.s7, end = CoachV7.Space.s8, bottom = CoachV7.Space.s8),
-                verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s5)) {
+                verticalArrangement = Arrangement.spacedBy(sectionSpacing)) {
                 Text("书架", style = MaterialTheme.typography.titleLarge, modifier = Modifier.testTag("library-title"))
                 Text("带来一本教材，从想读的地方开始。", color = colors.fgSecondary)
                 if (book == null) {

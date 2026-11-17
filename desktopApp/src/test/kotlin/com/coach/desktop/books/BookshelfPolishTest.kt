@@ -25,7 +25,7 @@ class BookshelfPolishTest {
         val titles = listOf("关于阅读与思考的一本很长很长的中文书名：从日常练习到知识的形成", "植物与四季", "阅读的方式", "纸上的世界", "观察的练习", "最后一本书")
         val books = titles.mapIndexed { index, title -> BookSummary("sample-$index", title, 120 + index, 1, 12, index == 0) }
         val book = Textbook(books[0].id, books[0].title, "md", listOf(BookPage(1, "隔离样例")), readingPage = 12, learning = true)
-        for ((width, height) in listOf(1920 to 1080, 2560 to 1440)) for (dark in listOf(false, true)) {
+        for ((width, height) in listOf(1920 to 1080, 2560 to 1440, 900 to 720)) for (dark in listOf(false, true)) {
             var selected = ""
             val actions = mutableListOf<String>()
             runSkikoComposeUiTest(size = Size(width.toFloat(), height.toFloat()), density = Density(1.5f)) {
@@ -48,6 +48,7 @@ class BookshelfPolishTest {
                 }
                 waitForIdle()
                 shot("top")
+                onNodeWithTag("home-read").assertIsDisplayed()
                 onNodeWithTag("upload-textbook").performScrollTo().performClick()
                 onNodeWithTag("home-learn").performScrollTo().performClick()
                 onNodeWithTag("home-read").performScrollTo().performClick()

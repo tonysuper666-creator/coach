@@ -70,16 +70,26 @@ probe 使用 `friend-public` environment；先按协议探针手册将该 enviro
 
 1. 运行 `phase=package`，等 Windows MSI 和 UI 驱动构建成功，记下 run ID。
    安装包是未签名开发包；只在临时 Actions Windows 运行机安装，不在用户设备发布。
-2. 在 Mac 私有朋友配置中建立本轮唯一名字 A、B（不得复用已有朋友名），B 的
+2. 在 Mac 私有朋友配置中建立本轮专用名字 `External acceptance A`、`External acceptance B`
+   （不得与已有朋友重名，重跑前先撤销上一轮 A/B 并核对），B 的
    `daily_calls=1`。合并配置时保留原字段；先备份，结束恢复时保留期间其他人的修改。
    两个朋友只用于本轮，账本保留，不删除或清零 quota/reserved。
-3. 用**当前安装 release 的 app 和当前服务相同环境**分别执行
-   `app pair-code --friend NAME`，在本地解析码，不能输出到公有日志。
+3. **先在 Mac 兑换 B，再签 A**：`pairing_code` 是单例，新码覆盖旧码，不能同时签 A/B。
+   对已批准的临时隔离实例使用 `tools/smoke/friend-prepare-windows.py --output PRIVATE_FILE`：
+   通过私有进程 env 传 `COACH_PREPARE_OWNER_URL`（管理回环端口）、
+   `COACH_PREPARE_PUBLIC_URL`（朋友回环端口）、`COACH_PREPARE_OWNER`（owner 凭据 JSON）。
+   输出父目录须 0700，文件须不存在；工具生成 0600 文件，仅含 `codeA` 和
+   `credentialB`（`deviceId`、`token`、`role=friend`）。B 兑换和授权失败时不签 A，
+   失败会尝试吊销本轮 A/B，退出 1 后仍须人工核对，不得继续派 probe。
    通过 `gh secret set --env friend-public` 的 stdin 设置 `COACH_EXTERNAL_URL`、
-   `COACH_EXTERNAL_CODE_A`、`COACH_EXTERNAL_CODE_B`，绝不把值放进命令参数、仓库文件
-   或 workflow inputs。URL 使用 HTTPS 443 的 Funnel 根地址。
-4. 立即手动派发 `phase=probe, package_run=ID`。配对码五分钟过期；队列过久或码过期
-   就生成新的码并重跑 probe，不能延长服务端有效期或使用常驻令牌代替一次性码。
+   `COACH_EXTERNAL_CODE_A`、`COACH_EXTERNAL_B`（上述 B 的完整 JSON），绝不把值放进
+   命令参数、仓库文件或 workflow inputs。URL 使用 HTTPS 443 的 Funnel 根地址。
+   B 是 Mac 预配的短期对照身份，**不计作 B 的 Windows 原生配对验收**；只有 A 在 Windows
+   配对 UI 兑换一次性码。B 只经步骤 env 进入驱动，解析前后 add-mask，不进 artifact。
+4. 立即手动派发 `phase=probe, package_run=ID`。A 配对码五分钟过期；队列过久或码过期
+   就签新 A 码、更新其 secret 并重跑 probe；B 已消费当日额度时停止本日重跑；另日重跑仍须先撤销并重新预配。
+   同名 B 的朋友日账本会保留，换设备不能恢复额度；不得清零账本、延长码有效期
+   或拿 B 令牌代替 A 的一次性码。
    environment secrets 在 job 开始时读取（[官方说明](https://docs.github.com/en/actions/reference/security/secrets)）；不要试图在运行中换 secret 修复该 run。
 5. Probe 验证 MSI 安装退出 0、安装版窗口可见并正常关闭，然后在独立 JVM 中驱动
    同一 commit 的生产 `WindowsTextbookHost`、原生导入核心、配对 UI、逐书同意和
@@ -97,6 +107,18 @@ probe 使用 `friend-public` environment；先按协议探针手册将该 enviro
 上传白名单仅有自写样例的讲解/出处截图和无身份信息的 JSON。失败不上传窗口、
 异常栈、Gradle 测试报告、配置或私有目录。GitHub 日志禁止写地址/代码/令牌；
 派发前核对工作流来源。共享的 URL、令牌和 pairing 状态不进入 artifact。
+
+首次临时公网开放前，受管 JVM 须显式设置 `COACH_FRIEND_API_ONLY=1`、
+`COACH_TRAFFIC=test` 和三个已审核的隔离端口，才会选择与私有朋友入口相同的
+`friend-service-bridge.py`。密钥只由 bridge 子进程读取已有 Keychain 项；
+不带此选项的生产桥接行为不变。实际监听必须核对该选择及朋友选段、模型、工具、
+格式和 owner 流量限制，不得拿普通 bridge 或仅 wrapper 单测替代。
+
+本地离线协议演练（先构建 `:server:app:installDist`，使用 bridge venv Python）：
+`python tools/smoke/friend-windows-rehearsal.py --work NEW_PRIVATE_DIRECTORY --node NODE_EXECUTABLE --math-dependencies NODE_MODULES_DIRECTORY`。
+它启动真实受管 JVM 和上述 wrapper，使用私有 Keychain shim 与离线提供方 SSE，
+验证 B→A、撤销、200→429、既有非零 owner 预算和预留连续性，最后关闭三处监听。
+所有 HOME/账本/资料均为合成 fixture；这不证明真实 Keychain、费用、Windows 或外网。
 
 ## 交付证据
 

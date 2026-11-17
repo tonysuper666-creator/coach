@@ -8,7 +8,9 @@ import androidx.compose.ui.awt.ComposeWindow
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.AnnotatedString
 import com.coach.desktop.books.*
+import com.coach.client.PairedCredentials
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.*
 import java.awt.GraphicsEnvironment
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -65,6 +67,12 @@ object ExternalFriendSmoke {
     }
 
     private fun probe() {
+        stage = "prepaired-b"
+        // B was paired on the Mac before A's code was signed. It is a quota and
+        // revocation control, not a second Windows native pairing acceptance.
+        val settings = bSettings()
+        val b = prepairedB(settings)
+        check(status(b).statusCode() == 200)
         stage = "import"
         val source = root.resolve("Self-authored sample.txt")
         Files.writeString(source, "Self-authored acceptance sample\n\n主动回忆是一种学习方法：先合上书，尝试用自己的话说出刚读过的概念，再打开原文核对遗漏。这个样例只用于连接验收。")
@@ -111,12 +119,9 @@ object ExternalFriendSmoke {
         shot("source.png")
         pass("nativeImport=1 friendPair=1 consent=1 selectionReply=1 citation=1")
 
-        stage = "pair-b"
-        val settings = bSettings()
-        val b = runBlocking { DesktopPairing(settings).pair(url, code("COACH_EXTERNAL_CODE_B"), "External acceptance B") }
-        check(b.credentials.role == "friend")
+        stage = "quota-b"
         check(status(b).statusCode() == 200)
-        // Mac must configure B.daily_calls=1 before creating its single-use code.
+        // Mac must configure B.daily_calls=1 before pre-pairing it.
         val book = checkNotNull(controller.state.value.book)
         val blocks = StudyCoachCourse.blocks(book.id, book.pages).filterNot { it.heading }
         val explainer = BookExplainer(settings, library)
@@ -127,7 +132,7 @@ object ExternalFriendSmoke {
             val second = explainer.ask(blocks.first(), "请再解释这段话。")
             check(second is ExplainResult.Refused && second.trouble == ExplainTrouble.Quota && second.message == "今天的讲解额度用完了，明天再来。")
         }
-        pass("bFirst=200 bSecond=429 dailyQuotaChinese=1")
+        pass("bPrepairedOnMac=1 bFirst=200 bSecond=429 dailyQuotaChinese=1")
         stage = "routes"
         val denied = listOf("/v1/ws", "/v1/commands", "/v1/devices", "/v1/pairing-code", "/v1/courses/x/snapshot", "/v1/courses/x/today", "/v1/hello", "/v1/usage", "/health", "/v1/reader", "/v1/library", "/v1/%64evices", "/v1/library/explain/")
         for (path in denied) {
@@ -161,6 +166,24 @@ object ExternalFriendSmoke {
     }
 
     private fun bSettings() = DesktopConnectionSettings(home = root.resolve("home-b"), environment = { null }, mac = false)
+    private fun prepairedB(settings: DesktopConnectionSettings): DesktopIdentity {
+        val raw = required("COACH_EXTERNAL_B")
+        mask(raw)
+        val value = Json.parseToJsonElement(raw).jsonObject
+        check(value.keys == setOf("deviceId", "token", "role"))
+        fun field(name: String) = value.getValue(name).jsonPrimitive.also { check(it.isString) }.content
+        val device = field("deviceId").also { mask(it); check(it.matches(Regex("[A-Za-z0-9_-]{1,128}"))) }
+        val token = field("token").also { mask(it); check(it.matches(Regex("[A-Za-z0-9_-]{43}"))) }
+        check(field("role") == "friend")
+        val identity = DesktopIdentity(url, PairedCredentials(device, token, "friend"))
+        check(status(identity).statusCode() == 200)
+        settings.saveAddress(url)
+        DesktopCredentials(settings.clientDirectory).save(url, identity.credentials)
+        return identity
+    }
+    private fun mask(value: String) {
+        println("::add-mask::" + value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
+    }
     private fun status(identity: DesktopIdentity) = request(identity, "/v1/public/status")
     private fun request(identity: DesktopIdentity, path: String): HttpResponse<String> {
         val req = HttpRequest.newBuilder(URI(url + path)).timeout(Duration.ofSeconds(15))
@@ -168,7 +191,7 @@ object ExternalFriendSmoke {
         return http.send(req, HttpResponse.BodyHandlers.ofString())
     }
     private fun required(name: String) = checkNotNull(System.getenv(name)).also { check(it.isNotBlank()) }
-    private fun code(name: String) = required(name).also { check(it.matches(Regex("[0-9]{6}"))) }
+    private fun code(name: String) = required(name).also { mask(it); check(it.matches(Regex("[0-9]{6}"))) }
     private fun pass(summary: String) = println("EXTERNAL_FRIEND PASS $summary")
     private fun nodes(): List<SemanticsNode> {
         fun walk(n: SemanticsNode): List<SemanticsNode> = listOf(n) + n.children.flatMap(::walk)

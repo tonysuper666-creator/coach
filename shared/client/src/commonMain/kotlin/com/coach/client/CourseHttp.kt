@@ -47,7 +47,8 @@ data class SourceDoc(val docId: String, val title: String, val firstPdfPage: Int
 data class SourcePage(val docId: String, val pdfPage: Int, val bookPage: Int?, val text: String)
 
 /** 模拟考接口的一次回答：成功时 [body] 是服务端原样的 JSON；失败时 [error] 是服务端写的原因，连不上 Mac 时两者都是 null。 */
-class MockReply(val body: JsonObject?, val error: String?, val retryable: Boolean = false, val statusCode: Int? = null)
+/** [code] 是服务端给程序看的类别（如 `daily_quota`），只用来决定怎么提示，从不显示给人。 */
+class MockReply(val body: JsonObject?, val error: String?, val retryable: Boolean = false, val statusCode: Int? = null, val code: String? = null)
 class MainlineEssayReply(val document: MainlineEssayDocument?, val error: String?, val retryable: Boolean = false)
 /** 题库里一道可以限时练的论述题。[fromMockPaper] 的题出自整套模拟卷，先练了那套卷就不再是生题。 */
 data class EssayPrompt(val id: String, val week: Int, val marks: Double, val wordTarget: Int, val stem: String, val pack: String, val fromMockPaper: Boolean)
@@ -141,7 +142,8 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         else {
             val parsed = Json.parseToJsonElement(response.bodyAsText()).jsonObject
             if (response.status.isSuccess()) MockReply(parsed, null, statusCode = response.status.value)
-            else MockReply(null, parsed.s("error").ifBlank { "暂时无法确认，请稍后重试。" }, statusCode = response.status.value)
+            else MockReply(null, parsed.s("error").ifBlank { "暂时无法确认，请稍后重试。" }, statusCode = response.status.value,
+                code = parsed.s("code").ifBlank { null })
         }
     } catch (_: HttpRequestTimeoutException) { MockReply(null, "讲解请求等待超时。可继续阅读或手动重试。") }
       catch (e: kotlinx.coroutines.CancellationException) { throw e }

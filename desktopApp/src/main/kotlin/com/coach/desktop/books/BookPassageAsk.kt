@@ -19,7 +19,7 @@ import kotlinx.coroutines.ensureActive
 
 /** Explicit paragraph selection keeps the original page offsets even for Unicode text. */
 @Composable
-internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearningSupport, onClose: () -> Unit) {
+internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearningSupport, onRepair: (() -> Unit)? = null, onClose: () -> Unit) {
     val blocks = remember(book.id, page.number) { StudyCoachCourse.blocks(book.id, listOf(page)).filterNot { it.heading } }
     var selected by remember(book.id, page.number) { mutableStateOf<SourceBlock?>(null) }
     var question by remember(book.id, page.number) { mutableStateOf("") }
@@ -89,15 +89,16 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
                             }
                         }
                     }
-                    is BookLearningReply.Unavailable -> Text(result.message, Modifier.testTag("book-passage-unavailable"),
-                        style = MaterialTheme.typography.bodySmall, color = v7Alert())
+                    // 没拿到回答：选中的原文和打好的问题都还在；能重试就原样再发一次。
+                    is BookLearningReply.Unavailable -> ExplainTroubleLine(result, onRetry = { request?.let(::send) },
+                        onRepair = onRepair, modifier = Modifier.testTag("book-passage-unavailable"))
                 }
             }
         }
     }, confirmButton = { V7TextButton(onClose, modifier = Modifier.testTag("book-passage-close")) { Text("回到阅读") } })
     pendingConsent?.let { input ->
-        AlertDialog(onDismissRequest = { pendingConsent = null }, title = { Text("把这段发到你的 Mac？") },
-            text = { Text("会把你选的原文和问题发给你配对的 Mac，由它的 AI 回答。这本书之后不再询问。《${book.title}》允许吗？") },
+        AlertDialog(onDismissRequest = { pendingConsent = null }, title = { Text(ExplainPrivacy.TITLE) },
+            text = { Text(ExplainPrivacy.ask(book.title), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("ask-consent")) },
             confirmButton = { V7TextButton({
                 support.allow(book.id); pendingConsent = null; send(input)
             }, Modifier.testTag("ask-consent-allow")) { Text("允许并提问") } },

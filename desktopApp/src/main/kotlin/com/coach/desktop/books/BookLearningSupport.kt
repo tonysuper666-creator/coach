@@ -34,7 +34,8 @@ internal data class BookPassageQuestion(val passage: BookPassage, val question: 
 }
 internal sealed interface BookLearningReply {
     data class Text(val text: String, val sources: List<BookPassage> = emptyList()) : BookLearningReply
-    data class Unavailable(val message: String) : BookLearningReply
+    /** [trouble] 为空是本机自己的原因（没接通、位置对不上）；不为空时照它给「再试一次」或「重新配对」。 */
+    data class Unavailable(val message: String, val trouble: ExplainTrouble? = null) : BookLearningReply
 }
 
 /** A real, authorized explanation/answer provider must be supplied here; source text is not a reply. */

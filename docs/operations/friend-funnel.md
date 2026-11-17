@@ -4,6 +4,10 @@
 `docs/FRIEND_ACCESS.md`。本文不保存实际地址、tailnet 名、配对码、设备令牌或教材。
 不要把私有操作记录或原始服务日志上传到公开仓库/Actions。
 
+已合入的协议探针和 environment 配置以 `docs/operations/friend-public.md` 为准。
+本文另提供后续原生窗口验收步骤；现行 Windows 排队约束解除并完成最终 main 冒烟前，
+不派发 package/probe，不新增 winbox 桌面测试、不做安装包、不安装到 tonii。
+
 ## 上线前门禁
 
 生产服务端升级需要一位异厂 reviewer 和另一位异厂 cross_review，先审代码、
@@ -61,7 +65,8 @@ TAILSCALE=/Applications/Tailscale.app/Contents/MacOS/Tailscale
 ## 外网 Windows：先包、后配对码
 
 工作流 `.github/workflows/friend-windows.yml` 只接受手动派发，无 PR/push 自动触发，
-不会在构建阶段读取朋友密钥。所有 run 都必须来自审核后的同一 commit。
+只允许 main，不会在构建阶段读取朋友密钥。两个 run 都必须来自审核后的同一 commit。
+probe 使用 `friend-public` environment；先按协议探针手册将该 environment 限制为 main。
 
 1. 运行 `phase=package`，等 Windows MSI 和 UI 驱动构建成功，记下 run ID。
    安装包是未签名开发包；只在临时 Actions Windows 运行机安装，不在用户设备发布。
@@ -70,12 +75,12 @@ TAILSCALE=/Applications/Tailscale.app/Contents/MacOS/Tailscale
    两个朋友只用于本轮，账本保留，不删除或清零 quota/reserved。
 3. 用**当前安装 release 的 app 和当前服务相同环境**分别执行
    `app pair-code --friend NAME`，在本地解析码，不能输出到公有日志。
-   通过 `gh secret set` 的 stdin 设置 `COACH_EXTERNAL_URL`、
+   通过 `gh secret set --env friend-public` 的 stdin 设置 `COACH_EXTERNAL_URL`、
    `COACH_EXTERNAL_CODE_A`、`COACH_EXTERNAL_CODE_B`，绝不把值放进命令参数、仓库文件
    或 workflow inputs。URL 使用 HTTPS 443 的 Funnel 根地址。
 4. 立即手动派发 `phase=probe, package_run=ID`。配对码五分钟过期；队列过久或码过期
    就生成新的码并重跑 probe，不能延长服务端有效期或使用常驻令牌代替一次性码。
-   GitHub 在排队时读取 repository secrets（[官方说明](https://docs.github.com/en/actions/reference/security/secrets)）；不要试图在运行中换 secret 修复该 run。
+   environment secrets 在 job 开始时读取（[官方说明](https://docs.github.com/en/actions/reference/security/secrets)）；不要试图在运行中换 secret 修复该 run。
 5. Probe 验证 MSI 安装退出 0、安装版窗口可见并正常关闭，然后在独立 JVM 中驱动
    同一 commit 的生产 `WindowsTextbookHost`、原生导入核心、配对 UI、逐书同意和
    选段提问。**窗口驱动不是安装版 exe 进程，导入调用核心而非文件选择/拖放手势**；

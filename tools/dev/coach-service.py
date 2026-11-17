@@ -112,7 +112,7 @@ def ready(info):
     raise RuntimeError('Not ready within 30s; inspect ~/Coach/logs/server-YYYY-MM-DD.log and bootstrap.log')
 
 
-def start():
+def start(after_ready=None):
     record, plist = RECORD.read_bytes(), PLIST.read_bytes()
     info = json.loads(record)
     def launch():
@@ -122,15 +122,30 @@ def start():
         if not loaded():
             run('launchctl', 'bootstrap', DOMAIN, PLIST)
         ready(info)
+    def complete():
+        if RECORD.read_bytes() != record or PLIST.read_bytes() != plist:
+            raise RuntimeError('Service pointers changed before pairing')
+        if after_ready is not None:
+            after_ready(info, plistlib.loads(plist))
     policy = BASE / 'friend-start-policy.json'
     if policy.exists() or policy.is_symlink() or (BASE / 'friend-operation.lock').exists():
         # Import only when armed, preserving the existing non-friend controller.
         # A missing helper/policy fails closed; never fall through to launch().
         import friend_service_guard
         friend_service_guard.start(policy, info['sourceHead'],
-                                   Path(info['dataDir']) / 'coach.sqlite', stop, launch)
+                                   Path(info['dataDir']) / 'coach.sqlite', stop, launch,
+                                   after_ready=complete)
     else:
         launch()
+        complete()
+
+
+def pair_code():
+    def issue(info, config):
+        env = dict(os.environ, **config['EnvironmentVariables'])
+        print('请在 LearningCoach 里输入下面的六位配对码。五分钟内有效，用过就失效。', flush=True)
+        run(Path(info['root']) / 'app/bin/app', 'pair-code', env=env)
+    start(after_ready=issue)
 
 
 def public_port(value):
@@ -226,7 +241,7 @@ def install(friend_port=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['install', 'start', 'stop', 'status', 'uninstall'])
+    parser.add_argument('command', choices=['install', 'start', 'stop', 'status', 'uninstall', 'pair-code'])
     parser.add_argument('--public-port', type=public_port, help='Opt-in loopback-only friend listener (install only)')
     args = parser.parse_args()
     command = args.command
@@ -236,6 +251,8 @@ def main():
         install(args.public_port)
     elif command == 'start':
         start()
+    elif command == 'pair-code':
+        pair_code()
     elif command == 'stop':
         stop()
     elif command == 'uninstall':

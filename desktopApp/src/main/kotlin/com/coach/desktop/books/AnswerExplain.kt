@@ -34,6 +34,7 @@ internal class AnswerExplain(
     val ready: () -> Boolean,
     val paired: () -> Boolean,
     val explain: suspend (chosen: SourceBlock, blocks: List<SourceBlock>) -> ExplainResult,
+    val revoked: () -> Boolean = { false },
 )
 
 /** Windows 主机的接线：配对与「这本书允许吗」沿用原文页已有的那一套，不另建通道。 */
@@ -43,6 +44,7 @@ internal fun answerExplainWith(explainer: BookExplainer, consent: ExplainConsent
     ready = { explainer.loaded },
     paired = { explainer.identity != null },
     explain = { chosen, blocks -> explainer.explain(chosen, blocks) },
+    revoked = { explainer.revoked },
 )
 
 /**
@@ -69,7 +71,7 @@ internal class PairedBookExplainSupport(
                     }
                     BookLearningReply.Text(withShortIds(result.explanation.text, result.explanation.citations), cited)
                 }
-                is ExplainResult.Refused -> BookLearningReply.Unavailable(result.message)
+                is ExplainResult.Refused -> BookLearningReply.Unavailable(result.message, result.trouble)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -115,7 +117,8 @@ internal fun LessonAnswerExplanation(
         !ready -> Text("正在看这台电脑和 Mac 的连接…", Modifier.testTag("answer-explain-loading"),
             style = MaterialTheme.typography.bodySmall)
         !paired -> Column(Modifier.fillMaxWidth().testTag("answer-explain-unpaired"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("讲解由你配对的 Mac 生成，这台电脑还没连上。", style = MaterialTheme.typography.bodySmall)
+            Text(if (gate.revoked()) ExplainTrouble.REVOKED else "讲解由配对的 Mac 生成，这台电脑还没连上。读书和做题照常。",
+                style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("answer-explain-unpaired-text"))
             V7TextButton(onOpenSourcePage, modifier = Modifier.testTag("answer-explain-pair")) { Text("去原文页配对") }
         }
         skipped -> Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
@@ -126,7 +129,7 @@ internal fun LessonAnswerExplanation(
         !allowed -> V7ExpandIn {
             PaperCard(Modifier.testTag("answer-explain-consent"), contentPadding = PaddingValues(16.dp)) {
                 Text("答完了，看看这段怎么讲", style = MaterialTheme.typography.titleMedium)
-                Text("讲解会把你刚做的这段原文和前后各一段发给你配对的 Mac，由它的 AI 生成。这本书只问这一次。",
+                Text(ExplainPrivacy.answer(book.title),
                     style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.fgSecondary)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                     PrimaryButton({ gate.consent.allow(book.id); allowed = true }, modifier = Modifier.testTag("answer-explain-allow")) {
@@ -140,7 +143,11 @@ internal fun LessonAnswerExplanation(
             val support = remember(book.id, lesson.id, practice.reference, gate) {
                 PairedBookExplainSupport(gate, practice.reference)
             }
-            BookLessonExplanation(book, lesson, support, reply = reply, sources = sources)
+            // 停用之后在原文页重新配好了：留着的那条「已停用」作废，这一节重新去取讲解。
+            LaunchedEffect(reply.value) {
+                if ((reply.value as? BookLearningReply.Unavailable)?.trouble == ExplainTrouble.Revoked && !gate.revoked()) reply.value = null
+            }
+            BookLessonExplanation(book, lesson, support, reply = reply, sources = sources, onRepair = onOpenSourcePage)
         }
     }
 }

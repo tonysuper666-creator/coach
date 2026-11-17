@@ -13,13 +13,15 @@ internal class PairedBookLearningSupport(
     override suspend fun explain(request: BookExplanationRequest) = UnconnectedBookLearningSupport.explain(request)
     override suspend fun ask(request: BookPassageQuestion): BookLearningReply {
         var citedText: String? = null
+        // The provider turns any failure into its own generic line; keep the server's sentence and kind here instead.
+        var refused: ExplainResult.Refused? = null
         val verified = OwnedBookLearningProvider(library) { prompt ->
             val excerpt = prompt.excerpts.single()
             require(consent.allowed(excerpt.citation.book))
             val c = excerpt.citation
             val block = SourceBlock("${c.book}:p${c.page}:${c.start}", c.page, c.start, c.end, false, excerpt.text)
             when (val result = send(block, checkNotNull(prompt.question))) {
-                is ExplainResult.Refused -> throw IllegalStateException(result.message)
+                is ExplainResult.Refused -> { refused = result; throw IllegalStateException("refused") }
                 is ExplainResult.Done -> {
                     require(result.explanation.citations.isNotEmpty() && result.explanation.citations.all {
                         it.blockId == block.id && it.page == c.page
@@ -31,7 +33,7 @@ internal class PairedBookLearningSupport(
         }
         return when (val reply = verified.ask(request)) {
             is BookLearningReply.Text -> reply.copy(text = checkNotNull(citedText), sources = listOf(request.passage))
-            is BookLearningReply.Unavailable -> reply
+            is BookLearningReply.Unavailable -> refused?.let { BookLearningReply.Unavailable(it.message, it.trouble) } ?: reply
         }
     }
 }

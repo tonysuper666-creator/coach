@@ -318,7 +318,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             Text(when { book.format == "pdf" -> "页码按 PDF 原文件计算。"; book.format in BookFormats.images -> "一张图片为一页。"; else -> "页码按阅读器中的正文分页计算。" }, style = MaterialTheme.typography.bodySmall)
         }
     }
-    if (asking) BookPassageAsk(book, page, support) { asking = false }
+    if (asking) BookPassageAsk(book, page, support, onRepair = { explainer.markRevoked(); asking = false; explainOpen = true }) { asking = false }
 }
 
 /** 一行 Markdown 标题：[marks] 是井号连同后面的空白，[title] 是标题文字；都是原文里的字符下标。 */

@@ -27,9 +27,12 @@ internal fun BookLessonExplanation(
     support: BookLearningSupport,
     reply: MutableState<BookLearningReply?> = remember(book.id, lesson.id, support) { mutableStateOf(null) },
     sources: @Composable (List<BookPassage>) -> Unit = {},
+    onRepair: (() -> Unit)? = null,
 ) {
     // A caller may hold this across a screen switch so returning does not re-ask the provider.
-    LaunchedEffect(book.id, lesson.id, support) {
+    var attempt by remember(book.id, lesson.id, support) { mutableIntStateOf(0) }
+    // 外面清掉旧结果（比如重新配对之后）也会重新取一次。
+    LaunchedEffect(book.id, lesson.id, support, attempt, reply.value == null) {
         if (reply.value != null) return@LaunchedEffect
         reply.value = try {
             val result = support.explain(BookExplanationRequest(book.id, lesson.id, lesson.blocks))
@@ -49,7 +52,8 @@ internal fun BookLessonExplanation(
                     Text(result.text, Modifier.testTag("book-explanation-text"))
                     sources(result.sources)
                 }
-                is BookLearningReply.Unavailable -> Text(result.message, Modifier.testTag("book-explanation-unavailable"))
+                is BookLearningReply.Unavailable -> ExplainTroubleLine(result, onRetry = { reply.value = null; attempt++ },
+                    onRepair = onRepair, modifier = Modifier.testTag("book-explanation-unavailable"))
             }
         }
     }

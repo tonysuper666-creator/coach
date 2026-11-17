@@ -44,7 +44,10 @@ internal data class Citation(val anchor: String, val blockId: String, val page: 
 internal data class Explanation(val text: String, val citations: List<Citation>, val elapsedMs: Long)
 internal sealed interface ExplainResult {
     data class Done(val explanation: Explanation) : ExplainResult
-    data class Refused(val message: String, val unauthorized: Boolean = false) : ExplainResult
+    /** [message] 是给人看的那一句；[trouble] 决定给不给「再试一次」或「重新配对」。 */
+    data class Refused(val message: String, val trouble: ExplainTrouble = ExplainTrouble.Other) : ExplainResult {
+        val unauthorized get() = trouble == ExplainTrouble.Revoked
+    }
 }
 
 /** Sending a book's text off this computer needs a yes from the reader, per book. Nothing is sent before it. */
@@ -115,18 +118,40 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         protected set
     var defaultAddress by mutableStateOf("")
         protected set
+    /** 服务端说这台电脑的连接已停用（401）；重新配对成功前，配对表单上先说清这一句。 */
+    var revoked by mutableStateOf(false)
+        protected set
+
+    /** 别处（选段提问、答后讲解）先碰到了 401：讲解面板也回到配对，不再显示「已连上」。 */
+    fun markRevoked() {
+        identity?.let { stopped += it.key() }
+        identity = null; revoked = true
+    }
 
     open suspend fun load() {
         val result = withContext(Dispatchers.IO) { runCatching { settings.serverUrl() to pairing.load() } }
-        result.getOrNull()?.let { defaultAddress = it.first.orEmpty(); identity = it.second }
+        result.getOrNull()?.let { (address, saved) ->
+            defaultAddress = address.orEmpty()
+            // 配对文件 401 之后仍在磁盘上；同一份凭据在这个进程里停用过，就别再当成「已连上」。
+            val stale = saved != null && saved.key() in stopped
+            identity = if (stale) null else saved
+            if (stale) revoked = true else if (saved != null) revoked = false
+        }
         loaded = true
     }
 
     open suspend fun pair(address: String, code: String): Boolean = try {
         identity = withContext(Dispatchers.IO) { pairing.pair(address, code, "Windows 电脑") }
+        revoked = false
         true
     } catch (cancelled: CancellationException) { throw cancelled }
     catch (_: Exception) { false }
+
+    private companion object {
+        /** 原文页、答后讲解、选段提问各有一个 explainer；谁先碰到 401，其他的读到同一份凭据时也算停用。 */
+        val stopped: MutableSet<Triple<String, String, String>> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+        fun DesktopIdentity.key() = Triple(serverUrl, credentials.deviceId, credentials.token)
+    }
 
     open suspend fun explain(chosen: SourceBlock, blocks: List<SourceBlock>, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult {
         val context = ExplainWire.context(blocks, chosen)
@@ -146,9 +171,10 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
             if (snapshot != null && withContext(Dispatchers.IO) { imports!!.snapshot(context) } != snapshot)
                 return ExplainResult.Refused("保存的原文已变化，请重新打开这本书后重试。")
             val body = reply.body
+            val trouble = ExplainTrouble.of(reply.statusCode, reply.code)
             when {
-                reply.statusCode == 401 -> { identity = null; ExplainResult.Refused(reply.error.orEmpty(), unauthorized = true) }
-                body == null -> ExplainResult.Refused(reply.error ?: "暂时没连上 Mac，可继续阅读或稍后重试。")
+                trouble == ExplainTrouble.Revoked -> { markRevoked(); ExplainResult.Refused(ExplainTrouble.REVOKED, trouble) }
+                body == null -> ExplainResult.Refused(ExplainTrouble.message(trouble, reply.error), trouble)
                 else -> ExplainWire.parse(body, context)
             }
         } catch (cancelled: CancellationException) {
@@ -163,7 +189,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
 private sealed interface BlockState {
     data object Waiting : BlockState
     data class Done(val explanation: Explanation, val context: List<SourceBlock>) : BlockState
-    data class Failed(val message: String) : BlockState
+    data class Failed(val message: String, val trouble: ExplainTrouble) : BlockState
 }
 
 /**
@@ -183,6 +209,7 @@ internal fun BookExplainPanel(book: Textbook, page: Int, consent: ExplainConsent
     var pairError by remember { mutableStateOf<String?>(null) }
     var pairing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val scroll = rememberScrollState()
     LaunchedEffect(explainer) { if (!explainer.loaded) explainer.load() }
 
     fun start(block: SourceBlock) {
@@ -191,19 +218,25 @@ internal fun BookExplainPanel(book: Textbook, page: Int, consent: ExplainConsent
             val result = explainer.explain(block, blocks)
             states[block.id] = when (result) {
                 is ExplainResult.Done -> BlockState.Done(result.explanation, ExplainWire.context(blocks, block))
-                is ExplainResult.Refused -> BlockState.Failed(result.message)
+                is ExplainResult.Refused -> BlockState.Failed(result.message, result.trouble)
             }
         }
     }
 
     val colors = CoachTheme.colors
     val numbers = LocalV7Fonts.current.numbers
-    Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp).testTag("book-explain"), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    Column(modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp).testTag("book-explain"), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         val paired = explainer.identity
         if (paired == null && explainer.loaded) Column(Modifier.testTag("explain-pairing"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("先连上你的 Mac", style = MaterialTheme.typography.titleMedium)
-            Text("讲解由你配对的 Mac 生成。打开 Tailscale，输入 Mac 地址和 Mac 上生成的 6 位配对码。", style = MaterialTheme.typography.bodySmall,
-                color = colors.fgSecondary)
+            if (explainer.revoked) {
+                Text("这台电脑的连接已停用", style = MaterialTheme.typography.titleMedium)
+                Text("请找给你配对码的人重新配对：输入 Mac 地址和新的 6 位配对码。读书和做题照常。", style = MaterialTheme.typography.bodySmall,
+                    color = colors.fgSecondary, modifier = Modifier.testTag("explain-revoked"))
+            } else {
+                Text("先连上 Mac", style = MaterialTheme.typography.titleMedium)
+                Text("讲解由配对的 Mac 生成。输入 Mac 地址和 Mac 那边生成的 6 位配对码。", style = MaterialTheme.typography.bodySmall,
+                    color = colors.fgSecondary)
+            }
             V7Field(address, { address = it; pairError = null }, "Mac 地址", enabled = !pairing, paper = colors.surface2, modifier = Modifier.fillMaxWidth().testTag("explain-address"))
             V7Field(code, { code = it.filter(Char::isDigit).take(6); pairError = null }, "配对码", enabled = !pairing, paper = colors.surface2,
                 visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
@@ -211,36 +244,48 @@ internal fun BookExplainPanel(book: Textbook, page: Int, consent: ExplainConsent
             PrimaryButton(onClick = {
                 pairing = true
                 scope.launch {
-                    if (!explainer.pair(address, code)) pairError = "没配上。确认 Mac 地址、Tailscale，并在 Mac 上生成新的配对码。"
+                    if (!explainer.pair(address, code)) pairError = "没配上。核对 Mac 地址，或请 Mac 那边生成新的配对码。"
+                    // 配好了：之前因停用而停下的段落回到「讲解这段」。
+                    else states.filterValues { (it as? BlockState.Failed)?.trouble == ExplainTrouble.Revoked }.keys.forEach(states::remove)
                     code = ""; pairing = false
                 }
             }, enabled = code.length == 6 && address.isNotBlank() && !pairing, modifier = Modifier.testTag("explain-pair")) { Text(if (pairing) "正在配对…" else "配对") }
             pairError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = v7Alert(), modifier = Modifier.testTag("explain-pair-error")) }
-        } else if (paired != null) Text("已连上你的 Mac。点一段原文旁的「讲解」。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+        } else if (paired != null) Text("已连上 Mac。点一段原文旁的「讲解这段」。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
         if (onPage.isEmpty()) Text("这一页没有可讲的正文。", style = MaterialTheme.typography.bodyMedium, color = colors.fgSecondary)
         for (block in onPage) Column(Modifier.fillMaxWidth().testTag("explain-block-${block.id}"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(block.text, style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary)
             val state = states[block.id]
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                PaperButton(onClick = {
-                    if (consented) start(block) else pending = block
-                }, enabled = paired != null && state != BlockState.Waiting, modifier = Modifier.testTag("explain-button")) {
-                    Text(if (state == BlockState.Waiting) "讲解中…" else "讲解这段")
+            val failed = state as? BlockState.Failed
+            // 状态行固定在按钮这一行：失败时按钮就地换成下一步（再试一次 / 重新配对），
+            // 右边的块编号换成那句话，下面的段落不被推下去（desktop-polish D3、E3）。
+            Row(Modifier.heightIn(min = 40.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                when (failed?.trouble) {
+                    ExplainTrouble.Revoked -> PaperButton(onClick = { scope.launch { scroll.animateScrollTo(0) } },
+                        modifier = Modifier.testTag("explain-repair")) { Text("重新配对") }
+                    ExplainTrouble.Quota -> PaperButton(onClick = {}, enabled = false, modifier = Modifier.testTag("explain-button")) { Text("讲解这段") }
+                    null -> PaperButton(onClick = {
+                        if (consented) start(block) else pending = block
+                    }, enabled = paired != null && state != BlockState.Waiting, modifier = Modifier.testTag("explain-button")) {
+                        Text(if (state == BlockState.Waiting) "讲解中…" else "讲解这段")
+                    }
+                    else -> PaperButton(onClick = { start(block) }, enabled = paired != null,
+                        modifier = Modifier.testTag("explain-retry")) { Text("再试一次") }
                 }
-                Text(ExplainWire.shortId(block.id), style = MaterialTheme.typography.labelMedium, fontFamily = numbers, color = colors.fgSecondary)
+                if (failed == null) Text(ExplainWire.shortId(block.id), style = MaterialTheme.typography.labelMedium, fontFamily = numbers, color = colors.fgSecondary)
+                else Text(failed.message, style = MaterialTheme.typography.bodySmall, maxLines = 2,
+                    color = if (failed.trouble == ExplainTrouble.Quota) colors.fgSecondary else v7Alert(),
+                    modifier = Modifier.weight(1f).testTag("explain-failed"))
             }
-            when (state) {
-                is BlockState.Done -> ExplanationView(state.explanation) { citation ->
-                    state.context.firstOrNull { it.id == citation.blockId }?.let { opened = citation to it }
-                }
-                is BlockState.Failed -> Text(state.message, style = MaterialTheme.typography.bodySmall, color = v7Alert(), modifier = Modifier.testTag("explain-failed"))
-                else -> {}
+            if (state is BlockState.Done) ExplanationView(state.explanation) { citation ->
+                state.context.firstOrNull { it.id == citation.blockId }?.let { opened = citation to it }
             }
         }
     }
     pending?.let { block ->
-        AlertDialog(onDismissRequest = { pending = null }, title = { Text("把这段发到你的 Mac？") },
-            text = { Text("讲解会把你选的这一段和前后各一段原文发给你配对的 Mac，由它的 AI 生成。这本书之后不再询问。《${book.title}》允许吗？",
+        AlertDialog(onDismissRequest = { pending = null }, title = { Text(ExplainPrivacy.TITLE) },
+            text = { Text(ExplainPrivacy.explain(book.title),
                 style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("explain-consent")) },
             confirmButton = {
                 PrimaryButton({ consent.allow(book.id); consented = true; pending = null; start(block) }, modifier = Modifier.testTag("explain-consent-allow")) { Text("允许并讲解") }

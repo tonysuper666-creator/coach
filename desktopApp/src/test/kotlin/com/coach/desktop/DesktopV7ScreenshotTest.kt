@@ -62,7 +62,10 @@ class DesktopV7ScreenshotTest {
         // 第 8 刀：阅读器里的「选段提问」弹窗和「讲解」面板，都对读书那一屏。
         "ask-pick" to "inner-read", "ask-unavailable" to "inner-read", "ask-too-long" to "inner-read",
         "explain-pairing" to "inner-read", "explain-consent" to "inner-read", "explain-answer" to "inner-read",
-        "explain-source" to "inner-read", "explain-failed" to "inner-read",
+        "explain-source" to "inner-read",
+        // TON-1687：讲解没拿到时——连不上、再试一次讲成了、额度用完、连接被停用、回到配对。都对读书那一屏。
+        "explain-offline" to "inner-read", "explain-retried" to "inner-read", "explain-quota" to "inner-read",
+        "explain-revoked" to "inner-read", "explain-repair" to "inner-read",
         // 第 9 刀：课程里的本地练习——入口、作答、保存冲突、读取确认、交卷确认、结果、冻结题源、历次结果，都对做题那一屏。
         "exam-entry" to "inner-quiz", "exam-attempt" to "inner-quiz", "exam-conflict" to "inner-quiz", "exam-reload" to "inner-quiz",
         "exam-submit" to "inner-quiz", "exam-result" to "inner-quiz", "exam-source" to "inner-quiz", "exam-history" to "inner-quiz",
@@ -272,6 +275,7 @@ class DesktopV7ScreenshotTest {
         val book = controller.state.value.book!!
         val blocks = StudyCoachCourse.blocks(book.id, book.pages).filterNot { it.heading }
         val page = blocks.groupBy { it.page }.maxBy { it.value.size }.key
+        val only = blocks.first { it.page == page }
         val consent = ExplainConsent(directory)
         val mac = FakeMac(root.resolve("home"))
         val shots = mutableListOf<Shot>()
@@ -314,13 +318,51 @@ class DesktopV7ScreenshotTest {
             onNodeWithTag("explain-source-close").performClick(); waitForIdle()
             onNodeWithTag("explain-source-card").assertDoesNotExist()
 
-            val buttons = onAllNodesWithTag("explain-button")
-            buttons[buttons.fetchSemanticsNodes().size - 1].performScrollTo().performClick()
+            // 连不上（Mac 合盖、休眠、断网）：那一行就地换成「再试一次」和固定的那句话，Mac 回来后再试一次就讲成。
+            fun inBlock(tag: String, block: SourceBlock) = onNode(hasTestTag(tag) and hasAnyAncestor(hasTestTag("explain-block-${block.id}")))
+            mac.script += ExplainResult.Refused(ExplainTrouble.UNREACHABLE, ExplainTrouble.Unreachable)
+            mac.script += null
+            inBlock("explain-button", only).performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-failed").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("explain-failed").performScrollTo(); waitForIdle()
-            shot("explain-failed")
+            inBlock("explain-failed", only).assertTextEquals(ExplainTrouble.UNREACHABLE)
+            onNodeWithTag("explain-answer").assertDoesNotExist()
+            inBlock("explain-retry", only).performScrollTo(); waitForIdle()
+            shot("explain-offline")
+            inBlock("explain-retry", only).performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-answer").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("explain-failed").assertDoesNotExist()
+            inBlock("explain-answer", only).performScrollTo(); waitForIdle()
+            shot("explain-retried")
+
+            // 连接被停用（401）：那一行给「重新配对」，点了回到顶上的配对，标题换成停用的说法。
+            mac.script += ExplainResult.Refused(ExplainTrouble.REVOKED, ExplainTrouble.Revoked)
+            inBlock("explain-button", only).performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-repair").fetchSemanticsNodes().isNotEmpty() }
+            inBlock("explain-failed", only).assertTextEquals(ExplainTrouble.REVOKED)
+            inBlock("explain-repair", only).performScrollTo(); waitForIdle()
+            shot("explain-revoked")
+            onNodeWithTag("explain-repair").performClick(); waitForIdle()
+            onNodeWithTag("explain-revoked").assertIsDisplayed()
+            shot("explain-repair")
+            onNodeWithTag("explain-code").performTextInput("135791")
+            onNodeWithTag("explain-pair").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
+            onNodeWithTag("explain-repair").assertDoesNotExist()
+            inBlock("explain-button", only).assertIsEnabled()
+
+            // 重新配对后再讲，碰上额度用完：原样显示服务端那句话，不给「再试一次」，按钮停用。
+            val quota = "今天的讲解额度用完了，明天再来。"
+            mac.script += ExplainResult.Refused(quota, ExplainTrouble.Quota)
+            inBlock("explain-button", only).performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-failed").fetchSemanticsNodes().isNotEmpty() }
+            inBlock("explain-failed", only).assertTextEquals(quota)
+            onNodeWithTag("explain-retry").assertDoesNotExist()
+            inBlock("explain-button", only).assertIsNotEnabled()
+            inBlock("explain-failed", only).performScrollTo(); waitForIdle()
+            shot("explain-quota")
         }
-        assertEquals(2, mac.explained)
+        assertEquals(5, mac.explained)
+        assertTrue(mac.script.isEmpty())
         return shots
     }
 
@@ -532,13 +574,19 @@ class DesktopV7ScreenshotTest {
         override suspend fun pair(address: String, code: String): Boolean {
             if (code == "000000") return false
             identity = DesktopIdentity("http://mac.test:18791", PairedCredentials("test-device", "test-token"))
+            revoked = false
             return true
         }
-        override suspend fun explain(chosen: SourceBlock, blocks: List<SourceBlock>, requestId: String): ExplainResult =
-            if (explained++ == 0) ExplainResult.Done(Explanation(
+        /** 接下来几次讲解的回话，按顺序取；`null` 表示讲成一条带出处的回答。脚本空了也讲成。 */
+        val script = ArrayDeque<ExplainResult.Refused?>()
+        override suspend fun explain(chosen: SourceBlock, blocks: List<SourceBlock>, requestId: String): ExplainResult {
+            explained++
+            val refused = script.removeFirstOrNull()
+            if (refused?.trouble == ExplainTrouble.Revoked) markRevoked()
+            return refused ?: ExplainResult.Done(Explanation(
                 "这一段讲的是细胞在生物体里的位置：结构从它搭起，功能也由它完成，所以叫「基本单位」。后半句提到细胞核，是给下一节留的线头。【c1】",
                 listOf(Citation("c1", chosen.id, chosen.page)), 12))
-            else ExplainResult.Refused("暂时没连上 Mac，可继续阅读或稍后重试。")
+        }
     }
 
     private fun ComposeUiTest.ready(c: TextbookController, condition: (LibraryUi) -> Boolean) {

@@ -33,6 +33,26 @@ function Fail([int]$n, [string]$why) {
 }
 function Pass([int]$n, [string]$what) { [void]$results.Add([pscustomobject]@{ Step = $n; Name = $steps[$n - 1]; Ok = $true; Why = $what }); Note "步骤$n 通过：$what" }
 function Has($lines, [string[]]$needles) { foreach ($s in $needles) { $m = Find-Text $lines $s; if ($m) { return $m } }; $null }
+function Get-AskReplyState($lines, [int]$page) {
+    $title = Find-Text $lines '就这段问一句'
+    $close = Find-Text $lines '回到阅读'
+    if (-not $title -or -not $close) { return 'waiting' }
+    # Only inspect text inside this dialog. The reader behind it has its own
+    # citation and page number even while the question is pending or refused.
+    $body = foreach ($line in $lines) {
+        $words = foreach ($word in $line.Words) {
+            $box = $word.BoundingRect
+            if ($box.X -ge $title.X1 -and $box.X + $box.Width -le $close.X2 -and
+                $box.Y -gt $title.Y2 -and $box.Y + $box.Height -lt $close.Y1) { $word.Text }
+        }
+        ($words -join '') -replace '\s', ''
+    }
+    if ($body -match '^(再试一次|重新配对)$' -or
+        $body -match '尚未接通|无法回答|不能回答|尚未核实|连不上|超时|暂时读不到回答') { return 'refused' }
+    if ($body -match '正在读这段问题') { return 'waiting' }
+    if ($body -match "^出处[·•.．:：]?第${page}页$") { return 'answered' }
+    return 'waiting'
+}
 function Await-Text([int]$n, [string]$tag, [string[]]$needles, [int]$sec) {
     $deadline = (Get-Date).AddSeconds($sec)
     do { $lines = Shot $n $tag; $m = Has $lines $needles; if ($m) { return $m }; Start-Sleep -Seconds 2 } while ((Get-Date) -lt $deadline)
@@ -251,9 +271,9 @@ try {
             Start-Sleep -Seconds 6; $i++
             Scroll-At 1080 600 -10; Start-Sleep -Milliseconds 600
             $lines = Shot 4 "ask-wait$i"
-            $e = $lines | Where-Object { $_.Text -match '尚未接通|无法回答|不能回答|尚未核实|连不上|超时' } | Select-Object -First 1
-            if ($e) { throw "服务拒绝了提问：$($e.Text)" }
-            if ((Has $lines @('出处')) -and (Has $lines @("第$physPage页", "第 $physPage 页"))) { $got = $true }
+            $replyState = Get-AskReplyState $lines $physPage
+            if ($replyState -eq 'refused') { throw '选段提问弹框显示请求失败，见本轮私有截图' }
+            $got = $replyState -eq 'answered'
         }
         if (-not $got) { throw '120 秒内提问没有得到带出处的回答' }
         Send-Keys '{ESC}'; Start-Sleep -Seconds 1

@@ -190,6 +190,12 @@ def main():
         require(not any((root / f'run/{n}.json').exists() for n in ('bridge', 'mathsvc')), 'health files cleaned')
         for port in ports:
             with socket.socket() as s:
+                s.settimeout(1)
+                require(s.connect_ex(('127.0.0.1', port)) != 0, 'listener stopped')
+            with socket.socket() as s:
+                # Ignore closed connections in TIME_WAIT, but still reject a
+                # live listener. No SO_REUSEPORT or listener adoption.
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 s.bind(('127.0.0.1', port))
         require(tree_hash(release) == before, 'immutable candidate')
         receipt.update(result='PASS', stopVerified=True, listenersReleased=3, candidateUnchanged=True)

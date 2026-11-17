@@ -101,7 +101,14 @@ def start():
     ready(info)
 
 
-def install():
+def public_port(value):
+    port = int(value)
+    if not 1 <= port <= 65535 or port in (18791, 8790, 8791, 3790, 19540):
+        raise argparse.ArgumentTypeError('Public port must be distinct from private Coach and bridge ports')
+    return port
+
+
+def install(friend_port=None):
     root = Path(__file__).resolve().parents[2]
     binary = root / 'server/app/build/install/app'
     if not (binary / 'bin/app').is_file():
@@ -144,6 +151,8 @@ def install():
         'BRIDGE_LOG_STDOUT': '1',
 
     }
+    if friend_port is not None:
+        environment['COACH_PUBLIC_PORT'] = str(public_port(friend_port))
     plist = {'Label': LABEL, 'ProgramArguments': [str(release / 'app/bin/app')], 'WorkingDirectory': str(release),
         'EnvironmentVariables': environment, 'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 5,
         'ExitTimeOut': 20, 'StandardOutPath': str(logs / 'bootstrap.log'), 'StandardErrorPath': str(logs / 'bootstrap.log'), 'Umask': 0o077}
@@ -183,9 +192,13 @@ def install():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['install', 'start', 'stop', 'status', 'uninstall'])
-    command = parser.parse_args().command
+    parser.add_argument('--public-port', type=public_port, help='Opt-in loopback-only friend listener (install only)')
+    args = parser.parse_args()
+    command = args.command
+    if args.public_port is not None and command != 'install':
+        parser.error('--public-port is only valid with install')
     if command == 'install':
-        install()
+        install(args.public_port)
     elif command == 'start':
         start()
     elif command == 'stop':

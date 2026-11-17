@@ -3,6 +3,7 @@ package com.coach.desktop
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import com.coach.desktop.books.*
@@ -479,6 +480,276 @@ class WindowsTextbooksTest {
             highlighted("书架")
             onNodeWithTag("host-bar").assertIsDisplayed()
             shot("back-on-shelf")
+        }
+    }
+
+    /**
+     * TON-1698, native-window half: the same walk as above, in a real [androidx.compose.ui.awt.ComposeWindow] on the
+     * Windows desktop, with the private real textbook kept outside Git on winbox (never a sample or synthetic book).
+     * Opt in with `-Pcoach.explainLiveWindow=true` on Windows. Explain requests go only to a loopback stub on a random
+     * port. Screenshots keep the rail, settings, the top bar and the panel's own status lines; everything else in the
+     * window (book pages, the passages listed in the panel, citation snippets) is mosaicked before the file is written,
+     * so no original text leaves the machine. Logs carry bounds and states only.
+     */
+    @Test fun realTextbookKeepsTheReaderShellInEveryExplainStateInANativeWindowInBothThemes() {
+        org.junit.Assume.assumeTrue(System.getProperty("coach.explainLiveWindow") == "true")
+        org.junit.Assume.assumeTrue(System.getProperty("os.name").startsWith("Windows"))
+        val book = Path.of("D:/agent/friend-path-books/health-economics.pdf")
+        check(Files.isRegularFile(book)) { "the private real textbook is missing on this machine" }
+        for (name in listOf("COACH_URL", "COACH_CLIENT_DIR", "COACH_TOKEN_FILE", "COACH_ACCEPTANCE_REPLAY", "COACH_AGENT_RUN_ID"))
+            check(System.getenv(name).isNullOrBlank()) { "$name must be unset for this isolated run" }
+        val saved = listOf("user.home", "jpackage.app-path", "coach.windows.theme").associateWith { System.getProperty(it) }
+        val root = Files.createTempDirectory("coach-explain-shell-native-")
+        try {
+            for (dark in listOf(false, true)) {
+                val theme = if (dark) "dark" else "light"
+                val home = Files.createDirectories(root.resolve("$theme-home"))
+                System.setProperty("user.home", home.toString())
+                System.setProperty("jpackage.app-path", home.resolve("LearningCoach.exe").toString())
+                System.setProperty("coach.windows.theme", theme)
+                assertEquals(home.resolve("Coach/client"), DesktopConnectionSettings().clientDirectory)
+                ExplainShellMac(if (dark) 'd' else 'l').use { mac -> NativeShellWalk(root.resolve(theme), theme, book, mac).run() }
+            }
+        } finally {
+            for ((key, value) in saved) if (value == null) System.clearProperty(key) else System.setProperty(key, value)
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @OptIn(androidx.compose.ui.InternalComposeUiApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class,
+        androidx.compose.runtime.tooling.ComposeToolingApi::class)
+    private class NativeShellWalk(val root: Path, val theme: String, val source: Path, val mac: ExplainShellMac) {
+        private lateinit var window: androidx.compose.ui.awt.ComposeWindow
+        private val out = File("build/screens/ton1698-native/$theme").apply { mkdirs() }
+
+        fun run() {
+            val library = TextbookLibrary(root.resolve("library"))
+            val stored = library.importBook(source)
+            check(stored.pages.size > 100) { "use the private real textbook" }
+            // Consent is per book and asked once; it is covered elsewhere. Granting it here sends passages only to the stub.
+            ExplainConsent(library.directory).allow(stored.id)
+            val controller = TextbookController(library)
+            kotlinx.coroutines.runBlocking { controller.load() }
+            window = edt { androidx.compose.ui.awt.ComposeWindow().apply {
+                title = "LearningCoach · TON-1698 讲解外壳真窗口 · 真实教材"
+                val screen = java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
+                setBounds(screen.x + 20, screen.y + 20, minOf(1440, screen.width - 40), minOf(900, screen.height - 60))
+                setContent { WindowsTextbookHost(controller) { null } }
+                isVisible = true
+            } }
+            try { walk(controller) } catch (failure: Throwable) { shot("failure"); throw failure } finally { edt { window.dispose() } }
+        }
+
+        private fun walk(controller: TextbookController) {
+            waitFor("host") { controller.state.value.screen == BookScreen.HOME && node("host-navigation") != null }
+            clickText("今天")
+            click("host-today-read")
+            waitFor("reader") { idle(controller) && controller.state.value.screen == BookScreen.READER && node("textbook-reader") != null }
+            if (controller.state.value.prompt != null) kotlinx.coroutines.runBlocking { controller.dismissPrompt() }
+            val book = controller.state.value.book!!
+            // A page in the body of the book with a real paragraph, so the panel has something to explain.
+            val block = StudyCoachCourse.blocks(book.id, book.pages).first { it.page >= 20 && !it.heading && it.text.length >= 120 }
+            kotlinx.coroutines.runBlocking { controller.page(block.page) }
+            waitFor("page ${block.page}") { idle(controller) && controller.state.value.page == block.page }
+            assertHighlighted("书架")
+            val reader = shell()
+            log("reader", reader, "pages=${book.pages.size} page=${block.page}")
+            shot("reader")
+            fun same(state: String) {
+                Thread.sleep(400)
+                assertEquals(reader, shell(), "explain panel $state ($theme) moved the shell")
+                assertHighlighted("书架")
+                log(state, reader)
+            }
+            fun inBlock(tag: String) = edt { nodes().firstOrNull { n ->
+                n.config.getOrNull(SemanticsProperties.TestTag) == tag && generateSequence(n.parent) { it.parent }
+                    .any { it.config.getOrNull(SemanticsProperties.TestTag) == "explain-block-${block.id}" } } }
+            fun clickInBlock(tag: String) {
+                waitFor(tag) { inBlock(tag) != null }
+                edt { assertTrue(inBlock(tag)!!.config[androidx.compose.ui.semantics.SemanticsActions.OnClick].action!!.invoke(), tag) }
+                Thread.sleep(250)
+            }
+            fun pair(code: String) {
+                waitFor("pairing form") { node("explain-pairing") != null }
+                type("explain-address", mac.url)
+                type("explain-code", code)
+                click("explain-pair")
+                waitFor("paired") { node("explain-pairing") == null }
+            }
+
+            // 连上
+            click("book-explain-toggle")
+            same("pairing")
+            pair("246810")
+            clickInBlock("explain-button")
+            waitFor("answer") { inBlock("explain-text") != null }
+            same("explain-connected")
+            shot("explain-connected")
+
+            // 连不上
+            mac.mode = ExplainShellMac.Mode.OFFLINE
+            clickInBlock("explain-button")
+            waitFor("offline") { inBlock("explain-retry") != null }
+            assertEquals(ExplainTrouble.UNREACHABLE, text(inBlock("explain-failed")))
+            same("explain-offline")
+            shot("explain-offline")
+
+            // 被停用
+            mac.mode = ExplainShellMac.Mode.REVOKED
+            clickInBlock("explain-retry")
+            waitFor("revoked") { node("explain-revoked") != null }
+            same("explain-revoked")
+            shot("explain-revoked")
+
+            // 额度用完
+            mac.mode = ExplainShellMac.Mode.QUOTA
+            pair("135791")
+            clickInBlock("explain-button")
+            waitFor("quota") { inBlock("explain-failed") != null }
+            assertEquals(ExplainShellMac.QUOTA, text(inBlock("explain-failed")))
+            assertNull(inBlock("explain-retry"))
+            same("explain-quota")
+            shot("explain-quota")
+            assertEquals(2, mac.pairs.get())
+
+            // 关面板，再「返回书架」
+            click("book-explain-toggle")
+            waitFor("panel closed") { node("book-explain") == null }
+            same("closed")
+            clickText("返回书架", inDesk = true)
+            waitFor("shelf") { idle(controller) && controller.state.value.screen == BookScreen.HOME }
+            assertHighlighted("书架")
+            assertNotNull(node("host-bar"))
+            log("back-on-shelf", shell(desk = false))
+            shot("back-on-shelf")
+
+            // Reading opened from 课程 is the shelf's page too.
+            clickText("课程")
+            click("host-course-read")
+            waitFor("course reader") { idle(controller) && controller.state.value.screen == BookScreen.READER }
+            if (controller.state.value.prompt != null) kotlinx.coroutines.runBlocking { controller.dismissPrompt() }
+            Thread.sleep(400)
+            assertHighlighted("书架")
+            assertNull(node("host-bar"))
+            log("course-reader", shell())
+        }
+
+        private fun idle(controller: TextbookController): Boolean {
+            check(controller.state.value.error == null) { "controller error ($theme)" }
+            return !controller.state.value.busy
+        }
+
+        private fun nodes(): List<androidx.compose.ui.semantics.SemanticsNode> {
+            fun walk(node: androidx.compose.ui.semantics.SemanticsNode): List<androidx.compose.ui.semantics.SemanticsNode> =
+                listOf(node) + node.children.flatMap(::walk)
+            return window.semanticsOwners.flatMap { walk(it.unmergedRootSemanticsNode) }
+        }
+        private fun node(tag: String) = edt { nodes().firstOrNull { it.config.getOrNull(SemanticsProperties.TestTag) == tag } }
+        private fun inDesk(node: androidx.compose.ui.semantics.SemanticsNode) =
+            generateSequence(node.parent) { it.parent }.any { it.config.getOrNull(SemanticsProperties.TestTag) == "v7-desk" }
+        private fun textNode(value: String, desk: Boolean) = edt { nodes().firstOrNull {
+            it.config.getOrNull(SemanticsProperties.Text)?.any { t -> t.text == value } == true && (!desk || inDesk(it)) } }
+        private fun text(node: androidx.compose.ui.semantics.SemanticsNode?): String = edt {
+            val target = checkNotNull(node)
+            (listOf(target) + target.children).flatMap { it.config.getOrNull(SemanticsProperties.Text).orEmpty() }.joinToString("") { it.text }
+        }
+        private fun assertHighlighted(label: String) =
+            assertEquals(label, edt { node("host-navigation")!!.config.getOrNull(SemanticsProperties.StateDescription) }, "rail ($theme)")
+
+        /** Rail, settings and, on the reader, the desk and its top bar (Coach, 目录, 返回书架), in window pixels. */
+        private fun shell(desk: Boolean = true): Map<String, androidx.compose.ui.geometry.Rect> = edt {
+            buildMap {
+                put("rail", node("host-navigation")!!.boundsInRoot)
+                put("settings", node("open-settings")!!.boundsInRoot)
+                if (desk) {
+                    put("desk", node("v7-desk")!!.boundsInRoot)
+                    put("Coach", textNode("Coach", desk = true)!!.boundsInRoot)
+                    put("目录", node("v7-directory-toggle")!!.boundsInRoot)
+                    put("返回书架", textNode("返回书架", desk = true)!!.boundsInRoot)
+                }
+            }
+        }
+
+        private fun click(tag: String) {
+            waitFor(tag) { node(tag) != null }
+            edt { assertTrue(node(tag)!!.config[androidx.compose.ui.semantics.SemanticsActions.OnClick].action!!.invoke(), tag) }
+            Thread.sleep(250)
+        }
+        private fun clickText(value: String, inDesk: Boolean = false) {
+            waitFor(value) { textNode(value, inDesk) != null }
+            edt {
+                val button = generateSequence(textNode(value, inDesk)) { it.parent }
+                    .first { it.config.getOrNull(androidx.compose.ui.semantics.SemanticsActions.OnClick) != null }
+                assertTrue(button.config[androidx.compose.ui.semantics.SemanticsActions.OnClick].action!!.invoke(), value)
+            }
+            Thread.sleep(250)
+        }
+        private fun type(tag: String, value: String) {
+            waitFor(tag) { node(tag) != null }
+            edt {
+                val field = node(tag)!!
+                val editable = (listOf(field) + field.children).first { it.config.getOrNull(androidx.compose.ui.semantics.SemanticsActions.SetText) != null }
+                assertTrue(editable.config[androidx.compose.ui.semantics.SemanticsActions.SetText].action!!
+                    .invoke(androidx.compose.ui.text.AnnotatedString(value)), tag)
+            }
+            Thread.sleep(250)
+        }
+
+        private fun log(step: String, shell: Map<String, androidx.compose.ui.geometry.Rect>, extra: String = "") = println(
+            "TON1698_NATIVE theme=$theme step=$step rail=${node("host-navigation")!!.config.getOrNull(SemanticsProperties.StateDescription)} " +
+                "hostBar=${node("host-bar") != null} " + shell.entries.joinToString(" ") { (k, r) ->
+                    "$k=${r.left.toInt()},${r.top.toInt()},${r.width.toInt()}x${r.height.toInt()}" } + " $extra".trimEnd())
+
+        /**
+         * Capture the native window, then mosaic every pixel outside the shell and the panel's status lines.
+         * The raw frame never leaves the run's temp directory, which is deleted afterwards.
+         */
+        private fun shot(name: String) {
+            Thread.sleep(500)
+            val raw = root.resolve("raw-$name.png").toFile()
+            val keep = edt {
+                window.renderImmediately()
+                VerifyHooks.capture(window, raw)
+                val tags = setOf("host-navigation", "open-settings", "host-bar", "book-explain-toggle", "explain-pairing",
+                    "explain-button", "explain-retry", "explain-repair", "explain-failed", "explain-text")
+                val all = nodes()
+                val boxes = all.filter { it.config.getOrNull(SemanticsProperties.TestTag) in tags }.map { it.boundsInRoot }.toMutableList()
+                // The reader's top bar: from the desk's top edge to the bottom of Coach / 目录 / 返回书架, full desk width.
+                val desk = all.firstOrNull { it.config.getOrNull(SemanticsProperties.TestTag) == "v7-desk" }?.boundsInRoot
+                val bar = listOfNotNull(all.firstOrNull { it.config.getOrNull(SemanticsProperties.TestTag) == "v7-directory-toggle" },
+                    textNode("Coach", desk = true), textNode("返回书架", desk = true)).map { it.boundsInRoot }
+                if (desk != null && bar.isNotEmpty()) boxes += androidx.compose.ui.geometry.Rect(desk.left, desk.top, desk.right, bar.maxOf { it.bottom } + 8f)
+                boxes.map { java.awt.Rectangle(it.left.toInt(), it.top.toInt(), it.width.toInt() + 1, it.height.toInt() + 1) }
+            }
+            val image = ImageIO.read(raw)
+            raw.delete()
+            val masked = java.awt.image.BufferedImage(image.width, image.height, java.awt.image.BufferedImage.TYPE_INT_RGB)
+            val cell = 28
+            for (y in 0 until image.height step cell) for (x in 0 until image.width step cell) {
+                val w = minOf(cell, image.width - x); val h = minOf(cell, image.height - y)
+                var r = 0L; var g = 0L; var b = 0L
+                for (yy in y until y + h) for (xx in x until x + w) image.getRGB(xx, yy).let { r += it shr 16 and 255; g += it shr 8 and 255; b += it and 255 }
+                val n = w * h
+                val rgb = ((r / n).toInt() shl 16) or ((g / n).toInt() shl 8) or (b / n).toInt()
+                for (yy in y until y + h) for (xx in x until x + w) masked.setRGB(xx, yy, rgb)
+            }
+            val g = masked.createGraphics()
+            for (box in keep) box.intersection(java.awt.Rectangle(0, 0, image.width, image.height)).takeIf { !it.isEmpty }?.let {
+                g.drawImage(image.getSubimage(it.x, it.y, it.width, it.height), it.x, it.y, null)
+            }
+            g.dispose()
+            ImageIO.write(masked, "png", File(out, "$name.png"))
+        }
+
+        private fun waitFor(label: String, condition: () -> Boolean) {
+            val deadline = System.nanoTime() + 90_000_000_000L
+            while (!condition()) { check(System.nanoTime() < deadline) { "Timed out: $label ($theme)" }; Thread.sleep(100) }
+        }
+        private fun <T> edt(block: () -> T): T {
+            if (javax.swing.SwingUtilities.isEventDispatchThread()) return block()
+            var result: Result<T>? = null
+            javax.swing.SwingUtilities.invokeAndWait { result = runCatching(block) }
+            return checkNotNull(result).getOrThrow()
         }
     }
 

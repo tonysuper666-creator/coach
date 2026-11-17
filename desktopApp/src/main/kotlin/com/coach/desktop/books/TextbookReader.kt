@@ -107,7 +107,14 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
         val target = practiceSource?.target
         val number = target?.pdfPage ?: practiceSource?.page ?: ui.page
         val stored = book.page(number)?.text.orEmpty()
-        val block = source?.blocks?.firstOrNull { it.page == number && it.start >= 0 && it.end > it.start && it.end <= stored.length }
+        val blocks = source?.blocks.orEmpty().filter {
+            it.page == number && it.start >= 0 && it.end > it.start && it.end <= stored.length
+        }
+        // A lesson opens at its body evidence. Imported physical-page markers and
+        // chapter titles can precede that evidence on a different laid-out page.
+        val block = blocks.firstOrNull {
+            !it.heading && !Regex("<!--\\s*PDF 第 (\\d+) 页 · 书第 (.*?) 页\\s*-->").matches(it.text.trim())
+        } ?: blocks.firstOrNull()
         val offset = when {
             target != null && target.start >= 0 && target.end > target.start && target.end <= stored.length &&
                 stored.substring(target.start, target.end) == target.quote -> target.start

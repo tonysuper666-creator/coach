@@ -106,6 +106,13 @@ A second English paragraph lets us inspect the space between paragraphs and the 
                 }
                 ready(controller) { it.screen == BookScreen.READER && it.prompt == null }
                 onNodeWithTag("reader-text").assertExists()
+                val layouts = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
+                onNodeWithTag("reader-text").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts)
+                val laid = layouts.single()
+                val stored = controller.state.value.book!!.pages.first().text
+                val paragraphs = com.coach.desktop.books.bookParagraphs(stored, false).paragraphs
+                println("ACTUAL paragraphs=$paragraphs styles=${laid.layoutInput.text.paragraphStyles}")
+                paragraphs.forEach { println("ACTUAL start=${it.start} left=${laid.getBoundingBox(it.start).left} top=${laid.getBoundingBox(it.start).top}") }
                 capture("reader-ton1666", screen, dark)
             }
         }

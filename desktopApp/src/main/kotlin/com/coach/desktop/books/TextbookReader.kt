@@ -40,12 +40,10 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.text
 import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.ParagraphStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coach.design.tokens.CoachV7
@@ -281,15 +279,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                     val bodySize = CoachV7.Size.body * textScale
                     val paragraphLayout = remember(page.text, book.format) { bookParagraphs(page.text, book.format == "pdf") }
                     val marked = buildAnnotatedString {
-                        append(paragraphLayout.display.ifBlank { "这一页没有可提取文字，请切换到原页阅读。" })
-                        for ((index, paragraph) in paragraphLayout.paragraphs.withIndex()) {
-                            val start = if (index == 0) 0 else paragraph.start
-                            val end = paragraphLayout.paragraphs.getOrNull(index + 1)?.start ?: paragraphLayout.display.length
-                            if (start < end) addStyle(ParagraphStyle(
-                                textAlign = if (paragraph.kind == BookParagraph.Kind.BODY && paragraph.chinese) TextAlign.Justify else TextAlign.Start,
-                                textIndent = TextIndent(firstLine = bodySize * paragraph.indentEm, restLine = 0.sp),
-                            ), start, end)
-                        }
+                        append(page.text.ifBlank { "这一页没有可提取文字，请切换到原页阅读。" })
                         // 原文里的 Markdown 标题：井号隐去、标题用宋体排大一号。字符不删，块范围和出处偏移照旧对得上原文。
                         for (heading in markdownHeadings(page.text)) {
                             addStyle(SpanStyle(color = Color.Transparent, fontSize = 0.1.sp), heading.marks.first, heading.marks.last + 1)
@@ -315,6 +305,14 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                     // 正文字号、行距取 V7 内屏 token（18 × 1.85，对照 inner-read 参考图量过），随 Aa 小/中/大缩放。
                     val bodyStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = bodySize,
                         lineHeight = CoachV7.Size.body * (CoachV7.LineHeight.body * textScale), fontFeatureSettings = "'chws'")
+                    val displayText = if (paragraphLayout.paragraphs.isEmpty()) marked else with(LocalDensity.current) {
+                        bookParagraphText(marked, paragraphLayout, bodyStyle, 12.dp.toSp(), 32.dp.toSp(),
+                            MaterialTheme.typography.headlineLarge.lineHeight, MaterialTheme.typography.titleLarge.lineHeight)
+                    }
+                    val firstKind = paragraphLayout.paragraphs.firstOrNull()?.kind
+                    val lastKind = paragraphLayout.paragraphs.lastOrNull()?.kind
+                    val topGap = when (firstKind) { BookParagraph.Kind.HEADING -> 32.dp; BookParagraph.Kind.SPECIAL -> 12.dp; else -> 0.dp }
+                    val bottomGap = if (lastKind != null && lastKind != BookParagraph.Kind.BODY) 12.dp else 0.dp
                     // 正文栏按 V7 measure 33em 限宽（中号 18sp → 594dp），在纸面内居中；窄窗口照旧占满可用宽度。
                     // 只改显示：分页在导入时按文字块固定，页码、原文字符和出处偏移都不受栏宽影响。
                     // 滚动留在整张纸上，鼠标停在栏外两侧也能滚。
@@ -329,13 +327,17 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                             scroll.scrollTo(laid.getLineTop(laid.getLineForOffset(markStart)).toInt())
                     }
                     Box(Modifier.fillMaxSize()) {
-                        SelectionContainer {
+                        BookSelectionClipboard { SelectionContainer {
                             Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(22.dp).testTag("reader-scroll"),
                                 contentAlignment = Alignment.TopCenter) {
-                                Text(marked, style = bodyStyle, onTextLayout = { layout = it },
-                                    modifier = Modifier.widthIn(max = measure).fillMaxWidth().testTag("reader-text")
+                                Text(displayText, style = if (paragraphLayout.paragraphs.isEmpty()) bodyStyle
+                                    else bodyStyle.copy(fontSize = 0.1.sp, lineHeight = 0.1.sp), onTextLayout = { layout = it },
+                                    modifier = Modifier.widthIn(max = measure).fillMaxWidth().padding(top = topGap, bottom = bottomGap)
+                                        // Accessibility reads the stored text; layout/selection keep the same offsets.
+                                        .semantics { text = marked }.testTag("reader-text")
                                         .pointerHoverIcon(PointerIcon(Cursor.getPredefinedCursor(Cursor.TEXT_CURSOR))))
                             }
+                        }
                         }
                         ReaderScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                     }

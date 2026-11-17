@@ -111,6 +111,8 @@ probe 使用 `friend-public` environment；先按协议探针手册将该 enviro
 首次临时公网开放前，受管 JVM 须显式设置 `COACH_FRIEND_API_ONLY=1`、
 `COACH_TRAFFIC=test` 和三个已审核的隔离端口，才会选择与私有朋友入口相同的
 `friend-service-bridge.py`。密钥只由 bridge 子进程读取已有 Keychain 项；
+macOS 上仅 `security` 读取子进程的 HOME 使用当前 UID 的账号主目录，避免隔离 HOME
+改变 Keychain 搜索列表。JVM、bridge 和资料目录继续使用隔离 HOME，不复制 Keychain。
 不带此选项的生产桥接行为不变。实际监听必须核对该选择及朋友选段、模型、工具、
 格式和 owner 流量限制，不得拿普通 bridge 或仅 wrapper 单测替代。
 

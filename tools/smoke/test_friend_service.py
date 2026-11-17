@@ -134,6 +134,20 @@ class BridgeBoundaryTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "Existing gift key unavailable"):
                 adapter.existing_gift_key()
 
+    def test_keychain_uses_account_home_without_changing_isolated_bridge_home(self):
+        from types import SimpleNamespace
+        account = SimpleNamespace(getpwuid=lambda uid: SimpleNamespace(pw_dir="/account-home"))
+        with patch.dict(os.environ, {"HOME": "/isolated-home", "COACH_TRAFFIC": "test"}, clear=True), \
+                patch.object(adapter.sys, "platform", "darwin"), \
+                patch.dict(adapter.sys.modules, {"pwd": account}), \
+                patch.object(adapter.subprocess, "run", return_value=SimpleNamespace(
+                    returncode=0, stdout=b"fixture-key\n")) as run:
+            self.assertEqual(adapter.existing_gift_key(), "fixture-key")
+            self.assertEqual(run.call_args.kwargs["env"]["HOME"], "/account-home")
+            self.assertEqual(run.call_args.kwargs["env"]["COACH_TRAFFIC"], "test")
+            self.assertEqual(os.environ["HOME"], "/isolated-home")
+            self.assertNotIn("fixture-key", str(run.call_args))
+
     async def call_adapter(self, traffic=b"test", payload=None):
         received, output = [], []
         async def upstream(scope, receive, send):

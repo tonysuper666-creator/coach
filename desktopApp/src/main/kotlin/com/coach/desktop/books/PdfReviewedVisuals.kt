@@ -93,9 +93,9 @@ internal object PdfReviewedVisuals {
                 val frame = physical.cropBox
                 require(physical.rotation == 0 && frame.width.isFinite() && frame.height.isFinite() &&
                     frame.width > 0 && frame.height > 0 && maxOf(frame.width, frame.height) <= 4096) { "暂不支持这页的几何信息。" }
-                val source = PdfPageTextExtraction.extract(document, number)
-                require(source.unit.text == page.text) { "页文字已变化，请重新复核裁图。" }
                 val scale = min(2f, 4096f / maxOf(frame.width, frame.height))
+                val source = PdfPageTextExtraction.extractForVisualReview(document, number, scale.toDouble())
+                require(source.unit.text == page.text) { "页文字已变化，请重新复核裁图。" }
                 val raster = renderer.renderImage(number - 1, scale)
                 try {
                     for (selection in selected) {

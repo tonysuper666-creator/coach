@@ -127,6 +127,7 @@ tasks.withType<JavaExec>().configureEach {
 tasks.test {
     if (providers.gradleProperty("coach.nativeOcr").orNull == "true") systemProperty("coach.nativeOcr", "true")
     if (providers.gradleProperty("coach.nativeFormats").orNull == "true") systemProperty("coach.nativeFormats", "true")
+    if (providers.gradleProperty("coach.explainLiveWindow").orNull == "true") systemProperty("coach.explainLiveWindow", "true")
     providers.gradleProperty("coach.liveBookConnection").orNull?.let { systemProperty("coach.liveBookConnection", it) }
 }
 

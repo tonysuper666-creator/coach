@@ -80,6 +80,12 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     val explainer = remember(library) { BookExplainer(library = library) }
     val explainConsent = remember(library) { ExplainConsent(library.directory) }
     val source = ui.source
+    // 从答后讲解的「去原文页配对」过来、这台电脑的连接已停用：原文页直接摊开配对，不用再去找「讲解」。
+    LaunchedEffect(explainer, source != null) {
+        if (source == null) return@LaunchedEffect
+        if (!explainer.loaded) explainer.load()
+        if (explainer.revoked && explainer.identity == null) explainOpen = true
+    }
     LaunchedEffect(book.id, ui.page, source) {
         if (page.ocr && source != null) textView = true
     }

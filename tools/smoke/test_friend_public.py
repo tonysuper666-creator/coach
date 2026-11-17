@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import ssl
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +37,7 @@ class ProbeTests(unittest.TestCase):
         secrets = ("private-address", "private-code", "private-token", "private-material")
         output = io.StringIO()
         with patch.dict(os.environ, {"COACH_FRIEND_URL": "https://node.example.ts.net", "COACH_FRIEND_CODE": "123456"}, clear=True), \
+                patch.object(probe, "public_route"), \
                 patch.object(probe.Client, "request", side_effect=RuntimeError(" ".join(secrets))), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             self.assertEqual(probe.main(["surface"]), 1)
@@ -43,10 +45,76 @@ class ProbeTests(unittest.TestCase):
             self.assertNotIn(secret, output.getvalue())
         output = io.StringIO()
         with patch.dict(os.environ, {"COACH_FRIEND_URL": "https://node.example.ts.net", "COACH_FRIEND_CODE": "123456"}, clear=True), \
+                patch.object(probe, "public_route"), \
                 patch.object(probe.Client, "request", return_value=(500, b"private-material")), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             self.assertEqual(probe.main(["surface"]), 1)
         self.assertNotIn("private-material", output.getvalue())
+
+    def test_transport_failures_report_fixed_stage_and_category_only(self):
+        private = "private-host private-token private-material ::warning::injection"
+        cases = (
+            (ssl.SSLEOFError(8, private), "tls-eof"),
+            (ssl.SSLCertVerificationError(1, private), "tls-certificate"),
+            (ssl.SSLError(1, private), "tls-other"),
+            (socket.gaierror(-2, private), "dns"),
+            (TimeoutError(private), "timeout"),
+            (ConnectionRefusedError(private), "connection-refused"),
+            (ConnectionResetError(private), "connection-reset"),
+            (RuntimeError(private), "unexpected"),
+        )
+        for cause, expected in cases:
+            for error in (cause, probe.urllib.error.URLError(cause)):
+                with self.subTest(category=expected, wrapped=error is not cause):
+                    output = io.StringIO()
+                    with patch.dict(os.environ, {"COACH_FRIEND_URL": "https://node.example.ts.net"}, clear=True), \
+                            patch.object(probe, "public_route"), \
+                            patch.object(probe.urllib.request.OpenerDirector, "open", side_effect=error), \
+                            contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                        self.assertEqual(probe.main(["transport"]), 1)
+                    self.assertEqual(output.getvalue(), "FAIL stage=anonymous-status category=" + expected
+                                     + "; private diagnostic values suppressed\n")
+
+    def test_transport_mode_needs_no_code_or_credentials(self):
+        output = io.StringIO()
+        with patch.dict(os.environ, {"COACH_FRIEND_URL": "https://node.example.ts.net"}, clear=True), \
+                patch.object(probe, "public_route"), patch.object(probe, "closed_ports"), \
+                patch.object(probe.Client, "request", return_value=(401, b"")) as request, \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(probe.main(["transport"]), 0)
+        request.assert_called_once_with("/v1/public/status")
+        self.assertIn("PASS anonymous_https=401", output.getvalue())
+
+    def test_tailnet_or_local_dns_cannot_reach_pairing(self):
+        for addresses in (("100.64.1.2",), ("127.0.0.1",), ("::1",), ("8.8.8.8", "100.64.1.2"), ()):
+            resolved = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (value, 443)) for value in addresses]
+            with self.subTest(addresses=addresses):
+                output = io.StringIO()
+                with patch.dict(os.environ, {"COACH_FRIEND_URL": "https://node.example.ts.net", "COACH_FRIEND_CODE": "123456"}, clear=True), \
+                        patch.object(socket, "getaddrinfo", return_value=resolved), \
+                        patch.object(probe.Client, "request") as request, \
+                        contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                    self.assertEqual(probe.main(["surface"]), 1)
+                request.assert_not_called()
+                self.assertIn("FAIL stage=public-dns check=public DNS required", output.getvalue())
+                self.assertNotIn("node.example.ts.net", output.getvalue())
+        resolved = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443)),
+                    (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:4700:4700::1111", 443, 0, 0))]
+        output = io.StringIO()
+        with patch.object(socket, "getaddrinfo", return_value=resolved), contextlib.redirect_stdout(output):
+            probe.public_route("unused")
+        self.assertEqual(output.getvalue(), "PASS dns=public\n")
+
+    def test_failure_after_anonymous_success_identifies_pairing_stage(self):
+        output = io.StringIO()
+        with patch.dict(os.environ, {"COACH_FRIEND_URL": "https://node.example.ts.net", "COACH_FRIEND_CODE": "123456"}, clear=True), \
+                patch.object(probe, "public_route"), \
+                patch.object(probe.Client, "request", side_effect=[(401, b""), TimeoutError("private-code")]), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            self.assertEqual(probe.main(["surface"]), 1)
+        self.assertIn("PASS anonymous_https=401\nFAIL stage=pairing category=timeout", output.getvalue())
+        for private in ("private-code", "123456", "node.example.ts.net"):
+            self.assertNotIn(private, output.getvalue())
 
     def test_masks_json_components_and_escapes_workflow_commands(self):
         output = io.StringIO()

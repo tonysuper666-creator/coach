@@ -6,7 +6,7 @@ on:
       mode:
         description: Protocol only; no book, GUI or billable explanation
         type: choice
-        options: [surface, revocation]
+        options: [transport, surface, revocation]
         default: surface
 
 permissions:

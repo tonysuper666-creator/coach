@@ -222,7 +222,12 @@ try {
         Click-Label 6 @('做题学') '书架没有做题学入口'
         # 已开启的书直接进入学习页；出题方式仍沿用这本书的设置。
         Click-Label 6 @('出题：', '出题:') '找不到出题设置'
-        Click-Label 6 @('选择') '找不到选择题设置'
+        $settings = Await-Text 6 'settings' @('出题方式') 15
+        if (-not $settings) { Fail 6 '出题方式对话框没有打开' }
+        # 背景页也有「出题：选择」；只点击对话框标题下面的选项，避免点到背景而关闭弹窗。
+        $choice = Find-All $script:Last '选择' | Where-Object { $_.Y -gt $settings.Y } | Select-Object -First 1
+        if (-not $choice) { Fail 6 '出题方式对话框没有选择题选项' }
+        Click-At $choice.X $choice.Y; Start-Sleep -Milliseconds 800
         Click-Label 6 @('确定') '无法确认选择题设置'
         $deadline = (Get-Date).AddSeconds(120); $question = $false; $picked = $null
         while ((Get-Date) -lt $deadline -and -not $question) {

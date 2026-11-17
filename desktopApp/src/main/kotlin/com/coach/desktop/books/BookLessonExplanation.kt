@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
 import com.coach.ui.v7.LocalV7ReducedMotion
 import com.coach.ui.v7.PaperCard
+import com.coach.ui.v7.PrimaryButton
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
 
@@ -31,11 +32,12 @@ internal fun BookLessonExplanation(
 ) {
     // A caller may hold this across a screen switch so returning does not re-ask the provider.
     var attempt by remember(book.id, lesson.id, support) { mutableIntStateOf(0) }
+    var allowed by remember(book.id, support) { mutableStateOf(!support.consentRequired(book.id)) }
     // 外面清掉旧结果（比如重新配对之后）也会重新取一次。只认这一帧看到的「空」：外面刚清掉、key 还没跟上时
     // 先不发，等 key 变过来再发，免得同一次重新配对发两遍、多扣一次额度。
     val waiting = reply.value == null
-    LaunchedEffect(book.id, lesson.id, support, attempt, waiting) {
-        if (!waiting || reply.value != null) return@LaunchedEffect
+    LaunchedEffect(book.id, lesson.id, support, attempt, waiting, allowed) {
+        if (!allowed || !waiting || reply.value != null) return@LaunchedEffect
         reply.value = try {
             val result = support.explain(BookExplanationRequest(book.id, lesson.id, lesson.blocks))
             coroutineContext.ensureActive()
@@ -48,14 +50,24 @@ internal fun BookLessonExplanation(
     V7ExpandIn {
         PaperCard(Modifier.v7Resize().testTag("book-lesson-explanation"), contentPadding = PaddingValues(16.dp)) {
             Text("讲解", style = MaterialTheme.typography.titleMedium)
-            when (val result = reply.value) {
-                null -> Text("正在读取这节的讲解…", color = com.coach.ui.theme.CoachTheme.colors.fgSecondary)
-                is BookLearningReply.Text -> {
-                    Text(result.text, Modifier.testTag("book-explanation-text"))
-                    sources(result.sources)
+            if (!allowed) {
+                Text("讲解这一节需要发送原文", style = MaterialTheme.typography.titleSmall)
+                Text("这一节的原文会经李政的 Mac 发给 Anthropic 或 OpenAI 的 API，不发到别处。API 默认不拿它训练模型。整本书留在这台电脑上。你可以继续读书和做题，允许后才会请求讲解。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = com.coach.ui.theme.CoachTheme.colors.fgSecondary,
+                    modifier = Modifier.testTag("book-lesson-consent"))
+                PrimaryButton({ support.allow(book.id); allowed = !support.consentRequired(book.id) },
+                    modifier = Modifier.testTag("book-lesson-consent-allow")) { Text("允许并讲解") }
+            } else {
+                when (val result = reply.value) {
+                    null -> Text("正在读取这节的讲解…", color = com.coach.ui.theme.CoachTheme.colors.fgSecondary)
+                    is BookLearningReply.Text -> {
+                        Text(result.text, Modifier.testTag("book-explanation-text"))
+                        sources(result.sources)
+                    }
+                    is BookLearningReply.Unavailable -> ExplainTroubleLine(result, onRetry = { reply.value = null; attempt++ },
+                        onRepair = onRepair, modifier = Modifier.testTag("book-explanation-unavailable"))
                 }
-                is BookLearningReply.Unavailable -> ExplainTroubleLine(result, onRetry = { reply.value = null; attempt++ },
-                    onRepair = onRepair, modifier = Modifier.testTag("book-explanation-unavailable"))
             }
         }
     }

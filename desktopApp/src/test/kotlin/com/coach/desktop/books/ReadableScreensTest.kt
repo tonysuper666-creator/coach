@@ -7,10 +7,13 @@ import androidx.compose.ui.InternalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
+import coach.design.tokens.CoachV7
 import com.coach.client.PairedCredentials
 import com.coach.desktop.DesktopConnectionSettings
 import com.coach.desktop.DesktopIdentity
@@ -35,6 +38,35 @@ class ReadableScreensTest {
     @Test fun passageAskDark() = passageAsk(true)
     @Test fun importedChoicesLight() = importedChoices(false)
     @Test fun importedChoicesDark() = importedChoices(true)
+    @Test fun explainTroubleLight() = explainTrouble(false)
+    @Test fun explainTroubleDark() = explainTrouble(true)
+
+    /** 连不上 Mac 是会自己好的：灰字 + 「再试一次」，不用朱色；连接被停用要重新配对，才用朱色。 */
+    private fun explainTrouble(dark: Boolean) {
+        for ((trouble, scene) in listOf(ExplainTrouble.Unreachable to "explain-unreachable", ExplainTrouble.Revoked to "explain-revoked")) {
+            val (root, library, book) = fixture()
+            val consent = ExplainConsent(library.directory).apply { allow(book.id) }
+            val explainer = FakeMac(root.resolve("home"), trouble)
+            val page = book.pages.first { p -> StudyCoachCourse.blocks(book.id, listOf(p)).any { !it.heading } }.number
+            runSkikoComposeUiTest(size = Size(1000f, 500f), density = Density(1f)) {
+                setContent { CoachTheme(darkTheme = dark) {
+                    Box(Modifier.fillMaxSize().background(CoachTheme.colors.surface1)) { BookExplainPanel(book, page, consent, explainer) }
+                } }
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-button").fetchSemanticsNodes().isNotEmpty() }
+                onAllNodesWithTag("explain-button")[0].performClick()
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-failed").fetchSemanticsNodes().isNotEmpty() }
+                capture(scene, dark)
+                val layouts = mutableListOf<TextLayoutResult>()
+                onAllNodesWithTag("explain-failed")[0].fetchSemanticsNode().config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts)
+                val color = layouts.single().layoutInput.style.color
+                if (trouble == ExplainTrouble.Unreachable) {
+                    assertEquals((if (dark) com.coach.ui.theme.CoachColors.dark() else com.coach.ui.theme.CoachColors.light()).fgSecondary, color, "连不上用中性灰字")
+                    onAllNodesWithTag("explain-retry")[0].assertHasClickAction()
+                } else assertEquals(if (dark) CoachV7.Dark.zhu else CoachV7.Light.zhu, color, "停用要重新配对，用朱色")
+            }
+            root.toFile().deleteRecursively()
+        }
+    }
 
     private fun explainPanel(dark: Boolean) {
         val (root, library, book) = fixture()
@@ -149,9 +181,10 @@ class ReadableScreensTest {
         return Triple(root, library, library.importBook(file))
     }
 
-    private class FakeMac(home: Path) : BookExplainer(DesktopConnectionSettings(home = home, environment = { null })) {
+    private class FakeMac(home: Path, val trouble: ExplainTrouble? = null) : BookExplainer(DesktopConnectionSettings(home = home, environment = { null })) {
         override suspend fun load() { identity = DesktopIdentity("http://mac.test:18791", PairedCredentials("test-device", "test-token")); loaded = true }
         override suspend fun explain(chosen: SourceBlock, blocks: List<SourceBlock>, requestId: String): ExplainResult {
+            if (trouble != null) return ExplainResult.Refused(ExplainTrouble.message(trouble, null), trouble)
             val next = ExplainWire.context(blocks, chosen).last()
             return ExplainResult.Done(Explanation(
                 "这一段在说：医院做某种手术越多，病人术后的结局往往越好。【S1】但作者马上提醒，这是观察到的关联，" +

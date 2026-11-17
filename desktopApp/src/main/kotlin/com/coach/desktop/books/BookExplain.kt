@@ -2,6 +2,10 @@ package com.coach.desktop.books
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -14,6 +18,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -21,7 +29,9 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
 import com.coach.ui.theme.CoachTheme
+import com.coach.ui.v7.LocalDeskMetrics
 import com.coach.ui.v7.PaperButton
+import com.coach.ui.v7.paperShadow
 import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.V7TextButton
 import com.coach.ui.v7.v7FocusRing
@@ -265,11 +275,11 @@ internal fun BookExplainPanel(book: Textbook, page: Int, consent: ExplainConsent
                     }, enabled = paired != null && state != BlockState.Waiting, modifier = Modifier.testTag("explain-button")) {
                         Text(if (state == BlockState.Waiting) "讲解中…" else "讲解这段")
                     }
-                    else -> PaperButton(onClick = { start(block) }, enabled = paired != null,
-                        modifier = Modifier.testTag("explain-retry")) { Text("再试一次") }
+                    else -> QuietButton("再试一次", enabled = paired != null, modifier = Modifier.testTag("explain-retry")) { start(block) }
                 }
+                // 连不上、超时、暂时读不到都是会自己好的：中性灰字。只有要用户动手的（连接被停用、要重新配对）才用朱色。
                 if (failed != null) Text(failed.message, style = MaterialTheme.typography.bodySmall, maxLines = 2,
-                    color = if (failed.trouble == ExplainTrouble.Quota) colors.fgSecondary else v7Alert(),
+                    color = if (failed.trouble.needsReader) v7Alert() else colors.fgSecondary,
                     modifier = Modifier.weight(1f).testTag("explain-failed"))
             }
             if (state is BlockState.Done) ExplanationView(book, state.explanation, state.context) { citation ->
@@ -319,6 +329,31 @@ private fun ExplanationView(book: Textbook, explanation: Explanation, context: L
 }
 
 /** V7 提醒色：朱 zhu，随明暗取 token。讲解面板和选段就问里「没配上、超字数、暂时读不到」都用它，不用 Material 红。 */
+/** 要读者自己动手才过得去的（连接被停用，只能重新配对）；其余都是等一下或再试就好的。 */
+private val ExplainTrouble.needsReader: Boolean get() = this == ExplainTrouble.Revoked
+
+/**
+ * 「再试一次」：和「讲解这段」同样的纸面按钮，但悬停只加一层中性灰，不用朱色的底——
+ * 失败后鼠标还停在原处，粉底会把一件可恢复的事看成报错。
+ */
+@Composable
+private fun QuietButton(label: String, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val c = CoachTheme.colors
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val shape = RoundedCornerShape(CoachV7.Radius.btn)
+    val base = if (c.dark) CoachV7.Dark.btnBg else CoachV7.Light.btnBg
+    Row(modifier.v7FocusRing(shape).paperShadow("button", c.dark).clip(shape)
+        .background(if (enabled && hovered) c.borderSubtle.copy(alpha = .16f).compositeOver(base) else base)
+        .hoverable(interaction, enabled)
+        .clickable(interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
+        .pointerHoverIcon(if (enabled) PointerIcon.Hand else PointerIcon.Default)
+        .defaultMinSize(minHeight = if (LocalDeskMetrics.current.inner) 36.dp else 44.dp).padding(horizontal = 16.dp),
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        Text(label, style = MaterialTheme.typography.labelLarge, color = c.fgPrimary.copy(alpha = if (enabled) 1f else .4f))
+    }
+}
+
 @Composable
 internal fun v7Alert(): Color = if (CoachTheme.colors.dark) CoachV7.Dark.zhu else CoachV7.Light.zhu
 

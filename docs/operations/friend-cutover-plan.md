@@ -85,7 +85,7 @@ SQL 行为小实验只能佐证风险及事务设计；离线供应商 SSE 或�
 | 工作流 | 秘密、资料及证据边界 |
 | --- | --- |
 | `friend-public.yml`：surface/revocation | 受保护 environment 的步骤 env 注入 `COACH_FRIEND_*` 及 A/B 临时凭据，配对回包另遮蔽字段；禁 shell trace，无 artifact；只证明协议与撤销，不发计费讲解 |
-| `friend-windows.yml`：package → probe（`package_run`） | probe 同样限定 main、受保护 environment；步骤 env 注入 `COACH_EXTERNAL_URL`、`COACH_EXTERNAL_CODE_A/B`，不写入 PowerShell 源码或参数。只用驱动自写材料；配对块消失后才截图。artifact 仅限现有自写材料证据白名单、包和提交记录，不能加入真实教材、地址、身份、凭据或原始日志。Mac 操作者须提前就位，在 Revoke 最多 180 秒内撤销 A 并验证 B 可用；超时是失败，不能当已撤销 |
+| `friend-windows.yml`：package → probe（`package_run`） | probe 同样限定 main、受保护 environment；Mac 先预配 B，确认 B 可用后再签 A；步骤 env 注入 `COACH_EXTERNAL_URL`、`COACH_EXTERNAL_CODE_A`、`COACH_EXTERNAL_B`（B 的短期凭据 JSON），驱动 add-mask，不写入 PowerShell 源码或参数。B 不计入 Windows 原生配对验收。只用驱动自写材料；配对块消失后才截图。artifact 仅限现有自写材料证据白名单、包和提交记录，不能加入真实教材、地址、身份、凭据或原始日志。Mac 操作者须提前就位，在 Revoke 最多 180 秒内撤销 A 并验证 B 可用；超时是失败，不能当已撤销 |
 
 package/probe 证明原生安装、配对、讲解和截图流程，不证明朋友自己的真实教材/API 或真实额度已验收；后者只在私有环境保留原始材料和证据。生产及临时实例分别登记测试身份，清理覆盖两套工作流的临时 secrets，不能只依赖 runner 清除本机身份。
 

@@ -18,10 +18,11 @@ internal class ChildServices(private val scope: CoroutineScope, private val env:
     private val logs = Path.of(env.getValue("COACH_LOG_DIR"))
     private val python = env.getValue("COACH_PYTHON")
     private val bridgePort = managedBridgePort(env)
+    private val bridgeCommand = managedBridgeCommand(env, root, python)
     private val jobs = mutableListOf<Job>()
 
     fun start() {
-        jobs += supervise("bridge", listOf(root.resolve("tools/bridge/run.sh").toString()), false)
+        jobs += supervise("bridge", bridgeCommand, false)
         jobs += supervise("mathsvc", listOf(env.getValue("COACH_NODE"), root.resolve("tools/mathsvc/src/server.mjs").toString()), true)
     }
 
@@ -119,4 +120,14 @@ internal class ChildServices(private val scope: CoroutineScope, private val env:
             }
         } finally { log.close(); Files.deleteIfExists(state) }
     }
+}
+
+/** Opt-in temporary friend listener uses the same narrow adapter as the private
+ * friend service, including Keychain access inside the bridge process only. */
+internal fun managedBridgeCommand(env: Map<String, String>, root: Path, python: String): List<String> {
+    val mode = env["COACH_FRIEND_API_ONLY"] ?: return listOf(root.resolve("tools/bridge/run.sh").toString())
+    require(mode == "1" && env["COACH_TRAFFIC"] == "test") { "Friend API preview requires test traffic" }
+    require(env["COACH_PUBLIC_PORT"]?.toIntOrNull() in 1024..65535) { "Friend API preview requires public listener" }
+    managedBridgePort(env) // Same isolated-port/URL checks as the supervised listener.
+    return listOf(python, root.resolve("tools/smoke/friend-service-bridge.py").toString())
 }

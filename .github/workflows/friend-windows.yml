@@ -86,7 +86,7 @@ jobs:
         env:
           COACH_EXTERNAL_URL: ${{ secrets.COACH_EXTERNAL_URL }}
           COACH_EXTERNAL_CODE_A: ${{ secrets.COACH_EXTERNAL_CODE_A }}
-          COACH_EXTERNAL_CODE_B: ${{ secrets.COACH_EXTERNAL_CODE_B }}
+          COACH_EXTERNAL_B: ${{ secrets.COACH_EXTERNAL_B }}
         run: ./tools/smoke/external-friend.ps1 -Phase Probe
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

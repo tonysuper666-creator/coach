@@ -283,7 +283,6 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(if (source != null) "学习原文 · ${source.title}" else "教材阅读", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                 if (hasOriginal) V7TextButton(onClick = {
-                    if (!textView) paging.anchor = BookPageAnchor(ui.page)
                     textView = !textView
                 }, modifier = Modifier.testTag("book-original-toggle")) { Text(if (textView) "看原页" else "看文字") }
                 V7TextButton(onClick = { asking = true }, modifier = Modifier.testTag("ask-book-passage")) { Text("选段提问") }

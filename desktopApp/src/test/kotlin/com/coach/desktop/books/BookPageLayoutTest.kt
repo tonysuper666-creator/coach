@@ -98,13 +98,16 @@ class BookPageLayoutTest {
             val containing = pages[pages.pageContaining(anchor)]
             assertTrue(containing.sources.any { anchor.offsetUtf16 in it.startUtf16 until it.endUtf16 })
             val state = BookPagingState(anchor).apply { this.pages = pages }
+            val chapter = pages[state.index].chapter
+            val chapterStart = pages.indexOfFirst { it.chapter == chapter }
+            val chapterEnd = pages.indexOfLast { it.chapter == chapter }
             state.move(ReaderTurn.First)
-            assertEquals(0, state.index)
+            assertEquals(chapterStart, state.index)
             state.spread = true
             state.move(ReaderTurn.Next)
-            assertEquals(2, state.index)
+            assertEquals(chapterStart + 2, state.index)
             state.move(ReaderTurn.Last)
-            assertEquals(pages.lastIndex, state.index)
+            assertEquals(chapterEnd, state.index)
         }
     }
 

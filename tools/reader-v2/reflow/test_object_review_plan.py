@@ -9,7 +9,7 @@ from test_source_payload import fixture, glyph, block
 def sample():
     p, l = fixture("FIG CAP BODY")
     p.update(regions=[], clip_unverified=False, graphics_unsupported=False,
-             rotated_glyphs=0, unmapped_ranges=[])
+             rotated_glyphs=0, unmapped_ranges=[], glyph_geometry_checked=True)
     p["glyphs"] = [glyph("FIG", 0, 3, [25, 25, 35, 35]),
                    glyph("CAP", 4, 7, [25, 75, 45, 85]),
                    glyph("BODY", 8, 12, [120, 75, 150, 85])]

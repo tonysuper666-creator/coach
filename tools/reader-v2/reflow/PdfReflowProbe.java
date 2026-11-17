@@ -50,6 +50,23 @@ public final class PdfReflowProbe {
                 : new String(Character.toChars(cp))));
             return out.toString();
         }
+        boolean missingBounds(TextPosition p) {
+            // Match PdfPageText.PositionStripper: a glyph can have a valid
+            // text slice but no usable box after CropBox clamping. Such a gap
+            // makes production preview reject the entire page, even elsewhere.
+            var crop=getCurrentPage().getCropBox();
+            int direction=(int)p.getDir();
+            boolean sideways=direction==90 || direction==270;
+            double width=(double)crop.getUpperRightX()-crop.getLowerLeftX();
+            double height=(double)crop.getUpperRightY()-crop.getLowerLeftY();
+            double w=sideways?height:width;
+            double h=sideways?width:height;
+            double x0=Math.max(0,Math.min(w,(double)p.getXDirAdj()));
+            double x1=Math.max(0,Math.min(w,(double)(p.getXDirAdj()+p.getWidthDirAdj())));
+            double y0=Math.max(0,Math.min(h,(double)(p.getYDirAdj()-p.getHeightDir())));
+            double y1=Math.max(0,Math.min(h,(double)p.getYDirAdj()));
+            return x1<=x0 || y1<=y0;
+        }
         @Override protected void writeString(String s,List<TextPosition> ps) throws IOException {
             int cursor=raw.getBuffer().length();
             String joined=ps.stream().map(p -> presentationText(p.getUnicode())).reduce("",String::concat);
@@ -58,6 +75,8 @@ public final class PdfReflowProbe {
             for (TextPosition p: ps) {
                 rotatedGlyphs |= p.getDir() != 0;
                 String normalized=presentationText(p.getUnicode());
+                if(aligned && !normalized.isEmpty() && missingBounds(p))
+                    unmapped.add(new int[]{cursor,cursor+normalized.length()});
                 glyphs.add(new Glyph(p.getUnicode(),p.getFont().getName(),
                     new Box(p.getXDirAdj(),p.getYDirAdj()-p.getHeightDir(),p.getXDirAdj()+p.getWidthDirAdj(),p.getYDirAdj()),
                     aligned ? cursor : -1,aligned ? cursor+normalized.length() : -1));
@@ -175,12 +194,14 @@ public final class PdfReflowProbe {
                 StringJoiner r=new StringJoiner(",");for(Region region:regions) r.add("{\"kind\":"+quote(region.kind)+",\"bbox\":"+region.box.json()+"}");
                 StringJoiner gs=new StringJoiner(",");for(Glyph g:stripper.glyphs) gs.add("{\"text\":"+quote(g.text)+",\"font\":"+quote(g.font)+",\"bbox\":"+g.box.json()+
                     ",\"start\":"+(g.start<0?"null":stripper.cleanedOffsets[g.start])+",\"end\":"+(g.end<0?"null":stripper.cleanedOffsets[g.end])+"}");
-                StringJoiner gaps=new StringJoiner(",");for(int[] gap:stripper.unmapped) gaps.add("["+stripper.cleanedOffsets[gap[0]]+","+stripper.cleanedOffsets[gap[1]]+"]");
+                StringJoiner gaps=new StringJoiner(",");for(int[] gap:stripper.unmapped)
+                    if(stripper.cleanedOffsets[gap[0]]<stripper.cleanedOffsets[gap[1]])
+                        gaps.add("["+stripper.cleanedOffsets[gap[0]]+","+stripper.cleanedOffsets[gap[1]]+"]");
                 StringJoiner rules=new StringJoiner(",");for(Box rule:graphics.horizontalRules) rules.add(rule.json());
                 String frame=",\"doc_sha256\":"+quote(sha)+",\"offset_unit\":\"utf16\",\"rotation\":"+page.getRotation()+
                     ",\"cropbox\":["+crop.getLowerLeftX()+","+crop.getLowerLeftY()+","+crop.getUpperRightX()+","+crop.getUpperRightY()+"]"+
                     ",\"mediabox\":["+media.getLowerLeftX()+","+media.getLowerLeftY()+","+media.getUpperRightX()+","+media.getUpperRightY()+"]"+
-                    ",\"unmapped_ranges\":["+gaps+"],\"horizontal_rules\":["+rules+"],\"graphics_unsupported\":"+graphics.unsupported;
+                    ",\"unmapped_ranges\":["+gaps+"],\"glyph_geometry_checked\":true,\"horizontal_rules\":["+rules+"],\"graphics_unsupported\":"+graphics.unsupported;
                 System.out.println("{\"page\":"+n+frame+",\"text\":"+quote(text)+",\"width\":"+page.getCropBox().getWidth()+",\"height\":"+page.getCropBox().getHeight()+",\"load_seconds\":"+load+",\"a_seconds\":"+a+",\"c_seconds\":"+c+",\"fallback\":"+bad+",\"clip_unverified\":"+graphics.clipped+",\"rotated_glyphs\":"+stripper.rotatedGlyphs+",\"regions\":["+r+"],\"glyphs\":["+gs+"]}");
             }
         }

@@ -707,10 +707,36 @@ passed production preview, executor inspection found 5 table titles now included
 but all 5 still missing lower notes/source lines. This is not independent review,
 an object success rate or reader retention. No object was approved or imported.
 
+### Glyph geometry evidence before planning
+
+The seven refusals above shared one page with one zero-width glyph outside the
+selected objects. Production extraction recorded its exact UTF-16 range as
+unmapped and refused every selection on that page; the old experimental probe
+omitted the gap. `PdfReflowProbe` now records missing bounds using production's
+CropBox clamping and text-direction dimensions, including zero-width/height
+glyphs and glyphs fully outside the crop. Canonical text and existing glyph
+offsets/boxes remain unchanged.
+
+Regenerate probe JSONL files before using `crop_candidates.py` or
+`object_review_plan.py`. Both ordinary candidates and caption expansions require
+`glyph_geometry_checked: true`; missing, false or non-boolean evidence is unsafe.
+Any unmapped range vetoes the whole page, even outside a proposed rectangle.
+This is eligibility evidence, not approval or a guarantee of production preview.
+
+Rerunning the same private 20 pages matched production text and gap ranges on
+every page. Boundary passes changed from 66 to 58; pending selections from 41 to
+34. Exactly the seven previous refusals disappeared; the retained 34 selection
+files were byte-identical and all passed fresh production preview, with zero
+approvals/imports. All six prior caption expansions remain, including the five
+tables still missing notes/source lines. Historical candidate/visual classifications
+are unchanged. This correction improves refusal alignment, not object coverage.
+
 ### Regression commands
 
 ```sh
 python3 -I -m unittest discover -s tools/reader-v2/reflow -v
+tools/dev/heavy --local python3 tools/reader-v2/reflow/verify_probe_geometry.py \
+  --pdfbox-classpath "$PDFBOX_CLASSPATH"
 tools/dev/heavy --local "$DOCLING_PYTHON" tools/reader-v2/reflow/verify_object_review_plan.py \
   --pdfbox-classpath "$PDFBOX_CLASSPATH"
 tools/dev/heavy --local "$DOCLING_PYTHON" tools/reader-v2/reflow/verify_crop_candidates.py \
@@ -726,7 +752,7 @@ DOCLING_ARTIFACTS_PATH="$DOCLING_MODELS" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
   -m unittest discover -s tools/reader-v2/layout/tests -v
 ```
 
-The 88 reflow tests (Pillow required for the 16 workspace/edit tests) cover diff accounting, private-output guards, stale identities,
+The 90 reflow tests (Pillow required for the 16 workspace/edit tests) cover diff accounting, private-output guards, stale identities,
 UTF-16/surrogate mappings, discontiguous ranges, table cuts/headers/rowspans,
 exact cell/glyph evidence and its refusal cases, touching vs gapped PDF rules,
 caption fragment references, scoped cross-page table partitions and header copies,
@@ -752,6 +778,13 @@ remain equal to an independent stripper baseline, 3 pending selections are emitt
 CropBox/rotation are handled and late invalid, stale, duplicate or existing-output
 cases leave no partial output or overwrite. It does not run model recognition or
 grant approval and does not substitute for production preview.
+Two geometry tests add fail-closed legacy evidence and page-wide gap vetoes for
+ordinary/caption proposals. Two existing fixtures now declare checked geometry;
+their assertions are unchanged. `verify_probe_geometry.py` generates five own
+pages: normal, zero-width, zero-height and two CropBox-clamped gaps. It compares
+canonical text against an independent stripper, checks exact UTF-16 gap slices
+and retains only the normal pending selection. It uses known layout/raster
+evidence to isolate the gap contract, without models or recognition claims.
 The Java integration compiles with `--release 17`, generates four self-authored
 PDF pages and compares against an independent plain PDFTextStripper baseline:
 120 glyph spans, segmented table rules, borderless table/header evidence,

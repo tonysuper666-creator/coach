@@ -165,6 +165,10 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
         if (page.ocr && source != null) textView = true
     }
     var asking by remember(book.id, ui.page) { mutableStateOf(false) }
+    // A laid-out sheet can start on the previous imported page. Its bookmark
+    // follows that first source, but paragraph actions must keep the source
+    // explicitly selected by a page jump or citation.
+    val paragraphPage = if (textView) book.page(paging.anchor.importPage) ?: page else page
 
     val readerSource = remember(library) { com.coach.desktop.reader.LocalBooksReaderSource(library) }
     val remote = remember(readerSource, book.id) { com.coach.desktop.reader.ReaderRemote(readerSource) }
@@ -376,7 +380,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                     turn?.let(turnLayout) ?: return@onPreviewKeyEvent false
                     true
                 }.focusable()) {
-                if (explainOpen) BookExplainPanel(book, ui.page, explainConsent, explainer)
+                if (explainOpen) BookExplainPanel(book, paragraphPage.number, explainConsent, explainer)
                 else if (textView) {
                     val ranges = remember(book.pages, source, practiceSource, ui.page, quoteAnchor, located, aspectOk) {
                         val result = mutableMapOf<Int, List<IntRange>>()
@@ -544,7 +548,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             }
         }
     }
-    if (asking) BookPassageAsk(book, page, support, onRepair = { explainer.markRevoked(); asking = false; explainOpen = true }) { asking = false }
+    if (asking) BookPassageAsk(book, paragraphPage, support, onRepair = { explainer.markRevoked(); asking = false; explainOpen = true }) { asking = false }
 }
 
 /** 键盘翻页的去向。 */

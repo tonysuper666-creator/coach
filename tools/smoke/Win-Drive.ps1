@@ -58,7 +58,7 @@ $script:AppPid = 0
 $script:Known = @()
 $script:RepoMarker = ''   # 本次检出的目录；设置后只认命令行里带这个目录的客户端进程（别人的 Coach 窗口永远不是我的）
 function Get-ClientPids([switch]$Mine) {
-    @(Get-CimInstance Win32_Process -Filter "Name='java.exe'" | Where-Object {
+    @(Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" | Where-Object {
         ($_.CommandLine -like '*com.coach.desktop.MainKt*' -or $_.CommandLine -like '*com.coach.desktop.smoke.SmokeMain*') -and (-not $Mine -or -not $script:RepoMarker -or $_.CommandLine.Replace('\','/').Contains($script:RepoMarker.TrimEnd([char[]]'\/').Replace('\','/') + '/desktopApp/build/')) } | ForEach-Object { [int]$_.ProcessId })
 }
 function Mark-ExistingClients { $script:Known = Get-ClientPids }

@@ -80,7 +80,9 @@ if ($Runtime) {
     # Preparation is a separate Mac heavy call. The foreground path still runs
     # the production MainKt entry; only -Background selects development controls.
     $entry = if ($Background) { 'com.coach.desktop.smoke.SmokeMain' } else { 'com.coach.desktop.MainKt' }
-    $gradle = Start-Process "$env:JAVA_HOME/bin/java.exe" -ArgumentList ('-cp "' + $classpath + '" ' + $entry) -WorkingDirectory $Repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
+    # javaw has no console for Windows Terminal to activate during background startup.
+    $java = if ($Background) { 'javaw.exe' } else { 'java.exe' }
+    $gradle = Start-Process "$env:JAVA_HOME/bin/$java" -ArgumentList ('-cp "' + $classpath + '" ' + $entry) -WorkingDirectory $Repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
 } else {
     $gradle = Start-Process (Join-Path $Repo 'gradlew.bat') -ArgumentList $launchArgs -WorkingDirectory $Repo `
     -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
@@ -142,8 +144,10 @@ try {
     if (-not $g) { Fail 4 '找不到页码跳转的「前往」' }
     Click-At ($g.X - 106) $g.Y; Send-Keys '^a'; Send-Keys "$physPage"; Start-Sleep -Milliseconds 500
     Click-At $g.X $g.Y; Start-Sleep -Seconds 3
-    Click-Label 4 @('看文字') '找不到「看文字」'; Start-Sleep -Seconds 2
-    Click-Label 4 @('讲解') '找不到「讲解」'; Start-Sleep -Seconds 3
+    Click-Label 4 @('看文字') '找不到「看文字」'
+    if (-not (Await-Text 4 'text-mode' @('看原页') 15)) { Fail 4 '点击「看文字」后没有切换到文字视图' }
+    Click-Label 4 @('讲解') '找不到「讲解」'
+    if (-not (Await-Text 4 'explain-mode' @('回到原文') 15)) { Fail 4 '点击「讲解」后没有进入讲解模式' }
     $lines = Shot 4 'blocks'
     # 可信选段所在的段落：用它开头的几个词在屏幕上定位，再取它下面最近的「讲解这段」
     $words = (($sel.selection -replace '[^A-Za-z ]', ' ').Trim() -split '\s+' | Select-Object -First 4) -join ''
@@ -192,7 +196,18 @@ try {
     try {
         Click-Label 4 @('选段提问') '找不到「选段提问」'; Start-Sleep -Seconds 2
         $lines = Shot 4 'ask-dlg'
-        $pp = $null; foreach ($l in $lines) { if ($l.Text -replace '[^A-Za-z]', '' -like "*$words*") { $pp = Find-Text @($l) ($l.Text.Substring(0, 6)); break } }
+        # The same paragraph is visible behind the modal. Clicking that copy
+        # dismisses the picker, so require the hit to lie inside its own labels.
+        $picker = Has $lines @('选择要问的原文段落'); $close = Has $lines @('回到阅读')
+        $pp = $null
+        if ($picker -and $close) {
+            foreach ($l in $lines) {
+                if (($l.Text -replace '[^A-Za-z]', '') -notlike "*$words*") { continue }
+                $candidate = Find-Text @($l) ($l.Text.Substring(0, 6))
+                if ($candidate -and $candidate.X1 -ge $picker.X1 -and $candidate.X2 -le $close.X2 -and
+                    $candidate.Y1 -gt $picker.Y2 -and $candidate.Y2 -lt $close.Y1) { $pp = $candidate; break }
+            }
+        }
         if (-not $pp) { throw '提问对话框里找不到可信选段所在的段落' }
         Click-At $pp.X $pp.Y; Start-Sleep -Seconds 2
         $lines = Shot 4 'ask-picked'

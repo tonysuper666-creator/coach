@@ -127,9 +127,6 @@ class V7ButtonWindowTest {
                     shot("normal")
                     robot.mouseMove(x, y)
                     shot("hover")
-                    robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
-                    shot("pressed")
-                    robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
                     robot.mouseMove(neutral.x, neutral.y)
                 }
                 // From the 1dp start target, one real Tab must land on the button.
@@ -151,23 +148,47 @@ class V7ButtonWindowTest {
                     println("TON-1657 native $mode Tab went to another window; re-activating ($foreignForeground)")
                 }
                 withForeground { shot("keyboard") }
-                // 这次点击也核对真的落在按钮上：没落到（前台被抢、点到别人窗口）就重发，最多 3 次；
-                // 落到了却数不对才是产品问题。断言仍是恰好 2 次。
-                var missedClicks = 0
-                while (true) {
-                    withForeground {
-                        robot.mouseMove(x, y)
-                        robot.mousePress(InputEvent.BUTTON1_DOWN_MASK); robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
-                        robot.waitForIdle(); robot.delay(300)
-                        robot.mouseMove(neutral.x, neutral.y)
-                    }
-                    val reached = AtomicInteger()
-                    EventQueue.invokeAndWait { reached.set(clicks) }
-                    if (reached.get() == 2) break
-                    if (reached.get() > 2) fail("$mode button received ${reached.get()} OS clicks instead of 2")
-                    if (++missedClicks > 3) fail("OS click never reached the $mode button: clicks=${reached.get()}; ${NativeWindowForeground.describe(window)}")
-                    println("TON-1657 native $mode click went to another window; re-sending ($missedClicks)")
+                // 两次点击各自核对「按下/抬起有没有真的落在按钮上」。送达证据只认 AWT 鼠标事件，
+                // 不认业务回调：回调是产品行为，按钮收到点击却不回调正是要抓的缺陷。
+                // 没送到就重发（最多 3 次）；送到了而回调数不对，立即失败。
+                fun callbacks(): Int {
+                    val value = AtomicInteger()
+                    EventQueue.invokeAndWait { value.set(clicks) }
+                    return value.get()
                 }
+                val buttonScreen = Rectangle(sx(b.x), sy(b.y),
+                    (b.width / transform.scaleX).toInt().coerceAtLeast(1),
+                    (b.height / transform.scaleY).toInt().coerceAtLeast(1))
+                val clicksReaching = WindowMouseArrivals(window) { buttonScreen }.start()
+                try {
+                    var redelivered = 0
+                    for (index in 0 until 2) {
+                        while (true) {
+                            val pressBefore = clicksReaching.pressCount
+                            val releaseBefore = clicksReaching.releaseCount
+                            val callbacksBefore = callbacks()
+                            withForeground {
+                                robot.mouseMove(x, y)
+                                robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
+                                if (index == 0) shot("pressed")
+                                robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
+                                robot.waitForIdle(); robot.delay(300)
+                                robot.mouseMove(neutral.x, neutral.y)
+                            }
+                            val presses = clicksReaching.pressCount - pressBefore
+                            val releases = clicksReaching.releaseCount - releaseBefore
+                            if (presses == 0 || releases == 0) {
+                                if (++redelivered > 3) fail("OS click ${index + 1} never reached the $mode button: presses=$presses releases=$releases; ${NativeWindowForeground.describe(window)}")
+                                println("TON-1657 native $mode click ${index + 1} did not reach the button (presses=$presses releases=$releases); re-sending ($redelivered)")
+                                continue
+                            }
+                            val callbacksAfter = callbacks()
+                            assertEquals(callbacksBefore + 1, callbacksAfter,
+                                "the $mode button received OS click ${index + 1} (presses=$presses releases=$releases) but its callbacks went $callbacksBefore -> $callbacksAfter")
+                            break
+                        }
+                    }
+                } finally { clicksReaching.stop() }
                 withForeground { shot("mouse-after") }
                 EventQueue.invokeAndWait {
                     assertEquals(2, clicks, "OS clicks must reach the actual button")
@@ -186,7 +207,8 @@ class V7ButtonWindowTest {
                 }
                 assertTrue(ringPixels("keyboard") > 0, "$mode keyboard focus must draw the ring in the native window")
                 assertEquals(0, ringPixels("mouse-after"), "$mode mouse click on the focused button must not draw the ring")
-                println("TON-1657 native $mode 5 states captured; ring keyboard=${ringPixels("keyboard")} mouse-after=0")
+                println("TON-1657 native $mode 5 states captured; ring keyboard=${ringPixels("keyboard")} mouse-after=0; " +
+                    "OS clicks reaching the button: presses=${clicksReaching.pressCount} releases=${clicksReaching.releaseCount} callbacks=$clicks")
             } finally {
                 Toolkit.getDefaultToolkit().removeAWTEventListener(tabListener)
                 robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)

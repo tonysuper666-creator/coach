@@ -6,10 +6,12 @@ import com.sun.jna.WString
 import com.sun.jna.win32.StdCallLibrary
 import java.awt.AWTEvent
 import java.awt.Component
+import java.awt.Rectangle
 import java.awt.Toolkit
 import java.awt.Window
 import java.awt.event.AWTEventListener
 import java.awt.event.KeyEvent
+import java.awt.event.MouseEvent
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.SwingUtilities
 
@@ -131,11 +133,43 @@ internal class WindowKeyArrivals(private val window: Window) {
     }
 
     val count: Int get() = pressed.get()
+}
 
-    private fun windowOf(source: Any?): Window? {
-        val component = source as? Component ?: return null
-        return if (component is Window) component else SwingUtilities.getWindowAncestor(component)
+/**
+ * 按窗口统计真的落在某个屏幕区域里的鼠标按下/抬起。
+ *
+ * 用它判「点击有没有送到按钮上」，而不是看业务回调有没有加一：回调是产品行为，
+ * 按钮收到点击却不回调正是要抓的缺陷；拿回调当送达证据会把这种缺陷漏掉。
+ */
+internal class WindowMouseArrivals(private val window: Window, private val area: () -> Rectangle?) {
+    private val presses = AtomicInteger()
+    private val releases = AtomicInteger()
+    private val listener = AWTEventListener { event ->
+        if (event !is MouseEvent) return@AWTEventListener
+        if (event.id != MouseEvent.MOUSE_PRESSED && event.id != MouseEvent.MOUSE_RELEASED) return@AWTEventListener
+        if (windowOf(event.source) !== window) return@AWTEventListener
+        val target = area() ?: return@AWTEventListener
+        val at = runCatching { event.locationOnScreen }.getOrNull() ?: return@AWTEventListener
+        if (!target.contains(at)) return@AWTEventListener
+        if (event.id == MouseEvent.MOUSE_PRESSED) presses.incrementAndGet() else releases.incrementAndGet()
     }
+
+    fun start(): WindowMouseArrivals {
+        Toolkit.getDefaultToolkit().addAWTEventListener(listener, AWTEvent.MOUSE_EVENT_MASK)
+        return this
+    }
+
+    fun stop() {
+        Toolkit.getDefaultToolkit().removeAWTEventListener(listener)
+    }
+
+    val pressCount: Int get() = presses.get()
+    val releaseCount: Int get() = releases.get()
+}
+
+private fun windowOf(source: Any?): Window? {
+    val component = source as? Component ?: return null
+    return if (component is Window) component else SwingUtilities.getWindowAncestor(component)
 }
 
 private interface FocusKernel : StdCallLibrary {

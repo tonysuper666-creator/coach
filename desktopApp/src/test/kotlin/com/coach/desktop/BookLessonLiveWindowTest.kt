@@ -100,7 +100,8 @@ class BookLessonLiveWindowTest {
                     val page = controller.state.value.page
                     assertEquals(citedBlock.page, page)
                     assertTrue(source.contains(book.pageLabel(page)), "Citation and returned original page must agree")
-                    assertEquals(citedBlock.text, controller.library.book(book.id).page(page)!!.text.substring(citedBlock.start, citedBlock.end))
+                    assertTrue(citedBlock.text == controller.library.book(book.id).page(page)!!.text.substring(citedBlock.start, citedBlock.end),
+                        "Returned source must match the original UTF-16 range; original text omitted")
                     waitFor("original page") { node(window, "reader-page-number") != null }
                     assertTrue(text(node(window, "reader-page-number")).contains(page.toString()))
                     shot(window, theme, "source")

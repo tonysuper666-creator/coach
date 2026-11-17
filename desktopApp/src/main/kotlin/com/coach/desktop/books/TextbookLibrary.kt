@@ -251,9 +251,15 @@ internal class TextbookLibrary(
             if (catalog().any { it.id == id }) return book(id)
             val fallback = source.fileName.toString().substringBeforeLast('.')
             val extracted = extractBook(stage, format, fallback, ocr, control).let { book ->
-                if (format == "html") StructuredBookExtraction.htmlImages(
-                    BookText.decode(Files.readAllBytes(stage)), book, source.toAbsolutePath().parent
-                ) else book
+                when (format) {
+                    "html" -> StructuredBookExtraction.htmlImages(
+                        BookText.decode(Files.readAllBytes(stage)), book, source.toAbsolutePath().parent
+                    )
+                    "md" -> MarkdownBookImages.attach(
+                        BookText.decode(Files.readAllBytes(stage)), book, source.toAbsolutePath().parent, control
+                    )
+                    else -> book
+                }
             }
             require(extracted.pages.isNotEmpty()) { "教材中没有可打开的页面。" }
             control.check()

@@ -4,8 +4,8 @@ package com.coach.desktop.books
 internal class PairedBookLearningSupport(
     private val library: TextbookLibrary,
     private val consent: ExplainConsent = ExplainConsent(library.directory),
-    private val sendLesson: suspend (List<SourceBlock>, Int) -> ExplainResult = { _, _ ->
-        ExplainResult.Refused("整节讲解正在接通。")
+    private val sendLesson: suspend (List<SourceBlock>, Int) -> ExplainResult = { blocks, pages ->
+        BookExplainer(library = library).run { load(); explainLesson(blocks, pages) }
     },
     private val send: suspend (SourceBlock, String) -> ExplainResult = { block, question ->
         BookExplainer(library = library).run { load(); ask(block, question) }

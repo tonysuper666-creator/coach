@@ -60,17 +60,23 @@ def connect(binding, writable=False):
         raise
 
 
-def validate(db, binding):
+def validate(db, binding, allow_unmigrated=False):
     require(db.execute("PRAGMA quick_check").fetchall() == [("ok",)])
     required = {
         "ledger_meta": {"singleton", "epoch"},
-        "devices": {"device_id", "name", "token_sha256", "created_at", "revoked_at", "friend_name"},
-        "pairing_code": {"singleton", "code_sha256", "expires_at", "attempts", "friend_name"},
+        "devices": {"device_id", "name", "token_sha256", "created_at", "revoked_at"},
+        "pairing_code": {"singleton", "code_sha256", "expires_at", "attempts"},
     }
+    actual = {}
     for table, columns in required.items():
         require(db.execute("SELECT type FROM sqlite_master WHERE name=?", (table,)).fetchall()
                 == [("table",)])
-        require(columns <= {row[1] for row in db.execute(f"PRAGMA table_info({table})")})
+        actual[table] = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        require(columns <= actual[table])
+    migrated = ["friend_name" in actual[table] for table in ("devices", "pairing_code")]
+    # Only the stopped-service guard opts into the pre-migration case. A
+    # partial migration is never evidence that there are no friend credentials.
+    require(all(migrated) or (allow_unmigrated and not any(migrated)))
     require(db.execute("SELECT singleton,epoch FROM ledger_meta").fetchall()
             == [(1, binding["epoch"])])
     # Unknown triggers could mutate owner rows, unrelated data or resurrect a
@@ -78,6 +84,7 @@ def validate(db, binding):
     require(not db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' "
                            "AND tbl_name IN ('devices','pairing_code')").fetchall())
     check_file(binding)
+    return all(migrated)
 
 
 def counts(db):
@@ -94,16 +101,31 @@ def snapshot(db, table):
     return db.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
 
 
-def revoke(binding, apply=False):
+def revoke(binding, apply=False, *, allow_unmigrated=False):
     # Always open read-only first, even for --apply. Revalidate under the write
     # transaction: the preflight snapshot is not authority for the mutation.
     db = connect(binding)
     try:
         db.execute("BEGIN")
-        validate(db, binding)
-        result = counts(db)
+        migrated = validate(db, binding, allow_unmigrated=allow_unmigrated)
+        if migrated:
+            result = counts(db)
+        else:
+            # Neither credential table can encode named friend credentials.
+            # Keep owner credentials and pending owner code byte-for-byte;
+            # never migrate or open a write connection to prove this case.
+            legacy_rows = {table: snapshot(db, table) for table in ("devices", "pairing_code")}
     finally:
         db.close()
+    if not migrated:
+        db = connect(binding)
+        try:
+            db.execute("BEGIN")
+            require(not validate(db, binding, allow_unmigrated=True))
+            require(all(snapshot(db, table) == rows for table, rows in legacy_rows.items()))
+        finally:
+            db.close()
+        return {"active_friends": 0, "pending_friend_codes": 0, "revoked": 0, "invalidated_codes": 0}
     if not apply:
         return {**result, "revoked": 0, "invalidated_codes": 0}
 

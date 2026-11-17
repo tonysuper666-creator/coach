@@ -1,9 +1,11 @@
 import fcntl
+import contextlib
 import importlib.util
 import json
 from pathlib import Path
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import unittest
@@ -77,6 +79,82 @@ class FriendStartTest(unittest.TestCase):
         self.start('a' * 40)
         self.assertEqual(self.calls, ['start'])
         self.assertEqual(self.db.rows('devices'), before)
+
+    def unmigrated_database(self):
+        with contextlib.closing(sqlite3.connect(self.db.path)) as db, db:
+            db.execute('DELETE FROM devices WHERE friend_name IS NOT NULL')
+            db.execute('UPDATE pairing_code SET friend_name=NULL,attempts=2')
+            db.execute('ALTER TABLE devices DROP COLUMN friend_name')
+            db.execute('ALTER TABLE pairing_code DROP COLUMN friend_name')
+
+    def test_policy_activation_can_start_unmigrated_old_database_without_writing(self):
+        self.unmigrated_database()
+        before = self.db.path.read_bytes()
+        real_connect = guard.offline.connect
+        with mock.patch.object(guard.offline, 'connect', wraps=real_connect) as connect:
+            self.start()
+        self.assertEqual(self.calls, ['close', 'stop', 'start'])
+        self.assertFalse(self.blocked.exists())
+        self.assertEqual(self.db.path.read_bytes(), before)
+        self.assertEqual(connect.call_count, 2)
+        self.assertTrue(all(not call.kwargs.get('writable', False) for call in connect.call_args_list))
+        # The standalone tool still refuses a missing friend schema.
+        with self.assertRaises(guard.offline.GateError):
+            guard.offline.revoke(self.db.binding, apply=True)
+
+    def test_candidate_failure_before_migration_can_restore_old_database(self):
+        self.unmigrated_database()
+        before = self.db.path.read_bytes()
+        with self.assertRaises(RuntimeError):
+            self.start('a' * 40, launch=mock.Mock(side_effect=RuntimeError('candidate failed before migration')))
+        self.start()
+        self.assertEqual(self.calls, ['close', 'stop', 'start'])
+        self.assertFalse(self.blocked.exists())
+        self.assertEqual(self.db.path.read_bytes(), before)
+
+    def test_partial_migration_in_either_direction_stays_stopped(self):
+        for table in ('devices', 'pairing_code'):
+            with self.subTest(table=table):
+                with contextlib.closing(sqlite3.connect(self.db.path)) as db, db:
+                    db.execute(f'ALTER TABLE {table} RENAME COLUMN friend_name TO incomplete_friend')
+                with self.assertRaises(guard.offline.GateError):
+                    self.start()
+                self.assertEqual(self.calls[-2:], ['close', 'stop'])
+                self.assertTrue(self.blocked.exists())
+                self.blocked.unlink()
+                with contextlib.closing(sqlite3.connect(self.db.path)) as db, db:
+                    db.execute(f'ALTER TABLE {table} RENAME COLUMN incomplete_friend TO friend_name')
+
+    def test_unmigrated_database_still_requires_epoch_and_trigger_checks(self):
+        self.unmigrated_database()
+        with contextlib.closing(sqlite3.connect(self.db.path)) as db, db:
+            db.execute("CREATE TRIGGER unexpected AFTER DELETE ON pairing_code BEGIN DELETE FROM devices; END")
+        with self.assertRaises(guard.offline.GateError):
+            self.start()
+        self.assertNotIn('start', self.calls)
+        self.blocked.unlink()
+        with contextlib.closing(sqlite3.connect(self.db.path)) as db, db:
+            db.execute('DROP TRIGGER unexpected')
+            db.execute("UPDATE ledger_meta SET epoch='other'")
+        with self.assertRaises(guard.offline.GateError):
+            self.start()
+        self.assertNotIn('start', self.calls)
+
+    def test_unmigrated_readback_failure_latches_and_never_starts(self):
+        self.unmigrated_database()
+        real_connect = guard.offline.connect
+        calls = 0
+        def fail_readback(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError('readback unavailable')
+            return real_connect(*args, **kwargs)
+        with mock.patch.object(guard.offline, 'connect', side_effect=fail_readback):
+            with self.assertRaises(OSError):
+                self.start()
+        self.assertTrue(self.blocked.exists())
+        self.assertNotIn('start', self.calls)
 
     def test_post_commit_readback_failure_latches_even_for_capable_or_retry(self):
         real_revoke = guard.offline.revoke

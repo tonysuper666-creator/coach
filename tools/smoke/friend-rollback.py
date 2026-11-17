@@ -118,7 +118,48 @@ def rehearse(config):
 
         try:
             owner, initial = launch(old)
+            database = data / 'coach.sqlite'
+            identity = database.stat()
+            policy = root / 'friend-start-policy.json'
+            policy.write_text(json.dumps({'version': 1, 'binding': {'database': str(database), 'device': identity.st_dev,
+                'inode': identity.st_ino, 'epoch': initial['epoch']}, 'capableHeads': [config['candidateHead']],
+                'tailscale': config['tailscale'], 'publicPort': public}))
+            policy.chmod(0o600)
+            status, _ = owner_client.request('/v1/pairing-code', 'POST', owner, {})
+            require(status == 200)
+            with sqlite3.connect(database) as db:
+                require(all('friend_name' not in {row[1] for row in db.execute(f'PRAGMA table_info({table})')}
+                            for table in ('devices', 'pairing_code')))
+                owner_code = db.execute('SELECT * FROM pairing_code').fetchall()
+                require(owner_code)
+            # First policy activation while the real old binary still owns an
+            # unmigrated database must not strand the owner behind a latch.
+            restored = []
+            guard.start(policy, config['oldHead'], database, stop, lambda: restored.append(launch(old)))
+            require(restored[-1][0] == owner and restored[-1][1]['epoch'] == initial['epoch'])
             stop()
+            # Fail the real candidate JVM before LedgerStore can migrate. The
+            # following legacy start must still work through the same guard.
+            previous_options = env['JAVA_OPTS']
+            env['JAVA_OPTS'] += ' -XX:CoachRehearsalInvalidOption=1'
+            try:
+                try:
+                    guard.start(policy, config['candidateHead'], database, stop, lambda: launch(candidate))
+                except RuntimeError:
+                    require(process is not None and process.poll() is not None)
+                else:
+                    raise RuntimeError('candidate failure was not exercised')
+            finally:
+                env['JAVA_OPTS'] = previous_options
+                stop()
+            guard.start(policy, config['oldHead'], database, stop, lambda: restored.append(launch(old)))
+            require(restored[-1][0] == owner and restored[-1][1]['epoch'] == initial['epoch'])
+            stop()
+            with sqlite3.connect(database) as db:
+                require(all('friend_name' not in {row[1] for row in db.execute(f'PRAGMA table_info({table})')}
+                            for table in ('devices', 'pairing_code')))
+                require(db.execute('SELECT * FROM pairing_code').fetchall() == owner_code)
+            require(not (root / 'friend-start-blocked.json').exists())
             same_owner, migrated = launch(candidate, expose=True)
             require(owner == same_owner and initial['epoch'] == migrated['epoch'])
             payload = json.dumps({'type': 'save_note', 'courseId': 'rehearsal',
@@ -180,6 +221,7 @@ def rehearse(config):
             require(budget.read_bytes() == budget_bytes)
             require(before == {key: manifest(binary) for key, binary in [('old', old), ('candidate', candidate)]})
             return {'forbidden_paths': checks - len(protocol.WRONG_METHODS), 'wrong_methods': len(protocol.WRONG_METHODS),
+                    'unmigrated_old_starts': 2, 'candidate_pre_migration_failure': 1, 'owner_pending_code_preserved': 1,
                     'revoked_tokens_rejected': 1, 'pending_codes_rejected': 1, 'owner_preserved': 1,
                     'events_preserved': 1, 'budget_bytes_preserved': 1, 'artifacts_unchanged': 1}
         finally:

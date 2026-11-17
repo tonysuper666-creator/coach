@@ -53,6 +53,19 @@ def stop():
                         remember(state[key])
             except FileNotFoundError:
                 pass
+    # Capture descendants while the parent still exists. Health files may be
+    # removed during a failed startup; their absence is not a shutdown proof.
+    processes = subprocess.run(['/bin/ps', '-axo', 'pid=,ppid='],
+                               check=True, capture_output=True, text=True)
+    children = [tuple(map(int, row.split())) for row in processes.stdout.splitlines()]
+    while True:
+        found = [pid for pid, parent in children if parent in tracked and pid not in tracked]
+        if not found:
+            break
+        for pid in found:
+            remember(pid)
+        # A process may exit before remember(); do not loop on that same PID.
+        children = [(pid, parent) for pid, parent in children if pid not in found]
     run('launchctl', 'disable', f'{DOMAIN}/{LABEL}')
     if loaded():
         run('launchctl', 'bootout', f'{DOMAIN}/{LABEL}')
@@ -68,6 +81,12 @@ def stop():
         if time.monotonic() >= deadline:
             raise RuntimeError('Stop timed out; inspect service logs. No unrelated processes were signalled.')
         time.sleep(.1)
+    if RECORD.exists():
+        release = str(Path(json.loads(RECORD.read_text())['root'])) + '/'
+        remaining = subprocess.run(['/bin/ps', '-axo', 'command='],
+                                   check=True, capture_output=True, text=True)
+        if any(release in line for line in remaining.stdout.splitlines()):
+            raise RuntimeError('Owned release still has processes; service remains disabled')
     print(f'{LABEL}: stopped and disabled until start (data retained)')
 
 
@@ -94,11 +113,24 @@ def ready(info):
 
 
 def start():
-    info = json.loads(RECORD.read_text())
-    run('launchctl', 'enable', f'{DOMAIN}/{LABEL}')
-    if not loaded():
-        run('launchctl', 'bootstrap', DOMAIN, PLIST)
-    ready(info)
+    record, plist = RECORD.read_bytes(), PLIST.read_bytes()
+    info = json.loads(record)
+    def launch():
+        if RECORD.read_bytes() != record or PLIST.read_bytes() != plist:
+            raise RuntimeError('Service pointers changed during start gate')
+        run('launchctl', 'enable', f'{DOMAIN}/{LABEL}')
+        if not loaded():
+            run('launchctl', 'bootstrap', DOMAIN, PLIST)
+        ready(info)
+    policy = BASE / 'friend-start-policy.json'
+    if policy.exists() or policy.is_symlink() or (BASE / 'friend-operation.lock').exists():
+        # Import only when armed, preserving the existing non-friend controller.
+        # A missing helper/policy fails closed; never fall through to launch().
+        import friend_service_guard
+        friend_service_guard.start(policy, info['sourceHead'],
+                                   Path(info['dataDir']) / 'coach.sqlite', stop, launch)
+    else:
+        launch()
 
 
 def public_port(value):
@@ -109,6 +141,9 @@ def public_port(value):
 
 
 def install(friend_port=None):
+    if ((BASE / 'friend-start-policy.json').exists()
+            or (BASE / 'friend-operation.lock').exists()):
+        raise RuntimeError('Friend interlock armed; use the reviewed pointer transaction')
     root = Path(__file__).resolve().parents[2]
     binary = root / 'server/app/build/install/app'
     if not (binary / 'bin/app').is_file():

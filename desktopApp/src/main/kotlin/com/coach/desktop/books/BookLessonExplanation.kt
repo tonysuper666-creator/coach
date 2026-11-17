@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
 import com.coach.ui.v7.LocalV7ReducedMotion
 import com.coach.ui.v7.PaperCard
+import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
@@ -65,11 +66,29 @@ internal fun BookLessonExplanation(
                         Text(result.text, Modifier.testTag("book-explanation-text"))
                         sources(result.sources)
                     }
-                    is BookLearningReply.Unavailable -> ExplainTroubleLine(result, onRetry = { reply.value = null; attempt++ },
+                    is BookLearningReply.Unavailable -> LessonTroubleLine(result, onRetry = { reply.value = null; attempt++ },
                         onRepair = onRepair, modifier = Modifier.testTag("book-explanation-unavailable"))
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun LessonTroubleLine(reply: BookLearningReply.Unavailable, onRetry: () -> Unit,
+    onRepair: (() -> Unit)?, modifier: Modifier = Modifier) {
+    val trouble = reply.trouble
+    Row(modifier.heightIn(min = 40.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        when {
+            trouble == ExplainTrouble.Revoked && onRepair != null ->
+                PaperButton(onRepair, modifier = Modifier.testTag("explain-trouble-repair")) { Text("去重新配对") }
+            trouble?.retry == true -> PaperButton(onRetry, modifier = Modifier.testTag("explain-trouble-retry")) { Text("再试一次") }
+        }
+        // 和选段讲解保持一致：暂时连不上用次要色，只有需要重新配对时才用朱色。
+        Text(reply.message, style = MaterialTheme.typography.bodySmall,
+            color = if (trouble == ExplainTrouble.Revoked) v7Alert() else com.coach.ui.theme.CoachTheme.colors.fgSecondary,
+            modifier = Modifier.weight(1f).testTag("explain-trouble"))
     }
 }
 

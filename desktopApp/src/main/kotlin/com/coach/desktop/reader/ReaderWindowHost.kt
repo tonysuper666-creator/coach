@@ -72,6 +72,7 @@ fun main() {
         Window(
             onCloseRequest = ::exitApplication,
             title = "$docTitle · LearningCoach",
+            icon = com.coach.desktop.AppIcon.window(),
             state = rememberWindowState(width = 1200.dp, height = 760.dp),
         ) {
             if (httpMode) {

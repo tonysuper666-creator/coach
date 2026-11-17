@@ -64,7 +64,7 @@ internal fun runWindowsTextbooks() {
         val closeGuard = remember(drafts, exams, scope) {
             TextbookCloseGuard({ drafts.flush() && exams.flush() }, scope, ::exitApplication)
         }
-        Window(onCloseRequest = closeGuard::requestClose, title = "LearningCoach",
+        Window(onCloseRequest = closeGuard::requestClose, title = "LearningCoach", icon = AppIcon.window(),
             state = rememberWindowState(
                 width = initialBounds.width.dp, height = initialBounds.height.dp,
                 position = WindowPosition.Absolute(initialBounds.x.dp, initialBounds.y.dp),

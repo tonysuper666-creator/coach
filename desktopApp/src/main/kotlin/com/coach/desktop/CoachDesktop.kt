@@ -55,7 +55,7 @@ fun runCoach() {
     application {
         var readerIdentity by remember { mutableStateOf<DesktopIdentity?>(null) }
         var readerController by remember { mutableStateOf<CoachController?>(null) }
-        Window(onCloseRequest = ::exitApplication, title = "LearningCoach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
+        Window(onCloseRequest = ::exitApplication, title = "LearningCoach", icon = AppIcon.window(), state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
             DesktopPairingGate(settings) { identity ->
                 if (identity.credentials.role == "friend") {
                     FriendCourseContent { kotlinx.coroutines.withContext(Dispatchers.Swing) {
@@ -83,7 +83,7 @@ fun runCoach() {
         }
         // Keep the course controller mounted; closing this window returns to its original state.
         readerIdentity?.let { identity ->
-            Window(onCloseRequest = { readerIdentity = null; readerController = null }, title = "教材原文 · LearningCoach",
+            Window(onCloseRequest = { readerIdentity = null; readerController = null }, title = "教材原文 · LearningCoach", icon = AppIcon.window(),
                 state = rememberWindowState(width = 1200.dp, height = 760.dp)) {
                 PairedHttpReader(settings, identity, course, controller = readerController)
             }

@@ -9,6 +9,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
@@ -51,9 +52,9 @@ class BookPageViewTest {
             val controller = TextbookController(library)
             runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
-                waitUntil(20_000) { controller.state.value.book != null && !controller.state.value.busy }
+                waitUntil(timeoutMillis = 20_000) { controller.state.value.book != null && !controller.state.value.busy }
                 onNodeWithTag("home-read").performClick()
-                waitUntil(20_000) { controller.state.value.screen == BookScreen.READER }
+                waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER }
                 onNodeWithTag("book-original-toggle").performClick()
                 waitForIdle()
                 fun displayed() = onNodeWithTag("reader-text").fetchSemanticsNode()
@@ -88,7 +89,9 @@ class BookPageViewTest {
         waitForIdle()
         onNodeWithTag("book-sheet-0").assertExists()
         onNodeWithTag("book-sheet-1").assertExists()
-        onAllNodesWithText(Regex("本章还剩 \\d+ 页")).assertCountEquals(2)
+        onAllNodes(SemanticsMatcher("remaining chapter pages") { node ->
+            node.config.getOrNull(SemanticsProperties.Text)?.any { Regex("本章还剩 \\d+ 页").matches(it.text) } == true
+        }).assertCountEquals(2)
         assertTrue(state.pages.size > 3)
         val anchor = state.pages[2].anchor.let { it.copy(offsetUtf16 = it.offsetUtf16 + 10) }
         runOnIdle { state.anchor = anchor }

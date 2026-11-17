@@ -116,7 +116,7 @@ internal class BookPageLayouter(
                         afterHeading = p.afterHeading || (i == 0 && headingEnd > 0)) })
             val original = buildAnnotatedString {
                 append(raw)
-                if (chapter.title != null) {
+                if (chapter.title != null && markdownHeadings(raw).none { it.marks.first == 0 }) {
                     val end = raw.indexOf('\n').let { if (it < 0) raw.length else it }
                     addStyle(typography.chapter, 0, end)
                 }

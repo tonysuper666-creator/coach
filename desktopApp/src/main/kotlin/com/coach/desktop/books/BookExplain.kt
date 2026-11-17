@@ -122,12 +122,21 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
     var revoked by mutableStateOf(false)
         protected set
 
-    /** 别处（选段提问）先碰到了 401：讲解面板也回到配对，不再显示「已连上」。 */
-    fun markRevoked() { identity = null; revoked = true }
+    /** 别处（选段提问、答后讲解）先碰到了 401：讲解面板也回到配对，不再显示「已连上」。 */
+    fun markRevoked() {
+        identity?.let { stopped += it.key() }
+        identity = null; revoked = true
+    }
 
     open suspend fun load() {
         val result = withContext(Dispatchers.IO) { runCatching { settings.serverUrl() to pairing.load() } }
-        result.getOrNull()?.let { defaultAddress = it.first.orEmpty(); identity = it.second }
+        result.getOrNull()?.let { (address, saved) ->
+            defaultAddress = address.orEmpty()
+            // 配对文件 401 之后仍在磁盘上；同一份凭据在这个进程里停用过，就别再当成「已连上」。
+            val stale = saved != null && saved.key() in stopped
+            identity = if (stale) null else saved
+            if (stale) revoked = true else if (saved != null) revoked = false
+        }
         loaded = true
     }
 
@@ -137,6 +146,12 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         true
     } catch (cancelled: CancellationException) { throw cancelled }
     catch (_: Exception) { false }
+
+    private companion object {
+        /** 原文页、答后讲解、选段提问各有一个 explainer；谁先碰到 401，其他的读到同一份凭据时也算停用。 */
+        val stopped: MutableSet<Triple<String, String, String>> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+        fun DesktopIdentity.key() = Triple(serverUrl, credentials.deviceId, credentials.token)
+    }
 
     open suspend fun explain(chosen: SourceBlock, blocks: List<SourceBlock>, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult {
         val context = ExplainWire.context(blocks, chosen)

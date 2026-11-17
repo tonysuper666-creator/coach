@@ -1,17 +1,31 @@
 package com.coach.desktop.books
 
+import androidx.compose.foundation.layout.Column
+import androidx.compose.material3.Text
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import com.coach.client.PairedCredentials
 import com.coach.desktop.DesktopConnectionSettings
 import com.coach.desktop.DesktopIdentity
 import com.coach.ui.theme.CoachTheme
+import com.coach.ui.v7.V7TextButton
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.*
 
 /**
@@ -137,6 +151,114 @@ class ExplainTroubleTest {
                 } else onNodeWithTag("explain-trouble-repair").assertDoesNotExist()
             }
         }
+    }
+
+    @Test fun quotaClosesTheSendButtonButKeepsPassageAndQuestion() {
+        val (library, book, chosen) = sample()
+        var calls = 0
+        val support = PairedBookLearningSupport(library) { _, _ -> calls++; ExplainResult.Refused("今天的讲解额度用完了，明天再来。", ExplainTrouble.Quota) }
+        support.allow(book.id)
+        runSkikoComposeUiTest(size = Size(1100f, 850f), density = Density(1f)) {
+            setContent { CoachTheme(darkTheme = false) { BookPassageAsk(book, book.pages.first(), support) {} } }
+            onNodeWithTag("ask-paragraph-0").performClick()
+            onNodeWithTag("book-passage-question").performTextInput("Why does the plant need light?")
+            onNodeWithTag("book-passage-send").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-passage-unavailable").fetchSemanticsNodes().isNotEmpty() }
+            // 额度用完：主「发送」也关上，点了不会再发一次；选段和问题都还在。
+            onNodeWithTag("book-passage-send").performScrollTo().assertIsNotEnabled().performClick()
+            waitForIdle()
+            assertEquals(1, calls)
+            onNodeWithTag("book-selected-passage").assertTextEquals(chosen.text)
+            onNodeWithTag("book-passage-question").assertTextContains("Why does the plant need light?")
+            onNodeWithTag("explain-trouble-retry").assertDoesNotExist()
+        }
+    }
+
+    /**
+     * 做题学答完 → 讲解被 401 停用 → 去原文页重新配对 → 回到同一节：这一节重新去取讲解，不再停在旧的「已停用」上。
+     * 走真的配对文件和真的 HTTP，只是 Mac 换成本机一个假服务：第一次配对的凭据讲解时回 401，第二次的正常讲。
+     */
+    @Test fun answerExplainComesBackAfterRepairingOnTheSourcePage() {
+        val (library, book, _) = sample()
+        val lesson = book.lessons.first()
+        val practice = assertNotNull(StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE))
+        FakeMac().use { mac ->
+            val home = Files.createTempDirectory("explain-repair-home-")
+            val settings = DesktopConnectionSettings(home, { null }, mac = false,
+                property = { if (it == "jpackage.app-path") "/synthetic/Coach.exe" else null })
+            assertTrue(runBlocking { BookExplainer(settings, library).pair(mac.url, "123456") })
+            val consent = ExplainConsent(library.directory).also { it.allow(book.id) }
+            // 和 Windows 主机一样：答后讲解一个 explainer，原文页每次进来另建一个。
+            val gate = answerExplainWith(BookExplainer(settings, library), consent)
+            val reply = mutableStateOf<BookLearningReply?>(null)
+            var onSourcePage by mutableStateOf(false)
+            runSkikoComposeUiTest(size = Size(1100f, 850f), density = Density(1f)) {
+                setContent {
+                    CoachTheme(darkTheme = true) {
+                        if (onSourcePage) Column {
+                            V7TextButton({ onSourcePage = false }, Modifier.testTag("back-to-lesson")) { Text("回到这一节") }
+                            BookExplainPanel(book, lesson.firstPage, consent, remember { BookExplainer(settings, library) })
+                        } else LessonAnswerExplanation(book, lesson, practice, gate, reply, sources = {}, onOpenSourcePage = { onSourcePage = true })
+                    }
+                }
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("answer-explain-unpaired").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("answer-explain-unpaired-text").assertTextEquals(ExplainTrouble.REVOKED)
+                assertEquals(1, mac.explains.get())
+                onNodeWithTag("answer-explain-pair").performClick()
+                // 原文页也知道这份凭据停用了：直接给配对表单，不显示「已连上 Mac」。
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("explain-revoked").assertExists()
+                onNodeWithTag("explain-address").performTextClearance()
+                onNodeWithTag("explain-address").performTextInput(mac.url)
+                onNodeWithTag("explain-code").performTextInput("654321")
+                onNodeWithTag("explain-pair").performClick()
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
+                assertEquals(2, mac.pairs.get())
+                onNodeWithTag("back-to-lesson").performClick()
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-explanation-text").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("book-explanation-text").assertTextContains("Light gives the plant its energy.", substring = true)
+                onNodeWithTag("book-explanation-unavailable").assertDoesNotExist()
+                assertEquals(2, mac.explains.get())
+            }
+        }
+    }
+
+    /** 本机回环上的假 Mac：配对第 n 次发第 n 份凭据；第一份讲解时回 401，之后的照常讲，引用发来的第一段。 */
+    private class FakeMac : AutoCloseable {
+        val pairs = AtomicInteger()
+        val explains = AtomicInteger()
+        private val tokens = listOf("a".repeat(43), "b".repeat(43))
+        private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val url: String
+
+        init {
+            server.createContext("/") { exchange ->
+                val sent = exchange.requestBody.use { it.readBytes() }.decodeToString()
+                val (status, body) = when (exchange.requestURI.path) {
+                    "/v1/pair" -> 200 to """{"deviceId":"friend-pc","token":"${tokens[pairs.getAndIncrement().coerceAtMost(1)]}"}"""
+                    "/v1/hello" -> 200 to """{"epoch":"synthetic","lastSeq":0,"backedUpThroughSeq":0,"lastSeqBefore":0}"""
+                    "/v1/library/explain" -> {
+                        explains.incrementAndGet()
+                        if (exchange.requestHeaders.getFirst("Authorization") == "Bearer ${tokens[0]}") 401 to """{"error":"unauthorized"}"""
+                        else {
+                            val id = Json.parseToJsonElement(sent).jsonObject.getValue("blocks").jsonArray.first().jsonObject.getValue("id").jsonPrimitive.content
+                            val page = Regex(":p(\\d+):").find(id)!!.groupValues[1]
+                            200 to """{"text":"Light gives the plant its energy.【S1】","sources":[{"docId":"$id","pdfPage":$page,"anchor":"S1"}]}"""
+                        }
+                    }
+                    else -> 404 to "{}"
+                }
+                val bytes = body.toByteArray()
+                exchange.responseHeaders.add("Content-Type", "application/json")
+                exchange.sendResponseHeaders(status, bytes.size.toLong())
+                exchange.responseBody.use { it.write(bytes) }
+            }
+            server.start()
+            check(server.address.port != 18791) { "never the production port" }
+            url = "http://127.0.0.1:${server.address.port}"
+        }
+
+        override fun close() = server.stop(0)
     }
 
     private data class Reply(val status: Int, val body: String, val type: String = "application/json")

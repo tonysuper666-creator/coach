@@ -143,7 +143,11 @@ internal fun LessonAnswerExplanation(
             val support = remember(book.id, lesson.id, practice.reference, gate) {
                 PairedBookExplainSupport(gate, practice.reference)
             }
-            BookLessonExplanation(book, lesson, support, reply = reply, sources = sources)
+            // 停用之后在原文页重新配好了：留着的那条「已停用」作废，这一节重新去取讲解。
+            LaunchedEffect(reply.value) {
+                if ((reply.value as? BookLearningReply.Unavailable)?.trouble == ExplainTrouble.Revoked && !gate.revoked()) reply.value = null
+            }
+            BookLessonExplanation(book, lesson, support, reply = reply, sources = sources, onRepair = onOpenSourcePage)
         }
     }
 }

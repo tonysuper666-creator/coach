@@ -78,7 +78,8 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
                         val input = BookPassageQuestion(passage, question)
                         if (support.consentRequired(book.id)) pendingConsent = input else send(input)
                     }
-                }, enabled = BookPassageQuestion.accepts(question) && (request == null || reply != null), modifier = Modifier.testTag("book-passage-send")) { Text("发送") }
+                }, enabled = BookPassageQuestion.accepts(question) && (request == null || reply != null) &&
+                    (reply as? BookLearningReply.Unavailable)?.trouble != ExplainTrouble.Quota, modifier = Modifier.testTag("book-passage-send")) { Text("发送") }
                 when (val result = reply) {
                     null -> if (request != null) Text("正在读这段问题…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                     is BookLearningReply.Text -> PaperCard(Modifier.testTag("book-passage-reply"), color = colors.surface1) {

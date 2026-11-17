@@ -75,8 +75,14 @@ class FriendApiOnly(SubscriptionOnly):
 def existing_gift_key():
     # Same existing Keychain item as tools/bridge/run.sh. Never a command argument,
     # inherited key, file, diagnostic or environment variable of the server JVM.
+    env = os.environ.copy()
+    if sys.platform == "darwin":
+        import pwd
+        # A test HOME must not redirect security's per-user Keychain search list.
+        # Only this reader uses the account home; bridge/data isolation stays put.
+        env["HOME"] = pwd.getpwuid(os.getuid()).pw_dir
     result = subprocess.run(["security", "find-generic-password", "-s", "coach-anthropic-api", "-w"],
-                            capture_output=True, timeout=20)
+                            capture_output=True, timeout=20, env=env)
     if result.returncode != 0 or not result.stdout.strip():
         raise ValueError("Existing gift key unavailable")
     return result.stdout.decode().strip()

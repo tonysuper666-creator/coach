@@ -67,17 +67,20 @@ if ($Background) {
     $env:COACH_SMOKE_ENABLED = $null
     $env:COACH_SMOKE_CONTROL_FILE = $null
 }
-$launchArgs = @($runTask, '-Pcoach.course=', '--console=plain', '--offline')
-if ($Background) { $launchArgs += '--no-daemon' }
+# A shared Gradle daemon is outside the interactive invocation's process job.
+# Use a single-use daemon so even a timeout before AppPid discovery owns the tree.
+$launchArgs = @($runTask, '-Pcoach.course=', '--console=plain', '--offline', '--no-daemon')
 $gradle = $null
 if ($Runtime) {
-    if (-not $Background) { throw '-Runtime requires -Background' }
     $Runtime = (Resolve-Path -LiteralPath $Runtime).Path
     $revision = (& git -C $Repo rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or (Get-Content (Join-Path $Runtime 'revision.txt') -Raw).Trim() -ne $revision) { throw 'Runtime source revision differs from checkout' }
     if ((Get-Content (Join-Path $Runtime 'dirty.txt') -Raw).Trim()) { throw 'Runtime was built from uncommitted source' }
     $classpath = ((Get-Content (Join-Path $Runtime 'classpath.txt')) | ForEach-Object { Join-Path $Runtime $_ }) -join ';'
-    $gradle = Start-Process "$env:JAVA_HOME/bin/java.exe" -ArgumentList ('-cp "' + $classpath + '" com.coach.desktop.smoke.SmokeMain') -WorkingDirectory $Repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
+    # Preparation is a separate Mac heavy call. The foreground path still runs
+    # the production MainKt entry; only -Background selects development controls.
+    $entry = if ($Background) { 'com.coach.desktop.smoke.SmokeMain' } else { 'com.coach.desktop.MainKt' }
+    $gradle = Start-Process "$env:JAVA_HOME/bin/java.exe" -ArgumentList ('-cp "' + $classpath + '" ' + $entry) -WorkingDirectory $Repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
 } else {
     $gradle = Start-Process (Join-Path $Repo 'gradlew.bat') -ArgumentList $launchArgs -WorkingDirectory $Repo `
     -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')

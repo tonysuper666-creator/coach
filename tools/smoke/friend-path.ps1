@@ -24,7 +24,12 @@ if ($ClientSeed) { $args2 += " -ClientSeed '$ClientSeed'" }
 if ($Selection) { $args2 += " -Selection '$Selection'" }
 if ($PairCode) { $args2 += " -PairCode '$PairCode'" }
 & (Join-Path $PSScriptRoot 'Run-Interactive.ps1') -Script (Join-Path $PSScriptRoot 'friend-path-worker.ps1') -ScriptArgs $args2 -LogFile (Join-Path $out 'worker.log') -TimeoutSec $TimeoutSec
+$invocationExit = $LASTEXITCODE
+if (-not (Test-Path -LiteralPath (Join-Path $out 'result.json'))) {
+    throw 'FRIEND_PATH_NO_RESULT: 调用失败，无有效 result；不记 N/7（见 worker.log.invocation.json）'
+}
 $r = Get-Content (Join-Path $out 'result.json') -Raw | ConvertFrom-Json
 "$($r.passed)/7  （截图与日志：$out）"
 foreach ($s in $r.steps) { '{0} 步骤{1} {2}：{3}' -f $(if ($s.Ok) { '✓' } else { '✗' }), $s.Step, $s.Name, $s.Why }
 if ($r.passed -lt 7) { exit 1 }   # 未满 7/7 必须非 0，监工不能只看退出码 0
+if ($invocationExit -ne 0) { exit $invocationExit }

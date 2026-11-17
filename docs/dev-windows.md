@@ -2,6 +2,21 @@
 
 本页记录 TON-1415 在 2026-11-09 的实际操作。Windows 负责源码修改、Android debug APK 编译和共享模块 JVM 测试；设备验收和服务端运行仍按下文交给 Mac。
 
+## 真窗口验收的准备与收尾
+
+朋友路径的窗口预算仍为 150 秒。冷检出先从 Mac 的默认入口运行
+`tools/dev/heavy ./gradlew :desktopApp:smokeRuntime --no-daemon --console=plain`，
+再将该 heavy 任务产出的 `desktopApp/build/outputs/smoke-runtime` 放到同一干净 revision 的
+winbox 验收检出内。给 `friend-path.ps1` 传 `-Runtime <该目录>`，把编译准备与真实七步分开。
+不传 `-Background` 时启动正式的 `MainKt`；传入时才启动开发专用 `SmokeMain`。
+两种入口都核对运行时的 revision/dirty 收据。准备失败不计为七步结果，不放宽步骤判定。
+
+`Run-Interactive.ps1` 在启动 worker 前建立本轮 Windows Job Object；超时或父调用退出会回收
+本轮后代进程，包括窗口尚未出现、父启动器已经退出的情况。worker 的 Gradle 回退路径使用
+`--no-daemon`，避免把客户端交给既有共享 daemon。既有进程不会加入本轮 job。
+调用状态单独写入 `worker.log.invocation.json`；没有 `result.json` 只记调用失败，不填 N/7。
+截图和 OCR 仍只留 winbox，日志不上传教材或凭据。
+
 ## 检出与分支
 
 在 Multica 分配的 PowerShell 工作目录运行。CLI 路径使用 daemon 注入的变量：

@@ -76,6 +76,41 @@ class DesktopV7ScreenshotTest {
         "short-answer" to "inner-quiz", "short-answer-restored" to "inner-quiz", "short-answer-revealed" to "inner-quiz",
     )
 
+    @Test fun ton1666ReaderComparison() {
+        for (screen in screens) for (dark in listOf(false, true)) {
+            val root = Files.createTempDirectory("coach-ton1666-isolated-")
+            val sample = root.resolve("paragraphs.md")
+            Files.writeString(sample, """## 一节　阅读与思考
+
+阅读是一种缓慢而主动的工作。人们沿着文字前行，把新的知识和已有的经验联系起来；每当遇到需要停下来思考的地方，都可以回到原文，重新检查前后两句之间的关系。这一段故意写得长一些，让段落在阅读栏中自然换行，观察标点和行尾。
+
+另一段从这里开始，段与段之间仍然相互独立。书页不需要额外插入一个空白行，也不需要改变任何一个原文字符。无论窗口大小如何改变，出处和批注都应当指向原来的位置。
+
+English readers follow the same page with a different convention. The first line after a heading begins at the margin, and subsequent paragraphs use a small indent.
+
+A second English paragraph lets us inspect the space between paragraphs and the natural shape of a left aligned margin.
+""")
+            val controller = TextbookController(TextbookLibrary(root.resolve("library")))
+            runBlocking {
+                controller.importBook(sample)
+                controller.chooseLearningPath(LearningPath.QUESTION_FIRST)
+                controller.enableLearning()
+                controller.back()
+                controller.read()
+            }
+            runSkikoComposeUiTest(size = Size(screen.width.toFloat(), screen.height.toFloat()), density = Density(scale)) {
+                setContent {
+                    CompositionLocalProvider(LocalSystemTheme provides if (dark) SystemTheme.Dark else SystemTheme.Light) {
+                        WindowsTextbookHost(controller) { null }
+                    }
+                }
+                ready(controller) { it.screen == BookScreen.READER && it.prompt == null }
+                onNodeWithTag("reader-text").assertExists()
+                capture("reader-ton1666", screen, dark)
+            }
+        }
+    }
+
     @Test fun everyDesktopSceneInLightAndDarkAtWindowsScaling() {
         val previous = System.getProperty("coach.windows.theme")
         val shots = mutableListOf<Shot>()

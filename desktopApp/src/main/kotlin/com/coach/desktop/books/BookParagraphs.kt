@@ -51,11 +51,10 @@ internal fun bookParagraphs(source: String, pdf: Boolean): BookParagraphs {
     while (i < lines.size) {
         val line = lines[i]
         if (line.kind == null) {
-            // Preserve one paragraph separator, removing only additional empty lines.
-            if (line.end < source.length) {
-                if (line.end > line.start && source[line.end - 1] == '\r') display[line.end - 1] = '\u200b'
-                display[line.end] = '\u200b'
-            }
+            // Keep the last separator before the next block, and collapse earlier
+            // blank-line characters into the preceding paragraph without moving offsets.
+            for (offset in line.start until line.end) display[offset] = '\u200b'
+            if (line.start > 0 && source[line.start - 1] == '\n') display[line.start - 1] = '\u200b'
             i++
             continue
         }

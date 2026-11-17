@@ -251,9 +251,15 @@ internal class TextbookLibrary(
             if (catalog().any { it.id == id }) return book(id)
             val fallback = source.fileName.toString().substringBeforeLast('.')
             val extracted = extractBook(stage, format, fallback, ocr, control).let { book ->
-                if (format == "html") StructuredBookExtraction.htmlImages(
-                    BookText.decode(Files.readAllBytes(stage)), book, source.toAbsolutePath().parent
-                ) else book
+                when (format) {
+                    "html" -> StructuredBookExtraction.htmlImages(
+                        BookText.decode(Files.readAllBytes(stage)), book, source.toAbsolutePath().parent,
+                    )
+                    "md" -> MarkdownBookImages.attach(
+                        BookText.decode(Files.readAllBytes(stage)), book, source.toAbsolutePath().parent, control,
+                    )
+                    else -> book
+                }
             }
             require(extracted.pages.isNotEmpty()) { "教材中没有可打开的页面。" }
             control.check()
@@ -592,7 +598,8 @@ internal object TextbookExtraction {
             for (page in recognized) {
                 control.report(page.number, pdf.numberOfPages)
                 if (visuals.size >= FormatBookImages.MAX_IMAGES || visualBytes >= FormatBookImages.MAX_TOTAL) break
-                for (crop in PdfBoxedVisuals.extract(pdf, page, control)) {
+                val enclosed = PdfBoxedVisuals.extract(pdf, page, control)
+                for (crop in PdfBookImages.extract(pdf, page, enclosed, control)) {
                     if (visuals.size >= FormatBookImages.MAX_IMAGES || visualBytes + crop.bytes.size > FormatBookImages.MAX_TOTAL) break
                     visuals += crop
                     visualBytes += crop.bytes.size
@@ -606,7 +613,7 @@ internal object TextbookExtraction {
             try { ExtractedBook(title, listOf(BookPage(1, ocr.recognize(image, control), ocr = true))) }
             finally { image.flush() }
         }
-        "epub" -> epub(path, title)
+        "epub" -> epub(path, title, control = control)
         "mobi", "azw3" -> com.coach.desktop.books.mobi.KindleText.read(Files.readAllBytes(path)).let { book ->
             val name = book.title().ifBlank { title }
             StructuredBookExtraction.kindle(book, name)
@@ -658,7 +665,8 @@ internal object TextbookExtraction {
         else EpubSourceMapping(EpubSourceMapping.Status.STALE_TEXT, emptyList())
     }
 
-    private fun epub(path: Path, fallback: String, elements: MutableList<EpubElementSource>? = null): ExtractedBook = ZipFile(path.toFile()).use { zip ->
+    private fun epub(path: Path, fallback: String, elements: MutableList<EpubElementSource>? = null,
+        control: BookImportControl = BookImportControl()): ExtractedBook = ZipFile(path.toFile()).use { zip ->
         fun read(name: String): ByteArray {
             require(!name.startsWith('/') && name.split('/').none { it == ".." } && '\\' !in name) { "EPUB 内含无效的文件位置。" }
             val entry = requireNotNull(zip.getEntry(name)) { "EPUB 缺少阅读顺序中的正文。" }
@@ -686,7 +694,10 @@ internal object TextbookExtraction {
         val root = java.net.URI("/$packagePath")
         var totalBytes = 0L
         var pageBase = 0
+        val imageExtractor = if (elements == null) EpubBookImages(zip, control) else null
+        val illustrations = mutableListOf<ExtractedIllustration>()
         val pages = spine.flatMap { (spineIndex, item) ->
+            control.check()
             val href = requireNotNull(manifest[item.getAttribute("idref")]) { "EPUB 阅读顺序不完整。" }
             val resolved = root.resolve(href).normalize()
             require(resolved.scheme == null && resolved.host == null && resolved.fragment == null) { "EPUB 的正文必须包含在书内。" }
@@ -704,6 +715,7 @@ internal object TextbookExtraction {
                 val block = name in setOf("p", "div", "li", "h1", "h2", "h3", "h4", "section", "br", "tr")
                 if (block) output.append("\n\n")
                 val start = output.length
+                if (node is Element) imageExtractor?.record(node, start)
                 if (name.matches(Regex("h[1-6]"))) output.append("# ")
                 var childIndex = 0
                 for (i in 0 until node.childNodes.length) {
@@ -717,11 +729,12 @@ internal object TextbookExtraction {
             }
             visit(doc, emptyList())
             val localPages = paginate(clean(output.toString()).trim())
+            imageExtractor?.let { illustrations += it.finish(output.toString(), localPages, member, pageBase) }
             trace?.let { elements?.addAll(it.project(output.toString(), localPages, spineIndex, member, bytes, pageBase)) }
             pageBase += localPages.size
             localPages
         }.mapIndexed { index, page -> page.copy(number = index + 1) }
         require(pages.any { it.text.isNotBlank() }) { "EPUB 中没有可读取的文字正文。" }
-        ExtractedBook(opf.all("title").firstOrNull()?.textContent?.trim()?.takeIf(String::isNotEmpty) ?: fallback, pages)
+        ExtractedBook(opf.all("title").firstOrNull()?.textContent?.trim()?.takeIf(String::isNotEmpty) ?: fallback, pages, illustrations)
     }
 }

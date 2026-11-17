@@ -1,0 +1,39 @@
+name: Friend public protocol check
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Protocol only; no book, GUI or billable explanation
+        type: choice
+        options: [surface, revocation]
+        default: surface
+
+permissions:
+  contents: read
+
+concurrency:
+  group: friend-public
+  cancel-in-progress: false
+
+jobs:
+  protocol:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 8
+    environment: friend-public
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check public boundary
+        shell: pwsh
+        env:
+          COACH_FRIEND_MODE: ${{ inputs.mode }}
+          COACH_FRIEND_URL: ${{ secrets.COACH_FRIEND_URL }}
+          COACH_FRIEND_CODE: ${{ inputs.mode == 'surface' && secrets.COACH_FRIEND_CODE || '' }}
+          COACH_REVOKED_CREDENTIAL: ${{ inputs.mode == 'revocation' && secrets.COACH_REVOKED_CREDENTIAL || '' }}
+          COACH_ACTIVE_CREDENTIAL: ${{ inputs.mode == 'revocation' && secrets.COACH_ACTIVE_CREDENTIAL || '' }}
+        run: |
+          python tools/smoke/friend-public.py $env:COACH_FRIEND_MODE
+          exit $LASTEXITCODE

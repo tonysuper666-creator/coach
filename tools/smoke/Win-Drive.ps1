@@ -52,7 +52,7 @@ function Find-CoachWindow {
         $p = 0; [WD]::GetWindowThreadProcessId($x, [ref]$p) | Out-Null
         if ($p -eq $script:AppPid -and [WD]::IsWindowVisible($x)) {
             $sb = New-Object Text.StringBuilder 256; [WD]::GetWindowText($x, $sb, 256) | Out-Null
-            if ($sb.ToString() -eq 'Coach') { $script:Win = $x } }
+            if (@('Coach', 'LearningCoach') -contains $sb.ToString()) { $script:Win = $x } }   # 产品改名后窗口标题是 LearningCoach；仍只认本次启动的进程
         return $true }, [IntPtr]::Zero) | Out-Null
     return ($script:Win -ne [IntPtr]::Zero)
 }

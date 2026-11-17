@@ -191,7 +191,12 @@ private fun BoxScope.BookSheet(bookTitle: String, page: BookLaidPage, typography
     }
     Text(selectable, style = typography.body, inlineContent = inline,
         modifier = Modifier.padding(start = inset, top = 52.dp + top).width(column)
-            .semantics { text = AnnotatedString(originalBookSelection(page.text), page.text.spanStyles, page.text.paragraphStyles) }.testTag(if (side == 0) "reader-text" else "reader-text-right"))
+            .semantics {
+                // Expose original heading/citation ranges, as the reader did before
+                // pagination; the rendering-only base typography is not a source mark.
+                text = AnnotatedString(originalBookSelection(page.text),
+                    page.text.spanStyles.filterNot { it.item == typography.body.toSpanStyle() }, page.text.paragraphStyles)
+            }.testTag(if (side == 0) "reader-text" else "reader-text-right"))
     var offset = 0
     for ((i, source) in page.sources.withIndex()) {
         if (i > 0) {

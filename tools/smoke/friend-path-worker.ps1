@@ -193,8 +193,20 @@ try {
         if (-not $pp) { throw '提问对话框里找不到可信选段所在的段落' }
         Click-At $pp.X $pp.Y; Start-Sleep -Seconds 2
         $lines = Shot 4 'ask-picked'
-        $ctr = Has $lines @('0/500', '/500'); $lab = Has $lines @('想问什么')
-        if ($ctr) { Click-At ($ctr.X + 300) ($ctr.Y - 100) } elseif ($lab) { Click-At ($lab.X + 300) ($lab.Y + 90) } else { throw '找不到提问输入框' }
+        # A long selected paragraph pushes the field below the dialog viewport.
+        # Require both edges of the input region before clicking inside it.
+        $ctr = $null; $lab = $null
+        foreach ($scrollTry in 0..10) {
+            $ctr = Has $lines @('0/500', '/500'); $lab = Has $lines @('想问什么')
+            if ($ctr -and $lab) { break }
+            $title = Has $lines @('就这段问一句')
+            if (-not $title) { throw '找不到提问对话框' }
+            Scroll-At ($title.X + 200) ($title.Y + 300) -3
+            Start-Sleep -Milliseconds 700
+            $lines = Shot 4 "ask-input-$scrollTry"
+        }
+        if (-not $ctr -or -not $lab -or $ctr.Y -le $lab.Y) { throw '找不到完整可见的提问输入框' }
+        Click-At ($lab.X + 100) ([int](($lab.Y + $ctr.Y) / 2))
         $question = '用大白话解释一下，这里的专用人力资本是什么意思？'
         if ($Marker) { $question = "$Marker $question" }
         Paste-Text $question; Start-Sleep -Seconds 1
@@ -202,15 +214,14 @@ try {
             $typed = Shot 4 'ask-marker'
             if (-not (Has $typed @($Marker))) { throw '本轮标记没有出现在自己的提问框中' }
         }
-        # 发送按钮在字数计数「n/500」下面约 57 像素；对话框内容可能滚动，按钮被挤出视野时先滚一下再点
+        # Locate the visible button after scrolling; the input may have reflowed.
         $sent = $false
         Scroll-At 1080 700 -3; Start-Sleep -Milliseconds 800   # 先滚一下让对话框布局稳定，再按截图定位
         foreach ($try in 1..4) {
-            $lines = Shot 4 'ask-send'; $c2 = Has $lines @('/500')
-            if (-not $c2) { Start-Sleep -Seconds 1; continue }
-            if ($c2.Y + 57 -gt 1075) { Scroll-At 1080 700 -3; Start-Sleep -Milliseconds 600; continue }
+            $lines = Shot 4 'ask-send'; $send = Has $lines @('发送')
+            if (-not $send) { Scroll-At 1080 700 -3; Start-Sleep -Milliseconds 600; continue }
             Start-Sleep -Milliseconds 500
-            Click-At ($c2.X1 + 45) ($c2.Y + 57); $sent = $true; break
+            Click-At $send.X $send.Y; $sent = $true; break
         }
         if (-not $sent) { throw '找不到「发送」按钮的位置' }
         $deadline = (Get-Date).AddSeconds(120); $got = $null; $i = 0

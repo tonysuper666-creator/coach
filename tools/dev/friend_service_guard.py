@@ -145,7 +145,7 @@ def start(path, source_head, database, stop, launch):
         finally:
             # Closing Funnel failing must never leave the candidate running.
             stop()
-        counts = offline.revoke(policy['binding'], apply=True)
+        counts = offline.revoke(policy['binding'], apply=True, allow_unmigrated=True)
         require(counts['active_friends'] == 0 and counts['pending_friend_codes'] == 0)
         try:
             launch()

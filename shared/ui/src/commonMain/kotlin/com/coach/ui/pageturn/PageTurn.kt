@@ -35,7 +35,6 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerType
-import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.onSizeChanged
@@ -230,11 +229,18 @@ fun PageTurnView(
                     else -> false
                 }
             }
-            .onPointerEvent(PointerEventType.Scroll) { ev ->
-                val dx = ev.changes.firstOrNull()?.scrollDelta?.x ?: 0f
-                if (dx != 0f) {
-                    scrollAcc += dx
-                    if (abs(scrollAcc) >= 3f) { launchTurn(scrollAcc > 0); scrollAcc = 0f }
+            // 桌面滚轮翻页。onPointerEvent 只有桌面端有，commonMain 里改用通用事件循环读
+            // scrollDelta；触屏不会产生 Scroll 事件，手机端等于不挂这个分支。
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val ev = awaitPointerEvent()
+                        if (ev.type != PointerEventType.Scroll) continue
+                        val dx = ev.changes.firstOrNull()?.scrollDelta?.x ?: 0f
+                        if (dx == 0f) continue
+                        scrollAcc += dx
+                        if (abs(scrollAcc) >= 3f) { launchTurn(scrollAcc > 0); scrollAcc = 0f }
+                    }
                 }
             }
             .pointerInput(cols) {

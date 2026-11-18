@@ -542,7 +542,8 @@ internal fun TextbookReader(
                             marks.map { it.startUtf16 until it.endUtf16 }
                         result
                     }
-                    BookPageView(book, paging, ranges, turnLayout, libraryDirectory = library.directory, turnStyle = turnStyle, readMode = readMode, onPosition = { number ->
+                    BookPageView(book, paging, ranges, turnLayout, libraryDirectory = library.directory,
+                        turnStyle = turnStyle, readMode = readMode, onOpenTableRow = openPassage, onPosition = { number ->
                         if (paging.publishImportPage(number)) {
                             onPage(number)
                             session.goToPage(number)

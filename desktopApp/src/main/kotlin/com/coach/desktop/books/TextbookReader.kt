@@ -397,6 +397,8 @@ internal fun TextbookReader(
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(if (source != null) "学习原文 · ${source.title}" else "教材阅读", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                 if (hasOriginal) V7TextButton(onClick = {
+                    // A reflowed sheet can start on an earlier page than its reading anchor.
+                    if (textView && paging.publishImportPage(paragraphPage.number)) onPage(paragraphPage.number)
                     if (!textView && chosen != null) paging.anchor = BookPageAnchor(page.number, chosen.start)
                     textView = !textView
                     selection = null

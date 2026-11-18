@@ -247,6 +247,26 @@ class BookPageViewTest {
         } finally { root.toFile().deleteRecursively() }
     }
 
+    /** TON-1724: 长英文教材首开，分页在后台做，主线程先显示「正在排版」而不是卡住。 */
+    @Test fun longBookLaysOutOffTheMainThreadAndShowsPagesWhenReady() = runSkikoComposeUiTest(
+        size = Size(900f, 1000f), density = Density(1f),
+    ) {
+        val sentence = "The multiplication of two whole numbers is the repeated addition of one of them, and the order of the factors does not alter the product. "
+        val raw = (1..40).joinToString("\n\n") { chapter ->
+            "CHAPTER $chapter\n\n" + (1..60).joinToString("\n\n") { sentence.repeat(3) }
+        }
+        assertTrue(raw.length > 60_000)
+        val book = Textbook("long-english", "Elements of arithmetic", "epub", listOf(BookPage(1, raw)))
+        val state = BookPagingState(BookPageAnchor(1))
+        setContent { CoachTheme {
+            Box(Modifier.width(800.dp).height(900.dp)) {
+                BookPageView(book, state, emptyMap(), onTurn = { state.move(it) })
+            }
+        } }
+        waitUntil(timeoutMillis = 120_000) { onAllNodesWithTag("book-sheet-0").fetchSemanticsNodes().isNotEmpty() }
+        assertTrue(state.pages.size > 100)
+    }
+
     @Test fun spreadKeepsBothInnerFootersAndSourceAnchorOnNarrowing() = runSkikoComposeUiTest(
         size = Size(1800f, 1000f), density = Density(1f),
     ) {

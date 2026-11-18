@@ -2,11 +2,7 @@ package com.coach.desktop.books
 
 import com.coach.domain.reader.ReaderRect
 import kotlinx.serialization.json.*
-import org.apache.pdfbox.Loader
-import org.apache.pdfbox.rendering.PDFRenderer
-import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
-import javax.imageio.ImageIO
 import kotlin.math.min
 
 /** Pixel edges in the production PDFBox raster (2x, reduced to at most 4096px per edge).
@@ -82,8 +78,8 @@ internal object PdfReviewedVisuals {
         require(canonical.size == pages.size) { "教材页码重复。" }
         val digest = BookIllustrationAssets.sha256(pdfBytes)
         var byteCount = 0L
-        return Loader.loadPDF(pdfBytes).use { document ->
-            val renderer = PDFRenderer(document)
+        return BookPdfLoader.load(pdfBytes).use { document ->
+            val renderer = BookPdfRenderer(document)
             val results = mutableMapOf<PdfVisualSelection, PdfVisualPreview>()
             for ((number, selected) in selections.groupBy { it.page }) {
                 control.check()
@@ -109,11 +105,8 @@ internal object PdfReviewedVisuals {
                             (selection.bottom - selection.top) / (frame.height.toDouble() * scale))
                         val mapping = PdfVisualSourceMapping.map(source, page.text, region)
                         require(mapping.status in setOf(PdfVisualMappingStatus.MAPPED, PdfVisualMappingStatus.DISCONTIGUOUS)) { "裁图切到了文字或无法可靠定位，请重新复核。" }
-                        val crop = raster.getSubimage(selection.left, selection.top,
+                        val png = bookBitmapCropPng(raster, selection.left, selection.top,
                             selection.right - selection.left, selection.bottom - selection.top)
-                        val png = try { ByteArrayOutputStream().use { out ->
-                            check(ImageIO.write(crop, "png", out)); out.toByteArray()
-                        } } finally { crop.flush() }
                         byteCount += png.size
                         require(png.size <= BookIllustrationAssets.MAX_IMAGE_BYTES && byteCount <= MAX_BYTES) { "裁图总量过大，请分批复核。" }
                         val image = ExtractedIllustration(number, mapping.ranges.minOf { it.startUtf16 }, png,
@@ -124,7 +117,7 @@ internal object PdfReviewedVisuals {
                             pngSha256 = image.contentSha256, selection = selection)
                         results[selection] = PdfVisualPreview(review, image)
                     }
-                } finally { raster.flush() }
+                } finally { releaseBookBitmap(raster) }
             }
             selections.map { results.getValue(it) }
         }

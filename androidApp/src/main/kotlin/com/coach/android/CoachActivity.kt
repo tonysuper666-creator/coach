@@ -6,6 +6,15 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.Composable
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.Column
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import com.coach.desktop.books.AndroidBookConnection
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.SideEffect
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -61,7 +70,16 @@ class CoachActivity : ComponentActivity() {
         val reminder = ReviewReminder(applicationContext).also { it.configure(serverUrl) }
         Log.i("CoachUrl", "package=$packageName extra=${requestedUrl ?: "<empty>"} resolved=$serverUrl")
         val store=KeystoreCredentials(this,serverUrl)
+        AndroidBookConnection.bind(this, serverUrl, store)
         setContent {
+            var personalCourse by rememberSaveable {
+                mutableStateOf(intent.hasExtra("openKp") || intent.hasExtra("tab") || intent.hasExtra("agentRunId"))
+            }
+            if (!personalCourse) {
+                AndroidBookWorkspace(onPersonalCourse = { personalCourse = true })
+                return@setContent
+            }
+            BackHandler { personalCourse = false }
             val dark = isSystemInDarkTheme()
             SideEffect {
                 WindowCompat.getInsetsController(window, window.decorView).apply {
@@ -76,7 +94,10 @@ class CoachActivity : ComponentActivity() {
                         if(BuildConfig.COACH_COURSE.isBlank()) CoachNotice("课程还没有装好，请稍后重开。")
                         else {
                             val controller=remember(credentials.deviceId) { createController(serverUrl,credentials) }
-                            CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"), initialTab = runCatching { com.coach.ui.AppTab.valueOf(intent.getStringExtra("tab").orEmpty()) }.getOrDefault(com.coach.ui.AppTab.TODAY), settings = { ReminderSettings(reminder) }, hinge = hinge)
+                            CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"), initialTab = runCatching { com.coach.ui.AppTab.valueOf(intent.getStringExtra("tab").orEmpty()) }.getOrDefault(com.coach.ui.AppTab.TODAY), settings = { Column {
+                                TextButton(onClick = { personalCourse = false }) { Text("返回书架") }
+                                ReminderSettings(reminder)
+                            } }, hinge = hinge)
                         }
                     }
                 }

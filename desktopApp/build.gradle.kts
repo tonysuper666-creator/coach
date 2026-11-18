@@ -232,3 +232,6 @@ val smokeRuntime by tasks.registering(Sync::class) {
 tasks.test {
     if (providers.gradleProperty("coach.smoke.prepare").orNull == "true") dependsOn(smokeRuntime)
 }
+
+// The local textbook workspace is also compiled into the Android host.
+kotlin.sourceSets.getByName("main").kotlin.srcDir("../shared/books/src/main/kotlin")

@@ -138,6 +138,7 @@ androidComponents.onVariants { variant ->
 
 android {
     sourceSets.getByName("main").kotlin.directories.add("../shared/books/src/main/kotlin")
+    sourceSets.getByName("main").java.directories.add("../shared/books/src/main/java")
     packaging.resources.excludes.addAll(setOf("META-INF/DEPENDENCIES", "META-INF/LICENSE.md", "META-INF/NOTICE.md"))
     namespace = "com.coach.android"
     compileSdk = 37

@@ -268,18 +268,7 @@ try {
     try {
         Click-Label 4 @('选段提问') '找不到「选段提问」'; Start-Sleep -Seconds 2
         $lines = Shot 4 'ask-dlg'
-        # The same paragraph is visible behind the modal. Clicking that copy
-        # dismisses the picker, so require the hit to lie inside its own labels.
-        $picker = Has $lines @('选择要问的原文段落'); $close = Has $lines @('回到阅读')
-        $pp = $null
-        if ($picker -and $close) {
-            foreach ($l in $lines) {
-                if (($l.Text -replace '[^A-Za-z]', '') -notlike "*$words*") { continue }
-                $candidate = Find-Text @($l) ($l.Text.Substring(0, 6))
-                if ($candidate -and $candidate.X1 -ge $picker.X1 -and $candidate.X2 -le $close.X2 -and
-                    $candidate.Y1 -gt $picker.Y2 -and $candidate.Y2 -lt $close.Y1) { $pp = $candidate; break }
-            }
-        }
+        $pp = Find-PickerParagraph $lines $words
         if (-not $pp) { throw '提问对话框里找不到可信选段所在的段落' }
         Click-At $pp.X $pp.Y; Start-Sleep -Seconds 2
         $lines = Shot 4 'ask-picked'

@@ -435,3 +435,25 @@ function Paste-Text([string]$text) {
         Start-Sleep -Milliseconds 150
     }
 }
+
+# 「就这段问一句」对话框里找可信选段所在的段落。同一段文字也在对话框后面的页面上，点那份会把对话框关掉，
+# 所以命中必须落在对话框自己的上下边界之内。上边界用对话框里任一稳定文案：副标题改过一次
+# （「选择要问的原文段落」→「点一段，再问一句」），所以副标题和标题都认。
+function Find-PickerParagraph($lines, [string]$words) {
+    $title = Find-Text $lines '就这段问一句'
+    $sub = Find-Text $lines '选择要问的原文段落'
+    if (-not $sub) { $sub = Find-Text $lines '再问一句' }
+    $close = Find-Text $lines '回到阅读'
+    $top = @($title, $sub | Where-Object { $_ })
+    if (-not $top -or -not $close) { return $null }
+    $yTop = ($top | ForEach-Object { $_.Y2 } | Measure-Object -Maximum).Maximum
+    # 标题是左对齐的，用它的左边当 X 下限；只认到副标题时，副标题的匹配起点在行中间，放宽一段
+    $xLeft = if ($title) { $title.X1 } else { $sub.X1 - 120 }
+    foreach ($l in $lines) {
+        if (($l.Text -replace '[^A-Za-z]', '') -notlike "*$words*") { continue }
+        $candidate = Find-Text @($l) ($l.Text.Substring(0, [Math]::Min(6, $l.Text.Length)))
+        if ($candidate -and $candidate.X1 -ge $xLeft -and $candidate.X2 -le $close.X2 -and
+            $candidate.Y1 -gt $yTop -and $candidate.Y2 -lt $close.Y1) { return $candidate }
+    }
+    return $null
+}

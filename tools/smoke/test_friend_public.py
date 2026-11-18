@@ -271,6 +271,90 @@ class ProbeTests(unittest.TestCase):
         connection.close.assert_called_once()
         connection.sendall.assert_not_called()
 
+    def test_stage_trace_records_tcp_failure(self):
+        output = io.StringIO()
+        with patch.dict(os.environ, {"COACH_FRIEND_URL": "https://node.example.ts.net"}, clear=True), \
+                patch.object(probe, "public_route"), \
+                patch.object(socket, "create_connection", side_effect=TimeoutError("private-host")), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            self.assertEqual(probe.main(["transport", "--stages"]), 1)
+        lines = output.getvalue().splitlines()
+        self.assertEqual(lines, [
+            "STAGE_TRACE tcp=timeout server_hello=unknown cert_verify=unknown http=unknown",
+            "FAIL stage=anonymous-status category=timeout; private diagnostic values suppressed",
+        ])
+
+    def test_stage_trace_records_eof_before_server_hello(self):
+        sock = Mock()
+        sock.recv.return_value = b""
+        output = io.StringIO()
+        with patch.dict(os.environ, {"COACH_FRIEND_URL": "https://node.example.ts.net"}, clear=True), \
+                patch.object(probe, "public_route"), \
+                patch.object(socket, "create_connection", return_value=sock), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            self.assertEqual(probe.main(["transport", "--stages"]), 1)
+        sock.close.assert_called_once()
+        lines = output.getvalue().splitlines()
+        self.assertEqual(lines, [
+            "STAGE_TRACE tcp=ok server_hello=none cert_verify=unknown http=unknown",
+            "FAIL stage=anonymous-status category=tls-eof; private diagnostic values suppressed",
+        ])
+
+    def test_stage_trace_records_server_hello_and_cert_failure_with_full_verify(self):
+        # TLS 1.2/1.3 Handshake record (type 22) containing ServerHello (msg type 2, len 4).
+        server_hello_record = bytes([22, 3, 3, 0, 8, 2, 0, 0, 4, 3, 3, 0, 0])
+        sock = Mock()
+        sock.recv.side_effect = [server_hello_record, b""]
+        ctx = ssl.create_default_context()
+        self.assertTrue(ctx.check_hostname)
+        self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        ssl_obj = Mock()
+        ssl_obj.do_handshake.side_effect = [
+            ssl.SSLWantReadError(),
+            ssl.SSLCertVerificationError(1, "private-host"),
+        ]
+        output = io.StringIO()
+        with patch.dict(os.environ, {"COACH_FRIEND_URL": "https://node.example.ts.net"}, clear=True), \
+                patch.object(probe, "public_route"), \
+                patch.object(socket, "create_connection", return_value=sock), \
+                patch.object(ssl, "create_default_context", return_value=ctx), \
+                patch.object(ctx, "wrap_bio", return_value=ssl_obj) as wrap_bio, \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            self.assertEqual(probe.main(["transport", "--stages"]), 1)
+        wrap_bio.assert_called_once()
+        self.assertEqual(wrap_bio.call_args.kwargs, {"server_hostname": "node.example.ts.net"})
+        lines = output.getvalue().splitlines()
+        self.assertEqual(lines, [
+            "STAGE_TRACE tcp=ok server_hello=ok cert_verify=fail http=unknown",
+            "FAIL stage=anonymous-status category=tls-certificate; private diagnostic values suppressed",
+        ])
+        self.assertNotIn("private-host", output.getvalue())
+        self.assertNotIn("node.example.ts.net", output.getvalue())
+
+    def test_stage_trace_records_full_tls_and_http_401_on_one_connection(self):
+        sock = Mock()
+        sock.recv.return_value = b""
+        ctx = ssl.create_default_context()
+        ssl_obj = Mock()
+        ssl_obj.do_handshake.return_value = None
+        ssl_obj.read.side_effect = [b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n", b""]
+        output = io.StringIO()
+        with patch.dict(os.environ, {"COACH_FRIEND_URL": "https://node.example.ts.net"}, clear=True), \
+                patch.object(probe, "public_route"), \
+                patch.object(probe, "closed_ports"), \
+                patch.object(socket, "create_connection", return_value=sock) as connect, \
+                patch.object(ssl, "create_default_context", return_value=ctx), \
+                patch.object(ctx, "wrap_bio", return_value=ssl_obj), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            self.assertEqual(probe.main(["transport", "--stages"]), 0)
+        connect.assert_called_once_with(("node.example.ts.net", 443), timeout=10)
+        sock.close.assert_called_once()
+        self.assertEqual(output.getvalue().splitlines(), [
+            "STAGE_TRACE tcp=ok server_hello=ok cert_verify=ok http=http-401",
+            "PASS anonymous_https=401",
+            "SCOPE protocol-only; native GUI, real explanation, quota ledger and cleanup require separate verification",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

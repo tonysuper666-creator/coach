@@ -1,10 +1,13 @@
 package com.coach.desktop.books
 
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import com.coach.ui.theme.CoachTheme
 import java.nio.file.Files
+import java.nio.file.Path
+import javax.imageio.ImageIO
 import kotlin.test.*
 
 /**
@@ -33,14 +36,23 @@ class MarkedPageParagraphTest {
             // 选段行只有两段正文；标记不占一行，也没有第三行。
             onNodeWithTag("ask-paragraph-1").assertExists()
             onNodeWithTag("ask-paragraph-2").assertDoesNotExist()
+            // 行首依次是 1、2，和讲解出处里的段号同源。
+            onNodeWithTag("ask-paragraph-0").performClick()
+            onNodeWithTag("book-selected-passage-number").assertTextEquals("1")
+            onNodeWithTag("book-selected-passage").assertTextEquals("Alpha light.")
             onNodeWithTag("ask-paragraph-1").performClick()
             onNodeWithTag("book-selected-passage-number").assertTextEquals("2")
             onNodeWithTag("book-selected-passage").assertTextEquals("Beta water.")
+            // 浅色真渲染留一张，交付时看选中行的段号。
+            val file = OUT.resolve("chooser-marked-page-light.png")
+            Files.createDirectories(file.parent)
+            assertTrue(ImageIO.write(captureToImage().toAwtImage(), "png", file.toFile()))
         }
         root.toFile().deleteRecursively()
     }
 
     private companion object {
+        val OUT: Path = Path.of("build/screens/ton1659")
         const val MARK = "<!-- PDF 第 5 页 · 书第 1 页 -->"
         val TEXT = """
             $MARK

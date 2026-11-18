@@ -398,6 +398,19 @@ internal fun bookCitationLabel(book: Textbook, blocks: List<SourceBlock>, citati
 }
 
 /**
+ * 选段就问回答下方的「出处」和原文弹窗：手上只有一段原文（[BookPassage]），没有引用对象，
+ * 所以先按页号和字符位置在整本书的块里找回这一段，再按讲解卡同一套写法写（[bookCitationLabel]）。
+ * 有页码就写「第 5 页 · 第 2 段」，没有页码就写「本章第 2 段」——不拿导入时编的块号冒充页码。
+ */
+internal fun bookPassageLabel(book: Textbook, blocks: List<SourceBlock>, passage: BookPassage): String {
+    val at = blocks.indexOfFirst {
+        it.page == passage.page && it.start == passage.start && it.end == passage.end
+    }
+    // 找不回这一段时只说得到的位置（页或「本章」），段号不编。
+    return bookCitationLabel(book, blocks, Citation("", blocks.getOrNull(at)?.id.orEmpty(), passage.page))
+}
+
+/**
  * 这一页的号是不是原件上印着的页码。PDF、幻灯片、扫描页本身就按页装；
  * 文本类导入（txt/md/epub/docx…）是按章节切块再编 1、2、3 的，只有页里带 [PRINTED_PAGE_MARK] 的
  * 才是从原件带过来的页码——该页的页号就是标记里的书页号。内部块编号照旧用来定位原文，

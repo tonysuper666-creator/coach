@@ -456,6 +456,8 @@ internal fun TextbookReader(
                             try {
                                 withContext(Dispatchers.IO) { library.setHighlight(passage, !highlighted) }
                                 highlightRevision++
+                                // 高亮后选区会清掉；先把阅读位置记在选区首字，之后切到文字版还回到这里
+                                paging.anchor = BookPageAnchor(chosen.page, chosen.start)
                                 if (pdf.selection == selected) pdf.selection = null
                             } catch (cancel: CancellationException) { throw cancel }
                             catch (_: Exception) { markError = true }

@@ -35,6 +35,8 @@ class ExplainFaintControlTest {
     private var blockTag = ""
     /** 同一页第 2 段的正文，用来量它有没有被第 1 段的状态行推走。 */
     private var secondTag = ""
+    /** 这一轮用的假 Mac：测试可以核对它收到了哪几次请求。 */
+    private lateinit var mac: FakeMac
 
     @Test fun faintTextSitsOnTheParagraphsFirstBaselineInBothThemes() {
         for (dark in listOf(false, true)) withPanel(dark) { dark ->
@@ -73,27 +75,52 @@ class ExplainFaintControlTest {
     }
 
     /**
-     * 同一页的第 1 段请求讲解、断连失败：等待中和失败后，第 2 段的上沿都要和点之前一模一样。
-     * 失败那一行（再试一次 + 那句话）占的是平时就留好的位置，不是临时插进来把读者正在读的段落往下推（QA 退回 PR #448）。
+     * 同一页的第 1 段请求讲解、断连失败、再在同段重试：请求前、等待中、失败后、重试等待中这四个时刻，
+     * 第 2 段的上沿都要和点之前一模一样。失败那一行（再试一次 + 那句话）占的是平时就留好的位置，
+     * 不是临时插进来把读者正在读的段落往下推（QA 退回 PR #448；desktop-polish D3）。
+     *
+     * 失败后「再试一次」必须还能点，点下去是同一个段 ID 的第二次请求；重试有结果后讲解照常出现。
      */
-    @Test fun theSecondParagraphDoesNotMoveWhileWaitingOrAfterAFailure() {
+    @Test fun theSecondParagraphStaysPutThroughWaitFailureAndInPlaceRetry() {
         for (dark in listOf(false, true)) {
-            val gate = CompletableDeferred<ExplainResult>()
-            withPanel(dark, gate = gate) { _ ->
+            val theme = if (dark) "dark" else "light"
+            val first = CompletableDeferred<ExplainResult>()
+            val retry = CompletableDeferred<ExplainResult>()
+            withPanel(dark, gates = listOf(first, retry)) { _ ->
                 val before = top(secondTag)
                 button().performClick()
                 waitForIdle()
                 assertFalse(enabled(), "点下去就进等待中")
-                assertEquals(before, top(secondTag), 1f, "等待中第 2 段被推动了（dark=$dark）")
-                gate.complete(ExplainResult.Refused(ExplainTrouble.UNREACHABLE, ExplainTrouble.Unreachable))
+                val waiting = top(secondTag)
+                assertEquals(before, waiting, 1f, "等待中第 2 段被推动了（$theme）")
+
+                first.complete(ExplainResult.Refused(ExplainTrouble.UNREACHABLE, ExplainTrouble.Unreachable))
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-retry").fetchSemanticsNodes().isNotEmpty() }
-                assertEquals(before, top(secondTag), 1f, "失败后第 2 段被推动了（dark=$dark）")
+                val failed = top(secondTag)
+                assertEquals(before, failed, 1f, "失败后第 2 段被推动了（$theme）")
+                assertNull(onNodeWithTag("explain-retry").fetchSemanticsNode().config.getOrNull(SemanticsProperties.Disabled),
+                    "失败后「再试一次」要还能点（$theme）")
+
+                onNodeWithTag("explain-retry").performClick()
+                waitForIdle()
+                val retrying = top(secondTag)
+                assertEquals(before, retrying, 1f, "同段重试时第 2 段被推动了（$theme）")
+                assertEquals(2, mac.asked.size, "重试要重新走一次请求（$theme）")
+                assertEquals(mac.asked[0].id, mac.asked[1].id, "重试要在当前段发起（$theme）")
+
+                println("D3_POSITION theme=$theme before=$before waiting=$waiting failed=$failed retrying=$retrying " +
+                    "sameBlock=${mac.asked[0].id == mac.asked[1].id} retryClickable=true")
+
+                retry.complete(mac.answer())
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-answer").fetchSemanticsNodes().isNotEmpty() }
+                val citation = onNodeWithTag("explain-citation").fetchSemanticsNode().config[SemanticsProperties.Text]
+                assertTrue(citation.any { it.text.startsWith("出处 1") }, "重试成功后讲解带出处正常出现（$theme）：$citation")
             }
         }
     }
 
     private fun withPanel(dark: Boolean, selected: Boolean = false, paired: Boolean = true,
-        gate: CompletableDeferred<ExplainResult>? = null,
+        gates: List<CompletableDeferred<ExplainResult>> = emptyList(),
         body: ComposeUiTest.(Boolean) -> Unit) {
         val root = Files.createTempDirectory("explain-faint-")
         val library = TextbookLibrary(root.resolve("library"))
@@ -106,7 +133,7 @@ class ExplainFaintControlTest {
         blockTag = "explain-block-${chosen.id}"
         secondTag = "explain-paragraph-${second.id}"
         val consent = ExplainConsent(library.directory).apply { allow(book.id) }
-        val mac = FakeMac(root.resolve("home"), paired, gate)
+        mac = FakeMac(root.resolve("home"), paired, gates)
         runSkikoComposeUiTest(size = Size(1100f, 900f), density = Density(1f)) {
             setContent {
                 CoachTheme(dark) {
@@ -149,16 +176,22 @@ class ExplainFaintControlTest {
     private fun ComposeUiTest.top(tag: String) = onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot.top
 
     private class FakeMac(home: Path, private val paired: Boolean,
-        private val gate: CompletableDeferred<ExplainResult>? = null) :
+        private val gates: List<CompletableDeferred<ExplainResult>> = emptyList()) :
         BookExplainer(DesktopConnectionSettings(home = home, environment = { null })) {
+        /** 每次请求问的段落，按调用顺序；D3 的用例用它核对重试仍是同一段。 */
+        val asked = mutableListOf<SourceBlock>()
         override suspend fun load() {
             if (paired) identity = DesktopIdentity("http://mac.test:18791", PairedCredentials("test-device", "test-token"))
             loaded = true
         }
-        /** [gate] 在的时候由测试决定这次请求什么时候回来、以什么结果回来，用来量等待中和失败后的排版。 */
-        override suspend fun explain(chosen: SourceBlock, blocks: List<SourceBlock>, requestId: String): ExplainResult =
-            gate?.await() ?: ExplainResult.Done(Explanation("这一段在说光被叶绿体用掉。【S1】",
-                listOf(Citation("S1", chosen.id, chosen.page)), 12))
+        /** [gates] 按请求顺序给出：测试决定那次请求什么时候回来、以什么结果回来，用来量等待中、失败后和重试时的排版。 */
+        override suspend fun explain(chosen: SourceBlock, blocks: List<SourceBlock>, requestId: String): ExplainResult {
+            asked += chosen
+            return gates.getOrNull(asked.lastIndex)?.await() ?: answer()
+        }
+        /** 正常讲解的回复，引用指回最后问的那一段。 */
+        fun answer() = ExplainResult.Done(Explanation("这一段在说光被叶绿体用掉。【S1】",
+            listOf(Citation("S1", asked.last().id, asked.last().page)), 12))
     }
 
     private companion object {

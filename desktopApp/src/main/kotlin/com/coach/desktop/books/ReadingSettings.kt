@@ -14,10 +14,16 @@ internal enum class PaperColor(val label: String, val dark: Boolean?) {
     SYSTEM("跟随系统", null), LIGHT("浅", false), DARK("深", true)
 }
 
+internal enum class ReadingFont(val label: String) {
+    SONG("宋体"), KAI("楷体")
+}
+
 /** Global to the local library, including when a development launch uses an isolated library. */
 internal class ReadingSettings(directory: Path) {
     private val url = "jdbc:sqlite:${directory.resolve("library.sqlite")}"
     var size by mutableStateOf(ReadingSize.MEDIUM)
+        private set
+    var font by mutableStateOf(ReadingFont.SONG)
         private set
     var paper by mutableStateOf(PaperColor.SYSTEM)
         private set
@@ -31,6 +37,7 @@ internal class ReadingSettings(directory: Path) {
                         val value = rows.getString("value")
                         when (rows.getString("name")) {
                             "size" -> size = ReadingSize.entries.firstOrNull { it.name == value } ?: ReadingSize.MEDIUM
+                            "font" -> font = ReadingFont.entries.firstOrNull { it.name == value } ?: ReadingFont.SONG
                             "paper" -> paper = PaperColor.entries.firstOrNull { it.name == value } ?: PaperColor.SYSTEM
                         }
                     }
@@ -47,6 +54,11 @@ internal class ReadingSettings(directory: Path) {
     fun choosePaper(value: PaperColor) {
         save("paper", value.name)
         paper = value
+    }
+
+    fun chooseFont(value: ReadingFont) {
+        save("font", value.name)
+        font = value
     }
 
     private fun save(name: String, value: String) {

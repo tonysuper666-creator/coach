@@ -20,6 +20,7 @@ import com.coach.desktop.books.AnswerExplain
 import com.coach.desktop.books.BookScreen
 import com.coach.desktop.books.BookFormats
 import com.coach.desktop.books.ReadingSettings
+import com.coach.desktop.books.LocalReadingFont
 import com.coach.desktop.books.ReadingSettingsPanel
 import com.coach.desktop.books.BookExplainer
 import com.coach.desktop.books.ExplainConsent
@@ -172,7 +173,8 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                     }
                     panel
                 } else null
-                CompositionLocalProvider(LocalDeskSelect provides deskSelect, LocalDeskTypeControl provides typeControl) {
+                CompositionLocalProvider(LocalDeskSelect provides deskSelect, LocalDeskTypeControl provides typeControl,
+                    LocalReadingFont provides preferences.font) {
                     // No rules between bar, rail and page: V7 separates them with the desk colour and the paper alone.
                     if (rail) Row(Modifier.fillMaxSize()) {
                         Column(Modifier.width(76.dp).fillMaxHeight().padding(top = HostBarHeight + 8.dp, bottom = 12.dp),

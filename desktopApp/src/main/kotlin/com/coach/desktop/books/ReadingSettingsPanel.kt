@@ -69,8 +69,10 @@ internal fun ReadingSettingsPanel(settings: ReadingSettings, isOriginal: () -> B
     Popup(popupPositionProvider = BelowAa, onDismissRequest = close, properties = PopupProperties(focusable = true)) {
         val shape = RoundedCornerShape(CoachV7.Radius.m)
         val sizes = remember { ReadingSize.entries.map { FocusRequester() } }
+        val fonts = remember { ReadingFont.entries.map { FocusRequester() } }
         val papers = remember { PaperColor.entries.map { FocusRequester() } }
         fun focusSize() = sizes[settings.size.ordinal].requestFocus()
+        fun focusFont() = fonts[settings.font.ordinal].requestFocus()
         fun focusPaper() = papers[settings.paper.ordinal].requestFocus()
         Column(Modifier.width(360.dp).clip(shape)
             .background(if (colors.dark) CoachV7.Dark.menuBg else CoachV7.Light.menuBg)
@@ -85,10 +87,13 @@ internal fun ReadingSettingsPanel(settings: ReadingSettings, isOriginal: () -> B
                 HorizontalDivider(color = if (colors.dark) CoachV7.Dark.menuSep else CoachV7.Light.menuSep)
             }
             SettingRow("字号", "size", ReadingSize.entries, settings.size, { it.label }, sizes, !original,
-                onRow = { focusPaper() }, choose = settings::chooseSize)
+                previousRow = { focusPaper() }, nextRow = { focusFont() }, choose = settings::chooseSize)
             if (original) Text("原版按原书大小显示", style = MaterialTheme.typography.labelSmall, color = colors.fgTertiary)
+            SettingRow("正文字体", "font", ReadingFont.entries, settings.font, { it.label }, fonts, !original,
+                previousRow = { focusSize() }, nextRow = { focusPaper() }, choose = settings::chooseFont)
             SettingRow("纸色", "paper", PaperColor.entries, settings.paper, { it.label }, papers, true,
-                onRow = { if (!original) focusSize() }, choose = settings::choosePaper)
+                previousRow = { if (!original) focusFont() }, nextRow = { if (!original) focusSize() },
+                choose = settings::choosePaper)
         }
         LaunchedEffect(Unit) { if (original) focusPaper() else focusSize() }
     }
@@ -96,7 +101,7 @@ internal fun ReadingSettingsPanel(settings: ReadingSettings, isOriginal: () -> B
 
 @Composable
 private fun <T : Enum<T>> SettingRow(title: String, tag: String, values: List<T>, selected: T, label: (T) -> String,
-    focus: List<FocusRequester>, enabled: Boolean, onRow: () -> Unit, choose: (T) -> Unit) {
+    focus: List<FocusRequester>, enabled: Boolean, previousRow: () -> Unit, nextRow: () -> Unit, choose: (T) -> Unit) {
     val colors = CoachTheme.colors
     val shape = RoundedCornerShape(CoachV7.Radius.s)
     Row(Modifier.fillMaxWidth().height(40.dp).selectableGroup(), verticalAlignment = Alignment.CenterVertically) {
@@ -110,7 +115,8 @@ private fun <T : Enum<T>> SettingRow(title: String, tag: String, values: List<T>
                 }
                 if (event.type == KeyEventType.KeyDown) {
                     when (event.key) {
-                        Key.DirectionUp, Key.DirectionDown -> onRow()
+                        Key.DirectionUp -> previousRow()
+                        Key.DirectionDown -> nextRow()
                         else -> {
                             val next = (i + if (event.key == Key.DirectionLeft) -1 else 1).coerceIn(values.indices)
                             choose(values[next])

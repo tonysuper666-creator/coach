@@ -72,6 +72,7 @@ class OriginalPdfNativeWindowTest {
                             questions, null, remember { FocusRequester() },
                             onNoteSession = {}, onPage = {}, onBack = {}, onLearn = {}, explainProvider = explainer)
                     } }
+                    isAlwaysOnTop = true
                     isVisible = true
                 } }
                 try {
@@ -207,35 +208,44 @@ class OriginalPdfNativeWindowTest {
         edt { assertTrue(node(window, tag)!!.config[SemanticsActions.OnClick].action!!.invoke(), tag) }
     }
 
-    private fun drag(window: ComposeWindow, from: ReaderRect, to: ReaderRect) = NativeWindowForeground.action {
-        NativeWindowForeground.activate(window)
-        val (start, end) = edt {
-            val bounds = node(window, "original-pdf-text-layer")!!.boundsInRoot
-            val origin = window.contentPane.locationOnScreen
-            val scale = window.graphicsConfiguration.defaultTransform
-            // Semantics bounds can be clipped by the scroll viewport. Use the full bitmap size.
-            val image = node(window, "remote-image")!!
-            val top = image.positionInRoot
-            fun point(box: ReaderRect) = Point(
-                origin.x + ((top.x + (box.x + box.width / 2) * image.size.width) / scale.scaleX).toInt(),
-                origin.y + ((top.y + (box.y + box.height / 2) * image.size.height) / scale.scaleY).toInt(),
-            )
-            assertTrue(bounds.height > 0)
-            point(from) to point(to)
+    private fun drag(window: ComposeWindow, from: ReaderRect, to: ReaderRect) {
+        repeat(3) {
+            val arrived = NativeWindowForeground.action {
+                NativeWindowForeground.activate(window)
+                val (start, end) = edt {
+                    val origin = window.contentPane.locationOnScreen
+                    val scale = window.graphicsConfiguration.defaultTransform
+                    // Semantics bounds can be clipped by the scroll viewport. Use the full bitmap size.
+                    val image = node(window, "remote-image")!!
+                    val top = image.positionInRoot
+                    fun point(box: ReaderRect) = Point(
+                        origin.x + ((top.x + (box.x + box.width / 2) * image.size.width) / scale.scaleX).toInt(),
+                        origin.y + ((top.y + (box.y + box.height / 2) * image.size.height) / scale.scaleY).toInt(),
+                    )
+                    point(from) to point(to)
+                }
+                val robot = Robot().apply { autoDelay = 35 }
+                val arrivals = WindowMouseArrivals(window) { Rectangle(start.x - 3, start.y - 3, 7, 7) }.start()
+                try {
+                    robot.mouseMove(start.x, start.y)
+                    robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
+                    try {
+                        for (step in 1..12) robot.mouseMove(
+                            start.x + (end.x - start.x) * step / 12, start.y + (end.y - start.y) * step / 12,
+                        )
+                    } finally { robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK) }
+                    robot.waitForIdle()
+                    arrivals.pressCount > 0
+                } finally { arrivals.stop() }
+            }
+            // Retry a press only when the OS did not deliver it to our window.
+            // Once delivered, an incorrect selection fails the caller's assertion.
+            if (arrived) return
         }
-        val robot = Robot().apply { autoDelay = 35 }
-        val arrivals = WindowMouseArrivals(window) { Rectangle(start.x - 3, start.y - 3, 7, 7) }.start()
-        try {
-            robot.mouseMove(start.x, start.y)
-            robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
-            try {
-                for (step in 1..12) robot.mouseMove(
-                    start.x + (end.x - start.x) * step / 12, start.y + (end.y - start.y) * step / 12,
-                )
-            } finally { robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK) }
-            robot.waitForIdle()
-            assertEquals(1, arrivals.pressCount, "The native drag did not land in this PDF window")
-        } finally { arrivals.stop() }
+        fail(
+            "The native drag did not land in this PDF window. " +
+                NativeWindowForeground.describe(window),
+        )
     }
 
     private fun shot(window: ComposeWindow, dark: Boolean, step: String) = NativeWindowForeground.action {

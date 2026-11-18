@@ -4,6 +4,7 @@ import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.platform.ClipEntry
@@ -38,6 +39,8 @@ internal object BookPdfLoader {
     fun load(file: File): BookPdfDocument = Loader.loadPDF(file)
     fun load(bytes: ByteArray): BookPdfDocument = Loader.loadPDF(bytes)
 }
+
+internal fun bookCffHasGlyph(font: BookPdfCffFont, code: Int) = font.hasGlyph(code)
 
 internal fun measureBookCffInk(font: BookPdfCffFont, code: Int, position: BookPdfTextPosition): BookInkBounds? {
     val path = font.getPath(code)
@@ -91,10 +94,12 @@ internal fun readBookRtf(path: Path): String {
 }
 
 private val bookTextFlavor = DataFlavor(AnnotatedString::class.java, "AnnotatedString")
+@OptIn(ExperimentalComposeUiApi::class)
 internal fun bookClipboardSelection(entry: ClipEntry?): AnnotatedString? {
     val data = entry?.asAwtTransferable ?: return null
     return if (data.isDataFlavorSupported(bookTextFlavor)) data.getTransferData(bookTextFlavor) as? AnnotatedString else null
 }
+@OptIn(ExperimentalComposeUiApi::class)
 internal fun bookClipboardText(text: String) = ClipEntry(StringSelection(text))
 
 @Composable

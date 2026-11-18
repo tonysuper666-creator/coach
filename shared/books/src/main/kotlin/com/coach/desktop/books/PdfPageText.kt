@@ -89,7 +89,7 @@ internal object PdfPageTextExtraction {
                 graphicsState.textState.renderingMode != BookPdfRenderingMode.FILL || graphicsState.softMask != null) return null
             return try {
                 val code = position.characterCodes.single()
-                if (!font.hasGlyph(code)) return null
+                if (!bookCffHasGlyph(font, code)) return null
                 val ink = measureBookCffInk(font, code, position)
                 if (ink == null) return if (position.unicode.all { it.isWhitespace() }) legacyBounds(position) else null
                 val width = frame.cropBox.right - frame.cropBox.left

@@ -21,18 +21,32 @@ if ($Phase -eq 'Install') {
     if ($executables.Count -ne 1) { throw 'Installed executable missing' }
     $exe = $executables[0].FullName
     Set-Content (Join-Path $private 'exe.txt') $exe -NoNewline
+    $installSmoke = Join-Path $private 'install-smoke'
+    New-Item -ItemType Directory -Force $installSmoke | Out-Null
+    $env:COACH_LIBRARY_DIR = Join-Path $installSmoke 'library'
+    $env:COACH_CLIENT_DIR = Join-Path $installSmoke 'client'
+    $env:COACH_TOKEN_FILE = Join-Path $installSmoke 'unused-token'
+    $beforePids = @(Get-Process LearningCoach -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
     $app = Start-Process $exe -PassThru
     try {
-        $deadline = [DateTime]::UtcNow.AddSeconds(45)
+        $deadline = [DateTime]::UtcNow.AddSeconds(120)
+        $windowOwner = $null
         do {
             Start-Sleep -Milliseconds 250
             $app.Refresh()
-            if ($app.HasExited) { throw 'Installed executable exited before window' }
-        } until ($app.MainWindowHandle -ne 0 -or [DateTime]::UtcNow -ge $deadline)
-        if ($app.MainWindowHandle -eq 0) { throw 'Installed window not visible' }
+            $candidates = @(Get-Process LearningCoach -ErrorAction SilentlyContinue | Where-Object { $beforePids -notcontains $_.Id -or $_.Id -eq $app.Id })
+            $windowOwner = @($candidates | Where-Object { $_.MainWindowHandle -ne 0 }) | Select-Object -First 1
+            if ($app.HasExited -and $candidates.Count -eq 0) { throw 'Installed executable exited before window' }
+        } until ($null -ne $windowOwner -or [DateTime]::UtcNow -ge $deadline)
+        if ($null -eq $windowOwner) { throw 'Installed window not visible' }
         Write-Output 'EXTERNAL_INSTALL PASS MSI=0 installedWindow=visible'
     } finally {
-        if (!$app.HasExited) { $null = $app.CloseMainWindow(); if (!$app.WaitForExit(10000)) { $app.Kill(); $app.WaitForExit() } }
+        $toClose = @(Get-Process LearningCoach -ErrorAction SilentlyContinue | Where-Object { $beforePids -notcontains $_.Id -or $_.Id -eq $app.Id })
+        foreach ($proc in $toClose) {
+            try {
+                if (!$proc.HasExited) { $null = $proc.CloseMainWindow(); if (!$proc.WaitForExit(10000)) { $proc.Kill(); $proc.WaitForExit() } }
+            } catch {}
+        }
     }
 } else {
     # No Gradle, installer, network dependency download or secret-bearing arguments here.

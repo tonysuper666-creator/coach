@@ -55,6 +55,9 @@ internal fun BookPassageAsk(
     val blocks = remember(book.id, page.number) {
         StudyCoachCourse.blocks(book.id, listOf(page)).filter { it.isBodyParagraph }
     }
+    // 回答里的「出处」和原文弹窗要和讲解卡写同一种位置：「第 5 页 · 第 2 段」或「本章第 2 段」。
+    // 数章内段号要往前找到章标题，只看这一页数不出来，所以按整本书的块算一次（弹窗开着时算一次）。
+    val bookBlocks = remember(book.id) { StudyCoachCourse.blocks(book.id, book.pages) }
     var selected by remember(book.id, page.number, initialSelection) { mutableStateOf(initialSelection) }
     var draft by remember(book.id, page.number) { mutableStateOf(TextFieldValue("")) }
     var request by remember(book.id, page.number) { mutableStateOf<BookPassageQuestion?>(null) }
@@ -151,12 +154,12 @@ internal fun BookPassageAsk(
             when (val result = reply) {
                 null -> if (request != null) Text("正在读这段问题…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                 is BookLearningReply.Text -> PaperCard(Modifier.testTag("book-passage-reply"), color = colors.surface1) {
-                    // 回答里的【S1】是给程序的引用标记，读者看下面那行「出处 · 第 N 页」就够了。
+                    // 回答里的【S1】是给程序的引用标记，读者看下面那行「出处 · 第 N 页 · 第 M 段」就够了。
                     Text(ReadableText.withoutCitationMarks(result.text), style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
                     result.sources.forEach { passage ->
                         V7TextButton({ if (onOpenOriginal != null) onOpenOriginal(passage) else source = passage },
                             Modifier.testTag("book-passage-citation")) {
-                            Text("出处 · ${book.pageLabel(passage.page)}")
+                            Text("出处 · ${bookPassageLabel(book, bookBlocks, passage)}")
                         }
                     }
                 }
@@ -175,7 +178,7 @@ internal fun BookPassageAsk(
             dismissButton = { V7TextButton({ pendingConsent = null }, Modifier.testTag("ask-consent-deny")) { Text("不允许") } })
     }
     source?.let { passage ->
-        AlertDialog(onDismissRequest = { source = null }, title = { Text("原文 · ${book.pageLabel(passage.page)}") },
+        AlertDialog(onDismissRequest = { source = null }, title = { Text("原文 · ${bookPassageLabel(book, bookBlocks, passage)}", modifier = Modifier.testTag("book-passage-source-title")) },
             text = { Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
                 Text(passage.text, Modifier.testTag("book-passage-source"))
             } }, confirmButton = { V7TextButton({ source = null }) { Text("回到问题") } })

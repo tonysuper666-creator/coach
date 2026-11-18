@@ -83,11 +83,15 @@ object ExternalFriendSmoke {
         check(status(b).statusCode() == 200)
         stage = "import"
         val source = root.resolve("Self-authored sample.txt")
-        Files.writeString(source, "Self-authored acceptance sample\n\n主动回忆是一种学习方法：先合上书，尝试用自己的话说出刚读过的概念，再打开原文核对遗漏。这个样例只用于连接验收。")
+        val samplePassage = "主动回忆是一种学习方法：先合上书，尝试用自己的话说出刚读过的概念，再打开原文核对遗漏。这个样例只用于连接验收。"
+        Files.writeString(source, "# Self-authored acceptance sample\n\n$samplePassage")
         val library = TextbookLibrary(root.resolve("library"))
         val controller = TextbookController(library)
         // Uses the native import core; does not claim to test file-picker/drag gestures.
         runBlocking { controller.importBook(source) }
+        val book = checkNotNull(controller.state.value.book)
+        val passage = StudyCoachCourse.blocks(book.id, book.pages).first { it.isBodyParagraph }
+        check(passage.page == book.readingPage && passage.text == samplePassage)
         val w = edt { ComposeWindow().apply {
             title = "LearningCoach · 外网连接验收 · 自写样例"
             val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
@@ -130,14 +134,12 @@ object ExternalFriendSmoke {
         stage = "quota-b"
         check(status(b).statusCode() == 200)
         // Mac must configure B.daily_calls=1 before pre-pairing it.
-        val book = checkNotNull(controller.state.value.book)
-        val blocks = StudyCoachCourse.blocks(book.id, book.pages).filterNot { it.heading }
         val explainer = BookExplainer(settings, library)
         runBlocking {
             explainer.load()
-            val first = explainer.ask(blocks.first(), "请解释这段话。")
+            val first = explainer.ask(passage, "请解释这段话。")
             check(first is ExplainResult.Done && first.explanation.citations.isNotEmpty())
-            val second = explainer.ask(blocks.first(), "请再解释这段话。")
+            val second = explainer.ask(passage, "请再解释这段话。")
             check(second is ExplainResult.Refused && second.trouble == ExplainTrouble.Quota && second.message == "今天的讲解额度用完了，明天再来。")
         }
         pass("bPrepairedOnMac=1 bFirst=200 bSecond=429 dailyQuotaChinese=1")

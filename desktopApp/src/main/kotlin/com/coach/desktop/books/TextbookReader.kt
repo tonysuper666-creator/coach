@@ -501,7 +501,7 @@ internal fun TextbookReader(
                             return@onPreviewKeyEvent true
                         }
                     }
-                    val turn = if (textView && !typing && event.key == Key.Spacebar) ReaderTurn.Next
+                    val turn = if (textView && !typing && event.key == Key.Spacebar) (if (event.isShiftPressed) ReaderTurn.Previous else ReaderTurn.Next)
                         else readerPagingTurn(event.key, typing)
                     turn?.let(turnLayout) ?: return@onPreviewKeyEvent false
                     true
@@ -633,7 +633,8 @@ internal fun TextbookReader(
                 // 阅读方式：翻页 / 滚动；本次打开内有效，按书记住并进阅读设置（TON-1654）。
                 Spacer(Modifier.width(20.dp))
                 V7Tooltip("阅读方式") {
-                    PaperButton({ readMode = if (readMode == BookReadMode.Paged) BookReadMode.Scroll else BookReadMode.Paged },
+                    PaperButton({ readMode = if (readMode == BookReadMode.Paged) BookReadMode.Scroll else BookReadMode.Paged
+                        runCatching { pageFocus.requestFocus() } },
                         modifier = Modifier.testTag("read-mode")) { Text(if (readMode == BookReadMode.Paged) "翻页" else "滚动") }
                 }
                 // 翻页效果：本次打开内有效；记住与入口以后并进阅读设置（TON-1654）。
@@ -643,7 +644,8 @@ internal fun TextbookReader(
                         PageTurnStyle.Flip -> PageTurnStyle.Slide
                         PageTurnStyle.Slide -> PageTurnStyle.None
                         PageTurnStyle.None -> PageTurnStyle.Flip
-                    } }, modifier = Modifier.testTag("turn-style")) {
+                    }
+                        runCatching { pageFocus.requestFocus() } }, modifier = Modifier.testTag("turn-style")) {
                         Text(when (turnStyle) { PageTurnStyle.Flip -> "翻转"; PageTurnStyle.Slide -> "滑动"; PageTurnStyle.None -> "无" })
                     }
                 }

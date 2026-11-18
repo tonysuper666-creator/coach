@@ -138,8 +138,10 @@ internal class BookPagingState(initial: BookPageAnchor) {
         return if (twoPages && groupPages === laid && (g == p || g == p - 1)) g else p
     }
     val index get() = firstFor(pages, spread)
-    val canPrevious get() = index > 0
-    val canNext get() = index + (if (spread) 2 else 1) < pages.size
+    /** 滚动读时登记：能不能还往上/往下滚。底栏「上一页/下一页」据此启用，不再按整页下标判断。 */
+    var scrollEdges by mutableStateOf<Pair<() -> Boolean, () -> Boolean>?>(null)
+    val canPrevious get() = scrollEdges?.first?.invoke() ?: (index > 0)
+    val canNext get() = scrollEdges?.second?.invoke() ?: (index + (if (spread) 2 else 1) < pages.size)
     /** 滚动读时由视图登记：上一页/下一页键改成往前/往后滚一屏（留 10% 重叠）；翻页读时为 null。 */
     var screenScroller: ((forward: Boolean) -> Unit)? = null
     fun move(turn: ReaderTurn): BookPageAnchor? {
@@ -255,7 +257,8 @@ internal fun BookPageView(
             val screenScope = rememberCoroutineScope()
             DisposableEffect(scrollState) {
                 state.screenScroller = { forward -> screenScope.launch { scrollState.scrollScreen(forward) } }
-                onDispose { state.screenScroller = null }
+                state.scrollEdges = { scrollState.canScrollBackward } to { scrollState.canScrollForward }
+                onDispose { state.screenScroller = null; state.scrollEdges = null }
             }
             // 用户滚动：把视口顶边那一行的原文位置写回锚点（不只是页首），切回翻页时能还原到这一行。
             // 进入时的位置是程序放的，不回写锚点：没动过就切回去，锚点要和切之前完全相等

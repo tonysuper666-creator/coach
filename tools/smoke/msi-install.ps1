@@ -214,7 +214,10 @@ try { Save-Shot (Join-Path $OutDir '01-window.png') } catch { Fail '截图' "整
 $r = Get-Rect
 # 桌面整屏 + 任务栏。裁剪按这次运行机的实际屏幕尺寸算，不写死 winbox 的 5120×2160 坐标。
 $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
-$taskbar = [int][Math]::Max(40, [Math]::Min(72, [Math]::Round($vs.Height * 0.04)))
+# 任务栏高度用工作区底边实测（RC1 那台 768 高的机器是 48px，按 4% 估成 40，04 少 8px、06 多带一条任务栏）；
+# Auto-hide 或量不到时再退回按屏幕高度估。
+$tbMeasured = [int]([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Bottom - [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea.Bottom)
+$taskbar = if ($tbMeasured -gt 16 -and $tbMeasured -lt [int]($vs.Height / 4)) { $tbMeasured } else { [int][Math]::Max(40, [Math]::Min(72, [Math]::Round($vs.Height * 0.04))) }
 $zoom = if ($vs.Width -le 1400) { 3 } else { 2 }
 Save-Desktop (Join-Path $OutDir '02-desktop-taskbar.png')
 # 标题栏左上角那枚 16/24/32px 图标放大 4 倍看，边缘糊不糊一眼就知道
@@ -229,10 +232,12 @@ Start-Sleep -Seconds 2
 [System.Windows.Forms.SendKeys]::SendWait('LearningCoach')
 Start-Sleep -Seconds 3
 Save-Desktop (Join-Path $OutDir '05-start-menu.png')
-# 搜索结果贴在任务栏上方。按实际屏幕裁任务栏以上的一条横带：左对齐（Win10）和居中（Win11）都在里面。
-$band = [int][Math]::Min([Math]::Round($vs.Height * 0.55), $vs.Height - $taskbar)
+# 结果行在菜单里的位置随 Win10 左对齐 / Win11 居中而变，别按任务栏往上倒推：
+# RC1 就是那样在 768 高的运行机上从 y=306 起裁，切掉了 y≈199 的结果行，只剩空白菜单。
+# 改成从屏幕顶端起、一直裁到任务栏上沿，菜单整块和搜索框都留在里面。
+$band = [int][Math]::Max(1, $vs.Height - $taskbar)
 $bandZoom = if ($vs.Width -le 1400) { 2 } else { 1 }
-Save-Crop (Join-Path $OutDir '05-start-menu.png') (Join-Path $OutDir '06-start-menu-result.png') 0 ($vs.Height - $taskbar - $band) $vs.Width $band $bandZoom
+Save-Crop (Join-Path $OutDir '05-start-menu.png') (Join-Path $OutDir '06-start-menu-result.png') 0 0 $vs.Width $band $bandZoom
 [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
 Start-Sleep -Seconds 1
 [System.Windows.Forms.SendKeys]::SendWait('{ESC}')

@@ -14,6 +14,7 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import com.coach.desktop.books.*
+import com.coach.ui.theme.CoachTheme
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import org.apache.pdfbox.pdmodel.PDDocument
@@ -45,6 +46,7 @@ class WindowsPassageQuestionLimitTest {
     /** Records what the composer actually handed over; it never pretends to be an answer. */
     private class Recorder : BookLearningSupport {
         val questions = mutableListOf<String>()
+        val passages = mutableListOf<BookPassage>()
 
         override suspend fun explain(request: BookExplanationRequest) =
             BookLearningReply.Unavailable("合成回执：本用例不评价讲解。")
@@ -53,7 +55,26 @@ class WindowsPassageQuestionLimitTest {
             // Same guard OwnedBookLearningProvider.question() applies before any transport runs.
             require(BookPassageQuestion.accepts(request.question)) { "Outside the provider's question bound" }
             questions += request.question
+            passages += request.passage
             return BookLearningReply.Unavailable("合成回执：只记录请求，尚未接通方案商。")
+        }
+    }
+
+    /** 回答里指出这一次问的那一段；第一问挂着不返回，读者正好可以在等回答的空档里再去点别的段。 */
+    private class Citing : BookLearningSupport {
+        val questions = mutableListOf<String>()
+        val passages = mutableListOf<BookPassage>()
+        val answer = CompletableDeferred<Unit>()
+
+        override suspend fun explain(request: BookExplanationRequest) =
+            BookLearningReply.Unavailable("合成回执：本用例不评价讲解。")
+
+        override suspend fun ask(request: BookPassageQuestion): BookLearningReply {
+            require(BookPassageQuestion.accepts(request.question)) { "Outside the provider's question bound" }
+            questions += request.question
+            passages += request.passage
+            answer.await()
+            return BookLearningReply.Text("合成回执：这一段的问题已经收到。", listOf(request.passage))
         }
     }
 
@@ -124,6 +145,7 @@ class WindowsPassageQuestionLimitTest {
     /** Holds the first question in flight, so a second Enter can be tried while the first is unanswered. */
     private class Holding : BookLearningSupport {
         val questions = mutableListOf<String>()
+        val passages = mutableListOf<BookPassage>()
         val answer = CompletableDeferred<BookLearningReply>()
         var consent = true
 
@@ -135,6 +157,7 @@ class WindowsPassageQuestionLimitTest {
         override suspend fun ask(request: BookPassageQuestion): BookLearningReply {
             require(BookPassageQuestion.accepts(request.question)) { "Outside the provider's question bound" }
             questions += request.question
+            passages += request.passage
             return answer.await()
         }
     }
@@ -253,7 +276,7 @@ class WindowsPassageQuestionLimitTest {
         val root = Files.createTempDirectory("coach-passage-chosen-")
         val source = pickerTextbook(root)
         val controller = TextbookController(TextbookLibrary(root.resolve("library")))
-        val support = Recorder()
+        val support = Citing()
         runSkikoComposeUiTest(size = Size(1100f, 800f), density = Density(1f)) {
             openPicker(controller, source, support)
             val book = controller.state.value.book!!
@@ -278,6 +301,129 @@ class WindowsPassageQuestionLimitTest {
             onNodeWithTag("book-passage-send").performClick()
             waitUntil(timeoutMillis = 20_000) { support.questions.size == 1 }
             assertEquals(listOf("这一段在说什么"), support.questions)
+            assertEquals(blocks[1].text, support.passages.single().text)
+
+            // 等回答的空档里再去点第 3 段：高亮不能跟着跑。请求的那一段、还亮着的那一段、
+            // 点开的原文必须是同一段，否则同页的两段只差一个段号，读者核页码都发现不了。
+            assertFalse(hasClickAction("ask-paragraph-0"), "发出去一段之后，前后两行不该还能换选段")
+            assertFalse(hasClickAction("ask-paragraph-2"))
+            onNodeWithTag("book-selected-passage-number").assertTextEquals("2")
+            onNodeWithTag("book-selected-passage").assertTextEquals(ReadableText.reflow(blocks[1].text))
+
+            support.answer.complete(Unit)
+            waitUntil(timeoutMillis = 20_000) {
+                onAllNodesWithTag("book-passage-citation").fetchSemanticsNodes().isNotEmpty()
+            }
+            // 回答回来以后高亮仍在第 2 段，点「出处」打开的也是第 2 段原文。
+            onNodeWithTag("book-selected-passage-number").assertTextEquals("2")
+            onNodeWithTag("book-selected-passage").assertTextEquals(ReadableText.reflow(blocks[1].text))
+            onNodeWithTag("book-passage-citation").performScrollTo().performClick()
+            onNodeWithTag("book-passage-source").assertTextEquals(blocks[1].text)
+            assertEquals(1, support.questions.size)
+        }
+    }
+
+    /** 发送之前可以随便换段：点第 1 段、再点第 3 段，发出去的、还亮着的、出处打开的都是第 3 段。 */
+    @Test fun pickingAnotherRowBeforeSendingSendsTheLastOne() {
+        val root = Files.createTempDirectory("coach-passage-before-send-")
+        val source = pickerTextbook(root)
+        val controller = TextbookController(TextbookLibrary(root.resolve("library")))
+        val support = Citing()
+        runSkikoComposeUiTest(size = Size(1100f, 800f), density = Density(1f)) {
+            openPicker(controller, source, support)
+            val book = controller.state.value.book!!
+            val blocks = StudyCoachCourse.blocks(book.id, listOf(book.pages.first())).filterNot { it.heading }
+            check(blocks.size >= 3) { "the picker needs a third paragraph to switch to" }
+
+            onNodeWithTag("ask-paragraph-0").performClick(); waitForIdle()
+            onNodeWithTag("book-selected-passage-number").assertTextEquals("1")
+            // 还没发出去：换段只是把高亮挪到新点的那一行。
+            assertTrue(hasClickAction("ask-paragraph-2"), "发送前另一段应当还能点")
+            onNodeWithTag("ask-paragraph-2").performClick(); waitForIdle()
+            onNodeWithTag("book-selected-passage-number").assertTextEquals("3")
+            onNodeWithTag("book-selected-passage").assertTextEquals(ReadableText.reflow(blocks[2].text))
+
+            onNodeWithTag("book-passage-question").performTextInput("这一段在说什么")
+            onNodeWithTag("book-passage-send").performClick()
+            waitUntil(timeoutMillis = 20_000) { support.questions.size == 1 }
+            assertEquals(blocks[2].text, support.passages.single().text)
+
+            support.answer.complete(Unit)
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-passage-citation").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("book-selected-passage-number").assertTextEquals("3")
+            onNodeWithTag("book-passage-citation").performScrollTo().performClick()
+            onNodeWithTag("book-passage-source").assertTextEquals(blocks[2].text)
+            assertEquals(1, support.questions.size)
+        }
+    }
+
+    /** 「不允许」没有发出请求，段就没被钉住：读者换一段再问，问的是新选的那段。 */
+    @Test fun denyingConsentLeavesThePassageUnlockedForANewPick() {
+        val root = Files.createTempDirectory("coach-passage-consent-repick-")
+        val source = pickerTextbook(root)
+        val controller = TextbookController(TextbookLibrary(root.resolve("library")))
+        val support = Holding()
+        runSkikoComposeUiTest(size = Size(1100f, 800f), density = Density(1f)) {
+            openPicker(controller, source, support)
+            val book = controller.state.value.book!!
+            val blocks = StudyCoachCourse.blocks(book.id, listOf(book.pages.first())).filterNot { it.heading }
+            check(blocks.size >= 3) { "the picker needs a third paragraph to switch to" }
+
+            onNodeWithTag("ask-paragraph-0").performClick(); waitForIdle()
+            onNodeWithTag("book-passage-question").performTextInput("这一页在讲什么")
+            onNodeWithTag("book-passage-send").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("ask-consent").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("ask-consent-deny").performClick(); waitForIdle()
+            assertEquals(0, support.questions.size)
+
+            // 没发出去：还能换段，高亮跟着走。
+            assertTrue(hasClickAction("ask-paragraph-2"), "「不允许」没发请求，段落不该被锁定")
+            onNodeWithTag("ask-paragraph-2").performClick(); waitForIdle()
+            onNodeWithTag("book-selected-passage-number").assertTextEquals("3")
+
+            onNodeWithTag("book-passage-send").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("ask-consent").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("ask-consent-allow").performClick()
+            waitUntil(timeoutMillis = 20_000) { support.questions.size == 1 }
+            waitForIdle()
+            assertEquals(listOf("这一页在讲什么"), support.questions)
+            assertEquals(blocks[2].text, support.passages.single().text)
+            // 真发出去之后才锁：其余两行不再可点。
+            assertFalse(hasClickAction("ask-paragraph-0"))
+            assertFalse(hasClickAction("ask-paragraph-1"))
+        }
+    }
+
+    /** 位置认不出时不发请求；换一段那条提示就消失，再发出去的是新选的那段。 */
+    @Test fun anUnlocatablePassageIsClearedWhenAnotherRowIsPicked() {
+        val root = Files.createTempDirectory("coach-passage-unlocatable-")
+        val source = pickerTextbook(root)
+        val controller = TextbookController(TextbookLibrary(root.resolve("library")))
+        runBlocking { controller.importBook(source) }
+        val book = assertNotNull(controller.state.value.book)
+        val page = book.pages.first()
+        val blocks = StudyCoachCourse.blocks(book.id, listOf(page)).filterNot { it.heading }
+        // 起止落在这一页正文之外、id 也对不上任何段落：BookPassage.from 认不出它。
+        val stale = SourceBlock("${book.id}:p${page.number}:${page.text.length + 1}", page.number,
+            page.text.length + 1, page.text.length + 5, false, "认不出位置的原文")
+        val support = Recorder()
+        runSkikoComposeUiTest(size = Size(1100f, 800f), density = Density(1f)) {
+            setContent { CoachTheme(darkTheme = false) { BookPassageAsk(book, page, support, initialSelection = stale) {} } }
+            waitForIdle()
+            onNodeWithTag("book-selected-passage").assertTextEquals("认不出位置的原文")
+            onNodeWithTag("book-passage-question").performTextInput("这一段在说什么")
+            onNodeWithTag("book-passage-send").performClick(); waitForIdle()
+            onNodeWithTag("book-passage-unavailable").assertExists()
+            onNodeWithTag("explain-trouble").assertTextEquals("这段原文的位置无法确认，请重新选择。")
+            assertEquals(0, support.questions.size)
+
+            // 那条提示说的是上一次的选段：换一段就跟着消失，再发出去的是新选的这段。
+            onNodeWithTag("ask-paragraph-0").performClick(); waitForIdle()
+            onNodeWithTag("book-passage-unavailable").assertDoesNotExist()
+            onNodeWithTag("book-selected-passage").assertTextEquals(ReadableText.reflow(blocks[0].text))
+            onNodeWithTag("book-passage-send").performClick()
+            waitUntil(timeoutMillis = 20_000) { support.questions.size == 1 }
+            assertEquals(blocks[0].text, support.passages.single().text)
         }
     }
 
@@ -363,6 +509,7 @@ class WindowsPassageQuestionLimitTest {
                         assertEquals(1, support.questions.size, "Enter while the answer is in flight must not send again")
                         assertEquals("why\nnot", fieldText(window))
                         windowShot(window, dark, "sent-once-in-flight")
+
                         support.release.complete(Unit)
                         awaitWindow("reply for the same passage", window) { windowNode(window, "book-passage-citation") != null }
                         windowShot(window, dark, "reply")
@@ -748,6 +895,10 @@ class WindowsPassageQuestionLimitTest {
 
     private fun ComposeUiTest.typedQuestion(): String =
         onNodeWithTag("book-passage-question").fetchSemanticsNode().config[SemanticsProperties.EditableText].text
+
+    /** 这一行现在还能不能点：段号发出去之后，其余段落不该再有点击动作。 */
+    private fun ComposeUiTest.hasClickAction(tag: String): Boolean =
+        onNodeWithTag(tag).fetchSemanticsNode().config.getOrNull(SemanticsActions.OnClick) != null
 
     private fun ComposeUiTest.ready(controller: TextbookController, condition: (LibraryUi) -> Boolean) {
         waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && condition(controller.state.value) }

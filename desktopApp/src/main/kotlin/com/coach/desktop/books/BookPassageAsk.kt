@@ -71,9 +71,18 @@ internal fun BookPassageAsk(
     // 段落列表和问题框一直都在：点一段只是把那一行就地染色，前后的段落和滚动位置都不动。
     val scroll = rememberScrollState()
     val colors = CoachTheme.colors
-    // 选中的那段在本页列表里排第几。从阅读页直接点进来的段落可能不在这一页（-1），段号就退回它自己的页码——
-    // 两者都是读者能对上原文的位置，内部 block id 不露在外面。
-    val chosenIndex = blocks.indexOfFirst { it.id == selected?.id }
+    // 发出去的那一段从按下发送起就钉在原地，直到弹窗关掉：回答里的「出处」打开的就是它。
+    // 还能接着点别的行的话，读者会把第 2 段的出处当成第 3 段——问第 2 段、等回答时点第 3 段，
+    // 高亮落在第 3 段、出处却是第 2 段，两段同页连页码都对不出来。
+    val asked = request?.passage
+    // 请求里的这一段在本页列表里排第几；-1 表示它不在本页（读者从阅读页里别的段落点进来的）。
+    val askedIndex = asked?.let { passage -> blocks.indexOfFirst { it.start == passage.start && it.end == passage.end } } ?: -1
+    // 高亮跟着「这次提问的那一段」走；还没提问时跟着读者点的那一段，发送前可以随便换。
+    val chosenIndex = if (asked != null) askedIndex else blocks.indexOfFirst { it.id == selected?.id }
+    // 段号退回这一段自己的页码：读者能对上原文的位置，内部 block id 不露在外面。
+    val chosenText = if (asked != null) asked.text else selected?.text
+    val chosenOrdinal = if (asked != null) asked.page else selected?.page
+    val hasChoice = asked != null || selected != null
     // V7：弹窗是 surface2 的纸；段落、选中的原文和输入框都是叠在上面的一层 surface1 纸，按钮走纸面按钮，不用 Material 描边。
     AlertDialog(modifier = Modifier.testTag("book-passage-dialog"), onDismissRequest = onClose, title = { Text("就这段问一句") }, text = {
         Column(Modifier.heightIn(max = 500.dp).verticalScroll(scroll).testTag("book-passage-ask"),
@@ -85,32 +94,35 @@ internal fun BookPassageAsk(
             // 点中的那行就地留下松绿线和 `pineWash` 底，前后的段落仍然在列表里，读者能对照着看。
             if (blocks.isNotEmpty()) PaperCard(color = colors.surface1, contentSpacing = 0.dp, contentPadding = PaddingValues(0.dp)) {
                 blocks.forEachIndexed { index, block ->
-                    val chosen = block.id == selected?.id
+                    val chosen = index == chosenIndex
                     if (index > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(colors.borderSubtle))
-                    // 已经选中的行不再可点：点它没有别的结果。不可点也就不合并语义，段号和原文才能按标签读到。
-                    val pick: (() -> Unit)? = if (chosen) null else ({ selected = block })
+                    // 已经高亮的那行、以及已经发出去一段之后的所有行都不再可点：点它没有别的结果。
+                    // 不可点也就不合并语义，段号和原文才能按标签读到。
+                    val pick: (() -> Unit)? = if (chosen || asked != null) null
+                        // 换一段就把上一条「这段原文的位置无法确认，请重新选择」清掉：它说的是上一次的选段。
+                        else ({ selected = block; reply = null })
                     PassageRow(index + 1, ReadableText.reflow(block.text), selected = chosen, rowTag = "ask-paragraph-$index",
                         textTag = if (chosen) "book-selected-passage" else null, onClick = pick)
                 }
                 // 不在本页列表里的段落（从阅读页直接点进来）：补一行在纸面末尾，段号退回它的页码。
-                val outside = selected?.takeIf { chosenIndex < 0 }
+                val outside = chosenText?.takeIf { chosenIndex < 0 }
                 if (outside != null) {
                     if (blocks.isNotEmpty()) Box(Modifier.fillMaxWidth().height(1.dp).background(colors.borderSubtle))
-                    PassageRow(outside.page, ReadableText.reflow(outside.text), selected = true, textTag = "book-selected-passage")
+                    PassageRow(chosenOrdinal ?: 1, ReadableText.reflow(outside), selected = true, textTag = "book-selected-passage")
                 }
             }
             val question = draft.text
             val typed = question.trim().length
             val tooLong = typed > BookPassageQuestion.MAX_QUESTION_LENGTH
             // Enter 和「发送」按钮走同一个入口、同一组放行条件：还没点段、超长、正在等回答、额度拒绝、逐书同意都按现有行为。
-            fun canSend(text: String) = selected != null && BookPassageQuestion.accepts(text) && (request == null || reply != null) &&
+            fun canSend(text: String) = hasChoice && BookPassageQuestion.accepts(text) && (request == null || reply != null) &&
                 (reply as? BookLearningReply.Unavailable)?.trouble != ExplainTrouble.Quota
             // 文本和放行条件都在按下的这一刻现读：按钮变灰靠的是上一帧的 draft，读者敲字与点发送之间
             // 可能还没重排，用重排时的快照会把刚打的字丢掉，发出一句空问题。
             fun submit() {
                 val text = draft.text
                 if (!canSend(text)) return
-                val passage = runCatching { BookPassage.from(book, checkNotNull(selected)) }.getOrNull()
+                val passage = asked ?: runCatching { BookPassage.from(book, checkNotNull(selected)) }.getOrNull()
                 if (passage == null) {
                     request = null
                     reply = BookLearningReply.Unavailable("这段原文的位置无法确认，请重新选择。")

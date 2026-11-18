@@ -8,6 +8,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
@@ -15,6 +16,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -34,6 +36,7 @@ import com.coach.ui.v7.LocalDeskMetrics
 import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.paperShadow
 import com.coach.ui.v7.PrimaryButton
+import com.coach.ui.v7.V7Scrollbar
 import com.coach.ui.v7.V7TextButton
 import com.coach.ui.v7.v7FocusRing
 import com.coach.client.CourseHttp
@@ -250,82 +253,88 @@ internal fun BookExplainPanel(
     }
 
     val colors = CoachTheme.colors
-    Column(modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp).testTag("book-explain"), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        val paired = explainer.identity
-        if (paired == null && explainer.loaded) Column(Modifier.testTag("explain-pairing"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (explainer.revoked) {
-                Text("这台电脑的连接已停用", style = MaterialTheme.typography.titleMedium)
-                Text("请找给你配对码的人重新配对：输入 Mac 地址和新的 6 位配对码。读书和做题照常。", style = MaterialTheme.typography.bodySmall,
-                    color = colors.fgSecondary, modifier = Modifier.testTag("explain-revoked"))
-            } else {
-                Text("先连上 Mac", style = MaterialTheme.typography.titleMedium)
-                Text("讲解由配对的 Mac 生成。输入 Mac 地址和 Mac 那边生成的 6 位配对码。", style = MaterialTheme.typography.bodySmall,
-                    color = colors.fgSecondary)
-            }
-            V7Field(address, { address = it; pairError = null }, "Mac 地址", enabled = !pairing, paper = colors.surface2, modifier = Modifier.fillMaxWidth().testTag("explain-address"))
-            V7Field(code, { code = it.filter(Char::isDigit).take(6); pairError = null }, "配对码", enabled = !pairing, paper = colors.surface2,
-                visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                modifier = Modifier.width(200.dp).testTag("explain-code"))
-            PrimaryButton(onClick = {
-                pairing = true
-                scope.launch {
-                    if (!explainer.pair(address, code)) pairError = "没配上。核对 Mac 地址，或请 Mac 那边生成新的配对码。"
-                    // 配好了：之前因停用而停下的段落回到「讲解这段」。
-                    else states.filterValues { (it as? BlockState.Failed)?.trouble == ExplainTrouble.Revoked }.keys.forEach(states::remove)
-                    code = ""; pairing = false
+    // 讲解长过一屏时，右侧这道 V7 细滚动条跟着同一个 ScrollState 走：不用滚轮也能看出下面还有内容，
+    // 拖动滑块能读到底（desktop-polish A11）。条子宽 12dp，落在正文右侧 16dp 的内边距里，不盖住字。
+    Box(modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp).testTag("book-explain"), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            val paired = explainer.identity
+            if (paired == null && explainer.loaded) Column(Modifier.testTag("explain-pairing"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (explainer.revoked) {
+                    Text("这台电脑的连接已停用", style = MaterialTheme.typography.titleMedium)
+                    Text("请找给你配对码的人重新配对：输入 Mac 地址和新的 6 位配对码。读书和做题照常。", style = MaterialTheme.typography.bodySmall,
+                        color = colors.fgSecondary, modifier = Modifier.testTag("explain-revoked"))
+                } else {
+                    Text("先连上 Mac", style = MaterialTheme.typography.titleMedium)
+                    Text("讲解由配对的 Mac 生成。输入 Mac 地址和 Mac 那边生成的 6 位配对码。", style = MaterialTheme.typography.bodySmall,
+                        color = colors.fgSecondary)
                 }
-            }, enabled = code.length == 6 && address.isNotBlank() && !pairing, modifier = Modifier.testTag("explain-pair")) { Text(if (pairing) "正在配对…" else "配对") }
-            pairError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = v7Alert(), modifier = Modifier.testTag("explain-pair-error")) }
-        } else if (paired != null) Text("已连上 Mac。点一段原文旁的「讲解这段」。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
-        if (onPage.isEmpty()) Text("这一页没有可讲的正文。", style = MaterialTheme.typography.bodyMedium, color = colors.fgSecondary)
-        for (block in onPage) Column(Modifier.fillMaxWidth().testTag("explain-block-${block.id}"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            val state = states[block.id]
-            val failed = state as? BlockState.Failed
-            val selected = selection?.id == block.id
-            val interaction = remember(block.id) { MutableInteractionSource() }
-            val hovered by interaction.collectIsHoveredAsState()
-            val canExplain = paired != null && state != BlockState.Waiting
-            // 「讲解这段」平时只是段落首行右边一行 faint 小字：鼠标扫到这一段、或这一段就是从阅读器选进来的，
-            // 才浮成纸面按钮。它和正文第一行同一基线，段落多长都不会掉到段落下面（desktop-polish A10）。
-            Row(Modifier.fillMaxWidth().hoverable(interaction)) {
-                Text(ReadableText.reflow(block.text), Modifier.weight(1f).alignByBaseline().testTag("explain-paragraph-${block.id}"),
-                    style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary)
-                // 失败时这一行留一个看不见的同款盒子：正文的折行不能因为入口消失而变，
-                // 否则段落会缩短一行，把下面的段落整体顶上去。
-                FaintExplainButton(
-                    label = if (state == BlockState.Waiting) "讲解中…" else "讲解这段",
-                    enabled = canExplain, waiting = state == BlockState.Waiting,
-                    emphasised = failed == null && canExplain && (selected || hovered),
-                    placeholder = failed != null,
-                    modifier = Modifier.alignByBaseline().padding(start = 12.dp)
-                        .then(if (failed == null) Modifier.testTag("explain-button") else Modifier),
-                    onClick = { if (consented) start(block) else pending = block })
-            }
-            // 失败时按钮就地换成下一步（再试一次 / 重新配对），右边写那句话。这一行任何时候都占着位置：
-            // 平时是留白，失败时才填内容，所以点下去、等回复、失败回来这三种状态里，下面正在读的段落
-            // 一个像素都不动（desktop-polish A10、D3、E3）。块编号是内部的，不给读者看。
-            Row(Modifier.fillMaxWidth().heightIn(min = 40.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                if (failed != null) {
-                    when (failed.trouble) {
-                        ExplainTrouble.Revoked -> PaperButton(onClick = { scope.launch { scroll.animateScrollTo(0) } },
-                            modifier = Modifier.testTag("explain-repair")) { Text("重新配对") }
-                        ExplainTrouble.Quota -> PaperButton(onClick = {}, enabled = false, modifier = Modifier.testTag("explain-button")) { Text("讲解这段") }
-                        else -> QuietButton("再试一次", enabled = paired != null, modifier = Modifier.testTag("explain-retry")) { start(block) }
+                V7Field(address, { address = it; pairError = null }, "Mac 地址", enabled = !pairing, paper = colors.surface2, modifier = Modifier.fillMaxWidth().testTag("explain-address"))
+                V7Field(code, { code = it.filter(Char::isDigit).take(6); pairError = null }, "配对码", enabled = !pairing, paper = colors.surface2,
+                    visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    modifier = Modifier.width(200.dp).testTag("explain-code"))
+                PrimaryButton(onClick = {
+                    pairing = true
+                    scope.launch {
+                        if (!explainer.pair(address, code)) pairError = "没配上。核对 Mac 地址，或请 Mac 那边生成新的配对码。"
+                        // 配好了：之前因停用而停下的段落回到「讲解这段」。
+                        else states.filterValues { (it as? BlockState.Failed)?.trouble == ExplainTrouble.Revoked }.keys.forEach(states::remove)
+                        code = ""; pairing = false
                     }
-                    // 连不上、超时、暂时读不到都是会自己好的：中性灰字。只有要读者动手的（连接被停用、要重新配对）才用朱色。
-                    Text(failed.message, style = MaterialTheme.typography.bodySmall, maxLines = 2,
-                        color = if (failed.trouble.needsReader) v7Alert() else colors.fgSecondary,
-                        modifier = Modifier.weight(1f).testTag("explain-failed"))
+                }, enabled = code.length == 6 && address.isNotBlank() && !pairing, modifier = Modifier.testTag("explain-pair")) { Text(if (pairing) "正在配对…" else "配对") }
+                pairError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = v7Alert(), modifier = Modifier.testTag("explain-pair-error")) }
+            } else if (paired != null) Text("已连上 Mac。点一段原文旁的「讲解这段」。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+            if (onPage.isEmpty()) Text("这一页没有可讲的正文。", style = MaterialTheme.typography.bodyMedium, color = colors.fgSecondary)
+            for (block in onPage) Column(Modifier.fillMaxWidth().testTag("explain-block-${block.id}"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                val state = states[block.id]
+                val failed = state as? BlockState.Failed
+                val selected = selection?.id == block.id
+                val interaction = remember(block.id) { MutableInteractionSource() }
+                val hovered by interaction.collectIsHoveredAsState()
+                val canExplain = paired != null && state != BlockState.Waiting
+                // 「讲解这段」平时只是段落首行右边一行 faint 小字：鼠标扫到这一段、或这一段就是从阅读器选进来的，
+                // 才浮成纸面按钮。它和正文第一行同一基线，段落多长都不会掉到段落下面（desktop-polish A10）。
+                Row(Modifier.fillMaxWidth().hoverable(interaction)) {
+                    Text(ReadableText.reflow(block.text), Modifier.weight(1f).alignByBaseline().testTag("explain-paragraph-${block.id}"),
+                        style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary)
+                    // 失败时这一行留一个看不见的同款盒子：正文的折行不能因为入口消失而变，
+                    // 否则段落会缩短一行，把下面的段落整体顶上去。
+                    FaintExplainButton(
+                        label = if (state == BlockState.Waiting) "讲解中…" else "讲解这段",
+                        enabled = canExplain, waiting = state == BlockState.Waiting,
+                        emphasised = failed == null && canExplain && (selected || hovered),
+                        placeholder = failed != null,
+                        modifier = Modifier.alignByBaseline().padding(start = 12.dp)
+                            .then(if (failed == null) Modifier.testTag("explain-button") else Modifier),
+                        onClick = { if (consented) start(block) else pending = block })
                 }
-            }
-            if (state is BlockState.Done) ExplanationView(book, state.explanation, state.context) { citation ->
-                state.context.firstOrNull { it.id == citation.blockId }?.let {
-                    if (onOpenOriginal != null) onOpenOriginal(BookPassage.from(book, it))
-                    else opened = citation to it
+                // 失败时按钮就地换成下一步（再试一次 / 重新配对），右边写那句话。这一行任何时候都占着位置：
+                // 平时是留白，失败时才填内容，所以点下去、等回复、失败回来这三种状态里，下面正在读的段落
+                // 一个像素都不动（desktop-polish A10、D3、E3）。块编号是内部的，不给读者看。
+                Row(Modifier.fillMaxWidth().heightIn(min = 40.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    if (failed != null) {
+                        when (failed.trouble) {
+                            ExplainTrouble.Revoked -> PaperButton(onClick = { scope.launch { scroll.animateScrollTo(0) } },
+                                modifier = Modifier.testTag("explain-repair")) { Text("重新配对") }
+                            ExplainTrouble.Quota -> PaperButton(onClick = {}, enabled = false, modifier = Modifier.testTag("explain-button")) { Text("讲解这段") }
+                            else -> QuietButton("再试一次", enabled = paired != null, modifier = Modifier.testTag("explain-retry")) { start(block) }
+                        }
+                        // 连不上、超时、暂时读不到都是会自己好的：中性灰字。只有要读者动手的（连接被停用、要重新配对）才用朱色。
+                        Text(failed.message, style = MaterialTheme.typography.bodySmall, maxLines = 2,
+                            color = if (failed.trouble.needsReader) v7Alert() else colors.fgSecondary,
+                            modifier = Modifier.weight(1f).testTag("explain-failed"))
+                    }
+                }
+                if (state is BlockState.Done) ExplanationView(book, state.explanation, state.context) { citation ->
+                    state.context.firstOrNull { it.id == citation.blockId }?.let {
+                        if (onOpenOriginal != null) onOpenOriginal(BookPassage.from(book, it))
+                        else opened = citation to it
+                    }
                 }
             }
         }
+        if (scroll.maxValue > 0) V7Scrollbar(rememberScrollbarAdapter(scroll),
+            Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 6.dp).testTag("explain-scrollbar"))
     }
     pending?.let { block ->
         AlertDialog(onDismissRequest = { pending = null }, title = { Text(ExplainPrivacy.TITLE) },

@@ -160,14 +160,34 @@ class SourceLookupTest {
                 assertEquals(target == allowed,process.exitValue() == 0,"target=${target.fileName}")
                 if (target != allowed) assertEquals("",output)
             }
-            // Run a write-capable system utility under the EXACT same read-only profile.
-            val command = sandbox.command(listOf(allowed),emptyList()).toMutableList()
-            command[2] = command[2].replace("(literal \"/bin/cat\")","(literal \"/usr/bin/touch\")")
-            command[3] = "/usr/bin/touch"
-            command += dir.resolve("new-file").toString()
+            val command = if (System.getProperty("os.name") == "Linux") {
+                val helper = checkNotNull(javaClass.getResourceAsStream("/source_reader.py"))
+                    .bufferedReader().use { it.readText() }
+                val probe = """
+                    import socket
+                    restrict_io([])
+                    for operation in (lambda: open(sys.argv[1]), lambda: open(sys.argv[2], 'w'), socket.socket):
+                        try:
+                            operation()
+                        except PermissionError:
+                            continue
+                        os._exit(2)
+                    os._exit(0)
+                """.trimIndent()
+                val script = "__name__ = 'probe'\n" + helper + "\n" + probe
+                listOf("/usr/bin/python3", "-I", "-c", script, keys.toString(), dir.resolve("new-file").toString())
+            } else {
+                // Exercise the same macOS profile with a write-capable executable.
+                sandbox.command(listOf(allowed),emptyList()).toMutableList().apply {
+                    this[2] = this[2].replace("(literal \"/bin/cat\")","(literal \"/usr/bin/touch\")")
+                    this[3] = "/usr/bin/touch"
+                    add(dir.resolve("new-file").toString())
+                }
+            }
             val writer = ProcessBuilder(command).redirectError(ProcessBuilder.Redirect.DISCARD).start()
             assertTrue(writer.waitFor(2,TimeUnit.SECONDS))
-            assertTrue(writer.exitValue() != 0)
+            if (System.getProperty("os.name") == "Linux") assertEquals(0, writer.exitValue())
+            else assertTrue(writer.exitValue() != 0)
             assertFalse(Files.exists(dir.resolve("new-file")))
         } finally { Files.walk(dir).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) } }
     }

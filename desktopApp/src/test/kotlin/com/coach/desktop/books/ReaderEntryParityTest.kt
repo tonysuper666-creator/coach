@@ -72,6 +72,10 @@ class ReaderEntryParityTest {
             onAllNodesWithTag("windows-textbooks").assertCountEquals(1)
             onAllNodesWithTag("textbook-reader").assertCountEquals(1)
             onAllNodesWithTag("reader-page").assertCountEquals(1)
+            // 书架已为这本书选了文字版。出处重开沿用它，仍可切回同一张原页。
+            assertEquals(true, library.savedTextView(book.id))
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("reader-text").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithText("看原页").performClick()
             waitUntil(timeoutMillis = 20_000) {
                 onAllNodesWithContentDescription("${book.title} 第 2 页").fetchSemanticsNodes().isNotEmpty()
             }

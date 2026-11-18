@@ -274,16 +274,15 @@ class WindowsPassageQuestionLimitTest {
                         awaitWindow("keyboard focus in the question field", window) {
                             onEdt { windowNode(window, "book-passage-question")!!.config.getOrNull(SemanticsProperties.Focused) == true }
                         }
-                        windowKeys(window, robot, arrivals, KeyEvent.VK_W, KeyEvent.VK_H, KeyEvent.VK_Y)
-                        awaitWindow("typed letters", window) { fieldText(window) == "why" }
-                        windowKeys(window, robot, arrivals, KeyEvent.VK_SHIFT, KeyEvent.VK_ENTER)
-                        awaitWindow("Shift+Enter keeps a second line", window) { fieldText(window) == "why\n" }
-                        windowKeys(window, robot, arrivals, KeyEvent.VK_N, KeyEvent.VK_O, KeyEvent.VK_T)
-                        awaitWindow("second line typed", window) { fieldText(window) == "why\nnot" }
+                        windowType(window, robot, arrivals, "why",
+                            KeyEvent.VK_W to 'w', KeyEvent.VK_H to 'h', KeyEvent.VK_Y to 'y')
+                        windowShiftEnter(window, robot, arrivals)
+                        windowType(window, robot, arrivals, "why\nnot",
+                            KeyEvent.VK_N to 'n', KeyEvent.VK_O to 'o', KeyEvent.VK_T to 't')
                         assertEquals(0, support.questions.size, "no request before Enter")
                         windowShot(window, dark, "typed-two-lines")
 
-                        windowKeys(window, robot, arrivals, KeyEvent.VK_ENTER)
+                        windowKey(window, robot, arrivals, KeyEvent.VK_ENTER)
                         awaitWindow("Enter sends the two-line question", window) { support.questions.size == 1 }
                         val sent = support.questions.single()
                         assertEquals("why\nnot", sent.question, "Enter must send exactly the typed text, no line break added")
@@ -292,8 +291,8 @@ class WindowsPassageQuestionLimitTest {
                         assertEquals(block.end, sent.passage.end)
                         assertEquals(book.id, sent.passage.book)
                         // 发送中：再按两次 Enter 不能变成第二次请求，也不能往问题里塞换行。
-                        windowKeys(window, robot, arrivals, KeyEvent.VK_ENTER)
-                        windowKeys(window, robot, arrivals, KeyEvent.VK_ENTER)
+                        windowKey(window, robot, arrivals, KeyEvent.VK_ENTER)
+                        windowKey(window, robot, arrivals, KeyEvent.VK_ENTER)
                         Thread.sleep(500)
                         assertEquals(1, support.questions.size, "Enter while the answer is in flight must not send again")
                         assertEquals("why\nnot", fieldText(window))
@@ -354,21 +353,77 @@ class WindowsPassageQuestionLimitTest {
         Thread.sleep(200)
     }
 
-    /** Presses real OS keys and retries only when the event never reached this window at all. */
-    private fun windowKeys(window: ComposeWindow, robot: Robot, arrivals: WindowKeyArrivals, vararg keys: Int) {
+    /**
+     * 送一个真键，等它真的到过这个窗口；只有完全没送到才补发。
+     * winbox 的两道作业共用一个控制台会话，别的作业的窗口会在两次按键之间把前台拿走。
+     */
+    private fun windowKey(window: ComposeWindow, robot: Robot, arrivals: WindowKeyArrivals, key: Int) {
         var resends = 0
         while (true) {
             val before = arrivals.count
             NativeWindowForeground.action {
                 NativeWindowForeground.activate(window)
-                keys.forEach { robot.keyPress(it) }
-                keys.reversed().forEach { robot.keyRelease(it) }
+                robot.keyPress(key)
+                robot.keyRelease(key)
                 robot.waitForIdle()
             }
             val deadline = System.nanoTime() + 2_000_000_000L
             while (arrivals.count <= before && System.nanoTime() < deadline) Thread.sleep(20)
             if (arrivals.count > before) return
-            check(resends++ < 2) { "keys ${keys.toList()} never reached this window" }
+            check(resends++ < 2) { "key $key never reached this window; ${NativeWindowForeground.describe(window)}" }
+        }
+    }
+
+    /**
+     * 逐字打到 [expected]：每次只补发还缺的那一个键。一批键只送到一半时（前台被另一道作业的窗口
+     * 拿走），按「当前文本是期望文本的前缀」补发，既不会重复打字，也不把被抢当成产品缺陷；
+     * 文本一旦偏离期望就立刻失败，断言仍是整串相等。
+     */
+    private fun windowType(window: ComposeWindow, robot: Robot, arrivals: WindowKeyArrivals,
+                           expected: String, vararg keys: Pair<Int, Char>) {
+        val deadline = System.nanoTime() + 20_000_000_000L
+        while (true) {
+            val text = fieldText(window).orEmpty()
+            if (text == expected) return
+            check(expected.startsWith(text)) {
+                "the question field holds \"$text\", which is not a prefix of \"$expected\"; ${NativeWindowForeground.describe(window)}"
+            }
+            check(System.nanoTime() < deadline) {
+                "Timed out typing \"$expected\"; the field holds \"$text\"; ${NativeWindowForeground.describe(window)}"
+            }
+            val missing = expected[text.length]
+            val next = keys.firstOrNull { it.second == missing }
+            checkNotNull(next) { "no key types '$missing' on the way to \"$expected\"" }
+            windowKey(window, robot, arrivals, next.first)
+        }
+    }
+
+    /**
+     * 真 Shift+Enter 只加一行：一次没送到就补发，但一次也不许变成两行。
+     * 补发只在「文本一个字都没变」时进行，所以重复执行不会被当成正常结果。
+     */
+    private fun windowShiftEnter(window: ComposeWindow, robot: Robot, arrivals: WindowKeyArrivals) {
+        val before = fieldText(window).orEmpty()
+        var attempts = 0
+        while (true) {
+            check(fieldText(window) == before) {
+                "Shift+Enter changed more than a line break: \"${fieldText(window)}\""
+            }
+            NativeWindowForeground.action {
+                NativeWindowForeground.activate(window)
+                robot.keyPress(KeyEvent.VK_SHIFT)
+                robot.keyPress(KeyEvent.VK_ENTER)
+                robot.keyRelease(KeyEvent.VK_ENTER)
+                robot.keyRelease(KeyEvent.VK_SHIFT)
+                robot.waitForIdle()
+            }
+            val deadline = System.nanoTime() + 3_000_000_000L
+            while (fieldText(window) == before && System.nanoTime() < deadline) Thread.sleep(20)
+            if (fieldText(window) == "$before\n") return
+            check(attempts++ < 3) {
+                "Shift+Enter did not open a second line; the field holds \"${fieldText(window)}\"; " +
+                    NativeWindowForeground.describe(window)
+            }
         }
     }
 

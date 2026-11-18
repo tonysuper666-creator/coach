@@ -138,7 +138,7 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | W2 | 窗口标题统一 | 待修 | 「Coach」、旧占位拼写、「教材原文」三种 | 归 TON-1656 |
 | W3 | 最小窗口尺寸 / 贴靠 | 待修 | 全仓 `minimumSize` 0 处 | 拖得很窄时侧栏和正文会挤坏。先在 1/2、1/3 贴靠下截图定最小值，再设 `window.minimumSize`。`WindowsTextbooks.kt` 被 TON-1656 占用，排在其后：P5 |
 | W4 | 125/150/175% 缩放 | 未验证 | — | 截图测试固定 Density 1.5。P5 交付时在 winbox 改系统缩放各拍一张 |
-| W5 | 滚动条 | 待修（阅读已接入） | `V7Scrollbar.kt`；阅读区 `ReaderScrollbar`（`TextbookReader.kt`） | V7 颜色，4dp → 8dp 悬停加粗，12dp 固定槽；拖动实际 ScrollState，正文不位移。阅读区已接入共享 `V7Scrollbar`：12dp 固定槽、槽里 4dp 细条悬停加粗到 8dp、加粗不挪正文，内容不满一屏时不占位（`ReaderScrollbar` 只剩这一句判空）。`light/reader`、`dark/reader` 的改后截图是旧 head 的，新 head 待串行窗口重拍；书架、讲解仍缺，去向 P3、P2 |
+| W5 | 滚动条 | 待修（阅读、讲解已接入） | `V7Scrollbar.kt`；阅读区 `ReaderScrollbar`（`TextbookReader.kt`）；讲解 `books/BookExplain.kt` | V7 颜色，4dp → 8dp 悬停加粗，12dp 固定槽；拖动实际 ScrollState，正文不位移。阅读区已接入共享 `V7Scrollbar`：12dp 固定槽、槽里 4dp 细条悬停加粗到 8dp、加粗不挪正文，内容不满一屏时不占位（`ReaderScrollbar` 只剩这一句判空）。`light/reader`、`dark/reader` 的改后截图是旧 head 的，新 head 待串行窗口重拍。讲解面板同样接共享 `V7Scrollbar`：正文 `Column` 外套 `Box`，条子 `align(CenterEnd)` 叠在正文右侧 16dp 内边距里，上下各让 6dp，`scroll.maxValue > 0` 才出现；与正文共用同一个 `ScrollState`，拖滑块能读到最后一条出处，条子加粗不推字。浅深真窗口截图 `explain-live-native/light/10-scrollbar-top.png`、`11-scrollbar-bottom.png` 与 `dark/` 同名两张。书架仍缺，去向 P3 |
 | W6 | 跟随系统明暗 | 未验证 | `WindowsTextbookHost.kt:103` 用 `isSystemInDarkTheme()` | 运行中切换系统主题是否即时跟随需真窗口核；P5 |
 | W7 | 系统标题栏 | 已对 | 使用系统标题栏 | 不自绘，贴靠菜单可用 |
 
@@ -186,7 +186,7 @@ Android actual 保留原填色和 LocalIndication，悬停叠色与无水波纹 
 | --- | --- | --- | --- |
 | P0 按钮手感 | M1 M2 M3 K2 K5，以及 V7 细滚动条样式 | `shared/ui/.../v7/PaperButton.kt`、新文件 `shared/ui/.../v7/V7Tooltip.kt`、`V7Scrollbar.kt`（jvmMain） | 组件已实现，真窗口 Tab / 鼠标验收已过，TON-1657 |
 | P1 本机阅读 | K3 E2(页图) W5(阅读) M2(正文) A12 | `books/TextbookReader.kt` | PR #325（`agent/cb-flash2/024eba4a5560`），已 rebase 到 main `ac702387`，并已换用 P0 的 `V7Tooltip`/`V7Scrollbar`；占位的混排页冷加载一跳按二退裁决砍出本卡、记入「以后再说」。待串行窗口：新 head 的 `desktopApp:test`、K1 Tab 顺序、同向页占位与滚动条的浅深截图 |
-| P2 讲解卡 | A10 A11(出处) E3(讲解) D3 W5(讲解) K7 | `books/BookExplain.kt`、`books/AnswerExplain.kt`、`books/BookSourceRow.kt` | 本轮派 |
+| P2 讲解卡 | A10 A11(出处) E3(讲解) D3 W5(讲解) K7 | `books/BookExplain.kt`、`books/AnswerExplain.kt`、`books/BookSourceRow.kt` | TON-1659：A10、A11(出处) 已合入 #448；W5(讲解) 已接（本卡第 4 项）；E3 讲解、K7、D3 待验收 |
 | P3 书架 | A1(模式卡) E3(书架) W5(书架) | `books/TextbookShelf.kt` | TON-1668 书架入口、书目与滚动待验收；E3 不纳入本轮 |
 | P4 本地参考练习文案 | A7 A11(作答记录、出题) | `books/exam/LocalExamUi.kt`、`books/TextbookLearning.kt` | 排队，等 TON-1650 第 13 刀合并 |
 | P5 窗口外壳 | W3 W4 W6 E2(顶部细条) E3(外壳错误) | `WindowsTextbooks.kt`、`WindowsTextbookHost.kt`、`books/TextbookWorkspace.kt` | 排队，等 TON-1656 合并 |
@@ -242,7 +242,7 @@ Android actual 保留原填色和 LocalIndication，悬停叠色与无水波纹 
 | B6 | 设置弹窗最显眼的是长路径 | `light/settings`；`WindowsHomeCards.kt:110` | 路径降为 `fgSecondary` 小字；用户主目录部分缩写成「用户文件夹」，后面照原样写（例如「用户文件夹\Coach\books」），完整路径仍然可以选中复制。截图样例改用真实形状的路径，不用测试临时目录 | P7 |
 | B7 | 「这一轮的知识小结」和「小结」两块叠在一起 | `light/recap`；`books/AnswerExplain.kt:162` 的 `LessonSummaryCard`、`books/KnowledgeRecap.kt:32` | 什么时候出小结、写什么不变（不改学习逻辑），只改呈现：两块同时出现时，标题分别写「这一节」和「这六题学到的」，层级拉开；「继续 / 完成」按钮只在最下面的那张卡里放一组 | P2（TON-1659） |
 | B8 | 导出弹窗：勾选框像 Material 默认件；说明在讲「Mac 公式服务」「源码」「账本快照」 | `dark/notes-export`；`NotesExportDialog.kt:105`、`:149`、`:176`、`:190` | 勾选框按 D14 已改成松绿，盲评仍然觉得刺眼：改成和 V7 选项同一套的小方框（细线框，选中时松绿填充，勾用纸色），不用 `CheckboxDefaults`；说明改成人话，例如 `:190` 改成「PDF 里的公式由你的 Mac 画出；画不出来的会照原样写出来并标明。」，`:149` 去掉「账本快照」 | P8 |
-| B9 | 长页面截图从半句话开始、顶部被截掉，看不出上面还有内容 | `light/explain-failed`、`light/recap` | 这有一部分是截图取景造成的（测试里 `performScrollTo` 滚到卡片中间），但用户滚动后看到的也是这样，而且页面没有滚动条（W5）。产品这边并进 W5 的讲解、做题滚动条；截图这边按第 1 轮要求从卡片顶部取景 | P2（W5）、第 1 轮截图集 |
+| B9 | 长页面截图从半句话开始、顶部被截掉，看不出上面还有内容 | `light/explain-failed`、`light/recap` | 这有一部分是截图取景造成的（测试里 `performScrollTo` 滚到卡片中间），但用户滚动后看到的也是这样，而且页面没有滚动条（W5）。产品这边并进 W5 的讲解、做题滚动条：讲解已随 TON-1659 第 4 项接入（见 W5），滚动后右侧有细条、能看出下方还有内容；做题与小结仍待各自卡片落地；截图这边按第 1 轮要求从卡片顶部取景 | P2（W5）、第 1 轮截图集 |
 
 ### logo（两家意见，只算模型意见）
 

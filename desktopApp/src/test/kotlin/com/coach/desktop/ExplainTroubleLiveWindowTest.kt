@@ -258,16 +258,104 @@ class ExplainTroubleLiveWindowTest {
         } finally { edt { window.dispose() } }
     }
 
+    /**
+     * TON-1659 第 4 项：讲解长过一屏时，真窗口右侧要有一道看得见的 V7 细滚动条；滚到底能看见最后一条出处。
+     * 浅色、深色各开一次真窗口拍两张（顶部 / 底部）。这台机器用不了物理鼠标时（会话不是交互桌面），
+     * 滚动走面板自己的滚动动作，滑块拖动由 `ExplainScrollbarTest` 用 Compose 的指针事件核。
+     */
+    @Test fun longExplanationShowsTheV7ScrollbarInRealWindowsInBothThemes() {
+        assumeTrue(System.getProperty("coach.explainLiveWindow") == "true")
+        assumeTrue(System.getProperty("os.name").startsWith("Windows"))
+        for (name in listOf("COACH_URL", "COACH_CLIENT_DIR", "COACH_TOKEN_FILE", "COACH_ACCEPTANCE_REPLAY", "COACH_AGENT_RUN_ID"))
+            check(System.getenv(name).isNullOrBlank()) { "$name must be unset for this isolated run" }
+        val saved = listOf("user.home", "jpackage.app-path", "coach.windows.theme").associateWith { System.getProperty(it) }
+        val root = Files.createTempDirectory("coach-explain-scroll-live-")
+        try {
+            for (dark in listOf(false, true)) {
+                val home = Files.createDirectories(root.resolve(if (dark) "dark-home" else "light-home"))
+                System.setProperty("user.home", home.toString())
+                System.setProperty("jpackage.app-path", home.resolve("LearningCoach.exe").toString())
+                System.setProperty("coach.windows.theme", if (dark) "dark" else "light")
+                assertEquals(home.resolve("Coach/client"), DesktopConnectionSettings().clientDirectory)
+                FakeMac(if (dark) 'd' else 'l').use { mac -> scrollWalk(root.resolve(if (dark) "dark" else "light"), dark, mac) }
+            }
+        } finally {
+            for ((key, value) in saved) if (value == null) System.clearProperty(key) else System.setProperty(key, value)
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    private fun scrollWalk(root: Path, dark: Boolean, mac: FakeMac) {
+        val theme = if (dark) "dark" else "light"
+        mac.longAnswer = true
+        val library = TextbookLibrary(root.resolve("library"))
+        val controller = TextbookController(library)
+        runBlocking {
+            controller.importBook(syntheticTextbook(root.resolve("scroll")))
+            controller.chooseLearningPath(LearningPath.QUESTION_FIRST); controller.enableLearning()
+            controller.back()
+        }
+        val book = controller.state.value.book!!
+        val consent = ExplainConsent(library.directory).apply { allow(book.id) }
+        val window = edt { ComposeWindow().apply {
+            title = "LearningCoach · 讲解滚动条真窗口验收 · 自造样例书"
+            val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
+            setBounds(screen.x + 20, screen.y + 20, minOf(1440, screen.width - 40), minOf(900, screen.height - 60))
+            setContent { WindowsTextbookHost(controller) { null } }
+            isVisible = true
+        } }
+        fun step(name: String) = println("EXPLAIN_SCROLL_LIVE theme=$theme step=$name explains=${mac.explains.get()}")
+        try {
+            waitFor("host") { controller.state.value.screen == BookScreen.HOME && node(window, "host-navigation") != null }
+            clickText(window, "今天")
+            click(window, "host-today-read")
+            waitFor("reader") { controller.state.value.screen == BookScreen.READER && node(window, "textbook-reader") != null }
+            if (controller.state.value.prompt != null) runBlocking { controller.dismissPrompt() }
+            click(window, "book-explain-toggle")
+            waitFor("pairing form") { node(window, "explain-pairing") != null }
+            type(window, "explain-address", mac.url)
+            type(window, "explain-code", "246810")
+            click(window, "explain-pair")
+            waitFor("paired") { node(window, "explain-pairing") == null }
+            click(window, "explain-button")
+            waitFor("long answer") { node(window, "explain-answer") != null }
+            val bar = assertNotNull(node(window, "explain-scrollbar"), "长讲解右侧应当有滚动条")
+            val barRect = edt { bar.boundsInRoot }
+            val answerTop = edt { assertNotNull(node(window, "explain-text")).boundsInRoot.top }
+            shot(window, dark, "10-scrollbar-top")
+            // 像滚轮一样把面板滚到底：滚动条跟着走，最后一条出处进到可见区。
+            edt {
+                val panel = nodes(window).first { it.config.getOrNull(SemanticsProperties.TestTag) == "book-explain" }
+                panel.config[SemanticsActions.ScrollBy].action!!.invoke(0f, 10_000f)
+            }
+            Thread.sleep(500)
+            assertTrue(edt { node(window, "explain-text")!!.boundsInRoot.top } < answerTop, "面板滚下去时讲解正文跟着走")
+            val lastCitation = edt { nodes(window).filter {
+                it.config.getOrNull(SemanticsProperties.TestTag) == "explain-citation" }.maxByOrNull { it.boundsInRoot.top } }
+            assertNotNull(lastCitation, "长讲解应当带出处")
+            assertTrue(edt { lastCitation.boundsInRoot.height > 0f && lastCitation.boundsInRoot.bottom <= barRect.bottom + 1f },
+                "滚到底后最后一条出处看得见：bounds=${edt { lastCitation.boundsInRoot }} bar=$barRect")
+            assertNotNull(node(window, "explain-scrollbar"), "滚到底滚动条还在")
+            shot(window, dark, "11-scrollbar-bottom")
+            step("scrollbar")
+        } finally { edt { window.dispose() } }
+    }
+
     /** 本机回环上的假 Mac。配对第 n 次发第 n 份凭据；[revokeFirst] 打开后第一份凭据讲解时回 401；[quota] 打开时回日额度用完。 */
     private class FakeMac(prefix: Char) : AutoCloseable {
         companion object {
             const val QUOTA = "今天的讲解额度用完了，明天再来。"
             const val ANSWER = "这一段说的是：细胞是生物体结构和功能的基本单位。"
+            /** 第 4 项要的长讲解：真窗口一屏放不下，右侧才该出现滚动条。 */
+            val LONG_ANSWER = buildString {
+                repeat(60) { i -> append("第 ${i + 1} 句：细胞把光能变成糖，氧气从气孔散出去，整个过程受光照、温度和水分影响。") }
+            }
         }
         val pairs = AtomicInteger()
         val explains = AtomicInteger()
         @Volatile var quota = false
         @Volatile var revokeFirst = false
+        @Volatile var longAnswer = false
         private val tokens = listOf(prefix + "a".repeat(42), prefix + "b".repeat(42))
         private var server: HttpServer? = open(0)
         private val port = server!!.address.port
@@ -301,7 +389,8 @@ class ExplainTroubleLiveWindowTest {
                         else -> {
                             val id = Json.parseToJsonElement(sent).jsonObject.getValue("blocks").jsonArray.first().jsonObject.getValue("id").jsonPrimitive.content
                             val page = Regex(":p(\\d+):").find(id)!!.groupValues[1]
-                            200 to """{"text":"$ANSWER【S1】","sources":[{"docId":"$id","pdfPage":$page,"anchor":"S1"}]}"""
+                            val answer = if (longAnswer) LONG_ANSWER else ANSWER
+                            200 to """{"text":"$answer【S1】","sources":[{"docId":"$id","pdfPage":$page,"anchor":"S1"}]}"""
                         }
                     }
                 }

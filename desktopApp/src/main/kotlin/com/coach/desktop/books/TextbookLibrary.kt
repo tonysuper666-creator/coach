@@ -122,7 +122,11 @@ internal class TextbookLibrary(
                     query.executeQuery().use { p -> buildList { while (p.next()) {
                         val number = p.getInt(1)
                         val extra = extras[number]
-                        add(BookPage(number, p.getString(2), p.getInt(3) == 1, extra?.illustrations.orEmpty(), extra?.textLayout))
+                        val text = p.getString(2)
+                        val illustrations = extra?.illustrations.orEmpty().map { item ->
+                            if (item.table?.valid(item.height, text) == false) item.copy(table = null) else item
+                        }
+                        add(BookPage(number, text, p.getInt(3) == 1, illustrations, extra?.textLayout))
                     } } }
                 }
                 val storedPage = row.getInt("reading_page")
@@ -268,7 +272,7 @@ internal class TextbookLibrary(
                 val data = Files.readAllBytes(BookIllustrationAssets.imageFile(directory, bookId, old))
                 check(BookIllustrationAssets.sha256(data) == old.imageSha256) { "已有插图已变化。" }
                 merged += ExtractedIllustration(number, old.anchorOffset, data, old.extension, old.width, old.height,
-                    old.caption, old.kind, old.sourceStart, old.sourceEnd, old.sourceRegion)
+                    old.caption, old.kind, old.sourceStart, old.sourceEnd, old.sourceRegion, old.table)
             }
             merged += incoming.filterNot { item -> existing.any { it.imageSha256 == item.contentSha256 && it.sourceRegion == item.sourceRegion } }
         }
@@ -668,7 +672,8 @@ internal object TextbookExtraction {
                 control.report(page.number, pdf.numberOfPages)
                 if (visuals.size >= FormatBookImages.MAX_IMAGES || visualBytes >= FormatBookImages.MAX_TOTAL) break
                 val enclosed = PdfBoxedVisuals.extract(pdf, page, control)
-                for (crop in PdfBookImages.extract(pdf, page, enclosed, control)) {
+                val tables = PdfPrintedTables.extract(pdf, page, control, enclosed)
+                for (crop in PdfBookImages.extract(pdf, page, enclosed + tables, control)) {
                     if (visuals.size >= FormatBookImages.MAX_IMAGES || visualBytes + crop.bytes.size > FormatBookImages.MAX_TOTAL) break
                     visuals += crop
                     visualBytes += crop.bytes.size

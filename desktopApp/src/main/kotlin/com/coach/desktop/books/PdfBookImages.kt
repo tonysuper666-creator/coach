@@ -76,6 +76,7 @@ internal object PdfBookImages {
             if (!intersects(expanded, label.box)) candidates += Candidate(expanded, label, false)
         }
         val result = enclosed.map { old ->
+            if (old.table != null) return@map old
             val label = old.sourceRegion?.let(::caption)?.text ?: old.caption
             ExtractedIllustration(old.page, old.anchorOffset, old.bytes, old.extension, old.width, old.height,
                 label, old.kind, old.sourceStart, old.sourceEnd, old.sourceRegion)
@@ -147,7 +148,7 @@ internal object PdfBookImages {
     private fun sane(r: ReaderRect, width: Float, height: Float) = r.x > 0 && r.y > 0 &&
         r.x + r.width < 1 && r.y + r.height < 1 && r.width * width >= 24 &&
         r.height * height >= 18 && r.width * r.height < .85
-    private fun intersects(a: ReaderRect, b: ReaderRect) = a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+    fun intersects(a: ReaderRect, b: ReaderRect) = a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
     private fun near(a: ReaderRect, b: ReaderRect, x: Double, y: Double) = a.x - x < b.x + b.width && b.x - x < a.x + a.width && a.y - y < b.y + b.height && b.y - y < a.y + a.height
     private fun union(a: ReaderRect, b: ReaderRect): ReaderRect {
         val x = minOf(a.x, b.x); val y = minOf(a.y, b.y)

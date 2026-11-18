@@ -53,6 +53,7 @@ internal data class BookIllustration(
     val sourceStart: Int? = null,
     val sourceEnd: Int? = null,
     val sourceRegion: ReaderRect? = null,
+    val table: ImportedTable? = null,
 ) {
     val fileName: String get() = "$imageSha256.$extension"
     val replacedSourceRange: IntRange?
@@ -75,6 +76,7 @@ internal class ExtractedIllustration(
     val sourceStart: Int? = null,
     val sourceEnd: Int? = null,
     val sourceRegion: ReaderRect? = null,
+    val table: ImportedTable? = null,
 ) {
     val extension: String = BookIllustrationAssets.normalizeExtension(extension)
     val caption: String? = caption?.trim()?.takeIf { it.isNotEmpty() }
@@ -91,7 +93,7 @@ internal class ExtractedIllustration(
             kind == other.kind &&
             sourceStart == other.sourceStart &&
             sourceEnd == other.sourceEnd &&
-            sourceRegion == other.sourceRegion &&
+            sourceRegion == other.sourceRegion && table == other.table &&
             bytes.contentEquals(other.bytes))
 
     override fun hashCode(): Int {
@@ -106,6 +108,7 @@ internal class ExtractedIllustration(
         result = 31 * result + (sourceStart ?: 0)
         result = 31 * result + (sourceEnd ?: 0)
         result = 31 * result + (sourceRegion?.hashCode() ?: 0)
+        result = 31 * result + (table?.hashCode() ?: 0)
         return result
     }
 
@@ -237,6 +240,10 @@ internal object BookIllustrationAnchors {
             val pageText = requireNotNull(pageTexts[item.page]) { "插图指向了不存在的页码：${item.page}" }
             require(isValidAnchor(pageText, item.anchorOffset)) {
                 "插图锚点 ${item.anchorOffset} 超出第 ${item.page} 页范围（0..${pageText.length}）或劈开了 UTF-16 代理对。"
+            }
+            if (item.table != null) {
+                require(item.kind == PageVisualKind.TABLE && item.table.valid(item.height, pageText) &&
+                    item.anchorOffset == item.table.rows.first().source.startUtf16) { "表格行界或出处与本页不符。" }
             }
             if (item.sourceStart != null || item.sourceEnd != null) {
                 val start = requireNotNull(item.sourceStart) { "裁图替换区间缺少起始偏移。" }
@@ -374,6 +381,7 @@ internal object BookIllustrationStore {
                     region_y REAL,
                     region_w REAL,
                     region_h REAL,
+                    table_rows BLOB,
                     PRIMARY KEY(book, page, ordinal)
                 )""".trimIndent(),
             )
@@ -391,6 +399,7 @@ internal object BookIllustrationStore {
         ensureColumn("region_y", "REAL")
         ensureColumn("region_w", "REAL")
         ensureColumn("region_h", "REAL")
+        ensureColumn("table_rows", "BLOB")
     }
 
     fun tableExists(db: Connection): Boolean =
@@ -433,8 +442,8 @@ internal object BookIllustrationStore {
             db.prepareStatement(
                 """INSERT INTO $TABLE(
                     book,page,ordinal,anchor_offset,image_sha256,extension,width,height,caption,
-                    kind,source_start,source_end,region_x,region_y,region_w,region_h
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""".trimIndent(),
+                    kind,source_start,source_end,region_x,region_y,region_w,region_h,table_rows
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""".trimIndent(),
             ).use { sql ->
                 for (item in illustrations) {
                     val ordinal = pageOrdinals.getOrDefault(item.page, 0)
@@ -460,6 +469,7 @@ internal object BookIllustrationStore {
                         sql.setDouble(13, region.x); sql.setDouble(14, region.y)
                         sql.setDouble(15, region.width); sql.setDouble(16, region.height)
                     }
+                    sql.setBytes(17, item.table?.encode())
                     sql.addBatch()
                     persisted.add(
                         BookIllustration(
@@ -475,6 +485,7 @@ internal object BookIllustrationStore {
                             sourceStart = item.sourceStart,
                             sourceEnd = item.sourceEnd,
                             sourceRegion = region,
+                            table = item.table,
                         ),
                     )
                 }
@@ -498,7 +509,8 @@ internal object BookIllustrationStore {
             "page,ordinal,anchor_offset,image_sha256,extension,width,height,caption"
         }
         val grouped = LinkedHashMap<Int, MutableList<BookIllustration>>()
-        db.prepareStatement("SELECT $selectCols FROM $TABLE WHERE book=? ORDER BY page,ordinal").use { sql ->
+        val tableColumn = if ("table_rows" in columns) ",table_rows" else ""
+        db.prepareStatement("SELECT $selectCols$tableColumn FROM $TABLE WHERE book=? ORDER BY page,ordinal").use { sql ->
             sql.setString(1, bookId)
             sql.executeQuery().use { rows ->
                 while (rows.next()) {
@@ -541,6 +553,10 @@ internal object BookIllustrationStore {
                         sourceStart = sourceStart,
                         sourceEnd = sourceEnd,
                         sourceRegion = region,
+                        table = if (kind == PageVisualKind.TABLE && "table_rows" in columns)
+                            ImportedTable.decode(rows.getBytes("table_rows"), height)?.takeIf {
+                                it.rows.first().source.startUtf16 == anchor
+                            } else null,
                     )
                     grouped.getOrPut(page) { mutableListOf() }.add(illustration)
                 }

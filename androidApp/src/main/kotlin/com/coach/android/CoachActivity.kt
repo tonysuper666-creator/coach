@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.SideEffect
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -69,12 +70,13 @@ class CoachActivity : ComponentActivity() {
                 }
             }
             CoachTheme(dark) {
+                val hinge = acceptanceHinge() ?: rememberWindowHinge()
                 Box(Modifier.semantics { testTagsAsResourceId = true }) {
                     PairingGate(store,serverUrl) { credentials ->
                         if(BuildConfig.COACH_COURSE.isBlank()) CoachNotice("课程还没有装好，请稍后重开。")
                         else {
                             val controller=remember(credentials.deviceId) { createController(serverUrl,credentials) }
-                            CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"), initialTab = runCatching { com.coach.ui.AppTab.valueOf(intent.getStringExtra("tab").orEmpty()) }.getOrDefault(com.coach.ui.AppTab.TODAY), settings = { ReminderSettings(reminder) })
+                            CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"), initialTab = runCatching { com.coach.ui.AppTab.valueOf(intent.getStringExtra("tab").orEmpty()) }.getOrDefault(com.coach.ui.AppTab.TODAY), settings = { ReminderSettings(reminder) }, hinge = hinge)
                         }
                     }
                 }

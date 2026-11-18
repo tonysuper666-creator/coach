@@ -26,7 +26,12 @@ fun AdaptiveScaffold(
     outline: @Composable () -> Unit = {},
 ) {
     BoxWithConstraints(modifier.fillMaxSize().background(CoachTheme.colors.bgCanvas).windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout).only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))) {
-        val layout = LayoutRules.compute(WindowSpec(maxWidth.value, maxHeight.value, hinge))
+        // 窗口坐标里的折痕要减掉这里已经吃掉的状态栏，否则上半屏会压到折痕底下。
+        val insetTop = with(androidx.compose.ui.platform.LocalDensity.current) {
+            WindowInsets.systemBars.union(WindowInsets.displayCutout).getTop(this).toDp().value
+        }
+        val local = hinge?.let { if (it.axis == HingeAxis.Horizontal) it.copy(atDp = it.atDp - insetTop) else it }
+        val layout = LayoutRules.compute(WindowSpec(maxWidth.value, maxHeight.value, local))
         AdaptiveScaffoldLayout(layout, asideOpen, onAsideDismiss, nav, conversation, aside, outline)
     }
 }
@@ -52,6 +57,15 @@ fun AdaptiveScaffoldLayout(
     val movableAside = remember { movableContentOf { asideNow() } }
     val movableOutline = remember { movableContentOf { outlineNow() } }
     val colors = CoachTheme.colors
+    val tabletop = layout.tabletopAtDp
+    if (tabletop != null) {
+        // 桌面姿态：上半屏只放内容，下半屏放操作（导航条和随内容走的控制），折痕上不放字。
+        Column(Modifier.fillMaxSize()) {
+            Box(Modifier.height(tabletop.dp).fillMaxWidth()) { movableConversation() }
+            Column(Modifier.weight(1f).fillMaxWidth().background(colors.surface1)) { nav(NavStyle.BottomBar) }
+        }
+        return
+    }
     when (layout.nav) {
         NavStyle.BottomBar -> Box(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize()) {

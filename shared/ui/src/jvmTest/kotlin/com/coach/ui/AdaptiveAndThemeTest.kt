@@ -96,8 +96,36 @@ class AdaptiveAndThemeTest {
         assertNull(LayoutRules.compute(WindowSpec(933f, 704f)).dividerAtDp)
     }
 
-    private class Clock(var ms: Long = 10_000) { fun now() = ms }
+    /** 展开态带着铰链进布局：竖着也是侧栏两栏，不再退回手机底部栏；折回外屏没有铰链，才是单栏底部栏。 */
+    @Test fun unfoldedFoldKeepsTheRailAndOnlyTheCoverFallsBackToTheBottomBar() {
+        val unfolded = LayoutRules.navigation(WindowSpec(dp(1848), dp(2448), Hinge(352f)))
+        assertEquals(NavStyle.Rail, unfolded.nav)
+        assertEquals(352f, unfolded.dividerAtDp)
+        val cover = LayoutRules.navigation(WindowSpec(dp(1248), dp(1972)))
+        assertEquals(NavStyle.BottomBar, cover.nav)
+        assertNull(cover.dividerAtDp)
+        // 外屏上系统也可能报一条折痕，但它分不开窗口，布局仍按手机单栏。
+        assertEquals(NavStyle.BottomBar, LayoutRules.navigation(WindowSpec(dp(1248), dp(1972), Hinge(237f))).nav)
+    }
 
+    /** 半折横放（桌面姿态）：折痕横着，上半屏内容、下半屏操作；摊平时的横向折痕不分区。 */
+    @Test fun tabletopSplitsAboveAndBelowTheHinge() {
+        val tabletop = LayoutRules.navigation(WindowSpec(933f, 704f, Hinge(atDp = 352f, axis = HingeAxis.Horizontal)))
+        assertEquals(352f, tabletop.tabletopAtDp)
+        assertNull(tabletop.dividerAtDp)
+        assertEquals(NavStyle.BottomBar, tabletop.nav)
+        assertEquals(AsidePlacement.BottomSheet, tabletop.aside)
+        // 摊平只报折痕、不是半折：一整块屏幕，不上下分区（普通窗口规则照旧）。
+        assertNull(LayoutRules.compute(WindowSpec(933f, 704f, Hinge(atDp = 352f))).tabletopAtDp)
+        // 矮窗口先按短屏处理，不分上下。
+        val flat = LayoutRules.compute(WindowSpec(933f, 460f, Hinge(atDp = 230f, axis = HingeAxis.Horizontal)))
+        assertNull(flat.tabletopAtDp); assertEquals(NavStyle.IconRail, flat.nav)
+        // 折痕贴边时把分界夹在中间，上下两半都不会被挤成 0。
+        assertEquals(LayoutRules.TabletopMinContentDp, LayoutRules.compute(WindowSpec(933f, 704f, Hinge(atDp = 80f, axis = HingeAxis.Horizontal))).tabletopAtDp)
+        assertEquals(704f - LayoutRules.TabletopMinControlsDp, LayoutRules.compute(WindowSpec(933f, 704f, Hinge(atDp = 690f, axis = HingeAxis.Horizontal))).tabletopAtDp)
+    }
+
+    private class Clock(var ms: Long = 10_000) { fun now() = ms }
     @Test fun enterNeverSendsInsideAComposition() {
         val clock = Clock(); val gate = EnterGate(60L) { clock.now() }
         assertTrue(gate.shouldSend(true, keyDown = true, shift = false, composingNow = false))

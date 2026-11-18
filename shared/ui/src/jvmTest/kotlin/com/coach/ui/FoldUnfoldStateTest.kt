@@ -10,6 +10,8 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import com.coach.ui.adaptive.Hinge
+import com.coach.ui.adaptive.HingeAxis
 import com.coach.ui.lab.FormFactorLab
 import com.coach.ui.lab.LabState
 import kotlin.math.abs
@@ -88,5 +90,37 @@ class FoldUnfoldStateTest {
         onNodeWithTag("chat-list").performScrollToIndex(1)
         onNodeWithTag("option-C").performClick()
         assertEquals("C", state.selected["q1"])
+    }
+    /**
+     * 半折横放（桌面姿态）：内容在上半屏、导航在下半屏。来回切 5 轮，草稿、选区、已选项、读到的位置都不动，
+     * 因为页面是同一个 movable 内容，换的不是屏幕而只是它占的那块地方。
+     */
+    @Test fun tabletopKeepsDraftOptionAndReadingPlace() = runComposeUiTest {
+        val state = LabState()
+        var size by mutableStateOf(inner)
+        var hinge by mutableStateOf<Hinge?>(null)
+        setContent { Box(Modifier.size(size.first.dp, size.second.dp)) { FormFactorLab(state, hinge, tickMs = 40L, chunk = 40) } }
+        waitForIdle()
+        onNodeWithTag("chat-list").performScrollToIndex(12)
+        waitForIdle()
+        runOnIdle { state.selected["q1"] = "B"; state.draft = TextFieldValue("半折也不丢", TextRange(3)) }
+        waitForIdle()
+        val tabletop = (933 to 704) to Hinge(352f, axis = HingeAxis.Horizontal)
+        var switches = 0; var draftLoss = 0; var optionLoss = 0; var anchorLoss = 0
+        repeat(5) {
+            for (target in listOf(tabletop, inner to null)) {
+                val (keyBefore, fractionBefore) = readerFraction(state)
+                size = target.first; hinge = target.second
+                mainClock.advanceTimeBy(200L); waitForIdle()
+                mainClock.advanceTimeBy(200L); waitForIdle()
+                switches++
+                if (state.draft.text != "半折也不丢" || state.draft.selection != TextRange(3)) draftLoss++
+                if (state.selected["q1"] != "B") optionLoss++
+                val (key, fraction) = readerFraction(state)
+                if (key != keyBefore || abs(fraction - fractionBefore) > 0.03f) anchorLoss++
+            }
+        }
+        assertEquals(10, switches)
+        assertEquals(0, draftLoss, "draft"); assertEquals(0, optionLoss, "selected option"); assertEquals(0, anchorLoss, "reading place")
     }
 }

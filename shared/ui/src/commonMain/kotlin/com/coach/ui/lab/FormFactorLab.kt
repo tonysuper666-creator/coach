@@ -36,7 +36,7 @@ class LabState(val streamTarget: String = LabText.streamed) {
 }
 
 @Composable
-fun FormFactorLab(state: LabState, tickMs: Long = 50L, chunk: Int = 6) {
+fun FormFactorLab(state: LabState, hinge: Hinge? = null, tickMs: Long = 50L, chunk: Int = 6) {
     // The stream belongs to the screen state, not to a pane: it keeps running through every layout change.
     LaunchedEffect(state) {
         while (state.streamedChars < state.streamTarget.length) {
@@ -46,6 +46,7 @@ fun FormFactorLab(state: LabState, tickMs: Long = 50L, chunk: Int = 6) {
     }
     CoachTheme {
         AdaptiveScaffold(
+            hinge = hinge,
             asideOpen = state.asideOpen,
             onAsideDismiss = { state.asideOpen = false },
             nav = { style -> LabNav(style) },

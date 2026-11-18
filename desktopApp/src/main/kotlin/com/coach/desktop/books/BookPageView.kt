@@ -33,7 +33,12 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalClipboard
@@ -100,10 +105,9 @@ internal class BookPagingState(initial: BookPageAnchor) {
     var anchor by mutableStateOf(initial)
     var pages by mutableStateOf(emptyList<BookLaidPage>())
     var spread by mutableStateOf(false)
-    /** 双页时右页页首的锚点；切到滚动读时从这里接着读。非双页为 null。 */
-    var spreadRightAnchor: BookPageAnchor? = null
-    /** 上次离开滚动读时的锚点；之后没翻过页就不再把「右页页首」当阅读位置，避免来回切时一次次往前挪。 */
-    var anchorAtScrollExit: BookPageAnchor? = null
+    /** 当前这组对开的左页下标，和排好的页表一起记着；读者点右页时锚点落在右页，但这一组对开不跟着移位。 */
+    var groupFirst = -1
+    var groupPages: List<BookLaidPage>? = null
     var publishedImportPage = initial.importPage
         private set
     private val pendingImportPages = mutableListOf<Int>()
@@ -125,7 +129,13 @@ internal class BookPagingState(initial: BookPageAnchor) {
             pendingImportPages.clear()
         }
     }
-    val index get() = pages.pageContaining(anchor)
+    /** 当前显示的第一页。双页时锚点在这组的左页或右页都算这一组。 */
+    fun firstFor(laid: List<BookLaidPage>, twoPages: Boolean): Int {
+        val p = laid.pageContaining(anchor)
+        val g = groupFirst
+        return if (twoPages && groupPages === laid && (g == p || g == p - 1)) g else p
+    }
+    val index get() = firstFor(pages, spread)
     val canPrevious get() = index > 0
     val canNext get() = index + (if (spread) 2 else 1) < pages.size
     fun move(turn: ReaderTurn): BookPageAnchor? {
@@ -200,15 +210,11 @@ internal fun BookPageView(
             Text("这一页没有可提取文字，请切换到原页阅读。", Modifier.align(Alignment.Center))
             return@BoxWithConstraints
         }
-        val first = pages.pageContaining(state.anchor)
+        val first = state.firstFor(pages, spread)
+        SideEffect { state.groupFirst = first; state.groupPages = pages }
         LaunchedEffect(pages, first, state.anchor) { onPosition(pages[first].anchor.importPage) }
-        if (!scrolling) SideEffect { state.spreadRightAnchor = if (spread && state.anchor == pages[first].anchor && state.anchor != state.anchorAtScrollExit) pages.getOrNull(first + 1)?.anchor else null }
         if (scrolling) {
             val itemHeightPx = with(density) { maxHeight.roundToPx() }.coerceAtLeast(1)
-            // 从双页切来：以右页页首为阅读位置（读到哪、接着读哪），其余情况用当前锚点
-            val entry = remember { state.spreadRightAnchor }
-            val consumed = remember { booleanArrayOf(false) }
-            LaunchedEffect(Unit) { entry?.let { state.anchor = it }; state.anchorAtScrollExit = state.anchor }
             val gapPx = with(density) { 24.dp.roundToPx() }
             val lineAt = itemHeightPx / 3 // 阅读行：屏幕上方 1/3 处（desktop-polish 6.9）
             /** 阅读行的原文锚点 -> 视口顶边应在的位置，使该行落在屏幕上方 1/3 处。 */
@@ -234,14 +240,15 @@ internal fun BookPageView(
                 return pages[idx.coerceIn(0, pages.lastIndex)].anchorAtY(y, measurer, typography, widthPx)
             }
             val scrollState = remember(pages) {
-                val seed = if (!consumed[0] && entry != null) entry else state.anchor
-                consumed[0] = true
-                ScrollReadState(pages.size, positionOf(seed))
+                val at = positionOf(state.anchor)
+                ScrollReadState(pages.size, at, (at.fraction * itemHeightPx).toInt())
             }
             // 用户滚动：把视口顶边那一行的原文位置写回锚点（不只是页首），切回翻页时能还原到这一行。
-            val programmatic = remember(scrollState) { arrayOfNulls<ScrollReadPosition>(1) }
+            // 进入时的位置是程序放的，不回写锚点：没动过就切回去，锚点要和切之前完全相等
+            val programmatic = remember(scrollState) { arrayOf<ScrollReadPosition?>(positionOf(state.anchor)) }
             val written = remember(scrollState) { arrayOfNulls<BookPageAnchor>(1) }
             LaunchedEffect(scrollState, pages) {
+                snapshotFlow { scrollState.laidOut }.first { it }
                 snapshotFlow { scrollState.position }.collect { pos ->
                     val set = programmatic[0]
                     // 程序刚跳过去的位置不回写，其余（用户滚动、惯性、语义滚动）都回写
@@ -250,7 +257,6 @@ internal fun BookPageView(
                     val next = anchorOf(pos)
                     written[0] = next
                     state.anchor = next
-                    state.anchorAtScrollExit = state.anchor
                 }
             }
             // 键盘 / 目录 / 出处等从外面改了锚点：滚过去；和当前位置差不到两行就不动，避免来回抖。
@@ -302,7 +308,8 @@ internal fun BookPageView(
                                 val page = pages.getOrNull(first + side)
                                 Box(Modifier.width(sheetWidth).fillMaxHeight()
                                     .background(if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper)
-                                    .clipToBounds().testTag("book-sheet-$side")) {
+                                    .clipToBounds().readingTap { y -> pages.getOrNull(first + side)?.let { state.anchor = it.anchorAtY(y, measurer, typography, widthPx) } }
+                                    .testTag("book-sheet-$side")) {
                                     if (page != null) {
                                         val remaining = pages.count { it.chapter == page.chapter } - pages.take(first + side + 1).count { it.chapter == page.chapter }
                                         BookSheet(book.title, page, typography, measurer, widthPx,
@@ -336,7 +343,9 @@ internal fun BookPageView(
                             shadow = if (colors.dark) Color.Black else CoachV7.Light.ink) { index ->
                             val side = if (spread) Math.floorMod(index - turnState.shownPosition, 2) else 0
                             val page = pages[index]
-                            Box(Modifier.width(sheetWidth).fillMaxHeight().background(paper).clipToBounds().testTag("book-sheet-$side")) {
+                            Box(Modifier.width(sheetWidth).fillMaxHeight().background(paper).clipToBounds()
+                                .readingTap { y -> state.anchor = pages[index].anchorAtY(y, measurer, typography, widthPx) }
+                                .testTag("book-sheet-$side")) {
                                 val remaining = pages.count { it.chapter == page.chapter } - pages.take(index + 1).count { it.chapter == page.chapter }
                                 BookSheet(book.title, page, typography, measurer, widthPx,
                                     if (spread && side == 1) rightInset else leftInset,
@@ -349,6 +358,16 @@ internal fun BookPageView(
             if (spread && turnStyle == PageTurnStyle.None) Box(Modifier.width(48.dp).fillMaxHeight().background(Brush.horizontalGradient(listOf(
                 Color.Transparent, (if (colors.dark) Color.Black.copy(alpha = .24f) else CoachV7.Light.ink.copy(alpha = .06f)), Color.Transparent))))
         }
+    }
+}
+
+/** 在版心里点一下（没有拖动）：点中的那一行就是当前阅读行，锚点落到那里，不管在左页还是右页。 */
+private fun Modifier.readingTap(onTap: (Int) -> Unit): Modifier = pointerInput(Unit) {
+    awaitEachGesture {
+        // Final 轮：图、按钮这类自己处理了点击（已消费）的元素不算「在版心里点一下」
+        val down = awaitFirstDown(requireUnconsumed = true, pass = PointerEventPass.Final)
+        val up = waitForUpOrCancellation(PointerEventPass.Final)
+        if (up != null && !up.isConsumed && (up.position - down.position).getDistance() <= viewConfiguration.touchSlop) onTap(down.position.y.toInt())
     }
 }
 

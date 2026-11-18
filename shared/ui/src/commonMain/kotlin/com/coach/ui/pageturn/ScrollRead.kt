@@ -35,12 +35,12 @@ import kotlinx.coroutines.launch
  * 页里画什么由 [ScrollReadView] 的调用方给；页高由页内容自己决定，页和页之间留 gap。
  */
 @Stable
-class ScrollReadState(val pageCount: Int, initial: ScrollReadPosition = ScrollReadPosition(0)) {
+class ScrollReadState(val pageCount: Int, initial: ScrollReadPosition = ScrollReadPosition(0), initialOffsetPx: Int = 0) {
     internal val list = LazyListState(
         firstVisibleItemIndex = initial.page.coerceIn(0, maxOf(0, pageCount - 1)),
-        firstVisibleItemScrollOffset = 0,
+        firstVisibleItemScrollOffset = initialOffsetPx.coerceAtLeast(0),
     )
-    private var pendingFraction: Float? = initial.fraction.takeIf { it > 0f }
+    private var pendingFraction: Float? = initial.fraction.takeIf { it > 0f && initialOffsetPx <= 0 }
     internal var reduced = false
 
     /** 视口顶边所在的页和页内进度。滚过页边后自然换成下一页。 */

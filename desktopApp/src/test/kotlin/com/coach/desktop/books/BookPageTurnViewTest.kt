@@ -66,42 +66,81 @@ class BookPageTurnViewTest {
     @Test fun flipDark() = run(PageTurnStyle.Flip, true)
     @Test fun slideLight() = run(PageTurnStyle.Slide, false)
 
-    @Test fun scrollModeKeepsThePageWhenSwitchingBackAndForthTenTimes() = runSkikoComposeUiTest(size = Size(2560f, 1440f), density = Density(1.5f)) {
-        val state = BookPagingState(BookPageAnchor(41))
-        var readMode by androidx.compose.runtime.mutableStateOf(BookReadMode.Paged)
+    private fun SkikoComposeUiTest.spreadHost(state: BookPagingState, mode: androidx.compose.runtime.MutableState<BookReadMode>) {
         mainClock.autoAdvance = false
         setContent { CoachTheme(false) { androidx.compose.material3.Surface(color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) { Box(Modifier.fillMaxSize()) {
-            BookPageView(book, state, emptyMap(), onTurn = { state.move(it) }, turnStyle = PageTurnStyle.None, readMode = readMode)
+            BookPageView(book, state, emptyMap(), onTurn = { state.move(it) }, turnStyle = PageTurnStyle.None, readMode = mode.value)
         } } } }
         mainClock.advanceTimeBy(100); waitForIdle()
-        runOnIdle { state.move(ReaderTurn.Next); state.move(ReaderTurn.Next) }
-        mainClock.advanceTimeBy(100); waitForIdle()
-        assertTrue(state.index > 0)
-        // 第一次从双页切到滚动：从右页页首接着读；之后来回切位置不再漂
-        runOnIdle { readMode = BookReadMode.Scroll }
-        mainClock.advanceTimeBy(150); waitForIdle()
-        runOnIdle { readMode = BookReadMode.Paged }
-        mainClock.advanceTimeBy(150); waitForIdle()
-        val start = state.anchor
-        // 双页和单栏的版心宽度不同，排版页下标不可比；停在同一处用「原文锚点」比
+    }
+
+    private fun SkikoComposeUiTest.tenRounds(state: BookPagingState, mode: androidx.compose.runtime.MutableState<BookReadMode>, baseline: BookPageAnchor) {
         repeat(10) { round ->
-            runOnIdle { readMode = BookReadMode.Scroll }
+            runOnIdle { mode.value = BookReadMode.Scroll }
             mainClock.advanceTimeBy(150); waitForIdle()
             onNodeWithTag("book-scroll-read").assertExists()
-            assertEquals(start, state.anchor, "round $round: entering scroll must stay on the same anchor")
-            runOnIdle { readMode = BookReadMode.Paged }
+            runOnIdle { mode.value = BookReadMode.Paged }
             mainClock.advanceTimeBy(150); waitForIdle()
-            assertEquals(start, state.anchor, "round $round: back to paging must stay on the same anchor")
+            assertEquals(baseline, state.anchor, "round $round: back in paging the anchor must equal the baseline")
         }
-        // 滚动时往下滑：锚点跟着走
-        runOnIdle { readMode = BookReadMode.Scroll }
+    }
+
+    @Test fun leftPageOfASpreadKeepsTheExactAnchorOverTenRoundTrips() = runSkikoComposeUiTest(size = Size(2560f, 1440f), density = Density(1.5f)) {
+        val state = BookPagingState(BookPageAnchor(41))
+        val mode = androidx.compose.runtime.mutableStateOf(BookReadMode.Paged)
+        spreadHost(state, mode)
+        runOnIdle { state.move(ReaderTurn.Next) }
+        mainClock.advanceTimeBy(100); waitForIdle()
+        assertTrue(state.spread)
+        val baseline = state.anchor
+        assertEquals(state.pages[state.index].anchor, baseline)
+        runOnIdle { mode.value = BookReadMode.Scroll }
+        mainClock.advanceTimeBy(150); waitForIdle()
+        assertEquals(baseline, state.anchor, "entering scroll without scrolling must not move the anchor")
+        runOnIdle { mode.value = BookReadMode.Paged }
+        mainClock.advanceTimeBy(150); waitForIdle()
+        assertEquals(baseline, state.anchor)
+        tenRounds(state, mode, baseline)
+    }
+
+    @Test fun rightPageClickBecomesTheReadingSpotAndSurvivesTenRoundTrips() = runSkikoComposeUiTest(size = Size(2560f, 1440f), density = Density(1.5f)) {
+        val state = BookPagingState(BookPageAnchor(41))
+        val mode = androidx.compose.runtime.mutableStateOf(BookReadMode.Paged)
+        spreadHost(state, mode)
+        runOnIdle { state.move(ReaderTurn.Next) }
+        mainClock.advanceTimeBy(100); waitForIdle()
+        val groupLeft = state.index
+        val leftAnchor = state.anchor
+        onNodeWithTag("book-sheet-1").performTouchInput { click(Offset(width / 2f, height / 2f)) }
+        mainClock.advanceTimeBy(100); waitForIdle()
+        val baseline = state.anchor
+        assertTrue(baseline.offsetUtf16 > leftAnchor.offsetUtf16, "a click on the right page must move the anchor into it")
+        assertEquals(groupLeft, state.index, "the spread must not shift when the right page is clicked")
+        runOnIdle { mode.value = BookReadMode.Scroll }
+        mainClock.advanceTimeBy(150); waitForIdle()
+        assertEquals(baseline, state.anchor)
+        runOnIdle { mode.value = BookReadMode.Paged }
+        mainClock.advanceTimeBy(150); waitForIdle()
+        assertEquals(baseline, state.anchor)
+        tenRounds(state, mode, baseline)
+    }
+
+    @Test fun scrollModeKeepsThePageWhenSwitchingBackAndForthTenTimes() = runSkikoComposeUiTest(size = Size(2560f, 1440f), density = Density(1.5f)) {
+        val state = BookPagingState(BookPageAnchor(41))
+        val mode = androidx.compose.runtime.mutableStateOf(BookReadMode.Paged)
+        spreadHost(state, mode)
+        runOnIdle { state.move(ReaderTurn.Next); state.move(ReaderTurn.Next) }
+        mainClock.advanceTimeBy(100); waitForIdle()
+        val baseline = state.anchor
+        tenRounds(state, mode, baseline)
+        runOnIdle { mode.value = BookReadMode.Scroll }
         mainClock.advanceTimeBy(150); waitForIdle()
         val scrollStartIndex = state.index
         onNodeWithTag("book-scroll-read").performTouchInput { swipeUp(startY = height * 0.9f, endY = height * 0.05f, durationMillis = 100) }
-        mainClock.advanceTimeBy(3000); waitForIdle() // 等惯性滚完再读位置
+        mainClock.advanceTimeBy(3000); waitForIdle()
         assertTrue(state.index > scrollStartIndex, "scrolling down should advance the page: $scrollStartIndex -> ${state.index}")
         val after = state.anchor
-        runOnIdle { readMode = BookReadMode.Paged }
+        runOnIdle { mode.value = BookReadMode.Paged }
         mainClock.advanceTimeBy(150); waitForIdle()
         assertEquals(after, state.anchor)
         shot("read-mode-paged-after-scroll")

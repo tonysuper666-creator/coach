@@ -14,7 +14,7 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class ReadingSpotQa436 {
-    data class Sentence(val id: String, val y: Float, val side: String)
+    data class Sentence(val id: String, val y: Float, val side: String, val rootX: Float = 0f, val rootY: Float = 0f)
 
     private fun SkikoComposeUiTest.sentences(): List<Sentence> {
         val viewport = onNodeWithTag("reader-page").fetchSemanticsNode().boundsInRoot
@@ -27,7 +27,8 @@ class ReadingSpotQa436 {
                     val line = layout.getLineForOffset(match.range.first)
                     val y = node.positionInRoot.y + layout.getLineTop(line)
                     val bottom = node.positionInRoot.y + layout.getLineBottom(line)
-                    if (y >= viewport.top && bottom <= viewport.bottom) Sentence(match.value, y - viewport.top, side) else null
+                    if (y >= viewport.top && bottom <= viewport.bottom) Sentence(match.value, y - viewport.top, side,
+                        node.positionInRoot.x + node.size.width / 2f, (y + bottom) / 2f) else null
                 }.toList()
             }
         }
@@ -70,8 +71,13 @@ class ReadingSpotQa436 {
         val before = sentences()
         val right = before.filter { it.side == "reader-text-right" }
         assertTrue(right.size >= 3, "spread fixture should have a visible right page")
-        val target = right[right.size / 2].id
-        report("spread-before", before, target)
+        val clicked = right[right.size / 2]
+        val target = clicked.id
+        // architect ruling: a click inside the right page makes it the reading page
+        val pageBounds = onNodeWithTag("reader-page").fetchSemanticsNode().boundsInRoot
+        onNodeWithTag("reader-page").performTouchInput { click(androidx.compose.ui.geometry.Offset(clicked.rootX - pageBounds.left, clicked.rootY - pageBounds.top)) }
+        mainClock.advanceTimeBy(300); waitForIdle()
+        report("spread-before", sentences(), target)
         toggle()
         onNodeWithTag("book-scroll-read").assertExists()
         val scrolling = sentences()
@@ -80,6 +86,23 @@ class ReadingSpotQa436 {
         val restored = sentences()
         report("back-to-spread", restored, target)
         assertTrue(scrolling.any { it.id == target } && restored.any { it.id == target }, "same sentence must remain visible on both switches")
+    }
+
+    @Test fun leftPageSentencesSurviveFirstSwitchWithoutAnyClick() = withBook(2560f) {
+        onNodeWithText("下一页").performClick()
+        mainClock.advanceTimeBy(850); waitForIdle()
+        val before = sentences()
+        val left = before.filter { it.side == "reader-text" }
+        assertTrue(left.size >= 3)
+        val first = left.first().id
+        val later = left[left.size / 2].id
+        toggle()
+        onNodeWithTag("book-scroll-read").assertExists()
+        val scrolling = sentences().map { it.id }
+        assertTrue(first in scrolling && later in scrolling, "left-page sentences $first and $later must be visible in scroll: $scrolling")
+        toggle()
+        val back = sentences().map { it.id }
+        assertTrue(first in back && later in back, "and again in the spread: $back")
     }
 
     @Test fun partialScrollRetainsActualReadingLineAcrossRoundTrip() = withBook(1440f) {

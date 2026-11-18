@@ -422,13 +422,23 @@ internal fun TextbookReader(
         Column(Modifier.fillMaxSize().padding(20.dp).testTag("textbook-reader"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             val actions: @Composable () -> Unit = {
                 if (hasOriginal) V7TextButton(onClick = {
+                    val showText = !textView
                     // A reflowed sheet can start on an earlier page than its reading anchor.
-                    if (textView) {
-                        if (originalPdf) pdf.jump(paragraphPage.number)
-                        if (paging.publishImportPage(paragraphPage.number)) onPage(paragraphPage.number)
+                    if (!showText) {
+                        val passage = passageJump?.takeIf {
+                            touchPdf && it.page == paging.anchor.importPage && it.start == paging.anchor.offsetUtf16
+                        }
+                        if (passage != null) openPassage(passage)
+                        else {
+                            if (touchPdf) passageJump = null
+                            if (originalPdf) pdf.jump(paragraphPage.number)
+                            if (paging.publishImportPage(paragraphPage.number)) onPage(paragraphPage.number)
+                        }
+                    } else if (chosen != null) {
+                        paging.anchor = BookPageAnchor(chosen.page, chosen.start)
+                        if (touchPdf) passageJump = BookPassage.from(book, chosen)
                     }
-                    if (!textView && chosen != null) paging.anchor = BookPageAnchor(chosen.page, chosen.start)
-                    textView = !textView
+                    textView = showText
                     pdf.selection = null
                     library.saveTextView(book.id, textView)
                 }, modifier = Modifier.testTag("book-original-toggle"), contentPadding = toolPadding) {

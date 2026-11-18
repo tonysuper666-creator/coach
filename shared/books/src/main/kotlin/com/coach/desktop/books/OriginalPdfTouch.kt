@@ -21,9 +21,22 @@ import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import com.coach.domain.reader.ReaderRect
 import com.coach.domain.reader.ReaderTextRange
 
 internal data class PdfSelectionHandle(val start: Boolean, val anchor: Offset, val center: Offset)
+
+internal fun pdfSelectionHandles(boxes: List<ReaderRect>, width: Float, height: Float, radius: Float): List<PdfSelectionHandle> {
+    if (boxes.isEmpty()) return emptyList()
+    return listOf(true to boxes.first(), false to boxes.last()).map { (start, box) ->
+        val x = (if (start) box.x else box.x + box.width).toFloat() * width
+        val y = (box.y + box.height).toFloat() * height
+        val anchor = Offset(x, y)
+        val center = Offset(x.coerceIn(radius, maxOf(radius, width - radius)),
+            (y + radius).coerceIn(radius, maxOf(radius, height - radius)))
+        PdfSelectionHandle(start, anchor, center)
+    }
+}
 
 @Stable
 internal class PdfTouchZoom {
@@ -58,14 +71,13 @@ private class PdfTouchDrag(
         // Use the glyph adjacent to the handle, even when the finger starts below or beside it.
         val target = if (handle == null) point else handle.anchor + (point - contact)
         val hit = geometry.nearest(target, width, height) ?: return null
-        val range = when (handle?.start) {
+        return when (handle?.start) {
             true -> hit.takeIf { it.startUtf16 < anchor.endUtf16 }
                 ?.let { ReaderTextRange(it.startUtf16, anchor.endUtf16) }
             false -> hit.takeIf { it.endUtf16 > anchor.startUtf16 }
                 ?.let { ReaderTextRange(anchor.startUtf16, it.endUtf16) }
             null -> ReaderTextRange(minOf(hit.startUtf16, anchor.startUtf16), maxOf(hit.endUtf16, anchor.endUtf16))
         }
-        return range?.takeIf { geometry.verifiedBoxes(it).isNotEmpty() }
     }
 }
 
@@ -91,11 +103,12 @@ internal fun Modifier.originalPdfTouch(
             val contact = zoom.pagePoint(down.position, width, height)
             val handle = if (glyphs != null && selected != null) {
                 val reach = 24.dp.toPx() / zoom.scale
-                glyphs.handles(selected, width, height, 5.dp.toPx() / zoom.scale)
+                pdfSelectionHandles(glyphs.verifiedBoxes(selected), width, height, 5.dp.toPx() / zoom.scale)
                     .filter { (it.center - contact).getDistance() <= reach }
                     .minByOrNull { (it.center - contact).getDistanceSquared() }
             } else null
             var drag = if (handle != null && selected != null) PdfTouchDrag(selected, handle, contact) else null
+            var reported = selected
             if (drag != null) down.consume()
 
             val hit = if (drag == null) glyphs?.nearest(contact, width, height, 7.dp.toPx() / zoom.scale) else null
@@ -106,6 +119,7 @@ internal fun Modifier.originalPdfTouch(
                     val word = glyphs.wordAt(hit)
                     if (glyphs.verifiedBoxes(word).isNotEmpty()) {
                         update(word)
+                        reported = word
                         drag = PdfTouchDrag(word, null, contact)
                     }
                 }
@@ -132,7 +146,11 @@ internal fun Modifier.originalPdfTouch(
                     drag != null && glyphs != null && finger != null -> {
                         if (finger.position != finger.previousPosition) {
                             val point = zoom.pagePoint(finger.position, width, height)
-                            drag.rangeAt(glyphs, point, width, height)?.let(update)
+                            val range = drag.rangeAt(glyphs, point, width, height)
+                            if (range != null && range != reported && glyphs.verifiedBoxes(range).isNotEmpty()) {
+                                update(range)
+                                reported = range
+                            }
                         }
                         finger.consume()
                     }

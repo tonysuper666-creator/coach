@@ -91,7 +91,7 @@ internal fun BoxScope.OriginalPdfSelection(
         paint(marked, highlightColor)
         paint(mergePdfLineBoxes(selected, size.width, size.height), selectionColor)
         if (touchZoom != null && selection != null && selected.isNotEmpty()) {
-            for (handle in geometry.handles(selection, size.width, size.height, 5.dp.toPx() / touchZoom.scale)) {
+            for (handle in pdfSelectionHandles(selected, size.width, size.height, 5.dp.toPx() / touchZoom.scale)) {
                 paintPdfHandle(handle, CoachV7.Light.zhu, touchZoom.scale)
             }
         }
@@ -139,19 +139,6 @@ internal class PdfSelectionGeometry(private val unit: ReaderTextUnit, private va
         return when (script) {
             Character.UnicodeScript.HAN, Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA -> hit
             else -> word.takeIf { verifiedBoxes(it).isNotEmpty() } ?: hit
-        }
-    }
-
-    fun handles(range: ReaderTextRange, width: Float, height: Float, radius: Float): List<PdfSelectionHandle> {
-        val boxes = verifiedBoxes(range)
-        if (boxes.isEmpty()) return emptyList()
-        return listOf(true to boxes.first(), false to boxes.last()).map { (start, box) ->
-            val x = (if (start) box.x else box.x + box.width).toFloat() * width
-            val y = (box.y + box.height).toFloat() * height
-            val anchor = Offset(x, y)
-            val center = Offset(x.coerceIn(radius, maxOf(radius, width - radius)),
-                (y + radius).coerceIn(radius, maxOf(radius, height - radius)))
-            PdfSelectionHandle(start, anchor, center)
         }
     }
 

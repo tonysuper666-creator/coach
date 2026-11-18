@@ -300,6 +300,18 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("replacement", events[-1]["outcome"].text)
         self.assertEqual(2, req.physical_calls)
 
+    async def test_api_only_blocks_cli_and_reports_api_failure(self):
+        req = bridge.build_req({"model": "claude-sonnet-5-5", "messages": [{"role": "user", "content": "sample"}]},
+                               {"x-coach-task": "TEACH"})
+        with patch.object(bridge, "API_ONLY", True), patch.object(bridge.API_ROUTER, "keys", {}),                 patch("asyncio.create_subprocess_exec") as launch:
+            outcome = await bridge.dispatch(req, req.model, None)
+            self.assertEqual(("failed", "missing_key", "api"), (outcome.status, outcome.reason, req.transport))
+            with self.assertRaises(bridge.BridgeError) as error:
+                await bridge.spawn(["claude"], Path("."), {})
+            self.assertEqual("subscription_disabled", error.exception.reason)
+            self.assertFalse((await bridge.cli_status(["codex"], {}, Path(".")))["enabled"])
+            launch.assert_not_called()
+
     def test_api_keys_are_removed_from_all_cli_children(self):
         with patch.dict("os.environ", {"COACH_OPENAI_API_KEY": KEY, "COACH_ANTHROPIC_API_KEY": KEY, "OPENAI_API_KEY": KEY, "ANTHROPIC_API_KEY": KEY}):
             for backend in ("claude", "codex", "agy"):

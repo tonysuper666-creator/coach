@@ -242,11 +242,14 @@ class WindowsPassageQuestionLimitTest {
             }
             onNodeWithTag("ask-paragraph-${blocks.size}").assertDoesNotExist()
             onNodeWithTag("book-selected-passage").assertDoesNotExist()
+            // 还没点段：问题框在，发送关着，读者得先挑一段。
+            onNodeWithTag("book-passage-question").assertExists()
+            onNodeWithTag("book-passage-send").assertIsNotEnabled()
         }
     }
 
-    /** 选中一段：列表收起，选中的那段带着自己的段号出现，送的仍是这段原文。 */
-    @Test fun theChosenPassageKeepsItsNumberAndSendsThatParagraph() {
+    /** 选中一段：留在原来的位置就地高亮，前后段落都看得见，送的仍是这段原文。 */
+    @Test fun theChosenPassageStaysInPlaceAndSendsThatParagraph() {
         val root = Files.createTempDirectory("coach-passage-chosen-")
         val source = pickerTextbook(root)
         val controller = TextbookController(TextbookLibrary(root.resolve("library")))
@@ -255,9 +258,18 @@ class WindowsPassageQuestionLimitTest {
             openPicker(controller, source, support)
             val book = controller.state.value.book!!
             val blocks = StudyCoachCourse.blocks(book.id, listOf(book.pages.first())).filterNot { it.heading }
+            check(blocks.size >= 3) { "the picker needs a paragraph on both sides of the chosen one" }
+            val before = onNodeWithTag("ask-paragraph-1").fetchSemanticsNode().boundsInRoot
             onNodeWithTag("ask-paragraph-1").performClick(); waitForIdle()
-            onNodeWithTag("ask-paragraph-0").assertDoesNotExist()
-            onNodeWithTag("book-passage-hint").assertDoesNotExist()
+            // 列表没有换成单独一张卡：提示、前后两段都还在，选中的那一行上沿一点没动。
+            onNodeWithTag("book-passage-hint").assertExists()
+            blocks.forEachIndexed { index, block ->
+                onNodeWithTag("ask-paragraph-$index").assertExists()
+                if (index != 1) {
+                    onNodeWithTag("ask-paragraph-$index").assertTextEquals("${index + 1}", ReadableText.reflow(block.text))
+                }
+            }
+            assertEquals(before, onNodeWithTag("ask-paragraph-1").fetchSemanticsNode().boundsInRoot)
             onNodeWithTag("book-selected-passage-number").assertTextEquals("2")
             onNodeWithTag("book-selected-passage").assertTextEquals(ReadableText.reflow(blocks[1].text))
 
@@ -369,7 +381,8 @@ class WindowsPassageQuestionLimitTest {
 
     /**
      * 选段列表的真窗口版本：明暗两种主题下核对段号、真的把鼠标移到第二行看悬停浅底有没有画出来，
-     * 再点它，拍下选中那段的松绿线加 `pineWash` 底。悬停不是断言语义能证明的事，这里比对像素。
+     * 再点它，核对这一行在屏幕上一点没挪、前后的段落还在，并拍下选中那行的松绿线加 `pineWash` 底。
+     * 悬停和「原地高亮」都不是断言语义能证明的事，这里比对像素和在屏幕上的位置。
      */
     @Test fun realWindowPickerNumbersRowsAndShowsHoverAndSelection() {
         assumeTrue(System.getProperty("os.name").startsWith("Windows"))
@@ -436,14 +449,23 @@ class WindowsPassageQuestionLimitTest {
                             "not just that row; ${NativeWindowForeground.describe(frontWindow(window))}")
                     saveDialogImage(hovered, dark, "pick-hover")
 
+                    // 点第二行之前先把三行在屏幕上的上沿记下来：选中之后列表和滚动位置都不许动，
+                    // 读者要能继续看到前后两段，而不是被换成单独一张卡整体往上跳。
+                    val before = blocks.indices.map { screenTop(window, "ask-paragraph-$it") }
                     windowClick(window, "ask-paragraph-1")
-                    awaitWindow("the chosen passage keeps its number", window) { windowNode(window, "book-selected-passage") != null }
+                    awaitWindow("the chosen passage stays in place", window) { windowNode(window, "book-selected-passage") != null }
+                    assertEquals(listOf("点一段，再问一句"), windowText(window, "book-passage-hint"))
+                    blocks.forEachIndexed { index, block ->
+                        assertEquals(listOf("${index + 1}", ReadableText.reflow(block.text)), windowText(window, "ask-paragraph-$index"))
+                    }
+                    val after = blocks.indices.map { screenTop(window, "ask-paragraph-$it") }
+                    assertEquals(before, after, "选中第二段后整列往上跳了：$before -> $after")
                     assertEquals(listOf("2"), windowText(window, "book-selected-passage-number"))
                     assertEquals(listOf(ReadableText.reflow(blocks[1].text)), windowText(window, "book-selected-passage"))
                     saveDialogImage(dialogImage(window), dark, "selected")
                     println("NATIVE_PASSAGE_PICKER theme=${if (dark) "dark" else "light"} rows=${blocks.size} " +
                         "hoverPixels=${changed.pixels} hoverBox=${changed.box.width}x${changed.box.height} " +
-                        "chosen=2 chosenText=true")
+                        "chosen=2 chosenText=true rowsMoved=${after[1] - before[1]} rowY=${before[1]}->${after[1]}")
                 } finally { onEdt { window.dispose() } }
                 NativeWindowForeground.awaitOtherWindowsClosed(keep = null)
             }
@@ -508,6 +530,14 @@ class WindowsPassageQuestionLimitTest {
         val origin = window.contentPane.locationOnScreen
         val scale = window.graphicsConfiguration.defaultTransform
         Point(origin.x + (bounds.center.x / scale.scaleX).toInt(), origin.y + (bounds.center.y / scale.scaleY).toInt())
+    }
+
+    /** 节点上沿在屏幕上的 y：选中前后行有没有往上跳，看的就是这个数。 */
+    private fun screenTop(window: ComposeWindow, tag: String): Int = onEdt {
+        val bounds = assertNotNull(windowNode(window, tag), tag).boundsInRoot
+        val origin = window.contentPane.locationOnScreen
+        val scale = window.graphicsConfiguration.defaultTransform
+        origin.y + (bounds.top / scale.scaleY).toInt()
     }
 
     /** 前台窗口当下这一帧的像素。悬停有没有画出来，只能从这里看出来。 */

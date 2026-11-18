@@ -29,7 +29,6 @@ import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -69,83 +68,85 @@ internal fun BookPassageAsk(
         } catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { BookLearningReply.Unavailable("暂时读不到回答，可以保留阅读位置后再试。") }
     }
-    // 在段落列表里往下滚了再选，换成提问时要回到顶上，引用的原文整段看得见，不被弹窗顶边切掉一半。
+    // 段落列表和问题框一直都在：点一段只是把那一行就地染色，前后的段落和滚动位置都不动。
     val scroll = rememberScrollState()
-    LaunchedEffect(selected) { scroll.scrollTo(0) }
     val colors = CoachTheme.colors
-    // 行首的段号：这一段在本页可选段落里排第几。从阅读页直接点进来的段落可能不在本页列表里，
-    // 这时退回它自己的页码——两者都是读者能对上原文的位置，内部 block id 不露在外面。
-    val ordinal = blocks.indexOfFirst { it.id == selected?.id }.let { if (it >= 0) it + 1 else selected?.page ?: 0 }
+    // 选中的那段在本页列表里排第几。从阅读页直接点进来的段落可能不在这一页（-1），段号就退回它自己的页码——
+    // 两者都是读者能对上原文的位置，内部 block id 不露在外面。
+    val chosenIndex = blocks.indexOfFirst { it.id == selected?.id }
     // V7：弹窗是 surface2 的纸；段落、选中的原文和输入框都是叠在上面的一层 surface1 纸，按钮走纸面按钮，不用 Material 描边。
     AlertDialog(modifier = Modifier.testTag("book-passage-dialog"), onDismissRequest = onClose, title = { Text("就这段问一句") }, text = {
         Column(Modifier.heightIn(max = 500.dp).verticalScroll(scroll).testTag("book-passage-ask"),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (selected == null) {
-                Text("点一段，再问一句", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary,
-                    modifier = Modifier.testTag("book-passage-hint"))
-                if (blocks.isEmpty()) Text("这一页没有可选的文字段落，可以先翻到有文字的页面。", style = MaterialTheme.typography.bodyMedium, color = colors.fgSecondary)
-                // 一列段落在同一张纸上，行间只用细线分开：读起来是一页原文，不是一排同样的按钮。
-                if (blocks.isNotEmpty()) PaperCard(color = colors.surface1, contentSpacing = 0.dp, contentPadding = PaddingValues(0.dp)) {
-                    blocks.forEachIndexed { index, block ->
-                        if (index > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(colors.borderSubtle))
-                        PassageRow(index + 1, ReadableText.reflow(block.text), rowTag = "ask-paragraph-$index",
-                            onClick = { selected = block })
-                    }
+            Text("点一段，再问一句", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary,
+                modifier = Modifier.testTag("book-passage-hint"))
+            if (blocks.isEmpty()) Text("这一页没有可选的文字段落，可以先翻到有文字的页面。", style = MaterialTheme.typography.bodyMedium, color = colors.fgSecondary)
+            // 一列段落在同一张纸上，行间只用细线分开：读起来是一页原文，不是一排同样的按钮。
+            // 点中的那行就地留下松绿线和 `pineWash` 底，前后的段落仍然在列表里，读者能对照着看。
+            if (blocks.isNotEmpty()) PaperCard(color = colors.surface1, contentSpacing = 0.dp, contentPadding = PaddingValues(0.dp)) {
+                blocks.forEachIndexed { index, block ->
+                    val chosen = block.id == selected?.id
+                    if (index > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(colors.borderSubtle))
+                    // 已经选中的行不再可点：点它没有别的结果。不可点也就不合并语义，段号和原文才能按标签读到。
+                    val pick: (() -> Unit)? = if (chosen) null else ({ selected = block })
+                    PassageRow(index + 1, ReadableText.reflow(block.text), selected = chosen, rowTag = "ask-paragraph-$index",
+                        textTag = if (chosen) "book-selected-passage" else null, onClick = pick)
                 }
-            } else {
-                val question = draft.text
-                val typed = question.trim().length
-                val tooLong = typed > BookPassageQuestion.MAX_QUESTION_LENGTH
-                // Enter 和「发送」按钮走同一个入口、同一组放行条件：超长、正在等回答、额度拒绝、逐书同意都按现有行为。
-                fun canSend(text: String) = BookPassageQuestion.accepts(text) && (request == null || reply != null) &&
-                    (reply as? BookLearningReply.Unavailable)?.trouble != ExplainTrouble.Quota
-                // 文本和放行条件都在按下的这一刻现读：按钮变灰靠的是上一帧的 draft，读者敲字与点发送之间
-                // 可能还没重排，用重排时的快照会把刚打的字丢掉，发出一句空问题。
-                fun submit() {
-                    val text = draft.text
-                    if (!canSend(text)) return
-                    val passage = runCatching { BookPassage.from(book, checkNotNull(selected)) }.getOrNull()
-                    if (passage == null) {
-                        request = null
-                        reply = BookLearningReply.Unavailable("这段原文的位置无法确认，请重新选择。")
-                    } else {
-                        val input = BookPassageQuestion(passage, text)
-                        if (support.consentRequired(book.id)) pendingConsent = input else send(input)
-                    }
+                // 不在本页列表里的段落（从阅读页直接点进来）：补一行在纸面末尾，段号退回它的页码。
+                val outside = selected?.takeIf { chosenIndex < 0 }
+                if (outside != null) {
+                    if (blocks.isNotEmpty()) Box(Modifier.fillMaxWidth().height(1.dp).background(colors.borderSubtle))
+                    PassageRow(outside.page, ReadableText.reflow(outside.text), selected = true, textTag = "book-selected-passage")
                 }
-                // 选中的那段保持行的样子：松绿线、`pineWash` 底、段号染松绿，读者一眼看出问的是哪一段。
-                // PDF 抽出的段落每行硬断：按段重排再显示。发出去的、出处里核对的仍是原文一字不改。
-                PassageRow(ordinal, ReadableText.reflow(checkNotNull(selected).text), selected = true,
-                    textTag = "book-selected-passage", textStyle = MaterialTheme.typography.bodyLarge)
-                // Nothing typed here is truncated: over-length text stays editable and copyable, and
-                // the hint below says why sending is closed instead of letting the provider reject it.
-                V7QuestionField(draft, { draft = it }, "想问什么？", isError = tooLong,
-                    onSubmit = { submit() },
-                    modifier = Modifier.fillMaxWidth().testTag("book-passage-question"))
-                Text(
-                    if (tooLong) "已超过 ${BookPassageQuestion.MAX_QUESTION_LENGTH} 字，删掉 " +
-                        "${typed - BookPassageQuestion.MAX_QUESTION_LENGTH} 字才能发送。已输入的文字没有被截断。"
-                    else "$typed / ${BookPassageQuestion.MAX_QUESTION_LENGTH}",
-                    modifier = Modifier.testTag("book-passage-length"), style = MaterialTheme.typography.bodySmall,
-                    color = if (tooLong) v7Alert() else colors.fgSecondary)
-                PrimaryButton(onClick = { submit() }, enabled = canSend(question),
-                    modifier = Modifier.testTag("book-passage-send")) { Text("发送") }
-                when (val result = reply) {
-                    null -> if (request != null) Text("正在读这段问题…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
-                    is BookLearningReply.Text -> PaperCard(Modifier.testTag("book-passage-reply"), color = colors.surface1) {
-                        // 回答里的【S1】是给程序的引用标记，读者看下面那行「出处 · 第 N 页」就够了。
-                        Text(ReadableText.withoutCitationMarks(result.text), style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
-                        result.sources.forEach { passage ->
-                            V7TextButton({ if (onOpenOriginal != null) onOpenOriginal(passage) else source = passage },
-                                Modifier.testTag("book-passage-citation")) {
-                                Text("出处 · ${book.pageLabel(passage.page)}")
-                            }
+            }
+            val question = draft.text
+            val typed = question.trim().length
+            val tooLong = typed > BookPassageQuestion.MAX_QUESTION_LENGTH
+            // Enter 和「发送」按钮走同一个入口、同一组放行条件：还没点段、超长、正在等回答、额度拒绝、逐书同意都按现有行为。
+            fun canSend(text: String) = selected != null && BookPassageQuestion.accepts(text) && (request == null || reply != null) &&
+                (reply as? BookLearningReply.Unavailable)?.trouble != ExplainTrouble.Quota
+            // 文本和放行条件都在按下的这一刻现读：按钮变灰靠的是上一帧的 draft，读者敲字与点发送之间
+            // 可能还没重排，用重排时的快照会把刚打的字丢掉，发出一句空问题。
+            fun submit() {
+                val text = draft.text
+                if (!canSend(text)) return
+                val passage = runCatching { BookPassage.from(book, checkNotNull(selected)) }.getOrNull()
+                if (passage == null) {
+                    request = null
+                    reply = BookLearningReply.Unavailable("这段原文的位置无法确认，请重新选择。")
+                } else {
+                    val input = BookPassageQuestion(passage, text)
+                    if (support.consentRequired(book.id)) pendingConsent = input else send(input)
+                }
+            }
+            // Nothing typed here is truncated: over-length text stays editable and copyable, and
+            // the hint below says why sending is closed instead of letting the provider reject it.
+            V7QuestionField(draft, { draft = it }, "想问什么？", isError = tooLong,
+                onSubmit = { submit() },
+                modifier = Modifier.fillMaxWidth().testTag("book-passage-question"))
+            Text(
+                if (tooLong) "已超过 ${BookPassageQuestion.MAX_QUESTION_LENGTH} 字，删掉 " +
+                    "${typed - BookPassageQuestion.MAX_QUESTION_LENGTH} 字才能发送。已输入的文字没有被截断。"
+                else "$typed / ${BookPassageQuestion.MAX_QUESTION_LENGTH}",
+                modifier = Modifier.testTag("book-passage-length"), style = MaterialTheme.typography.bodySmall,
+                color = if (tooLong) v7Alert() else colors.fgSecondary)
+            PrimaryButton(onClick = { submit() }, enabled = canSend(question),
+                modifier = Modifier.testTag("book-passage-send")) { Text("发送") }
+            when (val result = reply) {
+                null -> if (request != null) Text("正在读这段问题…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+                is BookLearningReply.Text -> PaperCard(Modifier.testTag("book-passage-reply"), color = colors.surface1) {
+                    // 回答里的【S1】是给程序的引用标记，读者看下面那行「出处 · 第 N 页」就够了。
+                    Text(ReadableText.withoutCitationMarks(result.text), style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
+                    result.sources.forEach { passage ->
+                        V7TextButton({ if (onOpenOriginal != null) onOpenOriginal(passage) else source = passage },
+                            Modifier.testTag("book-passage-citation")) {
+                            Text("出处 · ${book.pageLabel(passage.page)}")
                         }
                     }
-                    // 没拿到回答：选中的原文和打好的问题都还在；能重试就原样再发一次。
-                    is BookLearningReply.Unavailable -> ExplainTroubleLine(result, onRetry = { request?.let(::send) },
-                        onRepair = onRepair, modifier = Modifier.testTag("book-passage-unavailable"))
                 }
+                // 没拿到回答：选中的原文和打好的问题都还在；能重试就原样再发一次。
+                is BookLearningReply.Unavailable -> ExplainTroubleLine(result, onRetry = { request?.let(::send) },
+                    onRepair = onRepair, modifier = Modifier.testTag("book-passage-unavailable"))
             }
         }
     }, confirmButton = { V7TextButton(onClose, modifier = Modifier.testTag("book-passage-close")) { Text("回到阅读") } })
@@ -168,11 +169,12 @@ internal fun BookPassageAsk(
 /**
  * 选段就问里的一行原文：行首是段号（数字字体），悬停叠一层浅底，选中时整行 `pineWash` 底、左边一条松绿线。
  * 行是纸面的一部分：不加阴影、不描一圈边，六段排在一起像一页原文，而不是六个一模一样的按钮。
+ * 选中的行留在原来的位置、不再可点：前后段落不动，行高也不变，读者看到的是「这一段被标出来了」。
  */
 @Composable
 private fun PassageRow(
     ordinal: Int, text: String, selected: Boolean = false, rowTag: String? = null, textTag: String? = null,
-    textStyle: TextStyle = MaterialTheme.typography.bodyMedium, onClick: (() -> Unit)? = null,
+    onClick: (() -> Unit)? = null,
 ) {
     val colors = CoachTheme.colors
     val pine = v7Pine()
@@ -203,7 +205,7 @@ private fun PassageRow(
             textAlign = TextAlign.End, color = if (selected) pine else colors.fgTertiary)
         Text(text, Modifier.weight(1f).alignByBaseline()
             .then(if (textTag != null) Modifier.testTag(textTag) else Modifier),
-            style = textStyle, color = colors.fgPrimary)
+            style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
     }
 }
 

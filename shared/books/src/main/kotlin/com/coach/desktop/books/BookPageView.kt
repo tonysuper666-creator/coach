@@ -41,6 +41,8 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFontFamilyResolver
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.Clipboard
 import androidx.compose.ui.platform.ClipEntry
@@ -154,6 +156,9 @@ internal class BookPagingState(initial: BookPageAnchor) {
     }
 }
 
+/** 超过这么多字的书，分页放后台线程做（TON-1724）。 */
+private const val BACKGROUND_LAYOUT_CHARS = 60_000
+
 /** The same source anchor survives font/width reflow and original/text view changes. */
 @Composable
 internal fun BookPageView(
@@ -206,8 +211,26 @@ internal fun BookPageView(
                 page.copy(illustrations = page.illustrations.filter { libraryDirectory != null && it !in failed })
             }
         }
-        val pages = remember(layoutPages, widthPx, bodyHeight, typography, highlights, density, tableRows) {
-            BookPageLayouter(measurer, density, typography, book.format == "pdf").layout(layoutPages, widthPx, bodyHeight, highlights, tableRows)
+        // 分页要测量整本书的文字，长书首开在主线程做会超过 5 秒被判 ANR（TON-1724）。
+        // 长书放到后台线程，用独立的 TextMeasurer（Compose 的测量缓存不保证线程安全）；
+        // 重新分页期间保留上一份结果，首次还没算完时只显示「正在排版」。短书仍同步排，行为不变。
+        val isPdf = book.format == "pdf"
+        val longBook = remember(layoutPages) { layoutPages.sumOf { it.text.length } > BACKGROUND_LAYOUT_CHARS }
+        val fontResolver = LocalFontFamilyResolver.current
+        val layoutDirection = LocalLayoutDirection.current
+        val shortPages = if (longBook) null else remember(layoutPages, widthPx, bodyHeight, typography, highlights, density, tableRows) {
+            BookPageLayouter(measurer, density, typography, isPdf).layout(layoutPages, widthPx, bodyHeight, highlights, tableRows)
+        }
+        val longPages by produceState<List<BookLaidPage>?>(null, longBook, layoutPages, widthPx, bodyHeight, typography, highlights, density, tableRows) {
+            if (longBook) value = withContext(Dispatchers.Default) {
+                BookPageLayouter(TextMeasurer(fontResolver, density, layoutDirection, 128), density, typography, isPdf)
+                    .layout(layoutPages, widthPx, bodyHeight, highlights, tableRows)
+            }
+        }
+        val pages = if (longBook) longPages else shortPages
+        if (pages == null) {
+            Text("正在排版…", Modifier.align(Alignment.Center).testTag("book-page-laying-out"))
+            return@BoxWithConstraints
         }
         SideEffect { if (state.pages !== pages) state.pages = pages; if (state.spread != spread) state.spread = spread }
         if (pages.isEmpty()) {

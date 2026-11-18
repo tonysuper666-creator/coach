@@ -12,6 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.SkikoComposeUiTest
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.runSkikoComposeUiTest
 import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
@@ -131,5 +132,39 @@ class ScrollReadViewTest {
         scope.launch { state.scrollScreen(true) }
         mainClock.advanceTimeBy(1200); waitForIdle()
         assertEquals(1, state.position.page)
+    }
+
+    private fun SkikoComposeUiTest.tall(state: ScrollReadState, pageDp: Int, out: (CoroutineScope) -> Unit) {
+        mainClock.autoAdvance = false
+        setContent {
+            out(rememberCoroutineScope())
+            ScrollReadView(state, desk = androidx.compose.ui.graphics.Color.LightGray, paper = androidx.compose.ui.graphics.Color.White, modifier = Modifier.fillMaxSize()) { i ->
+                Box(Modifier.height(pageDp.dp)) { Text("page $i") }
+            }
+        }
+        mainClock.advanceTimeBy(64); waitForIdle()
+    }
+
+    @Test fun endLandsOnTheRealBottomNotJustTheLastPageStart() = runSkikoComposeUiTest(size = Size(1200f, 900f)) {
+        val state = ScrollReadState(3)
+        lateinit var scope: CoroutineScope
+        tall(state, 1800) { scope = it }
+        scope.launch { state.scrollToEnd() }
+        mainClock.advanceTimeBy(64); waitForIdle()
+        assertEquals(2, state.position.page)
+        assertFalse(state.canScrollForward, "End must reach the true bottom")
+        assertEquals(1f, state.overallProgress)
+    }
+
+    @Test fun oneLongPageScrolledToTheBottomReportsFullProgressAndShowsTheScrollbar() = runSkikoComposeUiTest(size = Size(1200f, 900f)) {
+        val state = ScrollReadState(1)
+        lateinit var scope: CoroutineScope
+        tall(state, 1800) { scope = it }
+        assertEquals(0f, state.overallProgress)
+        scope.launch { state.list.scrollBy(5000f) }
+        mainClock.advanceTimeBy(64); waitForIdle()
+        assertFalse(state.canScrollForward)
+        assertEquals(1f, state.overallProgress)
+        onNodeWithTag("scroll-read-scrollbar").assertExists()
     }
 }

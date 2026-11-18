@@ -17,10 +17,8 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.platform.testTag
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -60,7 +58,12 @@ class ScrollReadState(val pageCount: Int, initial: ScrollReadPosition = ScrollRe
 
     /** 整本书的粗进度 0..1，给细进度条用。 */
     val overallProgress: Float
-        get() = if (pageCount <= 1) 0f else ((position.page + position.fraction) / (pageCount - 1)).coerceIn(0f, 1f)
+        get() = when {
+            !list.canScrollBackward && !list.canScrollForward -> 0f
+            !list.canScrollForward -> 1f
+            !list.canScrollBackward -> 0f
+            else -> ((position.page + position.fraction) / pageCount).coerceIn(0f, 1f)
+        }
 
     /** 滚到某页某处（直接到位，不播动画）。页还没量过时进度先记着，量出来再补。 */
     suspend fun scrollTo(target: ScrollReadPosition) {
@@ -71,6 +74,14 @@ class ScrollReadState(val pageCount: Int, initial: ScrollReadPosition = ScrollRe
             if (h != null) list.scrollToItem(page, scrollOffsetFor(target.fraction, h)) else pendingFraction = target.fraction
         }
     }
+
+    /** 滚到真正的书尾：最后一页的最后一行可见，不只是末页页首。 */
+    suspend fun scrollToEnd() {
+        list.scrollToItem(maxOf(0, pageCount - 1))
+        list.scrollBy(1_000_000f)
+    }
+
+    val canScrollForward: Boolean get() = list.canScrollForward
 
     /** 往后/往前滚一屏；减弱动画时直接到位。 */
     suspend fun scrollScreen(forward: Boolean) {
@@ -99,7 +110,6 @@ fun ScrollReadView(
     modifier: Modifier = Modifier,
     gap: Dp = 16.dp,
     handleKeys: Boolean = true,
-    thumb: Color = Color.Gray.copy(alpha = 0.45f),
     page: @Composable (Int) -> Unit,
 ) {
     state.reduced = LocalV7ReducedMotion.current
@@ -117,7 +127,7 @@ fun ScrollReadView(
                     Key.DirectionDown -> { scope.launch { state.list.scrollBy(48f) }; true }
                     Key.DirectionUp -> { scope.launch { state.list.scrollBy(-48f) }; true }
                     Key.MoveHome -> { scope.launch { state.scrollTo(ScrollReadPosition(0)) }; true }
-                    Key.MoveEnd -> { scope.launch { state.scrollTo(ScrollReadPosition(state.pageCount - 1)) }; true }
+                    Key.MoveEnd -> { scope.launch { state.scrollToEnd() }; true }
                     else -> false
                 }
             }
@@ -131,12 +141,7 @@ fun ScrollReadView(
                 Box(Modifier.fillMaxWidth().background(paper)) { page(index) }
             }
         }
-        // 右侧细进度条：只画整本进度，不拦截指针
-        Box(Modifier.align(Alignment.CenterEnd).fillMaxSize().drawBehind {
-            val trackW = 3.dp.toPx()
-            val h = size.height * 0.12f
-            val y = (size.height - h) * state.overallProgress
-            drawRoundRect(thumb, Offset(size.width - trackW - 3.dp.toPx(), y), Size(trackW, h), CornerRadius(trackW / 2))
-        })
+        // 右侧滚动条：按实际可滚范围和视口比例，桌面用 V7Scrollbar（浅深色、悬停加粗、可拖）
+        ReadScrollbar(state.list, Modifier.align(Alignment.CenterEnd).fillMaxHeight().testTag("scroll-read-scrollbar"))
     }
 }

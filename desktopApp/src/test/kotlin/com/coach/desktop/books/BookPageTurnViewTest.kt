@@ -145,4 +145,30 @@ class BookPageTurnViewTest {
         assertEquals(after, state.anchor)
         shot("read-mode-paged-after-scroll")
     }
+
+    @Test fun inScrollModeNextAndPreviousScrollOneScreenWithOverlap() = runSkikoComposeUiTest(size = Size(1440f, 1440f), density = Density(1.5f)) {
+        val state = BookPagingState(BookPageAnchor(41))
+        val mode = androidx.compose.runtime.mutableStateOf(BookReadMode.Scroll)
+        spreadHost(state, mode)
+        assertTrue(!state.spread)
+        val start = state.anchor
+        runOnIdle { state.move(ReaderTurn.Next) }
+        mainClock.advanceTimeBy(1500); waitForIdle()
+        val one = state.anchor
+        assertTrue(one.offsetUtf16 > start.offsetUtf16, "Next in scroll mode must scroll forward: $start -> $one")
+        // 一屏约 0.9 个视口：不会像翻页那样直接跳到下一页页首
+        assertTrue(state.index <= 1, "one screen must not skip whole pages: index ${state.index}")
+        runOnIdle { state.move(ReaderTurn.Previous) }
+        mainClock.advanceTimeBy(1500); waitForIdle()
+        val back = state.anchor
+        assertTrue(kotlin.math.abs(back.offsetUtf16 - start.offsetUtf16) < (one.offsetUtf16 - start.offsetUtf16) / 3 + 80,
+            "Previous must return near the start: $start -> $one -> $back")
+        repeat(30) { runOnIdle { state.move(ReaderTurn.Next) }; mainClock.advanceTimeBy(400); waitForIdle() }
+        assertTrue(state.index == state.pages.lastIndex || state.anchor.offsetUtf16 > one.offsetUtf16, "repeated Next keeps scrolling to the end")
+        runOnIdle { mode.value = BookReadMode.Paged }
+        mainClock.advanceTimeBy(150); waitForIdle()
+        val pagedBefore = state.index
+        runOnIdle { state.move(ReaderTurn.Previous) }
+        assertTrue(state.index < pagedBefore || pagedBefore == 0, "in paged mode Previous still turns a page")
+    }
 }

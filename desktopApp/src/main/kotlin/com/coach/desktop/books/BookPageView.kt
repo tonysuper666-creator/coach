@@ -27,6 +27,7 @@ import com.coach.ui.pageturn.PageTurnStyle
 import com.coach.ui.pageturn.PageTurnView
 import androidx.compose.runtime.*
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -139,8 +140,15 @@ internal class BookPagingState(initial: BookPageAnchor) {
     val index get() = firstFor(pages, spread)
     val canPrevious get() = index > 0
     val canNext get() = index + (if (spread) 2 else 1) < pages.size
+    /** 滚动读时由视图登记：上一页/下一页键改成往前/往后滚一屏（留 10% 重叠）；翻页读时为 null。 */
+    var screenScroller: ((forward: Boolean) -> Unit)? = null
     fun move(turn: ReaderTurn): BookPageAnchor? {
         if (pages.isEmpty()) return null
+        val scroller = screenScroller
+        if (scroller != null && (turn == ReaderTurn.Next || turn == ReaderTurn.Previous)) {
+            scroller(turn == ReaderTurn.Next)
+            return anchor
+        }
         val current = index
         val target = when (turn) {
             ReaderTurn.Previous -> (current - if (spread) 2 else 1).coerceAtLeast(0)
@@ -243,6 +251,11 @@ internal fun BookPageView(
             val scrollState = remember(pages) {
                 val at = positionOf(state.anchor)
                 ScrollReadState(pages.size, at, (at.fraction * itemHeightPx).toInt())
+            }
+            val screenScope = rememberCoroutineScope()
+            DisposableEffect(scrollState) {
+                state.screenScroller = { forward -> screenScope.launch { scrollState.scrollScreen(forward) } }
+                onDispose { state.screenScroller = null }
             }
             // 用户滚动：把视口顶边那一行的原文位置写回锚点（不只是页首），切回翻页时能还原到这一行。
             // 进入时的位置是程序放的，不回写锚点：没动过就切回去，锚点要和切之前完全相等

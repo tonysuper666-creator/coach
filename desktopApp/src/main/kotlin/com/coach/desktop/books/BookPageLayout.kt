@@ -184,8 +184,10 @@ internal class BookPageLayouter(
                     if (replacement == null) offset in r else r.first < replacement.endUtf16 && r.last >= offset
                 }
                 val event = VisualEvent(owner, at, item, replacement, marked)
-                val rows = tableRows[item]
-                if (rows == null || item.kind != PageVisualKind.TABLE) listOf(event)
+                val rows = if (item.kind == PageVisualKind.TABLE) {
+                    tableRows[item] ?: item.table?.takeIf { it.valid(item.height, page.text) }?.layout()
+                } else null
+                if (rows == null) listOf(event)
                 else tableEvents(event, rows, page.text, highlights[page.number].orEmpty(), widthPx, bodyHeightPx)
             }
         }.groupBy { it.chapter }

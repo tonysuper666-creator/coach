@@ -32,6 +32,7 @@ internal data class BookPageTypography(
     val highlight: androidx.compose.ui.graphics.Color = androidx.compose.ui.graphics.Color.Unspecified,
     val number: TextStyle = body.copy(fontSize = body.fontSize * (48f / 18),
         fontWeight = androidx.compose.ui.text.font.FontWeight.Light, letterSpacing = (-.03).em),
+    val readingFont: ReadingFont = ReadingFont.SONG,
 )
 
 internal data class BookTextRun(
@@ -207,6 +208,7 @@ internal class BookPageLayouter(
                         afterHeading = p.afterHeading || (i == 0 && headingEnd > 0)) })
             val original = buildAnnotatedString {
                 append(raw)
+                applyReadingFont(typography.readingFont, raw, model)
                 if (chapter.title != null && markdownHeadings(raw).none { it.marks.first == headingStart }) {
                     val end = raw.indexOf('\n', headingStart).let { if (it < 0) raw.length else it }
                     addStyle(typography.chapter, headingStart, end)

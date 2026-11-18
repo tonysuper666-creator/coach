@@ -175,18 +175,23 @@ A second English paragraph lets us inspect the space between paragraphs and the 
         }
         val book = controller.state.value.book!!
         consent.allow(book.id)
+        // 服务端给的锚点是「S1、S2」这种写法：正文里换成小号上标，点开是那条出处。写成 c1 换不出来，
+        // 【c1】会原样留在讲解正文里，截图就不是读者看到的样子。
         val gate = AnswerExplain(consent, load = {}, ready = { true }, paired = { true },
             explain = { chosen, _ ->
                 ExplainResult.Done(Explanation(
                     "这一段只讲一件事：核糖体是细胞里合成蛋白质的地方。题目问「在哪儿做」，答案就落在「场所」两个字上；" +
-                        "后半句说它常附着在内质网上，是在告诉你去哪儿找它。【c1】",
-                    listOf(Citation("c1", chosen.id, chosen.page)), 12))
+                        "后半句说它常附着在内质网上，是在告诉你去哪儿找它。【S1】",
+                    listOf(Citation("S1", chosen.id, chosen.page)), 12))
             })
         val shots = mutableListOf<Shot>()
         runSkikoComposeUiTest(size = Size(screen.width.toFloat(), screen.height.toFloat()), density = Density(scale)) {
             setContent {
                 CompositionLocalProvider(LocalSystemTheme provides if (dark) SystemTheme.Dark else SystemTheme.Light) {
-                    WindowsTextbookHost(controller, answerExplain = gate) { null }
+                    // 选段提问这一场要的是「本机没接问答」那一句：不接 support 的话工作区会自己建一套
+                    // 跟着这台机器配对状态走的实现，配过对的机器上会真的往 Mac 发一次请求（Mac 离线时
+                    // 要挂到 20 秒超时）。这里显式给未接通的那一份，截图才不随机器变。
+                    WindowsTextbookHost(controller, answerExplain = gate, learningSupport = UnconnectedBookLearningSupport) { null }
                 }
             }
             fun nav(label: String) = onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText(label))
@@ -632,8 +637,8 @@ A second English paragraph lets us inspect the space between paragraphs and the 
             val refused = script.removeFirstOrNull()
             if (refused?.trouble == ExplainTrouble.Revoked) markRevoked()
             return refused ?: ExplainResult.Done(Explanation(
-                "这一段讲的是细胞在生物体里的位置：结构从它搭起，功能也由它完成，所以叫「基本单位」。后半句提到细胞核，是给下一节留的线头。【c1】",
-                listOf(Citation("c1", chosen.id, chosen.page)), 12))
+                "这一段讲的是细胞在生物体里的位置：结构从它搭起，功能也由它完成，所以叫「基本单位」。后半句提到细胞核，是给下一节留的线头。【S1】",
+                listOf(Citation("S1", chosen.id, chosen.page)), 12))
         }
     }
 

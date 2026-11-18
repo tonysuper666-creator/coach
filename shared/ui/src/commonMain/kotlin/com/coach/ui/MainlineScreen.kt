@@ -140,8 +140,10 @@ private fun CoverageLines(cov: JsonObject, modifier: Modifier = Modifier) {
 }
 
 /**
- * Preserves the displayed option permutation and layout for any item that still owns local
- * draft, in-flight, or graded state so a week refresh cannot remap recorded indices onto new text.
+ * Preserves the displayed option permutation and layout across a week refresh:
+ * graded items rely strictly on `result.options` (never falling back to cached `body`, which
+ * may already have been overwritten by an earlier refresh), while in-flight and draft items keep
+ * their saved `pending`/`choiceOptions` or cached `body` options.
  */
 internal fun restoreActiveQuestionOptions(fresh: JsonObject, saved: JsonObject): JsonObject {
     val savedResult = saved["result"] as? JsonObject
@@ -154,15 +156,18 @@ internal fun restoreActiveQuestionOptions(fresh: JsonObject, saved: JsonObject):
     val oldItem = ((saved["body"] as? JsonObject)?.get("items") as? JsonArray).orEmpty()
         .mapNotNull { it as? JsonObject }
         .firstOrNull { it.str("id") == activeId }
-    val preservedOptions = savedResult?.get("options") as? JsonArray
-        ?: savedPending?.get("options") as? JsonArray
-        ?: (saved["choiceOptions"] as? JsonArray)?.takeIf { saved.str("item") == activeId }
-        ?: oldItem?.get("options") as? JsonArray
-        ?: return fresh
-    val preservedLayout = savedResult?.get("layout")
-        ?: savedPending?.get("layout")
-        ?: saved["choiceLayout"]?.takeIf { saved.str("item") == activeId }
-        ?: oldItem?.get("layout")
+    val preservedOptions = when {
+        savedResult != null -> savedResult["options"] as? JsonArray ?: return fresh
+        savedPending != null -> savedPending["options"] as? JsonArray ?: oldItem?.get("options") as? JsonArray ?: return fresh
+        else -> (saved["choiceOptions"] as? JsonArray)?.takeIf { saved.str("item") == activeId }
+            ?: oldItem?.get("options") as? JsonArray
+            ?: return fresh
+    }
+    val preservedLayout = when {
+        savedResult != null -> savedResult["layout"]
+        savedPending != null -> savedPending["layout"] ?: oldItem?.get("layout")
+        else -> saved["choiceLayout"]?.takeIf { saved.str("item") == activeId } ?: oldItem?.get("layout")
+    }
     val freshItems = fresh["items"] as? JsonArray ?: return fresh
     return JsonObject(fresh + ("items" to JsonArray(freshItems.map { element ->
         val q = element as? JsonObject
@@ -533,6 +538,10 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     val answer = done?.num("answer")?.toInt()
     // A lost response may be replayed after a local edit: the recorded choice and outcome belong together.
     val displayedChoice = done?.num("choice")?.toInt() ?: chosen
+    // Pre-fix graded records omit `result.options`; without the submitted permutation, index-based marks cannot be trusted.
+    val optionOrderKnown = done == null || (done["options"] as? JsonArray)?.let { savedOpts ->
+        savedOpts.size == options.size && savedOpts.indices.all { i -> (savedOpts[i] as? JsonPrimitive)?.contentOrNull == options[i] }
+    } == true
     val reasons = explanation?.get("options") as? JsonObject
     val nextId = if (learning) ladderStep.question?.id else filtered.getOrNull(index + 1)?.str("id")
     fun nextQuestion() {
@@ -667,8 +676,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 Spacer(Modifier.height(20.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     options.forEachIndexed { i, option ->
-                        val verdict = if (done == null) null else if (i == answer) true else if (i == displayedChoice) false else null
-                        AnswerOption(letters[i], displayedChoice == i, verdict, done == null && !busy,
+                        val verdict = if (done == null || !optionOrderKnown) null else if (i == answer) true else if (i == displayedChoice) false else null
+                        AnswerOption(letters[i], optionOrderKnown && displayedChoice == i, verdict, done == null && !busy,
                             modifier = Modifier.testTag("mainline-option-$i"), onClick = {
                                 chosen = i
                                 save("choice" to JsonPrimitive(i), "choiceOptions" to (item["options"] ?: JsonNull), "choiceLayout" to (item["layout"] ?: JsonNull))
@@ -676,6 +685,11 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                             QuizText(option, "mainline:${item.str("id")}:$i", c.math)
                         }
                     }
+                }
+                if (done != null && !optionOrderKnown) {
+                    Spacer(Modifier.height(12.dp))
+                    Text("选项顺序更新过，这题的作答记录还在，就不标哪一项了。", Modifier.testTag("mainline-option-order-unknown"),
+                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (done != null && explanation != null) {
                     Spacer(Modifier.height(24.dp))
@@ -695,7 +709,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                                     val position = primers.indexOfFirst { it.str("id") == ref.str("question_id") }
                                     if (position >= 0) FeedbackText("开头『先试试』的第${position + 1}题说的就是这个。")
                                 }
-                                FeedbackText("为什么是 ${answer?.let { letters.getOrNull(it) }.orEmpty()}（为什么对）", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold))
+                                val whyHeading = if (optionOrderKnown) "为什么是 ${answer?.let { letters.getOrNull(it) }.orEmpty()}（为什么对）" else "为什么对"
+                                FeedbackText(whyHeading, style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold))
                                 Spacer(Modifier.height(8.dp))
                                 FeedbackText(explanation.str("correct"), style = MaterialTheme.typography.bodyLarge)
                                 Spacer(Modifier.height(16.dp))
@@ -704,7 +719,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                                     ClaimSourceReferences(http.reader, sourceKp, source, done.str("anchor"), item.str("id"))
                                 }
                             }
-                            val wrong = displayedChoice?.takeIf { it in options.indices && it != answer }
+                            val wrong = displayedChoice?.takeIf { optionOrderKnown && it in options.indices && it != answer }
                             if (wrong != null) {
                                 Spacer(Modifier.height(16.dp))
                                 FeedbackText("${letters.getOrNull(wrong)} 错在哪", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold))
@@ -732,9 +747,11 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     if (done.str("status") in setOf("missed", "guessed")) PersonalMarks(relatedMarks(marks, sections, item.strings("factIds")), sections)
                     if (explanation == null) ClaimSourceReferences(http.reader, sourceKp, done.str("source"), done.str("anchor"), item.str("id"))
                     Spacer(Modifier.height(16.dp))
-                    // Every unselected option's reason remains immediately available in the same scroll view.
-                    options.indices.filter { it != answer && it != displayedChoice }.forEach { i ->
-                        (reasons?.get("$i") as? JsonPrimitive)?.contentOrNull?.let { Labeled("${letters[i]} 为什么不选", it) }
+                    if (optionOrderKnown) {
+                        // Every unselected option's reason remains immediately available in the same scroll view.
+                        options.indices.filter { it != answer && it != displayedChoice }.forEach { i ->
+                            (reasons?.get("$i") as? JsonPrimitive)?.contentOrNull?.let { Labeled("${letters[i]} 为什么不选", it) }
+                        }
                     }
                     explanation?.str("background")?.takeIf { it.isNotBlank() }?.let { Labeled("背景", it) }
                     for (s in sections.filter { s -> s.strings("fact_ids").any { it in item.strings("factIds") } }) {

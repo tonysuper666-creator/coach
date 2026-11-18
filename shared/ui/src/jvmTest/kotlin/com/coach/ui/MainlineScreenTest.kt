@@ -860,23 +860,27 @@ class MainlineScreenTest {
         assertEquals("Pears are grown there", persistedItem.strings("options")[1])
     }
 
-    @Test fun existingGradedRecordPreservesSubmittedOptionsWhenServerReturnsDifferentOrder() =
+    private fun assertLegacyGradedRecordHidesOptionMarks(savedBodyLayout: Int) =
         FakeMac(today, false, reshuffleAfterAnswer = true).use { mac ->
         mac.answers += json("itemId" to "S1")
         val c = controller(mac)
-        val originalOptions = listOf("Apples are grown there", "Pears are grown there", "Plums ripen early", "Figs are grown there")
+        val savedOptions = if (savedBodyLayout == 1) {
+            listOf("Plums ripen early", "Figs are grown there", "Apples are grown there", "Pears are grown there")
+        } else {
+            listOf("Apples are grown there", "Pears are grown there", "Plums ripen early", "Figs are grown there")
+        }
         val existingBody = json(
             "week" to 1, "learning" to true, "title" to "Synthetic orchard",
             "items" to JsonArray(listOf(
                 json("id" to "S1", "tier" to "setup", "stem" to "Synthetic orchard question S1: which statement about the orchard holds?",
-                    "options" to originalOptions, "layout" to 0, "status" to "mastered", "keyState" to "VERIFIED",
+                    "options" to savedOptions, "layout" to savedBodyLayout, "status" to "mastered", "keyState" to "VERIFIED",
                     "factIds" to listOf("F-S1"), "ladder" to LedgerJson.encodeToJsonElement(
                         LadderQuestion("S1", "K", "W01-basics", "introduction", 2, "synthetic-orchard", "synthetic-S1", eligible = true)))
             ))
         )
         val existingResult = json(
             "itemId" to "S1", "answer" to 1, "choice" to 1, "guessed" to false, "dontKnow" to false,
-            "independentCorrect" to true, "status" to "mastered", "kpId" to "K", "source" to "Synthetic lecture 1",
+            "independentCorrect" to true, "status" to "mastered", "kpId" to "K", "remember" to "r1", "source" to "Synthetic lecture 1",
             "explanation" to json("correct" to "Synthetic pears are the only fruit grown in the synthetic orchard.",
                 "options" to json("0" to "Apples wrong", "2" to "Plums wrong", "3" to "Figs wrong"),
                 "background" to "Orchard background", "source" to "Synthetic lecture 1")
@@ -901,15 +905,31 @@ class MainlineScreenTest {
             "ladderSession" to LedgerJson.encodeToJsonElement(existingSession)
         ), "week:1")
         val view = CourseView(emptyList(), project(emptyList()))
-        runComposeUiTest {
-            setContent { CoachTheme(false) { Surface { Box(Modifier.size(900.dp, 900.dp)) {
+        runSkikoComposeUiTest(size = Size(1200f, 1800f)) {
+            setContent { CoachTheme(false) { Surface(Modifier.fillMaxSize()) {
                 MainlineScreen(c, view, onBack = {}, onOpenSteps = {}, onOpenEssay = {}, onReviewWeek = {})
-            } } } }
-            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("mainline-option-1").assertIsSelected()
-            onNodeWithTag("mainline-option-1").assertTextContains("Pears are grown there", substring = true)
-            onNodeWithTag("mainline-option-0").assertTextContains("Apples are grown there", substring = true)
-            onNodeWithText("为什么是 B（为什么对）", substring = true).assertIsDisplayed()
+            } } }
+            waitUntil(timeoutMillis = 10_000) {
+                val persisted = (c.sync.mainlineState("C", "week:1")["body"] as? JsonObject)
+                    ?.get("items")?.jsonArray?.firstOrNull { it.jsonObject.str("id") == "S1" }?.jsonObject
+                persisted?.num("layout")?.toInt() == 1 &&
+                    onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() &&
+                    onAllNodesWithTag("mainline-option-0").fetchSemanticsNodes().isNotEmpty()
+            }
+            onNodeWithTag("mainline-option-0").assertTextContains("Plums ripen early", substring = true)
+            for (i in 0..3) onNodeWithTag("mainline-option-$i").assertIsNotSelected()
+            assertTrue(onAllNodesWithText("正确").fetchSemanticsNodes().isEmpty())
+            assertTrue(onAllNodesWithText("你选的").fetchSemanticsNodes().isEmpty())
+            assertTrue(onAllNodesWithText("●").fetchSemanticsNodes().isEmpty())
+            onNodeWithTag("mainline-option-order-unknown").assertIsDisplayed()
+            onNodeWithText("为什么对").assertIsDisplayed()
+            onNodeWithText("Synthetic pears are the only fruit grown in the synthetic orchard.", substring = true).assertIsDisplayed()
+            assertTrue(onAllNodesWithText("为什么是", substring = true).fetchSemanticsNodes().isEmpty())
+            assertTrue(onAllNodesWithText("错在哪", substring = true).fetchSemanticsNodes().isEmpty())
+            assertTrue(onAllNodesWithText("为什么不选", substring = true).fetchSemanticsNodes().isEmpty())
+            onNodeWithText("记住这个").assertIsDisplayed()
+            onAllNodesWithText("Orchard background").onFirst().assertIsDisplayed()
+            onAllNodesWithText("Synthetic lecture 1", substring = true).onFirst().assertIsDisplayed()
             onNodeWithText("已做 6 题").assertIsDisplayed()
         }
         val stateAfter = c.sync.mainlineState("C", "week:1")
@@ -917,9 +937,24 @@ class MainlineScreenTest {
         assertEquals(6, savedSession.responses.size)
         assertEquals(6, savedSession.recapThrough)
         assertFalse(savedSession.recapOpen)
+        val storedResult = stateAfter.getValue("result").jsonObject
+        assertNull(storedResult["options"])
+        assertEquals(1, storedResult.num("answer").toInt())
+        assertEquals(1, storedResult.num("choice").toInt())
+        val persistedBody = stateAfter.getValue("body").jsonObject
+        val persistedItem = (persistedBody["items"] as JsonArray).map { it.jsonObject }.first { it.str("id") == "S1" }
+        assertEquals(1, persistedItem.num("layout").toInt())
     }
 
-    @Test fun restoreActiveQuestionOptionsCoversPendingDontKnowAndMainlineDraft() {
+    @Test fun legacyGradedRecordWithReshuffledBodySuppressesOptionMarks() {
+        assertLegacyGradedRecordHidesOptionMarks(savedBodyLayout = 1)
+    }
+
+    @Test fun legacyGradedRecordWithOriginalBodyDoesNotFallbackToBody() {
+        assertLegacyGradedRecordHidesOptionMarks(savedBodyLayout = 0)
+    }
+
+    @Test fun restoreActiveQuestionOptionsCoversPendingDontKnowResultAndMainlineDraft() {
         val fresh = json("items" to JsonArray(listOf(
             json("id" to "Q1", "options" to listOf("D", "C", "B", "A"), "layout" to 1)
         )))
@@ -929,10 +964,16 @@ class MainlineScreenTest {
         val pendingOnly = restoreActiveQuestionOptions(fresh, json("pending" to json("itemId" to "Q1"), "body" to oldBody))
         assertEquals(listOf("A", "B", "C", "D"), (pendingOnly["items"] as JsonArray).first().jsonObject.strings("options"))
 
-        val dontKnowResult = restoreActiveQuestionOptions(fresh, json("result" to json("itemId" to "Q1", "dontKnow" to true), "body" to oldBody))
-        assertEquals(listOf("A", "B", "C", "D"), (dontKnowResult["items"] as JsonArray).first().jsonObject.strings("options"))
-
         val draftChoice = restoreActiveQuestionOptions(fresh, json("item" to "Q1", "choice" to 2, "body" to oldBody))
         assertEquals(listOf("A", "B", "C", "D"), (draftChoice["items"] as JsonArray).first().jsonObject.strings("options"))
+
+        val legacyDontKnowWithoutOptions = restoreActiveQuestionOptions(fresh, json("result" to json("itemId" to "Q1", "dontKnow" to true), "body" to oldBody))
+        assertEquals(listOf("D", "C", "B", "A"), (legacyDontKnowWithoutOptions["items"] as JsonArray).first().jsonObject.strings("options"))
+
+        val gradedWithResultOptions = restoreActiveQuestionOptions(
+            fresh,
+            json("result" to json("itemId" to "Q1", "options" to listOf("A", "B", "C", "D"), "layout" to 0), "body" to fresh)
+        )
+        assertEquals(listOf("A", "B", "C", "D"), (gradedWithResultOptions["items"] as JsonArray).first().jsonObject.strings("options"))
     }
 }

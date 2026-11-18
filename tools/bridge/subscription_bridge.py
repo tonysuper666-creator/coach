@@ -48,6 +48,7 @@ from api_batch import BatchRouter, BatchPending, TASKS as BATCH_TASKS
 
 # ---------- 路径与配置（全部在 Coach 目录里） ----------
 
+API_ONLY = os.environ.get("COACH_API_ONLY") == "1"
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("BRIDGE_PORT", "8791"))
 # 8791 is reserved for the learner. Isolation is enforced before any CLI/gate.
@@ -611,6 +612,8 @@ def kill_group(proc: asyncio.subprocess.Process) -> None:
 
 async def spawn(argv: list[str], cwd: Path, env: dict[str, str],
                 stdin_pipe: bool = False) -> asyncio.subprocess.Process:
+    if API_ONLY:
+        raise BridgeError(503, "订阅通道已关闭", reason="subscription_disabled")
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv, cwd=str(cwd), env=env,
@@ -1194,6 +1197,8 @@ async def cli_status(argv: list[str], env: dict[str, str], cwd: Path) -> dict:
 
     cwd 必须给：codex 在沙箱里读不到自己的工作目录时会报 Operation not permitted。
     """
+    if API_ONLY:
+        return {"enabled": False, "logged_in": None, "detail": "订阅通道已关闭"}
     cwd.mkdir(parents=True, exist_ok=True)
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -1382,6 +1387,9 @@ async def dispatch_batch(req: ReqCtx, model: str, effort: str | None) -> Outcome
         reason = str(error) if isinstance(error, (ApiFailure, Denied)) else "batch_state_io"
         req.api_fallback = reason
         write_log(request_id=req.request_id, task=req.task, event="api_fallback", reason=reason)
+        if API_ONLY:
+            req.transport = "api"
+            return Outcome("failed", reason, "error", model)
         outcome = await dispatch_cli(req, model, effort)
         if outcome.status == "complete":
             try:
@@ -1433,6 +1441,11 @@ async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
                 code = "monthly_quota" if reason in ("credit_limit_95_percent", "monthly_quota") else "daily_quota" if reason == "daily_quota" else "unavailable"
                 req.transport = "api"
                 yield {"kind": "end", "outcome": Outcome("failed", code, "error", req.served_by or model, started=sent)}
+                return
+            if API_ONLY:
+                req.transport = "api"
+                yield {"kind": "end", "outcome": Outcome("truncated" if sent else "failed", reason, "error",
+                      req.served_by or model, started=sent)}
                 return
             req.api_fallback = reason
             write_log(request_id=req.request_id, task=req.task, event="api_fallback", reason=reason,

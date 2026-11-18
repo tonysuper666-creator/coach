@@ -1,19 +1,35 @@
 package com.coach.desktop.books
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import coach.design.tokens.CoachV7
+import com.coach.ui.input.EnterGate
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PaperCard
 import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.V7TextButton
+import com.coach.ui.v7.v7FocusRing
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
 
@@ -26,7 +42,7 @@ internal fun BookPassageAsk(
 ) {
     val blocks = remember(book.id, page.number) { StudyCoachCourse.blocks(book.id, listOf(page)).filterNot { it.heading } }
     var selected by remember(book.id, page.number, initialSelection) { mutableStateOf(initialSelection) }
-    var question by remember(book.id, page.number) { mutableStateOf("") }
+    var draft by remember(book.id, page.number) { mutableStateOf(TextFieldValue("")) }
     var request by remember(book.id, page.number) { mutableStateOf<BookPassageQuestion?>(null) }
     var reply by remember(book.id, page.number) { mutableStateOf<BookLearningReply?>(null) }
     var revision by remember(book.id, page.number) { mutableIntStateOf(0) }
@@ -60,8 +76,26 @@ internal fun BookPassageAsk(
                     }
                 }
             } else {
+                val question = draft.text
                 val typed = question.trim().length
                 val tooLong = typed > BookPassageQuestion.MAX_QUESTION_LENGTH
+                // Enter 和「发送」按钮走同一个入口、同一组放行条件：超长、正在等回答、额度拒绝、逐书同意都按现有行为。
+                fun canSend(text: String) = BookPassageQuestion.accepts(text) && (request == null || reply != null) &&
+                    (reply as? BookLearningReply.Unavailable)?.trouble != ExplainTrouble.Quota
+                // 文本和放行条件都在按下的这一刻现读：按钮变灰靠的是上一帧的 draft，读者敲字与点发送之间
+                // 可能还没重排，用重排时的快照会把刚打的字丢掉，发出一句空问题。
+                fun submit() {
+                    val text = draft.text
+                    if (!canSend(text)) return
+                    val passage = runCatching { BookPassage.from(book, checkNotNull(selected)) }.getOrNull()
+                    if (passage == null) {
+                        request = null
+                        reply = BookLearningReply.Unavailable("这段原文的位置无法确认，请重新选择。")
+                    } else {
+                        val input = BookPassageQuestion(passage, text)
+                        if (support.consentRequired(book.id)) pendingConsent = input else send(input)
+                    }
+                }
                 PaperCard(color = colors.surface1) {
                     // PDF 抽出的段落每行硬断：按段重排再显示。发出去的、出处里核对的仍是原文一字不改。
                     Text(ReadableText.reflow(checkNotNull(selected).text), style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary,
@@ -69,7 +103,8 @@ internal fun BookPassageAsk(
                 }
                 // Nothing typed here is truncated: over-length text stays editable and copyable, and
                 // the hint below says why sending is closed instead of letting the provider reject it.
-                V7Field(question, { question = it }, "想问什么？", singleLine = false, minLines = 3, isError = tooLong,
+                V7QuestionField(draft, { draft = it }, "想问什么？", isError = tooLong,
+                    onSubmit = { submit() },
                     modifier = Modifier.fillMaxWidth().testTag("book-passage-question"))
                 Text(
                     if (tooLong) "已超过 ${BookPassageQuestion.MAX_QUESTION_LENGTH} 字，删掉 " +
@@ -77,17 +112,8 @@ internal fun BookPassageAsk(
                     else "$typed / ${BookPassageQuestion.MAX_QUESTION_LENGTH}",
                     modifier = Modifier.testTag("book-passage-length"), style = MaterialTheme.typography.bodySmall,
                     color = if (tooLong) v7Alert() else colors.fgSecondary)
-                PrimaryButton(onClick = {
-                    val passage = runCatching { BookPassage.from(book, checkNotNull(selected)) }.getOrNull()
-                    if (passage == null) {
-                        request = null
-                        reply = BookLearningReply.Unavailable("这段原文的位置无法确认，请重新选择。")
-                    } else {
-                        val input = BookPassageQuestion(passage, question)
-                        if (support.consentRequired(book.id)) pendingConsent = input else send(input)
-                    }
-                }, enabled = BookPassageQuestion.accepts(question) && (request == null || reply != null) &&
-                    (reply as? BookLearningReply.Unavailable)?.trouble != ExplainTrouble.Quota, modifier = Modifier.testTag("book-passage-send")) { Text("发送") }
+                PrimaryButton(onClick = { submit() }, enabled = canSend(question),
+                    modifier = Modifier.testTag("book-passage-send")) { Text("发送") }
                 when (val result = reply) {
                     null -> if (request != null) Text("正在读这段问题…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                     is BookLearningReply.Text -> PaperCard(Modifier.testTag("book-passage-reply"), color = colors.surface1) {
@@ -120,5 +146,41 @@ internal fun BookPassageAsk(
             text = { Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
                 Text(passage.text, Modifier.testTag("book-passage-source"))
             } }, confirmButton = { V7TextButton({ source = null }) { Text("回到问题") } })
+    }
+}
+
+/**
+ * 选段提问的问题框：和 V7Field 同一套纸面、细描边、焦点环和字号。
+ * 这里自己画一遍是因为要按 Enter 发送：只有拿 [TextFieldValue] 才看得见输入法的候选（composition），
+ * 「问」字还没选定时按 Enter 是在确认候选，不能当成发送。Shift+Enter 仍是换行。
+ */
+@Composable
+private fun V7QuestionField(
+    value: TextFieldValue, onValueChange: (TextFieldValue) -> Unit, label: String, isError: Boolean,
+    onSubmit: () -> Unit, modifier: Modifier = Modifier,
+) {
+    val colors = CoachTheme.colors
+    val shape = RoundedCornerShape(CoachV7.Radius.btn)
+    val gate = remember { EnterGate() }
+    val current by rememberUpdatedState(value)
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
+        BasicTextField(value, { next -> gate.onEdit(current.composition != null, next.composition != null); onValueChange(next) },
+            singleLine = false, minLines = 3,
+            textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.fgPrimary),
+            cursorBrush = SolidColor(colors.fgPrimary),
+            modifier = modifier.v7FocusRing(shape).clip(shape).background(colors.surface1)
+                .border(1.dp, if (isError) v7Alert() else colors.borderSubtle, shape).padding(horizontal = 12.dp, vertical = 10.dp)
+                .onPreviewKeyEvent { event ->
+                    if (event.key != Key.Enter && event.key != Key.NumPadEnter) return@onPreviewKeyEvent false
+                    val down = event.type == KeyEventType.KeyDown
+                    when {
+                        gate.shouldSend(true, down, event.isShiftPressed, current.composition != null) -> { onSubmit(); true }
+                        // 其余不带 Shift 的 Enter 一律吃掉：确认候选那一下、以及发送关着（超长、正在等回答、
+                        // 额度拒绝）的时候，插一个换行只会把问题越写越长。Shift+Enter 照旧换行。
+                        down && !event.isShiftPressed -> true
+                        else -> false
+                    }
+                })
     }
 }

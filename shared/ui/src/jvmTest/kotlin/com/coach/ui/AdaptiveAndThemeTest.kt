@@ -96,6 +96,18 @@ class AdaptiveAndThemeTest {
         assertNull(LayoutRules.compute(WindowSpec(933f, 704f)).dividerAtDp)
     }
 
+    /** 展开态带着铰链进布局：竖着也是侧栏两栏，不再退回手机底部栏；折回外屏没有铰链，才是单栏底部栏。 */
+    @Test fun unfoldedFoldKeepsTheRailAndOnlyTheCoverFallsBackToTheBottomBar() {
+        val unfolded = LayoutRules.navigation(WindowSpec(dp(1848), dp(2448), Hinge(352f)))
+        assertEquals(NavStyle.Rail, unfolded.nav)
+        assertEquals(352f, unfolded.dividerAtDp)
+        val cover = LayoutRules.navigation(WindowSpec(dp(1248), dp(1972)))
+        assertEquals(NavStyle.BottomBar, cover.nav)
+        assertNull(cover.dividerAtDp)
+        // 外屏上系统也可能报一条折痕，但它分不开窗口，布局仍按手机单栏。
+        assertEquals(NavStyle.BottomBar, LayoutRules.navigation(WindowSpec(dp(1248), dp(1972), Hinge(237f))).nav)
+    }
+
     private class Clock(var ms: Long = 10_000) { fun now() = ms }
 
     @Test fun enterNeverSendsInsideAComposition() {

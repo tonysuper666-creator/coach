@@ -25,6 +25,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.coach.client.CourseView
+import com.coach.ui.adaptive.Hinge
 import com.coach.ui.adaptive.LayoutRules
 import com.coach.ui.adaptive.NavStyle
 import com.coach.ui.adaptive.WindowSpec
@@ -180,7 +181,7 @@ enum class AppTab(val label: String, val glyph: String? = null) {
 
 /** [initialSource] 同样只用于验收：打开知识点后直接展开「看原文」（桌面截图用）。[initialDraft] 只用于验收：把一句话预填进输入框（`adb` 敲不了中文），不会自动发送。 */
 @Composable
-fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false, settings: @Composable () -> Unit = {}, courseActions: @Composable (CourseView) -> Unit = {}, reviewCandidates: com.coach.domain.reviewqueue.VariantCandidatePort = com.coach.client.NoVariantCandidates) {
+fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false, settings: @Composable () -> Unit = {}, courseActions: @Composable (CourseView) -> Unit = {}, reviewCandidates: com.coach.domain.reviewqueue.VariantCandidatePort = com.coach.client.NoVariantCandidates, hinge: Hinge? = null) {
     val ui by c.tutor.model.state.collectAsState()
     val revision by c.sync.revision.collectAsState()
     val view by produceState<CourseView?>(null, c, revision) {
@@ -319,7 +320,8 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         val keyboard = with(LocalDensity.current) {
                             (WindowInsets.safeDrawing.getBottom(this) - WindowInsets.systemBars.union(WindowInsets.displayCutout).getBottom(this)).coerceAtLeast(0).toDp()
                         }
-                        val window = WindowSpec(maxWidth.value, (maxHeight + keyboard).value)
+                        // 折痕位置交给布局规则：有铰链的窗口按「书」排，展开态不再退回手机底部栏。
+                        val window = WindowSpec(maxWidth.value, (maxHeight + keyboard).value, hinge)
                         val layout = LayoutRules.navigation(window)
                         val current = view
                         val task = entry.page in listOf(AppPage.MOCK, AppPage.ESSAY)

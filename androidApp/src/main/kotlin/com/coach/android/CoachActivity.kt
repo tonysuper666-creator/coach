@@ -5,14 +5,22 @@ import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.core.view.WindowCompat
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.window.layout.FoldingFeature
+import androidx.window.layout.WindowInfoTracker
+import com.coach.ui.adaptive.Hinge
 import com.coach.client.PairedCredentials
 import androidx.activity.enableEdgeToEdge
 import androidx.metrics.performance.JankStats
@@ -69,12 +77,13 @@ class CoachActivity : ComponentActivity() {
                 }
             }
             CoachTheme(dark) {
+                val hinge = rememberHinge()
                 Box(Modifier.semantics { testTagsAsResourceId = true }) {
                     PairingGate(store,serverUrl) { credentials ->
                         if(BuildConfig.COACH_COURSE.isBlank()) CoachNotice("课程还没有装好，请稍后重开。")
                         else {
                             val controller=remember(credentials.deviceId) { createController(serverUrl,credentials) }
-                            CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"), initialTab = runCatching { com.coach.ui.AppTab.valueOf(intent.getStringExtra("tab").orEmpty()) }.getOrDefault(com.coach.ui.AppTab.TODAY), settings = { ReminderSettings(reminder) })
+                            CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"), initialTab = runCatching { com.coach.ui.AppTab.valueOf(intent.getStringExtra("tab").orEmpty()) }.getOrDefault(com.coach.ui.AppTab.TODAY), settings = { ReminderSettings(reminder) }, hinge = hinge)
                         }
                     }
                 }
@@ -83,6 +92,26 @@ class CoachActivity : ComponentActivity() {
         jank = JankStats.createAndTrack(window) { frame ->
             synchronized(frameMs) { frameMs += frame.frameDurationUiNanos / 1_000_000f; if (frame.isJank) jankFrames++ }
         }
+    }
+
+    /**
+     * Fold8 展开后两半屏幕之间有铰链。这里只取竖直铰链（书式展开）并把位置换算成 dp：
+     * 布局规则据此按「书」排版，展开态用侧栏而不是手机底部栏。外屏没有铰链，折叠时这里就是 null。
+     * 内屏左右没有系统栏，所以窗口坐标和内容坐标在横向上重合，不用再减 inset。
+     */
+    @Composable
+    private fun rememberHinge(): Hinge? {
+        val context = LocalContext.current
+        val density = LocalDensity.current.density
+        val hinge by produceState<Hinge?>(initialValue = null) {
+            val activity = context as? ComponentActivity ?: return@produceState
+            WindowInfoTracker.getOrCreate(activity).windowLayoutInfo(activity).collect { info ->
+                value = info.displayFeatures.filterIsInstance<FoldingFeature>()
+                    .firstOrNull { it.orientation == FoldingFeature.Orientation.VERTICAL }
+                    ?.let { Hinge(xDp = it.bounds.left / density, widthDp = it.bounds.width() / density) }
+            }
+        }
+        return hinge
     }
 
     private fun createController(serverUrl: String, credentials: PairedCredentials): CoachController {

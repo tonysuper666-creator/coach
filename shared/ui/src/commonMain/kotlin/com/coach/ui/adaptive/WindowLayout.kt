@@ -46,7 +46,8 @@ object LayoutRules {
     /** App chrome contract, also used by Desk: portrait Fold is single-column; the directory is a drawer. */
     fun navigation(spec: WindowSpec): PaneLayout {
         val layout = compute(spec)
-        val portrait = !layout.shortHeight && spec.widthDp < 840f && spec.heightDp > spec.widthDp && spec.hinge == null
+        // 只有折痕真能把窗口分成两栏（book）时才换掉手机布局：外屏和窄窗口上系统仍可能报铰链，那里还是单栏。
+        val portrait = !layout.shortHeight && spec.widthDp < 840f && spec.heightDp > spec.widthDp && layout.dividerAtDp == null
         return if (portrait) layout.copy(nav = NavStyle.BottomBar, navWidthDp = 0f, aside = AsidePlacement.BottomSheet,
             asideWidthDp = 0f, outlineDocked = false, outlineWidthDp = 0f)
         else layout.copy(outlineDocked = false, outlineWidthDp = 0f)

@@ -25,19 +25,19 @@ fun shouldCompleteTurn(progress: Float, velocityAlongTurn: Float, flingPxPerSec:
     }
 
 /** 位置规整：双页时第一页下标取偶数，总在 [0, last] 内。 */
-fun normalizePosition(position: Int, pageCount: Int, columns: Int): Int {
+fun normalizePosition(position: Int, pageCount: Int, columns: Int, align: Boolean = true): Int {
     if (pageCount <= 0) return 0
     val p = position.coerceIn(0, pageCount - 1)
-    return if (columns == 2) p - p % 2 else p
+    return if (columns == 2 && align) p - p % 2 else p
 }
 
 /** 前后翻一步后的位置；到头返回 null。 */
-fun stepPosition(position: Int, pageCount: Int, columns: Int, forward: Boolean): Int? {
+fun stepPosition(position: Int, pageCount: Int, columns: Int, forward: Boolean, align: Boolean = true): Int? {
     if (forward) {
         val next = position + columns
-        return if (next >= pageCount) null else normalizePosition(next, pageCount, columns)
+        return if (next >= pageCount) null else normalizePosition(next, pageCount, columns, align)
     }
-    return if (position <= 0) null else normalizePosition(position - columns, pageCount, columns)
+    return if (position <= 0) null else normalizePosition(position - columns, pageCount, columns, align)
 }
 
 /** 长距离跳转时画几张翻过的页：最多 maxLeaves，距离 0 返回 0。 */

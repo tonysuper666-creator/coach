@@ -45,6 +45,7 @@ internal class TextbookLibrary(
             sql.execute("CREATE TABLE IF NOT EXISTS book_learning_paths(book TEXT PRIMARY KEY,path TEXT NOT NULL CHECK(path IN ('READ','READ_AND_LEARN','QUESTION_FIRST')))")
             sql.execute("CREATE TABLE IF NOT EXISTS book_ladders(book TEXT PRIMARY KEY,session TEXT NOT NULL)")
             sql.execute("CREATE TABLE IF NOT EXISTS book_reader_views(book TEXT PRIMARY KEY,text_view INTEGER NOT NULL)")
+            sql.execute("CREATE TABLE IF NOT EXISTS book_pdf_modes(book TEXT PRIMARY KEY,scrolling INTEGER NOT NULL)")
             sql.execute("""CREATE TABLE IF NOT EXISTS book_highlights(
                 book TEXT NOT NULL,page INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,quote TEXT NOT NULL,
                 PRIMARY KEY(book,page,start,end))""")
@@ -174,6 +175,29 @@ internal class TextbookLibrary(
             sql.setBoolean(2, textView)
             sql.executeUpdate()
         }
+    }
+
+    fun pdfScrollMode(bookId: String): Boolean = database().use { db ->
+        db.prepareStatement("SELECT scrolling FROM book_pdf_modes WHERE book=?").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { !it.next() || it.getBoolean(1) }
+        }
+    }
+
+    fun savePdfScrollMode(bookId: String, scrolling: Boolean) = database().use { db ->
+        db.prepareStatement("INSERT OR REPLACE INTO book_pdf_modes(book,scrolling) VALUES(?,?)").use { sql ->
+            sql.setString(1, bookId)
+            sql.setBoolean(2, scrolling)
+            sql.executeUpdate()
+        }
+    }
+
+    fun pdfPageAspects(book: Textbook): Map<Int, Float> = Loader.loadPDF(original(book.id, book.format).toFile()).use { pdf ->
+        pdf.pages.withIndex().mapNotNull { (index, page) ->
+            val crop = page.cropBox
+            val aspect = if (page.rotation == 90 || page.rotation == 270) crop.height / crop.width else crop.width / crop.height
+            aspect.takeIf { it.isFinite() && it > 0 }?.let { index + 1 to it }
+        }.toMap()
     }
 
     fun highlights(bookId: String, page: BookPage): List<ReaderTextRange> = database().use { db ->

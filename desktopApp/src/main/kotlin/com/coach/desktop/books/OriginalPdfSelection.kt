@@ -37,12 +37,13 @@ internal fun BoxScope.OriginalPdfSelection(
     selectionColor: Color,
     highlightColor: Color,
     onSelection: (ReaderTextRange?) -> Unit,
+    layerTag: String = "original-pdf-text-layer",
 ) {
     val geometry = remember(unit, text) { PdfSelectionGeometry(unit, text) }
     val marked = remember(geometry, highlights) { highlights.flatMap(geometry::verifiedBoxes) }
     val selected = remember(geometry, selection) { selection?.let(geometry::verifiedBoxes).orEmpty() }
     val update = rememberUpdatedState(onSelection)
-    Canvas(Modifier.matchParentSize().testTag("original-pdf-text-layer").semantics {
+    Canvas(Modifier.matchParentSize().testTag(layerTag).semantics {
         if (selected.isNotEmpty() && selection != null) this[OriginalPdfSelectionRange] = selection
     }.pointerHoverIcon(PointerIcon.Text).pointerInput(geometry) {
         awaitEachGesture {

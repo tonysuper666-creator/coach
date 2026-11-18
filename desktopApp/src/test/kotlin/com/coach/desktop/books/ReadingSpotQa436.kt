@@ -88,6 +88,49 @@ class ReadingSpotQa436 {
         assertTrue(scrolling.any { it.id == target } && restored.any { it.id == target }, "same sentence must remain visible on both switches")
     }
 
+    private fun SkikoComposeUiTest.dragSelect(from: Sentence, to: Sentence) {
+        val b = onNodeWithTag("reader-page").fetchSemanticsNode().boundsInRoot
+        onNodeWithTag("reader-page").performMouseInput {
+            moveTo(androidx.compose.ui.geometry.Offset(from.rootX - b.left, from.rootY - b.top))
+            press()
+            moveTo(androidx.compose.ui.geometry.Offset((from.rootX + to.rootX) / 2f - b.left, (from.rootY + to.rootY) / 2f - b.top))
+            moveTo(androidx.compose.ui.geometry.Offset(to.rootX - b.left, to.rootY - b.top))
+            release()
+        }
+        mainClock.advanceTimeBy(300); waitForIdle()
+    }
+
+    @Test fun selectingOnTheRightPageKeepsItsFirstSentenceVisibleAcrossSwitches() = withBook(2560f) {
+        onNodeWithText("下一页").performClick()
+        mainClock.advanceTimeBy(850); waitForIdle()
+        val right = sentences().filter { it.side == "reader-text-right" }
+        assertTrue(right.size >= 6)
+        val first = right[right.size / 3]
+        val last = right[right.size * 2 / 3]
+        dragSelect(first, last)
+        toggle()
+        onNodeWithTag("book-scroll-read").assertExists()
+        val inScroll = sentences().map { it.id }
+        report("select-first-scroll", sentences(), first.id)
+        assertTrue(first.id in inScroll, "first selected sentence ${first.id} must be visible in scroll: $inScroll")
+        toggle()
+        assertTrue(first.id in sentences().map { it.id }, "and back in the spread")
+    }
+
+    @Test fun selectingFromTheLeftPageIntoTheRightKeepsTheLeftFirstSentence() = withBook(2560f) {
+        onNodeWithText("下一页").performClick()
+        mainClock.advanceTimeBy(850); waitForIdle()
+        val all = sentences()
+        val left = all.filter { it.side == "reader-text" }
+        val right = all.filter { it.side == "reader-text-right" }
+        val first = left[left.size / 2]
+        dragSelect(first, right[right.size / 3])
+        toggle()
+        assertTrue(first.id in sentences().map { it.id }, "left-page first sentence ${first.id} must be visible in scroll")
+        toggle()
+        assertTrue(first.id in sentences().map { it.id }, "and back in the spread")
+    }
+
     @Test fun leftPageSentencesSurviveFirstSwitchWithoutAnyClick() = withBook(2560f) {
         onNodeWithText("下一页").performClick()
         mainClock.advanceTimeBy(850); waitForIdle()

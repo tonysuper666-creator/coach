@@ -35,7 +35,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -308,7 +309,9 @@ internal fun BookPageView(
                                 val page = pages.getOrNull(first + side)
                                 Box(Modifier.width(sheetWidth).fillMaxHeight()
                                     .background(if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper)
-                                    .clipToBounds().readingTap { y -> pages.getOrNull(first + side)?.let { state.anchor = it.anchorAtY(y, measurer, typography, widthPx) } }
+                                    .clipToBounds().readingSpot { d, u, dragged ->
+                                        state.anchor = spotAnchor(pages, first + side, spread, side, d, u, dragged, with(density) { sheetWidth.toPx() }, measurer, typography, widthPx) ?: state.anchor
+                                    }
                                     .testTag("book-sheet-$side")) {
                                     if (page != null) {
                                         val remaining = pages.count { it.chapter == page.chapter } - pages.take(first + side + 1).count { it.chapter == page.chapter }
@@ -344,7 +347,9 @@ internal fun BookPageView(
                             val side = if (spread) Math.floorMod(index - turnState.shownPosition, 2) else 0
                             val page = pages[index]
                             Box(Modifier.width(sheetWidth).fillMaxHeight().background(paper).clipToBounds()
-                                .readingTap { y -> state.anchor = pages[index].anchorAtY(y, measurer, typography, widthPx) }
+                                .readingSpot { d, u, dragged ->
+                                    state.anchor = spotAnchor(pages, index, spread, side, d, u, dragged, with(density) { sheetWidth.toPx() }, measurer, typography, widthPx) ?: state.anchor
+                                }
                                 .testTag("book-sheet-$side")) {
                                 val remaining = pages.count { it.chapter == page.chapter } - pages.take(index + 1).count { it.chapter == page.chapter }
                                 BookSheet(book.title, page, typography, measurer, widthPx,
@@ -361,13 +366,40 @@ internal fun BookPageView(
     }
 }
 
-/** 在版心里点一下（没有拖动）：点中的那一行就是当前阅读行，锚点落到那里，不管在左页还是右页。 */
-private fun Modifier.readingTap(onTap: (Int) -> Unit): Modifier = pointerInput(Unit) {
+/**
+ * 版心里的阅读信号：点一下，或拖选文字。点（没有拖动）：点中的那一行。拖选：选区第一个字所在的那一行。
+ * 回调拿到按下点、抬起点（本页坐标，抬起点可能越过本页宽度到了另一页）。图、按钮这类自己消费了点击的不算点。
+ */
+private fun Modifier.readingSpot(onSpot: (down: Offset, up: Offset, dragged: Boolean) -> Unit): Modifier = pointerInput(Unit) {
     awaitEachGesture {
-        // Final 轮：图、按钮这类自己处理了点击（已消费）的元素不算「在版心里点一下」
         val down = awaitFirstDown(requireUnconsumed = true, pass = PointerEventPass.Final)
-        val up = waitForUpOrCancellation(PointerEventPass.Final)
-        if (up != null && !up.isConsumed && (up.position - down.position).getDistance() <= viewConfiguration.touchSlop) onTap(down.position.y.toInt())
+        var last = down.position
+        var consumedUp = false
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Final)
+            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+            last = change.position
+            if (!change.pressed) { consumedUp = change.isConsumed; break }
+        }
+        val dragged = (last - down.position).getDistance() > viewConfiguration.touchSlop
+        if (dragged || !consumedUp) onSpot(down.position, last, dragged)
+    }
+}
+
+/**
+ * 阅读信号 -> 原文锚点。点：点中那一行。拖选：选区第一个字所在那一行；左页拖到右页取左页按下点，
+ * 右页往回拖到左页取左页抬起点；同页内取更靠上的那一端。
+ */
+private fun spotAnchor(pages: List<BookLaidPage>, index: Int, twoPages: Boolean, side: Int, down: Offset, up: Offset,
+    dragged: Boolean, sheetWidthPx: Float, measurer: TextMeasurer, typography: BookPageTypography, widthPx: Int): BookPageAnchor? {
+    fun at(i: Int, y: Float) = pages.getOrNull(i)?.anchorAtY(y.toInt().coerceAtLeast(0), measurer, typography, widthPx)
+    if (!dragged) return at(index, down.y)
+    val rightOfOwn = twoPages && side == 0 && up.x > sheetWidthPx
+    val leftOfOwn = twoPages && side == 1 && up.x < 0f
+    return when {
+        rightOfOwn -> at(index, down.y)
+        leftOfOwn -> at(index - 1, up.y)
+        else -> at(index, minOf(down.y, up.y))
     }
 }
 

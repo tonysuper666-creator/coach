@@ -16,6 +16,10 @@ function Wait-File([string]$File) {
     if (!(Test-Path $File)) { throw 'Child did not reach memory admission' }
 }
 try {
+    $liveName = Get-SmokeMemoryMutexName 'd:/agent/state/coach-smoke-memory/'
+    $testName = Get-SmokeMemoryMutexName $state
+    Check ($liveName -ceq 'Global\Coach.SmokeMemory' -and $testName -cne $liveName) 'an isolated run does not open the live mutex'
+    Check ($testName -ceq (Get-SmokeMemoryMutexName (Join-Path $state '.'))) 'equivalent paths share the same mutex'
     $denied = $false
     try { $lease = Enter-SmokeMemory -StateDir $state -BudgetBytes ((Free-Bytes) + 1GB) -TimeoutSec 0 }
     catch { $denied = $_.Exception.Message -like 'SMOKE_MEMORY: insufficient RAM*' }
@@ -69,7 +73,7 @@ try {
     $firstExit = [DateTime](Get-Content (Join-Path $state 'first.release'))
     $secondEnter = [DateTime](Get-Content (Join-Path $state 'second.enter'))
     Check ($secondEnter -ge $firstExit -and @(Get-ChildItem $state -Filter '*.json').Count -eq 0) 'queued process resumes after release and both reservations are removed'
-    Write-Host "SMOKE_MEMORY $checks/6"
+    Write-Host "SMOKE_MEMORY $checks/8"
 } finally {
     Exit-SmokeMemory $lease
     foreach ($p in $children) {

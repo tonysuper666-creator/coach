@@ -1,4 +1,17 @@
 # Shared by independent smoke workers. The mutex covers admission, never UI work.
+function Get-SmokeMemoryMutexName([string]$StateDir) {
+    $path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($StateDir)
+    $path = [IO.Path]::GetFullPath($path).TrimEnd([char]'\').ToUpperInvariant()
+    # Keep the live name compatible with workers from older checkouts.
+    if ($path -eq 'D:\AGENT\STATE\COACH-SMOKE-MEMORY') { return 'Global\Coach.SmokeMemory' }
+    # An isolated ledger must not create the live mutex under a different session's token.
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $key = [BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($path))).Replace('-', '')
+        return "Global\Coach.SmokeMemory.$key"
+    } finally { $hash.Dispose() }
+}
+
 function Write-SmokeReservation([string]$File, $Record) {
     # A killed worker must not leave a truncated JSON reservation for its peers.
     $Record | ConvertTo-Json | Set-Content -LiteralPath "$File.tmp" -Encoding UTF8
@@ -14,7 +27,7 @@ function Enter-SmokeMemory(
     New-Item -ItemType Directory -Force $StateDir | Out-Null
     $owner = Get-Process -Id $PID
     $file = Join-Path $StateDir "$PID.json"
-    $mutex = [Threading.Mutex]::new($false, 'Global\Coach.SmokeMemory')
+    $mutex = [Threading.Mutex]::new($false, (Get-SmokeMemoryMutexName $StateDir))
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $lastNotice = -30
     try {
@@ -67,7 +80,7 @@ function Enter-SmokeMemory(
 
 function Set-SmokeMemoryClient([string]$Lease, [int]$ClientPid) {
     $client = Get-Process -Id $ClientPid -ErrorAction Stop
-    $mutex = [Threading.Mutex]::new($false, 'Global\Coach.SmokeMemory')
+    $mutex = [Threading.Mutex]::new($false, (Get-SmokeMemoryMutexName (Split-Path -Parent $Lease)))
     $held = $false
     try {
         try { $held = $mutex.WaitOne(10000) }
@@ -86,7 +99,7 @@ function Exit-SmokeMemory([string]$Lease) {
     # Each worker removes only its own file; admission prunes abandoned entries
     # using PID + StartTime if a Job Object terminates the worker first.
     if (!$Lease -or (Split-Path $Lease -Leaf) -ne "$PID.json") { return }
-    $mutex = [Threading.Mutex]::new($false, 'Global\Coach.SmokeMemory')
+    $mutex = [Threading.Mutex]::new($false, (Get-SmokeMemoryMutexName (Split-Path -Parent $Lease)))
     $held = $false
     try {
         try { $held = $mutex.WaitOne(10000) }

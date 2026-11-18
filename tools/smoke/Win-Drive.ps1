@@ -22,16 +22,25 @@ public class WD {
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int command);
   [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessageTimeout(
     IntPtr h, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeoutMs, out UIntPtr result);
+  public static string LastActivationFailure { get; private set; }
   public static bool Activate(IntPtr h) {
     // Keep the automation queue independent: attaching to a busy foreground
     // thread can block BringWindowToTop/SetForegroundWindow while holding our mutex.
     if (IsIconic(h)) ShowWindowAsync(h, 9); // SW_RESTORE
-    SetForegroundWindow(h);
+    bool accepted = SetForegroundWindow(h);
     UIntPtr ignored;
     // WM_NULL confirms the asynchronous activation has been processed. Never
     // wait indefinitely for a hung UI, and never bypass foreground ownership.
-    if (SendMessageTimeout(h, 0, UIntPtr.Zero, IntPtr.Zero, 0x23, 500, out ignored) == IntPtr.Zero) return false;
-    return GetForegroundWindow() == h;
+    if (SendMessageTimeout(h, 0, UIntPtr.Zero, IntPtr.Zero, 0x23, 500, out ignored) == IntPtr.Zero) {
+      LastActivationFailure = "WM_NULL confirmation failed";
+      return false;
+    }
+    if (GetForegroundWindow() != h) {
+      LastActivationFailure = accepted ? "activation accepted but target was not foreground" : "activation declined by Windows";
+      return false;
+    }
+    LastActivationFailure = null;
+    return true;
   }
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, IntPtr e);
@@ -146,13 +155,14 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
             try {
                 try { $held = $mutex.WaitOne(30000) } catch [Threading.AbandonedMutexException] { $held = $true }
                 if (-not $held) { throw 'WIN_DRIVE_TIMEOUT: waiting for one foreground action' }
-                if (-not [WD]::Activate($Window)) { throw 'WIN_DRIVE_FOCUS_LOST: foreground activation not confirmed' }
+                if (-not [WD]::Activate($Window)) { throw "WIN_DRIVE_FOCUS_LOST: $([WD]::LastActivationFailure)" }
                 Start-Sleep -Milliseconds 150
                 Assert-OurForeground
                 & $Action
                 return
             } catch {
                 if ($_.Exception.Message -notlike 'WIN_DRIVE_FOCUS_LOST*') { throw }
+                $lastFocusLoss = $_.Exception.Message
                 # Retry this action, never restart/reject the run for another window.
                 # Release first so the other driver can finish its action.
                 Write-Verbose "Foreground action retry $attempt/20"
@@ -161,7 +171,7 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
             }
             Start-Sleep -Milliseconds (Get-Random -Minimum 50 -Maximum 200)
         }
-        throw "WIN_DRIVE_TIMEOUT: could not regain our foreground for this action (foreground: $(Get-ForegroundSummary))"
+        throw "WIN_DRIVE_TIMEOUT: could not regain our foreground for this action (foreground: $(Get-ForegroundSummary)). Last retry: $lastFocusLoss"
     } finally { $mutex.Dispose() }
 }
 function Save-Shot([string]$path, [IntPtr]$Window = [IntPtr]::Zero) {

@@ -181,7 +181,7 @@ enum class AppTab(val label: String, val glyph: String? = null) {
 
 /** [initialSource] 同样只用于验收：打开知识点后直接展开「看原文」（桌面截图用）。[initialDraft] 只用于验收：把一句话预填进输入框（`adb` 敲不了中文），不会自动发送。 */
 @Composable
-fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false, settings: @Composable () -> Unit = {}, courseActions: @Composable (CourseView) -> Unit = {}, reviewCandidates: com.coach.domain.reviewqueue.VariantCandidatePort = com.coach.client.NoVariantCandidates, hinge: Hinge? = null) {
+fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false, settings: @Composable () -> Unit = {}, courseActions: @Composable (CourseView) -> Unit = {}, reviewCandidates: com.coach.domain.reviewqueue.VariantCandidatePort = com.coach.client.NoVariantCandidates, hinge: Hinge? = null, tabletopControls: @Composable () -> Unit = {}) {
     val ui by c.tutor.model.state.collectAsState()
     val revision by c.sync.revision.collectAsState()
     val view by produceState<CourseView?>(null, c, revision) {
@@ -307,13 +307,16 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
             }) {
                 Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
                     OfflineBanner(ui, c)
-                    if (!hideTaskChrome && entry.page !in listOf(AppPage.MOCK, AppPage.ESSAY)) {
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            if (navigation.canGoBack) TextButton(onClick = navigation::back, modifier = Modifier.testTag("navigation-back")) { Text("返回") }
-                            Text(if (entry.page == AppPage.HOME && entry.tab in primaryAppTabs) entry.tab.navigationLabel else entry.label,
-                                style = MaterialTheme.typography.titleSmall)
-                            Spacer(Modifier.weight(1f))
-                            TextButton(onClick = { if (entry.page != AppPage.SETTINGS) navigation.push(AppEntry(AppPage.SETTINGS, label = "设置")) }, modifier = Modifier.testTag("open-settings")) { Text("设置") }
+                    // 半折横放（桌面姿态）时这条标题栏连同导航一起挪到下半屏，折痕上不放按钮。
+                    val chrome: @Composable () -> Unit = {
+                        if (!hideTaskChrome && entry.page !in listOf(AppPage.MOCK, AppPage.ESSAY)) {
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                if (navigation.canGoBack) TextButton(onClick = navigation::back, modifier = Modifier.testTag("navigation-back")) { Text("返回") }
+                                Text(if (entry.page == AppPage.HOME && entry.tab in primaryAppTabs) entry.tab.navigationLabel else entry.label,
+                                    style = MaterialTheme.typography.titleSmall)
+                                Spacer(Modifier.weight(1f))
+                                TextButton(onClick = { if (entry.page != AppPage.SETTINGS) navigation.push(AppEntry(AppPage.SETTINGS, label = "设置")) }, modifier = Modifier.testTag("open-settings")) { Text("设置") }
+                            }
                         }
                     }
                     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -384,12 +387,26 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         }
                         // One movable page and one chrome owner, including a rail/bottom-bar transition.
                         val page = remember { movableContentOf { content() } }
-                        if (layout.nav == NavStyle.BottomBar) Column(Modifier.fillMaxSize()) {
+                        val tabletop = layout.tabletopAtDp
+                        if (tabletop != null) Column(Modifier.fillMaxSize()) {
+                            // 折痕位置是窗口坐标，这里已经吃掉了状态栏，按同一坐标减掉，内容才不会压到折痕上。
+                            val top = with(LocalDensity.current) { (tabletop - WindowInsets.safeDrawing.getTop(this).toDp().value).coerceAtLeast(LayoutRules.TabletopMinContentDp) }
+                            Box(Modifier.height(top.dp).fillMaxWidth().testTag("tabletop-content")) { page() }
+                            Column(Modifier.weight(1f).fillMaxWidth().testTag("tabletop-controls")) {
+                                tabletopControls()
+                                chrome()
+                                if (showNav) AppNavBar(entry.primaryTab, select)
+                            }
+                        } else if (layout.nav == NavStyle.BottomBar) Column(Modifier.fillMaxSize()) {
+                            chrome()
                             Box(Modifier.weight(1f).fillMaxWidth()) { page() }
                             if (showNav) AppNavBar(entry.primaryTab, select)
-                        } else Row(Modifier.fillMaxSize()) {
-                            if (showNav) { AppNavRail(entry.primaryTab, layout.nav == NavStyle.IconRail, select); VerticalDivider() }
-                            Box(Modifier.weight(1f).fillMaxHeight()) { page() }
+                        } else Column(Modifier.fillMaxSize()) {
+                            chrome()
+                            Row(Modifier.weight(1f).fillMaxWidth()) {
+                                if (showNav) { AppNavRail(entry.primaryTab, layout.nav == NavStyle.IconRail, select); VerticalDivider() }
+                                Box(Modifier.weight(1f).fillMaxHeight()) { page() }
+                            }
                         }
                     }
                 }

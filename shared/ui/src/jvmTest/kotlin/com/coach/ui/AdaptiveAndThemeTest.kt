@@ -108,8 +108,24 @@ class AdaptiveAndThemeTest {
         assertEquals(NavStyle.BottomBar, LayoutRules.navigation(WindowSpec(dp(1248), dp(1972), Hinge(237f))).nav)
     }
 
-    private class Clock(var ms: Long = 10_000) { fun now() = ms }
+    /** 半折横放（桌面姿态）：折痕横着，上半屏内容、下半屏操作；摊平时的横向折痕不分区。 */
+    @Test fun tabletopSplitsAboveAndBelowTheHinge() {
+        val tabletop = LayoutRules.navigation(WindowSpec(933f, 704f, Hinge(atDp = 352f, axis = HingeAxis.Horizontal)))
+        assertEquals(352f, tabletop.tabletopAtDp)
+        assertNull(tabletop.dividerAtDp)
+        assertEquals(NavStyle.BottomBar, tabletop.nav)
+        assertEquals(AsidePlacement.BottomSheet, tabletop.aside)
+        // 摊平只报折痕、不是半折：一整块屏幕，不上下分区（普通窗口规则照旧）。
+        assertNull(LayoutRules.compute(WindowSpec(933f, 704f, Hinge(atDp = 352f))).tabletopAtDp)
+        // 矮窗口先按短屏处理，不分上下。
+        val flat = LayoutRules.compute(WindowSpec(933f, 460f, Hinge(atDp = 230f, axis = HingeAxis.Horizontal)))
+        assertNull(flat.tabletopAtDp); assertEquals(NavStyle.IconRail, flat.nav)
+        // 折痕贴边时把分界夹在中间，上下两半都不会被挤成 0。
+        assertEquals(LayoutRules.TabletopMinContentDp, LayoutRules.compute(WindowSpec(933f, 704f, Hinge(atDp = 80f, axis = HingeAxis.Horizontal))).tabletopAtDp)
+        assertEquals(704f - LayoutRules.TabletopMinControlsDp, LayoutRules.compute(WindowSpec(933f, 704f, Hinge(atDp = 690f, axis = HingeAxis.Horizontal))).tabletopAtDp)
+    }
 
+    private class Clock(var ms: Long = 10_000) { fun now() = ms }
     @Test fun enterNeverSendsInsideAComposition() {
         val clock = Clock(); val gate = EnterGate(60L) { clock.now() }
         assertTrue(gate.shouldSend(true, keyDown = true, shift = false, composingNow = false))

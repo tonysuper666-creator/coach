@@ -8,8 +8,13 @@ enum class NavStyle { BottomBar, IconRail, Rail }
 /** How the secondary pane (reference page / outline) is shown. */
 enum class AsidePlacement { None, BottomSheet, Overlay, Docked }
 
-/** Vertical hinge in a book posture; panes split on it and no text crosses it. */
-data class Hinge(val xDp: Float, val widthDp: Float = 0f)
+enum class HingeAxis { Vertical, Horizontal }
+
+/**
+ * Hinge reported by the window (not guessed from the screen): [atDp] is the distance from the start edge of the window
+ * to the hinge line — x for a vertical hinge (book posture), y for a horizontal one (half-folded, sitting on a table).
+ */
+data class Hinge(val atDp: Float, val widthDp: Float = 0f, val axis: HingeAxis = HingeAxis.Vertical)
 
 data class WindowSpec(val widthDp: Float, val heightDp: Float, val hinge: Hinge? = null)
 
@@ -27,6 +32,8 @@ data class PaneLayout(
     val conversationMaxDp: Float,
     val navWidthDp: Float,
     val dividerAtDp: Float?,
+    /** 横向折痕的高度：桌面姿态（半折横放）时内容在上半屏、操作在下半屏，折痕上不放字。 */
+    val tabletopAtDp: Float? = null,
 ) {
     val dockedPaneCount: Int get() = (if (aside == AsidePlacement.Docked) 1 else 0) + (if (outlineDocked) 1 else 0)
 }
@@ -42,6 +49,12 @@ object LayoutRules {
     const val AsideDp = 360f
     const val AsideLargeDp = 380f
     const val OutlineDp = 300f
+    /** 桌面姿态的窗口下限：再窄就不值得上下分区，直接按普通窗口排。 */
+    const val TabletopMinWidthDp = 500f
+    const val TabletopMinHeightDp = 600f
+    /** 上半屏至少放得下一段讲解，下半屏至少放得下一行答题台。 */
+    const val TabletopMinContentDp = 240f
+    const val TabletopMinControlsDp = 180f
 
     /** App chrome contract, also used by Desk: portrait Fold is single-column; the directory is a drawer. */
     fun navigation(spec: WindowSpec): PaneLayout {
@@ -69,9 +82,13 @@ object LayoutRules {
         val w = spec.widthDp; val h = spec.heightDp
         val cls = widthClass(w)
         val short = h < ShortHeightDp
-        val book = spec.hinge != null && w >= 700f && h >= 600f
+        // 横向折痕 = 桌面姿态（半折后横放在桌上）：上半屏内容、下半屏操作。竖折痕才是「书」。
+        val tabletop = spec.hinge?.takeIf { it.axis == HingeAxis.Horizontal }?.takeIf { w >= TabletopMinWidthDp && h >= TabletopMinHeightDp }
         if (short) return PaneLayout(cls, true, NavStyle.IconRail, false, AsidePlacement.None, 0f, false, 0f, ConversationMaxMediumDp, IconRailDp, null)
+        if (tabletop != null) return PaneLayout(cls, false, NavStyle.BottomBar, true, AsidePlacement.BottomSheet, 0f, false, 0f,
+            ConversationMaxMediumDp, 0f, null, tabletopAtDp = tabletop.atDp.coerceIn(TabletopMinContentDp, h - TabletopMinControlsDp))
         if (cls == WidthClass.Compact) return PaneLayout(cls, false, NavStyle.BottomBar, true, AsidePlacement.BottomSheet, 0f, false, 0f, ConversationMaxMediumDp, 0f, null)
+        val book = spec.hinge?.axis == HingeAxis.Vertical && w >= 700f && h >= 600f
         val asideW = if (cls == WidthClass.Large) AsideLargeDp else AsideDp
         val convMax = when (cls) { WidthClass.Medium -> ConversationMaxMediumDp; WidthClass.Expanded -> ConversationMaxExpandedDp; else -> ConversationMaxLargeDp }
         val twoPane = w >= 840f || book
@@ -80,7 +97,7 @@ object LayoutRules {
         var outline = false
         if (twoPane && free - asideW >= ConversationMinDp) { asidePlacement = AsidePlacement.Docked; free -= asideW }
         if (cls == WidthClass.Large && asidePlacement == AsidePlacement.Docked && free - OutlineDp >= ConversationMinDp) { outline = true; free -= OutlineDp }
-        val divider = if (book) spec.hinge?.xDp else null
+        val divider = if (book) spec.hinge.atDp else null
         return PaneLayout(cls, false, NavStyle.Rail, true, asidePlacement, asideW, outline, if (outline) OutlineDp else 0f, convMax, RailDp, divider)
     }
 }

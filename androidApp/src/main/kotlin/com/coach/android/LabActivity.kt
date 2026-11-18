@@ -25,7 +25,8 @@ class LabActivity : ComponentActivity() {
         setContent {
             // A hardware keyboard sends on Enter; the soft keyboard inserts a newline.
             val hardware = resources.configuration.keyboard != Configuration.KEYBOARD_NOKEYS
-            CompositionLocalProvider(LocalEnterSends provides hardware) { FormFactorLab(holder.state) }
+            val hinge = acceptanceHinge() ?: rememberWindowHinge()
+            CompositionLocalProvider(LocalEnterSends provides hardware) { FormFactorLab(holder.state, hinge) }
         }
         jank = JankStats.createAndTrack(window) { frame -> frames++; if (frame.isJank) badFrames++ }
     }

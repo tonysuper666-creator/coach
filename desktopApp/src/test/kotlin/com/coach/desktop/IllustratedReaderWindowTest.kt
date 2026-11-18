@@ -180,9 +180,14 @@ class IllustratedReaderWindowTest {
                     } }
                     try {
                         fun tagged(tag: String) = nodes(window).firstOrNull { it.config.getOrNull(SemanticsProperties.TestTag) == tag }
-                        fun click(tag: String) {
-                            await(tag) { tagged(tag)?.config?.getOrNull(SemanticsActions.OnClick) != null }
-                            edt { assertTrue(tagged(tag)!!.config[SemanticsActions.OnClick].action!!.invoke()) }
+                        fun click(tag: String): Float {
+                            var width = 0f
+                            await(tag) {
+                                val node = tagged(tag) ?: return@await false
+                                width = node.boundsInRoot.width
+                                width > 0f && node.config.getOrNull(SemanticsActions.OnClick)?.action?.invoke() == true
+                            }
+                            return width
                         }
                         fun shot(name: String) {
                             // The semantics tree is ready before the native enter transition finishes.
@@ -207,12 +212,13 @@ class IllustratedReaderWindowTest {
                             if (style == "slide") click("turn-style")
                             val sources = edt { nodes(window).mapNotNull { it.config.getOrNull(BookPageSources) } }
                             assertTrue(sources.isNotEmpty())
-                            click(figureTag)
+                            val inlineWidth = click(figureTag)
                             await("expanded $style caption") {
                                 tagged("figure-caption")?.config?.getOrNull(SemanticsProperties.Text)?.singleOrNull()?.text == caption
                             }
-                            val largeWidth = edt { tagged("figure-full-image")!!.boundsInRoot.width }
-                            assertTrue(largeWidth >= edt { tagged(figureTag)!!.boundsInRoot.width })
+                            await("expanded image at least as wide as the inline figure") {
+                                (tagged("figure-full-image")?.boundsInRoot?.width ?: 0f) >= inlineWidth
+                            }
                             shot("expanded-$style")
                             click("figure-close")
                             await("returned to inline figure") { tagged("figure-preview") == null && tagged(figureTag) != null }

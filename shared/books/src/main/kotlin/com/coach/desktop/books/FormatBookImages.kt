@@ -1,11 +1,9 @@
 package com.coach.desktop.books
 
-import java.io.ByteArrayInputStream
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Base64
-import javax.imageio.ImageIO
 
 /** Visual extraction never inserts markers into the authoritative page text. */
 internal object FormatBookImages {
@@ -16,23 +14,8 @@ internal object FormatBookImages {
 
     fun image(bytes: ByteArray, page: Int, offset: Int, caption: String? = null): ExtractedIllustration {
         require(bytes.size in 1..MAX_BYTES) { "单张插图请控制在 16 MB 以内。" }
-        ImageIO.createImageInputStream(ByteArrayInputStream(bytes)).use { input ->
-            val readers = ImageIO.getImageReaders(input)
-            require(readers.hasNext()) { "插图格式暂时读不了，请改用 PNG、JPEG 或 GIF。" }
-            val reader = readers.next()
-            try {
-                reader.input = input
-                val width = reader.getWidth(0)
-                val height = reader.getHeight(0)
-                BookScanImages.checkSize(width, height)
-                val extension = when (reader.formatName.lowercase()) {
-                    "png" -> "png"; "jpeg", "jpg" -> "jpg"; "gif" -> "gif"
-                    else -> throw IllegalArgumentException("插图格式暂时读不了，请改用 PNG、JPEG 或 GIF。")
-                }
-                requireNotNull(reader.read(0)) { "插图已损坏，请重新保存。" }.flush()
-                return ExtractedIllustration(page, offset, bytes, extension, width, height, caption)
-            } finally { reader.dispose() }
-        }
+        val raster = inspectBookRaster(bytes)
+        return ExtractedIllustration(page, offset, bytes, raster.extension, raster.width, raster.height, caption)
     }
 
     /** Locate pages in the unchanged extraction stream, including trimmed chapter/page gaps. */

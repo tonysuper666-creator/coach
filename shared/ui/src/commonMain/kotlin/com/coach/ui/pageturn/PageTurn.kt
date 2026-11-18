@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,7 +34,6 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerType
-import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.onSizeChanged
@@ -210,7 +208,6 @@ fun PageTurnView(
     val cols = columns ?: pageTurnColumns(with(density) { widthPx.toDp().value }, spreadMinDp)
     if (cols != state.columns) state.clampTo(cols)
     val pageW = with(density) { (if (cols == 2) widthPx / 2 else widthPx).toDp() }
-    var scrollAcc by remember { mutableFloatStateOf(0f) }
     val travelFactor = if (cols == 2) 0.9f else 0.6f
 
     fun launchTurn(fwd: Boolean) { scope.launch { try { state.turn(fwd) } catch (_: CancellationException) { } } }
@@ -230,11 +227,18 @@ fun PageTurnView(
                     else -> false
                 }
             }
-            .onPointerEvent(PointerEventType.Scroll) { ev ->
-                val dx = ev.changes.firstOrNull()?.scrollDelta?.x ?: 0f
-                if (dx != 0f) {
-                    scrollAcc += dx
-                    if (abs(scrollAcc) >= 3f) { launchTurn(scrollAcc > 0); scrollAcc = 0f }
+            .pointerInput(state) {
+                awaitPointerEventScope {
+                    var scrollAcc = 0f
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        if (event.type != PointerEventType.Scroll) continue
+                        scrollAcc += event.changes.firstOrNull()?.scrollDelta?.x ?: 0f
+                        if (abs(scrollAcc) >= 3f) {
+                            launchTurn(scrollAcc > 0)
+                            scrollAcc = 0f
+                        }
+                    }
                 }
             }
             .pointerInput(cols) {

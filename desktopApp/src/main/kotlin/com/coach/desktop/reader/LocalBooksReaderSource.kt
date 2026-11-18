@@ -27,7 +27,7 @@ import java.security.MessageDigest
  * HTTP 的 opaque ID 与页文本哈希都不是本地文件身份。读取不会隐式导入文件。
  * 书签仍由书架控制器保存；没有持久 CAS/幂等与批注存储时，拒绝 ReaderSource 写入。
  */
-internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSource {
+internal class LocalBooksReaderSource(val library: TextbookLibrary, private val loadPageImages: Boolean = true) : ReaderSource {
     // 书库（SQLite）、PDFBox、PNG 编码都是阻塞工作。调用方在 EDT 上时挪到 IO 线程执行，EDT 只挂起等待、结果由调用方的调度器接回，
     // 状态提交仍在调用方；调用方本来就不在 EDT（后台线程、离屏测试）时原地执行，行为与以前完全一致。
     private suspend inline fun <T> offEdt(crossinline block: () -> T): T =
@@ -104,7 +104,8 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
         return ReaderReply(200, body)
     }
 
-    override suspend fun image(document: String, pdfPage: Int, version: String?): ByteArray? = offEdt { imageBlocking(document, pdfPage, version) }
+    override suspend fun image(document: String, pdfPage: Int, version: String?): ByteArray? =
+        if (loadPageImages) offEdt { imageBlocking(document, pdfPage, version) } else null
 
     private fun imageBlocking(document: String, pdfPage: Int, version: String?): ByteArray? {
         val book = findBook(document) ?: return null

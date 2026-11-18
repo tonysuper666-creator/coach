@@ -26,7 +26,8 @@ import java.nio.file.Path
 internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller), loadOnMount: Boolean = true,
     support: BookLearningSupport? = null,
     answerExplain: AnswerExplain? = null,
-    sourceResolver: BookSourceResolver = remember(controller.library) { BookSourceResolver(controller.library) }, chooseBook: suspend () -> Path?) {
+    sourceResolver: BookSourceResolver = remember(controller.library) { BookSourceResolver(controller.library) },
+    releasePickedBook: (Path) -> Unit = {}, chooseBook: suspend () -> Path?) {
     val learningSupport = support ?: remember(controller.library) { PairedBookLearningSupport(controller.library) }
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
@@ -66,6 +67,13 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
             returnFocus = sourceOrigin
         }
         run { controller.back() }
+    }
+    BookWorkspaceBackHandler(ui.prompt != null || ui.screen != BookScreen.HOME) {
+        when {
+            ui.prompt != null -> run { controller.dismissPrompt() }
+            ui.screen == BookScreen.READER -> returnFromReader()
+            else -> run { controller.back() }
+        }
     }
     fun openPracticeSource(practice: Practice) {
         val book = ui.book ?: return
@@ -133,7 +141,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                     val book = ui.book
                     when {
                         ui.screen == BookScreen.HOME || book == null -> LibraryHome(ui,
-                            onImport = { run { chooseBook()?.let { controller.importBook(it) } } },
+                            onImport = { run { chooseBook()?.let { picked ->
+                                try { controller.importBook(picked) } finally { releasePickedBook(picked) }
+                            } } },
                             onSelect = { run { controller.select(it) } }, onRead = { run { if (drafts.flush()) controller.learn(LearningPath.READ) } },
                             onLearn = { run { if (drafts.flush()) controller.learn() } },
                             onPath = { path -> run { if (drafts.flush()) controller.learn(path) } })

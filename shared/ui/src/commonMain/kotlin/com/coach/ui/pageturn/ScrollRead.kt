@@ -6,6 +6,7 @@ import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyColumn
@@ -17,8 +18,6 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.testTag
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -110,6 +109,8 @@ fun ScrollReadView(
     modifier: Modifier = Modifier,
     gap: Dp = 16.dp,
     handleKeys: Boolean = true,
+    /** 滚动条由宿主给：桌面传 [ReadScrollbarDesktop]（V7Scrollbar），不传就没有。 */
+    scrollbar: @Composable BoxScope.(ScrollReadState) -> Unit = {},
     page: @Composable (Int) -> Unit,
 ) {
     state.reduced = LocalV7ReducedMotion.current
@@ -141,7 +142,7 @@ fun ScrollReadView(
                 Box(Modifier.fillMaxWidth().background(paper)) { page(index) }
             }
         }
-        // 右侧滚动条：按实际可滚范围和视口比例，桌面用 V7Scrollbar（浅深色、悬停加粗、可拖）
-        ReadScrollbar(state.list, Modifier.align(Alignment.CenterEnd).fillMaxHeight().testTag("scroll-read-scrollbar"))
+        // 右侧滚动条：按实际可滚范围和视口比例，由 scrollbar 参数给（桌面 V7Scrollbar：浅深色、悬停加粗、可拖）
+        scrollbar(state)
     }
 }

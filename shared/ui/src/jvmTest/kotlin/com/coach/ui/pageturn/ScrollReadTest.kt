@@ -13,6 +13,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.SkikoComposeUiTest
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.runSkikoComposeUiTest
 import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
@@ -53,7 +56,7 @@ class ScrollReadViewTest {
         setContent {
             out(rememberCoroutineScope())
             CompositionLocalProvider(LocalV7ReducedMotion provides reduced, androidx.compose.material3.LocalContentColor provides ink) {
-                ScrollReadView(state, desk = desk, paper = sheet, modifier = Modifier.fillMaxSize()) { i ->
+                ScrollReadView(state, desk = desk, paper = sheet, modifier = Modifier.fillMaxSize(), scrollbar = { ReadScrollbarDesktop(it) }) { i ->
                     Box(Modifier.height(700.dp).padding(40.dp)) { Text("第 ${i + 1} 页\n" + "纸上的字。".repeat(40)) }
                 }
             }
@@ -138,7 +141,7 @@ class ScrollReadViewTest {
         mainClock.autoAdvance = false
         setContent {
             out(rememberCoroutineScope())
-            ScrollReadView(state, desk = androidx.compose.ui.graphics.Color.LightGray, paper = androidx.compose.ui.graphics.Color.White, modifier = Modifier.fillMaxSize()) { i ->
+            ScrollReadView(state, desk = androidx.compose.ui.graphics.Color.LightGray, paper = androidx.compose.ui.graphics.Color.White, modifier = Modifier.fillMaxSize(), scrollbar = { ReadScrollbarDesktop(it) }) { i ->
                 Box(Modifier.height(pageDp.dp)) { Text("page $i") }
             }
         }
@@ -166,5 +169,54 @@ class ScrollReadViewTest {
         assertFalse(state.canScrollForward)
         assertEquals(1f, state.overallProgress)
         onNodeWithTag("scroll-read-scrollbar").assertExists()
+    }
+
+    @Test fun thumbLengthDiffersBetweenAShortAndALongBook() = runSkikoComposeUiTest(size = Size(1200f, 900f)) {
+        val short = ScrollReadState(3); val long = ScrollReadState(60)
+        var shortSize = 0.0; var longSize = 0.0; var viewport = 0.0
+        mainClock.autoAdvance = false
+        setContent {
+            androidx.compose.foundation.layout.Column(Modifier.fillMaxSize()) {
+                Box(Modifier.height(450.dp)) {
+                    ScrollReadView(short, androidx.compose.ui.graphics.Color.LightGray, androidx.compose.ui.graphics.Color.White, Modifier.fillMaxSize(),
+                        scrollbar = { st -> androidx.compose.foundation.rememberScrollbarAdapter(st.list).let { shortSize = it.contentSize; viewport = it.viewportSize }; ReadScrollbarDesktop(st) }) { Box(Modifier.height(900.dp)) }
+                }
+                Box(Modifier.height(450.dp)) {
+                    ScrollReadView(long, androidx.compose.ui.graphics.Color.LightGray, androidx.compose.ui.graphics.Color.White, Modifier.fillMaxSize(),
+                        scrollbar = { st -> androidx.compose.foundation.rememberScrollbarAdapter(st.list).let { longSize = it.contentSize }; ReadScrollbarDesktop(st) }) { Box(Modifier.height(900.dp)) }
+                }
+            }
+        }
+        mainClock.advanceTimeBy(64); waitForIdle()
+        onAllNodesWithTag("scroll-read-scrollbar").assertCountEquals(2)
+        assertTrue(longSize > shortSize * 5, "content size should reflect the book length: short=$shortSize long=$longSize")
+        // 滑块长度 = 视口 / 内容：长书的滑块明显更短
+        assertTrue(viewport / longSize < viewport / shortSize)
+    }
+
+    @Test fun draggingTheThumbScrollsThePage() = runSkikoComposeUiTest(size = Size(1200f, 900f)) {
+        val state = ScrollReadState(10)
+        lateinit var scope: CoroutineScope
+        tall(state, 900) { scope = it }
+        assertEquals(0, state.position.page)
+        onNodeWithTag("scroll-read-scrollbar").performMouseInput {
+            moveTo(androidx.compose.ui.geometry.Offset(width / 2f, 20f))
+            press()
+            moveTo(androidx.compose.ui.geometry.Offset(width / 2f, 500f))
+            release()
+        }
+        mainClock.advanceTimeBy(100); waitForIdle()
+        assertTrue(state.position.page >= 3, "thumb drag should scroll, at ${state.position}")
+    }
+
+    @Test fun scrollbarShotsLightAndDark() {
+        for (dark in listOf(false, true)) runSkikoComposeUiTest(size = Size(1200f, 900f)) {
+            val state = ScrollReadState(20)
+            lateinit var scope: CoroutineScope
+            host(state, dark = dark) { scope = it }
+            scope.launch { state.list.scrollBy(900f) }
+            mainClock.advanceTimeBy(64); waitForIdle()
+            captureLessonEvidence("scroll-read-scrollbar-" + (if (dark) "dark" else "light"), 1200, 900)
+        }
     }
 }

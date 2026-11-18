@@ -1,7 +1,9 @@
 package com.coach.desktop.books
 
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.test.*
+import androidx.compose.ui.unit.Density
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
 import org.apache.pdfbox.pdmodel.PDPageContentStream
@@ -51,8 +53,13 @@ class ReaderKeyboardPagingTest {
 
     @Test fun arrowsAndPageKeysTurnPagesAndHomeEndJumpToTheEnds() {
         val controller = fivePageController()
-        runComposeUiTest {
+        runSkikoComposeUiTest(size = Size(840f, 900f), density = Density(1f)) {
             openReader(controller)
+            onNodeWithTag("v7-type-menu").performClick()
+            onNodeWithTag("original-mode-paged").performClick()
+            onNodeWithTag("original-pdf-paged").assertExists()
+            onNodeWithTag("original-pdf-right").assertDoesNotExist()
+            waitUntil(timeoutMillis = 20_000) { runCatching { onNodeWithTag("reader-page").assertIsFocused() }.isSuccess }
             fun press(key: Key) = onNodeWithTag("reader-page").performKeyInput { pressKey(key) }
             fun expectPage(number: Int) {
                 waitUntil(timeoutMillis = 20_000) { controller.state.value.page == number && !controller.state.value.busy }
@@ -75,6 +82,29 @@ class ReaderKeyboardPagingTest {
             assertEquals(1, controller.state.value.page)
             // 翻页把焦点留在阅读区，下一键马上还能用。
             onNodeWithTag("reader-page").assertIsFocused()
+        }
+    }
+
+    @Test fun pageDownScrollsAScreenAndHomeEndReachTheBookEdgesByDefault() {
+        val controller = fivePageController()
+        runComposeUiTest {
+            openReader(controller)
+            onNodeWithTag("original-pdf-scroll").assertExists()
+            val reading = onNodeWithTag("reader-page")
+            fun press(key: Key) = reading.performKeyInput { pressKey(key) }
+            fun imageTop() = onNodeWithTag("remote-image").fetchSemanticsNode().positionInRoot.y
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("remote-image").fetchSemanticsNodes().isNotEmpty() }
+            val before = imageTop()
+
+            press(Key.PageDown)
+            waitUntil(timeoutMillis = 20_000) { runCatching { imageTop() < before - 100f }.getOrDefault(false) }
+            assertEquals(1, controller.state.value.page, "One screen is shorter than this physical PDF page")
+
+            press(Key.MoveEnd)
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.page == 5 && !controller.state.value.busy }
+            press(Key.MoveHome)
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.page == 1 && !controller.state.value.busy }
+            reading.assertIsFocused()
         }
     }
 

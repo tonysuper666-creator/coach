@@ -2,12 +2,14 @@ package com.coach.desktop
 
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.tooling.ComposeToolingApi
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.InternalComposeUiApi
 import androidx.compose.ui.awt.ComposeDialog
 import androidx.compose.ui.awt.ComposeWindow
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -37,6 +39,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicReference
 import javax.swing.SwingUtilities
+import kotlin.math.roundToInt
 import kotlin.test.*
 
 /** Real Windows window, native pointer input, and an isolated book and paired service. */
@@ -154,20 +157,132 @@ class OriginalPdfNativeWindowTest {
         println("ORIGINAL_PDF_NATIVE themes=2 exactSelection=true exactExplanation=true exactCitation=true persistedHighlight=true")
     }
 
-    private fun fixture(root: Path): Path = root.resolve("Original PDF acceptance.pdf").also { file ->
+    @Test fun rightPageSelectionSurvivesTenSwitchesAndCitationsInBothModes() {
+        assumeTrue(System.getProperty("os.name").startsWith("Windows"))
+        val root = Files.createTempDirectory("coach-original-modes-")
+        val library = TextbookLibrary(root.resolve("library"))
+        val book = library.importBook(fixture(root, pages = 4))
+        val right = book.page(2)!!
+        val phrase = "The second column repeats this sentence."
+        val start = right.text.lastIndexOf(phrase)
+        assertTrue(start > right.text.indexOf(phrase))
+        val range = ReaderTextRange(start, start + phrase.length)
+        val layer = assertNotNull(library.pdfTextLayer(book, right))
+        val boxes = PdfTextSelection.boxesForVerifiedRange(layer, right.text, range)
+        LoopbackExplanation().use { service ->
+            val settings = DesktopConnectionSettings(root.resolve("paired"), environment = { null },
+                property = { if (it == "jpackage.app-path") "/synthetic/Coach.exe" else null })
+            val explainer = BookExplainer(settings, library)
+            assertTrue(runBlocking { explainer.pair(service.url, "123456") })
+            ExplainConsent(library.directory).allow(book.id)
+            val questions = PairedBookLearningSupport(library, send = { block, question -> explainer.ask(block, question) })
+            for (dark in listOf(false, true)) {
+                library.savePdfScrollMode(book.id, true)
+                val window = edt { ComposeWindow().apply {
+                    title = "LearningCoach · 原版双页与滚动验收"
+                    val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
+                    setBounds(screen.x + 20, screen.y + 20, minOf(1280, screen.width - 40), minOf(620, screen.height - 40))
+                    setContent { CoachTheme(darkTheme = dark) {
+                        Surface(color = CoachTheme.colors.bgCanvas) {
+                            val visible = remember { mutableIntStateOf(1) }
+                            TextbookReader(LibraryUi(book = book, page = visible.intValue, screen = BookScreen.READER), library,
+                                questions, null, remember { FocusRequester() }, onNoteSession = {},
+                                onPage = { visible.intValue = it }, onBack = {}, onLearn = {}, explainProvider = explainer)
+                        }
+                    } }
+                    isAlwaysOnTop = true
+                    isVisible = true
+                } }
+                try {
+                    waitFor("continuous reading and desktop scrollbar") { node(window, "scroll-read-scrollbar") != null }
+                    shot(window, dark, "modes-default")
+                    mode(window, scroll = false)
+                    waitFor("the right page has a bitmap and text layer") {
+                        node(window, "original-pdf-right") != null && node(window, "original-pdf-image-2") != null &&
+                            node(window, "original-pdf-text-layer-2") != null
+                    }
+                    shot(window, dark, "modes-paged")
+                    val last = boxes.last()
+                    // End just past the sentence. Its period can occupy less than one AWT pixel in the spread.
+                    drag(window, boxes.first(), last.copy(x = last.x + last.width), "original-pdf-image-2")
+                    shot(window, dark, "modes-right-drag")
+                    waitFor("exact right page selection", {
+                        "expected=$range actual=${selection(window)} " +
+                            "visible=${lineVisible(window, boxes.first())} image=" +
+                            node(window, "remote-image")?.config?.getOrNull(SemanticsProperties.ContentDescription)
+                    }) { selection(window) == range && lineVisible(window, boxes.first()) }
+                    shot(window, dark, "modes-right-before")
+                    repeat(10) { index ->
+                        mode(window, scroll = true)
+                        waitFor("right page selection in scroll mode") {
+                            node(window, "scroll-read-scrollbar") != null && selection(window) == range &&
+                                lineVisible(window, boxes.first(), nearUpperThird = true)
+                        }
+                        if (index == 0) shot(window, dark, "modes-scroll")
+                        mode(window, scroll = false)
+                        waitFor("the same right page selection in paged mode") {
+                            node(window, "original-pdf-right") != null && selection(window) == range &&
+                                node(window, "original-pdf-page-2") != null && lineVisible(window, boxes.first())
+                        }
+                    }
+                    shot(window, dark, "modes-right-after")
+                    assertFalse(TextbookLibrary(library.directory).pdfScrollMode(book.id))
+                    click(window, "book-explain-toggle")
+                    click(window, "explain-button")
+                    waitFor("selected right page explanation") { node(window, "explain-citation") != null }
+                    val request = checkNotNull(service.last.get())
+                    assertEquals(phrase, request.getValue("selection").jsonPrimitive.content)
+                    val sent = request.getValue("blocks").jsonArray.single().jsonObject
+                    assertEquals("${book.id}:p2:$start", sent.getValue("id").jsonPrimitive.content)
+                    click(window, "explain-citation")
+                    waitFor("citation visible in the right sheet") {
+                        node(window, "original-pdf-right") != null && node(window, "remote-highlight") != null && lineVisible(window, boxes.first())
+                    }
+                    mode(window, scroll = true)
+                    waitFor("citation visible after switching back to scroll") {
+                        node(window, "scroll-read-scrollbar") != null && node(window, "remote-highlight") != null && lineVisible(window, boxes.first())
+                    }
+                    shot(window, dark, "modes-citation")
+                } finally { edt { window.dispose() } }
+            }
+        }
+        println("ORIGINAL_PDF_MODES themes=2 switchesPerTheme=10 rightPage=2 sameRange=true citationInBoth=true")
+    }
+
+    private fun mode(window: ComposeWindow, scroll: Boolean) {
+        click(window, "v7-type-menu")
+        click(window, if (scroll) "original-mode-scroll" else "original-mode-paged")
+    }
+
+    private fun lineVisible(window: ComposeWindow, rect: ReaderRect, nearUpperThird: Boolean = false): Boolean = edt {
+        val viewport = node(window, "reader-page") ?: return@edt false
+        val image = node(window, "remote-image") ?: return@edt false
+        if (image.config.getOrNull(SemanticsProperties.ContentDescription)?.none { it.endsWith("第 2 页") } != false) return@edt false
+        val origin = image.positionInRoot
+        val point = Offset(origin.x + ((rect.x + rect.width / 2) * image.size.width).toFloat(),
+            origin.y + ((rect.y + rect.height / 2) * image.size.height).toFloat())
+        val bounds = viewport.boundsInRoot
+        bounds.contains(point) && (!nearUpperThird ||
+            kotlin.math.abs(point.y - (bounds.top + bounds.height / 3)) < bounds.height * .08f)
+    }
+
+    private fun fixture(root: Path, pages: Int = 1): Path = root.resolve("Original PDF acceptance.pdf").also { file ->
         PDDocument().use { pdf ->
-            val page = PDPage().also(pdf::addPage)
-            val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
-            PDPageContentStream(pdf, page).use { out ->
+            repeat(pages) { index ->
+                val page = PDPage().also(pdf::addPage)
+                val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+                PDPageContentStream(pdf, page).use { out ->
                 fun line(x: Float, y: Float, text: String, size: Float = 12f) {
                     out.beginText(); out.setFont(font, size); out.newLineAtOffset(x, y); out.showText(text); out.endText()
                 }
-                line(50f, 755f, "Learning from the original page", 20f)
-                line(50f, 703f, "The second column repeats this sentence.")
-                line(318f, 682f, "The second column repeats this sentence.")
+                line(50f, 755f, if (pages == 1) "Learning from the original page" else "Original page ${index + 1}", 20f)
+                val rightPageShift = if (index == 1) 230f else 0f
+                line(50f, 703f - rightPageShift, "The second column repeats this sentence.")
+                line(318f, 682f - rightPageShift, "The second column repeats this sentence.")
                 out.addRect(50f, 540f, 510f, 100f); out.stroke()
                 line(65f, 606f, "Knowledge box")
                 line(65f, 575f, "An equation keeps its spacing: E = m c^2")
+                }
             }
             pdf.save(file.toFile())
         }
@@ -186,7 +301,8 @@ class OriginalPdfNativeWindowTest {
                     "/v1/library/explain" -> {
                         val request = Json.parseToJsonElement(body).jsonObject.also(last::set)
                         val id = request.getValue("blocks").jsonArray.single().jsonObject.getValue("id").jsonPrimitive.content
-                        200 to """{"text":"A repeated sentence tests location accuracy.【S1】","sources":[{"docId":"$id","pdfPage":1,"anchor":"S1"}]}"""
+                        val page = id.substringAfterLast(":p").substringBefore(':').toInt()
+                        200 to """{"text":"A repeated sentence tests location accuracy.【S1】","sources":[{"docId":"$id","pdfPage":$page,"anchor":"S1"}]}"""
                     }
                     else -> 404 to "{}"
                 }
@@ -222,7 +338,7 @@ class OriginalPdfNativeWindowTest {
         edt { assertTrue(node(window, tag)!!.config[SemanticsActions.OnClick].action!!.invoke(), tag) }
     }
 
-    private fun drag(window: ComposeWindow, from: ReaderRect, to: ReaderRect) {
+    private fun drag(window: ComposeWindow, from: ReaderRect, to: ReaderRect, imageTag: String = "remote-image") {
         repeat(3) {
             val arrived = NativeWindowForeground.action {
                 NativeWindowForeground.activate(window)
@@ -230,11 +346,11 @@ class OriginalPdfNativeWindowTest {
                     val origin = window.contentPane.locationOnScreen
                     val scale = window.graphicsConfiguration.defaultTransform
                     // Semantics bounds can be clipped by the scroll viewport. Use the full bitmap size.
-                    val image = node(window, "remote-image")!!
+                    val image = node(window, imageTag)!!
                     val top = image.positionInRoot
                     fun point(box: ReaderRect) = Point(
-                        origin.x + ((top.x + (box.x + box.width / 2) * image.size.width) / scale.scaleX).toInt(),
-                        origin.y + ((top.y + (box.y + box.height / 2) * image.size.height) / scale.scaleY).toInt(),
+                        origin.x + ((top.x + (box.x + box.width / 2) * image.size.width) / scale.scaleX).roundToInt(),
+                        origin.y + ((top.y + (box.y + box.height / 2) * image.size.height) / scale.scaleY).roundToInt(),
                     )
                     point(from) to point(to)
                 }

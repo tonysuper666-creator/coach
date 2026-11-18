@@ -239,7 +239,7 @@ fun PageTurnView(
             }
             .pointerInput(cols) {
                 awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val down = awaitFirstDown(requireUnconsumed = true)
                     val w = size.width.toFloat()
                     val h = size.height.toFloat()
                     val edge = w * (if (cols == 2) 0.08f else 0.14f)

@@ -77,6 +77,7 @@ internal fun OriginalBookPage(
     pageText: String, selected: ReaderTextRange?, marks: List<ReaderTextRange>,
     citation: CitedPdfLocation?, quote: String?, onResize: (IntSize) -> Unit, onRetry: () -> Unit,
     onSelection: (ReaderTextRange?) -> Unit, modifier: Modifier = Modifier, roundPdfCorners: Boolean = false,
+    active: Boolean = true, inactivePage: Int = 0, knownAspect: Float? = null,
 ) {
     val colors = CoachTheme.colors
     val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
@@ -85,7 +86,7 @@ internal fun OriginalBookPage(
     val selectionColor = if (colors.dark) CoachV7.Dark.selBg else CoachV7.Light.selBg
     val bitmap = (image as? PageImage.Ready)?.image
     // Use the bitmap ratio once known, while the first layout uses this physical page's paper ratio.
-    val ratio = bitmap?.let { it.width.toFloat() / it.height } ?: placeholderAspect
+    val ratio = knownAspect ?: bitmap?.let { it.width.toFloat() / it.height } ?: placeholderAspect
     val bounds = modifier.fillMaxWidth().aspectRatio(ratio).onSizeChanged(onResize)
     val pageBounds = if (roundPdfCorners && colors.dark) bounds.clip(RoundedCornerShape(CoachV7.Radius.s)) else bounds
     Box(pageBounds) {
@@ -100,7 +101,8 @@ internal fun OriginalBookPage(
             }
             is PageImage.Ready -> {
                 Image(image.image, label, contentScale = ContentScale.FillBounds, modifier = Modifier.matchParentSize()
-                    .testTag("remote-image").semantics { this[OriginalPageBitmapWidth] = image.image.width })
+                    .testTag(if (active) "remote-image" else "original-pdf-image-$inactivePage")
+                    .semantics { this[OriginalPageBitmapWidth] = image.image.width })
                 if (citation?.located is Located.Found) Canvas(Modifier.testTag("remote-highlight")
                     .semantics { contentDescription = "原句：$quote" }.matchParentSize()) {
                     val boxes = citation.boxes
@@ -117,7 +119,8 @@ internal fun OriginalBookPage(
                     )
                 }
                 if (layer != null && layer.spans.isNotEmpty()) {
-                    OriginalPdfSelection(layer, pageText, selected, marks, selectionColor, highlight, onSelection)
+                    OriginalPdfSelection(layer, pageText, selected, marks, selectionColor, highlight, onSelection,
+                        layerTag = if (active) "original-pdf-text-layer" else "original-pdf-text-layer-$inactivePage")
                 }
             }
         }

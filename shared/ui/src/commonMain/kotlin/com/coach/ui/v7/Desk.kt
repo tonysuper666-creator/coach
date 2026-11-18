@@ -84,6 +84,7 @@ fun Desk(
     footer: (@Composable RowScope.() -> Unit)? = null,
     /** Opt in to a wider paper, for example a reader's two facing pages. */
     paperMaxWidth: Dp = Dp.Unspecified,
+    typeMenuExtra: @Composable (() -> Unit) -> Unit = {},
     content: @Composable () -> Unit,
 ) {
     val managed = com.coach.ui.LocalAppManagedNavigation.current
@@ -165,6 +166,7 @@ fun Desk(
                             val textScale = LocalV7TextScale.current
                             Text("Aa", Modifier.clickable { typeMenu = true }.testTag("v7-type-menu"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                             DropdownMenu(expanded = typeMenu, onDismissRequest = { typeMenu = false }) {
+                                typeMenuExtra { typeMenu = false }
                                 listOf("小" to .9f, "中" to 1f, "大" to 1.15f).forEach { (label, scale) ->
                                     DropdownMenuItem(text = { Text(label + if (textScale.value == scale) " ✓" else "") },
                                         modifier = Modifier.testTag("v7-type-$label"), onClick = { textScale.value = scale; typeMenu = false })

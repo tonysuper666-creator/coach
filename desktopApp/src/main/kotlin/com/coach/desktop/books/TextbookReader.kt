@@ -1,6 +1,8 @@
 package com.coach.desktop.books
 
 import com.coach.ui.pageturn.PageTurnStyle
+import com.coach.ui.pageturn.ScrollReadPosition
+import com.coach.ui.pageturn.ScrollReadState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -30,6 +32,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
@@ -104,36 +107,50 @@ internal fun TextbookReader(
         return
     }
     val hasOriginal = book.format == "pdf" || book.format in BookFormats.images
+    val originalPdf = book.format == "pdf"
     val textOnlySource = !hasOriginal || page.ocr
     val lastPage = book.pages.maxOf { it.number }
-    val previousPage = book.pages.filter { it.number < ui.page }.maxByOrNull { it.number }?.number
-    val nextPage = book.pages.filter { it.number > ui.page }.minByOrNull { it.number }?.number
     var textView by remember(book.id) {
         mutableStateOf(!hasOriginal || (library.savedTextView(book.id) ?: page.ocr))
     }
     val paging = remember(book.id) { BookPagingState(BookPageAnchor(ui.page)) }
+    val pdf = remember(library, book.id) { OriginalPdfReading(ui.page, !originalPdf || library.pdfScrollMode(book.id)) }
+    val pdfLayers = remember(library, book.id) { OriginalPdfTextLayers(library, book) }
+    val scroll = remember(book.id) { ScrollReadState(book.pages.size, ScrollReadPosition(book.pages.indexOf(page))) }
+    val pdfVisible = originalPdf && !textView
+    val pdfScrolling = pdfVisible && pdf.scrolling
+    val previousPage = if (pdfVisible && !pdf.scrolling) pdf.adjacent(false)
+        else book.pages.lastOrNull { it.number < ui.page }?.number
+    val nextPage = if (pdfVisible && !pdf.scrolling) pdf.adjacent(true)
+        else book.pages.firstOrNull { it.number > ui.page }?.number
     var turnStyle by remember { mutableStateOf(PageTurnStyle.Flip) }
     var readMode by remember(book.id) { mutableStateOf(BookReadMode.Paged) }
     LaunchedEffect(ui.page) {
+        val previouslyPublished = paging.publishedImportPage
         paging.followImportPage(ui.page)
+        if (pdfVisible && previouslyPublished != paging.publishedImportPage && pdf.page != ui.page) {
+            pdf.selection = null
+            pdf.jump(ui.page)
+        }
     }
     var editingJump by remember(book.id) { mutableStateOf(false) }
     var jump by remember(book.id, ui.page) { mutableStateOf(ui.page.toString()) }
     var retry by remember { mutableIntStateOf(0) }
     var notesOpen by remember(book.id) { mutableStateOf(false) }
     var explainOpen by remember(book.id) { mutableStateOf(false) }
-    var selection by remember(book.id, ui.page) { mutableStateOf<ReaderTextRange?>(null) }
     var explainingSelection by remember(book.id) { mutableStateOf<SourceBlock?>(null) }
     var passageJump by remember(book.id) { mutableStateOf<BookPassage?>(null) }
     var passageJumpTick by remember(book.id) { mutableIntStateOf(0) }
-    var marks by remember(book.id, ui.page, page.text) { mutableStateOf(library.highlights(book.id, page)) }
+    var highlightRevision by remember(book.id) { mutableIntStateOf(0) }
+    val marks = remember(library, book.id, page, highlightRevision) { library.highlights(book.id, page) }
     var savingMark by remember(book.id) { mutableStateOf(false) }
     var markError by remember(book.id, ui.page) { mutableStateOf(false) }
-    val visiblePageNumber by rememberUpdatedState(ui.page)
     val scope = rememberCoroutineScope()
-    val chosen = selection?.let { range ->
-        SourceBlock("${book.id}:p${page.number}:${range.startUtf16}", page.number, range.startUtf16, range.endUtf16,
-            false, page.text.substring(range.startUtf16, range.endUtf16))
+    val chosen = pdf.selection?.let { selected ->
+        val range = selected.range
+        val stored = book.page(selected.page)?.text ?: return@let null
+        SourceBlock("${book.id}:p${selected.page}:${range.startUtf16}", selected.page, range.startUtf16, range.endUtf16,
+            false, stored.substring(range.startUtf16, range.endUtf16))
     }?.takeIf { it.text.isNotBlank() }
     val learnableSelection = chosen?.takeIf { it.text.trim().length <= 4_000 }
     val explainer = remember(library, explainProvider) { explainProvider ?: BookExplainer(library = library) }
@@ -168,6 +185,7 @@ internal fun TextbookReader(
             } } ?: 0
         }
         paging.anchor = BookPageAnchor(number, offset)
+        if (originalPdf && number == ui.page) pdf.jump(number)
     }
     // 从答后讲解的「去原文页配对」过来、这台电脑的连接已停用：原文页直接摊开配对，不用再去找「讲解」。
     LaunchedEffect(explainer, source != null) {
@@ -211,7 +229,7 @@ internal fun TextbookReader(
     var jumpFocused by remember { mutableStateOf(false) }
     var pageFocused by remember { mutableStateOf(false) }
     val typing = readerTyping(asking, jumpFocused, notesOpen, session.noting)
-    LaunchedEffect(book.id, ui.page, typing) {
+    LaunchedEffect(book.id, ui.page, typing, pdfScrolling) {
         if (typing) return@LaunchedEffect
         // A successful request already owns focus. Do not leave another frame's
         // request pending: it could steal focus from a newly clicked page field.
@@ -224,9 +242,17 @@ internal fun TextbookReader(
             if (requested) return@LaunchedEffect
         }
     }
+    val publishPdfPage: (Int) -> Unit = { number ->
+        val selection = pdf.selection?.takeIf { it.page == number }
+        paging.anchor = BookPageAnchor(number, selection?.range?.startUtf16 ?: 0)
+        if (paging.publishImportPage(number)) onPage(number)
+        session.goToPage(number)
+    }
     val turnTo: (Int?) -> Unit = { pageNumber ->
         if (pageNumber != null && book.page(pageNumber) != null) {
             passageJump = null
+            pdf.selection = null
+            if (pdfVisible) pdf.jump(pageNumber)
             paging.anchor = BookPageAnchor(pageNumber)
             val visiblePage = if (textView && paging.pages.isNotEmpty())
                 paging.pages[paging.index].anchor.importPage else pageNumber
@@ -257,12 +283,13 @@ internal fun TextbookReader(
         val target = book.page(passage.page) ?: return@open
         if (passage.book != book.id || passage.start !in 0 until passage.end || passage.end > target.text.length ||
             target.text.substring(passage.start, passage.end) != passage.text) return@open
-        selection = null
+        pdf.selection = null
         asking = false
         explainOpen = false
         textView = false
         passageJump = passage
         passageJumpTick++
+        pdf.jump(passage.page)
         paging.anchor = BookPageAnchor(passage.page, passage.start)
         if (paging.publishImportPage(passage.page)) onPage(passage.page)
     }
@@ -280,14 +307,8 @@ internal fun TextbookReader(
         if (target.start >= 0 && target.end > target.start && target.end <= page.text.length &&
             page.text.substring(target.start, target.end) == target.quote) target.start until target.end else null
     }
-    val originalText by key(library, book.id, page.number, page.text, retry) {
-        produceState<Result<ReaderTextUnit?>?>(null) {
-            if (book.format != "pdf" || page.ocr) return@produceState
-            value = try { Result.success(withContext(Dispatchers.IO) { library.pdfTextLayer(book, page) }) }
-            catch (cancel: CancellationException) { throw cancel }
-            catch (error: Exception) { Result.failure(error) }
-        }
-    }
+    LaunchedEffect(pdfLayers, page.number, retry) { if (originalPdf) pdfLayers.keep(page) }
+    val originalText = pdfLayers[page.number]
     val layer = originalText?.getOrNull()
     val rangeLocation = remember(layer, citedRange, page.text) {
         val range = citedRange ?: return@remember null
@@ -296,9 +317,8 @@ internal fun TextbookReader(
         locateCitedPdfRange(PdfPageText(frame, unit, emptyList()), page.text, range)
     }
     var originalSize by remember(book.id) { mutableStateOf(IntSize.Zero) }
-    val originalPdf = book.format == "pdf"
-    val renderWidth = originalSize.width.takeIf { originalPdf && (!textView || it > 0) }
-    val image = rememberOriginalPageImage(library, book, page.number, hasOriginal && (!textView || source != null), renderWidth, retry)
+    val image = rememberOriginalPageImage(library, book, page.number,
+        hasOriginal && !pdfVisible && (!textView || source != null), null, retry)
     // 页图还没回来时先铺纸：这一页自己有尺寸就按它铺，量不到才借上一张成功页图的比例。
     // 图到了原地换掉，后面的按钮不往下跳；横竖混排的书也不会先铺上一页那张的纸再塌下来。
     var paperAspect by remember(book.id) { mutableStateOf<Float?>(null) }
@@ -314,9 +334,9 @@ internal fun TextbookReader(
         else if (samePage) (remote.boxes as? com.coach.desktop.reader.BoxesState.Ready)?.boxes else null
     val located = if (citedRange != null) rangeLocation?.located
         else if (boxes != null && quoteAnchor != null) com.coach.desktop.reader.QuoteLocator.locate(boxes, quoteAnchor) else null
-    val loadedImage = (image as? PageImage.Ready)?.image
-    val aspectOk = boxes != null && loadedImage != null &&
-        kotlin.math.abs(loadedImage.width.toDouble() / loadedImage.height - boxes.width / boxes.height) < 0.05
+    val loadedAspect = if (pdfVisible) pdf.rasters[ui.page]?.aspect else
+        (image as? PageImage.Ready)?.image?.let { it.width.toFloat() / it.height }
+    val aspectOk = boxes != null && loadedAspect != null && kotlin.math.abs(loadedAspect - boxes.width / boxes.height) < 0.05
     val textTarget = practiceSource?.target
     val textTargetValid = textTarget?.let { target -> book.page(target.pdfPage)?.text?.let { stored ->
         target.start >= 0 && target.end > target.start && target.end <= stored.length &&
@@ -334,7 +354,7 @@ internal fun TextbookReader(
         practiceSource?.page != null && practiceSource.page != ui.page -> "无法确认原句：本题依据在第 ${practiceSource.page} 页。"
         practiceSource?.target != null && citedRange == null -> "无法确认原句：这一页的内容变了，这条出处无法定位。"
         textOnlySource -> null
-        image is PageImage.Failed -> "无法确认原句：这一页的图像打不开。"
+        image is PageImage.Failed || (pdfVisible && pdf.rasters[ui.page]?.failed == true) -> "无法确认原句：这一页的图像打不开。"
         citedRange != null && originalText != null && rangeLocation == null -> "无法确认原句：无法读取这一页的文字位置。"
         remote.failure != null || remote.page is com.coach.desktop.reader.PageState.Failed -> "无法确认原句：无法读取这一页的定位信息。"
         remote.current != null && (remote.current?.id != book.id || remote.current?.version != "1") -> "无法确认原句：教材版本不一致。"
@@ -343,8 +363,14 @@ internal fun TextbookReader(
         located == com.coach.desktop.reader.Located.NoTextLayer -> "无法确认原句：这一页没有可定位的文字。"
         located == com.coach.desktop.reader.Located.NotFound -> "无法确认原句：这一页没有找到对应内容。"
         located == com.coach.desktop.reader.Located.Ambiguous -> "无法确认原句：这一页有多处相同内容。"
-        located is com.coach.desktop.reader.Located.Found && loadedImage != null && !aspectOk -> "无法确认原句：页面图像与文字位置不一致。"
+        located is com.coach.desktop.reader.Located.Found && loadedAspect != null && !aspectOk -> "无法确认原句：页面图像与文字位置不一致。"
         else -> null
+    }
+    LaunchedEffect(pdfScrolling, ui.page, citedRange, passageJumpTick, located, aspectOk) {
+        if (pdfScrolling && aspectOk && boxes != null && located is com.coach.desktop.reader.Located.Found) {
+            val top = located.rects.minOf { it.y0 } / boxes.height
+            pdf.jump(ui.page, top.toFloat(), reveal = true)
+        }
     }
 
     LaunchedEffect(citedRange, passageJumpTick, located, aspectOk, imageHeight, imageScroll.maxValue, imageScroll.viewportSize,
@@ -371,7 +397,22 @@ internal fun TextbookReader(
     }
 
     Desk(crumb = book.title, onBack = onBack, backLabel = if (source != null) { if (ui.review != null) "返回复习" else "返回学习" } else "返回书架", showNavigation = false, hasMargin = false,
-        paperMaxWidth = if (textView) Dp.Infinity else Dp.Unspecified,
+        paperMaxWidth = if (textView || pdfVisible) Dp.Infinity else Dp.Unspecified,
+        typeMenuExtra = { close ->
+            if (pdfVisible) for (scrolling in listOf(false, true)) {
+                val label = if (scrolling) "滚动" else "翻页"
+                DropdownMenuItem(text = { Text(label + if (pdf.scrolling == scrolling) " ✓" else "") },
+                    modifier = Modifier.testTag(if (scrolling) "original-mode-scroll" else "original-mode-paged"),
+                    onClick = {
+                        if (pdf.scrolling != scrolling) {
+                            pdf.switchMode()
+                            library.savePdfScrollMode(book.id, scrolling)
+                            publishPdfPage(pdf.page)
+                        }
+                        close()
+                    })
+            }
+        },
         status = "${book.pageLabel(ui.page)} · 共 $lastPage ${if (book.format == "pptx") "张" else "页"}", directory = {
             Text("教材目录", style = MaterialTheme.typography.titleMedium)
             for (lesson in book.lessons) TextButton(onClick = { turnTo(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
@@ -383,10 +424,13 @@ internal fun TextbookReader(
                 Text(if (source != null) "学习原文 · ${source.title}" else "教材阅读", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                 if (hasOriginal) V7TextButton(onClick = {
                     // A reflowed sheet can start on an earlier page than its reading anchor.
-                    if (textView && paging.publishImportPage(paragraphPage.number)) onPage(paragraphPage.number)
-                    if (!textView && chosen != null) paging.anchor = BookPageAnchor(page.number, chosen.start)
+                    if (textView) {
+                        if (originalPdf) pdf.jump(paragraphPage.number)
+                        if (paging.publishImportPage(paragraphPage.number)) onPage(paragraphPage.number)
+                    }
+                    if (!textView && chosen != null) paging.anchor = BookPageAnchor(chosen.page, chosen.start)
                     textView = !textView
-                    selection = null
+                    pdf.selection = null
                     library.saveTextView(book.id, textView)
                 }, modifier = Modifier.testTag("book-original-toggle")) { Text(if (textView) "看原页" else "看文字") }
                 V7TextButton(onClick = { asking = true }, enabled = chosen == null || learnableSelection != null,
@@ -399,8 +443,11 @@ internal fun TextbookReader(
                     Text(if (explainOpen) "回到原文" else if (chosen != null) "讲解选段" else "讲解")
                 }
                 if (!textView && !explainOpen && chosen != null) {
-                    val range = checkNotNull(selection)
-                    val highlighted = range in marks
+                    val selected = checkNotNull(pdf.selection)
+                    val highlighted = remember(library, book.id, selected, highlightRevision) {
+                        val selectedPage = checkNotNull(book.page(selected.page))
+                        selected.range in library.highlights(book.id, selectedPage)
+                    }
                     V7TextButton(onClick = {
                         val passage = BookPassage.from(book, chosen)
                         savingMark = true
@@ -408,10 +455,8 @@ internal fun TextbookReader(
                         scope.launch {
                             try {
                                 withContext(Dispatchers.IO) { library.setHighlight(passage, !highlighted) }
-                                if (page.number == visiblePageNumber) {
-                                    marks = if (highlighted) marks - range else marks + range
-                                    if (selection == range) selection = null
-                                }
+                                highlightRevision++
+                                if (pdf.selection == selected) pdf.selection = null
                             } catch (cancel: CancellationException) { throw cancel }
                             catch (_: Exception) { markError = true }
                             finally { savingMark = false }
@@ -441,6 +486,21 @@ internal fun TextbookReader(
                     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                     // Ctrl/Alt/Win 组合留给系统；纯方向键才翻页。
                     if (event.isCtrlPressed || event.isAltPressed || event.isMetaPressed) return@onPreviewKeyEvent false
+                    if (pdfScrolling && !typing) when (event.key) {
+                        Key.PageDown, Key.PageUp, Key.Spacebar, Key.MoveHome, Key.MoveEnd, Key.DirectionDown, Key.DirectionUp -> {
+                            pdf.selection = null
+                            passageJump = null
+                            scope.launch {
+                                when (event.key) {
+                                    Key.MoveEnd -> scroll.scrollToEnd()
+                                    Key.MoveHome -> scroll.scrollTo(ScrollReadPosition(0))
+                                    Key.DirectionDown, Key.DirectionUp -> scroll.scrollLine(event.key == Key.DirectionDown)
+                                    else -> scroll.scrollScreen(event.key == Key.PageDown || (event.key == Key.Spacebar && !event.isShiftPressed))
+                                }
+                            }
+                            return@onPreviewKeyEvent true
+                        }
+                    }
                     val turn = if (textView && !typing && event.key == Key.Spacebar) ReaderTurn.Next
                         else readerPagingTurn(event.key, typing)
                     turn?.let(turnLayout) ?: return@onPreviewKeyEvent false
@@ -487,6 +547,11 @@ internal fun TextbookReader(
                         }
                     })
 
+                } else if (originalPdf) {
+                    val citation = if (boxes != null && located is com.coach.desktop.reader.Located.Found)
+                        CitedPdfLocation(boxes, located) else null
+                    OriginalPdfReader(book, library, pdf, scroll, pdfLayers, citation, quoteAnchor, highlightRevision,
+                        turnStyle, publishPdfPage)
                 } else {
                     // 页图就位前先铺一张同尺寸的纸（纸面底色、一道细边），图到了原地换掉：
                     // 不出现转圈，下面的按钮和批注也不被推下去。打不开时同一张纸上给重试。
@@ -497,14 +562,12 @@ internal fun TextbookReader(
                     val aspect = readerPaperAspect(pageBoxes?.width, pageBoxes?.height, paperAspect)
                     val citation = if (aspectOk && boxes != null && located is com.coach.desktop.reader.Located.Found)
                         CitedPdfLocation(boxes, located) else null
-                    BoxWithConstraints(Modifier.fillMaxSize().background(paper)) {
-                        val gutter = if (originalPdf) minOf(64.dp, maxWidth * .1f) else 0.dp
+                    Box(Modifier.fillMaxSize().background(paper)) {
                         Column(Modifier.fillMaxSize().verticalScroll(imageScroll).padding(end = 12.dp).testTag("remote-pages")) {
                             OriginalBookPage(
-                                "${book.title} ${book.pageLabel(ui.page)}", image, aspect, layer, page.text, selection, marks,
+                                "${book.title} ${book.pageLabel(ui.page)}", image, aspect, layer, page.text, null, marks,
                                 citation, quoteAnchor, onResize = { originalSize = it }, onRetry = { retry++ },
-                                onSelection = { selection = it }, modifier = Modifier.padding(horizontal = gutter),
-                                roundPdfCorners = originalPdf,
+                                onSelection = {},
                             )
                         }
                         ReaderScrollbar(imageScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())

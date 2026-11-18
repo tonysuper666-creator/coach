@@ -118,6 +118,10 @@ data class AiCall(
     }
 }
 
+enum class BridgeFailureStage {
+    TRANSPORT, HTTP_RESPONSE, STREAM_READ, STREAM_PROTOCOL, TERMINAL, ROUTING, CANCELLED
+}
+
 sealed interface BridgeResult {
     val call: AiCall
     val terminal: TerminalState?
@@ -132,6 +136,7 @@ sealed interface BridgeResult {
         val reason: String,
         override val terminal: TerminalState?,
         override val call: AiCall,
+        val stage: BridgeFailureStage? = null,
     ) : BridgeResult
 }
 
@@ -324,6 +329,7 @@ class BridgeClient(
                     inChars = request.system.length + request.user.length, outChars = 0, startedAt = startedAt,
                     error = if (cancelled) "cancelled" else error.message,
                 ),
+                stage = if (cancelled) BridgeFailureStage.CANCELLED else BridgeFailureStage.TRANSPORT,
             )
             sink.onTerminal(result)
             return result
@@ -346,6 +352,7 @@ class BridgeClient(
                         inChars = request.system.length + request.user.length, outChars = 0,
                         startedAt = startedAt, error = "http_${response.statusCode()}",
                     ),
+                    stage = BridgeFailureStage.HTTP_RESPONSE,
                 )
                 sink.onTerminal(result)
                 return result
@@ -369,6 +376,7 @@ class BridgeClient(
         var terminal: TerminalState? = null
         var ttft: Long? = null
         var failure: String? = null
+        var failureStage = BridgeFailureStage.STREAM_PROTOCOL
         var served: String? = null
         BufferedReader(InputStreamReader(body, Charsets.UTF_8)).use { reader ->
             while (true) {
@@ -377,6 +385,7 @@ class BridgeClient(
                 } catch (error: Exception) {
                     // 取消会主动关掉流：这里读到异常是预期路径，不是故障
                     failure = if (handle.isCancelled) "cancelled" else "stream_read: ${error.javaClass.simpleName}"
+                    failureStage = BridgeFailureStage.STREAM_READ
                     break
                 }
                 if (!line.startsWith("data:")) continue
@@ -428,12 +437,12 @@ class BridgeClient(
             error = if (cancelled) "cancelled" else failure ?: if (resolved == null) "no_x_coach" else null,
         )
         val result: BridgeResult = when {
-            cancelled -> BridgeResult.Failure("cancelled", resolved, call)
-            failure != null -> BridgeResult.Failure(failure, resolved, call)
-            resolved == null -> BridgeResult.Failure("no_x_coach", null, call)
-            !resolved.complete -> BridgeResult.Failure("status_${resolved.status}", resolved, call)
+            cancelled -> BridgeResult.Failure("cancelled", resolved, call, BridgeFailureStage.CANCELLED)
+            failure != null -> BridgeResult.Failure(failure, resolved, call, failureStage)
+            resolved == null -> BridgeResult.Failure("no_x_coach", null, call, BridgeFailureStage.STREAM_PROTOCOL)
+            !resolved.complete -> BridgeResult.Failure("status_${resolved.status}", resolved, call, BridgeFailureStage.TERMINAL)
             else -> independenceProblem(request.model, resolved)?.let { problem ->
-                BridgeResult.Failure(problem, resolved, call)
+                BridgeResult.Failure(problem, resolved, call, BridgeFailureStage.ROUTING)
             } ?: BridgeResult.Success(text.toString(), resolved, call)
         }
         sink.onTerminal(result)

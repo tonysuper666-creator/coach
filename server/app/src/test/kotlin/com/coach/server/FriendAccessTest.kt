@@ -55,6 +55,15 @@ class FriendAccessTest {
                     "pages" to JsonArray(listOf(json("number" to 1, "length" to 200, "ocr" to false, "sha256" to "b".repeat(64))))))
             return request("/v1/library/explain", "POST", credential, input.toString())
         }
+        fun lesson(credential: JsonObject, requestId: String, blocks: Int = 8): HttpResponse<String> {
+            val book = "c".repeat(64)
+            val input = json("requestId" to requestId, "kind" to "lesson", "bookPages" to 8,
+                "blocks" to JsonArray((1..blocks).map { n -> json("id" to "$book:p$n:0", "text" to "Self-authored lesson block $n.") }),
+                "localSource" to json("schema" to 1, "book" to book, "format" to "txt", "title" to "Self-authored lesson",
+                    "consented" to true, "pages" to JsonArray((1..blocks).map { n -> json("number" to n, "length" to 200,
+                        "ocr" to false, "sha256" to "d".repeat(64)) })))
+            return request("/v1/library/explain", "POST", credential, input.toString())
+        }
         fun reply() = stub.stream(1, """{"paragraphs":[{"text":"有依据的解释。","anchors":["S1"]}]}""", StubTutor.terminal("complete"), StubTutor.DONE)
         override fun close() {
             runBlocking { owner.stopSuspend(0, 500); public.stopSuspend(0, 500); actor.close() }
@@ -129,15 +138,9 @@ class FriendAccessTest {
 
     @Test fun entireLessonUsesOneFriendCallAndOnlyStoresConsentedBlocks() = Harness().use { h ->
         val friend = h.pair("整节测试")
-        val book = "c".repeat(64)
-        val input = json("requestId" to "ab12", "kind" to "lesson", "bookPages" to 8,
-            "blocks" to JsonArray((1..8).map { n -> json("id" to "$book:p$n:0", "text" to "Self-authored lesson block $n.") }),
-            "localSource" to json("schema" to 1, "book" to book, "format" to "txt", "title" to "Self-authored lesson",
-                "consented" to true, "pages" to JsonArray((1..8).map { n -> json("number" to n, "length" to 200,
-                    "ocr" to false, "sha256" to "d".repeat(64)) })))
         h.stub.stream(1, """{"paragraphs":[{"text":"这一节的开头和结尾相互关联。","anchors":["S1","S8"]}]}""",
             StubTutor.terminal("complete"), StubTutor.DONE)
-        val response = h.request("/v1/library/explain", "POST", friend, input.toString())
+        val response = h.lesson(friend, "ab12")
         assertEquals(200, response.statusCode())
         assertEquals(listOf(1L, 8L), parse(response)["sources"]!!.jsonArray.map { it.jsonObject.num("pdfPage") })
         assertEquals(1, h.stub.requests)
@@ -148,12 +151,57 @@ class FriendAccessTest {
                 rows.next(); assertEquals(8, rows.getInt(1))
             } }
         }
-        assertFalse(Files.readString(privateDir.resolve("requests.log")).contains("Self-authored"))
+        val audit = LedgerJson.parseToJsonElement(Files.readString(privateDir.resolve("requests.log"))).jsonObject
+        assertEquals("ab12", audit.str("request"))
+        assertEquals(8L, audit.num("sentAnchors"))
+        assertEquals(2L, audit.num("citedAnchors"))
+        assertEquals(JsonNull, audit["formatReason"])
+        assertFalse(audit.toString().contains("Self-authored"))
         h.stub.stream(1, StubTutor.terminal("failed", "daily_quota"), StubTutor.DONE)
-        val limited = h.request("/v1/library/explain", "POST", friend, input.toString())
+        val limited = h.lesson(friend, "ab13")
         assertEquals(429, limited.statusCode())
         assertEquals(FriendServiceError("daily_quota").body, parse(limited))
         assertEquals(2, h.stub.requests, "No retry after the second manual request hits quota")
+    }
+
+    @Test fun lessonAuditDistinguishesFormatRefusalsFromBridgeFailuresByRequest() = Harness().use { h ->
+        val name = "诊断测试"
+        val friend = h.pair(name)
+        h.stub.stream(1, """{"paragraphs":[{"text":"PRIVATE_MODEL_TEXT","anchors":["S99"]}]}""",
+            StubTutor.terminal("complete"), StubTutor.DONE)
+        h.stub.stream(1, "PRIVATE_BAD_STREAM", StubTutor.terminal("complete"), StubTutor.DONE)
+        h.stub.httpError(503)
+        h.stub.stream(1, StubTutor.terminal("failed", "PRIVATE_BRIDGE_REASON"), StubTutor.DONE)
+
+        for ((id, count) in listOf("ca01" to 8, "ca02" to 3)) {
+            val response = h.lesson(friend, id, count)
+            assertEquals(200, response.statusCode())
+            val body = parse(response)
+            assertEquals("回答缺少可核对的页码依据，暂时无法确认。", body.str("text"))
+            assertTrue(body.getValue("sources").jsonArray.isEmpty())
+        }
+        for ((id, count) in listOf("ca03" to 5, "ca04" to 4)) {
+            val response = h.lesson(friend, id, count)
+            assertEquals(503, response.statusCode())
+            assertEquals(FriendServiceError().body, parse(response))
+        }
+        assertEquals(4, h.stub.requests)
+
+        val log = Files.readString(h.root.resolve("friends").resolve(friendId(name)).resolve("requests.log"))
+        val rows = log.lineSequence().filter(String::isNotEmpty).map { LedgerJson.parseToJsonElement(it).jsonObject }.toList()
+        assertEquals(listOf("ca01", "ca02", "ca03", "ca04"), rows.map { it.str("request") })
+        assertEquals(listOf("complete", "complete", "unavailable", "unavailable"), rows.map { it.str("status") })
+        assertEquals(listOf(8L, 3L, 5L, 4L), rows.map { it.num("sentAnchors") })
+        assertEquals(listOf("ANCHORS", "STREAM_JSON", null, null), rows.map { it.getValue("formatReason").jsonPrimitive.contentOrNull })
+        assertEquals(listOf(null, null, "HTTP_RESPONSE", "TERMINAL"), rows.map { it.getValue("bridgeFailureStage").jsonPrimitive.contentOrNull })
+        for (row in rows) {
+            assertEquals(friend.str("deviceId"), row.str("device"))
+            assertEquals(0L, row.num("citedAnchors"))
+            assertEquals(JsonNull, row["timeoutStage"])
+        }
+        for (secret in listOf("Self-authored", "PRIVATE_", "rid-stub", friend.str("token"))) {
+            assertFalse(secret in log)
+        }
     }
 
     @Test fun statusReportsOnlyOwnDeviceCallsAndSharedFriendRemainder() = Harness().use { h ->

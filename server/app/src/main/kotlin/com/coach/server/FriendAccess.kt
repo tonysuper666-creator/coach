@@ -60,7 +60,8 @@ class FriendAccess(private val directory: Path,
     }
 
     /** Answers live beside this friend's imports. The audit contains fixed codes, never source/answer text. */
-    @Synchronized internal fun record(name: String, device: String, request: String, status: String, answer: JsonObject? = null) {
+    @Synchronized internal fun record(name: String, device: String, request: String, status: String, answer: JsonObject? = null,
+        diagnostics: FriendReaderDiagnostics? = null) {
         val root = privateFiles.directory(directory.resolve(friendId(name)))
         val file = privateFiles.file(root.resolve("explanations.sqlite"))
         java.sql.DriverManager.getConnection("jdbc:sqlite:$file").use { db ->
@@ -71,7 +72,11 @@ class FriendAccess(private val directory: Path,
             }
         }
         val log = privateFiles.file(root.resolve("requests.log"))
-        val row = json("at" to System.currentTimeMillis(), "device" to device, "status" to status)
+        val row = json("at" to System.currentTimeMillis(), "device" to device, "status" to status,
+            "request" to request.takeIf(readerRequestId::matches),
+            "sentAnchors" to diagnostics?.sentAnchors, "citedAnchors" to diagnostics?.citedAnchors,
+            "formatReason" to diagnostics?.formatReason?.name, "bridgeFailureStage" to diagnostics?.bridgeFailureStage?.name,
+            "timeoutStage" to diagnostics?.timeoutStage?.name)
         Files.writeString(log, "$row\n", java.nio.file.StandardOpenOption.APPEND)
     }
 }

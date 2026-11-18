@@ -16,11 +16,14 @@ data class ReaderTimeouts(val firstMs: Long = 30_000, val gapMs: Long = 30_000, 
     }
 }
 
-internal class ReaderTimeout(val stage: String) : Exception(stage) {
-    val userText get() = when (stage) {
-        "first" -> "讲解正文迟迟未开始，已停止等待。可继续阅读或手动重试。"
-        "gap" -> "讲解正文中途停止更新，已结束本次追问。可继续阅读或手动重试。"
-        else -> "讲解已达到本次总时长上限，已停止。可继续阅读或手动重试。"
+internal enum class ReaderTimeoutStage { FIRST, GAP, TOTAL }
+
+internal class ReaderTimeout(val phase: ReaderTimeoutStage) : Exception(phase.name.lowercase()) {
+    val stage get() = phase.name.lowercase()
+    val userText get() = when (phase) {
+        ReaderTimeoutStage.FIRST -> "讲解正文迟迟未开始，已停止等待。可继续阅读或手动重试。"
+        ReaderTimeoutStage.GAP -> "讲解正文中途停止更新，已结束本次追问。可继续阅读或手动重试。"
+        ReaderTimeoutStage.TOTAL -> "讲解已达到本次总时长上限，已停止。可继续阅读或手动重试。"
     }
 }
 
@@ -121,7 +124,7 @@ internal class ReaderTiming(private val limits: ReaderTimeouts, val started: Lon
     @Volatile var first: Long? = null; private set
     @Volatile var last: Long? = null; private set
     @Volatile private var stopped = false
-    @Volatile private var expired: String? = null
+    @Volatile private var expired: ReaderTimeoutStage? = null
     @Volatile private var invalid = false
     @Volatile private var handle: BridgeStreamHandle? = null
     @Volatile private var sourceProcess: Process? = null
@@ -149,7 +152,7 @@ internal class ReaderTiming(private val limits: ReaderTimeouts, val started: Lon
                         val bodyDeadline = previous?.let { it + limits.gapMs * 1_000_000 } ?: (attemptStarted + limits.firstMs * 1_000_000)
                         val totalDeadline = started + limits.totalMs * 1_000_000
                         if (now >= minOf(bodyDeadline, totalDeadline)) {
-                            expired = if (totalDeadline <= bodyDeadline) "total" else if (previous == null) "first" else "gap"
+                            expired = timeoutStage(totalDeadline, bodyDeadline, previous)
                         } else if (expired == null) {
                             if (first == null) first = now
                             last = now
@@ -168,12 +171,18 @@ internal class ReaderTiming(private val limits: ReaderTimeouts, val started: Lon
                 val bodyDeadline = previous?.let { it + limits.gapMs * 1_000_000 } ?: (attemptStarted + limits.firstMs * 1_000_000)
                 val totalDeadline = started + limits.totalMs * 1_000_000
                 val remaining = minOf(bodyDeadline, totalDeadline) - System.nanoTime()
-                if (remaining <= 0) throw ReaderTimeout(if (totalDeadline <= bodyDeadline) "total" else if (previous == null) "first" else "gap")
+                if (remaining <= 0) throw ReaderTimeout(timeoutStage(totalDeadline, bodyDeadline, previous))
                 if (invalid) throw ReaderFormat(servedBy)
                 if (worker.isCompleted) return@coroutineScope worker.await()
                 withTimeoutOrNull((remaining + 999_999) / 1_000_000) { signal.receive() }
             }
             @Suppress("UNREACHABLE_CODE") error("unreachable")
         } finally { stop(); worker.cancel() }
+    }
+
+    private fun timeoutStage(totalDeadline: Long, bodyDeadline: Long, previous: Long?) = when {
+        totalDeadline <= bodyDeadline -> ReaderTimeoutStage.TOTAL
+        previous == null -> ReaderTimeoutStage.FIRST
+        else -> ReaderTimeoutStage.GAP
     }
 }

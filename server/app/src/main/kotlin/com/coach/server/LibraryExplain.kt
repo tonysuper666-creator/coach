@@ -115,6 +115,7 @@ fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanati
     routing {
         post("/v1/library/explain") { call.withReaderConnection {
             val friend = call.attributes.getOrNull(observedFriend)
+            val diagnostics = friend?.let { FriendReaderDiagnostics() }
             var requestId = ""
             try {
                 val channel = call.receiveChannel()
@@ -156,18 +157,18 @@ fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanati
                         actor.execute { request!!.isCurrent(this) }
                 }
                 val body = (if (parsed.isLesson) reader?.explainLesson(call.attributes[observedDevice], input, parsed.pages, scope,
-                    friend?.let(::friendId), current)
+                    friend?.let(::friendId), diagnostics, current)
                 else reader?.explain(call.attributes[observedDevice], "library", input, parsed.quote, parsed.pages, scope,
-                    friend?.let(::friendId), current))
+                    friend?.let(::friendId), diagnostics, current))
                     ?: json("text" to "讲解服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
                 if (friend != null) withContext(Dispatchers.IO) {
-                    try { friends!!.record(friend, call.attributes[observedDevice], requestId, "complete", body) }
+                    try { friends!!.record(friend, call.attributes[observedDevice], requestId, "complete", body, diagnostics) }
                     catch (_: Exception) { throw FriendServiceError() }
                 }
                 call.respondText(body.toString(), ContentType.Application.Json)
             } catch (e: FriendServiceError) {
                 if (friend != null) withContext(Dispatchers.IO) {
-                    runCatching { friends?.record(friend, call.attributes[observedDevice], requestId, e.code) }
+                    runCatching { friends?.record(friend, call.attributes[observedDevice], requestId, e.code, diagnostics = diagnostics) }
                 }
                 call.respondText(e.body.toString(), ContentType.Application.Json, e.status)
             } catch (e: MockError) {

@@ -1,0 +1,45 @@
+name: TON-1688 hosted identity probe
+# Isolated probe: can a GitHub-hosted Windows runner mint an OIDC token whose
+# claims bind this repository, ref, run and attempt? Prints claims only, never
+# the token. No secrets, no network target, no coordinator call.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/ton1688-identity-probe.yml
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  claims:
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - name: Mint a hosted OIDC token and print only its claims
+        shell: pwsh
+        run: |
+          if (-not $env:ACTIONS_ID_TOKEN_REQUEST_URL) { throw "id-token request url absent" }
+          $h = @{ Authorization = "Bearer $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN" }
+          $u = "$env:ACTIONS_ID_TOKEN_REQUEST_URL&audience=ton1688-coordinator"
+          $r = Invoke-RestMethod -Uri $u -Headers $h -Method Get
+          $parts = $r.value.Split('.')
+          $payload = $parts[1].Replace('-', '+').Replace('_', '/')
+          switch ($payload.Length % 4) { 2 { $payload += '==' } 3 { $payload += '=' } }
+          $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload))
+          $c = $json | ConvertFrom-Json
+          $aud = if ($c.aud -is [array]) { ($c.aud -join ',') } else { $c.aud }
+          Write-Output "CLAIMS:"
+          Write-Output "  iss=$($c.iss)"
+          Write-Output "  aud=$aud"
+          Write-Output "  sub=$($c.sub)"
+          Write-Output "  repository=$($c.repository)"
+          Write-Output "  ref=$($c.ref)"
+          Write-Output "  sha=$($c.sha)"
+          Write-Output "  event_name=$($c.event_name)"
+          Write-Output "  workflow_ref=$($c.workflow_ref)"
+          Write-Output "  job_workflow_ref=$($c.job_workflow_ref)"
+          Write-Output "  run_id=$($c.run_id)"
+          Write-Output "  run_attempt=$($c.run_attempt)"
+          Write-Output "  runner_environment=$($c.runner_environment)"
+          Write-Output "  jti_present=$([bool]$c.jti)"
+          Write-Output "TOKEN_SEGMENTS=$($parts.Count) NOW_SHA=$env:GITHUB_SHA NOW_RUN=$env:GITHUB_RUN_ID NOW_ATTEMPT=$env:GITHUB_RUN_ATTEMPT"

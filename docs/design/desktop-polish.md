@@ -109,7 +109,7 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | K4 | Esc 关闭 | 已对 | `Key.Escape` 6 处 | 阅读、批注、对话框都能 Esc |
 | K5 | 快捷键看得见 | 已对（组件与阅读底栏） | `V7Tooltip.kt`；`V7DesktopFeedbackTest`；阅读页底栏直接调用 `com.coach.ui.v7.V7Tooltip` | 组件支持可选 `shortcut`，验证显示 Esc；阅读页底栏三个控件悬停约 0.5 s 出提示：「上一页　←　PageUp」「下一页　→　PageDown」，页码的提示说清口径（PDF 为「页码按 PDF 原文件计算。」，图片书为「一张图片为一页。」，文字版为「页码按阅读器中的正文分页计算。」）。阅读页已换成共享组件（「上一页」+ 快捷键「← PageUp」、「下一页」+「→ PageDown」，快捷键那半截走数字字体），本文件不再有私有的 `ReaderTooltip`；新 head 的编译与真窗口复核归 P1 串行窗口 |
 | K6 | Ctrl+F | 不做 | — | 书内查找是新功能，本卡不加功能；记在 TON-1654「以后再说」 |
-| K7 | Enter 提交 | 已对（选段就问） | `books/BookPassageAsk.kt`；`WindowsPassageQuestionLimitTest`（合成键盘 + winbox 真窗口键盘用例，截图在 `desktopApp/build/screens/passage-keyboard/{light,dark}`） | Enter 与「发送」按钮走同一个入口、同一组放行条件：超长、正在等回答、额度拒绝、逐书同意都照旧。发出去的就是刚打的字（连按不重复发）；Shift+Enter 换行；输入法候选没确定时那一下 Enter 只确认候选，既不发送也不插换行；发送关着时 Enter 也不往问题里塞换行。真窗口里核对过发送带回的是同一本书同一段（book / page / start / end）。配对码输入框不在本卡，Enter 仍待验 |
+| K7 | Enter 提交 | 已对（选段就问） | `books/BookPassageAsk.kt`；`WindowsPassageQuestionLimitTest`（合成键盘 + winbox 真窗口键盘用例，截图在 `desktopApp/build/screens/passage-keyboard/{light,dark}`） | Enter 与「发送」按钮走同一个入口、同一组放行条件：超长、正在等回答、额度拒绝、逐书同意都照旧。发出去的就是刚打的字（连按不重复发）；Shift+Enter 换行；输入法候选没确定时那一下 Enter 只确认候选，既不发送也不插换行（`enterThatConfirmsAnImeCandidateSendsNothingAndAddsNoLineBreak` 用平台输入法 `SetComposingTextCommand` 把「什么」停在候选里，按 Enter 不发、不加行；`FinishComposingTextCommand` 落定并过了 60 ms 宽限再按 Enter 才发）；发送关着时 Enter 也不往问题里塞换行。真窗口里核对过发送带回的是同一本书同一段（book / page / start / end）。配对码输入框不在本卡，Enter 仍待验 |
 
 **鼠标**
 

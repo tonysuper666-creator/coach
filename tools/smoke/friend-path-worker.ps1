@@ -18,6 +18,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Win-Drive.ps1')
 . (Join-Path $PSScriptRoot 'Smoke-Memory.ps1')
 New-Item -ItemType Directory -Force $OutDir | Out-Null
+$script:ForegroundTracePath = Join-Path $OutDir 'foreground.jsonl'
 $steps = @('启动', '上传一本书', '翻页', '选中就问出讲解', '边看边学出讲解', '做题（答完出讲解和小结）', '点出处弹原文卡')
 $results = New-Object System.Collections.ArrayList
 $script:Last = $null

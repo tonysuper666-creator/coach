@@ -99,7 +99,7 @@ internal object PdfBoxedVisuals {
         } finally { image.flush() }
     }
 
-    private fun whitePerimeter(image: BufferedImage, x0: Int, y0: Int, x1: Int, y1: Int): Boolean {
+    fun whitePerimeter(image: BufferedImage, x0: Int, y0: Int, x1: Int, y1: Int): Boolean {
         fun white(x: Int, y: Int): Boolean {
             val rgb = image.getRGB(x, y)
             return (rgb shr 16 and 255) >= 250 && (rgb shr 8 and 255) >= 250 && (rgb and 255) >= 250

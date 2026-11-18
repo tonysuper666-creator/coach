@@ -74,6 +74,16 @@ class ScrollReadState(val pageCount: Int, initial: ScrollReadPosition = ScrollRe
         }
     }
 
+    /** Place a content anchor near the upper third of the viewport. The page footer is outside the anchor's coordinates. */
+    suspend fun reveal(target: ScrollReadPosition, footerPx: Int) {
+        val page = target.page.coerceIn(0, maxOf(0, pageCount - 1))
+        list.scrollToItem(page)
+        val item = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == page } ?: return
+        val contentHeight = (item.size - footerPx).coerceAtLeast(0)
+        val offset = (scrollOffsetFor(target.fraction, contentHeight) - list.layoutInfo.viewportSize.height / 3).coerceAtLeast(0)
+        if (offset > 0) list.scrollToItem(page, offset)
+    }
+
     /** 滚到真正的书尾：最后一页的最后一行可见，不只是末页页首。 */
     suspend fun scrollToEnd() {
         list.scrollToItem(maxOf(0, pageCount - 1))
@@ -81,6 +91,10 @@ class ScrollReadState(val pageCount: Int, initial: ScrollReadPosition = ScrollRe
     }
 
     val canScrollForward: Boolean get() = list.canScrollForward
+
+    suspend fun scrollLine(forward: Boolean) {
+        list.scrollBy(if (forward) 48f else -48f)
+    }
 
     /** 往后/往前滚一屏；减弱动画时直接到位。 */
     suspend fun scrollScreen(forward: Boolean) {
@@ -125,8 +139,8 @@ fun ScrollReadView(
                     Key.PageDown -> { scope.launch { state.scrollScreen(true) }; true }
                     Key.Spacebar -> { scope.launch { state.scrollScreen(!e.isShiftPressed) }; true }
                     Key.PageUp -> { scope.launch { state.scrollScreen(false) }; true }
-                    Key.DirectionDown -> { scope.launch { state.list.scrollBy(48f) }; true }
-                    Key.DirectionUp -> { scope.launch { state.list.scrollBy(-48f) }; true }
+                    Key.DirectionDown -> { scope.launch { state.scrollLine(true) }; true }
+                    Key.DirectionUp -> { scope.launch { state.scrollLine(false) }; true }
                     Key.MoveHome -> { scope.launch { state.scrollTo(ScrollReadPosition(0)) }; true }
                     Key.MoveEnd -> { scope.launch { state.scrollToEnd() }; true }
                     else -> false

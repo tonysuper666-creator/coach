@@ -18,6 +18,10 @@ import com.coach.desktop.books.textbookFileDrop
 import com.coach.desktop.books.AnswerDrafts
 import com.coach.desktop.books.AnswerExplain
 import com.coach.desktop.books.BookScreen
+import com.coach.desktop.books.BookFormats
+import com.coach.desktop.books.ReadingSettings
+import com.coach.desktop.books.LocalReadingFont
+import com.coach.desktop.books.ReadingSettingsPanel
 import com.coach.desktop.books.BookExplainer
 import com.coach.desktop.books.ExplainConsent
 import com.coach.desktop.books.TextbookController
@@ -29,6 +33,8 @@ import com.coach.ui.AppTab
 import com.coach.ui.CoachTheme
 import com.coach.ui.DeskNavigation
 import com.coach.ui.v7.LocalDeskSelect
+import com.coach.ui.v7.DeskTypeControl
+import com.coach.ui.v7.LocalDeskTypeControl
 import com.coach.ui.v7.V7TextButton
 import coach.design.tokens.CoachV7
 import kotlinx.coroutines.launch
@@ -114,7 +120,8 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
     val deskPage = destination == AppTab.RESOURCES && book != null && ui.screen != BookScreen.HOME
     val systemDark = isSystemInDarkTheme()
     val dark = remember { windowsThemeOverride(System.getProperty("coach.windows.theme")) }
-    CoachTheme(dark ?: systemDark) {
+    val preferences = remember(controller.library) { ReadingSettings(controller.library.directory) }
+    CoachTheme(dark ?: preferences.paper.dark ?: systemDark) {
         val colors = com.coach.ui.theme.CoachTheme.colors
         Surface(Modifier.fillMaxSize().textbookFileDrop { files ->
             scope.launch { if (drafts.flush() && exams.flush()) controller.importDroppedBooks(files) }
@@ -156,7 +163,18 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                     }
                 }
                 val deskSelect = remember { { picked: AppTab -> select(picked) } }
-                CompositionLocalProvider(LocalDeskSelect provides deskSelect) {
+                val typeControl: DeskTypeControl? = if (destination == AppTab.RESOURCES && ui.screen == BookScreen.READER && book != null) {
+                    val defaultTextView = remember(book.id) { book.page(ui.page)?.ocr == true }
+                    val panel: DeskTypeControl = { extra ->
+                        ReadingSettingsPanel(preferences, isOriginal = {
+                            (book.format == "pdf" || book.format in BookFormats.images) &&
+                                !(controller.library.savedTextView(book.id) ?: defaultTextView)
+                        }, extra = extra)
+                    }
+                    panel
+                } else null
+                CompositionLocalProvider(LocalDeskSelect provides deskSelect, LocalDeskTypeControl provides typeControl,
+                    LocalReadingFont provides preferences.font) {
                     // No rules between bar, rail and page: V7 separates them with the desk colour and the paper alone.
                     if (rail) Row(Modifier.fillMaxSize()) {
                         Column(Modifier.width(76.dp).fillMaxHeight().padding(top = HostBarHeight + 8.dp, bottom = 12.dp),

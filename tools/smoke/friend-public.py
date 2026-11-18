@@ -7,6 +7,7 @@ This is not native-client or real-material acceptance.
 import argparse
 import html
 import http.client
+import io
 import ipaddress
 import json
 import os
@@ -130,17 +131,159 @@ class Client:
             return response.code, data
 
 
-def anonymous(client):
+class _BytesSocket:
+    def __init__(self, data):
+        self._fp = io.BytesIO(data)
+
+    def makefile(self, mode="rb", buffering=-1):
+        return self._fp
+
+
+def _scan_tls_records(buf, state):
+    """Inspect unencrypted TLS record headers for ServerHello (type 22, msg 2) or Alert (21)."""
+    while state["pos"] + 5 <= len(buf):
+        rec_type = buf[state["pos"]]
+        rec_len = int.from_bytes(buf[state["pos"] + 3 : state["pos"] + 5], "big")
+        end = state["pos"] + 5 + rec_len
+        if end > len(buf):
+            break
+        payload = buf[state["pos"] + 5 : end]
+        if rec_type == 21:
+            state["alert"] = True
+        elif rec_type == 22:
+            state["hs_buf"].extend(payload)
+            while len(state["hs_buf"]) >= 4:
+                msg_type = state["hs_buf"][0]
+                msg_len = int.from_bytes(state["hs_buf"][1:4], "big")
+                if msg_type == 2:
+                    state["server_hello"] = True
+                if len(state["hs_buf"]) < 4 + msg_len:
+                    break
+                del state["hs_buf"][: 4 + msg_len]
+        state["pos"] = end
+
+
+def _flush_bio(sock, outgoing):
+    data = outgoing.read()
+    if data:
+        sock.sendall(data)
+
+
+def probe_anonymous_stages(host, port=443, timeout=10):
+    """Run GET /v1/public/status on one connection and emit fixed stage tokens only."""
+    stages = {"tcp": "unknown", "server_hello": "unknown", "cert_verify": "unknown", "http": "unknown"}
+    sock = None
+    try:
+        try:
+            sock = socket.create_connection((host, port), timeout=timeout)
+            stages["tcp"] = "ok"
+        except Exception as error:
+            stages["tcp"] = failure_category(error)
+            raise
+
+        ctx = ssl.create_default_context()
+        incoming = ssl.MemoryBIO()
+        outgoing = ssl.MemoryBIO()
+        ssl_obj = ctx.wrap_bio(incoming, outgoing, server_hostname=host)
+        wire_buf = bytearray()
+        tls_state = {"pos": 0, "hs_buf": bytearray(), "server_hello": False, "alert": False}
+
+        try:
+            while True:
+                try:
+                    ssl_obj.do_handshake()
+                    _flush_bio(sock, outgoing)
+                    break
+                except ssl.SSLWantReadError:
+                    _flush_bio(sock, outgoing)
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        incoming.write_eof()
+                    else:
+                        if len(wire_buf) < 65536:
+                            wire_buf.extend(chunk[: 65536 - len(wire_buf)])
+                            _scan_tls_records(wire_buf, tls_state)
+                        incoming.write(chunk)
+            stages["server_hello"] = "ok"
+            stages["cert_verify"] = "ok"
+        except ssl.SSLCertVerificationError:
+            stages["server_hello"] = "ok" if tls_state["server_hello"] else "unknown"
+            stages["cert_verify"] = "fail"
+            raise
+        except ssl.SSLEOFError:
+            if tls_state["server_hello"]:
+                stages["server_hello"] = "ok"
+            elif tls_state["alert"]:
+                stages["server_hello"] = "alert"
+            elif len(wire_buf) == 0:
+                stages["server_hello"] = "none"
+            raise
+        except Exception:
+            if tls_state["server_hello"]:
+                stages["server_hello"] = "ok"
+            elif tls_state["alert"]:
+                stages["server_hello"] = "alert"
+            raise
+
+        req = f"GET /v1/public/status HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode("ascii")
+        ssl_obj.write(req)
+        _flush_bio(sock, outgoing)
+        raw_http = bytearray()
+        max_http = MAX_BODY + 8192
+        try:
+            while len(raw_http) <= max_http:
+                try:
+                    data = ssl_obj.read(4096)
+                    if not data:
+                        break
+                    raw_http.extend(data)
+                except ssl.SSLWantReadError:
+                    _flush_bio(sock, outgoing)
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        incoming.write_eof()
+                    else:
+                        incoming.write(chunk)
+                except (ssl.SSLEOFError, ssl.SSLZeroReturnError):
+                    break
+            resp = http.client.HTTPResponse(_BytesSocket(bytes(raw_http)))
+            resp.begin()
+            body = resp.read(MAX_BODY + 1)
+            check(len(body) <= MAX_BODY, "response size")
+            stages["http"] = f"http-{resp.status}"
+            return resp.status, body
+        except CheckFailed:
+            stages["http"] = "response-oversized"
+            raise
+        except Exception as error:
+            stages["http"] = failure_category(error)
+            raise
+    finally:
+        if sock is not None:
+            sock.close()
+        print(
+            f"STAGE_TRACE tcp={stages['tcp']} server_hello={stages['server_hello']} "
+            f"cert_verify={stages['cert_verify']} http={stages['http']}",
+            flush=True,
+        )
+
+
+def anonymous(client, trace_stages=False):
     client.stage = "anonymous-status"
-    check(client.request("/v1/public/status")[0] == 401, "anonymous status")
+    if trace_stages:
+        host = urllib.parse.urlsplit(client.url).hostname
+        status = probe_anonymous_stages(host)[0]
+    else:
+        status = client.request("/v1/public/status")[0]
+    check(status == 401, "anonymous status")
     print("PASS anonymous_https=401")
 
 
-def surface(client, code):
+def surface(client, code, trace_stages=False):
     client.stage = "pairing-configuration"
     check(re.fullmatch(r"[0-9]{6}", code) is not None, "pairing code configuration")
     mask(code)
-    anonymous(client)
+    anonymous(client, trace_stages=trace_stages)
     client.stage = "pairing"
     status, body = client.request("/v1/pair", "POST", body={"code": code, "name": "External protocol check"})
     check(status == 200, "friend pairing")
@@ -236,6 +379,8 @@ def closed_ports(host):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("transport", "surface", "revocation"))
+    parser.add_argument("--stages", action="store_true",
+                        help="Emit fixed TCP/ServerHello/cert/HTTP stage tokens on the anonymous check")
     args = parser.parse_args(argv)
     client = None
     stage = "configuration"
@@ -246,10 +391,10 @@ def main(argv=None):
         public_route(urllib.parse.urlsplit(url).hostname)
         if args.mode == "transport":
             # No code or bearer credential is needed to locate TLS failures.
-            anonymous(client)
+            anonymous(client, trace_stages=args.stages)
         elif args.mode == "surface":
             client.stage = "pairing-configuration"
-            surface(client, os.environ["COACH_FRIEND_CODE"])
+            surface(client, os.environ["COACH_FRIEND_CODE"], trace_stages=args.stages)
         else:
             client.stage = "revocation-configuration"
             revocation(client, credential(os.environ["COACH_REVOKED_CREDENTIAL"]),

@@ -40,6 +40,9 @@ val LocalV7ReducedMotion = staticCompositionLocalOf { false }
 val LocalDeskWindow = staticCompositionLocalOf<com.coach.ui.adaptive.WindowSpec?> { null }
 val LocalDeskSelect = staticCompositionLocalOf<(AppTab) -> Unit> { {} }
 val LocalDeskNavigation = staticCompositionLocalOf<(@Composable (Boolean) -> Unit)?> { null }
+/** An installed Aa control receives the current reader's additional actions. */
+typealias DeskTypeControl = @Composable (@Composable (() -> Unit) -> Unit) -> Unit
+val LocalDeskTypeControl = staticCompositionLocalOf<DeskTypeControl?> { null }
 
 enum class DeskWindow { Inner, Medium, OuterLandscape, Outer }
 /** Columns depend only on the available width, including split-screen windows. */
@@ -161,15 +164,18 @@ fun Desk(
                     Row(Modifier.align(if (inner) Alignment.CenterEnd else Alignment.TopEnd).height(48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         val barStatus = if (inner) status else compactStatus
                         if (metrics.statusInBar && barStatus.isNotBlank()) Text(barStatus, style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
-                        var typeMenu by remember { mutableStateOf(false) }
                         Box {
-                            val textScale = LocalV7TextScale.current
-                            Text("Aa", Modifier.clickable { typeMenu = true }.testTag("v7-type-menu"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
-                            DropdownMenu(expanded = typeMenu, onDismissRequest = { typeMenu = false }) {
-                                typeMenuExtra { typeMenu = false }
-                                listOf("小" to .9f, "中" to 1f, "大" to 1.15f).forEach { (label, scale) ->
-                                    DropdownMenuItem(text = { Text(label + if (textScale.value == scale) " ✓" else "") },
-                                        modifier = Modifier.testTag("v7-type-$label"), onClick = { textScale.value = scale; typeMenu = false })
+                            val control = LocalDeskTypeControl.current
+                            if (control != null) control(typeMenuExtra) else {
+                                var typeMenu by remember { mutableStateOf(false) }
+                                val textScale = LocalV7TextScale.current
+                                Text("Aa", Modifier.clickable { typeMenu = true }.testTag("v7-type-menu"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
+                                DropdownMenu(expanded = typeMenu, onDismissRequest = { typeMenu = false }) {
+                                    typeMenuExtra { typeMenu = false }
+                                    listOf("小" to .9f, "中" to 1f, "大" to 1.15f).forEach { (label, scale) ->
+                                        DropdownMenuItem(text = { Text(label + if (textScale.value == scale) " ✓" else "") },
+                                            modifier = Modifier.testTag("v7-type-$label"), onClick = { textScale.value = scale; typeMenu = false })
+                                    }
                                 }
                             }
                         }

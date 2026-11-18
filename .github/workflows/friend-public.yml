@@ -35,5 +35,5 @@ jobs:
           COACH_REVOKED_CREDENTIAL: ${{ inputs.mode == 'revocation' && secrets.COACH_REVOKED_CREDENTIAL || '' }}
           COACH_ACTIVE_CREDENTIAL: ${{ inputs.mode == 'revocation' && secrets.COACH_ACTIVE_CREDENTIAL || '' }}
         run: |
-          python tools/smoke/friend-public.py $env:COACH_FRIEND_MODE
+          python tools/smoke/friend-public.py $env:COACH_FRIEND_MODE --stages
           exit $LASTEXITCODE

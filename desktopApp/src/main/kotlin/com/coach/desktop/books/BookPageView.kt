@@ -190,7 +190,8 @@ internal fun BookPageView(
         with(density) { 12.dp.toSp() }, with(density) { 32.dp.toSp() },
         if (colors.dark) CoachV7.Dark.hl else CoachV7.Light.hl,
         body.copy(fontFamily = fonts.display, fontWeight = androidx.compose.ui.text.font.FontWeight.Light,
-            fontSize = 48.sp * scale, letterSpacing = (-.03).em))
+            fontSize = 48.sp * scale, letterSpacing = (-.03).em),
+        readingFont = LocalReadingFont.current)
     val measurer = rememberTextMeasurer(cacheSize = 128)
     val reduced = LocalV7ReducedMotion.current
     val clipboard = LocalClipboard.current

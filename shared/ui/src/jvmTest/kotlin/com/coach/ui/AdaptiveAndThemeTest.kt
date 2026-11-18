@@ -96,6 +96,31 @@ class AdaptiveAndThemeTest {
         assertNull(LayoutRules.compute(WindowSpec(933f, 704f)).dividerAtDp)
     }
 
+    /** 阅读面摊开的同一套口径：竖折痕且两半各够宽才对开，书脊落在折痕上；横向折痕是桌面姿态，不左右摊。 */
+    @Test fun readingSpreadFollowsTheHingeNotTheWidth() {
+        val inner = LayoutRules.readingSpread(WindowSpec(dp(1848), dp(2448), Hinge(352f)))
+        assertEquals(2, inner.columns)
+        assertEquals(352f, inner.pageWidthDp)
+        // 模拟器报的铰链宽 0，页沟就只剩留白那一段。
+        assertEquals(LayoutRules.SpreadGutterDp, inner.gutterDp)
+        // 横过来：折痕跟着转，两页变宽，仍是对开。
+        val landscape = LayoutRules.readingSpread(WindowSpec(933f, 704f, Hinge(466f)))
+        assertEquals(2, landscape.columns)
+        assertEquals(466f, landscape.pageWidthDp)
+        // 外屏没有折痕，单页。
+        assertEquals(1, LayoutRules.readingSpread(WindowSpec(dp(1248), dp(1972))).columns)
+        // 折痕贴边、分不出两页时就别硬摊。
+        assertEquals(1, LayoutRules.readingSpread(WindowSpec(704f, 933f, Hinge(120f))).columns)
+        // 横向折痕（半折横放）不摊成左右两页，那是上下分区的事。
+        assertEquals(1, LayoutRules.readingSpread(WindowSpec(933f, 704f, Hinge(352f, axis = HingeAxis.Horizontal))).columns)
+        // 书页宽度跟着字号走：把每页下限提到 360，352 的两页就不够宽，退回单页。
+        assertEquals(1, LayoutRules.readingSpread(WindowSpec(dp(1848), dp(2448), Hinge(352f)), minPageDp = 360f).columns)
+        // 书本态如果还挂着 72dp 侧栏，左页只剩 280，摊不成对开——阅读页必须自己收起导航。
+        assertEquals(LayoutRules.RailDp, LayoutRules.navigation(WindowSpec(dp(1848), dp(2448), Hinge(352f))).navWidthDp)
+        assertEquals(1, LayoutRules.readingSpread(
+            WindowSpec(704f - LayoutRules.RailDp, 933f, Hinge(352f - LayoutRules.RailDp))).columns)
+    }
+
     /** 展开态带着铰链进布局：竖着也是侧栏两栏，不再退回手机底部栏；折回外屏没有铰链，才是单栏底部栏。 */
     @Test fun unfoldedFoldKeepsTheRailAndOnlyTheCoverFallsBackToTheBottomBar() {
         val unfolded = LayoutRules.navigation(WindowSpec(dp(1848), dp(2448), Hinge(352f)))

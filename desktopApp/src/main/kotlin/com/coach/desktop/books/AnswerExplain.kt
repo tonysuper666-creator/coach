@@ -247,8 +247,12 @@ internal fun GeneratedLessonPractice(
                 is ExplainResult.Refused -> failure = BookLearningReply.Unavailable(result.message, result.trouble)
                 is ExplainResult.Done -> {
                     val parsed = LessonPracticeWire.parse(book, chosen, result.explanation)
-                    if (parsed == null) failure = BookLearningReply.Unavailable("这次没有得到格式完整、出处可核对的选择题，可以重试。")
-                    else gate.practices[key] = parsed
+                    if (parsed == null) {
+                        failure = BookLearningReply.Unavailable(
+                            "这次没有得到格式完整、出处可核对的选择题，可以重试。",
+                            ExplainTrouble.Other,
+                        )
+                    } else gate.practices[key] = parsed
                 }
             }
         } catch (cancelled: CancellationException) { throw cancelled }

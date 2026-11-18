@@ -81,7 +81,7 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | A7 | 空状态「暂无数据」 | 待修 | `LocalExamUi.kt:129` | 「部分章节暂无可用题」改成「有几节还没有题，这份练习只出了已有的。」去向：卡 P4 |
 | A8 | 长文居中 | 已对 | `TextAlign.Center` 仅 1 处，非正文 | |
 | A9 | Material 默认残留 | 待修 | `dark/notes-export`（绿色实心勾选框、▾ 下拉）；代码：`AlertDialog` 10、`TextButton` 12、`Checkbox` 2、`OutlinedTextField` 3、`DropdownMenu` 1、默认 `LinearProgressIndicator` 4、`CircularProgressIndicator` 0（阅读页那份已换纸面占位，见 E2） | 对话框与表单件归 TON-1650 D12–D14；按钮按压水波纹见 M1；页图转圈见 E2 |
-| A10 | 基线不齐 | 待修 | `light/explain-failed` | 「讲解这段」按钮和右侧编号小字不在一条基线上；随 A11 去掉编号后消失 |
+| A10 | 基线不齐 | 已修 | `light/explain-failed`、`dark/explain-failed` | 「讲解这段」不再是一张常驻纸面按钮：平时是段落首行右侧一行 `faint` 小字，和正文同一基线（`alignByBaseline`），段落多长都贴在首行，不会掉到下面。鼠标扫到这一段、或这一段就是从阅读器选进来的，才换成 `fgPrimary` 字 + `btnBg` 纸面底 + 纸面阴影；两种状态盒子同尺寸，悬停不会把段落或下面的讲解挪位。失败时的「再试一次 / 重新配对」那一行占的是平时就留好的位置：状态行在任何时候都在块里，平时是留白，失败时才填内容，所以点下去、等回复、失败回来这三种状态里，同一页下面的段落一个像素都不动（QA 退回 47 像素那条之后补的）。TON-1659 第 3 项 |
 | A11 | 占位文案、中英混杂、内部编号露出 | 待修 | `light/explain-failed`（`3f6e6f96…:p1:11`）、`light/exam-attempt`（`作答记录：local-d25dd1bb-…`）、`light/quiz`（「出题：选择」） | 用户看到的是哈希和 UUID。去向：讲解卡 P2；考试 P4；「出题：选择」改「题型：选择题」随 P4 一起看文案 |
 | A12 | 开发者口吻的说明 | 已对 | `light/reader`；`TextbookReader.kt:393-401`（页码的悬停提示） | 页面底部常驻的「页码按 PDF 原文件计算。」已收进页码的悬停提示，正文下面不再有这行字；`light/reader` 改后截图底下只剩「上一页 1 / 1 下一页 · 页码 1 前往」。P1 |
 | A13 | 一屏多个主按钮 | 待修 | `light/today` | 今天页三个按钮里两个是黑底主按钮，看不出先点哪个。只留一个主按钮，其余用纸面按钮。`WindowsHomeCards.kt` 本轮无人占用，但等 P0 的按钮手感合并后再动，免得两次改同一处：P3 之后另排 |

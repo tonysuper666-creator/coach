@@ -5,12 +5,15 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.InternalComposeUiApi
 import androidx.compose.ui.awt.ComposeDialog
 import androidx.compose.ui.awt.ComposeWindow
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextLayoutResult
 import com.coach.desktop.books.*
+import com.coach.ui.theme.CoachColors
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
@@ -109,6 +112,38 @@ class ExplainTroubleLiveWindowTest {
             assertEquals(1, mac.pairs.get())
             step("paired")
 
+            // 第 3 项：平时「讲解这段」只是段落首行右边一行 faint 小字，和正文同一基线；
+            // 鼠标扫到这一段才浮成纸面按钮，盒子不挪位。用真窗口和真鼠标核一遍，浅深各拍两张。
+            val colors = if (dark) CoachColors.dark() else CoachColors.light()
+            fun label() = assertNotNull(inBlock("explain-button"))
+            reveal(window, "explain-paragraph-${block.id}")
+            assertEquals(colors.fgTertiary, labelColor(label()), "平时应当是 faint 文字")
+            assertEquals(firstBaseline(inBlock("explain-paragraph-${block.id}")!!), firstBaseline(label()), 1.5f,
+                "和段落首行同一基线")
+            val faintTop = edt { label().boundsInRoot.top }
+            shot(window, dark, "00-faint")
+            val origin = edt { window.contentPane.locationOnScreen }
+            val transform = edt { window.graphicsConfiguration.defaultTransform }
+            val band = edt { inBlock("explain-paragraph-${block.id}")!!.boundsInRoot }
+            val robot = java.awt.Robot().apply { autoDelay = 40 }
+            fun moveTo(x: Float, y: Float) =
+                robot.mouseMove(origin.x + (x / transform.scaleX).toInt(), origin.y + (y / transform.scaleY).toInt())
+            moveTo(band.center.x, band.center.y)
+            Thread.sleep(800)
+            assertEquals(colors.fgPrimary, labelColor(label()), "鼠标在这一段上时换成正常字色")
+            assertEquals(faintTop, edt { label().boundsInRoot.top }, 1f, "悬停不能把这一行挪位")
+            shot(window, dark, "00-faint-hover")
+            moveTo(4f, 4f)
+            Thread.sleep(800)
+            assertEquals(colors.fgTertiary, labelColor(label()), "鼠标离开回到 faint")
+            step("faint-control")
+
+            // 失败那一行（再试一次 + 那句话）占的应当是平时就留好的位置：失败回来这一块的高度和顶上都不许变，
+            // 否则同一页下面的段落会被推下去（QA 退回 PR #448 的那 47 像素）。
+            fun blockBounds() = edt { nodes(window).first {
+                it.config.getOrNull(SemanticsProperties.TestTag) == "explain-block-${block.id}" }.boundsInRoot }
+            val restingBlock = blockBounds()
+
             // 逐书同意 + 断连：Mac 那边整个服务停掉。点「讲解这段」先问这本书能不能发原文；允许之后才去连，连不上。
             mac.down()
             clickInBlock("explain-button")
@@ -124,6 +159,8 @@ class ExplainTroubleLiveWindowTest {
             assertNotNull(inBlock("explain-retry"), "连不上给「再试一次」")
             assertNull(node(window, "explain-answer"))
             shot(window, dark, "02-offline")
+            assertEquals(restingBlock.top, blockBounds().top, 1f, "失败不能把这一块往下挪")
+            assertEquals(restingBlock.height, blockBounds().height, 1f, "失败提示用的是预留的位置，块高度不变")
             step("offline")
 
             // Mac 回来：同一个按钮再试一次，讲出来，带出处。
@@ -292,6 +329,22 @@ class ExplainTroubleLiveWindowTest {
         (listOf(target) + target.children).flatMap { it.config.getOrNull(SemanticsProperties.Text).orEmpty() }.joinToString("") { it.text }
     }
     private fun enabled(node: SemanticsNode) = edt { node.config.getOrNull(SemanticsProperties.Disabled) == null }
+
+    /** 这个文字节点实际用的颜色（「讲解这段」平时靠字色区分）。 */
+    private fun labelColor(node: SemanticsNode): Color = edt {
+        val layouts = mutableListOf<TextLayoutResult>()
+        node.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts)
+        layouts.single().layoutInput.style.color
+    }
+
+    /** 一段文字画在屏幕上的第一条基线：节点顶 + 上下内边距 + 排版里的 firstBaseline。 */
+    private fun firstBaseline(node: SemanticsNode): Float = edt {
+        val layouts = mutableListOf<TextLayoutResult>()
+        node.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts)
+        val layout = layouts.single()
+        val inset = (node.boundsInRoot.height - layout.size.height) / 2f
+        node.boundsInRoot.top + inset + layout.firstBaseline
+    }
     private fun click(window: ComposeWindow, tag: String) {
         waitFor(tag) { node(window, tag) != null }
         edt { assertTrue(node(window, tag)!!.config[SemanticsActions.OnClick].action!!.invoke(), tag) }

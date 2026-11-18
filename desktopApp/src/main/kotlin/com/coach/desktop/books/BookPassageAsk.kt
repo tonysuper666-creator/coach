@@ -50,7 +50,11 @@ internal fun BookPassageAsk(
     initialSelection: SourceBlock? = null, onOpenOriginal: ((BookPassage) -> Unit)? = null,
     onClose: () -> Unit,
 ) {
-    val blocks = remember(book.id, page.number) { StudyCoachCourse.blocks(book.id, listOf(page)).filterNot { it.heading } }
+    // 行号数的是正文段：跳过章标题，也跳过导入时插在页首的原件页码标记，
+    // 和讲解出处里的段号用同一个判断（isBodyParagraph），同一段在两处读到的是同一个数。
+    val blocks = remember(book.id, page.number) {
+        StudyCoachCourse.blocks(book.id, listOf(page)).filter { it.isBodyParagraph }
+    }
     var selected by remember(book.id, page.number, initialSelection) { mutableStateOf(initialSelection) }
     var draft by remember(book.id, page.number) { mutableStateOf(TextFieldValue("")) }
     var request by remember(book.id, page.number) { mutableStateOf<BookPassageQuestion?>(null) }

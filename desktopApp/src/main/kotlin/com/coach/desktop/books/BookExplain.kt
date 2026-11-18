@@ -388,20 +388,14 @@ internal fun bookCitationLabel(book: Textbook, blocks: List<SourceBlock>, citati
     val at = blocks.indexOfFirst { it.id == citation.blockId }
     val printed = citation.page > 0 && book.printsPageNumbers(citation.page)
     // 找不到正文段时只说得到的位置，不编段号，更不把导入时编的块号当页码。
-    if (at < 0 || !blocks[at].isBody) return if (printed) book.pageLabel(citation.page) else "本章"
+    if (at < 0 || !blocks[at].isBodyParagraph) return if (printed) book.pageLabel(citation.page) else "本章"
     if (printed) {
-        val inPage = blocks.subList(0, at + 1).count { it.page == citation.page && it.isBody }
+        val inPage = blocks.subList(0, at + 1).count { it.page == citation.page && it.isBodyParagraph }
         return "${book.pageLabel(citation.page)} · 第 $inPage 段"
     }
     val heading = blocks.subList(0, at).indexOfLast { it.heading }
-    return "本章第 ${blocks.subList(heading + 1, at + 1).count { it.isBody }} 段"
+    return "本章第 ${blocks.subList(heading + 1, at + 1).count { it.isBodyParagraph }} 段"
 }
-
-/** 文本导入带的原件页码标记；有它的页，页码是书里印着的，不是导入时编的。 */
-private val PRINTED_PAGE_MARK = Regex("""<!--\s*PDF 第 \d+ 页 · 书第 .*? 页\s*-->""")
-
-/** 正文段：不是章标题，也不是单独一行的原件页码标记。 */
-private val SourceBlock.isBody: Boolean get() = !heading && !PRINTED_PAGE_MARK.matches(text.trim())
 
 /**
  * 这一页的号是不是原件上印着的页码。PDF、幻灯片、扫描页本身就按页装；

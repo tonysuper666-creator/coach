@@ -19,6 +19,16 @@ internal data class BookPage(
     val illustrations: List<BookIllustration> = emptyList(), val textLayout: PageTextLayout? = null,
 )
 internal data class SourceBlock(val id: String, val page: Int, val start: Int, val end: Int, val heading: Boolean, val text: String)
+
+/** 导入时插在页首的原件页码标记；页号是书里印着的，这一行本身不是正文。 */
+internal val PRINTED_PAGE_MARK = Regex("""<!--\s*PDF 第 \d+ 页 · 书第 .*? 页\s*-->""")
+
+/**
+ * 正文段：不是章标题，也不是单独一行的原件页码标记。
+ * 凡是给读者数「第几段」的地方都用它（选段就问的行号、讲解出处的段号），两处的数才对得上。
+ */
+internal val SourceBlock.isBodyParagraph: Boolean get() = !heading && !PRINTED_PAGE_MARK.matches(text.trim())
+
 internal data class BookLesson(val id: String, val title: String, val blocks: List<SourceBlock>) {
     val firstPage get() = blocks.first().page
     val lastPage get() = blocks.last().page

@@ -86,6 +86,7 @@ class BookPageNativeWindowTest {
             }
             for (dark in listOf(false, true)) {
                 System.setProperty("coach.windows.theme", if (dark) "dark" else "light")
+                controller.library.saveTextView(controller.state.value.book!!.id, false)
                 runBlocking { controller.page(1) }
                 val window = edt { ComposeWindow().apply {
                     title = "LearningCoach · 分页验收（自造 PDF）"

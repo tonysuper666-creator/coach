@@ -19,9 +19,13 @@ import kotlinx.coroutines.ensureActive
 
 /** Explicit paragraph selection keeps the original page offsets even for Unicode text. */
 @Composable
-internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearningSupport, onRepair: (() -> Unit)? = null, onClose: () -> Unit) {
+internal fun BookPassageAsk(
+    book: Textbook, page: BookPage, support: BookLearningSupport, onRepair: (() -> Unit)? = null,
+    initialSelection: SourceBlock? = null, onOpenOriginal: ((BookPassage) -> Unit)? = null,
+    onClose: () -> Unit,
+) {
     val blocks = remember(book.id, page.number) { StudyCoachCourse.blocks(book.id, listOf(page)).filterNot { it.heading } }
-    var selected by remember(book.id, page.number) { mutableStateOf<SourceBlock?>(null) }
+    var selected by remember(book.id, page.number, initialSelection) { mutableStateOf(initialSelection) }
     var question by remember(book.id, page.number) { mutableStateOf("") }
     var request by remember(book.id, page.number) { mutableStateOf<BookPassageQuestion?>(null) }
     var reply by remember(book.id, page.number) { mutableStateOf<BookLearningReply?>(null) }
@@ -90,7 +94,8 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
                         // 回答里的【S1】是给程序的引用标记，读者看下面那行「出处 · 第 N 页」就够了。
                         Text(ReadableText.withoutCitationMarks(result.text), style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
                         result.sources.forEach { passage ->
-                            V7TextButton({ source = passage }, Modifier.testTag("book-passage-citation")) {
+                            V7TextButton({ if (onOpenOriginal != null) onOpenOriginal(passage) else source = passage },
+                                Modifier.testTag("book-passage-citation")) {
                                 Text("出处 · ${book.pageLabel(passage.page)}")
                             }
                         }

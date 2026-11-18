@@ -24,7 +24,16 @@ internal data class PdfPageText(
     val unit: ReaderTextUnit,
     /** A run PDFBox rewrote in an unrecognised way is left unboxed, never guessed. */
     val unmappedRanges: List<ReaderTextRange>,
-)
+) {
+    fun pageLayout(): PageTextLayout = PageTextLayout(
+        checkNotNull(unit.resource.pdfPageIndex0) + 1,
+        frame.cropBox.right - frame.cropBox.left,
+        frame.cropBox.top - frame.cropBox.bottom,
+        unit.spans.flatMap { span -> span.geometry.boxes.map { box ->
+            PageTextBox(span.range.startUtf16, span.range.endUtf16, box)
+        } },
+    )
+}
 
 /** One extraction pass, with exactly the text and cleaning used by TextbookExtraction. */
 internal object PdfPageTextExtraction {
@@ -42,12 +51,25 @@ internal object PdfPageTextExtraction {
     private fun extract(document: PDDocument, page: Int, inkPadding: Double?): PdfPageText {
         require(page in 1..document.numberOfPages)
         require(document.currentAccessPermission.canExtractContent()) { "这本 PDF 限制了文字提取。" }
+        return PositionStripper(page, frame(document, page), inkPadding).extract(document)
+    }
+
+    fun restore(document: PDDocument, page: BookPage, layout: PageTextLayout): ReaderTextUnit? {
+        val frame = frame(document, page.number)
+        if (layout.page != page.number || layout.pageWidth != frame.cropBox.right - frame.cropBox.left ||
+            layout.pageHeight != frame.cropBox.top - frame.cropBox.bottom) return null
+        BookIllustrationAnchors.requireValidTextLayouts(mapOf(page.number to page.text), listOf(layout))
+        val spans = layout.boxes.groupBy { ReaderTextRange(it.startOffset, it.endOffset) }.map { (range, boxes) ->
+            ReaderTextGeometry(range, ReaderGeometry(frame, boxes.map(PageTextBox::bounds)))
+        }
+        return ReaderTextUnit(ReaderResource(pdfPageIndex0 = page.number - 1), page.text, spans)
+    }
+
+    private fun frame(document: PDDocument, page: Int): PdfPageFrame {
         val source = document.getPage(page - 1)
         fun PDRectangle.points() = PdfPointRect(lowerLeftX.toDouble(), lowerLeftY.toDouble(),
             upperRightX.toDouble(), upperRightY.toDouble())
-        val frame = PdfPageFrame(source.mediaBox.points(), source.cropBox.points(),
-            Math.floorMod(source.rotation, 360))
-        return PositionStripper(page, frame, inkPadding).extract(document)
+        return PdfPageFrame(source.mediaBox.points(), source.cropBox.points(), Math.floorMod(source.rotation, 360))
     }
 
     private class PositionStripper(private val page: Int, private val frame: PdfPageFrame,

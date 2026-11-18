@@ -214,9 +214,14 @@ private sealed interface BlockState {
  * 讲解里的块编号点开就是这一块原文。
  */
 @Composable
-internal fun BookExplainPanel(book: Textbook, page: Int, consent: ExplainConsent, explainer: BookExplainer, modifier: Modifier = Modifier) {
+internal fun BookExplainPanel(
+    book: Textbook, page: Int, consent: ExplainConsent, explainer: BookExplainer, modifier: Modifier = Modifier,
+    selection: SourceBlock? = null, onOpenOriginal: ((BookPassage) -> Unit)? = null,
+) {
     val blocks = remember(book.id) { StudyCoachCourse.blocks(book.id, book.pages) }
-    val onPage = remember(blocks, page) { blocks.filter { it.page == page && !it.heading } }
+    val onPage = remember(blocks, page, selection) {
+        if (selection != null) listOf(selection) else blocks.filter { it.page == page && !it.heading }
+    }
     var consented by remember(book.id) { mutableStateOf(consent.allowed(book.id)) }
     val states = remember(book.id) { mutableStateMapOf<String, BlockState>() }
     var pending by remember(book.id, page) { mutableStateOf<SourceBlock?>(null) }
@@ -232,9 +237,12 @@ internal fun BookExplainPanel(book: Textbook, page: Int, consent: ExplainConsent
     fun start(block: SourceBlock) {
         states[block.id] = BlockState.Waiting
         scope.launch {
-            val result = explainer.explain(block, blocks)
+            // The selected words can also occur in a neighbouring block. Send the
+            // chosen range alone so the server cannot attach their reply to that neighbour.
+            val candidates = if (selection == null) blocks else listOf(block)
+            val result = explainer.explain(block, candidates)
             states[block.id] = when (result) {
-                is ExplainResult.Done -> BlockState.Done(result.explanation, ExplainWire.context(blocks, block))
+                is ExplainResult.Done -> BlockState.Done(result.explanation, ExplainWire.context(candidates, block))
                 is ExplainResult.Refused -> BlockState.Failed(result.message, result.trouble)
             }
         }
@@ -294,7 +302,10 @@ internal fun BookExplainPanel(book: Textbook, page: Int, consent: ExplainConsent
                     modifier = Modifier.weight(1f).testTag("explain-failed"))
             }
             if (state is BlockState.Done) ExplanationView(book, state.explanation, state.context) { citation ->
-                state.context.firstOrNull { it.id == citation.blockId }?.let { opened = citation to it }
+                state.context.firstOrNull { it.id == citation.blockId }?.let {
+                    if (onOpenOriginal != null) onOpenOriginal(BookPassage.from(book, it))
+                    else opened = citation to it
+                }
             }
         }
     }

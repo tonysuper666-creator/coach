@@ -227,9 +227,15 @@ class BookIllustrationModelTest {
                 assertEquals(legacyLoaded, BookIllustrationStore.loadByPage(db, imported.id)[1])
             }
             val reopened = TextbookLibrary(library.directory).book(imported.id)
+            assertTrue(reopened.pages.all { it.textLayout == null }, "A legacy library opens before any text-layer backfill")
             assertEquals(imported.pages.map { page ->
-                if (page.number == 1) page.copy(illustrations = listOf(BookIllustration(1, 0, "b".repeat(64), "png", 200, 100, "旧图"))) else page
+                val legacy = page.copy(textLayout = null)
+                if (page.number == 1) legacy.copy(illustrations = listOf(BookIllustration(1, 0, "b".repeat(64), "png", 200, 100, "旧图"))) else legacy
             }, reopened.pages)
+            val layer = assertNotNull(library.pdfTextLayer(reopened, reopened.pages.first()))
+            assertEquals(imported.pages.first().text, layer.text)
+            assertEquals(imported.pages.first().textLayout, library.pageTextLayout(imported.id, 1))
+            assertNull(library.pageTextLayout(imported.id, 2), "Only the page actually opened is backfilled")
         } finally {
             root.toFile().deleteRecursively()
         }

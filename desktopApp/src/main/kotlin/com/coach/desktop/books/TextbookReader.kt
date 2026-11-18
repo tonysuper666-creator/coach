@@ -26,6 +26,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -57,8 +58,12 @@ import com.coach.ui.v7.v7FocusRing
 import com.coach.desktop.reader.ReaderSession
 import com.coach.desktop.reader.ReaderDraftScope
 import com.coach.desktop.reader.NotesSection
+import com.coach.domain.reader.ReaderTextRange
+import com.coach.domain.reader.ReaderTextUnit
+import com.coach.domain.reader.ReaderRect
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -100,7 +105,11 @@ private sealed interface PageImage {
 }
 
 @Composable
-internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: BookLearningSupport, practiceSource: PracticeSource?, pageFocus: FocusRequester, onNoteSession: (ReaderSession?) -> Unit, onPage: (Int) -> Unit, onBack: () -> Unit, onLearn: () -> Unit) {
+internal fun TextbookReader(
+    ui: LibraryUi, library: TextbookLibrary, support: BookLearningSupport, practiceSource: PracticeSource?,
+    pageFocus: FocusRequester, onNoteSession: (ReaderSession?) -> Unit, onPage: (Int) -> Unit, onBack: () -> Unit,
+    onLearn: () -> Unit, explainProvider: BookExplainer? = null,
+) {
     val book = checkNotNull(ui.book)
     val page = book.page(ui.page)
     if (page == null) {
@@ -112,7 +121,9 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     val lastPage = book.pages.maxOf { it.number }
     val previousPage = book.pages.filter { it.number < ui.page }.maxByOrNull { it.number }?.number
     val nextPage = book.pages.filter { it.number > ui.page }.minByOrNull { it.number }?.number
-    var textView by remember(book.id) { mutableStateOf(!hasOriginal || page.ocr) }
+    var textView by remember(book.id) {
+        mutableStateOf(!hasOriginal || (library.savedTextView(book.id) ?: page.ocr))
+    }
     val paging = remember(book.id) { BookPagingState(BookPageAnchor(ui.page)) }
     LaunchedEffect(ui.page) {
         paging.followImportPage(ui.page)
@@ -122,7 +133,21 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     var retry by remember { mutableIntStateOf(0) }
     var notesOpen by remember(book.id) { mutableStateOf(false) }
     var explainOpen by remember(book.id) { mutableStateOf(false) }
-    val explainer = remember(library) { BookExplainer(library = library) }
+    var selection by remember(book.id, ui.page) { mutableStateOf<ReaderTextRange?>(null) }
+    var explainingSelection by remember(book.id) { mutableStateOf<SourceBlock?>(null) }
+    var passageJump by remember(book.id) { mutableStateOf<BookPassage?>(null) }
+    var passageJumpTick by remember(book.id) { mutableIntStateOf(0) }
+    var marks by remember(book.id, ui.page, page.text) { mutableStateOf(library.highlights(book.id, page)) }
+    var savingMark by remember(book.id) { mutableStateOf(false) }
+    var markError by remember(book.id, ui.page) { mutableStateOf(false) }
+    val visiblePageNumber by rememberUpdatedState(ui.page)
+    val scope = rememberCoroutineScope()
+    val chosen = selection?.let { range ->
+        SourceBlock("${book.id}:p${page.number}:${range.startUtf16}", page.number, range.startUtf16, range.endUtf16,
+            false, page.text.substring(range.startUtf16, range.endUtf16))
+    }?.takeIf { it.text.isNotBlank() }
+    val learnableSelection = chosen?.takeIf { it.text.trim().length <= 4_000 }
+    val explainer = remember(library, explainProvider) { explainProvider ?: BookExplainer(library = library) }
     val explainConsent = remember(library) { ExplainConsent(library.directory) }
     val source = ui.source
     LaunchedEffect(book.id, source, practiceSource) {
@@ -211,6 +236,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     }
     val turnTo: (Int?) -> Unit = { pageNumber ->
         if (pageNumber != null && book.page(pageNumber) != null) {
+            passageJump = null
             paging.anchor = BookPageAnchor(pageNumber)
             val visiblePage = if (textView && paging.pages.isNotEmpty())
                 paging.pages[paging.index].anchor.importPage else pageNumber
@@ -237,37 +263,55 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
         }
     }
 
-    val quoteAnchor = remember(ui.page, source, practiceSource) {
-        if (source == null) null
+    val openPassage: (BookPassage) -> Unit = open@{ passage ->
+        val target = book.page(passage.page) ?: return@open
+        if (passage.book != book.id || passage.start !in 0 until passage.end || passage.end > target.text.length ||
+            target.text.substring(passage.start, passage.end) != passage.text) return@open
+        selection = null
+        asking = false
+        explainOpen = false
+        textView = false
+        passageJump = passage
+        passageJumpTick++
+        paging.anchor = BookPageAnchor(passage.page, passage.start)
+        if (paging.publishImportPage(passage.page)) onPage(passage.page)
+    }
+    val quoteAnchor = remember(ui.page, source, practiceSource, passageJump) {
+        if (passageJump?.page == ui.page) passageJump?.text
+        else if (source == null) null
         else if (practiceSource != null) practiceSource.quote?.takeIf { practiceSource.page == ui.page }
         else StudyCoachCourse.sourceQuote(source, ui.page)
     }
     // 讲解出处带着解析器核对过的块范围进来。只有这一页的同一偏移仍是同一句原文时才用它；
     // 对不上就什么都不标，绝不回落到「第一次出现」或别处的句子。
-    val citedRange = remember(practiceSource?.target, ui.page, page.text) {
+    val citedRange = remember(practiceSource?.target, passageJump, ui.page, page.text) {
+        passageJump?.takeIf { it.page == ui.page }?.let { return@remember it.start until it.end }
         val target = practiceSource?.target?.takeIf { it.pdfPage == ui.page } ?: return@remember null
         if (target.start >= 0 && target.end > target.start && target.end <= page.text.length &&
             page.text.substring(target.start, target.end) == target.quote) target.start until target.end else null
     }
-    val citedLocation by key(library, book.id, page, citedRange, retry) { produceState<Result<CitedPdfLocation>?>(null) {
-        value = null
-        val range = citedRange ?: return@produceState
-        if (book.format != "pdf" || page.ocr) return@produceState
-        value = try {
-            Result.success(withContext(Dispatchers.IO) {
-                org.apache.pdfbox.Loader.loadPDF(library.directory.resolve("${book.id}.pdf").toFile()).use { pdf ->
-                    locateCitedPdfRange(PdfPageTextExtraction.extract(pdf, page.number), page.text, range)
-                }
-            })
-        } catch (cancel: CancellationException) { throw cancel }
-        catch (error: Exception) { Result.failure(error) }
-    } }
-    val image by produceState<PageImage>(PageImage.Loading, book.id, ui.page, retry) {
-        value = PageImage.Loading
-        if (hasOriginal) {
-            value = try { withContext(Dispatchers.IO) { PageImage.Ready(library.renderOriginal(book, page.number).toComposeImageBitmap()) } }
+    val originalText by key(library, book.id, page.number, page.text, retry) {
+        produceState<Result<ReaderTextUnit?>?>(null) {
+            if (book.format != "pdf" || page.ocr) return@produceState
+            value = try { Result.success(withContext(Dispatchers.IO) { library.pdfTextLayer(book, page) }) }
             catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) { PageImage.Failed }
+            catch (error: Exception) { Result.failure(error) }
+        }
+    }
+    val layer = originalText?.getOrNull()
+    val rangeLocation = remember(layer, citedRange, page.text) {
+        val range = citedRange ?: return@remember null
+        val unit = layer ?: return@remember null
+        val frame = unit.spans.firstOrNull()?.geometry?.frame ?: return@remember null
+        locateCitedPdfRange(PdfPageText(frame, unit, emptyList()), page.text, range)
+    }
+    val image by key(book.id, ui.page, retry) {
+        produceState<PageImage>(PageImage.Loading) {
+            if (hasOriginal) {
+                value = try { withContext(Dispatchers.IO) { PageImage.Ready(library.renderOriginal(book, page.number).toComposeImageBitmap()) } }
+                catch (cancel: CancellationException) { throw cancel }
+                catch (_: Exception) { PageImage.Failed }
+            }
         }
     }
     // 页图还没回来时先铺纸：这一页自己有尺寸就按它铺，量不到才借上一张成功页图的比例。
@@ -281,7 +325,6 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     val view = (remote.page as? com.coach.desktop.reader.PageState.Ready)?.view
     val samePage = remote.current?.id == book.id && remote.current?.version == "1" &&
         view?.document == book.id && view.pdfPage == ui.page
-    val rangeLocation = citedLocation?.getOrNull()
     val boxes = if (citedRange != null) rangeLocation?.boxes
         else if (samePage) (remote.boxes as? com.coach.desktop.reader.BoxesState.Ready)?.boxes else null
     val located = if (citedRange != null) rangeLocation?.located
@@ -294,7 +337,9 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
         target.start >= 0 && target.end > target.start && target.end <= stored.length &&
             stored.substring(target.start, target.end) == target.quote
     } } == true
-    val sourceWarning = if (source == null) null else when {
+    val sourceWarning = if (passageJump?.page == page.number && originalText != null && !textView &&
+        rangeLocation?.located !is com.coach.desktop.reader.Located.Found) "无法确认原句：无法读取这一页的文字位置。"
+    else if (source == null) null else when {
         textView && practiceSource?.warning != null -> practiceSource.warning
         textView && textTarget != null && !textTargetValid -> "无法确认原句：这一页的内容变了，这条出处无法定位。"
         textView && citedRange == null && !quoteAnchor.isNullOrEmpty() &&
@@ -305,7 +350,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
         practiceSource?.target != null && citedRange == null -> "无法确认原句：这一页的内容变了，这条出处无法定位。"
         textOnlySource -> null
         image is PageImage.Failed -> "无法确认原句：这一页的图像打不开。"
-        citedRange != null && citedLocation?.isFailure == true -> "无法确认原句：无法读取这一页的文字位置。"
+        citedRange != null && originalText != null && rangeLocation == null -> "无法确认原句：无法读取这一页的文字位置。"
         remote.failure != null || remote.page is com.coach.desktop.reader.PageState.Failed -> "无法确认原句：无法读取这一页的定位信息。"
         remote.current != null && (remote.current?.id != book.id || remote.current?.version != "1") -> "无法确认原句：教材版本不一致。"
         citedRange == null && samePage && remote.boxes is com.coach.desktop.reader.BoxesState.Failed -> "无法确认原句：无法读取这一页的文字位置。"
@@ -317,11 +362,12 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
         else -> null
     }
 
-    LaunchedEffect(citedRange, located, aspectOk, imageHeight, imageScroll.maxValue, textView, explainOpen) {
-        if (citedRange != null && located is com.coach.desktop.reader.Located.Found && boxes != null &&
+    LaunchedEffect(citedRange, passageJumpTick, located, aspectOk, imageHeight, imageScroll.maxValue, imageScroll.viewportSize,
+        textView, explainOpen) {
+        if (located is com.coach.desktop.reader.Located.Found && boxes != null &&
             aspectOk && imageHeight > 0 && imageScroll.maxValue != Int.MAX_VALUE && !textView && !explainOpen) {
             val top = located.rects.minOf { it.y0 } / boxes.height * imageHeight
-            imageScroll.scrollTo((top - 24).toInt().coerceIn(0, imageScroll.maxValue))
+            imageScroll.scrollTo((top - imageScroll.viewportSize / 3).toInt().coerceIn(0, imageScroll.maxValue))
         }
     }
 
@@ -351,11 +397,41 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(if (source != null) "学习原文 · ${source.title}" else "教材阅读", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                 if (hasOriginal) V7TextButton(onClick = {
+                    if (!textView && chosen != null) paging.anchor = BookPageAnchor(page.number, chosen.start)
                     textView = !textView
+                    selection = null
+                    library.saveTextView(book.id, textView)
                 }, modifier = Modifier.testTag("book-original-toggle")) { Text(if (textView) "看原页" else "看文字") }
-                V7TextButton(onClick = { asking = true }, modifier = Modifier.testTag("ask-book-passage")) { Text("选段提问") }
-                V7TextButton(onClick = { explainOpen = !explainOpen }, enabled = !ui.busy, modifier = Modifier.testTag("book-explain-toggle")) {
-                    Text(if (explainOpen) "回到原文" else "讲解")
+                V7TextButton(onClick = { asking = true }, enabled = chosen == null || learnableSelection != null,
+                    modifier = Modifier.testTag("ask-book-passage")) { Text("选段提问") }
+                V7TextButton(onClick = {
+                    explainingSelection = if (explainOpen) null else learnableSelection
+                    explainOpen = !explainOpen
+                }, enabled = !ui.busy && (explainOpen || chosen == null || learnableSelection != null),
+                    modifier = Modifier.testTag("book-explain-toggle")) {
+                    Text(if (explainOpen) "回到原文" else if (chosen != null) "讲解选段" else "讲解")
+                }
+                if (!textView && !explainOpen && chosen != null) {
+                    val range = checkNotNull(selection)
+                    val highlighted = range in marks
+                    V7TextButton(onClick = {
+                        val passage = BookPassage.from(book, chosen)
+                        savingMark = true
+                        markError = false
+                        scope.launch {
+                            try {
+                                withContext(Dispatchers.IO) { library.setHighlight(passage, !highlighted) }
+                                if (page.number == visiblePageNumber) {
+                                    marks = if (highlighted) marks - range else marks + range
+                                    if (selection == range) selection = null
+                                }
+                            } catch (cancel: CancellationException) { throw cancel }
+                            catch (_: Exception) { markError = true }
+                            finally { savingMark = false }
+                        }
+                    }, enabled = !savingMark, modifier = Modifier.testTag("original-pdf-highlight")) {
+                        Text(if (highlighted) "取消高亮" else "高亮")
+                    }
                 }
                 V7TextButton(onClick = {
                     if (notesOpen) session.cancelNote()
@@ -366,6 +442,9 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                 if (source == null) PaperButton(onLearn, enabled = !ui.busy) { Text(if (book.learning) "继续学" else "开始学") }
             }
             if (page.ocr) Text(OCR_NOTICE, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("book-ocr-notice"))
+            if (markError) Text("高亮暂未保存，请再试一次。", style = MaterialTheme.typography.bodySmall, color = v7Alert())
+            if (chosen != null && learnableSelection == null) Text("选段超过 4000 字。请选短一些再讲解或提问。",
+                style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
             if (source != null) Text("对应教材第 ${source.firstPage}–${source.lastPage} 页 · 返回后保留学习进度", style = MaterialTheme.typography.bodySmall)
             sourceWarning?.let { Text(it, color = v7Alert(), style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("source-anchor-status")) }
@@ -380,9 +459,10 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                     turn?.let(turnLayout) ?: return@onPreviewKeyEvent false
                     true
                 }.focusable()) {
-                if (explainOpen) BookExplainPanel(book, paragraphPage.number, explainConsent, explainer)
+                if (explainOpen) BookExplainPanel(book, paragraphPage.number, explainConsent, explainer,
+                    selection = explainingSelection, onOpenOriginal = openPassage.takeIf { explainingSelection != null })
                 else if (textView) {
-                    val ranges = remember(book.pages, source, practiceSource, ui.page, quoteAnchor, located, aspectOk) {
+                    val ranges = remember(book.pages, source, practiceSource, ui.page, quoteAnchor, located, aspectOk, marks, passageJump) {
                         val result = mutableMapOf<Int, List<IntRange>>()
                         if (practiceSource == null) {
                             source?.blocks.orEmpty().groupBy { it.page }.forEach { (number, blocks) ->
@@ -408,6 +488,9 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                             }
                             if (number != null && range != null) result[number] = listOf(range)
                         }
+                        passageJump?.let { result[it.page] = result[it.page].orEmpty() + listOf(it.start until it.end) }
+                        if (marks.isNotEmpty()) result[ui.page] = result[ui.page].orEmpty() +
+                            marks.map { it.startUtf16 until it.endUtf16 }
                         result
                     }
                     BookPageView(book, paging, ranges, turnLayout, libraryDirectory = library.directory, onPosition = { number ->
@@ -444,12 +527,26 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                                                 .onSizeChanged { imageHeight = it.height }.testTag("remote-image"))
                                         if (located is com.coach.desktop.reader.Located.Found && aspectOk && boxes != null) {
                                             androidx.compose.foundation.Canvas(Modifier.testTag("remote-highlight").semantics { contentDescription = "原句：$quoteAnchor" }.matchParentSize()) {
-                                                val k = size.width / boxes.width.toFloat()
-                                                for (r in located.rects) drawRect(
+                                                val lines = mergePdfLineBoxes(located.rects.map { r ->
+                                                    ReaderRect(r.x0 / boxes.width, r.y0 / boxes.height,
+                                                        (r.x1 - r.x0) / boxes.width, (r.y1 - r.y0) / boxes.height)
+                                                }, size.width, size.height)
+                                                val frame = 2.dp.toPx()
+                                                for (r in lines) drawRect(
                                                     highlight,
-                                                    topLeft = androidx.compose.ui.geometry.Offset(r.x0.toFloat() * k, r.y0.toFloat() * k),
-                                                    size = androidx.compose.ui.geometry.Size((r.x1 - r.x0).toFloat() * k, (r.y1 - r.y0).toFloat() * k),
+                                                    topLeft = androidx.compose.ui.geometry.Offset(
+                                                        (r.x * size.width).toFloat() - frame, (r.y * size.height).toFloat() - frame),
+                                                    size = androidx.compose.ui.geometry.Size(
+                                                        (r.width * size.width).toFloat() + 2 * frame,
+                                                        (r.height * size.height).toFloat() + 2 * frame),
+                                                    style = Stroke(frame),
                                                 )
+                                            }
+                                        }
+                                        if (layer != null && layer.spans.isNotEmpty()) {
+                                            val selectionColor = if (colors.dark) CoachV7.Dark.selBg else CoachV7.Light.selBg
+                                            OriginalPdfSelection(layer, page.text, selection, marks, selectionColor, highlight) {
+                                                selection = it
                                             }
                                         }
                                     }
@@ -548,7 +645,11 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             }
         }
     }
-    if (asking) BookPassageAsk(book, paragraphPage, support, onRepair = { explainer.markRevoked(); asking = false; explainOpen = true }) { asking = false }
+    if (asking) BookPassageAsk(book, paragraphPage, support,
+        onRepair = { explainer.markRevoked(); asking = false; explainingSelection = learnableSelection; explainOpen = true },
+        initialSelection = learnableSelection,
+        onOpenOriginal = openPassage.takeIf { learnableSelection != null },
+    ) { asking = false }
 }
 
 /** 键盘翻页的去向。 */

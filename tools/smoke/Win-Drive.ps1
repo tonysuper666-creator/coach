@@ -23,20 +23,24 @@ public class WD {
   [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessageTimeout(
     IntPtr h, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeoutMs, out UIntPtr result);
   public static string LastActivationFailure { get; private set; }
+  public static bool LastActivationAccepted { get; private set; }
+  public static IntPtr ForegroundAtConfirmation { get; private set; }
   public static bool Activate(IntPtr h) {
     // Keep the automation queue independent: attaching to a busy foreground
     // thread can block BringWindowToTop/SetForegroundWindow while holding our mutex.
     if (IsIconic(h)) ShowWindowAsync(h, 9); // SW_RESTORE
-    bool accepted = SetForegroundWindow(h);
+    LastActivationAccepted = SetForegroundWindow(h);
     UIntPtr ignored;
     // WM_NULL confirms the asynchronous activation has been processed. Never
     // wait indefinitely for a hung UI, and never bypass foreground ownership.
-    if (SendMessageTimeout(h, 0, UIntPtr.Zero, IntPtr.Zero, 0x23, 500, out ignored) == IntPtr.Zero) {
+    bool responsive = SendMessageTimeout(h, 0, UIntPtr.Zero, IntPtr.Zero, 0x23, 500, out ignored) != IntPtr.Zero;
+    ForegroundAtConfirmation = GetForegroundWindow();
+    if (!responsive) {
       LastActivationFailure = "WM_NULL confirmation failed";
       return false;
     }
-    if (GetForegroundWindow() != h) {
-      LastActivationFailure = accepted ? "activation accepted but target was not foreground" : "activation declined by Windows";
+    if (ForegroundAtConfirmation != h) {
+      LastActivationFailure = LastActivationAccepted ? "activation accepted but target was not foreground" : "activation declined by Windows";
       return false;
     }
     LastActivationFailure = null;
@@ -62,6 +66,7 @@ function Await($op, [Type]$type) { $t = $script:asTask.MakeGenericMethod($type).
 $script:Ocr = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('zh-Hans-CN'))
 $script:Win = [IntPtr]::Zero
 $script:AppPid = 0
+$script:ForegroundTracePath = $null
 
 # Other agents may run their own Coach windows on this desktop. Only the process this script started is ever touched.
 $script:Known = @()
@@ -146,19 +151,34 @@ function Get-ForegroundSummary {
 # OCR, network waits, compilation and whole smoke runs stay outside.
 function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]::Zero) {
     if ($Window -eq [IntPtr]::Zero) { $Window = $script:Win }
-    $owner = 0; [WD]::GetWindowThreadProcessId($Window, [ref]$owner) | Out-Null
-    if (-not $script:AppPid -or $owner -ne $script:AppPid) { throw 'WIN_DRIVE_TARGET: window does not belong to this run' }
     $mutex = New-Object Threading.Mutex($false, 'Global\Coach.WinDrive.Foreground')
     try {
         foreach ($attempt in 1..20) {
             $held = $false
+            $declined = $false
+            $trace = $null
             try {
                 try { $held = $mutex.WaitOne(30000) } catch [Threading.AbandonedMutexException] { $held = $true }
                 if (-not $held) { throw 'WIN_DRIVE_TIMEOUT: waiting for one foreground action' }
-                if (-not [WD]::Activate($Window)) { throw "WIN_DRIVE_FOCUS_LOST: $([WD]::LastActivationFailure)" }
+                $acquired = [DateTime]::UtcNow
+                $owner = 0; [WD]::GetWindowThreadProcessId($Window, [ref]$owner) | Out-Null
+                if (-not $script:AppPid -or $owner -ne $script:AppPid) { throw 'WIN_DRIVE_TARGET: window does not belong to this run' }
+                $ready = [WD]::Activate($Window)
+                $observed = [WD]::ForegroundAtConfirmation
+                if ($script:ForegroundTracePath) {
+                    $foregroundPid = 0; [WD]::GetWindowThreadProcessId($observed, [ref]$foregroundPid) | Out-Null
+                    $trace = [ordered]@{ acquiredUtc=$acquired.ToString('o'); attempt=$attempt; targetHwnd=$Window.ToInt64()
+                        targetPid=$owner; foregroundHwnd=$observed.ToInt64(); foregroundPid=$foregroundPid
+                        accepted=[WD]::LastActivationAccepted; activationFailure=[WD]::LastActivationFailure; actionReturned=$false }
+                }
+                if (-not $ready) {
+                    $declined = [WD]::LastActivationFailure -eq 'activation declined by Windows'
+                    throw "WIN_DRIVE_FOCUS_LOST: $([WD]::LastActivationFailure)"
+                }
                 Start-Sleep -Milliseconds 150
-                Assert-OurForeground
+                Assert-OurForeground -Expected $Window
                 & $Action
+                if ($trace) { $trace.actionReturned = $true }
                 return
             } catch {
                 if ($_.Exception.Message -notlike 'WIN_DRIVE_FOCUS_LOST*') { throw }
@@ -168,8 +188,21 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
                 Write-Verbose "Foreground action retry $attempt/20"
             } finally {
                 if ($held) { $mutex.ReleaseMutex() }
+                if ($trace) {
+                    $trace.releasedUtc = [DateTime]::UtcNow.ToString('o')
+                    ($trace | ConvertTo-Json -Compress) | Add-Content -LiteralPath $script:ForegroundTracePath -Encoding UTF8
+                }
             }
-            Start-Sleep -Milliseconds (Get-Random -Minimum 50 -Maximum 200)
+            if ($attempt -lt 20 -and $declined) {
+                # Give the current owner time to finish. Wake early on a real
+                # foreground change. Never hold the input mutex while waiting.
+                $wait = [Diagnostics.Stopwatch]::StartNew()
+                while ([WD]::GetForegroundWindow() -eq $observed -and $wait.ElapsedMilliseconds -lt 1000) {
+                    Start-Sleep -Milliseconds 50
+                }
+            } elseif ($attempt -lt 20) {
+                Start-Sleep -Milliseconds (Get-Random -Minimum 50 -Maximum 200)
+            }
         }
         throw "WIN_DRIVE_TIMEOUT: could not regain our foreground for this action (foreground: $(Get-ForegroundSummary)). Last retry: $lastFocusLoss"
     } finally { $mutex.Dispose() }
@@ -252,10 +285,10 @@ function Find-Text($lines, [string]$needle) {
 
 # A notification or a non-Java window is not permission to type into it.
 # The caller holds the short mutex and retries only the interrupted action.
-function Assert-OurForeground {
+function Assert-OurForeground([IntPtr]$Expected = [IntPtr]::Zero) {
     $fg = [WD]::GetForegroundWindow(); $owner = 0
     [WD]::GetWindowThreadProcessId($fg, [ref]$owner) | Out-Null
-    if (-not $script:AppPid -or $owner -ne $script:AppPid) {
+    if (-not $script:AppPid -or $owner -ne $script:AppPid -or ($Expected -ne [IntPtr]::Zero -and $fg -ne $Expected)) {
         throw 'WIN_DRIVE_FOCUS_LOST: our client is no longer foreground'
     }
 }

@@ -173,6 +173,7 @@ internal fun BookPageView(
     turnStyle: PageTurnStyle = PageTurnStyle.None,
     /** 翻页读 / 滚动读（TON-1671）。两种共用同一套分页和锚点，切换时停在同一页。 */
     readMode: BookReadMode = BookReadMode.Paged,
+    onOpenTableRow: ((BookPassage) -> Unit)? = null,
 ) {
     var preview by remember(book.id, libraryDirectory) { mutableStateOf<BookFigurePreview?>(null) }
     preview?.let { BookFigureDialog(it) { preview = null } }
@@ -297,7 +298,8 @@ internal fun BookPageView(
                             Box(Modifier.width(sheetWidth).height(viewHeight).background(paper).clipToBounds().testTag("book-sheet-0")) {
                                 val page = pages[index]
                                 val remaining = pages.count { it.chapter == page.chapter } - pages.take(index + 1).count { it.chapter == page.chapter }
-                                BookSheet(book.title, page, typography, measurer, widthPx, leftInset, remaining, false, 0, book.id, libraryDirectory, { preview = it }) { failed.add(it) }
+                                BookSheet(book, page, typography, measurer, widthPx, leftInset, remaining, false, 0,
+                                    libraryDirectory, onOpenTableRow, { preview = it }) { failed.add(it) }
                             }
                         }
                     }
@@ -331,9 +333,9 @@ internal fun BookPageView(
                                     .testTag("book-sheet-$side")) {
                                     if (page != null) {
                                         val remaining = pages.count { it.chapter == page.chapter } - pages.take(first + side + 1).count { it.chapter == page.chapter }
-                                        BookSheet(book.title, page, typography, measurer, widthPx,
+                                        BookSheet(book, page, typography, measurer, widthPx,
                                             if (spread && side == 1) rightInset else leftInset,
-                                            remaining, spread, side, book.id, libraryDirectory, { preview = it }) { failed.add(it) }
+                                            remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }) { failed.add(it) }
                                     }
                                 }
                             }
@@ -368,9 +370,9 @@ internal fun BookPageView(
                                 }
                                 .testTag("book-sheet-$side")) {
                                 val remaining = pages.count { it.chapter == page.chapter } - pages.take(index + 1).count { it.chapter == page.chapter }
-                                BookSheet(book.title, page, typography, measurer, widthPx,
+                                BookSheet(book, page, typography, measurer, widthPx,
                                     if (spread && side == 1) rightInset else leftInset,
-                                    remaining, spread, side, book.id, libraryDirectory, { preview = it }) { failed.add(it) }
+                                    remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }) { failed.add(it) }
                             }
                         }
                     }
@@ -420,13 +422,14 @@ private fun spotAnchor(pages: List<BookLaidPage>, index: Int, twoPages: Boolean,
 }
 
 @Composable
-private fun BoxScope.BookSheet(bookTitle: String, page: BookLaidPage, typography: BookPageTypography,
+private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: BookPageTypography,
     measurer: TextMeasurer, widthPx: Int, inset: Dp, remaining: Int, spread: Boolean, side: Int,
-    bookId: String, libraryDirectory: Path?, onExpand: (BookFigurePreview) -> Unit, onMissing: (BookIllustration) -> Unit) {
+    libraryDirectory: Path?, onOpenTableRow: ((BookPassage) -> Unit)?,
+    onExpand: (BookFigurePreview) -> Unit, onMissing: (BookIllustration) -> Unit) {
     val density = LocalDensity.current
     val colors = CoachTheme.colors
     val column = with(density) { widthPx.toDp() }
-    DisableSelection { if (!page.opener) Text(if (spread && side == 0) bookTitle else page.title.orEmpty(),
+    DisableSelection { if (!page.opener) Text(if (spread && side == 0) book.title else page.title.orEmpty(),
         Modifier.align(Alignment.TopStart).padding(start = inset, top = 20.dp).width(column),
         textAlign = androidx.compose.ui.text.style.TextAlign.Center, color = colors.fgTertiary,
         style = MaterialTheme.typography.labelSmall.copy(fontSize = CoachV7.Size.cap,
@@ -469,7 +472,7 @@ private fun BoxScope.BookSheet(bookTitle: String, page: BookLaidPage, typography
             offset += source.endUtf16 - source.startUtf16
         }
     }
-    for (block in page.visuals) key(bookId, block.item, block.band?.startY) {
+    for (block in page.visuals) key(book.id, block.item, block.band?.startY) {
         val width = with(density) { block.widthPx.toDp() }
         val left = inset + (column - width) / 2
         val y = 52.dp + with(density) { block.topPx.toDp() }
@@ -479,7 +482,7 @@ private fun BoxScope.BookSheet(bookTitle: String, page: BookLaidPage, typography
             if (libraryDirectory != null) {
                 bitmap = withContext(Dispatchers.IO) {
                     try {
-                        ImageIO.read(BookIllustrationAssets.imageFile(libraryDirectory, bookId, item).toFile())
+                        ImageIO.read(BookIllustrationAssets.imageFile(libraryDirectory, book.id, item).toFile())
                             ?.takeIf { block.band == null || (it.width == item.width && it.height == item.height) }?.toComposeImageBitmap()
                     } catch (_: java.io.IOException) { null }
                 }
@@ -509,7 +512,7 @@ private fun BoxScope.BookSheet(bookTitle: String, page: BookLaidPage, typography
                         else Canvas(Modifier.fillMaxSize().semantics { contentDescription = "第 ${item.page} 页表格" }) {
                             val w = size.width.toInt()
                             val h = size.height.toInt()
-                            val headerHeight = (size.height * band.headerBottom / band.sourceHeight).toInt()
+                            val headerHeight = band.drawnHeaderHeight(h)
                             if (w > 0 && h > headerHeight) {
                                 if (headerHeight > 0) drawImage(image, srcSize = IntSize(image.width, band.headerBottom),
                                     dstSize = IntSize(w, headerHeight))
@@ -517,6 +520,7 @@ private fun BoxScope.BookSheet(bookTitle: String, page: BookLaidPage, typography
                                     dstOffset = IntOffset(0, headerHeight), dstSize = IntSize(w, h - headerHeight))
                             }
                         }
+                        if (band != null && onOpenTableRow != null) TableRowLinks(book, item, band, onOpenTableRow)
                     }
                 }
                 item.caption?.takeIf { it.isNotEmpty() && item.kind == PageVisualKind.ILLUSTRATION }?.let { caption ->
@@ -538,4 +542,42 @@ private fun BoxScope.BookSheet(bookTitle: String, page: BookLaidPage, typography
             Text(rest, color = colors.fgTertiary, style = MaterialTheme.typography.labelSmall)
         }
     } }
+}
+
+private fun BookTableBand.drawnHeaderHeight(height: Int): Int =
+    (height.toLong() * headerBottom / sourceHeight).toInt()
+
+/** The canvas draws the header and the cropped body into two separately scaled rectangles. */
+@Composable
+private fun TableRowLinks(book: Textbook, item: BookIllustration, band: BookTableBand, onOpen: (BookPassage) -> Unit) {
+    val table = item.table ?: return
+    val page = remember(book, item.page) { book.page(item.page) } ?: return
+    if (!remember(table, item.height, page.text) { table.valid(item.height, page.text) }) return
+    val rows = table.rows
+    val precedingRow = rows.indexOfFirst { it.bottomPx == band.startY }
+    val lastRow = rows.indexOfFirst { it.bottomPx == band.endY }
+    if (rows.first().bottomPx != band.headerBottom || precedingRow < 0 || lastRow <= precedingRow) return
+
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val height = constraints.maxHeight
+        val headerHeight = band.drawnHeaderHeight(height)
+        Column {
+            var top = 0
+            for (index in 0..lastRow) {
+                if (index in 1..precedingRow) continue
+                val row = rows[index]
+                val bottom = if (index == 0) headerHeight else headerHeight +
+                    ((row.bottomPx - band.startY).toLong() * (height - headerHeight) / (band.endY - band.startY)).toInt()
+                if (bottom > top) {
+                    val label = if (index == 0) "查看原页表头" else "查看原页第 ${index} 行数据"
+                    Spacer(Modifier.fillMaxWidth().height(with(LocalDensity.current) { (bottom - top).toDp() })
+                        .clickable(role = Role.Button) {
+                            val (start, end) = row.source
+                            onOpen(BookPassage(book.id, page.number, start, end, page.text.substring(start, end)))
+                        }.semantics { contentDescription = label })
+                }
+                top = bottom
+            }
+        }
+    }
 }

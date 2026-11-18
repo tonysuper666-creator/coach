@@ -129,17 +129,20 @@ internal class PdfSelectionGeometry(private val unit: ReaderTextUnit, private va
 
     fun verifiedBoxes(range: ReaderTextRange) = PdfTextSelection.boxesForVerifiedRange(unit, text, range)
 
-    fun wordAt(hit: ReaderTextRange): ReaderTextRange {
-        val words = java.text.BreakIterator.getWordInstance().apply { setText(text) }
-        val from = words.preceding(hit.startUtf16 + 1).takeIf { it >= 0 } ?: hit.startUtf16
-        val to = words.following(hit.startUtf16).coerceAtLeast(hit.endUtf16)
-        val word = ReaderTextRange(from, to)
+    fun wordAt(hit: ReaderTextRange): ReaderTextRange? {
+        if (unit.text != text || hit.endUtf16 > text.length) return null
+        val start = hit.startUtf16
         // CJK selections begin on the pressed glyph. The handles can include adjacent glyphs.
-        val script = Character.UnicodeScript.of(text.codePointAt(hit.startUtf16))
-        return when (script) {
-            Character.UnicodeScript.HAN, Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA -> hit
-            else -> word.takeIf { verifiedBoxes(it).isNotEmpty() } ?: hit
+        when (Character.UnicodeScript.of(text.codePointAt(start))) {
+            Character.UnicodeScript.HAN, Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA -> return hit
+            else -> Unit
         }
+        val words = java.text.BreakIterator.getWordInstance()
+        words.setText(text)
+        val from = if (words.isBoundary(start)) start else words.preceding(start)
+        val to = words.following(start).coerceAtLeast(hit.endUtf16)
+        val word = ReaderTextRange(from, to)
+        return word.takeIf { verifiedBoxes(it).isNotEmpty() } ?: hit
     }
 
     fun nearest(position: Offset, width: Float, height: Float, maxDistance: Float = Float.POSITIVE_INFINITY): ReaderTextRange? {

@@ -117,7 +117,7 @@ internal fun Modifier.originalPdfTouch(
                 pending = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) { awaitPdfMotion(down) }
                 if (pending == null) {
                     val word = glyphs.wordAt(hit)
-                    if (glyphs.verifiedBoxes(word).isNotEmpty()) {
+                    if (word != null && glyphs.verifiedBoxes(word).isNotEmpty()) {
                         update(word)
                         reported = word
                         drag = PdfTouchDrag(word, null, contact)

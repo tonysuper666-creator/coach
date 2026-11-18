@@ -42,6 +42,8 @@ internal object BookPdfLoader {
     fun load(bytes: ByteArray): BookPdfDocument = BookPdfDocument.load(bytes)
 }
 
+internal fun bookCffHasGlyph(font: BookPdfCffFont, code: Int) = font.hasGlyph(font.codeToName(code))
+
 internal fun measureBookCffInk(font: BookPdfCffFont, code: Int, position: BookPdfTextPosition): BookInkBounds? {
     val path = GraphicsPath(font.getPath(font.codeToName(code)))
     if (path.isEmpty) return null

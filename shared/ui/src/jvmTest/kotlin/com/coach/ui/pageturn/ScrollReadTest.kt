@@ -7,19 +7,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.test.ExperimentalTestApi
-import androidx.compose.ui.test.SkikoComposeUiTest
-import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onAllNodesWithTag
-import androidx.compose.ui.test.assertCountEquals
-import androidx.compose.ui.test.performMouseInput
-import androidx.compose.ui.test.runSkikoComposeUiTest
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
 import com.coach.ui.captureLessonEvidence
+import com.coach.ui.theme.CoachColors
+import com.coach.ui.theme.LocalCoachColors
 import com.coach.ui.v7.LocalV7ReducedMotion
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -55,7 +54,11 @@ class ScrollReadViewTest {
         val ink = if (dark) CoachV7.Dark.ink else CoachV7.Light.ink
         setContent {
             out(rememberCoroutineScope())
-            CompositionLocalProvider(LocalV7ReducedMotion provides reduced, androidx.compose.material3.LocalContentColor provides ink) {
+            CompositionLocalProvider(
+                LocalCoachColors provides if (dark) CoachColors.dark() else CoachColors.light(),
+                LocalV7ReducedMotion provides reduced,
+                androidx.compose.material3.LocalContentColor provides ink,
+            ) {
                 ScrollReadView(state, desk = desk, paper = sheet, modifier = Modifier.fillMaxSize(), scrollbar = { ReadScrollbarDesktop(it) }) { i ->
                     Box(Modifier.height(700.dp).padding(40.dp)) { Text("第 ${i + 1} 页\n" + "纸上的字。".repeat(40)) }
                 }
@@ -156,6 +159,10 @@ class ScrollReadViewTest {
         mainClock.advanceTimeBy(64); waitForIdle()
         assertEquals(2, state.position.page)
         assertFalse(state.canScrollForward, "End must reach the true bottom")
+        val layout = state.list.layoutInfo
+        val lastPage = layout.visibleItemsInfo.last()
+        assertEquals(2, lastPage.index)
+        assertEquals(layout.viewportEndOffset, lastPage.offset + lastPage.size)
         assertEquals(1f, state.overallProgress)
     }
 
@@ -218,5 +225,66 @@ class ScrollReadViewTest {
             mainClock.advanceTimeBy(64); waitForIdle()
             captureLessonEvidence("scroll-read-scrollbar-" + (if (dark) "dark" else "light"), 1200, 900)
         }
+    }
+}
+
+@OptIn(ExperimentalTestApi::class)
+class ScrollReadQa434 {
+    @Test fun switchingBooksRestoresFractionWhenVisibleCountIsUnchanged() = runSkikoComposeUiTest(size = Size(1200f, 900f)) {
+        val selected = mutableStateOf(ScrollReadState(20))
+        setContent {
+            ScrollReadView(selected.value, CoachV7.Light.desk, CoachV7.Light.sheet, Modifier.fillMaxSize()) {
+                Box(Modifier.height(700.dp))
+            }
+        }
+        waitForIdle()
+        val before = selected.value.visiblePages
+        val target = ScrollReadPosition(7, 0.4f)
+        runOnIdle { selected.value = ScrollReadState(20, target) }
+        waitForIdle()
+        val state = selected.value
+        println("QA434 replace-state before=$before after=${state.visiblePages} requested=$target actual=${state.position}")
+        assertTrue(state.position.sameSpot(target))
+    }
+
+    @Test fun keyboardWithReaderFocused() = runSkikoComposeUiTest(size = Size(1200f, 900f)) {
+        val state = ScrollReadState(3)
+        mainClock.autoAdvance = false
+        setContent {
+            CompositionLocalProvider(LocalV7ReducedMotion provides true) {
+                ScrollReadView(state, CoachV7.Light.desk, CoachV7.Light.sheet, Modifier.fillMaxSize().testTag("reader")) {
+                    Box(Modifier.height(1800.dp))
+                }
+            }
+        }
+        mainClock.advanceTimeBy(64)
+        val reader = onNodeWithTag("reader")
+        reader.requestFocus()
+        reader.assertIsFocused()
+        reader.performKeyInput { pressKey(Key.Spacebar) }
+        mainClock.advanceTimeBy(16)
+        waitForIdle()
+        val afterSpace = state.position
+        reader.performKeyInput { pressKey(Key.MoveEnd) }
+        mainClock.advanceTimeBy(64)
+        waitForIdle()
+        println("QA434 focused reduced=true Space=$afterSpace End=${state.position} canScrollForward=${state.list.canScrollForward}")
+        assertTrue(afterSpace.fraction > 0f && !state.list.canScrollForward)
+    }
+
+    @Test fun oneLongPageThumbAtEnd() = runSkikoComposeUiTest(size = Size(1200f, 900f)) {
+        val state = ScrollReadState(1)
+        lateinit var scope: CoroutineScope
+        setContent {
+            scope = rememberCoroutineScope()
+            ScrollReadView(state, CoachV7.Dark.desk, CoachV7.Dark.sheet, Modifier.fillMaxSize()) {
+                Box(Modifier.height(1800.dp))
+            }
+        }
+        waitForIdle()
+        scope.launch { state.list.scrollBy(1800f) }
+        waitForIdle()
+        println("QA434 single-page end=${state.position} canScrollForward=${state.list.canScrollForward} overallProgress=${state.overallProgress}")
+        assertTrue(!state.list.canScrollForward && state.overallProgress == 1f)
     }
 }

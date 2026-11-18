@@ -242,11 +242,13 @@ fun PageTurnView(
                     val down = awaitFirstDown(requireUnconsumed = true)
                     val w = size.width.toFloat()
                     val h = size.height.toFloat()
-                    val edge = w * (if (cols == 2) 0.08f else 0.14f)
-                    val fwd = down.position.x > w / 2f
+                    val touch = down.type == PointerType.Touch
+                    // 手指：左右 28% 点一下翻页，整页任何位置横滑都能翻；鼠标：只认窄边和页角
+                    val edge = w * (if (touch) 0.28f else if (cols == 2) 0.08f else 0.14f)
+                    var fwd = down.position.x > w / 2f
                     val inEdge = down.position.x < edge || down.position.x > w - edge
                     val inCorner = inEdge && (down.position.y < h * 0.18f || down.position.y > h * 0.82f)
-                    if (!inEdge) return@awaitEachGesture
+                    if (!inEdge && !touch) return@awaitEachGesture
                     val tracker = VelocityTracker()
                     tracker.addPosition(down.uptimeMillis, down.position)
                     val instantMode = state.reduced || state.style == PageTurnStyle.None
@@ -261,6 +263,7 @@ fun PageTurnView(
                             lastX = c.position.x
                             val slop = abs(c.position.x - down.position.x) > viewConfiguration.touchSlop
                             if (slop && (inCorner || c.type == PointerType.Touch)) {
+                                if (!dragging && !swiped && !inEdge) fwd = c.position.x < down.position.x
                                 if (instantMode) { swiped = true; c.consume() }
                                 else if (!dragging) {
                                     dragging = true
@@ -280,7 +283,7 @@ fun PageTurnView(
                         when {
                             dragging -> { dragging = false; scope.launch { state.endDrag(complete) } }
                             swiped -> if (complete) launchTurn(fwd)
-                            else -> launchTurn(fwd)
+                            inEdge -> launchTurn(fwd)  // 没拖动的轻点，只有落在边缘才翻页
                         }
                     } finally {
                         // 手势协程被撤（缩放窗口、pointerInput 重启）：没走到 endDrag 就回弹，不留 turning

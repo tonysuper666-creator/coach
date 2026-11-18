@@ -4,10 +4,11 @@ import com.coach.domain.LadderQuestion
 import com.coach.domain.LadderSession
 import com.coach.domain.LedgerJson
 import com.coach.domain.QuestionLadder
+import com.coach.domain.reader.ReaderTextRange
+import com.coach.domain.reader.ReaderTextUnit
 import kotlinx.serialization.encodeToString
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.rendering.PDFRenderer
-import org.apache.pdfbox.text.PDFTextStripper
 import org.w3c.dom.Element
 import org.w3c.dom.Node
 import java.awt.image.BufferedImage
@@ -43,6 +44,10 @@ internal class TextbookLibrary(
             sql.execute("CREATE TABLE IF NOT EXISTS book_review_position(slot INTEGER PRIMARY KEY CHECK(slot=1),book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL)")
             sql.execute("CREATE TABLE IF NOT EXISTS book_learning_paths(book TEXT PRIMARY KEY,path TEXT NOT NULL CHECK(path IN ('READ','READ_AND_LEARN','QUESTION_FIRST')))")
             sql.execute("CREATE TABLE IF NOT EXISTS book_ladders(book TEXT PRIMARY KEY,session TEXT NOT NULL)")
+            sql.execute("CREATE TABLE IF NOT EXISTS book_reader_views(book TEXT PRIMARY KEY,text_view INTEGER NOT NULL)")
+            sql.execute("""CREATE TABLE IF NOT EXISTS book_highlights(
+                book TEXT NOT NULL,page INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,quote TEXT NOT NULL,
+                PRIMARY KEY(book,page,start,end))""")
         } }
         database().use { db ->
             val hasOcr = db.createStatement().use { sql -> sql.executeQuery("PRAGMA table_info(pages)").use { rows ->
@@ -130,6 +135,70 @@ internal class TextbookLibrary(
 
     @Synchronized fun pageTextLayout(bookId: String, page: Int): PageTextLayout? = database().use { db ->
         BookPageTextBoxStore.loadPage(db, bookId, page)
+    }
+
+    fun pdfTextLayer(book: Textbook, page: BookPage): ReaderTextUnit? {
+        if (book.format != "pdf" || page.ocr || page.text.isBlank()) return null
+        return Loader.loadPDF(original(book.id, book.format).toFile()).use { pdf ->
+            if (!pdf.currentAccessPermission.canExtractContent()) return@use null
+            val saved = page.textLayout ?: pageTextLayout(book.id, page.number)
+            if (saved != null) {
+                val restored = try { PdfPageTextExtraction.restore(pdf, page, saved) }
+                catch (_: IllegalArgumentException) { null }
+                if (restored != null) return@use restored
+            }
+            val extracted = PdfPageTextExtraction.extract(pdf, page.number)
+            // Older books may have a different text layer. Attach nothing unless all offsets still agree.
+            if (extracted.unit.text != page.text) return@use null
+            database().use { db ->
+                BookPageTextBoxStore.saveInTransaction(db, book.id, mapOf(page.number to page.text), listOf(extracted.pageLayout()))
+            }
+            extracted.unit
+        }
+    }
+
+    fun savedTextView(bookId: String): Boolean? = database().use { db ->
+        db.prepareStatement("SELECT text_view FROM book_reader_views WHERE book=?").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { if (it.next()) it.getBoolean(1) else null }
+        }
+    }
+
+    fun saveTextView(bookId: String, textView: Boolean) = database().use { db ->
+        db.prepareStatement("INSERT OR REPLACE INTO book_reader_views(book,text_view) VALUES(?,?)").use { sql ->
+            sql.setString(1, bookId)
+            sql.setBoolean(2, textView)
+            sql.executeUpdate()
+        }
+    }
+
+    fun highlights(bookId: String, page: BookPage): List<ReaderTextRange> = database().use { db ->
+        db.prepareStatement("SELECT start,end,quote FROM book_highlights WHERE book=? AND page=? ORDER BY start,end").use { sql ->
+            sql.setString(1, bookId)
+            sql.setInt(2, page.number)
+            sql.executeQuery().use { rows -> buildList {
+                while (rows.next()) {
+                    val start = rows.getInt(1)
+                    val end = rows.getInt(2)
+                    if (start in 0 until end && end <= page.text.length &&
+                        page.text.substring(start, end) == rows.getString(3)) add(ReaderTextRange(start, end))
+                }
+            } }
+        }
+    }
+
+    fun setHighlight(passage: BookPassage, highlighted: Boolean) = database().use { db ->
+        val statement = if (highlighted)
+            "INSERT OR IGNORE INTO book_highlights(book,page,start,end,quote) VALUES(?,?,?,?,?)"
+        else "DELETE FROM book_highlights WHERE book=? AND page=? AND start=? AND end=? AND quote=?"
+        db.prepareStatement(statement).use { sql ->
+            sql.setString(1, passage.book)
+            sql.setInt(2, passage.page)
+            sql.setInt(3, passage.start)
+            sql.setInt(4, passage.end)
+            sql.setString(5, passage.text)
+            sql.executeUpdate()
+        }
     }
 
     /** Persisted provenance only. Missing, stale, unsupported or damaged records return null. */
@@ -568,11 +637,11 @@ internal object TextbookExtraction {
         "pdf" -> Loader.loadPDF(path.toFile()).use { pdf ->
             require(pdf.numberOfPages in 1..5000) { "这本 PDF 的页数暂不支持。" }
             require(pdf.currentAccessPermission.canExtractContent()) { "这本 PDF 限制了文字提取，请使用有阅读和提取权限的教材。" }
-            val stripper = PDFTextStripper().apply { sortByPosition = true; paragraphEnd = "\n\n" }
             val pages = (1..pdf.numberOfPages).map { n ->
                 control.report(n, pdf.numberOfPages)
-                stripper.startPage = n; stripper.endPage = n
-                BookPage(n, clean(stripper.getText(pdf)))
+                val extracted = PdfPageTextExtraction.extract(pdf, n)
+                val text = checkNotNull(extracted.unit.text)
+                BookPage(n, text, textLayout = extracted.pageLayout().takeIf { text.isNotBlank() })
             }
             require(pages.count { it.text.isBlank() } <= BookScanImages.MAX_OCR_PAGES) {
                 "扫描页超过 200 页，请把 PDF 拆分后再导入。"

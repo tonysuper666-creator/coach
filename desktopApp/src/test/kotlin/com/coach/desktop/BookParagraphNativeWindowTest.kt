@@ -76,6 +76,7 @@ class BookParagraphNativeWindowTest {
             }
             for (dark in listOf(false, true)) {
                 System.setProperty("coach.windows.theme", if (dark) "dark" else "light")
+                controller.library.saveTextView(controller.state.value.book!!.id, false)
                 runBlocking { controller.page(1) }
                 // 同批次里前一个原生用例的置顶窗口可能还盖在上面：真实点击和截图都会落到它那儿，
                 // 等它真的关掉再摆这一轮的窗口。

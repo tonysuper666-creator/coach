@@ -40,7 +40,6 @@ import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.Clipboard
@@ -303,13 +302,21 @@ internal fun BookPageView(
         val fade = remember { Animatable(1f) }
         LaunchedEffect(first, pages) { fade.snapTo(if (reduced) 1f else 0f); fade.animateTo(1f, tween(if (reduced) 0 else 150)) }
         var wheelAt by remember { mutableLongStateOf(0L) }
-        Box(Modifier.fillMaxSize().onPointerEvent(PointerEventType.Scroll) { event ->
-            val delta = event.changes.sumOf { it.scrollDelta.y.toDouble() }
-            val now = System.nanoTime()
-            if (delta != 0.0 && now - wheelAt > 220_000_000L) {
-                wheelAt = now; onTurn(if (delta > 0) ReaderTurn.Next else ReaderTurn.Previous)
+        val turn by rememberUpdatedState(onTurn)
+        // 滚轮翻页：和桌面 onPointerEvent(Scroll) 同一个事件阶段，安卓也能编译。
+        Box(Modifier.fillMaxSize().pointerInput(Unit) {
+            awaitPointerEventScope {
+                while (true) {
+                    val event = awaitPointerEvent()
+                    if (event.type != PointerEventType.Scroll) continue
+                    val delta = event.changes.sumOf { it.scrollDelta.y.toDouble() }
+                    val now = System.nanoTime()
+                    if (delta != 0.0 && now - wheelAt > 220_000_000L) {
+                        wheelAt = now; turn(if (delta > 0) ReaderTurn.Next else ReaderTurn.Previous)
+                    }
+                    event.changes.forEach { it.consume() }
+                }
             }
-            event.changes.forEach { it.consume() }
         }, contentAlignment = Alignment.Center) {
             CompositionLocalProvider(LocalClipboard provides pageClipboard) {
                 SelectionContainer {

@@ -74,15 +74,21 @@ def remaining(db):
 
 
 def grant(path, role):
+    with transaction(path) as db:
+        # Local fixture dispatch cannot substitute for either external source.
+        require(not db.execute("SELECT 1 FROM sqlite_master WHERE name='hosted_binding'").fetchone())
+        return grant_in_transaction(db, role)
+
+
+def grant_in_transaction(db, role):
     nonce = secrets.token_hex(24)
     digest = hashlib.sha256(nonce.encode()).hexdigest()
-    with transaction(path) as db:
-        require(role in ('H', 'E') and remaining(db) >= 40)
-        if role == 'E':
-            require(db.execute("SELECT state FROM slots WHERE role='H'").fetchone() == ('done',))
-        require(db.execute("UPDATE slots SET state='running',digest=?,until=? "
-                           "WHERE role=? AND state='unused'",
-                           (digest, time.monotonic() + 10, role)).rowcount == 1)
+    require(role in ('H', 'E') and remaining(db) >= 40)
+    if role == 'E':
+        require(db.execute("SELECT state FROM slots WHERE role='H'").fetchone() == ('done',))
+    require(db.execute("UPDATE slots SET state='running',digest=?,until=? "
+                       "WHERE role=? AND state='unused'",
+                       (digest, time.monotonic() + 10, role)).rowcount == 1)
     return nonce
 
 

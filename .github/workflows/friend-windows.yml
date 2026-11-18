@@ -99,7 +99,7 @@ jobs:
         env:
           COACH_FRIEND_URL: ${{ secrets.COACH_EXTERNAL_URL }}
         run: |
-          python tools/smoke/friend-public.py transport
+          python tools/smoke/friend-public.py transport --stages
           exit $LASTEXITCODE
       - name: Install development MSI and launch installed executable
         shell: pwsh

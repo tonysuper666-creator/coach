@@ -171,4 +171,20 @@ class BookPageTurnViewTest {
         runOnIdle { state.move(ReaderTurn.Previous) }
         assertTrue(state.index < pagedBefore || pagedBefore == 0, "in paged mode Previous still turns a page")
     }
+
+    @Test fun inScrollModeThePreviousButtonStateFollowsTheRealScrollEdges() = runSkikoComposeUiTest(size = Size(1440f, 1440f), density = Density(1.5f)) {
+        val state = BookPagingState(BookPageAnchor(41))
+        val mode = androidx.compose.runtime.mutableStateOf(BookReadMode.Scroll)
+        spreadHost(state, mode)
+        assertFalse(state.canPrevious, "at the very top there is nothing above")
+        assertTrue(state.canNext)
+        runOnIdle { state.move(ReaderTurn.Next) }
+        mainClock.advanceTimeBy(1500); waitForIdle()
+        assertTrue(state.canPrevious, "after scrolling half a screen down the previous button must be enabled")
+        repeat(60) { runOnIdle { state.move(ReaderTurn.Next) }; mainClock.advanceTimeBy(300); waitForIdle() }
+        assertFalse(state.canNext, "at the very bottom there is nothing below")
+        runOnIdle { mode.value = BookReadMode.Paged }
+        mainClock.advanceTimeBy(150); waitForIdle()
+        assertEquals(state.index > 0, state.canPrevious, "paged mode goes back to page-index rules")
+    }
 }

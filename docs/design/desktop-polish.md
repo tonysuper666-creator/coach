@@ -148,7 +148,7 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | --- | --- | --- | --- | --- |
 | D1 | 时长与曲线一致 | 已对 | TON-1650 D10 | 走 `CoachV7` 动画 token |
 | D2 | 减少动画 | 已对 | `V7Fonts.jvm.kt:136` | 读 Windows 设置 |
-| D3 | 不跳布局 | 待修 | `light/explain-failed` | 失败提示插在按钮下方，把下面的段落往下推；随 P2 一起把状态行固定高度 |
+| D3 | 不跳布局 | 已对（讲解面板） | `light/explain-failed`、`dark/explain-failed`；`BookExplain.kt:310-327`、`ExplainFaintControlTest.kt:77-120` | 第 1 段请求讲解时，同一页第 2 段的上沿在请求前、等待中、失败后、同段重试等待中四个时刻一致：1100×900、密度 1 下浅深两套都是 211.0 px，位移 0。失败那一行任何时候都占着 40 dp，平时是留白，失败时才填进「再试一次」和那句话，所以点下去、等回复、失败回来、再点重试都不推动下面的段落；失败后「再试一次」仍可点，第二次请求的段 ID 和第一次相同，回来以后讲解和「出处 1」照常出现。用例 `ExplainFaintControlTest.theSecondParagraphStaysPutThroughWaitFailureAndInPlaceRetry`，实测行 `D3_POSITION theme={light,dark} before=waiting=failed=retrying=211.0`；浅深截图 `desktopApp/build/screens/ton1694/explain-unreachable-{light,dark}.png` |
 
 ### 机械计数（只报告，不当门槛）
 

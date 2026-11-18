@@ -9,9 +9,10 @@ import kotlin.Unit;
 import kotlin.coroutines.Continuation;
 import kotlin.coroutines.intrinsics.IntrinsicsKt;
 import org.jetbrains.skia.Bitmap;
-import org.jetbrains.skia.Data;
-import org.jetbrains.skia.EncodedImageFormat;
-import org.jetbrains.skia.Image;
+import org.jetbrains.skia.ColorAlphaType;
+import org.jetbrains.skia.ColorSpace;
+import org.jetbrains.skia.ColorType;
+import org.jetbrains.skia.ImageInfo;
 import org.jetbrains.skiko.SkiaLayer;
 
 import javax.imageio.ImageIO;
@@ -19,9 +20,12 @@ import javax.swing.SwingUtilities;
 import java.awt.*;
 import java.awt.event.*;
 import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferInt;
 import java.io.ByteArrayOutputStream;
 import java.lang.reflect.*;
 import java.net.*;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
@@ -101,7 +105,10 @@ public final class SmokeMain implements AutoCloseable {
                 return;
             }
             if (route.equals("/shot")) {
-                respond(exchange, 200, "image/png", onEdt(this::screenshot));
+                BufferedImage frame = onEdt(this::screenshot);
+                ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                ImageIO.write(frame, "png", bytes);
+                respond(exchange, 200, "image/png", bytes.toByteArray());
                 return;
             }
             if (!exchange.getRequestMethod().equals("POST")) {
@@ -154,21 +161,19 @@ public final class SmokeMain implements AutoCloseable {
         } finally { exchange.close(); }
     }
 
-    private BufferedImage surface(SkiaLayer layer) throws Exception {
-        Bitmap bitmap = layer.screenshot();
-        if (bitmap == null) throw new NotReady("Surface is not ready");
-        try {
-            Image image = Image.Companion.makeFromBitmap(bitmap);
-            try {
-                Data data = image.encodeToData(EncodedImageFormat.PNG, 100, 0);
-                if (data == null) throw new NotReady("Surface encoding failed");
-                try { return ImageIO.read(new java.io.ByteArrayInputStream(data.getBytes())); }
-                finally { data.close(); }
-            } finally { image.close(); }
-        } finally { bitmap.close(); }
+    private static BufferedImage surface(Bitmap bitmap) throws NotReady {
+        int width = bitmap.getWidth(), height = bitmap.getHeight();
+        ImageInfo format = new ImageInfo(width, height, ColorType.BGRA_8888,
+            ColorAlphaType.UNPREMUL, ColorSpace.Companion.getSRGB());
+        byte[] bgra = bitmap.readPixels(format, Math.multiplyExact(width, 4), 0, 0);
+        if (bgra == null) throw new NotReady("Surface pixels are not ready");
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        int[] argb = ((DataBufferInt) image.getRaster().getDataBuffer()).getData();
+        ByteBuffer.wrap(bgra).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(argb);
+        return image;
     }
 
-    private byte[] screenshot() throws Exception {
+    private BufferedImage screenshot() throws Exception {
         window.renderImmediately();
         double scale = scale();
         BufferedImage output = new BufferedImage((int)Math.ceil(window.getWidth()*scale),
@@ -182,14 +187,14 @@ public final class SmokeMain implements AutoCloseable {
                 SkiaLayer layer = surface.layer;
                 if (!layer.isShowing()) continue;
                 Point point = layer.getCanvas().getLocationOnScreen();
-                BufferedImage pixels = surface(layer);
-                graphics.drawImage(pixels, (int)Math.round((point.x-origin.x)*scale),
-                    (int)Math.round((point.y-origin.y)*scale), null);
+                try (Bitmap bitmap = layer.screenshot()) {
+                    if (bitmap == null) throw new NotReady("Surface is not ready");
+                    graphics.drawImage(surface(bitmap), (int)Math.round((point.x-origin.x)*scale),
+                        (int)Math.round((point.y-origin.y)*scale), null);
+                }
             }
         } finally { graphics.dispose(); }
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        ImageIO.write(output, "png", bytes);
-        return bytes.toByteArray();
+        return output;
     }
 
     private record Surface(SkiaLayer layer, Object mediator, boolean focusable) { }

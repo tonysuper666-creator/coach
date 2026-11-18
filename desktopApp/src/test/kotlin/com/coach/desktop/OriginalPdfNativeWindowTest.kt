@@ -1,5 +1,6 @@
 package com.coach.desktop
 
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.tooling.ComposeToolingApi
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -68,9 +69,11 @@ class OriginalPdfNativeWindowTest {
                     val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
                     setBounds(screen.x + 20, screen.y + 20, minOf(1220, screen.width - 40), minOf(900, screen.height - 40))
                     setContent { CoachTheme(darkTheme = dark) {
-                        TextbookReader(LibraryUi(book = book, page = 1, screen = BookScreen.READER), library,
-                            questions, null, remember { FocusRequester() },
-                            onNoteSession = {}, onPage = {}, onBack = {}, onLearn = {}, explainProvider = explainer)
+                        Surface(color = CoachTheme.colors.bgCanvas) {
+                            TextbookReader(LibraryUi(book = book, page = 1, screen = BookScreen.READER), library,
+                                questions, null, remember { FocusRequester() },
+                                onNoteSession = {}, onPage = {}, onBack = {}, onLearn = {}, explainProvider = explainer)
+                        }
                     } }
                     isAlwaysOnTop = true
                     isVisible = true

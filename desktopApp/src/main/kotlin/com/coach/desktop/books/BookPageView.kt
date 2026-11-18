@@ -153,7 +153,11 @@ internal fun BookPageView(
     BoxWithConstraints(modifier.fillMaxSize().testTag("book-page-layout")) {
         val column = with(density) { (body.fontSize * 33).toDp() }
         val spread = bookSpread(maxWidth.value, column.value, mode, state.spread)
-        val sheetWidth = if (spread) minOf(maxWidth / 2, column + 112.dp) else minOf(maxWidth, column + 128.dp)
+        val sheetWidth = when {
+            !spread -> minOf(maxWidth, column + 128.dp)
+            mode == BookPageMode.Spread -> minOf((maxWidth - 48.dp) / 2, column + 112.dp)
+            else -> minOf(maxWidth / 2, column + 112.dp)
+        }
         val leftInset = 64.dp
         val rightInset = if (spread) 48.dp else 64.dp
         val widthPx = with(density) { (sheetWidth - leftInset - rightInset).roundToPx().coerceAtLeast(1) }

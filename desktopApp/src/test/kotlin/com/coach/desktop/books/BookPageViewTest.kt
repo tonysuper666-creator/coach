@@ -249,7 +249,8 @@ class BookPageViewTest {
         })
         runOnIdle { mode = BookPageMode.Spread; width = 1290.dp }
         waitForIdle()
-        onNodeWithTag("book-sheet-1").assertExists()
+        onNodeWithTag("book-sheet-0").assertWidthIsEqualTo(621.dp)
+        onNodeWithTag("book-sheet-1").assertWidthIsEqualTo(621.dp)
         runOnIdle { width = 1100.dp }
         waitForIdle()
         onNodeWithTag("book-sheet-1").assertDoesNotExist()

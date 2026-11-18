@@ -8,6 +8,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
@@ -29,6 +31,75 @@ import kotlin.test.*
 /** Source anchors survive both component reflow and Desk's opt-in width. */
 @OptIn(ExperimentalTestApi::class)
 class BookPageViewTest {
+    @Test fun reviewedTableRepeatsHeaderPixelsAndKeepsEachRowAndItsSourceOnOneSheet() {
+        val root = Files.createTempDirectory("coach-table-rows-")
+        try {
+            val image = java.awt.image.BufferedImage(210, 1080, java.awt.image.BufferedImage.TYPE_INT_RGB)
+            val headerColor = java.awt.Color.RED
+            val rowColors = listOf(java.awt.Color.BLUE, java.awt.Color.GREEN)
+            val g = image.createGraphics()
+            try {
+                g.color = headerColor
+                g.fillRect(0, 0, image.width, 30)
+                repeat(7) { row ->
+                    g.color = rowColors[row % 2]
+                    g.fillRect(0, 30 + 150 * row, image.width, 150)
+                }
+            } finally { g.dispose() }
+            val bytes = java.io.ByteArrayOutputStream().use {
+                javax.imageio.ImageIO.write(image, "png", it)
+                it.toByteArray()
+            }
+            val raw = "表头\n" + (1..7).joinToString("") { "第${it}行𠮷\n" }
+            val item = BookIllustration(41, 0, BookIllustrationAssets.sha256(bytes), "png", image.width, image.height,
+                kind = PageVisualKind.TABLE, sourceStart = 0, sourceEnd = raw.length,
+                sourceRegion = com.coach.domain.reader.ReaderRect(.1, .1, .9, .9))
+            val book = Textbook("a".repeat(64), "校验表", "pdf", listOf(BookPage(41, raw, illustrations = listOf(item))))
+            val file = BookIllustrationAssets.imageFile(root, book.id, item)
+            Files.createDirectories(file.parent)
+            Files.write(file, bytes)
+            val ends = raw.indices.filter { raw[it] == '\n' }.drop(1)
+            val rows = BookTableRows(30, ends.mapIndexed { i, end -> BookTableRow(30 + (i + 1) * 150, end + 1) }, 18f, 15f)
+            var directory by mutableStateOf(root)
+            var geometry by mutableStateOf(rows)
+            val state = BookPagingState(BookPageAnchor(41))
+            runSkikoComposeUiTest(size = Size(900f, 510f), density = Density(1f)) {
+                setContent { CoachTheme {
+                    BookPageView(book, state, mapOf(41 to listOf(ends[4]..ends[4])), onTurn = { state.move(it) },
+                        libraryDirectory = directory, tableRows = mapOf(item to geometry))
+                } }
+                waitForIdle()
+                assertEquals(4, state.pages.size)
+                var nextRow = 0
+                state.pages.forEachIndexed { i, page ->
+                    val block = page.visuals.single()
+                    val band = assertNotNull(block.band)
+                    assertEquals(30 + 150 * nextRow, band.startY)
+                    assertEquals(0, (band.endY - band.startY) % 150)
+                    val slice = assertNotNull(block.replacement)
+                    assertEquals(i, state.pages.pageContaining(BookPageAnchor(41, slice.endUtf16 - 1)))
+                    assertEquals(i, state.pages.pageContaining(page.anchor))
+                    assertEquals(ends[4] in slice.startUtf16 until slice.endUtf16, block.highlighted)
+                    runOnIdle { state.anchor = page.anchor }
+                    waitUntil(timeoutMillis = 10_000) { onAllNodesWithContentDescription("第 41 页表格", useUnmergedTree = true).fetchSemanticsNodes().size == 1 }
+                    waitForIdle()
+                    val pixels = onNodeWithTag("book-block-41-0").captureToImage().toPixelMap()
+                    assertEquals(headerColor.rgb, pixels[pixels.width / 2, 12].toArgb())
+                    assertEquals(rowColors[nextRow % 2].rgb, pixels[pixels.width / 2, 50].toArgb())
+                    nextRow += (band.endY - band.startY) / 150
+                }
+                assertEquals(7, nextRow)
+                assertEquals(raw, state.pages.flatMap { it.sources }.joinToString("") { raw.substring(it.startUtf16, it.endUtf16) })
+                runOnIdle { geometry = rows.copy(rows = rows.rows.reversed()) }
+                waitForIdle()
+                assertNull(state.pages.single().visuals.single().band)
+                runOnIdle { directory = root.resolve("missing") }
+                waitUntil(timeoutMillis = 10_000) { state.pages.isNotEmpty() && state.pages.all { it.visuals.isEmpty() } }
+                assertEquals(raw, state.pages.flatMap { it.runs }.joinToString("") { originalBookSelection(it.text) })
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun pendingBookmarkAllowsContinuousTurnsAndLateAcknowledgementsKeepTheVisibleText() {
         val root = Files.createTempDirectory("coach-page-bookmark-")
         try {
@@ -152,9 +223,10 @@ class BookPageViewTest {
             "# 第三章 阅读与证据\n\n" + "读者回到原文检查证据，再把结论接回已有经验。😀𠮷".repeat(300))))
         val state = BookPagingState(BookPageAnchor(41))
         var width by mutableStateOf(1600.dp)
+        var mode by mutableStateOf(BookPageMode.Auto)
         setContent { CoachTheme {
             Box(Modifier.width(width).height(900.dp)) {
-                BookPageView(book, state, emptyMap(), onTurn = { state.move(it) })
+                BookPageView(book, state, emptyMap(), onTurn = { state.move(it) }, mode = mode)
             }
         } }
         waitForIdle()
@@ -175,5 +247,15 @@ class BookPageViewTest {
         assertTrue(state.pages[state.index].sources.any {
             it.importPage == anchor.importPage && anchor.offsetUtf16 in it.startUtf16 until it.endUtf16
         })
+        runOnIdle { mode = BookPageMode.Spread; width = 1290.dp }
+        waitForIdle()
+        onNodeWithTag("book-sheet-1").assertExists()
+        runOnIdle { width = 1100.dp }
+        waitForIdle()
+        onNodeWithTag("book-sheet-1").assertDoesNotExist()
+        runOnIdle { mode = BookPageMode.Single; width = 1600.dp }
+        waitForIdle()
+        onNodeWithTag("book-sheet-1").assertDoesNotExist()
+        assertEquals(anchor, state.anchor)
     }
 }

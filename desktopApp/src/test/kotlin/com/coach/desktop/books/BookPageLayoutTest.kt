@@ -121,6 +121,16 @@ class BookPageLayoutTest {
             addStringAnnotation("coach.book.page-body", "", second, length)
         }
         assertEquals("甲😀\r\n乙丙𠮷丁", originalPagedBookSelection(selected))
+        val crossingCrop = buildAnnotatedString {
+            append(selected)
+            append("\n")
+            val next = length
+            append("戊己")
+            addStringAnnotation("coach.book.crop-gap", "框𠮷内", next, next + 1)
+            addStringAnnotation("coach.book.page-body", "", next, length)
+        }
+        assertEquals("甲😀\r\n乙丙𠮷丁框𠮷内戊己", originalPagedBookSelection(crossingCrop))
+        assertEquals("戊己", originalPagedBookSelection(crossingCrop.subSequence(crossingCrop.length - 2, crossingCrop.length)))
         val page = BookLaidPage(listOf(BookPageSlice(41, 0, 4)), 0, null, null, false,
             AnnotatedString("甲😀乙"), emptyList(), 0, 33)
         assertEquals(listOf(BookPageSlice(41, 1, 3)), page.selection(2, 3))
@@ -152,6 +162,9 @@ class BookPageLayoutTest {
             assertTrue(bookSpread(threshold - 23, col, BookPageMode.Auto, true))
             assertFalse(bookSpread(threshold - 25, col, BookPageMode.Auto, true))
             assertFalse(bookSpread(3000f, col, BookPageMode.Single, true))
+            val minimum = 2 * (28 * 18 * scale + 112) + 48
+            assertFalse(bookSpread(minimum - 1, col, BookPageMode.Spread, true))
+            assertTrue(bookSpread(minimum + .01f, col, BookPageMode.Spread, false))
         }
     }
 
@@ -173,6 +186,83 @@ class BookPageLayoutTest {
         assertTrue(originalBookSelection(pages[0].text).contains("第五页独立正文"))
         assertTrue(originalBookSelection(pages[1].text).contains("第六页独立正文"))
         assertEquals(sources.joinToString("") { it.text }, pages.joinToString("") { originalBookSelection(it.text) })
+    }
+
+    @Test fun deferredCropsFillWithLaterTextButInlineBlocksKeepTheirReadingOrder() = runSkikoComposeUiTest(density = Density(1f)) {
+        val before = "短句接续。".repeat(11)
+        val covered = "原框😀内的文字"
+        val after = "后文𠮷，接着读。".repeat(110)
+        val raw = before + covered + after
+        val region = com.coach.domain.reader.ReaderRect(.1, .1, .4, .3)
+        val kinds = PageVisualKind.entries
+        val layouts = mutableMapOf<PageVisualKind, List<BookLaidPage>>()
+        setContent { CoachTheme {
+            val layouter = BookPageLayouter(rememberTextMeasurer(), LocalDensity.current, BookPageTypography(
+                MaterialTheme.typography.bodyLarge.copy(fontSize = 18.sp, lineHeight = 30.sp),
+                SpanStyle(), SpanStyle(), 40.sp, 32.sp, 12.sp, 32.sp))
+            for (kind in kinds) {
+                val figure = kind == PageVisualKind.ILLUSTRATION
+                val item = BookIllustration(41, before.length, "a".repeat(64), "png", 280, 340,
+                    caption = if (figure) "原图的说明" else null, kind = kind, sourceRegion = region,
+                    sourceStart = if (figure) null else before.length, sourceEnd = if (figure) null else before.length + covered.length)
+                layouts[kind] = layouter.layout(listOf(BookPage(41, raw, illustrations = listOf(item))), 310, 390)
+            }
+        } }
+        waitForIdle()
+        for ((kind, pages) in layouts) {
+            val placed = pages.flatMap { it.visuals }.single()
+            assertEquals(1, pages.indexOfFirst { it.visuals.isNotEmpty() }, kind.name)
+            assertTrue(placed.heightPx + placed.captionGapPx + placed.captionHeightPx <= 390 * .85f)
+            val firstEnd = pages.first().runs.last().sources.last().endUtf16
+            if (kind == PageVisualKind.TABLE || kind == PageVisualKind.FORMULA) assertEquals(before.length, firstEnd)
+            else assertTrue(firstEnd > before.length + covered.length, "Following text fills the gap for $kind: firstEnd=$firstEnd anchor=${before.length} runs=${pages.first().runs.map { it.sources }}")
+            val rendered = pages.flatMap { it.runs }.joinToString("") { originalBookSelection(it.text) }
+            assertEquals(if (kind == PageVisualKind.ILLUSTRATION) raw else before + after, rendered)
+            if (kind != PageVisualKind.ILLUSTRATION) assertEquals(1, pages.pageContaining(BookPageAnchor(41, before.length + 2)))
+            assertEquals(raw, pages.flatMap { it.sources }.joinToString("") { raw.substring(it.startUtf16, it.endUtf16) })
+            pages.forEachIndexed { index, page -> assertEquals(index, pages.pageContaining(page.anchor)) }
+        }
+    }
+
+    @Test fun consecutiveImagesKeepOrderAndImageOnlyLeavesRemainReachable() = runSkikoComposeUiTest(density = Density(1f)) {
+        val figures = (0..2).map { BookIllustration(7, 0, "a".repeat(64), "png", 280, 410, order = it) }
+        var pages = emptyList<BookLaidPage>()
+        setContent { CoachTheme {
+            pages = BookPageLayouter(rememberTextMeasurer(), LocalDensity.current, BookPageTypography(
+                MaterialTheme.typography.bodyLarge.copy(fontSize = 18.sp, lineHeight = 30.sp),
+                SpanStyle(), SpanStyle(), 40.sp, 32.sp, 12.sp, 32.sp)).layout(
+                listOf(BookPage(7, "", illustrations = figures.reversed()), BookPage(8, "第二章 继续\n正文。")), 310, 390)
+        } }
+        waitForIdle()
+        assertTrue(pages.filter { it.visuals.isNotEmpty() }.all { it.title == null })
+        assertEquals(figures, pages.flatMap { it.visuals }.map { it.item })
+        pages.forEachIndexed { index, page -> assertEquals(index, pages.pageContaining(page.anchor)) }
+    }
+
+    @Test fun pdfFigureOnlyTakesAnExactCaptionLineAndRetainsItsOffsets() = runSkikoComposeUiTest(density = Density(1f)) {
+        val caption = "图 2 观察记录"
+        val before = "前段𠮷。\r\n  "
+        val after = "  \r\n接着读。"
+        val raw = before + caption + after
+        val item = BookIllustration(12, before.length, "a".repeat(64), "png", 240, 280, caption = caption,
+            sourceRegion = com.coach.domain.reader.ReaderRect(.1, .1, .8, .8))
+        var isolated = emptyList<BookLaidPage>()
+        var embedded = emptyList<BookLaidPage>()
+        setContent { CoachTheme {
+            val layouter = BookPageLayouter(rememberTextMeasurer(), LocalDensity.current, BookPageTypography(
+                MaterialTheme.typography.bodyLarge.copy(fontSize = 18.sp, lineHeight = 30.sp),
+                SpanStyle(), SpanStyle(), 40.sp, 32.sp, 12.sp, 32.sp), pdf = true)
+            isolated = layouter.layout(listOf(BookPage(12, raw, illustrations = listOf(item))), 260, 320)
+            embedded = layouter.layout(listOf(BookPage(12, before + caption + "见正文" + after, illustrations = listOf(item))), 260, 320)
+        } }
+        waitForIdle()
+        val index = isolated.indexOfFirst { it.visuals.isNotEmpty() }
+        val visual = isolated[index].visuals.single()
+        assertEquals(BookPageSlice(12, before.length, before.length + caption.length), visual.replacement)
+        assertEquals(index, isolated.pageContaining(BookPageAnchor(12, before.length + 1)))
+        assertEquals(before + after, isolated.flatMap { it.runs }.joinToString("") { originalBookSelection(it.text) })
+        assertEquals(raw, isolated.flatMap { it.sources }.joinToString("") { raw.substring(it.startUtf16, it.endUtf16) })
+        assertNull(embedded.flatMap { it.visuals }.single().replacement)
     }
 
     @Test fun imageAndCaptionMoveTogetherAndFormulaStaysInFlow() {

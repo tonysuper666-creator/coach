@@ -2,8 +2,15 @@ package com.coach.desktop.books
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Path
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
+import com.tom_roush.pdfbox.pdmodel.font.PDFont
+import com.tom_roush.pdfbox.pdmodel.font.PDType1Font
+import com.tom_roush.pdfbox.rendering.PageDrawer
+import com.tom_roush.pdfbox.rendering.PageDrawerParameters
+import com.tom_roush.pdfbox.util.Matrix
+import com.tom_roush.pdfbox.util.Vector
 import java.io.File
 import java.io.IOException
 import kotlin.math.abs
@@ -34,7 +41,34 @@ internal fun renderBookPdfPage(file: File, pdf: BookPdfDocument, index: Int, sca
             // A native page or its raster bounds were rejected. Keep the shared frame.
         }
     }
-    return BookPdfRenderer(pdf).renderImage(index, scale)
+    return OriginalBookPdfRenderer(pdf).renderImage(index, scale)
+}
+
+private class OriginalBookPdfRenderer(pdf: BookPdfDocument) : BookPdfRenderer(pdf) {
+    override fun createPageDrawer(parameters: PageDrawerParameters): PageDrawer = object : PageDrawer(parameters) {
+        override fun showFontGlyph(transform: Matrix, font: PDFont, code: Int, displacement: Vector) {
+            val outline = (font as? PDType1Font)?.takeIf { it.isEmbedded }?.cachedOutline(code)
+            val untransformed = outline?.let(::Path)
+            try {
+                super.showFontGlyph(transform, font, code, displacement)
+            } finally {
+                // PDFBox-Android 2.0.27 transforms this cached path in place while drawing.
+                if (untransformed != null) outline.set(untransformed)
+            }
+        }
+    }
+}
+
+private fun PDType1Font.cachedOutline(code: Int): Path? = try {
+    val encodedName = encoding.getName(code)
+    // Match Type1Glyph2D's lookup, including its Unicode alias for missing glyph names.
+    val alias = if (hasGlyph(encodedName)) null else glyphList.toUnicode(encodedName)?.singleOrNull()?.let {
+        "uni" + it.code.toString(16).uppercase().padStart(4, '0')
+    }
+    val name = alias?.takeIf(::hasGlyph) ?: encodedName
+    getPath(name) ?: getPath(".notdef")
+} catch (_: IOException) {
+    null
 }
 
 internal fun renderNativeBookPdfPage(file: File, index: Int, width: Float, height: Float, scale: Float): Bitmap? {

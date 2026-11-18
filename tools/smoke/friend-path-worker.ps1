@@ -60,6 +60,21 @@ function Await-Text([int]$n, [string]$tag, [string[]]$needles, [int]$sec) {
     return $null
 }
 function Page-Of($lines) { foreach ($l in $lines) { $mm = [regex]::Match($l.Text, '(\d+)[/／](\d+)'); if ($mm.Success) { return "$($mm.Groups[1].Value)/$($mm.Groups[2].Value)" } }; return $null }
+# Read only the printed counter between the original-page navigation buttons.
+function Get-OriginalPageNumber($lines) {
+    $prev = Find-Text $lines '上一页'
+    $next = Find-Text $lines '下一页'
+    if (-not $prev -or -not $next -or $prev.X2 -ge $next.X1) { return }
+    foreach ($line in $lines) {
+        $digits = foreach ($word in $line.Words) {
+            $b = $word.BoundingRect
+            $y = $b.Y + $b.Height / 2
+            if ($b.X -ge $prev.X2 -and $b.X + $b.Width -le $next.X1 -and
+                $y -ge $next.Y1 -and $y -le $next.Y2 -and $y -ge $prev.Y1 -and $y -le $prev.Y2) { $word.Text }
+        }
+        if ((($digits -join '') -replace '\s', '') -match '^([1-9]\d*)[/／]([1-9]\d*)$') { return $Matches[1] }
+    }
+}
 # The lowest on-screen occurrence of a label (e.g. the last 「讲解这段」 button on a page).
 function Find-Lowest($lines, [string]$needle) { $best = $null; foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m -and (-not $best -or $m.Y -gt $best.Y)) { $best = $m } }; $best }
 function Find-All($lines, [string]$needle) { $all = @(); foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m) { $all += $m } }; $all | Sort-Object Y }
@@ -313,15 +328,33 @@ try {
         if ($res -eq 'ok') {
             $sourcePage = [regex]::Match($source.Text, '第\s*(\d+)\s*页').Groups[1].Value
             Click-At $sourceBox.X $sourceBox.Y
-            $returned = Await-Text 5 'source' @('返回学习') 30
-            $openedPage = Page-Of $script:Last
-            if (-not $returned -or -not $openedPage -or ($openedPage -split '/')[0] -ne $sourcePage) {
-                Fail 5 '出处没有回到标注页的原文（见 5-source.png）'
-            }
-            if (Has $script:Last @('无法确认原句', '出处已过期', '无法定位')) {
-                Fail 5 '出处页打开了，但原句未能核对（见 5-source.png）'
-            }
-            Click-At $returned.X $returned.Y
+            $deadline = (Get-Date).AddSeconds(30)
+            $verified = $false
+            $switched = $false
+            $problem = '出处没有回到标注页的原文（见 5-source.png）'
+            do {
+                $lines = Shot 5 'source'
+                $returned = Find-Text $lines '返回学习'
+                if ($returned) {
+                    if (Has $lines @('无法确认原句', '出处已过期', '无法定位')) {
+                        $problem = '出处页打开了，但原句未能核对（见 5-source.png）'
+                        break
+                    }
+                    # A saved text view reports a reflowed range, sometimes spanning two PDF pages.
+                    # Switch presentation once, without using the jump field or turning a page.
+                    $original = Find-Text $lines '看原页'
+                    if ($original -and -not $switched) {
+                        Click-At $original.X $original.Y
+                        $switched = $true
+                    } elseif ((Find-Text $lines '看文字') -and (Get-OriginalPageNumber $lines) -eq $sourcePage) {
+                        $verified = $true
+                        break
+                    }
+                }
+                Start-Sleep -Seconds 1
+            } while ((Get-Date) -lt $deadline)
+            if ($returned -and ($verified -or $KeepGoing)) { Click-At $returned.X $returned.Y }
+            if (-not $verified) { Fail 5 $problem }
             Pass 5 '边看边学出了讲解正文和带页码的出处，点出处回到对应原文页'
         } elseif ($res) { Fail 5 "边看边学的讲解没出来，界面说「$($res.Substring(3))」" } else { Fail 5 '90 秒内没有同时看到讲解正文和带页码的出处（见 5-learn.png）' }
     } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $five = 'failed' }

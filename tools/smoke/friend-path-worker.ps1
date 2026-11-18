@@ -49,7 +49,7 @@ function Get-AskReplyState($lines, [int]$page) {
         ($words -join '') -replace '\s', ''
     }
     if ($body -match '^(再试一次|重新配对)$' -or
-        $body -match '尚未接通|无法回答|不能回答|尚未核实|连不上|超时|暂时读不到回答') { return 'refused' }
+        $body -match '尚未接通|无法回答|不能回答|尚未核实|连不上|超时|暂时读不到回答|额度(?:已)?用完') { return 'refused' }
     if ($body -match '正在读这段问题') { return 'waiting' }
     if ($body -match "^出处[·•.．:：]?第${page}页$") { return 'answered' }
     return 'waiting'
@@ -60,6 +60,42 @@ function Await-Text([int]$n, [string]$tag, [string[]]$needles, [int]$sec) {
     return $null
 }
 function Page-Of($lines) { foreach ($l in $lines) { $mm = [regex]::Match($l.Text, '(\d+)[/／](\d+)'); if ($mm.Success) { return "$($mm.Groups[1].Value)/$($mm.Groups[2].Value)" } }; return $null }
+# At either edge of the book the disabled navigation label may disappear in OCR.
+# Enlarge the counter beside its visible neighbour; keep the current page and total strictly numeric.
+function Get-OriginalPageNumber($lines, [string]$png) {
+    $prev = Find-Text $lines '上一页'
+    $next = Find-Text $lines '下一页'
+    if (-not $prev -and -not $next) { return }
+    $anchor = if ($next) { $next } else { $prev }
+    $height = $anchor.Y2 - $anchor.Y1
+    $src = [Drawing.Bitmap]::new($png)
+    try {
+        $left = if ($prev) { $prev.X2 } else { [math]::Max(0, $next.X1 - 16 * $height) }
+        $right = if ($next) { $next.X1 } else { [math]::Min($src.Width, $prev.X2 + 16 * $height) }
+        $top = [math]::Max(0, $anchor.Y1 - $height)
+        $bottom = [math]::Min($src.Height, $anchor.Y2 + $height)
+        if ($left -ge $right -or $top -ge $bottom) { return }
+        $rect = [Drawing.Rectangle]::new($left, $top, $right - $left, $bottom - $top)
+        $zoom = [Drawing.Bitmap]::new($rect.Width * 3, $rect.Height * 3)
+        $file = Join-Path (Split-Path -Parent $png) ('counter-' + [guid]::NewGuid() + '.png')
+        try {
+            $g = [Drawing.Graphics]::FromImage($zoom)
+            try {
+                $g.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                $g.DrawImage($src, [Drawing.Rectangle]::new(0, 0, $zoom.Width, $zoom.Height), $rect, [Drawing.GraphicsUnit]::Pixel)
+            } finally { $g.Dispose() }
+            $zoom.Save($file, [Drawing.Imaging.ImageFormat]::Png)
+            $pages = @(foreach ($line in Read-Screen $file) {
+                if (($line.Text -replace '\s', '') -match '^([1-9]\d*)[/／]([1-9]\d*)$') { $Matches[1] }
+            })
+            $unique = @($pages | Sort-Object -Unique)
+            if ($unique.Count -eq 1) { return $unique[0] }
+        } finally {
+            $zoom.Dispose()
+            Remove-Item -LiteralPath $file, ([IO.Path]::ChangeExtension($file, 'inv.png')) -ErrorAction SilentlyContinue
+        }
+    } finally { $src.Dispose() }
+}
 # The lowest on-screen occurrence of a label (e.g. the last 「讲解这段」 button on a page).
 function Find-Lowest($lines, [string]$needle) { $best = $null; foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m -and (-not $best -or $m.Y -gt $best.Y)) { $best = $m } }; $best }
 function Find-All($lines, [string]$needle) { $all = @(); foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m) { $all += $m } }; $all | Sort-Object Y }
@@ -313,15 +349,33 @@ try {
         if ($res -eq 'ok') {
             $sourcePage = [regex]::Match($source.Text, '第\s*(\d+)\s*页').Groups[1].Value
             Click-At $sourceBox.X $sourceBox.Y
-            $returned = Await-Text 5 'source' @('返回学习') 30
-            $openedPage = Page-Of $script:Last
-            if (-not $returned -or -not $openedPage -or ($openedPage -split '/')[0] -ne $sourcePage) {
-                Fail 5 '出处没有回到标注页的原文（见 5-source.png）'
-            }
-            if (Has $script:Last @('无法确认原句', '出处已过期', '无法定位')) {
-                Fail 5 '出处页打开了，但原句未能核对（见 5-source.png）'
-            }
-            Click-At $returned.X $returned.Y
+            $deadline = (Get-Date).AddSeconds(30)
+            $verified = $false
+            $switched = $false
+            $problem = '出处没有回到标注页的原文（见 5-source.png）'
+            do {
+                $lines = Shot 5 'source'
+                $returned = Find-Text $lines '返回学习'
+                if ($returned) {
+                    if (Has $lines @('无法确认原句', '出处已过期', '无法定位')) {
+                        $problem = '出处页打开了，但原句未能核对（见 5-source.png）'
+                        break
+                    }
+                    # A saved text view reports a reflowed range, sometimes spanning two PDF pages.
+                    # Switch presentation once, without using the jump field or turning a page.
+                    $original = Find-Text $lines '看原页'
+                    if ($original -and -not $switched) {
+                        Click-At $original.X $original.Y
+                        $switched = $true
+                    } elseif ((Find-Text $lines '看文字') -and (Get-OriginalPageNumber $lines (Join-Path $OutDir '5-source.png')) -eq $sourcePage) {
+                        $verified = $true
+                        break
+                    }
+                }
+                Start-Sleep -Seconds 1
+            } while ((Get-Date) -lt $deadline)
+            if ($returned -and ($verified -or $KeepGoing)) { Click-At $returned.X $returned.Y }
+            if (-not $verified) { Fail 5 $problem }
             Pass 5 '边看边学出了讲解正文和带页码的出处，点出处回到对应原文页'
         } elseif ($res) { Fail 5 "边看边学的讲解没出来，界面说「$($res.Substring(3))」" } else { Fail 5 '90 秒内没有同时看到讲解正文和带页码的出处（见 5-learn.png）' }
     } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $five = 'failed' }

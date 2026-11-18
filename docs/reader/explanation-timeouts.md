@@ -12,6 +12,11 @@ visibility and per-paragraph citation checks remain authoritative.
 
 Each setting accepts an integer from 1 through 86400000 milliseconds; invalid values fail startup.
 The monotonic clock includes the source sandbox, bridge queue, CLI startup and HTTP headers.
+Linux hosts need `/usr/bin/python3` with the distribution's seccomp bindings
+(`python3-seccomp` on Ubuntu). The helper opens the approved snapshot files, then
+loads its syscall filter before reading page content. Run the native
+`SourceLookupTest.osSandboxDeniesAnswerKeysChineseAnswerDirectoryWritesAndSymlinkEscapes`
+under the deployment account when validating a new host.
 Only decoded non-whitespace content in `paragraphs[*].text` advances the content clock. JSON keys,
 anchors, whitespace, metadata, heartbeats and empty deltas do not. Fragmented strings and Unicode
 escapes are handled without storing explanation text in the timer. Late content cannot revive an

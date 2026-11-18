@@ -109,13 +109,16 @@ class SourceCitationGate(private val anchors: Map<String,String>) {
  */
 class SourceReadSandbox {
     fun read(pack: SourcePack, onProcess: (Process?) -> Unit = {}): SourcePack {
-        check(System.getProperty("os.name").startsWith("Mac")) { "Source sandbox unavailable; lookup disabled" }
+        val os = System.getProperty("os.name")
+        check(os.startsWith("Mac") || os == "Linux") { "Source sandbox unavailable; lookup disabled" }
         val dir = Files.createTempDirectory("coach-source-").toRealPath()
         val reader = java.util.concurrent.Executors.newSingleThreadExecutor()
         try {
             val files = pack.pages.mapIndexed { i, p -> dir.resolve("page-$i").also { Files.writeString(it,p.text) } }
             val read = files.map { file ->
-                val process = ProcessBuilder(command(listOf(file),listOf(file))).redirectError(ProcessBuilder.Redirect.DISCARD).start()
+                val builder = ProcessBuilder(command(listOf(file),listOf(file)))
+                if (os == "Linux") builder.environment().clear()
+                val process = builder.redirectError(ProcessBuilder.Redirect.DISCARD).start()
                 onProcess(process)
                 val drain = reader.submit<ByteArray> { process.inputStream.readNBytes(160_001) }
                 try {
@@ -141,6 +144,10 @@ class SourceReadSandbox {
 
     /** Also used by the real OS denial tests, including symlink escapes. */
     fun command(allowed: List<Path>, targets: List<Path>): List<String> {
+        if (System.getProperty("os.name") == "Linux") {
+            return listOf("/usr/bin/python3", "-I", "-c", linuxReader, allowed.size.toString()) +
+                (allowed + targets).map { it.toAbsolutePath().toString() }
+        }
         fun quote(path: Path) = "\"" + path.toAbsolutePath().toString().replace("\\","\\\\").replace("\"","\\\"") + "\""
         val profile = """
             (version 1)
@@ -152,6 +159,13 @@ class SourceReadSandbox {
             (allow file-read-data ${allowed.joinToString(" ") { "(literal ${quote(it.toRealPath())})" }})
         """.trimIndent()
         return listOf("/usr/bin/sandbox-exec","-p",profile,"/bin/cat") + targets.map { it.toString() }
+    }
+
+    private companion object {
+        val linuxReader by lazy {
+            checkNotNull(SourceReadSandbox::class.java.getResourceAsStream("/source_reader.py"))
+                .bufferedReader(Charsets.UTF_8).use { it.readText() }
+        }
     }
 }
 

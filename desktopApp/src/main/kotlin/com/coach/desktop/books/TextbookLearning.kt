@@ -93,9 +93,10 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                         style = MaterialTheme.typography.bodySmall, color = com.coach.ui.theme.CoachTheme.colors.fgSecondary, modifier = Modifier.weight(1f, fill = false))
                     V7TextButton(onSource, enabled = !ui.busy, modifier = Modifier.focusRequester(lessonSourceFocus).testTag("open-lesson-source")) { Text("本节原文 · ${book.pageLabel(lesson.firstPage)}") }
                 }
-                // 做题学：累计到六题出知识小结。小结排在这一题和讲解后面，不把题挤下去；作答和走法都不动。
+                // 做题学：累计到六题出知识小结。两张小结同屏时这一节在上、六题小结在下，继续/完成只留最下面一组。
+                val recapOpen = ui.learningPath == LearningPath.QUESTION_FIRST && ui.ladder.recapOpen
                 val recap: @Composable () -> Unit = {
-                    if (ui.learningPath == LearningPath.QUESTION_FIRST && ui.ladder.recapOpen) KnowledgeRecapCard(ui.ladder) { onRecapContinue() }
+                    if (recapOpen) KnowledgeRecapCard(ui.ladder) { onRecapContinue() }
                 }
                 val practice = remember(book.id, lesson.id, book.questionMode, ui.questionsOpen) {
                     if (ui.questionsOpen) StudyCoachCourse.practice(book, lesson, book.questionMode) else null
@@ -126,15 +127,17 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                             }
                         }
                     }
-                    // 做题学：答完就讲，讲解在题下面；原文仍要点开才出现。讲完用小结点出下一步。
+                    // 做题学：答完就讲，讲解在题下面；原文仍要点开才出现。讲完用小结给出下一步。
                     val question = practice
                     if (ui.learningPath == LearningPath.QUESTION_FIRST && ui.answer.revealed && question != null) {
                         if (answerExplain != null) LessonAnswerExplanation(
                             book, lesson, question, answerExplain, answerExplainReply, sources = sourceRow,
                             onOpenSourcePage = onSource,
                         ) else BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow)
+                        val lessonNav: @Composable () -> Unit = { LessonNav(book, ui.busy, onLesson) }
+                        // 六题小结开着时，这一节只报刚才那一题、不铺按钮；走法让给最下面那张卡的「接着做题」。
+                        LessonSummaryCard(book, lesson, question, ui.answer, nav = if (recapOpen) null else lessonNav)
                         recap()
-                        LessonSummaryCard(book, lesson, question, ui.answer) { LessonNav(book, ui.busy, onLesson) }
                     } else {
                         recap()
                         LessonNav(book, ui.busy, onLesson)

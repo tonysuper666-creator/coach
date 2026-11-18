@@ -6,6 +6,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import com.coach.domain.QuestionLadder
@@ -179,12 +181,24 @@ class KnowledgeRecapTest {
             val title = book.lessons[1].title
             onNodeWithTag("book-knowledge-recap-line-0").assertTextContains(title, substring = true)
             assertTrue((0..4).count { onAllNodesWithTag("book-knowledge-recap-line-$it").fetchSemanticsNodes().isNotEmpty() } in 3..5)
+            // 两张小结同屏：这一节在上、六题小结在下，标题各写各的，继续/完成只留最下面「接着做题」一组。
+            onNodeWithTag("book-summary-title").assertTextEquals("这一节")
+            onNodeWithTag("book-knowledge-recap-title").assertTextEquals("这六题学到的")
+            // 两块在页面里的先后就是叠放顺序：这一节在前，六题小结在后。
+            val stacked = onAllNodes(hasTestTag("book-summary-card") or hasTestTag("book-knowledge-recap"))
+                .fetchSemanticsNodes().mapNotNull { it.config.getOrNull(SemanticsProperties.TestTag) }
+            assertEquals(listOf("book-summary-card", "book-knowledge-recap"), stacked,
+                "这一节在上、六题小结在下")
+            onNodeWithTag("next-lesson").assertDoesNotExist()
+            onNodeWithTag("previous-lesson").assertDoesNotExist()
             capture("sixth-answer-recap")
 
-            // 继续后：卡收起，原答还在，节没变。
+            // 继续后：卡收起，原答还在，节没变，走法回到这一节的卡上。
             onNodeWithTag("book-knowledge-recap-continue").performScrollTo().performClick()
             ready(controller) { !it.ladder.recapOpen }
             onNodeWithTag("book-knowledge-recap").assertDoesNotExist()
+            onNodeWithTag("book-summary-title").assertTextEquals("这一节")
+            onNodeWithTag("next-lesson").assertExists()
             assertEquals(last, controller.state.value.answer.text)
             assertTrue(controller.state.value.answer.revealed)
             assertEquals(5, controller.state.value.book!!.lessonIndex)

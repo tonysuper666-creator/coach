@@ -157,6 +157,9 @@ internal fun LessonAnswerExplanation(
 /**
  * 小结卡：只写这一节真的发生过的事——做了什么题、对不对、原文在哪一页——再给一条继续走的路。
  * 原文不铺在这里，要回看就点上面练习里的「查看对应原文」。
+ *
+ * 和六题小结同屏时，这张卡在上面，只报刚才这一节，所以标题就写「这一节」；下面的
+ * [KnowledgeRecapCard] 才是这一轮的知识。两卡同屏时 [nav] 传 null：这一屏只留最下面「接着做题」一组操作。
  */
 @Composable
 internal fun LessonSummaryCard(
@@ -165,16 +168,16 @@ internal fun LessonSummaryCard(
     practice: Practice,
     answer: PracticeAnswer,
     temporary: Boolean = false,
-    nav: @Composable () -> Unit,
+    nav: (@Composable () -> Unit)? = null,
 ) {
     V7ExpandIn {
         PaperCard(Modifier.v7Resize().testTag("book-summary-card"), contentPadding = PaddingValues(16.dp)) {
-            Text("小结", style = MaterialTheme.typography.titleMedium)
-            Text("这一节：${lesson.title}", style = MaterialTheme.typography.bodyMedium)
+            Text("这一节", style = MaterialTheme.typography.titleMedium, modifier = Modifier.testTag("book-summary-title"))
+            Text(lesson.title, style = MaterialTheme.typography.bodyMedium)
             Text(summaryLine(practice, answer, temporary), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("book-summary-detail"))
             Text("原文在「${lesson.title}」这一节，第 ${lesson.firstPage} 页起；要回看时再打开。",
                 style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.fgSecondary)
-            nav()
+            nav?.invoke()
         }
     }
 }
@@ -276,11 +279,13 @@ internal fun GeneratedLessonPractice(
                     Text(generated.explanation.text, Modifier.testTag("book-explanation-text"))
                     sources(generated.explanation.sources)
                 }
-                val recap = gate.recaps[book.id]
-                if (recap?.recapOpen == true) KnowledgeRecapCard(recap) {
+                val recap = gate.recaps[book.id]?.takeIf { it.recapOpen }
+                // 两张小结同屏：这一节在上、六题小结在下，继续/完成只留最下面一组。
+                LessonSummaryCard(book, lesson, generated.practice, answer, temporary = true,
+                    nav = if (recap == null) nav else null)
+                if (recap != null) KnowledgeRecapCard(recap) {
                     gate.recaps[book.id] = com.coach.domain.QuestionLadder.closeRecap(recap)
                 }
-                LessonSummaryCard(book, lesson, generated.practice, answer, temporary = true, nav = nav)
             } else nav()
         }
         // 连不上的时候不能让这一节空着：配对只管「现出题」，原文出的题和作答照常。

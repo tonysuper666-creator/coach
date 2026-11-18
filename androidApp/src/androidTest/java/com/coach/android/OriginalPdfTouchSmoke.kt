@@ -1,8 +1,12 @@
 package com.coach.desktop.books
 
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsDisplayed
@@ -56,9 +60,11 @@ class OriginalPdfTouchSmoke {
         }
         compose.setContent {
             CoachTheme(darkTheme = dark.value) {
-                if (open.value) TextbookReader(LibraryUi(book = book, page = 1, screen = BookScreen.READER), library,
-                    support, null, remember { FocusRequester() },
-                    onNoteSession = {}, onPage = {}, onBack = {}, onLearn = {})
+                Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+                    if (open.value) TextbookReader(LibraryUi(book = book, page = 1, screen = BookScreen.READER), library,
+                        support, null, remember { FocusRequester() },
+                        onNoteSession = {}, onPage = {}, onBack = {}, onLearn = {})
+                }
             }
         }
         val layerTag = "original-pdf-text-layer"

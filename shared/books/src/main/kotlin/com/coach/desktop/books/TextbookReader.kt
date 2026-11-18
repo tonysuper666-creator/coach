@@ -37,6 +37,8 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
@@ -677,7 +679,8 @@ internal fun TextbookReader(
                     }
                 }
             } else
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(if (touchPdf) 4.dp else 10.dp)) {
                 // 快捷键写在悬停提示里：不用记，也不用在页面上多一行说明。提示用共享的 V7Tooltip，
                 // 快捷键那半截走数字字体，跟面板上的其他提示一致。
                 V7Tooltip("上一页", shortcut = "←  PageUp") {
@@ -696,15 +699,18 @@ internal fun TextbookReader(
                     PaperButton({ turnTo(nextPage) }, enabled = !ui.busy && nextPage != null, modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
                 }
                 Spacer(Modifier.weight(1f))
-                Text("页码", color = colors.fgSecondary, style = MaterialTheme.typography.bodySmall)
+                if (!touchPdf) Text("页码", color = colors.fgSecondary, style = MaterialTheme.typography.bodySmall)
                 val field = RoundedCornerShape(8.dp)
                 BasicTextField(jump, { jump = it.filter(Char::isDigit).take(5) }, singleLine = true,
                     textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.fgPrimary, textAlign = TextAlign.Center),
                     cursorBrush = SolidColor(colors.fgPrimary),
-                    modifier = Modifier.width(64.dp).testTag("page-jump").v7FocusRing(field).clip(field).background(colors.surface2)
+                    modifier = Modifier.width(if (touchPdf) 52.dp else 64.dp).testTag("page-jump")
+                        .semantics { contentDescription = "页码" }.v7FocusRing(field).clip(field).background(colors.surface2)
                         .border(1.dp, colors.borderSubtle, field).onFocusChanged { jumpFocused = it.isFocused }
                         .padding(horizontal = 10.dp, vertical = 9.dp))
-                V7TextButton({ jump.toIntOrNull()?.let { turnTo(it); focusManager.clearFocus() } }, enabled = !ui.busy && jump.toIntOrNull()?.let { book.page(it) != null } == true) { Text("前往") }
+                V7TextButton({ jump.toIntOrNull()?.let { turnTo(it); focusManager.clearFocus() } },
+                    enabled = !ui.busy && jump.toIntOrNull()?.let { book.page(it) != null } == true,
+                    contentPadding = toolPadding) { Text("前往") }
             }
         }
     }

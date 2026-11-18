@@ -186,7 +186,7 @@ Android actual 保留原填色和 LocalIndication，悬停叠色与无水波纹 
 | --- | --- | --- | --- |
 | P0 按钮手感 | M1 M2 M3 K2 K5，以及 V7 细滚动条样式 | `shared/ui/.../v7/PaperButton.kt`、新文件 `shared/ui/.../v7/V7Tooltip.kt`、`V7Scrollbar.kt`（jvmMain） | 组件已实现，真窗口 Tab / 鼠标验收已过，TON-1657 |
 | P1 本机阅读 | K3 E2(页图) W5(阅读) M2(正文) A12 | `books/TextbookReader.kt` | PR #325（`agent/cb-flash2/024eba4a5560`），已 rebase 到 main `ac702387`，并已换用 P0 的 `V7Tooltip`/`V7Scrollbar`；占位的混排页冷加载一跳按二退裁决砍出本卡、记入「以后再说」。待串行窗口：新 head 的 `desktopApp:test`、K1 Tab 顺序、同向页占位与滚动条的浅深截图 |
-| P2 讲解卡 | A10 A11(出处) E3(讲解) D3 W5(讲解) K7 | `books/BookExplain.kt`、`books/AnswerExplain.kt`、`books/BookSourceRow.kt` | TON-1659：A10、A11(出处) 已合入 #448；W5(讲解) 已接（本卡第 4 项）；E3 讲解、K7、D3 待验收 |
+| P2 讲解卡 | A10 A11(出处、出处段号) E3(讲解) D3 W5(讲解) K7 | `books/BookExplain.kt`、`books/AnswerExplain.kt`、`books/BookSourceRow.kt` | TON-1659：A10、A11(出处) 已合入 #448；W5(讲解) 已接（本卡第 4 项）；A11(出处段号) 已做（本卡第 1 项）：`bookCitationLabel` 同时供出处链接和原文弹窗标题，有页码写「第 N 页 · 第 M 段」（M 数这一页的正文段，跳过章标题，和选段就问行首段号同一个数），页码为 0 或这一条不在自己那页时写「本章第 M 段」；`ExplainCitationTest` 用同页两段逐条核对链接、弹窗标题和打开的原文；E3 讲解、K7、D3 待验收 |
 | P3 书架 | A1(模式卡) E3(书架) W5(书架) | `books/TextbookShelf.kt` | TON-1668 书架入口、书目与滚动待验收；E3 不纳入本轮 |
 | P4 本地参考练习文案 | A7 A11(作答记录、出题) | `books/exam/LocalExamUi.kt`、`books/TextbookLearning.kt` | 排队，等 TON-1650 第 13 刀合并 |
 | P5 窗口外壳 | W3 W4 W6 E2(顶部细条) E3(外壳错误) | `WindowsTextbooks.kt`、`WindowsTextbookHost.kt`、`books/TextbookWorkspace.kt` | 排队，等 TON-1656 合并 |

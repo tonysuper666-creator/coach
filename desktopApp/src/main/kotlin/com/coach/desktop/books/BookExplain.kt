@@ -325,7 +325,7 @@ internal fun BookExplainPanel(
                             modifier = Modifier.weight(1f).testTag("explain-failed"))
                     }
                 }
-                if (state is BlockState.Done) ExplanationView(book, state.explanation, state.context) { citation ->
+                if (state is BlockState.Done) ExplanationView(book, blocks, state.explanation, state.context) { citation ->
                     state.context.firstOrNull { it.id == citation.blockId }?.let {
                         if (onOpenOriginal != null) onOpenOriginal(BookPassage.from(book, it))
                         else opened = citation to it
@@ -345,7 +345,7 @@ internal fun BookExplainPanel(
             }, dismissButton = { V7TextButton({ pending = null }, modifier = Modifier.testTag("explain-consent-deny")) { Text("不允许") } })
     }
     opened?.let { (citation, block) ->
-        AlertDialog(onDismissRequest = { opened = null }, title = { Text("原文 · ${book.pageLabel(citation.page)}") },
+        AlertDialog(onDismissRequest = { opened = null }, title = { Text("原文 · ${bookCitationLabel(book, blocks, citation)}", modifier = Modifier.testTag("explain-source-title")) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.testTag("explain-source-card")) {
                     Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
@@ -357,24 +357,43 @@ internal fun BookExplainPanel(
 }
 
 @Composable
-private fun ExplanationView(book: Textbook, explanation: Explanation, context: List<SourceBlock>, onOpen: (Citation) -> Unit) {
+private fun ExplanationView(book: Textbook, blocks: List<SourceBlock>, explanation: Explanation, context: List<SourceBlock>,
+    onOpen: (Citation) -> Unit) {
     val citations = explanation.citations
     // 正文里的【S1】换成主色小号上标数字，点它和点下面「出处 1」一样打开原文；读者看不到任何块编号。
     val shown = ReadableText.cited(explanation.text, citations.map { it.anchor }, v7LinkStyles()) { index -> onOpen(citations[index]) }
-    // V7：讲解是一张纸卡；出处是主色下划线的小字，像页边注：第几条 · 第几页 · 开头几个字。
+    // V7：讲解是一张纸卡；出处是主色下划线的小字，像页边注：第几条 · 第几页 · 第几段 · 开头几个字。
     com.coach.ui.v7.PaperCard(Modifier.testTag("explain-answer"), contentPadding = PaddingValues(16.dp)) {
         Text(shown, style = MaterialTheme.typography.bodyMedium, color = CoachTheme.colors.fgPrimary, modifier = Modifier.testTag("explain-text"))
         Column {
             citations.forEachIndexed { index, c ->
                 val quote = context.firstOrNull { it.id == c.blockId }?.let { " · " + shortQuote(it.text) }.orEmpty()
                 V7TextButton({ onOpen(c) }, modifier = Modifier.testTag("explain-citation")) {
-                    Text("出处 ${index + 1} · ${book.pageLabel(c.page)}$quote", style = MaterialTheme.typography.labelLarge, color = v7Pine(),
+                    Text("出处 ${index + 1} · ${bookCitationLabel(book, blocks, c)}$quote", style = MaterialTheme.typography.labelLarge, color = v7Pine(),
                         maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                         textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
                 }
             }
         }
     }
+}
+
+/**
+ * 出处的位置，让读者能按段找回原文：「第 12 页 · 第 3 段」。
+ * 段号数的是这一页的正文段（跳过章标题），和选段就问里行首的段号是同一个数。
+ * 这本书没有可用页码（页码 0 就是没有），或这一条根本不在它自己那一页的正文里时，
+ * 改成按本章正文的先后数：「本章第 3 段」——页码不编，读者照样能在原文里数到它。
+ */
+internal fun bookCitationLabel(book: Textbook, blocks: List<SourceBlock>, citation: Citation): String {
+    if (citation.page > 0) {
+        val onPage = blocks.filter { it.page == citation.page && !it.heading }
+        val at = onPage.indexOfFirst { it.id == citation.blockId }
+        if (at >= 0) return "${book.pageLabel(citation.page)} · 第 ${at + 1} 段"
+    }
+    val chapter = book.lessons.firstOrNull { lesson -> lesson.blocks.any { it.id == citation.blockId } }
+        ?: return book.pageLabel(citation.page)
+    val at = chapter.blocks.filterNot { it.heading }.indexOfFirst { it.id == citation.blockId }
+    return if (at >= 0) "本章第 ${at + 1} 段" else book.pageLabel(citation.page)
 }
 
 /** V7 提醒色：朱 zhu，随明暗取 token。讲解面板和选段就问里「没配上、超字数、暂时读不到」都用它，不用 Material 红。 */

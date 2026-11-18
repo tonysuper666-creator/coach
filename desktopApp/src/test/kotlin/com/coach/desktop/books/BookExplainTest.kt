@@ -43,6 +43,31 @@ class BookExplainTest {
         assertIs<ExplainResult.Refused>(ExplainWire.parse(mixed, sent), "A valid citation cannot hide a foreign one")
     }
 
+    /**
+     * 出处要能按段找回原文：有页码写「第 N 页 · 第 M 段」，M 是这一页的正文段（跳过章标题），
+     * 和选段就问里行首的段号是同一个数；没有页码的书写「本章第 M 段」，按本章正文的先后数。
+     */
+    @Test fun citationLabelCountsTheBodyParagraphsOfThePageOrTheChapter() {
+        val root = Files.createTempDirectory("explain-label-")
+        val library = TextbookLibrary(root.resolve("library"))
+        val book = library.importBook(Files.writeString(root.resolve("two.md"), """
+            # 1 Light
+
+            Alpha light.
+
+            Beta water.
+        """.trimIndent()))
+        val blocks = StudyCoachCourse.blocks(book.id, book.pages)
+        val paragraphs = blocks.filter { !it.heading }
+        assertEquals(listOf("Alpha light.", "Beta water."), paragraphs.map { it.text })
+
+        assertEquals("第 1 页 · 第 1 段", bookCitationLabel(book, blocks, Citation("S1", paragraphs[0].id, 1)))
+        assertEquals("第 1 页 · 第 2 段", bookCitationLabel(book, blocks, Citation("S2", paragraphs[1].id, 1)))
+        // 页码 0 就是没有页码：段号照给，页码不编。
+        assertEquals("本章第 2 段", bookCitationLabel(book, blocks, Citation("S2", paragraphs[1].id, 0)))
+        root.toFile().deleteRecursively()
+    }
+
     @Test fun consentIsPerBookAndNothingIsAllowedByDefault() {
         val consent = ExplainConsent(Files.createTempDirectory("coach-consent-"))
         assertFalse(consent.allowed(book))

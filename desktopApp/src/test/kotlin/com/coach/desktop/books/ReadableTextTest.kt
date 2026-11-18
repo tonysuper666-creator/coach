@@ -41,7 +41,7 @@ class ReadableTextTest {
     @Test fun internalIdPatternCatchesWhatUsedToLeak() {
         for (leak in listOf("43dc0c53…:p15", "43dc0c53b1e2f0aa43dc0c53b1e2f0aa43dc0c53:p1:25", "【S1】", "[S2]", "出处 · af774362…:p1:25"))
             assertTrue(ReadableText.INTERNAL_ID.containsMatchIn(leak), leak)
-        for (fine in listOf("出处 1 · 第 15 页 · “Small units are not…”", "第 3 页", "S1 级", "13 / 500"))
+        for (fine in listOf("出处 1 · 第 15 页 · 第 3 段 · “Small units are not…”", "本章第 3 段", "第 3 页", "S1 级", "13 / 500"))
             assertFalse(ReadableText.INTERNAL_ID.containsMatchIn(fine), fine)
         assertFalse(ReadableText.readsAsChinese("Failed requirement."))
         assertTrue(ReadableText.readsAsChinese("文件已加密，请先解密。"))

@@ -1,3 +1,4 @@
+import java.util.zip.ZipFile
 import java.util.Properties
 
 plugins {
@@ -101,7 +102,43 @@ androidComponents.onVariants { variant ->
     variant.sources.res?.addGeneratedSourceDirectory(generateNetworkSecurityConfig, GenerateNetworkSecurityConfig::outputDirectory)
 }
 
+val androidBookSqlite by configurations.creating {
+    isCanBeConsumed = false
+    isTransitive = false
+}
+
+abstract class GenerateBookSqliteLibraries : DefaultTask() {
+    @get:InputFiles abstract val nativeJar: ConfigurableFileCollection
+    @get:OutputDirectory abstract val outputDirectory: DirectoryProperty
+
+    @TaskAction
+    fun extract() {
+        ZipFile(nativeJar.singleFile).use { zip ->
+            val architecture = mapOf("aarch64" to "arm64-v8a", "arm" to "armeabi-v7a",
+                "x86" to "x86", "x86_64" to "x86_64")
+            for ((archiveAbi, androidAbi) in architecture) {
+                val entry = checkNotNull(zip.getEntry("org/sqlite/native/Linux-Android/$archiveAbi/libsqlitejdbc.so")) {
+                    "SQLite Android native library is missing for $androidAbi"
+                }
+                val library = outputDirectory.file("$androidAbi/libsqlitejdbc.so").get().asFile
+                library.parentFile.mkdirs()
+                zip.getInputStream(entry).use { source -> library.outputStream().use { source.copyTo(it) } }
+            }
+        }
+    }
+}
+
+val generateBookSqliteLibraries = tasks.register<GenerateBookSqliteLibraries>("generateBookSqliteLibraries") {
+    nativeJar.from(androidBookSqlite)
+    outputDirectory.set(layout.buildDirectory.dir("generated/bookSqlite/jniLibs"))
+}
+androidComponents.onVariants { variant ->
+    variant.sources.jniLibs?.addGeneratedSourceDirectory(generateBookSqliteLibraries, GenerateBookSqliteLibraries::outputDirectory)
+}
+
 android {
+    sourceSets.getByName("main").kotlin.directories.add("../shared/books/src/main/kotlin")
+    packaging.resources.excludes.addAll(setOf("META-INF/DEPENDENCIES", "META-INF/LICENSE.md", "META-INF/NOTICE.md"))
     namespace = "com.coach.android"
     compileSdk = 37
     buildToolsVersion = "37.0.0"
@@ -130,11 +167,21 @@ android {
     testOptions { unitTests.isIncludeAndroidResources = true }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
 }
 dependencies {
+    androidBookSqlite("org.xerial:sqlite-jdbc:${libs.versions.sqlite.get()}:natives-android")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+    implementation(libs.sqlite.jdbc)
+    implementation(libs.serialization.json)
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+    implementation("org.jsoup:jsoup:1.24.1")
+    implementation("com.ibm.icu:icu4j:78.1")
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+    implementation("com.caverock:androidsvg-aar:1.4")
     implementation(project(":shared:ui"))
     implementation(project(":shared:client"))
     implementation(libs.material3)

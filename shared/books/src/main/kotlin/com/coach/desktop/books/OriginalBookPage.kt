@@ -23,7 +23,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
@@ -60,7 +59,7 @@ internal fun rememberOriginalPageImage(
         // Keep the current raster and all its overlays during an active resize.
         if (value is PageImage.Ready) delay(200)
         try {
-            value = withContext(Dispatchers.IO) { PageImage.Ready(library.renderOriginal(book, page, pixelWidth).toComposeImageBitmap()) }
+            value = withContext(Dispatchers.IO) { PageImage.Ready(library.renderOriginal(book, page, pixelWidth).asBookImageBitmap()) }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (_: Exception) {

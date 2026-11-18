@@ -6,22 +6,15 @@ import org.jsoup.nodes.Node as HtmlNode
 import org.jsoup.nodes.TextNode
 import org.w3c.dom.Element
 import org.w3c.dom.Node
-import java.io.ByteArrayInputStream
 import java.nio.file.Files
 import java.nio.file.Path
-import javax.swing.text.rtf.RTFEditorKit
-import javax.xml.XMLConstants
-import javax.xml.parsers.DocumentBuilderFactory
 
 internal object StructuredBookExtraction {
     fun extract(path: Path, format: String, title: String, control: BookImportControl = BookImportControl()): ExtractedBook = when (format) {
         "html" -> html(BookText.decode(Files.readAllBytes(path)), title)
         "rtf" -> {
             require(Files.size(path) <= 32L * 1024 * 1024) { "文本教材请控制在 32 MB 以内。" }
-            val kit = RTFEditorKit()
-            val document = kit.createDefaultDocument()
-            Files.newInputStream(path).use { kit.read(it, document, 0) }
-            ExtractedBook(title, BookText.chapters(document.getText(0, document.length)))
+            ExtractedBook(title, BookText.chapters(readBookRtf(path)))
         }
         else -> SafeBookArchive(path).use { zip ->
             val bookTitle = if (zip.contains("docProps/core.xml")) xml(zip.read("docProps/core.xml")).all("title").firstOrNull()?.textContent?.trim()?.takeIf(String::isNotEmpty) ?: title else title
@@ -320,18 +313,7 @@ internal object StructuredBookExtraction {
     private fun relationships(zip: SafeBookArchive, path: String) = xml(zip.read(path)).all("Relationship")
         .filter { it.attr("TargetMode") != "External" }.associate { it.attr("Id") to it.attr("Target") }
 
-    internal fun xml(bytes: ByteArray): Element {
-        val factory = DocumentBuilderFactory.newInstance().apply {
-            isNamespaceAware = true
-            setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-            setFeature("http://xml.org/sax/features/external-general-entities", false)
-            setFeature("http://xml.org/sax/features/external-parameter-entities", false)
-            setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "")
-            setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "")
-            isXIncludeAware = false; isExpandEntityReferences = false
-        }
-        return factory.newDocumentBuilder().parse(ByteArrayInputStream(bytes)).documentElement
-    }
+    internal fun xml(bytes: ByteArray): Element = parseBookOfficeXml(bytes)
     private fun Element.attr(local: String): String = (0 until attributes.length).map { attributes.item(it) }
         .firstOrNull { it.localName == local || it.nodeName == local }?.nodeValue.orEmpty()
     private fun Element.children(): List<Element> = (0 until childNodes.length).mapNotNull { childNodes.item(it) as? Element }

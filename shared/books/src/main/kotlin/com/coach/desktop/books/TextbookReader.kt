@@ -14,7 +14,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.ScrollState
-import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -48,7 +47,6 @@ import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.Desk
 import com.coach.ui.v7.LocalV7Fonts
 import com.coach.ui.v7.PaperButton
-import com.coach.ui.v7.V7Scrollbar
 import com.coach.ui.v7.V7TextButton
 import com.coach.ui.v7.V7Tooltip
 import com.coach.ui.v7.v7FocusRing
@@ -761,7 +759,7 @@ internal fun markdownHeadings(text: String): List<MarkdownHeading> = markdownHea
 @Composable
 private fun ReaderScrollbar(scroll: ScrollState, modifier: Modifier = Modifier) {
     if (scroll.maxValue <= 0) return
-    V7Scrollbar(rememberScrollbarAdapter(scroll), modifier)
+    BookScrollbar(scroll, modifier)
 }
 
 /** 待办的阅读器焦点请求：发起时的书与出处。 */

@@ -113,6 +113,7 @@ internal fun TextbookReader(
     }
     val paging = remember(book.id) { BookPagingState(BookPageAnchor(ui.page)) }
     var turnStyle by remember { mutableStateOf(PageTurnStyle.Flip) }
+    var readMode by remember(book.id) { mutableStateOf(BookReadMode.Paged) }
     LaunchedEffect(ui.page) {
         paging.followImportPage(ui.page)
     }
@@ -479,7 +480,7 @@ internal fun TextbookReader(
                             marks.map { it.startUtf16 until it.endUtf16 }
                         result
                     }
-                    BookPageView(book, paging, ranges, turnLayout, libraryDirectory = library.directory, turnStyle = turnStyle, onPosition = { number ->
+                    BookPageView(book, paging, ranges, turnLayout, libraryDirectory = library.directory, turnStyle = turnStyle, readMode = readMode, onPosition = { number ->
                         if (paging.publishImportPage(number)) {
                             onPage(number)
                             session.goToPage(number)
@@ -565,6 +566,12 @@ internal fun TextbookReader(
                 V7Tooltip("下一页", shortcut = "→  PageDown") {
                     PaperButton({ turnLayout(ReaderTurn.Next) }, enabled = paging.canNext,
                         modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
+                }
+                // 阅读方式：翻页 / 滚动；本次打开内有效，按书记住并进阅读设置（TON-1654）。
+                Spacer(Modifier.width(20.dp))
+                V7Tooltip("阅读方式") {
+                    PaperButton({ readMode = if (readMode == BookReadMode.Paged) BookReadMode.Scroll else BookReadMode.Paged },
+                        modifier = Modifier.testTag("read-mode")) { Text(if (readMode == BookReadMode.Paged) "翻页" else "滚动") }
                 }
                 // 翻页效果：本次打开内有效；记住与入口以后并进阅读设置（TON-1654）。
                 Spacer(Modifier.width(20.dp))

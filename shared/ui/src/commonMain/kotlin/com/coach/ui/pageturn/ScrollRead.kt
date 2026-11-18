@@ -82,6 +82,9 @@ class ScrollReadState(val pageCount: Int, initial: ScrollReadPosition = ScrollRe
 
     val canScrollForward: Boolean get() = list.canScrollForward
 
+    /** 用户或惯性正在滚（程序跳转 scrollTo 不算）。 */
+    val isScrolling: Boolean get() = list.isScrollInProgress
+
     /** 往后/往前滚一屏；减弱动画时直接到位。 */
     suspend fun scrollScreen(forward: Boolean) {
         val dy = screenScrollPx(list.layoutInfo.viewportSize.height) * (if (forward) 1 else -1)

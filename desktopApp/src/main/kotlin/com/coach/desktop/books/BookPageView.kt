@@ -19,6 +19,10 @@ import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import com.coach.ui.pageturn.PageTurnState
+import com.coach.ui.pageturn.ReadScrollbarDesktop
+import com.coach.ui.pageturn.ScrollReadPosition
+import com.coach.ui.pageturn.ScrollReadState
+import com.coach.ui.pageturn.ScrollReadView
 import com.coach.ui.pageturn.PageTurnStyle
 import com.coach.ui.pageturn.PageTurnView
 import androidx.compose.runtime.*
@@ -87,6 +91,9 @@ private class PageClipboard(private val delegate: Clipboard) : Clipboard by dele
     }
 }
 
+/** 阅读方式：翻页读 / 滚动读。 */
+internal enum class BookReadMode { Paged, Scroll }
+
 @Stable
 internal class BookPagingState(initial: BookPageAnchor) {
     var anchor by mutableStateOf(initial)
@@ -138,6 +145,8 @@ internal fun BookPageView(
     libraryDirectory: Path? = null, tableRows: Map<BookIllustration, BookTableRows> = emptyMap(), onPosition: (Int) -> Unit = {},
     /** 翻页效果。None 沿用原来的淡入换页；Flip/Slide 走共用的 PageTurnView（TON-1671）。 */
     turnStyle: PageTurnStyle = PageTurnStyle.None,
+    /** 翻页读 / 滚动读（TON-1671）。两种共用同一套分页和锚点，切换时停在同一页。 */
+    readMode: BookReadMode = BookReadMode.Paged,
 ) {
     var preview by remember(book.id, libraryDirectory) { mutableStateOf<BookFigurePreview?>(null) }
     preview?.let { BookFigureDialog(it) { preview = null } }
@@ -161,7 +170,8 @@ internal fun BookPageView(
     val pageClipboard = remember(clipboard) { PageClipboard(clipboard) }
     BoxWithConstraints(modifier.fillMaxSize().testTag("book-page-layout")) {
         val column = with(density) { (body.fontSize * 33).toDp() }
-        val spread = bookSpread(maxWidth.value, column.value, mode, state.spread)
+        val scrolling = readMode == BookReadMode.Scroll
+        val spread = !scrolling && bookSpread(maxWidth.value, column.value, mode, state.spread)
         val sheetWidth = when {
             !spread -> minOf(maxWidth, column + 128.dp)
             mode == BookPageMode.Spread -> minOf((maxWidth - 48.dp) / 2, column + 112.dp)
@@ -187,6 +197,38 @@ internal fun BookPageView(
         }
         val first = pages.pageContaining(state.anchor)
         LaunchedEffect(pages, first, state.anchor) { onPosition(pages[first].anchor.importPage) }
+        if (scrolling) {
+            val scrollState = remember(pages) { ScrollReadState(pages.size, ScrollReadPosition(first)) }
+            // 用户滚到别的页：锚点跟过去；键盘 / 目录 / 出处改了锚点：滚过去。两边都对得上就不动，避免来回抖。
+            LaunchedEffect(scrollState, pages) {
+                // 只在用户真的在滚的时候才让页回写锚点；排版重算、程序跳转引起的页变化不动锚点
+                snapshotFlow { scrollState.position.page to scrollState.isScrolling }.collect { (p, userScrolling) ->
+                    if (userScrolling && p != pages.pageContaining(state.anchor)) state.anchor = pages[p].anchor
+                }
+            }
+            LaunchedEffect(scrollState, first) {
+                if (scrollState.position.page != first) scrollState.scrollTo(ScrollReadPosition(first))
+            }
+            val viewHeight = maxHeight
+            val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
+            val desk = if (colors.dark) CoachV7.Dark.desk else CoachV7.Light.desk
+            CompositionLocalProvider(LocalClipboard provides pageClipboard) {
+                SelectionContainer {
+                    ScrollReadView(scrollState, desk = desk, paper = Color.Transparent, gap = 24.dp, handleKeys = false,
+                        modifier = Modifier.fillMaxSize().testTag("book-scroll-read"),
+                        scrollbar = { ReadScrollbarDesktop(it) }) { index ->
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+                            Box(Modifier.width(sheetWidth).height(viewHeight).background(paper).clipToBounds().testTag("book-sheet-0")) {
+                                val page = pages[index]
+                                val remaining = pages.count { it.chapter == page.chapter } - pages.take(index + 1).count { it.chapter == page.chapter }
+                                BookSheet(book.title, page, typography, measurer, widthPx, leftInset, remaining, false, 0, book.id, libraryDirectory, { preview = it }) { failed.add(it) }
+                            }
+                        }
+                    }
+                }
+            }
+            return@BoxWithConstraints
+        }
         val fade = remember { Animatable(1f) }
         LaunchedEffect(first, pages) { fade.snapTo(if (reduced) 1f else 0f); fade.animateTo(1f, tween(if (reduced) 0 else 150)) }
         var wheelAt by remember { mutableLongStateOf(0L) }

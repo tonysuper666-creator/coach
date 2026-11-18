@@ -139,6 +139,39 @@ private fun CoverageLines(cov: JsonObject, modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * Preserves the displayed option permutation and layout for any item that still owns local
+ * draft, in-flight, or graded state so a week refresh cannot remap recorded indices onto new text.
+ */
+internal fun restoreActiveQuestionOptions(fresh: JsonObject, saved: JsonObject): JsonObject {
+    val savedResult = saved["result"] as? JsonObject
+    val savedPending = saved["pending"] as? JsonObject
+    val hasDraftChoice = (saved["choice"] as? JsonPrimitive)?.intOrNull != null
+    val activeId = savedResult?.str("itemId")?.ifBlank { null }
+        ?: savedPending?.str("itemId")?.ifBlank { null }
+        ?: saved.str("item").ifBlank { null }?.takeIf { hasDraftChoice }
+        ?: return fresh
+    val oldItem = ((saved["body"] as? JsonObject)?.get("items") as? JsonArray).orEmpty()
+        .mapNotNull { it as? JsonObject }
+        .firstOrNull { it.str("id") == activeId }
+    val preservedOptions = savedResult?.get("options") as? JsonArray
+        ?: savedPending?.get("options") as? JsonArray
+        ?: (saved["choiceOptions"] as? JsonArray)?.takeIf { saved.str("item") == activeId }
+        ?: oldItem?.get("options") as? JsonArray
+        ?: return fresh
+    val preservedLayout = savedResult?.get("layout")
+        ?: savedPending?.get("layout")
+        ?: saved["choiceLayout"]?.takeIf { saved.str("item") == activeId }
+        ?: oldItem?.get("layout")
+    val freshItems = fresh["items"] as? JsonArray ?: return fresh
+    return JsonObject(fresh + ("items" to JsonArray(freshItems.map { element ->
+        val q = element as? JsonObject
+        if (q != null && q.str("id") == activeId)
+            JsonObject(q + ("options" to preservedOptions) + ("layout" to (preservedLayout ?: JsonNull)))
+        else element
+    })))
+}
+
 private val tierNames = mapOf("setup" to "基础题", "detail" to "细节题", "bridge" to "综合题")
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -193,21 +226,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             error = r.error ?: if (r.body == null) "连不上 Mac，正在自动重连…" else null
             retryable = r.retryable
             if (r.body != null) {
-                val fresh = r.body!!
-                // Keep the original displayed option order for an unsubmitted page-practice draft.
-                val saved = page.value
-                val savedBody = saved["body"] as? JsonObject
-                val draftId = saved.str("item")
-                val oldItem = (savedBody?.get("items") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.firstOrNull { it.str("id") == draftId }
-                val freshItems = fresh["items"] as? JsonArray
-                val restored = if (only != null && (saved["choice"] as? JsonPrimitive)?.intOrNull != null && oldItem != null && freshItems != null) {
-                    JsonObject(fresh + ("items" to JsonArray(freshItems.map { element ->
-                        val q = element as? JsonObject
-                        if (q != null && q.str("id") == draftId && oldItem["options"] != null)
-                            JsonObject(q + ("options" to oldItem.getValue("options")) + ("layout" to (oldItem["layout"] ?: JsonNull)))
-                        else element
-                    })))
-                } else fresh
+                val restored = restoreActiveQuestionOptions(r.body!!, page.value)
                 body = restored; save("body" to restored); break
             }
             if (!r.retryable) break
@@ -227,6 +246,10 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     var itemId by remember { mutableStateOf(page.value.str("item")) }
     var chosen by remember { mutableStateOf((page.value["choice"] as? JsonPrimitive)?.intOrNull) }
     var result by remember { mutableStateOf(page.value["result"] as? JsonObject) }
+    fun clearAnswerSelection(vararg extra: Pair<String, JsonElement>) {
+        chosen = null; result = null
+        save("choice" to JsonNull, "choiceOptions" to JsonNull, "choiceLayout" to JsonNull, "result" to JsonNull, *extra)
+    }
     // A fresh answer reveals its feedback once; restoring an answer keeps the reader's scroll.
     var revealFeedback by remember { mutableStateOf(false) }
     val feedbackTrace = LocalFeedbackLayoutTrace.current
@@ -301,7 +324,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             if (!reading && paused != null && sameTarget) { targetReady = targetStored(itemId); return@LaunchedEffect }
             if (match == null && learning && !reading) {
                 val next = QuestionLadder.next(targetQuestions, targetSession, targetLearned, capabilities).question?.id.orEmpty()
-                if (next != itemId) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull) }
+                if (next != itemId) clearAnswerSelection()
                 if (filter != targetKpId) saveSession(ladderSession.copy(complete = false))
                 position(false, next, selectedFilter = targetKpId)
             } else if (match != null) {
@@ -319,7 +342,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     val id = next?.str("id").orEmpty()
                     if (filter != match.str("section_id")) saveSession(ladderSession.copy(complete = false))
                     val resetScroll = id != itemId
-                    if (resetScroll) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull) }
+                    if (resetScroll) clearAnswerSelection()
                     position(false, id, match.str("section_id"), match.str("section_id"))
                     targetReady = targetStored(id)
                     if (targetReady && resetScroll) scroll.scrollTo(0)
@@ -351,14 +374,20 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             val b = r.body
             if (b != null) {
                 ladderQuestions.firstOrNull { it.id == b.str("itemId") }?.let { q -> saveSession(QuestionLadder.record(ladderSession, q, b.flag("independentCorrect"), b.str("remember"))) }
-                result = b; pending = null; error = null
+                val answeredItem = items.firstOrNull { it.str("id") == b.str("itemId") }
+                val shownOptions = (wire["options"] as? JsonArray) ?: (answeredItem?.get("options") as? JsonArray)
+                val shownLayout = wire["layout"] ?: answeredItem?.get("layout")
+                val persistedResult = if (shownOptions != null) {
+                    JsonObject(b + ("options" to shownOptions) + ("layout" to (shownLayout ?: JsonNull)))
+                } else b
+                result = persistedResult; pending = null; error = null
                 SubmissionTrace.mark(traceId, "ui.resultAssigned")
                 val updatedItems = JsonArray(items.map { q ->
                     if (q.str("id") == b.str("itemId")) JsonObject(q + ("status" to JsonPrimitive(b.str("status")))) else q
                 })
                 body = JsonObject(body.orEmpty() + listOfNotNull("items" to updatedItems,
                     b["coverage"]?.let { "coverage" to it }, b["notes"]?.let { "notes" to it }))
-                save("result" to b, "pending" to JsonNull, "body" to body!!)
+                save("result" to persistedResult, "pending" to JsonNull, "body" to body!!)
                 feedbackSubmissionId = wire.str("submissionId")
                 revealFeedback = !reading
                 feedbackTrace?.invoke("reply submission=$feedbackSubmissionId reading=$reading reveal=$revealFeedback scroll=${scroll.value} max=${scroll.maxValue}")
@@ -375,7 +404,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         val choice = if (dontKnow) -1 else chosen ?: return
         if (busy || item == null) return
         val wire = json("itemId" to item.str("id"), "choice" to choice, "guessed" to guessed,
-            "submissionId" to Random.nextLong().toULong().toString(16), "layout" to item["layout"], "dontKnow" to dontKnow, "learning" to true, "assisted" to asked)
+            "submissionId" to Random.nextLong().toULong().toString(16), "layout" to item["layout"], "dontKnow" to dontKnow, "learning" to true, "assisted" to asked,
+            "options" to item["options"])
         // Commit the immutable payload and original displayed options BEFORE any network I/O.
         save("pending" to wire, "item" to JsonPrimitive(item.str("id")), "body" to body!!)
         SubmissionTrace.mark(wire.str("submissionId"), "ui.pendingSaved")
@@ -393,8 +423,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             else candidates.firstOrNull { it.str("id") == itemId } ?: candidates.firstOrNull { it.str("status") != "mastered" } ?: candidates.firstOrNull()
         val id = next?.str("id").orEmpty()
         if (id != itemId) {
-            chosen = null; result = null
-            save("choice" to JsonNull, "result" to JsonNull)
+            clearAnswerSelection()
             scope.launch { scroll.scrollTo(0) }
         }
         position(false, id, selectedFilter = selectedFilter)
@@ -422,14 +451,14 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             onQuiz = { sectionFilter, id ->
                 startQuiz(sectionFilter)
                 if (id != null && pending == null) {
-                    if (id != itemId) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull) }
+                    if (id != itemId) clearAnswerSelection()
                     position(false, id, selectedFilter = sectionFilter)
                     scope.launch { scroll.scrollTo(0) }
                 }
             }, onRefresh = {
                 if (pending == null) {
-                body = null; result = null; chosen = null
-                save("body" to JsonNull, "result" to JsonNull, "choice" to JsonNull)
+                body = null
+                clearAnswerSelection("body" to JsonNull)
                 retry++
                 }
             }, onFocus = { focused -> saveReader { JsonObject(it + ("focus" to JsonPrimitive(focused))) } },
@@ -443,7 +472,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             saveSession(QuestionLadder.closeRecap(ladderSession)); recapVisible = false; save("recapVisible" to JsonPrimitive(false))
             val next = QuestionLadder.next(ladderQuestions, ladderSession, previouslyLearned, capabilities).question?.id
             if (next == null) saveSession(ladderSession.copy(complete = true))
-            else { chosen = null; result = null; asked = false; save("choice" to JsonNull, "result" to JsonNull, "asked" to JsonPrimitive(false)); position(false, next); scope.launch { scroll.scrollTo(0) } }
+            else { asked = false; clearAnswerSelection("asked" to JsonPrimitive(false)); position(false, next); scope.launch { scroll.scrollTo(0) } }
         }, onNotes = { position(true) }, onNext = if (nextKp != null && onNextSection != null) ({ onNextSection(nextKp.id) }) else null, onBack = onBack,
             scopeMessage = runtime.scopeMessage, scopePoints = runtime.scopePoints)
         return
@@ -510,8 +539,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         if (learning && ladderSession.recapOpen) { recapVisible = true; save("recapVisible" to JsonPrimitive(true)); return }
         if (learning && nextId == null) { saveSession(ladderSession.copy(complete = true)); return }
         if (nextId != null) {
-            chosen = null; result = null; asked = false
-            save("choice" to JsonNull, "result" to JsonNull, "quizScroll" to JsonPrimitive(0), "asked" to JsonPrimitive(false))
+            asked = false
+            clearAnswerSelection("quizScroll" to JsonPrimitive(0), "asked" to JsonPrimitive(false))
             position(false, nextId)
             scope.launch { scroll.scrollTo(0) }
         } else position(true)
@@ -640,7 +669,10 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     options.forEachIndexed { i, option ->
                         val verdict = if (done == null) null else if (i == answer) true else if (i == displayedChoice) false else null
                         AnswerOption(letters[i], displayedChoice == i, verdict, done == null && !busy,
-                            modifier = Modifier.testTag("mainline-option-$i"), onClick = { chosen = i; save("choice" to JsonPrimitive(i)) }) {
+                            modifier = Modifier.testTag("mainline-option-$i"), onClick = {
+                                chosen = i
+                                save("choice" to JsonPrimitive(i), "choiceOptions" to (item["options"] ?: JsonNull), "choiceLayout" to (item["layout"] ?: JsonNull))
+                            }) {
                             QuizText(option, "mainline:${item.str("id")}:$i", c.math)
                         }
                     }

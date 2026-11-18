@@ -42,7 +42,7 @@ class MainlineScreenTest {
                           source: String = "Synthetic lecture 1, slide 4", private val strictResolve: Boolean = false,
                           correct: String = "Synthetic pears are the only fruit grown in the synthetic orchard, so this statement matches the lecture example.",
                           private val explain: ((JsonObject) -> JsonObject)? = null, private val primers: Boolean = false,
-                          private val splitKps: Boolean = false) : AutoCloseable {
+                          private val splitKps: Boolean = false, private val reshuffleAfterAnswer: Boolean = false) : AutoCloseable {
         @Volatile var offline = false
         val answers = CopyOnWriteArrayList<JsonObject>()
         val explains = CopyOnWriteArrayList<JsonObject>()
@@ -60,12 +60,19 @@ class MainlineScreenTest {
         private val items = (if (primers) listOf("P1" to "setup", "P2" to "setup") else emptyList()) +
             listOf("S1" to "setup", "D1" to "detail", "B1" to "bridge")
         private fun weeklyBody(): JsonObject {
+            val reshuffled = reshuffleAfterAnswer && answers.isNotEmpty()
+            val shownOptions = if (reshuffled) {
+                listOf("Plums ripen early", "Figs are grown there", "Apples are grown there", "Pears are grown there")
+            } else {
+                listOf("Apples are grown there", "Pears are grown there", "Plums ripen early", "Figs are grown there")
+            }
+            val layout = if (reshuffled) 1 else 0
             val questions = items.map { (id, tier) ->
                 val metadata = LadderQuestion(id, if (splitKps && id == "D1") "OTHER" else "K", if (id == "B1") "W01-bridge" else "W01-basics",
                     if (id.startsWith("P")) "try_first" else when (tier) { "setup" -> "introduction"; "bridge" -> "application"; else -> "concept" },
                     if (id == "S1") 2 else 0, "synthetic-orchard", "synthetic-$id", eligible = true)
                 json("id" to id, "tier" to tier, "stem" to "Synthetic orchard question $id: which statement about the orchard holds?",
-                    "options" to listOf("Apples are grown there", "Pears are grown there", "Plums ripen early", "Figs are grown there"),
+                    "options" to shownOptions, "layout" to layout,
                     "status" to "new", "keyState" to "VERIFIED", "factIds" to listOf("F-$id"), "ladder" to LedgerJson.encodeToJsonElement(metadata))
             }
             val body = json("week" to 1, "learning" to true, "title" to "Synthetic orchard", "coverage" to LedgerJson.parseToJsonElement(cov(0, 0)), "items" to JsonArray(questions))
@@ -802,5 +809,130 @@ class MainlineScreenTest {
         val resolved = mac.readerRequests.filter { it.contains("/resolve?") }.map { java.net.URLDecoder.decode(it.substringAfter("source="), "UTF-8") }
         assertEquals(listOf("W1 课件 p.26", "教材 p.8"), resolved.distinct(), "each citation resolves on its own, never the composite string")
         assertTrue(mac.readerRequests.any { it.contains("/doc/pages/39/") }, "the registered textbook opened its own PDF page: ${mac.readerRequests}")
+    }
+
+    @Test fun gradedQuestionKeepsSubmittedOptionOrderWhenReopenReceivesReshuffledLayout() =
+        FakeMac(today, false, reshuffleAfterAnswer = true).use { mac ->
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        ClientDatabase.Schema.create(driver)
+        val transport = object : LedgerTransport {
+            override suspend fun hello(epoch: String?): Hello = error("No ledger network in this test")
+            override suspend fun snapshot(course: String): Snapshot = error("No network")
+            override suspend fun events(course: String, after: Long): EventsPage = error("No network")
+            override suspend fun command(command: WireCommand): Receipt = error("No network")
+            override suspend fun watch(onLedger: suspend () -> Unit) = error("No network")
+        }
+        val db = ClientDatabase(driver)
+        fun makeController() = CoachController("C", SyncEngine(db, "synthetic", transport, listOf("C"), { "id" }, { "hash" }),
+            TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ now })), formatClock = { "12:00" }, nowMillis = { now }, course = mac.http)
+        val view = CourseView(emptyList(), project(emptyList()))
+
+        val first = makeController()
+        runComposeUiTest {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.size(900.dp, 900.dp)) {
+                MainlineScreen(first, view, onBack = {}, onOpenSteps = {}, onOpenEssay = {}, onReviewWeek = {})
+            } } } }
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-week-1").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("mainline-week-1").performClick()
+            awaitQuestion("S1")
+            onNodeWithTag("mainline-option-1").assertTextContains("Pears are grown there", substring = true)
+            onNodeWithTag("mainline-option-1").performClick()
+            onNodeWithTag("mainline-submit").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithText("为什么是 B（为什么对）", substring = true).assertIsDisplayed()
+            onNodeWithTag("mainline-option-1").assertIsSelected()
+        }
+
+        val reopened = makeController()
+        runComposeUiTest {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.size(900.dp, 900.dp)) {
+                MainlineScreen(reopened, view, onBack = {}, onOpenSteps = {}, onOpenEssay = {}, onReviewWeek = {})
+            } } } }
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("mainline-option-1").assertIsSelected()
+            onNodeWithTag("mainline-option-1").assertTextContains("Pears are grown there", substring = true)
+            onNodeWithTag("mainline-option-0").assertTextContains("Apples are grown there", substring = true)
+            onNodeWithText("为什么是 B（为什么对）", substring = true).assertIsDisplayed()
+        }
+        val persistedBody = reopened.sync.mainlineState("C", "week:1")["body"] as JsonObject
+        val persistedItem = (persistedBody["items"] as JsonArray).map { it.jsonObject }.first { it.str("id") == "S1" }
+        assertEquals(0, persistedItem.num("layout").toInt())
+        assertEquals("Pears are grown there", persistedItem.strings("options")[1])
+    }
+
+    @Test fun existingGradedRecordPreservesSubmittedOptionsWhenServerReturnsDifferentOrder() =
+        FakeMac(today, false, reshuffleAfterAnswer = true).use { mac ->
+        mac.answers += json("itemId" to "S1")
+        val c = controller(mac)
+        val originalOptions = listOf("Apples are grown there", "Pears are grown there", "Plums ripen early", "Figs are grown there")
+        val existingBody = json(
+            "week" to 1, "learning" to true, "title" to "Synthetic orchard",
+            "items" to JsonArray(listOf(
+                json("id" to "S1", "tier" to "setup", "stem" to "Synthetic orchard question S1: which statement about the orchard holds?",
+                    "options" to originalOptions, "layout" to 0, "status" to "mastered", "keyState" to "VERIFIED",
+                    "factIds" to listOf("F-S1"), "ladder" to LedgerJson.encodeToJsonElement(
+                        LadderQuestion("S1", "K", "W01-basics", "introduction", 2, "synthetic-orchard", "synthetic-S1", eligible = true)))
+            ))
+        )
+        val existingResult = json(
+            "itemId" to "S1", "answer" to 1, "choice" to 1, "guessed" to false, "dontKnow" to false,
+            "independentCorrect" to true, "status" to "mastered", "kpId" to "K", "source" to "Synthetic lecture 1",
+            "explanation" to json("correct" to "Synthetic pears are the only fruit grown in the synthetic orchard.",
+                "options" to json("0" to "Apples wrong", "2" to "Plums wrong", "3" to "Figs wrong"),
+                "background" to "Orchard background", "source" to "Synthetic lecture 1")
+        )
+        val existingSession = LadderSession(
+            responses = listOf(
+                LadderResponse("S1", "K", "synthetic-S1", true, remember = "r1"),
+                LadderResponse("D1", "K", "synthetic-D1", true, remember = "r2"),
+                LadderResponse("B1", "K", "synthetic-B1", true, remember = "r3"),
+                LadderResponse("S2", "K", "synthetic-S2", true, remember = "r4"),
+                LadderResponse("D2", "K", "synthetic-D2", true, remember = "r5"),
+                LadderResponse("B2", "K", "synthetic-B2", true, remember = "r6"),
+            ),
+            recapThrough = 6,
+            recapOpen = false,
+            complete = false,
+        )
+        c.sync.saveMainlineState("C", json("week" to 1, "entry" to "resume-quiz"))
+        c.sync.saveMainlineState("C", json(
+            "mode" to "quiz", "filter" to "", "item" to "S1", "choice" to 1,
+            "quizStarted" to true, "body" to existingBody, "result" to existingResult,
+            "ladderSession" to LedgerJson.encodeToJsonElement(existingSession)
+        ), "week:1")
+        val view = CourseView(emptyList(), project(emptyList()))
+        runComposeUiTest {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.size(900.dp, 900.dp)) {
+                MainlineScreen(c, view, onBack = {}, onOpenSteps = {}, onOpenEssay = {}, onReviewWeek = {})
+            } } } }
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("mainline-option-1").assertIsSelected()
+            onNodeWithTag("mainline-option-1").assertTextContains("Pears are grown there", substring = true)
+            onNodeWithTag("mainline-option-0").assertTextContains("Apples are grown there", substring = true)
+            onNodeWithText("为什么是 B（为什么对）", substring = true).assertIsDisplayed()
+            onNodeWithText("已做 6 题").assertIsDisplayed()
+        }
+        val stateAfter = c.sync.mainlineState("C", "week:1")
+        val savedSession = LedgerJson.decodeFromJsonElement<LadderSession>(stateAfter.getValue("ladderSession"))
+        assertEquals(6, savedSession.responses.size)
+        assertEquals(6, savedSession.recapThrough)
+        assertFalse(savedSession.recapOpen)
+    }
+
+    @Test fun restoreActiveQuestionOptionsCoversPendingDontKnowAndMainlineDraft() {
+        val fresh = json("items" to JsonArray(listOf(
+            json("id" to "Q1", "options" to listOf("D", "C", "B", "A"), "layout" to 1)
+        )))
+        val oldBody = json("items" to JsonArray(listOf(
+            json("id" to "Q1", "options" to listOf("A", "B", "C", "D"), "layout" to 0)
+        )))
+        val pendingOnly = restoreActiveQuestionOptions(fresh, json("pending" to json("itemId" to "Q1"), "body" to oldBody))
+        assertEquals(listOf("A", "B", "C", "D"), (pendingOnly["items"] as JsonArray).first().jsonObject.strings("options"))
+
+        val dontKnowResult = restoreActiveQuestionOptions(fresh, json("result" to json("itemId" to "Q1", "dontKnow" to true), "body" to oldBody))
+        assertEquals(listOf("A", "B", "C", "D"), (dontKnowResult["items"] as JsonArray).first().jsonObject.strings("options"))
+
+        val draftChoice = restoreActiveQuestionOptions(fresh, json("item" to "Q1", "choice" to 2, "body" to oldBody))
+        assertEquals(listOf("A", "B", "C", "D"), (draftChoice["items"] as JsonArray).first().jsonObject.strings("options"))
     }
 }

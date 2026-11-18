@@ -349,6 +349,11 @@ public final class SmokeMain implements AutoCloseable {
         FutureTask<T> task = new FutureTask<>(action);
         if (SwingUtilities.isEventDispatchThread()) task.run(); else SwingUtilities.invokeLater(task);
         try { return task.get(15, TimeUnit.SECONDS); }
+        catch (TimeoutException | InterruptedException stopped) {
+            // Discard queued input or captures when their caller stops waiting. Never interrupt the EDT.
+            task.cancel(false);
+            throw stopped;
+        }
         catch (ExecutionException failure) {
             if (failure.getCause() instanceof Exception cause) throw cause;
             throw failure;

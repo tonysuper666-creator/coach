@@ -33,6 +33,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 private const val FallbackPdfAspect = 0.7071f
 
@@ -253,9 +254,16 @@ private fun OriginalPdfLeaf(
 ) {
     var pixelWidth by remember { mutableIntStateOf(0) }
     var retry by remember { mutableIntStateOf(0) }
+    val reveal = reading.destination.takeIf { it.page == page.number && it.reveal }
+    val zoom = if (originalPdfTouchEnabled) remember(page.number, reveal) { PdfTouchZoom() } else null
+    val renderWidth = if (zoom == null || zoom.scale == 1f || pixelWidth == 0) pixelWidth else {
+        // Keep the current raster during the pinch. Bucket the next request for cache reuse.
+        val target = (pixelWidth * zoom.scale / 128f).roundToInt() * 128
+        target.coerceIn(pixelWidth.coerceAtMost(bookPdfRasterLimit), bookPdfRasterLimit)
+    }
     LaunchedEffect(layers, page.number, retry) { layers.keep(page) }
     val layer = layers[page.number]?.getOrNull()
-    val image = rememberOriginalPageImage(library, book, page.number, true, pixelWidth, retry)
+    val image = rememberOriginalPageImage(library, book, page.number, true, renderWidth, retry)
     val displayed = (image as? PageImage.Ready)?.image?.let { it.width.toFloat() / it.height }
     SideEffect { reading.rasters[page.number] = PdfRasterStatus(displayed, image == PageImage.Failed) }
     val active = reading.page == page.number
@@ -275,5 +283,6 @@ private fun OriginalPdfLeaf(
             }
         }, modifier = modifier.testTag("original-pdf-page-${page.number}"), roundPdfCorners = true,
         active = active, inactivePage = page.number, knownAspect = aspect,
+        touchZoom = zoom,
     )
 }

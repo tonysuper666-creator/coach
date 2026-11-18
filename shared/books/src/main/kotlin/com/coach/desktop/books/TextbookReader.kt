@@ -109,7 +109,7 @@ internal fun TextbookReader(
     val textOnlySource = !hasOriginal || page.ocr
     val lastPage = book.pages.maxOf { it.number }
     var textView by remember(book.id) {
-        mutableStateOf(!hasOriginal || (library.savedTextView(book.id) ?: page.ocr))
+        mutableStateOf(!hasOriginal || (library.savedTextView(book.id) ?: (page.ocr && !(originalPdf && originalPdfTouchEnabled))))
     }
     val paging = remember(book.id) { BookPagingState(BookPageAnchor(ui.page)) }
     val pdf = remember(library, book.id) { OriginalPdfReading(ui.page, !originalPdf || library.pdfScrollMode(book.id)) }
@@ -417,9 +417,10 @@ internal fun TextbookReader(
         }) {
         val colors = CoachTheme.colors
         val highlight = if (colors.dark) CoachV7.Dark.hl else CoachV7.Light.hl
+        val touchPdf = originalPdf && originalPdfTouchEnabled
+        val toolPadding = if (touchPdf) PaddingValues(horizontal = 8.dp) else ButtonDefaults.TextButtonContentPadding
         Column(Modifier.fillMaxSize().padding(20.dp).testTag("textbook-reader"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(if (source != null) "学习原文 · ${source.title}" else "教材阅读", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+            val actions: @Composable () -> Unit = {
                 if (hasOriginal) V7TextButton(onClick = {
                     // A reflowed sheet can start on an earlier page than its reading anchor.
                     if (textView) {
@@ -430,14 +431,16 @@ internal fun TextbookReader(
                     textView = !textView
                     pdf.selection = null
                     library.saveTextView(book.id, textView)
-                }, modifier = Modifier.testTag("book-original-toggle")) { Text(if (textView) "看原页" else "看文字") }
+                }, modifier = Modifier.testTag("book-original-toggle"), contentPadding = toolPadding) {
+                    Text(if (textView) "看原页" else "看文字")
+                }
                 V7TextButton(onClick = { asking = true }, enabled = chosen == null || learnableSelection != null,
-                    modifier = Modifier.testTag("ask-book-passage")) { Text("选段提问") }
+                    modifier = Modifier.testTag("ask-book-passage"), contentPadding = toolPadding) { Text("选段提问") }
                 V7TextButton(onClick = {
                     explainingSelection = if (explainOpen) null else learnableSelection
                     explainOpen = !explainOpen
                 }, enabled = !ui.busy && (explainOpen || chosen == null || learnableSelection != null),
-                    modifier = Modifier.testTag("book-explain-toggle")) {
+                    modifier = Modifier.testTag("book-explain-toggle"), contentPadding = toolPadding) {
                     Text(if (explainOpen) "回到原文" else if (chosen != null) "讲解选段" else "讲解")
                 }
                 if (!textView && !explainOpen && chosen != null) {
@@ -461,17 +464,30 @@ internal fun TextbookReader(
                             catch (_: Exception) { markError = true }
                             finally { savingMark = false }
                         }
-                    }, enabled = !savingMark, modifier = Modifier.testTag("original-pdf-highlight")) {
+                    }, enabled = !savingMark, modifier = Modifier.testTag("original-pdf-highlight"), contentPadding = toolPadding) {
                         Text(if (highlighted) "取消高亮" else "高亮")
                     }
+                } else if (touchPdf && !textView && !explainOpen) {
+                    V7TextButton(onClick = {}, enabled = false, contentPadding = toolPadding) { Text("高亮") }
                 }
                 V7TextButton(onClick = {
                     if (notesOpen) session.cancelNote()
                     notesOpen = !notesOpen
-                }, enabled = !ui.busy && samePage, modifier = Modifier.testTag("books-notes-toggle")) {
+                }, enabled = !ui.busy && samePage, modifier = Modifier.testTag("books-notes-toggle"), contentPadding = toolPadding) {
                     Text(if (notesOpen) "收起批注" else "批注")
                 }
                 if (source == null) PaperButton(onLearn, enabled = !ui.busy) { Text(if (book.learning) "继续学" else "开始学") }
+            }
+            if (touchPdf) {
+                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    itemVerticalAlignment = Alignment.CenterVertically) { actions() }
+            } else {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(if (source != null) "学习原文 · ${source.title}" else "教材阅读",
+                        modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    actions()
+                }
             }
             if (page.ocr) Text(OCR_NOTICE, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("book-ocr-notice"))
             if (markError) Text("高亮暂未保存，请再试一次。", style = MaterialTheme.typography.bodySmall, color = v7Alert())

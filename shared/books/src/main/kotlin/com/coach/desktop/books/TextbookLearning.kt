@@ -2,7 +2,6 @@ package com.coach.desktop.books
 
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -15,7 +14,6 @@ import androidx.compose.ui.unit.dp
 import com.coach.ui.v7.Desk
 import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
-import com.coach.ui.v7.V7Scrollbar
 import com.coach.ui.v7.V7TextButton
 import kotlinx.coroutines.flow.first
 
@@ -157,7 +155,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                     }
                 }
             }
-            if (scroll.maxValue > 0) V7Scrollbar(rememberScrollbarAdapter(scroll),
+            if (scroll.maxValue > 0) BookScrollbar(scroll,
                 Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 6.dp).testTag("learning-scrollbar"))
         }
     }

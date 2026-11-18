@@ -34,6 +34,14 @@ function Fail([int]$n, [string]$why) {
 }
 function Pass([int]$n, [string]$what) { [void]$results.Add([pscustomobject]@{ Step = $n; Name = $steps[$n - 1]; Ok = $true; Why = $what }); Note "步骤$n 通过：$what" }
 function Has($lines, [string[]]$needles) { foreach ($s in $needles) { $m = Find-Text $lines $s; if ($m) { return $m } }; $null }
+function Get-PassageQuotaMessage($lines) {
+    # BookExplain renders the disabled button and the quota message in one row.
+    # Match that status row so a mention of quota in the book cannot end the wait.
+    foreach ($line in $lines) {
+        $row = $line.Text -replace '\s', ''
+        if ($row -match '^讲解这段((?:今天的|这个月的)?讲解额度用完了)(?:[，,。.]|$)') { return $Matches[1] }
+    }
+}
 function Get-AskReplyState($lines, [int]$page) {
     $title = Find-Text $lines '就这段问一句'
     $close = Find-Text $lines '回到阅读'
@@ -225,7 +233,10 @@ try {
         $seen = @()
         foreach ($view in 0, 1) {                       # 讲解出现在原文段落下面：每轮看顶部和滚到底各一次，不累计滚动
             if ($view -eq 1) { Scroll-At 900 700 -10; Start-Sleep -Milliseconds 800 }
-            $lines = Shot 4 "result$n-$view"; $seen += $lines
+            $lines = Shot 4 "result$n-$view"
+            $quota = Get-PassageQuotaMessage $lines
+            if ($quota) { Fail 4 "服务回了拒绝：$quota" }
+            $seen += $lines
         }
         Scroll-At 900 700 20; Start-Sleep -Milliseconds 500
         $e = Has $seen @('无法讲解', '尚未核实', '尚未接通', '连不上', '超时', '没有得到可核对')

@@ -82,6 +82,9 @@ class ScrollReadState(val pageCount: Int, initial: ScrollReadPosition = ScrollRe
 
     val canScrollForward: Boolean get() = list.canScrollForward
 
+    /** 列表已经量过、能读出页高了。 */
+    val laidOut: Boolean get() = list.layoutInfo.visibleItemsInfo.isNotEmpty()
+
     /** 用户或惯性正在滚（程序跳转 scrollTo 不算）。 */
     val isScrolling: Boolean get() = list.isScrollInProgress
 

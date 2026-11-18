@@ -76,8 +76,13 @@ class BookPageTurnViewTest {
         mainClock.advanceTimeBy(100); waitForIdle()
         runOnIdle { state.move(ReaderTurn.Next); state.move(ReaderTurn.Next) }
         mainClock.advanceTimeBy(100); waitForIdle()
-        val start = state.anchor
         assertTrue(state.index > 0)
+        // 第一次从双页切到滚动：从右页页首接着读；之后来回切位置不再漂
+        runOnIdle { readMode = BookReadMode.Scroll }
+        mainClock.advanceTimeBy(150); waitForIdle()
+        runOnIdle { readMode = BookReadMode.Paged }
+        mainClock.advanceTimeBy(150); waitForIdle()
+        val start = state.anchor
         // 双页和单栏的版心宽度不同，排版页下标不可比；停在同一处用「原文锚点」比
         repeat(10) { round ->
             runOnIdle { readMode = BookReadMode.Scroll }

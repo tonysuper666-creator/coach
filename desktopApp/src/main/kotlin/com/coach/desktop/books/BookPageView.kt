@@ -26,6 +26,7 @@ import com.coach.ui.pageturn.ScrollReadView
 import com.coach.ui.pageturn.PageTurnStyle
 import com.coach.ui.pageturn.PageTurnView
 import androidx.compose.runtime.*
+import kotlinx.coroutines.flow.first
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -99,6 +100,10 @@ internal class BookPagingState(initial: BookPageAnchor) {
     var anchor by mutableStateOf(initial)
     var pages by mutableStateOf(emptyList<BookLaidPage>())
     var spread by mutableStateOf(false)
+    /** 双页时右页页首的锚点；切到滚动读时从这里接着读。非双页为 null。 */
+    var spreadRightAnchor: BookPageAnchor? = null
+    /** 上次离开滚动读时的锚点；之后没翻过页就不再把「右页页首」当阅读位置，避免来回切时一次次往前挪。 */
+    var anchorAtScrollExit: BookPageAnchor? = null
     var publishedImportPage = initial.importPage
         private set
     private val pendingImportPages = mutableListOf<Int>()
@@ -197,17 +202,65 @@ internal fun BookPageView(
         }
         val first = pages.pageContaining(state.anchor)
         LaunchedEffect(pages, first, state.anchor) { onPosition(pages[first].anchor.importPage) }
+        if (!scrolling) SideEffect { state.spreadRightAnchor = if (spread && state.anchor == pages[first].anchor && state.anchor != state.anchorAtScrollExit) pages.getOrNull(first + 1)?.anchor else null }
         if (scrolling) {
-            val scrollState = remember(pages) { ScrollReadState(pages.size, ScrollReadPosition(first)) }
-            // 用户滚到别的页：锚点跟过去；键盘 / 目录 / 出处改了锚点：滚过去。两边都对得上就不动，避免来回抖。
-            LaunchedEffect(scrollState, pages) {
-                // 只在用户真的在滚的时候才让页回写锚点；排版重算、程序跳转引起的页变化不动锚点
-                snapshotFlow { scrollState.position.page to scrollState.isScrolling }.collect { (p, userScrolling) ->
-                    if (userScrolling && p != pages.pageContaining(state.anchor)) state.anchor = pages[p].anchor
+            val itemHeightPx = with(density) { maxHeight.roundToPx() }.coerceAtLeast(1)
+            // 从双页切来：以右页页首为阅读位置（读到哪、接着读哪），其余情况用当前锚点
+            val entry = remember { state.spreadRightAnchor }
+            val consumed = remember { booleanArrayOf(false) }
+            LaunchedEffect(Unit) { entry?.let { state.anchor = it }; state.anchorAtScrollExit = state.anchor }
+            val gapPx = with(density) { 24.dp.roundToPx() }
+            val lineAt = itemHeightPx / 3 // 阅读行：屏幕上方 1/3 处（desktop-polish 6.9）
+            /** 阅读行的原文锚点 -> 视口顶边应在的位置，使该行落在屏幕上方 1/3 处。 */
+            fun positionOf(anchor: BookPageAnchor): ScrollReadPosition {
+                val idx = pages.pageContaining(anchor)
+                val y = pages[idx].yOfAnchor(anchor, measurer, typography, widthPx) ?: 0
+                val top = y - lineAt
+                return when {
+                    top >= 0 -> ScrollReadPosition(idx, (top.toFloat() / itemHeightPx).coerceIn(0f, 1f))
+                    idx > 0 && top < -gapPx -> ScrollReadPosition(idx - 1, ((itemHeightPx + gapPx + top).toFloat() / itemHeightPx).coerceIn(0f, 1f))
+                    else -> ScrollReadPosition(idx, 0f)
                 }
             }
-            LaunchedEffect(scrollState, first) {
-                if (scrollState.position.page != first) scrollState.scrollTo(ScrollReadPosition(first))
+            /** 视口顶边位置 -> 屏幕上方 1/3 处那一行的原文锚点。 */
+            fun anchorOf(pos: ScrollReadPosition): BookPageAnchor {
+                val total = (pos.fraction * itemHeightPx).toInt() + lineAt
+                val (idx, y) = when {
+                    pos.page + 1 >= pages.size -> pos.page to total.coerceAtMost(itemHeightPx)
+                    total >= itemHeightPx + gapPx -> pos.page + 1 to (total - itemHeightPx - gapPx)
+                    total >= itemHeightPx -> pos.page + 1 to 0
+                    else -> pos.page to total
+                }
+                return pages[idx.coerceIn(0, pages.lastIndex)].anchorAtY(y, measurer, typography, widthPx)
+            }
+            val scrollState = remember(pages) {
+                val seed = if (!consumed[0] && entry != null) entry else state.anchor
+                consumed[0] = true
+                ScrollReadState(pages.size, positionOf(seed))
+            }
+            // 用户滚动：把视口顶边那一行的原文位置写回锚点（不只是页首），切回翻页时能还原到这一行。
+            val programmatic = remember(scrollState) { arrayOfNulls<ScrollReadPosition>(1) }
+            val written = remember(scrollState) { arrayOfNulls<BookPageAnchor>(1) }
+            LaunchedEffect(scrollState, pages) {
+                snapshotFlow { scrollState.position }.collect { pos ->
+                    val set = programmatic[0]
+                    // 程序刚跳过去的位置不回写，其余（用户滚动、惯性、语义滚动）都回写
+                    if (set != null && set.page == pos.page && kotlin.math.abs(set.fraction - pos.fraction) * itemHeightPx <= 80) return@collect
+                    programmatic[0] = null
+                    val next = anchorOf(pos)
+                    written[0] = next
+                    state.anchor = next
+                    state.anchorAtScrollExit = state.anchor
+                }
+            }
+            // 键盘 / 目录 / 出处等从外面改了锚点：滚过去；和当前位置差不到两行就不动，避免来回抖。
+            LaunchedEffect(scrollState, state.anchor) {
+                if (state.anchor == written[0]) return@LaunchedEffect // 是滚动自己写的，不用再滚回去
+                snapshotFlow { scrollState.laidOut }.first { it }
+                val target = positionOf(state.anchor)
+                val now = scrollState.position
+                val moved = target.page != now.page || kotlin.math.abs(target.fraction - now.fraction) * itemHeightPx > 80
+                if (moved) { programmatic[0] = target; scrollState.scrollTo(target) }
             }
             val viewHeight = maxHeight
             val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper

@@ -410,7 +410,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                         }
                         result
                     }
-                    BookPageView(book, paging, ranges, turnLayout, onPosition = { number ->
+                    BookPageView(book, paging, ranges, turnLayout, libraryDirectory = library.directory, onPosition = { number ->
                         if (paging.publishImportPage(number)) {
                             onPage(number)
                             session.goToPage(number)

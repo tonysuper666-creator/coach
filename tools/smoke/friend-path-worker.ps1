@@ -60,20 +60,41 @@ function Await-Text([int]$n, [string]$tag, [string[]]$needles, [int]$sec) {
     return $null
 }
 function Page-Of($lines) { foreach ($l in $lines) { $mm = [regex]::Match($l.Text, '(\d+)[/／](\d+)'); if ($mm.Success) { return "$($mm.Groups[1].Value)/$($mm.Groups[2].Value)" } }; return $null }
-# Read only the printed counter between the original-page navigation buttons.
-function Get-OriginalPageNumber($lines) {
+# At either edge of the book the disabled navigation label may disappear in OCR.
+# Enlarge the counter beside its visible neighbour; keep the current page and total strictly numeric.
+function Get-OriginalPageNumber($lines, [string]$png) {
     $prev = Find-Text $lines '上一页'
     $next = Find-Text $lines '下一页'
-    if (-not $prev -or -not $next -or $prev.X2 -ge $next.X1) { return }
-    foreach ($line in $lines) {
-        $digits = foreach ($word in $line.Words) {
-            $b = $word.BoundingRect
-            $y = $b.Y + $b.Height / 2
-            if ($b.X -ge $prev.X2 -and $b.X + $b.Width -le $next.X1 -and
-                $y -ge $next.Y1 -and $y -le $next.Y2 -and $y -ge $prev.Y1 -and $y -le $prev.Y2) { $word.Text }
+    if (-not $prev -and -not $next) { return }
+    $anchor = if ($next) { $next } else { $prev }
+    $height = $anchor.Y2 - $anchor.Y1
+    $src = [Drawing.Bitmap]::new($png)
+    try {
+        $left = if ($prev) { $prev.X2 } else { [math]::Max(0, $next.X1 - 16 * $height) }
+        $right = if ($next) { $next.X1 } else { [math]::Min($src.Width, $prev.X2 + 16 * $height) }
+        $top = [math]::Max(0, $anchor.Y1 - $height)
+        $bottom = [math]::Min($src.Height, $anchor.Y2 + $height)
+        if ($left -ge $right -or $top -ge $bottom) { return }
+        $rect = [Drawing.Rectangle]::new($left, $top, $right - $left, $bottom - $top)
+        $zoom = [Drawing.Bitmap]::new($rect.Width * 3, $rect.Height * 3)
+        $file = Join-Path (Split-Path -Parent $png) ('counter-' + [guid]::NewGuid() + '.png')
+        try {
+            $g = [Drawing.Graphics]::FromImage($zoom)
+            try {
+                $g.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                $g.DrawImage($src, [Drawing.Rectangle]::new(0, 0, $zoom.Width, $zoom.Height), $rect, [Drawing.GraphicsUnit]::Pixel)
+            } finally { $g.Dispose() }
+            $zoom.Save($file, [Drawing.Imaging.ImageFormat]::Png)
+            $pages = @(foreach ($line in Read-Screen $file) {
+                if (($line.Text -replace '\s', '') -match '^([1-9]\d*)[/／]([1-9]\d*)$') { $Matches[1] }
+            })
+            $unique = @($pages | Sort-Object -Unique)
+            if ($unique.Count -eq 1) { return $unique[0] }
+        } finally {
+            $zoom.Dispose()
+            Remove-Item -LiteralPath $file, ([IO.Path]::ChangeExtension($file, 'inv.png')) -ErrorAction SilentlyContinue
         }
-        if ((($digits -join '') -replace '\s', '') -match '^([1-9]\d*)[/／]([1-9]\d*)$') { return $Matches[1] }
-    }
+    } finally { $src.Dispose() }
 }
 # The lowest on-screen occurrence of a label (e.g. the last 「讲解这段」 button on a page).
 function Find-Lowest($lines, [string]$needle) { $best = $null; foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m -and (-not $best -or $m.Y -gt $best.Y)) { $best = $m } }; $best }
@@ -346,7 +367,7 @@ try {
                     if ($original -and -not $switched) {
                         Click-At $original.X $original.Y
                         $switched = $true
-                    } elseif ((Find-Text $lines '看文字') -and (Get-OriginalPageNumber $lines) -eq $sourcePage) {
+                    } elseif ((Find-Text $lines '看文字') -and (Get-OriginalPageNumber $lines (Join-Path $OutDir '5-source.png')) -eq $sourcePage) {
                         $verified = $true
                         break
                     }

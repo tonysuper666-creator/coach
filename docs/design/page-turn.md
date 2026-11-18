@@ -71,3 +71,20 @@ iOS 用 `UIPageViewController`：`transitionStyle = .pageCurl`；`spineLocation 
 - 比一整页还高的图缩到一页内放下。
 - 裁图块（公式、知识框）不从中间切开。
 - 长表格按行拆到下一页，表头在新页重复。
+
+## 滚动阅读组件用法（TON-1671，只在 shared/ui，未接阅读器）
+
+`com.coach.ui.pageturn.ScrollReadView` / `ScrollReadState` / `ScrollReadPosition`（`ScrollRead.kt`、`ScrollReadMath.kt`）。
+
+```kotlin
+val state = remember(pageCount) { ScrollReadState(pageCount, ScrollReadPosition(page, fraction)) }
+ScrollReadView(state, desk = deskColor, paper = paperColor) { i -> /* 画第 i 页，高度由内容定 */ }
+state.position   // 视口顶边所在页 + 页内进度，滚过页边自动换成下一页
+state.scrollTo(ScrollReadPosition(page, fraction))   // 目录、出处、搜索跳转；直接到位
+```
+
+- 页下标与 `PageTurnState.position` 同一套。翻页 → 滚动：`pageTurn.toScrollPosition()`；滚动 → 翻页：`position.toPageTurnPosition(pageCount, columns, align)`（书页 `alignToSpread=false` 时传 `align=false`）。要回到同一句，调用方在切换前后各用自己的句子锚点换算页和进度，组件保证页与页内进度不丢。
+- 键盘：空格 / PageDown 滚一屏（留 10% 重叠）、Shift+空格 / PageUp 回一屏、Home / End、方向键；滚轮与触控板惯性走 LazyColumn 原生滚动；右侧细进度条。`handleKeys=false` 可交给宿主。
+- 系统关闭「显示动画」（`LocalV7ReducedMotion`）：键盘滚一屏直接到位。
+- 页间缝是 `desk` 色，宽 `gap`（默认 16dp）。
+- 页边小字原书页码、出处框选，由调用方在页内容里画；`state.visiblePages` 给出视口内的页范围。

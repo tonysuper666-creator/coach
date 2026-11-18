@@ -1,5 +1,6 @@
 package com.coach.desktop
 
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.tooling.ComposeToolingApi
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.InternalComposeUiApi
@@ -7,6 +8,11 @@ import androidx.compose.ui.awt.ComposeDialog
 import androidx.compose.ui.awt.ComposeWindow
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.platform.InterceptPlatformTextInput
+import androidx.compose.ui.platform.PlatformTextInputInterceptor
+import androidx.compose.ui.platform.PlatformTextInputMethodRequest
+import androidx.compose.ui.text.input.FinishComposingTextCommand
+import androidx.compose.ui.text.input.SetComposingTextCommand
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -207,6 +213,46 @@ class WindowsPassageQuestionLimitTest {
             waitUntil(timeoutMillis = 20_000) { support.questions.size == 1 }
             // Shift+Enter is a line break; the plain Enter sends that same two-line question unchanged.
             assertEquals("第一行\n第二行", support.questions.single())
+        }
+    }
+
+    /**
+     * 输入法里候选还没定时，那一下 Enter 是在确认候选：既不能把半截问题发出去，也不能往问题里插换行。
+     * 候选落定、过了确认宽限之后再按 Enter，发出去的是汉字，不是拼音。
+     */
+    @Test fun enterThatConfirmsAnImeCandidateSendsNothingAndAddsNoLineBreak() {
+        val root = Files.createTempDirectory("coach-passage-ime-")
+        val source = learningPathTextbook(root, "Synthetic astronomy")
+        val controller = TextbookController(TextbookLibrary(root.resolve("library")))
+        val support = Recorder()
+        var request: PlatformTextInputMethodRequest? = null
+        val interceptor = PlatformTextInputInterceptor { input, next ->
+            request = input
+            try { next.startInputMethod(input) } finally { request = null }
+        }
+        runSkikoComposeUiTest(size = Size(1100f, 800f), density = Density(1f)) {
+            openComposer(controller, source, support) { content -> InterceptPlatformTextInput(interceptor) { content() } }
+            onNodeWithTag("book-passage-question").performClick().performTextReplacement("这一页在讲")
+            waitUntil(timeoutMillis = 20_000) { request != null }
+            // 走真的平台输入法：候选「什么」在输入框里，composition 还没落定。
+            runOnIdle { checkNotNull(request).onEditCommand(listOf(SetComposingTextCommand("什么", 1))) }
+            waitForIdle()
+            assertNotNull(request?.value?.invoke()?.composition, "候选应当还停在输入框里")
+            assertEquals("这一页在讲什么", typedQuestion())
+
+            onNodeWithTag("book-passage-question").performKeyInput { pressKey(Key.Enter) }
+            waitForIdle()
+            assertEquals(0, support.questions.size, "确认候选的那一下 Enter 不能发出去")
+            assertEquals("这一页在讲什么", typedQuestion(), "确认候选的 Enter 不能往问题里插换行")
+
+            // 候选落定，等过 60 ms 的确认宽限，再按一次 Enter 才发。
+            runOnIdle { checkNotNull(request).onEditCommand(listOf(FinishComposingTextCommand())) }
+            waitForIdle()
+            assertNull(request?.value?.invoke()?.composition)
+            Thread.sleep(150)
+            onNodeWithTag("book-passage-question").performKeyInput { pressKey(Key.Enter) }
+            waitUntil(timeoutMillis = 20_000) { support.questions.size == 1 }
+            assertEquals("这一页在讲什么", support.questions.single())
         }
     }
 
@@ -875,8 +921,11 @@ class WindowsPassageQuestionLimitTest {
     }
 
     /** 打开选段列表但一段都不点：列表本身就是这次要核对的东西。 */
-    private fun ComposeUiTest.openPicker(controller: TextbookController, source: Path, support: BookLearningSupport) {
-        setContent { TextbookWorkspace(controller, support = support) { source } }
+    private fun ComposeUiTest.openPicker(
+        controller: TextbookController, source: Path, support: BookLearningSupport,
+        wrap: @Composable (@Composable () -> Unit) -> Unit = { it() },
+    ) {
+        setContent { wrap { TextbookWorkspace(controller, support = support) { source } } }
         ready(controller) { it.catalog.isEmpty() }
         onNodeWithTag("upload-textbook").performClick()
         ready(controller) { it.prompt == BookPrompt.IMPORTED }
@@ -888,8 +937,11 @@ class WindowsPassageQuestionLimitTest {
         waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("ask-paragraph-0").fetchSemanticsNodes().isNotEmpty() }
     }
 
-    private fun ComposeUiTest.openComposer(controller: TextbookController, source: Path, support: BookLearningSupport) {
-        openPicker(controller, source, support)
+    private fun ComposeUiTest.openComposer(
+        controller: TextbookController, source: Path, support: BookLearningSupport,
+        wrap: @Composable (@Composable () -> Unit) -> Unit = { it() },
+    ) {
+        openPicker(controller, source, support, wrap)
         onNodeWithTag("ask-paragraph-0").performClick()
     }
 

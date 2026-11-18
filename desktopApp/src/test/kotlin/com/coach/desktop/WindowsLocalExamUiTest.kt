@@ -327,6 +327,7 @@ class WindowsLocalExamUiTest {
         val first = book.lessons.first()
         val practice = StudyCoachCourse.practice(book, first, QuestionMode.CHOICE)!!
         val correct = practice.options.indexOf(practice.answer)
+        val choice = hasTestTag("local-choice-${first.id}-$correct")
         var windowOpen by mutableStateOf(true)
         lateinit var guard: TextbookCloseGuard
         lateinit var id: String
@@ -354,11 +355,11 @@ class WindowsLocalExamUiTest {
                 db.createStatement().use { it.execute("""CREATE TRIGGER reject_save BEFORE UPDATE OF answers_json ON local_exam_attempts
                     BEGIN SELECT RAISE(ABORT,'synthetic save failure'); END""") }
             }
-            // 试卷落库和界面换页不是同一拍：等选项真的画出来再点，别跟这一帧抢。
-            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-choice-${first.id}-$correct").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("local-choice-${first.id}-$correct").performScrollTo().performClick()
+            // SQLite commits before refresh publishes the attempt and the option becomes interactive.
+            waitUntil(timeoutMillis = 20_000) { onAllNodes(choice and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
+            onNode(choice).performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-exam-error").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("local-choice-${first.id}-$correct").assertIsSelected()
+            onNode(choice).assertIsSelected()
             onNodeWithTag("exam-request-close").performClick()
             waitUntil(timeoutMillis = 20_000) { guard.failed }
             assertTrue(windowOpen)
@@ -378,7 +379,8 @@ class WindowsLocalExamUiTest {
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-resume").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("local-resume").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-exam-attempt").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("local-choice-${first.id}-$correct").performScrollTo().assertIsSelected()
+            onNodeWithTag("local-attempt-id").assertTextEquals("作答记录：$id")
+            onNode(choice).performScrollTo().assertIsSelected()
         }
         println("LOCAL_EXAM_CLOSE_PASS: accepted choice stayed visible after SQLite failure; window held; retry saved before close; reopened exact choice")
     }

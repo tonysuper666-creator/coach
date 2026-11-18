@@ -44,27 +44,47 @@ class BookExplainTest {
     }
 
     /**
-     * 出处要能按段找回原文：有页码写「第 N 页 · 第 M 段」，M 是这一页的正文段（跳过章标题），
-     * 和选段就问里行首的段号是同一个数；没有页码的书写「本章第 M 段」，按本章正文的先后数。
+     * 出处要能按段找回原文，段号数的是正文段（跳过章标题），和选段就问里行首的段号是同一个数。
+     * 书里有页码（原件印着的）写「第 N 页 · 第 M 段」；按章节切块的文本导入没有页码，写「本章第 M 段」。
+     * 两种情况都用真的导入的书，不手搓块。
      */
     @Test fun citationLabelCountsTheBodyParagraphsOfThePageOrTheChapter() {
         val root = Files.createTempDirectory("explain-label-")
         val library = TextbookLibrary(root.resolve("library"))
-        val book = library.importBook(Files.writeString(root.resolve("two.md"), """
+        fun paragraphsOf(name: String, text: String): Pair<Textbook, List<SourceBlock>> {
+            val book = library.importBook(Files.writeString(root.resolve(name), text))
+            return book to StudyCoachCourse.blocks(book.id, book.pages)
+                .filter { !it.heading && !it.text.startsWith("<!--") }
+        }
+
+        // 有页码：文本导入带着原件的页标记，第 5 页上两段。
+        val (paged, onPage) = paragraphsOf("paged.md", """
+            <!-- PDF 第 5 页 · 书第 1 页 -->
             # 1 Light
 
             Alpha light.
 
             Beta water.
-        """.trimIndent()))
-        val blocks = StudyCoachCourse.blocks(book.id, book.pages)
-        val paragraphs = blocks.filter { !it.heading }
-        assertEquals(listOf("Alpha light.", "Beta water."), paragraphs.map { it.text })
+        """.trimIndent())
+        assertEquals(listOf("Alpha light.", "Beta water."), onPage.map { it.text })
+        val pagedBlocks = StudyCoachCourse.blocks(paged.id, paged.pages)
+        assertTrue(pagedBlocks.any { it.text.startsWith("<!--") }, "页标记是导入的元数据，单独成块")
+        assertEquals("第 5 页 · 第 1 段", bookCitationLabel(paged, pagedBlocks, Citation("S1", onPage[0].id, 5)),
+            "页标记不能算作正文段")
+        assertEquals("第 5 页 · 第 2 段", bookCitationLabel(paged, pagedBlocks, Citation("S2", onPage[1].id, 5)))
 
-        assertEquals("第 1 页 · 第 1 段", bookCitationLabel(book, blocks, Citation("S1", paragraphs[0].id, 1)))
-        assertEquals("第 1 页 · 第 2 段", bookCitationLabel(book, blocks, Citation("S2", paragraphs[1].id, 1)))
-        // 页码 0 就是没有页码：段号照给，页码不编。
-        assertEquals("本章第 2 段", bookCitationLabel(book, blocks, Citation("S2", paragraphs[1].id, 0)))
+        // 没有页码：同一章两段，导入时编出来的页号（1）不拿去当页码。
+        val (plain, plainParagraphs) = paragraphsOf("plain.md", """
+            # 1 Light
+
+            Alpha light.
+
+            Beta water.
+        """.trimIndent())
+        val plainBlocks = StudyCoachCourse.blocks(plain.id, plain.pages)
+        assertEquals(1, plainParagraphs[0].page, "文本导入的块号仍从 1 编起，内部照用")
+        assertEquals("本章第 1 段", bookCitationLabel(plain, plainBlocks, Citation("S1", plainParagraphs[0].id, 1)))
+        assertEquals("本章第 2 段", bookCitationLabel(plain, plainBlocks, Citation("S2", plainParagraphs[1].id, 1)))
         root.toFile().deleteRecursively()
     }
 

@@ -56,7 +56,8 @@ public final class SmokeMain implements AutoCloseable {
         Path control = Path.of(Objects.requireNonNull(
             System.getenv("COACH_SMOKE_CONTROL_FILE"), "COACH_SMOKE_CONTROL_FILE"));
         Runtime.getRuntime().addShutdownHook(new Thread(hook::close));
-        onEdt(() -> {
+        // The worker owns the startup deadline. The per-action timeout starts after readiness.
+        SwingUtilities.invokeAndWait(() -> {
             hook.window = new ComposeWindow();
             hook.window.setTitle("LearningCoach");
             hook.window.setBounds(WindowsWindowGeometryKt.windowsInitialWindowBounds());
@@ -76,7 +77,6 @@ public final class SmokeMain implements AutoCloseable {
                 @Override public void windowClosed(WindowEvent event) { hook.close(); }
             });
             hook.window.setVisible(true);
-            return null;
         });
         hook.server.start();
         Files.createDirectories(control.toAbsolutePath().getParent());

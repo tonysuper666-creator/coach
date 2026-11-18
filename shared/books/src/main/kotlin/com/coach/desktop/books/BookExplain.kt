@@ -64,7 +64,7 @@ internal class ExplainConsent(private val directory: Path) {
     fun allow(bookId: String) {
         val target = file(bookId) ?: return
         Files.createDirectories(target.parent)
-        Files.writeString(target, "allowed")
+        Files.write(target, "allowed".toByteArray(Charsets.UTF_8))
     }
 }
 

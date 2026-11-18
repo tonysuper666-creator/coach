@@ -15,6 +15,17 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.*
 
+@OptIn(ExperimentalTestApi::class)
+internal fun ComposeUiTest.chooseReadingSize(size: ReadingSize) {
+    onNodeWithTag("v7-type-menu").performClick()
+    val option = onNodeWithTag("reading-size-${size.name}")
+    option.performClick()
+    option.assertIsSelected()
+    // The Aa anchor is just outside the panel. Send a pointer click so the popup handles dismissal.
+    onNodeWithTag("v7-type-menu").performMouseInput { click() }
+    onNodeWithTag("reading-settings-panel").assertDoesNotExist()
+}
+
 /**
  * 第 12 刀：阅读器正文栏按 V7 `measure: 33em` 限宽并在纸面内居中。
  * 用合成的一整段长文（导入时按文字块切成多页）核对：两种常见屏和窄窗口、Aa 小/中/大下
@@ -78,7 +89,7 @@ class ReaderMeasureUiTest {
         return narrow
     }
 
-    private fun ComposeUiTest.typeSize(label: String) {
+    private fun ComposeUiTest.chooseWorkspaceMenuSize(label: String) {
         onNodeWithTag("v7-type-menu").performClick(); waitForIdle()
         onNodeWithTag("v7-type-$label").performClick(); waitForIdle()
     }
@@ -99,8 +110,9 @@ class ReaderMeasureUiTest {
                 ready(controller) { it.book?.id == imported.id }
                 onNodeWithTag("home-read").performClick()
                 ready(controller) { it.screen == BookScreen.READER && it.prompt == null && it.page == 1 }
-                for ((label, scale) in listOf("小" to .9f, "大" to 1.15f, "中" to 1f)) {
-                    typeSize(label)
+                for ((size, scale) in listOf(ReadingSize.SMALL to .9f, ReadingSize.LARGE to 1.15f, ReadingSize.MEDIUM to 1f)) {
+                    val label = size.label
+                    chooseReadingSize(size)
                     while (isEnabled().matches(onNodeWithTag("previous-page").fetchSemanticsNode())) {
                         onNodeWithTag("previous-page").performClick(); waitForIdle()
                     }
@@ -185,8 +197,8 @@ class ReaderMeasureUiTest {
                 assertColumn(scale, "source", 1.5f)
             }
             checkAnchor(1f)
-            typeSize("大"); checkAnchor(1.15f)
-            typeSize("中"); checkAnchor(1f)
+            chooseWorkspaceMenuSize("大"); checkAnchor(1.15f)
+            chooseWorkspaceMenuSize("中"); checkAnchor(1f)
             val covered = mutableSetOf<Int>()
             while (true) {
                 visible().forEach { node ->

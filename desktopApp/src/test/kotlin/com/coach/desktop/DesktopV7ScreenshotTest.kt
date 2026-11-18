@@ -229,7 +229,6 @@ A second English paragraph lets us inspect the space between paragraphs and the 
                 .config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().spanStyles
                 .filter { it.item.fontFamily != null && it.item.color != androidx.compose.ui.graphics.Color.Transparent }
                 .also { assertTrue(it.isNotEmpty(), "正文里有标题") }.maxOf { it.item.fontSize.value }
-            fun typeSize(label: String) { onNodeWithTag("v7-type-menu").performClick(); waitForIdle(); onNodeWithTag("v7-type-$label").performClick(); waitForIdle() }
             // 正文（第 11 刀）：字号、行距取 V7 内屏 token（18 × 1.85），和标题一起随 Aa 缩放；原文字符和标记偏移不因缩放改变。
             fun bodyStyle(): androidx.compose.ui.text.TextStyle {
                 val layouts = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
@@ -249,11 +248,11 @@ A second English paragraph lets us inspect the space between paragraphs and the 
             val normalMarks = marks()
             assertEquals(coach.design.tokens.ReadingSizes.section.value, normalHeading, 0.01f, "二级标题用 section 字号")
             assertBody(1f, "Aa 中")
-            typeSize("大"); assertEquals(normalHeading * 1.15f, headingSize(), 0.01f, "Aa 大：标题跟着放大")
+            chooseReadingSize(ReadingSize.LARGE); assertEquals(normalHeading * 1.15f, headingSize(), 0.01f, "Aa 大：标题跟着放大")
             assertBody(1.15f, "Aa 大"); assertEquals(normalMarks, marks(), "Aa 大：原文和偏移不变")
-            typeSize("小"); assertEquals(normalHeading * .9f, headingSize(), 0.01f, "Aa 小：标题跟着缩小")
+            chooseReadingSize(ReadingSize.SMALL); assertEquals(normalHeading * .9f, headingSize(), 0.01f, "Aa 小：标题跟着缩小")
             assertBody(.9f, "Aa 小"); assertEquals(normalMarks, marks(), "Aa 小：原文和偏移不变")
-            typeSize("中"); assertEquals(normalHeading, headingSize(), 0.01f)
+            chooseReadingSize(ReadingSize.MEDIUM); assertEquals(normalHeading, headingSize(), 0.01f)
             assertBody(1f, "回到 Aa 中"); assertEquals(normalMarks, marks())
 
             // 选段提问（第 8 刀）：在真阅读器里点开。宿主没接问答方案商，发出去一定落到「暂时不能回答」，所以每次拍到的都一样。

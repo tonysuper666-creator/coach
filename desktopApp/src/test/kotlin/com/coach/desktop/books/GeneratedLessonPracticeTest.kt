@@ -40,6 +40,55 @@ class GeneratedLessonPracticeTest {
         }
     }
 
+    @Test fun retriesMalformedPracticeInTheSameLessonAndCanAnswerIt() {
+        val root = Files.createTempDirectory("generated-practice-retry-")
+        try {
+            val controller = TextbookController(TextbookLibrary(root.resolve("library")))
+            runBlocking {
+                controller.importBook(learningPathTextbook(root, "Synthetic astronomy"))
+                controller.chooseLearningPath(LearningPath.QUESTION_FIRST)
+                controller.enableLearning()
+            }
+            val currentBook = checkNotNull(controller.state.value.book)
+            val lesson = currentBook.lessons[currentBook.lessonIndex]
+            val consent = ExplainConsent(root.resolve("consent"))
+            consent.allow(currentBook.id)
+            val requests = mutableListOf<Pair<SourceBlock, String>>()
+            val gate = AnswerExplain(consent, {}, { true }, { true }, { _, _ -> error("legacy explain must not run") },
+                ask = { block, question ->
+                    requests += block to question
+                    val valid = reply(block)
+                    ExplainResult.Done(if (requests.size == 1) {
+                        valid.copy(text = valid.text.replace("选项D：不沿轨道运行", ""))
+                    } else valid)
+                })
+            runSkikoComposeUiTest(size = Size(1100f, 900f), density = Density(1f)) {
+                setContent { TextbookWorkspace(controller, loadOnMount = false, answerExplain = gate) { null } }
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("practice-unavailable").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("explain-trouble").assertTextContains("格式完整", substring = true)
+                onNodeWithTag("generated-practice").assertDoesNotExist()
+                runOnIdle { assertEquals(1, requests.size) }
+
+                onNodeWithTag("explain-trouble-retry").assertTextEquals("再试一次").performScrollTo().performClick()
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("generated-practice").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("practice-unavailable").assertDoesNotExist()
+                onNodeWithTag("book-explanation-text").assertDoesNotExist()
+                runOnIdle {
+                    val activeBook = checkNotNull(controller.state.value.book)
+                    assertEquals(BookScreen.LEARNING, controller.state.value.screen)
+                    assertEquals(currentBook.id, activeBook.id)
+                    assertEquals(lesson.id, activeBook.lessons[activeBook.lessonIndex].id)
+                    val source = lesson.blocks.first { !it.heading && it.text.trim().length in 40..4000 }
+                    assertEquals(List(2) { source to LessonPracticeWire.question }, requests)
+                }
+
+                onNodeWithTag("choice-0").assertTextContains("恒星", substring = true).performScrollTo().performClick()
+                onNodeWithTag("book-explanation-text").assertTextContains("行星沿轨道绕恒星运行", substring = true)
+                onNodeWithTag("book-summary-detail").assertTextContains("与本题答案一致", substring = true)
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun asksAfterConsentRevealsAfterAnswerAndNeverSavesGeneratedAnswers() {
         val root = Files.createTempDirectory("generated-practice-")
         val controller = TextbookController(TextbookLibrary(root.resolve("library")))

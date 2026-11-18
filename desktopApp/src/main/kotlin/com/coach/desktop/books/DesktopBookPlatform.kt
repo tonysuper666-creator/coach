@@ -10,6 +10,8 @@ import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.asAwtTransferable
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.platform.Font
 import com.coach.ui.pageturn.ReadScrollbarDesktop
 import com.coach.ui.pageturn.ScrollReadState
 import com.coach.ui.v7.V7Scrollbar
@@ -123,3 +125,5 @@ internal fun bookBitmapPixel(bitmap: BookBitmap, x: Int, y: Int) = bitmap.getRGB
 
 @Composable
 internal fun BookWorkspaceBackHandler(enabled: Boolean, onBack: () -> Unit) = Unit
+
+internal fun bookWenKaiFontFamily() = FontFamily(Font("font/lxgw_wenkai.ttf"))

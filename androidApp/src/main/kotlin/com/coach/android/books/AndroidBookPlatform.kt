@@ -20,9 +20,12 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.coach.ui.pageturn.ScrollReadState
 import com.coach.ui.pageturn.ReadScrollbarAndroid
+import com.coach.shared.ui.R
 import com.coach.ui.theme.CoachTheme
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -116,3 +119,5 @@ internal typealias BookPdfPoint = android.graphics.PointF
 internal typealias BookPdfFillRule = android.graphics.Path.FillType
 internal fun newBookPdfPoint(x: Float = 0f, y: Float = 0f): BookPdfPoint = BookPdfPoint(x, y)
 internal fun bookBitmapPixel(bitmap: BookBitmap, x: Int, y: Int) = bitmap.getPixel(x, y)
+
+internal fun bookWenKaiFontFamily() = FontFamily(Font(R.font.lxgw_wenkai))

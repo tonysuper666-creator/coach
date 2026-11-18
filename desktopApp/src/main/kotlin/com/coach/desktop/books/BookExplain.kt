@@ -26,6 +26,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
 import com.coach.ui.theme.CoachTheme
@@ -289,27 +290,34 @@ internal fun BookExplainPanel(
             Row(Modifier.fillMaxWidth().hoverable(interaction)) {
                 Text(ReadableText.reflow(block.text), Modifier.weight(1f).alignByBaseline().testTag("explain-paragraph-${block.id}"),
                     style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary)
-                if (failed == null) FaintExplainButton(
+                // 失败时这一行留一个看不见的同款盒子：正文的折行不能因为入口消失而变，
+                // 否则段落会缩短一行，把下面的段落整体顶上去。
+                FaintExplainButton(
                     label = if (state == BlockState.Waiting) "讲解中…" else "讲解这段",
                     enabled = canExplain, waiting = state == BlockState.Waiting,
-                    emphasised = canExplain && (selected || hovered),
-                    modifier = Modifier.alignByBaseline().padding(start = 12.dp).testTag("explain-button"),
+                    emphasised = failed == null && canExplain && (selected || hovered),
+                    placeholder = failed != null,
+                    modifier = Modifier.alignByBaseline().padding(start = 12.dp)
+                        .then(if (failed == null) Modifier.testTag("explain-button") else Modifier),
                     onClick = { if (consented) start(block) else pending = block })
             }
-            // 失败时按钮就地换成下一步（再试一次 / 重新配对），右边写那句话；这一行高度固定，
-            // 下面的段落不被推下去（desktop-polish D3、E3）。块编号是内部的，不给读者看。
-            if (failed != null) Row(Modifier.heightIn(min = 40.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
+            // 失败时按钮就地换成下一步（再试一次 / 重新配对），右边写那句话。这一行任何时候都占着位置：
+            // 平时是留白，失败时才填内容，所以点下去、等回复、失败回来这三种状态里，下面正在读的段落
+            // 一个像素都不动（desktop-polish A10、D3、E3）。块编号是内部的，不给读者看。
+            Row(Modifier.fillMaxWidth().heightIn(min = 40.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                when (failed.trouble) {
-                    ExplainTrouble.Revoked -> PaperButton(onClick = { scope.launch { scroll.animateScrollTo(0) } },
-                        modifier = Modifier.testTag("explain-repair")) { Text("重新配对") }
-                    ExplainTrouble.Quota -> PaperButton(onClick = {}, enabled = false, modifier = Modifier.testTag("explain-button")) { Text("讲解这段") }
-                    else -> QuietButton("再试一次", enabled = paired != null, modifier = Modifier.testTag("explain-retry")) { start(block) }
+                if (failed != null) {
+                    when (failed.trouble) {
+                        ExplainTrouble.Revoked -> PaperButton(onClick = { scope.launch { scroll.animateScrollTo(0) } },
+                            modifier = Modifier.testTag("explain-repair")) { Text("重新配对") }
+                        ExplainTrouble.Quota -> PaperButton(onClick = {}, enabled = false, modifier = Modifier.testTag("explain-button")) { Text("讲解这段") }
+                        else -> QuietButton("再试一次", enabled = paired != null, modifier = Modifier.testTag("explain-retry")) { start(block) }
+                    }
+                    // 连不上、超时、暂时读不到都是会自己好的：中性灰字。只有要读者动手的（连接被停用、要重新配对）才用朱色。
+                    Text(failed.message, style = MaterialTheme.typography.bodySmall, maxLines = 2,
+                        color = if (failed.trouble.needsReader) v7Alert() else colors.fgSecondary,
+                        modifier = Modifier.weight(1f).testTag("explain-failed"))
                 }
-                // 连不上、超时、暂时读不到都是会自己好的：中性灰字。只有要读者动手的（连接被停用、要重新配对）才用朱色。
-                Text(failed.message, style = MaterialTheme.typography.bodySmall, maxLines = 2,
-                    color = if (failed.trouble.needsReader) v7Alert() else colors.fgSecondary,
-                    modifier = Modifier.weight(1f).testTag("explain-failed"))
             }
             if (state is BlockState.Done) ExplanationView(book, state.explanation, state.context) { citation ->
                 state.context.firstOrNull { it.id == citation.blockId }?.let {
@@ -368,21 +376,26 @@ private val ExplainTrouble.needsReader: Boolean get() = this == ExplainTrouble.R
  * 「讲解这段」的常态：段落首行右边一行 faint 小字，和正文同一基线，不占段落下面的一行。
  * [emphasised]（鼠标扫到这一段，或这一段就是从阅读器选进来的）时才浮出纸面底和正常字色，
  * 盒子大小不变，所以段落和下面的讲解都不会因鼠标经过而挪位。
+ *
+ * 宽度是固定的：这一行和正文抢宽度，字号一变（「讲解中…」）或这一行暂时让给失败提示时，
+ * 只有宽度不动，正文才不会重新折行、把下面的段落顶下去。失败时用 [placeholder] 留一个看不见的同款盒子。
  */
 @Composable
 private fun FaintExplainButton(label: String, enabled: Boolean, waiting: Boolean, emphasised: Boolean,
-    modifier: Modifier = Modifier, onClick: () -> Unit) {
+    placeholder: Boolean = false, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val c = CoachTheme.colors
     val interaction = remember { MutableInteractionSource() }
     val shape = RoundedCornerShape(CoachV7.Radius.btn)
     val base = if (c.dark) CoachV7.Dark.btnBg else CoachV7.Light.btnBg
-    Text(label, modifier.v7FocusRing(shape)
+    Text(label, modifier
         .then(if (emphasised) Modifier.paperShadow("button", c.dark).clip(shape).background(base) else Modifier)
-        .clickable(interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
-        .pointerHoverIcon(if (enabled) PointerIcon.Hand else PointerIcon.Default)
-        .padding(horizontal = 12.dp, vertical = 3.dp),
-        style = MaterialTheme.typography.labelLarge, maxLines = 1,
+        .then(if (placeholder) Modifier else Modifier.v7FocusRing(shape)
+            .clickable(interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
+            .pointerHoverIcon(if (enabled) PointerIcon.Hand else PointerIcon.Default))
+        .widthIn(min = 84.dp).padding(horizontal = 12.dp, vertical = 3.dp),
+        style = MaterialTheme.typography.labelLarge, maxLines = 1, textAlign = TextAlign.Center,
         color = when {
+            placeholder -> Color.Transparent
             waiting -> c.fgSecondary
             !enabled -> c.fgTertiary.copy(alpha = .45f)
             emphasised -> c.fgPrimary

@@ -138,6 +138,12 @@ class ExplainTroubleLiveWindowTest {
             assertEquals(colors.fgTertiary, labelColor(label()), "鼠标离开回到 faint")
             step("faint-control")
 
+            // 失败那一行（再试一次 + 那句话）占的应当是平时就留好的位置：失败回来这一块的高度和顶上都不许变，
+            // 否则同一页下面的段落会被推下去（QA 退回 PR #448 的那 47 像素）。
+            fun blockBounds() = edt { nodes(window).first {
+                it.config.getOrNull(SemanticsProperties.TestTag) == "explain-block-${block.id}" }.boundsInRoot }
+            val restingBlock = blockBounds()
+
             // 逐书同意 + 断连：Mac 那边整个服务停掉。点「讲解这段」先问这本书能不能发原文；允许之后才去连，连不上。
             mac.down()
             clickInBlock("explain-button")
@@ -153,6 +159,8 @@ class ExplainTroubleLiveWindowTest {
             assertNotNull(inBlock("explain-retry"), "连不上给「再试一次」")
             assertNull(node(window, "explain-answer"))
             shot(window, dark, "02-offline")
+            assertEquals(restingBlock.top, blockBounds().top, 1f, "失败不能把这一块往下挪")
+            assertEquals(restingBlock.height, blockBounds().height, 1f, "失败提示用的是预留的位置，块高度不变")
             step("offline")
 
             // Mac 回来：同一个按钮再试一次，讲出来，带出处。

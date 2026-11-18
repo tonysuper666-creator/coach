@@ -19,6 +19,7 @@ import com.coach.desktop.DesktopConnectionSettings
 import com.coach.desktop.DesktopIdentity
 import com.coach.ui.CoachTheme
 import com.coach.ui.theme.CoachColors
+import kotlinx.coroutines.CompletableDeferred
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.*
@@ -32,6 +33,8 @@ class ExplainFaintControlTest {
     /** 第一段（有正文的那段）的 testTag，每一轮 fixture 都会换。 */
     private var paragraphTag = ""
     private var blockTag = ""
+    /** 同一页第 2 段的正文，用来量它有没有被第 1 段的状态行推走。 */
+    private var secondTag = ""
 
     @Test fun faintTextSitsOnTheParagraphsFirstBaselineInBothThemes() {
         for (dark in listOf(false, true)) withPanel(dark) { dark ->
@@ -69,7 +72,28 @@ class ExplainFaintControlTest {
         assertNotEquals(colors(false).fgPrimary, labelColor(), "不可点时不抢正文")
     }
 
+    /**
+     * 同一页的第 1 段请求讲解、断连失败：等待中和失败后，第 2 段的上沿都要和点之前一模一样。
+     * 失败那一行（再试一次 + 那句话）占的是平时就留好的位置，不是临时插进来把读者正在读的段落往下推（QA 退回 PR #448）。
+     */
+    @Test fun theSecondParagraphDoesNotMoveWhileWaitingOrAfterAFailure() {
+        for (dark in listOf(false, true)) {
+            val gate = CompletableDeferred<ExplainResult>()
+            withPanel(dark, gate = gate) { _ ->
+                val before = top(secondTag)
+                button().performClick()
+                waitForIdle()
+                assertFalse(enabled(), "点下去就进等待中")
+                assertEquals(before, top(secondTag), 1f, "等待中第 2 段被推动了（dark=$dark）")
+                gate.complete(ExplainResult.Refused(ExplainTrouble.UNREACHABLE, ExplainTrouble.Unreachable))
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-retry").fetchSemanticsNodes().isNotEmpty() }
+                assertEquals(before, top(secondTag), 1f, "失败后第 2 段被推动了（dark=$dark）")
+            }
+        }
+    }
+
     private fun withPanel(dark: Boolean, selected: Boolean = false, paired: Boolean = true,
+        gate: CompletableDeferred<ExplainResult>? = null,
         body: ComposeUiTest.(Boolean) -> Unit) {
         val root = Files.createTempDirectory("explain-faint-")
         val library = TextbookLibrary(root.resolve("library"))
@@ -77,10 +101,12 @@ class ExplainFaintControlTest {
         val blocks = StudyCoachCourse.blocks(book.id, book.pages)
         val page = blocks.first { !it.heading }.page
         val chosen = blocks.first { it.page == page && !it.heading }
+        val second = blocks.first { it.page == page && !it.heading && it.id != chosen.id }
         paragraphTag = "explain-paragraph-${chosen.id}"
         blockTag = "explain-block-${chosen.id}"
+        secondTag = "explain-paragraph-${second.id}"
         val consent = ExplainConsent(library.directory).apply { allow(book.id) }
-        val mac = FakeMac(root.resolve("home"), paired)
+        val mac = FakeMac(root.resolve("home"), paired, gate)
         runSkikoComposeUiTest(size = Size(1100f, 900f), density = Density(1f)) {
             setContent {
                 CoachTheme(dark) {
@@ -120,14 +146,18 @@ class ExplainFaintControlTest {
     private fun ComposeUiTest.enabled() =
         button().fetchSemanticsNode().config.getOrNull(SemanticsProperties.Disabled) == null
 
-    private class FakeMac(home: Path, private val paired: Boolean) :
+    private fun ComposeUiTest.top(tag: String) = onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot.top
+
+    private class FakeMac(home: Path, private val paired: Boolean,
+        private val gate: CompletableDeferred<ExplainResult>? = null) :
         BookExplainer(DesktopConnectionSettings(home = home, environment = { null })) {
         override suspend fun load() {
             if (paired) identity = DesktopIdentity("http://mac.test:18791", PairedCredentials("test-device", "test-token"))
             loaded = true
         }
+        /** [gate] 在的时候由测试决定这次请求什么时候回来、以什么结果回来，用来量等待中和失败后的排版。 */
         override suspend fun explain(chosen: SourceBlock, blocks: List<SourceBlock>, requestId: String): ExplainResult =
-            ExplainResult.Done(Explanation("这一段在说光被叶绿体用掉。【S1】",
+            gate?.await() ?: ExplainResult.Done(Explanation("这一段在说光被叶绿体用掉。【S1】",
                 listOf(Citation("S1", chosen.id, chosen.page)), 12))
     }
 

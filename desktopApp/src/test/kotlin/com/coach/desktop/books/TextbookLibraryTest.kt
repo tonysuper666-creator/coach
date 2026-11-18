@@ -36,6 +36,22 @@ internal fun syntheticTextbook(directory: Path): Path {
 }
 
 class TextbookLibraryTest {
+    @Test fun textReadModeIsRememberedPerBook() {
+        val root = Files.createTempDirectory("coach-text-mode-")
+        val library = TextbookLibrary(root.resolve("library"))
+        assertFalse(library.textScrollMode("a"))
+        library.saveTextScrollMode("a", true)
+        assertTrue(library.textScrollMode("a"))
+        assertFalse(library.textScrollMode("b"))
+        assertTrue(TextbookLibrary(root.resolve("library")).textScrollMode("a"))
+        library.saveTextScrollMode("a", false)
+        assertFalse(library.textScrollMode("a"))
+        assertEquals(0, library.textSpotOffset("a", 2))
+        library.saveTextSpot("a", 2, 137)
+        assertEquals(137, TextbookLibrary(root.resolve("library")).textSpotOffset("a", 2))
+        assertEquals(0, library.textSpotOffset("a", 3))
+    }
+
     @Test fun ownPdfIsCopiedReadWithoutLearningThenResumedAsACourseWithExactSource() = runBlocking {
         val root = Files.createTempDirectory("coach-own-book-")
         val source = syntheticTextbook(root.resolve("friend"))

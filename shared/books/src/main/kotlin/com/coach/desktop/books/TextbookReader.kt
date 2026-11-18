@@ -18,6 +18,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.debounce
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -92,6 +94,7 @@ internal fun locateCitedPdfRange(page: PdfPageText, text: String, range: IntRang
     return CitedPdfLocation(com.coach.desktop.reader.PageBoxes(displayWidth, displayHeight, rects), located)
 }
 
+@OptIn(FlowPreview::class)
 @Composable
 internal fun TextbookReader(
     ui: LibraryUi, library: TextbookLibrary, support: BookLearningSupport, practiceSource: PracticeSource?,
@@ -111,7 +114,15 @@ internal fun TextbookReader(
     var textView by remember(book.id) {
         mutableStateOf(!hasOriginal || (library.savedTextView(book.id) ?: page.ocr))
     }
-    val paging = remember(book.id) { BookPagingState(BookPageAnchor(ui.page)) }
+    val paging = remember(book.id) {
+        BookPagingState(BookPageAnchor(ui.page, library.textSpotOffset(book.id, ui.page)))
+    }
+    // 读到哪一行也记下来（防抖），重开回到同一句，不只是同一页
+    LaunchedEffect(library, book.id) {
+        snapshotFlow { paging.anchor }.debounce(400).collect { a ->
+            if (a.visualOrder == null) runCatching { library.saveTextSpot(book.id, a.importPage, a.offsetUtf16) }
+        }
+    }
     val pdf = remember(library, book.id) { OriginalPdfReading(ui.page, !originalPdf || library.pdfScrollMode(book.id)) }
     val pdfLayers = remember(library, book.id) { OriginalPdfTextLayers(library, book) }
     val scroll = remember(book.id) { ScrollReadState(book.pages.size, ScrollReadPosition(book.pages.indexOf(page))) }
@@ -122,7 +133,9 @@ internal fun TextbookReader(
     val nextPage = if (pdfVisible && !pdf.scrolling) pdf.adjacent(true)
         else book.pages.firstOrNull { it.number > ui.page }?.number
     var turnStyle by remember { mutableStateOf(PageTurnStyle.Flip) }
-    var readMode by remember(book.id) { mutableStateOf(BookReadMode.Paged) }
+    var readMode by remember(library, book.id) {
+        mutableStateOf(if (library.textScrollMode(book.id)) BookReadMode.Scroll else BookReadMode.Paged)
+    }
     LaunchedEffect(ui.page) {
         val previouslyPublished = paging.publishedImportPage
         paging.followImportPage(ui.page)
@@ -631,10 +644,11 @@ internal fun TextbookReader(
                     PaperButton({ turnLayout(ReaderTurn.Next) }, enabled = paging.canNext,
                         modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
                 }
-                // 阅读方式：翻页 / 滚动；本次打开内有效，按书记住并进阅读设置（TON-1654）。
+                // 阅读方式：翻页 / 滚动；按书记住（book_text_modes），重开仍是上次的读法。
                 Spacer(Modifier.width(20.dp))
                 V7Tooltip("阅读方式") {
                     PaperButton({ readMode = if (readMode == BookReadMode.Paged) BookReadMode.Scroll else BookReadMode.Paged
+                        library.saveTextScrollMode(book.id, readMode == BookReadMode.Scroll)
                         runCatching { pageFocus.requestFocus() } },
                         modifier = Modifier.testTag("read-mode")) { Text(if (readMode == BookReadMode.Paged) "翻页" else "滚动") }
                 }

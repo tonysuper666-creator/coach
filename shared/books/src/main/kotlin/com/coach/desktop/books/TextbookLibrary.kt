@@ -43,6 +43,8 @@ internal class TextbookLibrary(
             sql.execute("CREATE TABLE IF NOT EXISTS book_ladders(book TEXT PRIMARY KEY,session TEXT NOT NULL)")
             sql.execute("CREATE TABLE IF NOT EXISTS book_reader_views(book TEXT PRIMARY KEY,text_view INTEGER NOT NULL)")
             sql.execute("CREATE TABLE IF NOT EXISTS book_pdf_modes(book TEXT PRIMARY KEY,scrolling INTEGER NOT NULL)")
+            sql.execute("CREATE TABLE IF NOT EXISTS book_text_modes(book TEXT PRIMARY KEY,scrolling INTEGER NOT NULL)")
+            sql.execute("CREATE TABLE IF NOT EXISTS book_text_spot(book TEXT PRIMARY KEY,page INTEGER NOT NULL,offset_utf16 INTEGER NOT NULL)")
             sql.execute("""CREATE TABLE IF NOT EXISTS book_highlights(
                 book TEXT NOT NULL,page INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,quote TEXT NOT NULL,
                 PRIMARY KEY(book,page,start,end))""")
@@ -185,6 +187,40 @@ internal class TextbookLibrary(
         db.prepareStatement("INSERT OR REPLACE INTO book_pdf_modes(book,scrolling) VALUES(?,?)").use { sql ->
             sql.setString(1, bookId)
             sql.setBoolean(2, scrolling)
+            sql.executeUpdate()
+        }
+    }
+
+    /** 文字版的读法（翻页 / 滑动），按书记住；没选过就是翻页。 */
+    fun textScrollMode(bookId: String): Boolean = database().use { db ->
+        db.prepareStatement("SELECT scrolling FROM book_text_modes WHERE book=?").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { it.next() && it.getBoolean(1) }
+        }
+    }
+
+    fun saveTextScrollMode(bookId: String, scrolling: Boolean) = database().use { db ->
+        db.prepareStatement("INSERT OR REPLACE INTO book_text_modes(book,scrolling) VALUES(?,?)").use { sql ->
+            sql.setString(1, bookId)
+            sql.setBoolean(2, scrolling)
+            sql.executeUpdate()
+        }
+    }
+
+    /** 文字版读到的那一行：页内原文偏移。只在页号对得上时才用，对不上就回到页首。 */
+    fun textSpotOffset(bookId: String, page: Int): Int = database().use { db ->
+        db.prepareStatement("SELECT offset_utf16 FROM book_text_spot WHERE book=? AND page=?").use { sql ->
+            sql.setString(1, bookId)
+            sql.setInt(2, page)
+            sql.executeQuery().use { if (it.next()) it.getInt(1) else 0 }
+        }
+    }
+
+    fun saveTextSpot(bookId: String, page: Int, offsetUtf16: Int) = database().use { db ->
+        db.prepareStatement("INSERT OR REPLACE INTO book_text_spot(book,page,offset_utf16) VALUES(?,?,?)").use { sql ->
+            sql.setString(1, bookId)
+            sql.setInt(2, page)
+            sql.setInt(3, offsetUtf16)
             sql.executeUpdate()
         }
     }

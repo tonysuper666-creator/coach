@@ -4,6 +4,8 @@ package com.coach.desktop.books
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
@@ -137,6 +139,8 @@ internal fun BookPageView(
     /** 翻页效果。None 沿用原来的淡入换页；Flip/Slide 走共用的 PageTurnView（TON-1671）。 */
     turnStyle: PageTurnStyle = PageTurnStyle.None,
 ) {
+    var preview by remember(book.id, libraryDirectory) { mutableStateOf<BookFigurePreview?>(null) }
+    preview?.let { BookFigureDialog(it) { preview = null } }
     val density = LocalDensity.current
     val colors = CoachTheme.colors
     val scale = LocalV7TextScale.current.value
@@ -208,7 +212,7 @@ internal fun BookPageView(
                                         val remaining = pages.count { it.chapter == page.chapter } - pages.take(first + side + 1).count { it.chapter == page.chapter }
                                         BookSheet(book.title, page, typography, measurer, widthPx,
                                             if (spread && side == 1) rightInset else leftInset,
-                                            remaining, spread, side, book.id, libraryDirectory) { failed.add(it) }
+                                            remaining, spread, side, book.id, libraryDirectory, { preview = it }) { failed.add(it) }
                                     }
                                 }
                             }
@@ -241,7 +245,7 @@ internal fun BookPageView(
                                 val remaining = pages.count { it.chapter == page.chapter } - pages.take(index + 1).count { it.chapter == page.chapter }
                                 BookSheet(book.title, page, typography, measurer, widthPx,
                                     if (spread && side == 1) rightInset else leftInset,
-                                    remaining, spread, side, book.id, libraryDirectory) { failed.add(it) }
+                                    remaining, spread, side, book.id, libraryDirectory, { preview = it }) { failed.add(it) }
                             }
                         }
                     }
@@ -256,7 +260,7 @@ internal fun BookPageView(
 @Composable
 private fun BoxScope.BookSheet(bookTitle: String, page: BookLaidPage, typography: BookPageTypography,
     measurer: TextMeasurer, widthPx: Int, inset: Dp, remaining: Int, spread: Boolean, side: Int,
-    bookId: String, libraryDirectory: Path?, onMissing: (BookIllustration) -> Unit) {
+    bookId: String, libraryDirectory: Path?, onExpand: (BookFigurePreview) -> Unit, onMissing: (BookIllustration) -> Unit) {
     val density = LocalDensity.current
     val colors = CoachTheme.colors
     val column = with(density) { widthPx.toDp() }
@@ -330,7 +334,12 @@ private fun BoxScope.BookSheet(bookTitle: String, page: BookLaidPage, typography
                     else -> Modifier.clip(shape).background(CoachV7.Light.pgPaper)
                 }
                 val mark = if (block.highlighted) Modifier.border(2.dp, typography.highlight, shape) else Modifier
-                Box(Modifier.fillMaxWidth().height(height).then(mark).then(backing), contentAlignment = Alignment.Center) {
+                val loaded = bitmap
+                val expand = if (item.kind == PageVisualKind.ILLUSTRATION && loaded != null)
+                    Modifier.testTag("book-figure-${item.page}-${item.order}").clickable(role = Role.Button, onClickLabel = "放大插图") {
+                        onExpand(BookFigurePreview(loaded, item))
+                    } else Modifier
+                Box(Modifier.fillMaxWidth().height(height).then(expand).then(mark).then(backing), contentAlignment = Alignment.Center) {
                     bitmap?.let { image ->
                         val band = block.band
                         if (band == null) Image(image, item.caption ?: "第 ${item.page} 页插图",

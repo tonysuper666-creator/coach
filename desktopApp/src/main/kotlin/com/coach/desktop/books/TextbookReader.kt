@@ -5,7 +5,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
@@ -25,10 +24,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
@@ -37,15 +33,12 @@ import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
 import coach.design.tokens.CoachV7
 import com.coach.ui.theme.CoachTheme
@@ -61,7 +54,6 @@ import com.coach.desktop.reader.ReaderDraftScope
 import com.coach.desktop.reader.NotesSection
 import com.coach.domain.reader.ReaderTextRange
 import com.coach.domain.reader.ReaderTextUnit
-import com.coach.domain.reader.ReaderRect
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -97,12 +89,6 @@ internal fun locateCitedPdfRange(page: PdfPageText, text: String, range: IntRang
         else -> com.coach.desktop.reader.Located.Found(rects)
     }
     return CitedPdfLocation(com.coach.desktop.reader.PageBoxes(displayWidth, displayHeight, rects), located)
-}
-
-private sealed interface PageImage {
-    data object Loading : PageImage
-    data object Failed : PageImage
-    data class Ready(val image: ImageBitmap) : PageImage
 }
 
 @Composable
@@ -197,7 +183,8 @@ internal fun TextbookReader(
     // explicitly selected by a page jump or citation.
     val paragraphPage = if (textView) book.page(paging.anchor.importPage) ?: page else page
 
-    val readerSource = remember(library) { com.coach.desktop.reader.LocalBooksReaderSource(library) }
+    // The page surface fetches its own raster at the current viewport size.
+    val readerSource = remember(library) { com.coach.desktop.reader.LocalBooksReaderSource(library, loadPageImages = false) }
     val remote = remember(readerSource, book.id) { com.coach.desktop.reader.ReaderRemote(readerSource) }
     val session = remember(remote) {
         com.coach.desktop.reader.ReaderSession(
@@ -307,15 +294,10 @@ internal fun TextbookReader(
         val frame = unit.spans.firstOrNull()?.geometry?.frame ?: return@remember null
         locateCitedPdfRange(PdfPageText(frame, unit, emptyList()), page.text, range)
     }
-    val image by key(book.id, ui.page, retry) {
-        produceState<PageImage>(PageImage.Loading) {
-            if (hasOriginal) {
-                value = try { withContext(Dispatchers.IO) { PageImage.Ready(library.renderOriginal(book, page.number).toComposeImageBitmap()) } }
-                catch (cancel: CancellationException) { throw cancel }
-                catch (_: Exception) { PageImage.Failed }
-            }
-        }
-    }
+    var originalSize by remember(book.id) { mutableStateOf(IntSize.Zero) }
+    val originalPdf = book.format == "pdf"
+    val renderWidth = originalSize.width.takeIf { originalPdf && (!textView || it > 0) }
+    val image = rememberOriginalPageImage(library, book, page.number, hasOriginal && (!textView || source != null), renderWidth, retry)
     // 页图还没回来时先铺纸：这一页自己有尺寸就按它铺，量不到才借上一张成功页图的比例。
     // 图到了原地换掉，后面的按钮不往下跳；横竖混排的书也不会先铺上一页那张的纸再塌下来。
     var paperAspect by remember(book.id) { mutableStateOf<Float?>(null) }
@@ -323,7 +305,7 @@ internal fun TextbookReader(
         (image as? PageImage.Ready)?.let { paperAspect = it.image.width.toFloat() / it.image.height }
     }
     val imageScroll = remember(book.id, ui.page) { ScrollState(0) }
-    var imageHeight by remember(book.id, ui.page) { mutableIntStateOf(0) }
+    val imageHeight = originalSize.height
     val view = (remote.page as? com.coach.desktop.reader.PageState.Ready)?.view
     val samePage = remote.current?.id == book.id && remote.current?.version == "1" &&
         view?.document == book.id && view.pdfPage == ui.page
@@ -508,54 +490,21 @@ internal fun TextbookReader(
                     // 页图就位前先铺一张同尺寸的纸（纸面底色、一道细边），图到了原地换掉：
                     // 不出现转圈，下面的按钮和批注也不被推下去。打不开时同一张纸上给重试。
                     val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
-                    val paperLine = if (colors.dark) CoachV7.Dark.line else CoachV7.Light.line
                     // 只有 pdf 的非 OCR 页，boxes 才是这一页真实的 cropBox；图片书和 OCR 页那份是
                     // 1200x1600 的占位常数，按它铺纸反而会和真图差一截，所以只认真量过的几何。
                     val pageBoxes = if (readerBoxesAreGeometry(book.format, page.ocr)) boxes else null
                     val aspect = readerPaperAspect(pageBoxes?.width, pageBoxes?.height, paperAspect)
-                    Box(Modifier.fillMaxSize()) {
+                    val citation = if (aspectOk && boxes != null && located is com.coach.desktop.reader.Located.Found)
+                        CitedPdfLocation(boxes, located) else null
+                    BoxWithConstraints(Modifier.fillMaxSize().background(paper)) {
+                        val gutter = if (originalPdf) minOf(64.dp, maxWidth * .1f) else 0.dp
                         Column(Modifier.fillMaxSize().verticalScroll(imageScroll).padding(end = 12.dp).testTag("remote-pages")) {
-                            Box(Modifier.fillMaxWidth()) {
-                                when (val loaded = image) {
-                                    PageImage.Loading -> Box(Modifier.fillMaxWidth().aspectRatio(aspect)
-                                        .background(paper).border(1.dp, paperLine).testTag("reader-page-placeholder"))
-                                    PageImage.Failed -> Column(Modifier.fillMaxWidth().aspectRatio(aspect)
-                                        .background(paper).border(1.dp, paperLine).testTag("reader-page-placeholder"),
-                                        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                                        Text("这一页暂时打不开。", color = colors.fgSecondary)
-                                        TextButton(onClick = { retry++ }) { Text("重试") }
-                                    }
-                                    is PageImage.Ready -> {
-                                        Image(loaded.image, "${book.title} 第 ${ui.page} 页", contentScale = ContentScale.FillWidth,
-                                            modifier = Modifier.fillMaxWidth().aspectRatio(loaded.image.width.toFloat() / loaded.image.height)
-                                                .onSizeChanged { imageHeight = it.height }.testTag("remote-image"))
-                                        if (located is com.coach.desktop.reader.Located.Found && aspectOk && boxes != null) {
-                                            androidx.compose.foundation.Canvas(Modifier.testTag("remote-highlight").semantics { contentDescription = "原句：$quoteAnchor" }.matchParentSize()) {
-                                                val lines = mergePdfLineBoxes(located.rects.map { r ->
-                                                    ReaderRect(r.x0 / boxes.width, r.y0 / boxes.height,
-                                                        (r.x1 - r.x0) / boxes.width, (r.y1 - r.y0) / boxes.height)
-                                                }, size.width, size.height)
-                                                val frame = 2.dp.toPx()
-                                                for (r in lines) drawRect(
-                                                    highlight,
-                                                    topLeft = androidx.compose.ui.geometry.Offset(
-                                                        (r.x * size.width).toFloat() - frame, (r.y * size.height).toFloat() - frame),
-                                                    size = androidx.compose.ui.geometry.Size(
-                                                        (r.width * size.width).toFloat() + 2 * frame,
-                                                        (r.height * size.height).toFloat() + 2 * frame),
-                                                    style = Stroke(frame),
-                                                )
-                                            }
-                                        }
-                                        if (layer != null && layer.spans.isNotEmpty()) {
-                                            val selectionColor = if (colors.dark) CoachV7.Dark.selBg else CoachV7.Light.selBg
-                                            OriginalPdfSelection(layer, page.text, selection, marks, selectionColor, highlight) {
-                                                selection = it
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            OriginalBookPage(
+                                "${book.title} ${book.pageLabel(ui.page)}", image, aspect, layer, page.text, selection, marks,
+                                citation, quoteAnchor, onResize = { originalSize = it }, onRetry = { retry++ },
+                                onSelection = { selection = it }, modifier = Modifier.padding(horizontal = gutter),
+                                roundPdfCorners = originalPdf,
+                            )
                         }
                         ReaderScrollbar(imageScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                     }

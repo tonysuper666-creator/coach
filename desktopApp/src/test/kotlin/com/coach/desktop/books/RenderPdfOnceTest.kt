@@ -1,5 +1,11 @@
 package com.coach.desktop.books
 
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.pdmodel.PDPage
+import org.apache.pdfbox.pdmodel.PDPageContentStream
+import org.apache.pdfbox.pdmodel.common.PDRectangle
+import org.apache.pdfbox.pdmodel.font.PDType1Font
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -42,6 +48,33 @@ class RenderPdfOnceTest {
         file.writeBytes(bytes)
         assertTrue(library.renderPdf(book, 1).width > 0)
         assertEquals(0, library.renderTraces().count { it.outcome == "hit" && it.page == 1 })
+    }
+
+    @Test fun requestedPixelsFollowTheDisplayedWidthOfAQuarterTurnPage() {
+        val root = Files.createTempDirectory("coach-render-rotated-")
+        val file = root.resolve("Synthetic quarter turn.pdf")
+        PDDocument().use { pdf ->
+            val page = PDPage(PDRectangle(400f, 600f)).apply { rotation = 90 }
+            pdf.addPage(page)
+            PDPageContentStream(pdf, page).use { stream ->
+                stream.beginText()
+                stream.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 14f)
+                stream.newLineAtOffset(60f, 400f)
+                stream.showText("The displayed page width includes the quarter turn.")
+                stream.endText()
+            }
+            pdf.save(file.toFile())
+        }
+        val library = TextbookLibrary(root.resolve("library"))
+        val book = library.importBook(file)
+        val normal = library.renderPdf(book, 1)
+        val wide = library.renderPdf(book, 1, pixelWidth = 1440)
+        val narrow = library.renderPdf(book, 1, pixelWidth = 720)
+        assertEquals(listOf(900, 600), listOf(normal.width, normal.height))
+        assertEquals(listOf(1440, 960), listOf(wide.width, wide.height))
+        assertEquals(listOf(720, 480), listOf(narrow.width, narrow.height))
+        assertSame(wide, library.renderPdf(book, 1, pixelWidth = 1440))
+        assertSame(normal, library.renderPdf(book, 1))
     }
 }
 

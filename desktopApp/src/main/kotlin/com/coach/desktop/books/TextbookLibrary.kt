@@ -514,8 +514,8 @@ internal class TextbookLibrary(
         database().use { db -> db.createStatement().use { it.executeUpdate("DELETE FROM book_review_position") } }
     }
 
-    // ---- 页图渲染：同一页只渲染一次（并发调用合并、结果缓存），每次调用留下分段计时 ----
-    private data class RenderKey(val id: String, val page: Int, val stamp: Long)
+    // ---- 同一页、同一显示宽度合并并发调用并缓存，每次调用留下分段计时 ----
+    private data class RenderKey(val id: String, val page: Int, val stamp: Long, val pixelWidth: Int?)
     private val renderLock = Any()
     private val renderCache = object : LinkedHashMap<RenderKey, BufferedImage>(16, .75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<RenderKey, BufferedImage>) = size > 6
@@ -535,19 +535,20 @@ internal class TextbookLibrary(
      * 返回的图片是只读共享的（调用方只转换/编码，不修改）。渲染分三段计时：loadPDF / 取页框 / renderImage，另记总耗时。
      * 同一本书同一页（文件大小+修改时间一致）并发调用只会真正渲染一次，其余等同一结果；失败不缓存。
      */
-    fun renderOriginal(book: Textbook, page: Int): BufferedImage {
+    fun renderOriginal(book: Textbook, page: Int, pixelWidth: Int? = null): BufferedImage {
         require(book.page(page) != null)
-        return if (book.format == "pdf") renderPdf(book, page)
+        return if (book.format == "pdf") renderPdf(book, page, pixelWidth)
         else {
             require(book.format in BookFormats.images)
             BookScanImages.read(original(book.id, book.format))
         }
     }
 
-    fun renderPdf(book: Textbook, page: Int): BufferedImage {
+    fun renderPdf(book: Textbook, page: Int, pixelWidth: Int? = null): BufferedImage {
         require(book.format == "pdf" && page in 1..book.pages.size)
+        require(pixelWidth == null || pixelWidth > 0)
         val file = original(book.id, book.format).toFile()
-        val key = RenderKey(book.id, page, file.length() xor file.lastModified())
+        val key = RenderKey(book.id, page, file.length() xor file.lastModified(), pixelWidth)
         val started = System.nanoTime()
         var owner = false
         val future: java.util.concurrent.CompletableFuture<BufferedImage>
@@ -565,8 +566,15 @@ internal class TextbookLibrary(
             val t0 = System.nanoTime()
             val image = Loader.loadPDF(file).use { pdf ->
                 val t1 = System.nanoTime()
-                val bounds = pdf.getPage(page - 1).cropBox
-                val scale = minOf(1.5f, 1800f / maxOf(bounds.width, bounds.height)).coerceAtLeast(.05f)
+                val sheet = pdf.getPage(page - 1)
+                val bounds = sheet.cropBox
+                val longEdge = maxOf(bounds.width, bounds.height)
+                val scale = if (pixelWidth == null) minOf(1.5f, 1800f / longEdge).coerceAtLeast(.05f)
+                else {
+                    val displayedWidth = if (sheet.rotation == 90 || sheet.rotation == 270) bounds.height else bounds.width
+                    // PDFBox floors pixel dimensions. Round the scale upward before applying the raster limit.
+                    minOf(Math.nextUp(pixelWidth / displayedWidth), 4096f / longEdge)
+                }
                 val t2 = System.nanoTime()
                 val img = PDFRenderer(pdf).renderImage(page - 1, scale)
                 val t3 = System.nanoTime()

@@ -81,6 +81,10 @@ class OriginalPdfNativeWindowTest {
                 try {
                     waitFor("original PDF default") { node(window, "original-pdf-text-layer") != null }
                     assertNull(node(window, "reader-text"))
+                    val firstPageWidth = checkNotNull(node(window, "remote-image")).let { image ->
+                        assertEquals(image.size.width, image.config[OriginalPageBitmapWidth])
+                        image.size.width
+                    }
                     shot(window, dark, "original")
                     drag(window, rects.first(), rects.last())
                     waitFor("visible native drag selection", { "expected=$range actual=" + selection(window) }) {
@@ -88,6 +92,13 @@ class OriginalPdfNativeWindowTest {
                     }
                     shot(window, dark, "drag-selection")
                     if (!dark) {
+                        edt { window.setSize(window.width - 144, window.height) }
+                        waitFor("new raster after resizing the same page") {
+                            val image = checkNotNull(node(window, "remote-image")) { "The page became blank during resize" }
+                            image.size.width != firstPageWidth && image.config[OriginalPageBitmapWidth] == image.size.width
+                        }
+                        assertEquals(range, selection(window), "Resizing preserves the exact UTF-16 selection")
+                        shot(window, dark, "resized-selection")
                         click(window, "ask-book-passage")
                         waitFor("question prefilled with selected text") { node(window, "book-passage-question") != null }
                         edt {

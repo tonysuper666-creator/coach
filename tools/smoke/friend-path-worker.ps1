@@ -49,7 +49,7 @@ function Get-AskReplyState($lines, [int]$page) {
         ($words -join '') -replace '\s', ''
     }
     if ($body -match '^(再试一次|重新配对)$' -or
-        $body -match '尚未接通|无法回答|不能回答|尚未核实|连不上|超时|暂时读不到回答') { return 'refused' }
+        $body -match '尚未接通|无法回答|不能回答|尚未核实|连不上|超时|暂时读不到回答|额度(?:已)?用完') { return 'refused' }
     if ($body -match '正在读这段问题') { return 'waiting' }
     if ($body -match "^出处[·•.．:：]?第${page}页$") { return 'answered' }
     return 'waiting'

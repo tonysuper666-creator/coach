@@ -5,11 +5,49 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.*
 import androidx.compose.ui.text.*
 import androidx.compose.ui.unit.*
+import com.coach.domain.reader.ReaderTextRange
 import com.coach.ui.CoachTheme
 import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class BookPageLayoutTest {
+    @Test fun ordinaryTableUsesSavedRowsAndRepeatsItsHeader() = runSkikoComposeUiTest(density = Density(1f)) {
+        val text = "列\n甲😀\n乙\n丙\n丁"
+        val table = ImportedTable(listOf(
+            ImportedTableRow(30, ReaderTextRange(0, 1)),
+            ImportedTableRow(170, ReaderTextRange(2, 5)),
+            ImportedTableRow(310, ReaderTextRange(6, 7)),
+            ImportedTableRow(450, ReaderTextRange(8, 9)),
+            ImportedTableRow(590, ReaderTextRange(10, 11)),
+        ), bodyFontPx = 18f, tableFontPx = 14f)
+        val item = BookIllustration(7, 0, "a".repeat(64), "png", 240, 590, kind = PageVisualKind.TABLE, table = table)
+        // The second row's shortened range would end between the surrogate pair.
+        val invalid = table.copy(rows = table.rows.mapIndexed { i, row ->
+            if (i == 1) row.copy(source = ReaderTextRange(2, 4)) else row
+        })
+        var layouts = emptyList<List<BookLaidPage>>()
+        setContent { CoachTheme {
+            val layouter = BookPageLayouter(rememberTextMeasurer(), LocalDensity.current, BookPageTypography(
+                MaterialTheme.typography.bodyLarge.copy(fontSize = 18.sp, lineHeight = 30.sp),
+                SpanStyle(), SpanStyle(), 40.sp, 32.sp, 12.sp, 32.sp))
+            layouts = listOf(item, item.copy(table = invalid), item.copy(table = null)).map { visual ->
+                layouter.layout(listOf(BookPage(7, text, illustrations = listOf(visual))), 280, 215)
+            }
+        } }
+        waitForIdle()
+        val fragments = layouts.first().filter { it.visuals.isNotEmpty() }.map { it.visuals.single() }
+        val bands = fragments.map { assertNotNull(it.band) }
+        assertEquals(table.rows.dropLast(1).map { it.bottomPx }, bands.map { it.startY })
+        assertEquals(table.rows.drop(1).map { it.bottomPx }, bands.map { it.endY })
+        assertTrue(bands.all { it.headerBottom == table.rows.first().bottomPx })
+        assertTrue(fragments.all { it.replacement == null })
+        for (fallback in layouts.drop(1)) assertNull(fallback.flatMap { it.visuals }.single().band)
+        for (pages in layouts) {
+            assertEquals(text, pages.flatMap { it.sources }.joinToString("") { text.substring(it.startUtf16, it.endUtf16) })
+            assertEquals(text, pages.flatMap { it.runs }.joinToString("") { originalBookSelection(it.text) })
+        }
+    }
+
     @Test fun reflowIsLosslessAndCitationsKeepLocalUtf16Coordinates() = runSkikoComposeUiTest {
         val raw = "第一章 源头\r\n\r\n" + ("天地之间😀𠮷，读书使人明理。".repeat(31) + "\r\n\r\n").repeat(6) +
             "第二章 继续\r\n\r\n" + "The next paragraph has English words and spaces. ".repeat(75)

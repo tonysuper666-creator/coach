@@ -5,6 +5,30 @@ import kotlinx.coroutines.*
 import kotlin.test.*
 
 class PairedBookLearningSupportTest {
+    @Test fun lessonCleansKnownAndUnknownMarksWithoutChangingSourcesOrOrdinaryText(): Unit = runBlocking {
+        val root = Files.createTempDirectory("paired-lesson-marks-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val book = library.importBook(syntheticTextbook(root.resolve("synthetic")))
+            val lesson = book.lessons.first()
+            val block = lesson.blocks.first { !it.heading }
+            val request = BookExplanationRequest(book.id, lesson.id, lesson.blocks)
+            ExplainConsent(library.directory).allow(book.id)
+            for ((input, expected) in listOf(
+                "Plants need light.【S1】" to "Plants need light.",
+                "Plants need light [S1, S9] and water.［S42］" to "Plants need light and water.",
+                "Plants need light and water." to "Plants need light and water.",
+            )) {
+                val support = PairedBookLearningSupport(library, sendLesson = { _, _ ->
+                    ExplainResult.Done(Explanation(input, listOf(Citation("S1", block.id, block.page)), 1))
+                })
+                val reply = assertIs<BookLearningReply.Text>(support.explain(request))
+                assertEquals(expected, reply.text)
+                assertEquals(listOf(BookPassage.from(book, block)), reply.sources)
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun wholeLessonUsesOneConsentedSendAndMapsLastBlockCitation(): Unit = runBlocking {
         val root = Files.createTempDirectory("paired-lesson-")
         try {

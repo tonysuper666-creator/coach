@@ -34,9 +34,7 @@ internal class PairedBookLearningSupport(
                         excerpt
                     }.distinct()
                     require(cited.isNotEmpty() && consent.allowed(request.book))
-                    val readable = result.explanation.citations.fold(result.explanation.text) { text, citation ->
-                        text.replace("【${citation.anchor}】", "")
-                    }.trim()
+                    val readable = ReadableText.withoutCitationMarks(result.explanation.text)
                     answer = BookLearningReply.Text(readable, cited.map {
                         val c = it.citation
                         BookPassage(c.book, c.page, c.start, c.end, it.text)

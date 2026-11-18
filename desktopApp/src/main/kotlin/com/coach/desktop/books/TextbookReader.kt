@@ -1,5 +1,6 @@
 package com.coach.desktop.books
 
+import com.coach.ui.pageturn.PageTurnStyle
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -114,6 +115,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     val nextPage = book.pages.filter { it.number > ui.page }.minByOrNull { it.number }?.number
     var textView by remember(book.id) { mutableStateOf(!hasOriginal || page.ocr) }
     val paging = remember(book.id) { BookPagingState(BookPageAnchor(ui.page)) }
+    var turnStyle by remember { mutableStateOf(PageTurnStyle.Flip) }
     LaunchedEffect(ui.page) {
         paging.followImportPage(ui.page)
     }
@@ -410,7 +412,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                         }
                         result
                     }
-                    BookPageView(book, paging, ranges, turnLayout, libraryDirectory = library.directory, onPosition = { number ->
+                    BookPageView(book, paging, ranges, turnLayout, libraryDirectory = library.directory, turnStyle = turnStyle, onPosition = { number ->
                         if (paging.publishImportPage(number)) {
                             onPage(number)
                             session.goToPage(number)
@@ -515,6 +517,17 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                 V7Tooltip("下一页", shortcut = "→  PageDown") {
                     PaperButton({ turnLayout(ReaderTurn.Next) }, enabled = paging.canNext,
                         modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
+                }
+                // 翻页效果：本次打开内有效；记住与入口以后并进阅读设置（TON-1654）。
+                Spacer(Modifier.width(20.dp))
+                V7Tooltip("翻页效果") {
+                    PaperButton({ turnStyle = when (turnStyle) {
+                        PageTurnStyle.Flip -> PageTurnStyle.Slide
+                        PageTurnStyle.Slide -> PageTurnStyle.None
+                        PageTurnStyle.None -> PageTurnStyle.Flip
+                    } }, modifier = Modifier.testTag("turn-style")) {
+                        Text(when (turnStyle) { PageTurnStyle.Flip -> "翻转"; PageTurnStyle.Slide -> "滑动"; PageTurnStyle.None -> "无" })
+                    }
                 }
             } else
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {

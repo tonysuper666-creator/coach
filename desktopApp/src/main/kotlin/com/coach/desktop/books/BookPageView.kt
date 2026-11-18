@@ -16,6 +16,9 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import com.coach.ui.pageturn.PageTurnState
+import com.coach.ui.pageturn.PageTurnStyle
+import com.coach.ui.pageturn.PageTurnView
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -131,6 +134,8 @@ internal fun BookPageView(
     book: Textbook, state: BookPagingState, highlights: Map<Int, List<IntRange>>,
     onTurn: (ReaderTurn) -> Unit, modifier: Modifier = Modifier, mode: BookPageMode = BookPageMode.Auto,
     libraryDirectory: Path? = null, tableRows: Map<BookIllustration, BookTableRows> = emptyMap(), onPosition: (Int) -> Unit = {},
+    /** 翻页效果。None 沿用原来的淡入换页；Flip/Slide 走共用的 PageTurnView（TON-1671）。 */
+    turnStyle: PageTurnStyle = PageTurnStyle.None,
 ) {
     val density = LocalDensity.current
     val colors = CoachTheme.colors
@@ -191,25 +196,58 @@ internal fun BookPageView(
         }, contentAlignment = Alignment.Center) {
             CompositionLocalProvider(LocalClipboard provides pageClipboard) {
                 SelectionContainer {
+                    if (turnStyle == PageTurnStyle.None) {
                     Row(Modifier.fillMaxHeight().graphicsLayer { alpha = fade.value }) {
-                        val visible = if (spread) 2 else 1
-                        repeat(visible) { side ->
-                            val page = pages.getOrNull(first + side)
-                            Box(Modifier.width(sheetWidth).fillMaxHeight()
-                                .background(if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper)
-                                .clipToBounds().testTag("book-sheet-$side")) {
-                                if (page != null) {
-                                    val remaining = pages.count { it.chapter == page.chapter } - pages.take(first + side + 1).count { it.chapter == page.chapter }
-                                    BookSheet(book.title, page, typography, measurer, widthPx,
-                                        if (spread && side == 1) rightInset else leftInset,
-                                        remaining, spread, side, book.id, libraryDirectory) { failed.add(it) }
+                            val visible = if (spread) 2 else 1
+                            repeat(visible) { side ->
+                                val page = pages.getOrNull(first + side)
+                                Box(Modifier.width(sheetWidth).fillMaxHeight()
+                                    .background(if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper)
+                                    .clipToBounds().testTag("book-sheet-$side")) {
+                                    if (page != null) {
+                                        val remaining = pages.count { it.chapter == page.chapter } - pages.take(first + side + 1).count { it.chapter == page.chapter }
+                                        BookSheet(book.title, page, typography, measurer, widthPx,
+                                            if (spread && side == 1) rightInset else leftInset,
+                                            remaining, spread, side, book.id, libraryDirectory) { failed.add(it) }
+                                    }
                                 }
+                            }
+                        }
+    
+                    } else {
+                        val visible = if (spread) 2 else 1
+                        val turnState = remember(pages) { PageTurnState(pages.size, first, alignToSpread = false) }
+                        // 锚点（目录跳转、键盘、重排）变了：相邻一步翻过去，远的快翻，不动画的直接换
+                        LaunchedEffect(turnState, first, spread) {
+                            if (turnState.position != first) {
+                                val d = first - turnState.position
+                                if (turnState.turning || reduced) turnState.snapTo(first)
+                                else if (kotlin.math.abs(d) == visible) turnState.turn(d > 0)
+                                else turnState.jumpTo(first)
+                            }
+                        }
+                        // 拖页角翻过去、触控板横扫：位置先变，回头同步成锚点
+                        LaunchedEffect(turnState.position) {
+                            val at = turnState.position
+                            if (at != first && !turnState.turning) onTurn(if (at > first) ReaderTurn.Next else ReaderTurn.Previous)
+                        }
+                        val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
+                        PageTurnView(turnState, paper = paper, style = turnStyle, columns = visible, handleKeys = false,
+                            modifier = Modifier.width(sheetWidth * visible).fillMaxHeight().testTag("book-page-turn"),
+                            shadow = if (colors.dark) Color.Black else CoachV7.Light.ink) { index ->
+                            val side = if (spread) Math.floorMod(index - turnState.shownPosition, 2) else 0
+                            val page = pages[index]
+                            Box(Modifier.width(sheetWidth).fillMaxHeight().background(paper).clipToBounds().testTag("book-sheet-$side")) {
+                                val remaining = pages.count { it.chapter == page.chapter } - pages.take(index + 1).count { it.chapter == page.chapter }
+                                BookSheet(book.title, page, typography, measurer, widthPx,
+                                    if (spread && side == 1) rightInset else leftInset,
+                                    remaining, spread, side, book.id, libraryDirectory) { failed.add(it) }
                             }
                         }
                     }
                 }
             }
-            if (spread) Box(Modifier.width(48.dp).fillMaxHeight().background(Brush.horizontalGradient(listOf(
+            if (spread && turnStyle == PageTurnStyle.None) Box(Modifier.width(48.dp).fillMaxHeight().background(Brush.horizontalGradient(listOf(
                 Color.Transparent, (if (colors.dark) Color.Black.copy(alpha = .24f) else CoachV7.Light.ink.copy(alpha = .06f)), Color.Transparent))))
         }
     }

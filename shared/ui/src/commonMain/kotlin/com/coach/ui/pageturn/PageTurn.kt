@@ -56,7 +56,9 @@ enum class PageTurnStyle { Flip, Slide, None }
  * 页里画什么由 [PageTurnView] 的调用方给，这里只管「怎么翻」。
  */
 @Stable
-class PageTurnState(val pageCount: Int, initialPosition: Int = 0) {
+class PageTurnState(val pageCount: Int, initialPosition: Int = 0, private val alignToSpread: Boolean = true) {
+    private fun step(from: Int, fwd: Boolean) = stepPosition(from, pageCount, columns, fwd, alignToSpread)
+    private fun norm(p: Int, cols: Int = columns) = normalizePosition(p, pageCount, cols, alignToSpread)
     var position by mutableIntStateOf(initialPosition.coerceIn(0, maxOf(0, pageCount - 1)))
         private set
     var columns by mutableIntStateOf(1)
@@ -84,13 +86,13 @@ class PageTurnState(val pageCount: Int, initialPosition: Int = 0) {
     /** 0..1，当前翻起的页翻到哪了。 */
     val progress: Float get() = progressAnim.value
 
-    val canGoForward get() = stepPosition(position, pageCount, columns, true) != null
-    val canGoBack get() = stepPosition(position, pageCount, columns, false) != null
+    val canGoForward get() = step(position, true) != null
+    val canGoBack get() = step(position, false) != null
 
     /** 自动翻一页（键盘、点页边、拖选到页边停住时都调它）。返回是否真的翻了。 */
     suspend fun turn(forward: Boolean, durationMs: Int = if (instant) 0 else CoachV7.Motion.pageMs): Boolean {
         if (turning) return false
-        if (stepPosition(position, pageCount, columns, forward) == null) return false
+        if (step(position, forward) == null) return false
         if (durationMs <= 0) { commitStep(forward); return true }
         this.forward = forward; turning = true
         val mine = epoch
@@ -104,12 +106,12 @@ class PageTurnState(val pageCount: Int, initialPosition: Int = 0) {
 
     /** 按提交那一刻的列数算落点，所以动画中途切单双页也不会写回旧落点。 */
     private fun commitStep(fwd: Boolean) {
-        stepPosition(position, pageCount, columns, fwd)?.let { position = it }
+        step(position, fwd)?.let { position = it }
     }
 
     /** 跳页：中间几页只快速翻过去（最多 6 张），不一页一页播；画面上沿途换不同的页。 */
     suspend fun jumpTo(page: Int) {
-        val target = normalizePosition(page, pageCount, columns)
+        val target = norm(page)
         if (target == position || turning) return
         val fwd = target > position
         val leaves = if (instant) 0 else riffleLeaves(position, target, columns)
@@ -122,7 +124,7 @@ class PageTurnState(val pageCount: Int, initialPosition: Int = 0) {
                 if (mine != epoch) return
                 riffle = leaves - i
                 // 第 i 张从沿途的第 i 个位置翻起，最后一张从离目标一步处翻到目标
-                riffleAt = normalizePosition(from + (target - from) * i / leaves, pageCount, columns)
+                riffleAt = norm(from + (target - from) * i / leaves)
                 forward = fwd; turning = true
                 progressAnim.snapTo(0f)
                 progressAnim.animateTo(1f, tween(RIFFLE_MS, easing = LinearOutSlowInEasing))
@@ -136,17 +138,23 @@ class PageTurnState(val pageCount: Int, initialPosition: Int = 0) {
         }
     }
 
+    /** 外部直接改了位置（目录跳转、改字号重排）：不动画，作废在途翻页。 */
+    fun snapTo(page: Int) {
+        epoch++; dragging = false; turning = false; riffle = 0
+        position = norm(page)
+    }
+
     internal fun clampTo(columnsNow: Int) {
         if (columnsNow != columns) {
             // 布局变了：作废正在进行的翻页和拖动，按新列数规整位置
             epoch++; dragging = false; turning = false; riffle = 0
         }
         columns = columnsNow
-        position = normalizePosition(position, pageCount, columnsNow)
+        position = norm(position, columnsNow)
     }
 
     internal suspend fun beginDrag(fwd: Boolean): Boolean {
-        if (instant || turning || stepPosition(position, pageCount, columns, fwd) == null) return false
+        if (instant || turning || step(position, fwd) == null) return false
         forward = fwd; turning = true; dragging = true; progressAnim.snapTo(0f); return true
     }
 
@@ -190,6 +198,8 @@ fun PageTurnView(
     spreadMinDp: Int = PAGE_TURN_SPREAD_MIN_DP,
     showThrough: Boolean = true,
     handleKeys: Boolean = true,
+    /** 调用方已定好单双页（如书页按字号算分界）时传入；不传就按宽度和 [spreadMinDp] 判断。 */
+    columns: Int? = null,
     page: @Composable (Int) -> Unit,
 ) {
     state.reduced = LocalV7ReducedMotion.current
@@ -197,7 +207,7 @@ fun PageTurnView(
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
     var widthPx by remember { mutableIntStateOf(0) }
-    val cols = pageTurnColumns(with(density) { widthPx.toDp().value }, spreadMinDp)
+    val cols = columns ?: pageTurnColumns(with(density) { widthPx.toDp().value }, spreadMinDp)
     if (cols != state.columns) state.clampTo(cols)
     val pageW = with(density) { (if (cols == 2) widthPx / 2 else widthPx).toDp() }
     var scrollAcc by remember { mutableFloatStateOf(0f) }
@@ -209,7 +219,7 @@ fun PageTurnView(
         modifier
             .onSizeChanged { widthPx = it.width }
             .clipToBounds()
-            .focusable()
+            .then(if (handleKeys) Modifier.focusable() else Modifier)
             .onKeyEvent { e ->
                 if (!handleKeys || e.type != KeyEventType.KeyDown) return@onKeyEvent false
                 when (e.key) {

@@ -2,8 +2,12 @@ package com.coach.desktop.books
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
@@ -11,6 +15,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -18,14 +25,18 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
 import com.coach.ui.input.EnterGate
 import com.coach.ui.theme.CoachTheme
-import com.coach.ui.v7.PaperButton
+import com.coach.ui.v7.LocalV7Fonts
 import com.coach.ui.v7.PaperCard
 import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.V7TextButton
@@ -62,17 +73,23 @@ internal fun BookPassageAsk(
     val scroll = rememberScrollState()
     LaunchedEffect(selected) { scroll.scrollTo(0) }
     val colors = CoachTheme.colors
+    // 行首的段号：这一段在本页可选段落里排第几。从阅读页直接点进来的段落可能不在本页列表里，
+    // 这时退回它自己的页码——两者都是读者能对上原文的位置，内部 block id 不露在外面。
+    val ordinal = blocks.indexOfFirst { it.id == selected?.id }.let { if (it >= 0) it + 1 else selected?.page ?: 0 }
     // V7：弹窗是 surface2 的纸；段落、选中的原文和输入框都是叠在上面的一层 surface1 纸，按钮走纸面按钮，不用 Material 描边。
     AlertDialog(modifier = Modifier.testTag("book-passage-dialog"), onDismissRequest = onClose, title = { Text("就这段问一句") }, text = {
         Column(Modifier.heightIn(max = 500.dp).verticalScroll(scroll).testTag("book-passage-ask"),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (selected == null) {
-                Text("选择要问的原文段落", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+                Text("点一段，再问一句", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary,
+                    modifier = Modifier.testTag("book-passage-hint"))
                 if (blocks.isEmpty()) Text("这一页没有可选的文字段落，可以先翻到有文字的页面。", style = MaterialTheme.typography.bodyMedium, color = colors.fgSecondary)
-                blocks.forEachIndexed { index, block ->
-                    PaperButton({ selected = block }, Modifier.fillMaxWidth().testTag("ask-paragraph-$index"),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)) {
-                        Text(ReadableText.reflow(block.text), style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Start, modifier = Modifier.fillMaxWidth())
+                // 一列段落在同一张纸上，行间只用细线分开：读起来是一页原文，不是一排同样的按钮。
+                if (blocks.isNotEmpty()) PaperCard(color = colors.surface1, contentSpacing = 0.dp, contentPadding = PaddingValues(0.dp)) {
+                    blocks.forEachIndexed { index, block ->
+                        if (index > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(colors.borderSubtle))
+                        PassageRow(index + 1, ReadableText.reflow(block.text), rowTag = "ask-paragraph-$index",
+                            onClick = { selected = block })
                     }
                 }
             } else {
@@ -96,11 +113,10 @@ internal fun BookPassageAsk(
                         if (support.consentRequired(book.id)) pendingConsent = input else send(input)
                     }
                 }
-                PaperCard(color = colors.surface1) {
-                    // PDF 抽出的段落每行硬断：按段重排再显示。发出去的、出处里核对的仍是原文一字不改。
-                    Text(ReadableText.reflow(checkNotNull(selected).text), style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary,
-                        modifier = Modifier.testTag("book-selected-passage"))
-                }
+                // 选中的那段保持行的样子：松绿线、`pineWash` 底、段号染松绿，读者一眼看出问的是哪一段。
+                // PDF 抽出的段落每行硬断：按段重排再显示。发出去的、出处里核对的仍是原文一字不改。
+                PassageRow(ordinal, ReadableText.reflow(checkNotNull(selected).text), selected = true,
+                    textTag = "book-selected-passage", textStyle = MaterialTheme.typography.bodyLarge)
                 // Nothing typed here is truncated: over-length text stays editable and copyable, and
                 // the hint below says why sending is closed instead of letting the provider reject it.
                 V7QuestionField(draft, { draft = it }, "想问什么？", isError = tooLong,
@@ -146,6 +162,48 @@ internal fun BookPassageAsk(
             text = { Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
                 Text(passage.text, Modifier.testTag("book-passage-source"))
             } }, confirmButton = { V7TextButton({ source = null }) { Text("回到问题") } })
+    }
+}
+
+/**
+ * 选段就问里的一行原文：行首是段号（数字字体），悬停叠一层浅底，选中时整行 `pineWash` 底、左边一条松绿线。
+ * 行是纸面的一部分：不加阴影、不描一圈边，六段排在一起像一页原文，而不是六个一模一样的按钮。
+ */
+@Composable
+private fun PassageRow(
+    ordinal: Int, text: String, selected: Boolean = false, rowTag: String? = null, textTag: String? = null,
+    textStyle: TextStyle = MaterialTheme.typography.bodyMedium, onClick: (() -> Unit)? = null,
+) {
+    val colors = CoachTheme.colors
+    val pine = v7Pine()
+    val shape = RoundedCornerShape(CoachV7.Radius.s)
+    val wash = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val pressed by interaction.collectIsPressedAsState()
+    // 悬停沿用 PaperButton 的叠色（浅一层、按下深一点），和书架行、选项行是同一套手感。
+    val hoverWash = if (pressed) (if (colors.dark) CoachV7.Dark.selBg else CoachV7.Light.selBg)
+    else (if (colors.dark) CoachV7.Dark.zhuWash else CoachV7.Light.zhuWash)
+    val base = Modifier.fillMaxWidth().then(if (rowTag != null) Modifier.testTag(rowTag) else Modifier)
+        .clip(shape).background(when {
+            selected -> wash
+            hovered || pressed -> hoverWash
+            else -> Color.Transparent
+        })
+        // 松绿线按整行高画在最左边，行多长线就多长；选中那行的段号也跟着染松绿。
+        .drawBehind { if (selected) drawRect(pine, size = Size(3.dp.toPx(), size.height)) }
+    val row = if (onClick != null) base.v7FocusRing(shape).pointerHoverIcon(PointerIcon.Hand)
+        .selectable(selected, interactionSource = interaction, indication = null, role = Role.RadioButton, onClick = onClick)
+    else base
+    Row(row.padding(start = 16.dp, end = 14.dp, top = 10.dp, bottom = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("$ordinal", Modifier.width(20.dp).alignByBaseline()
+            .then(if (textTag != null) Modifier.testTag("$textTag-number") else Modifier),
+            fontFamily = LocalV7Fonts.current.numbers, style = MaterialTheme.typography.labelLarge,
+            textAlign = TextAlign.End, color = if (selected) pine else colors.fgTertiary)
+        Text(text, Modifier.weight(1f).alignByBaseline()
+            .then(if (textTag != null) Modifier.testTag(textTag) else Modifier),
+            style = textStyle, color = colors.fgPrimary)
     }
 }
 

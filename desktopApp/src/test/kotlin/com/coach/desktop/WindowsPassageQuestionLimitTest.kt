@@ -16,15 +16,23 @@ import androidx.compose.ui.unit.Density
 import com.coach.desktop.books.*
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.pdmodel.PDPage
+import org.apache.pdfbox.pdmodel.PDPageContentStream
+import org.apache.pdfbox.pdmodel.font.PDType1Font
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts
 import org.junit.Assume.assumeTrue
 import java.awt.GraphicsEnvironment
 import java.awt.Point
+import java.awt.Rectangle
 import java.awt.Robot
 import java.awt.Window
 import java.awt.event.InputEvent
 import java.awt.event.KeyEvent
+import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
+import javax.imageio.ImageIO
 import javax.swing.SwingUtilities
 import kotlin.test.*
 
@@ -215,6 +223,52 @@ class WindowsPassageQuestionLimitTest {
         }
     }
 
+    /** 选段列表：一句提示，下面每段一行，行首是自己的段号。 */
+    @Test fun everyPassageIsANumberedRowUnderTheChooseHint() {
+        val root = Files.createTempDirectory("coach-passage-rows-")
+        val source = pickerTextbook(root)
+        val controller = TextbookController(TextbookLibrary(root.resolve("library")))
+        val support = Recorder()
+        runSkikoComposeUiTest(size = Size(1100f, 800f), density = Density(1f)) {
+            openPicker(controller, source, support)
+            onNodeWithTag("book-passage-hint").assertTextEquals("点一段，再问一句")
+            val book = controller.state.value.book!!
+            val blocks = StudyCoachCourse.blocks(book.id, listOf(book.pages.first())).filterNot { it.heading }
+            check(blocks.size >= 2) { "the picker needs more than one paragraph to show numbering" }
+            blocks.forEachIndexed { index, block ->
+                // 行首是段号，后面是原文：合并后正好是 [段号, 原文]，不是一整块没有序号的文字。
+                onNodeWithTag("ask-paragraph-$index").assertTextEquals("${index + 1}", ReadableText.reflow(block.text))
+                onNodeWithTag("ask-paragraph-$index").assertIsNotSelected()
+            }
+            onNodeWithTag("ask-paragraph-${blocks.size}").assertDoesNotExist()
+            onNodeWithTag("book-selected-passage").assertDoesNotExist()
+        }
+    }
+
+    /** 选中一段：列表收起，选中的那段带着自己的段号出现，送的仍是这段原文。 */
+    @Test fun theChosenPassageKeepsItsNumberAndSendsThatParagraph() {
+        val root = Files.createTempDirectory("coach-passage-chosen-")
+        val source = pickerTextbook(root)
+        val controller = TextbookController(TextbookLibrary(root.resolve("library")))
+        val support = Recorder()
+        runSkikoComposeUiTest(size = Size(1100f, 800f), density = Density(1f)) {
+            openPicker(controller, source, support)
+            val book = controller.state.value.book!!
+            val blocks = StudyCoachCourse.blocks(book.id, listOf(book.pages.first())).filterNot { it.heading }
+            onNodeWithTag("ask-paragraph-1").performClick(); waitForIdle()
+            onNodeWithTag("ask-paragraph-0").assertDoesNotExist()
+            onNodeWithTag("book-passage-hint").assertDoesNotExist()
+            onNodeWithTag("book-selected-passage-number").assertTextEquals("2")
+            onNodeWithTag("book-selected-passage").assertTextEquals(ReadableText.reflow(blocks[1].text))
+
+            // 行首段号只属于列表：发出去的问题和引用的原文一字不多。
+            onNodeWithTag("book-passage-question").performTextInput("这一段在说什么")
+            onNodeWithTag("book-passage-send").performClick()
+            waitUntil(timeoutMillis = 20_000) { support.questions.size == 1 }
+            assertEquals(listOf("这一段在说什么"), support.questions)
+        }
+    }
+
     /**
      * The same composer in a real Windows window, driven by the OS keyboard instead of the test
      * framework's synthetic events: Shift+Enter keeps a line, Enter sends exactly once through the
@@ -313,6 +367,92 @@ class WindowsPassageQuestionLimitTest {
         }
     }
 
+    /**
+     * 选段列表的真窗口版本：明暗两种主题下核对段号、真的把鼠标移到第二行看悬停浅底有没有画出来，
+     * 再点它，拍下选中那段的松绿线加 `pineWash` 底。悬停不是断言语义能证明的事，这里比对像素。
+     */
+    @Test fun realWindowPickerNumbersRowsAndShowsHoverAndSelection() {
+        assumeTrue(System.getProperty("os.name").startsWith("Windows"))
+        val root = Files.createTempDirectory("coach-passage-picker-")
+        val previousTheme = System.getProperty("coach.windows.theme")
+        try {
+            val file = pickerTextbook(root)
+            for (dark in listOf(false, true)) {
+                System.setProperty("coach.windows.theme", if (dark) "dark" else "light")
+                val controller = TextbookController(TextbookLibrary(root.resolve("library-$dark")))
+                runBlocking {
+                    controller.importBook(file)
+                    controller.chooseLearningPath(LearningPath.READ)
+                    controller.enableLearning()
+                }
+                val book = assertNotNull(controller.state.value.book)
+                val page = book.pages.first()
+                val blocks = StudyCoachCourse.blocks(book.id, listOf(page)).filterNot { it.heading }
+                check(blocks.size >= 2) { "the picker sample needs at least two paragraphs" }
+                NativeWindowForeground.awaitOtherWindowsClosed(keep = null)
+                val window = onEdt { ComposeWindow().apply {
+                    title = "LearningCoach · 选段列表"
+                    val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
+                    setBounds(screen.x + 20, screen.y + 20, minOf(1280, screen.width - 40), minOf(920, screen.height - 40))
+                    setContent { WindowsTextbookHost(controller, learningSupport = Recorder()) { null } }
+                    isAlwaysOnTop = true
+                    isVisible = true
+                    toFront(); requestFocus()
+                } }
+                try {
+                    awaitWindow("reader with the passage composer", window) { windowNode(window, "ask-book-passage") != null }
+                    windowClick(window, "ask-book-passage")
+                    awaitWindow("numbered passage rows", window) { windowNode(window, "ask-paragraph-0") != null }
+                    assertEquals(listOf("点一段，再问一句"), windowText(window, "book-passage-hint"))
+                    blocks.forEachIndexed { index, block ->
+                        assertEquals(listOf("${index + 1}", ReadableText.reflow(block.text)), windowText(window, "ask-paragraph-$index"))
+                    }
+
+                    // 先把真鼠标停在不带悬停的东西上（弹窗标题下面那块），再拍没有悬停的那张。
+                    val robot = Robot().apply { autoDelay = 60 }
+                    val hint = screenPoint(window, "book-passage-hint")
+                    mouseTo(frontWindow(window), robot, Point(hint.x, hint.y - 40))
+                    val idle = dialogImage(window)
+                    saveDialogImage(idle, dark, "pick")
+
+                    // 把真鼠标移到第二行上：悬停只有画出来了才算数，而且变色的地方得是这一行，
+                    // 不是整扇窗重画了一遍。所以先等到像素稳定，再核对变化只在那一行的高度里。
+                    var hover: BufferedImage? = null
+                    var change: Changed? = null
+                    var moved = 0
+                    while (hover == null && moved < 4) {
+                        mouseTo(frontWindow(window), robot, screenPoint(window, "ask-paragraph-1"))
+                        val next = dialogImage(window)
+                        val changed = changedBounds(idle, next)
+                        if (changed.pixels > 0) { hover = next; change = changed }
+                        moved++
+                    }
+                    val hovered = checkNotNull(hover) {
+                        "hovering row 2 changed no pixel; ${NativeWindowForeground.describe(frontWindow(window))}"
+                    }
+                    val changed = checkNotNull(change)
+                    assertTrue(changed.box.height < idle.height / 6,
+                        "hovering row 2 repainted ${changed.box.height} of ${idle.height} pixel rows (${changed.box}), " +
+                            "not just that row; ${NativeWindowForeground.describe(frontWindow(window))}")
+                    saveDialogImage(hovered, dark, "pick-hover")
+
+                    windowClick(window, "ask-paragraph-1")
+                    awaitWindow("the chosen passage keeps its number", window) { windowNode(window, "book-selected-passage") != null }
+                    assertEquals(listOf("2"), windowText(window, "book-selected-passage-number"))
+                    assertEquals(listOf(ReadableText.reflow(blocks[1].text)), windowText(window, "book-selected-passage"))
+                    saveDialogImage(dialogImage(window), dark, "selected")
+                    println("NATIVE_PASSAGE_PICKER theme=${if (dark) "dark" else "light"} rows=${blocks.size} " +
+                        "hoverPixels=${changed.pixels} hoverBox=${changed.box.width}x${changed.box.height} " +
+                        "chosen=2 chosenText=true")
+                } finally { onEdt { window.dispose() } }
+                NativeWindowForeground.awaitOtherWindowsClosed(keep = null)
+            }
+        } finally {
+            if (previousTheme == null) System.clearProperty("coach.windows.theme") else System.setProperty("coach.windows.theme", previousTheme)
+            root.toFile().deleteRecursively()
+        }
+    }
+
     /** Holds the answer in flight and keeps the whole request, so page and paragraph can be checked. */
     private class KeyboardRecorder : BookLearningSupport {
         val questions = mutableListOf<BookPassageQuestion>()
@@ -346,6 +486,104 @@ class WindowsPassageQuestionLimitTest {
 
     private fun fieldText(window: ComposeWindow): String? =
         windowNode(window, "book-passage-question")?.config?.getOrNull(SemanticsProperties.EditableText)?.text
+
+    /**
+     * 一个节点连同它的子节点在无合并树里的全部文字，按子节点顺序：行首段号在前，原文在后。
+     * 可点的行把文字合进了自己，行节点本身没有文字，文字在它的两个子节点上。
+     */
+    private fun windowText(window: ComposeWindow, tag: String): List<String> = onEdt {
+        fun text(node: SemanticsNode): List<String> =
+            node.config.getOrNull(SemanticsProperties.Text).orEmpty().map { it.text } + node.children.flatMap(::text)
+        windowNode(window, tag)?.let(::text).orEmpty()
+    }
+
+    /** 最上层的那个窗口：选段表在窗口自己里还是独立弹窗里，截图和鼠标坐标都跟着它走。 */
+    private fun frontWindow(window: Window): Window = onEdt {
+        window.ownedWindows.filterIsInstance<ComposeDialog>().lastOrNull { it.isVisible }?.let { frontWindow(it) } ?: window
+    }
+
+    /** 节点中心在屏幕上的坐标，和真鼠标用的是同一套坐标。 */
+    private fun screenPoint(window: ComposeWindow, tag: String): Point = onEdt {
+        val bounds = assertNotNull(windowNode(window, tag), tag).boundsInRoot
+        val origin = window.contentPane.locationOnScreen
+        val scale = window.graphicsConfiguration.defaultTransform
+        Point(origin.x + (bounds.center.x / scale.scaleX).toInt(), origin.y + (bounds.center.y / scale.scaleY).toInt())
+    }
+
+    /** 前台窗口当下这一帧的像素。悬停有没有画出来，只能从这里看出来。 */
+    private fun captureFront(window: ComposeWindow): BufferedImage = onEdt {
+        val front = frontWindow(window)
+        when (front) {
+            is ComposeWindow -> front.renderImmediately()
+            is ComposeDialog -> front.renderImmediately()
+        }
+        val file = Files.createTempFile("coach-passage-shot-", ".png").toFile()
+        try {
+            VerifyHooks.capture(front as java.awt.Container, file)
+            checkNotNull(ImageIO.read(file)) { "could not read back the capture of ${front.javaClass.simpleName}" }
+        } finally { file.delete() }
+    }
+
+    /**
+     * 连拍两张一样才算画完了。重排之后的第一次截图可能还是上一帧的合成结果（页面文字压在弹窗上），
+     * 拿它当基准会把整扇窗的重画记成悬停效果。
+     */
+    private fun dialogImage(window: ComposeWindow): BufferedImage {
+        var previous = captureFront(window)
+        repeat(5) {
+            Thread.sleep(150)
+            val next = captureFront(window)
+            if (samePixels(previous, next)) return next
+            previous = next
+        }
+        return previous
+    }
+
+    private fun mouseTo(window: Window, robot: Robot, at: Point) {
+        NativeWindowForeground.action {
+            NativeWindowForeground.activate(window)
+            robot.mouseMove(at.x, at.y)
+            robot.waitForIdle()
+        }
+        Thread.sleep(300)
+    }
+
+    private fun saveDialogImage(image: BufferedImage, dark: Boolean, name: String) {
+        val folder = Path.of("build/screens/passage-picker", if (dark) "dark" else "light")
+        Files.createDirectories(folder)
+        ImageIO.write(image, "png", folder.resolve("$name.png").toFile())
+    }
+
+    private fun changedPixels(a: BufferedImage, b: BufferedImage): Int {
+        if (a.width != b.width || a.height != b.height) return maxOf(a.width * a.height, b.width * b.height)
+        var changed = 0
+        for (y in 0 until a.height) for (x in 0 until a.width) if (a.getRGB(x, y) != b.getRGB(x, y)) changed++
+        return changed
+    }
+
+    private fun samePixels(a: BufferedImage, b: BufferedImage): Boolean =
+        a.width == b.width && a.height == b.height && changedPixels(a, b) == 0
+
+    /** 两张图不一样的地方有多少、落在哪块矩形里。 */
+    private data class Changed(val pixels: Int, val box: Rectangle)
+
+    private fun changedBounds(a: BufferedImage, b: BufferedImage): Changed {
+        if (a.width != b.width || a.height != b.height) return Changed(maxOf(a.width * a.height, b.width * b.height), Rectangle())
+        var pixels = 0
+        var minX = a.width
+        var minY = a.height
+        var maxX = -1
+        var maxY = -1
+        for (y in 0 until a.height) for (x in 0 until a.width) {
+            if (a.getRGB(x, y) == b.getRGB(x, y)) continue
+            pixels++
+            if (x < minX) minX = x
+            if (y < minY) minY = y
+            if (x > maxX) maxX = x
+            if (y > maxY) maxY = y
+        }
+        return if (pixels == 0) Changed(0, Rectangle()) else Changed(pixels, Rectangle(minX, minY, maxX - minX + 1, maxY - minY + 1))
+    }
 
     private fun windowClick(window: ComposeWindow, tag: String) {
         awaitWindow(tag, window) { windowNode(window, tag)?.config?.getOrNull(SemanticsActions.OnClick) != null }
@@ -459,7 +697,8 @@ class WindowsPassageQuestionLimitTest {
         return checkNotNull(result).getOrThrow()
     }
 
-    private fun ComposeUiTest.openComposer(controller: TextbookController, source: Path, support: BookLearningSupport) {
+    /** 打开选段列表但一段都不点：列表本身就是这次要核对的东西。 */
+    private fun ComposeUiTest.openPicker(controller: TextbookController, source: Path, support: BookLearningSupport) {
         setContent { TextbookWorkspace(controller, support = support) { source } }
         ready(controller) { it.catalog.isEmpty() }
         onNodeWithTag("upload-textbook").performClick()
@@ -470,6 +709,10 @@ class WindowsPassageQuestionLimitTest {
         ready(controller) { it.prompt == null }
         onNodeWithTag("ask-book-passage").performClick()
         waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("ask-paragraph-0").fetchSemanticsNodes().isNotEmpty() }
+    }
+
+    private fun ComposeUiTest.openComposer(controller: TextbookController, source: Path, support: BookLearningSupport) {
+        openPicker(controller, source, support)
         onNodeWithTag("ask-paragraph-0").performClick()
     }
 
@@ -481,4 +724,33 @@ class WindowsPassageQuestionLimitTest {
         assertNull(controller.state.value.error)
         waitForIdle()
     }
+}
+
+/**
+ * 第一页就有三段正文的合成教材：选段列表要排成好几行，才看得出它是一列可点的段落、
+ * 而不是一个没有先后的大按钮。页眉照旧是标题块，不会被列进可选的段落里。
+ */
+private fun pickerTextbook(root: Path, title: String = "Synthetic astronomy, three paragraphs"): Path {
+    Files.createDirectories(root)
+    val file = root.resolve("$title.pdf")
+    PDDocument().use { pdf ->
+        pdf.documentInformation.title = title
+        val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+        val page = PDPage(); pdf.addPage(page)
+        PDPageContentStream(pdf, page).use { out ->
+            var y = 710f
+            out.beginText(); out.setFont(font, 18f); out.newLineAtOffset(50f, y); out.showText("Chapter 1 Orbits"); out.endText()
+            y -= 48f
+            for (paragraph in listOf(
+                "An orbit is the path of an object around another body. An orbit can be elliptical.",
+                "Gravity is the attraction between bodies with mass. Gravity acts across distance.",
+                "A rotation is the turning of a body around its axis. One rotation determines a day.",
+            )) {
+                out.beginText(); out.setFont(font, 11f); out.newLineAtOffset(50f, y); out.showText(paragraph); out.endText()
+                y -= 60f
+            }
+        }
+        pdf.save(file.toFile())
+    }
+    return file
 }

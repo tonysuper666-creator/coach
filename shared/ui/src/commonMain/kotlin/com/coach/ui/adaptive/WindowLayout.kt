@@ -18,6 +18,19 @@ data class Hinge(val atDp: Float, val widthDp: Float = 0f, val axis: HingeAxis =
 
 data class WindowSpec(val widthDp: Float, val heightDp: Float, val hinge: Hinge? = null)
 
+/**
+ * How a reading surface opens up: the same rule for the original PDF (TON-1723) and the text reader (TON-1724),
+ * so neither lane invents its own spread threshold. Measured on the whole window — see [LayoutRules.readingSpread].
+ */
+data class ReadingSpread(
+    /** 1 = one page; 2 = facing pages with the spine on the hinge. */
+    val columns: Int,
+    /** Empty band kept clear next to the spine (the hinge itself plus some air); 0 for a single page. */
+    val gutterDp: Float,
+    /** Width of one page; the window width when [columns] is 1. */
+    val pageWidthDp: Float,
+)
+
 data class PaneLayout(
     val widthClass: WidthClass,
     val shortHeight: Boolean,
@@ -55,6 +68,24 @@ object LayoutRules {
     /** 上半屏至少放得下一段讲解，下半屏至少放得下一行答题台。 */
     const val TabletopMinContentDp = 240f
     const val TabletopMinControlsDp = 180f
+    /** 一页至少这么宽，一行才排得下十来个字；再窄就退回单页，别把字挤成一条。 */
+    const val ReadingPageMinDp = 300f
+    /** 书脊处除铰链本身之外再留的空白。 */
+    const val SpreadGutterDp = 16f
+
+    /**
+     * 阅读面按折痕摊开：竖折痕且左右两半都放得下一页时对开，书脊落在折痕上。
+     * 从窗口左边量起，**调用方必须自己收起侧栏**（72dp 的导航栏会把 352 的左页压成 280，摊不成对开）。
+     */
+    fun readingSpread(spec: WindowSpec, minPageDp: Float = ReadingPageMinDp): ReadingSpread {
+        val hinge = spec.hinge?.takeIf { it.axis == HingeAxis.Vertical }
+            ?: return ReadingSpread(1, 0f, spec.widthDp)
+        val left = hinge.atDp.coerceAtLeast(0f)
+        val right = (spec.widthDp - hinge.atDp).coerceAtLeast(0f)
+        return if (left >= minPageDp && right >= minPageDp)
+            ReadingSpread(2, hinge.widthDp + SpreadGutterDp, minOf(left, right))
+        else ReadingSpread(1, 0f, spec.widthDp)
+    }
 
     /** App chrome contract, also used by Desk: portrait Fold is single-column; the directory is a drawer. */
     fun navigation(spec: WindowSpec): PaneLayout {

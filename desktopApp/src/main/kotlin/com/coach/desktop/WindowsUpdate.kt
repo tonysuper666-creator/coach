@@ -1,8 +1,13 @@
 package com.coach.desktop
 
+import com.sun.jna.Native
+import com.sun.jna.Pointer
+import com.sun.jna.ptr.ShortByReference
+import com.sun.jna.win32.StdCallLibrary
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedInputStream
@@ -16,6 +21,22 @@ import javax.net.ssl.HttpsURLConnection
 
 internal data class WindowsRelease(val version: String, val file: String, val size: Long, val sha256: String)
 
+internal interface UpdateKernel32 : StdCallLibrary {
+    fun GetCurrentProcess(): Pointer
+    fun IsWow64Process2(process: Pointer, processMachine: ShortByReference, nativeMachine: ShortByReference): Boolean
+}
+
+internal fun windowsUpdateArch(kernel: UpdateKernel32): String? {
+    val nativeMachine = ShortByReference()
+    // The second output describes the host even when the current JVM runs under Prism.
+    if (!kernel.IsWow64Process2(kernel.GetCurrentProcess(), ShortByReference(), nativeMachine)) return null
+    return when (nativeMachine.value.toUShort().toInt()) {
+        0x8664 -> "x64"   // IMAGE_FILE_MACHINE_AMD64
+        0xaa64 -> "arm64" // IMAGE_FILE_MACHINE_ARM64
+        else -> null
+    }
+}
+
 internal class WindowsUpdate(private val manifest: URI, private val installed: String, private val arch: String) {
     init {
         require(manifest.scheme == "https" && manifest.host != null && manifest.rawUserInfo == null &&
@@ -28,12 +49,11 @@ internal class WindowsUpdate(private val manifest: URI, private val installed: S
             val version = System.getProperty("jpackage.app-version") ?: return null
             val url = WindowsUpdate::class.java.getResourceAsStream("/windows-update-channel.txt")
                 ?.bufferedReader(Charsets.UTF_8)?.use { it.readText().trim() } ?: return null
-            // Preserve the installed runtime's architecture, including x64 running under Prism.
-            val arch = when (System.getProperty("os.arch").lowercase()) {
-                "amd64", "x86_64" -> "x64"
-                "aarch64", "arm64" -> "arm64"
-                else -> return null
-            }
+            val arch = try {
+                windowsUpdateArch(Native.load("kernel32", UpdateKernel32::class.java))
+            } catch (_: UnsatisfiedLinkError) {
+                null
+            } ?: return null
             return WindowsUpdate(URI(url), version, arch)
         }
     }
@@ -45,10 +65,12 @@ internal class WindowsUpdate(private val manifest: URI, private val installed: S
     }
 
     internal fun candidate(json: String): WindowsRelease? {
-        val data = Json.parseToJsonElement(json).jsonObject
+        val manifestData = Json.parseToJsonElement(json).jsonObject
+        val packages = manifestData["packages"]?.jsonArray?.map { it.jsonObject } ?: listOf(manifestData)
+        val data = packages.singleOrNull { it.getValue("arch").jsonPrimitive.content == arch } ?: return null
         fun field(name: String) = data.getValue(name).jsonPrimitive.content
         val version = field("version")
-        if (field("arch") != arch || (versionNumber(version) ?: return null) <= (versionNumber(installed) ?: return null)) return null
+        if ((versionNumber(version) ?: return null) <= (versionNumber(installed) ?: return null)) return null
         val file = field("file")
         require(file.matches(Regex("""[A-Za-z0-9][A-Za-z0-9._-]{0,180}\.msi""")))
         val size = field("size").toLong()

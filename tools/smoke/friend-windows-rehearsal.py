@@ -41,6 +41,7 @@ def install_provider_fixture():
     import httpx
     import subscription_bridge as bridge
     from api_route import ApiRouter
+    from api_budget import CreditLedger
 
     def provider(request):
         require(request.url.host == "api.anthropic.com")
@@ -54,7 +55,8 @@ def install_provider_fixture():
                   {"type": "message_stop"}]
         return httpx.Response(200, content="".join("data: " + json.dumps(e) + "\n\n" for e in events).encode())
 
-    bridge.API_ROUTER = ApiRouter(client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(provider)),
+    bridge.API_ROUTER = ApiRouter(ledger=CreditLedger(Path(os.environ["COACH_API_STATE_DIR"])),
+                                  client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(provider)),
                                   keys={"anthropic": "offline-fixture-only"})
 
     async def forbidden(*args, **kwargs):

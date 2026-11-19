@@ -61,7 +61,9 @@ def cost(model: str, usage: dict, batch: bool = False) -> int:
 
 class ApiRouter:
     def __init__(self, ledger=None, client_factory=None, keys=None):
-        self.ledger = ledger or CreditLedger(Path(os.environ.get("COACH_API_STATE_DIR", str(Path.home() / "Coach/state"))).expanduser())
+        self.ledger = ledger or CreditLedger(
+            Path(os.environ.get("COACH_API_STATE_DIR", str(Path.home() / "Coach/state"))).expanduser(),
+            shared_grant=True)
         self.client_factory = client_factory or (lambda: httpx.AsyncClient(timeout=httpx.Timeout(20, connect=5), trust_env=False, follow_redirects=False))
         self.keys = keys if keys is not None else {
             "anthropic": os.environ.get("COACH_ANTHROPIC_API_KEY", ""),

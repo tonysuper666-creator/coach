@@ -10,11 +10,13 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
 import fcntl
+import hashlib
 import json
 import os
 import re
 from pathlib import Path
 import secrets
+import socket
 import time
 
 MONTHLY_GRANTS = json.loads(Path(__file__).with_name("model_routes.json").read_text())["monthly_grants_usd"]
@@ -38,6 +40,15 @@ def grant_limit_micros(provider):
     return micros(MONTHLY_GRANTS[provider]) * 95 // 100
 
 
+def settled_total(data, provider):
+    recorded = {cid.split(":", 1)[1]: cycle["spent"] for cid, cycle in data["cycles"].items()
+                if cid.startswith(provider + ":")}
+    for month, providers in data["months"].items():
+        summary = providers.get(provider, {}).get("spent_microusd", 0)
+        recorded[month] = max(recorded.get(month, 0), summary)
+    return sum(recorded.values())
+
+
 def atomic_json(path: Path, value: dict):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = path.with_name(path.name + "." + secrets.token_hex(8) + ".tmp")
@@ -57,8 +68,49 @@ def atomic_json(path: Path, value: dict):
 
 
 class CreditLedger:
-    def __init__(self, state: Path, clock=time.time):
+    def __init__(self, state: Path, clock=time.time, *, shared_grant=False):
         self.state, self.clock = state, clock
+        self.shared_grant = shared_grant
+
+    def allocation(self, provider, now, data):
+        """The same immutable plan is installed at every participating ledger."""
+        try:
+            plan = json.loads((self.state / f"grant-allocation-{provider}.json").read_text())
+            start, end = plan["start_utc"], plan["end_utc"]
+            require(type(start) is int and type(end) is int and start <= now < end)
+            require(plan["provider"] == provider and plan["version"] == 1)
+            grant = plan["grant_microusd"]
+            require(type(grant) is int and 0 <= grant <= micros(MONTHLY_GRANTS[provider]))
+            others, writers = plan["other_writers_microusd"], plan["ledgers"]
+            require(type(others) is int and others >= 0 and isinstance(writers, list) and writers)
+            limits = {}
+            for writer in writers:
+                share, baseline = writer["limit_microusd"], writer["prior_settled_microusd"]
+                require(all(type(n) is int and n >= 0 for n in (share, baseline)))
+                identity = (writer["host"], writer["state"])
+                require(identity not in limits)
+                limits[identity] = (share, baseline)
+            require(others + sum(share for share, _ in limits.values()) <= grant * 95 // 100)
+            share, baseline = limits[socket.gethostname(), str(self.state.resolve())]
+            require((self.state / "api-credit-ledger.json").is_file())
+            # Settlement of a reservation from before the window increases this
+            # total too. The audited opening baseline excludes all pending usage.
+            # Use the larger record per month. Older key-specific cycle ids can
+            # lack a month mapping; conservatively count them in addition.
+            settled = settled_total(data, provider)
+            require(baseline <= settled)
+            digest = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
+            pin = self.state / f"grant-window-{provider}.json"
+            if pin.exists():
+                previous = json.loads(pin.read_text())
+                require(previous["digest"] == digest or previous["end_utc"] <= start)
+            else:
+                previous = {}
+            if previous.get("digest") != digest:
+                atomic_json(pin, {"digest": digest, "end_utc": end})
+            return share, settled - baseline, f"{provider}-{start}-{end}"
+        except (KeyError, TypeError, ValueError, OSError, AttributeError):
+            raise Denied("grant_allocation_unavailable") from None
 
     @contextmanager
     def locked(self):
@@ -127,7 +179,8 @@ class CreditLedger:
             raise Denied("invalid_reservation")
         with self.locked():
             data = self.read()
-            month = datetime.fromtimestamp(self.clock(), timezone.utc).strftime("%Y-%m")
+            now = self.clock()
+            month = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m")
             limit = grant_limit_micros(provider)
             cycle_id = f"{provider}:{month}"
             cycle = data["cycles"].setdefault(cycle_id, {"spent": 0, "reserved": {}, "limit": limit})
@@ -141,13 +194,24 @@ class CreditLedger:
             # evidence-based ledger; starting a new month must not erase a call.
             pending = sum(sum(c["reserved"].values()) for cid, c in data["cycles"].items() if cid.startswith(provider + ":"))
             summary = data["months"].setdefault(month, {}).setdefault(provider, {"spent_microusd": 0, "reserved_microusd": 0, "calls": 0})
-            if max(cycle["spent"], summary["spent_microusd"]) + pending + maximum > limit:
+            ceiling = cycle["limit"]
+            used = max(cycle["spent"], summary["spent_microusd"])
+            remaining = ceiling - used - pending
+            period = None
+            if self.shared_grant:
+                share, settled, period = self.allocation(provider, now, data)
+                # A zero lock survives a UTC month change inside the grant.
+                if any(c["limit"] == 0 for cid, c in data["cycles"].items() if cid.startswith(provider + ":")):
+                    share = 0
+                remaining = min(remaining, share - settled - pending)
+                ceiling = min(ceiling, share)
+            if maximum > remaining:
                 # A request can cross the boundary before the settled total reaches
                 # it. Leave a content-free signal for the existing spend monitor.
                 atomic_json(self.state / f"credit-guard-{month}-{provider}.json",
-                            {"maximum_microusd": maximum, "limit_microusd": limit})
-                raise Denied("credit_limit_95_percent")
-            if cycle["spent"] + pending + maximum > cycle["limit"]:
+                            {"maximum_microusd": maximum, "limit_microusd": ceiling})
+                if period:
+                    atomic_json(self.state / f"grant-guard-{period}.json", {"period": period})
                 raise Denied("credit_limit_95_percent")
             token = secrets.token_hex(16)
             if friend is not None:
@@ -156,7 +220,7 @@ class CreditLedger:
                         type(tokens) is not int or tokens <= 0):
                     raise Denied("invalid_friend_reservation")
                 limits = self.friend_limits(friend)
-                day = datetime.fromtimestamp(self.clock(), timezone.utc).strftime("%Y-%m-%d")
+                day = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d")
                 usage = data.setdefault("friends", {}).setdefault(friend, {}).setdefault(day,
                     {"calls": 0, "input_tokens": 0, "output_tokens": 0, "spent_microusd": 0, "reserved": {}, "devices": {}})
                 if (usage["calls"] + len(usage["reserved"]) + 1 > limits["daily_calls"] or
@@ -166,6 +230,8 @@ class CreditLedger:
                 usage["reserved"][token] = {"tokens": tokens, "device": device, "microusd": maximum}
             cycle["reserved"][token] = maximum
             summary["reserved_microusd"] += maximum
+            if period and maximum == remaining:
+                atomic_json(self.state / f"grant-guard-{period}.json", {"period": period})
             self.save(data)
             return cycle_id, month, token
 

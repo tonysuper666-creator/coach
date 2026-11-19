@@ -18,6 +18,7 @@ import com.coach.desktop.books.rememberAnswerDrafts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.swing.Swing
 import kotlinx.coroutines.withContext
@@ -61,8 +62,11 @@ internal fun runWindowsTextbooks() {
         val drafts = rememberAnswerDrafts(controller)
         val exams = rememberLocalExamController(controller.library)
         val scope = rememberCoroutineScope()
-        val closeGuard = remember(drafts, exams, scope) {
-            TextbookCloseGuard({ drafts.flush() && exams.flush() }, scope, ::exitApplication)
+        val saveDrafts: suspend () -> Boolean = remember(drafts, exams) {
+            { drafts.flush() && exams.flush() }
+        }
+        val closeGuard = remember(saveDrafts, scope) {
+            TextbookCloseGuard(saveDrafts, scope, ::exitApplication)
         }
         Window(onCloseRequest = closeGuard::requestClose, title = "LearningCoach", icon = AppIcon.window(),
             state = rememberWindowState(
@@ -80,6 +84,10 @@ internal fun runWindowsTextbooks() {
                 }
             })
             TextbookCloseWarning(closeGuard)
+            WindowsUpdatePrompt(save = {
+                controller.state.first { !it.busy }
+                saveDrafts()
+            }, close = ::exitApplication)
             LaunchedEffect(window) { VerifyHooks.captures(window) }
             LaunchedEffect(Unit) {
                 System.getProperty("coach.autoExitSeconds")?.toLongOrNull()?.let { delay(it * 1000); closeGuard.requestClose() }

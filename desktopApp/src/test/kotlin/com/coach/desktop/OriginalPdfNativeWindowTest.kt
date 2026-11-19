@@ -38,6 +38,7 @@ import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.DriverManager
+import java.sql.SQLException
 import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -68,6 +69,15 @@ class OriginalPdfNativeWindowTest {
                 sql.executeQuery("SELECT text_view FROM view_writes ORDER BY rowid").use { rows ->
                     buildList { while (rows.next()) add(rows.getBoolean(1)) }
                 }
+            }
+        }
+        fun waitForSqlite(label: String, ready: () -> Boolean) = waitFor(label) {
+            try {
+                ready()
+            } catch (error: SQLException) {
+                // A read can briefly meet an exclusive commit after we release the write lock.
+                if ((error.errorCode and 0xff) != 5 /* SQLITE_BUSY */) throw error
+                false
             }
         }
         for (dark in listOf(false, true)) {
@@ -127,7 +137,7 @@ class OriginalPdfNativeWindowTest {
                             }
                         }
                     }
-                    waitFor("SQLite text_view=$text") { stored.savedTextView(book.id) == text }
+                    waitForSqlite("SQLite text_view=$text") { stored.savedTextView(book.id) == text }
                     println("READER_VIEW dark=$dark page=$page text=$text sqlite=$text")
                 }
                 fun releasePage(page: Int) = edt { holdPage = false; publishedPage.intValue = page }
@@ -185,7 +195,7 @@ class OriginalPdfNativeWindowTest {
                             } finally { sql.execute("ROLLBACK") }
                         }
                     }
-                    waitFor("rapid SQLite writes drained in click order") {
+                    waitForSqlite("rapid SQLite writes drained in click order") {
                         recordedWrites() == priorWrites + sequence
                     }
                     releasePage(target)

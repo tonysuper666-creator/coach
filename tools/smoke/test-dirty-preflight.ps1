@@ -37,10 +37,72 @@ foreach ($c in $dirtyCases) {
     Check "dirty-$($c.Name)" $ok $(if ($got) { $got.Summary } else { 'none' })
 }
 
-# 3. 实调用 Win32 前台探测不抛异常
+# 3. 实调用 Win32 前台探测、空闲时间与串流探测不抛异常
 $liveOk = $true; $liveNote = 'ok'
-try { $null = Find-ForeignForegroundWindow } catch { $liveOk = $false; $liveNote = $_.Exception.Message }
+try {
+    $null = Find-ForeignForegroundWindow
+    $liveIdleMs = [WD]::GetLastInputIdleMs()
+    $null = Get-ActiveStreamingSession
+    if ($liveIdleMs -lt 0) { throw "GetLastInputIdleMs returned $liveIdleMs" }
+    $liveNote = "idleMs=$liveIdleMs"
+} catch { $liveOk = $false; $liveNote = $_.Exception.Message }
 Check 'live-win32-probe-runs' $liveOk $liveNote
+
+# 3a. 桌面占人判定（空闲时间 + Apollo/Moonlight 串流）与真正脏窗口（其他 Coach MainKt、登记的测试遗留外窗）
+$regTmp = Join-Path ([IO.Path]::GetTempPath()) ('fp-ext-reg-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Force $regTmp | Out-Null
+try {
+    $edgeFg = { [pscustomobject]@{ Hwnd = 2230432L; Pid = 20664; Visible = $true; Cloaked = $false; Class = 'Chrome_WidgetWin_1'; Process = 'msedge' } }
+    $termFg = { [pscustomobject]@{ Hwnd = 721576L; Pid = 8924; Visible = $true; Cloaked = $false; Class = 'CASCADIA_HOSTING_WINDOW_CLASS'; Process = 'WindowsTerminal' } }
+    $noCoach = { @() }
+    $noStream = { $null }
+    $idle15m = { 900.0 }
+
+    # Edge 或 WindowsTerminal 在前台，只要键鼠空闲 >=10分钟 且无串流、无其他 Coach/遗留外窗 -> 放行
+    $pfEdge = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+    Check 'preflight-allows-idle-edge-foreground' ($pfEdge.Clean -and $pfEdge.Foreground.Process -eq 'msedge') $pfEdge.Reason
+    $pfTerm = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $termFg
+    Check 'preflight-allows-idle-terminal-foreground' ($pfTerm.Clean -and $pfTerm.Foreground.Process -eq 'WindowsTerminal') $pfTerm.Reason
+
+    # 近 10 分钟内有键鼠输入 -> 拒绝（即使前景是桌面壳）
+    $pfRecentInput = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe { 120.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach
+    Check 'preflight-rejects-recent-human-input' (-not $pfRecentInput.Clean -and $pfRecentInput.Reason -like '*120*') $pfRecentInput.Reason
+
+    # GetLastInputInfo 读取失败（<0）-> 保守拒绝
+    $pfUnreadableIdle = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe { -1.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach
+    Check 'preflight-rejects-unreadable-idle' (-not $pfUnreadableIdle.Clean) $pfUnreadableIdle.Reason
+
+    # 键鼠空闲但 Apollo/Moonlight 正在串流 -> 拒绝
+    $pfStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Pid = 12640; Ports = @(47998, 48010); Summary = 'sunshine pid=12640 streaming ports=47998,48010' } } -CoachWindowProbe $noCoach
+    Check 'preflight-rejects-active-stream' (-not $pfStream.Clean -and $pfStream.Reason -like '*Apollo/Moonlight*') $pfStream.Reason
+
+    # 本轮之外的其他 Coach MainKt 窗口存在 -> 即使空闲无串流也算脏
+    $pfCoach = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe { @([pscustomobject]@{ Kind = 'coach-window'; Pid = 21116; Process = 'java'; Summary = 'coach-window java pid=21116' }) } -ForegroundProbe $edgeFg
+    Check 'preflight-rejects-foreign-coach' (-not $pfCoach.Clean -and $pfCoach.DirtyWindows.Count -eq 1 -and $pfCoach.DirtyWindows[0].Pid -eq 21116) $pfCoach.Reason
+
+    # 测试登记的遗留外窗（PID + StartTime 对得上）-> 算脏；死掉/复用后的过期登记自动清理并放行
+    $leftover = $null; $leftTicks = 0L
+    try {
+        $leftover = Start-Process powershell.exe -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 60"' -PassThru -WindowStyle Hidden
+        $leftTicks = Get-TrackedProcessStartTicks $leftover
+        $null = Register-ExternalWindowPid -ProcessId $leftover.Id -StartTimeTicks $leftTicks -Kind 'notepad' -RegistryDir $regTmp
+        $pfLeftover = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        Check 'preflight-rejects-registered-leftover' (-not $pfLeftover.Clean -and $pfLeftover.DirtyWindows.Count -eq 1 -and $pfLeftover.DirtyWindows[0].Pid -eq $leftover.Id) $pfLeftover.Reason
+
+        # 伪造一条同 PID 但 StartTime 不匹配的过期登记：必须被判定为复用/已退并清掉文件
+        Unregister-ExternalWindowPid -ProcessId $leftover.Id -StartTimeTicks $leftTicks -RegistryDir $regTmp
+        $null = Register-ExternalWindowPid -ProcessId $leftover.Id -StartTimeTicks ($leftTicks + 1L) -Kind 'stale-reused' -RegistryDir $regTmp
+        $pfStale = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        Check 'preflight-prunes-mismatched-registration' ($pfStale.Clean -and @(Get-ChildItem $regTmp -Filter '*.json').Count -eq 0) "files=$(@(Get-ChildItem $regTmp -Filter '*.json').Count)"
+    } finally {
+        if ($leftover -and $leftTicks -gt 0L) {
+            Stop-TrackedPid -ProcessId $leftover.Id -StartTimeTicks $leftTicks -WaitMs 5000
+            Unregister-ExternalWindowPid -ProcessId $leftover.Id -StartTimeTicks $leftTicks -RegistryDir $regTmp
+        }
+    }
+} finally {
+    Remove-Item -Recurse -Force $regTmp -ErrorAction SilentlyContinue
+}
 
 # 4. 受管 PID 在 finally 关掉并核对已退出（含 StartTime 防误判校验）
 # 收尾只走 Stop-TrackedPid：身份确认才停 1 次；已退出或 PID 被复用 0 次；启动时间读不到时 0 次并报 CLEANUP_UNVERIFIED。

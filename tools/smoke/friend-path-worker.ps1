@@ -129,17 +129,19 @@ $serverPort = ([uri]$env:COACH_URL).Port
 if ($serverPort -in 18791, 8791, 8790) { throw "拒绝：$serverPort 是生产端口，冒烟只用隔离测试端口。" }
 $script:RepoMarker = $Repo
 if (-not $Background) {
-    $foreign = Find-ForeignForegroundWindow
-    if ($foreign) {
-        $reason = "桌面存在非本轮拉起的前台窗口（$($foreign.Summary)）"
+    $preflight = Test-DesktopPreflight
+    if (-not $preflight.Clean) {
         @{
             dirty = $true
             exitCode = 2
-            reason = $reason
-            foreground = $foreign
+            reason = $preflight.Reason
+            dirtyWindows = $preflight.DirtyWindows
+            activeUser = $preflight.ActiveUser
+            idleSeconds = $preflight.IdleSeconds
+            foreground = $preflight.Foreground
             time = (Get-Date).ToUniversalTime().ToString('o')
-        } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $OutDir 'environment-dirty.json')
-        Note "ENVIRONMENT_DIRTY：$reason"
+        } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 (Join-Path $OutDir 'environment-dirty.json')
+        Note "ENVIRONMENT_DIRTY：$($preflight.Reason)"
         $global:LASTEXITCODE = 2
         exit 2
     }

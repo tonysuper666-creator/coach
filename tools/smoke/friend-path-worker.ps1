@@ -12,6 +12,10 @@ param(
     [string]$Runtime = '',
     [ValidatePattern('^[\p{L}\p{N}_-]{1,32}$')][string]$Marker = '',
     [int]$StartTimeoutSec = 150,
+    [int]$LessonNumber = 181,                   # 第⑤步要选的整节：目录里的序号（181 = 零基 180，物理第 150 页，在已授权的 131–156 页内）
+    [int]$StopAfter = 7,                        # 只跑到这一步（5 = 只占第 ⑤ 步区段，不进第 ⑥ 步）
+    [int]$LessonPage = 150,                     # 该节应落的物理页；界面标签不是这页就不发请求
+
     [switch]$KeepGoing                          # 某步失败后仍尝试后面不依赖它的步骤（默认停在第一个失败）
 )
 $ErrorActionPreference = 'Stop'
@@ -326,6 +330,24 @@ try {
         Click-Label 5 @('开始学') '找不到「开始学」'; Start-Sleep -Seconds 2
         Click-Label 5 @('边看边学') '找不到「边看边学」'; Start-Sleep -Seconds 1
         Click-Label 5 @('开始边看边学') '找不到「开始边看边学」'
+        # 选中经授权的整节：目录 → 滚到序号 → 点 → 收起；核对「本节原文 · 第 N 页」就是授权页，才允许发请求
+        Start-Sleep -Seconds 4
+        Click-Label 5 @('目录') '找不到「目录」'; Start-Sleep -Seconds 3
+        $entry = $null
+        foreach ($k in 1..60) {
+            $tocLines = Shot 5 "toc$k"
+            foreach ($tl in $tocLines) { if ($tl.Text -match ("^$LessonNumber" + '[\.．。,，、]')) { $entry = Find-Text @($tl) $tl.Text.Substring(0, "$LessonNumber".Length); break } }
+            if ($entry) { break }
+            Scroll-At 300 700 -8; Start-Sleep -Milliseconds 700
+        }
+        if (-not $entry) { Fail 5 "目录里滚了 60 次也没找到第 $LessonNumber 条，没有发请求" }
+        Click-At $entry.X $entry.Y; Start-Sleep -Seconds 3
+        Click-Label 5 @('收起目录') '找不到「收起目录」'; Start-Sleep -Seconds 2
+        $sectionLines = Shot 5 'section'
+        $label = $sectionLines | Where-Object { $_.Text -match '本节原文' } | Select-Object -First 1
+        $labelPage = if ($label) { [regex]::Match($label.Text, '第\s*(\d+)\s*页').Groups[1].Value } else { '' }
+        if (-not $labelPage) { Fail 5 '选中节后界面没有「本节原文 · 第 N 页」标签，没有发请求' }
+        if ([int]$labelPage -ne $LessonPage) { Fail 5 "选中的第 $LessonNumber 条落在第 $labelPage 页，不是授权页第 $LessonPage 页，没有发请求（见 5-section.png）" }
         $deadline = (Get-Date).AddSeconds(90); $res = $null
         while ((Get-Date) -lt $deadline -and -not $res) {
             Start-Sleep -Seconds 5; $lines = Shot 5 'learn'
@@ -349,6 +371,7 @@ try {
         }
         if ($res -eq 'ok') {
             $sourcePage = [regex]::Match($source.Text, '第\s*(\d+)\s*页').Groups[1].Value
+            if ([int]$sourcePage -ne $LessonPage) { Fail 5 "讲解自己的出处是第 $sourcePage 页，不是本节页第 $LessonPage 页" }
             Click-At $sourceBox.X $sourceBox.Y
             $deadline = (Get-Date).AddSeconds(30)
             $verified = $false
@@ -377,10 +400,11 @@ try {
             } while ((Get-Date) -lt $deadline)
             if ($returned -and ($verified -or $KeepGoing)) { Click-At $returned.X $returned.Y }
             if (-not $verified) { Fail 5 $problem }
-            Pass 5 '边看边学出了讲解正文和带页码的出处，点出处回到对应原文页'
+            Pass 5 "授权节（目录第 $LessonNumber 条，第 $LessonPage 页）出了讲解正文和自己的第 $sourcePage 页出处，点出处回到对应原文页"
         } elseif ($res) { Fail 5 "边看边学的讲解没出来，界面说「$($res.Substring(3))」" } else { Fail 5 '90 秒内没有同时看到讲解正文和带页码的出处（见 5-learn.png）' }
     } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $five = 'failed' }
     if ($five -and -not $KeepGoing) { throw 'STEP_FAILED' }
+    if ($StopAfter -le 5) { throw 'STEP_FAILED' }   # 按要求停在第 ⑤ 步之后；已记录的结果不变
 
     # ⑥ 朋友自己的书：按节现出题，真实点一个选项，再等答后讲解和小结；不依赖整理题库准入。
     $six = $null

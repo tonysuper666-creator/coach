@@ -126,8 +126,17 @@ public class WD {
             if (rootUnder == h && SetCursorPos(clickX, clickY) && GetCursorPos(out actualPt)) {
               IntPtr actualUnder = WindowFromPoint(actualPt);
               IntPtr actualRoot = (actualUnder != IntPtr.Zero) ? GetAncestor(actualUnder, 2) : IntPtr.Zero; // GA_ROOT
-              bool inCaptionBand = actualPt.X >= r.L && actualPt.X < r.R && actualPt.Y >= r.T && actualPt.Y < Math.Min(r.B, r.T + 48);
-              if (actualRoot == h && inCaptionBand) {
+              // Ask the target itself what the actual cursor point is (WM_NCHITTEST, screen
+              // coordinates). Click only on a draggable caption (HTCAPTION = 2); close/min/max
+              // buttons, borders, client area, a hung target or any other answer => zero input.
+              UIntPtr hit = UIntPtr.Zero;
+              bool onCaption = false;
+              if (actualUnder == h && actualRoot == h) {
+                IntPtr hitLParam = (IntPtr)((actualPt.Y << 16) | (actualPt.X & 0xFFFF));
+                onCaption = SendMessageTimeout(h, 0x84, UIntPtr.Zero, hitLParam, 0x23, 200, out hit) != IntPtr.Zero
+                  && hit.ToUInt64() == 2UL;
+              }
+              if (onCaption) {
                 LastActivationInjectedInput = true;
                 mouse_event(2, 0, 0, 0, IntPtr.Zero);
                 System.Threading.Thread.Sleep(30);

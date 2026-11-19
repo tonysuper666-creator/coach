@@ -528,7 +528,7 @@ exit /b 0
             ([WD]::LastActivationFailure -eq 'WM_NULL confirmation failed')
         ) "ok=$zeroAct injected=$([WD]::LastActivationInjectedInput) fail=$([WD]::LastActivationFailure)"
 
-        # 8a-0. 标题栏点击分支替身回归：正常移动落入目标标题栏才点；移动失败 / 实际落点不可读 / 被系统裁出目标或裁出标题栏均零输入
+        # 8a-0. 标题栏点击分支替身回归：实际落点经目标 WM_NCHITTEST 确认为 HTCAPTION 才点；移动失败 / 落点不可读 / 裁出目标 / 裁到关闭按钮或客户区 / 命中测试无应答均零输入
         if (-not ('CoachCaptionGuardCheck' -as [type])) {
             $wdSrc = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'Win-Drive.ps1')
             $cgStart = $wdSrc.IndexOf('    if (ForegroundAtConfirmation != h && IsWindowEnabled(h)) {')
@@ -552,13 +552,30 @@ public static class CoachCaptionGuardCheck {
     static void GetWindowThreadProcessId(IntPtr h, out uint pid) { pid = 1; }
     static bool GetWindowRect(IntPtr h, out RECT r) { r = new RECT { L = 200, T = 200, R = 1000, B = 900 }; return true; }
     static bool SetWindowPos(IntPtr h, IntPtr z, int x, int y, int w, int b, uint flags) { return true; }
-    static IntPtr SendMessageTimeout(IntPtr h, uint m, UIntPtr w, IntPtr p, uint flags, uint ms, out UIntPtr result) { result = UIntPtr.Zero; return (IntPtr)1; }
+    // 与 QA 在自建隐藏窗口上实测的命中结果一致：窗口 (200,200)-(1000,900)，标题栏行 y<230，
+    // 右上角 x>=940 是关闭按钮 HTCLOSE(20)，标题栏其余是 HTCAPTION(2)，下面是客户区 HTCLIENT(1)。
+    static int HitTest(int x, int y) {
+        if (WindowFromPoint(new POINT { X = x, Y = y }) != Target) return 0;
+        if (y < 230) return (x >= 940) ? 20 : 2;
+        return 1;
+    }
+    static IntPtr SendMessageTimeout(IntPtr h, uint m, UIntPtr w, IntPtr p, uint flags, uint ms, out UIntPtr result) {
+        result = UIntPtr.Zero;
+        if (m == 0x84) {
+            if (h != Target || mode == "hittest-hung") return IntPtr.Zero;
+            int lp = (int)p.ToInt64();
+            result = (UIntPtr)(uint)HitTest((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF));
+        }
+        return (IntPtr)1;
+    }
     static IntPtr WindowFromPoint(POINT p) { return (p.X >= 200 && p.X < 1000 && p.Y >= 200 && p.Y < 900) ? Target : Other; }
     static IntPtr GetAncestor(IntPtr h, uint flags) { return h; }
     static bool SetCursorPos(int x, int y) {
         if (mode == "failed-move") return false;
-        if (mode == "normal" || mode == "unreadable-pos") { cursorX = x; cursorY = y; }
+        if (mode == "normal" || mode == "unreadable-pos" || mode == "hittest-hung") { cursorX = x; cursorY = y; }
         else if (mode == "clipped-client") { cursorX = x; cursorY = 500; }
+        else if (mode == "clipped-close") { cursorX = 980; cursorY = 218; }
+        else if (mode == "clipped-client-band") { cursorX = 466; cursorY = 244; }
         return true;
     }
     static bool GetCursorPos(out POINT p) {
@@ -567,7 +584,7 @@ public static class CoachCaptionGuardCheck {
     }
     static void mouse_event(uint flags, int x, int y, uint data, IntPtr extra) {
         Events++;
-        if (WindowFromPoint(new POINT { X = cursorX, Y = cursorY }) != Target || cursorY >= 248) OtherEvents++;
+        if (HitTest(cursorX, cursorY) != 2) OtherEvents++;
     }
     static IntPtr ReadForegroundSettled(bool accepted) { return (OtherEvents == 0 && Events > 0) ? Target : Other; }
     public static bool Run(string scenario) {
@@ -593,6 +610,9 @@ $cgBlock
             @{ Name = 'caption-guard-unreadable-cursor-pos'; Scenario = 'unreadable-pos'; ExpectOk = $false; ExpectEvents = 0; ExpectInjected = $false }
             @{ Name = 'caption-guard-clipped-off-target'; Scenario = 'clipped-move'; ExpectOk = $false; ExpectEvents = 0; ExpectInjected = $false }
             @{ Name = 'caption-guard-clipped-outside-caption'; Scenario = 'clipped-client'; ExpectOk = $false; ExpectEvents = 0; ExpectInjected = $false }
+            @{ Name = 'caption-guard-clipped-to-close-button'; Scenario = 'clipped-close'; ExpectOk = $false; ExpectEvents = 0; ExpectInjected = $false }
+            @{ Name = 'caption-guard-clipped-to-client-in-top-band'; Scenario = 'clipped-client-band'; ExpectOk = $false; ExpectEvents = 0; ExpectInjected = $false }
+            @{ Name = 'caption-guard-hittest-unconfirmed'; Scenario = 'hittest-hung'; ExpectOk = $false; ExpectEvents = 0; ExpectInjected = $false }
         )) {
             $cgOk = [CoachCaptionGuardCheck]::Run($cgCase.Scenario)
             Check $cgCase.Name (

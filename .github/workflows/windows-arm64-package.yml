@@ -26,7 +26,9 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
         with:
-          distribution: temurin
+          # Keep Java 17 aligned with x64; Temurin's 17.0.20 release has no
+          # Windows ARM64 JDK, while Microsoft publishes a native build.
+          distribution: microsoft
           java-version: '17'
           architecture: aarch64
       - name: Record host and Java architecture

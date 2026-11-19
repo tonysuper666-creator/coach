@@ -1,12 +1,29 @@
 param(
     [Parameter(Mandatory)][string]$OutDir,
     [Parameter(Mandatory)][string]$Fixture,
-    [Parameter(Mandatory)][string]$InstallResult
+    [Parameter(Mandatory)][string]$InstallResult,
+    [string]$TestDesktop
 )
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:PROCESSOR_ARCHITECTURE -ne 'ARM64') {
     throw 'This probe is restricted to a disposable GitHub ARM64 runner.'
 }
+Add-Type -Path (Join-Path $PSScriptRoot 'ArmSmokeDesktop.cs')
+if (-not $TestDesktop) {
+    New-Item -ItemType Directory -Force $OutDir | Out-Null
+    $outPath = (Resolve-Path -LiteralPath $OutDir).Path
+    $fixturePath = (Resolve-Path -LiteralPath $Fixture).Path
+    $resultPath = (Resolve-Path -LiteralPath $InstallResult).Path
+    $name = 'CoachSmoke-' + [Guid]::NewGuid().ToString('N')
+    $argsForDriver = '-NoProfile -NonInteractive -File "{0}" -OutDir "{1}" -Fixture "{2}" -InstallResult "{3}" -TestDesktop {4}' -f `
+        $PSCommandPath, $outPath, $fixturePath, $resultPath, $name
+    $code = [ArmSmokeDesktop]::Run((Join-Path $PSHOME 'powershell.exe'), $argsForDriver, $name)
+    $log = Join-Path $outPath 'desktop.log'
+    if (Test-Path $log) { Get-Content -LiteralPath $log -Encoding UTF8 }
+    if ($code -ne 0) { throw "Installed desktop probe exited $code" }
+    return
+}
+Start-Transcript -LiteralPath (Join-Path $OutDir 'desktop.log') -ErrorAction Stop | Out-Null
 . (Join-Path $PSScriptRoot 'Win-Drive.ps1')
 Add-Type -Path (Join-Path $PSScriptRoot 'InstalledShelf.cs') -ReferencedAssemblies System.Drawing
 Add-Type -AssemblyName UIAutomationClient
@@ -104,7 +121,7 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
     if (Test-Path $env:COACH_LIBRARY_DIR) { throw 'The scan probe needs a fresh library' }
     New-Item -ItemType Directory $env:COACH_LIBRARY_DIR, $env:COACH_CLIENT_DIR | Out-Null
     $before = @(Get-CimInstance Win32_Process -Filter "Name='LearningCoach.exe'" | ForEach-Object { [int]$_.ProcessId })
-    $app = Start-Process -FilePath $exe -PassThru
+    $app = [ArmSmokeDesktop]::Start($exe, '', $TestDesktop)
     $own = @()
     try {
         $deadline = (Get-Date).AddSeconds(300)
@@ -119,15 +136,6 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
         Save-OwnWindow 'installed-window-printwindow.png'
         Write-Output 'Captured installed app window via PrintWindow; image requires visual review.'
 
-        # On this disposable runner, dismiss only a foreground WWAHost as explicitly
-        # authorized. Input still uses Win-Drive's foreground and PID guards.
-        $foreground = [WD]::GetForegroundWindow(); $owner = 0
-        [WD]::GetWindowThreadProcessId($foreground, [ref]$owner) | Out-Null
-        $front = Get-Process -Id $owner -ErrorAction SilentlyContinue
-        if ($front -and $front.ProcessName -eq 'WWAHost') {
-            Stop-Process -Id $owner -Force
-            Write-Output "Closed foreground WWAHost pid=$owner on the disposable runner"
-        }
         $upload = -join ([char[]](0x4e0a,0x4f20,0x6559,0x6750))
         $invoked = $false
         try {
@@ -172,3 +180,4 @@ if ([IO.Path]::GetFileName($Fixture) -eq '01-clean-serif.png') {
     $pdf = Join-Path (Split-Path -Parent $Fixture) 'three-scanned-pages.pdf'
     Test-InstalledScan (Join-Path $OutDir 'pdf') $pdf
 }
+Stop-Transcript | Out-Null

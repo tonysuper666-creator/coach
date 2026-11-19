@@ -566,7 +566,7 @@ internal fun TextbookReader(
                     val citation = if (boxes != null && located is com.coach.desktop.reader.Located.Found)
                         CitedPdfLocation(boxes, located) else null
                     OriginalPdfReader(book, library, pdf, scroll, pdfLayers, citation, quoteAnchor, highlightRevision,
-                        turnStyle, publishPdfPage)
+                        turnStyle, publishPdfPage, onTurn = turnTo)
                 } else {
                     // 页图就位前先铺一张同尺寸的纸（纸面底色、一道细边），图到了原地换掉：
                     // 不出现转圈，下面的按钮和批注也不被推下去。打不开时同一张纸上给重试。

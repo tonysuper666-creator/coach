@@ -33,8 +33,10 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 private const val FallbackPdfAspect = 0.7071f
+private const val TouchPdfRasterLimit = 3072
 
 internal data class PdfSelection(val page: Int, val range: ReaderTextRange, val top: Float)
 
@@ -136,7 +138,7 @@ internal fun originalPdfSheets(pages: List<Int>, aspects: Map<Int, Float>, width
 internal fun OriginalPdfReader(
     book: Textbook, library: TextbookLibrary, reading: OriginalPdfReading, scroll: ScrollReadState,
     layers: OriginalPdfTextLayers, citation: CitedPdfLocation?, quote: String?, highlightRevision: Int,
-    turnStyle: PageTurnStyle, onPage: (Int) -> Unit,
+    turnStyle: PageTurnStyle, onPage: (Int) -> Unit, onTurn: (Int) -> Unit,
 ) {
     val pageNumbers = remember(book.id, book.pages.size) { book.pages.map(BookPage::number) }
     val aspects by produceState(emptyMap<Int, Float>(), library, book.id) {
@@ -147,6 +149,13 @@ internal fun OriginalPdfReader(
     val currentPage by rememberUpdatedState(onPage)
     val colors = CoachTheme.colors
     val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
+    val turnByTouch: (Boolean) -> Unit = { forward ->
+        val target = if (reading.scrolling) {
+            val position = pageNumbers.indexOf(reading.page)
+            if (position < 0) null else pageNumbers.getOrNull(position + if (forward) 1 else -1)
+        } else reading.adjacent(forward)
+        target?.let(onTurn)
+    }
 
     val leaf: @Composable (Int, Modifier) -> Unit = { number, modifier ->
         val page = checkNotNull(book.page(number))
@@ -177,8 +186,9 @@ internal fun OriginalPdfReader(
                     first = false
                 }
         }
+        val swipe = if (originalPdfTouchEnabled) Modifier.originalPdfSwipe(onTurn = turnByTouch) else Modifier
         ScrollReadView(scroll, desk = colors.bgCanvas, paper = Color.Transparent,
-            modifier = Modifier.fillMaxSize().testTag("original-pdf-scroll"), gap = 24.dp, handleKeys = false,
+            modifier = Modifier.fillMaxSize().testTag("original-pdf-scroll").then(swipe), gap = 24.dp, handleKeys = false,
             scrollbar = { BookReadScrollbar(it) }) { index ->
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
                 Column(Modifier.widthIn(max = 1198.dp).fillMaxWidth()
@@ -216,8 +226,15 @@ internal fun OriginalPdfReader(
                 }
             }
         }
-        PageTurnView(state, paper = paper, modifier = Modifier.width(sheetWidth).fillMaxHeight().testTag("original-pdf-paged"),
-            style = turnStyle, columns = columns, handleKeys = false, showThrough = false) { slot ->
+        val swipe = if (originalPdfTouchEnabled) Modifier.originalPdfSwipe(
+            edgeFraction = if (columns == 2) .08f else .14f,
+            travelFraction = if (columns == 2) .9f else .6f,
+            onTurn = turnByTouch,
+        ) else Modifier
+        PageTurnView(state, paper = paper,
+            modifier = Modifier.width(sheetWidth).fillMaxHeight().testTag("original-pdf-paged").then(swipe),
+            style = turnStyle, columns = columns, handleKeys = false, showThrough = false,
+            handleTouch = !originalPdfTouchEnabled) { slot ->
             val number = sheets[slot / columns].getOrNull(slot % columns)
             if (number != null) key(number) {
                 val right = columns == 2 && slot % columns == 1
@@ -253,9 +270,16 @@ private fun OriginalPdfLeaf(
 ) {
     var pixelWidth by remember { mutableIntStateOf(0) }
     var retry by remember { mutableIntStateOf(0) }
+    val reveal = reading.destination.takeIf { it.page == page.number && it.reveal }
+    val zoom = if (originalPdfTouchEnabled) remember(page.number, reveal) { PdfTouchZoom() } else null
+    val renderWidth = if (zoom == null || zoom.scale == 1f || pixelWidth == 0) pixelWidth else {
+        // Keep the current raster during the pinch. Bucket the next request for cache reuse.
+        val target = (pixelWidth * zoom.scale / 128f).roundToInt() * 128
+        target.coerceIn(pixelWidth.coerceAtMost(TouchPdfRasterLimit), TouchPdfRasterLimit)
+    }
     LaunchedEffect(layers, page.number, retry) { layers.keep(page) }
     val layer = layers[page.number]?.getOrNull()
-    val image = rememberOriginalPageImage(library, book, page.number, true, pixelWidth, retry)
+    val image = rememberOriginalPageImage(library, book, page.number, true, renderWidth, retry)
     val displayed = (image as? PageImage.Ready)?.image?.let { it.width.toFloat() / it.height }
     SideEffect { reading.rasters[page.number] = PdfRasterStatus(displayed, image == PageImage.Failed) }
     val active = reading.page == page.number
@@ -275,5 +299,6 @@ private fun OriginalPdfLeaf(
             }
         }, modifier = modifier.testTag("original-pdf-page-${page.number}"), roundPdfCorners = true,
         active = active, inactivePage = page.number, knownAspect = aspect,
+        touchZoom = zoom,
     )
 }

@@ -199,6 +199,8 @@ fun PageTurnView(
     handleKeys: Boolean = true,
     /** 调用方已定好单双页（如书页按字号算分界）时传入；不传就按宽度和 [spreadMinDp] 判断。 */
     columns: Int? = null,
+    /** Set to false when a caller arbitrates touch with its own content gestures. */
+    handleTouch: Boolean = true,
     page: @Composable (Int) -> Unit,
 ) {
     state.reduced = LocalV7ReducedMotion.current
@@ -243,9 +245,10 @@ fun PageTurnView(
                     }
                 }
             }
-            .pointerInput(cols) {
+            .pointerInput(cols, handleTouch) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = true)
+                    if (!handleTouch && down.type == PointerType.Touch) return@awaitEachGesture
                     val w = size.width.toFloat()
                     val h = size.height.toFloat()
                     val edge = w * (if (cols == 2) 0.08f else 0.14f)

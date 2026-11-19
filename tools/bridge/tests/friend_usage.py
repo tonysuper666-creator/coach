@@ -27,8 +27,8 @@ def dev(calls, inp, out, spent):
             "spent_microusd": spent}
 
 
-def ledger(friends):
-    return {"version": 1, "cycles": {}, "months": {}, "friends": friends}
+def ledger(friends, months=None):
+    return {"version": 1, "cycles": {}, "months": months or {}, "friends": friends}
 
 
 class FriendUsageReportTests(unittest.TestCase):
@@ -99,6 +99,19 @@ class FriendUsageReportTests(unittest.TestCase):
         self.assertIn("同名 #1", out["text"])
         self.assertIn("同名 #2", out["text"])
 
+    def test_namesakes_with_several_ids_each_stay_separate(self):
+        d = name_id("丁")
+        self.roster_of([{"name": "甲", "ids": [A, C]}, {"name": "甲", "ids": [B, d]}])
+        self.save(ledger({A: {"2026-11-19": entry(1, 10, 1, 100)},
+                          C: {"2026-11-19": entry(1, 10, 1, 100)},
+                          B: {"2026-11-19": entry(1, 10, 1, 100)},
+                          d: {"2026-11-19": entry(1, 10, 1, 100)}}))
+        out = build(self.state, "2026-11-19", [self.roster], [], now=NOW)
+        self.assertEqual(len(out["rows"]), 2)
+        self.assertEqual(sorted(row["total"]["calls"] for row in out["rows"]), [2, 2])
+        self.assertIn("同名 #1", out["text"])
+        self.assertIn("同名 #2", out["text"])
+
     def test_unmapped_identity_keeps_hash_and_is_counted(self):
         self.roster_of([{"name": "甲"}])
         self.save(ledger({A: {"2026-11-19": entry(1, 10, 1, 100)},
@@ -151,6 +164,23 @@ class FriendUsageReportTests(unittest.TestCase):
         out = build(self.state, "2026-11-19", [self.roster], [], now=NOW)
         self.assertIn("## 测试身份", out["text"])
         self.assertIn("当天没有已命名的朋友调用。", out["text"])
+
+    def test_month_table_marks_test_usage_separately(self):
+        self.roster_of([{"name": "甲", "test": True}, {"name": "乙"}])
+        self.save(ledger({A: {"2026-11-19": entry(2, 20, 2, 200)},
+                          B: {"2026-11-19": entry(1, 10, 1, 100)}}))
+        out = build(self.state, "2026-11-19", [self.roster], [], now=NOW)
+        self.assertIn("甲（测试）", out["text"])
+        self.assertIn("朋友本月合计：1 次，11 token，$0.000100。", out["text"])
+        self.assertIn("测试本月合计：2 次，22 token，$0.000200", out["text"])
+
+    def test_provider_month_gap_is_stated_not_guessed(self):
+        self.save(ledger({A: {"2026-11-19": entry(2, 20, 2, 200)}},
+                         months={"2026-11": {"p": {"spent_microusd": 500,
+                                                   "reserved_microusd": 0, "calls": 5}}}))
+        out = build(self.state, "2026-11-19", [self.roster], [], now=NOW)
+        self.assertIn("供应商月度汇总（1 个来源）：5 次、$0.000500", out["text"])
+        self.assertIn("差 3 次、$0.000300 不在 `friends` 段", out["text"])
 
     def test_pending_reservations_are_reported_not_counted(self):
         self.save(ledger({A: {"2026-11-19": entry(

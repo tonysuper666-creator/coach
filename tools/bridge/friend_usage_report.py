@@ -57,7 +57,12 @@ def _json(path: Path):
 
 
 def load_roster(paths) -> dict:
-    """id -> {"name": str|None, "test": bool, "merge": str|None, "source": str}"""
+    """id -> {"name", "test", "person", "source"}
+
+    ``person`` identifies the roster entry, not the display name: two people may
+    legitimately be called 甲, and each may have several ids. Grouping on the
+    name would merge them, so the group key is the entry itself.
+    """
     people, conflicts = {}, []
     for path in paths:
         data = _json(path)
@@ -66,13 +71,14 @@ def load_roster(paths) -> dict:
         entries = data.get("people")
         if not isinstance(entries, list):
             continue
-        for person in entries:
+        for index, person in enumerate(entries):
             if not isinstance(person, dict):
                 continue
             name = person.get("name")
             if not isinstance(name, str) or not name.strip():
                 continue
             name = name.strip()
+            person_key = f"{path}#{index}"
             names = [name] + [a.strip() for a in person.get("aliases") or []
                               if isinstance(a, str) and a.strip()]
             explicit = [i for i in person.get("ids") or [] if isinstance(i, str) and ID_RE.fullmatch(i)]
@@ -80,15 +86,14 @@ def load_roster(paths) -> dict:
             # person"; hashing the name on top of it would attach the name's own
             # hash to every namesake, merging two different people called 甲.
             ids = explicit or [name_id(n) for n in names]
-            merge = name if len(set(ids)) > 1 else None
             for friend in ids:
                 entry = people.setdefault(friend, {"name": None, "test": False,
-                                                   "merge": None, "source": "roster"})
+                                                   "person": person_key,
+                                                   "source": "roster"})
                 if entry["name"] and entry["name"] != name:
                     conflicts.append((friend, entry["name"], name))
                 entry["name"] = entry["name"] or name
                 entry["test"] |= bool(person.get("test"))
-                entry["merge"] = entry["merge"] or merge
     return {"people": people, "conflicts": conflicts}
 
 
@@ -218,7 +223,7 @@ def group_people(data: dict, roster: dict, devices: dict) -> dict:
         elif not name and db_names:
             name = " / ".join(sorted(db_names))
             conflict = len(db_names) > 1
-        key = known.get("merge") or friend
+        key = known.get("person") or friend
         group = groups.setdefault(key, {"ids": [], "name": name, "test": bool(known.get("test")),
                                         "conflict": conflict, "split": 0})
         group["ids"].append(friend)
@@ -373,16 +378,34 @@ def render(data: dict, collect_result: dict, day: str, now: datetime, sources: d
 
     month_rows = month_totals(data, month, collect_result["groups"])
     month_rows.sort(key=lambda r: (-r["total"]["spent_microusd"], -r["total"]["calls"]))
+    # Test identities are visible as such in the month table too, not folded in.
+    for row in month_rows:
+        if row["test"]:
+            row["name"] = f"{row['name']}（测试）" if row["name"] else "（测试身份）"
     out += ["", f"## 本月累计（{month}，按同一人名合并）", ""]
     out += _table(month_rows, with_devices=False)
-    month_total = {k: sum(r["total"][k] for r in month_rows) for k in FIELDS}
-    out += ["", f"朋友本月合计：{month_total['calls']} 次，"
-                f"{_tokens(month_total['input_tokens'] + month_total['output_tokens'])} token，"
-                f"{_money(month_total['spent_microusd'])}。"]
+    friends_month = {k: sum(r["total"][k] for r in month_rows if not r["test"]) for k in FIELDS}
+    tests_month = {k: sum(r["total"][k] for r in month_rows if r["test"]) for k in FIELDS}
+    out += ["", f"朋友本月合计：{friends_month['calls']} 次，"
+                f"{_tokens(friends_month['input_tokens'] + friends_month['output_tokens'])} token，"
+                f"{_money(friends_month['spent_microusd'])}。"]
+    if tests_month["calls"]:
+        out += [f"测试本月合计：{tests_month['calls']} 次，"
+                f"{_tokens(tests_month['input_tokens'] + tests_month['output_tokens'])} token，"
+                f"{_money(tests_month['spent_microusd'])}（单独列出，不计入上面的朋友合计）。"]
 
     out += ["", "## 对账与来源", ""]
     out += [f"- 当天按人合计与账本 `friends` 段逐项相加一致：{total['calls']} 次、"
             f"{_money(total['spent_microusd'])}。"]
+    provider = (data.get("months") or {}).get(month) or {}
+    bills = [v for v in provider.values() if isinstance(v, dict)] if isinstance(provider, dict) else []
+    if bills:
+        pcalls = sum(int(v.get("calls", 0)) for v in bills)
+        pmoney = sum(int(v.get("spent_microusd", 0)) for v in bills)
+        out += [f"- 供应商月度汇总（{len(bills)} 个来源）：{pcalls} 次、{_money(pmoney)}；"
+                f"减去朋友本月合计后差 {pcalls - friends_month['calls']} 次、"
+                f"{_money(pmoney - friends_month['spent_microusd'])} 不在 `friends` 段，"
+                "归属未核实（多为维护者/内部调用），本报告不猜。"]
     for row in rows:
         if row["mismatch"]:
             out += [f"- **账本自相矛盾**：{row['name'] or row['ids'][0][:12]} 的当天合计与设备明细不等，"

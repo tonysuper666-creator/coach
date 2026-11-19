@@ -71,6 +71,7 @@ class DesktopV7ScreenshotTest {
         "exam-submit" to "inner-quiz", "exam-result" to "inner-quiz", "exam-source" to "inner-quiz", "exam-history" to "inner-quiz",
         // 第 10 刀：书架顶栏的「设置」弹窗；课程窗口的「导出复习提纲」——初始、按知识点选、导出成功、导出失败。都对周览那一屏。
         "settings" to "inner-week", "notes-export" to "inner-week", "notes-export-point" to "inner-week", "notes-export-week-menu" to "inner-week",
+        "notes-export-unchecked" to "inner-week",
         "notes-export-done" to "inner-week", "notes-export-failed" to "inner-week",
         // 第 13 刀：简答作答——写到一半、离开再回来接着写、对照原文并自评。都对做题那一屏。
         "short-answer" to "inner-quiz", "short-answer-restored" to "inner-quiz", "short-answer-revealed" to "inner-quiz",
@@ -528,9 +529,12 @@ A second English paragraph lets us inspect the space between paragraphs and the 
             onNodeWithText("尚未选择保存位置").assertExists()
             shot("notes-export")
 
-            // 第 15 刀：PDF 勾选项换了字体，整行仍是一个勾选框，点一下取消、再点一下勾回。
-            onNodeWithTag("notes-pdf").assertIsOn().performClick(); waitForIdle()
-            assertFalse(state.includePdf); onNodeWithTag("notes-pdf").assertIsOff().performClick(); waitForIdle()
+            // 第 18 刀：PDF 勾选项换成 V7 小方框，整行仍是一个开关；两态各拍一张（勾上是松绿实底配纸色勾，没勾是细线框）。
+            onNodeWithTag("notes-pdf").assertIsOn()
+            onNodeWithTag("notes-pdf").performClick(); waitForIdle()
+            assertFalse(state.includePdf); onNodeWithTag("notes-pdf").assertIsOff()
+            shot("notes-export-unchecked")
+            onNodeWithTag("notes-pdf").performClick(); waitForIdle()
             assertTrue(state.includePdf)
 
             // 第 14 刀：周次下拉的展开态，当前是第 1 周；点第 2 周后菜单收起、选中改成第 2 周，再改回第 1 周。
@@ -554,7 +558,7 @@ A second English paragraph lets us inspect the space between paragraphs and the 
 
             onNodeWithText("选择本机文件夹…").performClick(); waitForIdle()
             state.saved = Path.of("D:/学习/复习提纲/coach-notes-1")
-            state.status = "已导出：5 条待练错题，账本序号 128。"
+            state.status = "已导出：5 条待练错题。"
             shot("notes-export-done")
 
             state.saved = null; state.failed = true

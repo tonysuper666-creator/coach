@@ -40,6 +40,7 @@ import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.LocalV7Fonts
 import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
+import com.coach.ui.v7.V7Checkbox
 import com.coach.ui.v7.V7TextButton
 import com.coach.ui.v7.v7FocusRing
 import coach.design.tokens.CoachV7
@@ -94,7 +95,7 @@ private fun NotesExportDialog(view: CourseView, controller: CoachController, mat
         val destination = directory ?: return
         val selection = if (byWeek) NotesSelection(week = week) else NotesSelection(pointId = point)
         val cached = controller.math.assets.toMap()
-        busy = true; saved = null; failed = false; status = "正在整理账本与复习资料…"
+        busy = true; saved = null; failed = false; status = "正在整理复习资料…"
         scope.launch {
             try {
                 val draft = NotesCore.build(notesRequest(view, controller.courseId, selection))
@@ -110,9 +111,9 @@ private fun NotesExportDialog(view: CourseView, controller: CoachController, mat
                     withContext(Dispatchers.IO) { saveNotes(destination, draft, pdf?.bytes) }
                 }
                 saved = result
-                status = "已导出：${draft.attemptIds.size} 条待练错题，账本序号 ${draft.lastSeq}。"
-                if (unresolved > 0) status += " PDF 有 $unresolved 处公式未能渲染，已标注并保留原始 TeX；请检查公式服务和源资料。"
-                if (unresolvedImages > 0) status += " PDF 有 $unresolvedImages 张图片未嵌入，已标注；原引用保留在 Markdown。仅嵌入账本自带的 PNG/JPEG，不读取外部文件或网址。"
+                status = "已导出：${draft.attemptIds.size} 条待练错题。"
+                if (unresolved > 0) status += " PDF 里有 $unresolved 处公式没画出来，已照原样写出并标明。"
+                if (unresolvedImages > 0) status += " PDF 里有 $unresolvedImages 张图片没能放进去，已标明；引用仍留在 Markdown 里，可回原书查看。只嵌入教材自带的 PNG/JPEG，不读电脑上的其他文件或网址。"
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
             catch (e: Exception) { failed = true; status = e.message ?: "导出失败，请重试" }
             finally {
@@ -155,7 +156,7 @@ internal fun NotesExportPanel(state: NotesExportState, onPickDirectory: () -> Un
         .testTag("notes-export-panel"), verticalArrangement = Arrangement.spacedBy(18.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("导出复习提纲", style = MaterialTheme.typography.headlineSmall, color = colors.fgPrimary)
-            Text("包含要点、掌握度、公式和当前待练选择题。后续同步不会改变这次导出的账本快照。",
+            Text("包含要点、掌握度、公式和现在还要练的选择题。之后再做题，不会改动这份导出。",
                 style = MaterialTheme.typography.bodyMedium, color = colors.fgSecondary)
         }
         NotesField("范围") {
@@ -170,10 +171,10 @@ internal fun NotesExportPanel(state: NotesExportState, onPickDirectory: () -> Un
                     Text(if (byWeek) "第 ${week ?: "—"} 周" else points.firstOrNull { it.id == point }?.title ?: "选择知识点",
                         style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary)
                     Spacer(Modifier.width(10.dp))
-                    Text("▾", style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
+                    DropdownChevron(colors.fgSecondary)
                 }
                 // V7 纸面菜单：一张 surface1 的纸加一道弱线，没有 Material 的灰底和色调抬升；
-                // 方向键、回车、Esc 和点外面关闭仍由 DropdownMenu 负责。
+                // 回车、Esc 和点外面关闭仍由 DropdownMenu 负责。
                 DropdownMenu(expanded, { expanded = false }, shape = paper, containerColor = colors.surface1,
                     tonalElevation = 0.dp, shadowElevation = 6.dp, border = BorderStroke(1.dp, colors.borderSubtle),
                     modifier = Modifier.testTag("notes-picker-menu")) {
@@ -185,11 +186,12 @@ internal fun NotesExportPanel(state: NotesExportState, onPickDirectory: () -> Un
             }
         }
         NotesField("格式") {
+            // 整行仍是同一个开关：框、字一起点，空格也能切，语义是 Checkbox；框本身按 V7 的小方框画。
             Row(Modifier.v7FocusRing(paper).clip(paper).toggleable(includePdf, remember { MutableInteractionSource() }, null,
-                enabled = !busy, role = Role.Checkbox) { includePdf = it }.padding(end = 12.dp).testTag("notes-pdf"),
-                verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(includePdf, null, enabled = !busy, colors = CheckboxDefaults.colors(checkedColor = v7Pine(),
-                    uncheckedColor = colors.fgSecondary, checkmarkColor = colors.surface1))
+                enabled = !busy, role = Role.Checkbox) { includePdf = it }
+                .heightIn(min = 32.dp).padding(end = 12.dp).testTag("notes-pdf"),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                V7Checkbox(includePdf, enabled = !busy)
                 Text("Markdown + 可打印 PDF", style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary)
             }
         }
@@ -202,7 +204,7 @@ internal fun NotesExportPanel(state: NotesExportState, onPickDirectory: () -> Un
                         .padding(horizontal = 12.dp, vertical = 10.dp).testTag("notes-directory"))
                 PaperButton(onPickDirectory, enabled = !busy, modifier = Modifier.testTag("notes-pick-directory")) { Text("选择本机文件夹…") }
             }
-            Text("文件只保存在所选目录的新文件夹内。PDF 公式使用与应用相同的 Mac 公式服务；无法渲染的公式会标注并保留源码。",
+            Text("文件只保存在所选目录的新文件夹内。PDF 里的公式由你的 Mac 画出；画不出来的会照原样写出来并标明。",
                 style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
         }
         status?.let {
@@ -218,6 +220,19 @@ internal fun NotesExportPanel(state: NotesExportState, onPickDirectory: () -> Un
         }
     }
 } }
+
+/**
+ * 下拉指示：一道画的细线箭头，和 V7 的图标一样只有线条，不再用字体里的「▾」——不同字体会落成不同的三角，
+ * 还会跟着字号一起变胖。按钮的悬停底由 P0 的 `PaperButton` 给，这里只管画箭头。
+ */
+@Composable
+private fun DropdownChevron(color: Color) {
+    Canvas(Modifier.size(10.dp, 6.dp)) {
+        val w = size.width; val h = size.height
+        drawPath(TickPath().apply { moveTo(w * 0.08f, h * 0.20f); lineTo(w * 0.50f, h * 0.80f); lineTo(w * 0.92f, h * 0.20f) },
+            color, style = Stroke(1.2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+    }
+}
 
 @Composable
 private fun NotesField(label: String, content: @Composable ColumnScope.() -> Unit) {

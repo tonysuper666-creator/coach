@@ -1035,7 +1035,6 @@ function Click-At(
             if ($MouseProbe) { & $MouseProbe 'up' ($r.L + $x) ($r.T + $y) | Out-Null }
             else { [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero) }
         }
-        Assert-OurForeground -ForegroundProbe $ForegroundProbe
     }
 }
 # A drag is one action: release the button even if foreground is interrupted.
@@ -1047,13 +1046,12 @@ function Drag-Between([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
         Assert-OurForeground
         [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
         try {
-            Start-Sleep -Milliseconds 120; Assert-OurForeground
+            Start-Sleep -Milliseconds 120
             [WD]::SetCursorPos($r.L + [int](($x1 + $x2) / 2), $r.T + [int](($y1 + $y2) / 2)) | Out-Null
-            Start-Sleep -Milliseconds 80; Assert-OurForeground
+            Start-Sleep -Milliseconds 80
             [WD]::SetCursorPos($r.L + $x2, $r.T + $y2) | Out-Null
-            Start-Sleep -Milliseconds 120; Assert-OurForeground
+            Start-Sleep -Milliseconds 120
         } finally { [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero) }
-        Assert-OurForeground
     }
 }
 function Send-Keys([string]$keys) {
@@ -1061,7 +1059,6 @@ function Send-Keys([string]$keys) {
     Invoke-ForegroundStep -InjectsInput -Action {
         Assert-OurForeground
         [System.Windows.Forms.SendKeys]::SendWait($keys)
-        Assert-OurForeground
     }
 }
 
@@ -1164,7 +1161,6 @@ function Scroll-At([int]$x, [int]$y, [int]$notches) {
         $delta = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int](120 * $notches)), 0)
         Assert-OurForeground
         [WD]::mouse_event(0x800, 0, 0, $delta, [IntPtr]::Zero)
-        Assert-OurForeground
     }
 }
 # Clipboard write and paste are one action. Keep it stable until consumed.
@@ -1175,7 +1171,6 @@ function Paste-Text([string]$text) {
         Assert-OurForeground
         [System.Windows.Forms.SendKeys]::SendWait('^v')
         Start-Sleep -Milliseconds 150
-        Assert-OurForeground
     }
 }
 

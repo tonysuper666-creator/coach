@@ -150,3 +150,12 @@ function Resolve-SourcePageRangeAction($State) {
     }
     return [pscustomobject]@{ Action = 'wait_learning'; Range = $null; Button = $null }
 }
+function Resolve-SourceReturnAction([bool]$ReturnedToLearning, [bool]$SawFocusLoss, $ReturnButton) {
+    if ($ReturnedToLearning) {
+        return [pscustomobject]@{ Action = 'done'; Button = $null }
+    }
+    if ($SawFocusLoss -and $ReturnButton) {
+        return [pscustomobject]@{ Action = 'reclick'; Button = $ReturnButton }
+    }
+    return [pscustomobject]@{ Action = 'wait_learning'; Button = $null }
+}

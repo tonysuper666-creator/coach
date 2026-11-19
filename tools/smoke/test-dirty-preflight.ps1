@@ -689,7 +689,7 @@ $cgBlock
         Invoke-SwapRegressionCase 'invoke-entry2-ext-to-own-after-unlock' 'entry2' $extObj $ownObj $true
         Invoke-SwapRegressionCase 'invoke-entry2-own-to-ext-after-unlock' 'entry2' $ownObj $extObj $false
 
-        # 8b. Click-At 动作期间失焦：按住到抬起之间如果前台被抢走，必须释放按键、触发重试或判环境占用，不能静默成功。
+        # 8b. Click-At 失焦边界：按下前失焦保留自动重试与占用判定；抬起回调已触发后的失焦不得重放。
         $prevStampPath = $script:DriverInputStampPath
         $script:DriverInputStampPath = Join-Path $tmp 'click-midloss-input.stamp'
         try {
@@ -706,39 +706,79 @@ $cgBlock
                 $script:clickState.phase = 'pre-down'
                 return [pscustomobject]@{ Ready = $true; ObservedHwnd = 555501L; Failure = ''; Accepted = $true }
             }
-            $mouseProbeRetry = {
+            $mouseProbeBeforeDownRetry = {
                 param($kind, $mx, $my)
                 [void]$clickLog.Add("$($script:clickState.attempt):$kind@$mx,$my")
-                if ($kind -eq 'down' -and $script:clickState.attempt -eq 1) {
-                    $script:clickState.phase = 'stolen-mid-click'
+                if ($kind -eq 'move' -and $script:clickState.attempt -eq 1) {
+                    $script:clickState.phase = 'stolen-before-down'
                 }
             }
-            $fgProbeRetry = {
-                if ($script:clickState.phase -eq 'stolen-mid-click') { return $extStealObj }
+            $fgProbeBeforeDown = {
+                if ($script:clickState.phase -eq 'stolen-before-down') { return $extStealObj }
                 return $ownWinObj
             }
-            Click-At 338 82 -TargetOwnerProbe $targetOwnerProbe -ActivateProbe $actProbeClick -ForegroundProbe $fgProbeRetry -RectProbe $rectProbe -MouseProbe $mouseProbeRetry
-            Check 'click-at-retries-when-focus-lost-mid-click' (
+            Click-At 338 82 -TargetOwnerProbe $targetOwnerProbe -ActivateProbe $actProbeClick -ForegroundProbe $fgProbeBeforeDown -RectProbe $rectProbe -MouseProbe $mouseProbeBeforeDownRetry
+            Check 'click-at-retries-when-focus-lost-before-down' (
                 $script:clickState.attempt -eq 2 -and
-                ($clickLog -join '|') -eq '1:move@438,282|1:down@438,282|1:up@438,282|2:move@438,282|2:down@438,282|2:up@438,282'
+                ($clickLog -join '|') -eq '1:move@438,282|2:move@438,282|2:down@438,282|2:up@438,282'
             ) "attempts=$($script:clickState.attempt) log=$($clickLog -join '|')"
 
             $script:clickState = @{ attempt = 0; phase = 'init' }
-            $mouseProbeAlwaysStolen = {
+            $alwaysLostLog = New-Object System.Collections.ArrayList
+            $mouseProbeAlwaysBeforeDown = {
                 param($kind, $mx, $my)
-                if ($kind -eq 'down') { $script:clickState.phase = 'stolen-mid-click' }
+                [void]$alwaysLostLog.Add("$($script:clickState.attempt):$kind")
+                if ($kind -eq 'move') { $script:clickState.phase = 'stolen-before-down' }
             }
             $clickErr = $null
             try {
-                Click-At 338 82 -TargetOwnerProbe $targetOwnerProbe -ActivateProbe $actProbeClick -ForegroundProbe $fgProbeRetry -RectProbe $rectProbe -MouseProbe $mouseProbeAlwaysStolen
+                Click-At 338 82 -TargetOwnerProbe $targetOwnerProbe -ActivateProbe $actProbeClick -ForegroundProbe $fgProbeBeforeDown -RectProbe $rectProbe -MouseProbe $mouseProbeAlwaysBeforeDown
             } catch {
                 $clickErr = $_.Exception.Message
             }
-            Check 'click-at-reports-contention-when-focus-lost-every-click' (
+            Check 'click-at-reports-contention-when-focus-lost-before-down' (
                 $script:clickState.attempt -eq 20 -and
                 $clickErr -like 'WIN_DRIVE_FOREGROUND_CONTENTION*' -and
-                $clickErr -match 'pid=6832'
-            ) "attempts=$($script:clickState.attempt) err=$clickErr"
+                $clickErr -match 'pid=6832' -and
+                -not ($alwaysLostLog -match ':down$|:up$')
+            ) "attempts=$($script:clickState.attempt) err=$clickErr log=$($alwaysLostLog -join '|')"
+
+            foreach ($deliveryMode in @('stable', 'before-down', 'after-delivery')) {
+                $script:deliveryPage = 1
+                $script:deliveryAttempt = 0
+                $script:deliveryLost = $false
+                $btn = New-Object System.Windows.Forms.Button
+                $btn.Add_Click({ $script:deliveryPage++ })
+                try {
+                    $actDelivery = {
+                        param($w, $attemptNum)
+                        $script:deliveryAttempt = [int]$attemptNum
+                        $script:deliveryLost = $false
+                        return [pscustomobject]@{ Ready = $true; ObservedHwnd = 555501L; Failure = ''; Accepted = $true }
+                    }
+                    $fgDelivery = {
+                        if ($script:deliveryLost) { return $extStealObj }
+                        return $ownWinObj
+                    }
+                    $mouseDelivery = {
+                        param($kind, $mx, $my)
+                        if ($deliveryMode -eq 'before-down' -and $script:deliveryAttempt -eq 1 -and $kind -eq 'move') {
+                            $script:deliveryLost = $true
+                        }
+                        if ($kind -eq 'up') {
+                            $btn.PerformClick()
+                            if ($deliveryMode -eq 'after-delivery') { $script:deliveryLost = $true }
+                        }
+                    }
+                    Click-At 338 82 -TargetOwnerProbe $targetOwnerProbe -ActivateProbe $actDelivery -ForegroundProbe $fgDelivery -RectProbe $rectProbe -MouseProbe $mouseDelivery
+                    $expectedAttempts = if ($deliveryMode -eq 'before-down') { 2 } else { 1 }
+                    Check "click-at-single-delivery-$deliveryMode" (
+                        $script:deliveryPage -eq 2 -and $script:deliveryAttempt -eq $expectedAttempts
+                    ) "mode=$deliveryMode page=$($script:deliveryPage) attempts=$($script:deliveryAttempt)"
+                } finally {
+                    $btn.Dispose()
+                }
+            }
         } finally {
             $script:DriverInputStampPath = $prevStampPath
         }

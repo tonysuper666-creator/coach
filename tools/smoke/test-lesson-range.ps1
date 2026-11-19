@@ -121,11 +121,16 @@ $actWait = Resolve-SourcePageRangeAction $sStaleDisabled
 $actClick = Resolve-SourcePageRangeAction $sNewEnabled
 $actFade = Resolve-SourcePageRangeAction $sFade
 $actFind = Resolve-SourcePageRangeAction $sFind152
+$retReclick = Resolve-SourceReturnAction $false $true ([pscustomobject]@{ X = 91; Y = 42 })
 foreach ($a in @(
     @{ n = 'action-wait-disabled'; ok = ($actWait.Action -eq 'wait_learning') },
     @{ n = 'action-click-enabled'; ok = ($actClick.Action -eq 'click_source') },
     @{ n = 'action-wait-fade-6busy3'; ok = ($actFade.Action -eq 'wait_range_fade') },
-    @{ n = 'action-read-before-return-6find'; ok = ($actFind.Action -eq 'return_range' -and $actFind.Range.First -eq 152 -and $actFind.Range.Last -eq 153 -and -not (Test-RangeHasPage $actFind.Range $target)) }
+    @{ n = 'action-read-before-return-6find'; ok = ($actFind.Action -eq 'return_range' -and $actFind.Range.First -eq 152 -and $actFind.Range.Last -eq 153 -and -not (Test-RangeHasPage $actFind.Range $target)) },
+    @{ n = 'return-already-back-ignores-focus-loss'; ok = ((Resolve-SourceReturnAction $true $true ([pscustomobject]@{ X = 91; Y = 42 })).Action -eq 'done') },
+    @{ n = 'return-reclicks-fresh-coords-after-focus-loss'; ok = ($retReclick.Action -eq 'reclick' -and $retReclick.Button.X -eq 91 -and $retReclick.Button.Y -eq 42) },
+    @{ n = 'return-no-reclick-without-focus-loss'; ok = ((Resolve-SourceReturnAction $false $false ([pscustomobject]@{ X = 91; Y = 42 })).Action -eq 'wait_learning') },
+    @{ n = 'return-waits-when-lost-and-no-button'; ok = ((Resolve-SourceReturnAction $false $true $null).Action -eq 'wait_learning') }
 )) {
     '{0} {1}' -f $(if ($a.ok) { 'PASS' } else { 'FAIL' }), $a.n
     if (-not $a.ok) { $fail++ }; $extra++

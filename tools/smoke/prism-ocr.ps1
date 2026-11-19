@@ -25,6 +25,7 @@ if (-not $TestDesktop) {
 }
 Start-Transcript -LiteralPath (Join-Path $OutDir 'desktop.log') -ErrorAction Stop | Out-Null
 . (Join-Path $PSScriptRoot 'Win-Drive.ps1')
+. (Join-Path $PSScriptRoot 'arm-tutor-ui.ps1')
 Add-Type -Path (Join-Path $PSScriptRoot 'InstalledShelf.cs') -ReferencedAssemblies System.Drawing
 Add-Type -AssemblyName UIAutomationClient
 Add-Type @'
@@ -103,9 +104,27 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
     if (Test-Path $env:COACH_LIBRARY_DIR) { throw 'The scan probe needs a fresh library' }
     New-Item -ItemType Directory $env:COACH_LIBRARY_DIR, $env:COACH_CLIENT_DIR | Out-Null
     $before = @(Get-CimInstance Win32_Process -Filter "Name='LearningCoach.exe'" | ForEach-Object { [int]$_.ProcessId })
-    $app = [ArmSmokeDesktop]::Start($exe, '', $TestDesktop)
     $own = @()
+    $tutor = $null
     try {
+        if ([IO.Path]::GetExtension($Fixture) -eq '.pdf') {
+            $tutorPrivate = Join-Path $env:RUNNER_TEMP ('coach-tutor-' + [Guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory $tutorPrivate | Out-Null
+            $parameters = @((Join-Path $PSScriptRoot 'arm-loopback-tutor.py'), $tutorPrivate,
+                $Fixture, (Join-Path $OutDir 'tutor-events.jsonl')) | ForEach-Object { '"' + $_ + '"' }
+            $tutor = Start-Process (Get-Command python.exe).Source -ArgumentList $parameters -WindowStyle Hidden -PassThru
+            $portFile = Join-Path $tutorPrivate 'port'
+            $limit = (Get-Date).AddSeconds(15)
+            while (-not (Test-Path $portFile)) {
+                if ($tutor.HasExited -or (Get-Date) -gt $limit) { throw 'Local tutor did not start' }
+                Start-Sleep -Milliseconds 100
+            }
+            $port = [int](Get-Content -Raw $portFile)
+            $env:COACH_URL = "http://127.0.0.1:$port"
+            $env:COACH_DEVICE_ID = 'arm-smoke'
+            $env:COACH_TOKEN_FILE = Join-Path $tutorPrivate 'token'
+        }
+        $app = [ArmSmokeDesktop]::Start($exe, '', $TestDesktop)
         $deadline = (Get-Date).AddSeconds(300)
         do {
             Start-Sleep -Milliseconds 500
@@ -159,8 +178,14 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
             }
             Save-OwnWindow 'reader-after.png'
             if ($LASTEXITCODE -ne 0) { throw 'Installed reader did not persist page 2' }
+            Test-InstalledTutor
         }
     } finally {
+        if ($tutor) {
+            if (-not $tutor.HasExited) { $tutor.Kill(); $tutor.WaitForExit() }
+            $tutor.Dispose()
+            Remove-Item -LiteralPath (Join-Path $tutorPrivate 'token') -ErrorAction SilentlyContinue
+        }
         foreach ($id in $own) {
             $proc = Get-Process -Id $id -ErrorAction SilentlyContinue
             if ($proc -and $proc.ProcessName -eq 'LearningCoach') { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }

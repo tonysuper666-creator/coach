@@ -151,6 +151,9 @@ internal class BookPagingState(initial: BookPageAnchor) {
             ReaderTurn.First -> pages.indexOfFirst { it.chapter == pages[current].chapter }
             ReaderTurn.Last -> pages.indexOfLast { it.chapter == pages[current].chapter }
         }
+        // 没有实际翻页（到了边界，或首/末页键落在当前页）：保留读者明确定位过的那一句，不要换成页首，
+        // 否则折叠屏换宽度重排时，那一句会落到下一个子页（TON-1724）。
+        if (target == current) return anchor
         anchor = pages[target].anchor
         return anchor
     }
@@ -248,7 +251,9 @@ internal fun BookPageView(
         SideEffect { state.groupFirst = first; state.groupPages = pages }
         LaunchedEffect(pages, first, state.anchor) {
             onPosition(pages[first].anchor.importPage)
-            pages[first].anchor.takeIf { it.visualOrder == null }?.let(onSpot)
+            // 读者定位过的那一句就在当前页上就存它，冷启回到同一句；否则存页首。
+            val exact = state.anchor.takeIf { it.visualOrder == null && pages.pageContaining(it) == first }
+            (exact ?: pages[first].anchor.takeIf { it.visualOrder == null })?.let(onSpot)
         }
         if (scrolling) {
             val itemHeightPx = with(density) { maxHeight.roundToPx() }.coerceAtLeast(1)

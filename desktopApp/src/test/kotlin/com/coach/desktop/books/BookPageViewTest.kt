@@ -272,7 +272,7 @@ class BookPageViewTest {
                 assertTrue(state.index > 0, "冷启不应回章首")
                 val shown = state.pages[state.index].sources.single { it.importPage == 1 }
                 assertTrue(target in shown.startUtf16 until shown.endUtf16, "起步页应包含存下的那句 @width=$width")
-                assertEquals(shown.startUtf16, spot!!.offsetUtf16)
+                assertEquals(target, spot!!.offsetUtf16) // 定位过的那一句就在当前页：存精确偏移，不退回页首
             }
         } finally { root.toFile().deleteRecursively() }
     }
@@ -328,6 +328,47 @@ class BookPageViewTest {
         narrowSlices(wide.anchor)
         val shown = state.pages[state.index].sources
         assertTrue(shown.any { it.importPage == wide.anchor.importPage && wide.anchor.offsetUtf16 in it.startUtf16 until it.endUtf16 })
+    }
+
+    /** TON-1724: 读者定位过的那一句：宽→窄→宽始终在当前页；边界没翻页保留；主动翻页后不再被旧锚点拉回。 */
+    @Test fun explicitSpotStaysVisibleAcrossWidthsAndActiveTurnsDoNotJumpBack() = runSkikoComposeUiTest(
+        size = Size(1400f, 1000f), density = Density(1f),
+    ) {
+        val sentence = "The multiplication of two whole numbers is the repeated addition of one of them, and the order of the factors does not alter the product. "
+        val pages = (1..30).map { n -> BookPage(n, (1..4).joinToString("\n\n") { sentence.repeat(10) }) }
+        val book = Textbook("spot-fold", "Elements of arithmetic", "epub", pages)
+        val state = BookPagingState(BookPageAnchor(20))
+        var width by androidx.compose.runtime.mutableStateOf(1200)
+        setContent { CoachTheme { Box(Modifier.width(width.dp).height(900.dp)) {
+            BookPageView(book, state, emptyMap(), onTurn = { state.move(it) })
+        } } }
+        waitUntil(timeoutMillis = 120_000) { state.pages.size > 30 }
+        fun reflow(to: Int) {
+            val before = state.pages
+            width = to
+            waitUntil(timeoutMillis = 120_000) { state.pages !== before && state.pages.size > 30 }
+        }
+        fun shows(anchor: BookPageAnchor) = state.pages[state.index].sources.any {
+            it.importPage == anchor.importPage && anchor.offsetUtf16 in it.startUtf16 until it.endUtf16 }
+        val slice = state.pages[state.index].sources.first { it.importPage == 20 }
+        val spot = BookPageAnchor(20, (slice.startUtf16 + slice.endUtf16) / 2)
+        state.anchor = spot
+        assertTrue(shows(spot), "宽屏")
+        reflow(520); assertTrue(shows(spot), "窄屏")
+        reflow(1200); assertTrue(shows(spot), "回到宽屏")
+        // 按钮到边界、没有实际翻页：保留原锚点
+        state.anchor = BookPageAnchor(1, 5)
+        assertTrue(state.index == 0)
+        state.move(ReaderTurn.Previous)
+        assertEquals(BookPageAnchor(1, 5), state.anchor)
+        // 定位后主动翻页：锚点换成新页，合起再展开都不回跳
+        state.anchor = spot
+        reflow(520)
+        val moved = state.move(ReaderTurn.Next)!!
+        assertTrue(moved != spot && state.anchor == moved)
+        assertTrue(shows(moved), "翻页后")
+        reflow(1200); assertTrue(shows(moved) && state.anchor == moved, "展开后仍在新页")
+        reflow(520); assertTrue(shows(moved) && state.anchor == moved, "再合起仍在新页")
     }
 
     /** TON-1724: 长英文教材首开，分页在后台做，主线程先显示「正在排版」而不是卡住。 */

@@ -73,6 +73,20 @@ class BoydenFoldReflowTest {
                     val ns = narrow.sources.filter { it.importPage == 20 }
                     println("DIAG $anchorKind narrowPages=${state.pages.size} narrowIdx=${state.index} slices=${ns.map { "${it.startUtf16}..${it.endUtf16}" }} containsAnchor=${ns.any { state.anchor.offsetUtf16 in it.startUtf16 until it.endUtf16 }} containsTarget=${ns.any { target in it.startUtf16 until it.endUtf16 }}")
                 }
+                fun reflow(to: Int) { val b = state.pages; width = to; waitUntil(timeoutMillis = 600_000) { state.pages !== b && state.pages.size > 100 } }
+                fun shows(a: BookPageAnchor) = state.pages[state.index].sources.any { it.importPage == a.importPage && a.offsetUtf16 in it.startUtf16 until it.endUtf16 }
+                width = 1200; waitForIdle()
+                val spot = BookPageAnchor(20, target)
+                state.anchor = spot
+                val steps = mutableListOf<Boolean>()
+                steps += shows(spot); reflow(520); steps += shows(spot); reflow(1200); steps += shows(spot)
+                println("DIAG spot wide/narrow/wide visible=$steps")
+                reflow(520)
+                val moved = state.move(ReaderTurn.Next)!!
+                val afterTurn = shows(moved); reflow(1200); val wideAfter = shows(moved) && state.anchor == moved
+                reflow(520); val narrowAfter = shows(moved) && state.anchor == moved
+                println("DIAG activeTurn movedPage=${moved.importPage}@${moved.offsetUtf16} visibleAfterTurn=$afterTurn wide=$wideAfter narrow=$narrowAfter")
+                check(steps.all { it } && afterTurn && wideAfter && narrowAfter)
             }
         } finally { root.toFile().deleteRecursively() }
     }

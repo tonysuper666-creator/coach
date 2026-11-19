@@ -146,12 +146,18 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
         Save-OwnWindow 'after-import-printwindow.png'
         if ([IO.Path]::GetExtension($Fixture) -eq '.pdf') {
             Click-CapturedControl 'shelf-read-first.png' 'after-import-printwindow.png'
-            Start-Sleep -Seconds 2
+            Click-CapturedControl 'reader-defer-study.png' 'reader-first-open.png'
+            Start-Sleep -Seconds 1
             Save-OwnWindow 'reader-before.png'
-            Send-Keys '{RIGHT}'
-            Start-Sleep -Seconds 2
+            # The reflow reader can lay out several screenfuls per source page.
+            # Stop as soon as the book's persisted physical page changes to 2.
+            foreach ($turn in 1..8) {
+                Send-Keys '{RIGHT}'
+                Start-Sleep -Milliseconds 900
+                & python (Join-Path $PSScriptRoot 'prism-ocr-check.py') $db $Fixture --reading-page 2
+                if ($LASTEXITCODE -eq 0) { break }
+            }
             Save-OwnWindow 'reader-after.png'
-            & python (Join-Path $PSScriptRoot 'prism-ocr-check.py') $db $Fixture --reading-page 2
             if ($LASTEXITCODE -ne 0) { throw 'Installed reader did not persist page 2' }
         }
     } finally {

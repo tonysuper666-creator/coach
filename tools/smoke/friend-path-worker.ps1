@@ -12,6 +12,7 @@ param(
     [string]$Runtime = '',
     [ValidatePattern('^[\p{L}\p{N}_-]{1,32}$')][string]$Marker = '',
     [int]$StartTimeoutSec = 150,
+    [int]$BuildTimeoutSec = 900,
     [int]$LessonNumber = 181,                   # 第⑤步要选的整节：目录里的序号（181 = 零基 180，物理第 150 页，在已授权的 131–156 页内）
     [int]$StopAfter = 7,                        # 只跑到这一步（5 = 只占第 ⑤ 步区段，不进第 ⑥ 步）
     [int]$LessonPage = 150,                     # 该节应落的物理页；界面标签不是这页就不发请求
@@ -128,6 +129,102 @@ $env:COACH_URL = if ($Url) { $Url } else { 'http://127.0.0.1:18999' }
 $serverPort = ([uri]$env:COACH_URL).Port
 if ($serverPort -in 18791, 8791, 8790) { throw "拒绝：$serverPort 是生产端口，冒烟只用隔离测试端口。" }
 $script:RepoMarker = $Repo
+
+function Invoke-FriendBuild([string]$BuildRepo, [string]$BuildOutDir, [bool]$IsBackground, [int]$TimeoutSec) {
+    [string[]]$tasks = if ($IsBackground) { @(':desktopApp:classes', ':desktopApp:smokeClasses') } else { @(':desktopApp:classes') }
+    [string[]]$buildArgs = @($tasks) + @('-Pcoach.course=', '--console=plain', '--offline', '--no-daemon')
+    $buildOut = Join-Path $BuildOutDir 'build.out.log'
+    $buildErr = Join-Path $BuildOutDir 'build.err.log'
+    $buildLog = Join-Path $BuildOutDir 'build.log'
+    $proc = Start-Process (Join-Path $BuildRepo 'gradlew.bat') -ArgumentList $buildArgs -WorkingDirectory $BuildRepo `
+        -WindowStyle Hidden -PassThru -RedirectStandardOutput $buildOut -RedirectStandardError $buildErr
+    $null = $proc.Handle
+    $startTicks = Get-TrackedProcessStartTicks $proc
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $timedOut = $false
+    try {
+        while (-not $proc.WaitForExit(1000)) {
+            if ($sw.Elapsed.TotalSeconds -ge $TimeoutSec) {
+                $timedOut = $true
+                break
+            }
+        }
+        if ($timedOut) {
+            Stop-TrackedPid -ProcessId $proc.Id -StartTimeTicks $startTicks -WaitMs 10000 -Tree `
+                -StdoutPath (Join-Path $BuildOutDir 'build.cleanup.out.log') -StderrPath (Join-Path $BuildOutDir 'build.cleanup.err.log')
+        } else {
+            $proc.WaitForExit()
+        }
+    } catch {
+        if (-not $timedOut -and $startTicks -gt 0L) {
+            try { Stop-TrackedPid -ProcessId $proc.Id -StartTimeTicks $startTicks -WaitMs 10000 -Tree } catch { }
+        }
+        throw
+    } finally {
+        $sw.Stop()
+    }
+    $parts = New-Object System.Collections.Generic.List[string]
+    if (Test-Path -LiteralPath $buildOut) {
+        $outRaw = Get-Content -LiteralPath $buildOut -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($outRaw) { [void]$parts.Add($outRaw.TrimEnd("`r", "`n")) }
+        Remove-Item -LiteralPath $buildOut -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $buildErr) {
+        $errRaw = Get-Content -LiteralPath $buildErr -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($errRaw -and $errRaw.Trim()) {
+            [void]$parts.Add("[stderr]`n" + $errRaw.TrimEnd("`r", "`n"))
+        }
+        Remove-Item -LiteralPath $buildErr -ErrorAction SilentlyContinue
+    }
+    $exitCode = if ($timedOut) { 2 } elseif ($null -ne $proc.ExitCode) { [int]$proc.ExitCode } else { 1 }
+    $elapsedSec = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+    [void]$parts.Add("[coach-build] exitCode=$(if ($timedOut) { 'timeout' } else { $exitCode }) seconds=$elapsedSec timedOut=$timedOut")
+    ($parts -join "`n") + "`n" | Set-Content -LiteralPath $buildLog -Encoding UTF8
+    [pscustomobject]@{
+        TimedOut = $timedOut
+        ExitCode = $exitCode
+        Seconds = $sw.Elapsed.TotalSeconds
+    }
+}
+
+$runTask = ':desktopApp:run'
+if ($Background) {
+    $runTask = ':desktopApp:smokeRun'
+    $env:COACH_SMOKE_ENABLED = '1'
+    $env:COACH_SMOKE_CONTROL_FILE = Join-Path $OutDir 'control.private.json'
+} else {
+    $env:COACH_SMOKE_ENABLED = $null
+    $env:COACH_SMOKE_CONTROL_FILE = $null
+}
+# A shared Gradle daemon is outside the interactive invocation's process job.
+# Use a single-use daemon so even a timeout before AppPid discovery owns the tree.
+$launchArgs = @($runTask, '-Pcoach.course=', '--console=plain', '--offline', '--no-daemon')
+$memoryLease = Enter-SmokeMemory
+try {
+if ($ClientSeed) { Copy-Item -Recurse -Force (Join-Path $ClientSeed '*') $client }
+$buildResult = $null
+if (-not $Runtime) {
+    Note '构建开始：gradlew :desktopApp:classes'
+    $buildResult = Invoke-FriendBuild -BuildRepo $Repo -BuildOutDir $OutDir -IsBackground ([bool]$Background) -TimeoutSec $BuildTimeoutSec
+    if ($buildResult.TimedOut) {
+        @{
+            dirty = $true
+            exitCode = 2
+            reason = 'build-timeout'
+            buildSeconds = [math]::Round($buildResult.Seconds, 2)
+            buildTimeoutSec = $BuildTimeoutSec
+            time = (Get-Date).ToUniversalTime().ToString('o')
+        } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 (Join-Path $OutDir 'environment-dirty.json')
+        Note "ENVIRONMENT_DIRTY：build-timeout（$([math]::Round($buildResult.Seconds, 2)) 秒）"
+        $global:LASTEXITCODE = 2
+        exit 2
+    }
+    if ($buildResult.ExitCode -eq 0) {
+        Note ("构建完成：耗时 {0:N2} 秒" -f $buildResult.Seconds)
+    } else {
+        Note ("构建失败：退出码 {0}，耗时 {1:N2} 秒（见 build.log）" -f $buildResult.ExitCode, $buildResult.Seconds)
+    }
+}
 if (-not $Background) {
     $preflight = Test-DesktopPreflight
     if (-not $preflight.Clean) {
@@ -148,48 +245,40 @@ if (-not $Background) {
 }
 # Other Coach windows/heavy jobs may coexist; only input/capture is serialized.
 Mark-ExistingClients
-$runTask = ':desktopApp:run'
-if ($Background) {
-    $runTask = ':desktopApp:smokeRun'
-    $env:COACH_SMOKE_ENABLED = '1'
-    $env:COACH_SMOKE_CONTROL_FILE = Join-Path $OutDir 'control.private.json'
-} else {
-    $env:COACH_SMOKE_ENABLED = $null
-    $env:COACH_SMOKE_CONTROL_FILE = $null
-}
-# A shared Gradle daemon is outside the interactive invocation's process job.
-# Use a single-use daemon so even a timeout before AppPid discovery owns the tree.
-$launchArgs = @($runTask, '-Pcoach.course=', '--console=plain', '--offline', '--no-daemon')
-$memoryLease = Enter-SmokeMemory
-try {
-if ($ClientSeed) { Copy-Item -Recurse -Force (Join-Path $ClientSeed '*') $client }
 $gradle = $null
 $gradleStartTicks = 0L
-if ($Runtime) {
-    $Runtime = (Resolve-Path -LiteralPath $Runtime).Path
-    $revision = (& git -C $Repo rev-parse HEAD).Trim()
-    if ($LASTEXITCODE -ne 0 -or (Get-Content (Join-Path $Runtime 'revision.txt') -Raw).Trim() -ne $revision) { throw 'Runtime source revision differs from checkout' }
-    if ((Get-Content (Join-Path $Runtime 'dirty.txt') -Raw).Trim()) { throw 'Runtime was built from uncommitted source' }
-    $classpath = ((Get-Content (Join-Path $Runtime 'classpath.txt')) | ForEach-Object { Join-Path $Runtime $_ }) -join ';'
-    # Preparation is a separate Mac heavy call. The foreground path still runs
-    # the production MainKt entry; only -Background selects development controls.
-    $entry = if ($Background) { 'com.coach.desktop.smoke.SmokeMain' } else { 'com.coach.desktop.MainKt' }
-    # javaw has no console for Windows Terminal to activate during background startup.
-    $java = if ($Background) { 'javaw.exe' } else { 'java.exe' }
-    $gradle = Start-Process "$env:JAVA_HOME/bin/$java" -ArgumentList ('-cp "' + $classpath + '" ' + $entry) -WorkingDirectory $Repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
-} else {
-    $gradle = Start-Process (Join-Path $Repo 'gradlew.bat') -ArgumentList $launchArgs -WorkingDirectory $Repo `
-    -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
+$launchSw = $null
+if (-not $buildResult -or $buildResult.ExitCode -eq 0) {
+    if ($Runtime) {
+        $Runtime = (Resolve-Path -LiteralPath $Runtime).Path
+        $revision = (& git -C $Repo rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or (Get-Content (Join-Path $Runtime 'revision.txt') -Raw).Trim() -ne $revision) { throw 'Runtime source revision differs from checkout' }
+        if ((Get-Content (Join-Path $Runtime 'dirty.txt') -Raw).Trim()) { throw 'Runtime was built from uncommitted source' }
+        $classpath = ((Get-Content (Join-Path $Runtime 'classpath.txt')) | ForEach-Object { Join-Path $Runtime $_ }) -join ';'
+        # Preparation is a separate Mac heavy call. The foreground path still runs
+        # the production MainKt entry; only -Background selects development controls.
+        $entry = if ($Background) { 'com.coach.desktop.smoke.SmokeMain' } else { 'com.coach.desktop.MainKt' }
+        # javaw has no console for Windows Terminal to activate during background startup.
+        $java = if ($Background) { 'javaw.exe' } else { 'java.exe' }
+        $launchSw = [Diagnostics.Stopwatch]::StartNew()
+        $gradle = Start-Process "$env:JAVA_HOME/bin/$java" -ArgumentList ('-cp "' + $classpath + '" ' + $entry) -WorkingDirectory $Repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
+    } else {
+        $launchSw = [Diagnostics.Stopwatch]::StartNew()
+        $gradle = Start-Process (Join-Path $Repo 'gradlew.bat') -ArgumentList $launchArgs -WorkingDirectory $Repo `
+        -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
+    }
+    if ($gradle) { $gradleStartTicks = Get-TrackedProcessStartTicks $gradle }
 }
-if ($gradle) { $gradleStartTicks = Get-TrackedProcessStartTicks $gradle }
 try {
     # ① 启动
+    if ($buildResult -and $buildResult.ExitCode -ne 0) { Fail 1 '构建失败（见 build.log）' }
     $deadline = (Get-Date).AddSeconds($StartTimeoutSec)
     while (-not (Find-CoachWindow) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
     if ($script:Win -eq [IntPtr]::Zero) { Fail 1 "客户端窗口 $StartTimeoutSec 秒内没有出现（见 client.err.log）" }
     Set-SmokeMemoryClient $memoryLease $script:AppPid
     $m = Await-Text 1 'start' @('上传教材', '书架') 30
     if (-not $m) { Fail 1 '窗口出来了但没有看到书架' }
+    if ($launchSw) { Note ("起窗完成：编译结束后 {0:N2} 秒" -f $launchSw.Elapsed.TotalSeconds) }
     Pass 1 '客户端窗口出现，书架可见'
 
     # ② 上传一本书

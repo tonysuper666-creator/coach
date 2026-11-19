@@ -58,26 +58,48 @@ try {
     $noStream = { $null }
     $idle15m = { 900.0 }
 
+    $stampTmp = "$regTmp-driver-input.json"
+
     # Edge 或 WindowsTerminal 在前台，只要键鼠空闲 >=10分钟 且无串流、无其他 Coach/遗留外窗 -> 放行
-    $pfEdge = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+    $pfEdge = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
     Check 'preflight-allows-idle-edge-foreground' ($pfEdge.Clean -and $pfEdge.Foreground.Process -eq 'msedge') $pfEdge.Reason
-    $pfTerm = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $termFg
+    $pfTerm = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $termFg
     Check 'preflight-allows-idle-terminal-foreground' ($pfTerm.Clean -and $pfTerm.Foreground.Process -eq 'WindowsTerminal') $pfTerm.Reason
 
-    # 近 10 分钟内有键鼠输入 -> 拒绝（即使前景是桌面壳）
-    $pfRecentInput = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe { 120.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach
+    # 近 10 分钟内有键鼠输入且无匹配驱动注入记录 -> 拒绝（即使前景是桌面壳）
+    $pfRecentInput = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe { 120.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach
     Check 'preflight-rejects-recent-human-input' (-not $pfRecentInput.Clean -and $pfRecentInput.Reason -like '*120*') $pfRecentInput.Reason
 
+    # 连跑两轮之间（驱动自己注入的 SendInput 距 GetLastInputInfo 最后输入 < 2 秒）-> 不算真人，两轮之间不拦
+    $tBase = [datetime]::SpecifyKind([datetime]'2026-11-19T18:27:01', [DateTimeKind]::Utc)
+    Record-DriverInputTimestamp -UtcTime $tBase.AddSeconds(-5.0) -StampFile $stampTmp
+    $pfBackToBackImmediate = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 5.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+    Record-DriverInputTimestamp -UtcTime $tBase.AddSeconds(-525.6) -StampFile $stampTmp
+    $pfBackToBackDelayed = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 525.6 } -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+    Check 'preflight-allows-back-to-back-driver-input' ($pfBackToBackImmediate.Clean -and $pfBackToBackDelayed.Clean) "imm=$($pfBackToBackImmediate.Reason) del=$($pfBackToBackDelayed.Reason)"
+
+    # 驱动注入时间与系统最后输入相差 1.2 秒（< 2 秒阈值）-> 放行；真人输入相差 >= 2 秒 -> 拒绝；正在串流仍拒绝
+    Record-DriverInputTimestamp -UtcTime $tBase.AddSeconds(-120.0) -StampFile $stampTmp
+    $pfWithin2s = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 121.2 } -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+    Check 'preflight-allows-driver-input-within-2s' $pfWithin2s.Clean $pfWithin2s.Reason
+
+    Record-DriverInputTimestamp -UtcTime $tBase.AddSeconds(-525.6) -StampFile $stampTmp
+    $pfHumanAfterDriver = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 30.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+    Check 'preflight-rejects-human-input-outside-2s' (-not $pfHumanAfterDriver.Clean -and $pfHumanAfterDriver.Reason -like '*30*') $pfHumanAfterDriver.Reason
+
+    $pfDriverStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 525.6 } -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Pid = 12640; Ports = @(47998); Summary = 'sunshine pid=12640 streaming ports=47998' } } -CoachWindowProbe $noCoach
+    Check 'preflight-rejects-driver-input-when-streaming' (-not $pfDriverStream.Clean -and $pfDriverStream.Reason -like '*Apollo/Moonlight*') $pfDriverStream.Reason
+
     # GetLastInputInfo 读取失败（<0）-> 保守拒绝
-    $pfUnreadableIdle = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe { -1.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach
+    $pfUnreadableIdle = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe { -1.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach
     Check 'preflight-rejects-unreadable-idle' (-not $pfUnreadableIdle.Clean) $pfUnreadableIdle.Reason
 
     # 键鼠空闲但 Apollo/Moonlight 正在串流 -> 拒绝
-    $pfStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Pid = 12640; Ports = @(47998, 48010); Summary = 'sunshine pid=12640 streaming ports=47998,48010' } } -CoachWindowProbe $noCoach
+    $pfStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Pid = 12640; Ports = @(47998, 48010); Summary = 'sunshine pid=12640 streaming ports=47998,48010' } } -CoachWindowProbe $noCoach
     Check 'preflight-rejects-active-stream' (-not $pfStream.Clean -and $pfStream.Reason -like '*Apollo/Moonlight*') $pfStream.Reason
 
     # 本轮之外的其他 Coach MainKt 窗口存在 -> 即使空闲无串流也算脏
-    $pfCoach = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe { @([pscustomobject]@{ Kind = 'coach-window'; Pid = 21116; Process = 'java'; Summary = 'coach-window java pid=21116' }) } -ForegroundProbe $edgeFg
+    $pfCoach = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe { @([pscustomobject]@{ Kind = 'coach-window'; Pid = 21116; Process = 'java'; Summary = 'coach-window java pid=21116' }) } -ForegroundProbe $edgeFg
     Check 'preflight-rejects-foreign-coach' (-not $pfCoach.Clean -and $pfCoach.DirtyWindows.Count -eq 1 -and $pfCoach.DirtyWindows[0].Pid -eq 21116) $pfCoach.Reason
 
     # 测试登记的遗留外窗（PID + StartTime 对得上）-> 算脏；死掉/复用后的过期登记自动清理并放行
@@ -86,13 +108,13 @@ try {
         $leftover = Start-Process powershell.exe -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 60"' -PassThru -WindowStyle Hidden
         $leftTicks = Get-TrackedProcessStartTicks $leftover
         $null = Register-ExternalWindowPid -ProcessId $leftover.Id -StartTimeTicks $leftTicks -Kind 'notepad' -RegistryDir $regTmp
-        $pfLeftover = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        $pfLeftover = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
         Check 'preflight-rejects-registered-leftover' (-not $pfLeftover.Clean -and $pfLeftover.DirtyWindows.Count -eq 1 -and $pfLeftover.DirtyWindows[0].Pid -eq $leftover.Id) $pfLeftover.Reason
 
         # 伪造一条同 PID 但 StartTime 不匹配的过期登记：必须被判定为复用/已退并清掉文件
         Unregister-ExternalWindowPid -ProcessId $leftover.Id -StartTimeTicks $leftTicks -RegistryDir $regTmp
         $null = Register-ExternalWindowPid -ProcessId $leftover.Id -StartTimeTicks ($leftTicks + 1L) -Kind 'stale-reused' -RegistryDir $regTmp
-        $pfStale = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        $pfStale = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
         Check 'preflight-prunes-mismatched-registration' ($pfStale.Clean -and @(Get-ChildItem $regTmp -Filter '*.json').Count -eq 0) "files=$(@(Get-ChildItem $regTmp -Filter '*.json').Count)"
     } finally {
         if ($leftover -and $leftTicks -gt 0L) {
@@ -101,6 +123,7 @@ try {
         }
     }
 } finally {
+    Remove-Item -LiteralPath "$regTmp-driver-input.json" -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $regTmp -ErrorAction SilentlyContinue
 }
 
@@ -215,6 +238,8 @@ try {
 param([string]$Script, [string[]]$ScriptArgs = @(), [int]$TimeoutSec = 600, [string]$LogFile)
 $mode = $env:FP_TEST_MODE
 $outDir = Split-Path -Parent $LogFile
+@{ timeoutSec = $TimeoutSec; script = $Script; scriptArgs = ($ScriptArgs -join ' ') } |
+    ConvertTo-Json -Depth 3 | Set-Content -Encoding utf8 (Join-Path $outDir 'forwarded.json')
 if ($mode -eq 'dirty') {
     @{ dirty = $true; exitCode = 2; reason = '桌面存在非本轮拉起的前台窗口（Notepad pid=26044 class=Notepad）' } |
         ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $outDir 'environment-dirty.json')
@@ -241,6 +266,130 @@ if ($mode -eq 'dirty') {
         $code = $LASTEXITCODE
         Check "exitcode-$($tc.Mode)" ($code -eq $tc.ExpectExit -and $outText.Contains($tc.Match)) "exit=$code expected=$($tc.ExpectExit)"
     }
+
+    # 6. friend-path.ps1 超时参数透传 + 默认外层 TimeoutSec = 600 + BuildTimeoutSec
+    $env:FP_TEST_MODE = 'pass'
+    $evFwd = Join-Path $tmp 'ev-fwd'
+    New-Item -ItemType Directory -Force $evFwd | Out-Null
+    $null = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fp -Evidence $evFwd 2>&1 | Out-String)
+    $fwdDefault = Get-Content -LiteralPath (Get-ChildItem $evFwd -Recurse -Filter 'forwarded.json' | Select-Object -First 1).FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+    Check 'forward-default-timeouts' ($LASTEXITCODE -eq 0 -and $fwdDefault.timeoutSec -eq 1500 -and $fwdDefault.scriptArgs -match '-StartTimeoutSec 150\b' -and $fwdDefault.scriptArgs -match '-BuildTimeoutSec 900\b') "timeout=$($fwdDefault.timeoutSec) args=$($fwdDefault.scriptArgs)"
+
+    $evCustom = Join-Path $tmp 'ev-custom'
+    New-Item -ItemType Directory -Force $evCustom | Out-Null
+    $null = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fp -Evidence $evCustom -StartTimeoutSec 90 -BuildTimeoutSec 420 2>&1 | Out-String)
+    $fwdCustom = Get-Content -LiteralPath (Get-ChildItem $evCustom -Recurse -Filter 'forwarded.json' | Select-Object -First 1).FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+    Check 'forward-custom-timeouts' ($LASTEXITCODE -eq 0 -and $fwdCustom.timeoutSec -eq 1020 -and $fwdCustom.scriptArgs -match '-StartTimeoutSec 90\b' -and $fwdCustom.scriptArgs -match '-BuildTimeoutSec 420\b') "timeout=$($fwdCustom.timeoutSec) args=$($fwdCustom.scriptArgs)"
+
+    $evExplicit = Join-Path $tmp 'ev-explicit'
+    New-Item -ItemType Directory -Force $evExplicit | Out-Null
+    $null = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fp -Evidence $evExplicit -BuildTimeoutSec 420 -TimeoutSec 777 2>&1 | Out-String)
+    $fwdExplicit = Get-Content -LiteralPath (Get-ChildItem $evExplicit -Recurse -Filter 'forwarded.json' | Select-Object -First 1).FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+    Check 'forward-explicit-outer-timeout' ($LASTEXITCODE -eq 0 -and $fwdExplicit.timeoutSec -eq 777) "timeout=$($fwdExplicit.timeoutSec)"
+
+    # 7. friend-path-worker 编译超时与编译失败分流（桩 gradlew.bat，不真实编译）
+    $buildRepo = Join-Path $tmp 'repo-stub'
+    $buildSmoke = Join-Path $buildRepo 'tools\smoke'
+    $evBuild = Join-Path $tmp 'ev-build'
+    New-Item -ItemType Directory -Force $buildSmoke, $evBuild | Out-Null
+    foreach ($name in @('friend-path.ps1', 'friend-path-worker.ps1', 'Win-Drive.ps1', 'Smoke-Memory.ps1', 'Lesson-Range.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $buildSmoke $name)
+    }
+    @'
+param([string]$Script, [string[]]$ScriptArgs = @(), [int]$TimeoutSec = 600, [string]$LogFile)
+$global:LASTEXITCODE = 0
+$cmd = "& '" + $Script.Replace("'", "''") + "' " + ($ScriptArgs -join ' ')
+Invoke-Expression $cmd *>&1 | Out-File -Encoding utf8 $LogFile
+exit ([int]$LASTEXITCODE)
+'@ | Set-Content -Encoding utf8 (Join-Path $buildSmoke 'Run-Interactive.ps1')
+
+    $fpBuild = Join-Path $buildSmoke 'friend-path.ps1'
+    $stubTag = 'coach-build-stub-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    @"
+@echo off
+echo STUB_BUILD_ARGS %*
+powershell -NoProfile -Command "Start-Sleep -Seconds 30 # $stubTag"
+exit /b 0
+"@ | Set-Content -Encoding ascii (Join-Path $buildRepo 'gradlew.bat')
+    $evTimeout = Join-Path $evBuild 'timeout'
+    $outTimeout = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fpBuild -Evidence $evTimeout -BuildTimeoutSec 2 -StartTimeoutSec 15 2>&1 | Out-String)
+    $codeTimeout = $LASTEXITCODE
+    $runDirTimeout = Get-ChildItem -LiteralPath $evTimeout -Directory | Select-Object -First 1
+    $dirtyTimeout = if ($runDirTimeout -and (Test-Path -LiteralPath (Join-Path $runDirTimeout.FullName 'environment-dirty.json'))) {
+        Get-Content -LiteralPath (Join-Path $runDirTimeout.FullName 'environment-dirty.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    } else { $null }
+    $logTimeout = if ($runDirTimeout -and (Test-Path -LiteralPath (Join-Path $runDirTimeout.FullName 'build.log'))) {
+        Get-Content -LiteralPath (Join-Path $runDirTimeout.FullName 'build.log') -Raw -Encoding UTF8
+    } else { '' }
+    $strayStub = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like "*$stubTag*" }).Count
+    Check 'build-timeout-dirty-exit2' (
+        $codeTimeout -eq 2 -and
+        $outTimeout -match 'ENVIRONMENT_DIRTY:\s*build-timeout' -and
+        $dirtyTimeout -and $dirtyTimeout.reason -eq 'build-timeout' -and
+        -not (Test-Path -LiteralPath (Join-Path $runDirTimeout.FullName 'result.json')) -and
+        $logTimeout -match 'STUB_BUILD_ARGS :desktopApp:classes\b' -and
+        $logTimeout -match 'timedOut=True' -and
+        $strayStub -eq 0
+    ) "code=$codeTimeout reason=$($dirtyTimeout.reason) stray=$strayStub"
+
+    @"
+@echo off
+echo STUB_BUILD_ARGS %*
+echo STUB_COMPILE_ERROR>&2
+exit /b 7
+"@ | Set-Content -Encoding ascii (Join-Path $buildRepo 'gradlew.bat')
+    $evFail = Join-Path $evBuild 'fail'
+    $outFail = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fpBuild -Evidence $evFail -BuildTimeoutSec 30 -StartTimeoutSec 15 2>&1 | Out-String)
+    $codeFail = $LASTEXITCODE
+    $runDirFail = Get-ChildItem -LiteralPath $evFail -Directory | Select-Object -First 1
+    $resFail = if ($runDirFail -and (Test-Path -LiteralPath (Join-Path $runDirFail.FullName 'result.json'))) {
+        Get-Content -LiteralPath (Join-Path $runDirFail.FullName 'result.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    } else { $null }
+    $logFail = if ($runDirFail -and (Test-Path -LiteralPath (Join-Path $runDirFail.FullName 'build.log'))) {
+        Get-Content -LiteralPath (Join-Path $runDirFail.FullName 'build.log') -Raw -Encoding UTF8
+    } else { '' }
+    Check 'build-error-fail-step1' (
+        $codeFail -eq 1 -and
+        $outFail -match '0/7' -and
+        -not (Test-Path -LiteralPath (Join-Path $runDirFail.FullName 'environment-dirty.json')) -and
+        $resFail -and $resFail.passed -eq 0 -and $resFail.steps.Count -eq 1 -and
+        $resFail.steps[0].Step -eq 1 -and (-not $resFail.steps[0].Ok) -and
+        $resFail.steps[0].Why -eq '构建失败（见 build.log）' -and
+        $logFail -match 'STUB_COMPILE_ERROR' -and $logFail -match 'exitCode=7'
+    ) "code=$codeFail passed=$($resFail.passed) why=$($resFail.steps[0].Why)"
+
+    @"
+@echo off
+if "%1"==":desktopApp:classes" (
+    echo STUB_BUILD_ARGS %*
+    powershell -NoProfile -Command "Start-Sleep -Seconds 3"
+    exit /b 0
+)
+echo STUB_RUN_ARGS %*
+exit /b 0
+"@ | Set-Content -Encoding ascii (Join-Path $buildRepo 'gradlew.bat')
+    $evOrder = Join-Path $evBuild 'order'
+    $null = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fpBuild -Evidence $evOrder -BuildTimeoutSec 15 -StartTimeoutSec 2 2>&1 | Out-String)
+    $codeOrder = $LASTEXITCODE
+    $runDirOrder = Get-ChildItem -LiteralPath $evOrder -Directory | Select-Object -First 1
+    $logOrder = if ($runDirOrder -and (Test-Path -LiteralPath (Join-Path $runDirOrder.FullName 'build.log'))) {
+        Get-Content -LiteralPath (Join-Path $runDirOrder.FullName 'build.log') -Raw -Encoding UTF8
+    } else { '' }
+    $clientOutOrder = if ($runDirOrder -and (Test-Path -LiteralPath (Join-Path $runDirOrder.FullName 'client.out.log'))) {
+        Get-Content -LiteralPath (Join-Path $runDirOrder.FullName 'client.out.log') -Raw -Encoding UTF8
+    } else { '' }
+    $resOrder = if ($runDirOrder -and (Test-Path -LiteralPath (Join-Path $runDirOrder.FullName 'result.json'))) {
+        Get-Content -LiteralPath (Join-Path $runDirOrder.FullName 'result.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    } else { $null }
+    Check 'split-build-exceeds-start-timeout' (
+        $codeOrder -eq 1 -and
+        $logOrder -match 'STUB_BUILD_ARGS :desktopApp:classes' -and
+        $logOrder -match 'exitCode=0\b' -and
+        $logOrder -match 'timedOut=False' -and
+        $clientOutOrder -match 'STUB_RUN_ARGS :desktopApp:run' -and
+        $resOrder -and $resOrder.passed -eq 0 -and
+        $resOrder.steps[0].Why -eq '客户端窗口 2 秒内没有出现（见 client.err.log）'
+    ) "code=$codeOrder why=$($resOrder.steps[0].Why)"
 } finally {
     Remove-Item Env:FP_TEST_MODE -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue

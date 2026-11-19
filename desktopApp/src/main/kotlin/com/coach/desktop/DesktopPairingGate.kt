@@ -8,6 +8,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.coach.desktop.books.ExplainTrouble
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -16,6 +17,7 @@ import kotlinx.coroutines.withContext
 @Composable
 internal fun DesktopPairingGate(settings: DesktopConnectionSettings, content: @Composable (DesktopIdentity) -> Unit) {
     val pairing = remember(settings) { DesktopPairing(settings) }
+    val sable = remember(settings) { settings.sableLoginShown() }
     var identity by remember { mutableStateOf<DesktopIdentity?>(null) }
     var initialized by remember { mutableStateOf(false) }
     var address by remember { mutableStateOf("") }
@@ -37,7 +39,11 @@ internal fun DesktopPairingGate(settings: DesktopConnectionSettings, content: @C
         try {
             withContext(Dispatchers.IO) { pairing.awaitRevocation(current) }
             identity = null
-            error = if (current.credentials.role == "friend") "授权已撤销，请重新登录。" else "这台电脑已取消配对，请在 Mac 上生成新配对码。"
+            error = when {
+                current.credentials.role != "friend" -> "这台电脑已取消配对，请在 Mac 上生成新配对码。"
+                sable -> "授权已撤销，请重新登录。"
+                else -> ExplainTrouble.REVOKED
+            }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) {
             identity = null
@@ -51,8 +57,10 @@ internal fun DesktopPairingGate(settings: DesktopConnectionSettings, content: @C
             else if (!initialized) Box(Modifier.padding(24.dp)) { Text("正在读取连接信息…") }
             else Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("连接你的 Mac", style = MaterialTheme.typography.headlineMedium)
-                com.coach.ui.SableLoginButton(busy, { busy = it }) { open -> identity = pairing.sable(open) }
-                Text("没有 Sable 账号？用配对码")
+                if (sable) {
+                    com.coach.ui.SableLoginButton(busy, { busy = it }) { open -> identity = pairing.sable(open) }
+                    Text("没有 Sable 账号？用配对码")
+                }
                 OutlinedTextField(value = address, onValueChange = { address = it; error = null },
                     label = { Text("Mac 地址") }, placeholder = { Text("http://你的Mac地址:18791") },
                     singleLine = true, enabled = !busy)

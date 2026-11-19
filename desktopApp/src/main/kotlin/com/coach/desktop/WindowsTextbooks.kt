@@ -75,6 +75,7 @@ internal fun runWindowsTextbooks() {
             )) {
             WindowsReadingMinimum(window)
             var revoked by remember { mutableStateOf(false) }
+            val sableLogin = remember { DesktopConnectionSettings().sableLoginShown() }
             LaunchedEffect(Unit) {
                 revoked = withContext(Dispatchers.IO) {
                     val pairing = DesktopPairing(DesktopConnectionSettings())
@@ -83,8 +84,8 @@ internal fun runWindowsTextbooks() {
                 }
             }
             if (revoked) AlertDialog(onDismissRequest = { revoked = false },
-                title = { Text("授权已撤销，请重新登录") },
-                text = { Text("打开书中的讲解页即可重新登录。") },
+                title = { Text(if (sableLogin) "授权已撤销，请重新登录" else "这台电脑的连接已停用") },
+                text = { Text(if (sableLogin) "打开书中的讲解页即可重新登录。" else "打开书中的讲解页，用新的配对码重新配对。读书和做题照常。") },
                 confirmButton = { TextButton(onClick = { revoked = false }) { Text("知道了") } })
             WindowsTextbookHost(controller, drafts, exams, chooseBook = {
                 withContext(Dispatchers.Swing) {

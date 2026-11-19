@@ -43,6 +43,12 @@ internal class DesktopConnectionSettings(
     private fun configuredFriendUrl(): String? = (environment("COACH_FRIEND_URL") ?: properties().getProperty("coach.friendUrl") ?: property("coach.friendUrl"))
         ?.takeIf(String::isNotBlank)?.let(::desktopServerUrl)
 
+    /**
+     * 「用 Sable 账号登录」入口。生产授权没放行前默认收起，首次连接和重新配对只给配对码；
+     * 候选构建时用 `-Pcoach.sableLogin=true` 打开（TON-1760）。登录实现本身一直保留。
+     */
+    fun sableLoginShown(): Boolean = property("coach.sableLogin")?.trim() == "true"
+
     fun sableFriendUrl(): String = configuredFriendUrl()
         ?: throw com.coach.client.SableLoginError("请先在连接配置中设置朋友服务地址。")
 

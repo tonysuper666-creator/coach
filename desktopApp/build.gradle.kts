@@ -98,6 +98,12 @@ val coachCourse = providers.gradleProperty("coach.course")
 require(coachCourse.isEmpty() || coachCourse.matches(Regex("[A-Za-z0-9_-]+"))) {
     "coach.course must contain only letters, digits, underscores or hyphens"
 }
+// 「用 Sable 账号登录」入口：默认收起（生产授权没放行，TON-1760）。候选构建时显式传
+// -Pcoach.sableLogin=true 才打开；不从 local.properties 读，免得哪台机器的旧配置悄悄改了包。
+val coachSableLogin = providers.gradleProperty("coach.sableLogin").orNull?.trim()?.lowercase()
+require(coachSableLogin == null || coachSableLogin == "true" || coachSableLogin == "false") {
+    "coach.sableLogin must be true or false"
+}
 compose.desktop {
     application {
         mainClass = "com.coach.desktop.MainKt"
@@ -106,6 +112,7 @@ compose.desktop {
             jvmArgs("-Dcoach.friendUrl=$origin")
         }
         if (coachCourse.isNotEmpty()) jvmArgs("-Dcoach.course=$coachCourse")
+        if (coachSableLogin == "true") jvmArgs("-Dcoach.sableLogin=true")
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi)
             packageName = "LearningCoach"

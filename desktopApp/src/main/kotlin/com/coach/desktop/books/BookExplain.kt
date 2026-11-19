@@ -131,6 +131,8 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
     /** 服务端说这台电脑的连接已停用（401）；重新配对成功前，配对表单上先说清这一句。 */
     var revoked by mutableStateOf(false)
         protected set
+    /** 配对表单上要不要放「用 Sable 账号登录」：跟着构建时的决定走，默认只给配对码。 */
+    val sableLogin: Boolean get() = settings.sableLoginShown()
 
     /** 别处（选段提问、答后讲解）先碰到了 401：讲解面板也回到配对，不再显示「已连上」。 */
     fun markRevoked() {
@@ -274,20 +276,23 @@ internal fun BookExplainPanel(
         Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp).testTag("book-explain"), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             val paired = explainer.identity
             if (paired == null && explainer.loaded) Column(Modifier.testTag("explain-pairing"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                val sable = explainer.sableLogin
                 if (explainer.revoked) {
                     Text("这台电脑的连接已停用", style = MaterialTheme.typography.titleMedium)
-                    Text("授权已撤销，请重新登录。读书和做题照常。", style = MaterialTheme.typography.bodySmall,
-                        color = colors.fgSecondary, modifier = Modifier.testTag("explain-revoked"))
+                    Text(if (sable) "授权已撤销，请重新登录。读书和做题照常。" else "请 Mac 那边生成新的配对码，填在下面重新配对。读书和做题照常。",
+                        style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("explain-revoked"))
                 } else {
                     Text("先连上 Mac", style = MaterialTheme.typography.titleMedium)
-                    Text("登录后可以提问，也可以让朋友服务讲解选中的原文。", style = MaterialTheme.typography.bodySmall,
-                        color = colors.fgSecondary)
+                    Text(if (sable) "登录后可以提问，也可以让朋友服务讲解选中的原文。" else "填上 Mac 地址和配对码，连上后可以提问，也可以讲解选中的原文。",
+                        style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("explain-connect-hint"))
                 }
-                com.coach.ui.SableLoginButton(pairing, { pairing = it }) { open ->
-                    explainer.sable(open)
-                    states.filterValues { (it as? BlockState.Failed)?.trouble == ExplainTrouble.Revoked }.keys.forEach(states::remove)
+                if (sable) {
+                    com.coach.ui.SableLoginButton(pairing, { pairing = it }) { open ->
+                        explainer.sable(open)
+                        states.filterValues { (it as? BlockState.Failed)?.trouble == ExplainTrouble.Revoked }.keys.forEach(states::remove)
+                    }
+                    Text("没有 Sable 账号？用配对码", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                 }
-                Text("没有 Sable 账号？用配对码", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                 V7Field(address, { address = it; pairError = null }, "Mac 地址", enabled = !pairing, paper = colors.surface2, modifier = Modifier.fillMaxWidth().testTag("explain-address"))
                 V7Field(code, { code = it.filter(Char::isDigit).take(6); pairError = null }, "配对码", enabled = !pairing, paper = colors.surface2,
                     visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),

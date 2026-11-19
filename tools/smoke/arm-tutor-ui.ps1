@@ -104,6 +104,8 @@ function Test-Practice {
     $null = Find-TutorLabel '06-selected' @('你选择','你选了','本题答案一致') -2
     $null = Find-TutorLabel '06-feedback' @('Practicefeedback','feedback') -3
     $null = Find-TutorLabel '06-feedback-source' @('出处') -2
+    # The summary heading can enter the viewport while the actual result still sits below it.
+    Scroll-At 584 490 -24
     $summary = Find-TutorLabel '06-summary' @('这一节','小结','题目和作答') -3
     $null = Find-TutorLabel '06-summary' @('Recallbefore','beforechecking') 0 100 ($summary.Y - 45)
 }

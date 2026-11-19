@@ -181,6 +181,7 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
             Save-OwnWindow 'reader-after.png'
             if ($LASTEXITCODE -ne 0) { throw 'Installed reader did not persist page 2' }
             Test-InstalledTutor
+            Write-Output 'INSTALLED_FRIEND_PATH_PASS 7/7 (runner loopback tutor)'
         }
     } finally {
         if ($tutor) {

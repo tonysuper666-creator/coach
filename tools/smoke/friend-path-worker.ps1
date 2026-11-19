@@ -382,12 +382,99 @@ try {
     } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $five = 'failed' }
     if ($five -and -not $KeepGoing) { throw 'STEP_FAILED' }
 
-    # ⑥ 朋友自己的书：按节现出题，真实点一个选项，再等答后讲解和小结；不依赖整理题库准入。
+    # ⑥ 朋友自己的书：从正常界面进入授权章节后按节现出题，真实点一个选项，再等答后讲解和单题小结；不依赖整理题库准入。
     $six = $null
     try {
         Scroll-At 900 700 30; Start-Sleep -Seconds 1
         Click-Label 6 @('返回书架') '无法从学习页返回书架'
-        Click-Label 6 @('做题学') '书架没有做题学入口'
+        Click-Label 6 @('做题学', '继续做题学') '书架没有做题学入口'
+        $enter = Await-Text 6 'learn-enter' @('本节原文') 15
+        if (-not $enter) { Fail 6 '做题学页面没有显示「本节原文」' }
+        $readPage = { param($lines)
+            foreach ($l in $lines) {
+                $t = $l.Text -replace '\s', ''
+                if ($t -match '本节原文[·•.．:：]?第(\d+)页') { return [int]$Matches[1] }
+            }
+            return 0
+        }
+        $readTotalLessons = { param($lines)
+            foreach ($l in $lines) {
+                $t = $l.Text -replace '\s', ''
+                if ($t -match '第\d+[/／](\d+)节') { return [int]$Matches[1] }
+            }
+            return 0
+        }
+        $curPage = & $readPage $script:Last
+        $totalLessons = & $readTotalLessons $script:Last
+        $totalPages = if ($page1 -match '[/／](\d+)$') { [int]$Matches[1] } elseif ($page0 -match '[/／](\d+)$') { [int]$Matches[1] } else { 0 }
+        if ($physPage -gt 0 -and ($curPage -eq 0 -or $curPage -gt $physPage -or ($physPage - $curPage) -gt 8)) {
+            $targetIdx = if ($totalLessons -gt 0 -and $totalPages -gt 0) {
+                [Math]::Max(1, [Math]::Min($totalLessons, [int][Math]::Round($physPage * $totalLessons / $totalPages)))
+            } else { [Math]::Max(1, [int][Math]::Round($physPage * 1.25)) }
+            $landed = $false
+            for ($hop = 1; $hop -le 6 -and -not $landed; $hop++) {
+                Click-Label 6 @('目录') '做题学页面找不到「目录」'
+                Start-Sleep -Milliseconds 500
+                $closeDir = Await-Text 6 "dir-$hop" @('收起目录') 10
+                if (-not $closeDir) { Fail 6 '点击「目录」后学习路线抽屉没有打开' }
+                $lines = $script:Last
+                $chosenNum = 0
+                for ($sc = 0; $sc -lt 10; $sc++) {
+                    $items = @(foreach ($l in $lines) {
+                        if ($l.Text -match '^\s*(\d+)[.．]') {
+                            $num = [int]$Matches[1]
+                            $box = Find-Text @($l) $Matches[0]
+                            if ($box -and [Math]::Abs($box.X1 - $closeDir.X1) -lt 80 -and $box.Y1 -gt $closeDir.Y) {
+                                [pscustomobject]@{ Num = $num; X = $box.X; Y = $box.Y }
+                            }
+                        }
+                    }) | Sort-Object Num
+                    if ($items.Count -gt 0) {
+                        $minNum = $items[0].Num; $maxNum = $items[$items.Count - 1].Num
+                        if ($targetIdx -ge $minNum -and $targetIdx -le $maxNum) {
+                            $pick = $items | Sort-Object { [Math]::Abs($_.Num - $targetIdx) } | Select-Object -First 1
+                            $chosenNum = $pick.Num
+                            Click-At $pick.X $pick.Y
+                            Start-Sleep -Milliseconds 400
+                            break
+                        }
+                        if ($sc -eq 9) {
+                            $pick = if ($targetIdx -lt $minNum) { $items[0] } else { $items[$items.Count - 1] }
+                            $chosenNum = $pick.Num
+                            Click-At $pick.X $pick.Y
+                            Start-Sleep -Milliseconds 400
+                            break
+                        }
+                        $notches = if ($targetIdx -gt $maxNum) {
+                            -[Math]::Min(60, [Math]::Max(4, [int][Math]::Ceiling(($targetIdx - $maxNum) / 2.2)))
+                        } else {
+                            [Math]::Min(60, [Math]::Max(4, [int][Math]::Ceiling(($minNum - $targetIdx) / 2.2)))
+                        }
+                    } else {
+                        $notches = -20
+                    }
+                    Scroll-At $closeDir.X ($closeDir.Y + 250) $notches
+                    Start-Sleep -Milliseconds 400
+                    $lines = Shot 6 "dir-$hop-$sc"
+                }
+                Click-Label 6 @('收起目录') '选中学习路线条目后无法收起目录'
+                $afterSec = Await-Text 6 "sec-$hop" @('本节原文') 15
+                if (-not $afterSec) { Fail 6 '切换学习路线章节后页面没有显示「本节原文」' }
+                $curPage = & $readPage $script:Last
+                if ($curPage -gt 0 -and (($curPage -le $physPage -and ($physPage - $curPage) -le 8) -or [Math]::Abs($curPage - $physPage) -le 5)) {
+                    $landed = $true
+                    break
+                }
+                if ($chosenNum -gt 0 -and $curPage -gt 0) {
+                    $scale = if ($totalLessons -gt 0 -and $totalPages -gt 0) { $totalLessons / $totalPages } else { 1.25 }
+                    $delta = [int][Math]::Round(($physPage - $curPage) * $scale)
+                    if ($delta -eq 0) { $delta = if ($physPage -gt $curPage) { 2 } else { -2 } }
+                    $cap = if ($totalLessons -gt 0) { $totalLessons } else { 9999 }
+                    $targetIdx = [Math]::Max(1, [Math]::Min($cap, $chosenNum + $delta))
+                }
+            }
+            if (-not $landed) { Fail 6 "未能从目录切到含第 $physPage 页的授权章节（当前停在第 $curPage 页）" }
+        }
         # 已开启的书直接进入学习页；出题方式仍沿用这本书的设置。
         Click-Label 6 @('出题：', '出题:') '找不到出题设置'
         $settings = Await-Text 6 'settings' @('出题方式') 15
@@ -402,7 +489,7 @@ try {
             $lines = Shot 6 'question'
             $allow = Has $lines @('允许并出题')
             if ($allow) { Click-At $allow.X $allow.Y; Start-Sleep -Seconds 2; continue }
-            if (Has $lines @('格式完整', '出题暂时读不到', '没有足够的正文', '需要连上', '尚未核实', '额度', '重新配对')) {
+            if (Has $lines @('格式完整', '出题暂时读不到', '没有足够的正文', '需要连上', '尚未核实', '额度', '重新配对', '暂时无法确认')) {
                 Fail 6 '本节出题被拒绝或不可用，见 winbox 私有截图 6-question.png'
             }
             $anchor = Has $lines @('查看对应原文')
@@ -426,14 +513,14 @@ try {
             if (Has $lines @('你选择：', '你选择:')) { $selected = $true }
             if (Has $lines @('答后讲解')) { $explained = $true }
             if (Has $lines @('出处')) { $cited = $true }
-            if (Has $lines @('小结')) { $summary = $true }
+            if (Has $lines @('题目和作答只保留在这次练习中', '要回看时再打开', '小结')) { $summary = $true }
             if ($selected -and $explained -and $cited -and $summary) { break }
             Scroll-At 900 700 -2; Start-Sleep -Seconds 1
         }
         if (-not $selected) { Fail 6 '点击选项后没有看到已选答案' }
         if (-not $explained -or -not $cited) { Fail 6 '已作答，但没有看到带出处的答后讲解' }
-        if (-not $summary) { Fail 6 '已作答并看到讲解，但没有小结' }
-        Pass 6 '本节现出选择题，真实作答后出现已选答案、带出处的答后讲解和小结（6-question、6-answered 私有截图）'
+        if (-not $summary) { Fail 6 '已作答并看到讲解，但没有看到单题小结' }
+        Pass 6 '从正常界面进入授权章节，现出选择题作答后出现已选答案、带出处的答后讲解和单题小结（6-question、6-answered 私有截图）'
     } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $six = 'failed' }
     if ($six -and -not $KeepGoing) { throw 'STEP_FAILED' }
 

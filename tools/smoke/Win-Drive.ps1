@@ -266,13 +266,51 @@ function Get-Rect { $r = New-Object WD+RECT; [WD]::GetWindowRect($script:Win, [r
 
 # Names who holds the foreground when we give up, so a timeout can be attributed
 # to another run or program. Process name and window class only; never titles.
-function Get-ForegroundSummary {
-    $fg = [WD]::GetForegroundWindow(); $owner = 0
-    [WD]::GetWindowThreadProcessId($fg, [ref]$owner) | Out-Null
-    $cls = New-Object Text.StringBuilder 128; [WD]::GetClassName($fg, $cls, 128) | Out-Null
-    $name = (Get-Process -Id $owner -ErrorAction SilentlyContinue).ProcessName
-    $whose = if ($owner -eq $script:AppPid) { 'this run' } else { 'other' }
-    "$name pid=$owner class=$($cls.ToString()) $whose"
+function Get-ForegroundOwner([scriptblock]$Probe = $null) {
+    $raw = if ($Probe) {
+        & $Probe
+    } else {
+        $fg = [WD]::GetForegroundWindow()
+        $owner = 0
+        if ($fg -ne [IntPtr]::Zero) { [WD]::GetWindowThreadProcessId($fg, [ref]$owner) | Out-Null }
+        $cls = New-Object Text.StringBuilder 128
+        if ($fg -ne [IntPtr]::Zero) { [WD]::GetClassName($fg, $cls, 128) | Out-Null }
+        $name = if ($owner -gt 0) { (Get-Process -Id $owner -ErrorAction SilentlyContinue).ProcessName } else { '' }
+        [pscustomobject]@{
+            Hwnd = $fg.ToInt64()
+            Pid = [int]$owner
+            Process = if ($name) { [string]$name } else { '' }
+            Class = $cls.ToString()
+        }
+    }
+    $fgPid = if ($raw -and $null -ne $raw.Pid) { [int]$raw.Pid } else { 0 }
+    $procName = if ($raw -and $raw.Process) { [string]$raw.Process } else { '' }
+    $clsName = if ($raw -and $raw.Class) { [string]$raw.Class } else { '' }
+    $hwndVal = if ($raw -and $null -ne $raw.Hwnd) { [long]$raw.Hwnd } else { 0L }
+    $isOwn = [bool]($script:AppPid -and $fgPid -eq $script:AppPid)
+    $whose = if ($isOwn) { 'this run' } else { 'other' }
+    [pscustomobject]@{
+        Hwnd = $hwndVal
+        Pid = $fgPid
+        Process = $procName
+        Class = $clsName
+        IsOwnCoach = $isOwn
+        Summary = "$procName pid=$fgPid class=$clsName $whose"
+    }
+}
+function Get-ForegroundSummary { (Get-ForegroundOwner).Summary }
+function Resolve-ForegroundRetryTimeout([string]$LastFocusLoss = '', [scriptblock]$ForegroundProbe = $null) {
+    $fgOwner = Get-ForegroundOwner -Probe $ForegroundProbe
+    if ($fgOwner.Pid -gt 0 -and -not $fgOwner.IsOwnCoach) {
+        $procLabel = if ($fgOwner.Process) { $fgOwner.Process } else { 'unknown' }
+        $err = [System.InvalidOperationException]::new("WIN_DRIVE_FOREGROUND_CONTENTION: could not regain our foreground for this action (foreground: $($fgOwner.Summary)). Last retry: $LastFocusLoss")
+        $err.Data['ForegroundPid'] = $fgOwner.Pid
+        $err.Data['ForegroundProcess'] = $procLabel
+        $err.Data['ForegroundClass'] = $fgOwner.Class
+        $err.Data['LastFocusLoss'] = $LastFocusLoss
+        return $err
+    }
+    return [System.InvalidOperationException]::new("WIN_DRIVE_TIMEOUT: could not regain our foreground for this action (foreground: $($fgOwner.Summary)). Last retry: $LastFocusLoss")
 }
 function Find-ForeignForegroundWindow([scriptblock]$Probe = $null) {
     $shellClasses = @(
@@ -644,7 +682,7 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
                 Start-Sleep -Milliseconds (Get-Random -Minimum 50 -Maximum 200)
             }
         }
-        throw "WIN_DRIVE_TIMEOUT: could not regain our foreground for this action (foreground: $(Get-ForegroundSummary)). Last retry: $lastFocusLoss"
+        throw (Resolve-ForegroundRetryTimeout -LastFocusLoss $lastFocusLoss)
     } finally { $mutex.Dispose() }
 }
 function Save-Shot([string]$path, [IntPtr]$Window = [IntPtr]::Zero) {

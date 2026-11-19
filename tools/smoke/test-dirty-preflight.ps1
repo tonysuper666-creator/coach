@@ -390,7 +390,132 @@ exit /b 0
         $resOrder -and $resOrder.passed -eq 0 -and
         $resOrder.steps[0].Why -eq '客户端窗口 2 秒内没有出现（见 client.err.log）'
     ) "code=$codeOrder why=$($resOrder.steps[0].Why)"
+
+    # 8. 重试用完分流：外部进程占前台写 foreground-contention 并退出 2（保留已通过步骤）；本轮 Coach 自窗照旧记 Fail
+    $prevAppPid = $script:AppPid
+    try {
+        $script:AppPid = 55555
+        $extErr = Resolve-ForegroundRetryTimeout -LastFocusLoss 'WIN_DRIVE_FOCUS_LOST: activation declined by Windows' -ForegroundProbe {
+            [pscustomobject]@{ Hwnd = 683201L; Pid = 6832; Process = 'java'; Class = 'SunAwtFrame' }
+        }
+        Check 'retry-exhausted-external-throws-contention' (
+            $extErr -and
+            $extErr.Message -like 'WIN_DRIVE_FOREGROUND_CONTENTION:*' -and
+            $extErr.Data['ForegroundPid'] -eq 6832 -and
+            $extErr.Data['ForegroundProcess'] -eq 'java'
+        ) $extErr.Message
+
+        $ownErr = Resolve-ForegroundRetryTimeout -LastFocusLoss 'WIN_DRIVE_FOCUS_LOST: our client is no longer foreground' -ForegroundProbe {
+            [pscustomobject]@{ Hwnd = 555502L; Pid = 55555; Process = 'java'; Class = 'SunAwtDialog' }
+        }
+        Check 'retry-exhausted-own-window-stays-timeout' (
+            $ownErr -and
+            $ownErr.Message -like 'WIN_DRIVE_TIMEOUT:*' -and
+            $ownErr.Message -notlike 'WIN_DRIVE_FOREGROUND_CONTENTION*' -and
+            $ownErr.Message -match 'this run'
+        ) $ownErr.Message
+
+        $zeroErr = Resolve-ForegroundRetryTimeout -LastFocusLoss 'WIN_DRIVE_FOCUS_LOST: activation declined by Windows' -ForegroundProbe {
+            [pscustomobject]@{ Hwnd = 0L; Pid = 0; Process = ''; Class = '' }
+        }
+        Check 'retry-exhausted-zero-pid-stays-timeout' (
+            $zeroErr -and
+            $zeroErr.Message -like 'WIN_DRIVE_TIMEOUT:*'
+        ) $zeroErr.Message
+    } finally {
+        $script:AppPid = $prevAppPid
+    }
+
+    $fgRepo = Join-Path $tmp 'repo-fg'
+    $fgSmoke = Join-Path $fgRepo 'tools\smoke'
+    $evFg = Join-Path $tmp 'ev-fg'
+    New-Item -ItemType Directory -Force $fgSmoke, $evFg | Out-Null
+    foreach ($name in @('friend-path.ps1', 'friend-path-worker.ps1', 'Win-Drive.ps1', 'Smoke-Memory.ps1', 'Lesson-Range.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $fgSmoke $name)
+    }
+    Copy-Item -LiteralPath (Join-Path $buildSmoke 'Run-Interactive.ps1') -Destination (Join-Path $fgSmoke 'Run-Interactive.ps1')
+    @"
+@echo off
+if "%1"==":desktopApp:classes" (
+    echo STUB_FG_BUILD %*
+    exit /b 0
+)
+echo STUB_FG_RUN %*
+powershell -NoProfile -Command "Start-Sleep -Seconds 30"
+exit /b 0
+"@ | Set-Content -Encoding ascii (Join-Path $fgRepo 'gradlew.bat')
+    @'
+function Test-DesktopPreflight { [pscustomobject]@{ Clean = $true; Reason = ''; DirtyWindows = @(); ActiveUser = $null; IdleSeconds = 900.0; Foreground = $null } }
+function Mark-ExistingClients { }
+function Stop-MyClient { $script:AppPid = 0; $script:AppStartTicks = 0L }
+function Set-SmokeMemoryClient($lease, [int]$appPid) { }
+function Find-CoachWindow { $script:AppPid = 55555; $script:AppStartTicks = 0L; $script:Win = [IntPtr]12345; return $true }
+function Save-Shot([string]$path, [IntPtr]$Window = [IntPtr]::Zero) {
+    if ([IO.Path]::GetFileName($path) -like '2-*') {
+        if ($env:FP_FG_TEST_CASE -eq 'external') {
+            throw (Resolve-ForegroundRetryTimeout -LastFocusLoss 'WIN_DRIVE_FOCUS_LOST: activation declined by Windows' -ForegroundProbe {
+                [pscustomobject]@{ Hwnd = 683201L; Pid = 6832; Process = 'java'; Class = 'SunAwtFrame' }
+            })
+        }
+        throw (Resolve-ForegroundRetryTimeout -LastFocusLoss 'WIN_DRIVE_FOCUS_LOST: our client is no longer foreground' -ForegroundProbe {
+            [pscustomobject]@{ Hwnd = 555502L; Pid = 55555; Process = 'java'; Class = 'SunAwtDialog' }
+        })
+    }
+    Set-Content -LiteralPath $path -Value 'stub' -Encoding ascii
+}
+function Read-Screen([string]$png) {
+    @([pscustomobject]@{
+        Text = '书架'
+        Words = @([pscustomobject]@{
+            Text = '书架'
+            BoundingRect = [pscustomobject]@{ X = 10; Y = 10; Width = 40; Height = 20 }
+        })
+    })
+}
+'@ | Add-Content -Encoding utf8 (Join-Path $fgSmoke 'Lesson-Range.ps1')
+
+    $fpFg = Join-Path $fgSmoke 'friend-path.ps1'
+    $env:FP_FG_TEST_CASE = 'external'
+    $evFgExt = Join-Path $evFg 'ext'
+    $outFgExt = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fpFg -Evidence $evFgExt -BuildTimeoutSec 30 -StartTimeoutSec 15 2>&1 | Out-String)
+    $codeFgExt = $LASTEXITCODE
+    $runDirFgExt = Get-ChildItem -LiteralPath $evFgExt -Directory | Select-Object -First 1
+    $dirtyFgExt = if ($runDirFgExt -and (Test-Path -LiteralPath (Join-Path $runDirFgExt.FullName 'environment-dirty.json'))) {
+        Get-Content -LiteralPath (Join-Path $runDirFgExt.FullName 'environment-dirty.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    } else { $null }
+    $resFgExt = if ($runDirFgExt -and (Test-Path -LiteralPath (Join-Path $runDirFgExt.FullName 'result.json'))) {
+        Get-Content -LiteralPath (Join-Path $runDirFgExt.FullName 'result.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    } else { $null }
+    Check 'foreground-contention-external-exit2-keeps-passed' (
+        $codeFgExt -eq 2 -and
+        $outFgExt -match 'ENVIRONMENT_DIRTY:\s*foreground-contention' -and
+        $outFgExt -match '不计 N/7' -and
+        $dirtyFgExt -and $dirtyFgExt.reason -eq 'foreground-contention' -and
+        $dirtyFgExt.foregroundPid -eq 6832 -and $dirtyFgExt.foregroundProcess -eq 'java' -and
+        $dirtyFgExt.step -eq 2 -and
+        $resFgExt -and $resFgExt.passed -eq 1 -and $resFgExt.stoppedAtStep -eq 2 -and
+        @($resFgExt.steps).Count -eq 1 -and $resFgExt.steps[0].Step -eq 1 -and $resFgExt.steps[0].Ok
+    ) "code=$codeFgExt reason=$($dirtyFgExt.reason) pid=$($dirtyFgExt.foregroundPid) passed=$($resFgExt.passed) stopped=$($resFgExt.stoppedAtStep)"
+
+    $env:FP_FG_TEST_CASE = 'own-window'
+    $evFgOwn = Join-Path $evFg 'own'
+    $outFgOwn = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fpFg -Evidence $evFgOwn -BuildTimeoutSec 30 -StartTimeoutSec 15 2>&1 | Out-String)
+    $codeFgOwn = $LASTEXITCODE
+    $runDirFgOwn = Get-ChildItem -LiteralPath $evFgOwn -Directory | Select-Object -First 1
+    $resFgOwn = if ($runDirFgOwn -and (Test-Path -LiteralPath (Join-Path $runDirFgOwn.FullName 'result.json'))) {
+        Get-Content -LiteralPath (Join-Path $runDirFgOwn.FullName 'result.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    } else { $null }
+    Check 'foreground-contention-own-window-fails' (
+        $codeFgOwn -eq 1 -and
+        $outFgOwn -match '1/7' -and
+        -not (Test-Path -LiteralPath (Join-Path $runDirFgOwn.FullName 'environment-dirty.json')) -and
+        $resFgOwn -and $resFgOwn.passed -eq 1 -and @($resFgOwn.steps).Count -eq 2 -and
+        $resFgOwn.steps[0].Step -eq 1 -and $resFgOwn.steps[0].Ok -and
+        $resFgOwn.steps[1].Step -eq 2 -and (-not $resFgOwn.steps[1].Ok) -and
+        $resFgOwn.steps[1].Why -like '*WIN_DRIVE_TIMEOUT:*'
+    ) "code=$codeFgOwn passed=$($resFgOwn.passed) steps=$(@($resFgOwn.steps).Count) why=$($resFgOwn.steps[1].Why)"
 } finally {
+    Remove-Item Env:FP_FG_TEST_CASE -ErrorAction SilentlyContinue
     Remove-Item Env:FP_TEST_MODE -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

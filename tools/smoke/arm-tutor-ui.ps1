@@ -55,7 +55,6 @@ function Test-BlockAndCitation {
     Select-TutorLabel '07-citation' @('出处1','出处') -2
     $null = Find-TutorLabel '07-original' @('关闭')
     Send-Keys '{ESC}'
-    Select-TutorLabel '04-back' @('回到原文')
 }
 
 function Test-PassageQuestion {
@@ -82,8 +81,8 @@ function Open-TutorShelf([string]$name) {
 
 function Test-WholeLesson {
     Open-TutorShelf '05-shelf'
-    Select-TutorLabel '05-path' @('边看边学','先看讲解') -2
-    Select-TutorLabel '05-open' @('开始边看边学')
+    Click-CapturedControl 'shelf-guided.png' '05-path.png'
+    Select-TutorLabel '05-open' @('开始边看边学','开始边看','边看边学') 0 550 400
     $null = Find-TutorLabel '05-lesson' @('Lessonoverview','overview') -4
     Select-TutorLabel '05-lesson-source' @('出处') -3
     $null = Find-TutorLabel '05-original' @('返回学习')
@@ -92,7 +91,7 @@ function Test-WholeLesson {
 
 function Test-Practice {
     Open-TutorShelf '06-shelf'
-    Select-TutorLabel '06-practice-path' @('做题学','先试题') -3
+    Click-CapturedControl 'shelf-practice.png' '06-practice-path.png'
     $null = Find-TutorLabel '06-question' @('Whichmethod','checksrecall') -3
     Select-TutorLabel '06-options' @('Recallbefore','beforechecking') -3
     $null = Find-TutorLabel '06-selected' @('你选择','你选了') -2

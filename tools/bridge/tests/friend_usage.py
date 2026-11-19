@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from api_budget import Denied, atomic_json  # noqa: E402
-from friend_usage_report import ID_RE, build, name_id, write_report  # noqa: E402
+from friend_usage_report import ID_RE, SABLE_PREFIX, build, name_id, write_report  # noqa: E402
 
 NOW = datetime(2026, 11, 20, 0, 10, tzinfo=timezone.utc)
 A, B, C = name_id("甲"), name_id("乙"), name_id("丙")
@@ -169,6 +169,115 @@ class FriendUsageReportTests(unittest.TestCase):
         out = build(self.state, "2026-11-19", [self.roster], [], now=NOW)
         self.assertNotIn("Mac/state", out["text"])
         self.assertIn("不进 Git、评论或附件", out["text"])
+
+    # --- Sable identities (TON-1740): sable_friends(friend_name, username) ---
+
+    def make_db(self, devices=(), sable=(), grants=(), sable_table=True):
+        import sqlite3
+        db = self.state / "coach.sqlite"
+        conn = sqlite3.connect(db)
+        conn.execute("create table devices (device_id text, friend_name text)")
+        if sable_table:
+            conn.execute("create table sable_friends (friend_name text primary key, "
+                         "username text not null, disabled integer not null default 0)")
+        conn.execute("create table sable_grants (device_id text, sealed_token blob)")
+        conn.executemany("insert into devices values (?,?)", list(devices))
+        if sable_table:
+            conn.executemany("insert into sable_friends values (?,?,0)", list(sable))
+        conn.executemany("insert into sable_grants values (?,?)", list(grants))
+        conn.commit()
+        conn.close()
+        return db
+
+    @staticmethod
+    def sable_id(tag):
+        return SABLE_PREFIX + name_id(tag)
+
+    def test_sable_username_is_shown_instead_of_the_internal_identity(self):
+        friend = self.sable_id("sable-subject-1")
+        fid = name_id(friend)
+        self.save(ledger({fid: {"2026-11-19": entry(2, 20, 2, 200)}}))
+        db = self.make_db(devices=[("d1", friend)], sable=[(friend, "friend-a")])
+        out = build(self.state, "2026-11-19", [self.roster], [db], now=NOW)
+        self.assertIn("friend-a", out["text"])
+        self.assertNotIn(SABLE_PREFIX, out["text"])
+        self.assertEqual(out["sources"]["sable"], 1)
+        self.assertEqual(out["rows"][0]["name"], "friend-a")
+
+    def test_cleared_username_keeps_its_own_history(self):
+        old, new = self.sable_id("old-sub"), self.sable_id("new-sub")
+        self.save(ledger({name_id(old): {"2026-11-19": entry(5, 50, 5, 500)},
+                          name_id(new): {"2026-11-19": entry(1, 10, 1, 100)}}))
+        db = self.make_db(devices=[("d1", old), ("d2", new)],
+                          sable=[(old, ""), (new, "friend-a")])
+        out = build(self.state, "2026-11-19", [self.roster], [db], now=NOW)
+        by_name = {row["name"]: row["total"]["calls"] for row in out["rows"]}
+        self.assertEqual(len(out["rows"]), 2)
+        self.assertEqual(by_name["friend-a"], 1)
+        self.assertEqual(by_name[f"sable-{name_id(old)[:8]}"], 5)
+        self.assertEqual(out["sources"]["sable_cleared"], 1)
+
+    def test_sealed_grants_are_never_read_into_the_report(self):
+        friend = self.sable_id("sable-subject-2")
+        self.save(ledger({name_id(friend): {"2026-11-19": entry(1, 10, 1, 100)}}))
+        db = self.make_db(sable=[(friend, "friend-a")],
+                          grants=[("d1", b"TOPSECRET-TOKEN-BYTES")])
+        out = build(self.state, "2026-11-19", [self.roster], [db], now=NOW)
+        self.assertIn("friend-a", out["text"])
+        self.assertNotIn("TOPSECRET", out["text"])
+
+    def test_internal_sable_id_without_the_table_is_labelled_not_shown(self):
+        friend = self.sable_id("sable-subject-3")
+        fid = name_id(friend)
+        self.save(ledger({fid: {"2026-11-19": entry(1, 10, 1, 100)}}))
+        db = self.make_db(devices=[("d1", friend)], sable_table=False)
+        out = build(self.state, "2026-11-19", [self.roster], [db], now=NOW)
+        self.assertIn(f"sable-{fid[:8]}", out["text"])
+        self.assertNotIn(SABLE_PREFIX, out["text"])
+
+    def test_legacy_pairing_names_still_work_alongside_sable(self):
+        friend = self.sable_id("sable-subject-4")
+        self.save(ledger({name_id(friend): {"2026-11-19": entry(1, 10, 1, 100)},
+                          A: {"2026-11-19": entry(2, 20, 2, 200)}}))
+        db = self.make_db(devices=[("d1", friend), ("d2", "甲")],
+                          sable=[(friend, "friend-a")])
+        out = build(self.state, "2026-11-19", [self.roster], [db], now=NOW)
+        self.assertEqual({row["name"] for row in out["rows"]}, {"friend-a", "甲"})
+
+    # --- extra ledgers from another machine (Mac) ---
+
+    def test_copied_ledger_is_counted_once(self):
+        row = entry(2, 20, 2, 200, devices={"pc": dev(2, 20, 2, 200)})
+        self.save(ledger({A: {"2026-11-19": row}}))
+        copy = self.state / "mac.json"
+        atomic_json(copy, ledger({A: {"2026-11-19": row}}))
+        out = build(self.state, "2026-11-19", [self.roster], [],
+                    now=NOW, extras=[("mac", copy)])
+        self.assertEqual(out["rows"][0]["total"]["calls"], 2)
+        self.assertEqual(out["rows"][0]["total"]["spent_microusd"], 200)
+        self.assertIn("额外合并账本 1 份：mac", out["text"])
+
+    def test_devices_from_two_machines_add_up(self):
+        self.save(ledger({A: {"2026-11-19": entry(
+            2, 20, 2, 200, devices={"pc": dev(2, 20, 2, 200)})}}))
+        other = self.state / "mac.json"
+        atomic_json(other, ledger({A: {"2026-11-19": entry(
+            1, 10, 1, 100, devices={"laptop": dev(1, 10, 1, 100)})}}))
+        out = build(self.state, "2026-11-19", [self.roster], [],
+                    now=NOW, extras=[("mac", other)])
+        row = out["rows"][0]
+        self.assertEqual(row["total"]["calls"], 3)
+        self.assertEqual(row["total"]["spent_microusd"], 300)
+        self.assertEqual(row["devices"], 2)
+
+    def test_unreadable_extra_ledger_is_named_not_silently_dropped(self):
+        self.save(ledger({A: {"2026-11-19": entry(1, 10, 1, 100)}}))
+        broken = self.state / "mac.json"
+        broken.write_text("{not json")
+        out = build(self.state, "2026-11-19", [self.roster], [],
+                    now=NOW, extras=[("mac", broken)])
+        self.assertEqual(out["rows"][0]["total"]["calls"], 1)
+        self.assertIn("有 1 份账本读不出", out["text"])
 
 
 if __name__ == "__main__":

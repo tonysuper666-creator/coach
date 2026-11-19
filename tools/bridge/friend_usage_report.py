@@ -7,9 +7,10 @@ report maps those hashes back to names with two local, private sources:
 
 * ``state/friend-names.json`` - the operator's own roster. It is never committed;
   it holds the names (and optional Sable usernames) already approved for display.
-* a server ``coach.sqlite`` - the ``devices.friend_name`` column written when a
-  friend pairs. Only names whose SHA-256 equals the ledger key are accepted, so a
-  stale row cannot silently attach the wrong person.
+* a server ``coach.sqlite`` - ``devices.friend_name`` for legacy pairing, and
+  ``sable_friends(friend_name, username)`` for Sable logins (TON-1740). Only those
+  columns are read; the sealed-token table is never touched. A cleared username
+  keeps a ``sable-<hash prefix>`` label so old calls never move to a new account.
 
 Everything else stays visibly unmapped: the report prints the full hash so the
 row can be reconciled later. No prompt, answer, key or token is read or written.
@@ -17,7 +18,8 @@ row can be reconciled later. No prompt, answer, key or token is read or written.
 Devices are already merged per friend id by the ledger writer; rows are only
 merged across ids when the roster explicitly lists several ids for one person.
 Re-running the same day rewrites the same file from the ledger - there is no
-accumulation, so a rerun can never double count.
+accumulation, so a rerun can never double count. ``--ledger LABEL=PATH`` adds
+another machine's ledger; copies collapse per (friend, device, day).
 """
 from __future__ import annotations
 
@@ -37,6 +39,9 @@ from api_budget import CreditLedger, Denied  # noqa: E402
 ID_RE = re.compile(r"^[a-f0-9]{64}$")
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 FIELDS = ("calls", "input_tokens", "output_tokens", "spent_microusd")
+# Same prefix as server/store LedgerStore.sableFriendName (TON-1740). The device
+# column carries this internal string for Sable logins; it is not a person's name.
+SABLE_PREFIX = "sable.identity.v1:"
 
 
 def name_id(name: str) -> str:
@@ -87,26 +92,102 @@ def load_roster(paths) -> dict:
     return {"people": people, "conflicts": conflicts}
 
 
-def load_devices(paths) -> dict:
-    """id -> set(names) from devices.friend_name, only where the hash matches."""
-    out = {}
+def sable_label(fid: str) -> str:
+    """A cleared or unclaimed Sable username still needs a reconcilable label."""
+    return f"sable-{fid[:8]}"
+
+
+def load_devices(paths):
+    """id -> set(labels), plus how many Sable identities were seen.
+
+    Legacy pairing writes the name into ``devices.friend_name``. A Sable login
+    (TON-1740) writes ``sableFriendName(sub)`` there instead and keeps the real
+    username in ``sable_friends(friend_name, username)``. So when that table
+    exists its two columns are authoritative for Sable identities; the device
+    column is only used for those without a row. ``sable_grants`` holds sealed
+    tokens and is never read.
+
+    A username can be emptied when the same handle is re-registered to another
+    Sable account. The old row keeps its ``friend_name``, so its history stays
+    labelled ``sable-<hash prefix>`` instead of moving to the new account.
+    """
+    names, stats = {}, {"sable": 0, "cleared": 0}
     for path in paths:
         if not Path(path).exists():
             continue
         try:
             conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
             try:
-                rows = conn.execute(
-                    "select friend_name from devices "
-                    "where friend_name is not null and friend_name <> ''").fetchall()
+                tables = {row[0] for row in conn.execute(
+                    "select name from sqlite_master where type='table'")}
+                legacy = []
+                if "devices" in tables:
+                    legacy = conn.execute(
+                        "select friend_name from devices "
+                        "where friend_name is not null and friend_name <> ''").fetchall()
+                sable = []
+                if "sable_friends" in tables:
+                    sable = conn.execute(
+                        "select friend_name, username from sable_friends").fetchall()
             finally:
                 conn.close()
         except sqlite3.Error:
             continue
-        for (name,) in rows:
-            if isinstance(name, str) and name:
-                out.setdefault(name_id(name), set()).add(name)
-    return out
+        for (friend,) in legacy:
+            if not isinstance(friend, str) or not friend:
+                continue
+            fid = name_id(friend)
+            # Never print the internal identity as if it were a person.
+            shown = sable_label(fid) if friend.startswith(SABLE_PREFIX) else friend
+            names.setdefault(fid, set()).add(shown)
+        for friend, username in sable:
+            if not isinstance(friend, str) or not friend:
+                continue
+            fid = name_id(friend)
+            shown = username.strip() if isinstance(username, str) else ""
+            names[fid] = {shown or sable_label(fid)}
+            stats["sable"] += 1
+            stats["cleared"] += 0 if shown else 1
+    return names, stats
+
+
+def merge_sources(base: dict, extras) -> dict:
+    """Merge extra ledgers into one view, counting a copied call once.
+
+    Two machines can each serve friends, so their ledgers both contain rows.
+    A migration or snapshot copy repeats the very same numbers, though, so the
+    merge keys on (friend, device, day) and keeps the maximum of each field:
+    identical copies collapse, a device that really ran elsewhere adds up.
+    Rows without a device breakdown fall back to the largest declared total.
+    """
+    friends = {}
+    for data in [base] + [payload for _, payload in extras]:
+        rows_in = (data.get("friends") or {}) if isinstance(data, dict) else {}
+        for fid, days in rows_in.items():
+            if not ID_RE.fullmatch(fid) or not isinstance(days, dict):
+                continue
+            for day, row in days.items():
+                if not DAY_RE.fullmatch(day) or not isinstance(row, dict):
+                    continue
+                dst = friends.setdefault(fid, {}).setdefault(
+                    day, {"devices": {}, "reserved": {}, "declared": {k: 0 for k in FIELDS}})
+                for k in FIELDS:
+                    dst["declared"][k] = max(dst["declared"][k], int(row.get(k, 0)))
+                for device, values in (row.get("devices") or {}).items():
+                    slot = dst["devices"].setdefault(device, {k: 0 for k in FIELDS})
+                    for k in FIELDS:
+                        slot[k] = max(slot[k], int((values or {}).get(k, 0)))
+                for token, hold in (row.get("reserved") or {}).items():
+                    dst["reserved"].setdefault(token, hold)
+    for days in friends.values():
+        for dst in days.values():
+            declared = dst.pop("declared")
+            if dst["devices"]:
+                totals = {k: sum(v[k] for v in dst["devices"].values()) for k in FIELDS}
+            else:
+                totals = declared
+            dst.update(totals)
+    return {"version": 1, "friends": friends}
 
 
 def usage(day_entry: dict) -> dict:
@@ -253,8 +334,9 @@ def render(data: dict, collect_result: dict, day: str, now: datetime, sources: d
     unmapped = {k: sum(r["total"][k] for r in nominal) for k in FIELDS}
 
     out = [f"# 朋友用量 · {day}（UTC）", "",
-           f"生成：{now.strftime('%Y-%m-%dT%H:%M:%SZ')}，来源：`api-credit-ledger.json`（版本 1），"
-           "按 UTC 自然日归集。",
+           f"生成：{now.strftime('%Y-%m-%dT%H:%M:%SZ')}，来源：`api-credit-ledger.json`（版本 1）"
+           + (f" + 合并账本 {len(sources.get('ledgers') or [])} 份" if sources.get("ledgers") else "")
+           + "，按 UTC 自然日归集。",
            "单位：次数＝实际 API 调用次数；token＝模型输入/输出 token；"
            "花费＝美元（账本存整数微美元 µ$，1 美元＝1,000,000 µ$）。", ""]
 
@@ -305,17 +387,28 @@ def render(data: dict, collect_result: dict, day: str, now: datetime, sources: d
         if row["mismatch"]:
             out += [f"- **账本自相矛盾**：{row['name'] or row['ids'][0][:12]} 的当天合计与设备明细不等，"
                     "上面用的是当天合计（服务端读状态也用这个数），明细请以设备为准复核。"]
-    out += [f"- 名字来源：服务端 `devices.friend_name` 覆盖 "
+    out += [f"- 名字来源：配对名 `devices.friend_name` 与 Sable 的 "
+            f"`sable_friends(friend_name, username)` 覆盖 "
             f"{len([r for r in rows if r['name'] and not r['test']])} 个人名、"
             f"私有名单 `friend-names.json` 覆盖 {sources['roster']} 个身份；"
             f"当天未映射 {len(nominal)} 个身份。"]
+    if sources.get("sable"):
+        out += [f"- Sable 身份 {sources['sable']} 个：用 `friend_name` 算 SHA-256 对账、"
+                f"用 `username` 显示；其中 {sources['sable_cleared']} 个用户名为空"
+                "（换绑、重注册或清理），显示为 `sable-<哈希前 8 位>`，历史仍归原身份，"
+                "不会并到后来接手该用户名的新账号。"]
     if sources["devices_missing"]:
         out += ["- 指定的设备库没有找到，本次只用了名单。"]
     if sources["conflicts"]:
         out += [f"- 名字冲突 {len(sources['conflicts'])} 处：同一身份对应了不同名字，已并列显示，需人工确认。"]
-    out += ["- Mac 与 hermes 是同一条账本在迁移中的两份记录；本报告只读一份账本文件，不合并两份来源，"
-            "因此不会把同一次调用算两次。若迁移时把同一次调用写进了两个设备，"
-            "当天合计与设备明细会出现上面那种矛盾，请按该条处理。"]
+    if sources.get("ledgers"):
+        out += [f"- 本次额外合并账本 {len(sources['ledgers'])} 份：{', '.join(sources['ledgers'])}；"
+                "按（人、设备、天）逐设备逐字段取最大值，迁移或快照副本的同一次调用只算一次。"]
+    if sources.get("ledgers_unreadable"):
+        out += [f"- 有 {len(sources['ledgers_unreadable'])} 份账本读不出，未计入："
+                f"{', '.join(sources['ledgers_unreadable'])}。"]
+    out += ["- 默认只读本机 `api-credit-ledger.json`。备份、回滚、staging 里的文件是快照，不是独立来源，"
+            "不要当 `--ledger` 传入；两台机器各服务一部分朋友时再合并，副本会被上面的规则去重。"]
     out += ["- 本文件私有（0600），含真名与哈希，不进 Git、评论或附件。", ""]
     return "\n".join(out)
 
@@ -349,31 +442,52 @@ def resolve_day(value: str, now: datetime) -> str:
     return value
 
 
-def build(state: Path, day: str, roster_paths, device_paths, now=None) -> dict:
+def build(state: Path, day: str, roster_paths, device_paths, now=None, extras=None) -> dict:
     now = now or datetime.now(timezone.utc)
     ledger = CreditLedger(state)
     with ledger.locked():
         data = ledger.read()
+    loaded, unreadable = [], []
+    for label, path in extras or []:
+        payload = _json(path)
+        if isinstance(payload, dict):
+            loaded.append((label, payload))
+        else:
+            unreadable.append(label)
+    if loaded:
+        data = merge_sources(data, loaded)
     roster = load_roster(roster_paths)
-    devices = load_devices(device_paths)
+    devices, stats = load_devices(device_paths)
     result = collect(data, day, roster["people"], devices)
     missing_db = [str(p) for p in device_paths if not Path(p).exists()]
     sources = {"roster": len(roster["people"]), "conflicts": roster["conflicts"],
-               "devices_missing": bool(missing_db)}
+               "devices_missing": bool(missing_db),
+               "sable": stats["sable"], "sable_cleared": stats["cleared"],
+               "ledgers": [label for label, _ in loaded], "ledgers_unreadable": unreadable}
     text = render(data, result, day, now, sources)
     return {"day": day, "text": text, "rows": result["rows"], "sources": sources}
 
 
 def write_report(state: Path, day: str = "yesterday", out: Path | None = None,
-                 roster_paths=None, device_paths=None, now=None) -> Path:
+                 roster_paths=None, device_paths=None, now=None, extras=None) -> Path:
     """Write ``friend-usage-YYYY-MM-DD.md``; safe to rerun (overwrites, never adds)."""
     now = now or datetime.now(timezone.utc)
     day = resolve_day(day, now)
     roster_paths = roster_paths or [state / "friend-names.json"]
-    result = build(state, day, roster_paths, device_paths or [], now=now)
+    result = build(state, day, roster_paths, device_paths or [], now=now, extras=extras)
     target = (out or state) / f"friend-usage-{day}.md"
     atomic_text(target, result["text"])
     return target
+
+
+def parse_ledger(value: str):
+    """``LABEL=PATH``; a bare path is labelled by its file name."""
+    label, sep, path = value.partition("=")
+    if not sep:
+        return Path(value).name, Path(value)
+    if not label.strip() or not path.strip():
+        raise SystemExit("--ledger 需要 LABEL=PATH 或 PATH")
+    return label.strip(), Path(path.strip())
 
 
 def main() -> int:
@@ -386,18 +500,23 @@ def main() -> int:
     p.add_argument("--roster", action="append", type=Path, default=None,
                    help="私有名单，可重复；默认 <state>/friend-names.json")
     p.add_argument("--devices-db", action="append", type=Path, default=None,
-                   help="读 devices.friend_name 的 coach.sqlite，可重复")
+                   help="读 devices.friend_name / sable_friends 的 coach.sqlite，可重复")
+    p.add_argument("--ledger", action="append", default=None, metavar="LABEL=PATH",
+                   help="另一台机器（如 Mac）的账本，可重复；按设备逐字段取最大值去重")
     p.add_argument("--stdout", action="store_true", help="打印而不写文件")
     args = p.parse_args()
     rosters = args.roster or [args.state / "friend-names.json"]
+    extras = [parse_ledger(v) for v in args.ledger or []]
     now = datetime.now(timezone.utc)
     day = resolve_day(args.day, now)
     try:
         if args.stdout:
-            result = build(args.state, day, rosters, args.devices_db or [], now=now)
+            result = build(args.state, day, rosters, args.devices_db or [], now=now,
+                           extras=extras)
             print(result["text"])
             return 0
-        target = write_report(args.state, day, args.out, rosters, args.devices_db or [], now=now)
+        target = write_report(args.state, day, args.out, rosters, args.devices_db or [],
+                              now=now, extras=extras)
     except Denied as exc:
         print(f"账本读不出：{exc}", file=sys.stderr)
         return 2

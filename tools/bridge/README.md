@@ -157,12 +157,17 @@ tools/bridge/.venv/bin/python tools/bridge/tests/exam_protection.py
   - `<state>/friend-names.json`：运维自己维护的名单，**不进 Git**
     （`{"version":1,"people":[{"name":"名字","ids":["<64位哈希>"],"aliases":[],"test":false}]}`；
     有 `ids` 时只用 `ids`，不会把同名的人按 `sha256(名字)` 连到一起）；
-  - 服务端 `coach.sqlite` 的 `devices.friend_name`（配对时写入）。
+  - 服务端 `coach.sqlite`：库里有 `sable_friends` 时只读它的 `friend_name`、`username` 两列
+    （Sable 登录，TON-1740），用 `friend_name` 算哈希对账、用 `username` 显示；否则读
+    `devices.friend_name`（配对时写入）。`sable_grants` 存密封 token，**不读**。
+  - Sable 用户名被清空（同一 handle 换绑给新账号、或记录被清理）时，旧身份显示为
+    `sable-<哈希前 8 位>`，历史仍归原身份，不会并到后来接手该用户名的人。
+  - `devices.friend_name` 里的内部串 `sable.identity.v1:<hash>` 任何时候都不会被当成名字显示。
   对不上的人按哈希原样列出并标明占当天多少，可对账、可补名；标 `test` 的身份单列，不与朋友合并。
 - 重跑同一天直接覆盖同一文件，不从报告累计，所以不会重复计数。
-- Mac 与 hermes 是同一条账本在迁移中的两份记录；报告只读运行时那一份账本文件，
-  **不合并两个来源**。若迁移时把同一次调用写进了两个设备，当天合计与设备明细会对不上，
-  报告会在「对账与来源」里点名这一条，按当天合计计（服务端读状态也用这个数）。
+- 默认只读运行时那一份账本。备份、回滚、staging 里的 `api-credit-ledger.json` 是快照，不是独立来源，
+  不要传。两台机器各服务一部分朋友时用 `--ledger 标签=路径` 合并：按（人、设备、天）逐设备逐字段
+  取最大值，同一次调用出现在迁移副本里只算一次，不同设备照常相加。
 - 报告落在 `<state>/friend-usage-YYYY-MM-DD.md`，目录 0700、文件 0600，含真名与哈希，
   **不进 Git、评论或附件**。与 `usage-YYYYMMDD.md`（「今天卡在哪」）是两个不同文件。
 
@@ -172,6 +177,8 @@ tools/bridge/.venv/bin/python tools/bridge/tests/exam_protection.py
 python3 tools/bridge/friend_usage_report.py --state ~/Coach/state --day 2026-11-19 \
   --devices-db ~/Coach/data/coach.sqlite            # 写 state/friend-usage-2026-11-19.md
 python3 tools/bridge/friend_usage_report.py --state ~/Coach/state --day yesterday --stdout  # 不写文件
+python3 tools/bridge/friend_usage_report.py --state ~/Coach/state --day yesterday \
+  --devices-db ~/Coach/data/coach.sqlite --ledger mac=~/coach-cost/inbox/mac-ledger.json
 ```
 
 部署到 hermes（每天 00:20 UTC 出昨天那份；脚本放在 `~/coach-cost/bin`，与其他运维脚本同一处）：
@@ -193,5 +200,5 @@ systemctl --user list-timers coach-friend-usage.timer
 测试（Linux；`api_budget.py` 依赖 `fcntl`，Windows 跑不了）：
 
 ```sh
-cd tools/bridge && python3 -m unittest discover -s tests -p 'friend_usage.py' -v
+python3 tools/bridge/tests/friend_usage.py -v      # 在仓库根目录
 ```

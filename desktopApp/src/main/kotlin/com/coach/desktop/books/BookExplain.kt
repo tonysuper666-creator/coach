@@ -201,7 +201,13 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
             if (snapshot != null && withContext(Dispatchers.IO) { imports!!.snapshot(context) } != snapshot)
                 return ExplainResult.Refused("保存的原文已变化，请重新打开这本书后重试。")
             val body = reply.body
-            val trouble = ExplainTrouble.of(reply.statusCode, reply.code)
+            // A 403 can mean either a revoked device or an unauthorized passage. Check only
+            // the original server with the original identity; never resend the book text.
+            val revoked = reply.statusCode == 401 ||
+                (reply.statusCode == 403 && http.libraryAuthStatus() == 401)
+            // A late response must not invalidate a pairing made while the request was in flight.
+            if (identity != paired) return ExplainResult.Refused("连接已更换，请重新选择这段后再试。")
+            val trouble = if (revoked) ExplainTrouble.Revoked else ExplainTrouble.of(reply.statusCode, reply.code)
             when {
                 trouble == ExplainTrouble.Revoked -> { markRevoked(); ExplainResult.Refused(ExplainTrouble.REVOKED, trouble) }
                 body == null -> ExplainResult.Refused(ExplainTrouble.message(trouble, reply.error), trouble)

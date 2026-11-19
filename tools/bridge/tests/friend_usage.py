@@ -274,31 +274,31 @@ class FriendUsageReportTests(unittest.TestCase):
         out = build(self.state, "2026-11-19", [self.roster], [db], now=NOW)
         self.assertEqual({row["name"] for row in out["rows"]}, {"friend-a", "甲"})
 
-    # --- extra ledgers from another machine (Mac) ---
+    # --- another machine's ledger (Mac): listed per source, never summed ---
 
-    def test_copied_ledger_is_counted_once(self):
-        row = entry(2, 20, 2, 200, devices={"pc": dev(2, 20, 2, 200)})
-        self.save(ledger({A: {"2026-11-19": row}}))
-        copy = self.state / "mac.json"
-        atomic_json(copy, ledger({A: {"2026-11-19": row}}))
-        out = build(self.state, "2026-11-19", [self.roster], [],
-                    now=NOW, extras=[("mac", copy)])
-        self.assertEqual(out["rows"][0]["total"]["calls"], 2)
-        self.assertEqual(out["rows"][0]["total"]["spent_microusd"], 200)
-        self.assertIn("额外合并账本 1 份：mac", out["text"])
-
-    def test_devices_from_two_machines_add_up(self):
+    def test_independent_ledgers_are_listed_separately_not_maxed(self):
         self.save(ledger({A: {"2026-11-19": entry(
             2, 20, 2, 200, devices={"pc": dev(2, 20, 2, 200)})}}))
         other = self.state / "mac.json"
         atomic_json(other, ledger({A: {"2026-11-19": entry(
-            1, 10, 1, 100, devices={"laptop": dev(1, 10, 1, 100)})}}))
+            3, 30, 3, 300, devices={"pc": dev(3, 30, 3, 300)})}}))
         out = build(self.state, "2026-11-19", [self.roster], [],
                     now=NOW, extras=[("mac", other)])
-        row = out["rows"][0]
-        self.assertEqual(row["total"]["calls"], 3)
-        self.assertEqual(row["total"]["spent_microusd"], 300)
-        self.assertEqual(row["devices"], 2)
+        self.assertEqual(out["rows"][0]["total"]["calls"], 2)
+        self.assertIn("当天合计：2 次，22 token，$0.000200。", out["text"])
+        self.assertIn("`mac` 当天：3 次，33 token，$0.000300。", out["text"])
+        self.assertIn("未计入上面的合计", out["text"])
+        self.assertIn("尚未确认", out["text"])
+
+    def test_copied_ledger_never_inflates_the_local_total(self):
+        row = entry(2, 20, 2, 200, devices={"pc": dev(2, 20, 2, 200)})
+        self.save(ledger({A: {"2026-11-19": row}}))
+        copy = self.state / "copy.json"
+        atomic_json(copy, ledger({A: {"2026-11-19": row}}))
+        out = build(self.state, "2026-11-19", [self.roster], [],
+                    now=NOW, extras=[("copy", copy)])
+        self.assertIn("当天合计：2 次", out["text"])
+        self.assertIn("朋友本月合计：2 次", out["text"])
 
     def test_unreadable_extra_ledger_is_named_not_silently_dropped(self):
         self.save(ledger({A: {"2026-11-19": entry(1, 10, 1, 100)}}))

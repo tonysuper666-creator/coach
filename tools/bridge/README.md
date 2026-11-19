@@ -149,7 +149,7 @@ tools/bridge/.venv/bin/python tools/bridge/tests/exam_protection.py
 
 `friend_usage_report.py` 把 `api-credit-ledger.json` 的 `friends` 段按 UTC 自然日汇总成
 一份**私有** Markdown：每人次数、输入/输出 token、花费；同一人的多台设备合并，
-本月累计按同一人名再合一次。
+本月累计按同一人再合一次（测试身份在月表里标「（测试）」并单列小计）。
 
 - 花费单位：账本存整数微美元 µ$，报告写成美元（1 美元＝1,000,000 µ$）。
 - 名字：账本只有名字的 SHA-256（`sha256(name.encode("utf-8"))`，与 `FriendAccess.kt` 同字节同编码）。
@@ -165,9 +165,10 @@ tools/bridge/.venv/bin/python tools/bridge/tests/exam_protection.py
   - `devices.friend_name` 里的内部串 `sable.identity.v1:<hash>` 任何时候都不会被当成名字显示。
   对不上的人按哈希原样列出并标明占当天多少，可对账、可补名；标 `test` 的身份单列，不与朋友合并。
 - 重跑同一天直接覆盖同一文件，不从报告累计，所以不会重复计数。
-- 默认只读运行时那一份账本。备份、回滚、staging 里的 `api-credit-ledger.json` 是快照，不是独立来源，
-  不要传。两台机器各服务一部分朋友时用 `--ledger 标签=路径` 合并：按（人、设备、天）逐设备逐字段
-  取最大值，同一次调用出现在迁移副本里只算一次，不同设备照常相加。
+- 合计只来自运行时那一份账本。备份、回滚、staging 里的 `api-credit-ledger.json` 是快照，不是独立来源，
+  不要传。另一台机器（如 Mac 朋友实例）的账本用 `--ledger 标签=路径` **单独成节**，不并入本机合计：
+  仅凭累计数分不清独立账本、副本还是迁移分叉，相加会双算、取最大会少算。两边要出合计，
+  先确认来源关系（独立，或共同迁移基线及分界日）再另做。
 - 报告落在 `<state>/friend-usage-YYYY-MM-DD.md`，目录 0700、文件 0600，含真名与哈希，
   **不进 Git、评论或附件**。与 `usage-YYYYMMDD.md`（「今天卡在哪」）是两个不同文件。
 

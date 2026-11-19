@@ -18,8 +18,11 @@ row can be reconciled later. No prompt, answer, key or token is read or written.
 Devices are already merged per friend id by the ledger writer; rows are only
 merged across ids when the roster explicitly lists several ids for one person.
 Re-running the same day rewrites the same file from the ledger - there is no
-accumulation, so a rerun can never double count. ``--ledger LABEL=PATH`` adds
-another machine's ledger; copies collapse per (friend, device, day).
+accumulation, so a rerun can never double count. ``--ledger LABEL=PATH`` lists
+another machine's ledger in its own section. It is never added to the local
+totals: cumulative counters alone cannot tell an independent ledger from a copy
+or a migration fork, so summing (or taking the max) would double count or drop
+calls. A combined figure needs the source relation confirmed first.
 """
 from __future__ import annotations
 
@@ -154,45 +157,6 @@ def load_devices(paths):
             stats["sable"] += 1
             stats["cleared"] += 0 if shown else 1
     return names, stats
-
-
-def merge_sources(base: dict, extras) -> dict:
-    """Merge extra ledgers into one view, counting a copied call once.
-
-    Two machines can each serve friends, so their ledgers both contain rows.
-    A migration or snapshot copy repeats the very same numbers, though, so the
-    merge keys on (friend, device, day) and keeps the maximum of each field:
-    identical copies collapse, a device that really ran elsewhere adds up.
-    Rows without a device breakdown fall back to the largest declared total.
-    """
-    friends = {}
-    for data in [base] + [payload for _, payload in extras]:
-        rows_in = (data.get("friends") or {}) if isinstance(data, dict) else {}
-        for fid, days in rows_in.items():
-            if not ID_RE.fullmatch(fid) or not isinstance(days, dict):
-                continue
-            for day, row in days.items():
-                if not DAY_RE.fullmatch(day) or not isinstance(row, dict):
-                    continue
-                dst = friends.setdefault(fid, {}).setdefault(
-                    day, {"devices": {}, "reserved": {}, "declared": {k: 0 for k in FIELDS}})
-                for k in FIELDS:
-                    dst["declared"][k] = max(dst["declared"][k], int(row.get(k, 0)))
-                for device, values in (row.get("devices") or {}).items():
-                    slot = dst["devices"].setdefault(device, {k: 0 for k in FIELDS})
-                    for k in FIELDS:
-                        slot[k] = max(slot[k], int((values or {}).get(k, 0)))
-                for token, hold in (row.get("reserved") or {}).items():
-                    dst["reserved"].setdefault(token, hold)
-    for days in friends.values():
-        for dst in days.values():
-            declared = dst.pop("declared")
-            if dst["devices"]:
-                totals = {k: sum(v[k] for v in dst["devices"].values()) for k in FIELDS}
-            else:
-                totals = declared
-            dst.update(totals)
-    return {"version": 1, "friends": friends}
 
 
 def usage(day_entry: dict) -> dict:
@@ -340,7 +304,6 @@ def render(data: dict, collect_result: dict, day: str, now: datetime, sources: d
 
     out = [f"# 朋友用量 · {day}（UTC）", "",
            f"生成：{now.strftime('%Y-%m-%dT%H:%M:%SZ')}，来源：`api-credit-ledger.json`（版本 1）"
-           + (f" + 合并账本 {len(sources.get('ledgers') or [])} 份" if sources.get("ledgers") else "")
            + "，按 UTC 自然日归集。",
            "单位：次数＝实际 API 调用次数；token＝模型输入/输出 token；"
            "花费＝美元（账本存整数微美元 µ$，1 美元＝1,000,000 µ$）。", ""]
@@ -382,7 +345,7 @@ def render(data: dict, collect_result: dict, day: str, now: datetime, sources: d
     for row in month_rows:
         if row["test"]:
             row["name"] = f"{row['name']}（测试）" if row["name"] else "（测试身份）"
-    out += ["", f"## 本月累计（{month}，按同一人名合并）", ""]
+    out += ["", f"## 本月累计（{month}，按同一人合并）", ""]
     out += _table(month_rows, with_devices=False)
     friends_month = {k: sum(r["total"][k] for r in month_rows if not r["test"]) for k in FIELDS}
     tests_month = {k: sum(r["total"][k] for r in month_rows if r["test"]) for k in FIELDS}
@@ -393,6 +356,20 @@ def render(data: dict, collect_result: dict, day: str, now: datetime, sources: d
         out += [f"测试本月合计：{tests_month['calls']} 次，"
                 f"{_tokens(tests_month['input_tokens'] + tests_month['output_tokens'])} token，"
                 f"{_money(tests_month['spent_microusd'])}（单独列出，不计入上面的朋友合计）。"]
+
+    for label, other in sources.get("extra_results") or []:
+        extra_rows = other["rows"]
+        extra_total = {k: sum(r["total"][k] for r in extra_rows) for k in FIELDS}
+        out += ["", f"## 另一来源 `{label}`（当天，单独列出，未计入上面的合计）", ""]
+        if extra_rows:
+            out += _table(extra_rows, with_devices=True)
+        else:
+            out += ["这份账本当天没有调用。"]
+        out += ["", f"`{label}` 当天：{extra_total['calls']} 次，"
+                    f"{_tokens(extra_total['input_tokens'] + extra_total['output_tokens'])} token，"
+                    f"{_money(extra_total['spent_microusd'])}。",
+                "缺口：这份账本和本机账本是否独立（还是副本、迁移分叉）尚未确认，"
+                "所以不和本机相加，也没有给出两边合计。"]
 
     out += ["", "## 对账与来源", ""]
     out += [f"- 当天按人合计与账本 `friends` 段逐项相加一致：{total['calls']} 次、"
@@ -425,13 +402,13 @@ def render(data: dict, collect_result: dict, day: str, now: datetime, sources: d
     if sources["conflicts"]:
         out += [f"- 名字冲突 {len(sources['conflicts'])} 处：同一身份对应了不同名字，已并列显示，需人工确认。"]
     if sources.get("ledgers"):
-        out += [f"- 本次额外合并账本 {len(sources['ledgers'])} 份：{', '.join(sources['ledgers'])}；"
-                "按（人、设备、天）逐设备逐字段取最大值，迁移或快照副本的同一次调用只算一次。"]
+        out += [f"- 另列账本 {len(sources['ledgers'])} 份：{', '.join(sources['ledgers'])}；"
+                "各自单独成节，不并入本机合计。"]
     if sources.get("ledgers_unreadable"):
         out += [f"- 有 {len(sources['ledgers_unreadable'])} 份账本读不出，未计入："
                 f"{', '.join(sources['ledgers_unreadable'])}。"]
-    out += ["- 默认只读本机 `api-credit-ledger.json`。备份、回滚、staging 里的文件是快照，不是独立来源，"
-            "不要当 `--ledger` 传入；两台机器各服务一部分朋友时再合并，副本会被上面的规则去重。"]
+    out += ["- 上面的合计只来自本机 `api-credit-ledger.json`。备份、回滚、staging 里的文件是快照，"
+            "不是独立来源，不要当 `--ledger` 传入。"]
     out += ["- 本文件私有（0600），含真名与哈希，不进 Git、评论或附件。", ""]
     return "\n".join(out)
 
@@ -477,16 +454,18 @@ def build(state: Path, day: str, roster_paths, device_paths, now=None, extras=No
             loaded.append((label, payload))
         else:
             unreadable.append(label)
-    if loaded:
-        data = merge_sources(data, loaded)
     roster = load_roster(roster_paths)
     devices, stats = load_devices(device_paths)
     result = collect(data, day, roster["people"], devices)
+    extra_results = [(label, collect(payload, day, roster["people"], devices))
+                     for label, payload in loaded
+                     if isinstance(payload.get("friends"), dict)]
     missing_db = [str(p) for p in device_paths if not Path(p).exists()]
     sources = {"roster": len(roster["people"]), "conflicts": roster["conflicts"],
                "devices_missing": bool(missing_db),
                "sable": stats["sable"], "sable_cleared": stats["cleared"],
-               "ledgers": [label for label, _ in loaded], "ledgers_unreadable": unreadable}
+               "ledgers": [label for label, _ in loaded], "ledgers_unreadable": unreadable,
+               "extra_results": extra_results}
     text = render(data, result, day, now, sources)
     return {"day": day, "text": text, "rows": result["rows"], "sources": sources}
 
@@ -525,7 +504,7 @@ def main() -> int:
     p.add_argument("--devices-db", action="append", type=Path, default=None,
                    help="读 devices.friend_name / sable_friends 的 coach.sqlite，可重复")
     p.add_argument("--ledger", action="append", default=None, metavar="LABEL=PATH",
-                   help="另一台机器（如 Mac）的账本，可重复；按设备逐字段取最大值去重")
+                   help="另一台机器（如 Mac）的账本，可重复；单独成节，不并入本机合计")
     p.add_argument("--stdout", action="store_true", help="打印而不写文件")
     args = p.parse_args()
     rosters = args.roster or [args.state / "friend-names.json"]

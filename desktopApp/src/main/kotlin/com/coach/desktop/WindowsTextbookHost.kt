@@ -168,7 +168,7 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                     val panel: DeskTypeControl = { extra ->
                         ReadingSettingsPanel(preferences, isOriginal = {
                             (book.format == "pdf" || book.format in BookFormats.images) &&
-                                !(controller.library.savedTextView(book.id) ?: defaultTextView)
+                                !(controller.library.preferredTextView(book.id) ?: defaultTextView)
                         }, extra = extra)
                     }
                     panel

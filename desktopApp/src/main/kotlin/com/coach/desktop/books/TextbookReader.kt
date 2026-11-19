@@ -58,11 +58,13 @@ import com.coach.desktop.reader.NotesSection
 import com.coach.domain.reader.ReaderTextRange
 import com.coach.domain.reader.ReaderTextUnit
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.sql.SQLException
 
 /**
  * 出处打开后这一页要标什么。练习依据只有页 + 原句；讲解出处还带着解析器核对过的块范围，
@@ -110,9 +112,11 @@ internal fun TextbookReader(
     val originalPdf = book.format == "pdf"
     val textOnlySource = !hasOriginal || page.ocr
     val lastPage = book.pages.maxOf { it.number }
-    var textView by remember(book.id) {
-        mutableStateOf(!hasOriginal || (library.savedTextView(book.id) ?: page.ocr))
+    var textView by remember(library, book.id) {
+        mutableStateOf(!hasOriginal || (library.preferredTextView(book.id) ?: page.ocr))
     }
+    var viewSaveRevision by remember(library, book.id) { mutableIntStateOf(0) }
+    var viewSaveError by remember(library, book.id) { mutableStateOf(false) }
     val paging = remember(book.id) { BookPagingState(BookPageAnchor(ui.page)) }
     val pdf = remember(library, book.id) { OriginalPdfReading(ui.page, !originalPdf || library.pdfScrollMode(book.id)) }
     val pdfLayers = remember(library, book.id) { OriginalPdfTextLayers(library, book) }
@@ -429,9 +433,18 @@ internal fun TextbookReader(
                         if (paging.publishImportPage(paragraphPage.number)) onPage(paragraphPage.number)
                     }
                     if (!textView && chosen != null) paging.anchor = BookPageAnchor(chosen.page, chosen.start)
-                    textView = !textView
+                    val nextTextView = !textView
+                    textView = nextTextView
                     pdf.selection = null
-                    library.saveTextView(book.id, textView)
+                    viewSaveError = false
+                    val revision = ++viewSaveRevision
+                    scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                        try {
+                            library.persistTextView(book.id, nextTextView)
+                        } catch (_: SQLException) {
+                            if (revision == viewSaveRevision) viewSaveError = true
+                        }
+                    }
                 }, modifier = Modifier.testTag("book-original-toggle")) { Text(if (textView) "看原页" else "看文字") }
                 V7TextButton(onClick = { asking = true }, enabled = chosen == null || learnableSelection != null,
                     modifier = Modifier.testTag("ask-book-passage")) { Text("选段提问") }
@@ -476,6 +489,7 @@ internal fun TextbookReader(
                 if (source == null) PaperButton(onLearn, enabled = !ui.busy) { Text(if (book.learning) "继续学" else "开始学") }
             }
             if (page.ocr) Text(OCR_NOTICE, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("book-ocr-notice"))
+            if (viewSaveError) Text("阅读视图暂未保存。切换视图后会再试一次。", style = MaterialTheme.typography.bodySmall, color = v7Alert())
             if (markError) Text("高亮暂未保存，请再试一次。", style = MaterialTheme.typography.bodySmall, color = v7Alert())
             if (chosen != null && learnableSelection == null) Text("选段超过 4000 字。请选短一些再讲解或提问。",
                 style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)

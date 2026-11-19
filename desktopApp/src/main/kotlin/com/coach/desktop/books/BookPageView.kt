@@ -38,11 +38,14 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFontFamilyResolver
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.Clipboard
 import androidx.compose.ui.platform.ClipEntry
@@ -66,6 +69,8 @@ import androidx.compose.ui.text.style.TextAlign
 import java.nio.file.Path
 import javax.imageio.ImageIO
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.StringSelection
@@ -102,10 +107,18 @@ private class PageClipboard(private val delegate: Clipboard) : Clipboard by dele
 /** 阅读方式：翻页读 / 滚动读。 */
 internal enum class BookReadMode { Paged, Scroll }
 
+internal data class BookPaginationInputs(
+    val pages: List<BookPage>, val width: Int, val height: Int, val typography: BookPageTypography,
+    val highlights: Map<Int, List<IntRange>>, val tableRows: Map<BookIllustration, BookTableRows>,
+    val density: Density, val direction: LayoutDirection, val fonts: FontFamily.Resolver, val pdf: Boolean,
+)
+
 @Stable
 internal class BookPagingState(initial: BookPageAnchor) {
     var anchor by mutableStateOf(initial)
     var pages by mutableStateOf(emptyList<BookLaidPage>())
+    // Keep the last completed layout while the reader is showing the original PDF.
+    var completedPagination: Pair<BookPaginationInputs, List<BookLaidPage>>? = null
     var spread by mutableStateOf(false)
     /** 当前这组对开的左页下标，和排好的页表一起记着；读者点右页时锚点落在右页，但这一组对开不跟着移位。 */
     var groupFirst = -1
@@ -178,6 +191,8 @@ internal fun BookPageView(
     var preview by remember(book.id, libraryDirectory) { mutableStateOf<BookFigurePreview?>(null) }
     preview?.let { BookFigureDialog(it) { preview = null } }
     val density = LocalDensity.current
+    val fontResolver = LocalFontFamilyResolver.current
+    val layoutDirection = LocalLayoutDirection.current
     val colors = CoachTheme.colors
     val scale = LocalV7TextScale.current.value
     val fonts = LocalV7Fonts.current
@@ -215,8 +230,37 @@ internal fun BookPageView(
                 page.copy(illustrations = page.illustrations.filter { libraryDirectory != null && it !in failed })
             }
         }
-        val pages = remember(layoutPages, widthPx, bodyHeight, typography, highlights, density, tableRows) {
-            BookPageLayouter(measurer, density, typography, book.format == "pdf").layout(layoutPages, widthPx, bodyHeight, highlights, tableRows)
+        val pdf = book.format == "pdf"
+        // The ordinary short-book path fits in one frame and needs no loading screen.
+        val backgroundLayout = remember(layoutPages) {
+            layoutPages.size > 64 || layoutPages.sumOf { it.illustrations.size } > 64 ||
+                layoutPages.sumOf { it.text.length.toLong() } > 32_768
+        }
+        val inputs = BookPaginationInputs(layoutPages, widthPx, bodyHeight, typography, highlights, tableRows,
+            density, layoutDirection, fontResolver, pdf)
+        val pages = if (backgroundLayout) {
+            var result by remember(state, inputs) {
+                mutableStateOf(state.completedPagination?.takeIf { it.first == inputs }?.second)
+            }
+            LaunchedEffect(state, inputs) {
+                if (result != null) return@LaunchedEffect
+                // Measure with a worker-owned cache. Closing or switching views cancels this pagination.
+                val laidOut = withContext(Dispatchers.Default) {
+                    val context = currentCoroutineContext()
+                    val workerMeasurer = TextMeasurer(fontResolver, density, layoutDirection, cacheSize = 128)
+                    BookPageLayouter(workerMeasurer, density, typography, pdf)
+                        .layout(layoutPages, widthPx, bodyHeight, highlights, tableRows) { context.ensureActive() }
+                }
+                state.completedPagination = inputs to laidOut
+                result = laidOut
+            }
+            result
+        } else remember(inputs) {
+            BookPageLayouter(measurer, density, typography, pdf).layout(layoutPages, widthPx, bodyHeight, highlights, tableRows)
+        }
+        if (pages == null) {
+            Text("正在排版…", Modifier.align(Alignment.Center).testTag("book-page-loading"), color = colors.fgSecondary)
+            return@BoxWithConstraints
         }
         SideEffect { if (state.pages !== pages) state.pages = pages; if (state.spread != spread) state.spread = spread }
         if (pages.isEmpty()) {

@@ -69,6 +69,7 @@ internal fun runWindowsTextbooks() {
                 width = initialBounds.width.dp, height = initialBounds.height.dp,
                 position = WindowPosition.Absolute(initialBounds.x.dp, initialBounds.y.dp),
             )) {
+            LaunchedEffect(window) { window.applyWindowsReadingMinimum() }
             WindowsTextbookHost(controller, drafts, exams, chooseBook = {
                 withContext(Dispatchers.Swing) {
                     val dialog = FileDialog(window, "上传教材 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)

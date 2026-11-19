@@ -27,10 +27,11 @@ $script:ForegroundTracePath = Join-Path $OutDir 'foreground.jsonl'
 $steps = @('启动', '上传一本书', '翻页', '选中就问出讲解', '边看边学出讲解', '做题（答完出讲解和小结）', '点出处弹原文卡')
 $results = New-Object System.Collections.ArrayList
 $script:Last = $null
+$script:LastPng = ''
 function Note([string]$m) { "$(Get-Date -Format 'HH:mm:ss') $m" | Tee-Object -FilePath (Join-Path $OutDir 'run.log') -Append }
 function Shot([int]$n, [string]$tag) {
     $png = Join-Path $OutDir ('{0}-{1}.png' -f $n, $tag); Save-Shot $png
-    $lines = @(Read-Screen $png); $script:Last = $lines
+    $lines = @(Read-Screen $png); $script:Last = $lines; $script:LastPng = $png
     ($lines | ForEach-Object Text) -join "`n" | Set-Content -Encoding utf8 ([IO.Path]::ChangeExtension($png, 'txt'))
     return $lines
 }
@@ -450,27 +451,50 @@ try {
             while ((Get-Date) -lt $idle -and (Has (Shot 6 "busy-$tag") @('正在按本节原文出题'))) { Start-Sleep -Seconds 2 }
         }
         # 上一次点击可能慢一步才打开原文页（两窗争用时 15 秒内没等到）：已在原文页且读得出页段，就直接用这一帧。
-        $onSource = { param($lines) if (Find-Text $lines '返回学习') { Get-LessonSourceRange $lines } }
+        $waitRangeFade = { param([string]$tag)
+            $fadeStop = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $fadeStop -and (Find-Text $script:Last '返回学习')) {
+                $found = Get-LessonSourceRange $script:Last
+                if ($found) { return $found }
+                Start-Sleep -Seconds 1
+                $null = Shot 6 "fade-$tag"
+            }
+            if (Find-Text $script:Last '返回学习') { return (Get-LessonSourceRange $script:Last) }
+            return $null
+        }
         $readRange = { param([string]$tag)
             $r = $null
             foreach ($try in 1..2) {
                 & $waitIdle $tag
-                $r = & $onSource $script:Last; if ($r) { break }
-                $btn = Find-LessonSourceButton $script:Last
-                # 换节后的过渡帧可能还没画好按钮，重新取图几次再判失败。
-                foreach ($again in 1..3) {
+                $act = Resolve-SourcePageRangeAction (Get-LessonLearningState $script:Last $script:LastPng)
+                if ($act.Action -eq 'return_range') { $r = $act.Range; break }
+                if ($act.Action -eq 'wait_range_fade') { $r = & $waitRangeFade "$tag-$try"; if ($r) { break } }
+                $btn = if ($act.Action -eq 'click_source') { $act.Button } else { $null }
+                # 换节后的过渡帧可能还没画好或按钮仍处于 ui.busy 灰态，重新取图等按钮可用再点。
+                foreach ($again in 1..6) {
                     if ($btn) { break }
                     Start-Sleep -Milliseconds 1500
                     $lines = Shot 6 "btn-$tag-$try-$again"
-                    $r = & $onSource $lines; if ($r) { break }
-                    $btn = Find-LessonSourceButton $lines
+                    $act = Resolve-SourcePageRangeAction (Get-LessonLearningState $lines $script:LastPng)
+                    if ($act.Action -eq 'return_range') { $r = $act.Range; break }
+                    if ($act.Action -eq 'wait_range_fade') { $r = & $waitRangeFade "$tag-$try-$again"; if ($r) { break } }
+                    if ($act.Action -eq 'click_source') { $btn = $act.Button }
                 }
                 if ($r) { break }
-                if (-not $btn) { Fail 6 '做题学页面找不到「本节原文 · 第X页」按钮' }
+                if (-not $btn) { Fail 6 '做题学页面找不到可用的「本节原文 · 第X页」按钮' }
                 Click-At $btn.X $btn.Y; Start-Sleep -Milliseconds 800
-                if (Await-Text 6 "range-$tag" @('对应教材第') 15) { $r = Get-LessonSourceRange $script:Last; break }
+                if (Await-Text 6 "range-$tag" @('对应教材第') 25) { $r = Get-LessonSourceRange $script:Last; break }
+                $actAfter = Resolve-SourcePageRangeAction (Get-LessonLearningState $script:Last $script:LastPng)
+                if ($actAfter.Action -eq 'return_range') { $r = $actAfter.Range; break }
+                if ($actAfter.Action -eq 'wait_range_fade') { $r = & $waitRangeFade "$tag-after-$try"; if ($r) { break } }
             }
-            Click-Label 6 @('返回学习') '本节原文页没有「返回学习」' | Out-Null
+            $ret = Await-Text 6 'find' @('返回学习') 15
+            if (-not $ret) { Fail 6 '本节原文页没有「返回学习」（屏幕上找不到「返回学习」）' }
+            if (-not $r) {
+                $r = Get-LessonSourceRange $script:Last
+                if (-not $r) { $r = & $waitRangeFade "late-$tag" }
+            }
+            Click-At $ret.X $ret.Y; Start-Sleep -Milliseconds 800
             if (-not (Await-Text 6 "back-$tag" @('本节原文') 15)) { Fail 6 '从本节原文返回后没有回到做题学页面' }
             return $r
         }
@@ -493,8 +517,17 @@ try {
                         Fail 6 "没有哪一节的页段含第 $physPage 页：相邻两节分别是第 $($prev.First)–$($prev.Last) 页和第 $($range.First)–$($range.Last) 页"
                     }
                     & $waitIdle "step-$hop"
+                    $beforeLesson = Get-LessonLearningState $script:Last $script:LastPng
                     if ($dir -eq 'next') { Click-Label 6 @('继续下一节') '做题学页面找不到「继续下一节」' } else { Click-Label 6 @('上一节') '做题学页面找不到「上一节」' }
-                    if (-not (Await-Text 6 "sec-$hop" @('本节原文') 15)) { Fail 6 '切换到相邻一节后页面没有显示「本节原文」' }
+                    $secDeadline = (Get-Date).AddSeconds(30)
+                    $secReady = $false
+                    while ((Get-Date) -lt $secDeadline) {
+                        $secLines = Shot 6 "sec-$hop"
+                        $nowLesson = Get-LessonLearningState $secLines $script:LastPng
+                        if (Test-AdjacentLessonReady $beforeLesson $nowLesson) { $secReady = $true; break }
+                        Start-Sleep -Seconds 2
+                    }
+                    if (-not $secReady) { Fail 6 '切换到相邻一节后页面没有切到新节或「本节原文」按钮仍不可用' }
                     if ($chosenNum -gt 0) { $chosenNum += $(if ($dir -eq 'next') { 1 } else { -1 }) }
                     $stepDir = $dir; $prev = $range
                     $range = & $readRange "$hop"

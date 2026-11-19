@@ -6,7 +6,12 @@ import com.coach.domain.LedgerJson
 import com.coach.domain.QuestionLadder
 import com.coach.domain.reader.ReaderTextRange
 import com.coach.domain.reader.ReaderTextUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.serialization.encodeToString
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.rendering.PDFRenderer
 import org.w3c.dom.Element
@@ -18,9 +23,11 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.sql.Connection
 import java.sql.DriverManager
+import java.sql.SQLException
 import java.time.Clock
 import java.time.LocalDate
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipFile
 
 /** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
@@ -29,6 +36,9 @@ internal class TextbookLibrary(
     private val extractBook: (Path, String, String, BookOcr, BookImportControl) -> ExtractedBook = TextbookExtraction::extract,
 ) {
     private val reviewStore = TextbookReviewStore { LocalDate.now(clock).toEpochDay() }
+    private class PendingTextView(val textView: Boolean)
+    private val pendingTextViews = ConcurrentHashMap<String, PendingTextView>()
+    private val textViewWrites = Mutex()
     init {
         Files.createDirectories(directory)
         PdfWarmup.start()
@@ -166,6 +176,31 @@ internal class TextbookLibrary(
         db.prepareStatement("SELECT text_view FROM book_reader_views WHERE book=?").use { sql ->
             sql.setString(1, bookId)
             sql.executeQuery().use { if (it.next()) it.getBoolean(1) else null }
+        }
+    }
+
+    fun preferredTextView(bookId: String): Boolean? = pendingTextViews[bookId]?.textView ?: savedTextView(bookId)
+
+    /** Called in click order from the UI. Finish accepted writes even if the reader closes. */
+    suspend fun persistTextView(bookId: String, textView: Boolean) {
+        val pending = PendingTextView(textView)
+        pendingTextViews[bookId] = pending
+        try {
+            withContext(NonCancellable) {
+                textViewWrites.withLock {
+                    withContext(Dispatchers.IO) {
+                        try {
+                            saveTextView(bookId, textView)
+                        } catch (error: SQLException) {
+                            // Retry a transient write lock once using a fresh connection.
+                            if ((error.errorCode and 0xff) != 5 /* SQLITE_BUSY */) throw error
+                            saveTextView(bookId, textView)
+                        }
+                    }
+                }
+            }
+        } finally {
+            pendingTextViews.remove(bookId, pending)
         }
     }
 

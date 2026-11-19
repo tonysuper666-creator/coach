@@ -37,6 +37,7 @@ import java.awt.event.InputEvent
 import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.nio.file.Path
+import java.sql.DriverManager
 import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -54,6 +55,21 @@ class OriginalPdfNativeWindowTest {
         val library = TextbookLibrary(root.resolve("library"))
         val book = library.importBook(viewSwitchPdf(root))
         val stored = TextbookLibrary(library.directory)
+        val databaseUrl = "jdbc:sqlite:${library.directory.resolve("library.sqlite")}"
+        DriverManager.getConnection(databaseUrl).use { db ->
+            db.createStatement().use { sql ->
+                sql.execute("CREATE TABLE view_writes(text_view INTEGER NOT NULL)")
+                sql.execute("CREATE TRIGGER record_view_write AFTER INSERT ON book_reader_views " +
+                    "BEGIN INSERT INTO view_writes VALUES (NEW.text_view); END")
+            }
+        }
+        fun recordedWrites(): List<Boolean> = DriverManager.getConnection(databaseUrl).use { db ->
+            db.createStatement().use { sql ->
+                sql.executeQuery("SELECT text_view FROM view_writes ORDER BY rowid").use { rows ->
+                    buildList { while (rows.next()) add(rows.getBoolean(1)) }
+                }
+            }
+        }
         for (dark in listOf(false, true)) {
             // Hold the controller's page acknowledgement while the reader is already navigating.
             val publishedPage = mutableIntStateOf(1)
@@ -111,7 +127,7 @@ class OriginalPdfNativeWindowTest {
                             }
                         }
                     }
-                    assertEquals(text, stored.savedTextView(book.id))
+                    waitFor("SQLite text_view=$text") { stored.savedTextView(book.id) == text }
                     println("READER_VIEW dark=$dark page=$page text=$text sqlite=$text")
                 }
                 fun releasePage(page: Int) = edt { holdPage = false; publishedPage.intValue = page }
@@ -152,11 +168,25 @@ class OriginalPdfNativeWindowTest {
                     edt { window.setSize(window.width, window.height - 64) }
                     jump(target, hold = true)
                     assertNotEquals(target, edt { publishedPage.intValue })
-                    repeat(if (endsInText) 3 else 2) { index ->
-                        toggle()
-                        responsiveFrame()
-                        assertEquals(index % 2 == 0, stored.savedTextView(book.id))
-                        if (index % 2 == 0) assertNotNull(node(window, "book-page-loading"))
+                    val priorWrites = recordedWrites()
+                    val sequence = if (endsInText) listOf(true, false, true) else listOf(true, false)
+                    DriverManager.getConnection(databaseUrl).use { db ->
+                        db.createStatement().use { sql ->
+                            // Simulate a concurrent writer holding the SQLite write lock during the jump.
+                            sql.execute("BEGIN IMMEDIATE")
+                            try {
+                                for (text in sequence) {
+                                    toggle()
+                                    responsiveFrame()
+                                    assertEquals(text, library.preferredTextView(book.id))
+                                    if (text) assertNotNull(node(window, "book-page-loading"))
+                                }
+                                assertEquals(priorWrites, recordedWrites())
+                            } finally { sql.execute("ROLLBACK") }
+                        }
+                    }
+                    waitFor("rapid SQLite writes drained in click order") {
+                        recordedWrites() == priorWrites + sequence
                     }
                     releasePage(target)
                     visible(endsInText, target)
@@ -281,7 +311,7 @@ class OriginalPdfNativeWindowTest {
                         // physical page again after re-opening the ordinary reading position.
                         click(window, "book-original-toggle")
                         waitFor("text view") { node(window, "reader-text") != null }
-                        assertEquals(true, TextbookLibrary(library.directory).savedTextView(book.id))
+                        waitFor("text view saved to SQLite") { library.savedTextView(book.id) == true }
                         click(window, "book-original-toggle")
                         waitFor("original view") { node(window, "original-pdf-text-layer") != null }
                     }

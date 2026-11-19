@@ -77,7 +77,7 @@ class FriendBudgetTests(unittest.TestCase):
         self.reserve(tokens=200)
 
     def test_month_limit_is_shared_with_owner_and_no_daily_reservation_is_created_on_denial(self):
-        self.ledger.reserve("anthropic", KEY, micros(150))
+        self.ledger.reserve("anthropic", KEY, micros(190))
         with self.assertRaisesRegex(Denied, "credit_limit_95_percent"):
             self.reserve()
         self.assertNotIn("friends", self.ledger.read())
@@ -93,22 +93,26 @@ class FriendBudgetTests(unittest.TestCase):
             self.reserve()
 
     def test_spend_warning_publishes_once_and_contains_no_private_text(self):
-        self.ledger.reserve("anthropic", KEY, micros(120))
+        self.ledger.reserve("anthropic", KEY, micros(185))
         calls = []
         def run(args, **kw):
             calls.append(args)
             return SimpleNamespace(stdout="{}")
         with patch.dict(os.environ, {"MULTICA_CLI_PATH": "/synthetic/multica"}):
+            quiet = publish(self.root, run=run, now=datetime.fromtimestamp(NOW, timezone.utc))
+            self.assertEqual("ok", quiet["status"])
+            with self.assertRaisesRegex(Denied, "95_percent"):
+                self.ledger.reserve("anthropic", KEY, micros(6))
             first = publish(self.root, run=run, now=datetime.fromtimestamp(NOW, timezone.utc))
             publish(self.root, run=run, now=datetime.fromtimestamp(NOW + 60, timezone.utc))
         self.assertEqual("warn", first["status"])
         asks = [c for c in calls if "--key" in c and c[c.index("--key") + 1] == "ask"]
         self.assertEqual(1, len(asks))
-        self.assertEqual("朋友讲解花到本月上限的八成了，要不要继续？", json.loads(asks[0][-1])["q"])
+        self.assertIn("赠额 95% 保护线", json.loads(asks[0][-1])["q"])
         self.assertTrue(all(KEY not in str(c) for c in calls))
 
     def test_warning_does_not_replace_an_existing_question_or_fail_on_a_broken_marker(self):
-        self.ledger.reserve("anthropic", KEY, micros(120))
+        self.ledger.reserve("anthropic", KEY, micros(190))
         (self.root / "friend-spend-watch.json").write_text("broken")
         calls = []
         def run(args, **kw):
@@ -117,7 +121,7 @@ class FriendBudgetTests(unittest.TestCase):
         with patch.dict(os.environ, {"MULTICA_CLI_PATH": "/synthetic/multica"}):
             publish(self.root, run=run, now=datetime.fromtimestamp(NOW, timezone.utc))
         self.assertFalse(any("--key" in c and c[c.index("--key") + 1] == "ask" for c in calls))
-        self.assertNotIn("asked_month", json.loads((self.root / "friend-spend-watch.json").read_text()))
+        self.assertNotIn("asked_guard_month", json.loads((self.root / "friend-spend-watch.json").read_text()))
 
 
 class FriendApiTests(unittest.IsolatedAsyncioTestCase):

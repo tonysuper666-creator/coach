@@ -58,10 +58,12 @@ no tools, no explicit prompt-cache writes and no regional/Fast mode.
 
 Atomic, fsynced `api-credit-ledger.json` is authoritative. Calendar summaries
 `api-spend-YYYY-MM.json` report `spent_microusd`, `reserved_microusd`, and completed
-`calls` per provider. One dollar is 1,000,000 microdollars. Coach's UTC monthly caps
-are **Anthropic $150 and OpenAI $475**, including all unresolved reservations.
-The ceiling also retains 5% of the nominal $200 / $500 grant; the stricter
-$150 / $475 caps apply. Changing a key does not reset the provider budget.
+`calls` per provider. One dollar is 1,000,000 microdollars. Coach reserves at most
+95% of each configured monthly API grant, including all unresolved reservations.
+The nominal Anthropic $200 and OpenAI $500 grants allow $190 and $475 respectively.
+The spend monitor reports a reservation that would cross this boundary to the
+main session for Li Zheng's decision before incurring paid usage. The limit
+applies across API keys.
 Unresolved reservations from all prior months (including old ledger records)
 continue to consume headroom until settled; completed spend resets each month.
 

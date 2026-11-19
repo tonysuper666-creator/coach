@@ -1,5 +1,5 @@
 {
-  "monthly_caps_usd": {"anthropic": 150, "openai": 475},
+  "monthly_grants_usd": {"anthropic": 200, "openai": 500},
   "models": {
     "teaching": "claude-haiku-5-5",
     "draft": "claude-haiku-5-5",

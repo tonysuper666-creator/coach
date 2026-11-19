@@ -35,8 +35,9 @@ import org.junit.Assume.assumeTrue
  * 焦点落在哪一格不用另找探针——别的控件都不会改这几个值，值变了就说明键盘真的到了那一格。
  * 截图落在 `build/screens/ton1731/native/`，留焦点环和展开菜单的样子。
  *
- * 菜单行不参与走查：Material3 1.12-alpha03 的菜单在 KeyDown 阶段自己吃掉上下键和回车，菜单行只收到 KeyUp，
- * 焦点不移动、回车也不选中（改动前就是这样，本卡要求「下拉键盘行为不变」，没有动它，另记在交付评论里）。
+ * 菜单行只记录、不断言：Material3 1.12-alpha03 的菜单在 KeyDown 阶段就吃掉上下键和回车，两下 ↓ 之后 `week`
+ * 仍是 1，回车关掉菜单并把 `week` 推到 2。main 基线（`0f617f25`）上逐格同值，本卡要求「下拉键盘行为不变」，
+ * 所以没动它，只把每一步的 `week`/`expanded` 原样打到 stdout，和基线的数字并排看。
  */
 class NotesExportWindowTest {
     @Test fun keyboardWalkthroughTogglesCheckboxAndDropdown() {

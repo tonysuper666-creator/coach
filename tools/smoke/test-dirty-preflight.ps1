@@ -57,6 +57,38 @@ try {
     }
 }
 
+# 4b. 进程身份核对防误杀（替身验证：仅双方启动时间一致时停 1 次；不同或任一缺失均 0 次停止，缺失时间报 CLEANUP_UNVERIFIED）
+$script:SpyState = $null
+function Run-PidIdentityCase([string]$name, $mockProc, [long]$recordedTicks, [int]$expectStops, [bool]$expectThrow) {
+    $script:SpyState = @{ proc = $mockProc; stops = 0; killed = $false }
+    function global:Get-Process([int]$Id, [string]$ErrorAction) {
+        if ($Id -eq 42424 -and -not $script:SpyState.killed) { return $script:SpyState.proc }
+        return $null
+    }
+    function global:Stop-Process([int]$Id, [switch]$Force, [string]$ErrorAction) {
+        $script:SpyState.stops++
+        $script:SpyState.killed = $true
+    }
+    $threw = $false; $errMsg = ''
+    try {
+        Stop-TrackedPid -ProcessId 42424 -StartTimeTicks $recordedTicks -WaitMs 500
+    } catch {
+        $threw = $true
+        $errMsg = $_.Exception.Message
+    } finally {
+        Remove-Item Function:\Get-Process -ErrorAction SilentlyContinue
+        Remove-Item Function:\Stop-Process -ErrorAction SilentlyContinue
+    }
+    $ok = ($script:SpyState.stops -eq $expectStops) -and ($threw -eq $expectThrow) -and (-not $expectThrow -or $errMsg -like 'CLEANUP_UNVERIFIED:*')
+    Check "pid-identity-$name" $ok "stops=$($script:SpyState.stops)/$expectStops threw=$threw/$expectThrow err=$errMsg"
+}
+$t1 = [datetime]::SpecifyKind([datetime]'2026-11-19T17:00:00', [DateTimeKind]::Utc)
+$t2 = $t1.AddSeconds(10)
+Run-PidIdentityCase 'both-match' ([pscustomobject]@{ Id = 42424; StartTime = $t1 }) $t1.Ticks 1 $false
+Run-PidIdentityCase 'different-start' ([pscustomobject]@{ Id = 42424; StartTime = $t2 }) $t1.Ticks 0 $false
+Run-PidIdentityCase 'missing-recorded-start' ([pscustomobject]@{ Id = 42424; StartTime = $t1 }) 0L 0 $true
+Run-PidIdentityCase 'missing-observed-start' ([pscustomobject]@{ Id = 42424; StartTime = $null }) $t1.Ticks 0 $true
+
 # 5. friend-path.ps1 退出码隔离：环境脏=2，产品失败=1，全过=0
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('fp-preflight-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $smokeTmp = Join-Path $tmp 'tools\smoke'

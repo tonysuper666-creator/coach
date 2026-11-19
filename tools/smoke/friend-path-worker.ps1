@@ -178,7 +178,7 @@ if ($Runtime) {
     $gradle = Start-Process (Join-Path $Repo 'gradlew.bat') -ArgumentList $launchArgs -WorkingDirectory $Repo `
     -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
 }
-if ($gradle) { $gradleStartTicks = $gradle.StartTime.ToUniversalTime().Ticks }
+if ($gradle) { $gradleStartTicks = Get-TrackedProcessStartTicks $gradle }
 try {
     # ① 启动
     $deadline = (Get-Date).AddSeconds($StartTimeoutSec)

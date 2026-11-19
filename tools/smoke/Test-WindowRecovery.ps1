@@ -23,7 +23,7 @@ function Minimize-Own {
     if(-not[WD]::IsIconic($script:Win)){throw 'Test did not minimize its owned window'}
 }
 $app=Start-Process $spec.executable -ArgumentList $spec.arguments -WorkingDirectory $spec.repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
-$appStartTicks=if($app -and $app.StartTime){$app.StartTime.ToUniversalTime().Ticks}else{0L}
+$appStartTicks=Get-TrackedProcessStartTicks $app
 $errorText=''
 try {
     $until=(Get-Date).AddSeconds(45)

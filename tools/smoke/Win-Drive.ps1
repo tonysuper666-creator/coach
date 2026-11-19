@@ -133,7 +133,7 @@ function Find-CoachWindow {
     if (-not $mine) { return $false }
     $script:AppPid = $mine[0]
     $proc = Get-Process -Id $script:AppPid -ErrorAction SilentlyContinue
-    $script:AppStartTicks = if ($proc -and $proc.StartTime) { $proc.StartTime.ToUniversalTime().Ticks } else { 0L }
+    $script:AppStartTicks = Get-TrackedProcessStartTicks $proc
     [WD]::EnumWindows({ param($x, $l)
         $p = 0; [WD]::GetWindowThreadProcessId($x, [ref]$p) | Out-Null
         if ($p -eq $script:AppPid -and [WD]::IsWindowVisible($x)) {
@@ -142,14 +142,26 @@ function Find-CoachWindow {
         return $true }, [IntPtr]::Zero) | Out-Null
     return ($script:Win -ne [IntPtr]::Zero)
 }
-function Test-TrackedPidExited([int]$ProcessId, [long]$StartTimeTicks = 0L) {
-    if ($ProcessId -le 0) { return $true }
+function Get-TrackedProcessStartTicks($Process) {
+    if (-not $Process) { return 0L }
+    try {
+        $st = $Process.StartTime
+        if ($st) { return ([datetime]$st).ToUniversalTime().Ticks }
+    } catch { }
+    return 0L
+}
+function Get-TrackedPidState([int]$ProcessId, [long]$StartTimeTicks = 0L) {
+    if ($ProcessId -le 0) { return 'exited' }
     $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-    if (-not $proc) { return $true }
-    if ($StartTimeTicks -gt 0L -and $proc.StartTime -and $proc.StartTime.ToUniversalTime().Ticks -ne $StartTimeTicks) {
-        return $true
-    }
-    return $false
+    if (-not $proc) { return 'exited' }
+    if ($StartTimeTicks -le 0L) { return 'unverified' }
+    $observedTicks = Get-TrackedProcessStartTicks $proc
+    if ($observedTicks -le 0L) { return 'unverified' }
+    if ($observedTicks -ne $StartTimeTicks) { return 'exited' }
+    return 'alive'
+}
+function Test-TrackedPidExited([int]$ProcessId, [long]$StartTimeTicks = 0L) {
+    return (Get-TrackedPidState $ProcessId $StartTimeTicks) -eq 'exited'
 }
 function Stop-TrackedPid(
     [int]$ProcessId,
@@ -159,7 +171,11 @@ function Stop-TrackedPid(
     [string]$StdoutPath = '',
     [string]$StderrPath = ''
 ) {
-    if (Test-TrackedPidExited $ProcessId $StartTimeTicks) { return }
+    $state = Get-TrackedPidState $ProcessId $StartTimeTicks
+    if ($state -eq 'exited') { return }
+    if ($state -eq 'unverified') {
+        throw "CLEANUP_UNVERIFIED: pid $ProcessId is running but identity cannot be verified (recordedStartTicks=$StartTimeTicks)"
+    }
     if ($Tree) {
         $taskkillArgs = @{
             FilePath = 'taskkill.exe'
@@ -178,7 +194,12 @@ function Stop-TrackedPid(
         Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
     }
     $deadline = [DateTime]::UtcNow.AddMilliseconds($WaitMs)
-    while (-not (Test-TrackedPidExited $ProcessId $StartTimeTicks)) {
+    while ($true) {
+        $state = Get-TrackedPidState $ProcessId $StartTimeTicks
+        if ($state -eq 'exited') { return }
+        if ($state -eq 'unverified') {
+            throw "CLEANUP_UNVERIFIED: pid $ProcessId identity could not be verified after stop (recordedStartTicks=$StartTimeTicks)"
+        }
         if ([DateTime]::UtcNow -ge $deadline) {
             throw "CLEANUP_FAILED: owned pid $ProcessId did not exit"
         }

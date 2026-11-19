@@ -49,27 +49,32 @@ function Save-OwnWindow([string]$name, [IntPtr]$handle = $script:Win) {
     } finally { $bmp.Dispose() }
 }
 
-function Click-CapturedUpload {
-    $shot = 'installed-window-printwindow.png'
-    $reference = [Drawing.Bitmap]::new((Join-Path $PSScriptRoot 'fixtures/empty-shelf-upload.png'))
+function Click-CapturedControl([string]$template, [string]$shot) {
+    # The previous file picker leaves the pointer over Upload. Compare the idle
+    # appearance, on the application window that owns the next input action.
+    Invoke-ForegroundStep {
+        $rect = Get-Rect
+        Assert-OurForeground -Expected $script:Win
+        if (-not [WD]::SetCursorPos($rect.L + 40, $rect.T + 14)) { throw 'Cannot park pointer on the title bar' }
+    }
+    $reference = [Drawing.Bitmap]::new((Join-Path $PSScriptRoot "fixtures/$template"))
     try {
         $deadline = (Get-Date).AddSeconds(25)
         do {
             Save-OwnWindow $shot
             $frame = [Drawing.Bitmap]::new((Join-Path $OutDir $shot))
-            try { $point = [InstalledShelf]::FindUpload($frame, $reference) }
+            try { $point = [InstalledShelf]::FindControl($frame, $reference) }
             finally { $frame.Dispose() }
             if (-not $point.IsEmpty) {
                 $root = [System.Windows.Automation.AutomationElement]::FromHandle($script:Win)
-                if ($root.Current.ProcessId -ne $script:AppPid) { throw 'Upload window owner changed' }
-                Write-Output "Matched upload at ($($point.X),$($point.Y)). Foreground: $(Get-ForegroundSummary)"
-                try { $root.SetFocus() } catch { Write-Output "UI Automation focus: $($_.Exception.Message)" }
+                if ($root.Current.ProcessId -ne $script:AppPid) { throw 'Window owner changed' }
+                Write-Output "Matched $template at ($($point.X),$($point.Y)). Foreground: $(Get-ForegroundSummary)"
                 Click-At $point.X $point.Y
                 return
             }
             Start-Sleep -Milliseconds 400
         } while ((Get-Date) -lt $deadline)
-        throw 'Could not identify the upload button in the owned shelf screenshot'
+        throw "Could not identify $template in the application screenshot"
     } finally { $reference.Dispose() }
 }
 
@@ -125,7 +130,7 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
             }
         } catch { Write-Output "UI Automation unavailable: $($_.Exception.Message)" }
         if (-not $invoked) {
-            Click-CapturedUpload
+            Click-CapturedControl 'empty-shelf-upload.png' 'installed-window-printwindow.png'
         }
         Submit-ScanFile $upload
         $db = Join-Path $env:COACH_LIBRARY_DIR 'library.sqlite'
@@ -139,6 +144,16 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
         if (-not $recognized) { throw 'No expected OCR text was saved from the imported fixture' }
         Write-Output 'INSTALLED_SCAN_IMPORT_PASS'
         Save-OwnWindow 'after-import-printwindow.png'
+        if ([IO.Path]::GetExtension($Fixture) -eq '.pdf') {
+            Click-CapturedControl 'shelf-read-first.png' 'after-import-printwindow.png'
+            Start-Sleep -Seconds 2
+            Save-OwnWindow 'reader-before.png'
+            Send-Keys '{RIGHT}'
+            Start-Sleep -Seconds 2
+            Save-OwnWindow 'reader-after.png'
+            & python (Join-Path $PSScriptRoot 'prism-ocr-check.py') $db $Fixture --reading-page 2
+            if ($LASTEXITCODE -ne 0) { throw 'Installed reader did not persist page 2' }
+        }
     } finally {
         foreach ($id in $own) {
             $proc = Get-Process -Id $id -ErrorAction SilentlyContinue

@@ -3,7 +3,7 @@ using System.Drawing;
 
 // Fallback for the hosted ARM desktop, where Compose is sometimes absent from UI Automation.
 public static class InstalledShelf {
-    public static Point FindUpload(Bitmap frame, Bitmap button) {
+    public static Point FindControl(Bitmap frame, Bitmap button) {
         int top = button.GetPixel(button.Width / 2, 0).ToArgb() & 0xffffff;
         Point match = Point.Empty;
         for (int y = 1; y <= frame.Height - button.Height; y++) {
@@ -12,7 +12,7 @@ public static class InstalledShelf {
                 if ((frame.GetPixel(mid, y).ToArgb() & 0xffffff) != top ||
                     (frame.GetPixel(mid, y-1).ToArgb() & 0xffffff) == top) continue;
                 if (!Matches(frame, button, x, y)) continue;
-                if (!match.IsEmpty) throw new InvalidOperationException("Ambiguous upload button");
+                if (!match.IsEmpty) throw new InvalidOperationException("Ambiguous control match");
                 match = new Point(mid, y + button.Height / 2);
             }
         }

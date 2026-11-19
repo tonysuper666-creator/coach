@@ -20,24 +20,67 @@ public class WD {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int command);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessageTimeout(
     IntPtr h, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeoutMs, out UIntPtr result);
   public static string LastActivationFailure { get; private set; }
   public static bool LastActivationAccepted { get; private set; }
   public static IntPtr ForegroundAtConfirmation { get; private set; }
+  private static uint[] ownedForegroundPids = new uint[0];
+  public static void SetOwnedForegroundPids(uint[] pids) { ownedForegroundPids = pids ?? new uint[0]; }
+  private static bool IsOwnedForegroundPid(uint pid) {
+    if (pid == 0) return false;
+    uint[] list = ownedForegroundPids;
+    for (int i = 0; i < list.Length; i++) {
+      if (list[i] == pid) return true;
+    }
+    return false;
+  }
+  private static IntPtr ReadForegroundSettled(bool accepted) {
+    IntPtr fg = GetForegroundWindow();
+    for (int i = 0; accepted && fg == IntPtr.Zero && i < 5; i++) {
+      System.Threading.Thread.Sleep(10);
+      fg = GetForegroundWindow();
+    }
+    return fg;
+  }
   public static bool Activate(IntPtr h) {
-    // Keep the automation queue independent: attaching to a busy foreground
-    // thread can block BringWindowToTop/SetForegroundWindow while holding our mutex.
     if (IsIconic(h)) ShowWindowAsync(h, 9); // SW_RESTORE
     LastActivationAccepted = SetForegroundWindow(h);
     UIntPtr ignored;
     // WM_NULL confirms the asynchronous activation has been processed. Never
     // wait indefinitely for a hung UI, and never bypass foreground ownership.
     bool responsive = SendMessageTimeout(h, 0, UIntPtr.Zero, IntPtr.Zero, 0x23, 500, out ignored) != IntPtr.Zero;
-    ForegroundAtConfirmation = GetForegroundWindow();
+    ForegroundAtConfirmation = ReadForegroundSettled(LastActivationAccepted);
     if (!responsive) {
       LastActivationFailure = "WM_NULL confirmation failed";
       return false;
+    }
+    if (ForegroundAtConfirmation != h && ForegroundAtConfirmation != IntPtr.Zero) {
+      // Only probe/attach when foreground ownership is confirmed to belong to an
+      // owned Coach client window; never message or attach to unrelated windows.
+      uint holderPid;
+      uint holderTid = GetWindowThreadProcessId(ForegroundAtConfirmation, out holderPid);
+      if (IsOwnedForegroundPid(holderPid) &&
+          SendMessageTimeout(ForegroundAtConfirmation, 0, UIntPtr.Zero, IntPtr.Zero, 0x02, 200, out ignored) != IntPtr.Zero) {
+        uint callerTid = GetCurrentThreadId();
+        bool attached = holderTid != 0 && callerTid != holderTid && AttachThreadInput(callerTid, holderTid, true);
+        try {
+          BringWindowToTop(h);
+          LastActivationAccepted = SetForegroundWindow(h);
+        } finally {
+          if (attached) AttachThreadInput(callerTid, holderTid, false);
+        }
+        responsive = SendMessageTimeout(h, 0, UIntPtr.Zero, IntPtr.Zero, 0x23, 500, out ignored) != IntPtr.Zero;
+        ForegroundAtConfirmation = ReadForegroundSettled(LastActivationAccepted);
+        if (!responsive) {
+          LastActivationFailure = "WM_NULL confirmation failed";
+          return false;
+        }
+      }
     }
     if (ForegroundAtConfirmation != h) {
       LastActivationFailure = LastActivationAccepted ? "activation accepted but target was not foreground" : "activation declined by Windows";
@@ -157,12 +200,14 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
             $held = $false
             $declined = $false
             $trace = $null
+            $ownedPids = [uint32[]]@(@(Get-ClientPids) + @($script:AppPid) | Where-Object { $_ -gt 0 } | Select-Object -Unique)
             try {
                 try { $held = $mutex.WaitOne(30000) } catch [Threading.AbandonedMutexException] { $held = $true }
                 if (-not $held) { throw 'WIN_DRIVE_TIMEOUT: waiting for one foreground action' }
                 $acquired = [DateTime]::UtcNow
                 $owner = 0; [WD]::GetWindowThreadProcessId($Window, [ref]$owner) | Out-Null
                 if (-not $script:AppPid -or $owner -ne $script:AppPid) { throw 'WIN_DRIVE_TARGET: window does not belong to this run' }
+                [WD]::SetOwnedForegroundPids($ownedPids)
                 $ready = [WD]::Activate($Window)
                 $observed = [WD]::ForegroundAtConfirmation
                 if ($script:ForegroundTracePath) {
@@ -187,6 +232,7 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
                 # Release first so the other driver can finish its action.
                 Write-Verbose "Foreground action retry $attempt/20"
             } finally {
+                [WD]::SetOwnedForegroundPids([uint32[]]@())
                 if ($held) { $mutex.ReleaseMutex() }
                 if ($trace) {
                     $trace.releasedUtc = [DateTime]::UtcNow.ToString('o')
@@ -210,6 +256,29 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
 function Save-Shot([string]$path, [IntPtr]$Window = [IntPtr]::Zero) {
     if (Has-BackgroundDriver) { Invoke-BackgroundAction -path "/shot" -save $path; return }
     if ($Window -eq [IntPtr]::Zero) { $Window = $script:Win }
+    $owner = 0; [WD]::GetWindowThreadProcessId($Window, [ref]$owner) | Out-Null
+    if (-not $script:AppPid -or $owner -ne $script:AppPid) { throw 'WIN_DRIVE_TARGET: window does not belong to this run' }
+    if (-not [WD]::IsIconic($Window)) {
+        $r = New-Object WD+RECT; $client = New-Object WD+RECT
+        if ([WD]::GetWindowRect($Window, [ref]$r) -and [WD]::GetClientRect($Window, [ref]$client) -and $client.R -gt 0 -and $client.B -gt 0) {
+            $w = $r.R - $r.L; $h = $r.B - $r.T
+            if ($w -gt 0 -and $h -gt 0) {
+                $bmp = New-Object System.Drawing.Bitmap $w, $h
+                try {
+                    $captured = $false
+                    $g = [System.Drawing.Graphics]::FromImage($bmp)
+                    try {
+                        $hdc = $g.GetHdc()
+                        try { $captured = [WD]::PrintWindow($Window, $hdc, 2) } finally { $g.ReleaseHdc($hdc) }
+                    } finally { $g.Dispose() }
+                    if ($captured) {
+                        $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+                        return
+                    }
+                } finally { $bmp.Dispose() }
+            }
+        }
+    }
     Invoke-ForegroundStep -Window $Window -Action {
         $r = New-Object WD+RECT; [WD]::GetWindowRect($Window, [ref]$r) | Out-Null; $w = $r.R - $r.L; $h = $r.B - $r.T
         $client = New-Object WD+RECT

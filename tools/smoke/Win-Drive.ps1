@@ -266,11 +266,11 @@ function Get-Rect { $r = New-Object WD+RECT; [WD]::GetWindowRect($script:Win, [r
 
 # Names who holds the foreground when we give up, so a timeout can be attributed
 # to another run or program. Process name and window class only; never titles.
-function Get-ForegroundOwner([scriptblock]$Probe = $null) {
+function Get-ForegroundOwner([scriptblock]$Probe = $null, [Nullable[long]]$Hwnd = $null) {
     $raw = if ($Probe) {
-        & $Probe
+        if ($null -ne $Hwnd) { & $Probe ([long]$Hwnd) } else { & $Probe }
     } else {
-        $fg = [WD]::GetForegroundWindow()
+        $fg = if ($null -ne $Hwnd) { [IntPtr][long]$Hwnd } else { [WD]::GetForegroundWindow() }
         $owner = 0
         if ($fg -ne [IntPtr]::Zero) { [WD]::GetWindowThreadProcessId($fg, [ref]$owner) | Out-Null }
         $cls = New-Object Text.StringBuilder 128
@@ -299,14 +299,28 @@ function Get-ForegroundOwner([scriptblock]$Probe = $null) {
     }
 }
 function Get-ForegroundSummary { (Get-ForegroundOwner).Summary }
-function Resolve-ForegroundRetryTimeout([string]$LastFocusLoss = '', [scriptblock]$ForegroundProbe = $null) {
-    $fgOwner = Get-ForegroundOwner -Probe $ForegroundProbe
+function New-FocusLossException([string]$Message, $Owner) {
+    $err = [System.InvalidOperationException]::new($Message)
+    if ($Owner) {
+        $err.Data['ForegroundOwner'] = $Owner
+        $err.Data['ForegroundHwnd'] = [long]$Owner.Hwnd
+        $err.Data['ForegroundPid'] = [int]$Owner.Pid
+        $err.Data['ForegroundProcess'] = if ($Owner.Process) { [string]$Owner.Process } else { 'unknown' }
+        $err.Data['ForegroundClass'] = [string]$Owner.Class
+        $err.Data['ForegroundSummary'] = [string]$Owner.Summary
+    }
+    return $err
+}
+function Resolve-ForegroundRetryTimeout([string]$LastFocusLoss = '', $ForegroundOwner = $null, [scriptblock]$ForegroundProbe = $null) {
+    $fgOwner = if ($ForegroundOwner) { $ForegroundOwner } else { Get-ForegroundOwner -Probe $ForegroundProbe }
     if ($fgOwner.Pid -gt 0 -and -not $fgOwner.IsOwnCoach) {
         $procLabel = if ($fgOwner.Process) { $fgOwner.Process } else { 'unknown' }
         $err = [System.InvalidOperationException]::new("WIN_DRIVE_FOREGROUND_CONTENTION: could not regain our foreground for this action (foreground: $($fgOwner.Summary)). Last retry: $LastFocusLoss")
-        $err.Data['ForegroundPid'] = $fgOwner.Pid
+        $err.Data['ForegroundHwnd'] = [long]$fgOwner.Hwnd
+        $err.Data['ForegroundPid'] = [int]$fgOwner.Pid
         $err.Data['ForegroundProcess'] = $procLabel
-        $err.Data['ForegroundClass'] = $fgOwner.Class
+        $err.Data['ForegroundClass'] = [string]$fgOwner.Class
+        $err.Data['ForegroundSummary'] = [string]$fgOwner.Summary
         $err.Data['LastFocusLoss'] = $LastFocusLoss
         return $err
     }
@@ -618,9 +632,18 @@ function Test-DesktopPreflight(
 }
 # All drivers share this mutex, but hold it for one input/capture only.
 # OCR, network waits, compilation and whole smoke runs stay outside.
-function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]::Zero, [switch]$InjectsInput) {
+function Invoke-ForegroundStep(
+    [scriptblock]$Action,
+    [IntPtr]$Window = [IntPtr]::Zero,
+    [switch]$InjectsInput,
+    [scriptblock]$TargetOwnerProbe = $null,
+    [scriptblock]$ActivateProbe = $null,
+    [scriptblock]$ForegroundProbe = $null
+) {
     if ($Window -eq [IntPtr]::Zero) { $Window = $script:Win }
     $mutex = New-Object Threading.Mutex($false, 'Global\Coach.WinDrive.Foreground')
+    $lastFocusLoss = ''
+    $lastForegroundOwner = $null
     try {
         foreach ($attempt in 1..20) {
             $held = $false
@@ -631,23 +654,48 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
                 try { $held = $mutex.WaitOne(30000) } catch [Threading.AbandonedMutexException] { $held = $true }
                 if (-not $held) { throw 'WIN_DRIVE_TIMEOUT: waiting for one foreground action' }
                 $acquired = [DateTime]::UtcNow
-                $owner = 0; [WD]::GetWindowThreadProcessId($Window, [ref]$owner) | Out-Null
+                $owner = 0
+                if ($TargetOwnerProbe) {
+                    $owner = [int](& $TargetOwnerProbe $Window)
+                } else {
+                    [WD]::GetWindowThreadProcessId($Window, [ref]$owner) | Out-Null
+                }
                 if (-not $script:AppPid -or $owner -ne $script:AppPid) { throw 'WIN_DRIVE_TARGET: window does not belong to this run' }
                 [WD]::SetOwnedForegroundPids($ownedPids)
-                $ready = [WD]::Activate($Window)
-                $observed = [WD]::ForegroundAtConfirmation
+                if ($ActivateProbe) {
+                    $probeRes = & $ActivateProbe $Window $attempt
+                    $ready = [bool]$probeRes.Ready
+                    $observed = [IntPtr][long]$probeRes.ObservedHwnd
+                    $activationFailure = [string]$probeRes.Failure
+                    $accepted = if ($probeRes.PSObject.Properties.Name -contains 'Accepted') { [bool]$probeRes.Accepted } else { $false }
+                } else {
+                    $ready = [WD]::Activate($Window)
+                    $observed = [WD]::ForegroundAtConfirmation
+                    $activationFailure = [WD]::LastActivationFailure
+                    $accepted = [WD]::LastActivationAccepted
+                }
+                $observedOwner = if (-not $ready) {
+                    Get-ForegroundOwner -Hwnd $observed.ToInt64() -Probe $ForegroundProbe
+                } else { $null }
                 if ($script:ForegroundTracePath) {
-                    $foregroundPid = 0; [WD]::GetWindowThreadProcessId($observed, [ref]$foregroundPid) | Out-Null
+                    $foregroundPid = 0
+                    if ($observedOwner) {
+                        $foregroundPid = $observedOwner.Pid
+                    } elseif ($ActivateProbe) {
+                        $foregroundPid = $owner
+                    } else {
+                        [WD]::GetWindowThreadProcessId($observed, [ref]$foregroundPid) | Out-Null
+                    }
                     $trace = [ordered]@{ acquiredUtc=$acquired.ToString('o'); attempt=$attempt; targetHwnd=$Window.ToInt64()
                         targetPid=$owner; foregroundHwnd=$observed.ToInt64(); foregroundPid=$foregroundPid
-                        accepted=[WD]::LastActivationAccepted; activationFailure=[WD]::LastActivationFailure; actionReturned=$false }
+                        accepted=$accepted; activationFailure=$activationFailure; actionReturned=$false }
                 }
                 if (-not $ready) {
-                    $declined = [WD]::LastActivationFailure -eq 'activation declined by Windows'
-                    throw "WIN_DRIVE_FOCUS_LOST: $([WD]::LastActivationFailure)"
+                    $declined = $activationFailure -eq 'activation declined by Windows'
+                    throw (New-FocusLossException -Message "WIN_DRIVE_FOCUS_LOST: $activationFailure" -Owner $observedOwner)
                 }
                 Start-Sleep -Milliseconds 150
-                Assert-OurForeground -Expected $Window
+                Assert-OurForeground -Expected $Window -ForegroundProbe $ForegroundProbe
                 try {
                     & $Action
                 } finally {
@@ -660,6 +708,13 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
             } catch {
                 if ($_.Exception.Message -notlike 'WIN_DRIVE_FOCUS_LOST*') { throw }
                 $lastFocusLoss = $_.Exception.Message
+                # Record foreground ownership while still holding the mutex so a
+                # post-unlock focus swap cannot flip exit-code attribution.
+                $lastForegroundOwner = if ($_.Exception.Data -and $_.Exception.Data.Contains('ForegroundOwner')) {
+                    $_.Exception.Data['ForegroundOwner']
+                } else {
+                    Get-ForegroundOwner -Probe $ForegroundProbe
+                }
                 # Retry this action, never restart/reject the run for another window.
                 # Release first so the other driver can finish its action.
                 Write-Verbose "Foreground action retry $attempt/20"
@@ -682,7 +737,7 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
                 Start-Sleep -Milliseconds (Get-Random -Minimum 50 -Maximum 200)
             }
         }
-        throw (Resolve-ForegroundRetryTimeout -LastFocusLoss $lastFocusLoss)
+        throw (Resolve-ForegroundRetryTimeout -LastFocusLoss $lastFocusLoss -ForegroundOwner $lastForegroundOwner -ForegroundProbe $ForegroundProbe)
     } finally { $mutex.Dispose() }
 }
 function Save-Shot([string]$path, [IntPtr]$Window = [IntPtr]::Zero) {
@@ -786,11 +841,10 @@ function Find-Text($lines, [string]$needle) {
 
 # A notification or a non-Java window is not permission to type into it.
 # The caller holds the short mutex and retries only the interrupted action.
-function Assert-OurForeground([IntPtr]$Expected = [IntPtr]::Zero) {
-    $fg = [WD]::GetForegroundWindow(); $owner = 0
-    [WD]::GetWindowThreadProcessId($fg, [ref]$owner) | Out-Null
-    if (-not $script:AppPid -or $owner -ne $script:AppPid -or ($Expected -ne [IntPtr]::Zero -and $fg -ne $Expected)) {
-        throw 'WIN_DRIVE_FOCUS_LOST: our client is no longer foreground'
+function Assert-OurForeground([IntPtr]$Expected = [IntPtr]::Zero, [scriptblock]$ForegroundProbe = $null) {
+    $fgOwner = Get-ForegroundOwner -Probe $ForegroundProbe
+    if (-not $script:AppPid -or $fgOwner.Pid -ne $script:AppPid -or ($Expected -ne [IntPtr]::Zero -and $fgOwner.Hwnd -ne $Expected.ToInt64())) {
+        throw (New-FocusLossException -Message 'WIN_DRIVE_FOCUS_LOST: our client is no longer foreground' -Owner $fgOwner)
     }
 }
 function Click-At([int]$x, [int]$y) {

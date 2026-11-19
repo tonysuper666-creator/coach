@@ -746,23 +746,29 @@ try {
 } catch {
     if ("$_" -like 'WIN_DRIVE_FOREGROUND_CONTENTION*') {
         $stopStep = [Math]::Min($results.Count + 1, 7)
-        $fgPid = 0; $fgProcess = ''; $fgClass = ''
+        $fgHwnd = 0L; $fgPid = 0; $fgProcess = ''; $fgClass = ''; $fgSummary = ''
         $ex = $_.Exception
         if ($ex -and $ex.Data -and $ex.Data.Contains('ForegroundPid')) {
+            if ($ex.Data.Contains('ForegroundHwnd')) { $fgHwnd = [long]$ex.Data['ForegroundHwnd'] }
             $fgPid = [int]$ex.Data['ForegroundPid']
             $fgProcess = [string]$ex.Data['ForegroundProcess']
             $fgClass = [string]$ex.Data['ForegroundClass']
-        } elseif ("$_" -match 'foreground:\s*(.*?)\s+pid=(\d+)\s+class=([^\s)]*)') {
+            if ($ex.Data.Contains('ForegroundSummary')) { $fgSummary = [string]$ex.Data['ForegroundSummary'] }
+        } elseif ("$_" -match 'foreground:\s*(.*?)\s+pid=(\d+)\s+class=([^\s)]*)(?:\s+(this run|other))?') {
             $fgProcess = if ($Matches[1]) { $Matches[1] } else { 'unknown' }
             $fgPid = [int]$Matches[2]
             $fgClass = $Matches[3]
+            $fgSummary = "$fgProcess pid=$fgPid class=$fgClass $(if ($Matches[4]) { $Matches[4] } else { 'other' })"
         }
         if (-not $fgProcess) { $fgProcess = 'unknown' }
+        if (-not $fgSummary) { $fgSummary = "$fgProcess pid=$fgPid class=$fgClass other" }
         $dirtyContention = [pscustomobject]@{
             step = $stopStep
+            hwnd = $fgHwnd
             pid = $fgPid
             process = $fgProcess
             class = $fgClass
+            summary = $fgSummary
             detail = "$_"
         }
         @{
@@ -770,17 +776,21 @@ try {
             exitCode = 2
             reason = 'foreground-contention'
             step = $stopStep
+            foregroundHwnd = $fgHwnd
             foregroundPid = $fgPid
             foregroundProcess = $fgProcess
+            foregroundSummary = $fgSummary
             foreground = @{
+                hwnd = $fgHwnd
                 pid = $fgPid
                 process = $fgProcess
                 class = $fgClass
+                summary = $fgSummary
             }
             detail = "$_"
             time = (Get-Date).ToUniversalTime().ToString('o')
         } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 (Join-Path $OutDir 'environment-dirty.json')
-        Note "ENVIRONMENT_DIRTY：foreground-contention（步骤$stopStep 前台被 $fgProcess pid=$fgPid 占用，不计 N/7）"
+        Note "ENVIRONMENT_DIRTY：foreground-contention（步骤$stopStep 前台被 $fgSummary 占用，hwnd=$fgHwnd，不计 N/7）"
     } elseif ("$_" -like 'DESKTOP_BUSY*') { $n = $results.Count + 1; [void]$results.Add([pscustomobject]@{ Step = $n; Name = $steps[[Math]::Min($n - 1, 6)]; Ok = $false; Why = "$_" }); Note "$_" }
     elseif ("$_" -ne 'STEP_FAILED') { Note "脚本异常：$_"; [void]$results.Add([pscustomobject]@{ Step = $results.Count + 1; Name = $steps[[Math]::Min($results.Count, 6)]; Ok = $false; Why = "脚本异常：$_" }) }
 } finally {

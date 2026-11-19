@@ -269,6 +269,7 @@ if (-not $buildResult -or $buildResult.ExitCode -eq 0) {
     }
     if ($gradle) { $gradleStartTicks = Get-TrackedProcessStartTicks $gradle }
 }
+$dirtyContention = $null
 try {
     # ① 启动
     if ($buildResult -and $buildResult.ExitCode -ne 0) { Fail 1 '构建失败（见 build.log）' }
@@ -430,7 +431,7 @@ try {
         }
         if (-not $got) { throw '120 秒内提问没有得到带出处的回答' }
         Send-Keys '{ESC}'; Start-Sleep -Seconds 1
-    } catch { if ("$_" -like 'DESKTOP_BUSY*') { throw }; $askWhy = "$_"; try { Send-Keys '{ESC}' } catch { } }
+    } catch { if ("$_" -like 'DESKTOP_BUSY*' -or "$_" -like 'WIN_DRIVE_FOREGROUND_CONTENTION*') { throw }; $askWhy = "$_"; try { Send-Keys '{ESC}' } catch { } }
     if ($askWhy) {
         try { Fail 4 "讲解这段可用，但实际提问失败：$askWhy" } catch { if ("$_" -ne 'STEP_FAILED') { throw }; if (-not $KeepGoing) { throw 'STEP_FAILED' } }
     } else { Pass 4 '选中一段能得到带出处的讲解，也能输入问题得到带出处的回答' }
@@ -743,12 +744,63 @@ try {
 
     if ($cardOk) { Fail 7 $cardOk } else { Pass 7 "点出处弹出第 $physPage 页原文卡" }
 } catch {
-    if ("$_" -like 'DESKTOP_BUSY*') { $n = $results.Count + 1; [void]$results.Add([pscustomobject]@{ Step = $n; Name = $steps[[Math]::Min($n - 1, 6)]; Ok = $false; Why = "$_" }); Note "$_" }
+    if ("$_" -like 'WIN_DRIVE_FOREGROUND_CONTENTION*') {
+        $stopStep = [Math]::Min($results.Count + 1, 7)
+        $fgHwnd = 0L; $fgPid = 0; $fgProcess = ''; $fgClass = ''; $fgSummary = ''
+        $ex = $_.Exception
+        if ($ex -and $ex.Data -and $ex.Data.Contains('ForegroundPid')) {
+            if ($ex.Data.Contains('ForegroundHwnd')) { $fgHwnd = [long]$ex.Data['ForegroundHwnd'] }
+            $fgPid = [int]$ex.Data['ForegroundPid']
+            $fgProcess = [string]$ex.Data['ForegroundProcess']
+            $fgClass = [string]$ex.Data['ForegroundClass']
+            if ($ex.Data.Contains('ForegroundSummary')) { $fgSummary = [string]$ex.Data['ForegroundSummary'] }
+        } elseif ("$_" -match 'foreground:\s*(.*?)\s+pid=(\d+)\s+class=([^\s)]*)(?:\s+(this run|other))?') {
+            $fgProcess = if ($Matches[1]) { $Matches[1] } else { 'unknown' }
+            $fgPid = [int]$Matches[2]
+            $fgClass = $Matches[3]
+            $fgSummary = "$fgProcess pid=$fgPid class=$fgClass $(if ($Matches[4]) { $Matches[4] } else { 'other' })"
+        }
+        if (-not $fgProcess) { $fgProcess = 'unknown' }
+        if (-not $fgSummary) { $fgSummary = "$fgProcess pid=$fgPid class=$fgClass other" }
+        $dirtyContention = [pscustomobject]@{
+            step = $stopStep
+            hwnd = $fgHwnd
+            pid = $fgPid
+            process = $fgProcess
+            class = $fgClass
+            summary = $fgSummary
+            detail = "$_"
+        }
+        @{
+            dirty = $true
+            exitCode = 2
+            reason = 'foreground-contention'
+            step = $stopStep
+            foregroundHwnd = $fgHwnd
+            foregroundPid = $fgPid
+            foregroundProcess = $fgProcess
+            foregroundSummary = $fgSummary
+            foreground = @{
+                hwnd = $fgHwnd
+                pid = $fgPid
+                process = $fgProcess
+                class = $fgClass
+                summary = $fgSummary
+            }
+            detail = "$_"
+            time = (Get-Date).ToUniversalTime().ToString('o')
+        } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 (Join-Path $OutDir 'environment-dirty.json')
+        Note "ENVIRONMENT_DIRTY：foreground-contention（步骤$stopStep 前台被 $fgSummary 占用，hwnd=$fgHwnd，不计 N/7）"
+    } elseif ("$_" -like 'DESKTOP_BUSY*') { $n = $results.Count + 1; [void]$results.Add([pscustomobject]@{ Step = $n; Name = $steps[[Math]::Min($n - 1, 6)]; Ok = $false; Why = "$_" }); Note "$_" }
     elseif ("$_" -ne 'STEP_FAILED') { Note "脚本异常：$_"; [void]$results.Add([pscustomobject]@{ Step = $results.Count + 1; Name = $steps[[Math]::Min($results.Count, 6)]; Ok = $false; Why = "脚本异常：$_" }) }
 } finally {
     $passed = @($results | Where-Object Ok).Count
-    $summary = [pscustomobject]@{ passed = $passed; total = 7; marker = $Marker; time = (Get-Date -Format 'o'); outDir = $OutDir; server = $env:COACH_URL; steps = $results }
-    $summary | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $OutDir 'result.json')
+    $summary = [ordered]@{ passed = $passed; total = 7; marker = $Marker; time = (Get-Date -Format 'o'); outDir = $OutDir; server = $env:COACH_URL; steps = $results }
+    if ($dirtyContention) {
+        $summary.stoppedAtStep = $dirtyContention.step
+        $summary.stoppedReason = 'foreground-contention'
+    }
+    [pscustomobject]$summary | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $OutDir 'result.json')
     $cleanupErr = $null
     try { Stop-MyClient } catch { $cleanupErr = $_ }
     # Kill only the exact launcher tree this worker created; its Java wrapper
@@ -759,10 +811,18 @@ try {
                 -StdoutPath (Join-Path $OutDir 'cleanup.out.log') -StderrPath (Join-Path $OutDir 'cleanup.err.log')
         }
     } catch { if (-not $cleanupErr) { $cleanupErr = $_ } }
-    Note "结果 $passed/7"
+    if ($dirtyContention) {
+        Note "已通过 $passed/7 步，停在步骤$($dirtyContention.step)（环境被占，不计 N/7）"
+    } else {
+        Note "结果 $passed/7"
+    }
     if ($cleanupErr) { throw $cleanupErr }
 }
 } finally {
     if ($ClientSeed) { Remove-Item -Recurse -Force $client -ErrorAction SilentlyContinue }   # 配对凭据只在运行期存在
     Exit-SmokeMemory $memoryLease
+}
+if ($dirtyContention) {
+    $global:LASTEXITCODE = 2
+    exit 2
 }

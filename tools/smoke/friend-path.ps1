@@ -32,10 +32,16 @@ if ($PairCode) { $args2 += " -PairCode '$PairCode'" }
 $invocationExit = $LASTEXITCODE
 $dirtyFile = Join-Path $out 'environment-dirty.json'
 if ($invocationExit -eq 2 -or (Test-Path -LiteralPath $dirtyFile)) {
-    $reason = if (Test-Path -LiteralPath $dirtyFile) {
-        (Get-Content -LiteralPath $dirtyFile -Raw -Encoding UTF8 | ConvertFrom-Json).reason
-    } else { '桌面有人使用或存在测试遗留窗口' }
-    "ENVIRONMENT_DIRTY: $reason （未开跑，不计 N/7；退出码 2；日志：$out）"
+    $dirtyObj = if (Test-Path -LiteralPath $dirtyFile) {
+        Get-Content -LiteralPath $dirtyFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    } else { $null }
+    $reason = if ($dirtyObj -and $dirtyObj.reason) { $dirtyObj.reason } else { '桌面有人使用或存在测试遗留窗口' }
+    if ($dirtyObj -and $reason -eq 'foreground-contention') {
+        $holder = if ($dirtyObj.foregroundProcess -or $dirtyObj.foregroundPid) { " ($($dirtyObj.foregroundProcess) pid=$($dirtyObj.foregroundPid))" } else { '' }
+        "ENVIRONMENT_DIRTY: $reason$holder （环境被占，不计 N/7；退出码 2；日志：$out）"
+    } else {
+        "ENVIRONMENT_DIRTY: $reason （未开跑，不计 N/7；退出码 2；日志：$out）"
+    }
     exit 2
 }
 if (-not (Test-Path -LiteralPath (Join-Path $out 'result.json'))) {

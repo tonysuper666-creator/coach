@@ -65,10 +65,12 @@ class OriginalPdfNativeWindowTest {
                 val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
                 setBounds(screen.x + 20, screen.y + 20, minOf(1100, screen.width - 40), minOf(830, screen.height - 40))
                 setContent { CoachTheme(darkTheme = dark) {
-                    TextbookReader(LibraryUi(book = book, page = publishedPage.intValue, screen = BookScreen.READER), library,
-                        UnconnectedBookLearningSupport, null, remember { FocusRequester() }, onNoteSession = {},
-                        onPage = { requestedPage = it; if (!holdPage) publishedPage.intValue = it },
-                        onBack = {}, onLearn = {})
+                    Surface(color = CoachTheme.colors.bgCanvas) {
+                        TextbookReader(LibraryUi(book = book, page = publishedPage.intValue, screen = BookScreen.READER), library,
+                            UnconnectedBookLearningSupport, null, remember { FocusRequester() }, onNoteSession = {},
+                            onPage = { requestedPage = it; if (!holdPage) publishedPage.intValue = it },
+                            onBack = {}, onLearn = {})
+                    }
                 } }
                 isVisible = true
             } }
@@ -133,6 +135,8 @@ class OriginalPdfNativeWindowTest {
                 shot(window, dark, "switch-before")
                 toggle()
                 responsiveFrame(firstToggle = true)
+                assertNotNull(node(window, "book-page-loading"))
+                shot(window, dark, "switch-loading")
                 visible(true, 154)
                 shot(window, dark, "switch-after")
                 repeat(2) {

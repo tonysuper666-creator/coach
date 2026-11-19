@@ -521,6 +521,13 @@ exit /b 0
             $zeroErr.Message -like 'WIN_DRIVE_TIMEOUT:*'
         ) $zeroErr.Message
 
+        $zeroAct = [WD]::Activate([IntPtr]::Zero)
+        Check 'activate-zero-hwnd-fails-without-input' (
+            (-not $zeroAct) -and
+            (-not [WD]::LastActivationInjectedInput) -and
+            ([WD]::LastActivationFailure -eq 'WM_NULL confirmation failed')
+        ) "ok=$zeroAct injected=$([WD]::LastActivationInjectedInput) fail=$([WD]::LastActivationFailure)"
+
         # 8a. Invoke-ForegroundStep 真实 20 次重试 + 放锁后双向切窗回归（覆盖激活被拒与动作中失焦两个入口）
         function Invoke-SwapRegressionCase([string]$name, [ValidateSet('entry1','entry2')][string]$entry, $stateA, $stateB, [bool]$expectContention) {
             $mainWin = [IntPtr]555501L

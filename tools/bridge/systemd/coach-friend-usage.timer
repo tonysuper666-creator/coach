@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the Coach per-person usage report daily after the UTC day closes
+
+[Timer]
+# 00:20 UTC: the ledger day key rolls over at 00:00 UTC, so the previous day is
+# complete by then. Persistent=true re-runs once after downtime; older days can
+# be rebuilt by hand with --day YYYY-MM-DD.
+OnCalendar=*-*-* 00:20:00 UTC
+RandomizedDelaySec=120
+Persistent=true
+Unit=coach-friend-usage.service
+
+[Install]
+WantedBy=timers.target

@@ -468,13 +468,13 @@ function Get-ApolloLogSession(
     $ProcessStartUtc = $null
 ) {
     if (-not $LogPath -or -not (Test-Path -LiteralPath $LogPath) -or $null -eq $ProcessStartUtc) {
-        return [pscustomobject]@{ Readable = $false; Active = $false }
+        return [pscustomobject]@{ Readable = $false; Active = $false; ActiveClients = 0 }
     }
-    $connected = $false
+    $activeClients = 0
     try {
         $lines = @(Get-Content -LiteralPath $LogPath -Encoding UTF8 -ErrorAction Stop)
     } catch {
-        return [pscustomobject]@{ Readable = $false; Active = $false }
+        return [pscustomobject]@{ Readable = $false; Active = $false; ActiveClients = 0 }
     }
     $startUtc = ([datetime]$ProcessStartUtc).ToUniversalTime()
     foreach ($line in $lines) {
@@ -488,11 +488,11 @@ function Get-ApolloLogSession(
             }
             if ($ts.ToUniversalTime() -lt $startUtc) { continue }
             $msg = $Matches[2].Trim()
-            if ($msg -eq 'CLIENT CONNECTED') { $connected = $true }
-            elseif ($msg -eq 'CLIENT DISCONNECTED') { $connected = $false }
+            if ($msg -eq 'CLIENT CONNECTED') { $activeClients++ }
+            elseif ($msg -eq 'CLIENT DISCONNECTED' -and $activeClients -gt 0) { $activeClients-- }
         }
     }
-    return [pscustomobject]@{ Readable = $true; Active = $connected }
+    return [pscustomobject]@{ Readable = $true; Active = ($activeClients -gt 0); ActiveClients = $activeClients }
 }
 function Get-ActiveStreamingSession(
     [scriptblock]$Probe = $null,
@@ -507,21 +507,26 @@ function Get-ActiveStreamingSession(
         @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^(sunshine|apollo)$' })
     }
     if ($hosts.Count -eq 0) { return $null }
-    $portCheckOk = $true
+    $udpOk = $true; $tcpOk = $true
     $allUdp = @(); $allTcp = @()
     if (-not $PortProbe) {
         try {
             $allUdp = @(Get-NetUDPEndpoint -ErrorAction Stop)
+        } catch {
+            $udpOk = $false
+        }
+        try {
             $allTcp = @(Get-NetTCPConnection -ErrorAction Stop)
         } catch {
-            $portCheckOk = $false
+            $tcpOk = $false
         }
     }
     $indeterminate = $null
     foreach ($h in $hosts) {
         $hPid = [int]$h.Id
         $hName = if ($h.ProcessName) { [string]$h.ProcessName } else { 'sunshine' }
-        $hostPortOk = $portCheckOk
+        $hostUdpOk = $udpOk
+        $hostTcpOk = $tcpOk
         $ports = @()
         if ($PortProbe) {
             try {
@@ -530,18 +535,23 @@ function Get-ActiveStreamingSession(
                 $tcpPorts = if ($pd -and $pd.Tcp) { @($pd.Tcp) } else { @() }
                 $ports = @(@($udpPorts) + @($tcpPorts) | Sort-Object -Unique)
             } catch {
-                $hostPortOk = $false
+                $hostUdpOk = $false
+                $hostTcpOk = $false
             }
-        } elseif ($hostPortOk) {
-            $udpPorts = @($allUdp | Where-Object { $_.OwningProcess -eq $hPid -and $_.LocalPort -ge 47998 -and $_.LocalPort -le 48020 } | ForEach-Object LocalPort)
-            $tcpPorts = @($allTcp | Where-Object {
-                $_.OwningProcess -eq $hPid -and $_.State -eq 'Established' -and (
-                    $_.LocalPort -in 47984, 47989, 48010 -or ($_.LocalPort -ge 47998 -and $_.LocalPort -le 48020)
-                )
-            } | ForEach-Object LocalPort)
+        } else {
+            $udpPorts = if ($hostUdpOk) {
+                @($allUdp | Where-Object { $_ -and $_.OwningProcess -eq $hPid -and $_.LocalPort -ge 47998 -and $_.LocalPort -le 48020 } | ForEach-Object LocalPort)
+            } else { @() }
+            $tcpPorts = if ($hostTcpOk) {
+                @($allTcp | Where-Object {
+                    $_ -and $_.OwningProcess -eq $hPid -and $_.State -eq 'Established' -and (
+                        $_.LocalPort -in 47984, 47989, 48010 -or ($_.LocalPort -ge 47998 -and $_.LocalPort -le 48020)
+                    )
+                } | ForEach-Object LocalPort)
+            } else { @() }
             $ports = @(@($udpPorts) + @($tcpPorts) | Sort-Object -Unique)
         }
-        if ($hostPortOk -and $ports.Count -gt 0) {
+        if ($ports.Count -gt 0) {
             return [pscustomobject]@{
                 Tool = 'Apollo/Sunshine'
                 Source = 'ports'
@@ -559,10 +569,10 @@ function Get-ActiveStreamingSession(
                 Source = 'log'
                 Pid = $hPid
                 Ports = @()
-                Summary = "$hName pid=$hPid streaming log=CLIENT CONNECTED"
+                Summary = "$hName pid=$hPid streaming log=CLIENT CONNECTED active=$($logState.ActiveClients)"
             }
         }
-        if (-not $hostPortOk -and -not $logState.Readable -and -not $indeterminate) {
+        if ((-not $hostUdpOk -or -not $hostTcpOk) -and -not $logState.Readable -and -not $indeterminate) {
             $indeterminate = [pscustomobject]@{
                 Tool = 'Apollo/Sunshine'
                 Source = 'indeterminate'

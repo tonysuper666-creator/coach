@@ -151,8 +151,49 @@ try {
         # Apollo 在跑，但端口查询报错、日志也没有 -> 占用
         $pfIndet = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $apolloHost -PortProbe { throw 'NetTCPIP CIM failed' } -ApolloLogPath (Join-Path $regTmp 'missing-sunshine.log') -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
         Check 'stream-apollo-running-ports-error-no-log' (-not $pfIndet.Clean -and $pfIndet.ActiveUser.Streaming.Source -eq 'indeterminate') $pfIndet.Reason
+
+        # 独立查询 UDP / TCP（真实 Test-DesktopPreflight 端口枚举路径，无 -PortProbe）：
+        # UDP 47998 已绑定但 TCP 枚举报错 -> 保留已查到的 UDP 端口并判占用
+        $fakeHost = { @([pscustomobject]@{ Id = 44444; ProcessName = 'sunshine'; StartTime = $apolloStartLocal }) }
+        $emptyLog = Join-Path $regTmp 'empty-sunshine.log'
+        Set-Content -Encoding utf8 -Path $emptyLog -Value @('[2026-11-19 20:00:01.100]: Info: Apollo version: 0.4.6')
+        $pfUdpKeepWhenTcpErr = & {
+            function Get-NetUDPEndpoint { param($ErrorAction) @([pscustomobject]@{ OwningProcess = 44444; LocalPort = 47998 }) }
+            function Get-NetTCPConnection { param($ErrorAction) throw 'TCP CIM failed' }
+            Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $fakeHost -ApolloLogPath $emptyLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        }
+        Check 'stream-udp-47998-when-tcp-query-fails' (-not $pfUdpKeepWhenTcpErr.Clean -and $pfUdpKeepWhenTcpErr.ActiveUser.Streaming.Source -eq 'ports' -and ($pfUdpKeepWhenTcpErr.ActiveUser.Streaming.Ports -contains 47998)) $pfUdpKeepWhenTcpErr.Reason
+
+        # UDP 枚举报错但 TCP 48010 已建立 -> TCP 不被跳过并判占用
+        $pfTcpKeepWhenUdpErr = & {
+            function Get-NetUDPEndpoint { param($ErrorAction) throw 'UDP CIM failed' }
+            function Get-NetTCPConnection { param($ErrorAction) @([pscustomobject]@{ OwningProcess = 44444; State = 'Established'; LocalPort = 48010 }) }
+            Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $fakeHost -ApolloLogPath $emptyLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        }
+        Check 'stream-tcp-48010-when-udp-query-fails' (-not $pfTcpKeepWhenUdpErr.Clean -and $pfTcpKeepWhenUdpErr.ActiveUser.Streaming.Source -eq 'ports' -and ($pfTcpKeepWhenUdpErr.ActiveUser.Streaming.Ports -contains 48010)) $pfTcpKeepWhenUdpErr.Reason
+
+        # 两次连接后仅断开一次（仍有一路在线）-> 占用；两次均断开 -> 放行
+        @(
+            '[2026-11-19 20:00:01.100]: Info: Apollo version: 0.4.6'
+            '[2026-11-19 20:01:11.012]: Info: CLIENT CONNECTED'
+            '[2026-11-19 20:02:05.330]: Info: CLIENT CONNECTED'
+            '[2026-11-19 20:03:10.400]: Info: CLIENT DISCONNECTED'
+        ) | Set-Content -Encoding utf8 $apolloLog
+        $pfTwoConnOneDisc = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $apolloHost -PortProbe $noPorts -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        Check 'stream-log-two-connected-one-disconnected' (-not $pfTwoConnOneDisc.Clean -and $pfTwoConnOneDisc.ActiveUser.Streaming.Source -eq 'log') $pfTwoConnOneDisc.Reason
+
+        @(
+            '[2026-11-19 20:00:01.100]: Info: Apollo version: 0.4.6'
+            '[2026-11-19 20:01:11.012]: Info: CLIENT CONNECTED'
+            '[2026-11-19 20:02:05.330]: Info: CLIENT CONNECTED'
+            '[2026-11-19 20:03:10.400]: Info: CLIENT DISCONNECTED'
+            '[2026-11-19 20:04:22.900]: Info: CLIENT DISCONNECTED'
+        ) | Set-Content -Encoding utf8 $apolloLog
+        $pfTwoConnTwoDisc = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $apolloHost -PortProbe $noPorts -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        Check 'stream-log-two-connected-both-disconnected' $pfTwoConnTwoDisc.Clean $pfTwoConnTwoDisc.Reason
     } finally {
         Remove-Item -LiteralPath $apolloLog -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $regTmp 'empty-sunshine.log') -ErrorAction SilentlyContinue
     }
 
     # 本轮之外的其他 Coach MainKt 窗口存在 -> 即使空闲无串流也算脏

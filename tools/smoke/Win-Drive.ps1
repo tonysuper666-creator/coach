@@ -23,6 +23,8 @@ public class WD {
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int val, int size);
+  public static bool IsCloaked(IntPtr h) { int v = 0; return DwmGetWindowAttribute(h, 14, out v, 4) == 0 && v != 0; }
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessageTimeout(
     IntPtr h, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeoutMs, out UIntPtr result);
@@ -109,6 +111,7 @@ function Await($op, [Type]$type) { $t = $script:asTask.MakeGenericMethod($type).
 $script:Ocr = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('zh-Hans-CN'))
 $script:Win = [IntPtr]::Zero
 $script:AppPid = 0
+$script:AppStartTicks = 0L
 $script:ForegroundTracePath = $null
 
 # Other agents may run their own Coach windows on this desktop. Only the process this script started is ever touched.
@@ -129,6 +132,8 @@ function Find-CoachWindow {
     }
     if (-not $mine) { return $false }
     $script:AppPid = $mine[0]
+    $proc = Get-Process -Id $script:AppPid -ErrorAction SilentlyContinue
+    $script:AppStartTicks = if ($proc -and $proc.StartTime) { $proc.StartTime.ToUniversalTime().Ticks } else { 0L }
     [WD]::EnumWindows({ param($x, $l)
         $p = 0; [WD]::GetWindowThreadProcessId($x, [ref]$p) | Out-Null
         if ($p -eq $script:AppPid -and [WD]::IsWindowVisible($x)) {
@@ -137,7 +142,56 @@ function Find-CoachWindow {
         return $true }, [IntPtr]::Zero) | Out-Null
     return ($script:Win -ne [IntPtr]::Zero)
 }
-function Stop-MyClient { if ($script:AppPid) { Stop-Process -Id $script:AppPid -Force -ErrorAction SilentlyContinue } }
+function Test-TrackedPidExited([int]$ProcessId, [long]$StartTimeTicks = 0L) {
+    if ($ProcessId -le 0) { return $true }
+    $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (-not $proc) { return $true }
+    if ($StartTimeTicks -gt 0L -and $proc.StartTime -and $proc.StartTime.ToUniversalTime().Ticks -ne $StartTimeTicks) {
+        return $true
+    }
+    return $false
+}
+function Stop-TrackedPid(
+    [int]$ProcessId,
+    [long]$StartTimeTicks = 0L,
+    [int]$WaitMs = 5000,
+    [switch]$Tree,
+    [string]$StdoutPath = '',
+    [string]$StderrPath = ''
+) {
+    if (Test-TrackedPidExited $ProcessId $StartTimeTicks) { return }
+    if ($Tree) {
+        $taskkillArgs = @{
+            FilePath = 'taskkill.exe'
+            ArgumentList = "/PID $ProcessId /T /F"
+            WindowStyle = 'Hidden'
+            PassThru = $true
+        }
+        if ($StdoutPath) { $taskkillArgs.RedirectStandardOutput = $StdoutPath }
+        if ($StderrPath) { $taskkillArgs.RedirectStandardError = $StderrPath }
+        $killer = Start-Process @taskkillArgs
+        if (-not $killer.WaitForExit([Math]::Max(5000, $WaitMs))) {
+            Stop-Process -Id $killer.Id -Force -ErrorAction SilentlyContinue
+            throw "Owned launcher cleanup timed out for pid $ProcessId"
+        }
+    } else {
+        Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($WaitMs)
+    while (-not (Test-TrackedPidExited $ProcessId $StartTimeTicks)) {
+        if ([DateTime]::UtcNow -ge $deadline) {
+            throw "CLEANUP_FAILED: owned pid $ProcessId did not exit"
+        }
+        Start-Sleep -Milliseconds 100
+    }
+}
+function Stop-MyClient {
+    if ($script:AppPid) {
+        Stop-TrackedPid -ProcessId $script:AppPid -StartTimeTicks $script:AppStartTicks -WaitMs 5000
+        $script:AppPid = 0
+        $script:AppStartTicks = 0L
+    }
+}
 
 # The development launcher owns its port/token. No foreground, cursor,
 # clipboard or screen resource is used by this backend.
@@ -189,6 +243,44 @@ function Get-ForegroundSummary {
     $name = (Get-Process -Id $owner -ErrorAction SilentlyContinue).ProcessName
     $whose = if ($owner -eq $script:AppPid) { 'this run' } else { 'other' }
     "$name pid=$owner class=$($cls.ToString()) $whose"
+}
+function Find-ForeignForegroundWindow([scriptblock]$Probe = $null) {
+    $shellClasses = @(
+        'Progman', 'WorkerW', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd',
+        'TaskListThumbnailWnd', 'MultitaskingViewFrame', 'ForegroundStaging'
+    )
+    $info = if ($Probe) {
+        & $Probe
+    } else {
+        $fg = [WD]::GetForegroundWindow()
+        if ($fg -eq [IntPtr]::Zero) { $null }
+        else {
+            $owner = 0; [WD]::GetWindowThreadProcessId($fg, [ref]$owner) | Out-Null
+            $cls = New-Object Text.StringBuilder 128; [WD]::GetClassName($fg, $cls, 128) | Out-Null
+            $proc = (Get-Process -Id $owner -ErrorAction SilentlyContinue).ProcessName
+            [pscustomobject]@{
+                Hwnd = $fg.ToInt64()
+                Pid = [int]$owner
+                Visible = [WD]::IsWindowVisible($fg)
+                Cloaked = [WD]::IsCloaked($fg)
+                Class = $cls.ToString()
+                Process = $proc
+            }
+        }
+    }
+    if (-not $info -or [long]$info.Hwnd -eq 0L) { return $null }
+    if (-not $info.Visible -or $info.Cloaked) { return $null }
+    if ([int]$info.Pid -eq $PID) { return $null }
+    if ($shellClasses -contains [string]$info.Class) { return $null }
+    $procLabel = if ($info.Process) { [string]$info.Process } else { 'unknown' }
+    $clsLabel = if ($info.Class) { [string]$info.Class } else { 'unknown' }
+    [pscustomobject]@{
+        Hwnd = [long]$info.Hwnd
+        Pid = [int]$info.Pid
+        Process = $procLabel
+        Class = $clsLabel
+        Summary = "$procLabel pid=$([int]$info.Pid) class=$clsLabel"
+    }
 }
 # All drivers share this mutex, but hold it for one input/capture only.
 # OCR, network waits, compilation and whole smoke runs stay outside.

@@ -26,6 +26,14 @@ if ($Selection) { $args2 += " -Selection '$Selection'" }
 if ($PairCode) { $args2 += " -PairCode '$PairCode'" }
 & (Join-Path $PSScriptRoot 'Run-Interactive.ps1') -Script (Join-Path $PSScriptRoot 'friend-path-worker.ps1') -ScriptArgs $args2 -LogFile (Join-Path $out 'worker.log') -TimeoutSec $TimeoutSec
 $invocationExit = $LASTEXITCODE
+$dirtyFile = Join-Path $out 'environment-dirty.json'
+if ($invocationExit -eq 2 -or (Test-Path -LiteralPath $dirtyFile)) {
+    $reason = if (Test-Path -LiteralPath $dirtyFile) {
+        (Get-Content -LiteralPath $dirtyFile -Raw -Encoding UTF8 | ConvertFrom-Json).reason
+    } else { '桌面存在非本轮拉起的前台窗口' }
+    "ENVIRONMENT_DIRTY: $reason （未开跑，不计 N/7；退出码 2；日志：$out）"
+    exit 2
+}
 if (-not (Test-Path -LiteralPath (Join-Path $out 'result.json'))) {
     throw 'FRIEND_PATH_NO_RESULT: 调用失败，无有效 result；不记 N/7（见 worker.log.invocation.json）'
 }

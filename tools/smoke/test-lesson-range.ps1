@@ -1,5 +1,6 @@
 ﻿# 离线验证第⑥步的落点核对（不开客户端、不调模型）：按 TextbookReader.kt 的版式画出「对应教材第 F–L 页」，OCR 后判断是否含目标页。
 # 用例取 #495 那次的两个相邻节：第 150–151 页不含第 154 页（旧判据按起始页距离误判为已落点），第 153–157 页含；读不到页段必须返回空。退出码 0 = 全过。
+param([string]$BatchDir = '')
 . (Join-Path $PSScriptRoot 'Win-Drive.ps1')
 . (Join-Path $PSScriptRoot 'Lesson-Range.ps1')
 $out = Join-Path ([IO.Path]::GetTempPath()) ('lesson-range-' + [guid]::NewGuid().ToString('N').Substring(0, 8)); New-Item -ItemType Directory $out | Out-Null
@@ -70,7 +71,90 @@ if (-not $ok) { $fail++ }
 $busy = Find-LessonSourceButton @((Rec '正在按本节原文出题…' 300 60), (Rec '第150页' 520 60), (Rec '本节原文·' 848 376), (Rec '第153页' 961 470))
 '{0} split-blocks-reject: button={1} expected=none' -f $(if (-not $busy) { 'PASS' } else { 'FAIL' }), $(if ($busy) { $busy.Y } else { 'none' })
 if ($busy) { $fail++ }
-$total = $cases.Count + 5
+
+# 换节按钮可用性：ui.busy=true 时按钮按 Material3 disabled 降透明度（如 6-sec-4 的 0.38 对比度），必须判不可点。
+function Draw-ThemeLearn([string]$name, [string]$title, [string]$btnLabel, [bool]$dark, [int]$btnAlpha) {
+    $bmp = New-Object System.Drawing.Bitmap 1600, 500; $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $bg = if ($dark) { [System.Drawing.Color]::FromArgb(14, 13, 11) } else { [System.Drawing.Color]::FromArgb(250, 247, 240) }
+    $g.Clear($bg); $g.TextRenderingHint = 'AntiAliasGridFit'
+    $fg = if ($dark) { [System.Drawing.Color]::FromArgb(221, 215, 204) } else { [System.Drawing.Color]::FromArgb(26, 24, 20) }
+    $sec = if ($dark) { [System.Drawing.Color]::FromArgb(140, 134, 125) } else { [System.Drawing.Color]::FromArgb(110, 105, 98) }
+    $btnCol = [System.Drawing.Color]::FromArgb($btnAlpha, $fg.R, $fg.G, $fg.B)
+    $g.DrawString($title, (New-Object System.Drawing.Font 'Microsoft YaHei', 22), (New-Object System.Drawing.SolidBrush $fg), 389, 275)
+    $g.DrawString('先试着回答，答后再看讲解；原文可以主动打开。', (New-Object System.Drawing.Font 'Microsoft YaHei', 15), (New-Object System.Drawing.SolidBrush $sec), 389, 375)
+    $g.DrawString($btnLabel, (New-Object System.Drawing.Font 'Microsoft YaHei', 15), (New-Object System.Drawing.SolidBrush $btnCol), 848, 375)
+    $g.Dispose(); $p = Join-Path $out "$name.png"; $bmp.Save($p, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose(); $p
+}
+$extra = 0
+foreach ($tc in @(
+    @{ n = 'dark-disabled-6sec4'; title = '6.7 Section 2'; btn = '本节原文 · 第151页'; dark = $true; alpha = 97; expectEnabled = $false },
+    @{ n = 'dark-enabled-6busy4'; title = '6.7 Section 3'; btn = '本节原文 · 第152页'; dark = $true; alpha = 255; expectEnabled = $true },
+    @{ n = 'light-disabled'; title = '6.7 Section 2'; btn = '本节原文 · 第151页'; dark = $false; alpha = 97; expectEnabled = $false },
+    @{ n = 'light-enabled'; title = '6.7 Section 3'; btn = '本节原文 · 第152页'; dark = $false; alpha = 255; expectEnabled = $true }
+)) {
+    $png = Draw-ThemeLearn $tc.n $tc.title $tc.btn $tc.dark $tc.alpha
+    $st = Get-LessonLearningState @(Read-Screen $png) $png
+    $ok = ($st.HasSourceButton -and ($st.ButtonEnabled -eq $tc.expectEnabled))
+    '{0} {1}: enabled={2} expected={3}' -f $(if ($ok) { 'PASS' } else { 'FAIL' }), $tc.n, $st.ButtonEnabled, $tc.expectEnabled
+    if (-not $ok) { $fail++ }; $extra++
+}
+
+# 相邻节状态转移与 6-busy-3 / 6-find 原文页动作判定
+$sPrev = [pscustomobject]@{ OnSourcePage = $false; SourceRange = $null; BusyGenerating = $false; HasSourceButton = $true; Button = @{ X = 947; Y = 385 }; ButtonEnabled = $true; ButtonPage = 151; Title = '6·7Section·2' }
+$sStaleDisabled = [pscustomobject]@{ OnSourcePage = $false; SourceRange = $null; BusyGenerating = $false; HasSourceButton = $true; Button = @{ X = 946; Y = 385 }; ButtonEnabled = $false; ButtonPage = 151; Title = '6·7Section·2' }
+$sStaleEnabled = [pscustomobject]@{ OnSourcePage = $false; SourceRange = $null; BusyGenerating = $false; HasSourceButton = $true; Button = @{ X = 947; Y = 385 }; ButtonEnabled = $true; ButtonPage = 151; Title = '6·7Section·2' }
+$sNewEnabled = [pscustomobject]@{ OnSourcePage = $false; SourceRange = $null; BusyGenerating = $false; HasSourceButton = $true; Button = @{ X = 947; Y = 385 }; ButtonEnabled = $true; ButtonPage = 152; Title = '6·7Section·3' }
+$sSamePageNewTitle = [pscustomobject]@{ OnSourcePage = $false; SourceRange = $null; BusyGenerating = $false; HasSourceButton = $true; Button = @{ X = 947; Y = 385 }; ButtonEnabled = $true; ButtonPage = 151; Title = '6·7Section·3' }
+foreach ($t in @(
+    @{ n = 'adjacent-reject-disabled-stale'; got = (Test-AdjacentLessonReady $sPrev $sStaleDisabled); expect = $false },
+    @{ n = 'adjacent-reject-same-section'; got = (Test-AdjacentLessonReady $sPrev $sStaleEnabled); expect = $false },
+    @{ n = 'adjacent-accept-new-section'; got = (Test-AdjacentLessonReady $sPrev $sNewEnabled); expect = $true },
+    @{ n = 'adjacent-accept-title-changed'; got = (Test-AdjacentLessonReady $sPrev $sSamePageNewTitle); expect = $true }
+)) {
+    '{0} {1}: ready={2} expected={3}' -f $(if ($t.got -eq $t.expect) { 'PASS' } else { 'FAIL' }), $t.n, $t.got, $t.expect
+    if ($t.got -ne $t.expect) { $fail++ }; $extra++
+}
+
+$sFade = [pscustomobject]@{ OnSourcePage = $true; SourceRange = $null; BusyGenerating = $false; HasSourceButton = $false; Button = $null; ButtonEnabled = $false; ButtonPage = 0; Title = '' }
+$sFind152 = [pscustomobject]@{ OnSourcePage = $true; SourceRange = [pscustomobject]@{ First = 152; Last = 153 }; BusyGenerating = $false; HasSourceButton = $false; Button = $null; ButtonEnabled = $false; ButtonPage = 0; Title = '' }
+$actWait = Resolve-SourcePageRangeAction $sStaleDisabled
+$actClick = Resolve-SourcePageRangeAction $sNewEnabled
+$actFade = Resolve-SourcePageRangeAction $sFade
+$actFind = Resolve-SourcePageRangeAction $sFind152
+foreach ($a in @(
+    @{ n = 'action-wait-disabled'; ok = ($actWait.Action -eq 'wait_learning') },
+    @{ n = 'action-click-enabled'; ok = ($actClick.Action -eq 'click_source') },
+    @{ n = 'action-wait-fade-6busy3'; ok = ($actFade.Action -eq 'wait_range_fade') },
+    @{ n = 'action-read-before-return-6find'; ok = ($actFind.Action -eq 'return_range' -and $actFind.Range.First -eq 152 -and $actFind.Range.Last -eq 153 -and -not (Test-RangeHasPage $actFind.Range $target)) }
+)) {
+    '{0} {1}' -f $(if ($a.ok) { 'PASS' } else { 'FAIL' }), $a.n
+    if (-not $a.ok) { $fail++ }; $extra++
+}
+
+if ($BatchDir) {
+    $bStep4 = Join-Path $BatchDir '6-busy-step-4.png'
+    $bSec4 = Join-Path $BatchDir '6-sec-4.png'
+    $bBusy4 = Join-Path $BatchDir '6-busy-4.png'
+    $bBusy3 = Join-Path $BatchDir '6-busy-3.png'
+    $bFind = Join-Path $BatchDir '6-find.png'
+    $stStep4 = Get-LessonLearningState @(Read-Screen $bStep4) $bStep4
+    $stSec4 = Get-LessonLearningState @(Read-Screen $bSec4) $bSec4
+    $stBusy4 = Get-LessonLearningState @(Read-Screen $bBusy4) $bBusy4
+    $stBusy3 = Get-LessonLearningState @(Read-Screen $bBusy3) $bBusy3
+    $stFind = Get-LessonLearningState @(Read-Screen $bFind) $bFind
+    $rFind = Resolve-SourcePageRangeAction $stFind
+    foreach ($bc in @(
+        @{ n = 'batch-6sec4-not-ready'; ok = (-not $stSec4.ButtonEnabled -and -not (Test-AdjacentLessonReady $stStep4 $stSec4)) },
+        @{ n = 'batch-6busy4-ready'; ok = ($stBusy4.ButtonEnabled -and (Test-AdjacentLessonReady $stStep4 $stBusy4) -and $stBusy4.ButtonPage -eq 152) },
+        @{ n = 'batch-6busy3-fade'; ok = ((Resolve-SourcePageRangeAction $stBusy3).Action -eq 'wait_range_fade') },
+        @{ n = 'batch-6find-reads-152-153'; ok = ($rFind.Action -eq 'return_range' -and $rFind.Range.First -eq 152 -and $rFind.Range.Last -eq 153 -and -not (Test-RangeHasPage $rFind.Range $target)) }
+    )) {
+        '{0} {1}' -f $(if ($bc.ok) { 'PASS' } else { 'FAIL' }), $bc.n
+        if (-not $bc.ok) { $fail++ }; $extra++
+    }
+}
+
+$total = $cases.Count + 5 + $extra
 Remove-Item -Recurse -Force $out
 "RESULT $($total - $fail)/$total target=$target"
 exit $(if ($fail) { 1 } else { 0 })

@@ -13,6 +13,8 @@ $here = $PSScriptRoot
 $upstream = (Get-Content (Join-Path $ClientSeed 'pairing\server-url') -Raw).Trim()
 $work = Join-Path $Evidence ('step5-boundary-' + (Get-Date -Format 'yyyyMMdd-HHmmss')); New-Item -ItemType Directory -Force $work | Out-Null
 $log = Join-Path $work 'counts.jsonl'; $portFile = Join-Path $work 'port.txt'
+$seed = $null
+$script:Failed = $false
 $proxy = Start-Process python -ArgumentList @((Join-Path $here 'explain-count-proxy.py'), '--upstream', $upstream, '--log', $log, '--port-file', $portFile) -WindowStyle Hidden -PassThru
 try {
     foreach ($i in 1..50) { if (Test-Path $portFile) { break }; Start-Sleep -Milliseconds 200 }
@@ -22,6 +24,7 @@ try {
     $cred = Join-Path $seed 'pairing\credentials.properties'
     (Get-Content $cred -Raw) -replace '(?m)^server=.*$', ('server=' + ($proxyUrl -replace ':', '\:')) | Set-Content -NoNewline -Encoding ascii $cred
     Set-Content -NoNewline -Encoding ascii (Join-Path $seed 'pairing\server-url') $proxyUrl
+    foreach ($need in @($Book, $Selection)) { if (-not (Test-Path -LiteralPath $need)) { throw "输入文件不存在：$need" } }
     $verdicts = @()
     foreach ($case in @(@{ n = '选错的节（第 13 页目录项）'; lesson = $WrongLesson; expect = 0 }, @{ n = '授权节（核准第 150 页后）'; lesson = $GoodLesson; expect = 1 })) {
         Remove-Item $log -ErrorAction SilentlyContinue
@@ -39,5 +42,13 @@ try {
     }
     $verdicts | Format-Table -AutoSize | Out-String | Write-Host
     $verdicts | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $work 'verdicts.json')
-    if (@($verdicts | Where-Object { -not $_.pass }).Count -gt 0) { "FAIL (见 $work)"; exit 1 } else { "PASS (见 $work)"; exit 0 }
-} finally { if ($proxy -and -not $proxy.HasExited) { Stop-Process -Id $proxy.Id -Force -ErrorAction SilentlyContinue } }
+    $script:Failed = @($verdicts | Where-Object { -not $_.pass }).Count -gt 0
+} catch {
+    "测试本身出错：$_"; $script:Failed = $true
+} finally {
+    if ($proxy -and -not $proxy.HasExited) { Stop-Process -Id $proxy.Id -Force -ErrorAction SilentlyContinue }
+    # 代理测试自己新建的配对凭据副本：成功和异常都要清掉，并且核对真的没了
+    if ($seed -and (Test-Path -LiteralPath $seed)) { Remove-Item -LiteralPath $seed -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($seed -and (Test-Path -LiteralPath $seed)) { "清理失败：配对副本还在 $seed"; $script:Failed = $true }
+}
+if ($script:Failed) { "FAIL (见 $work)"; exit 1 } else { "PASS (见 $work)"; exit 0 }

@@ -46,16 +46,19 @@ function Select-TutorLabel([string]$name, [string[]]$labels, [int]$scroll = 0, [
     Click-At $point.X $point.Y
 }
 
-function Test-InstalledTutor {
+function Test-BlockAndCitation {
     Send-Keys '{HOME}'
     Select-TutorLabel '04-reader' @('讲解') 0 675
     Select-TutorLabel '04-explain-action' @('讲解这段') -2 675 150
-    Select-TutorLabel '04-consent' @('允许并讲解') 0 350 280
+    Click-CapturedControl 'explain-consent.png' '04-consent.png'
     $null = Find-TutorLabel '04-block' @('Blockexplanation','explanation') -2
     Select-TutorLabel '07-citation' @('出处1','出处') -2
     $null = Find-TutorLabel '07-original' @('关闭')
     Send-Keys '{ESC}'
     Select-TutorLabel '04-back' @('回到原文')
+}
+
+function Test-PassageQuestion {
     Select-TutorLabel '04-ask-action' @('选段提问')
     $hint = Find-TutorLabel '04-ask-dialog' @('点一段','再问一句')
     Click-At ($hint.X + 80) ($hint.Y + 46)
@@ -63,24 +66,51 @@ function Test-InstalledTutor {
     Click-At ($field.X + 35) ($field.Y + 34)
     Send-Keys 'What does this passage mean?'
     Send-Keys '{ENTER}'
-    $null = Find-TutorLabel '04-answer' @('Passageanswer','Passage') -3
+    $null = Find-TutorLabel '04-answer' @('Passageanswer') -3
     $null = Find-TutorLabel '04-answer-source' @('出处') -3
     Send-Keys '{ESC}'
-    Select-TutorLabel '05-start' @('开始学','开始') 0 830
-    Select-TutorLabel '05-path' @('边看边学') 0 200 150
+}
+
+function Open-TutorShelf([string]$name) {
+    # Dismiss any modal left by the previous path before using the app's Back action.
+    Send-Keys '{ESC}'
+    Start-Sleep -Milliseconds 300
+    $lines = @(Read-TutorFrame $name)
+    if (Find-Text $lines '上传教材') { return }
+    Select-TutorLabel $name @('返回书架') 0
+}
+
+function Test-WholeLesson {
+    Open-TutorShelf '05-shelf'
+    Select-TutorLabel '05-path' @('边看边学','先看讲解') -2
     Select-TutorLabel '05-open' @('开始边看边学')
     $null = Find-TutorLabel '05-lesson' @('Lessonoverview','overview') -4
     Select-TutorLabel '05-lesson-source' @('出处') -3
     $null = Find-TutorLabel '05-original' @('返回学习')
     Select-TutorLabel '05-return' @('返回学习')
-    Select-TutorLabel '06-shelf' @('返回书架') 25
-    Select-TutorLabel '06-practice-path' @('做题学') -3
+}
+
+function Test-Practice {
+    Open-TutorShelf '06-shelf'
+    Select-TutorLabel '06-practice-path' @('做题学','先试题') -3
     $null = Find-TutorLabel '06-question' @('Whichmethod','checksrecall') -3
     Select-TutorLabel '06-options' @('Recallbefore','beforechecking') -3
     $null = Find-TutorLabel '06-selected' @('你选择','你选了') -2
     $null = Find-TutorLabel '06-feedback' @('Practicefeedback','feedback') -3
     $null = Find-TutorLabel '06-feedback-source' @('出处') -2
-    $null = Find-TutorLabel '06-summary' @('与本题答案一致','这次练习中','题目和作答') -3
+    $null = Find-TutorLabel '06-summary' @('这次练习中','题目和作答') -3
+}
+
+function Test-InstalledTutor {
+    $errors = @()
+    foreach ($scenario in @('Test-BlockAndCitation', 'Test-PassageQuestion', 'Test-WholeLesson', 'Test-Practice')) {
+        try { & $scenario; Write-Output "UI_PASS $scenario" }
+        catch {
+            $errors += "$scenario - $($_.Exception.Message)"
+            Write-Output $errors[-1]
+        }
+    }
+    if ($errors) { throw ($errors -join ' | ') }
     $events = @(Get-Content -LiteralPath (Join-Path $OutDir 'tutor-events.jsonl') -Encoding UTF8 | ForEach-Object { $_ | ConvertFrom-Json })
     foreach ($kind in @('explain','ask','lesson','practice')) {
         if ($kind -notin $events.kind) { throw "Missing loopback request: $kind" }

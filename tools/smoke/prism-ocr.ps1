@@ -8,6 +8,8 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:PROCESSOR_ARCHITECTURE -ne 'ARM64') 
     throw 'This probe is restricted to a disposable GitHub ARM64 runner.'
 }
 . (Join-Path $PSScriptRoot 'Win-Drive.ps1')
+Add-Type -Path (Join-Path $PSScriptRoot 'InstalledShelf.cs') -ReferencedAssemblies System.Drawing
+Add-Type -AssemblyName UIAutomationClient
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -21,7 +23,8 @@ $Fixture = (Resolve-Path $Fixture).Path
 $env:COACH_LIBRARY_DIR = Join-Path $OutDir 'library'
 $env:COACH_CLIENT_DIR = Join-Path $OutDir 'client'
 $env:COACH_TOKEN_FILE = Join-Path $OutDir 'unused-token'
-New-Item -ItemType Directory -Force $env:COACH_LIBRARY_DIR, $env:COACH_CLIENT_DIR | Out-Null
+if (Test-Path $env:COACH_LIBRARY_DIR) { throw 'The scan probe needs a fresh library' }
+New-Item -ItemType Directory $env:COACH_LIBRARY_DIR, $env:COACH_CLIENT_DIR | Out-Null
 $install = Get-Content -Raw -Encoding UTF8 $InstallResult | ConvertFrom-Json
 if (-not $install.installedTo) { throw 'The MSI smoke did not record an install location' }
 $exe = Join-Path $install.installedTo 'LearningCoach.exe'
@@ -42,6 +45,63 @@ function Save-OwnWindow([string]$name) {
         } finally { $graphics.Dispose() }
         $bmp.Save((Join-Path $OutDir $name), [System.Drawing.Imaging.ImageFormat]::Png)
     } finally { $bmp.Dispose() }
+}
+
+function Click-CapturedUpload {
+    $shot = 'installed-window-printwindow.png'
+    $reference = [Drawing.Bitmap]::new((Join-Path $PSScriptRoot 'fixtures/empty-shelf-upload.png'))
+    try {
+        $deadline = (Get-Date).AddSeconds(25)
+        do {
+            Save-OwnWindow $shot
+            $frame = [Drawing.Bitmap]::new((Join-Path $OutDir $shot))
+            try { $point = [InstalledShelf]::FindUpload($frame, $reference) }
+            finally { $frame.Dispose() }
+            if (-not $point.IsEmpty) {
+                $rect = New-Object WD+RECT
+                if (-not [WD]::GetWindowRect($script:Win, [ref]$rect)) { throw 'Upload window disappeared' }
+                $screen = [Drawing.Point]::new($rect.L + $point.X, $rect.T + $point.Y)
+                [InstalledShelf]::ClickUpload($script:Win, $script:AppPid, $screen)
+                return
+            }
+            Start-Sleep -Milliseconds 400
+        } while ((Get-Date) -lt $deadline)
+        throw 'Could not identify the upload button in the owned shelf screenshot'
+    } finally { $reference.Dispose() }
+}
+
+function Submit-ScanFile([string]$title) {
+    $deadline = (Get-Date).AddSeconds(20)
+    do {
+        $dialog = Find-AppWindowByTitle $title
+        if ($dialog -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    if ($dialog -eq [IntPtr]::Zero) { throw 'Click did not open the installed app file picker' }
+    $element = [System.Windows.Automation.AutomationElement]::FromHandle($dialog)
+    $scope = [System.Windows.Automation.TreeScope]::Descendants
+    $idProp = [System.Windows.Automation.AutomationElement]::AutomationIdProperty
+    $editType = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
+    # Windows exposes the editable filename inside the cmb13 (1148) combo.
+    $edit = $null
+    foreach ($controlId in @('FileNameControlHost','1148')) {
+        $combo = $element.FindFirst($scope, [System.Windows.Automation.PropertyCondition]::new($idProp, $controlId))
+        if ($combo) {
+            $edit = if ($combo.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit) { $combo } else { $combo.FindFirst($scope, $editType) }
+            if ($edit) { break }
+        }
+    }
+    if (-not $edit) {
+        $edit = $element.FindFirst($scope, [System.Windows.Automation.AndCondition]::new(
+            $editType, [System.Windows.Automation.PropertyCondition]::new($idProp, '1152')))
+    }
+    $open = $element.FindFirst($scope, [System.Windows.Automation.PropertyCondition]::new($idProp, '1'))
+    if (-not $edit -or -not $open) { throw 'File name or Open control missing from the owned file picker' }
+    $value = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+    $value.SetValue($Fixture)
+    if ($value.Current.Value -ne $Fixture) { throw 'File picker did not accept the fixture path' }
+    $open.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
 }
 try {
     $deadline = (Get-Date).AddSeconds(300)
@@ -78,18 +138,15 @@ try {
         }
     } catch { Write-Output "UI Automation unavailable: $($_.Exception.Message)" }
     if (-not $invoked) {
-        if (-not $script:Ocr) { throw 'Upload UI is not accessible and Chinese Windows OCR is unavailable' }
-        $ready = Wait-Text $OutDir 'before-import' @($upload) 60
-        if (-not $ready) { throw 'Upload button not found' }
-        Click-At $ready.X $ready.Y
+        Click-CapturedUpload
     }
-    if (-not (Choose-File $upload $Fixture)) { throw "Image picker failed: $script:ChooseFileWhy" }
+    Submit-ScanFile $upload
     $db = Join-Path $env:COACH_LIBRARY_DIR 'library.sqlite'
     $deadline = (Get-Date).AddSeconds(300)
     $recognized = $false
     do {
         Start-Sleep -Seconds 3
-        & python (Join-Path $PSScriptRoot 'prism-ocr-check.py') $db
+        & python (Join-Path $PSScriptRoot 'prism-ocr-check.py') $db $Fixture
         if ($LASTEXITCODE -eq 0) { $recognized = $true; break }
     } while ((Get-Date) -lt $deadline)
     if (-not $recognized) { throw 'No expected OCR text was saved from the imported fixture' }

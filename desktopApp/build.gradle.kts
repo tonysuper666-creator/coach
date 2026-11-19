@@ -146,6 +146,22 @@ val notesCore by tasks.registering(Zip::class) {
 sourceSets.main { resources.srcDir(notesCore.map { it.destinationDirectory }) }
 tasks.processResources { dependsOn(notesCore) }
 
+// currentOs selects Skiko from the build JVM. Ship the OCR payload for that same JVM.
+if (System.getProperty("os.name").startsWith("Windows") &&
+    System.getProperty("os.arch").lowercase() in setOf("aarch64", "arm64")) {
+    sourceSets.main { resources.exclude("ocr/windows-x64.zip", "ocr/sha256.txt", "ocr/NOTICE.md") }
+    tasks.processResources { from("src/windowsArm64/resources") }
+    // Exercise the packaged application jar, including its selected DLLs and models.
+    val verifyArm64Ocr by tasks.registering(Test::class) {
+        dependsOn(tasks.testClasses, tasks.jar)
+        testClassesDirs = sourceSets.test.get().output.classesDirs
+        classpath = files(sourceSets.test.get().output, tasks.jar) + configurations.testRuntimeClasspath.get()
+        filter { includeTestsMatching("*.BookOcrTest.actualBundledEngineImportsThreeScansJpegAndPdfOffline") }
+        testLogging.showStandardStreams = true
+    }
+    tasks.matching { it.name == "packageMsi" }.configureEach { dependsOn(verifyArm64Ocr) }
+}
+
 tasks.withType<JavaExec>().configureEach {
     for (key in listOf("coach.exportFormulas", "coach.capturePath", "coach.captures", "coach.captureDir")) providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }
 }

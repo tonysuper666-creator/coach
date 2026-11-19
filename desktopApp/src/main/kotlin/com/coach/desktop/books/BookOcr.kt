@@ -65,7 +65,7 @@ internal object BookScanImages {
     }
 }
 
-/** Minimal C API bridge: bundled x64 Windows engine + fast Simplified Chinese/English models.
+/** Minimal C API bridge: bundled Windows engine + fast Simplified Chinese/English models.
  * No optional Windows language pack, system executable, network or Python at runtime.
  */
 internal object BundledBookOcr : BookOcr {
@@ -85,18 +85,29 @@ internal object BundledBookOcr : BookOcr {
         fun TessMonitorSetCancelFunc(monitor: Pointer, callback: CancelCallback)
         fun TessMonitorSetDeadlineMSecs(monitor: Pointer, deadline: Int)
     }
-    private val runtime by lazy { unpack() }
-    // Retain the dependency handle for the entire process lifetime.
-    private val leptonica by lazy { NativeLibrary.getInstance(runtime.resolve("libleptonica1870.dll").toString()) }
-    private val api by lazy {
-        require(System.getProperty("os.name").startsWith("Windows") && System.getProperty("os.arch") in setOf("amd64", "x86_64")) {
+    private enum class Engine(val archive: String, val lept: String, val tess: String) {
+        X64("windows-x64", "libleptonica1870.dll", "libtesseract552.dll"),
+        ARM64("windows-arm64", "libleptonica-1.87.0.dll", "libtesseract55.dll"),
+    }
+    private val engine by lazy {
+        val arch = System.getProperty("os.arch").lowercase()
+        require(System.getProperty("os.name").startsWith("Windows") &&
+            arch in setOf("amd64", "x86_64", "aarch64", "arm64")) {
             "扫描文字识别目前支持 Windows 64 位，请在 Windows 上导入这份扫描材料。"
         }
+        if (arch == "aarch64" || arch == "arm64") Engine.ARM64 else Engine.X64
+    }
+    private val runtime by lazy { unpack() }
+    // Retain the dependency handle for the entire process lifetime.
+    private val leptonica by lazy { NativeLibrary.getInstance(runtime.resolve(engine.lept).toString()) }
+    private val api by lazy {
         // Set before loading the engine/OpenMP runtime. Process-local; never changes Windows settings.
-        NativeLibrary.getInstance("kernel32").getFunction("SetEnvironmentVariableW")
-            .invokeInt(arrayOf(WString("OMP_THREAD_LIMIT"), WString("2")))
+        if (engine == Engine.X64) {
+            NativeLibrary.getInstance("kernel32").getFunction("SetEnvironmentVariableW")
+                .invokeInt(arrayOf(WString("OMP_THREAD_LIMIT"), WString("2")))
+        }
         leptonica
-        Native.load(runtime.resolve("libtesseract552.dll").toString(), Api::class.java,
+        Native.load(runtime.resolve(engine.tess).toString(), Api::class.java,
             mapOf(Library.OPTION_STRING_ENCODING to "UTF-8"))
     }
 
@@ -145,10 +156,12 @@ internal object BundledBookOcr : BookOcr {
 
     /** Content-checked shared cache, locked across processes; models never enter learner data. */
     private fun unpack(): Path {
-        val root = Path.of(System.getProperty("java.io.tmpdir"), "learningcoach-ocr-5.5.2-fast-87416418")
+        val manifest = checkNotNull(javaClass.getResourceAsStream("/ocr/sha256.txt")).use { it.readBytes() }
+        val version = MessageDigest.getInstance("SHA-256").digest(manifest).take(12).joinToString("") { "%02x".format(it) }
+        val root = Path.of(System.getProperty("java.io.tmpdir"), "learningcoach-ocr-${engine.archive}-$version")
         Files.createDirectories(root)
         FileChannel.open(root.resolve("extract.lock"), CREATE, WRITE).use { channel -> channel.lock().use {
-            val hashes = checkNotNull(javaClass.getResourceAsStream("/ocr/sha256.txt")).bufferedReader().use { it.readLines() }
+            val hashes = manifest.decodeToString().lineSequence().filter { it.isNotBlank() }
                 .associate { it.substringAfter("  ") to it.substringBefore("  ") }
             fun valid(name: String): Boolean {
                 val file = root.resolve(name)
@@ -156,7 +169,7 @@ internal object BundledBookOcr : BookOcr {
                     .joinToString("") { "%02x".format(it) } == hashes[name]
             }
             if (!hashes.keys.all(::valid)) {
-                ZipInputStream(checkNotNull(javaClass.getResourceAsStream("/ocr/windows-x64.zip"))).use { zip ->
+                ZipInputStream(checkNotNull(javaClass.getResourceAsStream("/ocr/${engine.archive}.zip"))).use { zip ->
                     while (true) {
                         val entry = zip.nextEntry ?: break
                         require(entry.name in hashes)

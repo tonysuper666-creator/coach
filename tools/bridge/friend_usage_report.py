@@ -18,11 +18,22 @@ row can be reconciled later. No prompt, answer, key or token is read or written.
 Devices are already merged per friend id by the ledger writer; rows are only
 merged across ids when the roster explicitly lists several ids for one person.
 Re-running the same day rewrites the same file from the ledger - there is no
-accumulation, so a rerun can never double count. ``--ledger LABEL=PATH`` lists
-another machine's ledger in its own section. It is never added to the local
-totals: cumulative counters alone cannot tell an independent ledger from a copy
-or a migration fork, so summing (or taking the max) would double count or drop
-calls. A combined figure needs the source relation confirmed first.
+accumulation, so a rerun can never double count. ``--ledger LABEL=PATH`` takes
+another machine's ledger. Cumulative counters alone cannot tell an independent
+ledger from a copy or a migration fork, so the file itself must say which it is:
+
+* ``"independent": true`` plus a ``source_id`` of its own - a separate instance;
+  its settled counts are added, per (source_id, day), so a repeated delivery of
+  the same source is counted once and two sources are never max-merged (max
+  would drop calls when one person used both instances).
+* the same ``source_id`` as the local ledger - a copy/snapshot; field-wise max,
+  so a stale copy can never inflate the total.
+* no declaration - kept in its own section and left out of the totals, with the
+  gap stated, because the relation is unknown.
+
+A source that shares a migration baseline with the local ledger can declare
+``inherited_through: YYYY-MM-DD``; days up to and including that date came from
+the other side and are not counted again, only its own later days are added.
 """
 from __future__ import annotations
 
@@ -171,6 +182,164 @@ def device_totals(day_entry: dict) -> dict:
     return total
 
 
+def _entry_max(a: dict, b: dict) -> dict:
+    """Two copies of one source: same day, keep the larger value per field."""
+    out = dict(a)
+    for k in FIELDS:
+        out[k] = max(int(a.get(k, 0)), int(b.get(k, 0)))
+    devices = {}
+    for src in (a, b):
+        for name, dev in (src.get("devices") or {}).items():
+            old = devices.get(name)
+            devices[name] = ({k: max(int(old.get(k, 0)), int(dev.get(k, 0))) for k in FIELDS}
+                             if old else dev)
+    if devices or "devices" in a or "devices" in b:
+        out["devices"] = devices
+    reserved = dict(a.get("reserved") or {})
+    for k, v in (b.get("reserved") or {}).items():
+        reserved.setdefault(k, v)
+    if reserved or "reserved" in a or "reserved" in b:
+        out["reserved"] = reserved
+    return out
+
+
+def _entry_add(a: dict, b: dict) -> dict:
+    """Two confirmed independent sources: the same person/device may use both."""
+    out = {k: int(a.get(k, 0)) + int(b.get(k, 0)) for k in FIELDS}
+    devices = {}
+    for src in (a, b):
+        for name, dev in (src.get("devices") or {}).items():
+            old = devices.get(name) or {k: 0 for k in FIELDS}
+            devices[name] = {k: int(old.get(k, 0)) + int(dev.get(k, 0)) for k in FIELDS}
+    if devices:
+        out["devices"] = devices
+    reserved = dict(a.get("reserved") or {})
+    reserved.update(b.get("reserved") or {})
+    if reserved:
+        out["reserved"] = reserved
+    return out
+
+
+def _bill_add(a: dict, b: dict) -> dict:
+    """Provider month totals from two independent instances add up."""
+    out = dict(a)
+    for k, v in b.items():
+        old = out.get(k)
+        out[k] = old + v if isinstance(old, int) and isinstance(v, int) else v
+    return out
+
+
+def _source_id(payload: dict, fallback: str) -> str:
+    sid = payload.get("source_id")
+    if isinstance(sid, str) and sid.strip():
+        return sid.strip()
+    return fallback
+
+
+def _is_independent(payload: dict) -> bool:
+    return payload.get("independent") is True
+
+
+def _inherited_through(copies) -> str | None:
+    days = [c.get("inherited_through") for c in copies
+            if isinstance(c.get("inherited_through"), str)
+            and DAY_RE.fullmatch(c.get("inherited_through", ""))]
+    return max(days) if days else None
+
+
+def _lineage_days(copies) -> dict:
+    """One source, several deliveries: field-wise max per (friend, day)."""
+    merged = {}
+    for payload in copies:
+        for fid, days in (payload.get("friends") or {}).items():
+            if not ID_RE.fullmatch(fid) or not isinstance(days, dict):
+                continue
+            for day, entry_ in days.items():
+                if not DAY_RE.fullmatch(day) or not isinstance(entry_, dict):
+                    continue
+                old = merged.setdefault(fid, {}).get(day)
+                merged[fid][day] = _entry_max(old, entry_) if old else entry_
+    return merged
+
+
+def _lineage_months(copies) -> dict:
+    merged = {}
+    for payload in copies:
+        for month, providers in (payload.get("months") or {}).items():
+            if not isinstance(providers, dict):
+                continue
+            for provider, bill in providers.items():
+                if not isinstance(bill, dict):
+                    continue
+                old = merged.setdefault(month, {}).get(provider)
+                if old:
+                    combined = dict(old)
+                    for k, v in bill.items():
+                        a, b = old.get(k), v
+                        combined[k] = (max(int(a), int(b))
+                                       if isinstance(a, int) and isinstance(b, int) else b)
+                    merged[month][provider] = combined
+                else:
+                    merged[month][provider] = bill
+    return merged
+
+
+def merge_ledgers(base: dict, extras, day: str):
+    """Combine the local ledger with ``--ledger`` files, by source relation.
+
+    Returns ``(data, info)``. Only sources that declare themselves independent
+    are added; copies of the local source are max-merged into it; anything
+    undeclared stays out (``info["separate"]``) so the report can list it with
+    the gap instead of guessing.
+    """
+    base_sid = _source_id(base, "local")
+    lineages = {base_sid: {"label": "本机", "copies": [base]}}
+    separate = []
+    for label, payload in extras:
+        declared = isinstance(payload.get("source_id"), str) and payload["source_id"].strip()
+        sid = _source_id(payload, label)
+        if _is_independent(payload) and declared and sid == base_sid:
+            lineages[base_sid]["copies"].append(payload)   # same source, fresh copy
+        elif _is_independent(payload) and declared:
+            lineages.setdefault(sid, {"label": label, "copies": []})["copies"].append(payload)
+        else:
+            separate.append((label, payload))
+
+    friends, months = {}, {}
+    merged, inherited = [], []
+    for sid, lineage in lineages.items():
+        through = _inherited_through(lineage["copies"])
+        dropped, calls, spent = 0, 0, 0
+        for fid, days in _lineage_days(lineage["copies"]).items():
+            for when, entry_ in days.items():
+                if through and when <= through:
+                    dropped += 1
+                    continue
+                tagged = dict(entry_)
+                tagged["reserved"] = {f"{sid}:{k}": v
+                                      for k, v in (entry_.get("reserved") or {}).items()}
+                current = friends.setdefault(fid, {}).get(when)
+                friends[fid][when] = _entry_add(current, tagged) if current else tagged
+                if when == day:
+                    calls += int(entry_.get("calls", 0))
+                    spent += int(entry_.get("spent_microusd", 0))
+        for month, providers in _lineage_months(lineage["copies"]).items():
+            target = months.setdefault(month, {})
+            for provider, bill in providers.items():
+                target[provider] = _bill_add(target[provider], bill) if provider in target else dict(bill)
+        if sid != base_sid:
+            merged.append({"source_id": sid, "label": lineage["label"],
+                           "calls": calls, "spent_microusd": spent})
+        if dropped:
+            inherited.append({"source_id": sid, "through": through, "days": dropped})
+
+    data = dict(base)
+    data["friends"] = friends
+    data["months"] = months
+    data["source_id"] = base_sid
+    return data, {"merged": merged, "inherited": inherited, "separate": separate}
+
+
 def group_people(data: dict, roster: dict, devices: dict) -> dict:
     """friend id -> person group. Shared by the day and month sections."""
     groups = {}
@@ -302,8 +471,10 @@ def render(data: dict, collect_result: dict, day: str, now: datetime, sources: d
     pending = sum(r["pending"] for r in rows)
     unmapped = {k: sum(r["total"][k] for r in nominal) for k in FIELDS}
 
+    merged_names = [m["source_id"] for m in sources.get("merged_sources") or []]
     out = [f"# 朋友用量 · {day}（UTC）", "",
            f"生成：{now.strftime('%Y-%m-%dT%H:%M:%SZ')}，来源：`api-credit-ledger.json`（版本 1）"
+           + (f" + 独立来源 {', '.join(f'`{n}`' for n in merged_names)}" if merged_names else "")
            + "，按 UTC 自然日归集。",
            "单位：次数＝实际 API 调用次数；token＝模型输入/输出 token；"
            "花费＝美元（账本存整数微美元 µ$，1 美元＝1,000,000 µ$）。", ""]
@@ -401,13 +572,29 @@ def render(data: dict, collect_result: dict, day: str, now: datetime, sources: d
         out += ["- 指定的设备库没有找到，本次只用了名单。"]
     if sources["conflicts"]:
         out += [f"- 名字冲突 {len(sources['conflicts'])} 处：同一身份对应了不同名字，已并列显示，需人工确认。"]
+    if sources.get("merged_sources"):
+        parts = [f"`{m['source_id']}`（当天 {m['calls']} 次、{_money(m['spent_microusd'])}）"
+                 for m in sources["merged_sources"]]
+        out += [f"- 已并入独立来源：{'、'.join(parts)}。依据：文件自带 `source_id` 与 "
+                "`independent: true`，是与本机账本分开的实例；重复投递按（来源, 日）只算一次，"
+                "两个人各自用过两个实例时按来源相加，不用最大值压掉其中一份。"]
+    if sources.get("inherited"):
+        for item in sources["inherited"]:
+            out += [f"- `{item['source_id']}` 声明继承基线截至 {item['through']}："
+                    f"该日及以前的 {item['days']} 条记录来自共同历史，只算一次，不重复累计；"
+                    "之后的天数按独立来源相加。"]
     if sources.get("ledgers"):
-        out += [f"- 另列账本 {len(sources['ledgers'])} 份：{', '.join(sources['ledgers'])}；"
-                "各自单独成节，不并入本机合计。"]
+        out += [f"- 另有 {len(sources['ledgers'])} 份账本来源关系未声明，单独列出、未并入合计："
+                f"{', '.join(sources['ledgers'])}。"]
+    if sources.get("ledgers_missing"):
+        out += [f"- 有 {len(sources['ledgers_missing'])} 份账本尚未收到，本次未计入："
+                f"{', '.join(sources['ledgers_missing'])}。"]
     if sources.get("ledgers_unreadable"):
         out += [f"- 有 {len(sources['ledgers_unreadable'])} 份账本读不出，未计入："
                 f"{', '.join(sources['ledgers_unreadable'])}。"]
-    out += ["- 上面的合计只来自本机 `api-credit-ledger.json`。备份、回滚、staging 里的文件是快照，"
+    basis = ("本机 `api-credit-ledger.json` 与上面已确认的独立来源" if merged_names else
+             "本机 `api-credit-ledger.json`")
+    out += [f"- 上面的合计来自{basis}。备份、回滚、staging 里的文件是快照，"
             "不是独立来源，不要当 `--ledger` 传入。"]
     out += ["- 本文件私有（0600），含真名与哈希，不进 Git、评论或附件。", ""]
     return "\n".join(out)
@@ -447,24 +634,29 @@ def build(state: Path, day: str, roster_paths, device_paths, now=None, extras=No
     ledger = CreditLedger(state)
     with ledger.locked():
         data = ledger.read()
-    loaded, unreadable = [], []
+    loaded, unreadable, missing = [], [], []
     for label, path in extras or []:
+        if not Path(path).exists():
+            missing.append(label)
+            continue
         payload = _json(path)
-        if isinstance(payload, dict):
+        if isinstance(payload, dict) and isinstance(payload.get("friends"), dict):
             loaded.append((label, payload))
         else:
             unreadable.append(label)
     roster = load_roster(roster_paths)
     devices, stats = load_devices(device_paths)
+    data, merge_info = merge_ledgers(data, loaded, day)
     result = collect(data, day, roster["people"], devices)
     extra_results = [(label, collect(payload, day, roster["people"], devices))
-                     for label, payload in loaded
-                     if isinstance(payload.get("friends"), dict)]
+                     for label, payload in merge_info["separate"]]
     missing_db = [str(p) for p in device_paths if not Path(p).exists()]
     sources = {"roster": len(roster["people"]), "conflicts": roster["conflicts"],
                "devices_missing": bool(missing_db),
                "sable": stats["sable"], "sable_cleared": stats["cleared"],
-               "ledgers": [label for label, _ in loaded], "ledgers_unreadable": unreadable,
+               "ledgers": [label for label, _ in merge_info["separate"]],
+               "ledgers_unreadable": unreadable, "ledgers_missing": missing,
+               "merged_sources": merge_info["merged"], "inherited": merge_info["inherited"],
                "extra_results": extra_results}
     text = render(data, result, day, now, sources)
     return {"day": day, "text": text, "rows": result["rows"], "sources": sources}
@@ -500,14 +692,17 @@ def main() -> int:
     p.add_argument("--out", type=Path, default=None, help="报告目录，默认同 --state")
     p.add_argument("--day", default="yesterday", help="YYYY-MM-DD / today / yesterday（UTC）")
     p.add_argument("--roster", action="append", type=Path, default=None,
-                   help="私有名单，可重复；默认 <state>/friend-names.json")
+                   help="追加私有名单，可重复；<state>/friend-names.json 始终会读")
     p.add_argument("--devices-db", action="append", type=Path, default=None,
                    help="读 devices.friend_name / sable_friends 的 coach.sqlite，可重复")
     p.add_argument("--ledger", action="append", default=None, metavar="LABEL=PATH",
-                   help="另一台机器（如 Mac）的账本，可重复；单独成节，不并入本机合计")
+                   help="另一台机器的账本，可重复；文件自带 source_id + independent=true 才并入合计")
     p.add_argument("--stdout", action="store_true", help="打印而不写文件")
     args = p.parse_args()
-    rosters = args.roster or [args.state / "friend-names.json"]
+    rosters = [args.state / "friend-names.json"]
+    for extra_roster in args.roster or []:
+        if extra_roster not in rosters:
+            rosters.append(extra_roster)
     extras = [parse_ledger(v) for v in args.ledger or []]
     now = datetime.now(timezone.utc)
     day = resolve_day(args.day, now)

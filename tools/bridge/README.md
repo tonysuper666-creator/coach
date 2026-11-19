@@ -165,10 +165,15 @@ tools/bridge/.venv/bin/python tools/bridge/tests/exam_protection.py
   - `devices.friend_name` 里的内部串 `sable.identity.v1:<hash>` 任何时候都不会被当成名字显示。
   对不上的人按哈希原样列出并标明占当天多少，可对账、可补名；标 `test` 的身份单列，不与朋友合并。
 - 重跑同一天直接覆盖同一文件，不从报告累计，所以不会重复计数。
-- 合计只来自运行时那一份账本。备份、回滚、staging 里的 `api-credit-ledger.json` 是快照，不是独立来源，
-  不要传。另一台机器（如 Mac 朋友实例）的账本用 `--ledger 标签=路径` **单独成节**，不并入本机合计：
-  仅凭累计数分不清独立账本、副本还是迁移分叉，相加会双算、取最大会少算。两边要出合计，
-  先确认来源关系（独立，或共同迁移基线及分界日）再另做。
+- 合计来自本机账本，加上**已声明是独立实例**的来源（如 Mac 朋友实例）。备份、回滚、staging 里的
+  `api-credit-ledger.json` 是快照，不是独立来源，不要传。`--ledger 标签=路径` 按文件自己的声明处理：
+  - 文件带 `"independent": true` 和自己的 `"source_id"`（如 `"mac-friend"`）：并入合计。
+    同一来源重复投递按（来源, 日）只算一次；两个独立实例之间逐字段相加，不取最大值
+    （同一人同一设备两边都用过时，取最大会少计）。
+  - 与本地账本同一个 `source_id`：当作副本/快照，逐字段取最大，不会抬高合计。
+  - 没有声明：单独成节、标明「未计入」和缺口，来源关系确认后再接。
+  - 有共同迁移基线时，在文件里写 `"inherited_through": "YYYY-MM-DD"`：该日及以前的记录来自
+    共同历史，只算一次，之后的天数才相加。
 - 报告落在 `<state>/friend-usage-YYYY-MM-DD.md`，目录 0700、文件 0600，含真名与哈希，
   **不进 Git、评论或附件**。与 `usage-YYYYMMDD.md`（「今天卡在哪」）是两个不同文件。
 
@@ -180,6 +185,9 @@ python3 tools/bridge/friend_usage_report.py --state ~/Coach/state --day 2026-11-
 python3 tools/bridge/friend_usage_report.py --state ~/Coach/state --day yesterday --stdout  # 不写文件
 python3 tools/bridge/friend_usage_report.py --state ~/Coach/state --day yesterday \
   --devices-db ~/Coach/data/coach.sqlite --ledger mac=~/coach-cost/inbox/mac-ledger.json
+python3 tools/bridge/friend_usage_report.py --state ~/Coach/state --day yesterday --stdout \
+  --roster ~/coach-cost/inbox/mac-friend-names.json \
+  --ledger mac-friend=~/coach-cost/inbox/mac-friend.json
 ```
 
 部署到 hermes（每天 00:20 UTC 出昨天那份；脚本放在 `~/coach-cost/bin`，与其他运维脚本同一处）：

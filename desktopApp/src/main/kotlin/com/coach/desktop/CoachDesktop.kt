@@ -11,6 +11,7 @@ import com.coach.desktop.reader.PairedHttpReader
 
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
@@ -25,6 +26,12 @@ import com.coach.client.TutorModel
 import com.coach.client.db.ClientDatabase
 import com.coach.ui.CoachController
 import com.coach.ui.MathAssets
+import java.awt.Dimension
+import java.awt.Toolkit
+import java.awt.Window as AwtWindow
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
+import java.beans.PropertyChangeListener
 import java.io.File
 import java.security.MessageDigest
 import java.time.Instant
@@ -41,6 +48,39 @@ import kotlinx.coroutines.swing.Swing
 
 private fun env(name: String, default: String) = System.getenv(name)?.takeIf { it.isNotBlank() } ?: default
 
+/** AWT top-level window sizes are logical units, including the native frame. */
+@Composable
+internal fun WindowsReadingMinimum(window: AwtWindow) {
+    if (!System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) return
+    DisposableEffect(window) {
+        fun updateMinimum() {
+            val screen = window.graphicsConfiguration
+            val insets = Toolkit.getDefaultToolkit().getScreenInsets(screen)
+            window.minimumSize = Dimension(
+                (screen.bounds.width - insets.left - insets.right).coerceIn(1, 480),
+                (screen.bounds.height - insets.top - insets.bottom).coerceIn(1, 560),
+            )
+        }
+        val screenListener = PropertyChangeListener { updateMinimum() }
+        val sizeListener = object : ComponentAdapter() {
+            override fun componentResized(event: ComponentEvent) {
+                // The Windows peer can accept a native resize below the logical minimum on HiDPI.
+                val min = window.minimumSize
+                if (window.width < min.width || window.height < min.height) {
+                    window.setSize(maxOf(window.width, min.width), maxOf(window.height, min.height))
+                }
+            }
+        }
+        updateMinimum()
+        window.addPropertyChangeListener("graphicsConfiguration", screenListener)
+        window.addComponentListener(sizeListener)
+        onDispose {
+            window.removePropertyChangeListener("graphicsConfiguration", screenListener)
+            window.removeComponentListener(sizeListener)
+        }
+    }
+}
+
 internal fun resolveCourse(environment: String?, packaged: String?): String =
     sequenceOf(environment, packaged).firstOrNull { !it.isNullOrBlank() }?.trim()
         ?: error("No course configured. Set coach.course in ~/Coach/config/local.properties when building Coach, or set COACH_COURSE.")
@@ -56,6 +96,7 @@ fun runCoach() {
         var readerIdentity by remember { mutableStateOf<DesktopIdentity?>(null) }
         var readerController by remember { mutableStateOf<CoachController?>(null) }
         Window(onCloseRequest = ::exitApplication, title = "LearningCoach", icon = AppIcon.window(), state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
+            WindowsReadingMinimum(window)
             DesktopPairingGate(settings) { identity ->
                 if (identity.credentials.role == "friend") {
                     FriendCourseContent { kotlinx.coroutines.withContext(Dispatchers.Swing) {
@@ -85,6 +126,7 @@ fun runCoach() {
         readerIdentity?.let { identity ->
             Window(onCloseRequest = { readerIdentity = null; readerController = null }, title = "教材原文 · LearningCoach", icon = AppIcon.window(),
                 state = rememberWindowState(width = 1200.dp, height = 760.dp)) {
+                WindowsReadingMinimum(window)
                 PairedHttpReader(settings, identity, course, controller = readerController)
             }
         }

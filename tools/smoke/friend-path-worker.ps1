@@ -59,7 +59,8 @@ function Get-AskReplyState($lines, [int]$page) {
     if ($body -match '^(再试一次|重新配对)$' -or
         $body -match '尚未接通|无法回答|不能回答|尚未核实|连不上|超时|暂时读不到回答|讲解服务暂时不可用|额度(?:已)?用完') { return 'refused' }
     if ($body -match '正在读这段问题') { return 'waiting' }
-    if ($body -match "^出处[·•.．:：]?第${page}页$") { return 'answered' }
+    # 出处条现在写成「出处 · 第 154 页 · 第 3 段」；段落后缀可有可无，页码必须是目标页
+    if ($body -match "^出处[·•.．:：]?第${page}页(?:[·•.．:：]?第\d+段)?$") { return 'answered' }
     return 'waiting'
 }
 function Await-Text([int]$n, [string]$tag, [string[]]$needles, [int]$sec) {

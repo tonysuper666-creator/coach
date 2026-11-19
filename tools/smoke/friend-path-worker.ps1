@@ -404,23 +404,27 @@ try {
             $idle = (Get-Date).AddSeconds(90)
             while ((Get-Date) -lt $idle -and (Has (Shot 6 "busy-$tag") @('正在按本节原文出题'))) { Start-Sleep -Seconds 2 }
         }
+        # 上一次点击可能慢一步才打开原文页（两窗争用时 15 秒内没等到）：已在原文页且读得出页段，就直接用这一帧。
+        $onSource = { param($lines) if (Find-Text $lines '返回学习') { Get-LessonSourceRange $lines } }
         $readRange = { param([string]$tag)
-            $opened = $null
+            $r = $null
             foreach ($try in 1..2) {
                 & $waitIdle $tag
+                $r = & $onSource $script:Last; if ($r) { break }
                 $btn = Find-LessonSourceButton $script:Last
                 # 换节后的过渡帧可能还没画好按钮，重新取图几次再判失败。
                 foreach ($again in 1..3) {
                     if ($btn) { break }
                     Start-Sleep -Milliseconds 1500
-                    $btn = Find-LessonSourceButton (Shot 6 "btn-$tag-$try-$again")
+                    $lines = Shot 6 "btn-$tag-$try-$again"
+                    $r = & $onSource $lines; if ($r) { break }
+                    $btn = Find-LessonSourceButton $lines
                 }
+                if ($r) { break }
                 if (-not $btn) { Fail 6 '做题学页面找不到「本节原文 · 第X页」按钮' }
                 Click-At $btn.X $btn.Y; Start-Sleep -Milliseconds 800
-                $opened = Await-Text 6 "range-$tag" @('对应教材第') 15
-                if ($opened) { break }
+                if (Await-Text 6 "range-$tag" @('对应教材第') 15) { $r = Get-LessonSourceRange $script:Last; break }
             }
-            $r = if ($opened) { Get-LessonSourceRange $script:Last } else { $null }
             Click-Label 6 @('返回学习') '本节原文页没有「返回学习」' | Out-Null
             if (-not (Await-Text 6 "back-$tag" @('本节原文') 15)) { Fail 6 '从本节原文返回后没有回到做题学页面' }
             return $r

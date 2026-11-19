@@ -526,3 +526,13 @@ function Find-PickerParagraph($lines, [string]$words) {
     }
     return $null
 }
+
+# 撤掉本轮测试书架里所有书的「发送原文」同意，并确认真的没有了。删不掉（被占用、没权限）就抛错：
+# 同意还在，客户端进入整节就会自动发请求，调用方必须停。
+function Clear-ExplainConsent([string]$library) {
+    $dir = Join-Path $library 'explain-consent'
+    if (-not (Test-Path -LiteralPath $dir)) { return }
+    Get-ChildItem -LiteralPath $dir -Force | Remove-Item -Force -Recurse -ErrorAction Stop
+    $left = @(Get-ChildItem -LiteralPath $dir -Force)
+    if ($left.Count -gt 0) { throw "同意文件还剩 $($left.Count) 个" }
+}

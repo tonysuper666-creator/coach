@@ -2,7 +2,7 @@
 #   powershell -File tools\smoke\friend-path.ps1 [-Url http://<mac>:<隔离端口>] [-PairCode 123456]
 # 输出 N/7，每步一张截图在 D:\agent\evidence\friend-path\<时间>\（含教材原文，只留在 winbox，不上传）。
 param(
-    [string]$Url = '', [string]$PairCode = '', [string]$ClientSeed = '', [string]$Selection = '', [switch]$KeepGoing,
+    [string]$Url = '', [string]$PairCode = '', [string]$ClientSeed = '', [string]$Selection = '', [switch]$KeepGoing, [int]$LessonNumber = 181, [int]$LessonPage = 150, [int]$StopAfter = 7,
     [switch]$Background,
     [string]$Runtime = '',
     [ValidatePattern('^[\p{L}\p{N}_-]{1,32}$')][string]$Marker = '',
@@ -17,6 +17,7 @@ $out = (Resolve-Path $out).Path
 $args2 = "-Repo '$repo' -OutDir '$out' -Book '$Book'"
 if ($Url) { $args2 += " -Url '$Url'" }
 if ($KeepGoing) { $args2 += ' -KeepGoing' }
+$args2 += " -LessonNumber $LessonNumber -LessonPage $LessonPage -StopAfter $StopAfter"
 if ($Background) { $args2 += ' -Background' }
 if ($Runtime) { $args2 += " -Runtime '$($Runtime.Replace("'", "''"))'" }
 if ($Marker) { $args2 += " -Marker '$Marker'" }

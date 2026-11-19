@@ -158,6 +158,8 @@ internal class BookPagingState(initial: BookPageAnchor) {
 
 /** 超过这么多字的书，分页放后台线程做（TON-1724）。 */
 private const val BACKGROUND_LAYOUT_CHARS = 60_000
+/** 长书先排所在位置前后各这么多导入页，整本排完再换（TON-1724）。 */
+private const val NEAR_LAYOUT_PAGES = 2
 
 /** The same source anchor survives font/width reflow and original/text view changes. */
 @Composable
@@ -223,8 +225,13 @@ internal fun BookPageView(
         }
         val longPages by produceState<List<BookLaidPage>?>(null, longBook, layoutPages, widthPx, bodyHeight, typography, highlights, density, tableRows) {
             if (longBook) value = withContext(Dispatchers.Default) {
-                BookPageLayouter(TextMeasurer(fontResolver, density, layoutDirection, 128), density, typography, isPdf)
-                    .layout(layoutPages, widthPx, bodyHeight, highlights, tableRows)
+                val layouter = BookPageLayouter(TextMeasurer(fontResolver, density, layoutDirection, 128), density, typography, isPdf)
+                // 先只排读者所在位置前后几章页，马上有字可读；整本排完后再换上（锚点按原文位置对齐，读位不动）。
+                val at = state.anchor.importPage
+                val near = layoutPages.filter { it.number in (at - NEAR_LAYOUT_PAGES)..(at + NEAR_LAYOUT_PAGES) }
+                if (near.isNotEmpty() && near.size < layoutPages.size)
+                    value = layouter.layout(near, widthPx, bodyHeight, highlights, tableRows)
+                layouter.layout(layoutPages, widthPx, bodyHeight, highlights, tableRows)
             }
         }
         val pages = if (longBook) longPages else shortPages

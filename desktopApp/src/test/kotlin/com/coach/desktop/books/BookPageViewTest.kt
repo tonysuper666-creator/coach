@@ -277,6 +277,28 @@ class BookPageViewTest {
         } finally { root.toFile().deleteRecursively() }
     }
 
+    /** TON-1724: 长书先只排读位前后几页就出字，整本排完后换上，读位始终在同一页。 */
+    @Test fun longBookShowsNearbyPagesFirstThenTheWholeBookKeepingThePlace() = runSkikoComposeUiTest(
+        size = Size(900f, 1000f), density = Density(1f),
+    ) {
+        val sentence = "The multiplication of two whole numbers is the repeated addition of one of them, and the order of the factors does not alter the product. "
+        val pages = (1..60).map { n -> BookPage(n, (1..4).joinToString("\n\n") { sentence.repeat(10) }) }
+        assertTrue(pages.sumOf { it.text.length } > 60_000)
+        val book = Textbook("near-first", "Elements of arithmetic", "epub", pages)
+        val state = BookPagingState(BookPageAnchor(30))
+        setContent { CoachTheme {
+            Box(Modifier.width(800.dp).height(900.dp)) {
+                BookPageView(book, state, emptyMap(), onTurn = { state.move(it) })
+            }
+        } }
+        waitUntil(timeoutMillis = 120_000) { state.pages.isNotEmpty() }
+        val firstCount = state.pages.size
+        assertTrue(state.pages[state.index].sources.any { it.importPage == 30 })
+        waitUntil(timeoutMillis = 120_000) { state.pages.size > firstCount }
+        assertTrue(state.pages.any { page -> page.sources.any { it.importPage == 1 } })
+        assertTrue(state.pages[state.index].sources.any { it.importPage == 30 })
+    }
+
     /** TON-1724: 长英文教材首开，分页在后台做，主线程先显示「正在排版」而不是卡住。 */
     @Test fun longBookLaysOutOffTheMainThreadAndShowsPagesWhenReady() = runSkikoComposeUiTest(
         size = Size(900f, 1000f), density = Density(1f),

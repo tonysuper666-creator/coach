@@ -462,46 +462,133 @@ function Get-RegisteredExternalWindows([string]$RegistryDir = $script:ExternalWi
     }
     return @($active)
 }
-function Get-ActiveStreamingSession([scriptblock]$Probe = $null) {
+$script:ApolloLogPath = 'E:\Apollo\config\sunshine.log'
+function Get-ApolloLogSession(
+    [string]$LogPath = $script:ApolloLogPath,
+    $ProcessStartUtc = $null
+) {
+    if (-not $LogPath -or -not (Test-Path -LiteralPath $LogPath) -or $null -eq $ProcessStartUtc) {
+        return [pscustomobject]@{ Readable = $false; Active = $false; ActiveClients = 0 }
+    }
+    $activeClients = 0
+    try {
+        $lines = @(Get-Content -LiteralPath $LogPath -Encoding UTF8 -ErrorAction Stop)
+    } catch {
+        return [pscustomobject]@{ Readable = $false; Active = $false; ActiveClients = 0 }
+    }
+    $startUtc = ([datetime]$ProcessStartUtc).ToUniversalTime()
+    foreach ($line in $lines) {
+        # Apollo 0.4.6 (commit 0cd32aba): src/logging.cpp:104 timestamp format,
+        # src/stream.cpp:603 "CLIENT CONNECTED", src/stream.cpp:606 "CLIENT DISCONNECTED".
+        $cleanLine = $line.TrimStart([char]0xFEFF)
+        if ($cleanLine -match '^\[(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]:\s*\w+:\s*(.+)$') {
+            $ts = [datetime]::MinValue
+            if (-not [datetime]::TryParseExact($Matches[1], [string[]]@('yyyy-MM-dd HH:mm:ss.fff', 'yyyy-MM-dd HH:mm:ss'), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal, [ref]$ts)) {
+                continue
+            }
+            if ($ts.ToUniversalTime() -lt $startUtc) { continue }
+            $msg = $Matches[2].Trim()
+            if ($msg -eq 'CLIENT CONNECTED') { $activeClients++ }
+            elseif ($msg -eq 'CLIENT DISCONNECTED' -and $activeClients -gt 0) { $activeClients-- }
+        }
+    }
+    return [pscustomobject]@{ Readable = $true; Active = ($activeClients -gt 0); ActiveClients = $activeClients }
+}
+function Get-ActiveStreamingSession(
+    [scriptblock]$Probe = $null,
+    [scriptblock]$HostProbe = $null,
+    [scriptblock]$PortProbe = $null,
+    [string]$LogPath = $script:ApolloLogPath
+) {
     if ($Probe) { return (& $Probe) }
-    $hosts = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^(sunshine|apollo)$' })
+    $hosts = if ($HostProbe) {
+        @(& $HostProbe)
+    } else {
+        @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^(sunshine|apollo)$' })
+    }
+    if ($hosts.Count -eq 0) { return $null }
+    $udpOk = $true; $tcpOk = $true
+    $allUdp = @(); $allTcp = @()
+    if (-not $PortProbe) {
+        try {
+            $allUdp = @(Get-NetUDPEndpoint -ErrorAction Stop)
+        } catch {
+            $udpOk = $false
+        }
+        try {
+            $allTcp = @(Get-NetTCPConnection -ErrorAction Stop)
+        } catch {
+            $tcpOk = $false
+        }
+    }
+    $indeterminate = $null
     foreach ($h in $hosts) {
-        $udp = @(Get-NetUDPEndpoint -OwningProcess $h.Id -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ge 47998 -and $_.LocalPort -le 48020 })
-        $tcp = @(Get-NetTCPConnection -OwningProcess $h.Id -State Established -ErrorAction SilentlyContinue | Where-Object {
-            $_.LocalPort -in 47984, 47989, 48010 -or ($_.LocalPort -ge 47998 -and $_.LocalPort -le 48020)
-        })
-        if ($udp.Count -gt 0 -or $tcp.Count -gt 0) {
-            $ports = @(@($udp | ForEach-Object LocalPort) + @($tcp | ForEach-Object LocalPort) | Sort-Object -Unique)
+        $hPid = [int]$h.Id
+        $hName = if ($h.ProcessName) { [string]$h.ProcessName } else { 'sunshine' }
+        $hostUdpOk = $udpOk
+        $hostTcpOk = $tcpOk
+        $ports = @()
+        if ($PortProbe) {
+            try {
+                $pd = & $PortProbe $hPid
+                $udpPorts = if ($pd -and $pd.Udp) { @($pd.Udp) } else { @() }
+                $tcpPorts = if ($pd -and $pd.Tcp) { @($pd.Tcp) } else { @() }
+                $ports = @(@($udpPorts) + @($tcpPorts) | Sort-Object -Unique)
+            } catch {
+                $hostUdpOk = $false
+                $hostTcpOk = $false
+            }
+        } else {
+            $udpPorts = if ($hostUdpOk) {
+                @($allUdp | Where-Object { $_ -and $_.OwningProcess -eq $hPid -and $_.LocalPort -ge 47998 -and $_.LocalPort -le 48020 } | ForEach-Object LocalPort)
+            } else { @() }
+            $tcpPorts = if ($hostTcpOk) {
+                @($allTcp | Where-Object {
+                    $_ -and $_.OwningProcess -eq $hPid -and $_.State -eq 'Established' -and (
+                        $_.LocalPort -in 47984, 47989, 48010 -or ($_.LocalPort -ge 47998 -and $_.LocalPort -le 48020)
+                    )
+                } | ForEach-Object LocalPort)
+            } else { @() }
+            $ports = @(@($udpPorts) + @($tcpPorts) | Sort-Object -Unique)
+        }
+        if ($ports.Count -gt 0) {
             return [pscustomobject]@{
                 Tool = 'Apollo/Sunshine'
-                Pid = [int]$h.Id
+                Source = 'ports'
+                Pid = $hPid
                 Ports = $ports
-                Summary = "$($h.ProcessName) pid=$($h.Id) streaming ports=$($ports -join ',')"
+                Summary = "$hName pid=$hPid streaming ports=$($ports -join ',')"
             }
         }
-    }
-    $clients = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^moonlight' })
-    foreach ($c in $clients) {
-        $tcp = @(Get-NetTCPConnection -OwningProcess $c.Id -State Established -ErrorAction SilentlyContinue)
-        if ($c.MainWindowHandle -ne [IntPtr]::Zero -or $tcp.Count -gt 0) {
+        $startTicks = Get-TrackedProcessStartTicks $h
+        $startUtc = if ($startTicks -gt 0L) { [datetime]::new($startTicks, [DateTimeKind]::Utc) } else { $null }
+        $logState = Get-ApolloLogSession -LogPath $LogPath -ProcessStartUtc $startUtc
+        if ($logState.Readable -and $logState.Active) {
             return [pscustomobject]@{
-                Tool = 'Moonlight'
-                Pid = [int]$c.Id
-                Ports = @($tcp | ForEach-Object RemotePort | Sort-Object -Unique)
-                Summary = "$($c.ProcessName) pid=$($c.Id) active"
+                Tool = 'Apollo/Sunshine'
+                Source = 'log'
+                Pid = $hPid
+                Ports = @()
+                Summary = "$hName pid=$hPid streaming log=CLIENT CONNECTED active=$($logState.ActiveClients)"
+            }
+        }
+        if ((-not $hostUdpOk -or -not $hostTcpOk) -and -not $logState.Readable -and -not $indeterminate) {
+            $indeterminate = [pscustomobject]@{
+                Tool = 'Apollo/Sunshine'
+                Source = 'indeterminate'
+                Pid = $hPid
+                Ports = @()
+                Summary = "$hName pid=$hPid streaming state unreadable (ports and log unavailable)"
             }
         }
     }
-    return $null
+    return $indeterminate
 }
-function Find-ActiveDesktopUser(
-    [int]$MinIdleSeconds = 600,
+function Get-DesktopIdleEvidence(
     [scriptblock]$IdleProbe = $null,
-    [scriptblock]$StreamProbe = $null,
     [string]$DriverInputFile = $script:DriverInputStampPath,
     [scriptblock]$NowProbe = $null
 ) {
-    $stream = Get-ActiveStreamingSession -Probe $StreamProbe
     $nowUtc = if ($NowProbe) { ([datetime](& $NowProbe)).ToUniversalTime() } else { [DateTime]::UtcNow }
     $idleSec = if ($IdleProbe) {
         [double](& $IdleProbe)
@@ -509,35 +596,42 @@ function Find-ActiveDesktopUser(
         $ms = [WD]::GetLastInputIdleMs()
         if ($ms -lt 0) { -1.0 } else { [double]$ms / 1000.0 }
     }
+    $matched = $false
+    $driverUtc = Get-DriverInputTimestampUtc -StampFile $DriverInputFile
+    if ($idleSec -ge 0 -and $driverUtc) {
+        $lastOsInputUtc = $nowUtc.AddSeconds(-$idleSec)
+        if ([Math]::Abs(($lastOsInputUtc - $driverUtc).TotalSeconds) -lt 2.0) { $matched = $true }
+    }
+    [pscustomobject]@{
+        IdleSeconds = if ($idleSec -lt 0) { -1.0 } else { [math]::Round($idleSec, 1) }
+        DriverInputMatched = $matched
+        DriverInputUtc = if ($driverUtc) { $driverUtc.ToString('o') } else { $null }
+    }
+}
+function Find-ActiveDesktopUser(
+    [int]$MinIdleSeconds = 600,
+    [scriptblock]$IdleProbe = $null,
+    [scriptblock]$StreamProbe = $null,
+    [string]$DriverInputFile = $script:DriverInputStampPath,
+    [scriptblock]$NowProbe = $null,
+    [scriptblock]$HostProbe = $null,
+    [scriptblock]$PortProbe = $null,
+    [string]$ApolloLogPath = $script:ApolloLogPath
+) {
+    $stream = Get-ActiveStreamingSession -Probe $StreamProbe -HostProbe $HostProbe -PortProbe $PortProbe -LogPath $ApolloLogPath
+    $idle = Get-DesktopIdleEvidence -IdleProbe $IdleProbe -DriverInputFile $DriverInputFile -NowProbe $NowProbe
     if ($stream) {
+        $reason = if ($stream.Source -eq 'indeterminate') {
+            "Apollo 正在运行但串流端口与日志均不可读，按占用处理（$($stream.Summary)）"
+        } else {
+            "Apollo/Moonlight 正在串流（$($stream.Summary)）"
+        }
         return [pscustomobject]@{
             Occupied = $true
-            IdleSeconds = $idleSec
+            IdleSeconds = $idle.IdleSeconds
+            DriverInputMatched = $idle.DriverInputMatched
             Streaming = $stream
-            Reason = "Apollo/Moonlight 正在串流（$($stream.Summary)）"
-        }
-    }
-    if ($idleSec -lt 0) {
-        return [pscustomobject]@{
-            Occupied = $true
-            IdleSeconds = $idleSec
-            Streaming = $null
-            Reason = '无法读取桌面键鼠空闲时间（GetLastInputInfo 失败）'
-        }
-    }
-    if ($idleSec -lt $MinIdleSeconds) {
-        $driverUtc = Get-DriverInputTimestampUtc -StampFile $DriverInputFile
-        if ($driverUtc) {
-            $lastOsInputUtc = $nowUtc.AddSeconds(-$idleSec)
-            if ([Math]::Abs(($lastOsInputUtc - $driverUtc).TotalSeconds) -lt 2.0) {
-                return $null
-            }
-        }
-        return [pscustomobject]@{
-            Occupied = $true
-            IdleSeconds = [math]::Round($idleSec, 1)
-            Streaming = $null
-            Reason = "桌面近 $([int][Math]::Floor($idleSec)) 秒内有键鼠输入（阈值 ${MinIdleSeconds} 秒）"
+            Reason = $reason
         }
     }
     return $null
@@ -592,13 +686,14 @@ function Test-DesktopPreflight(
     [scriptblock]$CoachWindowProbe = $null,
     [scriptblock]$ForegroundProbe = $null,
     [string]$DriverInputFile = $script:DriverInputStampPath,
-    [scriptblock]$NowProbe = $null
+    [scriptblock]$NowProbe = $null,
+    [scriptblock]$HostProbe = $null,
+    [scriptblock]$PortProbe = $null,
+    [string]$ApolloLogPath = $script:ApolloLogPath
 ) {
     $dirtyWindows = @(Find-DirtyDesktopWindow -RegistryDir $RegistryDir -CoachWindowProbe $CoachWindowProbe)
-    $activeUser = Find-ActiveDesktopUser -MinIdleSeconds $MinIdleSeconds -IdleProbe $IdleProbe -StreamProbe $StreamProbe -DriverInputFile $DriverInputFile -NowProbe $NowProbe
-    $idleSec = if ($IdleProbe) { [double](& $IdleProbe) } else {
-        $ms = [WD]::GetLastInputIdleMs(); if ($ms -lt 0) { -1.0 } else { [double]$ms / 1000.0 }
-    }
+    $idle = Get-DesktopIdleEvidence -IdleProbe $IdleProbe -DriverInputFile $DriverInputFile -NowProbe $NowProbe
+    $activeUser = Find-ActiveDesktopUser -MinIdleSeconds $MinIdleSeconds -IdleProbe { $idle.IdleSeconds } -StreamProbe $StreamProbe -DriverInputFile $DriverInputFile -NowProbe $NowProbe -HostProbe $HostProbe -PortProbe $PortProbe -ApolloLogPath $ApolloLogPath
     $fg = Find-ForeignForegroundWindow -Probe $ForegroundProbe
     if ($dirtyWindows.Count -gt 0) {
         $desc = ($dirtyWindows | ForEach-Object Summary) -join '; '
@@ -607,7 +702,8 @@ function Test-DesktopPreflight(
             Reason = "桌面存在测试遗留或本轮之外的 Coach 窗口（$desc）"
             DirtyWindows = $dirtyWindows
             ActiveUser = $activeUser
-            IdleSeconds = [math]::Round($idleSec, 1)
+            IdleSeconds = $idle.IdleSeconds
+            DriverInputMatched = $idle.DriverInputMatched
             Foreground = $fg
         }
     }
@@ -617,7 +713,8 @@ function Test-DesktopPreflight(
             Reason = $activeUser.Reason
             DirtyWindows = @()
             ActiveUser = $activeUser
-            IdleSeconds = $activeUser.IdleSeconds
+            IdleSeconds = $idle.IdleSeconds
+            DriverInputMatched = $idle.DriverInputMatched
             Foreground = $fg
         }
     }
@@ -626,7 +723,8 @@ function Test-DesktopPreflight(
         Reason = ''
         DirtyWindows = @()
         ActiveUser = $null
-        IdleSeconds = [math]::Round($idleSec, 1)
+        IdleSeconds = $idle.IdleSeconds
+        DriverInputMatched = $idle.DriverInputMatched
         Foreground = $fg
     }
 }

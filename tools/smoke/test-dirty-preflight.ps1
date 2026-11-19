@@ -66,37 +66,135 @@ try {
     $pfTerm = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $termFg
     Check 'preflight-allows-idle-terminal-foreground' ($pfTerm.Clean -and $pfTerm.Foreground.Process -eq 'WindowsTerminal') $pfTerm.Reason
 
-    # 近 10 分钟内有键鼠输入且无匹配驱动注入记录 -> 拒绝（即使前景是桌面壳）
+    # 按 11-19 20:48 主会话决定改期望：近 10 分钟内有键鼠输入且无串流 -> 放行，IdleSeconds 仅记作证据
     $pfRecentInput = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe { 120.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach
-    Check 'preflight-rejects-recent-human-input' (-not $pfRecentInput.Clean -and $pfRecentInput.Reason -like '*120*') $pfRecentInput.Reason
+    Check 'preflight-rejects-recent-human-input' ($pfRecentInput.Clean -and $pfRecentInput.IdleSeconds -eq 120.0 -and (-not $pfRecentInput.DriverInputMatched)) "clean=$($pfRecentInput.Clean) idle=$($pfRecentInput.IdleSeconds)"
 
-    # 连跑两轮之间（驱动自己注入的 SendInput 距 GetLastInputInfo 最后输入 < 2 秒）-> 不算真人，两轮之间不拦
+    # 连跑两轮之间（驱动自己注入的 SendInput 距 GetLastInputInfo 最后输入 < 2 秒）-> 放行且标记 DriverInputMatched 证据
     $tBase = [datetime]::SpecifyKind([datetime]'2026-11-19T18:27:01', [DateTimeKind]::Utc)
     Record-DriverInputTimestamp -UtcTime $tBase.AddSeconds(-5.0) -StampFile $stampTmp
     $pfBackToBackImmediate = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 5.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
     Record-DriverInputTimestamp -UtcTime $tBase.AddSeconds(-525.6) -StampFile $stampTmp
     $pfBackToBackDelayed = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 525.6 } -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
-    Check 'preflight-allows-back-to-back-driver-input' ($pfBackToBackImmediate.Clean -and $pfBackToBackDelayed.Clean) "imm=$($pfBackToBackImmediate.Reason) del=$($pfBackToBackDelayed.Reason)"
+    Check 'preflight-allows-back-to-back-driver-input' ($pfBackToBackImmediate.Clean -and $pfBackToBackDelayed.Clean -and $pfBackToBackImmediate.DriverInputMatched -and $pfBackToBackDelayed.DriverInputMatched) "imm=$($pfBackToBackImmediate.IdleSeconds) del=$($pfBackToBackDelayed.IdleSeconds)"
 
-    # 驱动注入时间与系统最后输入相差 1.2 秒（< 2 秒阈值）-> 放行；真人输入相差 >= 2 秒 -> 拒绝；正在串流仍拒绝
+    # 按 11-19 20:48 主会话决定改期望：驱动注入时间比对仅作证据（DriverInputMatched），30 秒人工输入也不再拦人；正在串流仍拒绝
     Record-DriverInputTimestamp -UtcTime $tBase.AddSeconds(-120.0) -StampFile $stampTmp
     $pfWithin2s = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 121.2 } -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
-    Check 'preflight-allows-driver-input-within-2s' $pfWithin2s.Clean $pfWithin2s.Reason
+    Check 'preflight-allows-driver-input-within-2s' ($pfWithin2s.Clean -and $pfWithin2s.DriverInputMatched) $pfWithin2s.Reason
 
     Record-DriverInputTimestamp -UtcTime $tBase.AddSeconds(-525.6) -StampFile $stampTmp
     $pfHumanAfterDriver = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 30.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
-    Check 'preflight-rejects-human-input-outside-2s' (-not $pfHumanAfterDriver.Clean -and $pfHumanAfterDriver.Reason -like '*30*') $pfHumanAfterDriver.Reason
+    Check 'preflight-rejects-human-input-outside-2s' ($pfHumanAfterDriver.Clean -and $pfHumanAfterDriver.IdleSeconds -eq 30.0 -and (-not $pfHumanAfterDriver.DriverInputMatched)) "clean=$($pfHumanAfterDriver.Clean) idle=$($pfHumanAfterDriver.IdleSeconds)"
 
     $pfDriverStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 525.6 } -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Pid = 12640; Ports = @(47998); Summary = 'sunshine pid=12640 streaming ports=47998' } } -CoachWindowProbe $noCoach
     Check 'preflight-rejects-driver-input-when-streaming' (-not $pfDriverStream.Clean -and $pfDriverStream.Reason -like '*Apollo/Moonlight*') $pfDriverStream.Reason
 
-    # GetLastInputInfo 读取失败（<0）-> 保守拒绝
+    # 按 11-19 20:48 主会话决定改期望：GetLastInputInfo 读取失败（<0）不拦人，IdleSeconds 记 -1 作证据
     $pfUnreadableIdle = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe { -1.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach
-    Check 'preflight-rejects-unreadable-idle' (-not $pfUnreadableIdle.Clean) $pfUnreadableIdle.Reason
+    Check 'preflight-rejects-unreadable-idle' ($pfUnreadableIdle.Clean -and $pfUnreadableIdle.IdleSeconds -eq -1.0) "clean=$($pfUnreadableIdle.Clean) idle=$($pfUnreadableIdle.IdleSeconds)"
 
     # 键鼠空闲但 Apollo/Moonlight 正在串流 -> 拒绝
     $pfStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Pid = 12640; Ports = @(47998, 48010); Summary = 'sunshine pid=12640 streaming ports=47998,48010' } } -CoachWindowProbe $noCoach
     Check 'preflight-rejects-active-stream' (-not $pfStream.Clean -and $pfStream.Reason -like '*Apollo/Moonlight*') $pfStream.Reason
+
+    # 3b. Apollo 端口 + sunshine.log 双依据串流检测（合成日志用 192.0.2.x，不写真实设备名）
+    $apolloStartLocal = [datetime]'2026-11-19 20:00:00'
+    $apolloHost = { @([pscustomobject]@{ Id = 12640; ProcessName = 'sunshine'; StartTime = $apolloStartLocal }) }
+    $noPorts = { [pscustomobject]@{ Udp = @(); Tcp = @() } }
+    $apolloLog = Join-Path $regTmp 'sunshine.log'
+    try {
+        # Apollo 没在跑 -> 放行
+        $pfNoApollo = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe { 5.0 } -HostProbe { @() } -PortProbe $noPorts -ApolloLogPath (Join-Path $regTmp 'nonexistent.log') -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        Check 'stream-apollo-not-running' $pfNoApollo.Clean $pfNoApollo.Reason
+
+        # 有连接、没断开（在当前进程启动之后）-> 占用
+        @(
+            '[2026-11-19 20:00:01.100]: Info: Apollo version: 0.4.6'
+            '[2026-11-19 20:01:10.250]: Info: New streaming session started [active sessions: 1]'
+            '[2026-11-19 20:01:10.500]: Info: Expecting incoming session connections from 192.0.2.10'
+            '[2026-11-19 20:01:11.012]: Info: CLIENT CONNECTED'
+        ) | Set-Content -Encoding utf8 $apolloLog
+        $pfLogConn = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $apolloHost -PortProbe $noPorts -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        Check 'stream-log-connected-no-disconnect' (-not $pfLogConn.Clean -and $pfLogConn.ActiveUser.Streaming.Source -eq 'log') $pfLogConn.Reason
+
+        # 连接后又断开 -> 放行
+        @(
+            '[2026-11-19 20:00:01.100]: Info: Apollo version: 0.4.6'
+            '[2026-11-19 20:01:11.012]: Info: CLIENT CONNECTED'
+            '[2026-11-19 20:05:30.400]: Info: CLIENT DISCONNECTED'
+        ) | Set-Content -Encoding utf8 $apolloLog
+        $pfLogDisc = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe { 3.0 } -HostProbe $apolloHost -PortProbe $noPorts -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        Check 'stream-log-connected-then-disconnected' ($pfLogDisc.Clean -and $pfLogDisc.IdleSeconds -eq 3.0) $pfLogDisc.Reason
+
+        # 连接发生在当前进程启动之前（Apollo 重启过）-> 放行
+        @(
+            '[2026-11-19 19:40:00.000]: Info: CLIENT CONNECTED'
+            '[2026-11-19 20:00:00.500]: Info: Apollo version: 0.4.6'
+            '[2026-11-19 20:00:02.000]: Info: Configuration UI available at [https://localhost:47990]'
+        ) | Set-Content -Encoding utf8 $apolloLog
+        $pfLogStale = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe { 12.0 } -HostProbe $apolloHost -PortProbe $noPorts -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        Check 'stream-log-connected-before-process-restart' $pfLogStale.Clean $pfLogStale.Reason
+
+        # 日志里没有会话、端口也没绑 -> 放行
+        @(
+            '[2026-11-19 20:00:00.500]: Info: Registered Apollo mDNS service'
+            '[2026-11-19 20:00:01.200]: Info: System tray created'
+        ) | Set-Content -Encoding utf8 $apolloLog
+        $pfLogIdle = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe { 1.0 } -HostProbe $apolloHost -PortProbe $noPorts -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        Check 'stream-log-empty-and-no-ports' $pfLogIdle.Clean $pfLogIdle.Reason
+
+        # UDP 47998 已绑定（即使日志没记录）-> 占用
+        $pfUdpBound = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $apolloHost -PortProbe { [pscustomobject]@{ Udp = @(47998); Tcp = @() } } -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        Check 'stream-udp-47998-bound' (-not $pfUdpBound.Clean -and $pfUdpBound.ActiveUser.Streaming.Source -eq 'ports' -and ($pfUdpBound.ActiveUser.Streaming.Ports -contains 47998)) $pfUdpBound.Reason
+
+        # Apollo 在跑，但端口查询报错、日志也没有 -> 占用
+        $pfIndet = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $apolloHost -PortProbe { throw 'NetTCPIP CIM failed' } -ApolloLogPath (Join-Path $regTmp 'missing-sunshine.log') -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        Check 'stream-apollo-running-ports-error-no-log' (-not $pfIndet.Clean -and $pfIndet.ActiveUser.Streaming.Source -eq 'indeterminate') $pfIndet.Reason
+
+        # 独立查询 UDP / TCP（真实 Test-DesktopPreflight 端口枚举路径，无 -PortProbe）：
+        # UDP 47998 已绑定但 TCP 枚举报错 -> 保留已查到的 UDP 端口并判占用
+        $fakeHost = { @([pscustomobject]@{ Id = 44444; ProcessName = 'sunshine'; StartTime = $apolloStartLocal }) }
+        $emptyLog = Join-Path $regTmp 'empty-sunshine.log'
+        Set-Content -Encoding utf8 -Path $emptyLog -Value @('[2026-11-19 20:00:01.100]: Info: Apollo version: 0.4.6')
+        $pfUdpKeepWhenTcpErr = & {
+            function Get-NetUDPEndpoint { param($ErrorAction) @([pscustomobject]@{ OwningProcess = 44444; LocalPort = 47998 }) }
+            function Get-NetTCPConnection { param($ErrorAction) throw 'TCP CIM failed' }
+            Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $fakeHost -ApolloLogPath $emptyLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        }
+        Check 'stream-udp-47998-when-tcp-query-fails' (-not $pfUdpKeepWhenTcpErr.Clean -and $pfUdpKeepWhenTcpErr.ActiveUser.Streaming.Source -eq 'ports' -and ($pfUdpKeepWhenTcpErr.ActiveUser.Streaming.Ports -contains 47998)) $pfUdpKeepWhenTcpErr.Reason
+
+        # UDP 枚举报错但 TCP 48010 已建立 -> TCP 不被跳过并判占用
+        $pfTcpKeepWhenUdpErr = & {
+            function Get-NetUDPEndpoint { param($ErrorAction) throw 'UDP CIM failed' }
+            function Get-NetTCPConnection { param($ErrorAction) @([pscustomobject]@{ OwningProcess = 44444; State = 'Established'; LocalPort = 48010 }) }
+            Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $fakeHost -ApolloLogPath $emptyLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        }
+        Check 'stream-tcp-48010-when-udp-query-fails' (-not $pfTcpKeepWhenUdpErr.Clean -and $pfTcpKeepWhenUdpErr.ActiveUser.Streaming.Source -eq 'ports' -and ($pfTcpKeepWhenUdpErr.ActiveUser.Streaming.Ports -contains 48010)) $pfTcpKeepWhenUdpErr.Reason
+
+        # 两次连接后仅断开一次（仍有一路在线）-> 占用；两次均断开 -> 放行
+        @(
+            '[2026-11-19 20:00:01.100]: Info: Apollo version: 0.4.6'
+            '[2026-11-19 20:01:11.012]: Info: CLIENT CONNECTED'
+            '[2026-11-19 20:02:05.330]: Info: CLIENT CONNECTED'
+            '[2026-11-19 20:03:10.400]: Info: CLIENT DISCONNECTED'
+        ) | Set-Content -Encoding utf8 $apolloLog
+        $pfTwoConnOneDisc = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $apolloHost -PortProbe $noPorts -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        Check 'stream-log-two-connected-one-disconnected' (-not $pfTwoConnOneDisc.Clean -and $pfTwoConnOneDisc.ActiveUser.Streaming.Source -eq 'log') $pfTwoConnOneDisc.Reason
+
+        @(
+            '[2026-11-19 20:00:01.100]: Info: Apollo version: 0.4.6'
+            '[2026-11-19 20:01:11.012]: Info: CLIENT CONNECTED'
+            '[2026-11-19 20:02:05.330]: Info: CLIENT CONNECTED'
+            '[2026-11-19 20:03:10.400]: Info: CLIENT DISCONNECTED'
+            '[2026-11-19 20:04:22.900]: Info: CLIENT DISCONNECTED'
+        ) | Set-Content -Encoding utf8 $apolloLog
+        $pfTwoConnTwoDisc = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $apolloHost -PortProbe $noPorts -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        Check 'stream-log-two-connected-both-disconnected' $pfTwoConnTwoDisc.Clean $pfTwoConnTwoDisc.Reason
+    } finally {
+        Remove-Item -LiteralPath $apolloLog -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $regTmp 'empty-sunshine.log') -ErrorAction SilentlyContinue
+    }
 
     # 本轮之外的其他 Coach MainKt 窗口存在 -> 即使空闲无串流也算脏
     $pfCoach = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe { @([pscustomobject]@{ Kind = 'coach-window'; Pid = 21116; Process = 'java'; Summary = 'coach-window java pid=21116' }) } -ForegroundProbe $edgeFg

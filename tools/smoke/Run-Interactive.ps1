@@ -45,7 +45,7 @@ try {
 "@
 $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -STA -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $enc"
+$action = New-ScheduledTaskAction -Execute 'conhost.exe' -Argument "--headless powershell.exe -NoProfile -STA -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $enc"
 $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds ($TimeoutSec + 15))
 $job = [IntPtr]::Zero; $registered = $false; $exitCode = 1; $state = 'failed-before-start'

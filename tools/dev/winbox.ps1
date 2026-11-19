@@ -198,8 +198,8 @@ try {
             if ($config.interactive) {
                 $console = Get-ActiveConsole  # Recheck after queue/preparation.
                 $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-                $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
-                    "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File $inbox/runner.ps1 -Job $Job -InteractiveWorker -ExpectedSessionId $console")
+                $action = New-ScheduledTaskAction -Execute 'conhost.exe' -Argument (
+                    "--headless powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File $inbox/runner.ps1 -Job $Job -InteractiveWorker -ExpectedSessionId $console")
                 $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
                 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds $config.interactiveSeconds)
                 Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings | Out-Null

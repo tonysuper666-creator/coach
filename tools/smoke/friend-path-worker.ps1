@@ -235,6 +235,7 @@ if (-not $Background) {
             dirtyWindows = $preflight.DirtyWindows
             activeUser = $preflight.ActiveUser
             idleSeconds = $preflight.IdleSeconds
+            driverInputMatched = $preflight.DriverInputMatched
             foreground = $preflight.Foreground
             time = (Get-Date).ToUniversalTime().ToString('o')
         } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 (Join-Path $OutDir 'environment-dirty.json')
@@ -242,6 +243,7 @@ if (-not $Background) {
         $global:LASTEXITCODE = 2
         exit 2
     }
+    Note "预检通过：Apollo 无活动串流（GetLastInputInfo 空闲 $($preflight.IdleSeconds) 秒，driverInputMatched=$($preflight.DriverInputMatched)，仅作证据）"
 }
 # Other Coach windows/heavy jobs may coexist; only input/capture is serialized.
 Mark-ExistingClients

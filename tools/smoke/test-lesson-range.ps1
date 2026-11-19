@@ -56,7 +56,21 @@ $merged = Find-LessonSourceButton @(Read-Screen $mp)
 $ok = [bool]($merged -and $merged.X1 -gt 500)
 '{0} merged-line-button: x1={1} expected>500' -f $(if ($ok) { 'PASS' } else { 'FAIL' }), $(if ($merged) { $merged.X1 } else { 'none' })
 if (-not $ok) { $fail++ }
-$total = $cases.Count + 3
+# OCR 把同一颗按钮拆成两块（QA 回放 #495 第 5 跳失败帧：标签从 (848,376)、页码从 (961,376) 开始，且「页」被读成「贞」）。按 OCR 记录的形状造两块直接测。
+function Rec([string]$text, [int]$x, [int]$y, [int]$charW = 21) {
+    $ws = @(); $cx = $x
+    foreach ($ch in $text.ToCharArray()) { $ws += [pscustomobject]@{ Text = [string]$ch; BoundingRect = [pscustomobject]@{ X = $cx; Y = $y; Width = $charW - 2; Height = 22 } }; $cx += $charW }
+    [pscustomobject]@{ Text = $text; Words = $ws }
+}
+$split = Find-LessonSourceButton @((Rec '根据本节原文，补全这句话：' 300 160), (Rec '本节原文' 848 376), (Rec '第152贞' 961 376))
+$ok = [bool]($split -and $split.X1 -eq 848 -and $split.X2 -ge 1000 -and $split.Y -gt 376 -and $split.Y -lt 400)
+'{0} split-blocks-button: x1={1} x2={2} y={3} expected x1=848 x2>=1000' -f $(if ($ok) { 'PASS' } else { 'FAIL' }), $split.X1, $split.X2, $split.Y
+if (-not $ok) { $fail++ }
+# 反例：出题中提示和不相干的「第X页」挨在同一行，或标签和页码不在同一行，都不能拼成按钮。
+$busy = Find-LessonSourceButton @((Rec '正在按本节原文出题…' 300 60), (Rec '第150页' 520 60), (Rec '本节原文·' 848 376), (Rec '第153页' 961 470))
+'{0} split-blocks-reject: button={1} expected=none' -f $(if (-not $busy) { 'PASS' } else { 'FAIL' }), $(if ($busy) { $busy.Y } else { 'none' })
+if ($busy) { $fail++ }
+$total = $cases.Count + 5
 Remove-Item -Recurse -Force $out
 "RESULT $($total - $fail)/$total target=$target"
 exit $(if ($fail) { 1 } else { 0 })

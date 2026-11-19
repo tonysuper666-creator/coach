@@ -409,6 +409,12 @@ try {
             foreach ($try in 1..2) {
                 & $waitIdle $tag
                 $btn = Find-LessonSourceButton $script:Last
+                # 换节后的过渡帧可能还没画好按钮，重新取图几次再判失败。
+                foreach ($again in 1..3) {
+                    if ($btn) { break }
+                    Start-Sleep -Milliseconds 1500
+                    $btn = Find-LessonSourceButton (Shot 6 "btn-$tag-$try-$again")
+                }
                 if (-not $btn) { Fail 6 '做题学页面找不到「本节原文 · 第X页」按钮' }
                 Click-At $btn.X $btn.Y; Start-Sleep -Milliseconds 800
                 $opened = Await-Text 6 "range-$tag" @('对应教材第') 15
@@ -532,12 +538,12 @@ try {
             }
             $anchor = Has $lines @('查看对应原文')
             if ((Has $lines @('本次练习')) -and $anchor) {
-                # 只在题目原文按钮下找独立的 A 字母；不以固定屏幕位置或「猜的」芯片当成作答。
+                # 只在题目原文按钮下找独立的选项字母；不以固定屏幕位置或「猜的」芯片当成作答。
+                # 深色下的选项字母对比度低，OCR 常漏读 A、B，或把 C 读成 c：取最靠上的那个单字母选项。
                 foreach ($line in $lines) { foreach ($word in $line.Words) {
-                    if ($word.Text -eq 'A' -and $word.BoundingRect.Y -gt $anchor.Y) {
-                        $picked = $word.BoundingRect; break
-                    }
-                }; if ($picked) { break } }
+                    $b = $word.BoundingRect
+                    if ($word.Text -cmatch '^[A-Da-d]$' -and $b.Y -gt $anchor.Y + 10 -and (-not $picked -or $b.Y -lt $picked.Y)) { $picked = $b }
+                } }
                 if ($picked) { $question = $true }
             }
             if (-not $question) { Start-Sleep -Seconds 3 }

@@ -30,14 +30,30 @@ jobs:
           run-id: 44273248327
           github-token: ${{ github.token }}
       - name: Verify RC2 hash
+        id: verify
         shell: pwsh
         run: |
           $h = (Get-FileHash bundle/LearningCoach-1.0.1.msi -Algorithm SHA256).Hash.ToLower()
           "msi_sha256=$h" | Tee-Object -Append evidence/machine.txt
           if ($h -ne '568f22f0ec021c6b167274ae420e4b90f22fa46b6b733268c209c62dc0e6137d') { throw 'not RC2' }
-      - name: Install x64 MSI under Prism, launch, screenshot, uninstall
+      - name: Install x64 MSI under Prism, launch and screenshot
         shell: powershell
-        run: ./tools/smoke/msi-install.ps1 -Msi bundle/LearningCoach-1.0.1.msi -OutDir evidence/install -StartTimeoutSec 300
+        run: ./tools/smoke/msi-install.ps1 -Msi bundle/LearningCoach-1.0.1.msi -OutDir evidence/install -StartTimeoutSec 300 -KeepInstalled
+      - name: Capture installed window and import synthetic scan
+        if: ${{ always() && steps.verify.outcome == 'success' }}
+        shell: powershell
+        run: |
+          ./tools/smoke/prism-ocr.ps1 -OutDir evidence/prism-ocr -Fixture desktopApp/src/test/resources/books/ocr/01-clean-serif.png
+      - name: Uninstall isolated test package
+        if: always()
+        shell: powershell
+        run: |
+          $products = @(Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object DisplayName -eq 'LearningCoach')
+          if ($products.Count -gt 1) { throw 'Unexpected multiple LearningCoach installations' }
+          if ($products.Count -eq 1) {
+            $p = Start-Process msiexec.exe -ArgumentList @('/x', $products[0].PSChildName, '/qn', '/norestart') -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "Uninstall failed: $($p.ExitCode)" }
+          }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:

@@ -215,6 +215,8 @@ try {
 param([string]$Script, [string[]]$ScriptArgs = @(), [int]$TimeoutSec = 600, [string]$LogFile)
 $mode = $env:FP_TEST_MODE
 $outDir = Split-Path -Parent $LogFile
+@{ timeoutSec = $TimeoutSec; script = $Script; scriptArgs = ($ScriptArgs -join ' ') } |
+    ConvertTo-Json -Depth 3 | Set-Content -Encoding utf8 (Join-Path $outDir 'forwarded.json')
 if ($mode -eq 'dirty') {
     @{ dirty = $true; exitCode = 2; reason = '桌面存在非本轮拉起的前台窗口（Notepad pid=26044 class=Notepad）' } |
         ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $outDir 'environment-dirty.json')
@@ -241,6 +243,130 @@ if ($mode -eq 'dirty') {
         $code = $LASTEXITCODE
         Check "exitcode-$($tc.Mode)" ($code -eq $tc.ExpectExit -and $outText.Contains($tc.Match)) "exit=$code expected=$($tc.ExpectExit)"
     }
+
+    # 6. friend-path.ps1 超时参数透传 + 默认外层 TimeoutSec = 600 + BuildTimeoutSec
+    $env:FP_TEST_MODE = 'pass'
+    $evFwd = Join-Path $tmp 'ev-fwd'
+    New-Item -ItemType Directory -Force $evFwd | Out-Null
+    $null = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fp -Evidence $evFwd 2>&1 | Out-String)
+    $fwdDefault = Get-Content -LiteralPath (Get-ChildItem $evFwd -Recurse -Filter 'forwarded.json' | Select-Object -First 1).FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+    Check 'forward-default-timeouts' ($LASTEXITCODE -eq 0 -and $fwdDefault.timeoutSec -eq 1500 -and $fwdDefault.scriptArgs -match '-StartTimeoutSec 150\b' -and $fwdDefault.scriptArgs -match '-BuildTimeoutSec 900\b') "timeout=$($fwdDefault.timeoutSec) args=$($fwdDefault.scriptArgs)"
+
+    $evCustom = Join-Path $tmp 'ev-custom'
+    New-Item -ItemType Directory -Force $evCustom | Out-Null
+    $null = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fp -Evidence $evCustom -StartTimeoutSec 90 -BuildTimeoutSec 420 2>&1 | Out-String)
+    $fwdCustom = Get-Content -LiteralPath (Get-ChildItem $evCustom -Recurse -Filter 'forwarded.json' | Select-Object -First 1).FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+    Check 'forward-custom-timeouts' ($LASTEXITCODE -eq 0 -and $fwdCustom.timeoutSec -eq 1020 -and $fwdCustom.scriptArgs -match '-StartTimeoutSec 90\b' -and $fwdCustom.scriptArgs -match '-BuildTimeoutSec 420\b') "timeout=$($fwdCustom.timeoutSec) args=$($fwdCustom.scriptArgs)"
+
+    $evExplicit = Join-Path $tmp 'ev-explicit'
+    New-Item -ItemType Directory -Force $evExplicit | Out-Null
+    $null = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fp -Evidence $evExplicit -BuildTimeoutSec 420 -TimeoutSec 777 2>&1 | Out-String)
+    $fwdExplicit = Get-Content -LiteralPath (Get-ChildItem $evExplicit -Recurse -Filter 'forwarded.json' | Select-Object -First 1).FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+    Check 'forward-explicit-outer-timeout' ($LASTEXITCODE -eq 0 -and $fwdExplicit.timeoutSec -eq 777) "timeout=$($fwdExplicit.timeoutSec)"
+
+    # 7. friend-path-worker 编译超时与编译失败分流（桩 gradlew.bat，不真实编译）
+    $buildRepo = Join-Path $tmp 'repo-stub'
+    $buildSmoke = Join-Path $buildRepo 'tools\smoke'
+    $evBuild = Join-Path $tmp 'ev-build'
+    New-Item -ItemType Directory -Force $buildSmoke, $evBuild | Out-Null
+    foreach ($name in @('friend-path.ps1', 'friend-path-worker.ps1', 'Win-Drive.ps1', 'Smoke-Memory.ps1', 'Lesson-Range.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $buildSmoke $name)
+    }
+    @'
+param([string]$Script, [string[]]$ScriptArgs = @(), [int]$TimeoutSec = 600, [string]$LogFile)
+$global:LASTEXITCODE = 0
+$cmd = "& '" + $Script.Replace("'", "''") + "' " + ($ScriptArgs -join ' ')
+Invoke-Expression $cmd *>&1 | Out-File -Encoding utf8 $LogFile
+exit ([int]$LASTEXITCODE)
+'@ | Set-Content -Encoding utf8 (Join-Path $buildSmoke 'Run-Interactive.ps1')
+
+    $fpBuild = Join-Path $buildSmoke 'friend-path.ps1'
+    $stubTag = 'coach-build-stub-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    @"
+@echo off
+echo STUB_BUILD_ARGS %*
+powershell -NoProfile -Command "Start-Sleep -Seconds 30 # $stubTag"
+exit /b 0
+"@ | Set-Content -Encoding ascii (Join-Path $buildRepo 'gradlew.bat')
+    $evTimeout = Join-Path $evBuild 'timeout'
+    $outTimeout = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fpBuild -Evidence $evTimeout -BuildTimeoutSec 2 -StartTimeoutSec 15 2>&1 | Out-String)
+    $codeTimeout = $LASTEXITCODE
+    $runDirTimeout = Get-ChildItem -LiteralPath $evTimeout -Directory | Select-Object -First 1
+    $dirtyTimeout = if ($runDirTimeout -and (Test-Path -LiteralPath (Join-Path $runDirTimeout.FullName 'environment-dirty.json'))) {
+        Get-Content -LiteralPath (Join-Path $runDirTimeout.FullName 'environment-dirty.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    } else { $null }
+    $logTimeout = if ($runDirTimeout -and (Test-Path -LiteralPath (Join-Path $runDirTimeout.FullName 'build.log'))) {
+        Get-Content -LiteralPath (Join-Path $runDirTimeout.FullName 'build.log') -Raw -Encoding UTF8
+    } else { '' }
+    $strayStub = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like "*$stubTag*" }).Count
+    Check 'build-timeout-dirty-exit2' (
+        $codeTimeout -eq 2 -and
+        $outTimeout -match 'ENVIRONMENT_DIRTY:\s*build-timeout' -and
+        $dirtyTimeout -and $dirtyTimeout.reason -eq 'build-timeout' -and
+        -not (Test-Path -LiteralPath (Join-Path $runDirTimeout.FullName 'result.json')) -and
+        $logTimeout -match 'STUB_BUILD_ARGS :desktopApp:classes\b' -and
+        $logTimeout -match 'timedOut=True' -and
+        $strayStub -eq 0
+    ) "code=$codeTimeout reason=$($dirtyTimeout.reason) stray=$strayStub"
+
+    @"
+@echo off
+echo STUB_BUILD_ARGS %*
+echo STUB_COMPILE_ERROR>&2
+exit /b 7
+"@ | Set-Content -Encoding ascii (Join-Path $buildRepo 'gradlew.bat')
+    $evFail = Join-Path $evBuild 'fail'
+    $outFail = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fpBuild -Evidence $evFail -BuildTimeoutSec 30 -StartTimeoutSec 15 2>&1 | Out-String)
+    $codeFail = $LASTEXITCODE
+    $runDirFail = Get-ChildItem -LiteralPath $evFail -Directory | Select-Object -First 1
+    $resFail = if ($runDirFail -and (Test-Path -LiteralPath (Join-Path $runDirFail.FullName 'result.json'))) {
+        Get-Content -LiteralPath (Join-Path $runDirFail.FullName 'result.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    } else { $null }
+    $logFail = if ($runDirFail -and (Test-Path -LiteralPath (Join-Path $runDirFail.FullName 'build.log'))) {
+        Get-Content -LiteralPath (Join-Path $runDirFail.FullName 'build.log') -Raw -Encoding UTF8
+    } else { '' }
+    Check 'build-error-fail-step1' (
+        $codeFail -eq 1 -and
+        $outFail -match '0/7' -and
+        -not (Test-Path -LiteralPath (Join-Path $runDirFail.FullName 'environment-dirty.json')) -and
+        $resFail -and $resFail.passed -eq 0 -and $resFail.steps.Count -eq 1 -and
+        $resFail.steps[0].Step -eq 1 -and (-not $resFail.steps[0].Ok) -and
+        $resFail.steps[0].Why -eq '构建失败（见 build.log）' -and
+        $logFail -match 'STUB_COMPILE_ERROR' -and $logFail -match 'exitCode=7'
+    ) "code=$codeFail passed=$($resFail.passed) why=$($resFail.steps[0].Why)"
+
+    @"
+@echo off
+if "%1"==":desktopApp:classes" (
+    echo STUB_BUILD_ARGS %*
+    powershell -NoProfile -Command "Start-Sleep -Seconds 3"
+    exit /b 0
+)
+echo STUB_RUN_ARGS %*
+exit /b 0
+"@ | Set-Content -Encoding ascii (Join-Path $buildRepo 'gradlew.bat')
+    $evOrder = Join-Path $evBuild 'order'
+    $null = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fpBuild -Evidence $evOrder -BuildTimeoutSec 15 -StartTimeoutSec 2 2>&1 | Out-String)
+    $codeOrder = $LASTEXITCODE
+    $runDirOrder = Get-ChildItem -LiteralPath $evOrder -Directory | Select-Object -First 1
+    $logOrder = if ($runDirOrder -and (Test-Path -LiteralPath (Join-Path $runDirOrder.FullName 'build.log'))) {
+        Get-Content -LiteralPath (Join-Path $runDirOrder.FullName 'build.log') -Raw -Encoding UTF8
+    } else { '' }
+    $clientOutOrder = if ($runDirOrder -and (Test-Path -LiteralPath (Join-Path $runDirOrder.FullName 'client.out.log'))) {
+        Get-Content -LiteralPath (Join-Path $runDirOrder.FullName 'client.out.log') -Raw -Encoding UTF8
+    } else { '' }
+    $resOrder = if ($runDirOrder -and (Test-Path -LiteralPath (Join-Path $runDirOrder.FullName 'result.json'))) {
+        Get-Content -LiteralPath (Join-Path $runDirOrder.FullName 'result.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    } else { $null }
+    Check 'split-build-exceeds-start-timeout' (
+        $codeOrder -eq 1 -and
+        $logOrder -match 'STUB_BUILD_ARGS :desktopApp:classes' -and
+        $logOrder -match 'exitCode=0\b' -and
+        $logOrder -match 'timedOut=False' -and
+        $clientOutOrder -match 'STUB_RUN_ARGS :desktopApp:run' -and
+        $resOrder -and $resOrder.passed -eq 0 -and
+        $resOrder.steps[0].Why -eq '客户端窗口 2 秒内没有出现（见 client.err.log）'
+    ) "code=$codeOrder why=$($resOrder.steps[0].Why)"
 } finally {
     Remove-Item Env:FP_TEST_MODE -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue

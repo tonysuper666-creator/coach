@@ -40,10 +40,9 @@ read Keychain. Directly launching the Python module does not read Keychain.
 
 ## Owner-authorized API access
 
-On 2026-11-15 the owner waived the account-evidence prerequisite and authorized
-using the existing keys under Coach's local monthly caps. No private admission
-file or account attestation is required. A configured key can use its provider's
-API immediately; a missing key still uses the subscription bridge.
+The owner authorized using the existing keys for Coach. Each writer now needs
+its share of the provider grant before forwarding a request. A missing key
+still uses the subscription bridge.
 
 The ledger measures Coach consumption in UTC calendar months. It does not measure
 other applications in the shared organization or establish the provider's grant
@@ -65,7 +64,63 @@ The spend monitor reports a reservation that would cross this boundary to the
 main session for Li Zheng's decision before incurring paid usage. The limit
 applies across API keys.
 Unresolved reservations from all prior months (including old ledger records)
-continue to consume headroom until settled; completed spend resets each month.
+continue to consume headroom until settled. UTC monthly reporting and the
+provider's grant window have separate boundaries.
+
+### Sharing one provider grant
+
+All production streaming and Batch submissions use the allocated ledger. Install
+the **same private** `grant-allocation-<provider>.json` beside each participating
+ledger. Obtain its window and gross grant from the provider's actual grant record.
+Count every other writer's settled spend, unresolved reservations and enforceable
+future allowance in `other_writers_microusd`. Historical average spend does not
+bound future usage. Leave the allocation absent until these amounts reconcile.
+A missing, expired, inconsistent or unrecognized allocation denies new API calls.
+
+The file contains `version: 1`, `provider`, integer Unix seconds `start_utc`
+(inclusive) and `end_utc` (exclusive), `grant_microusd`, `other_writers_microusd`
+and a `ledgers` array. Each entry contains the precise `socket.gethostname()`
+value in `host`, the canonical absolute ledger directory in `state`, and two
+integer amounts. `limit_microusd` covers the site's entire window including
+spend to date. `prior_settled_microusd` includes only verified settled charges
+from **before** this grant began. Use zero when a historical charge cannot be
+excluded. Never subtract unresolved reservations. A current-window settlement
+of an older reservation counts against the same local share. The sum of all
+shares plus other writers is bounded by 95% of the verified gross grant.
+
+The private and isolation services on hermes use one entry for their common
+locked ledger. The Mac friend bridge has a separate Anthropic entry and no
+OpenAI entry. Keep its existing $149.79 ceiling or lower for the original
+window. The $0.21 adjustment is already reflected in this ceiling. Preserve
+the ledger, friend accounting, pending batches and lock-zero records.
+
+**Cutover and rollback**
+
+1. Independently reconcile the two site totals, grant dates, external writer
+   bounds and prior-settled baselines. Include any older bridge capable of
+   forwarding and fence it before the cutover. Keep provider records private.
+2. Stage separate releases and retain the old release, service configuration and
+   private accounting backup. Compare the allocation digests on both machines
+   before enabling either share. Verify the actual service interpreter, imported
+   router and canonical state path at each entry point. Exercise the staged
+   release with two temporary ledgers and an isolated receiver:
+   `PYTHONPATH=tools/bridge:tools/bridge/tests python -m unittest api_routing batch_routing friends shared_grant`.
+3. Switch the Mac only in its friend's approved window. Fence all old API
+   writers while switching. Never borrow an unreachable site's share. Reissue
+   only for a verified non-overlapping grant window. The first use pins the plan
+   under the ledger lock. Retain these pins and the event files across releases.
+4. On the Mac, run one `friend_spend_watch.py --state <friend-ledger>
+   --guard-inbox <private-receiver-dir> --pull-guards-from <ssh-alias>`
+   from the spend relay schedule. Its alias uses the existing read-only SSH
+   path to the hermes ledger. Keep reporting usage, but give this receiver sole
+   ownership of grant decision asks on TON-1691. It retries missed events after
+   reconnect and keeps another pending decision in place. Check both service
+   health paths and the receiver invocation. Report the redacted running
+   versions, matching plan digest and eligible window to the two handoff issues.
+5. On failure, fence paid API forwarding on the affected writers before
+   restoring the previous binary. Keep the latest ledger, pending batches,
+   allocation pins and receiver receipts. Resume paid forwarding only with a
+   verified bounded allocation covering every live writer.
 
 Complete, model-matching usage settles the reservation at configured price;
 timeouts, HTTP errors, cancellation, missing usage and stream interruption retain

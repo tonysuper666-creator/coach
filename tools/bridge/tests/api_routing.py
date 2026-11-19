@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from api_budget import CreditLedger, Denied, atomic_json, micros
+from grant_fixture import fund
 from api_route import ApiRouter, ApiFailure, CONFIG, cost, route, vendor
 import httpx
 import subscription_bridge as bridge
@@ -55,15 +56,17 @@ class LedgerTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.now = NOW
+        fund(self.root)
         self.ledger = CreditLedger(self.root, lambda: self.now)
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def test_missing_key_does_not_create_a_ledger(self):
+        empty = self.root / "empty"
         with self.assertRaisesRegex(Denied, "missing_key"):
-            self.ledger.reserve("anthropic", "", 1)
-        self.assertFalse((self.root / "api-credit-ledger.json").exists())
+            CreditLedger(empty).reserve("anthropic", "", 1)
+        self.assertFalse((empty / "api-credit-ledger.json").exists())
 
     def test_owner_authorized_key_needs_no_account_attestation(self):
         self.ledger.reserve("openai", KEY, 1)
@@ -148,10 +151,13 @@ class LedgerTests(unittest.TestCase):
 
     def test_settled_usage_resets_month_but_unknown_usage_carries_forward(self):
         self.now = 1796083140
+        rollover = self.now + 60
+        fund(self.root, end=rollover)
         r = self.ledger.reserve("anthropic", KEY, micros(189))
         self.ledger.settle("anthropic", r, micros(189))
         self.ledger.reserve("anthropic", KEY, micros(1))
         self.now += 120
+        fund(self.root, start=rollover, prior_anthropic=micros(189))
         self.ledger.reserve("anthropic", KEY, micros(189))
         with self.assertRaises(Denied):
             self.ledger.reserve("anthropic", KEY, 1)
@@ -169,6 +175,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.ledger = CreditLedger(self.root, lambda: NOW)
+        fund(self.root)
         self.requests = []
 
     def tearDown(self):

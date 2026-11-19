@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from api_budget import CreditLedger, Denied, atomic_json, micros
 from api_route import ApiRouter, CONFIG
 from api_routing import frames, KEY, NOW
+from grant_fixture import fund
 from friend_spend_watch import publish
 import httpx
 import subscription_bridge as bridge
@@ -30,6 +31,7 @@ class FriendBudgetTests(unittest.TestCase):
         self.env = patch.dict(os.environ, {"COACH_FRIEND_CONFIG": str(self.config)})
         self.env.start()
         self.now = NOW
+        fund(self.root)
         self.ledger = CreditLedger(self.root, lambda: self.now)
 
     def tearDown(self):
@@ -142,6 +144,7 @@ class FriendBudgetTests(unittest.TestCase):
 class FriendApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_api_only_all_failures_map_without_cli_and_success_uses_haiku_even_on_repair(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_FRIEND_CONFIG": temp + "/friends.json"}):
+            fund(Path(temp))
             ledger = CreditLedger(Path(temp), lambda: NOW)
             seen = []
             def response(request):
@@ -178,6 +181,7 @@ class FriendApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_http_failure_and_cancellation_keep_both_reservations(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_FRIEND_CONFIG": temp + "/missing"}):
+            fund(Path(temp))
             ledger = CreditLedger(Path(temp), lambda: NOW)
             router = ApiRouter(ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(500))), keys={"anthropic": KEY})
             request = bridge.build_req({"model": "claude-sonnet-5-5", "messages": [{"role": "user", "content": "synthetic"}]},

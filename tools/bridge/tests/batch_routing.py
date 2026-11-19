@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import httpx
 from api_batch import BatchRouter, BatchPending
 from api_budget import CreditLedger, atomic_json, micros, Denied
+from grant_fixture import fund
 from api_route import ApiRouter, ApiFailure, cost
 import subscription_bridge as bridge
 
@@ -25,6 +26,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.now = NOW
+        fund(self.root)
         self.ledger = CreditLedger(self.root, lambda: self.now)
         self.calls = []
         self.provider = "anthropic"

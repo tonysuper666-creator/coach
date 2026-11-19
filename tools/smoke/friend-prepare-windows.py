@@ -35,7 +35,7 @@ def local_endpoint(value):
 
 
 def code(client, owner, name):
-    status, body = client.request("/v1/pairing-code", "POST", owner, {"friend": name})
+    status, body = client.request("/v1/friends/invite", "POST", owner, {"friend": name})
     require(status == 200)
     value = json.loads(body)["code"]
     require(isinstance(value, str) and re.fullmatch(r"[0-9]{6}", value))

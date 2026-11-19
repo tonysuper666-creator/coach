@@ -24,7 +24,7 @@ import java.util.Base64
 fun main(args: Array<String>): Unit = runBlocking {
     val managed = System.getenv("COACH_MANAGE_SERVICES") == "1"
     val data = Path.of(System.getenv("COACH_DATA_DIR") ?: File(System.getProperty("user.home"),"Coach/data").path)
-    if (args.firstOrNull() in setOf("pair-code", "devices", "revoke", "revoke-friend")) {
+    if (args.firstOrNull() in setOf("pair-code", "invite-friend", "devices", "revoke", "revoke-friend")) {
         pairingCommand(args, data)
         return@runBlocking
     }

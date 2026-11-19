@@ -95,6 +95,8 @@ def prepare(args):
             # Credentials are instance-local. Learning, source and admission records stay intact.
             dest.execute("delete from devices")
             dest.execute("delete from pairing_code")
+            if dest.execute("select 1 from sqlite_master where type='table' and name='friend_invites'").fetchone():
+                dest.execute("delete from friend_invites")
         if (source / "blobs").exists():
             shutil.copytree(source / "blobs", root / "data/blobs")
     spec = importlib.util.spec_from_file_location("pdf_import", REPO / "tools/reader/import_pdf.py")

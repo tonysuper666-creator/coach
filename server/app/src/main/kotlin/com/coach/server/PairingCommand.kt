@@ -26,16 +26,17 @@ internal fun pairingCommand(args: Array<String>, data: Path) {
     val endpoint = when (args.first()) {
         "pair-code" -> { require(args.size == 1 || (args.size == 3 && args[1] == "--friend")); "/v1/pairing-code" }
         "revoke-friend" -> { require(args.size == 2); "/v1/friends/revoke" }
+        "invite-friend" -> { require(args.size == 2); "/v1/friends/invite" }
         "devices" -> { require(args.size == 1); "/v1/devices" }
         else -> {
             require(args.size == 2 && args[1].matches(Regex("[A-Za-z0-9_-]{1,128}"))) { "usage: app revoke DEVICE_ID" }
             "/v1/devices/${args[1]}"
         }
     }
-    val method = when (args.first()) { "pair-code", "revoke-friend" -> "POST"; "devices" -> "GET"; else -> "DELETE" }
+    val method = when (args.first()) { "pair-code", "invite-friend", "revoke-friend" -> "POST"; "devices" -> "GET"; else -> "DELETE" }
     val body = when {
         args.first() == "pair-code" && args.size == 3 -> com.coach.domain.json("friend" to args[2]).toString()
-        args.first() == "revoke-friend" -> com.coach.domain.json("friend" to args[1]).toString()
+        args.first() in setOf("revoke-friend", "invite-friend") -> com.coach.domain.json("friend" to args[1]).toString()
         else -> ""
     }
     val request = HttpRequest.newBuilder(URI("http://127.0.0.1:$port$endpoint"))
@@ -45,7 +46,10 @@ internal fun pairingCommand(args: Array<String>, data: Path) {
         .method(method, HttpRequest.BodyPublishers.ofString(body)).build()
     val response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString())
     check(response.statusCode() in 200..299) { "Coach management request failed (${response.statusCode()})" }
-    if (args.first() == "pair-code") {
+    if (args.first() == "invite-friend") {
+        val invite = LedgerJson.parseToJsonElement(response.body()).jsonObject
+        println("Friend invitation: ${invite.str("code")} (single use; expires in 72 hours)")
+    } else if (args.first() == "pair-code") {
         val body = LedgerJson.parseToJsonElement(response.body()).jsonObject
         println("Pairing code: ${body.str("code")} (single use; expires in 5 minutes)")
     } else if (method == "DELETE" || args.first() == "revoke-friend") println("Device(s) revoked")

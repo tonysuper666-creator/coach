@@ -108,6 +108,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         }
         sql("CREATE TABLE IF NOT EXISTS pairing_code(singleton INTEGER PRIMARY KEY CHECK(singleton=1), code_sha256 TEXT NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0)")
         // Additive capabilities: old paired devices retain owner permissions.
+        sql("""CREATE TABLE IF NOT EXISTS friend_invites(
+            slot_hash TEXT PRIMARY KEY NOT NULL, salt BLOB NOT NULL, verifier BLOB NOT NULL,
+            friend_name TEXT NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0)""")
         if (query("PRAGMA table_info(devices)") { it.getString("name") }.none { it == "friend_name" })
             sql("ALTER TABLE devices ADD COLUMN friend_name TEXT")
         if (query("PRAGMA table_info(devices)") { it.getString("name") }.none { it == "last_used_at" })
@@ -687,36 +690,101 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun enroll(device: String, token: String) { require(token.length >= 32); sql("INSERT INTO devices(device_id,token_sha256,created_at) VALUES(?,?,?) ON CONFLICT(device_id) DO UPDATE SET token_sha256=excluded.token_sha256,revoked_at=NULL",device,sha256(token.toByteArray(Charsets.UTF_8)),clock()) }
 
     fun friendName(device: String): String? = query("SELECT friend_name FROM devices WHERE device_id=? AND revoked_at IS NULL", device) { it.getString(1) }.singleOrNull()
-    fun revokeFriend(name: String) { sql("UPDATE devices SET revoked_at=? WHERE friend_name=? AND revoked_at IS NULL", clock(), name) }
+    fun revokeFriend(name: String) = transaction {
+        sql("DELETE FROM friend_invites WHERE friend_name=?", name)
+        sql("UPDATE devices SET revoked_at=? WHERE friend_name=? AND revoked_at IS NULL", clock(), name)
+        Unit
+    }
 
-    fun createPairingCode(friend: String? = null): PairingCode {
+    // RC2 sends only six digits. The first digit selects the invitation whose
+    // remaining five digits are being tried, without spending another invite's guesses.
+    private fun inviteSlot(digit: Char) = sha256("friend-invite-slot:$digit".toByteArray())
+    private fun inviteVerifier(code: String, salt: ByteArray): ByteArray {
+        val spec = javax.crypto.spec.PBEKeySpec(code.toCharArray(), salt, 210_000, 256)
+        return try {
+            javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+        } finally { spec.clearPassword() }
+    }
+
+    fun createFriendInvite(friend: String): PairingCode? = transaction {
+        require(friend.isNotBlank() && friend.length <= 80 && friend.none { it.isISOControl() })
+        val now = clock()
+        sql("DELETE FROM friend_invites WHERE expires_at<=? OR attempts>=5", now)
+        val occupied = query("SELECT slot_hash FROM friend_invites") { it.getString(1) }.toSet()
+        val free = ('0'..'9').filterNot { inviteSlot(it) in occupied }
+        if (free.isEmpty()) return@transaction null
+        val prefix = free[idRandom.nextInt(free.size)]
+        val singleton = query("SELECT code_sha256 FROM pairing_code WHERE singleton=1") { it.getString(1) }.singleOrNull()
+        var code: String
+        do {
+            code = prefix + idRandom.nextInt(100_000).toString().padStart(5, '0')
+        } while (singleton == credentialHash(code, true) || singleton == credentialHash(code, false))
+        val salt = ByteArray(16).also(idRandom::nextBytes)
+        val expires = now + java.time.Duration.ofHours(72).toMillis()
+        sql("INSERT INTO friend_invites(slot_hash,salt,verifier,friend_name,expires_at) VALUES(?,?,?,?,?)",
+            inviteSlot(prefix), salt, inviteVerifier(code, salt), friend, expires)
+        PairingCode(code, expires)
+    }
+
+    private class PendingInvite(val friend: String, val salt: ByteArray, val verifier: ByteArray)
+    private fun PendingInvite.matches(code: String) = MessageDigest.isEqual(verifier, inviteVerifier(code, salt))
+
+    private fun pendingInvite(slot: String) =
+        query("SELECT friend_name,salt,verifier FROM friend_invites WHERE slot_hash=? AND expires_at>? AND attempts<5", slot, clock()) {
+            PendingInvite(it.getString(1), it.getBytes(2), it.getBytes(3))
+        }.singleOrNull()
+
+    fun createPairingCode(friend: String? = null): PairingCode = transaction {
         require(friend == null || (friend.isNotBlank() && friend.length <= 80 && friend.none { it.isISOControl() }))
-        val code = idRandom.nextInt(1_000_000).toString().padStart(6, '0')
+        var code: String
+        do {
+            code = idRandom.nextInt(1_000_000).toString().padStart(6, '0')
+        } while (pendingInvite(inviteSlot(code.first()))?.matches(code) == true)
         val expires = clock() + 300_000
         sql("INSERT INTO pairing_code(singleton,code_sha256,expires_at,attempts,friend_name,friend_hash_version) VALUES(1,?,?,0,?,?) ON CONFLICT(singleton) DO UPDATE SET code_sha256=excluded.code_sha256,expires_at=excluded.expires_at,attempts=0,friend_name=excluded.friend_name,friend_hash_version=excluded.friend_hash_version",
             credentialHash(code, friend != null), expires, friend, if (friend == null) 0 else 1)
-        return PairingCode(code, expires)
+        PairingCode(code, expires)
     }
 
     /** Wall clock expiry, five total guesses, single use across both listeners/restarts. */
     fun pair(code: String, name: String, friendsOnly: Boolean = false): DeviceCredential? = transaction {
+        val slot = code.firstOrNull()?.takeIf { it in '0'..'9' }?.let(::inviteSlot)
+        val invite = slot?.let(::pendingInvite)
+        if (invite != null && code.matches(Regex("[0-9]{6}")) && invite.matches(code)) {
+            if (name.isBlank() || name.length > 80) {
+                sql("UPDATE friend_invites SET attempts=attempts+1 WHERE slot_hash=?", slot)
+                return@transaction null
+            }
+            sql("DELETE FROM friend_invites WHERE slot_hash=?", slot)
+            return@transaction enrollPairedDevice(name, invite.friend)
+        }
+        val paired = pairSingleton(code, name, friendsOnly)
+        if (paired == null && invite != null) sql("UPDATE friend_invites SET attempts=attempts+1 WHERE slot_hash=?", slot)
+        paired
+    }
+
+    private fun pairSingleton(code: String, name: String, friendsOnly: Boolean): DeviceCredential? {
         val scope = query("SELECT friend_name,friend_hash_version FROM pairing_code WHERE singleton=1") { it.getString(1) to it.getInt(2) }.singleOrNull()
         val friend = scope?.first
-        if (friend != null && scope?.second != 1) return@transaction null
-        if (friendsOnly && friend == null) return@transaction null
+        if (friend != null && scope?.second != 1) return null
+        if (friendsOnly && friend == null) return null
         val active = query("SELECT code_sha256,expires_at,attempts FROM pairing_code WHERE singleton=1") {
             Triple(it.getString(1), it.getLong(2), it.getInt(3))
-        }.singleOrNull() ?: return@transaction null
-        if (clock() >= active.second || active.third >= 5) return@transaction null
+        }.singleOrNull() ?: return null
+        if (clock() >= active.second || active.third >= 5) return null
         sql("UPDATE pairing_code SET attempts=attempts+1 WHERE singleton=1")
         if (!code.matches(Regex("[0-9]{6}")) || name.isBlank() || name.length > 80 ||
-            !MessageDigest.isEqual(active.first.toByteArray(), credentialHash(code, friend != null).toByteArray())) return@transaction null
+            !MessageDigest.isEqual(active.first.toByteArray(), credentialHash(code, friend != null).toByteArray())) return null
+        sql("DELETE FROM pairing_code WHERE singleton=1")
+        return enrollPairedDevice(name, friend)
+    }
+
+    private fun enrollPairedDevice(name: String, friend: String?): DeviceCredential {
         val token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32).also(idRandom::nextBytes))
         val device = uid()
         sql("INSERT INTO devices(device_id,name,token_sha256,created_at,friend_name,friend_hash_version) VALUES(?,?,?,?,?,?)",
             device, name, credentialHash(token, friend != null), clock(), friend, if (friend == null) 0 else 1)
-        sql("DELETE FROM pairing_code WHERE singleton=1")
-        DeviceCredential(device, token, if (friend == null) "owner" else "friend")
+        return DeviceCredential(device, token, if (friend == null) "owner" else "friend")
     }
 
     fun pairedDevices(): List<PairedDevice> = query("SELECT device_id,name,created_at,revoked_at,friend_name,last_used_at FROM devices ORDER BY created_at,device_id") {

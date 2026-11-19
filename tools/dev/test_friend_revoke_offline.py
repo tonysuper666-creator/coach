@@ -136,6 +136,15 @@ class OfflineRevokeTest(unittest.TestCase):
         self.assert_success(self.invoke(True), {"active_friends": 0, "pending_friend_codes": 0,
                                                 "revoked": 3, "invalidated_codes": 1})
 
+    def test_invitations_are_included_in_inspection_and_revocation(self):
+        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("CREATE TABLE friend_invites(slot_hash TEXT PRIMARY KEY)")
+            db.executemany("INSERT INTO friend_invites VALUES(?)", [("slot-a",), ("slot-b",)])
+        self.assert_success(self.invoke(), {"active_friends": 3, "pending_friend_codes": 3,
+                                            "revoked": 0, "invalidated_codes": 0})
+        self.assert_success(self.invoke(True), {"active_friends": 0, "pending_friend_codes": 0,
+                                                "revoked": 3, "invalidated_codes": 3})
+
     def test_wrong_identity_and_missing_database_do_not_write_or_create(self):
         before = self.path.read_bytes()
         for field, value in [('device', self.binding['device'] + 1),

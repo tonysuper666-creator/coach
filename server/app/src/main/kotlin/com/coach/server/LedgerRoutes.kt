@@ -203,6 +203,15 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             val code = actor.execute { createPairingCode(friend) }
             call.respondText(json("code" to code.code, "expiresAt" to code.expiresAt).toString(), ContentType.Application.Json)
         }
+        post("/v1/friends/invite") {
+            if (!call.requireAdmin()) return@post
+            call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+            val body = runCatching { LedgerJson.parseToJsonElement(call.receiveText()).jsonObject }.getOrNull()
+            val friend = body?.str("friend").orEmpty()
+            if (friend.isBlank() || friend.length > 80 || friend.any { it.isISOControl() }) return@post call.respond(HttpStatusCode.BadRequest)
+            val invite = actor.execute { createFriendInvite(friend) } ?: return@post call.respond(HttpStatusCode.Conflict)
+            call.respondText(json("code" to invite.code, "expiresAt" to invite.expiresAt).toString(), ContentType.Application.Json)
+        }
         get("/v1/devices") {
             if (!call.requireAdmin()) return@get
             val devices = actor.execute { pairedDevices() }.map { json("deviceId" to it.id, "name" to it.name, "createdAt" to it.createdAt, "revokedAt" to it.revokedAt,

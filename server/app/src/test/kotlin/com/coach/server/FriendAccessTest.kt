@@ -93,6 +93,21 @@ class FriendAccessTest {
         println("FRIEND_BOUNDARY=20 paths x 3 public identities + owner listener; all denied")
     }
 
+    @Test fun onlyPrivateAdminIssuesInvitationAndConcurrentPublicClaimsGetOneFriend() = Harness().use { h ->
+        val path = "/v1/friends/invite"
+        val target = json("friend" to "朋友A").toString()
+        assertEquals(404, h.request(path, "POST", h.ownerCredential, target).statusCode())
+        assertEquals(401, h.request(path, "POST", body = target, private = true).statusCode())
+        assertEquals(404, h.request(path, "POST", h.pair("其他朋友"), target, private = true).statusCode())
+        val result = h.request(path, "POST", h.ownerCredential, target, private = true)
+        assertEquals(200, result.statusCode())
+        val claim = json("code" to parse(result).str("code"), "name" to "RC2").toString()
+        val statuses = runBlocking {
+            List(2) { async(Dispatchers.IO) { h.request("/v1/pair", "POST", body = claim).statusCode() } }.awaitAll()
+        }
+        assertEquals(listOf(200, 401), statuses.sorted())
+    }
+
     @Test fun friendsHaveSeparateImportsAnswersAuditsAndNoOwnerLedgerCallsAndRevocationIsImmediate() = runBlocking {
         Harness().use { h ->
             val a = h.pair("甲"); val a2 = h.pair("甲"); val b = h.pair("乙")

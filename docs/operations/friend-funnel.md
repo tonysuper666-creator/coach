@@ -74,7 +74,7 @@ probe 使用 `friend-public` environment；先按协议探针手册将该 enviro
    （不得与已有朋友重名，重跑前先撤销上一轮 A/B 并核对），B 的
    `daily_calls=1`。合并配置时保留原字段；先备份，结束恢复时保留期间其他人的修改。
    两个朋友只用于本轮，账本保留，不删除或清零 quota/reserved。
-3. **先在 Mac 兑换 B，再签 A**：`pairing_code` 是单例，新码覆盖旧码，不能同时签 A/B。
+3. 在 Mac 管理端用 `/v1/friends/invite` 分别给 B 和 A 签发独立邀请码。先在 Mac 兑换 B 用作对照，A 留给 Windows 配对。
    对已批准的临时隔离实例使用 `tools/smoke/friend-prepare-windows.py --output PRIVATE_FILE`：
    通过私有进程 env 传 `COACH_PREPARE_OWNER_URL`（管理回环端口）、
    `COACH_PREPARE_PUBLIC_URL`（朋友回环端口）、`COACH_PREPARE_OWNER`（owner 凭据 JSON）。
@@ -86,8 +86,8 @@ probe 使用 `friend-public` environment；先按协议探针手册将该 enviro
    命令参数、仓库文件或 workflow inputs。URL 使用 HTTPS 443 的 Funnel 根地址。
    B 是 Mac 预配的短期对照身份，**不计作 B 的 Windows 原生配对验收**；只有 A 在 Windows
    配对 UI 兑换一次性码。B 只经步骤 env 进入驱动，解析前后 add-mask，不进 artifact。
-4. 立即手动派发 `phase=probe, package_run=ID`。A 配对码五分钟过期；队列过久或码过期
-   就签新 A 码、更新其 secret 并重跑 probe；B 已消费当日额度时停止本日重跑；另日重跑仍须先撤销并重新预配。
+4. 手动派发 `phase=probe, package_run=ID`。A 的邀请码签发后 72 小时有效，限领一次。过期时
+   重新签发并更新 A 的 secret；B 已消费当日额度时停止本日重跑；另日重跑仍须先撤销并重新预配。
    同名 B 的朋友日账本会保留，换设备不能恢复额度；不得清零账本、延长码有效期
    或拿 B 令牌代替 A 的一次性码。
    environment secrets 在 job 开始时读取（[官方说明](https://docs.github.com/en/actions/reference/security/secrets)）；不要试图在运行中换 secret 修复该 run。

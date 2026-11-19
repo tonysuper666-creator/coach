@@ -144,6 +144,8 @@ with sqlite3.connect((source_data / "coach.sqlite").as_uri() + "?mode=ro", uri=T
         copied.execute("DELETE FROM jobs")
         copied.execute("DELETE FROM turn_leases")
         copied.execute("DELETE FROM pairing_code")
+        if copied.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='friend_invites'").fetchone():
+            copied.execute("DELETE FROM friend_invites")
         seeded = seed_due_review(copied, cli.course)
         event_count = copied.execute("SELECT count(*) FROM events").fetchone()[0]
         ai_before = copied.execute("SELECT count(*) FROM ai_calls").fetchone()[0]

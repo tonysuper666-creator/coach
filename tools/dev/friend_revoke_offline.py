@@ -82,17 +82,24 @@ def validate(db, binding, allow_unmigrated=False):
     # Unknown triggers could mutate owner rows, unrelated data or resurrect a
     # credential. No trigger is present on these tables in LedgerStore.
     require(not db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' "
-                           "AND tbl_name IN ('devices','pairing_code')").fetchall())
+                           "AND tbl_name IN ('devices','pairing_code','friend_invites')").fetchall())
+    if has_invites(db):
+        require(all(migrated))
     check_file(binding)
     return all(migrated)
 
 
+def has_invites(db):
+    return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='friend_invites'").fetchone() is not None
+
+
 def counts(db):
+    invitations = db.execute("SELECT count(*) FROM friend_invites").fetchone()[0] if has_invites(db) else 0
     return {
         "active_friends": db.execute("SELECT count(*) FROM devices WHERE friend_name IS NOT NULL "
                                      "AND revoked_at IS NULL").fetchone()[0],
         # Delete expired/exhausted friend codes too; none may survive rollback.
-        "pending_friend_codes": db.execute("SELECT count(*) FROM pairing_code "
+        "pending_friend_codes": invitations + db.execute("SELECT count(*) FROM pairing_code "
                                            "WHERE friend_name IS NOT NULL").fetchone()[0],
     }
 
@@ -153,6 +160,8 @@ def revoke(binding, apply=False, *, allow_unmigrated=False):
         revoked = db.execute("UPDATE devices SET revoked_at=? WHERE friend_name IS NOT NULL "
                              "AND revoked_at IS NULL", (now,)).rowcount
         invalidated = db.execute("DELETE FROM pairing_code WHERE friend_name IS NOT NULL").rowcount
+        if has_invites(db):
+            invalidated += db.execute("DELETE FROM friend_invites").rowcount
         result = counts(db)
         require(result == {"active_friends": 0, "pending_friend_codes": 0})
         require(snapshot(db, "devices") == expected_devices)

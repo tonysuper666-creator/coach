@@ -20,7 +20,7 @@ class PrepareTest(unittest.TestCase):
         class Client:
             def request(self, path, method="GET", auth=None, body=None):
                 events.append((path, body))
-                if path == "/v1/pairing-code":
+                if path == "/v1/friends/invite":
                     return 200, json.dumps({"code": "123456"})
                 if path == "/v1/pair":
                     return (401, "{}") if fail == "pair" else (200, json.dumps(b | ({"role": "owner"} if fail == "role" else {})))
@@ -30,7 +30,7 @@ class PrepareTest(unittest.TestCase):
     def test_b_is_redeemed_and_authorized_before_a_is_signed(self):
         private, public, events = self.clients()
         result = prepare.prepare(private, public, self.owner)
-        self.assertEqual([e[0] for e in events], ["/v1/pairing-code", "/v1/pair", "/v1/public/status", "/v1/pairing-code", "/v1/public/status"])
+        self.assertEqual([e[0] for e in events], ["/v1/friends/invite", "/v1/pair", "/v1/public/status", "/v1/friends/invite", "/v1/public/status"])
         self.assertEqual(events[0][1], {"friend": prepare.B})
         self.assertEqual(events[3][1], {"friend": prepare.A})
         self.assertEqual(result["credentialB"]["role"], "friend")
@@ -40,7 +40,7 @@ class PrepareTest(unittest.TestCase):
             private, public, events = self.clients(failure)
             with self.subTest(failure=failure), self.assertRaises(ValueError):
                 prepare.prepare(private, public, self.owner)
-            self.assertNotIn(("/v1/pairing-code", {"friend": prepare.A}), events)
+            self.assertNotIn(("/v1/friends/invite", {"friend": prepare.A}), events)
 
     def test_only_isolated_loopback_endpoints(self):
         self.assertEqual(prepare.local_endpoint("http://127.0.0.1:41242"), "http://127.0.0.1:41242")

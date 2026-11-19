@@ -233,6 +233,7 @@ if (-not $Background) {
             exitCode = 2
             reason = $preflight.Reason
             dirtyWindows = $preflight.DirtyWindows
+            otherCoachWindows = @($preflight.OtherCoachWindows)
             activeUser = $preflight.ActiveUser
             idleSeconds = $preflight.IdleSeconds
             driverInputMatched = $preflight.DriverInputMatched
@@ -244,6 +245,10 @@ if (-not $Background) {
         exit 2
     }
     Note "预检通过：Apollo 无活动串流（GetLastInputInfo 空闲 $($preflight.IdleSeconds) 秒，driverInputMatched=$($preflight.DriverInputMatched)，仅作证据）"
+    $coexisting = @($preflight.OtherCoachWindows | Where-Object { $_ })
+    if ($coexisting.Count -gt 0) {
+        Note "并存的其他 Coach 客户端（不属于本轮，只作证据；点按逐动作校验目标窗归属）：$(($coexisting | ForEach-Object { "pid=$($_.Pid)" }) -join ', ')"
+    }
 }
 # Other Coach windows/heavy jobs may coexist; only input/capture is serialized.
 Mark-ExistingClients

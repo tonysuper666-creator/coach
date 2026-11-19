@@ -123,26 +123,31 @@ def main():
             assert request("/v1/public/status", credentials=a)[0] == 401
             assert request("/v1/public/status", credentials=b)[0] == 200
             b_id = hashlib.sha256(b"Synthetic B").hexdigest()
-            (root / "friends.json").write_text(json.dumps({"friends": {b_id: {"daily_calls": 1}}}))
+            for _ in range(2):
+                status, body = request("/v1/library/explain", "POST", b, payload)
+                assert status == 200 and "自写样例说明" in json.loads(body)["text"]
+            status, body = request("/v1/public/status", credentials=b)
+            usage = json.loads(body)
+            assert status == 200 and usage["calls"] == 2 and not {"callsRemaining", "tokensRemaining"} & usage.keys()
+            (root / "friends.json").write_text(json.dumps({"friends": {b_id: {"daily_calls": 2}}}))
             status, body = request("/v1/library/explain", "POST", b, payload)
-            assert status == 200 and "自写样例说明" in json.loads(body)["text"]
-            status, body = request("/v1/library/explain", "POST", b, payload)
-            assert status == 429 and json.loads(body) == {"error": "今天的讲解额度用完了，明天再来。", "code": "daily_quota"}
+            assert status == 429 and json.loads(body) == {"error": "讲解服务暂时连不上，读书照常。", "code": "daily_quota"}
             ledger = json.loads((root / "api-state/api-credit-ledger.json").read_text())
             daily = next(iter(ledger["friends"][b_id].values()))
-            assert (daily["calls"], daily["input_tokens"], daily["output_tokens"], len(daily["reserved"])) == (1, 100, 20, 0)
-            assert daily["devices"][b["deviceId"]]["calls"] == 1
+            assert (daily["calls"], daily["input_tokens"], daily["output_tokens"], len(daily["reserved"])) == (2, 200, 40, 0)
+            assert daily["spent_microusd"] > 0 and daily["devices"][b["deviceId"]]["spent_microusd"] == daily["spent_microusd"]
+            assert daily["devices"][b["deviceId"]]["calls"] == 2
             status, body = request("/v1/public/status", credentials=b)
             assert status == 200 and json.loads(body)["callsRemaining"] == 0
             devices = json.loads(command("devices"))
-            assert any(d["deviceId"] == b["deviceId"] and d["today"]["calls"] == 1 for d in devices)
+            assert any(d["deviceId"] == b["deviceId"] and d["today"]["calls"] == 2 for d in devices)
             # The owner's SQL call ledger remains empty.
             db = next((root / "data").glob("*.sqlite"))
             with sqlite3.connect(db) as connection:
                 assert connection.execute("SELECT COUNT(*) FROM ai_calls").fetchone()[0] == 0
             print("FRIEND_ACCEPTANCE PASS: real isolated listeners + actual bridge + offline Anthropic SSE")
             print("pair A/B=friend; own sample explanation=200; 20 forbidden paths=empty404; revoke A=401/B=200")
-            print("B daily_calls=1: first=200, second=429 daily_quota; ledger calls=1 input=100 output=20 pending=0; owner AI calls=0")
+            print("B default=2 successful calls with no remainder; explicit limit=429; ledger calls=2 input=200 output=40 cost recorded; owner AI calls=0")
             print("production=untouched; provider network=0; subscription CLI=0")
         finally:
             # Every process is a directly owned child; never terminate by executable name.

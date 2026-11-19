@@ -47,7 +47,7 @@ data class SourceDoc(val docId: String, val title: String, val firstPdfPage: Int
 data class SourcePage(val docId: String, val pdfPage: Int, val bookPage: Int?, val text: String)
 
 /** 模拟考接口的一次回答：成功时 [body] 是服务端原样的 JSON；失败时 [error] 是服务端写的原因，连不上 Mac 时两者都是 null。 */
-/** [code] 是服务端给程序看的类别（如 `daily_quota`），只用来决定怎么提示，从不显示给人。 */
+/** [code] 是服务端给程序看的类别，只用来决定怎么提示，从不显示给人。 */
 class MockReply(val body: JsonObject?, val error: String?, val retryable: Boolean = false, val statusCode: Int? = null, val code: String? = null)
 class MainlineEssayReply(val document: MainlineEssayDocument?, val error: String?, val retryable: Boolean = false)
 /** 题库里一道可以限时练的论述题。[fromMockPaper] 的题出自整套模拟卷，先练了那套卷就不再是生题。 */
@@ -141,9 +141,15 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         if (response.status.value == 401) MockReply(null, "这台电脑的配对已失效，请在 Mac 上生成新配对码重新配对。", statusCode = 401)
         else {
             val parsed = Json.parseToJsonElement(response.bodyAsText()).jsonObject
-            if (response.status.isSuccess()) MockReply(parsed, null, statusCode = response.status.value)
-            else MockReply(null, parsed.s("error").ifBlank { "暂时无法确认，请稍后重试。" }, statusCode = response.status.value,
-                code = parsed.s("code").ifBlank { null })
+            val status = response.status.value
+            val code = parsed.s("code").ifBlank { null }
+            when {
+                response.status.isSuccess() -> MockReply(parsed, null, statusCode = status)
+                // Older friend services return a quota sentence. Use the same service guidance on both clients.
+                status == 429 || code == "daily_quota" || code == "monthly_quota" ->
+                    MockReply(null, "讲解服务暂时不可用，请稍后再试。", retryable = true, statusCode = status, code = "unavailable")
+                else -> MockReply(null, parsed.s("error").ifBlank { "暂时无法确认，请稍后重试。" }, statusCode = status, code = code)
+            }
         }
     } catch (_: HttpRequestTimeoutException) { MockReply(null, "讲解请求等待超时。可继续阅读或手动重试。") }
       catch (e: kotlinx.coroutines.CancellationException) { throw e }

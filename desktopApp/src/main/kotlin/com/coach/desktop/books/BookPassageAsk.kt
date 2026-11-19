@@ -121,9 +121,8 @@ internal fun BookPassageAsk(
             val question = draft.text
             val typed = question.trim().length
             val tooLong = typed > BookPassageQuestion.MAX_QUESTION_LENGTH
-            // Enter 和「发送」按钮走同一个入口、同一组放行条件：还没点段、超长、正在等回答、额度拒绝、逐书同意都按现有行为。
-            fun canSend(text: String) = hasChoice && BookPassageQuestion.accepts(text) && (request == null || reply != null) &&
-                (reply as? BookLearningReply.Unavailable)?.trouble != ExplainTrouble.Quota
+            // Enter 和「发送」按钮共用放行条件。
+            fun canSend(text: String) = hasChoice && BookPassageQuestion.accepts(text) && (request == null || reply != null)
             // 文本和放行条件都在按下的这一刻现读：按钮变灰靠的是上一帧的 draft，读者敲字与点发送之间
             // 可能还没重排，用重排时的快照会把刚打的字丢掉，发出一句空问题。
             fun submit() {
@@ -255,8 +254,7 @@ private fun V7QuestionField(
                     val down = event.type == KeyEventType.KeyDown
                     when {
                         gate.shouldSend(true, down, event.isShiftPressed, current.composition != null) -> { onSubmit(); true }
-                        // 其余不带 Shift 的 Enter 一律吃掉：确认候选那一下、以及发送关着（超长、正在等回答、
-                        // 额度拒绝）的时候，插一个换行只会把问题越写越长。Shift+Enter 照旧换行。
+                        // 确认候选或暂时不能发送时，Enter 不插入换行。Shift+Enter 照旧换行。
                         down && !event.isShiftPressed -> true
                         else -> false
                     }

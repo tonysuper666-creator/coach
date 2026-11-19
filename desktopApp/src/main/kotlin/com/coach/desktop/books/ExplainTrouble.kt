@@ -10,7 +10,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
-import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.PaperButton
 
 /**
@@ -20,10 +19,8 @@ import com.coach.ui.v7.PaperButton
 internal enum class ExplainTrouble(val retry: Boolean) {
     /** 没连上：Mac 合盖、休眠、断网、超时，或中间的网关回了一页不是 JSON 的错误。 */
     Unreachable(true),
-    /** 连上了，但讲解服务这会儿不行（5xx、408、`code=unavailable`）：原样显示服务端那句话。 */
+    /** 连上了，但讲解服务这会儿不可用：显示讲解请求返回的提示。 */
     Busy(true),
-    /** 今天或这个月的讲解额度用完了：原样显示服务端那句话，重试也没用，所以不给按钮。 */
-    Quota(false),
     /** 这台电脑的连接被停用（401）：给一条回到配对的路。 */
     Revoked(false),
     /** 其余：出处对不上、原文变了、服务端拒绝了这次请求。显示那句话，可以再试。 */
@@ -37,8 +34,7 @@ internal enum class ExplainTrouble(val retry: Boolean) {
         fun of(status: Int?, code: String?): ExplainTrouble = when {
             status == null -> Unreachable
             status == 401 -> Revoked
-            code?.endsWith("_quota") == true || status == 429 -> Quota
-            code == "unavailable" || status == 408 || status >= 500 -> Busy
+            code == "unavailable" || status == 408 || status == 429 || status >= 500 -> Busy
             else -> Other
         }
 
@@ -48,7 +44,6 @@ internal enum class ExplainTrouble(val retry: Boolean) {
             return when (trouble) {
                 Unreachable -> UNREACHABLE
                 Revoked -> REVOKED
-                Quota -> said.ifEmpty { "讲解额度用完了。" }
                 Busy -> said.ifEmpty { "讲解服务这会儿没顾上，稍后再试一次。" }
                 Other -> said.ifEmpty { "这次没讲成，可以再试一次。" }
             }
@@ -58,7 +53,6 @@ internal enum class ExplainTrouble(val retry: Boolean) {
 
 /**
  * 讲解或回答没拿到时的那一行：左边是下一步（再试一次 / 重新配对），右边是那句话。
- * 额度用完不给按钮，话用次要色而不是朱色——这不是出错，只是今天到头了。
  * 行高固定，出现和消失都不把下面的内容推来推去。
  */
 @Composable
@@ -72,7 +66,7 @@ internal fun ExplainTroubleLine(reply: BookLearningReply.Unavailable, onRetry: (
             trouble?.retry == true -> PaperButton(onRetry, modifier = Modifier.testTag("explain-trouble-retry")) { Text("再试一次") }
         }
         Text(reply.message, style = MaterialTheme.typography.bodySmall,
-            color = if (trouble == ExplainTrouble.Quota) CoachTheme.colors.fgSecondary else v7Alert(),
+            color = v7Alert(),
             modifier = Modifier.weight(1f).testTag("explain-trouble"))
     }
 }

@@ -78,10 +78,11 @@ class PairedBookLearningSupportTest {
             val lesson = book.lessons.first()
             val request = BookExplanationRequest(book.id, lesson.id, lesson.blocks)
             ExplainConsent(library.directory).allow(book.id)
-            val quota = PairedBookLearningSupport(library, sendLesson = { _, _ ->
-                ExplainResult.Refused("今天的讲解额度已用完。", ExplainTrouble.Quota)
+            val message = "讲解服务暂时不可用，请稍后再试。"
+            val busy = PairedBookLearningSupport(library, sendLesson = { _, _ ->
+                ExplainResult.Refused(message, ExplainTrouble.Busy)
             })
-            assertEquals(BookLearningReply.Unavailable("今天的讲解额度已用完。", ExplainTrouble.Quota), quota.explain(request))
+            assertEquals(BookLearningReply.Unavailable(message, ExplainTrouble.Busy), busy.explain(request))
             val entered = CompletableDeferred<Unit>()
             val stopped = CompletableDeferred<Unit>()
             val pending = PairedBookLearningSupport(library, sendLesson = { _, _ ->

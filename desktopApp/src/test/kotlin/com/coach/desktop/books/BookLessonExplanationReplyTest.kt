@@ -131,16 +131,17 @@ class BookLessonExplanationReplyTest {
         }
     }
 
-    @Test fun exhaustedQuotaOffersNoRetry() {
+    @Test fun unavailableServiceOffersRetry() {
+        val message = "讲解服务暂时不可用，请稍后再试。"
         val support = object : BookLearningSupport {
             override suspend fun explain(request: BookExplanationRequest) =
-                BookLearningReply.Unavailable("今天的讲解额度用完了。", ExplainTrouble.Quota)
+                BookLearningReply.Unavailable(message, ExplainTrouble.Busy)
             override suspend fun ask(request: BookPassageQuestion): BookLearningReply = error("Not a passage question")
         }
         runSkikoComposeUiTest(size = Size(900f, 700f), density = Density(1f)) {
             setContent { BookLessonExplanation(book, lesson, support) }
-            onNodeWithTag("explain-trouble").assertTextEquals("今天的讲解额度用完了。")
-            onNodeWithTag("explain-trouble-retry").assertDoesNotExist()
+            onNodeWithTag("explain-trouble").assertTextEquals(message)
+            onNodeWithTag("explain-trouble-retry").assertIsEnabled()
         }
     }
 }

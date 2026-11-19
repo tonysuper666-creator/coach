@@ -316,7 +316,6 @@ internal fun BookExplainPanel(
                         when (failed.trouble) {
                             ExplainTrouble.Revoked -> PaperButton(onClick = { scope.launch { scroll.animateScrollTo(0) } },
                                 modifier = Modifier.testTag("explain-repair")) { Text("重新配对") }
-                            ExplainTrouble.Quota -> PaperButton(onClick = {}, enabled = false, modifier = Modifier.testTag("explain-button")) { Text("讲解这段") }
                             else -> QuietButton("再试一次", enabled = paired != null, modifier = Modifier.testTag("explain-retry")) { start(block) }
                         }
                         // 连不上、超时、暂时读不到都是会自己好的：中性灰字。只有要读者动手的（连接被停用、要重新配对）才用朱色。

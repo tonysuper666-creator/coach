@@ -42,6 +42,21 @@ class FriendBudgetTests(unittest.TestCase):
     def reserve(self, friend=B, device="pc", tokens=200):
         return self.ledger.reserve("anthropic", KEY, 100, friend=friend, device=device, tokens=tokens)
 
+    def test_default_usage_continues_past_old_limits_and_is_recorded_per_person(self):
+        first = self.reserve(tokens=1_000_100)
+        self.ledger.settle("anthropic", first, 20, usage={"input_tokens": 1_000_000, "output_tokens": 20})
+        data = self.ledger.read()
+        daily = next(iter(data["friends"][B].values()))
+        daily["calls"] = daily["devices"]["pc"]["calls"] = 100
+        self.ledger.save(data)
+        atomic_json(self.config, {"defaults": {}})
+        second = self.reserve(device="second-pc")
+        self.ledger.settle("anthropic", second, 30, usage={"input_tokens": 100, "output_tokens": 15})
+        daily = next(iter(self.ledger.read()["friends"][B].values()))
+        self.assertEqual((101, 1_000_100, 35, 50),
+                         tuple(daily[key] for key in ("calls", "input_tokens", "output_tokens", "spent_microusd")))
+        self.assertEqual({"pc": 100, "second-pc": 1}, {key: value["calls"] for key, value in daily["devices"].items()})
+
     def test_concurrent_requests_for_last_slot_admit_exactly_one_and_no_partial_month_write(self):
         self.limit()
         def reserve(_):

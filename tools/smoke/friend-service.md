@@ -97,7 +97,7 @@ and bridge process state still stay under the isolated service root.
 Create a service-root `friends.json`, owned by the current user with mode 0600:
 
 ```json
-{"paused":true,"defaults":{"daily_calls":100,"daily_tokens":1000000}}
+{"paused":true}
 ```
 
 Start paused, then explicitly unpause for the authorized verification. Existing

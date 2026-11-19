@@ -786,6 +786,14 @@ $cgBlock
         $script:AppPid = $prevAppPid
     }
 
+    # 8c. 中途失焦不重放：后台驱动外窗前台不补点、拖拽按住期间失焦只松键一次（子进程，替换函数不污染本脚本）。
+    $focusOut = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test-focus-interrupt.ps1'))
+    $focusExit = $LASTEXITCODE
+    foreach ($line in $focusOut) {
+        if ("$line" -match '^(PASS|FAIL) (\S+)(?: \((.*)\))?$') { Check "focus-interrupt-$($Matches[2])" ($Matches[1] -eq 'PASS') $Matches[3] }
+    }
+    Check 'focus-interrupt-suite-exit' ($focusExit -eq 0 -and @($focusOut | Where-Object { "$_" -match '^(PASS|FAIL) ' }).Count -ge 6) "exit=$focusExit"
+
     $fgRepo = Join-Path $tmp 'repo-fg'
     $fgSmoke = Join-Path $fgRepo 'tools\smoke'
     $evFg = Join-Path $tmp 'ev-fg'

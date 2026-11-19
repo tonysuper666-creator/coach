@@ -1038,6 +1038,9 @@ function Click-At(
     }
 }
 # A drag is one action: release the button even if foreground is interrupted.
+# Focus lost before the press is retried like any other action. Focus lost while
+# the button is held stops the remaining moves, releases once and fails the step
+# without replaying the gesture (the target may already have seen part of it).
 function Drag-Between([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
     if (Has-BackgroundDriver) { Invoke-BackgroundAction "/drag?x1=$x1&y1=$y1&x2=$x2&y2=$y2"; return }
     Invoke-ForegroundStep -InjectsInput -Action {
@@ -1045,13 +1048,27 @@ function Drag-Between([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
         [WD]::SetCursorPos($r.L + $x1, $r.T + $y1) | Out-Null
         Assert-OurForeground
         [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
+        $interrupted = $null
         try {
-            Start-Sleep -Milliseconds 120
-            [WD]::SetCursorPos($r.L + [int](($x1 + $x2) / 2), $r.T + [int](($y1 + $y2) / 2)) | Out-Null
-            Start-Sleep -Milliseconds 80
-            [WD]::SetCursorPos($r.L + $x2, $r.T + $y2) | Out-Null
-            Start-Sleep -Milliseconds 120
+            $legs = @(
+                @{ X = $r.L + [int](($x1 + $x2) / 2); Y = $r.T + [int](($y1 + $y2) / 2); Wait = 120 },
+                @{ X = $r.L + $x2; Y = $r.T + $y2; Wait = 80 }
+            )
+            foreach ($leg in $legs) {
+                Start-Sleep -Milliseconds $leg.Wait
+                try { Assert-OurForeground } catch { $interrupted = $_.Exception; break }
+                [WD]::SetCursorPos($leg.X, $leg.Y) | Out-Null
+            }
+            if (-not $interrupted) { Start-Sleep -Milliseconds 120 }
         } finally { [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero) }
+        if ($interrupted) {
+            $owner = if ($interrupted.Data -and $interrupted.Data.Contains('ForegroundOwner')) { $interrupted.Data['ForegroundOwner'] } else { $null }
+            # Not WIN_DRIVE_FOCUS_LOST, so Invoke-ForegroundStep does not replay the drag.
+            $why = "WIN_DRIVE_DRAG_INTERRUPTED: focus lost while the button was held; drag released once, not replayed ($($interrupted.Message))"
+            $err = Resolve-ForegroundRetryTimeout -LastFocusLoss $why -ForegroundOwner $owner
+            if ($err.Message -like 'WIN_DRIVE_FOREGROUND_CONTENTION*') { throw $err }
+            throw $why
+        }
     }
 }
 function Send-Keys([string]$keys) {

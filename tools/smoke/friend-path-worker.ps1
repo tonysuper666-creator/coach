@@ -589,11 +589,18 @@ try {
                 if (-not $r) { $r = & $waitRangeFade "late-$tag" }
             }
             Click-At $ret.X $ret.Y
-            $fgAfterClick = Get-ForegroundOwner
-            $sawFocusLoss = -not $fgAfterClick.IsOwnCoach
+            # Only the foreground driver can lose focus mid-click. The background driver never owns
+            # the foreground, so a foreign foreground is not evidence there: wait, never re-click.
+            $sawFocusLoss = $false
+            if (-not (Has-BackgroundDriver)) {
+                $fgAfterClick = Get-ForegroundOwner
+                $sawFocusLoss = -not $fgAfterClick.IsOwnCoach
+            }
             Start-Sleep -Milliseconds 800
-            $fgSettled = Get-ForegroundOwner
-            if (-not $fgSettled.IsOwnCoach) { $sawFocusLoss = $true }
+            if (-not (Has-BackgroundDriver)) {
+                $fgSettled = Get-ForegroundOwner
+                if (-not $fgSettled.IsOwnCoach) { $sawFocusLoss = $true }
+            }
             $linesNow = Shot 6 "back-$tag"
             $backFound = [bool](Find-Text $linesNow '本节原文')
             $retNow = if (-not $backFound) { Find-Text $linesNow '返回学习' } else { $null }

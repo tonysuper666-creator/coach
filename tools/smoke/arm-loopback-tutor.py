@@ -1,10 +1,12 @@
 """Fixed replies for the installed ARM UI smoke, limited to the repository PDF."""
 import hashlib
 import json
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
 import secrets
+import sqlite3
 import sys
 
 
@@ -44,10 +46,17 @@ class Tutor(BaseHTTPRequestHandler):
             else:
                 raise ValueError("unexpected question")
             block_id = chosen["id"]
-            page = int(self.server.block.fullmatch(block_id).group(1))
-            source = {"docId": block_id, "anchor": "S1", "pdfPage": page}
+            page, offset = map(int, self.server.block.fullmatch(block_id).groups())
+            with closing(sqlite3.connect(self.server.database, uri=True)) as db:
+                row = db.execute("SELECT text FROM pages WHERE book=? AND page=? AND ocr=1",
+                                 (self.server.digest, page)).fetchone()
+            if not row or not row[0].startswith(chosen["text"], offset):
+                raise ValueError("source differs from imported page")
+            paragraph = 1 + len(re.findall(r"\r?\n[ \t]*\r?\n", row[0][:offset]))
+            source = {"docId": block_id, "anchor": "S1", "pdfPage": page,
+                      "label": f"第 {page} 页 · 第 {paragraph} 段"}
             body = json.dumps({"text": text + "【S1】", "sources": [source]}, ensure_ascii=False).encode()
-        except (KeyError, ValueError, TypeError, StopIteration):
+        except (KeyError, ValueError, TypeError, StopIteration, sqlite3.Error):
             self.send_error(400)
             return
         with self.server.events.open("a", encoding="utf-8") as log:
@@ -60,10 +69,12 @@ class Tutor(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    private, fixture, events = map(Path, sys.argv[1:])
+    private, fixture, events, database = map(Path, sys.argv[1:])
     with ThreadingHTTPServer(("127.0.0.1", 0), Tutor) as server:
         digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
-        server.block = re.compile(digest + r":p([1-3]):[0-9]+")
+        server.digest = digest
+        server.database = database.resolve().as_uri() + "?mode=ro"
+        server.block = re.compile(digest + r":p([1-3]):([0-9]+)")
         server.token = secrets.token_hex(24)
         server.events = events
         (private / "token").write_text(server.token, encoding="ascii")

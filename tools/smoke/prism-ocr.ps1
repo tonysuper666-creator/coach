@@ -111,7 +111,8 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
             $tutorPrivate = Join-Path $env:RUNNER_TEMP ('coach-tutor-' + [Guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory $tutorPrivate | Out-Null
             $parameters = @((Join-Path $PSScriptRoot 'arm-loopback-tutor.py'), $tutorPrivate,
-                $Fixture, (Join-Path $OutDir 'tutor-events.jsonl')) | ForEach-Object { '"' + $_ + '"' }
+                $Fixture, (Join-Path $OutDir 'tutor-events.jsonl'), (Join-Path $env:COACH_LIBRARY_DIR 'library.sqlite')) |
+                ForEach-Object { '"' + $_ + '"' }
             $tutor = Start-Process (Get-Command python.exe).Source -ArgumentList $parameters -WindowStyle Hidden -PassThru
             $portFile = Join-Path $tutorPrivate 'port'
             $limit = (Get-Date).AddSeconds(15)

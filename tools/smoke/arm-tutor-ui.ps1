@@ -52,7 +52,8 @@ function Test-BlockAndCitation {
     # RC2 places these controls below each paragraph, the native candidate puts them on the right.
     Select-TutorLabel '04-explain-action' @('讲解这段','井解这上段') -2 100 150
     Click-CapturedControl 'explain-consent.png' '04-consent.png'
-    $null = Find-TutorLabel '04-block' @('Blockexplanation','explanation') -2
+    Scroll-At 584 490 25
+    $null = Find-TutorLabel '04-block' @('Block','explanation','先独立回答') -2
     Select-TutorLabel '07-citation' @('出处1','出处') -2
     $null = Find-TutorLabel '07-original' @('关闭')
     Send-Keys '{ESC}'
@@ -83,9 +84,15 @@ function Test-WholeLesson {
     Open-TutorShelf '05-shelf'
     Click-CapturedControl 'shelf-guided.png' '05-path.png'
     Click-CapturedControl 'guided-start.png' '05-open.png'
-    $null = Find-TutorLabel '05-lesson' @('Lessonoverview','overview') -4
+    $null = Find-TutorLabel '05-lesson' @('Lessonover','先阅读原文','再用回忆检查理解') -3
     Select-TutorLabel '05-lesson-source' @('出处') -3
     $null = Find-TutorLabel '05-original' @('返回学习')
+    $view = @(Read-TutorFrame '05-original')
+    $toggle = Find-Text $view '看原页'
+    if ($toggle) { Click-At $toggle.X $toggle.Y }
+    $null = Find-TutorLabel '05-pdf-page' @('看文字')
+    # The first page has the Memory heading. Only the physical PDF view has the 1 / 3 counter.
+    $null = Find-TutorLabel '05-pdf-page' @('1/3','1／3','Memory')
     Select-TutorLabel '05-return' @('返回学习')
 }
 
@@ -97,7 +104,8 @@ function Test-Practice {
     $null = Find-TutorLabel '06-selected' @('你选择','你选了') -2
     $null = Find-TutorLabel '06-feedback' @('Practicefeedback','feedback') -3
     $null = Find-TutorLabel '06-feedback-source' @('出处') -2
-    $null = Find-TutorLabel '06-summary' @('这次练习中','题目和作答') -3
+    $summary = Find-TutorLabel '06-summary' @('这一节','小结','题目和作答') -3
+    $null = Find-TutorLabel '06-summary' @('Recallbefore','beforechecking') 0 100 ($summary.Y - 45)
 }
 
 function Test-InstalledTutor {

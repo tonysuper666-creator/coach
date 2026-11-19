@@ -57,7 +57,13 @@ public static class ArmSmokeDesktop {
         Child child;
         if (!CreateProcess(exe, command, IntPtr.Zero, IntPtr.Zero, false, 0x08000000, IntPtr.Zero,
                            Environment.CurrentDirectory, ref startup, out child)) throw Error("Launch on test desktop");
-        try { return Process.GetProcessById(child.pid); }
+        try {
+            var process = Process.GetProcessById(child.pid);
+            // Retain a query handle before the child exits. WaitForExit alone
+            // opens a temporary wait handle on Windows PowerShell's .NET runtime.
+            var handle = process.Handle;
+            return process;
+        }
         finally { CloseHandle(child.thread); CloseHandle(child.process); }
     }
     public static int Run(string exe, string args, string desktop) {

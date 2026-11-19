@@ -86,30 +86,7 @@ function Submit-ScanFile([string]$title) {
     }
     Save-OwnWindow 'file-picker.png' $dialog
     Write-Output "Installed file picker opened for $([IO.Path]::GetFileName($Fixture))"
-    $element = [System.Windows.Automation.AutomationElement]::FromHandle($dialog)
-    $scope = [System.Windows.Automation.TreeScope]::Descendants
-    $idProp = [System.Windows.Automation.AutomationElement]::AutomationIdProperty
-    $editType = [System.Windows.Automation.PropertyCondition]::new(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
-    # Windows exposes the editable filename inside the cmb13 (1148) combo.
-    $edit = $null
-    foreach ($controlId in @('FileNameControlHost','1148')) {
-        $combo = $element.FindFirst($scope, [System.Windows.Automation.PropertyCondition]::new($idProp, $controlId))
-        if ($combo) {
-            $edit = if ($combo.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit) { $combo } else { $combo.FindFirst($scope, $editType) }
-            if ($edit) { break }
-        }
-    }
-    if (-not $edit) {
-        $edit = $element.FindFirst($scope, [System.Windows.Automation.AndCondition]::new(
-            $editType, [System.Windows.Automation.PropertyCondition]::new($idProp, '1152')))
-    }
-    $open = $element.FindFirst($scope, [System.Windows.Automation.PropertyCondition]::new($idProp, '1'))
-    if (-not $edit -or -not $open) { throw 'File name or Open control missing from the owned file picker' }
-    $value = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-    $value.SetValue($Fixture)
-    if ($value.Current.Value -ne $Fixture) { throw 'File picker did not accept the fixture path' }
-    $open.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    if (-not (Choose-File $title $Fixture)) { throw $script:ChooseFileWhy }
 }
 function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
     New-Item -ItemType Directory -Force $OutDir | Out-Null

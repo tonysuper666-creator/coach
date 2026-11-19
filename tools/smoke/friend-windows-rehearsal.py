@@ -41,7 +41,6 @@ def install_provider_fixture():
     import httpx
     import subscription_bridge as bridge
     from api_route import ApiRouter
-    from api_budget import CreditLedger
 
     def provider(request):
         require(request.url.host == "api.anthropic.com")
@@ -55,8 +54,7 @@ def install_provider_fixture():
                   {"type": "message_stop"}]
         return httpx.Response(200, content="".join("data: " + json.dumps(e) + "\n\n" for e in events).encode())
 
-    bridge.API_ROUTER = ApiRouter(ledger=CreditLedger(Path(os.environ["COACH_API_STATE_DIR"])),
-                                  client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(provider)),
+    bridge.API_ROUTER = ApiRouter(client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(provider)),
                                   keys={"anthropic": "offline-fixture-only"})
 
     async def forbidden(*args, **kwargs):
@@ -110,6 +108,12 @@ def main():
         month = datetime.now(timezone.utc).strftime("%Y-%m")
         cycle_id = "anthropic:" + month
         ledger_file = root / "state/api-credit-ledger.json"
+        now = int(time.time())
+        (ledger_file.parent / "grant-allocation-anthropic.json").write_text(json.dumps({
+            "version": 1, "provider": "anthropic", "grant_microusd": 2_000_000,
+            "start_utc": now - 1, "end_utc": now + 86400, "other_writers_microusd": 0,
+            "ledgers": [{"host": socket.gethostname(), "state": str(ledger_file.parent),
+                         "limit_microusd": 1_000_000, "prior_settled_microusd": 0}]}))
         ledger_file.write_text(json.dumps({"version": 1,
             "cycles": {cycle_id: {"spent": 17, "limit": 1_000_000, "reserved": {"owner-pending": 3}}},
             "months": {month: {"anthropic": {"spent_microusd": 17, "reserved_microusd": 3, "calls": 1}}}}))

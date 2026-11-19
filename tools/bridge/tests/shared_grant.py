@@ -40,7 +40,7 @@ class SharedGrantTests(unittest.TestCase):
         atomic_json(state / "grant-allocation-anthropic.json", self.plan)
 
     def ledger(self, site):
-        return CreditLedger(self.states[site], lambda: self.now, shared_grant=True)
+        return CreditLedger(self.states[site], lambda: self.now)
 
     def test_two_sites_compete_for_last_micros_and_one_receiver_deduplicates(self):
         barrier = threading.Barrier(4)
@@ -134,6 +134,17 @@ class SharedGrantTests(unittest.TestCase):
         with self.assertRaisesRegex(Denied, "95_percent"):
             self.ledger(0).reserve("anthropic", KEY, 1)
 
+    def test_adjusted_legacy_ceiling_survives_mid_grant_calendar_rollover(self):
+        self.plan["ledgers"][0]["limit_microusd"] -= 210_000
+        self.plan["ledgers"][1]["limit_microusd"] += 210_000
+        self.install(self.states[1])
+        data = self.ledger(1).read()
+        data["cycles"]["anthropic:2026-11"] = {"spent": 149_790_000, "limit": 149_790_000, "reserved": {}}
+        self.ledger(1).save(data)
+        self.now += 120
+        with self.assertRaisesRegex(Denied, "95_percent"):
+            self.ledger(1).reserve("anthropic", KEY, 1)
+
     def test_wrong_identity_overallocated_reissued_and_missing_ledger(self):
         state = self.states[0]
         self.plan["other_writers_microusd"] += 1
@@ -149,7 +160,7 @@ class SharedGrantTests(unittest.TestCase):
             self.ledger(0).reserve("anthropic", KEY, 1)
         self.install(self.root)
         with self.assertRaisesRegex(Denied, "allocation_unavailable"):
-            CreditLedger(self.root, lambda: self.now, shared_grant=True).reserve("anthropic", KEY, 1)
+            CreditLedger(self.root, lambda: self.now).reserve("anthropic", KEY, 1)
         (self.states[1] / "api-credit-ledger.json").unlink()
         with self.assertRaisesRegex(Denied, "allocation_unavailable"):
             self.ledger(1).reserve("anthropic", KEY, 1)

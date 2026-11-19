@@ -40,11 +40,9 @@ read Keychain. Directly launching the Python module does not read Keychain.
 
 ## Owner-authorized API access
 
-On 2026-11-15 the owner waived the account-evidence prerequisite and authorized
-using the existing keys under Coach's local monthly caps. No private admission
-file or account attestation is required. A configured key can use its provider's
-API subject to the shared grant allocation below. A missing key still uses the
-subscription bridge.
+The owner authorized using the existing keys for Coach. Each writer now needs
+its share of the provider grant before forwarding a request. A missing key
+still uses the subscription bridge.
 
 The ledger measures Coach consumption in UTC calendar months. It does not measure
 other applications in the shared organization or establish the provider's grant

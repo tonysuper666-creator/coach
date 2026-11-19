@@ -58,10 +58,11 @@ function Click-CapturedUpload {
             try { $point = [InstalledShelf]::FindUpload($frame, $reference) }
             finally { $frame.Dispose() }
             if (-not $point.IsEmpty) {
-                $rect = New-Object WD+RECT
-                if (-not [WD]::GetWindowRect($script:Win, [ref]$rect)) { throw 'Upload window disappeared' }
-                $screen = [Drawing.Point]::new($rect.L + $point.X, $rect.T + $point.Y)
-                [InstalledShelf]::ClickUpload($script:Win, $script:AppPid, $screen)
+                $root = [System.Windows.Automation.AutomationElement]::FromHandle($script:Win)
+                if ($root.Current.ProcessId -ne $script:AppPid) { throw 'Upload window owner changed' }
+                Write-Output "Matched upload at ($($point.X),$($point.Y)). Foreground: $(Get-ForegroundSummary)"
+                try { $root.SetFocus() } catch { Write-Output "UI Automation focus: $($_.Exception.Message)" }
+                Click-At $point.X $point.Y
                 return
             }
             Start-Sleep -Milliseconds 400
@@ -77,7 +78,10 @@ function Submit-ScanFile([string]$title) {
         if ($dialog -ne [IntPtr]::Zero) { break }
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)
-    if ($dialog -eq [IntPtr]::Zero) { throw 'Click did not open the installed app file picker' }
+    if ($dialog -eq [IntPtr]::Zero) {
+        List-AppWindows | Write-Output
+        throw 'Click did not open the installed app file picker'
+    }
     $element = [System.Windows.Automation.AutomationElement]::FromHandle($dialog)
     $scope = [System.Windows.Automation.TreeScope]::Descendants
     $idProp = [System.Windows.Automation.AutomationElement]::AutomationIdProperty
@@ -128,7 +132,6 @@ try {
     $upload = -join ([char[]](0x4e0a,0x4f20,0x6559,0x6750))
     $invoked = $false
     try {
-        Add-Type -AssemblyName UIAutomationClient
         $root = [System.Windows.Automation.AutomationElement]::FromHandle($script:Win)
         $condition = New-Object System.Windows.Automation.PropertyCondition ([System.Windows.Automation.AutomationElement]::NameProperty), $upload
         $button = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
@@ -150,7 +153,7 @@ try {
         if ($LASTEXITCODE -eq 0) { $recognized = $true; break }
     } while ((Get-Date) -lt $deadline)
     if (-not $recognized) { throw 'No expected OCR text was saved from the imported fixture' }
-    Write-Output 'PRISM_SCAN_IMPORT_PASS'
+    Write-Output 'INSTALLED_SCAN_IMPORT_PASS'
     Save-OwnWindow 'after-import-printwindow.png'
 } finally {
     foreach ($id in $own) {

@@ -1,6 +1,5 @@
 using System;
 using System.Drawing;
-using System.Runtime.InteropServices;
 
 // Fallback for the hosted ARM desktop, where Compose is sometimes absent from UI Automation.
 public static class InstalledShelf {
@@ -29,30 +28,4 @@ public static class InstalledShelf {
         return true;
     }
 
-    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out int pid);
-    [DllImport("user32.dll")] private static extern bool ScreenToClient(IntPtr window, ref Point p);
-    [DllImport("user32.dll")] private static extern IntPtr ChildWindowFromPointEx(IntPtr parent, Point p, uint flags);
-    [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, uint msg, IntPtr key, IntPtr position);
-
-    public static void ClickUpload(IntPtr frame, int pid, Point screen) {
-        // Walk the owned AWT children even when an unrelated window covers the frame.
-        // Each posted mouse event is addressed to the selected component. No global mouse input.
-        IntPtr target = frame;
-        Point local;
-        while (true) {
-            int owner;
-            GetWindowThreadProcessId(target, out owner);
-            if (owner != pid) throw new InvalidOperationException("Upload window owner changed");
-            local = screen;
-            if (!ScreenToClient(target, ref local)) throw new InvalidOperationException("Cannot map button position");
-            IntPtr child = ChildWindowFromPointEx(target, local, 7); // skip invisible, disabled, transparent
-            if (child == IntPtr.Zero || child == target) break;
-            target = child;
-        }
-        IntPtr position = (IntPtr)((local.Y << 16) | (local.X & 0xffff));
-        if (!PostMessage(target, 0x0200, IntPtr.Zero, position) ||
-            !PostMessage(target, 0x0201, (IntPtr)1, position) ||
-            !PostMessage(target, 0x0202, IntPtr.Zero, position))
-            throw new InvalidOperationException("Could not click owned upload button");
-    }
 }

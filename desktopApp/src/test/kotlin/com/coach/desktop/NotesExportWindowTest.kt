@@ -33,11 +33,11 @@ import org.junit.Assume.assumeTrue
  *
  * 只断言「按下去以后产品里的值有没有变」：空格翻的是 `includePdf`，回车开的是 `expanded`，Esc 收起但不动选择。
  * 焦点落在哪一格不用另找探针——别的控件都不会改这几个值，值变了就说明键盘真的到了那一格。
- * 截图落在 `build/screens/ton1731/native/`，留焦点环和展开菜单的样子。
+ * 截图落在 `build/screens/ton1731/native/`，只取窗口内容区（或独立弹层）自身边界，留焦点环和展开菜单的样子。
  *
- * 菜单行只记录、不断言：Material3 1.12-alpha03 的菜单在 KeyDown 阶段就吃掉上下键和回车，两下 ↓ 之后 `week`
- * 仍是 1，回车关掉菜单并把 `week` 推到 2。main 基线（`0f617f25`）上逐格同值，本卡要求「下拉键盘行为不变」，
- * 所以没动它，只把每一步的 `week`/`expanded` 原样打到 stdout，和基线的数字并排看。
+ * 菜单分两次展开：第一次只按 Esc，断言收起且仍是第 1 周；第二次按 ↓ ↓ 回车，断言收起并选中第 2 周。
+ * 「↓↓ 回车得第 2 周」是 Material3 1.12-alpha03 菜单的现状（KeyDown 阶段吃掉上下键，焦点不跟着走），
+ * main 基线 `0f617f25` 上浅深实测同值；本卡要求下拉键盘行为不变，所以把现状钉住，改了会在这里变红。
  */
 class NotesExportWindowTest {
     @Test fun keyboardWalkthroughTogglesCheckboxAndDropdown() {
@@ -72,14 +72,17 @@ class NotesExportWindowTest {
             try {
                 robot.waitForIdle(); robot.delay(1000)
                 val frame = AtomicReference<Rectangle>()
-                EventQueue.invokeAndWait { frame.set(window.bounds) }
+                // Windows 的 window.bounds 含两侧和底部看不见的缩放边框，会带进桌面；只取 Coach 自己画的内容区。
+                EventQueue.invokeAndWait {
+                    val pane = window.contentPane
+                    frame.set(Rectangle(pane.locationOnScreen, pane.size))
+                }
                 val mode = if (dark) "dark" else "light"
                 val shots = mutableMapOf<String, BufferedImage>()
-                // 只拍 Coach 窗口自己（四周留 8px 让焦点环完整），窗口以外的桌面不进图。
+                // 只拍 Coach 窗口内容区，窗口以外的桌面不进图（焦点环和菜单都画在窗口里）。
                 fun shot(name: String) {
                     robot.waitForIdle(); robot.delay(250)
-                    val f = frame.get()
-                    val image = robot.createScreenCapture(Rectangle(f.x - 8, f.y - 8, f.width + 16, f.height + 16))
+                    val image = robot.createScreenCapture(Rectangle(frame.get()))
                     shots[name] = image
                     ImageIO.write(image, "png", File(out, "$mode-$name.png"))
                 }
@@ -93,8 +96,7 @@ class NotesExportWindowTest {
                         println("TON-1731 native $mode menu renders inside the window; $name skipped")
                         return
                     }
-                    val b = popup.bounds
-                    val image = robot.createScreenCapture(Rectangle(b.x - 4, b.y - 4, b.width + 8, b.height + 8))
+                    val image = robot.createScreenCapture(Rectangle(popup.bounds))
                     shots[name] = image
                     ImageIO.write(image, "png", File(out, "$mode-$name.png"))
                 }
@@ -132,26 +134,26 @@ class NotesExportWindowTest {
                     // 往回一格就是下拉：回车展开菜单（菜单自己把焦点放到第 1 周）。
                     key(KeyEvent.VK_TAB, shift = true)
                     shot("dropdown-focused")
+                    assertEquals(1, state.week)
                     key(KeyEvent.VK_ENTER)
                     assertTrue(state.expanded, "Enter on the focused 周次 button must open the menu")
                     shot("menu-open"); menuShot("menu-only")
 
-                    // 方向键实测：按两下 ↓ 再回车，把每一格之后的值原样打出来。
-                    // Material3 1.12-alpha03 的菜单在 KeyDown 阶段就把 ↓ 和回车吃掉，焦点不跟着走；
-                    // 这一段的数字要和 main 基线并排看（见交付评论），所以只记录、不假设它一定选中什么。
-                    val weekBefore = state.week
-                    key(KeyEvent.VK_DOWN); val afterDown1 = state.week
-                    key(KeyEvent.VK_DOWN); val afterDown2 = state.week
-                    key(KeyEvent.VK_ENTER); val afterEnter = state.week
-                    val stillOpen = state.expanded
-                    println(
-                        "TON-1731 native $mode menu keys: start=$weekBefore ↓=$afterDown1 ↓=$afterDown2 Enter=$afterEnter " +
-                            "expanded=$stillOpen focusedWeek=$weekBefore",
-                    )
-                    if (stillOpen) key(KeyEvent.VK_ESCAPE)
-                    assertFalse(state.expanded, "Esc must close the menu")
-                    assertEquals(afterEnter, state.week, "Esc must not change the selection")
-                    assertTrue(state.week in 1..3, "the selection must stay one of the weeks, was ${state.week}")
+                    // 第一次展开：只按 Esc。菜单必须是开着时按下的，收起后仍是第 1 周。
+                    key(KeyEvent.VK_ESCAPE)
+                    assertFalse(state.expanded, "Esc must close the open menu")
+                    assertEquals(1, state.week, "Esc must keep week 1")
+                }
+                foreground {
+                    // 第二次展开：Esc 后焦点回到下拉按钮，回车再开，↓ ↓ 回车确认。
+                    key(KeyEvent.VK_ENTER)
+                    assertTrue(state.expanded, "Enter must reopen the menu after Esc")
+                    key(KeyEvent.VK_DOWN)
+                    key(KeyEvent.VK_DOWN)
+                    key(KeyEvent.VK_ENTER)
+                    println("TON-1731 native $mode menu keys: ↓↓Enter -> week=${state.week} expanded=${state.expanded}")
+                    assertFalse(state.expanded, "Enter on a menu row must close the menu")
+                    assertEquals(2, state.week, "↓ ↓ Enter from week 1 selects week 2 (main baseline behaviour)")
                 }
                 println("TON-1731 native $mode keyboard walkthrough passed: week=${state.week} includePdf=${state.includePdf} shots=${shots.keys}")
             } finally {

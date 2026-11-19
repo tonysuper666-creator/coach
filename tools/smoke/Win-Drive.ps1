@@ -22,6 +22,10 @@ public class WD {
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int command);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT pt);
+  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint gaFlags);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
   [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int val, int size);
   public static bool IsCloaked(IntPtr h) { int v = 0; return DwmGetWindowAttribute(h, 14, out v, 4) == 0 && v != 0; }
@@ -39,6 +43,7 @@ public class WD {
     IntPtr h, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeoutMs, out UIntPtr result);
   public static string LastActivationFailure { get; private set; }
   public static bool LastActivationAccepted { get; private set; }
+  public static bool LastActivationInjectedInput { get; private set; }
   public static IntPtr ForegroundAtConfirmation { get; private set; }
   private static uint[] ownedForegroundPids = new uint[0];
   public static void SetOwnedForegroundPids(uint[] pids) { ownedForegroundPids = pids ?? new uint[0]; }
@@ -59,6 +64,7 @@ public class WD {
     return fg;
   }
   public static bool Activate(IntPtr h) {
+    LastActivationInjectedInput = false;
     if (IsIconic(h)) ShowWindowAsync(h, 9); // SW_RESTORE
     LastActivationAccepted = SetForegroundWindow(h);
     UIntPtr ignored;
@@ -93,6 +99,65 @@ public class WD {
         }
       }
     }
+    if (ForegroundAtConfirmation != h && IsWindowEnabled(h)) {
+      // Windows 11 with ForegroundLockTimeout set rejects SetForegroundWindow from
+      // headless background tasks even when the desktop is idle behind an unrelated
+      // window (e.g. Edge). Raise only our own window transiently and click its
+      // own caption only if WindowFromPoint confirms this HWND owns that pixel;
+      // never message, attach to, move, or minimize any unrelated window.
+      uint targetPid = 0;
+      GetWindowThreadProcessId(h, out targetPid);
+      RECT r;
+      if (targetPid != 0 && GetWindowRect(h, out r)) {
+        int w = r.R - r.L;
+        int height = r.B - r.T;
+        if (w > 40 && height > 40) {
+          int offset = (w > 240) ? Math.Min(w / 3, w - 160) : (w / 2);
+          int leftMargin = (w > 120) ? 48 : 16;
+          int clickX = r.L + Math.Max(leftMargin, Math.Min(offset, w - 16));
+          int clickY = r.T + 18;
+          SetWindowPos(h, (IntPtr)(-1), 0, 0, 0, 0, 0x0043); // HWND_TOPMOST | NOMOVE | NOSIZE | SHOWWINDOW
+          try {
+            SendMessageTimeout(h, 0, UIntPtr.Zero, IntPtr.Zero, 0x23, 200, out ignored);
+            POINT pt; pt.X = clickX; pt.Y = clickY;
+            IntPtr under = WindowFromPoint(pt);
+            IntPtr rootUnder = (under != IntPtr.Zero) ? GetAncestor(under, 2) : IntPtr.Zero; // GA_ROOT
+            POINT actualPt = new POINT();
+            if (rootUnder == h && SetCursorPos(clickX, clickY) && GetCursorPos(out actualPt)) {
+              IntPtr actualUnder = WindowFromPoint(actualPt);
+              IntPtr actualRoot = (actualUnder != IntPtr.Zero) ? GetAncestor(actualUnder, 2) : IntPtr.Zero; // GA_ROOT
+              // Ask the target itself what the actual cursor point is (WM_NCHITTEST, screen
+              // coordinates). Click only on a draggable caption (HTCAPTION = 2); close/min/max
+              // buttons, borders, client area, a hung target or any other answer => zero input.
+              UIntPtr hit = UIntPtr.Zero;
+              bool onCaption = false;
+              if (actualUnder == h && actualRoot == h) {
+                IntPtr hitLParam = (IntPtr)((actualPt.Y << 16) | (actualPt.X & 0xFFFF));
+                onCaption = SendMessageTimeout(h, 0x84, UIntPtr.Zero, hitLParam, 0x23, 200, out hit) != IntPtr.Zero
+                  && hit.ToUInt64() == 2UL;
+              }
+              if (onCaption) {
+                LastActivationInjectedInput = true;
+                mouse_event(2, 0, 0, 0, IntPtr.Zero);
+                System.Threading.Thread.Sleep(30);
+                mouse_event(4, 0, 0, 0, IntPtr.Zero);
+                responsive = SendMessageTimeout(h, 0, UIntPtr.Zero, IntPtr.Zero, 0x23, 500, out ignored) != IntPtr.Zero;
+                ForegroundAtConfirmation = ReadForegroundSettled(true);
+                if (ForegroundAtConfirmation == h) {
+                  LastActivationAccepted = true;
+                }
+              }
+            }
+          } finally {
+            SetWindowPos(h, (IntPtr)(-2), 0, 0, 0, 0, 0x0013); // HWND_NOTOPMOST | NOMOVE | NOSIZE | NOACTIVATE
+          }
+          if (!responsive) {
+            LastActivationFailure = "WM_NULL confirmation failed";
+            return false;
+          }
+        }
+      }
+    }
     if (ForegroundAtConfirmation != h) {
       LastActivationFailure = LastActivationAccepted ? "activation accepted but target was not foreground" : "activation declined by Windows";
       return false;
@@ -101,6 +166,7 @@ public class WD {
     return true;
   }
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT pt);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, IntPtr e);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
 }
@@ -768,6 +834,9 @@ function Invoke-ForegroundStep(
                     $accepted = if ($probeRes.PSObject.Properties.Name -contains 'Accepted') { [bool]$probeRes.Accepted } else { $false }
                 } else {
                     $ready = [WD]::Activate($Window)
+                    if ([WD]::LastActivationInjectedInput) {
+                        try { Record-DriverInputTimestamp } catch { }
+                    }
                     $observed = [WD]::ForegroundAtConfirmation
                     $activationFailure = [WD]::LastActivationFailure
                     $accepted = [WD]::LastActivationAccepted

@@ -34,6 +34,7 @@ import com.coach.client.RenderedMath
 import com.coach.domain.WeekPoint
 import com.coach.domain.weekPoints
 import com.coach.desktop.books.v7Alert
+import com.coach.desktop.books.v7Pine
 import com.coach.ui.CoachController
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.LocalV7Fonts

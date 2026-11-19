@@ -29,6 +29,16 @@ public class WD {
   public static string LastActivationFailure { get; private set; }
   public static bool LastActivationAccepted { get; private set; }
   public static IntPtr ForegroundAtConfirmation { get; private set; }
+  private static uint[] ownedForegroundPids = new uint[0];
+  public static void SetOwnedForegroundPids(uint[] pids) { ownedForegroundPids = pids ?? new uint[0]; }
+  private static bool IsOwnedForegroundPid(uint pid) {
+    if (pid == 0) return false;
+    uint[] list = ownedForegroundPids;
+    for (int i = 0; i < list.Length; i++) {
+      if (list[i] == pid) return true;
+    }
+    return false;
+  }
   private static IntPtr ReadForegroundSettled(bool accepted) {
     IntPtr fg = GetForegroundWindow();
     for (int i = 0; accepted && fg == IntPtr.Zero && i < 5; i++) {
@@ -50,12 +60,12 @@ public class WD {
       return false;
     }
     if (ForegroundAtConfirmation != h && ForegroundAtConfirmation != IntPtr.Zero) {
-      // Another responsive window (e.g. a parallel Coach or test frame) holds OS
-      // foreground. Probe it with SMTO_ABORTIFHUNG before attaching so a hung
-      // thread can never block us while we hold the foreground mutex.
-      if (SendMessageTimeout(ForegroundAtConfirmation, 0, UIntPtr.Zero, IntPtr.Zero, 0x02, 200, out ignored) != IntPtr.Zero) {
-        uint holderPid;
-        uint holderTid = GetWindowThreadProcessId(ForegroundAtConfirmation, out holderPid);
+      // Only probe/attach when foreground ownership is confirmed to belong to an
+      // owned Coach client window; never message or attach to unrelated windows.
+      uint holderPid;
+      uint holderTid = GetWindowThreadProcessId(ForegroundAtConfirmation, out holderPid);
+      if (IsOwnedForegroundPid(holderPid) &&
+          SendMessageTimeout(ForegroundAtConfirmation, 0, UIntPtr.Zero, IntPtr.Zero, 0x02, 200, out ignored) != IntPtr.Zero) {
         uint callerTid = GetCurrentThreadId();
         bool attached = holderTid != 0 && callerTid != holderTid && AttachThreadInput(callerTid, holderTid, true);
         try {
@@ -190,12 +200,14 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
             $held = $false
             $declined = $false
             $trace = $null
+            $ownedPids = [uint32[]]@(@(Get-ClientPids) + @($script:AppPid) | Where-Object { $_ -gt 0 } | Select-Object -Unique)
             try {
                 try { $held = $mutex.WaitOne(30000) } catch [Threading.AbandonedMutexException] { $held = $true }
                 if (-not $held) { throw 'WIN_DRIVE_TIMEOUT: waiting for one foreground action' }
                 $acquired = [DateTime]::UtcNow
                 $owner = 0; [WD]::GetWindowThreadProcessId($Window, [ref]$owner) | Out-Null
                 if (-not $script:AppPid -or $owner -ne $script:AppPid) { throw 'WIN_DRIVE_TARGET: window does not belong to this run' }
+                [WD]::SetOwnedForegroundPids($ownedPids)
                 $ready = [WD]::Activate($Window)
                 $observed = [WD]::ForegroundAtConfirmation
                 if ($script:ForegroundTracePath) {
@@ -220,6 +232,7 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
                 # Release first so the other driver can finish its action.
                 Write-Verbose "Foreground action retry $attempt/20"
             } finally {
+                [WD]::SetOwnedForegroundPids([uint32[]]@())
                 if ($held) { $mutex.ReleaseMutex() }
                 if ($trace) {
                     $trace.releasedUtc = [DateTime]::UtcNow.ToString('o')

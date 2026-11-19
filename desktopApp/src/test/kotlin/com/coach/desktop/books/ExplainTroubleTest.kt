@@ -312,6 +312,42 @@ class ExplainTroubleTest {
         }
     }
 
+    /**
+     * 放出了 Sable 登录的构建（TON-1760 显示模式）：答后讲解碰到 401，那一句要把登录也说上；
+     * 原文页的停用提示和表单里的登录按钮同样在，配对码仍可填。
+     */
+    @Test fun answerExplain401PointsToLoginWhenTheSableEntryIsShown() {
+        val (library, book, _) = sample()
+        val lesson = book.lessons.first()
+        val practice = assertNotNull(StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE))
+        FakeMac().use { mac ->
+            val settings = DesktopConnectionSettings(Files.createTempDirectory("explain-sable-401-"), { null }, mac = false,
+                property = { when (it) { "jpackage.app-path" -> "/synthetic/Coach.exe"; "coach.sableLogin" -> "true"; else -> null } })
+            assertTrue(runBlocking { BookExplainer(settings, library).pair(mac.url, "123456") })
+            val consent = ExplainConsent(library.directory).also { it.allow(book.id) }
+            val gate = answerExplainWith(BookExplainer(settings, library), consent)
+            val reply = mutableStateOf<BookLearningReply?>(null)
+            var onSourcePage by mutableStateOf(false)
+            runSkikoComposeUiTest(size = Size(1100f, 850f), density = Density(1f)) {
+                setContent {
+                    CoachTheme(darkTheme = false) {
+                        if (onSourcePage) BookExplainPanel(book, lesson.firstPage, consent, remember { BookExplainer(settings, library) })
+                        else LessonAnswerExplanation(book, lesson, practice, gate, reply, sources = {}, onOpenSourcePage = { onSourcePage = true })
+                    }
+                }
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("answer-explain-unpaired").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("answer-explain-unpaired-text").assertTextEquals(ExplainTrouble.REVOKED_LOGIN)
+                assertTrue(ExplainTrouble.REVOKED_LOGIN.contains("登录"))
+                onNodeWithTag("answer-explain-pair").performClick()
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("explain-revoked").assertTextContains("登录", substring = true)
+                onNodeWithText("用 Sable 账号登录").assertExists()
+                onNodeWithTag("explain-code").assertExists()
+            }
+            assertEquals(1, mac.explains.get())
+        }
+    }
+
     /** 本机回环上的假 Mac：配对第 n 次发第 n 份凭据；第一份讲解时回 401，之后的照常讲，引用发来的第一段。 */
     private class FakeMac : AutoCloseable {
         val pairs = AtomicInteger()

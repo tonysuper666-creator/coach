@@ -211,7 +211,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
             if (identity != paired) return ExplainResult.Refused("连接已更换，请重新选择这段后再试。")
             val trouble = if (revoked) ExplainTrouble.Revoked else ExplainTrouble.of(reply.statusCode, reply.code)
             when {
-                trouble == ExplainTrouble.Revoked -> { markRevoked(); ExplainResult.Refused(ExplainTrouble.REVOKED, trouble) }
+                trouble == ExplainTrouble.Revoked -> { markRevoked(); ExplainResult.Refused(ExplainTrouble.revoked(sableLogin), trouble) }
                 body == null -> ExplainResult.Refused(ExplainTrouble.message(trouble, reply.error), trouble)
                 else -> ExplainWire.parse(body, context)
             }

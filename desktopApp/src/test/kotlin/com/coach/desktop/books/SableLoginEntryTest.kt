@@ -101,6 +101,23 @@ class SableLoginEntryTest {
         assertTrue(DesktopConnectionSettings(home, { null }, mac = false, property = { if (it == "coach.sableLogin") " true " else null }).sableLoginShown())
     }
 
+    /** 默认收起只管 Windows：Mac 没传开关照旧显示，显式传 false 才收起。 */
+    @Test fun macKeepsTheSableEntryUnlessTheBuildTurnsItOff() {
+        val home = Files.createTempDirectory("sable-mac-flag-")
+        for ((value, shown) in listOf(null to true, "" to true, "true" to true, "false" to false)) {
+            val settings = DesktopConnectionSettings(home, { null }, mac = true, property = { if (it == "coach.sableLogin") value else null })
+            assertEquals(shown, settings.sableLoginShown(), "mac, coach.sableLogin=$value")
+        }
+        val (library, book) = sample()
+        val mac = DesktopConnectionSettings(Files.createTempDirectory("sable-mac-"), { null }, mac = true, property = { null })
+        runSkikoComposeUiTest(size = Size(1100f, 850f), density = Density(1f)) {
+            setContent { CoachTheme(darkTheme = false) { BookExplainPanel(book, book.lessons.first().firstPage, ExplainConsent(library.directory), BookExplainer(mac, library)) } }
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithText("用 Sable 账号登录").assertExists()
+            onNodeWithTag("explain-code").assertExists()
+        }
+    }
+
     @Test fun pairingGateFollowsTheSameBuildDecision() {
         for (shown in listOf(false, true)) {
             val settings = settings(Files.createTempDirectory("sable-gate-"), sableLogin = shown)

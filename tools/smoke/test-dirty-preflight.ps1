@@ -43,19 +43,72 @@ try { $null = Find-ForeignForegroundWindow } catch { $liveOk = $false; $liveNote
 Check 'live-win32-probe-runs' $liveOk $liveNote
 
 # 4. 受管 PID 在 finally 关掉并核对已退出（含 StartTime 防误判校验）
-$disposable = $null; $startTicks = 0L
-try {
-    $disposable = Start-Process powershell.exe -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 60"' -PassThru -WindowStyle Hidden
-    $startTicks = $disposable.StartTime.ToUniversalTime().Ticks
+# 收尾只走 Stop-TrackedPid：身份确认才停 1 次；已退出或 PID 被复用 0 次；启动时间读不到时 0 次并报 CLEANUP_UNVERIFIED。
+function Invoke-TrackedDisposable([scriptblock]$Launch, [scriptblock]$Body, [int]$WaitMs = 5000) {
+    $proc = $null; $ticks = 0L
+    try {
+        $proc = & $Launch
+        $ticks = Get-TrackedProcessStartTicks $proc
+        & $Body $proc $ticks
+    } finally {
+        if ($proc) { Stop-TrackedPid -ProcessId $proc.Id -StartTimeTicks $ticks -WaitMs $WaitMs }
+    }
+}
+Invoke-TrackedDisposable -Launch {
+    Start-Process powershell.exe -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 60"' -PassThru -WindowStyle Hidden
+} -Body {
+    param($disposable, $startTicks)
+    Check 'disposable-start-recorded' ($startTicks -gt 0L) "pid=$($disposable.Id)"
     Check 'disposable-alive-before-stop' (-not (Test-TrackedPidExited $disposable.Id $startTicks)) "pid=$($disposable.Id)"
     Check 'disposable-start-mismatch-ignored' (Test-TrackedPidExited $disposable.Id ($startTicks + 1)) "pid=$($disposable.Id)"
     Stop-TrackedPid -ProcessId $disposable.Id -StartTimeTicks $startTicks -WaitMs 5000
     Check 'disposable-exited-after-stop' (Test-TrackedPidExited $disposable.Id $startTicks) "pid=$($disposable.Id)"
-} finally {
-    if ($disposable -and $startTicks -gt 0L -and -not (Test-TrackedPidExited $disposable.Id $startTicks)) {
-        Stop-Process -Id $disposable.Id -Force -ErrorAction SilentlyContinue
-    }
 }
+
+# 4a. 整个异常退出路径（替身进程，不发真实停止）：正文里的停止和 finally 收尾合计的停止请求数
+$script:TeardownSpy = $null
+function New-SpyProc($startTime, [switch]$Unreadable) {
+    $p = [pscustomobject]@{ Id = 42425 }
+    if ($Unreadable) { $p | Add-Member ScriptProperty StartTime { throw 'Access is denied' } }
+    else { $p | Add-Member NoteProperty StartTime $startTime }
+    return $p
+}
+function Run-TeardownCase([string]$name, $launchProc, [scriptblock]$Body, [int]$expectStops, [string]$expectErr) {
+    $script:TeardownSpy = @{ proc = $launchProc; stops = 0; killed = $false }
+    function global:Get-Process([int]$Id, [string]$ErrorAction) {
+        if ($Id -eq 42425 -and -not $script:TeardownSpy.killed) { return $script:TeardownSpy.proc }
+        return $null
+    }
+    function global:Stop-Process([int]$Id, [switch]$Force, [string]$ErrorAction) {
+        $script:TeardownSpy.stops++
+        $script:TeardownSpy.killed = $true
+    }
+    $errMsg = ''
+    try {
+        Invoke-TrackedDisposable -Launch { $script:TeardownSpy.proc } -Body $Body -WaitMs 500
+    } catch {
+        $errMsg = $_.Exception.Message
+    } finally {
+        Remove-Item Function:\Get-Process -ErrorAction SilentlyContinue
+        Remove-Item Function:\Stop-Process -ErrorAction SilentlyContinue
+    }
+    $ok = ($script:TeardownSpy.stops -eq $expectStops) -and $(if ($expectErr) { $errMsg -like "$expectErr*" } else { -not $errMsg })
+    Check "teardown-$name" $ok "stops=$($script:TeardownSpy.stops)/$expectStops err=$errMsg"
+}
+$t0 = [datetime]::SpecifyKind([datetime]'2026-11-19T16:00:00', [DateTimeKind]::Utc)
+$helperStop = { param($p, $t) Stop-TrackedPid -ProcessId $p.Id -StartTimeTicks $t -WaitMs 500 }
+# 启动时就读不到：正文停止报错 → finally 再核对，仍 0 次停止，报 CLEANUP_UNVERIFIED
+Run-TeardownCase 'unreadable-at-launch' (New-SpyProc -Unreadable) $helperStop 0 'CLEANUP_UNVERIFIED:'
+# 记录到了，之后读不到（QA 替身场景）：正文和 finally 合计 0 次停止
+Run-TeardownCase 'unreadable-later' (New-SpyProc $t0) {
+    param($p, $t)
+    $script:TeardownSpy.proc = New-SpyProc -Unreadable
+    & $helperStop $p $t
+} 0 'CLEANUP_UNVERIFIED:'
+# 正文中途出错、身份可确认：finally 停 1 次，原错误照常抛出
+Run-TeardownCase 'body-throws-verified' (New-SpyProc $t0) { throw 'BODY_FAILED' } 1 'BODY_FAILED'
+# 正文已停、finally 不重复停
+Run-TeardownCase 'helper-stopped-verified' (New-SpyProc $t0) $helperStop 1 ''
 
 # 4b. 进程身份核对防误杀（替身验证：仅双方启动时间一致时停 1 次；不同或任一缺失均 0 次停止，缺失时间报 CLEANUP_UNVERIFIED）
 $script:SpyState = $null

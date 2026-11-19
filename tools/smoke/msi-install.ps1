@@ -95,6 +95,35 @@ function Open-StartMenu {
     [CoachWin]::keybd_event(0x5B, 0, 2, [IntPtr]::Zero)
 }
 
+# Select the running app through Explorer on the hosted ARM desktop. The shell
+# can activate its taskbar item while Windows declines a background driver's
+# SetForegroundWindow request. Save-Shot still checks the exact HWND and PID.
+function Select-InstalledTaskbarButton {
+    if ([WD]::GetForegroundWindow() -eq $script:Win) { return }
+    Add-Type -AssemblyName UIAutomationClient
+    $desktop = [System.Windows.Automation.AutomationElement]::RootElement
+    $class = [System.Windows.Automation.AutomationElement]::ClassNameProperty
+    $taskbar = $desktop.FindFirst([System.Windows.Automation.TreeScope]::Children,
+        [System.Windows.Automation.PropertyCondition]::new($class, 'Shell_TrayWnd'))
+    if (-not $taskbar) { throw 'Windows taskbar is unavailable on the input desktop' }
+    $buttons = $taskbar.FindAll([System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Button))
+    $items = @($buttons | Where-Object { $_.Current.Name -match '^LearningCoach(\b|$)' })
+    if ($items.Count -ne 1) {
+        $names = ($buttons | ForEach-Object { $_.Current.Name }) -join ', '
+        throw "Expected one running LearningCoach taskbar button, found $($items.Count). Taskbar buttons: $names"
+    }
+    $item = $items[0]
+    $item.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $deadline = (Get-Date).AddSeconds(5)
+    while ([WD]::GetForegroundWindow() -ne $script:Win -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    Note "Selected taskbar item '$($item.Current.Name)'; foreground: $(Get-ForegroundSummary)"
+}
+
 function Get-LearningCoachProducts {
     $paths = @('HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*')
     @(Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'LearningCoach' })
@@ -210,7 +239,15 @@ $dpi = try { [int][CoachWin]::GetDpiForWindow($hwnd) } catch { 0 }
 if ($dpi -gt 0) { "Dpi: $dpi ($([math]::Round(100 * $dpi / 96))%)" | Add-Content -Encoding utf8 (Join-Path $OutDir 'environment.txt') }
 
 Start-Sleep -Seconds 2
-try { Save-Shot (Join-Path $OutDir '01-window.png') } catch { Fail '截图' "整窗实拍失败：$($_.Exception.Message)" }
+$hostedArm = $env:GITHUB_ACTIONS -eq 'true' -and $env:RUNNER_ENVIRONMENT -eq 'github-hosted' -and $env:PROCESSOR_ARCHITECTURE -eq 'ARM64'
+try {
+    if ($hostedArm -and -not [WD]::Activate($hwnd)) { Select-InstalledTaskbarButton }
+    Save-Shot (Join-Path $OutDir '01-window.png')
+} catch {
+    $why = $_.Exception.Message
+    if ($hostedArm) { Save-Desktop (Join-Path $OutDir 'failed-desktop.png') }
+    Fail '截图' "整窗实拍失败：$why"
+}
 $r = Get-Rect
 # 桌面整屏 + 任务栏。裁剪按这次运行机的实际屏幕尺寸算，不写死 winbox 的 5120×2160 坐标。
 $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen

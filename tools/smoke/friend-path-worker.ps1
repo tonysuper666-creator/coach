@@ -59,7 +59,8 @@ function Get-AskReplyState($lines, [int]$page) {
     if ($body -match '^(再试一次|重新配对)$' -or
         $body -match '尚未接通|无法回答|不能回答|尚未核实|连不上|超时|暂时读不到回答|讲解服务暂时不可用|额度(?:已)?用完') { return 'refused' }
     if ($body -match '正在读这段问题') { return 'waiting' }
-    if ($body -match "^出处[·•.．:：]?第${page}页$") { return 'answered' }
+    # bookPassageLabel adds the paragraph number when it can resolve the source block.
+    if ($body -match "^出处[·•.．:：]?第${page}页(?:[·•.．:：]?第[1-9][0-9]*段)?$") { return 'answered' }
     return 'waiting'
 }
 function Await-Text([int]$n, [string]$tag, [string[]]$needles, [int]$sec) {

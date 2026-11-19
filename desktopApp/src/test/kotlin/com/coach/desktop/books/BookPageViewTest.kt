@@ -247,6 +247,36 @@ class BookPageViewTest {
         } finally { root.toFile().deleteRecursively() }
     }
 
+    /** TON-1724: 章内读到后面的子页，存下偏移；冷启用该偏移起步，回到同一句附近，且换排版宽度也一样。 */
+    @Test fun readSpotInsideAChapterSurvivesColdStartAndReflowWidth() {
+        val sentence = "The multiplication of two whole numbers is the repeated addition of one of them, and the order of the factors does not alter the product. "
+        val raw = "CHAPTER 1\n\n" + (1..200).joinToString("\n\n") { n -> "Paragraph $n. " + sentence.repeat(3) }
+        val book = Textbook("spot-book", "Elements of arithmetic", "epub", listOf(BookPage(1, raw)))
+        val root = Files.createTempDirectory("spot")
+        try {
+            val library = TextbookLibrary(root)
+            assertEquals(null, library.savedReadSpot(book.id))
+            val target = raw.indexOf("Paragraph 150.")
+            library.saveReadSpot(book.id, 1, target)
+            library.saveReadSpot(book.id, 1, target) // 重复保存是覆盖，不是堆叠
+            assertEquals(1 to target, TextbookLibrary(root).savedReadSpot(book.id))
+            for (width in listOf(800, 560)) runSkikoComposeUiTest(size = Size(900f, 1000f), density = Density(1f)) {
+                val state = BookPagingState(BookPageAnchor(1, target))
+                var spot: BookPageAnchor? = null
+                setContent { CoachTheme {
+                    Box(Modifier.width(width.dp).height(900.dp)) {
+                        BookPageView(book, state, emptyMap(), onTurn = { state.move(it) }, onSpot = { spot = it })
+                    }
+                } }
+                waitUntil(timeoutMillis = 60_000) { state.pages.isNotEmpty() && spot != null }
+                assertTrue(state.index > 0, "冷启不应回章首")
+                val shown = state.pages[state.index].sources.single { it.importPage == 1 }
+                assertTrue(target in shown.startUtf16 until shown.endUtf16, "起步页应包含存下的那句 @width=$width")
+                assertEquals(shown.startUtf16, spot!!.offsetUtf16)
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     /** TON-1724: 长英文教材首开，分页在后台做，主线程先显示「正在排版」而不是卡住。 */
     @Test fun longBookLaysOutOffTheMainThreadAndShowsPagesWhenReady() = runSkikoComposeUiTest(
         size = Size(900f, 1000f), density = Density(1f),

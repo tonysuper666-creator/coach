@@ -42,6 +42,7 @@ internal class TextbookLibrary(
             sql.execute("CREATE TABLE IF NOT EXISTS book_learning_paths(book TEXT PRIMARY KEY,path TEXT NOT NULL CHECK(path IN ('READ','READ_AND_LEARN','QUESTION_FIRST')))")
             sql.execute("CREATE TABLE IF NOT EXISTS book_ladders(book TEXT PRIMARY KEY,session TEXT NOT NULL)")
             sql.execute("CREATE TABLE IF NOT EXISTS book_reader_views(book TEXT PRIMARY KEY,text_view INTEGER NOT NULL)")
+            sql.execute("CREATE TABLE IF NOT EXISTS book_read_spots(book TEXT PRIMARY KEY,page INTEGER NOT NULL,offset_utf16 INTEGER NOT NULL)")
             sql.execute("CREATE TABLE IF NOT EXISTS book_pdf_modes(book TEXT PRIMARY KEY,scrolling INTEGER NOT NULL)")
             sql.execute("""CREATE TABLE IF NOT EXISTS book_highlights(
                 book TEXT NOT NULL,page INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,quote TEXT NOT NULL,
@@ -170,6 +171,23 @@ internal class TextbookLibrary(
         db.prepareStatement("INSERT OR REPLACE INTO book_reader_views(book,text_view) VALUES(?,?)").use { sql ->
             sql.setString(1, bookId)
             sql.setBoolean(2, textView)
+            sql.executeUpdate()
+        }
+    }
+
+    /** 文字版读到的位置：章（导入页）里的 UTF-16 偏移；章内翻到第二个重排子页后冷启据此回到同一句附近（TON-1724）。 */
+    fun savedReadSpot(bookId: String): Pair<Int, Int>? = database().use { db ->
+        db.prepareStatement("SELECT page,offset_utf16 FROM book_read_spots WHERE book=?").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { if (it.next()) it.getInt(1) to it.getInt(2) else null }
+        }
+    }
+
+    fun saveReadSpot(bookId: String, page: Int, offsetUtf16: Int) = database().use { db ->
+        db.prepareStatement("INSERT OR REPLACE INTO book_read_spots(book,page,offset_utf16) VALUES(?,?,?)").use { sql ->
+            sql.setString(1, bookId)
+            sql.setInt(2, page)
+            sql.setInt(3, offsetUtf16)
             sql.executeUpdate()
         }
     }

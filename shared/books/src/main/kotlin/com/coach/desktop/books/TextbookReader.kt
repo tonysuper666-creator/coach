@@ -111,7 +111,11 @@ internal fun TextbookReader(
     var textView by remember(book.id) {
         mutableStateOf(!hasOriginal || (library.savedTextView(book.id) ?: page.ocr))
     }
-    val paging = remember(book.id) { BookPagingState(BookPageAnchor(ui.page)) }
+    val paging = remember(book.id) {
+        // 章内翻到后面的重排子页再退出：同一章里回到存下的偏移，而不是章首（TON-1724）。
+        val spot = library.savedReadSpot(book.id)?.takeIf { it.first == ui.page }
+        BookPagingState(BookPageAnchor(ui.page, spot?.second ?: 0))
+    }
     val pdf = remember(library, book.id) { OriginalPdfReading(ui.page, !originalPdf || library.pdfScrollMode(book.id)) }
     val pdfLayers = remember(library, book.id) { OriginalPdfTextLayers(library, book) }
     val scroll = remember(book.id) { ScrollReadState(book.pages.size, ScrollReadPosition(book.pages.indexOf(page))) }
@@ -541,7 +545,8 @@ internal fun TextbookReader(
                         result
                     }
                     BookPageView(book, paging, ranges, turnLayout, libraryDirectory = library.directory,
-                        turnStyle = turnStyle, readMode = readMode, onOpenTableRow = openPassage, onPosition = { number ->
+                        turnStyle = turnStyle, readMode = readMode, onOpenTableRow = openPassage,
+                        onSpot = { library.saveReadSpot(book.id, it.importPage, it.offsetUtf16) }, onPosition = { number ->
                         if (paging.publishImportPage(number)) {
                             onPage(number)
                             session.goToPage(number)

@@ -164,7 +164,7 @@ private const val BACKGROUND_LAYOUT_CHARS = 60_000
 internal fun BookPageView(
     book: Textbook, state: BookPagingState, highlights: Map<Int, List<IntRange>>,
     onTurn: (ReaderTurn) -> Unit, modifier: Modifier = Modifier, mode: BookPageMode = BookPageMode.Auto,
-    libraryDirectory: Path? = null, tableRows: Map<BookIllustration, BookTableRows> = emptyMap(), onPosition: (Int) -> Unit = {},
+    libraryDirectory: Path? = null, tableRows: Map<BookIllustration, BookTableRows> = emptyMap(), onPosition: (Int) -> Unit = {}, onSpot: (BookPageAnchor) -> Unit = {},
     /** 翻页效果。None 沿用原来的淡入换页；Flip/Slide 走共用的 PageTurnView（TON-1671）。 */
     turnStyle: PageTurnStyle = PageTurnStyle.None,
     /** 翻页读 / 滚动读（TON-1671）。两种共用同一套分页和锚点，切换时停在同一页。 */
@@ -239,7 +239,10 @@ internal fun BookPageView(
         }
         val first = state.firstFor(pages, spread)
         SideEffect { state.groupFirst = first; state.groupPages = pages }
-        LaunchedEffect(pages, first, state.anchor) { onPosition(pages[first].anchor.importPage) }
+        LaunchedEffect(pages, first, state.anchor) {
+            onPosition(pages[first].anchor.importPage)
+            pages[first].anchor.takeIf { it.visualOrder == null }?.let(onSpot)
+        }
         if (scrolling) {
             val itemHeightPx = with(density) { maxHeight.roundToPx() }.coerceAtLeast(1)
             val gapPx = with(density) { 24.dp.roundToPx() }

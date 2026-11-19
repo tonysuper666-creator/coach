@@ -31,6 +31,16 @@ def ledger(friends, months=None):
     return {"version": 1, "cycles": {}, "months": months or {}, "friends": friends}
 
 
+def source(data, sid="mac-friend", independent=True, inherited_through=None):
+    """An exported ledger that declares what it is (Mac friend instance)."""
+    out = dict(data)
+    out["source_id"] = sid
+    out["independent"] = independent
+    if inherited_through:
+        out["inherited_through"] = inherited_through
+    return out
+
+
 class FriendUsageReportTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -299,6 +309,46 @@ class FriendUsageReportTests(unittest.TestCase):
                     now=NOW, extras=[("copy", copy)])
         self.assertIn("当天合计：2 次", out["text"])
         self.assertIn("朋友本月合计：2 次", out["text"])
+
+    def test_independent_source_is_added_not_maxed(self):
+        # The reviewer's case: one person, one device, two separate instances.
+        self.save(ledger({A: {"2026-11-19": entry(
+            2, 20, 2, 200, devices={"pc": dev(2, 20, 2, 200)})}}))
+        other = self.state / "mac.json"
+        atomic_json(other, source(ledger({A: {"2026-11-19": entry(
+            3, 30, 3, 300, devices={"pc": dev(3, 30, 3, 300)})}})))
+        out = build(self.state, "2026-11-19", [self.roster], [],
+                    now=NOW, extras=[("mac", other)])
+        self.assertEqual(out["rows"][0]["total"]["calls"], 5)
+        self.assertEqual(out["rows"][0]["total"]["spent_microusd"], 500)
+        self.assertIn("当天合计：5 次", out["text"])
+        self.assertIn("朋友本月合计：5 次", out["text"])
+        self.assertIn("已并入独立来源：`mac-friend`（当天 3 次、$0.000300）", out["text"])
+
+    def test_same_source_delivered_twice_counts_once(self):
+        # Idempotent per (source_id, day): the same export pushed again is a copy.
+        self.save(ledger({A: {"2026-11-19": entry(1, 10, 1, 100)}}))
+        other = self.state / "mac.json"
+        atomic_json(other, source(ledger({A: {"2026-11-19": entry(2, 20, 2, 200)}})))
+        out = build(self.state, "2026-11-19", [self.roster], [], now=NOW,
+                    extras=[("mac", other), ("mac-again", other)])
+        self.assertIn("当天合计：3 次", out["text"])
+        self.assertIn("朋友本月合计：3 次", out["text"])
+
+    def test_migration_baseline_counts_only_the_new_days(self):
+        # Both sides carry the same 2026-11-10 history; only later days are new.
+        self.save(ledger({A: {"2026-11-10": entry(5, 50, 5, 500),
+                              "2026-11-18": entry(1, 10, 1, 100)}}))
+        other = self.state / "mac.json"
+        atomic_json(other, source(ledger({A: {
+            "2026-11-10": entry(5, 50, 5, 500),
+            "2026-11-11": entry(2, 20, 2, 200),
+            "2026-11-18": entry(1, 10, 1, 100)}}), inherited_through="2026-11-10"))
+        out = build(self.state, "2026-11-18", [self.roster], [],
+                    now=NOW, extras=[("mac", other)])
+        self.assertIn("当天合计：2 次", out["text"])
+        self.assertIn("朋友本月合计：9 次", out["text"])
+        self.assertIn("继承基线截至 2026-11-10", out["text"])
 
     def test_unreadable_extra_ledger_is_named_not_silently_dropped(self):
         self.save(ledger({A: {"2026-11-19": entry(1, 10, 1, 100)}}))

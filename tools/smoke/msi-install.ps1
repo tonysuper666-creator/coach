@@ -64,6 +64,17 @@ if (-not ('CoachWin' -as [type])) {
     Add-Type @"
 using System; using System.Runtime.InteropServices;
 public class CoachWin {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct POINT { public int X, Y; }
+  [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
+  [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW")]
+  static extern IntPtr HitTest(IntPtr h, uint msg, UIntPtr wp, IntPtr lp, uint flags, uint timeout, out IntPtr result);
+  public static bool IsExposedCaption(IntPtr h, int x, int y) {
+    if (WindowFromPoint(new POINT { X = x, Y = y }) != h) return false;
+    IntPtr part;
+    return HitTest(h, 0x84 /* WM_NCHITTEST */, UIntPtr.Zero, (IntPtr)((y << 16) | (x & 65535)),
+                   2, 300, out part) != IntPtr.Zero && part.ToInt64() == 2 /* HTCAPTION */;
+  }
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
@@ -93,6 +104,35 @@ function Open-StartMenu {
     [CoachWin]::keybd_event(0x5B, 0, 0, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 80
     [CoachWin]::keybd_event(0x5B, 0, 2, [IntPtr]::Zero)
+}
+
+# On hosted ARM, Start may already be open over the app. Dismiss it with Esc
+# only when it owns the foreground. Then use the installed window's exposed
+# title bar to activate it as a user would. Save-Shot independently verifies focus.
+function Select-InstalledWindow {
+    $foreground = [WD]::GetForegroundWindow()
+    $owner = 0
+    [WD]::GetWindowThreadProcessId($foreground, [ref]$owner) | Out-Null
+    $shell = Get-Process -Id $owner -ErrorAction SilentlyContinue
+    if ($shell.ProcessName -in 'SearchHost','StartMenuExperienceHost' -and [WD]::GetForegroundWindow() -eq $foreground) {
+        [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+        Start-Sleep -Milliseconds 400
+    }
+    if ([WD]::GetForegroundWindow() -eq $script:Win) { return }
+    $owner = 0
+    [WD]::GetWindowThreadProcessId($script:Win, [ref]$owner) | Out-Null
+    if ($owner -ne $script:WinPid -or $script:TargetPids -notcontains $owner) { throw 'Installed window owner changed' }
+    $r = Get-Rect
+    $x = $r.L + [int](($r.R - $r.L) / 2)
+    $y = $r.T + [int]([System.Windows.Forms.SystemInformation]::CaptionHeight / 2)
+    if (-not [CoachWin]::IsExposedCaption($script:Win, $x, $y)) { throw 'Installed window title bar is covered' }
+    if (-not [WD]::SetCursorPos($x, $y) -or -not [CoachWin]::IsExposedCaption($script:Win, $x, $y)) {
+        throw 'Cannot select the installed title bar'
+    }
+    [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
+    [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 300
+    Note "Selected installed title bar; foreground: $(Get-ForegroundSummary)"
 }
 
 function Get-LearningCoachProducts {
@@ -210,7 +250,15 @@ $dpi = try { [int][CoachWin]::GetDpiForWindow($hwnd) } catch { 0 }
 if ($dpi -gt 0) { "Dpi: $dpi ($([math]::Round(100 * $dpi / 96))%)" | Add-Content -Encoding utf8 (Join-Path $OutDir 'environment.txt') }
 
 Start-Sleep -Seconds 2
-try { Save-Shot (Join-Path $OutDir '01-window.png') } catch { Fail '截图' "整窗实拍失败：$($_.Exception.Message)" }
+$hostedArm = $env:GITHUB_ACTIONS -eq 'true' -and $env:RUNNER_ENVIRONMENT -eq 'github-hosted' -and $env:PROCESSOR_ARCHITECTURE -eq 'ARM64'
+try {
+    if ($hostedArm -and -not [WD]::Activate($hwnd)) { Select-InstalledWindow }
+    Save-Shot (Join-Path $OutDir '01-window.png')
+} catch {
+    $why = $_.Exception.Message
+    if ($hostedArm) { Save-Desktop (Join-Path $OutDir 'failed-desktop.png') }
+    Fail '截图' "整窗实拍失败：$why"
+}
 $r = Get-Rect
 # 桌面整屏 + 任务栏。裁剪按这次运行机的实际屏幕尺寸算，不写死 winbox 的 5120×2160 坐标。
 $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen

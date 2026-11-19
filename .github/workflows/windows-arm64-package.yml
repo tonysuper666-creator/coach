@@ -1,0 +1,62 @@
+name: Windows ARM64 package probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ton-1719-arm64-prism]
+    paths:
+      - .github/workflows/windows-arm64-package.yml
+      - desktopApp/**
+      - shared/**
+      - gradle/**
+      - gradle.properties
+      - build.gradle.kts
+      - settings.gradle.kts
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          # Keep Java 17 aligned with x64; Temurin's 17.0.20 release has no
+          # Windows ARM64 JDK, while Microsoft publishes a native build.
+          distribution: microsoft
+          java-version: '17'
+          architecture: aarch64
+      - name: Record host and Java architecture
+        shell: pwsh
+        run: |
+          if ($env:PROCESSOR_ARCHITECTURE -ne 'ARM64') { throw "Expected ARM64 host, got $env:PROCESSOR_ARCHITECTURE" }
+          java -XshowSettings:properties -version 2>&1 | Tee-Object java-settings.txt
+          if (-not (Select-String -Path java-settings.txt -Pattern 'os.arch\s*=\s*aarch64')) { throw 'JDK is not ARM64' }
+      - name: Build native MSI
+        shell: bash
+        env:
+          COACH_HEAVY_HOST: local
+        run: tools/dev/heavy ./gradlew :desktopApp:packageMsi --console=plain --max-workers=2
+      - name: Prepare candidate
+        shell: pwsh
+        run: |
+          $packages = @(Get-ChildItem desktopApp/build/compose/binaries/main/msi/*.msi)
+          if ($packages.Count -ne 1) { throw "Expected one MSI, found $($packages.Count)" }
+          $versionLine = Get-Content gradle.properties | Where-Object { $_ -match '^coach\.release\.version=' }
+          if (@($versionLine).Count -ne 1) { throw 'Missing or ambiguous release version' }
+          $version = ($versionLine -split '=', 2)[1].Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid release version' }
+          New-Item -ItemType Directory -Force candidate | Out-Null
+          Copy-Item $packages[0].FullName "candidate/LearningCoach-$version-arm64.msi"
+          Set-Content candidate/commit.txt $env:GITHUB_SHA -NoNewline
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-arm64-package-candidate
+          path: candidate/
+          retention-days: 3
+          if-no-files-found: error

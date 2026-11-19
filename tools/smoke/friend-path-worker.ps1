@@ -17,6 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Win-Drive.ps1')
 . (Join-Path $PSScriptRoot 'Smoke-Memory.ps1')
+. (Join-Path $PSScriptRoot 'Lesson-Range.ps1')
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $script:ForegroundTracePath = Join-Path $OutDir 'foreground.jsonl'
 $steps = @('启动', '上传一本书', '翻页', '选中就问出讲解', '边看边学出讲解', '做题（答完出讲解和小结）', '点出处弹原文卡')
@@ -390,13 +391,6 @@ try {
         Click-Label 6 @('做题学', '继续做题学') '书架没有做题学入口'
         $enter = Await-Text 6 'learn-enter' @('本节原文') 15
         if (-not $enter) { Fail 6 '做题学页面没有显示「本节原文」' }
-        $readPage = { param($lines)
-            foreach ($l in $lines) {
-                $t = $l.Text -replace '\s', ''
-                if ($t -match '本节原文[·•.．:：]?第(\d+)页') { return [int]$Matches[1] }
-            }
-            return 0
-        }
         $readTotalLessons = { param($lines)
             foreach ($l in $lines) {
                 $t = $l.Text -replace '\s', ''
@@ -404,15 +398,57 @@ try {
             }
             return 0
         }
-        $curPage = & $readPage $script:Last
+        # 落点只认产品自己写出的页段：点「本节原文」，读「对应教材第 F–L 页」，再「返回学习」。
+        # 本节正在出题时「本节原文」「上一节」「继续下一节」都是禁用的（TextbookLearning.kt enabled = !busy），先等出题结束再点。
+        $waitIdle = { param([string]$tag)
+            $idle = (Get-Date).AddSeconds(90)
+            while ((Get-Date) -lt $idle -and (Has (Shot 6 "busy-$tag") @('正在按本节原文出题'))) { Start-Sleep -Seconds 2 }
+        }
+        $readRange = { param([string]$tag)
+            $opened = $null
+            foreach ($try in 1..2) {
+                & $waitIdle $tag
+                $btn = Find-LessonSourceButton $script:Last
+                if (-not $btn) { Fail 6 '做题学页面找不到「本节原文 · 第X页」按钮' }
+                Click-At $btn.X $btn.Y; Start-Sleep -Milliseconds 800
+                $opened = Await-Text 6 "range-$tag" @('对应教材第') 15
+                if ($opened) { break }
+            }
+            $r = if ($opened) { Get-LessonSourceRange $script:Last } else { $null }
+            Click-Label 6 @('返回学习') '本节原文页没有「返回学习」' | Out-Null
+            if (-not (Await-Text 6 "back-$tag" @('本节原文') 15)) { Fail 6 '从本节原文返回后没有回到做题学页面' }
+            return $r
+        }
         $totalLessons = & $readTotalLessons $script:Last
         $totalPages = if ($page1 -match '[/／](\d+)$') { [int]$Matches[1] } elseif ($page0 -match '[/／](\d+)$') { [int]$Matches[1] } else { 0 }
-        if ($physPage -gt 0 -and ($curPage -eq 0 -or $curPage -gt $physPage -or ($physPage - $curPage) -gt 8)) {
-            $targetIdx = if ($totalLessons -gt 0 -and $totalPages -gt 0) {
-                [Math]::Max(1, [Math]::Min($totalLessons, [int][Math]::Round($physPage * $totalLessons / $totalPages)))
-            } else { [Math]::Max(1, [int][Math]::Round($physPage * 1.25)) }
-            $landed = $false
-            for ($hop = 1; $hop -le 6 -and -not $landed; $hop++) {
+        $range = if ($physPage -gt 0) { & $readRange '0' } else { $null }
+        if ($physPage -gt 0 -and -not (Test-RangeHasPage $range $physPage)) {
+            # 目录估算只用来跳到附近；每跳之后用页段收窄上下界。离目标页 4 页以内改用「上一节 / 继续下一节」逐节核对，
+            # 直到某节页段真的含目标页；相邻两节把目标页夹在中间却都不含它，就明确报错。
+            $cap = if ($totalLessons -gt 0) { $totalLessons } else { 9999 }
+            $scale = if ($totalLessons -gt 0 -and $totalPages -gt 0) { $totalLessons / $totalPages } else { 1.25 }
+            $lo = 1; $hi = $cap
+            $targetIdx = [Math]::Max(1, [Math]::Min($cap, [int][Math]::Round($physPage * $scale)))
+            $landed = $false; $stepDir = $null; $chosenNum = 0
+            for ($hop = 1; $hop -le 12 -and -not $landed; $hop++) {
+                $dir = if ($range -and $range.Last -lt $physPage -and $physPage - $range.Last -le 4) { 'next' }
+                       elseif ($range -and $range.First -gt $physPage -and $range.First - $physPage -le 4) { 'prev' } else { $null }
+                if ($dir) {
+                    if ($stepDir -and $stepDir -ne $dir) {
+                        Fail 6 "没有哪一节的页段含第 $physPage 页：相邻两节分别是第 $($prev.First)–$($prev.Last) 页和第 $($range.First)–$($range.Last) 页"
+                    }
+                    & $waitIdle "step-$hop"
+                    if ($dir -eq 'next') { Click-Label 6 @('继续下一节') '做题学页面找不到「继续下一节」' } else { Click-Label 6 @('上一节') '做题学页面找不到「上一节」' }
+                    if (-not (Await-Text 6 "sec-$hop" @('本节原文') 15)) { Fail 6 '切换到相邻一节后页面没有显示「本节原文」' }
+                    if ($chosenNum -gt 0) { $chosenNum += $(if ($dir -eq 'next') { 1 } else { -1 }) }
+                    $stepDir = $dir; $prev = $range
+                    $range = & $readRange "$hop"
+                    if (-not $range) { Fail 6 '无法确认相邻一节的页段：本节原文页没有读到「对应教材第 F–L 页」' }
+                    Note "步骤6 第 $hop 跳（$(if ($dir -eq 'next') { '下一节' } else { '上一节' })）：第 $($range.First)–$($range.Last) 页"
+                    if (Test-RangeHasPage $range $physPage) { $landed = $true }
+                    continue
+                }
+                $stepDir = $null
                 Click-Label 6 @('目录') '做题学页面找不到「目录」'
                 Start-Sleep -Milliseconds 500
                 $closeDir = Await-Text 6 "dir-$hop" @('收起目录') 10
@@ -432,7 +468,10 @@ try {
                     if ($items.Count -gt 0) {
                         $minNum = $items[0].Num; $maxNum = $items[$items.Count - 1].Num
                         if ($targetIdx -ge $minNum -and $targetIdx -le $maxNum) {
-                            $pick = $items | Sort-Object { [Math]::Abs($_.Num - $targetIdx) } | Select-Object -First 1
+                            # 只在已确认的上下界内挑；OCR 漏读个别编号时不会退回已排除的那一节。
+                            $inBounds = @($items | Where-Object { $_.Num -ge $lo -and $_.Num -le $hi })
+                            $pool = if ($inBounds.Count -gt 0) { $inBounds } else { $items }
+                            $pick = $pool | Sort-Object { [Math]::Abs($_.Num - $targetIdx) } | Select-Object -First 1
                             $chosenNum = $pick.Num
                             Click-At $pick.X $pick.Y
                             Start-Sleep -Milliseconds 400
@@ -460,21 +499,20 @@ try {
                 Click-Label 6 @('收起目录') '选中学习路线条目后无法收起目录'
                 $afterSec = Await-Text 6 "sec-$hop" @('本节原文') 15
                 if (-not $afterSec) { Fail 6 '切换学习路线章节后页面没有显示「本节原文」' }
-                $curPage = & $readPage $script:Last
-                if ($curPage -gt 0 -and (($curPage -le $physPage -and ($physPage - $curPage) -le 8) -or [Math]::Abs($curPage - $physPage) -le 5)) {
-                    $landed = $true
-                    break
-                }
-                if ($chosenNum -gt 0 -and $curPage -gt 0) {
-                    $scale = if ($totalLessons -gt 0 -and $totalPages -gt 0) { $totalLessons / $totalPages } else { 1.25 }
-                    $delta = [int][Math]::Round(($physPage - $curPage) * $scale)
-                    if ($delta -eq 0) { $delta = if ($physPage -gt $curPage) { 2 } else { -2 } }
-                    $cap = if ($totalLessons -gt 0) { $totalLessons } else { 9999 }
-                    $targetIdx = [Math]::Max(1, [Math]::Min($cap, $chosenNum + $delta))
-                }
+                $range = & $readRange "$hop"
+                if (-not $range) { Fail 6 "无法确认第 $chosenNum 节的页段：本节原文页没有读到「对应教材第 F–L 页」" }
+                Note "步骤6 第 $hop 跳（目录第 $chosenNum 条）：第 $($range.First)–$($range.Last) 页"
+                if (Test-RangeHasPage $range $physPage) { $landed = $true; break }
+                if ($chosenNum -le 0) { Fail 6 '学习路线里没有找到可点的章节条目' }
+                if ($range.Last -lt $physPage) { $lo = [Math]::Max($lo, $chosenNum + 1); $delta = [Math]::Max(1, [int][Math]::Round(($physPage - $range.Last) * $scale)) }
+                else { $hi = [Math]::Min($hi, $chosenNum - 1); $delta = [Math]::Min(-1, [int][Math]::Round(($physPage - $range.First) * $scale)) }
+                if ($lo -gt $hi) { Fail 6 "没有哪一节的页段含第 $physPage 页（最后确认的一节是第 $($range.First)–$($range.Last) 页）" }
+                $targetIdx = [Math]::Max($lo, [Math]::Min($hi, $chosenNum + $delta))
             }
-            if (-not $landed) { Fail 6 "未能从目录切到含第 $physPage 页的授权章节（当前停在第 $curPage 页）" }
+            $seen = if ($range) { "第 $($range.First)–$($range.Last) 页" } else { '未读到页段' }
+            if (-not $landed) { Fail 6 "未能切到含第 $physPage 页的章节（最后确认：$seen）" }
         }
+        if ($range) { Note "步骤6 落点：本节对应教材第 $($range.First)–$($range.Last) 页，目标第 $physPage 页" }
         # 已开启的书直接进入学习页；出题方式仍沿用这本书的设置。
         Click-Label 6 @('出题：', '出题:') '找不到出题设置'
         $settings = Await-Text 6 'settings' @('出题方式') 15

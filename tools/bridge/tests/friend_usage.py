@@ -61,7 +61,7 @@ class FriendUsageReportTests(unittest.TestCase):
         self.assertEqual(row["total"]["input_tokens"] + row["total"]["output_tokens"], 1020)
         self.assertEqual(row["devices"], 2)
         self.assertFalse(row["mismatch"])
-        self.assertIn("| 3 | 900 | 120 | 1,020 | $0.0025 |", out["text"])
+        self.assertIn("| 3 | 900 | 120 | 1,020 | $0.002500 |", out["text"])
 
     def test_roster_name_alias_and_device_name(self):
         self.roster_of([{"name": "甲", "aliases": ["Jia"]}])
@@ -113,7 +113,16 @@ class FriendUsageReportTests(unittest.TestCase):
         out = build(self.state, "2026-11-19", [self.roster], [], now=NOW)
         day_total = out["rows"][0]["total"]
         self.assertEqual(day_total["calls"], 2)
-        self.assertIn("朋友本月合计：3 次，33 token，$0.0003。", out["text"])
+        self.assertIn("朋友本月合计：3 次，33 token，$0.000300。", out["text"])
+
+    def test_month_includes_people_idle_on_the_report_day(self):
+        self.roster_of([{"name": "甲"}])
+        self.save(ledger({A: {"2026-11-18": entry(1, 10, 1, 100)},
+                          B: {"2026-11-19": entry(3, 30, 3, 300)}}))
+        out = build(self.state, "2026-11-18", [self.roster], [], now=NOW)
+        self.assertEqual(len(out["rows"]), 1)  # B has no row on the reported day
+        self.assertIn("当天合计：1 次，11 token，$0.000100。", out["text"])
+        self.assertIn("朋友本月合计：4 次，44 token，$0.000400。", out["text"])
 
     def test_rerun_overwrites_without_double_counting(self):
         self.save(ledger({A: {"2026-11-19": entry(2, 20, 2, 200)}}))

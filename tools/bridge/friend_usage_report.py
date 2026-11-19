@@ -121,14 +121,11 @@ def device_totals(day_entry: dict) -> dict:
     return total
 
 
-def collect(data: dict, day: str, roster: dict, devices: dict) -> dict:
-    """Group one day's ledger rows by person. No I/O, no clock."""
+def group_people(data: dict, roster: dict, devices: dict) -> dict:
+    """friend id -> person group. Shared by the day and month sections."""
     groups = {}
-    for friend, days in sorted((data.get("friends") or {}).items()):
+    for friend in sorted((data.get("friends") or {})):
         if not ID_RE.fullmatch(friend):
-            continue
-        entry = days.get(day)
-        if not isinstance(entry, dict):
             continue
         known = roster.get(friend) or {}
         db_names = devices.get(friend, set())
@@ -157,13 +154,22 @@ def collect(data: dict, day: str, roster: dict, devices: dict) -> dict:
             for index, group in enumerate(sorted(same, key=lambda g: g["ids"][0]), 1):
                 group["name"] = f"{name}（同名 #{index}）"
                 group["conflict"] = True
+    return groups
 
+
+def collect(data: dict, day: str, roster: dict, devices: dict, groups=None) -> dict:
+    """Group one day's ledger rows by person. No I/O, no clock."""
+    groups = groups if groups is not None else group_people(data, roster, devices)
     rows = []
     for key, group in groups.items():
+        ids = [f for f in group["ids"]
+               if isinstance(((data["friends"].get(f) or {}).get(day)), dict)]
+        if not ids:
+            continue
         total = {k: 0 for k in FIELDS}
         detail = {k: 0 for k in FIELDS}
         devices_seen, pending = set(), 0
-        for friend in group["ids"]:
+        for friend in ids:
             entry = data["friends"][friend][day]
             for k in FIELDS:
                 total[k] += int(entry.get(k, 0))
@@ -174,7 +180,7 @@ def collect(data: dict, day: str, roster: dict, devices: dict) -> dict:
         rows.append({
             "key": key,
             "name": group["name"] or "",
-            "ids": group["ids"],
+            "ids": ids,
             "test": group["test"],
             "conflict": group["conflict"],
             "devices": len(devices_seen),
@@ -184,25 +190,34 @@ def collect(data: dict, day: str, roster: dict, devices: dict) -> dict:
         })
     rows.sort(key=lambda r: (-r["total"]["spent_microusd"], -r["total"]["calls"],
                              r["name"] or r["ids"][0]))
-    return {"day": day, "rows": rows}
+    return {"day": day, "rows": rows, "groups": groups}
 
 
-def month_totals(data: dict, month: str, collect_result: dict) -> list:
+def month_totals(data: dict, month: str, groups: dict) -> list:
+    """Everyone with a row in the month, not only those active on the report day."""
     rows = []
-    for row in collect_result["rows"]:
+    for key, group in groups.items():
         total = {k: 0 for k in FIELDS}
-        for friend in row["ids"]:
-            for day, entry in (data["friends"].get(friend) or {}).items():
+        ids = []
+        for friend in group["ids"]:
+            used = False
+            for day, entry in ((data["friends"].get(friend)) or {}).items():
                 if day.startswith(month) and DAY_RE.fullmatch(day) and isinstance(entry, dict):
                     for k in FIELDS:
                         total[k] += int(entry.get(k, 0))
-        rows.append({"name": row["name"], "ids": row["ids"], "test": row["test"],
+                    used = True
+            if used:
+                ids.append(friend)
+        if not ids:
+            continue
+        rows.append({"name": group["name"] or "", "ids": ids, "test": group["test"],
                      "total": total})
     return rows
 
 
 def _money(microusd: int) -> str:
-    return f"${microusd / 1_000_000:.4f}"
+    # Six decimals is the ledger's own resolution: 1 µ$ == $0.000001.
+    return f"${microusd / 1_000_000:.6f}"
 
 
 def _tokens(value: int) -> str:
@@ -274,7 +289,7 @@ def render(data: dict, collect_result: dict, day: str, now: datetime, sources: d
                 "这些身份在名单里标了 `test`，单独列出，不和真实朋友合并。", ""]
         out += _table(tests, with_devices=True)
 
-    month_rows = month_totals(data, month, collect_result)
+    month_rows = month_totals(data, month, collect_result["groups"])
     month_rows.sort(key=lambda r: (-r["total"]["spent_microusd"], -r["total"]["calls"]))
     out += ["", f"## 本月累计（{month}，按同一人名合并）", ""]
     out += _table(month_rows, with_devices=False)
@@ -293,7 +308,7 @@ def render(data: dict, collect_result: dict, day: str, now: datetime, sources: d
     out += [f"- 名字来源：服务端 `devices.friend_name` 覆盖 "
             f"{len([r for r in rows if r['name'] and not r['test']])} 个人名、"
             f"私有名单 `friend-names.json` 覆盖 {sources['roster']} 个身份；"
-            f"未映射 {len(nominal)} 个身份。"]
+            f"当天未映射 {len(nominal)} 个身份。"]
     if sources["devices_missing"]:
         out += ["- 指定的设备库没有找到，本次只用了名单。"]
     if sources["conflicts"]:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LaunchAgent entry: publish content-free Coach spend; ask once per month at 80%."""
+"""Publish Coach spend and request a decision at the grant boundary."""
 import argparse
 from datetime import datetime, timezone
 import json
@@ -7,22 +7,27 @@ import os
 from pathlib import Path
 import subprocess
 
-from api_budget import CreditLedger, Denied, MONTHLY_CAPS, atomic_json, micros
+from api_budget import CreditLedger, Denied, MONTHLY_GRANTS, atomic_json, grant_limit_micros
+
+DECISION_ISSUE = "TON-1691"
 
 
 def snapshot(ledger, now):
     month = now.strftime("%Y-%m")
     data = ledger.read()
     rows, warning = [], False
-    for provider, cap in MONTHLY_CAPS.items():
+    for provider in MONTHLY_GRANTS:
+        limit = grant_limit_micros(provider)
         used = data["months"].get(month, {}).get(provider, {}).get("spent_microusd", 0)
         pending = sum(sum(c["reserved"].values()) for key, c in data["cycles"].items() if key.startswith(provider + ":"))
-        warning |= (used + pending) * 5 >= micros(cap) * 4
-        rows.append(f"{provider} 本月已用 ${used / 1_000_000:.2f}，预留 ${pending / 1_000_000:.2f}，上限 ${cap}")
+        reached = used + pending >= limit or (ledger.state / f"credit-guard-{month}-{provider}.json").is_file()
+        warning |= reached
+        detail = f"{provider} 本月已用 ${used / 1_000_000:.2f}，预留 ${pending / 1_000_000:.2f}，赠额保护线 ${limit / 1_000_000:.2f}"
+        rows.append(detail + ("（已触线）" if reached else ""))
     return {"status": "warn" if warning else "ok", "since": now.isoformat(), "detail": "；".join(rows)}
 
 
-def publish(state, issue="TON-1686", panel_support=False, run=subprocess.run, now=None):
+def publish(state, issue=DECISION_ISSUE, panel_support=False, run=subprocess.run, now=None):
     now = now or datetime.now(timezone.utc)
     ledger = CreditLedger(state)
     try:
@@ -46,25 +51,25 @@ def publish(state, issue="TON-1686", panel_support=False, run=subprocess.run, no
         value["since"] = previous.get("since", value["since"])
     put("TON-740", "coach.api-spend", value)
     month = now.strftime("%Y-%m")
-    if value["status"] == "warn" and not panel_support and previous.get("asked_month") != month:
+    if value["status"] == "warn" and not panel_support and previous.get("asked_guard_month") != month:
         # Butler's generic system-state key support has not been confirmed. The
         # supported issue ask is therefore the default; no direct messages.
         current = run([cli, "issue", "metadata", "list", issue, "--output", "json"],
                       check=True, capture_output=True, text=True)
         metadata = json.loads(current.stdout)
-        require_ask = "朋友讲解花到本月上限的八成了，要不要继续？"
+        require_ask = "Coach 调用已触及赠额 95% 保护线，是否另行授权自费？"
         existing = metadata.get("ask")
         if existing:
             try:
                 if json.loads(existing).get("q") == require_ask:
-                    previous["asked_month"] = month
+                    previous["asked_guard_month"] = month
             except (ValueError, AttributeError, TypeError):
                 pass
         else:
             put(issue, "ask", {"q": require_ask,
-                "why": value["detail"], "options": ["继续，到上限自动停", "现在停掉朋友讲解"], "recommend": 0})
+                "why": value["detail"], "options": ["保持赠额保护", "另行决定自费预算"], "recommend": 0})
             put(issue, "ask_since", now.isoformat())
-            previous["asked_month"] = month
+            previous["asked_guard_month"] = month
     atomic_json(marker, {**previous, **value})
     return value
 
@@ -72,7 +77,7 @@ def publish(state, issue="TON-1686", panel_support=False, run=subprocess.run, no
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("--state", type=Path, default=Path(os.environ.get("COACH_API_STATE_DIR", str(Path.home() / "Coach/state"))))
-    parser.add_argument("--issue", default="TON-1686")
+    parser.add_argument("--issue", default=DECISION_ISSUE)
     parser.add_argument("--panel-support", action="store_true", help="Only after verifying Butler displays coach.api-spend")
     args = parser.parse_args()
     print(json.dumps(publish(args.state, args.issue, args.panel_support), ensure_ascii=False))

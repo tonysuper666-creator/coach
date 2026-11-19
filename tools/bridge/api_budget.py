@@ -1,6 +1,6 @@
 """Conservative credit reservations. Billing authority remains the provider, not this ledger.
 
-The owner authorized existing keys with local monthly limits. This ledger records
+The owner authorized 95% of the configured monthly API grants. This ledger records
 Coach usage, not the shared account's remaining grant or provider billing period.
 All amounts on disk are integer microdollars, never prompt/response contents.
 """
@@ -17,7 +17,7 @@ from pathlib import Path
 import secrets
 import time
 
-MONTHLY_CAPS = json.loads(Path(__file__).with_name("model_routes.json").read_text())["monthly_caps_usd"]
+MONTHLY_GRANTS = json.loads(Path(__file__).with_name("model_routes.json").read_text())["monthly_grants_usd"]
 
 
 class Denied(Exception):
@@ -32,6 +32,10 @@ def require(condition):
 
 def micros(value) -> int:
     return int((Decimal(str(value)) * 1_000_000).to_integral_value(rounding=ROUND_CEILING))
+
+
+def grant_limit_micros(provider):
+    return micros(MONTHLY_GRANTS[provider]) * 95 // 100
 
 
 def atomic_json(path: Path, value: dict):
@@ -119,23 +123,31 @@ class CreditLedger:
     def reserve(self, provider: str, key: str, maximum: int, *, friend=None, device=None, tokens=0) -> tuple[str, str, str]:
         if not key:
             raise Denied("missing_key")
-        if type(maximum) is not int or maximum <= 0 or provider not in MONTHLY_CAPS:
+        if type(maximum) is not int or maximum <= 0 or provider not in MONTHLY_GRANTS:
             raise Denied("invalid_reservation")
         with self.locked():
             data = self.read()
             month = datetime.fromtimestamp(self.clock(), timezone.utc).strftime("%Y-%m")
-            # Caps are per Coach/provider, independent of key changes. Keep 5% of
-            # the nominal grant (200/500) and the owner's stricter Coach caps.
-            limit = min(micros(MONTHLY_CAPS[provider]), micros({"anthropic": 200, "openai": 500}[provider]) * 95 // 100)
+            limit = grant_limit_micros(provider)
             cycle_id = f"{provider}:{month}"
             cycle = data["cycles"].setdefault(cycle_id, {"spent": 0, "reserved": {}, "limit": limit})
-            cycle["limit"] = min(cycle["limit"], limit)
+            # Migrate the retired Coach ceiling without reopening a cycle locked
+            # at zero by settlement or dropping any spend or pending reservations.
+            if provider == "anthropic" and cycle["limit"] == micros(150):
+                cycle["limit"] = limit
+            else:
+                cycle["limit"] = min(cycle["limit"], limit)
             # Unknown usage survives month rollover and migration from the earlier
             # evidence-based ledger; starting a new month must not erase a call.
             pending = sum(sum(c["reserved"].values()) for cid, c in data["cycles"].items() if cid.startswith(provider + ":"))
             summary = data["months"].setdefault(month, {}).setdefault(provider, {"spent_microusd": 0, "reserved_microusd": 0, "calls": 0})
-            if (cycle["spent"] + pending + maximum > cycle["limit"] or
-                    summary["spent_microusd"] + pending + maximum > limit):
+            if max(cycle["spent"], summary["spent_microusd"]) + pending + maximum > limit:
+                # A request can cross the boundary before the settled total reaches
+                # it. Leave a content-free signal for the existing spend monitor.
+                atomic_json(self.state / f"credit-guard-{month}-{provider}.json",
+                            {"maximum_microusd": maximum, "limit_microusd": limit})
+                raise Denied("credit_limit_95_percent")
+            if cycle["spent"] + pending + maximum > cycle["limit"]:
                 raise Denied("credit_limit_95_percent")
             token = secrets.token_hex(16)
             if friend is not None:

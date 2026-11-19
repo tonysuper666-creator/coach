@@ -76,23 +76,34 @@ class LedgerTests(unittest.TestCase):
         with self.assertRaisesRegex(Denied, "invalid_reservation"):
             self.ledger.reserve("unknown", KEY, 1)
 
-    def test_new_coach_caps_and_95_percent_of_grant(self):
-        for provider, limit in (("anthropic", 150), ("openai", 475)):
+    def test_95_percent_of_each_grant(self):
+        for provider, limit in (("anthropic", 190), ("openai", 475)):
             self.ledger.reserve(provider, KEY, micros(limit))
             with self.assertRaisesRegex(Denied, "95_percent"):
                 self.ledger.reserve(provider, KEY, 1)
 
     def test_key_change_does_not_reset_provider_budget(self):
-        self.ledger.reserve("anthropic", KEY, micros(150))
+        self.ledger.reserve("anthropic", KEY, micros(190))
         with self.assertRaises(Denied):
             self.ledger.reserve("anthropic", "another-synthetic-key", 1)
 
     def test_restart_retains_unsettled_usage(self):
-        self.ledger.reserve("anthropic", KEY, micros(150))
+        self.ledger.reserve("anthropic", KEY, micros(190))
         restarted = CreditLedger(self.root, lambda: NOW)
         with self.assertRaises(Denied):
             restarted.reserve("anthropic", KEY, 1)
-        self.assertEqual(micros(150), json.loads((self.root / "api-spend-2026-11.json").read_text())["anthropic"]["reserved_microusd"])
+        self.assertEqual(micros(190), json.loads((self.root / "api-spend-2026-11.json").read_text())["anthropic"]["reserved_microusd"])
+
+    def test_existing_anthropic_cycle_releases_only_retired_ceiling(self):
+        settled = self.ledger.reserve("anthropic", KEY, micros(140))
+        self.ledger.settle("anthropic", settled, micros(140))
+        self.ledger.reserve("anthropic", KEY, micros(10))
+        data = self.ledger.read()
+        data["cycles"][settled[0]]["limit"] = micros(150)
+        self.ledger.save(data)
+        self.ledger.reserve("anthropic", KEY, micros(40))
+        with self.assertRaisesRegex(Denied, "95_percent"):
+            self.ledger.reserve("anthropic", KEY, 1)
 
     def test_settlement_and_price_change(self):
         reservation = self.ledger.reserve("anthropic", KEY, 1000)
@@ -112,7 +123,7 @@ class LedgerTests(unittest.TestCase):
             except Denied:
                 return False
         with ThreadPoolExecutor(max_workers=12) as pool:
-            self.assertEqual(15, sum(pool.map(reserve, range(30))))
+            self.assertEqual(19, sum(pool.map(reserve, range(30))))
 
     def test_corrupted_ledger_is_not_reset(self):
         (self.root / "api-credit-ledger.json").write_text("broken")
@@ -137,17 +148,17 @@ class LedgerTests(unittest.TestCase):
 
     def test_settled_usage_resets_month_but_unknown_usage_carries_forward(self):
         self.now = 1796083140
-        r = self.ledger.reserve("anthropic", KEY, micros(149))
-        self.ledger.settle("anthropic", r, micros(149))
+        r = self.ledger.reserve("anthropic", KEY, micros(189))
+        self.ledger.settle("anthropic", r, micros(189))
         self.ledger.reserve("anthropic", KEY, micros(1))
         self.now += 120
-        self.ledger.reserve("anthropic", KEY, micros(149))
+        self.ledger.reserve("anthropic", KEY, micros(189))
         with self.assertRaises(Denied):
             self.ledger.reserve("anthropic", KEY, 1)
 
     def test_old_ledger_unsettled_calls_still_count(self):
         atomic_json(self.root / "api-credit-ledger.json", {"version": 1, "cycles": {
-            "anthropic:old-cycle:old-key": {"spent": 0, "reserved": {"old": micros(150)}, "limit": micros(190)}
+            "anthropic:old-cycle:old-key": {"spent": 0, "reserved": {"old": micros(190)}, "limit": micros(190)}
         }, "months": {}})
         with self.assertRaises(Denied):
             self.ledger.reserve("anthropic", KEY, 1)

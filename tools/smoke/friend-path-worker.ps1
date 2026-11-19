@@ -325,6 +325,9 @@ try {
     } else { Pass 4 '选中一段能得到带出处的讲解，也能输入问题得到带出处的回答' }
 
     # ⑤ 边看边学出讲解
+    # 客户端对「已同意」的书，进入或切换整节就会自动发讲解请求（BookLessonExplanation）。④ 已经替这本书同意过，
+    # 所以先撤掉本轮测试书架里这本书的同意：默认首节和选错的节只显示同意卡，不发请求；核准落点页之后才由驱动点同意，发一次。
+    Remove-Item (Join-Path $lib 'explain-consent\*') -Force -ErrorAction SilentlyContinue
     $five = $null
     try {
         Click-Label 5 @('开始学') '找不到「开始学」'; Start-Sleep -Seconds 2

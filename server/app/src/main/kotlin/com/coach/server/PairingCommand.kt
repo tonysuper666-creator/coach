@@ -26,15 +26,18 @@ internal fun pairingCommand(args: Array<String>, data: Path) {
     val endpoint = when (args.first()) {
         "pair-code" -> { require(args.size == 1 || (args.size == 3 && args[1] == "--friend")); "/v1/pairing-code" }
         "revoke-friend" -> { require(args.size == 2); "/v1/friends/revoke" }
+        "sable-users" -> { require(args.size == 1); "/v1/sable/users" }
+        "disable-sable" -> { require(args.size == 2); "/v1/sable/disable" }
         "devices" -> { require(args.size == 1); "/v1/devices" }
         else -> {
             require(args.size == 2 && args[1].matches(Regex("[A-Za-z0-9_-]{1,128}"))) { "usage: app revoke DEVICE_ID" }
             "/v1/devices/${args[1]}"
         }
     }
-    val method = when (args.first()) { "pair-code", "revoke-friend" -> "POST"; "devices" -> "GET"; else -> "DELETE" }
+    val method = when (args.first()) { "pair-code", "revoke-friend", "disable-sable" -> "POST"; "devices", "sable-users" -> "GET"; else -> "DELETE" }
     val body = when {
         args.first() == "pair-code" && args.size == 3 -> com.coach.domain.json("friend" to args[2]).toString()
+        args.first() == "disable-sable" -> com.coach.domain.json("username" to args[1]).toString()
         args.first() == "revoke-friend" -> com.coach.domain.json("friend" to args[1]).toString()
         else -> ""
     }

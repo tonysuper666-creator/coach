@@ -6,6 +6,8 @@ import com.coach.client.PairedCredentials
 import com.coach.client.PairingClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
@@ -38,12 +40,26 @@ internal class DesktopPairing(
         } finally { client.close() }
     }
 
+    suspend fun sable(open: suspend (String, String) -> Unit, issuer: String = com.coach.client.SABLE_ORIGIN): DesktopIdentity {
+        val url = settings.sableFriendUrl()
+        requireDevelopmentServer(settings, url)
+        val client = PairingClient(url)
+        try {
+            val value = client.sable(open, issuer)
+            withContext(Dispatchers.IO) {
+                settings.saveAddress(url)
+                store.save(url, value)
+            }
+            return DesktopIdentity(url, value)
+        } finally { client.close() }
+    }
+
     /** Offline is not revocation. Only an authenticated endpoint's explicit 401 retires a pairing. */
-    suspend fun stillAuthorized(identity: DesktopIdentity): Boolean {
+    suspend fun stillAuthorized(identity: DesktopIdentity, startup: Boolean = false): Boolean {
         if (identity.credentials.role == "friend") {
             val client = PairingClient(identity.serverUrl)
             return try {
-                client.friendAuthorized(identity.credentials).also { if (!it) store.clear(identity.serverUrl, identity.credentials) }
+                client.friendAuthorized(identity.credentials, startup).also { if (!it) store.clear(identity.serverUrl, identity.credentials) }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { true }
             finally { client.close() }
@@ -57,8 +73,10 @@ internal class DesktopPairing(
     }
 
     suspend fun awaitRevocation(identity: DesktopIdentity) {
+        var startup = true
         while (currentCoroutineContext().isActive) {
-            if (!stillAuthorized(identity)) return
+            if (!stillAuthorized(identity, startup)) return
+            startup = false
             delay(5_000)
         }
     }

@@ -2,12 +2,21 @@
 
 TON-1686；父卡 TON-1685 决策 13。生产上线和外网 Windows 实测由 TON-1688 执行。本卡已启用只读花费监控的 LaunchAgent，没有启用朋友生产监听或 Funnel。
 
+## 用 Sable 账号登录
+
+制作朋友安装包时，在构建机私有的 `~/Coach/config/local.properties` 中设置 `coach.friendUrl` 为朋友服务的 HTTPS 根地址。桌面版也可在安装后读取这项配置。连接页的 Sable 按钮会打开系统浏览器，朋友核对两处授权码后点「允许」。没有账号仍可使用六位配对码。
+
+朋友监听用 Sable 的 `whoami` 核对稳定身份，每台获准设备取得自己的 Coach 凭据。同一人的设备共用讲解额度。服务端以 AES-GCM 单独加密每笔上游授权，密钥由服务账号保存在数据目录旁的 `<数据目录名>-sable-credentials/grant.key`。迁移服务时需私下迁移该密钥，保留目录和文件的所有者权限。客户端只保存 Coach 凭据。
+
+`app sable-users` 列出用户名和停用状态。`app disable-sable USERNAME` 吊销此人的所有 Coach 凭据并阻止再次换发。在 Sable 设置里撤销一笔授权只影响该笔授权签发的凭据。服务重启或客户端启动会重新核对。正常使用满十分钟后先复核再处理请求。若 Sable 临时离线，距上次成功复核满十五分钟后返回 503，恢复后可继续。明确撤销返回 401。
+
 ## 服务与配对
 
 正常端口、owner 配对与课程学习保持原有行为。只有设置 `COACH_PUBLIC_PORT` 才增加一个独立 `127.0.0.1` 监听；不能为 18791、正常端口、0 或超出 65535。这个端口仅接受以下方法与路径：
 
 | 方法 | 路径 | 内容 |
 | --- | --- | --- |
+| POST | `/v1/public/sable` | 验证 Sable Bearer，返回同一格式的朋友凭据 |
 | POST | `/v1/pair` | 朋友码配对，回包 `role: friend` |
 | GET | `/v1/public/status` | 在线、本设备今日已结算调用数、这个朋友共同剩余额度 |
 | POST | `/v1/library/explain` | 必须带设备自己的 `localSource` 导入证明 |

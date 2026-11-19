@@ -27,7 +27,7 @@ class KeystoreCredentials(context: Context, private val serverUrl: String, stora
     }
     fun save(credentials: PairedCredentials) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()); updateAAD(serverUrl.toByteArray()) }
-        val plain = JSONObject().put("deviceId", credentials.deviceId).put("token", credentials.token).toString().toByteArray()
+        val plain = JSONObject().put("deviceId", credentials.deviceId).put("token", credentials.token).put("role", credentials.role).toString().toByteArray()
         val envelope = JSONObject().put("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
             .put("ciphertext", Base64.encodeToString(cipher.doFinal(plain), Base64.NO_WRAP)).toString()
         check(preferences.edit().putString("credentials", envelope).commit()) { "Could not save pairing" }
@@ -41,7 +41,7 @@ class KeystoreCredentials(context: Context, private val serverUrl: String, stora
                 updateAAD(serverUrl.toByteArray())
             }
             val plain = JSONObject(String(cipher.doFinal(Base64.decode(value.getString("ciphertext"), Base64.NO_WRAP)), Charsets.UTF_8))
-            PairedCredentials(plain.getString("deviceId"), plain.getString("token"))
+            PairedCredentials(plain.getString("deviceId"), plain.getString("token"), plain.optString("role", "owner"))
         } catch (_: Exception) {
             // Reinstall/key invalidation/server change requires pairing again, never plaintext fallback.
             clear()

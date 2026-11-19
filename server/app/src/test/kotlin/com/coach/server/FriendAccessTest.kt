@@ -33,9 +33,10 @@ class FriendAccessTest {
         val owner = engine(false)
         val public = engine(true)
         val client = HttpClient.newHttpClient()
-        fun request(path: String, method: String = "GET", credential: JsonObject? = null, body: String = "", private: Boolean = false): HttpResponse<String> {
+        fun request(path: String, method: String = "GET", credential: JsonObject? = null, body: String = "", private: Boolean = false, startup: Boolean = false): HttpResponse<String> {
             val port = runBlocking { (if (private) owner else public).engine.resolvedConnectors().single().port }
             val request = HttpRequest.newBuilder(URI("http://127.0.0.1:$port$path")).timeout(java.time.Duration.ofSeconds(10))
+            if (startup) request.header("X-Coach-Startup", "1")
             if (credential != null) request.header("X-Coach-Device", credential.str("deviceId")).header("Authorization", "Bearer ${credential.str("token")}")
             return client.send(request.method(method, HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString())
         }
@@ -72,6 +73,46 @@ class FriendAccessTest {
     }
     private companion object {
         fun parse(response: HttpResponse<String>) = LedgerJson.parseToJsonElement(response.body()).jsonObject
+    }
+
+    @Test fun sableCredentialUsesFriendQuotaAndChecksRevocationOnStartupAndAfterTenMinutes() = Harness().use { h ->
+        var time = 100L
+        var active = true
+        var offline = false
+        val other = "second-synthetic-sable-grant"
+        val token = "synthetic-sable-token-for-friend"
+        fun sessions() = SableSessions(h.actor, SableVault(h.root.resolve("vault")), { value ->
+            if (offline) throw SableUnavailable()
+            if ((active && value == token) || value == other) SableIdentity("stable-sub", "demo") else null
+        }, { time })
+        h.friends.sable = sessions()
+        fun exchange() = h.request("/v1/public/sable", "POST", json("deviceId" to "", "token" to token))
+        val first = parse(exchange())
+        val independent = parse(h.request("/v1/public/sable", "POST", json("deviceId" to "", "token" to other)))
+        h.friends.sable = sessions()
+        assertEquals(200, h.request("/v1/public/status", credential = first).statusCode())
+        offline = true
+        time += 10 * 60_000
+        assertEquals(200, h.request("/v1/public/status", credential = first).statusCode())
+        time += 5 * 60_000
+        assertEquals(503, h.request("/v1/public/status", credential = first).statusCode())
+        offline = false
+        assertEquals(200, h.request("/v1/public/status", credential = first).statusCode())
+        assertEquals("friend", first.str("role"))
+        h.stub.stream(1, StubTutor.terminal("failed", "daily_quota"), StubTutor.DONE)
+        assertEquals(429, h.lesson(first, "ab13").statusCode())
+        active = false
+        time += 10 * 60_000
+        assertEquals(401, h.request("/v1/public/status", credential = first).statusCode())
+        assertEquals(200, h.request("/v1/public/status", credential = independent).statusCode())
+        active = true
+        val second = parse(exchange())
+        active = false
+        assertEquals(401, h.request("/v1/public/status", credential = second, startup = true).statusCode())
+        assertEquals(200, h.request("/v1/public/status", credential = h.pair("manual")).statusCode())
+        active = true
+        assertEquals(204, h.request("/v1/sable/disable", "POST", h.ownerCredential, """{"username":"demo"}""", true).statusCode())
+        assertEquals(401, exchange().statusCode())
     }
 
     @Test fun twentyForbiddenPathsHaveEmpty404EvenWithoutAuthenticationAndFriendsCannotUseOwnerPort() = Harness().use { h ->

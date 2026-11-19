@@ -144,10 +144,19 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
             defaultAddress = address.orEmpty()
             // 配对文件 401 之后仍在磁盘上；同一份凭据在这个进程里停用过，就别再当成「已连上」。
             val stale = saved != null && saved.key() in stopped
+            val authorized = saved == null || saved.credentials.role != "friend" || withContext(Dispatchers.IO) {
+                pairing.stillAuthorized(saved)
+            }
+            if (!authorized) { markRevoked(); loaded = true; return }
             identity = if (stale) null else saved
             if (stale) revoked = true else if (saved != null) revoked = false
         }
         loaded = true
+    }
+
+    suspend fun sable(open: suspend (String, String) -> Unit) {
+        identity = pairing.sable(open)
+        revoked = false
     }
 
     open suspend fun pair(address: String, code: String): Boolean = try {
@@ -261,13 +270,18 @@ internal fun BookExplainPanel(
             if (paired == null && explainer.loaded) Column(Modifier.testTag("explain-pairing"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (explainer.revoked) {
                     Text("这台电脑的连接已停用", style = MaterialTheme.typography.titleMedium)
-                    Text("请找给你配对码的人重新配对：输入 Mac 地址和新的 6 位配对码。读书和做题照常。", style = MaterialTheme.typography.bodySmall,
+                    Text("授权已撤销，请重新登录。读书和做题照常。", style = MaterialTheme.typography.bodySmall,
                         color = colors.fgSecondary, modifier = Modifier.testTag("explain-revoked"))
                 } else {
                     Text("先连上 Mac", style = MaterialTheme.typography.titleMedium)
-                    Text("讲解由配对的 Mac 生成。输入 Mac 地址和 Mac 那边生成的 6 位配对码。", style = MaterialTheme.typography.bodySmall,
+                    Text("登录后可以提问，也可以让朋友服务讲解选中的原文。", style = MaterialTheme.typography.bodySmall,
                         color = colors.fgSecondary)
                 }
+                com.coach.ui.SableLoginButton(pairing, { pairing = it }) { open ->
+                    explainer.sable(open)
+                    states.filterValues { (it as? BlockState.Failed)?.trouble == ExplainTrouble.Revoked }.keys.forEach(states::remove)
+                }
+                Text("没有 Sable 账号？用配对码", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                 V7Field(address, { address = it; pairError = null }, "Mac 地址", enabled = !pairing, paper = colors.surface2, modifier = Modifier.fillMaxWidth().testTag("explain-address"))
                 V7Field(code, { code = it.filter(Char::isDigit).take(6); pairError = null }, "配对码", enabled = !pairing, paper = colors.surface2,
                     visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),

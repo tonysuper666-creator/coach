@@ -70,6 +70,18 @@ internal fun runWindowsTextbooks() {
                 position = WindowPosition.Absolute(initialBounds.x.dp, initialBounds.y.dp),
             )) {
             WindowsReadingMinimum(window)
+            var revoked by remember { mutableStateOf(false) }
+            LaunchedEffect(Unit) {
+                revoked = withContext(Dispatchers.IO) {
+                    val pairing = DesktopPairing(DesktopConnectionSettings())
+                    val identity = runCatching { pairing.load() }.getOrNull()
+                    identity?.credentials?.role == "friend" && !pairing.stillAuthorized(identity, startup = true)
+                }
+            }
+            if (revoked) AlertDialog(onDismissRequest = { revoked = false },
+                title = { Text("授权已撤销，请重新登录") },
+                text = { Text("打开书中的讲解页即可重新登录。") },
+                confirmButton = { TextButton(onClick = { revoked = false }) { Text("知道了") } })
             WindowsTextbookHost(controller, drafts, exams, chooseBook = {
                 withContext(Dispatchers.Swing) {
                     val dialog = FileDialog(window, "上传教材 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)

@@ -688,6 +688,60 @@ $cgBlock
         Invoke-SwapRegressionCase 'invoke-entry1-own-to-ext-after-unlock' 'entry1' $ownObj $extObj $false
         Invoke-SwapRegressionCase 'invoke-entry2-ext-to-own-after-unlock' 'entry2' $extObj $ownObj $true
         Invoke-SwapRegressionCase 'invoke-entry2-own-to-ext-after-unlock' 'entry2' $ownObj $extObj $false
+
+        # 8b. Click-At 动作期间失焦：按住到抬起之间如果前台被抢走，必须释放按键、触发重试或判环境占用，不能静默成功。
+        $prevStampPath = $script:DriverInputStampPath
+        $script:DriverInputStampPath = Join-Path $tmp 'click-midloss-input.stamp'
+        try {
+            $script:Win = [IntPtr]555501L
+            $ownWinObj = [pscustomobject]@{ Hwnd = 555501L; Pid = 55555; Process = 'java'; Class = 'SunAwtFrame' }
+            $extStealObj = [pscustomobject]@{ Hwnd = 683201L; Pid = 6832; Process = 'java'; Class = 'SunAwtFrame' }
+            $clickLog = New-Object System.Collections.ArrayList
+            $script:clickState = @{ attempt = 0; phase = 'init' }
+            $rectProbe = { [pscustomobject]@{ L = 100; T = 200 } }
+            $targetOwnerProbe = { param($w) 55555 }
+            $actProbeClick = {
+                param($w, $attemptNum)
+                $script:clickState.attempt = [int]$attemptNum
+                $script:clickState.phase = 'pre-down'
+                return [pscustomobject]@{ Ready = $true; ObservedHwnd = 555501L; Failure = ''; Accepted = $true }
+            }
+            $mouseProbeRetry = {
+                param($kind, $mx, $my)
+                [void]$clickLog.Add("$($script:clickState.attempt):$kind@$mx,$my")
+                if ($kind -eq 'down' -and $script:clickState.attempt -eq 1) {
+                    $script:clickState.phase = 'stolen-mid-click'
+                }
+            }
+            $fgProbeRetry = {
+                if ($script:clickState.phase -eq 'stolen-mid-click') { return $extStealObj }
+                return $ownWinObj
+            }
+            Click-At 338 82 -TargetOwnerProbe $targetOwnerProbe -ActivateProbe $actProbeClick -ForegroundProbe $fgProbeRetry -RectProbe $rectProbe -MouseProbe $mouseProbeRetry
+            Check 'click-at-retries-when-focus-lost-mid-click' (
+                $script:clickState.attempt -eq 2 -and
+                ($clickLog -join '|') -eq '1:move@438,282|1:down@438,282|1:up@438,282|2:move@438,282|2:down@438,282|2:up@438,282'
+            ) "attempts=$($script:clickState.attempt) log=$($clickLog -join '|')"
+
+            $script:clickState = @{ attempt = 0; phase = 'init' }
+            $mouseProbeAlwaysStolen = {
+                param($kind, $mx, $my)
+                if ($kind -eq 'down') { $script:clickState.phase = 'stolen-mid-click' }
+            }
+            $clickErr = $null
+            try {
+                Click-At 338 82 -TargetOwnerProbe $targetOwnerProbe -ActivateProbe $actProbeClick -ForegroundProbe $fgProbeRetry -RectProbe $rectProbe -MouseProbe $mouseProbeAlwaysStolen
+            } catch {
+                $clickErr = $_.Exception.Message
+            }
+            Check 'click-at-reports-contention-when-focus-lost-every-click' (
+                $script:clickState.attempt -eq 20 -and
+                $clickErr -like 'WIN_DRIVE_FOREGROUND_CONTENTION*' -and
+                $clickErr -match 'pid=6832'
+            ) "attempts=$($script:clickState.attempt) err=$clickErr"
+        } finally {
+            $script:DriverInputStampPath = $prevStampPath
+        }
     } finally {
         $script:AppPid = $prevAppPid
     }

@@ -1014,14 +1014,28 @@ function Assert-OurForeground([IntPtr]$Expected = [IntPtr]::Zero, [scriptblock]$
         throw (New-FocusLossException -Message 'WIN_DRIVE_FOCUS_LOST: our client is no longer foreground' -Owner $fgOwner)
     }
 }
-function Click-At([int]$x, [int]$y) {
+function Click-At(
+    [int]$x,
+    [int]$y,
+    [scriptblock]$TargetOwnerProbe = $null,
+    [scriptblock]$ActivateProbe = $null,
+    [scriptblock]$ForegroundProbe = $null,
+    [scriptblock]$RectProbe = $null,
+    [scriptblock]$MouseProbe = $null
+) {
     if (Has-BackgroundDriver) { Invoke-BackgroundAction "/click?x=$x&y=$y"; return }
-    Invoke-ForegroundStep -InjectsInput -Action {
-        $r = Get-Rect
-        [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null
-        Assert-OurForeground
-        [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
-        try { Start-Sleep -Milliseconds 60 } finally { [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero) }
+    Invoke-ForegroundStep -InjectsInput -TargetOwnerProbe $TargetOwnerProbe -ActivateProbe $ActivateProbe -ForegroundProbe $ForegroundProbe -Action {
+        $r = if ($RectProbe) { & $RectProbe } else { Get-Rect }
+        if ($MouseProbe) { & $MouseProbe 'move' ($r.L + $x) ($r.T + $y) | Out-Null }
+        else { [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null }
+        Assert-OurForeground -ForegroundProbe $ForegroundProbe
+        if ($MouseProbe) { & $MouseProbe 'down' ($r.L + $x) ($r.T + $y) | Out-Null }
+        else { [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero) }
+        try { Start-Sleep -Milliseconds 60 } finally {
+            if ($MouseProbe) { & $MouseProbe 'up' ($r.L + $x) ($r.T + $y) | Out-Null }
+            else { [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero) }
+        }
+        Assert-OurForeground -ForegroundProbe $ForegroundProbe
     }
 }
 # A drag is one action: release the button even if foreground is interrupted.
@@ -1039,11 +1053,16 @@ function Drag-Between([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
             [WD]::SetCursorPos($r.L + $x2, $r.T + $y2) | Out-Null
             Start-Sleep -Milliseconds 120; Assert-OurForeground
         } finally { [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero) }
+        Assert-OurForeground
     }
 }
 function Send-Keys([string]$keys) {
     if (Has-BackgroundDriver) { Invoke-BackgroundAction "/keys" $keys; return }
-    Invoke-ForegroundStep -InjectsInput -Action { Assert-OurForeground; [System.Windows.Forms.SendKeys]::SendWait($keys) }
+    Invoke-ForegroundStep -InjectsInput -Action {
+        Assert-OurForeground
+        [System.Windows.Forms.SendKeys]::SendWait($keys)
+        Assert-OurForeground
+    }
 }
 
 # Wait until a label shows on screen. Returns the match, or $null on timeout. Every poll leaves a PNG so a failure is inspectable.
@@ -1145,6 +1164,7 @@ function Scroll-At([int]$x, [int]$y, [int]$notches) {
         $delta = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int](120 * $notches)), 0)
         Assert-OurForeground
         [WD]::mouse_event(0x800, 0, 0, $delta, [IntPtr]::Zero)
+        Assert-OurForeground
     }
 }
 # Clipboard write and paste are one action. Keep it stable until consumed.
@@ -1155,6 +1175,7 @@ function Paste-Text([string]$text) {
         Assert-OurForeground
         [System.Windows.Forms.SendKeys]::SendWait('^v')
         Start-Sleep -Milliseconds 150
+        Assert-OurForeground
     }
 }
 

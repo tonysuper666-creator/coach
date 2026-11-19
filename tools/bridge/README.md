@@ -144,3 +144,70 @@ tools/bridge/.venv/bin/python tools/bridge/tests/traffic_isolation.py
 tools/bridge/.venv/bin/python tools/bridge/tests/fault_injection.py
 tools/bridge/.venv/bin/python tools/bridge/tests/exam_protection.py
 ```
+
+## 每日按人用量报告（TON-1742）
+
+`friend_usage_report.py` 把 `api-credit-ledger.json` 的 `friends` 段按 UTC 自然日汇总成
+一份**私有** Markdown：每人次数、输入/输出 token、花费；同一人的多台设备合并，
+本月累计按同一人再合一次（测试身份在月表里标「（测试）」并单列小计）。
+
+- 花费单位：账本存整数微美元 µ$，报告写成美元（1 美元＝1,000,000 µ$）。
+- 名字：账本只有名字的 SHA-256（`sha256(name.encode("utf-8"))`，与 `FriendAccess.kt` 同字节同编码）。
+  报告用两个本地私有来源对回名字，只认哈希相等的记录：
+  - `<state>/friend-names.json`：运维自己维护的名单，**不进 Git**
+    （`{"version":1,"people":[{"name":"名字","ids":["<64位哈希>"],"aliases":[],"test":false}]}`；
+    有 `ids` 时只用 `ids`，不会把同名的人按 `sha256(名字)` 连到一起）；
+  - 服务端 `coach.sqlite`：库里有 `sable_friends` 时只读它的 `friend_name`、`username` 两列
+    （Sable 登录，TON-1740），用 `friend_name` 算哈希对账、用 `username` 显示；否则读
+    `devices.friend_name`（配对时写入）。`sable_grants` 存密封 token，**不读**。
+  - Sable 用户名被清空（同一 handle 换绑给新账号、或记录被清理）时，旧身份显示为
+    `sable-<哈希前 8 位>`，历史仍归原身份，不会并到后来接手该用户名的人。
+  - `devices.friend_name` 里的内部串 `sable.identity.v1:<hash>` 任何时候都不会被当成名字显示。
+  对不上的人按哈希原样列出并标明占当天多少，可对账、可补名；标 `test` 的身份单列，不与朋友合并。
+- 重跑同一天直接覆盖同一文件，不从报告累计，所以不会重复计数。
+- 合计来自本机账本，加上**已声明是独立实例**的来源（如 Mac 朋友实例）。备份、回滚、staging 里的
+  `api-credit-ledger.json` 是快照，不是独立来源，不要传。`--ledger 标签=路径` 按文件自己的声明处理：
+  - 文件带 `"independent": true` 和自己的 `"source_id"`（如 `"mac-friend"`）：并入合计。
+    同一来源重复投递按（来源, 日）只算一次；两个独立实例之间逐字段相加，不取最大值
+    （同一人同一设备两边都用过时，取最大会少计）。
+  - 与本地账本同一个 `source_id`：当作副本/快照，逐字段取最大，不会抬高合计。
+  - 没有声明：单独成节、标明「未计入」和缺口，来源关系确认后再接。
+  - 有共同迁移基线时，在文件里写 `"inherited_through": "YYYY-MM-DD"`：该日及以前的记录来自
+    共同历史，只算一次，之后的天数才相加。
+- 报告落在 `<state>/friend-usage-YYYY-MM-DD.md`，目录 0700、文件 0600，含真名与哈希，
+  **不进 Git、评论或附件**。与 `usage-YYYYMMDD.md`（「今天卡在哪」）是两个不同文件。
+
+手工生成（任意一天，含重跑）：
+
+```sh
+python3 tools/bridge/friend_usage_report.py --state ~/Coach/state --day 2026-11-19 \
+  --devices-db ~/Coach/data/coach.sqlite            # 写 state/friend-usage-2026-11-19.md
+python3 tools/bridge/friend_usage_report.py --state ~/Coach/state --day yesterday --stdout  # 不写文件
+python3 tools/bridge/friend_usage_report.py --state ~/Coach/state --day yesterday \
+  --devices-db ~/Coach/data/coach.sqlite --ledger mac=~/coach-cost/inbox/mac-ledger.json
+python3 tools/bridge/friend_usage_report.py --state ~/Coach/state --day yesterday --stdout \
+  --roster ~/coach-cost/inbox/mac-friend-names.json \
+  --ledger mac-friend=~/coach-cost/inbox/mac-friend.json
+```
+
+部署到 hermes（每天 00:20 UTC 出昨天那份；脚本放在 `~/coach-cost/bin`，与其他运维脚本同一处）：
+
+```sh
+install -m 600 tools/bridge/friend_usage_report.py ~/coach-cost/bin/
+install -m 600 tools/bridge/api_budget.py ~/coach-cost/bin/     # 已由 spend-watch 部署过则跳过
+install -m 644 tools/bridge/systemd/coach-friend-usage.service ~/.config/systemd/user/
+install -m 644 tools/bridge/systemd/coach-friend-usage.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now coach-friend-usage.timer
+systemctl --user start coach-friend-usage.service     # 立刻出首份
+systemctl --user list-timers coach-friend-usage.timer
+```
+
+停/改：`systemctl --user disable --now coach-friend-usage.timer`。两个 unit 与
+`coach-spend-watch.*` 相互独立，只共用同一份账本和同一把读锁。
+
+测试（Linux；`api_budget.py` 依赖 `fcntl`，Windows 跑不了）：
+
+```sh
+python3 tools/bridge/tests/friend_usage.py -v      # 在仓库根目录
+```

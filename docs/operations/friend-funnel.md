@@ -1,6 +1,6 @@
 # 朋友讲解入口：上线和外网 Windows 验收
 
-仅适用于 TON-1688 已获同意的朋友入口。四条路由及额度契约见
+仅适用于 TON-1688 已获同意的朋友入口。四条路由及用量契约见
 `docs/FRIEND_ACCESS.md`。本文不保存实际地址、tailnet 名、配对码、设备令牌或教材。
 不要把私有操作记录或原始服务日志上传到公开仓库/Actions。
 
@@ -70,10 +70,9 @@ probe 使用 `friend-public` environment；先按协议探针手册将该 enviro
 
 1. 运行 `phase=package`，等 Windows MSI 和 UI 驱动构建成功，记下 run ID。
    安装包是未签名开发包；只在临时 Actions Windows 运行机安装，不在用户设备发布。
-2. 在 Mac 私有朋友配置中建立本轮专用名字 `External acceptance A`、`External acceptance B`
-   （不得与已有朋友重名，重跑前先撤销上一轮 A/B 并核对），B 的
-   `daily_calls=1`。合并配置时保留原字段；先备份，结束恢复时保留期间其他人的修改。
-   两个朋友只用于本轮，账本保留，不删除或清零 quota/reserved。
+2. 为本轮使用两位专用测试身份 `External acceptance A`、`External acceptance B`。
+   重跑前先撤销上一轮 A/B 并核对。记录两人的当日账本基线，使用缺省个人用量设置。
+   保留该身份的既有结算与未决预留。
 3. **先在 Mac 兑换 B，再签 A**：`pairing_code` 是单例，新码覆盖旧码，不能同时签 A/B。
    对已批准的临时隔离实例使用 `tools/smoke/friend-prepare-windows.py --output PRIVATE_FILE`：
    通过私有进程 env 传 `COACH_PREPARE_OWNER_URL`（管理回环端口）、
@@ -87,9 +86,8 @@ probe 使用 `friend-public` environment；先按协议探针手册将该 enviro
    B 是 Mac 预配的短期对照身份，**不计作 B 的 Windows 原生配对验收**；只有 A 在 Windows
    配对 UI 兑换一次性码。B 只经步骤 env 进入驱动，解析前后 add-mask，不进 artifact。
 4. 立即手动派发 `phase=probe, package_run=ID`。A 配对码五分钟过期；队列过久或码过期
-   就签新 A 码、更新其 secret 并重跑 probe；B 已消费当日额度时停止本日重跑；另日重跑仍须先撤销并重新预配。
-   同名 B 的朋友日账本会保留，换设备不能恢复额度；不得清零账本、延长码有效期
-   或拿 B 令牌代替 A 的一次性码。
+   就签新 A 码、更新其 secret 并重跑 probe。重跑沿用同一人既有账本，重新建立设备用量基线。
+   A 仍使用自己的单次配对码。
    environment secrets 在 job 开始时读取（[官方说明](https://docs.github.com/en/actions/reference/security/secrets)）；不要试图在运行中换 secret 修复该 run。
 5. Probe 在安装和任何计费请求之前，先运行同一 commit 的
    `python tools/smoke/friend-public.py transport`：仅步骤 env 传 URL，不传配对码或令牌。
@@ -101,9 +99,9 @@ probe 使用 `friend-public` environment；先按协议探针手册将该 enviro
    这两项限制必须与结果一并披露，不能称为完整的安装版用户操作录制。
    只生成自写样例，不上传任何真实教材。实际讲解走已配置的朋友 API，不用 mock。
    驱动在配对和计费之前另验 8791 TCP 不可达，保留桥端口边界。
-6. `friend-windows-evidence` artifact 出现后，先在 Mac 确认 B 的账本恰好一次真实调用，
-   对照 input/output token、设备归属及无残留 reservation；格式重试若多调用则测试应
-   失败，不能改账本凑数。然后用 `app revoke-friend NAME_A` 撤销 A。
+6. `friend-windows-evidence` artifact 出现后，先在 Mac 确认 B 的两次有出处的讲解都已记到同一人，
+   对照实际 API 调用数、输入和输出 token、费用、设备归属和未决预留。格式修复按实际调用记账。
+   然后用 `app revoke-friend NAME_A` 撤销 A。
    后续步骤最多等 180 秒，必须得到 A=401、B=200，生成 revocation artifact。
 7. 无论 Actions 成败，都在 Mac 撤销 A/B，删除三个临时 Actions secrets，核对其他朋友
    和李政自己的连接仍正常。runner 的 `always()` 只清理 runner 私有文件；它不能替代
@@ -124,14 +122,14 @@ macOS 上仅 `security` 读取子进程的 HOME 使用当前 UID 的账号主目
 本地离线协议演练（先构建 `:server:app:installDist`，使用 bridge venv Python）：
 `python tools/smoke/friend-windows-rehearsal.py --work NEW_PRIVATE_DIRECTORY --node NODE_EXECUTABLE --math-dependencies NODE_MODULES_DIRECTORY`。
 它启动真实受管 JVM 和上述 wrapper，使用私有 Keychain shim 与离线提供方 SSE，
-验证 B→A、撤销、200→429、既有非零 owner 预算和预留连续性，最后关闭三处监听。
+验证 B→A、B 连续两次讲解成功且按人记账、A 撤销隔离、owner 预算和预留连续性，最后关闭三处监听。
 所有 HOME/账本/资料均为合成 fixture；这不证明真实 Keychain、费用、Windows 或外网。
 
 ## 交付证据
 
 记录候选 head、两个独立审核结论、隔离门禁命令/退出码、切换/五分钟内验证结果、
-Funnel 规则数量（不含地址）、Actions 链接、截图、撤销 A/B、B 一次调用的 token
-计数和清理结果。协议步骤只验证 80/8443/10000/18791 四个主机路由，驱动另验
+Funnel 规则数量（不含地址）、Actions 链接、截图、撤销 A/B、B 的调用数、token 和费用增量，
+以及清理结果。协议步骤只验证 80/8443/10000/18791 四个主机路由，驱动另验
 8791 TCP；不能写成全部 65535 端口均已验证或所有采样端口均 TCP 关闭。
 `ready-for-revoke.json` 的 `bridgePortClosed=true` 只指 8791；主机路由证据来自前置步骤日志，
 不再输出旧的 `otherPorts=4`。任一步未跑写「未验证」；工作流文件存在不代表上线完成。

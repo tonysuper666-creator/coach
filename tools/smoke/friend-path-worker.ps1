@@ -34,12 +34,12 @@ function Fail([int]$n, [string]$why) {
 }
 function Pass([int]$n, [string]$what) { [void]$results.Add([pscustomobject]@{ Step = $n; Name = $steps[$n - 1]; Ok = $true; Why = $what }); Note "步骤$n 通过：$what" }
 function Has($lines, [string[]]$needles) { foreach ($s in $needles) { $m = Find-Text $lines $s; if ($m) { return $m } }; $null }
-function Get-PassageQuotaMessage($lines) {
-    # BookExplain renders the disabled button and the quota message in one row.
-    # Match that status row so a mention of quota in the book cannot end the wait.
+function Get-PassageServiceError($lines) {
+    # Match the status row on current and older installed clients.
     foreach ($line in $lines) {
         $row = $line.Text -replace '\s', ''
         if ($row -match '^讲解这段((?:今天的|这个月的)?讲解额度用完了)(?:[，,。.]|$)') { return $Matches[1] }
+        if ($row -match '^(?:再试一次)?(讲解服务暂时不可用)(?:[，,。.]|$)') { return $Matches[1] }
     }
 }
 function Get-AskReplyState($lines, [int]$page) {
@@ -57,7 +57,7 @@ function Get-AskReplyState($lines, [int]$page) {
         ($words -join '') -replace '\s', ''
     }
     if ($body -match '^(再试一次|重新配对)$' -or
-        $body -match '尚未接通|无法回答|不能回答|尚未核实|连不上|超时|暂时读不到回答|额度(?:已)?用完') { return 'refused' }
+        $body -match '尚未接通|无法回答|不能回答|尚未核实|连不上|超时|暂时读不到回答|讲解服务暂时不可用|额度(?:已)?用完') { return 'refused' }
     if ($body -match '正在读这段问题') { return 'waiting' }
     if ($body -match "^出处[·•.．:：]?第${page}页$") { return 'answered' }
     return 'waiting'
@@ -234,8 +234,8 @@ try {
         foreach ($view in 0, 1) {                       # 讲解出现在原文段落下面：每轮看顶部和滚到底各一次，不累计滚动
             if ($view -eq 1) { Scroll-At 900 700 -10; Start-Sleep -Milliseconds 800 }
             $lines = Shot 4 "result$n-$view"
-            $quota = Get-PassageQuotaMessage $lines
-            if ($quota) { Fail 4 "服务回了拒绝：$quota" }
+            $serviceError = Get-PassageServiceError $lines
+            if ($serviceError) { Fail 4 "服务回了拒绝：$serviceError" }
             $seen += $lines
         }
         Scroll-At 900 700 20; Start-Sleep -Milliseconds 500
@@ -330,7 +330,7 @@ try {
             Start-Sleep -Seconds 5; $lines = Shot 5 'learn'
             $allow = Has $lines @('允许并讲解')
             if ($allow) { Click-At $allow.X $allow.Y; continue }
-            $e = $lines | Where-Object { $_.Text -match '尚未接通|无法讲解|尚未核实|连不上|超时|没有可用的讲解|讲解暂时读不到|额度.*用完|没有可核对的出处|出处已过期' } | Select-Object -First 1
+            $e = $lines | Where-Object { $_.Text -match '尚未接通|无法讲解|尚未核实|连不上|超时|没有可用的讲解|讲解暂时读不到|讲解服务暂时不可用|额度.*用完|没有可核对的出处|出处已过期' } | Select-Object -First 1
             if ($e) { $res = "拒绝：$($e.Text)"; continue }
             # 「本节原文」不是讲解的出处。讲解标题与带页码的出处之间必须有正文。
             $heading = $lines | Where-Object { ($_.Text -replace '\s', '') -eq '讲解' } | Select-Object -First 1

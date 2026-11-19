@@ -1,6 +1,6 @@
 """Conservative credit reservations. Billing authority remains the provider, not this ledger.
 
-The owner authorized existing keys with local monthly limits. This ledger records
+The owner authorized 95% of the configured monthly API grants. This ledger records
 Coach usage, not the shared account's remaining grant or provider billing period.
 All amounts on disk are integer microdollars, never prompt/response contents.
 """
@@ -17,7 +17,7 @@ from pathlib import Path
 import secrets
 import time
 
-MONTHLY_CAPS = json.loads(Path(__file__).with_name("model_routes.json").read_text())["monthly_caps_usd"]
+MONTHLY_GRANTS = json.loads(Path(__file__).with_name("model_routes.json").read_text())["monthly_grants_usd"]
 
 
 class Denied(Exception):
@@ -32,6 +32,10 @@ def require(condition):
 
 def micros(value) -> int:
     return int((Decimal(str(value)) * 1_000_000).to_integral_value(rounding=ROUND_CEILING))
+
+
+def grant_limit_micros(provider):
+    return micros(MONTHLY_GRANTS[provider]) * 95 // 100
 
 
 def atomic_json(path: Path, value: dict):
@@ -106,11 +110,14 @@ class CreditLedger:
         path = Path(os.environ.get("COACH_FRIEND_CONFIG", str(Path.home() / "Coach/config/friends.json")))
         try:
             data = json.loads(path.read_text()) if path.exists() else {}
-            defaults, override = data.get("defaults", {}), data.get("friends", {}).get(friend, {})
+            defaults, friends = data.get("defaults", {}), data.get("friends", {})
+            require(isinstance(defaults, dict) and isinstance(friends, dict))
+            override = friends.get(friend, {})
+            require(isinstance(override, dict))
             if data.get("paused", False) or override.get("paused", False):
                 raise Denied("monthly_quota")
-            limits = {k: override.get(k, defaults.get(k, v)) for k, v in
-                      (("daily_calls", 100), ("daily_tokens", 1_000_000))}
+            settings = defaults | override
+            limits = {key: settings[key] for key in ("daily_calls", "daily_tokens") if key in settings}
             require(all(type(v) is int and v >= 0 for v in limits.values()))
             return limits
         except (OSError, ValueError, TypeError, AttributeError):
@@ -119,23 +126,31 @@ class CreditLedger:
     def reserve(self, provider: str, key: str, maximum: int, *, friend=None, device=None, tokens=0) -> tuple[str, str, str]:
         if not key:
             raise Denied("missing_key")
-        if type(maximum) is not int or maximum <= 0 or provider not in MONTHLY_CAPS:
+        if type(maximum) is not int or maximum <= 0 or provider not in MONTHLY_GRANTS:
             raise Denied("invalid_reservation")
         with self.locked():
             data = self.read()
             month = datetime.fromtimestamp(self.clock(), timezone.utc).strftime("%Y-%m")
-            # Caps are per Coach/provider, independent of key changes. Keep 5% of
-            # the nominal grant (200/500) and the owner's stricter Coach caps.
-            limit = min(micros(MONTHLY_CAPS[provider]), micros({"anthropic": 200, "openai": 500}[provider]) * 95 // 100)
+            limit = grant_limit_micros(provider)
             cycle_id = f"{provider}:{month}"
             cycle = data["cycles"].setdefault(cycle_id, {"spent": 0, "reserved": {}, "limit": limit})
-            cycle["limit"] = min(cycle["limit"], limit)
+            # Migrate the retired Coach ceiling without reopening a cycle locked
+            # at zero by settlement or dropping any spend or pending reservations.
+            if provider == "anthropic" and cycle["limit"] == micros(150):
+                cycle["limit"] = limit
+            else:
+                cycle["limit"] = min(cycle["limit"], limit)
             # Unknown usage survives month rollover and migration from the earlier
             # evidence-based ledger; starting a new month must not erase a call.
             pending = sum(sum(c["reserved"].values()) for cid, c in data["cycles"].items() if cid.startswith(provider + ":"))
             summary = data["months"].setdefault(month, {}).setdefault(provider, {"spent_microusd": 0, "reserved_microusd": 0, "calls": 0})
-            if (cycle["spent"] + pending + maximum > cycle["limit"] or
-                    summary["spent_microusd"] + pending + maximum > limit):
+            if max(cycle["spent"], summary["spent_microusd"]) + pending + maximum > limit:
+                # A request can cross the boundary before the settled total reaches
+                # it. Leave a content-free signal for the existing spend monitor.
+                atomic_json(self.state / f"credit-guard-{month}-{provider}.json",
+                            {"maximum_microusd": maximum, "limit_microusd": limit})
+                raise Denied("credit_limit_95_percent")
+            if cycle["spent"] + pending + maximum > cycle["limit"]:
                 raise Denied("credit_limit_95_percent")
             token = secrets.token_hex(16)
             if friend is not None:
@@ -147,9 +162,12 @@ class CreditLedger:
                 day = datetime.fromtimestamp(self.clock(), timezone.utc).strftime("%Y-%m-%d")
                 usage = data.setdefault("friends", {}).setdefault(friend, {}).setdefault(day,
                     {"calls": 0, "input_tokens": 0, "output_tokens": 0, "spent_microusd": 0, "reserved": {}, "devices": {}})
-                if (usage["calls"] + len(usage["reserved"]) + 1 > limits["daily_calls"] or
-                        usage["input_tokens"] + usage["output_tokens"] +
-                        sum(p["tokens"] for p in usage["reserved"].values()) + tokens > limits["daily_tokens"]):
+                call_limit = limits.get("daily_calls")
+                token_limit = limits.get("daily_tokens")
+                if call_limit is not None and usage["calls"] + len(usage["reserved"]) + 1 > call_limit:
+                    raise Denied("daily_quota")
+                if token_limit is not None and (usage["input_tokens"] + usage["output_tokens"] +
+                        sum(p["tokens"] for p in usage["reserved"].values()) + tokens > token_limit):
                     raise Denied("daily_quota")
                 usage["reserved"][token] = {"tokens": tokens, "device": device, "microusd": maximum}
             cycle["reserved"][token] = maximum

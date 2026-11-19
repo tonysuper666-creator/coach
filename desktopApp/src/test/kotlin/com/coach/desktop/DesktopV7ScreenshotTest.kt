@@ -63,8 +63,8 @@ class DesktopV7ScreenshotTest {
         "ask-pick" to "inner-read", "ask-unavailable" to "inner-read", "ask-too-long" to "inner-read",
         "explain-pairing" to "inner-read", "explain-consent" to "inner-read", "explain-answer" to "inner-read",
         "explain-source" to "inner-read",
-        // TON-1687：讲解没拿到时——连不上、再试一次讲成了、额度用完、连接被停用、回到配对。都对读书那一屏。
-        "explain-offline" to "inner-read", "explain-retried" to "inner-read", "explain-quota" to "inner-read",
+        // 讲解没拿到和恢复的各个状态，都对读书那一屏。
+        "explain-offline" to "inner-read", "explain-retried" to "inner-read", "explain-busy" to "inner-read",
         "explain-revoked" to "inner-read", "explain-repair" to "inner-read",
         // 第 9 刀：课程里的本地练习——入口、作答、保存冲突、读取确认、交卷确认、结果、冻结题源、历次结果，都对做题那一屏。
         "exam-entry" to "inner-quiz", "exam-attempt" to "inner-quiz", "exam-conflict" to "inner-quiz", "exam-reload" to "inner-quiz",
@@ -404,16 +404,15 @@ A second English paragraph lets us inspect the space between paragraphs and the 
             onNodeWithTag("explain-repair").assertDoesNotExist()
             inBlock("explain-button", only).assertIsEnabled()
 
-            // 重新配对后再讲，碰上额度用完：原样显示服务端那句话，不给「再试一次」，按钮停用。
-            val quota = "今天的讲解额度用完了，明天再来。"
-            mac.script += ExplainResult.Refused(quota, ExplainTrouble.Quota)
+            // 重新配对后服务暂不可用，仍可从原段重试。
+            val unavailable = "讲解服务暂时不可用，请稍后再试。"
+            mac.script += ExplainResult.Refused(unavailable, ExplainTrouble.Busy)
             inBlock("explain-button", only).performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-failed").fetchSemanticsNodes().isNotEmpty() }
-            inBlock("explain-failed", only).assertTextEquals(quota)
-            onNodeWithTag("explain-retry").assertDoesNotExist()
-            inBlock("explain-button", only).assertIsNotEnabled()
+            inBlock("explain-failed", only).assertTextEquals(unavailable)
+            inBlock("explain-retry", only).assertIsEnabled()
             inBlock("explain-failed", only).performScrollTo(); waitForIdle()
-            shot("explain-quota")
+            shot("explain-busy")
         }
         assertEquals(5, mac.explained)
         assertTrue(mac.script.isEmpty())

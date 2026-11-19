@@ -245,17 +245,30 @@ class FriendAccessTest {
         }
     }
 
-    @Test fun statusReportsOnlyOwnDeviceCallsAndSharedFriendRemainder() = Harness().use { h ->
+    @Test fun statusReportsOwnDeviceCallsAndOnlyExplicitFriendLimits() = Harness().use { h ->
         val b = h.pair("乙"); val b2 = h.pair("乙")
         Files.createDirectories(h.root.resolve("state"))
         val day = java.time.LocalDate.now(java.time.ZoneOffset.UTC).toString()
-        Files.writeString(h.root.resolve("friends.json"), json("defaults" to json("daily_calls" to 1)).toString())
         Files.writeString(h.root.resolve("state/api-credit-ledger.json"), json("friends" to json(friendId("乙") to json(day to json(
             "calls" to 1, "input_tokens" to 100, "output_tokens" to 20, "devices" to json(b.str("deviceId") to json("calls" to 1)))))).toString())
         val first = parse(h.request("/v1/public/status", credential = b))
         val second = parse(h.request("/v1/public/status", credential = b2))
         assertEquals(1L, first.num("calls")); assertEquals(0L, second.num("calls"))
-        assertEquals(0L, first.num("callsRemaining")); assertEquals(0L, second.num("callsRemaining"))
+        for (status in listOf(first, second)) {
+            assertFalse("callsRemaining" in status)
+            assertFalse("tokensRemaining" in status)
+        }
+        val config = h.root.resolve("friends.json")
+        Files.writeString(config, json("defaults" to json("daily_calls" to 1)).toString())
+        for (device in listOf(b, b2)) {
+            val limited = parse(h.request("/v1/public/status", credential = device))
+            assertEquals(0L, limited.getValue("callsRemaining").jsonPrimitive.long)
+            assertFalse("tokensRemaining" in limited)
+        }
+        Files.writeString(config, json("friends" to json(friendId("乙") to json("daily_tokens" to 130))).toString())
+        val tokenLimited = parse(h.request("/v1/public/status", credential = b2))
+        assertFalse("callsRemaining" in tokenLimited)
+        assertEquals(10L, tokenLimited.num("tokensRemaining"))
         assertFalse(first.toString().contains(friendId("乙")))
     }
 }

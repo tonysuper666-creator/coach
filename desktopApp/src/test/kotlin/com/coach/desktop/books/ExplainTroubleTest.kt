@@ -30,7 +30,7 @@ import kotlin.test.*
 
 /**
  * 朋友那台电脑连李政的 Mac 讲解时，没讲成的几种情况（TON-1687）：
- * 连不上、额度用完、连接被停用，以及服务端回的那句话怎么原样到人眼前。教材是自造的英文短文。
+ * 连不上、服务暂时不可用、连接被停用。教材是自造的英文短文。
  */
 @OptIn(ExperimentalTestApi::class)
 class ExplainTroubleTest {
@@ -38,28 +38,26 @@ class ExplainTroubleTest {
         assertEquals(ExplainTrouble.Unreachable, ExplainTrouble.of(null, null))
         assertEquals(ExplainTrouble.Revoked, ExplainTrouble.of(401, null))
         assertEquals(ExplainTrouble.Revoked, ExplainTrouble.of(401, "daily_quota"))
-        assertEquals(ExplainTrouble.Quota, ExplainTrouble.of(429, "daily_quota"))
-        assertEquals(ExplainTrouble.Quota, ExplainTrouble.of(403, "monthly_quota"))
-        assertEquals(ExplainTrouble.Quota, ExplainTrouble.of(429, null))
+        assertEquals(ExplainTrouble.Busy, ExplainTrouble.of(403, "unavailable"))
+        assertEquals(ExplainTrouble.Busy, ExplainTrouble.of(429, null))
         assertEquals(ExplainTrouble.Busy, ExplainTrouble.of(503, "unavailable"))
         assertEquals(ExplainTrouble.Busy, ExplainTrouble.of(500, null))
         assertEquals(ExplainTrouble.Busy, ExplainTrouble.of(408, null))
         assertEquals(ExplainTrouble.Other, ExplainTrouble.of(400, "source_mismatch"))
-        assertFalse(ExplainTrouble.Quota.retry)
         assertFalse(ExplainTrouble.Revoked.retry)
         assertTrue(ExplainTrouble.Unreachable.retry && ExplainTrouble.Busy.retry && ExplainTrouble.Other.retry)
         // 连不上和停用用固定的话，不管服务端或底层说了什么。
         assertEquals(ExplainTrouble.UNREACHABLE, ExplainTrouble.message(ExplainTrouble.Unreachable, "java.net.ConnectException: refused"))
         assertEquals(ExplainTrouble.REVOKED, ExplainTrouble.message(ExplainTrouble.Revoked, "HTTP 401"))
-        assertEquals("讲解额度用完了。", ExplainTrouble.message(ExplainTrouble.Quota, "  "))
     }
 
     @Test fun serverSentenceReachesThePersonWithoutCodeOrStatus() = runBlocking {
         val quota = "今天的讲解额度用完了，明天再来。"
         val busy = "讲解这会儿排满了，过一会儿再试。"
         val cases = listOf(
-            Reply(429, """{"error":"$quota","code":"daily_quota"}""") to (ExplainTrouble.Quota to quota),
-            Reply(403, """{"error":"这个月的讲解额度用完了。","code":"monthly_quota"}""") to (ExplainTrouble.Quota to "这个月的讲解额度用完了。"),
+            Reply(429, """{"error":"$quota","code":"daily_quota"}""") to (ExplainTrouble.Busy to BUSY),
+            Reply(403, """{"error":"这个月的讲解额度用完了。","code":"monthly_quota"}""") to (ExplainTrouble.Busy to BUSY),
+            Reply(429, """{"error":"$quota"}""") to (ExplainTrouble.Busy to BUSY),
             Reply(503, """{"error":"$busy","code":"unavailable"}""") to (ExplainTrouble.Busy to busy),
             // Funnel 或代理回的 HTML 错误页：不是 Mac 说的话，按连不上处理。
             Reply(502, "<html><body>502 Bad Gateway</body></html>", "text/html") to (ExplainTrouble.Unreachable to ExplainTrouble.UNREACHABLE),
@@ -93,11 +91,11 @@ class ExplainTroubleTest {
 
     @Test fun pairedQuestionKeepsTheServerSentenceAndItsKind() = runBlocking {
         val (library, book, chosen) = sample()
-        val support = PairedBookLearningSupport(library) { _, _ -> ExplainResult.Refused("今天的讲解额度用完了，明天再来。", ExplainTrouble.Quota) }
+        val support = PairedBookLearningSupport(library) { _, _ -> ExplainResult.Refused(BUSY, ExplainTrouble.Busy) }
         support.allow(book.id)
         val reply = assertIs<BookLearningReply.Unavailable>(support.ask(BookPassageQuestion(BookPassage.from(book, chosen), "Why light?")))
-        assertEquals("今天的讲解额度用完了，明天再来。", reply.message)
-        assertEquals(ExplainTrouble.Quota, reply.trouble)
+        assertEquals(BUSY, reply.message)
+        assertEquals(ExplainTrouble.Busy, reply.trouble)
     }
 
     @Test fun retryAfterTheMacIsBackKeepsPassageAndQuestion() {
@@ -130,33 +128,29 @@ class ExplainTroubleTest {
         }
     }
 
-    @Test fun quotaHasNoRetryAndRevokedLeadsBackToPairing() {
+    @Test fun revokedLeadsBackToPairing() {
         val (library, book, _) = sample()
-        for (refused in listOf(ExplainResult.Refused("今天的讲解额度用完了，明天再来。", ExplainTrouble.Quota),
-            ExplainResult.Refused(ExplainTrouble.REVOKED, ExplainTrouble.Revoked))) {
-            val support = PairedBookLearningSupport(library) { _, _ -> refused }
-            support.allow(book.id)
-            var repaired = 0
-            runSkikoComposeUiTest(size = Size(1100f, 850f), density = Density(1f)) {
-                setContent { CoachTheme(darkTheme = true) { BookPassageAsk(book, book.pages.first(), support, onRepair = { repaired++ }) {} } }
-                onNodeWithTag("ask-paragraph-0").performClick()
-                onNodeWithTag("book-passage-question").performTextInput("Why light?")
-                onNodeWithTag("book-passage-send").performScrollTo().performClick()
-                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-passage-unavailable").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithTag("explain-trouble").assertTextEquals(refused.message)
-                onNodeWithTag("explain-trouble-retry").assertDoesNotExist()
-                if (refused.trouble == ExplainTrouble.Revoked) {
-                    onNodeWithTag("explain-trouble-repair").performScrollTo().performClick()
-                    assertEquals(1, repaired)
-                } else onNodeWithTag("explain-trouble-repair").assertDoesNotExist()
-            }
+        val refused = ExplainResult.Refused(ExplainTrouble.REVOKED, ExplainTrouble.Revoked)
+        val support = PairedBookLearningSupport(library) { _, _ -> refused }
+        support.allow(book.id)
+        var repaired = 0
+        runSkikoComposeUiTest(size = Size(1100f, 850f), density = Density(1f)) {
+            setContent { CoachTheme(darkTheme = true) { BookPassageAsk(book, book.pages.first(), support, onRepair = { repaired++ }) {} } }
+            onNodeWithTag("ask-paragraph-0").performClick()
+            onNodeWithTag("book-passage-question").performTextInput("Why light?")
+            onNodeWithTag("book-passage-send").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-passage-unavailable").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("explain-trouble").assertTextEquals(refused.message)
+            onNodeWithTag("explain-trouble-retry").assertDoesNotExist()
+            onNodeWithTag("explain-trouble-repair").performScrollTo().performClick()
+            assertEquals(1, repaired)
         }
     }
 
-    @Test fun quotaClosesTheSendButtonButKeepsPassageAndQuestion() {
+    @Test fun serviceUnavailableAllowsResendingWithTheSamePassageAndQuestion() {
         val (library, book, chosen) = sample()
         var calls = 0
-        val support = PairedBookLearningSupport(library) { _, _ -> calls++; ExplainResult.Refused("今天的讲解额度用完了，明天再来。", ExplainTrouble.Quota) }
+        val support = PairedBookLearningSupport(library) { _, _ -> calls++; ExplainResult.Refused(BUSY, ExplainTrouble.Busy) }
         support.allow(book.id)
         runSkikoComposeUiTest(size = Size(1100f, 850f), density = Density(1f)) {
             setContent { CoachTheme(darkTheme = false) { BookPassageAsk(book, book.pages.first(), support) {} } }
@@ -164,13 +158,13 @@ class ExplainTroubleTest {
             onNodeWithTag("book-passage-question").performTextInput("Why does the plant need light?")
             onNodeWithTag("book-passage-send").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-passage-unavailable").fetchSemanticsNodes().isNotEmpty() }
-            // 额度用完：主「发送」也关上，点了不会再发一次；选段和问题都还在。
-            onNodeWithTag("book-passage-send").performScrollTo().assertIsNotEnabled().performClick()
-            waitForIdle()
             assertEquals(1, calls)
+            onNodeWithTag("book-passage-send").performScrollTo().assertIsEnabled().performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-trouble-retry").fetchSemanticsNodes().isNotEmpty() }
+            assertEquals(2, calls)
             onNodeWithTag("book-selected-passage").assertTextEquals(chosen.text)
             onNodeWithTag("book-passage-question").assertTextContains("Why does the plant need light?")
-            onNodeWithTag("explain-trouble-retry").assertDoesNotExist()
+            onNodeWithTag("explain-trouble-repair").assertDoesNotExist()
         }
     }
 
@@ -265,10 +259,11 @@ class ExplainTroubleTest {
 
     private class TestMac(private val url: String) :
         BookExplainer(DesktopConnectionSettings(home = Files.createTempDirectory("explain-trouble-home-"), environment = { null })) {
-        override suspend fun load() { identity = DesktopIdentity(url, PairedCredentials("test-device", "test-token")); loaded = true }
+        override suspend fun load() { identity = DesktopIdentity(url, PairedCredentials("test-device", "test-token", "friend")); loaded = true }
     }
 
     private val block = SourceBlock("synthetic:p1:0", 1, 0, 30, heading = false, text = "Plants use light to make food.")
+    private val BUSY = "讲解服务暂时不可用，请稍后再试。"
 
     private fun sample(): Triple<TextbookLibrary, Textbook, SourceBlock> {
         val root = Files.createTempDirectory("explain-trouble-")

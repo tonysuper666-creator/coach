@@ -228,7 +228,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         for capped in (False, True):
             self.router.path(self.key()).unlink(missing_ok=True)
             if capped:
-                self.ledger.reserve("anthropic", KEY, micros(150))
+                self.ledger.reserve("anthropic", KEY, micros(190))
             router = self.make_router(keys=None if capped else {})
             def req():
                 return bridge.build_req({"model": "claude-sonnet-5-5", "max_tokens": 100,

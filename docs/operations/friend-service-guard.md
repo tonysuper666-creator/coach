@@ -58,7 +58,7 @@
 
 `ton1175_switch.py` 新增可选 `friendAccess`，仅含 `publicPort`、`config`、`policy`。未配置时沿用原流程。首次迁移拒绝已存在朋友变量的旧配置；后续升级须另绑定方案。
 
-stage 仅在原有三个 release 变量替换之外增加 `COACH_PUBLIC_PORT` 和 `COACH_FRIEND_CONFIG`。保留 HOME、API state 设置及其他变量。朋友配置必须私有、`paused: true`，并显式提供正整数 `defaults.daily_calls`、`defaults.daily_tokens`；不依赖缺省预算。校验端口空闲、策略数据库与数据目录一致、候选在已审查名单内，且 controller 必须指向上述持久 `control.py`，三个代码文件必须与当前源码逐字节一致。
+stage 仅在原有三个 release 变量替换之外增加 `COACH_PUBLIC_PORT` 和 `COACH_FRIEND_CONFIG`。保留 HOME、API state 设置及其他变量。朋友配置必须私有并设置 `paused: true`。如果显式配置 `defaults.daily_calls` 或 `defaults.daily_tokens`，值须为正整数。校验端口空闲、策略数据库与数据目录一致、候选在已审查名单内，且 controller 必须指向上述持久 `control.py`，三个代码文件必须与当前源码逐字节一致。
 
 stage 记录策略和持久代码哈希，switch/rollback/recover 都重新校验；漂移须重新审查。switch 另核对最初暂停配置的哈希，防止 owner 验收前放开计费。之后合法额度调整不妨碍 rollback。经核对调用同一持久控制器的原 stage rollback 才经过此门禁；其他入口须按前述盘点退役。费用账本不参与指针恢复。
 

@@ -154,9 +154,10 @@ def friend_api_environment(root, config):
     require(policy.is_file() and not policy.is_symlink() and metadata.st_uid == os.getuid() and
             metadata.st_mode & 0o777 == 0o600, "private friend policy required")
     settings = json.loads(policy.read_text())
-    require(type(settings.get("paused")) is bool and isinstance(settings.get("defaults"), dict) and
-            all(type(settings["defaults"].get(k)) is int and settings["defaults"][k] >= 0
-                for k in ("daily_calls", "daily_tokens")), "explicit friend limits required")
+    defaults = settings.get("defaults", {})
+    require(type(settings.get("paused")) is bool and isinstance(defaults, dict) and
+            all(type(defaults[k]) is int and defaults[k] >= 0
+                for k in ("daily_calls", "daily_tokens") if k in defaults), "invalid friend policy")
     return {"COACH_API_STATE_DIR": str(state), "COACH_FRIEND_CONFIG": str(policy),
             "COACH_FRIEND_API_ONLY": "1"}
 

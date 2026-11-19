@@ -137,9 +137,13 @@ class FriendDomainSwitchTest(unittest.TestCase):
                 switch.stage(self.f.config, True)
             self.assertFalse(self.f.ops.exists())
 
-    def test_unpaused_or_implicit_or_invalid_limits_refused(self):
+    def test_stage_accepts_paused_config_without_daily_limits(self):
+        self.config_path.write_text(json.dumps(dict(paused=True)))
+        self.stage()
+
+    def test_unpaused_or_invalid_limits_refused(self):
         for value in (dict(paused=False, defaults=dict(daily_calls=1, daily_tokens=2)),
-                      dict(paused=True), dict(paused=True, defaults=dict(daily_calls=True, daily_tokens=2)),
+                      dict(paused=True, defaults=dict(daily_calls=True, daily_tokens=2)),
                       dict(paused=True, defaults=dict(daily_calls=1, daily_tokens=0))):
             with self.subTest(value=value):
                 self.config_path.write_text(json.dumps(value))

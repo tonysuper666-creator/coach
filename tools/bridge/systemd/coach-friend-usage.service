@@ -1,0 +1,30 @@
+[Unit]
+Description=Coach daily per-person usage report (private file, no platform login)
+Documentation=file://%h/coach-cost/README.md
+# Reads the same ledger as the 2-hour spend recorder; never modifies it.
+After=coach-spend-watch.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/coach-cost/bin
+# Yesterday in UTC: report day keys are UTC, and a run at 00:20 UTC closes the
+# previous day without needing a timezone in the script.
+# mac-friend.json is the Mac friend instance's settled export; it is added only
+# because it declares its own source_id and independent=true. mac-friend-names.json
+# is the same private roster format and only adds names. Both are optional: an
+# offline Mac leaves last night's file in place and a missing file is reported,
+# never silently dropped.
+ExecStart=/usr/bin/python3 %h/coach-cost/bin/friend_usage_report.py --state %h/Coach/state --day yesterday --devices-db %h/Coach/data/coach.sqlite --roster %h/coach-cost/inbox/mac-friend-names.json --ledger mac-friend=%h/coach-cost/inbox/mac-friend.json
+Environment=COACH_API_STATE_DIR=%h/Coach/state
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/Coach/state
+MemoryMax=64M
+CPUQuota=20%
+Nice=10
+
+[Install]
+WantedBy=default.target

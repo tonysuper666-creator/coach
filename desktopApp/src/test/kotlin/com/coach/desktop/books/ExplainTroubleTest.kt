@@ -18,10 +18,14 @@ import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.V7TextButton
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
+import kotlinx.coroutines.Dispatchers
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -34,6 +38,97 @@ import kotlin.test.*
  */
 @OptIn(ExperimentalTestApi::class)
 class ExplainTroubleTest {
+    @Test fun lateRevocationDoesNotInvalidateTheNewPairing() = runBlocking {
+        val checking = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            exchange.requestBody.use { it.readBytes() }
+            val status = if (exchange.requestURI.path == "/v1/public/status") {
+                checking.countDown(); check(release.await(10, TimeUnit.SECONDS)); 401
+            } else 403
+            val bytes = "{}".toByteArray()
+            exchange.sendResponseHeaders(status, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        try {
+            val mac = TestMac("http://127.0.0.1:${server.address.port}")
+            mac.load()
+            val request = async(Dispatchers.IO) { mac.explain(block, listOf(block)) }
+            assertTrue(checking.await(10, TimeUnit.SECONDS))
+            val replacement = DesktopIdentity("http://127.0.0.1:${server.address.port}", PairedCredentials("new-device", "new-token", "friend"))
+            mac.switchTo(replacement)
+            release.countDown()
+            assertIs<ExplainResult.Refused>(request.await())
+            assertSame(replacement, mac.identity)
+            assertFalse(mac.revoked)
+        } finally { release.countDown(); server.stop(0) }
+    }
+
+    @Test fun forbiddenExplanationChecksTheSameIdentityWithoutResendingThePassage() {
+        for (status in listOf(401, 200, 0)) {
+            val (library, book, chosen) = sample()
+            val savedPage = book.readingPage
+            val explains = AtomicInteger()
+            val checks = AtomicInteger()
+            val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+            server.createContext("/") { exchange ->
+                val bytes = exchange.requestBody.use { it.readBytes() }
+                assertEquals("Bearer test-token", exchange.requestHeaders.getFirst("Authorization"))
+                assertEquals("test-device", exchange.requestHeaders.getFirst("X-Coach-Device"))
+                when (exchange.requestURI.path) {
+                    "/v1/library/explain" -> {
+                        explains.incrementAndGet()
+                        val body = """{"error":"这段原文没有访问权限。"}""".toByteArray()
+                        exchange.sendResponseHeaders(403, body.size.toLong())
+                        exchange.responseBody.use { it.write(body) }
+                    }
+                    "/v1/public/status" -> {
+                        checks.incrementAndGet()
+                        assertEquals("GET", exchange.requestMethod)
+                        assertEquals(0, bytes.size)
+                        if (status == 0) exchange.close() else {
+                            val body = "{}".toByteArray()
+                            exchange.sendResponseHeaders(status, body.size.toLong())
+                            exchange.responseBody.use { it.write(body) }
+                        }
+                    }
+                    else -> error("unexpected request")
+                }
+            }
+            server.start()
+            try {
+                val mac = TestMac("http://127.0.0.1:${server.address.port}")
+                val consent = ExplainConsent(library.directory)
+                runSkikoComposeUiTest(size = Size(1100f, 850f), density = Density(1f)) {
+                    setContent { CoachTheme(darkTheme = false) { BookExplainPanel(book, chosen.page, consent, mac, selection = chosen) } }
+                    waitUntil(timeoutMillis = 20_000) { mac.loaded }
+                    onNodeWithTag("explain-button").performClick()
+                    onNodeWithTag("explain-consent-allow").performClick()
+                    waitUntil(timeoutMillis = 30_000) { onAllNodesWithTag("explain-failed").fetchSemanticsNodes().isNotEmpty() }
+                    assertEquals(1, explains.get())
+                    assertTrue(checks.get() >= 1)
+                    if (status == 401) {
+                        onNodeWithTag("explain-failed").assertTextEquals(ExplainTrouble.REVOKED)
+                        onNodeWithTag("explain-repair").performScrollTo().performClick()
+                        onNodeWithTag("explain-pairing").assertExists()
+                        onNodeWithTag("explain-address").assertExists()
+                        onNodeWithTag("explain-code").assertExists()
+                        assertNull(mac.identity)
+                    } else {
+                        onNodeWithTag("explain-failed").assertTextEquals("这段原文没有访问权限。")
+                        onNodeWithTag("explain-retry").assertExists()
+                        onNodeWithTag("explain-repair").assertDoesNotExist()
+                        assertNotNull(mac.identity)
+                    }
+                    assertEquals(savedPage, library.book(book.id).readingPage)
+                    assertTrue(library.catalog().any { it.id == book.id })
+                    assertEquals(1, explains.get(), "状态查询不能重发原文")
+                }
+            } finally { server.stop(0) }
+        }
+    }
     @Test fun eachReplyKindGetsItsOwnNextStep() {
         assertEquals(ExplainTrouble.Unreachable, ExplainTrouble.of(null, null))
         assertEquals(ExplainTrouble.Revoked, ExplainTrouble.of(401, null))
@@ -260,6 +355,7 @@ class ExplainTroubleTest {
     private class TestMac(private val url: String) :
         BookExplainer(DesktopConnectionSettings(home = Files.createTempDirectory("explain-trouble-home-"), environment = { null })) {
         override suspend fun load() { identity = DesktopIdentity(url, PairedCredentials("test-device", "test-token", "friend")); loaded = true }
+        fun switchTo(value: DesktopIdentity) { identity = value }
     }
 
     private val block = SourceBlock("synthetic:p1:0", 1, 0, 30, heading = false, text = "Plants use light to make food.")

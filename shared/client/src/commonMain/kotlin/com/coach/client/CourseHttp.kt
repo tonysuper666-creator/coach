@@ -140,20 +140,28 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         }
         if (response.status.value == 401) MockReply(null, "这台电脑的配对已失效，请在 Mac 上生成新配对码重新配对。", statusCode = 401)
         else {
-            val parsed = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+            val text = response.bodyAsText()
+            val parsed = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull()
             val status = response.status.value
-            val code = parsed.s("code").ifBlank { null }
+            val code = parsed?.s("code")?.ifBlank { null }
             when {
+                parsed == null && status != 403 -> MockReply(null, "连不上 Mac，可继续阅读或稍后重试。")
                 response.status.isSuccess() -> MockReply(parsed, null, statusCode = status)
                 // Older friend services return a quota sentence. Use the same service guidance on both clients.
                 status == 429 || code == "daily_quota" || code == "monthly_quota" ->
                     MockReply(null, "讲解服务暂时不可用，请稍后再试。", retryable = true, statusCode = status, code = "unavailable")
-                else -> MockReply(null, parsed.s("error").ifBlank { "暂时无法确认，请稍后重试。" }, statusCode = status, code = code)
+                else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "暂时无法确认，请稍后重试。", statusCode = status, code = code)
             }
         }
     } catch (_: HttpRequestTimeoutException) { MockReply(null, "讲解请求等待超时。可继续阅读或手动重试。") }
       catch (e: kotlinx.coroutines.CancellationException) { throw e }
       catch (_: Exception) { MockReply(null, "连不上 Mac，可继续阅读或稍后重试。") }
+
+    /** Check this same server and device without sending any book text. Only 401 proves revocation. */
+    suspend fun libraryAuthStatus(): Int? = try {
+        http.get("$base/v1/public/status").status.value
+    } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+      catch (_: Exception) { null }
     suspend fun cancelLibraryExplain(id: String) {
         runCatching { http.post("$base/v1/library/explain/cancel") {
             setBody(TextContent(buildJsonObject { put("requestId", id) }.toString(), ContentType.Application.Json)) } }

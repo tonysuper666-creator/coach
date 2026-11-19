@@ -573,9 +573,7 @@ internal class TextbookLibrary(
     // ---- 同一页、同一显示宽度合并并发调用并缓存，每次调用留下分段计时 ----
     private data class RenderKey(val id: String, val page: Int, val stamp: Long, val pixelWidth: Int?)
     private val renderLock = Any()
-    private val renderCache = object : LinkedHashMap<RenderKey, BookBitmap>(16, .75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<RenderKey, BookBitmap>) = size > 6
-    }
+    private val renderCache = LinkedHashMap<RenderKey, BookBitmap>(16, .75f, true)
     private val renderInflight = HashMap<RenderKey, java.util.concurrent.CompletableFuture<BookBitmap>>()
     private val traces = java.util.concurrent.ConcurrentLinkedQueue<RenderTrace>()
 
@@ -629,15 +627,24 @@ internal class TextbookLibrary(
                 else {
                     val displayedWidth = if (sheet.rotation == 90 || sheet.rotation == 270) bounds.height else bounds.width
                     // PDFBox floors pixel dimensions. Round the scale upward before applying the raster limit.
-                    minOf(Math.nextUp(pixelWidth / displayedWidth), 4096f / longEdge)
+                    minOf(Math.nextUp(pixelWidth / displayedWidth), bookPdfRasterLimit / longEdge)
                 }
                 val t2 = System.nanoTime()
-                val img = BookPdfRenderer(pdf).renderImage(page - 1, scale)
+                val img = renderBookPdfPage(file, pdf, page - 1, scale)
                 val t3 = System.nanoTime()
                 record(RenderTrace(book.id, page, "render", (t1 - t0) / 1_000_000.0, (t2 - t1) / 1_000_000.0, (t3 - t2) / 1_000_000.0, (t3 - started) / 1_000_000.0, Thread.currentThread().name))
                 img
             }
-            synchronized(renderLock) { renderCache[key] = image; renderInflight.remove(key) }
+            synchronized(renderLock) {
+                renderCache[key] = image
+                val entries = renderCache.values.iterator()
+                var bytes = renderCache.values.sumOf(::bookPdfBitmapBytes)
+                while (renderCache.size > 6 || bytes > bookPdfCacheBytes) {
+                    bytes -= bookPdfBitmapBytes(entries.next())
+                    entries.remove()
+                }
+                renderInflight.remove(key)
+            }
             future.complete(image)
             return image
         } catch (e: Throwable) {

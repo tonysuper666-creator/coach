@@ -1,5 +1,7 @@
 package com.coach.desktop
 
+import com.sun.jna.Pointer
+import com.sun.jna.ptr.ShortByReference
 import java.net.URI
 import java.nio.file.Files
 import java.security.MessageDigest
@@ -17,6 +19,27 @@ class WindowsUpdateTest {
         assertEquals("1.10.0", update.candidate(json())?.version)
         for (version in listOf("1.9.0", "1.8.99", "256.0.0", "1.09.1", "1.9.65536")) assertNull(update.candidate(json(version)))
         assertNull(update.candidate(json(arch = "arm64")))
+    }
+
+    @Test fun x64ProcessUnderPrismUpdatesToNativeArm64() {
+        val kernel = object : UpdateKernel32 {
+            override fun GetCurrentProcess(): Pointer = Pointer.createConstant(-1L)
+            override fun IsWow64Process2(process: Pointer, processMachine: ShortByReference, nativeMachine: ShortByReference): Boolean {
+                assertEquals(GetCurrentProcess(), process)
+                processMachine.value = 0x8664.toShort() // emulated x64
+                nativeMachine.value = 0xaa64.toShort() // native ARM64
+                return true
+            }
+        }
+        val host = assertNotNull(windowsUpdateArch(kernel))
+        val prism = WindowsUpdate(URI("https://updates.invalid/channel/latest.json"), "1.0.1", host)
+        val x64 = json(version = "1.1.0", file = "LearningCoach-1.1.0-x64.msi")
+        val arm64 = """{"version":"1.1.0","arch":"arm64","file":"LearningCoach-1.1.0-arm64.msi","size":42,"sha256":"${"a".repeat(64)}"}"""
+        val manifest = """{"packages":[$x64,$arm64]}"""
+        assertEquals(WindowsRelease("1.1.0", "LearningCoach-1.1.0-arm64.msi", 42, "a".repeat(64)), prism.candidate(manifest))
+        assertNull(prism.candidate(x64))
+        val nativeX64 = WindowsUpdate(URI("https://updates.invalid/channel/latest.json"), "1.0.1", "x64")
+        assertEquals(WindowsRelease("1.1.0", "LearningCoach-1.1.0-x64.msi", bytes.size.toLong(), hash), nativeX64.candidate(manifest))
     }
 
     @Test fun confinesDownloadsToPackagedHttpsDirectory() {

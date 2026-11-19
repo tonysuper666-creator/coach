@@ -64,6 +64,17 @@ if (-not ('CoachWin' -as [type])) {
     Add-Type @"
 using System; using System.Runtime.InteropServices;
 public class CoachWin {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct POINT { public int X, Y; }
+  [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
+  [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW")]
+  static extern IntPtr HitTest(IntPtr h, uint msg, UIntPtr wp, IntPtr lp, uint flags, uint timeout, out IntPtr result);
+  public static bool IsExposedCaption(IntPtr h, int x, int y) {
+    if (WindowFromPoint(new POINT { X = x, Y = y }) != h) return false;
+    IntPtr part;
+    return HitTest(h, 0x84 /* WM_NCHITTEST */, UIntPtr.Zero, (IntPtr)((y << 16) | (x & 65535)),
+                   2, 300, out part) != IntPtr.Zero && part.ToInt64() == 2 /* HTCAPTION */;
+  }
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
@@ -95,33 +106,33 @@ function Open-StartMenu {
     [CoachWin]::keybd_event(0x5B, 0, 2, [IntPtr]::Zero)
 }
 
-# Select the running app through Explorer on the hosted ARM desktop. The shell
-# can activate its taskbar item while Windows declines a background driver's
-# SetForegroundWindow request. Save-Shot still checks the exact HWND and PID.
-function Select-InstalledTaskbarButton {
+# On hosted ARM, Start may already be open over the app. Dismiss it with Esc
+# only when it owns the foreground. Then use the installed window's exposed
+# title bar to activate it as a user would. Save-Shot independently verifies focus.
+function Select-InstalledWindow {
+    $foreground = [WD]::GetForegroundWindow()
+    $owner = 0
+    [WD]::GetWindowThreadProcessId($foreground, [ref]$owner) | Out-Null
+    $shell = Get-Process -Id $owner -ErrorAction SilentlyContinue
+    if ($shell.ProcessName -in 'SearchHost','StartMenuExperienceHost' -and [WD]::GetForegroundWindow() -eq $foreground) {
+        [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+        Start-Sleep -Milliseconds 400
+    }
     if ([WD]::GetForegroundWindow() -eq $script:Win) { return }
-    Add-Type -AssemblyName UIAutomationClient
-    $desktop = [System.Windows.Automation.AutomationElement]::RootElement
-    $class = [System.Windows.Automation.AutomationElement]::ClassNameProperty
-    $taskbar = $desktop.FindFirst([System.Windows.Automation.TreeScope]::Children,
-        [System.Windows.Automation.PropertyCondition]::new($class, 'Shell_TrayWnd'))
-    if (-not $taskbar) { throw 'Windows taskbar is unavailable on the input desktop' }
-    $buttons = $taskbar.FindAll([System.Windows.Automation.TreeScope]::Descendants,
-        [System.Windows.Automation.PropertyCondition]::new(
-            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-            [System.Windows.Automation.ControlType]::Button))
-    $items = @($buttons | Where-Object { $_.Current.Name -match '^LearningCoach(\b|$)' })
-    if ($items.Count -ne 1) {
-        $names = ($buttons | ForEach-Object { $_.Current.Name }) -join ', '
-        throw "Expected one running LearningCoach taskbar button, found $($items.Count). Taskbar buttons: $names"
+    $owner = 0
+    [WD]::GetWindowThreadProcessId($script:Win, [ref]$owner) | Out-Null
+    if ($owner -ne $script:WinPid -or $script:TargetPids -notcontains $owner) { throw 'Installed window owner changed' }
+    $r = Get-Rect
+    $x = $r.L + [int](($r.R - $r.L) / 2)
+    $y = $r.T + [int]([System.Windows.Forms.SystemInformation]::CaptionHeight / 2)
+    if (-not [CoachWin]::IsExposedCaption($script:Win, $x, $y)) { throw 'Installed window title bar is covered' }
+    if (-not [WD]::SetCursorPos($x, $y) -or -not [CoachWin]::IsExposedCaption($script:Win, $x, $y)) {
+        throw 'Cannot select the installed title bar'
     }
-    $item = $items[0]
-    $item.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-    $deadline = (Get-Date).AddSeconds(5)
-    while ([WD]::GetForegroundWindow() -ne $script:Win -and (Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 100
-    }
-    Note "Selected taskbar item '$($item.Current.Name)'; foreground: $(Get-ForegroundSummary)"
+    [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
+    [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 300
+    Note "Selected installed title bar; foreground: $(Get-ForegroundSummary)"
 }
 
 function Get-LearningCoachProducts {
@@ -241,7 +252,7 @@ if ($dpi -gt 0) { "Dpi: $dpi ($([math]::Round(100 * $dpi / 96))%)" | Add-Content
 Start-Sleep -Seconds 2
 $hostedArm = $env:GITHUB_ACTIONS -eq 'true' -and $env:RUNNER_ENVIRONMENT -eq 'github-hosted' -and $env:PROCESSOR_ARCHITECTURE -eq 'ARM64'
 try {
-    if ($hostedArm -and -not [WD]::Activate($hwnd)) { Select-InstalledTaskbarButton }
+    if ($hostedArm -and -not [WD]::Activate($hwnd)) { Select-InstalledWindow }
     Save-Shot (Join-Path $OutDir '01-window.png')
 } catch {
     $why = $_.Exception.Message

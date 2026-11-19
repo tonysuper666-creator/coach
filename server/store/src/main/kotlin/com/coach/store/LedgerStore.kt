@@ -117,6 +117,8 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             sql("ALTER TABLE devices ADD COLUMN last_used_at INTEGER")
         if (query("PRAGMA table_info(pairing_code)") { it.getString("name") }.none { it == "friend_name" })
             sql("ALTER TABLE pairing_code ADD COLUMN friend_name TEXT")
+        if (query("PRAGMA table_info(pairing_code)") { it.getString("name") }.none { it == "slot_hash" })
+            sql("ALTER TABLE pairing_code ADD COLUMN slot_hash TEXT")
         // A digest alone cannot reveal its hash domain. Old inserts default to version 0;
         // only this implementation issues version 1 friend credentials. Never accept legacy
         // friend hashes through the owner path, including after an old binary writes the DB.
@@ -711,8 +713,10 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         val now = clock()
         sql("DELETE FROM friend_invites WHERE expires_at<=? OR attempts>=5", now)
         val occupied = query("SELECT slot_hash FROM friend_invites") { it.getString(1) }.toSet()
-        val free = ('0'..'9').filterNot { inviteSlot(it) in occupied }
-        if (free.isEmpty()) return@transaction null
+        // Keep one slot available for the existing five-minute pairing flow.
+        if (occupied.size >= 9) return@transaction null
+        val singletonSlot = query("SELECT slot_hash FROM pairing_code WHERE expires_at>? AND attempts<5", now) { it.getString(1) }.singleOrNull()
+        val free = ('0'..'9').filterNot { inviteSlot(it) in occupied || inviteSlot(it) == singletonSlot }
         val prefix = free[idRandom.nextInt(free.size)]
         val singleton = query("SELECT code_sha256 FROM pairing_code WHERE singleton=1") { it.getString(1) }.singleOrNull()
         var code: String
@@ -736,13 +740,13 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
 
     fun createPairingCode(friend: String? = null): PairingCode = transaction {
         require(friend == null || (friend.isNotBlank() && friend.length <= 80 && friend.none { it.isISOControl() }))
-        var code: String
-        do {
-            code = idRandom.nextInt(1_000_000).toString().padStart(6, '0')
-        } while (pendingInvite(inviteSlot(code.first()))?.matches(code) == true)
+        val occupied = query("SELECT slot_hash FROM friend_invites WHERE expires_at>? AND attempts<5", clock()) { it.getString(1) }.toSet()
+        val free = ('0'..'9').filterNot { inviteSlot(it) in occupied }
+        val prefix = free[idRandom.nextInt(free.size)]
+        val code = prefix + idRandom.nextInt(100_000).toString().padStart(5, '0')
         val expires = clock() + 300_000
-        sql("INSERT INTO pairing_code(singleton,code_sha256,expires_at,attempts,friend_name,friend_hash_version) VALUES(1,?,?,0,?,?) ON CONFLICT(singleton) DO UPDATE SET code_sha256=excluded.code_sha256,expires_at=excluded.expires_at,attempts=0,friend_name=excluded.friend_name,friend_hash_version=excluded.friend_hash_version",
-            credentialHash(code, friend != null), expires, friend, if (friend == null) 0 else 1)
+        sql("INSERT INTO pairing_code(singleton,code_sha256,expires_at,attempts,friend_name,friend_hash_version,slot_hash) VALUES(1,?,?,0,?,?,?) ON CONFLICT(singleton) DO UPDATE SET code_sha256=excluded.code_sha256,expires_at=excluded.expires_at,attempts=0,friend_name=excluded.friend_name,friend_hash_version=excluded.friend_hash_version,slot_hash=excluded.slot_hash",
+            credentialHash(code, friend != null), expires, friend, if (friend == null) 0 else 1, inviteSlot(prefix))
         PairingCode(code, expires)
     }
 
@@ -758,7 +762,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             sql("DELETE FROM friend_invites WHERE slot_hash=?", slot)
             return@transaction enrollPairedDevice(name, invite.friend)
         }
-        val paired = pairSingleton(code, name, friendsOnly)
+        // Older installations have no recorded slot; keep their already issued code redeemable.
+        val tryLegacy = invite == null || query("SELECT 1 FROM pairing_code WHERE slot_hash IS NULL AND expires_at>? AND attempts<5", clock()) { true }.isNotEmpty()
+        val paired = if (tryLegacy) pairSingleton(code, name, friendsOnly) else null
         if (paired == null && invite != null) sql("UPDATE friend_invites SET attempts=attempts+1 WHERE slot_hash=?", slot)
         paired
     }

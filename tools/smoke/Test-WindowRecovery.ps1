@@ -23,6 +23,7 @@ function Minimize-Own {
     if(-not[WD]::IsIconic($script:Win)){throw 'Test did not minimize its owned window'}
 }
 $app=Start-Process $spec.executable -ArgumentList $spec.arguments -WorkingDirectory $spec.repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
+$appStartTicks=Get-TrackedProcessStartTicks $app
 $errorText=''
 try {
     $until=(Get-Date).AddSeconds(45)
@@ -61,7 +62,7 @@ try {
     $lines=@(Read-Screen $png)
     Check 'keyboard restores minimized window and closes settings' (-not[WD]::IsIconic($script:Win) -and $null -eq (Find-Text $lines '教材位置') -and $null -ne (Find-Text $lines '书架'))
 } catch {$errorText=$_.Exception.Message} finally {
-    Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+    if($app){Stop-TrackedPid -ProcessId $app.Id -StartTimeTicks $appStartTicks -WaitMs 5000 -Tree}
     @{checks=$checks;error=$errorText;time=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 (Join-Path $OutDir 'result.json')
 }
 "WINDOW_RECOVERY $(@($checks|Where-Object ok).Count)/$($checks.Count) error=$errorText"

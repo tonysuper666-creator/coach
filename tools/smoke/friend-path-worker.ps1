@@ -127,6 +127,22 @@ $env:COACH_URL = if ($Url) { $Url } else { 'http://127.0.0.1:18999' }
 $serverPort = ([uri]$env:COACH_URL).Port
 if ($serverPort -in 18791, 8791, 8790) { throw "拒绝：$serverPort 是生产端口，冒烟只用隔离测试端口。" }
 $script:RepoMarker = $Repo
+if (-not $Background) {
+    $foreign = Find-ForeignForegroundWindow
+    if ($foreign) {
+        $reason = "桌面存在非本轮拉起的前台窗口（$($foreign.Summary)）"
+        @{
+            dirty = $true
+            exitCode = 2
+            reason = $reason
+            foreground = $foreign
+            time = (Get-Date).ToUniversalTime().ToString('o')
+        } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $OutDir 'environment-dirty.json')
+        Note "ENVIRONMENT_DIRTY：$reason"
+        $global:LASTEXITCODE = 2
+        exit 2
+    }
+}
 # Other Coach windows/heavy jobs may coexist; only input/capture is serialized.
 Mark-ExistingClients
 $runTask = ':desktopApp:run'
@@ -145,6 +161,7 @@ $memoryLease = Enter-SmokeMemory
 try {
 if ($ClientSeed) { Copy-Item -Recurse -Force (Join-Path $ClientSeed '*') $client }
 $gradle = $null
+$gradleStartTicks = 0L
 if ($Runtime) {
     $Runtime = (Resolve-Path -LiteralPath $Runtime).Path
     $revision = (& git -C $Repo rev-parse HEAD).Trim()
@@ -161,6 +178,7 @@ if ($Runtime) {
     $gradle = Start-Process (Join-Path $Repo 'gradlew.bat') -ArgumentList $launchArgs -WorkingDirectory $Repo `
     -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
 }
+if ($gradle) { $gradleStartTicks = Get-TrackedProcessStartTicks $gradle }
 try {
     # ① 启动
     $deadline = (Get-Date).AddSeconds($StartTimeoutSec)
@@ -607,18 +625,18 @@ try {
     $passed = @($results | Where-Object Ok).Count
     $summary = [pscustomobject]@{ passed = $passed; total = 7; marker = $Marker; time = (Get-Date -Format 'o'); outDir = $OutDir; server = $env:COACH_URL; steps = $results }
     $summary | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $OutDir 'result.json')
-    Stop-MyClient
+    $cleanupErr = $null
+    try { Stop-MyClient } catch { $cleanupErr = $_ }
     # Kill only the exact launcher tree this worker created; its Java wrapper
     # must not survive a startup failure and launch an orphan window later.
-    $launcher = Get-Process -Id $gradle.Id -ErrorAction SilentlyContinue
-    if ($launcher -and $launcher.StartTime -eq $gradle.StartTime) {
-        $killer = Start-Process taskkill.exe -ArgumentList "/PID $($gradle.Id) /T /F" -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'cleanup.out.log') -RedirectStandardError (Join-Path $OutDir 'cleanup.err.log')
-        if (-not $killer.WaitForExit(10000)) {
-            Stop-Process -Id $killer.Id -Force -ErrorAction SilentlyContinue
-            throw 'Owned launcher cleanup timed out'
+    try {
+        if ($gradle) {
+            Stop-TrackedPid -ProcessId $gradle.Id -StartTimeTicks $gradleStartTicks -WaitMs 10000 -Tree `
+                -StdoutPath (Join-Path $OutDir 'cleanup.out.log') -StderrPath (Join-Path $OutDir 'cleanup.err.log')
         }
-    }
+    } catch { if (-not $cleanupErr) { $cleanupErr = $_ } }
     Note "结果 $passed/7"
+    if ($cleanupErr) { throw $cleanupErr }
 }
 } finally {
     if ($ClientSeed) { Remove-Item -Recurse -Force $client -ErrorAction SilentlyContinue }   # 配对凭据只在运行期存在

@@ -37,6 +37,8 @@ internal class AnswerExplain(
     val explain: suspend (chosen: SourceBlock, blocks: List<SourceBlock>) -> ExplainResult,
     val revoked: () -> Boolean = { false },
     val ask: (suspend (SourceBlock, String) -> ExplainResult)? = null,
+    /** 这台电脑放没放出「用 Sable 账号登录」；停用那一句只指向真能用的入口。 */
+    val sableLogin: () -> Boolean = { false },
 ) {
     // Generated practice is deliberately window-local: never grade it with the saved cloze key.
     val practices = mutableStateMapOf<String, GeneratedPractice>()
@@ -53,6 +55,7 @@ internal fun answerExplainWith(explainer: BookExplainer, consent: ExplainConsent
     explain = { chosen, blocks -> explainer.explain(chosen, blocks) },
     revoked = { explainer.revoked },
     ask = { chosen, question -> explainer.ask(chosen, question) },
+    sableLogin = { explainer.sableLogin },
 )
 
 /**
@@ -119,7 +122,7 @@ internal fun LessonAnswerExplanation(
         !ready -> Text("正在看这台电脑和 Mac 的连接…", Modifier.testTag("answer-explain-loading"),
             style = MaterialTheme.typography.bodySmall)
         !paired -> Column(Modifier.fillMaxWidth().testTag("answer-explain-unpaired"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(if (gate.revoked()) ExplainTrouble.REVOKED else "讲解由配对的 Mac 生成，这台电脑还没连上。读书和做题照常。",
+            Text(if (gate.revoked()) ExplainTrouble.revoked(gate.sableLogin()) else "讲解由配对的 Mac 生成，这台电脑还没连上。读书和做题照常。",
                 style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("answer-explain-unpaired-text"))
             V7TextButton(onOpenSourcePage, modifier = Modifier.testTag("answer-explain-pair")) { Text("去原文页配对") }
         }
@@ -291,7 +294,7 @@ internal fun GeneratedLessonPractice(
         // 连不上的时候不能让这一节空着：配对只管「现出题」，原文出的题和作答照常。
         !gate.ready() -> fallback()
         !gate.paired() -> {
-            Text(if (gate.revoked()) ExplainTrouble.REVOKED else "现出题和答后讲解要用配对的 Mac；连上之前，这一节先用原文出的题。")
+            Text(if (gate.revoked()) ExplainTrouble.revoked(gate.sableLogin()) else "现出题和答后讲解要用配对的 Mac；连上之前，这一节先用原文出的题。")
             V7TextButton(onRepair) { Text("去原文页配对") }
             fallback()
         }

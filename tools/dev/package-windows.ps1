@@ -19,6 +19,11 @@
 .PARAMETER Task
     Gradle task. Default: packageDistributionForCurrentOS (MSI on Windows).
 
+.PARAMETER SableLogin
+    Show the "Sable account" sign-in entry in this build. Off by default: the
+    pairing-code form is the only way to connect until the production sign-in is
+    released (TON-1760). The decision is printed as sable-login=shown|hidden.
+
 .PARAMETER WixZip
     Optional pre-downloaded wix311.zip for an offline host. Copied to
     ~/.gradle/compose-jb/wix311.zip before the build when that file is absent.
@@ -29,7 +34,8 @@
 [CmdletBinding()]
 param(
     [string]$Task = 'packageDistributionForCurrentOS',
-    [string]$WixZip
+    [string]$WixZip,
+    [switch]$SableLogin
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,7 +70,8 @@ Push-Location $root
 try {
     (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
     & (Join-Path $root 'gradlew.bat') --console=plain --priority=low --max-workers=2 `
-        '-Pcoach.release=true' :desktopApp:verifyReleaseVersion ":desktopApp:$Task"
+        '-Pcoach.release=true' "-Pcoach.sableLogin=$(if ($SableLogin) { 'true' } else { 'false' })" `
+        :desktopApp:verifyReleaseVersion ":desktopApp:$Task"
     $code = $LASTEXITCODE
 } finally {
     Pop-Location
@@ -84,4 +91,5 @@ foreach ($installer in $installers) {
     Write-Host ("size={0}" -f $installer.Length)
     Write-Host ("sha256={0}" -f $hash)
     Write-Host ("signature={0} {1}" -f $sig.Status, $signer)
+    Write-Host ("sable-login={0}" -f $(if ($SableLogin) { 'shown' } else { 'hidden' }))
 }

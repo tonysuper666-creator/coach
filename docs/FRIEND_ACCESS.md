@@ -9,7 +9,7 @@ TON-1686；父卡 TON-1685 决策 13。生产上线和外网 Windows 实测由 T
 | 方法 | 路径 | 内容 |
 | --- | --- | --- |
 | POST | `/v1/pair` | 朋友码配对，回包 `role: friend` |
-| GET | `/v1/public/status` | 在线、本设备今日已结算调用数、这个朋友共同剩余额度 |
+| GET | `/v1/public/status` | 在线、本设备当日已结算调用数。只有显式启用某项日限时才返回该项剩余量 |
 | POST | `/v1/library/explain` | 必须带设备自己的 `localSource` 导入证明 |
 | POST | `/v1/library/explain/cancel` | 取消本设备的 requestId |
 
@@ -24,7 +24,7 @@ app revoke DEVICE_ID
 app revoke-friend '朋友甲'
 ```
 
-配对码仍为六位、单次、五分钟、最多五次猜测。同名朋友的多台电脑共用日额度；吊销一个朋友会停掉其全部现有电脑，重新签发仍沿用这个名字的当日用量。`devices` 的 JSON 包含 friend、friendId、配对/最近使用时间和 today；friendId 是 UTF-8 名字的 SHA-256，供私有配置引用。名字应当稳定，改名不会迁移日额度。
+配对码仍为六位、单次、五分钟、最多五次猜测。同名朋友的多台设备合并记账；吊销一个朋友会停掉其全部现有设备，重新签发仍沿用这个名字的当日用量。`devices` 的 JSON 包含 friend、friendId、配对/最近使用时间和 today；friendId 是 UTF-8 名字的 SHA-256，供私有配置引用。名字应当稳定，改名后会使用新的账本身份。
 
 客户端保存角色；朋友配对和重开只探测 public/status，不访问 hello、ws、snapshot、today。已配置课程的安装也进入本机书架，不构造服务端课程/做题账本客户端。本地书籍的学习和练习仍可用。逐书同意和服务错误面板由 TON-1687 处理。
 
@@ -38,32 +38,24 @@ app revoke-friend '朋友甲'
 桥与 Kotlin 服务必须共享 `COACH_API_STATE_DIR`（默认 `~/Coach/state`）和 `COACH_FRIEND_CONFIG`（默认 `~/Coach/config/friends.json`）。配置示例，目录 0700、文件 0600：
 
 ```json
-{
-  "paused": false,
-  "defaults": {"daily_calls": 100, "daily_tokens": 1000000},
-  "friends": {
-    "用 devices 输出中的 friendId 替换这个键": {
-      "daily_calls": 20,
-      "daily_tokens": 200000,
-      "paused": false
-    }
-  }
-}
+{"paused": false}
 ```
 
-额度是**每次实际发给 API 的请求**，包括格式修复重试；日界线为 UTC 00:00。tokens 是输入加输出。每次调用先用 UTF-8 字节和输出上界保守预留日次数、token 与月费用，使用同一个文件锁和同一份原子账本提交。完整用量回包才结算；取消、超时、HTTP 错误或用量不明保留预留，重启/月切换不清掉未知月费用。不应手工删除预留，须先核实实际账单。预留也会占用日余量，故界面余量可能暂时小于默认值减已结算次数。
+默认没有个人每日次数或 token 上限。管理员仍可在 `defaults` 或 `friends.<friendId>` 显式设置 `daily_calls`、`daily_tokens` 中的任意一项，个人设置优先。旧配置里显式设置的值继续生效，删掉相应键即可恢复缺省行为。
 
-所有朋友讲解固定走 Anthropic Haiku API，包括第三次格式修复；不升级为更贵模型，不进入订阅 CLI。与 owner 的 API 请求共同受既有 Coach 月上限约束。`paused: true` 可立即阻止新的朋友 API 调用，owner API 和已经在途请求不受其控制；如需中止某朋友在途响应，吊销该朋友，其响应交付前会再次校验鉴权。
+每次实际 API 请求均按人记录调用次数、输入与输出 token、费用，包括格式修复重试。UTC 00:00 换日，账本同时保留设备明细。调用前在同一份原子账本中预留 token 与费用；收到完整用量才结算，取消、超时或用量不明时保留预留。重启和换月都会保留未决费用，核实实际账单后才能处理。
+
+朋友讲解和格式修复固定走 Anthropic Haiku API。同一账本上的朋友与 owner API 调用共用赠额保护。`paused: true` 可立即阻止新的朋友 API 调用，owner API 和已经在途请求不受其控制；如需中止某朋友在途响应，吊销该朋友，其响应交付前会再次校验鉴权。
 
 价格沿用 `model_routes.json`，本实现没有重新核实供应商报价。该配置的输入 $0.10/百万、输出 $0.50/百万，因此 100 万输入加输出 token **不是固定 $0.15**；按配置全部为输出时为 $0.50。实际计费按输入/输出分别记入微美元整数。
 
-固定错误：日额度/月额度用完为 HTTP 429，API 或费用状态不可用为 503；`error` 是中文提示，`code` 只供程序判断。
+显式限额或赠额保护拒绝调用时返回 HTTP 429，API 或费用状态不可用时返回 503。客户端显示讲解服务暂不可用，`code` 供程序判断。
 
-## 八成提醒的部署与停用
+## 赠额保护监控的部署与停用
 
-`tools/bridge/friend_spend_watch.py` 在文件锁下读取账本，把各家本月已结算费用和所有未决预留与月上限比较，再写 TON-740 的 string 元数据 `coach.api-spend`，内容为 `{status,since,detail}`。达到八成含预留即 warn。相同状态保留起始时间，不携带原文或密钥。
+`tools/bridge/friend_spend_watch.py` 在文件锁下核对本月已结费用、未决预留和拒绝记录，写入 TON-740 的 `coach.api-spend`。保护线为赠额的 95%，即 Anthropic $190、OpenAI $475。触线时记为 `warn`，相同状态保留起始时间。记录仅含状态、时间和费用摘要。
 
-已核对 Butler「系统状态」的实现：它只渲染通道和 Sable，不显示这个键，因此走 ask 备用，不传 `--panel-support`。达到八成时默认同时在 TON-1686 写一次 ask，每月一次：朋友讲解花到本月上限的八成了，要不要继续？选项为继续，到上限自动停/现在停掉朋友讲解。已有其他待答问题时保留它，下次检查再尝试。不会发送聊天消息。人选择现在停时，由接到 ask_answer 的管家把私有配置的全局 paused 改为 true；继续则保持月硬上限。
+触线时默认在 TON-1691 登记一次待决定事项，由主会话交李政决定是否另行授权自费。已有待答事项时保留它，下次检查再尝试。赠额保护持续生效，自费需要另行授权。
 
 用 plistlib 渲染 `tools/bridge/com.tony.coach-api-spend.plist.in` 的占位值，避免路径 XML 转义问题：Python 必须指向生产桥 venv，脚本放在持久部署目录并带上 `api_budget.py` 和 `model_routes.json`，state 与生产桥相同，log 目录预建且私有（目录 0700、文件 0600，plist 的 `Umask` 设为 077）。不得直接 bootstrap 未渲染的模板。
 
@@ -103,7 +95,7 @@ launchctl bootout "gui/$(id -u)/com.tony.coach-api-spend"
 python tools/bridge/tests/friend_acceptance.py
 ```
 
-脚本经 `tools/dev/heavy` 构建，使用临时 HOME/数据/日志/费用配置和三个随机回环端口，起真实 Coach 与真实 bridge，只有 Anthropic HTTP transport 被 MockTransport 替代。生成样例书、用真实管理程序签码并配对 A/B、完成讲解、检查 20 条禁用路径、吊销 A 后检查 A401/B200、B 日限调为 1 后检查第二次429及账本调用/token/owner零记录。结束回收自己创建的进程和临时文件。没有真实 API、订阅 CLI、生产 18791、Funnel 或真实教材。
+脚本用临时数据和回环端口启动真实 Coach 与 bridge，通过 MockTransport 提供 Anthropic 回包。验收 A/B 配对、讲解、20 条禁用路径、A 吊销后 A 401/B 200、B 缺省下两次讲解成功且按人结算次数、token、费用。再验证显式设置日限仍返回 429，owner 账本无朋友调用。结束回收隔离进程和临时文件。
 
 补充门禁：
 

@@ -456,7 +456,7 @@ class WindowsTextbooksTest {
             sameShell("revoked")
             shot("explain-revoked")
 
-            // 额度用完: re-pair, then the day's quota is used; the button closes and there is no retry.
+            // 重新配对后，旧 429 回包显示服务暂不可用并允许重试。
             mac.mode = ExplainShellMac.Mode.QUOTA
             onNodeWithTag("explain-address").performTextClearance()
             onNodeWithTag("explain-address").performTextInput(mac.url)
@@ -465,10 +465,10 @@ class WindowsTextbooksTest {
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
             onAllNodesWithTag("explain-button")[0].performScrollTo().performClick()
             waitTag("explain-failed")
-            onAllNodesWithTag("explain-failed")[0].assertTextEquals(ExplainShellMac.QUOTA)
-            onAllNodesWithTag("explain-retry").assertCountEquals(0)
-            sameShell("quota")
-            shot("explain-quota")
+            onAllNodesWithTag("explain-failed")[0].assertTextEquals(ExplainShellMac.SERVICE_BUSY)
+            onAllNodesWithTag("explain-retry")[0].assertIsEnabled()
+            sameShell("service-unavailable")
+            shot("explain-busy")
             assertEquals(2, mac.pairs.get())
 
             // Leaving the panel does not move anything either, and 返回书架 is the way back to the shelf.
@@ -601,15 +601,15 @@ class WindowsTextbooksTest {
             same("explain-revoked")
             shot("explain-revoked")
 
-            // 额度用完
+            // 旧服务 429
             mac.mode = ExplainShellMac.Mode.QUOTA
             pair("135791")
             clickInBlock("explain-button")
             waitFor("quota") { inBlock("explain-failed") != null }
-            assertEquals(ExplainShellMac.QUOTA, text(inBlock("explain-failed")))
-            assertNull(inBlock("explain-retry"))
-            same("explain-quota")
-            shot("explain-quota")
+            assertEquals(ExplainShellMac.SERVICE_BUSY, text(inBlock("explain-failed")))
+            assertNotNull(inBlock("explain-retry"))
+            same("explain-busy")
+            shot("explain-busy")
             assertEquals(2, mac.pairs.get())
 
             // 关面板，再「返回书架」
@@ -756,7 +756,10 @@ class WindowsTextbooksTest {
     /** Loopback stand-in for the Mac: pairing hands out credentials, explain answers by [mode]. */
     private class ExplainShellMac(prefix: Char) : AutoCloseable {
         enum class Mode { OK, OFFLINE, REVOKED, QUOTA }
-        companion object { const val QUOTA = "今天的讲解额度用完了，明天再来。" }
+        companion object {
+            private const val QUOTA = "今天的讲解额度用完了，明天再来。"
+            const val SERVICE_BUSY = "讲解服务暂时不可用，请稍后再试。"
+        }
         @Volatile var mode = Mode.OK
         val pairs = java.util.concurrent.atomic.AtomicInteger()
         private val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)

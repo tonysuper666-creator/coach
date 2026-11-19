@@ -76,11 +76,11 @@ object ExternalFriendSmoke {
         check(!connected)
         pass("bridgePortClosed=1")
         stage = "prepaired-b"
-        // B was paired on the Mac before A's code was signed. It is a quota and
+        // B was paired on the Mac before A's code was signed. It is a usage and
         // revocation control, not a second Windows native pairing acceptance.
         val settings = bSettings()
         val b = prepairedB(settings)
-        check(status(b).statusCode() == 200)
+        val bCallsBefore = calls(b)
         stage = "import"
         val source = root.resolve("Self-authored sample.txt")
         val samplePassage = "主动回忆是一种学习方法：先合上书，尝试用自己的话说出刚读过的概念，再打开原文核对遗漏。这个样例只用于连接验收。"
@@ -131,26 +131,32 @@ object ExternalFriendSmoke {
         shot("source.png")
         pass("nativeImport=1 friendPair=1 consent=1 selectionReply=1 citation=1")
 
-        stage = "quota-b"
-        check(status(b).statusCode() == 200)
-        // Mac must configure B.daily_calls=1 before pre-pairing it.
+        stage = "usage-b"
         val explainer = BookExplainer(settings, library)
         runBlocking {
             explainer.load()
             val first = explainer.ask(passage, "请解释这段话。")
             check(first is ExplainResult.Done && first.explanation.citations.isNotEmpty())
             val second = explainer.ask(passage, "请再解释这段话。")
-            check(second is ExplainResult.Refused && second.trouble == ExplainTrouble.Quota && second.message == "今天的讲解额度用完了，明天再来。")
+            check(second is ExplainResult.Done && second.explanation.citations.isNotEmpty())
         }
-        pass("bPrepairedOnMac=1 bFirst=200 bSecond=429 dailyQuotaChinese=1")
+        val bCalls = calls(b) - bCallsBefore
+        check(bCalls >= 2)
+        pass("bPrepairedOnMac=1 bFirst=200 bSecond=200 bCalls=$bCalls")
         stage = "routes"
         val denied = listOf("/v1/ws", "/v1/commands", "/v1/devices", "/v1/pairing-code", "/v1/courses/x/snapshot", "/v1/courses/x/today", "/v1/hello", "/v1/usage", "/health", "/v1/reader", "/v1/library", "/v1/%64evices", "/v1/library/explain/")
         for (path in denied) {
             val reply = request(a, path)
             check(reply.statusCode() == 404 && reply.body().isEmpty())
         }
-        Files.writeString(evidence.resolve("ready-for-revoke.json"), """{"ready":true,"forbiddenPaths":13,"bridgePortClosed":true,"bCalls":1}""")
+        Files.writeString(evidence.resolve("ready-for-revoke.json"), """{"ready":true,"forbiddenPaths":13,"bridgePortClosed":true,"bCalls":$bCalls}""")
         pass("forbiddenEmpty404=13 readyForMacRevoke=1")
+    }
+
+    private fun calls(identity: DesktopIdentity): Long {
+        val response = status(identity)
+        check(response.statusCode() == 200)
+        return Json.parseToJsonElement(response.body()).jsonObject.getValue("calls").jsonPrimitive.long
     }
 
     private fun revoke() {

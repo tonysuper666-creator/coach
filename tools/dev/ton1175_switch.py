@@ -279,9 +279,11 @@ def friend_environment(c, env, info):
                 and stat.S_IMODE(config_stat.st_mode) == 0o600,
                 'friend config must be a canonical private file')
         limits = load(config_path)
-        require(limits.get('paused') is True and all(type(limits.get('defaults', {}).get(key)) is int
-                and limits['defaults'][key] > 0 for key in ('daily_calls', 'daily_tokens')),
-                'friend config must start paused with explicit limits')
+        defaults = limits.get('defaults', {})
+        require(limits.get('paused') is True and isinstance(defaults, dict)
+                and all(type(defaults[key]) is int and defaults[key] > 0
+                        for key in ('daily_calls', 'daily_tokens') if key in defaults),
+                'friend config must start paused with valid limits')
         if 'policy' not in friend:
             with socket.socket() as listener:
                 listener.bind(('127.0.0.1', port))

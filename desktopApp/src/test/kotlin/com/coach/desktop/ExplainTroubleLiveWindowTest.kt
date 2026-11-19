@@ -32,7 +32,7 @@ import kotlin.test.*
 
 /**
  * 朋友那台 Windows 电脑上，讲解没讲成的几种情况在真窗口里走一遍（TON-1687）：
- * 逐书同意、断连后再试一次讲成、日额度用完、答后讲解被 401 停用 → 去原文页重新配对 → 回到这一节讲出来。
+ * 逐书同意、断连后重试、旧 429 回包、答后讲解被 401 停用 → 去原文页重新配对 → 回到这一节讲出来。
  *
  * 走 Windows 主机默认的那套讲解器和配对文件，不注入讲解器：只把这个测试进程的 `user.home` 换成临时目录，
  * 并按安装版的样子带上 `jpackage.app-path`，所以配对、凭据和逐书同意都落在临时目录里，不碰真实的 `~/Coach/client`。
@@ -41,7 +41,7 @@ import kotlin.test.*
  */
 @OptIn(InternalComposeUiApi::class, ExperimentalComposeUiApi::class, ComposeToolingApi::class)
 class ExplainTroubleLiveWindowTest {
-    @Test fun friendWindowHandlesOfflineQuotaRevokedAndPerBookConsentInBothThemes() {
+    @Test fun friendWindowHandlesOfflineUnavailableRevokedAndPerBookConsentInBothThemes() {
         assumeTrue(System.getProperty("coach.explainLiveWindow") == "true")
         assumeTrue(System.getProperty("os.name").startsWith("Windows"))
         // 这些变量会把客户端目录、服务地址或凭据指到别处；带着它们跑就不再是隔离的临时目录。
@@ -172,35 +172,34 @@ class ExplainTroubleLiveWindowTest {
             shot(window, dark, "03-retried")
             step("retried")
 
-            // 日额度用完：服务端那句话原样显示，没有「再试一次」，按钮停用。
+            // 旧服务的 429 转为通用提示，仍可手动重试。
             mac.quota = true
             clickInBlock("explain-button")
             waitFor("quota line") { inBlock("explain-failed") != null }
-            assertEquals(FakeMac.QUOTA, text(inBlock("explain-failed")))
-            assertNull(inBlock("explain-retry"), "额度用完不给再试")
-            assertFalse(enabled(inBlock("explain-button")!!), "额度用完按钮停用")
+            assertEquals(SERVICE_BUSY, text(inBlock("explain-failed")))
+            assertTrue(enabled(inBlock("explain-retry")!!))
             assertEquals(2, mac.explains.get())
-            shot(window, dark, "04-quota")
-            step("quota")
+            shot(window, dark, "04-service-unavailable")
+            step("service-unavailable")
 
-            // 选段就问碰上额度用完：同一句话，「发送」停用，选段和问题留着。
+            // 选段就问也显示通用提示，选段和问题留着。
             click(window, "book-explain-toggle")
             click(window, "ask-book-passage")
             click(window, "ask-paragraph-0")
             type(window, "book-passage-question", "这里的「基本单位」指什么？")
             click(window, "book-passage-send")
-            waitFor("ask quota") { node(window, "book-passage-unavailable") != null }
-            assertEquals(FakeMac.QUOTA, text(node(window, "explain-trouble")))
-            assertNull(node(window, "explain-trouble-retry"))
-            assertFalse(enabled(node(window, "book-passage-send")!!))
-            assertEquals(3, mac.explains.get(), "额度用完只发了这一次")
+            waitFor("ask unavailable") { node(window, "book-passage-unavailable") != null }
+            assertEquals(SERVICE_BUSY, text(node(window, "explain-trouble")))
+            assertNotNull(node(window, "explain-trouble-retry"))
+            assertTrue(enabled(node(window, "book-passage-send")!!))
+            assertEquals(3, mac.explains.get(), "失败后只等待手动重试")
             assertNotNull(node(window, "book-selected-passage"))
             reveal(window, "book-passage-unavailable")
-            shot(window, dark, "05-ask-quota")
+            shot(window, dark, "05-ask-service-unavailable")
             click(window, "book-passage-close")
-            step("ask-quota")
+            step("ask-service-unavailable")
 
-            // 第二天额度回来了，但这台电脑的连接在 Mac 那边被停用（401）。做题学答完，讲解那一块指回配对。
+            // 这台电脑随后被停用（401）。做题学答完，讲解入口指回配对。
             mac.quota = false
             mac.revokeFirst = true
             clickText(window, "课程")
@@ -341,7 +340,9 @@ class ExplainTroubleLiveWindowTest {
         } finally { edt { window.dispose() } }
     }
 
-    /** 本机回环上的假 Mac。配对第 n 次发第 n 份凭据；[revokeFirst] 打开后第一份凭据讲解时回 401；[quota] 打开时回日额度用完。 */
+    private val SERVICE_BUSY = "讲解服务暂时不可用，请稍后再试。"
+
+    /** 本机回环上的假 Mac。每次配对发新凭据，可模拟 401 或旧服务的 429。 */
     private class FakeMac(prefix: Char) : AutoCloseable {
         companion object {
             const val QUOTA = "今天的讲解额度用完了，明天再来。"

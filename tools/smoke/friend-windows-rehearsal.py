@@ -102,8 +102,7 @@ def main():
         counter.write_text("0")
         friend_b = hashlib.sha256(prepare.B.encode()).hexdigest()
         config = root / "friends.json"
-        config.write_text(json.dumps({"paused": False, "defaults": {"daily_calls": 4, "daily_tokens": 1_000_000},
-                                      "friends": {friend_b: {"daily_calls": 1, "daily_tokens": 1_000_000}}}))
+        config.write_text(json.dumps({"paused": False}))
         config.chmod(0o600)
         month = datetime.now(timezone.utc).strftime("%Y-%m")
         cycle_id = "anthropic:" + month
@@ -167,28 +166,27 @@ def main():
         require(status == 200)
         a, b = json.loads(body), prepared["credentialB"]
         require(public_client.request("/v1/public/status", auth=b)[0] == 200)
-        stage = "explain-and-quota"
+        stage = "explain-and-usage"
         book = hashlib.sha256(b"Self-authored acceptance book").hexdigest()
         text = "A synthetic orbit is a path around a synthetic star."
         payload = {"requestId": "ab12", "kind": "explain", "selection": text, "blocks": [{"id": book + ":p1:0", "text": text}],
             "localSource": {"schema": 1, "book": book, "format": "txt", "title": "Self-authored sample", "consented": True,
                 "pages": [{"number": 1, "length": len(text), "ocr": False, "sha256": hashlib.sha256(text.encode()).hexdigest()}]}}
-        for identity in (a, b):
+        for identity in (a, b, b):
             status, body = public_client.request("/v1/library/explain", "POST", identity, payload)
             require(status == 200 and "自写样例说明" in json.loads(body)["text"])
-        status, body = public_client.request("/v1/library/explain", "POST", b, payload)
-        require(status == 429 and json.loads(body)["code"] == "daily_quota")
         stage = "revoke-a"
         require(private_client.request("/v1/friends/revoke", "POST", owner, {"friend": prepare.A})[0] == 204)
         require(public_client.request("/v1/public/status", auth=a)[0] == 401)
         require(public_client.request("/v1/public/status", auth=b)[0] == 200)
         ledger = json.loads(ledger_file.read_text())
         daily = next(iter(ledger["friends"][friend_b].values()))
-        require((daily["calls"], daily["input_tokens"], daily["output_tokens"], len(daily["reserved"])) == (1, 100, 20, 0))
-        require(daily["devices"][b["deviceId"]]["calls"] == 1 and counter.read_text() == "2")
+        require((daily["calls"], daily["input_tokens"], daily["output_tokens"], len(daily["reserved"])) == (2, 200, 40, 0))
+        require(daily["spent_microusd"] > 0 and daily["devices"][b["deviceId"]]["spent_microusd"] == daily["spent_microusd"])
+        require(daily["devices"][b["deviceId"]]["calls"] == 2 and counter.read_text() == "3")
         require(ledger["cycles"][cycle_id]["reserved"] == {"owner-pending": 3})
         require(ledger["cycles"][cycle_id]["limit"] == 1_000_000 and ledger["cycles"][cycle_id]["spent"] > 17)
-        require(ledger["months"][month]["anthropic"]["calls"] == 3)
+        require(ledger["months"][month]["anthropic"]["calls"] == 4)
         result = 0
     except Exception:
         (root / "failure.log").write_text(traceback.format_exc())
@@ -216,8 +214,8 @@ def main():
             time.sleep(.1)
     if result == 0:
         print("FRIEND_WINDOWS_REHEARSAL PASS managedWrapper=1 boundaryDenials=6 providerNetwork=0 keychainReads=0")
-        print("bPrepairedOnMac=1 aPair=200 bStatus=200 aRevoked=401 bPreserved=200 bFirst=200 bSecond=429")
-        print("bCalls=1 input=100 output=20 pending=0 ownerPendingPreserved=1 ownerCapUnchanged=1 listenersReleased=3")
+        print("bPrepairedOnMac=1 aPair=200 bStatus=200 aRevoked=401 bPreserved=200 bFirst=200 bSecond=200")
+        print("bCalls=2 input=200 output=40 costRecorded=1 pending=0 ownerPendingPreserved=1 ownerCapUnchanged=1 listenersReleased=3")
     else:
         print("FRIEND_WINDOWS_REHEARSAL FAIL stage=" + stage)
     return result

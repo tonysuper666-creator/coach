@@ -25,7 +25,7 @@ class DesktopFriendPairingTest {
             exchange.requestBody.readAllBytes()
             val pair = exchange.requestURI.path == "/v1/pair"
             val body = (if (pair) """{"deviceId":"friend-pc","token":"${"a".repeat(43)}","role":"friend"}"""
-                else """{"online":true,"calls":0,"callsRemaining":100}""").toByteArray()
+                else """{"online":true,"calls":0}""").toByteArray()
             exchange.sendResponseHeaders(if (pair) 200 else status, body.size.toLong())
             exchange.responseBody.use { it.write(body) }
         }

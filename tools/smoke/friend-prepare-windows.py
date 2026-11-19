@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Pre-pair B on the Mac, then sign A's one-use Windows code.
 
-Only for a stopped/cleaned previous temporary acceptance session. Configure
-explicit A/B limits first. No quota changes or model requests are made here.
+Use dedicated A/B identities after any previous temporary session is cleaned up.
+This helper prepares credentials only.
 Secrets enter via env; the new 0600 output is private, never an artifact.
 """
 import argparse
@@ -46,7 +46,7 @@ def prepare(private, public, owner):
     require(owner.get("deviceId") == "desktop" and isinstance(owner.get("token"), str) and owner["token"])
     # Do not sign A until B has been redeemed and independently authorized.
     b_code = code(private, owner, B)
-    status, body = public.request("/v1/pair", "POST", body={"code": b_code, "name": "Mac pre-paired quota control"})
+    status, body = public.request("/v1/pair", "POST", body={"code": b_code, "name": "Mac pre-paired usage control"})
     require(status == 200)
     b = json.loads(body)
     require(isinstance(b, dict) and b.get("role") == "friend"

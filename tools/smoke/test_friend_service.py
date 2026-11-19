@@ -21,7 +21,7 @@ adapter = module("friend_bridge", "friend-service-bridge.py")
 
 
 class ServiceIsolationTest(unittest.TestCase):
-    def test_friend_api_keeps_existing_owner_ledger_and_explicit_private_limits(self):
+    def test_friend_api_keeps_existing_owner_ledger_and_accepts_unlimited_private_config(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(service.Path, "home", return_value=Path(temp).resolve()):
             state = Path(temp).resolve() / "Coach/state"
             root = state / "isolated"
@@ -29,8 +29,7 @@ class ServiceIsolationTest(unittest.TestCase):
             ledger = state / "api-credit-ledger.json"
             original = b'{"cycles":{"owner":{"spent":17,"reserved":{"pending":3},"limit":100}},"months":{}}'
             ledger.write_bytes(original)
-            service.private_json(root / "friends.json", {"paused": True,
-                "defaults": {"daily_calls": 100, "daily_tokens": 1_000_000}})
+            service.private_json(root / "friends.json", {"paused": True})
             config = {"friendApi": True, "apiStateDir": str(state)}
             env = service.friend_api_environment(root, config)
             self.assertEqual(env["COACH_API_STATE_DIR"], str(state))
@@ -41,7 +40,7 @@ class ServiceIsolationTest(unittest.TestCase):
                            {"apiStateDir": "relative"}, {"friendApi": "true"}):
                 with self.subTest(change=change), self.assertRaises(ValueError):
                     service.friend_api_environment(root, config | change)
-            for policy in ({"paused": False}, {"paused": False, "defaults": {"daily_calls": -1, "daily_tokens": 1}},
+            for policy in ({"paused": "false"}, {"paused": False, "defaults": {"daily_calls": -1, "daily_tokens": 1}},
                            {"paused": False, "defaults": {"daily_calls": True, "daily_tokens": 1}}):
                 service.private_json(root / "friends.json", policy)
                 with self.assertRaises(ValueError):

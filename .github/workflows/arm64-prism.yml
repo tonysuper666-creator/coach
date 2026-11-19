@@ -1,5 +1,5 @@
-name: Windows ARM64 Prism smoke (TON-1719)
-# 骁龙（Windows on ARM）机器上，现有 x64 安装包靠 Prism 仿真能不能装、能不能起窗口。
+name: Windows ARM64 installed package smoke (TON-1719)
+# 在独立的 Windows ARM 运行机上，从已核对散列的原生包及 x64 RC2 启动书架并导入扫描材料。
 # 只在 ton-1719-* 分支推送时跑；不碰朋友入口、不用任何 secrets。
 on:
   push:
@@ -9,6 +9,23 @@ permissions:
   actions: read
 jobs:
   prism:
+    name: Installed ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: prism
+            artifact: friend-windows-package
+            run: '44273248327'
+            msi: LearningCoach-1.0.1.msi
+            sha256: 568f22f0ec021c6b167274ae420e4b90f22fa46b6b733268c209c62dc0e6137d
+            fixture: 01-clean-serif.png
+          - arch: native-arm64
+            artifact: windows-arm64-package-candidate
+            run: '44511269008'
+            msi: LearningCoach-1.0.1-arm64.msi
+            sha256: 9897e1dea8d7b59be3e2e358c168d5bc36f27345ad5079d876e85656e508bdeb
+            fixture: three-scanned-pages.pdf
     runs-on: windows-11-arm
     timeout-minutes: 30
     steps:
@@ -22,20 +39,20 @@ jobs:
           "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE" | Tee-Object evidence/machine.txt
           (Get-CimInstance Win32_Processor | Select-Object -First 1 Name).Name | Tee-Object -Append evidence/machine.txt
           [System.Environment]::OSVersion.VersionString | Tee-Object -Append evidence/machine.txt
-      # RC2：11-18 交付并通过 7/7 的同一个 x64 包（run 44273248327，SHA-256 568f22f0…6137d）
+      # Use the reviewed installer from its original build, including for driver-only commits.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: friend-windows-package
+          name: ${{ matrix.artifact }}
           path: bundle
-          run-id: 44273248327
+          run-id: ${{ matrix.run }}
           github-token: ${{ github.token }}
-      - name: Verify RC2 hash
+      - name: Verify installer identity
         id: verify
         shell: pwsh
         run: |
-          $h = (Get-FileHash bundle/LearningCoach-1.0.1.msi -Algorithm SHA256).Hash.ToLower()
+          $h = (Get-FileHash 'bundle/${{ matrix.msi }}' -Algorithm SHA256).Hash.ToLower()
           "msi_sha256=$h" | Tee-Object -Append evidence/machine.txt
-          if ($h -ne '568f22f0ec021c6b167274ae420e4b90f22fa46b6b733268c209c62dc0e6137d') { throw 'not RC2' }
+          if ($h -ne '${{ matrix.sha256 }}') { throw 'Unexpected installer hash' }
       - name: Dismiss foreground runner blocker
         shell: powershell
         run: |
@@ -52,14 +69,14 @@ jobs:
           [PrismForeground]::GetWindowThreadProcessId([PrismForeground]::GetForegroundWindow(), [ref]$owner) | Out-Null
           $front = Get-Process -Id $owner -ErrorAction SilentlyContinue
           if ($front -and $front.ProcessName -eq 'WWAHost') { Stop-Process -Id $owner -Force; "Closed foreground WWAHost $owner" }
-      - name: Install x64 MSI under Prism, launch and screenshot
+      - name: Install MSI, launch and screenshot
         shell: powershell
-        run: ./tools/smoke/msi-install.ps1 -Msi bundle/LearningCoach-1.0.1.msi -OutDir evidence/install -StartTimeoutSec 300 -KeepInstalled
+        run: ./tools/smoke/msi-install.ps1 -Msi 'bundle/${{ matrix.msi }}' -OutDir evidence/install -StartTimeoutSec 300 -KeepInstalled
       - name: Capture installed window and import synthetic scan
         if: ${{ always() && steps.verify.outcome == 'success' }}
         shell: powershell
         run: |
-          ./tools/smoke/prism-ocr.ps1 -OutDir evidence/prism-ocr -Fixture desktopApp/src/test/resources/books/ocr/01-clean-serif.png -InstallResult evidence/install/result.json
+          ./tools/smoke/prism-ocr.ps1 -OutDir evidence/scan -Fixture 'desktopApp/src/test/resources/books/ocr/${{ matrix.fixture }}' -InstallResult evidence/install/result.json
       - name: Uninstall isolated test package
         if: always()
         shell: powershell
@@ -83,7 +100,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: arm64-prism-evidence
+          name: arm64-${{ matrix.arch }}-evidence
           path: evidence/
           retention-days: 7
           if-no-files-found: warn

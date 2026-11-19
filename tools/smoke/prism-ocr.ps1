@@ -1,15 +1,34 @@
+# After installing the x64 candidate on winbox:
+# powershell -File tools/smoke/prism-ocr.ps1 -Winbox -OutDir <new-evidence-directory>
+[CmdletBinding(DefaultParameterSetName='Hosted')]
 param(
     [Parameter(Mandatory)][string]$OutDir,
-    [Parameter(Mandatory)][string]$Fixture,
-    [Parameter(Mandatory)][string]$InstallResult,
-    [string]$TestDesktop
+    [Parameter(Mandatory,ParameterSetName='Hosted')][string]$Fixture,
+    [Parameter(Mandatory,ParameterSetName='Hosted')][string]$InstallResult,
+    [Parameter(ParameterSetName='Hosted')][string]$TestDesktop,
+    [Parameter(Mandatory,ParameterSetName='Local')][switch]$Winbox
 )
 $ErrorActionPreference = 'Stop'
-if ($env:GITHUB_ACTIONS -ne 'true' -or $env:PROCESSOR_ARCHITECTURE -ne 'ARM64') {
+if ($Winbox) {
+    if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw 'Expected an x64 Windows host' }
+    New-Item -ItemType Directory -Force $OutDir | Out-Null
+    $OutDir = (Resolve-Path -LiteralPath $OutDir).Path
+    if ((Get-Process -Id $PID).SessionId -eq 0) {
+        $quotedOut = $OutDir.Replace("'", "''")
+        & (Join-Path $PSScriptRoot 'Run-Interactive.ps1') -Script $PSCommandPath -ScriptArgs "-Winbox -OutDir '$quotedOut'" -LogFile (Join-Path $OutDir 'worker.log') -TimeoutSec 900
+        exit $LASTEXITCODE
+    }
+    $Fixture = (Resolve-Path (Join-Path $PSScriptRoot '../../desktopApp/src/test/resources/books/ocr/three-scanned-pages.pdf')).Path
+    $products = @(Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object DisplayName -eq 'LearningCoach')
+    if ($products.Count -ne 1) { throw 'Expected one installed LearningCoach MSI' }
+    $exe = Join-Path $products[0].InstallLocation 'LearningCoach.exe'
+    $env:COACH_SMOKE_ENABLED = $null
+} elseif ($env:GITHUB_ACTIONS -ne 'true' -or $env:PROCESSOR_ARCHITECTURE -ne 'ARM64') {
     throw 'This probe is restricted to a disposable GitHub ARM64 runner.'
+} else {
+    Add-Type -Path (Join-Path $PSScriptRoot 'ArmSmokeDesktop.cs')
 }
-Add-Type -Path (Join-Path $PSScriptRoot 'ArmSmokeDesktop.cs')
-if (-not $TestDesktop) {
+if (-not $Winbox -and -not $TestDesktop) {
     New-Item -ItemType Directory -Force $OutDir | Out-Null
     $outPath = (Resolve-Path -LiteralPath $OutDir).Path
     $fixturePath = (Resolve-Path -LiteralPath $Fixture).Path
@@ -36,6 +55,9 @@ public static class PrismCapture {
 }
 '@
 function Save-OwnWindow([string]$name, [IntPtr]$handle = $script:Win) {
+    $owner = 0
+    [WD]::GetWindowThreadProcessId($handle, [ref]$owner) | Out-Null
+    if (-not $script:AppPid -or $owner -ne $script:AppPid) { throw 'Capture target changed owner' }
     $rect = New-Object WD+RECT
     if (-not [WD]::GetWindowRect($handle, [ref]$rect)) { throw 'Cannot get own window bounds' }
     $bmp = New-Object System.Drawing.Bitmap ($rect.R - $rect.L), ($rect.B - $rect.T)
@@ -51,6 +73,11 @@ function Save-OwnWindow([string]$name, [IntPtr]$handle = $script:Win) {
 }
 
 function Click-CapturedControl([string]$template, [string]$shot, [switch]$VerifyOnly, [int]$ScrollNotches = 0) {
+    if ($Winbox) {
+        $point = Find-WinboxControl $template ([IO.Path]::GetFileNameWithoutExtension($shot)) $ScrollNotches
+        if (-not $VerifyOnly) { Click-At $point.X $point.Y }
+        return
+    }
     # The previous file picker leaves the pointer over Upload. Compare the idle
     # appearance, on the application window that owns the next input action.
     Invoke-ForegroundStep {
@@ -91,7 +118,8 @@ function Submit-ScanFile([string]$title) {
         List-AppWindows | Write-Output
         throw 'Click did not open the installed app file picker'
     }
-    Save-OwnWindow 'file-picker.png' $dialog
+    # The shared host's native file picker can display unrelated recent files.
+    if (-not $Winbox) { Save-OwnWindow 'file-picker.png' $dialog }
     Write-Output "Installed file picker opened for $([IO.Path]::GetFileName($Fixture))"
     if (-not (Choose-File $title $Fixture)) { throw $script:ChooseFileWhy }
 }
@@ -104,12 +132,13 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
     $env:COACH_TOKEN_FILE = Join-Path $OutDir 'unused-token'
     if (Test-Path $env:COACH_LIBRARY_DIR) { throw 'The scan probe needs a fresh library' }
     New-Item -ItemType Directory $env:COACH_LIBRARY_DIR, $env:COACH_CLIENT_DIR | Out-Null
-    $before = @(Get-CimInstance Win32_Process -Filter "Name='LearningCoach.exe'" | ForEach-Object { [int]$_.ProcessId })
-    $own = @()
+    $app = $null
+    $window = $null
     $tutor = $null
     try {
         if ([IO.Path]::GetExtension($Fixture) -eq '.pdf') {
-            $tutorPrivate = Join-Path $env:RUNNER_TEMP ('coach-tutor-' + [Guid]::NewGuid().ToString('N'))
+            $tempRoot = if ($Winbox) { [IO.Path]::GetTempPath() } else { $env:RUNNER_TEMP }
+            $tutorPrivate = Join-Path $tempRoot ('coach-tutor-' + [Guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory $tutorPrivate | Out-Null
             $parameters = @((Join-Path $PSScriptRoot 'arm-loopback-tutor.py'), $tutorPrivate,
                 $Fixture, (Join-Path $OutDir 'tutor-events.jsonl'), (Join-Path $env:COACH_LIBRARY_DIR 'library.sqlite')) |
@@ -122,16 +151,21 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
                 Start-Sleep -Milliseconds 100
             }
             $port = [int](Get-Content -Raw $portFile)
+            if ($port -le 0 -or $port -gt 65535 -or $port -eq 41000) { throw 'Unexpected local tutor port' }
             $env:COACH_URL = "http://127.0.0.1:$port"
+            Write-Output "Fixture tutor listening on $env:COACH_URL"
+            $env:COACH_TOKEN = $null
             $env:COACH_DEVICE_ID = 'arm-smoke'
             $env:COACH_TOKEN_FILE = Join-Path $tutorPrivate 'token'
         }
-        $app = [ArmSmokeDesktop]::Start($exe, '', $TestDesktop)
+        $app = if ($Winbox) { Start-Process -FilePath $exe -PassThru } else { [ArmSmokeDesktop]::Start($exe, '', $TestDesktop) }
         $deadline = (Get-Date).AddSeconds(300)
         do {
             Start-Sleep -Milliseconds 500
-            $own = @(Get-CimInstance Win32_Process -Filter "Name='LearningCoach.exe'" | Where-Object { $before -notcontains [int]$_.ProcessId } | ForEach-Object { [int]$_.ProcessId })
-            $window = if ($own.Count) { @(Get-Process -Id $own -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -eq 'LearningCoach' }) | Select-Object -First 1 } else { $null }
+            $candidates = Get-CimInstance Win32_Process -Filter "Name='LearningCoach.exe' AND (ProcessId=$($app.Id) OR ParentProcessId=$($app.Id))" |
+                Where-Object ExecutablePath -eq $exe
+            $window = $candidates | ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue } |
+                Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -eq 'LearningCoach' } | Select-Object -First 1
         } while (-not $window -and (Get-Date) -lt $deadline)
         if (-not $window) { throw 'Installed app window did not appear' }
         $script:AppPid = $window.Id
@@ -189,16 +223,17 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
             $tutor.Dispose()
             Remove-Item -LiteralPath (Join-Path $tutorPrivate 'token') -ErrorAction SilentlyContinue
         }
-        foreach ($id in $own) {
-            $proc = Get-Process -Id $id -ErrorAction SilentlyContinue
-            if ($proc -and $proc.ProcessName -eq 'LearningCoach') { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+        foreach ($proc in @($window, $app)) {
+            if ($proc -and -not $proc.HasExited) { $proc.Kill(); $proc.WaitForExit() }
         }
     }
 }
 
-$install = Get-Content -Raw -Encoding UTF8 $InstallResult | ConvertFrom-Json
-if (-not $install.installedTo) { throw 'The MSI smoke did not record an install location' }
-$exe = Join-Path $install.installedTo 'LearningCoach.exe'
+if (-not $Winbox) {
+    $install = Get-Content -Raw -Encoding UTF8 $InstallResult | ConvertFrom-Json
+    if (-not $install.installedTo) { throw 'The MSI smoke did not record an install location' }
+    $exe = Join-Path $install.installedTo 'LearningCoach.exe'
+}
 if (-not (Test-Path -LiteralPath $exe)) { throw 'Installed executable missing' }
 Test-InstalledScan $OutDir $Fixture
 if ([IO.Path]::GetFileName($Fixture) -eq '01-clean-serif.png') {

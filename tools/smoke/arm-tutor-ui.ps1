@@ -1,6 +1,11 @@
 ﻿# Dot-sourced inside the isolated interactive desktop after opening the PDF.
 function Read-TutorFrame([string]$name) {
     Save-OwnWindow "$name.png"
+    if ($Winbox) {
+        $lines = @(Read-Screen (Join-Path $OutDir "$name.png"))
+        $lines | ForEach-Object Text | Set-Content (Join-Path $OutDir "$name.txt") -Encoding UTF8
+        return $lines
+    }
     $src = [Drawing.Bitmap]::new((Join-Path $OutDir "$name.png"))
     $bmp = [Drawing.Bitmap]::new($src.Width * 3, $src.Height * 3, [Drawing.Imaging.PixelFormat]::Format24bppRgb)
     try {
@@ -26,17 +31,30 @@ function Read-TutorFrame([string]$name) {
     return $lines
 }
 
+function Scroll-TutorView([int]$notches) {
+    if ($Winbox) {
+        $bounds = Get-Rect
+        Scroll-At ([int](($bounds.R - $bounds.L) * 0.56)) ([int](($bounds.B - $bounds.T) * 0.70)) $notches
+    } else {
+        Scroll-At 584 490 $notches
+    }
+}
+
 function Find-TutorLabel([string]$name, [string[]]$labels, [int]$scroll = 0, [int]$minX = 0, [int]$minY = 0) {
     foreach ($attempt in 0..5) {
         Start-Sleep -Milliseconds 450
         $lines = @(Read-TutorFrame $name)
         foreach ($label in $labels) {
+            if ($Winbox) {
+                # Prefer a stand-alone button over instructions that quote its label.
+                $lines = @($lines | Sort-Object { ($_.Text -replace '\s','') -ne $label })
+            }
             foreach ($line in $lines) {
                 $hit = Find-Text @($line) $label
                 if ($hit -and $hit.X -ge $minX -and $hit.Y -ge $minY) { return $hit }
             }
         }
-        if ($scroll) { Scroll-At 584 490 $scroll }
+        if ($scroll) { Scroll-TutorView $scroll }
     }
     throw "Missing '$($labels -join ' / ')' in $name"
 }
@@ -46,13 +64,40 @@ function Select-TutorLabel([string]$name, [string[]]$labels, [int]$scroll = 0, [
     Click-At $point.X $point.Y
 }
 
+# On the shared x64 desktop, font scale and theme follow the user's settings.
+# Match the visible label in the app's own capture, including the PDF page fraction.
+function Find-WinboxControl([string]$template, [string]$name, [int]$scroll) {
+    $label = @{
+        'empty-shelf-upload.png' = '上传教材'
+        'shelf-read-first.png' = '先读'
+        'reader-defer-study.png' = '暂不开启'
+        'explain-consent.png' = '允许并讲解'
+        'block-reply-text.png' = 'Blockexplanation.'
+        'shelf-guided.png' = '边看边学'
+        'guided-start.png' = '开始边看边学'
+        'pdf-page-1-of-3.png' = '1/3'
+        'shelf-practice.png' = '做题学'
+    }[$template]
+    if (-not $label) { throw "Unknown installed control $template" }
+    foreach ($attempt in 1..10) {
+        $lines = @(Read-TutorFrame $name)
+        $exact = @($lines | Where-Object { ($_.Text -replace '\s','') -eq $label })
+        $hit = Find-Text $exact $label
+        if (-not $hit -and $template -eq 'block-reply-text.png') { $hit = Find-Text $lines $label }
+        if ($hit) { return $hit }
+        if ($scroll) { Scroll-TutorView $scroll }
+        Start-Sleep -Milliseconds 500
+    }
+    throw "Missing $label in $name"
+}
+
 function Test-BlockAndCitation {
     Send-Keys '{HOME}'
     Select-TutorLabel '04-reader' @('讲解') 0 675
     # RC2 places these controls below each paragraph, the native candidate puts them on the right.
     Select-TutorLabel '04-explain-action' @('讲解这段','井解这上段') -2 100 150
     Click-CapturedControl 'explain-consent.png' '04-consent.png'
-    Scroll-At 584 490 25
+    Scroll-TutorView 25
     Click-CapturedControl 'block-reply-text.png' '04-block.png' -VerifyOnly -ScrollNotches -1
     Select-TutorLabel '07-citation' @('出处1','出处') -2
     $null = Find-TutorLabel '07-original' @('关闭')
@@ -63,9 +108,21 @@ function Test-PassageQuestion {
     Select-TutorLabel '04-ask-action' @('选段提问')
     Select-TutorLabel '04-ask-dialog' @('correlation')
     $field = Find-TutorLabel '04-question-field' @('想问什么') -4
-    Click-At ($field.X + 35) ($field.Y + 34)
-    Send-Keys 'What does this passage mean?'
-    Send-Keys '{ENTER}'
+    $question = 'What does this passage mean?'
+    if ($Winbox) {
+        $counter = Find-TutorLabel '04-question-field' @('0/500') -2
+        $field = Find-TutorLabel '04-question-field' @('想问什么')
+        if ($counter.Y -le $field.Y) { throw 'Question input is not fully visible' }
+        Click-At ($field.X + 100) ([int](($field.Y + $counter.Y) / 2))
+        Start-Sleep -Milliseconds 300
+        Send-Keys $question
+        $null = Find-TutorLabel '04-typed' @('Whatdoesthispassagemean')
+        Select-TutorLabel '04-send' @('发送')
+    } else {
+        Click-At ($field.X + 35) ($field.Y + 34)
+        Send-Keys $question
+        Send-Keys '{ENTER}'
+    }
     $null = Find-TutorLabel '04-answer' @('Passageanswer') -3
     $null = Find-TutorLabel '04-answer-source' @('出处') -3
     Send-Keys '{ESC}'
@@ -105,9 +162,14 @@ function Test-Practice {
     $null = Find-TutorLabel '06-feedback' @('Practicefeedback','feedback') -3
     $null = Find-TutorLabel '06-feedback-source' @('出处') -2
     # The summary heading can enter the viewport while the actual result still sits below it.
-    Scroll-At 584 490 -24
-    $summary = Find-TutorLabel '06-summary' @('这一节','小结','题目和作答') -3
-    $null = Find-TutorLabel '06-summary' @('Recallbefore','beforechecking') 0 100 ($summary.Y - 45)
+    Scroll-TutorView -24
+    if ($Winbox) {
+        $null = Find-TutorLabel '06-summary' @('题目和作答只保留在这次练习中') -3
+        $null = Find-TutorLabel '06-summary' @('你选了「Recallbeforechecking」，与本题答案一致')
+    } else {
+        $summary = Find-TutorLabel '06-summary' @('这一节','小结','题目和作答') -3
+        $null = Find-TutorLabel '06-summary' @('Recallbefore','beforechecking') 0 100 ($summary.Y - 45)
+    }
 }
 
 function Test-InstalledTutor {

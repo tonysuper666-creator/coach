@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class, kotlinx.coroutines.FlowPreview::class)
 
 package com.coach.desktop.books
 
@@ -25,6 +25,9 @@ import com.coach.ui.pageturn.ScrollReadView
 import com.coach.ui.pageturn.PageTurnStyle
 import com.coach.ui.pageturn.PageTurnView
 import androidx.compose.runtime.*
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
@@ -238,6 +241,19 @@ internal fun BookPageView(
             }
         }
         val pages = if (longBook) longPages else shortPages
+        // 读位只在读者自己动了锚点（翻页、滚动、点选、目录、出处）时写；重排（字号、宽度、字体……）
+        // 只按锚点找页、不改锚点也不写，否则写回的是新排版的页首，往返字号会一次退一页。
+        val spotSaved = remember { arrayOf(state.anchor) }
+        val latestOnSpot by rememberUpdatedState(onSpot)
+        LaunchedEffect(Unit) {
+            snapshotFlow { state.anchor }.distinctUntilChanged().drop(1).debounce(300).collect { a ->
+                spotSaved[0] = a
+                withContext(Dispatchers.IO) { latestOnSpot(a) }
+            }
+        }
+        DisposableEffect(Unit) {
+            onDispose { state.anchor.takeIf { it != spotSaved[0] }?.let(latestOnSpot) }
+        }
         if (pages == null) {
             Text("正在排版…", Modifier.align(Alignment.Center).testTag("book-page-laying-out"))
             return@BoxWithConstraints
@@ -249,12 +265,7 @@ internal fun BookPageView(
         }
         val first = state.firstFor(pages, spread)
         SideEffect { state.groupFirst = first; state.groupPages = pages }
-        LaunchedEffect(pages, first, state.anchor) {
-            onPosition(pages[first].anchor.importPage)
-            // 读者定位过的那一句就在当前页上就存它，冷启回到同一句；否则存页首。
-            val exact = state.anchor.takeIf { it.visualOrder == null && pages.pageContaining(it) == first }
-            (exact ?: pages[first].anchor.takeIf { it.visualOrder == null })?.let(onSpot)
-        }
+        LaunchedEffect(pages, first, state.anchor) { onPosition(pages[first].anchor.importPage) }
         if (scrolling) {
             val itemHeightPx = with(density) { maxHeight.roundToPx() }.coerceAtLeast(1)
             val gapPx = with(density) { 24.dp.roundToPx() }

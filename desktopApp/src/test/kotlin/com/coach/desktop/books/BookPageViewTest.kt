@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import com.coach.ui.CoachTheme
+import com.coach.ui.LocalV7TextScale
 import com.coach.ui.v7.Desk
 import com.coach.desktop.WindowsTextbookHost
 import com.coach.domain.reader.ReaderTextRange
@@ -268,11 +269,14 @@ class BookPageViewTest {
                         BookPageView(book, state, emptyMap(), onTurn = { state.move(it) }, onSpot = { spot = it })
                     }
                 } }
-                waitUntil(timeoutMillis = 60_000) { state.pages.isNotEmpty() && spot != null }
+                waitUntil(timeoutMillis = 60_000) { state.pages.isNotEmpty() }
+                mainClock.advanceTimeBy(2_000); waitForIdle()
                 assertTrue(state.index > 0, "冷启不应回章首")
                 val shown = state.pages[state.index].sources.single { it.importPage == 1 }
                 assertTrue(target in shown.startUtf16 until shown.endUtf16, "起步页应包含存下的那句 @width=$width")
-                assertEquals(target, spot!!.offsetUtf16) // 定位过的那一句就在当前页：存精确偏移，不退回页首
+                // 冷启只排版不写入：存储里仍是 target，不是新排版的页首
+                assertEquals(null, spot, "冷启不应写读位 @width=$width")
+                assertEquals(1 to target, TextbookLibrary(root).savedReadSpot(book.id))
             }
         } finally { root.toFile().deleteRecursively() }
     }
@@ -369,6 +373,99 @@ class BookPageViewTest {
         assertTrue(shows(moved), "翻页后")
         reflow(1200); assertTrue(shows(moved) && state.anchor == moved, "展开后仍在新页")
         reflow(520); assertTrue(shows(moved) && state.anchor == moved, "再合起仍在新页")
+
+
+    private val spotSentence = "The multiplication of two whole numbers is the repeated addition of one of them, and the order of the factors does not alter the product. "
+    private fun spotBook(): Textbook {
+        val raw = "CHAPTER 1\n\n" + (1..200).joinToString("\n\n") { n -> "Paragraph $n. " + spotSentence.repeat(3) }
+        return Textbook("spot-roundtrip", "Elements of arithmetic", "epub", listOf(BookPage(1, raw)))
+    }
+
+    /** a / c: 改字号再改回、改宽度再改回，锚点不动、页不退、不写读位。 */
+    @Test fun reflowRoundTripKeepsAnchorAndWritesNothing() = runSkikoComposeUiTest(size = Size(900f, 1000f), density = Density(1f)) {
+        val book = spotBook()
+        val state = BookPagingState(BookPageAnchor(1, book.pages.single().text.indexOf("Paragraph 150.")))
+        var scale by mutableStateOf<androidx.compose.runtime.MutableState<Float>?>(null)
+        var width by mutableStateOf(800)
+        val writes = mutableListOf<BookPageAnchor>()
+        setContent { CoachTheme {
+            scale = LocalV7TextScale.current
+            Box(Modifier.width(width.dp).height(900.dp)) {
+                BookPageView(book, state, emptyMap(), onTurn = { state.move(it) }, onSpot = { writes += it })
+            }
+        } }
+        waitUntil(timeoutMillis = 60_000) { state.pages.isNotEmpty() }
+        // 读者翻到第 k 页页首：锚点落在页首
+        state.anchor = state.pages[state.index].anchor
+        mainClock.advanceTimeBy(2_000); waitForIdle()
+        val k = state.index; val head = state.anchor
+        val startUtf16 = state.pages[k].sources.first().startUtf16
+        writes.clear()
+        for (step in listOf<() -> Unit>({ scale!!.value = 1.4f }, { scale!!.value = 1f }, { width = 560 }, { width = 800 })) {
+            step(); waitForIdle(); mainClock.advanceTimeBy(2_000); waitForIdle()
+            waitUntil(timeoutMillis = 60_000) { state.pages.isNotEmpty() }
+        }
+        assertEquals(head, state.anchor, "重排往返锚点不变")
+        assertEquals(k, state.index)
+        assertEquals(startUtf16, state.pages[state.index].sources.first().startUtf16)
+        assertEquals(0, writes.size, "重排不写读位：$writes")
+    }
+
+    /** b: 大号时用存下的读位新建，再按中号排版，回到同一页。 */
+    @Test fun coldStartRoundTripReturnsToTheSamePage() {
+        val book = spotBook()
+        var savedPage: BookPageAnchor? = null
+        var k = -1
+        fun open(anchor: BookPageAnchor, textScale: Float, onShown: (BookPagingState) -> Unit) =
+            runSkikoComposeUiTest(size = Size(900f, 1000f), density = Density(1f)) {
+                val state = BookPagingState(anchor)
+                setContent { CoachTheme {
+                    LocalV7TextScale.current.value = textScale
+                    Box(Modifier.width(800.dp).height(900.dp)) { BookPageView(book, state, emptyMap(), onTurn = { state.move(it) }) }
+                } }
+                waitUntil(timeoutMillis = 60_000) { state.pages.isNotEmpty() }
+                waitForIdle(); mainClock.advanceTimeBy(2_000); waitForIdle()
+                onShown(state)
+            }
+        val start = BookPageAnchor(1, book.pages.single().text.indexOf("Paragraph 150."))
+        open(start, 1f) { s -> savedPage = s.pages[s.index].anchor; k = s.index }
+        open(savedPage!!, 1.4f) { s -> assertEquals(savedPage, s.anchor, "大号冷启锚点不变") }
+        open(savedPage!!, 1f) { s -> assertEquals(k, s.index, "改回中号回到原页") }
+    }
+
+    /** d: 手动翻页 300ms 之后存下新页页首。 */
+    @Test fun turningThePageStillSavesTheSpot() = runSkikoComposeUiTest(size = Size(900f, 1000f), density = Density(1f)) {
+        val book = spotBook()
+        val state = BookPagingState(BookPageAnchor(1))
+        val writes = mutableListOf<BookPageAnchor>()
+        setContent { CoachTheme { Box(Modifier.width(800.dp).height(900.dp)) {
+            BookPageView(book, state, emptyMap(), onTurn = { state.move(it) }, onSpot = { writes += it })
+        } } }
+        waitUntil(timeoutMillis = 60_000) { state.pages.isNotEmpty() }
+        val moved = state.move(ReaderTurn.Next)
+        waitForIdle(); mainClock.advanceTimeBy(1_000)
+        waitUntil(timeoutMillis = 10_000) { writes.isNotEmpty() }
+        assertEquals(listOf(moved!!), writes)
+    }
+
+    /** e: 滚动读中改字号再改回，锚点不被改成别的行，也不写读位。 */
+    @Test fun scrollModeReflowKeepsTheReadingLine() = runSkikoComposeUiTest(size = Size(900f, 1000f), density = Density(1f)) {
+        val book = spotBook()
+        val line = BookPageAnchor(1, book.pages.single().text.indexOf("Paragraph 150."))
+        val state = BookPagingState(line)
+        var scale by mutableStateOf<androidx.compose.runtime.MutableState<Float>?>(null)
+        val writes = mutableListOf<BookPageAnchor>()
+        setContent { CoachTheme {
+            scale = LocalV7TextScale.current
+            Box(Modifier.width(800.dp).height(900.dp)) {
+                BookPageView(book, state, emptyMap(), onTurn = { state.move(it) }, readMode = BookReadMode.Scroll, onSpot = { writes += it })
+            }
+        } }
+        waitUntil(timeoutMillis = 60_000) { state.pages.isNotEmpty() }
+        waitForIdle(); mainClock.advanceTimeBy(2_000); waitForIdle()
+        for (v in listOf(1.4f, 1f)) { scale!!.value = v; waitForIdle(); mainClock.advanceTimeBy(2_000); waitForIdle() }
+        assertEquals(line, state.anchor)
+        assertEquals(0, writes.size, "$writes")
     }
 
     /** TON-1724: 长英文教材首开，分页在后台做，主线程先显示「正在排版」而不是卡住。 */

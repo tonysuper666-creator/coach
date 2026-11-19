@@ -122,7 +122,9 @@ internal class BookPageLayouter(
     private val pdf: Boolean = false,
 ) {
     fun layout(pages: List<BookPage>, widthPx: Int, bodyHeightPx: Int,
-        highlights: Map<Int, List<IntRange>> = emptyMap(), tableRows: Map<BookIllustration, BookTableRows> = emptyMap()): List<BookLaidPage> {
+        highlights: Map<Int, List<IntRange>> = emptyMap(), tableRows: Map<BookIllustration, BookTableRows> = emptyMap(),
+        checkCancelled: () -> Unit = {},
+    ): List<BookLaidPage> {
         require(widthPx > 0 && bodyHeightPx > 0)
         val source = pages.joinToString("") { it.text }
         if (source.isEmpty() && pages.all { it.illustrations.isEmpty() }) return emptyList()
@@ -158,6 +160,7 @@ internal class BookPageLayouter(
         val leadingImages = textChapters.first().title != null && pages.takeWhile { it.text.isEmpty() }.any { it.illustrations.isNotEmpty() }
         val chapters = if (leadingImages) listOf(BookChapter(0, 0, null, 0)) + textChapters else textChapters
         val chapterVisuals = starts.flatMap { (base, page) ->
+            checkCancelled()
             if (page.illustrations.isEmpty()) return@flatMap emptyList()
             val segments = BookIllustrationLayout.segment(page.text, page.illustrations, hideReplacedSourceText = true)
             val visible = segments.filterIsInstance<BookPageSegment.Text>()
@@ -195,6 +198,7 @@ internal class BookPageLayouter(
         val result = mutableListOf<BookLaidPage>()
         var previousTextEnd = 0
         for ((chapterIndex, chapter) in chapters.withIndex()) {
+            checkCancelled()
             val raw = source.substring(chapter.start, chapter.end)
             // A recognized chapter title is a heading even in plain text/PDF. Do not
             // let PDF hard-line joining merge it into the first body paragraph.
@@ -231,6 +235,7 @@ internal class BookPageLayouter(
             var firstSheet = true
             val pending = ArrayDeque<VisualEvent>()
             while (start < raw.length || next < events.size || pending.isNotEmpty()) {
+                checkCancelled()
                 val opener = firstSheet && chapter.title != null
                 val number = if (opener) bookChapterNumber(chapter.title!!) else null
                 val top = if (opener) bodyHeightPx / 4 else 0

@@ -37,6 +37,9 @@ import java.awt.event.InputEvent
 import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicReference
 import javax.swing.SwingUtilities
 import kotlin.math.roundToInt
@@ -45,6 +48,140 @@ import kotlin.test.*
 /** Real Windows window, native pointer input, and an isolated book and paired service. */
 @OptIn(InternalComposeUiApi::class, ExperimentalComposeUiApi::class, ComposeToolingApi::class)
 class OriginalPdfNativeWindowTest {
+    @Test fun farPageViewSwitchKeepsTheWindowResponsiveAndAgreesWithSqlite() {
+        assumeTrue(System.getProperty("os.name").startsWith("Windows"))
+        val root = Files.createTempDirectory("coach-reader-view-")
+        val library = TextbookLibrary(root.resolve("library"))
+        val book = library.importBook(viewSwitchPdf(root))
+        val stored = TextbookLibrary(library.directory)
+        for (dark in listOf(false, true)) {
+            // Hold the controller's page acknowledgement while the reader is already navigating.
+            val publishedPage = mutableIntStateOf(1)
+            var requestedPage = 1
+            var holdPage = false
+            library.saveTextView(book.id, false)
+            val window = edt { ComposeWindow().apply {
+                title = "LearningCoach · 原页和文字切换"
+                val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
+                setBounds(screen.x + 20, screen.y + 20, minOf(1100, screen.width - 40), minOf(830, screen.height - 40))
+                setContent { CoachTheme(darkTheme = dark) {
+                    TextbookReader(LibraryUi(book = book, page = publishedPage.intValue, screen = BookScreen.READER), library,
+                        UnconnectedBookLearningSupport, null, remember { FocusRequester() }, onNoteSession = {},
+                        onPage = { requestedPage = it; if (!holdPage) publishedPage.intValue = it },
+                        onBack = {}, onLearn = {})
+                } }
+                isVisible = true
+            } }
+            try {
+                val edtThread = edt { Thread.currentThread() }
+                fun toggle() = click(window, "book-original-toggle")
+                fun jump(page: Int, hold: Boolean = false) {
+                    edt {
+                        holdPage = hold
+                        val field = assertNotNull(node(window, "page-jump"))
+                        assertTrue(field.config[SemanticsActions.SetText].action!!.invoke(AnnotatedString(page.toString())))
+                    }
+                    waitFor("enabled page jump") { findNode(window) { it.isAction("前往") } != null }
+                    edt { assertTrue(findNode(window) { it.isAction("前往") }!!.config[SemanticsActions.OnClick].action!!.invoke()) }
+                    assertEquals(page, edt { requestedPage })
+                }
+                fun visible(text: Boolean, page: Int) {
+                    val label = if (text) "看原页" else "看文字"
+                    waitFor("$label and page $page", detail = {
+                        edt {
+                            val body = node(window, "reader-text")
+                            val sources = body?.config?.getOrNull(BookPageSources)?.map { it.importPage }.orEmpty()
+                            "loading=${node(window, "book-page-loading") != null} displayedSources=$sources" +
+                                " published=${publishedPage.intValue} requested=$requestedPage sqlite=${stored.savedTextView(book.id)}"
+                        }
+                    }, timeoutMillis = if (text) 60_000 else 20_000) {
+                        edt {
+                            val button = node(window, "book-original-toggle")
+                            val body = node(window, "reader-text")
+                            val original = node(window, "original-pdf-page-$page")
+                            button?.isAction(label) == true && if (text) {
+                                body?.config?.getOrNull(SemanticsProperties.Text).orEmpty().any { "Page sample $page:" in it.text } &&
+                                    original == null
+                            } else {
+                                body == null && original?.children?.any { image ->
+                                    image.config.getOrNull(OriginalPageBitmapWidth) != null && !image.boundsInRoot.isEmpty
+                                } == true
+                            }
+                        }
+                    }
+                    assertEquals(text, stored.savedTextView(book.id))
+                    println("READER_VIEW dark=$dark page=$page text=$text sqlite=$text")
+                }
+                fun releasePage(page: Int) = edt { holdPage = false; publishedPage.intValue = page }
+                fun responsiveFrame(firstToggle: Boolean = false) {
+                    val frame = FutureTask<Unit> { window.renderImmediately() }
+                    SwingUtilities.invokeLater(frame)
+                    try {
+                        frame.get(2, TimeUnit.SECONDS)
+                    } catch (_: TimeoutException) {
+                        val stack = edtThread.stackTrace
+                        println("READER_VIEW_BLOCKED sqlite=${stored.savedTextView(book.id)}\n${stack.take(50).joinToString("\n")}")
+                        if (!firstToggle) fail("Reader did not draw a frame within two seconds")
+                        frame.get(90, TimeUnit.SECONDS)
+                        fail("Reader did not draw the first text view within two seconds")
+                    }
+                }
+
+                visible(false, 1)
+                jump(154)
+                visible(false, 154)
+                shot(window, dark, "switch-before")
+                toggle()
+                responsiveFrame(firstToggle = true)
+                visible(true, 154)
+                shot(window, dark, "switch-after")
+                repeat(2) {
+                    toggle()
+                    visible(false, 154)
+                    toggle()
+                    visible(true, 154)
+                }
+                toggle()
+                visible(false, 154)
+
+                for ((target, endsInText) in listOf(150 to false, 154 to true)) {
+                    edt { window.setSize(window.width, window.height - 64) }
+                    jump(target, hold = true)
+                    assertNotEquals(target, edt { publishedPage.intValue })
+                    repeat(if (endsInText) 3 else 2) { index ->
+                        toggle()
+                        responsiveFrame()
+                        assertEquals(index % 2 == 0, stored.savedTextView(book.id))
+                        if (index % 2 == 0) assertNotNull(node(window, "book-page-loading"))
+                    }
+                    releasePage(target)
+                    visible(endsInText, target)
+                }
+            } finally { edt { window.dispose() } }
+        }
+    }
+
+    private fun viewSwitchPdf(root: Path): Path = root.resolve("Reader view sample.pdf").also { file ->
+        PDDocument().use { pdf ->
+            val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+            for (number in 1..620) {
+                val page = PDPage()
+                pdf.addPage(page)
+                PDPageContentStream(pdf, page).use { content ->
+                    content.beginText()
+                    content.setFont(font, 11f)
+                    content.newLineAtOffset(54f, 735f)
+                    repeat(44) { line ->
+                        content.showText("Page sample $number: a synthetic reading paragraph, line ${line + 1}.")
+                        content.newLineAtOffset(0f, -15f)
+                    }
+                    content.endText()
+                }
+            }
+            pdf.save(file.toFile())
+        }
+    }
+
     @Test fun draggingTheSecondOccurrenceExplainsHighlightsAndJumpsToThatExactOccurrence() {
         assumeTrue(System.getProperty("os.name").startsWith("Windows"))
         val root = Files.createTempDirectory("coach-original-pdf-native-")
@@ -318,9 +455,18 @@ class OriginalPdfNativeWindowTest {
 
     private fun selection(window: ComposeWindow) = node(window, "original-pdf-text-layer")?.config?.getOrNull(OriginalPdfSelectionRange)
 
-    private fun node(window: ComposeWindow, tag: String): SemanticsNode? = edt {
+    private fun SemanticsNode.hasLabel(label: String): Boolean =
+        config.getOrNull(SemanticsProperties.Text).orEmpty().any { it.text == label } || children.any { it.hasLabel(label) }
+
+    private fun SemanticsNode.isAction(label: String): Boolean =
+        config.getOrNull(SemanticsActions.OnClick) != null && !config.contains(SemanticsProperties.Disabled) && hasLabel(label)
+
+    private fun node(window: ComposeWindow, tag: String): SemanticsNode? =
+        findNode(window) { it.config.getOrNull(SemanticsProperties.TestTag) == tag }
+
+    private fun findNode(window: ComposeWindow, matches: (SemanticsNode) -> Boolean): SemanticsNode? = edt {
         fun find(node: SemanticsNode): SemanticsNode? =
-            if (node.config.getOrNull(SemanticsProperties.TestTag) == tag) node else node.children.firstNotNullOfOrNull(::find)
+            if (matches(node)) node else node.children.firstNotNullOfOrNull(::find)
         fun findIn(owner: Window): SemanticsNode? {
             val owners = when (owner) {
                 is ComposeWindow -> owner.semanticsOwners
@@ -388,8 +534,8 @@ class OriginalPdfNativeWindowTest {
         }
     }
 
-    private fun waitFor(label: String, detail: () -> String = { "" }, ready: () -> Boolean) {
-        val limit = System.nanoTime() + 20_000_000_000L
+    private fun waitFor(label: String, detail: () -> String = { "" }, timeoutMillis: Long = 20_000, ready: () -> Boolean) {
+        val limit = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
         while (!ready()) {
             check(System.nanoTime() < limit) { "Timed out: $label ${detail()}" }
             Thread.sleep(80)

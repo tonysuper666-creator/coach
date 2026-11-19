@@ -58,26 +58,48 @@ try {
     $noStream = { $null }
     $idle15m = { 900.0 }
 
+    $stampTmp = "$regTmp-driver-input.json"
+
     # Edge 或 WindowsTerminal 在前台，只要键鼠空闲 >=10分钟 且无串流、无其他 Coach/遗留外窗 -> 放行
-    $pfEdge = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+    $pfEdge = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
     Check 'preflight-allows-idle-edge-foreground' ($pfEdge.Clean -and $pfEdge.Foreground.Process -eq 'msedge') $pfEdge.Reason
-    $pfTerm = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $termFg
+    $pfTerm = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $termFg
     Check 'preflight-allows-idle-terminal-foreground' ($pfTerm.Clean -and $pfTerm.Foreground.Process -eq 'WindowsTerminal') $pfTerm.Reason
 
-    # 近 10 分钟内有键鼠输入 -> 拒绝（即使前景是桌面壳）
-    $pfRecentInput = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe { 120.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach
+    # 近 10 分钟内有键鼠输入且无匹配驱动注入记录 -> 拒绝（即使前景是桌面壳）
+    $pfRecentInput = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe { 120.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach
     Check 'preflight-rejects-recent-human-input' (-not $pfRecentInput.Clean -and $pfRecentInput.Reason -like '*120*') $pfRecentInput.Reason
 
+    # 连跑两轮之间（驱动自己注入的 SendInput 距 GetLastInputInfo 最后输入 < 2 秒）-> 不算真人，两轮之间不拦
+    $tBase = [datetime]::SpecifyKind([datetime]'2026-11-19T18:27:01', [DateTimeKind]::Utc)
+    Record-DriverInputTimestamp -UtcTime $tBase.AddSeconds(-5.0) -StampFile $stampTmp
+    $pfBackToBackImmediate = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 5.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+    Record-DriverInputTimestamp -UtcTime $tBase.AddSeconds(-525.6) -StampFile $stampTmp
+    $pfBackToBackDelayed = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 525.6 } -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+    Check 'preflight-allows-back-to-back-driver-input' ($pfBackToBackImmediate.Clean -and $pfBackToBackDelayed.Clean) "imm=$($pfBackToBackImmediate.Reason) del=$($pfBackToBackDelayed.Reason)"
+
+    # 驱动注入时间与系统最后输入相差 1.2 秒（< 2 秒阈值）-> 放行；真人输入相差 >= 2 秒 -> 拒绝；正在串流仍拒绝
+    Record-DriverInputTimestamp -UtcTime $tBase.AddSeconds(-120.0) -StampFile $stampTmp
+    $pfWithin2s = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 121.2 } -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+    Check 'preflight-allows-driver-input-within-2s' $pfWithin2s.Clean $pfWithin2s.Reason
+
+    Record-DriverInputTimestamp -UtcTime $tBase.AddSeconds(-525.6) -StampFile $stampTmp
+    $pfHumanAfterDriver = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 30.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+    Check 'preflight-rejects-human-input-outside-2s' (-not $pfHumanAfterDriver.Clean -and $pfHumanAfterDriver.Reason -like '*30*') $pfHumanAfterDriver.Reason
+
+    $pfDriverStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 525.6 } -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Pid = 12640; Ports = @(47998); Summary = 'sunshine pid=12640 streaming ports=47998' } } -CoachWindowProbe $noCoach
+    Check 'preflight-rejects-driver-input-when-streaming' (-not $pfDriverStream.Clean -and $pfDriverStream.Reason -like '*Apollo/Moonlight*') $pfDriverStream.Reason
+
     # GetLastInputInfo 读取失败（<0）-> 保守拒绝
-    $pfUnreadableIdle = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe { -1.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach
+    $pfUnreadableIdle = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe { -1.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach
     Check 'preflight-rejects-unreadable-idle' (-not $pfUnreadableIdle.Clean) $pfUnreadableIdle.Reason
 
     # 键鼠空闲但 Apollo/Moonlight 正在串流 -> 拒绝
-    $pfStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Pid = 12640; Ports = @(47998, 48010); Summary = 'sunshine pid=12640 streaming ports=47998,48010' } } -CoachWindowProbe $noCoach
+    $pfStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Pid = 12640; Ports = @(47998, 48010); Summary = 'sunshine pid=12640 streaming ports=47998,48010' } } -CoachWindowProbe $noCoach
     Check 'preflight-rejects-active-stream' (-not $pfStream.Clean -and $pfStream.Reason -like '*Apollo/Moonlight*') $pfStream.Reason
 
     # 本轮之外的其他 Coach MainKt 窗口存在 -> 即使空闲无串流也算脏
-    $pfCoach = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe { @([pscustomobject]@{ Kind = 'coach-window'; Pid = 21116; Process = 'java'; Summary = 'coach-window java pid=21116' }) } -ForegroundProbe $edgeFg
+    $pfCoach = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe { @([pscustomobject]@{ Kind = 'coach-window'; Pid = 21116; Process = 'java'; Summary = 'coach-window java pid=21116' }) } -ForegroundProbe $edgeFg
     Check 'preflight-rejects-foreign-coach' (-not $pfCoach.Clean -and $pfCoach.DirtyWindows.Count -eq 1 -and $pfCoach.DirtyWindows[0].Pid -eq 21116) $pfCoach.Reason
 
     # 测试登记的遗留外窗（PID + StartTime 对得上）-> 算脏；死掉/复用后的过期登记自动清理并放行
@@ -86,13 +108,13 @@ try {
         $leftover = Start-Process powershell.exe -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 60"' -PassThru -WindowStyle Hidden
         $leftTicks = Get-TrackedProcessStartTicks $leftover
         $null = Register-ExternalWindowPid -ProcessId $leftover.Id -StartTimeTicks $leftTicks -Kind 'notepad' -RegistryDir $regTmp
-        $pfLeftover = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        $pfLeftover = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
         Check 'preflight-rejects-registered-leftover' (-not $pfLeftover.Clean -and $pfLeftover.DirtyWindows.Count -eq 1 -and $pfLeftover.DirtyWindows[0].Pid -eq $leftover.Id) $pfLeftover.Reason
 
         # 伪造一条同 PID 但 StartTime 不匹配的过期登记：必须被判定为复用/已退并清掉文件
         Unregister-ExternalWindowPid -ProcessId $leftover.Id -StartTimeTicks $leftTicks -RegistryDir $regTmp
         $null = Register-ExternalWindowPid -ProcessId $leftover.Id -StartTimeTicks ($leftTicks + 1L) -Kind 'stale-reused' -RegistryDir $regTmp
-        $pfStale = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
+        $pfStale = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
         Check 'preflight-prunes-mismatched-registration' ($pfStale.Clean -and @(Get-ChildItem $regTmp -Filter '*.json').Count -eq 0) "files=$(@(Get-ChildItem $regTmp -Filter '*.json').Count)"
     } finally {
         if ($leftover -and $leftTicks -gt 0L) {
@@ -101,6 +123,7 @@ try {
         }
     }
 } finally {
+    Remove-Item -LiteralPath "$regTmp-driver-input.json" -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $regTmp -ErrorAction SilentlyContinue
 }
 

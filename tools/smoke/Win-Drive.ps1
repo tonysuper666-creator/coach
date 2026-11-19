@@ -313,6 +313,36 @@ function Find-ForeignForegroundWindow([scriptblock]$Probe = $null) {
     }
 }
 $script:ExternalWindowRegistryDir = 'D:\agent\state\coach-smoke-external-windows'
+$script:DriverInputStampPath = 'D:\agent\state\coach-smoke-driver-input.json'
+function Record-DriverInputTimestamp(
+    [datetime]$UtcTime = [DateTime]::UtcNow,
+    [string]$StampFile = $script:DriverInputStampPath
+) {
+    if (-not $StampFile) { return }
+    $utc = $UtcTime.ToUniversalTime()
+    $dir = Split-Path -Parent $StampFile
+    if ($dir) { New-Item -ItemType Directory -Force $dir | Out-Null }
+    $tmp = "$StampFile.$PID.tmp"
+    @{
+        utc = $utc.ToString('o')
+        utcTicks = $utc.Ticks
+        pid = $PID
+    } | ConvertTo-Json -Compress | Set-Content -LiteralPath $tmp -Encoding UTF8
+    Move-Item -LiteralPath $tmp -Destination $StampFile -Force
+}
+function Get-DriverInputTimestampUtc([string]$StampFile = $script:DriverInputStampPath) {
+    if (-not $StampFile -or -not (Test-Path -LiteralPath $StampFile)) { return $null }
+    try {
+        $data = Get-Content -LiteralPath $StampFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($data.PSObject.Properties.Name -contains 'utcTicks' -and [long]$data.utcTicks -gt 0L) {
+            return [datetime]::new([long]$data.utcTicks, [DateTimeKind]::Utc)
+        }
+        if ($data.PSObject.Properties.Name -contains 'utc' -and $data.utc) {
+            return ([datetime]::Parse([string]$data.utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToUniversalTime()
+        }
+    } catch { }
+    return $null
+}
 function Register-ExternalWindowPid(
     [int]$ProcessId,
     [long]$StartTimeTicks = 0L,
@@ -415,9 +445,12 @@ function Get-ActiveStreamingSession([scriptblock]$Probe = $null) {
 function Find-ActiveDesktopUser(
     [int]$MinIdleSeconds = 600,
     [scriptblock]$IdleProbe = $null,
-    [scriptblock]$StreamProbe = $null
+    [scriptblock]$StreamProbe = $null,
+    [string]$DriverInputFile = $script:DriverInputStampPath,
+    [scriptblock]$NowProbe = $null
 ) {
     $stream = Get-ActiveStreamingSession -Probe $StreamProbe
+    $nowUtc = if ($NowProbe) { ([datetime](& $NowProbe)).ToUniversalTime() } else { [DateTime]::UtcNow }
     $idleSec = if ($IdleProbe) {
         [double](& $IdleProbe)
     } else {
@@ -441,6 +474,13 @@ function Find-ActiveDesktopUser(
         }
     }
     if ($idleSec -lt $MinIdleSeconds) {
+        $driverUtc = Get-DriverInputTimestampUtc -StampFile $DriverInputFile
+        if ($driverUtc) {
+            $lastOsInputUtc = $nowUtc.AddSeconds(-$idleSec)
+            if ([Math]::Abs(($lastOsInputUtc - $driverUtc).TotalSeconds) -lt 2.0) {
+                return $null
+            }
+        }
         return [pscustomobject]@{
             Occupied = $true
             IdleSeconds = [math]::Round($idleSec, 1)
@@ -498,10 +538,12 @@ function Test-DesktopPreflight(
     [scriptblock]$IdleProbe = $null,
     [scriptblock]$StreamProbe = $null,
     [scriptblock]$CoachWindowProbe = $null,
-    [scriptblock]$ForegroundProbe = $null
+    [scriptblock]$ForegroundProbe = $null,
+    [string]$DriverInputFile = $script:DriverInputStampPath,
+    [scriptblock]$NowProbe = $null
 ) {
     $dirtyWindows = @(Find-DirtyDesktopWindow -RegistryDir $RegistryDir -CoachWindowProbe $CoachWindowProbe)
-    $activeUser = Find-ActiveDesktopUser -MinIdleSeconds $MinIdleSeconds -IdleProbe $IdleProbe -StreamProbe $StreamProbe
+    $activeUser = Find-ActiveDesktopUser -MinIdleSeconds $MinIdleSeconds -IdleProbe $IdleProbe -StreamProbe $StreamProbe -DriverInputFile $DriverInputFile -NowProbe $NowProbe
     $idleSec = if ($IdleProbe) { [double](& $IdleProbe) } else {
         $ms = [WD]::GetLastInputIdleMs(); if ($ms -lt 0) { -1.0 } else { [double]$ms / 1000.0 }
     }
@@ -538,7 +580,7 @@ function Test-DesktopPreflight(
 }
 # All drivers share this mutex, but hold it for one input/capture only.
 # OCR, network waits, compilation and whole smoke runs stay outside.
-function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]::Zero) {
+function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]::Zero, [switch]$InjectsInput) {
     if ($Window -eq [IntPtr]::Zero) { $Window = $script:Win }
     $mutex = New-Object Threading.Mutex($false, 'Global\Coach.WinDrive.Foreground')
     try {
@@ -568,7 +610,13 @@ function Invoke-ForegroundStep([scriptblock]$Action, [IntPtr]$Window = [IntPtr]:
                 }
                 Start-Sleep -Milliseconds 150
                 Assert-OurForeground -Expected $Window
-                & $Action
+                try {
+                    & $Action
+                } finally {
+                    if ($InjectsInput) {
+                        try { Record-DriverInputTimestamp } catch { }
+                    }
+                }
                 if ($trace) { $trace.actionReturned = $true }
                 return
             } catch {
@@ -709,7 +757,7 @@ function Assert-OurForeground([IntPtr]$Expected = [IntPtr]::Zero) {
 }
 function Click-At([int]$x, [int]$y) {
     if (Has-BackgroundDriver) { Invoke-BackgroundAction "/click?x=$x&y=$y"; return }
-    Invoke-ForegroundStep {
+    Invoke-ForegroundStep -InjectsInput -Action {
         $r = Get-Rect
         [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null
         Assert-OurForeground
@@ -720,7 +768,7 @@ function Click-At([int]$x, [int]$y) {
 # A drag is one action: release the button even if foreground is interrupted.
 function Drag-Between([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
     if (Has-BackgroundDriver) { Invoke-BackgroundAction "/drag?x1=$x1&y1=$y1&x2=$x2&y2=$y2"; return }
-    Invoke-ForegroundStep {
+    Invoke-ForegroundStep -InjectsInput -Action {
         $r = Get-Rect
         [WD]::SetCursorPos($r.L + $x1, $r.T + $y1) | Out-Null
         Assert-OurForeground
@@ -736,7 +784,7 @@ function Drag-Between([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
 }
 function Send-Keys([string]$keys) {
     if (Has-BackgroundDriver) { Invoke-BackgroundAction "/keys" $keys; return }
-    Invoke-ForegroundStep { Assert-OurForeground; [System.Windows.Forms.SendKeys]::SendWait($keys) }
+    Invoke-ForegroundStep -InjectsInput -Action { Assert-OurForeground; [System.Windows.Forms.SendKeys]::SendWait($keys) }
 }
 
 # Wait until a label shows on screen. Returns the match, or $null on timeout. Every poll leaves a PNG so a failure is inspectable.
@@ -781,7 +829,7 @@ function Choose-File([string]$dialogTitlePrefix, [string]$path, [int]$timeoutSec
     $deadline = (Get-Date).AddSeconds($timeoutSec); $h = [IntPtr]::Zero
     while ($h -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500; $h = Find-AppWindowByTitle $dialogTitlePrefix }
     if ($h -eq [IntPtr]::Zero) { $script:ChooseFileWhy = '没有弹出选书对话框'; return $false }
-    Invoke-ForegroundStep -Window $h -Action {
+    Invoke-ForegroundStep -Window $h -InjectsInput -Action {
         [System.Windows.Forms.SendKeys]::SendWait('%n')
         Assert-OurForeground
         [System.Windows.Forms.SendKeys]::SendWait('^a')
@@ -796,12 +844,12 @@ function Choose-File([string]$dialogTitlePrefix, [string]$path, [int]$timeoutSec
             # box left behind keeps taking the foreground from every other run.
             $script:ChooseFileWhy = '选书对话框弹出了错误提示，没有接受这本书的路径'
             foreach ($w in @($all | Where-Object { [WD]::IsWindowEnabled($_) }) + @($all | Where-Object { -not [WD]::IsWindowEnabled($_) })) {
-                try { Invoke-ForegroundStep -Window $w -Action { [System.Windows.Forms.SendKeys]::SendWait('{ESC}') } } catch { }
+                try { Invoke-ForegroundStep -Window $w -InjectsInput -Action { [System.Windows.Forms.SendKeys]::SendWait('{ESC}') } } catch { }
                 Start-Sleep -Milliseconds 500
             }
             return $false
         }
-        Invoke-ForegroundStep -Window $all[0] -Action {
+        Invoke-ForegroundStep -Window $all[0] -InjectsInput -Action {
             Assert-OurForeground; [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
         }
         Start-Sleep -Seconds 2
@@ -832,7 +880,7 @@ function List-AppWindows {
 # Mouse-wheel inside the window; negative delta scrolls down.
 function Scroll-At([int]$x, [int]$y, [int]$notches) {
     if (Has-BackgroundDriver) { Invoke-BackgroundAction "/scroll?x=$x&y=$y&notches=$notches"; return }
-    Invoke-ForegroundStep {
+    Invoke-ForegroundStep -InjectsInput -Action {
         $r = Get-Rect
         [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null
         $delta = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int](120 * $notches)), 0)
@@ -843,7 +891,7 @@ function Scroll-At([int]$x, [int]$y, [int]$notches) {
 # Clipboard write and paste are one action. Keep it stable until consumed.
 function Paste-Text([string]$text) {
     if (Has-BackgroundDriver) { Invoke-BackgroundAction "/text" $text; return }
-    Invoke-ForegroundStep {
+    Invoke-ForegroundStep -InjectsInput -Action {
         [System.Windows.Forms.Clipboard]::SetText($text)
         Assert-OurForeground
         [System.Windows.Forms.SendKeys]::SendWait('^v')

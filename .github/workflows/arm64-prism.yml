@@ -1,0 +1,47 @@
+name: Windows ARM64 Prism smoke (TON-1719)
+# 骁龙（Windows on ARM）机器上，现有 x64 安装包靠 Prism 仿真能不能装、能不能起窗口。
+# 只在 ton-1719-* 分支推送时跑；不碰朋友入口、不用任何 secrets。
+on:
+  push:
+    branches: ['ton-1719-**']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  prism:
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Machine facts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force evidence | Out-Null
+          "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE" | Tee-Object evidence/machine.txt
+          (Get-CimInstance Win32_Processor | Select-Object -First 1 Name).Name | Tee-Object -Append evidence/machine.txt
+          [System.Environment]::OSVersion.VersionString | Tee-Object -Append evidence/machine.txt
+      # RC2：11-18 交付并通过 7/7 的同一个 x64 包（run 44273248327，SHA-256 568f22f0…6137d）
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: friend-windows-package
+          path: bundle
+          run-id: 44273248327
+          github-token: ${{ github.token }}
+      - name: Verify RC2 hash
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash bundle/LearningCoach-1.0.1.msi -Algorithm SHA256).Hash.ToLower()
+          "msi_sha256=$h" | Tee-Object -Append evidence/machine.txt
+          if ($h -ne '568f22f0ec021c6b167274ae420e4b90f22fa46b6b733268c209c62dc0e6137d') { throw 'not RC2' }
+      - name: Install x64 MSI under Prism, launch, screenshot, uninstall
+        shell: powershell
+        run: ./tools/smoke/msi-install.ps1 -Msi bundle/LearningCoach-1.0.1.msi -OutDir evidence/install -StartTimeoutSec 300
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: arm64-prism-evidence
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: warn

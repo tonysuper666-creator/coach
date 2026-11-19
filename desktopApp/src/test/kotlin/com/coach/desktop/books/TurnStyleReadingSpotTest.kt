@@ -34,6 +34,13 @@ class TurnStyleReadingSpotTest {
         }
     }
 
+    /** 双页翻页读：左右两页的正文都在，并且没有滚动控件。 */
+    private fun SkikoComposeUiTest.assertSpread(when_: String) {
+        assertTrue(onAllNodesWithTag("reader-text").fetchSemanticsNodes().isNotEmpty(), "$when_: left page body must be visible")
+        assertTrue(onAllNodesWithTag("reader-text-right").fetchSemanticsNodes().isNotEmpty(), "$when_: right page body must be visible")
+        onNodeWithTag("book-scroll-read").assertDoesNotExist()
+    }
+
     private fun SkikoComposeUiTest.selectStyle(label: String) {
         repeat(3) {
             if (onAllNodes(hasTestTag("turn-style") and hasText(label)).fetchSemanticsNodes().isNotEmpty()) return
@@ -60,6 +67,7 @@ class TurnStyleReadingSpotTest {
                 waitForIdle()
                 selectStyle(label)
                 mainClock.autoAdvance = false
+                assertSpread("initially")
                 val start = visibleSentences()
                 assertTrue(start.size > 10, "wide window shows a spread: ${start.size} sentences")
                 onNodeWithText("下一页").performClick()
@@ -77,6 +85,8 @@ class TurnStyleReadingSpotTest {
                 assertTrue(first in scrolling && later in scrolling, "$label: same sentences in scroll mode: $first/$later in $scrolling")
                 onNodeWithTag("read-mode").performClick()
                 mainClock.advanceTimeBy(900); waitForIdle()
+                onNodeWithTag("book-scroll-read").assertDoesNotExist() // 切回了翻页读：滚动控件已消失
+                assertSpread("after switching back")
                 val back = visibleSentences()
                 assertTrue(first in back && later in back, "$label: and back in the spread: $first/$later in $back")
             }

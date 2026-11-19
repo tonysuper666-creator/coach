@@ -299,6 +299,37 @@ class BookPageViewTest {
         assertTrue(state.pages[state.index].sources.any { it.importPage == 30 })
     }
 
+    /** TON-1724: 折叠屏宽→窄重排，锚点是原文精确偏移时，窄屏选中的子页必含同一句；锚点只是宽页页首时，目标句会落到下一子页（已知取舍）。 */
+    @Test fun narrowReflowKeepsAnExactAnchorButAPageStartAnchorMayDrift() = runSkikoComposeUiTest(
+        size = Size(1400f, 1000f), density = Density(1f),
+    ) {
+        val sentence = "The multiplication of two whole numbers is the repeated addition of one of them, and the order of the factors does not alter the product. "
+        val pages = (1..30).map { n -> BookPage(n, (1..4).joinToString("\n\n") { sentence.repeat(10) }) }
+        val book = Textbook("fold-reflow", "Elements of arithmetic", "epub", pages)
+        val state = BookPagingState(BookPageAnchor(20))
+        var width by androidx.compose.runtime.mutableStateOf(1200)
+        setContent { CoachTheme { Box(Modifier.width(width.dp).height(900.dp)) {
+            BookPageView(book, state, emptyMap(), onTurn = { state.move(it) })
+        } } }
+        waitUntil(timeoutMillis = 120_000) { state.pages.size > 30 }
+        val wide = state.pages[state.index]
+        val slice = wide.sources.first { it.importPage == 20 }
+        val target = (slice.startUtf16 + slice.endUtf16) / 2
+        fun narrowSlices(anchor: BookPageAnchor): List<BookPageSlice> {
+            width = 1200; waitForIdle()
+            state.anchor = anchor
+            val before = state.pages
+            width = 520
+            waitUntil(timeoutMillis = 120_000) { state.pages !== before && state.pages.size > 30 }
+            return state.pages[state.index].sources.filter { it.importPage == 20 }
+        }
+        assertTrue(narrowSlices(BookPageAnchor(20, target)).any { target in it.startUtf16 until it.endUtf16 }, "精确锚点：窄屏子页含同一句")
+        // 锚点是宽页页首（翻页后的形态）：窄屏选中的子页含该锚点本身，但读者看的那句（页中间）会落到下一子页。
+        narrowSlices(wide.anchor)
+        val shown = state.pages[state.index].sources
+        assertTrue(shown.any { it.importPage == wide.anchor.importPage && wide.anchor.offsetUtf16 in it.startUtf16 until it.endUtf16 })
+    }
+
     /** TON-1724: 长英文教材首开，分页在后台做，主线程先显示「正在排版」而不是卡住。 */
     @Test fun longBookLaysOutOffTheMainThreadAndShowsPagesWhenReady() = runSkikoComposeUiTest(
         size = Size(900f, 1000f), density = Density(1f),

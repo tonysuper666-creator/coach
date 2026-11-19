@@ -176,5 +176,12 @@ mobi("fresh-coast.mobi", version=6, compression=1)
 mobi("fresh-coast.azw3", version=8)
 mobi("fresh-locked.mobi", drm=True)
 
+# ---- Damaged samples for the rejection round -------------------------------------------
+# Our own bytes cut short on purpose: the ZIP header says DOCX, the body cannot be parsed.
+# It must never reach the shelf. The truncated and password-protected PDFs are generated
+# inside the test with PDFBox, never checked in: no password-protected learner material
+# enters Git, and the sample stays reproducible.
+(ROOT / "fresh-broken.docx").write_bytes(b"PK\x03\x04fresh-but-truncated")
+
 for file in sorted(ROOT.glob("fresh-*")):
     print(f"{file.name}\t{file.stat().st_size}")

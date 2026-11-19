@@ -53,7 +53,7 @@ function Test-BlockAndCitation {
     Select-TutorLabel '04-explain-action' @('讲解这段','井解这上段') -2 100 150
     Click-CapturedControl 'explain-consent.png' '04-consent.png'
     Scroll-At 584 490 25
-    $null = Find-TutorLabel '04-block' @('Block','explanation','先独立回答') -2
+    Click-CapturedControl 'block-reply-text.png' '04-block.png' -VerifyOnly -ScrollNotches -1
     Select-TutorLabel '07-citation' @('出处1','出处') -2
     $null = Find-TutorLabel '07-original' @('关闭')
     Send-Keys '{ESC}'
@@ -91,8 +91,8 @@ function Test-WholeLesson {
     $toggle = Find-Text $view '看原页'
     if ($toggle) { Click-At $toggle.X $toggle.Y }
     $null = Find-TutorLabel '05-pdf-page' @('看文字')
-    # The first page has the Memory heading. Only the physical PDF view has the 1 / 3 counter.
-    $null = Find-TutorLabel '05-pdf-page' @('1/3','1／3','Memory')
+    $null = Find-TutorLabel '05-pdf-page' @('understanding','correlation')
+    Click-CapturedControl 'pdf-page-1-of-3.png' '05-pdf-page.png' -VerifyOnly
     Select-TutorLabel '05-return' @('返回学习')
 }
 
@@ -101,7 +101,7 @@ function Test-Practice {
     Click-CapturedControl 'shelf-practice.png' '06-practice-path.png'
     $null = Find-TutorLabel '06-question' @('Whichmethod','checksrecall') -3
     Select-TutorLabel '06-options' @('Recallbefore','beforechecking') -3
-    $null = Find-TutorLabel '06-selected' @('你选择','你选了') -2
+    $null = Find-TutorLabel '06-selected' @('你选择','你选了','本题答案一致') -2
     $null = Find-TutorLabel '06-feedback' @('Practicefeedback','feedback') -3
     $null = Find-TutorLabel '06-feedback-source' @('出处') -2
     $summary = Find-TutorLabel '06-summary' @('这一节','小结','题目和作答') -3

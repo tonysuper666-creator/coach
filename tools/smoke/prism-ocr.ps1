@@ -50,7 +50,7 @@ function Save-OwnWindow([string]$name, [IntPtr]$handle = $script:Win) {
     } finally { $bmp.Dispose() }
 }
 
-function Click-CapturedControl([string]$template, [string]$shot) {
+function Click-CapturedControl([string]$template, [string]$shot, [switch]$VerifyOnly, [int]$ScrollNotches = 0) {
     # The previous file picker leaves the pointer over Upload. Compare the idle
     # appearance, on the application window that owns the next input action.
     Invoke-ForegroundStep {
@@ -70,9 +70,10 @@ function Click-CapturedControl([string]$template, [string]$shot) {
                 $root = [System.Windows.Automation.AutomationElement]::FromHandle($script:Win)
                 if ($root.Current.ProcessId -ne $script:AppPid) { throw 'Window owner changed' }
                 Write-Output "Matched $template at ($($point.X),$($point.Y)). Foreground: $(Get-ForegroundSummary)"
-                Click-At $point.X $point.Y
+                if (-not $VerifyOnly) { Click-At $point.X $point.Y }
                 return
             }
+            if ($ScrollNotches) { Scroll-At 584 490 $ScrollNotches }
             Start-Sleep -Milliseconds 400
         } while ((Get-Date) -lt $deadline)
         throw "Could not identify $template in the application screenshot"

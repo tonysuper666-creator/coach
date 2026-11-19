@@ -31,6 +31,9 @@ class PairingClient(private val baseUrl: String) {
         followRedirects = false
         install(HttpTimeout) { requestTimeoutMillis=10000; connectTimeoutMillis=3000; socketTimeoutMillis=10000 }
     }
+    suspend fun sable(open: suspend (String, String) -> Unit, issuer: String = SABLE_ORIGIN): PairedCredentials =
+        sableLogin(client, baseUrl, open, issuer)
+
     suspend fun pair(code: String, name: String): PairedCredentials {
         require(code.matches(Regex("[0-9]{6}"))) { "Enter a six digit code" }
         val response = client.post("${baseUrl.trimEnd('/')}/v1/pair") {
@@ -44,8 +47,9 @@ class PairingClient(private val baseUrl: String) {
         }
     }
     /** Friends never probe hello, snapshots or the owner's learning ledger. */
-    suspend fun friendAuthorized(credentials: PairedCredentials): Boolean {
+    suspend fun friendAuthorized(credentials: PairedCredentials, startup: Boolean = false): Boolean {
         val response = client.get("${baseUrl.trimEnd('/')}/v1/public/status") {
+            if (startup) header("X-Coach-Startup", "1")
             header("X-Coach-Device", credentials.deviceId)
             header(HttpHeaders.Authorization, "Bearer ${credentials.token}")
         }

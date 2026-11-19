@@ -40,11 +40,18 @@ internal class DesktopConnectionSettings(
         if (Files.exists(configFile)) Files.newInputStream(configFile).use { load(it) }
     }
 
+    private fun configuredFriendUrl(): String? = (environment("COACH_FRIEND_URL") ?: properties().getProperty("coach.friendUrl") ?: property("coach.friendUrl"))
+        ?.takeIf(String::isNotBlank)?.let(::desktopServerUrl)
+
+    fun sableFriendUrl(): String = configuredFriendUrl()
+        ?: throw com.coach.client.SableLoginError("请先在连接配置中设置朋友服务地址。")
+
     fun serverUrl(): String? {
         environment("COACH_URL")?.takeIf(String::isNotBlank)?.let { return desktopServerUrl(it) }
         localConnection.savedAddress()?.let { return it }
         val config = properties()
         config.getProperty("coach.desktopUrl")?.takeIf(String::isNotBlank)?.let { return desktopServerUrl(it) }
+        if (!mac) configuredFriendUrl()?.let { return it }
         if (mac) return desktopServerUrl("http://127.0.0.1:${config.getProperty("coach.port", "18791").trim()}")
         config.getProperty("coach.tailHost")?.takeIf(String::isNotBlank)?.let { host ->
             val port = config.getProperty("coach.port", "18791").trim()

@@ -17,6 +17,10 @@ import java.util.logging.Logger
 import kotlin.random.Random
 
 fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+// Longer than any accepted pairing-code friend name, so a manual pairing cannot share this quota identity.
+private const val SABLE_PREFIX = "sable.identity.v1:"
+fun sableFriendName(sub: String) = SABLE_PREFIX + sha256(sub.toByteArray(Charsets.UTF_8))
+fun isSableFriend(name: String) = name.length == SABLE_PREFIX.length + 64 && name.startsWith(SABLE_PREFIX)
 private val idRandom = java.security.SecureRandom()
 private val ledgerLogger = Logger.getLogger(LedgerStore::class.java.name)
 // Owner hashes remain compatible with existing devices and old server binaries.
@@ -122,7 +126,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 if ("friend_hash_version" !in query("PRAGMA table_info($table)") { it.getString("name") })
                     sql("ALTER TABLE $table ADD COLUMN friend_hash_version INTEGER NOT NULL DEFAULT 0")
             }
-            sql("UPDATE devices SET revoked_at=? WHERE friend_name IS NOT NULL AND friend_hash_version<>1 AND revoked_at IS NULL", clock())
+            sql("UPDATE devices SET revoked_at=? WHERE friend_name IS NOT NULL AND friend_hash_version NOT IN (1,2) AND revoked_at IS NULL", clock())
             sql("DELETE FROM pairing_code WHERE friend_name IS NOT NULL AND friend_hash_version<>1")
         }
         sql("CREATE TABLE IF NOT EXISTS offline_packs(pack_id TEXT PRIMARY KEY,course_id TEXT NOT NULL,device_id TEXT NOT NULL,expires_at INTEGER NOT NULL,pack_json TEXT NOT NULL)")
@@ -156,6 +160,8 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 sql("PRAGMA user_version=7")
             }
         }
+        sql("CREATE TABLE IF NOT EXISTS sable_friends(friend_name TEXT PRIMARY KEY, username TEXT NOT NULL, disabled INTEGER NOT NULL DEFAULT 0)")
+        sql("CREATE TABLE IF NOT EXISTS sable_grants(device_id TEXT PRIMARY KEY REFERENCES devices(device_id), sealed_token BLOB NOT NULL)")
         ensureSourceIndexes()
         if (query("SELECT name FROM sqlite_master WHERE type='table' AND name='pool_details'") { it.getString(1) }.isEmpty()) {
             rawBackup(directory.resolve("backups/pre-pool-${uid()}"))
@@ -680,7 +686,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         val friend = row?.second != null
         val expected = row?.first ?: "0".repeat(64)
         val matches = MessageDigest.isEqual(expected.toByteArray(), credentialHash(token, friend).toByteArray())
-        val valid = row != null && (!friend || row.third == 1) && matches
+        val valid = row != null && (!friend || row.third == 1 || (row.third == 2 && isSableFriend(row.second.orEmpty()))) && matches
         if (valid) sql("UPDATE devices SET last_used_at=? WHERE device_id=?", clock(), device)
         return valid
     }
@@ -711,12 +717,49 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         sql("UPDATE pairing_code SET attempts=attempts+1 WHERE singleton=1")
         if (!code.matches(Regex("[0-9]{6}")) || name.isBlank() || name.length > 80 ||
             !MessageDigest.isEqual(active.first.toByteArray(), credentialHash(code, friend != null).toByteArray())) return@transaction null
+        sql("DELETE FROM pairing_code WHERE singleton=1")
+        issueCredential(name, friend)
+    }
+
+    fun sableCredential(sub: String, username: String, seal: (String, String) -> ByteArray): DeviceCredential? = transaction {
+        val friend = sableFriendName(sub)
+        // A re-registered username must point to its current Sable subject only.
+        sql("UPDATE sable_friends SET username='' WHERE username=? AND friend_name<>?", username, friend)
+        sql("INSERT INTO sable_friends(friend_name,username) VALUES(?,?) ON CONFLICT(friend_name) DO UPDATE SET username=excluded.username", friend, username)
+        if (query("SELECT disabled FROM sable_friends WHERE friend_name=?", friend) { it.getInt(1) }.single() != 0) return@transaction null
+        // Earlier server versions reject version 2 and cannot honor a grant after rollback.
+        val credential = issueCredential(username, friend, hashVersion = 2)
+        sql("INSERT INTO sable_grants VALUES(?,?)", credential.deviceId, seal(credential.deviceId, friend))
+        credential
+    }
+
+    fun sableUsers() = query("SELECT username,disabled FROM sable_friends WHERE username<>'' ORDER BY username") {
+        it.getString(1) to (it.getInt(2) != 0)
+    }
+
+    fun disableSable(username: String): Boolean = transaction {
+        val names = query("SELECT friend_name FROM sable_friends WHERE username=?", username) { it.getString(1) }
+        if (names.size != 1) return@transaction false
+        sql("UPDATE sable_friends SET disabled=1 WHERE friend_name=?", names.single())
+        revokeFriend(names.single())
+        true
+    }
+
+    fun sableGrant(device: String) = query("SELECT d.friend_name,g.sealed_token FROM sable_grants g JOIN devices d USING(device_id) WHERE g.device_id=? AND d.revoked_at IS NULL", device) {
+        it.getString(1) to it.getBytes(2)
+    }.singleOrNull()
+
+    fun activeSableDevices(): List<String> {
+        sql("DELETE FROM sable_grants WHERE device_id IN (SELECT device_id FROM devices WHERE revoked_at IS NOT NULL)")
+        return query("SELECT device_id FROM sable_grants") { it.getString(1) }
+    }
+
+    private fun issueCredential(name: String, friend: String?, hashVersion: Int = if (friend == null) 0 else 1): DeviceCredential {
         val token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32).also(idRandom::nextBytes))
         val device = uid()
         sql("INSERT INTO devices(device_id,name,token_sha256,created_at,friend_name,friend_hash_version) VALUES(?,?,?,?,?,?)",
-            device, name, credentialHash(token, friend != null), clock(), friend, if (friend == null) 0 else 1)
-        sql("DELETE FROM pairing_code WHERE singleton=1")
-        DeviceCredential(device, token, if (friend == null) "owner" else "friend")
+            device, name, credentialHash(token, friend != null), clock(), friend, hashVersion)
+        return DeviceCredential(device, token, if (friend == null) "owner" else "friend")
     }
 
     fun pairedDevices(): List<PairedDevice> = query("SELECT device_id,name,created_at,revoked_at,friend_name,last_used_at FROM devices ORDER BY created_at,device_id") {

@@ -24,7 +24,7 @@ import java.util.Base64
 fun main(args: Array<String>): Unit = runBlocking {
     val managed = System.getenv("COACH_MANAGE_SERVICES") == "1"
     val data = Path.of(System.getenv("COACH_DATA_DIR") ?: File(System.getProperty("user.home"),"Coach/data").path)
-    if (args.firstOrNull() in setOf("pair-code", "devices", "revoke", "revoke-friend")) {
+    if (args.firstOrNull() in setOf("pair-code", "devices", "revoke", "revoke-friend", "sable-users", "disable-sable")) {
         pairingCommand(args, data)
         return@runBlocking
     }
@@ -116,12 +116,16 @@ fun main(args: Array<String>): Unit = runBlocking {
     val mainline=Mainline(library)
     val reader = ReaderLibrary.configured()
     val imports = ImportedBookSources(data.resolve("personal-imports"))
-    val friends = FriendAccess(data.resolve("friends"))
+    val port = System.getenv("COACH_PORT")?.toInt() ?: 18791
+    val publicPort = System.getenv("COACH_PUBLIC_PORT")?.toInt()?.also {
+        require(it in 1..65535 && it != 18791 && it != port) { "COACH_PUBLIC_PORT must be a distinct non-production port" }
+    }
+    val sable = publicPort?.let { SableSessions(actor, data.resolveSibling("${data.fileName}-sable-credentials")) }
+    val friends = FriendAccess(data.resolve("friends"), sableSessions = sable)
     val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation,friends); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); libraryExplainRoutes(actor,chat.reader,reader,imports,friends); readerRoutes(actor,pushes,reader,mainline) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")
-    val port = System.getenv("COACH_PORT")?.toInt() ?: 18791
     val localConfig = Properties().apply {
         val file = File(System.getProperty("user.home"), "Coach/config/local.properties")
         if (file.exists()) file.inputStream().use { load(it) }
@@ -129,8 +133,14 @@ fun main(args: Array<String>): Unit = runBlocking {
     val tailHost = System.getenv("COACH_TAIL_HOST") ?: localConfig.getProperty("coach.tailHost")
     val local = embeddedServer(Netty, host = "127.0.0.1", port = port, module = module)
     local.engineConfig.apply { connectionGroupSize = 1; workerGroupSize = 1; callGroupSize = 2 }
-    val publicPort = System.getenv("COACH_PUBLIC_PORT")?.toInt()?.also {
-        require(it in 1..65535 && it != 18791 && it != port) { "COACH_PUBLIC_PORT must be a distinct non-production port" }
+    val verification = sable?.let { sessions ->
+        launch {
+            while (isActive) {
+                try { sessions.refresh() } catch (e: CancellationException) { throw e }
+                catch (_: Exception) { println("COACH Sable verification unavailable") }
+                delay(30_000)
+            }
+        }
     }
     val public = publicPort?.let { p -> embeddedServer(Netty, host = "127.0.0.1", port = p) {
         ledgerRoutes(actor,pushes,adminDevice=device,friends=friends,publicOnly=true)
@@ -182,7 +192,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     val shutdown = Thread {
         runBlocking {
             children?.stop();supervisor.cancelAndJoin();public?.stopSuspend(100,1000);local.stopSuspend(100,1000)
-            maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close()
+            verification?.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close()
         }
     }
     Runtime.getRuntime().addShutdownHook(shutdown)
@@ -193,6 +203,6 @@ fun main(args: Array<String>): Unit = runBlocking {
         supervisor.cancelAndJoin()
         public?.stop(100, 1000)
         local.stop(100, 1000)
-        maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close();lock.release();fileLock.close()
+        verification?.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close();lock.release();fileLock.close()
     }
 }

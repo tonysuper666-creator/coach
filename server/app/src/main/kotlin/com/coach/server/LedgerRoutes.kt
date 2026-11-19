@@ -56,7 +56,8 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             finish()
             return@intercept
         }
-        if (!pairing) {
+        val exchange = publicOnly && call.request.path() == "/v1/public/sable" && call.request.httpMethod == HttpMethod.Post
+        if (!pairing && !exchange) {
             val device = call.request.header("X-Coach-Device")
             val authorization = call.request.header("Authorization")
             val token = authorization?.takeIf { it.startsWith("Bearer ") }?.removePrefix("Bearer ")
@@ -70,6 +71,13 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             val friend = identity.second
             if ((publicOnly && friend == null) || (friend != null && !friendPath(call))) {
                 call.respondText("", status=HttpStatusCode.NotFound); finish(); return@intercept
+            }
+            if (friend != null && com.coach.store.isSableFriend(friend)) {
+                val startup = call.request.path() == "/v1/public/status" && call.request.header("X-Coach-Startup") == "1"
+                val status = friends?.sable?.check(identity.first, startup) ?: HttpStatusCode.Unauthorized
+                if (status != HttpStatusCode.OK) {
+                    call.respond(status); finish(); return@intercept
+                }
             }
             call.attributes.put(observedDevice, identity.first)
             if (friend != null) call.attributes.put(observedFriend, friend)
@@ -174,6 +182,31 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             require(kps.size in 1..5)
             val result=checkNotNull(chat).prepareLessons(course,kps,input.flag("questionsOnly"))
             call.respondText(result.toString(),ContentType.Application.Json)
+        }
+        if (publicOnly) post("/v1/public/sable") {
+            call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+            val bearer = call.request.headers.getAll(HttpHeaders.Authorization)?.singleOrNull()
+            if (bearer == null || !bearer.matches(Regex("Bearer [A-Za-z0-9._~+/=-]{20,512}"))) {
+                return@post call.respond(HttpStatusCode.Unauthorized)
+            }
+            val sessions = friends?.sable ?: return@post call.respond(HttpStatusCode.ServiceUnavailable)
+            val credential = try { sessions.exchange(bearer.removePrefix("Bearer ")) }
+                catch (_: SableUnavailable) { return@post call.respond(HttpStatusCode.ServiceUnavailable) }
+            if (credential == null) return@post call.respond(HttpStatusCode.Unauthorized)
+            call.respondText(json("deviceId" to credential.deviceId, "token" to credential.token,
+                "role" to credential.role).toString(), ContentType.Application.Json)
+        }
+        get("/v1/sable/users") {
+            if (!call.requireAdmin()) return@get
+            val users = actor.execute { sableUsers() }.map { (username, disabled) ->
+                json("username" to username, "disabled" to disabled)
+            }
+            call.respondText(JsonArray(users).toString(), ContentType.Application.Json)
+        }
+        post("/v1/sable/disable") {
+            if (!call.requireAdmin()) return@post
+            val username = LedgerJson.parseToJsonElement(call.receiveText()).jsonObject.str("username")
+            call.respond(if (actor.execute { disableSable(username) }) HttpStatusCode.NoContent else HttpStatusCode.NotFound)
         }
         post("/v1/pair") {
             call.response.headers.append(HttpHeaders.CacheControl, "no-store")

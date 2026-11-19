@@ -28,7 +28,7 @@ internal enum class ExplainTrouble(val retry: Boolean) {
 
     companion object {
         const val UNREACHABLE = "讲解服务暂时连不上，读书和做题照常。"
-        const val REVOKED = "这台电脑的连接已停用，请找给你配对码的人重新配对。"
+        const val REVOKED = "这台电脑的连接已停用。请重新登录，或使用新的配对码。"
 
         /** [status] 为空表示请求没拿到任何回复（网络、超时、非 JSON 网关页）。 */
         fun of(status: Int?, code: String?): ExplainTrouble = when {

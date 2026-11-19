@@ -16,7 +16,7 @@ import java.util.concurrent.ConcurrentHashMap
 internal val observedFriend = AttributeKey<String>("coach.friend")
 internal fun friendId(name: String) = sha256(name.toByteArray(Charsets.UTF_8))
 internal fun friendPath(call: ApplicationCall): Boolean = when (call.request.httpMethod to call.request.path()) {
-    HttpMethod.Post to "/v1/pair", HttpMethod.Get to "/v1/public/status",
+    HttpMethod.Post to "/v1/public/sable", HttpMethod.Post to "/v1/pair", HttpMethod.Get to "/v1/public/status",
     HttpMethod.Post to "/v1/library/explain", HttpMethod.Post to "/v1/library/explain/cancel" -> true
     else -> false
 }
@@ -30,7 +30,9 @@ internal class FriendServiceError(val code: String = "unavailable") : RuntimeExc
 /** These stores never open the owner's catalog, ledger, source files or AI-call table. */
 class FriendAccess(private val directory: Path,
     private val state: Path = Path.of(System.getenv("COACH_API_STATE_DIR") ?: "${System.getProperty("user.home")}/Coach/state"),
-    private val config: Path = Path.of(System.getenv("COACH_FRIEND_CONFIG") ?: "${System.getProperty("user.home")}/Coach/config/friends.json")) {
+    private val config: Path = Path.of(System.getenv("COACH_FRIEND_CONFIG") ?: "${System.getProperty("user.home")}/Coach/config/friends.json"),
+    sableSessions: SableSessions? = null) {
+    internal var sable: SableSessions? = sableSessions
     private val stores = ConcurrentHashMap<String, ImportedBookSources>()
     internal fun imports(name: String) = stores.computeIfAbsent(friendId(name)) { ImportedBookSources(directory.resolve(it).resolve("imports")) }
     internal fun status(name: String, device: String? = null): JsonObject {

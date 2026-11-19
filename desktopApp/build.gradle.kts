@@ -101,6 +101,10 @@ require(coachCourse.isEmpty() || coachCourse.matches(Regex("[A-Za-z0-9_-]+"))) {
 compose.desktop {
     application {
         mainClass = "com.coach.desktop.MainKt"
+        localConfig.getProperty("coach.friendUrl")?.takeIf(String::isNotBlank)?.let { origin ->
+            require(origin.matches(Regex("https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?"))) { "Invalid private friend service origin" }
+            jvmArgs("-Dcoach.friendUrl=$origin")
+        }
         if (coachCourse.isNotEmpty()) jvmArgs("-Dcoach.course=$coachCourse")
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi)

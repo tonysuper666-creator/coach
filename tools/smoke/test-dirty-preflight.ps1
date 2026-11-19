@@ -688,9 +688,111 @@ $cgBlock
         Invoke-SwapRegressionCase 'invoke-entry1-own-to-ext-after-unlock' 'entry1' $ownObj $extObj $false
         Invoke-SwapRegressionCase 'invoke-entry2-ext-to-own-after-unlock' 'entry2' $extObj $ownObj $true
         Invoke-SwapRegressionCase 'invoke-entry2-own-to-ext-after-unlock' 'entry2' $ownObj $extObj $false
+
+        # 8b. Click-At 失焦边界：按下前失焦保留自动重试与占用判定；抬起回调已触发后的失焦不得重放。
+        $prevStampPath = $script:DriverInputStampPath
+        $script:DriverInputStampPath = Join-Path $tmp 'click-midloss-input.stamp'
+        try {
+            $script:Win = [IntPtr]555501L
+            $ownWinObj = [pscustomobject]@{ Hwnd = 555501L; Pid = 55555; Process = 'java'; Class = 'SunAwtFrame' }
+            $extStealObj = [pscustomobject]@{ Hwnd = 683201L; Pid = 6832; Process = 'java'; Class = 'SunAwtFrame' }
+            $clickLog = New-Object System.Collections.ArrayList
+            $script:clickState = @{ attempt = 0; phase = 'init' }
+            $rectProbe = { [pscustomobject]@{ L = 100; T = 200 } }
+            $targetOwnerProbe = { param($w) 55555 }
+            $actProbeClick = {
+                param($w, $attemptNum)
+                $script:clickState.attempt = [int]$attemptNum
+                $script:clickState.phase = 'pre-down'
+                return [pscustomobject]@{ Ready = $true; ObservedHwnd = 555501L; Failure = ''; Accepted = $true }
+            }
+            $mouseProbeBeforeDownRetry = {
+                param($kind, $mx, $my)
+                [void]$clickLog.Add("$($script:clickState.attempt):$kind@$mx,$my")
+                if ($kind -eq 'move' -and $script:clickState.attempt -eq 1) {
+                    $script:clickState.phase = 'stolen-before-down'
+                }
+            }
+            $fgProbeBeforeDown = {
+                if ($script:clickState.phase -eq 'stolen-before-down') { return $extStealObj }
+                return $ownWinObj
+            }
+            Click-At 338 82 -TargetOwnerProbe $targetOwnerProbe -ActivateProbe $actProbeClick -ForegroundProbe $fgProbeBeforeDown -RectProbe $rectProbe -MouseProbe $mouseProbeBeforeDownRetry
+            Check 'click-at-retries-when-focus-lost-before-down' (
+                $script:clickState.attempt -eq 2 -and
+                ($clickLog -join '|') -eq '1:move@438,282|2:move@438,282|2:down@438,282|2:up@438,282'
+            ) "attempts=$($script:clickState.attempt) log=$($clickLog -join '|')"
+
+            $script:clickState = @{ attempt = 0; phase = 'init' }
+            $alwaysLostLog = New-Object System.Collections.ArrayList
+            $mouseProbeAlwaysBeforeDown = {
+                param($kind, $mx, $my)
+                [void]$alwaysLostLog.Add("$($script:clickState.attempt):$kind")
+                if ($kind -eq 'move') { $script:clickState.phase = 'stolen-before-down' }
+            }
+            $clickErr = $null
+            try {
+                Click-At 338 82 -TargetOwnerProbe $targetOwnerProbe -ActivateProbe $actProbeClick -ForegroundProbe $fgProbeBeforeDown -RectProbe $rectProbe -MouseProbe $mouseProbeAlwaysBeforeDown
+            } catch {
+                $clickErr = $_.Exception.Message
+            }
+            Check 'click-at-reports-contention-when-focus-lost-before-down' (
+                $script:clickState.attempt -eq 20 -and
+                $clickErr -like 'WIN_DRIVE_FOREGROUND_CONTENTION*' -and
+                $clickErr -match 'pid=6832' -and
+                -not ($alwaysLostLog -match ':down$|:up$')
+            ) "attempts=$($script:clickState.attempt) err=$clickErr log=$($alwaysLostLog -join '|')"
+
+            foreach ($deliveryMode in @('stable', 'before-down', 'after-delivery')) {
+                $script:deliveryPage = 1
+                $script:deliveryAttempt = 0
+                $script:deliveryLost = $false
+                $btn = New-Object System.Windows.Forms.Button
+                $btn.Add_Click({ $script:deliveryPage++ })
+                try {
+                    $actDelivery = {
+                        param($w, $attemptNum)
+                        $script:deliveryAttempt = [int]$attemptNum
+                        $script:deliveryLost = $false
+                        return [pscustomobject]@{ Ready = $true; ObservedHwnd = 555501L; Failure = ''; Accepted = $true }
+                    }
+                    $fgDelivery = {
+                        if ($script:deliveryLost) { return $extStealObj }
+                        return $ownWinObj
+                    }
+                    $mouseDelivery = {
+                        param($kind, $mx, $my)
+                        if ($deliveryMode -eq 'before-down' -and $script:deliveryAttempt -eq 1 -and $kind -eq 'move') {
+                            $script:deliveryLost = $true
+                        }
+                        if ($kind -eq 'up') {
+                            $btn.PerformClick()
+                            if ($deliveryMode -eq 'after-delivery') { $script:deliveryLost = $true }
+                        }
+                    }
+                    Click-At 338 82 -TargetOwnerProbe $targetOwnerProbe -ActivateProbe $actDelivery -ForegroundProbe $fgDelivery -RectProbe $rectProbe -MouseProbe $mouseDelivery
+                    $expectedAttempts = if ($deliveryMode -eq 'before-down') { 2 } else { 1 }
+                    Check "click-at-single-delivery-$deliveryMode" (
+                        $script:deliveryPage -eq 2 -and $script:deliveryAttempt -eq $expectedAttempts
+                    ) "mode=$deliveryMode page=$($script:deliveryPage) attempts=$($script:deliveryAttempt)"
+                } finally {
+                    $btn.Dispose()
+                }
+            }
+        } finally {
+            $script:DriverInputStampPath = $prevStampPath
+        }
     } finally {
         $script:AppPid = $prevAppPid
     }
+
+    # 8c. 中途失焦不重放：后台驱动外窗前台不补点、拖拽按住期间失焦只松键一次（子进程，替换函数不污染本脚本）。
+    $focusOut = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test-focus-interrupt.ps1'))
+    $focusExit = $LASTEXITCODE
+    foreach ($line in $focusOut) {
+        if ("$line" -match '^(PASS|FAIL) (\S+)(?: \((.*)\))?$') { Check "focus-interrupt-$($Matches[2])" ($Matches[1] -eq 'PASS') $Matches[3] }
+    }
+    Check 'focus-interrupt-suite-exit' ($focusExit -eq 0 -and @($focusOut | Where-Object { "$_" -match '^(PASS|FAIL) ' }).Count -ge 6) "exit=$focusExit"
 
     $fgRepo = Join-Path $tmp 'repo-fg'
     $fgSmoke = Join-Path $fgRepo 'tools\smoke'

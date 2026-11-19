@@ -588,8 +588,32 @@ try {
                 $r = Get-LessonSourceRange $script:Last
                 if (-not $r) { $r = & $waitRangeFade "late-$tag" }
             }
-            Click-At $ret.X $ret.Y; Start-Sleep -Milliseconds 800
-            if (-not (Await-Text 6 "back-$tag" @('本节原文') 15)) { Fail 6 '从本节原文返回后没有回到做题学页面' }
+            Click-At $ret.X $ret.Y
+            # Only the foreground driver can lose focus mid-click. The background driver never owns
+            # the foreground, so a foreign foreground is not evidence there: wait, never re-click.
+            $sawFocusLoss = $false
+            if (-not (Has-BackgroundDriver)) {
+                $fgAfterClick = Get-ForegroundOwner
+                $sawFocusLoss = -not $fgAfterClick.IsOwnCoach
+            }
+            Start-Sleep -Milliseconds 800
+            if (-not (Has-BackgroundDriver)) {
+                $fgSettled = Get-ForegroundOwner
+                if (-not $fgSettled.IsOwnCoach) { $sawFocusLoss = $true }
+            }
+            $linesNow = Shot 6 "back-$tag"
+            $backFound = [bool](Find-Text $linesNow '本节原文')
+            $retNow = if (-not $backFound) { Find-Text $linesNow '返回学习' } else { $null }
+            $retAct = Resolve-SourceReturnAction -ReturnedToLearning $backFound -SawFocusLoss $sawFocusLoss -ReturnButton $retNow
+            if ($retAct.Action -eq 'reclick') {
+                Note "步骤6 点返回学习后失焦且仍在原文页，按当前帧坐标重点击 ($($retAct.Button.X),$($retAct.Button.Y))"
+                Click-At $retAct.Button.X $retAct.Button.Y
+                Start-Sleep -Milliseconds 800
+                $backFound = [bool](Await-Text 6 "back-$tag" @('本节原文') 15)
+            } elseif ($retAct.Action -eq 'wait_learning') {
+                $backFound = [bool](Await-Text 6 "back-$tag" @('本节原文') 15)
+            }
+            if (-not $backFound) { Fail 6 '从本节原文返回后没有回到做题学页面' }
             return $r
         }
         $totalLessons = & $readTotalLessons $script:Last

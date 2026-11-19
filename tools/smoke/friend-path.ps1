@@ -30,7 +30,7 @@ $dirtyFile = Join-Path $out 'environment-dirty.json'
 if ($invocationExit -eq 2 -or (Test-Path -LiteralPath $dirtyFile)) {
     $reason = if (Test-Path -LiteralPath $dirtyFile) {
         (Get-Content -LiteralPath $dirtyFile -Raw -Encoding UTF8 | ConvertFrom-Json).reason
-    } else { '桌面存在非本轮拉起的前台窗口' }
+    } else { '桌面有人使用或存在测试遗留窗口' }
     "ENVIRONMENT_DIRTY: $reason （未开跑，不计 N/7；退出码 2；日志：$out）"
     exit 2
 }

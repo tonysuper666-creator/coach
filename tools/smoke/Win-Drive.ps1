@@ -25,6 +25,15 @@ public class WD {
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
   [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int val, int size);
   public static bool IsCloaked(IntPtr h) { int v = 0; return DwmGetWindowAttribute(h, 14, out v, 4) == 0 && v != 0; }
+  [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+  [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+  [DllImport("kernel32.dll")] public static extern uint GetTickCount();
+  public static long GetLastInputIdleMs() {
+    LASTINPUTINFO lii = new LASTINPUTINFO();
+    lii.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+    if (!GetLastInputInfo(ref lii)) return -1;
+    return (long)unchecked(GetTickCount() - lii.dwTime);
+  }
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessageTimeout(
     IntPtr h, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeoutMs, out UIntPtr result);
@@ -301,6 +310,230 @@ function Find-ForeignForegroundWindow([scriptblock]$Probe = $null) {
         Process = $procLabel
         Class = $clsLabel
         Summary = "$procLabel pid=$([int]$info.Pid) class=$clsLabel"
+    }
+}
+$script:ExternalWindowRegistryDir = 'D:\agent\state\coach-smoke-external-windows'
+function Register-ExternalWindowPid(
+    [int]$ProcessId,
+    [long]$StartTimeTicks = 0L,
+    [string]$Kind = 'external',
+    [string]$RegistryDir = $script:ExternalWindowRegistryDir
+) {
+    if ($ProcessId -le 0) { throw "Register-ExternalWindowPid requires positive ProcessId (got $ProcessId)" }
+    if ($StartTimeTicks -le 0L) {
+        $proc = Get-Process -Id $ProcessId -ErrorAction Stop
+        $StartTimeTicks = Get-TrackedProcessStartTicks $proc
+    }
+    if ($StartTimeTicks -le 0L) { throw "Register-ExternalWindowPid could not read StartTime for pid $ProcessId" }
+    New-Item -ItemType Directory -Force $RegistryDir | Out-Null
+    $ownerTicks = Get-TrackedProcessStartTicks (Get-Process -Id $PID -ErrorAction SilentlyContinue)
+    $path = Join-Path $RegistryDir ("$ProcessId-$StartTimeTicks.json")
+    $tmp = "$path.tmp"
+    @{
+        pid = $ProcessId
+        startTicks = $StartTimeTicks
+        kind = $Kind
+        ownerPid = $PID
+        ownerStartTicks = $ownerTicks
+        registeredUtc = [DateTime]::UtcNow.ToString('o')
+    } | ConvertTo-Json -Compress | Set-Content -LiteralPath $tmp -Encoding UTF8
+    Move-Item -LiteralPath $tmp -Destination $path -Force
+    return $path
+}
+function Unregister-ExternalWindowPid(
+    [int]$ProcessId,
+    [long]$StartTimeTicks = 0L,
+    [string]$RegistryDir = $script:ExternalWindowRegistryDir
+) {
+    if (-not (Test-Path -LiteralPath $RegistryDir)) { return }
+    $pattern = if ($StartTimeTicks -gt 0L) { "$ProcessId-$StartTimeTicks.json" } else { "$ProcessId-*.json" }
+    foreach ($f in @(Get-ChildItem -LiteralPath $RegistryDir -Filter $pattern -ErrorAction SilentlyContinue)) {
+        Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+function Get-RegisteredExternalWindows([string]$RegistryDir = $script:ExternalWindowRegistryDir) {
+    if (-not (Test-Path -LiteralPath $RegistryDir)) { return @() }
+    $active = New-Object System.Collections.ArrayList
+    foreach ($entry in @(Get-ChildItem -LiteralPath $RegistryDir -Filter '*.json' -ErrorAction SilentlyContinue)) {
+        $rec = $null
+        try { $rec = Get-Content -LiteralPath $entry.FullName -Raw -Encoding UTF8 | ConvertFrom-Json } catch { continue }
+        if (-not $rec -or -not $rec.pid) { continue }
+        $pidVal = [int]$rec.pid
+        $ticksVal = if ($rec.startTicks) { [long]$rec.startTicks } else { 0L }
+        $state = Get-TrackedPidState $pidVal $ticksVal
+        if ($state -eq 'exited') {
+            Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction SilentlyContinue
+            continue
+        }
+        $ownerAlive = if ($rec.ownerPid) {
+            (Get-TrackedPidState ([int]$rec.ownerPid) $(if ($rec.ownerStartTicks) { [long]$rec.ownerStartTicks } else { 0L })) -ne 'exited'
+        } else { $false }
+        [void]$active.Add([pscustomobject]@{
+            Pid = $pidVal
+            StartTicks = $ticksVal
+            Kind = if ($rec.kind) { [string]$rec.kind } else { 'external' }
+            State = $state
+            OwnerPid = if ($rec.ownerPid) { [int]$rec.ownerPid } else { 0 }
+            OwnerAlive = $ownerAlive
+            Summary = "registered:$($rec.kind) pid=$pidVal state=$state ownerAlive=$ownerAlive"
+        })
+    }
+    return @($active)
+}
+function Get-ActiveStreamingSession([scriptblock]$Probe = $null) {
+    if ($Probe) { return (& $Probe) }
+    $hosts = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^(sunshine|apollo)$' })
+    foreach ($h in $hosts) {
+        $udp = @(Get-NetUDPEndpoint -OwningProcess $h.Id -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ge 47998 -and $_.LocalPort -le 48020 })
+        $tcp = @(Get-NetTCPConnection -OwningProcess $h.Id -State Established -ErrorAction SilentlyContinue | Where-Object {
+            $_.LocalPort -in 47984, 47989, 48010 -or ($_.LocalPort -ge 47998 -and $_.LocalPort -le 48020)
+        })
+        if ($udp.Count -gt 0 -or $tcp.Count -gt 0) {
+            $ports = @(@($udp | ForEach-Object LocalPort) + @($tcp | ForEach-Object LocalPort) | Sort-Object -Unique)
+            return [pscustomobject]@{
+                Tool = 'Apollo/Sunshine'
+                Pid = [int]$h.Id
+                Ports = $ports
+                Summary = "$($h.ProcessName) pid=$($h.Id) streaming ports=$($ports -join ',')"
+            }
+        }
+    }
+    $clients = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^moonlight' })
+    foreach ($c in $clients) {
+        $tcp = @(Get-NetTCPConnection -OwningProcess $c.Id -State Established -ErrorAction SilentlyContinue)
+        if ($c.MainWindowHandle -ne [IntPtr]::Zero -or $tcp.Count -gt 0) {
+            return [pscustomobject]@{
+                Tool = 'Moonlight'
+                Pid = [int]$c.Id
+                Ports = @($tcp | ForEach-Object RemotePort | Sort-Object -Unique)
+                Summary = "$($c.ProcessName) pid=$($c.Id) active"
+            }
+        }
+    }
+    return $null
+}
+function Find-ActiveDesktopUser(
+    [int]$MinIdleSeconds = 600,
+    [scriptblock]$IdleProbe = $null,
+    [scriptblock]$StreamProbe = $null
+) {
+    $stream = Get-ActiveStreamingSession -Probe $StreamProbe
+    $idleSec = if ($IdleProbe) {
+        [double](& $IdleProbe)
+    } else {
+        $ms = [WD]::GetLastInputIdleMs()
+        if ($ms -lt 0) { -1.0 } else { [double]$ms / 1000.0 }
+    }
+    if ($stream) {
+        return [pscustomobject]@{
+            Occupied = $true
+            IdleSeconds = $idleSec
+            Streaming = $stream
+            Reason = "Apollo/Moonlight 正在串流（$($stream.Summary)）"
+        }
+    }
+    if ($idleSec -lt 0) {
+        return [pscustomobject]@{
+            Occupied = $true
+            IdleSeconds = $idleSec
+            Streaming = $null
+            Reason = '无法读取桌面键鼠空闲时间（GetLastInputInfo 失败）'
+        }
+    }
+    if ($idleSec -lt $MinIdleSeconds) {
+        return [pscustomobject]@{
+            Occupied = $true
+            IdleSeconds = [math]::Round($idleSec, 1)
+            Streaming = $null
+            Reason = "桌面近 $([int][Math]::Floor($idleSec)) 秒内有键鼠输入（阈值 ${MinIdleSeconds} 秒）"
+        }
+    }
+    return $null
+}
+function Find-DirtyDesktopWindow(
+    [string]$RegistryDir = $script:ExternalWindowRegistryDir,
+    [scriptblock]$CoachWindowProbe = $null
+) {
+    $dirty = New-Object System.Collections.ArrayList
+    $coachWins = if ($CoachWindowProbe) {
+        @(& $CoachWindowProbe)
+    } else {
+        $clientPids = [Collections.Generic.HashSet[int]]::new()
+        foreach ($cpid in @(Get-ClientPids)) {
+            if ($cpid -gt 0 -and $cpid -ne $script:AppPid) { [void]$clientPids.Add([int]$cpid) }
+        }
+        $found = New-Object System.Collections.ArrayList
+        $seenPids = [Collections.Generic.HashSet[int]]::new()
+        [WD]::EnumWindows({ param($h, $l)
+            if ([WD]::IsWindowVisible($h) -and -not [WD]::IsCloaked($h)) {
+                $p = 0; [WD]::GetWindowThreadProcessId($h, [ref]$p) | Out-Null
+                if ($p -gt 0 -and $p -ne $script:AppPid -and -not $seenPids.Contains([int]$p)) {
+                    $pn = (Get-Process -Id $p -ErrorAction SilentlyContinue).ProcessName
+                    if ($clientPids.Contains([int]$p) -or $pn -eq 'LearningCoach') {
+                        [void]$seenPids.Add([int]$p)
+                        [void]$found.Add([pscustomobject]@{
+                            Kind = 'coach-window'
+                            Pid = [int]$p
+                            Process = if ($pn) { $pn } else { 'java' }
+                            Summary = "coach-window $(if ($pn) { $pn } else { 'java' }) pid=$p"
+                        })
+                    }
+                }
+            }
+            return $true
+        }, [IntPtr]::Zero) | Out-Null
+        @($found)
+    }
+    foreach ($cw in $coachWins) {
+        if ($cw) { [void]$dirty.Add($cw) }
+    }
+    foreach ($rw in @(Get-RegisteredExternalWindows -RegistryDir $RegistryDir)) {
+        [void]$dirty.Add($rw)
+    }
+    return @($dirty)
+}
+function Test-DesktopPreflight(
+    [int]$MinIdleSeconds = 600,
+    [string]$RegistryDir = $script:ExternalWindowRegistryDir,
+    [scriptblock]$IdleProbe = $null,
+    [scriptblock]$StreamProbe = $null,
+    [scriptblock]$CoachWindowProbe = $null,
+    [scriptblock]$ForegroundProbe = $null
+) {
+    $dirtyWindows = @(Find-DirtyDesktopWindow -RegistryDir $RegistryDir -CoachWindowProbe $CoachWindowProbe)
+    $activeUser = Find-ActiveDesktopUser -MinIdleSeconds $MinIdleSeconds -IdleProbe $IdleProbe -StreamProbe $StreamProbe
+    $idleSec = if ($IdleProbe) { [double](& $IdleProbe) } else {
+        $ms = [WD]::GetLastInputIdleMs(); if ($ms -lt 0) { -1.0 } else { [double]$ms / 1000.0 }
+    }
+    $fg = Find-ForeignForegroundWindow -Probe $ForegroundProbe
+    if ($dirtyWindows.Count -gt 0) {
+        $desc = ($dirtyWindows | ForEach-Object Summary) -join '; '
+        return [pscustomobject]@{
+            Clean = $false
+            Reason = "桌面存在测试遗留或本轮之外的 Coach 窗口（$desc）"
+            DirtyWindows = $dirtyWindows
+            ActiveUser = $activeUser
+            IdleSeconds = [math]::Round($idleSec, 1)
+            Foreground = $fg
+        }
+    }
+    if ($activeUser) {
+        return [pscustomobject]@{
+            Clean = $false
+            Reason = $activeUser.Reason
+            DirtyWindows = @()
+            ActiveUser = $activeUser
+            IdleSeconds = $activeUser.IdleSeconds
+            Foreground = $fg
+        }
+    }
+    return [pscustomobject]@{
+        Clean = $true
+        Reason = ''
+        DirtyWindows = @()
+        ActiveUser = $null
+        IdleSeconds = [math]::Round($idleSec, 1)
+        Foreground = $fg
     }
 }
 # All drivers share this mutex, but hold it for one input/capture only.

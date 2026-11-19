@@ -19,16 +19,32 @@ import kotlin.test.*
 class ScrollHighlightVisibilityTest {
     private val marker = "句0300。"
 
-    /** 视口里含 marker 的那段文字的布局里，marker 范围上有没有 hl 背景。没有可见节点返回 null。 */
+    /**
+     * marker 整句（逐字排版边界）都落在裁剪后的视口里时，返回整句是否带 hl 背景；
+     * 句子还在屏外（懒加载列表里节点已存在但没滚进来）或只露一半，返回 null。
+     */
     private fun SkikoComposeUiTest.markerHighlighted(): Boolean? {
         val hl = CoachV7.Light.hl
+        val viewport = onRoot().fetchSemanticsNode().boundsInRoot
         for (tag in listOf("reader-text", "reader-text-right")) for (node in onAllNodesWithTag(tag).fetchSemanticsNodes()) {
             val results = mutableListOf<TextLayoutResult>()
             node.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(results)
-            val text = results.single().layoutInput.text
+            val layout = results.single()
+            val text = layout.layoutInput.text
             val at = text.text.indexOf(marker)
             if (at < 0) continue
-            return text.spanStyles.any { it.item.background == hl && it.start <= at && it.end >= at + marker.length }
+            val origin = node.positionInRoot
+            var inside = true
+            for (i in at until at + marker.length) {
+                val box = layout.getBoundingBox(i)
+                val left = origin.x + box.left; val right = origin.x + box.right
+                val top = origin.y + box.top; val bottom = origin.y + box.bottom
+                if (top < viewport.top || bottom > viewport.bottom || left < viewport.left || right > viewport.right) { inside = false; break }
+            }
+            if (!inside) return null
+            return (at until at + marker.length).all { i ->
+                text.spanStyles.any { it.item.background == hl && it.start <= i && it.end > i }
+            }
         }
         return null
     }
@@ -54,7 +70,7 @@ class ScrollHighlightVisibilityTest {
                     }
                 } } }
                 mainClock.advanceTimeBy(300); waitForIdle()
-                assertNull(markerHighlighted(), "the highlighted sentence is far below: not on screen yet")
+                assertNull(markerHighlighted(), "the highlighted sentence is far below: not fully inside the viewport yet")
                 var steps = 0
                 while (markerHighlighted() == null && steps < 80) {
                     runOnIdle { state.move(ReaderTurn.Next) }
@@ -64,7 +80,7 @@ class ScrollHighlightVisibilityTest {
                 // 回到书首（高亮离开视口，列表回收），再一屏屏滚回来
                 runOnIdle { state.anchor = state.pages.first().anchor }
                 mainClock.advanceTimeBy(800); waitForIdle()
-                assertNull(markerHighlighted(), "back at the top the highlight is off screen again")
+                assertNull(markerHighlighted(), "back at the top the sentence is outside the viewport again")
                 steps = 0
                 while (markerHighlighted() == null && steps < 80) {
                     runOnIdle { state.move(ReaderTurn.Next) }

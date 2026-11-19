@@ -49,7 +49,8 @@ function Select-TutorLabel([string]$name, [string[]]$labels, [int]$scroll = 0, [
 function Test-BlockAndCitation {
     Send-Keys '{HOME}'
     Select-TutorLabel '04-reader' @('讲解') 0 675
-    Select-TutorLabel '04-explain-action' @('讲解这段') -2 675 150
+    # RC2 places these controls below each paragraph, the native candidate puts them on the right.
+    Select-TutorLabel '04-explain-action' @('讲解这段','井解这上段') -2 100 150
     Click-CapturedControl 'explain-consent.png' '04-consent.png'
     $null = Find-TutorLabel '04-block' @('Blockexplanation','explanation') -2
     Select-TutorLabel '07-citation' @('出处1','出处') -2
@@ -59,8 +60,7 @@ function Test-BlockAndCitation {
 
 function Test-PassageQuestion {
     Select-TutorLabel '04-ask-action' @('选段提问')
-    $hint = Find-TutorLabel '04-ask-dialog' @('点一段','再问一句')
-    Click-At ($hint.X + 80) ($hint.Y + 46)
+    Select-TutorLabel '04-ask-dialog' @('correlation')
     $field = Find-TutorLabel '04-question-field' @('想问什么') -4
     Click-At ($field.X + 35) ($field.Y + 34)
     Send-Keys 'What does this passage mean?'
@@ -82,7 +82,7 @@ function Open-TutorShelf([string]$name) {
 function Test-WholeLesson {
     Open-TutorShelf '05-shelf'
     Click-CapturedControl 'shelf-guided.png' '05-path.png'
-    Select-TutorLabel '05-open' @('开始边看边学','开始边看','边看边学') 0 550 400
+    Click-CapturedControl 'guided-start.png' '05-open.png'
     $null = Find-TutorLabel '05-lesson' @('Lessonoverview','overview') -4
     Select-TutorLabel '05-lesson-source' @('出处') -3
     $null = Find-TutorLabel '05-original' @('返回学习')

@@ -297,8 +297,39 @@ class MockExamTest {
             assertEquals(0, mocks.home(store, "C1").getValue("drill").jsonObject.getValue("total").jsonPrimitive.int,
                 "an unchecked pack adds nothing the learner could actually practise")
             assertEquals(404, assertFailsWith<MockError> { mocks.start(store, "C1", json("drill" to json("week" to 1))) }.status.value)
-            // Even so, nothing from it may ever reach the week's mistakes.
+            // Nothing was ever asked here, so nothing can be listed; the record-carrying case is the legacy one below.
             assertEquals(emptyList(), weekMistakes(store.events("C1"), 1))
+        } finally { store.close(); dir.toFile().deleteRecursively() }
+    }
+
+    /** A drill frozen and running before the upgrade can still be submitted; its unchecked key must stay out of the week's mistakes. */
+    @Test fun aLegacyDrillWithAnUncheckedKeyNeverReachesTheWeekMistakes() = runBlocking<Unit> {
+        val dir = Files.createTempDirectory("mock-drill-legacy")
+        val now = AtomicLong(1_800_000_000_000)
+        val store = LedgerStore(Files.createDirectories(dir.resolve("db"))) { now.get() }
+        val mocks = MockEngine(MockLibrary(Files.createDirectories(dir.resolve("papers"))), clock = { now.get() })
+        try {
+            store.append("C1", "outline_revised", json("knowledgePoints" to JsonArray(listOf(json("id" to "kp-drill-1", "title" to "drill topic", "week" to 1)))))
+            // Papers frozen by the server before this change: the unchecked one was already posed and answered wrongly.
+            fun legacy(id: String, keyState: String) {
+                val paper = json("id" to "drill", "kind" to "drill", "course" to "C1", "title" to "单选速刷 · 第 1 周",
+                    "sections" to JsonArray(listOf(json("title" to "单选速刷 · 第 1 周", "items" to JsonArray(listOf(
+                        json("id" to "checked.$id", "type" to "mcq", "kp_week" to 1, "kp" to "kp-drill-1", "marks" to 4, "key_state" to keyState,
+                            "stem" to "Synthetic legacy drill $id?", "options" to JsonArray(listOf("Yes", "No").map(::JsonPrimitive)),
+                            "answer" to 0, "explanation" to "Synthetic explanation")))))))
+                store.createMock(MockSession(id, "C1", "drill", "TIMED", paper, now.get(), now.get() + 14 * 60_000))
+                val result = mocks.submit(store, "C1", id, json("checked.$id" to json("choice" to 1)), false)
+                assertEquals(0.0, result.getValue("score").jsonPrimitive.double, "the legacy drill graded the wrong choice as wrong")
+            }
+            legacy("legacy-unchecked", "UNREVIEWED")
+            legacy("legacy-checked", "VERIFIED")
+            val events = store.events("C1")
+            // The upgrade does not rewrite history: the unchecked attempt is still in the ledger, graded wrong.
+            assertNotNull(events.firstOrNull { it.type == "question_posed" && it.payload.str("mockId") == "legacy-unchecked" &&
+                it.payload.str("keyState") == "UNREVIEWED" })
+            assertNotNull(events.firstOrNull { it.type == "attempt_graded" && it.payload.str("attemptId") == "legacy-unchecked-1" })
+            // A choice nobody checked cannot be re-posed, so that week's mistakes leaves it out and keeps the checked one.
+            assertEquals(listOf("legacy-checked"), weekMistakes(events, 1).map { it.payload.str("mockId") })
         } finally { store.close(); dir.toFile().deleteRecursively() }
     }
 

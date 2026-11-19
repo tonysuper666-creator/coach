@@ -36,6 +36,22 @@ jobs:
           $h = (Get-FileHash bundle/LearningCoach-1.0.1.msi -Algorithm SHA256).Hash.ToLower()
           "msi_sha256=$h" | Tee-Object -Append evidence/machine.txt
           if ($h -ne '568f22f0ec021c6b167274ae420e4b90f22fa46b6b733268c209c62dc0e6137d') { throw 'not RC2' }
+      - name: Dismiss foreground runner blocker
+        shell: powershell
+        run: |
+          if ($env:GITHUB_ACTIONS -ne 'true' -or $env:PROCESSOR_ARCHITECTURE -ne 'ARM64') { throw 'Expected disposable ARM runner' }
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class PrismForeground {
+            [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+          }
+          '@
+          $owner = 0
+          [PrismForeground]::GetWindowThreadProcessId([PrismForeground]::GetForegroundWindow(), [ref]$owner) | Out-Null
+          $front = Get-Process -Id $owner -ErrorAction SilentlyContinue
+          if ($front -and $front.ProcessName -eq 'WWAHost') { Stop-Process -Id $owner -Force; "Closed foreground WWAHost $owner" }
       - name: Install x64 MSI under Prism, launch and screenshot
         shell: powershell
         run: ./tools/smoke/msi-install.ps1 -Msi bundle/LearningCoach-1.0.1.msi -OutDir evidence/install -StartTimeoutSec 300 -KeepInstalled
@@ -43,16 +59,26 @@ jobs:
         if: ${{ always() && steps.verify.outcome == 'success' }}
         shell: powershell
         run: |
-          ./tools/smoke/prism-ocr.ps1 -OutDir evidence/prism-ocr -Fixture desktopApp/src/test/resources/books/ocr/01-clean-serif.png
+          ./tools/smoke/prism-ocr.ps1 -OutDir evidence/prism-ocr -Fixture desktopApp/src/test/resources/books/ocr/01-clean-serif.png -InstallResult evidence/install/result.json
       - name: Uninstall isolated test package
         if: always()
         shell: powershell
         run: |
-          $products = @(Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object DisplayName -eq 'LearningCoach')
+          $paths = @('HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*')
+          $products = @(Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'LearningCoach' })
           if ($products.Count -gt 1) { throw 'Unexpected multiple LearningCoach installations' }
           if ($products.Count -eq 1) {
             $p = Start-Process msiexec.exe -ArgumentList @('/x', $products[0].PSChildName, '/qn', '/norestart') -Wait -PassThru
             if ($p.ExitCode -ne 0) { throw "Uninstall failed: $($p.ExitCode)" }
+            $left = @(Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'LearningCoach' })
+            if ($left.Count) { throw 'LearningCoach still appears in the uninstall registry' }
+            Write-Output 'Uninstall completed and registry entry is gone'
+          } else {
+            if (Test-Path 'evidence/install/result.json') {
+              $result = Get-Content -Raw -Encoding UTF8 'evidence/install/result.json' | ConvertFrom-Json
+              if ($result.installedTo -and (Test-Path (Join-Path $result.installedTo 'LearningCoach.exe'))) { throw 'Installed app remains but registry entry was not found' }
+            }
+            Write-Output 'No LearningCoach installation found to uninstall'
           }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()

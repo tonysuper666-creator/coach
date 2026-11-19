@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory)][string]$OutDir,
-    [Parameter(Mandatory)][string]$Fixture
+    [Parameter(Mandatory)][string]$Fixture,
+    [Parameter(Mandatory)][string]$InstallResult
 )
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:PROCESSOR_ARCHITECTURE -ne 'ARM64') {
@@ -21,9 +22,9 @@ $env:COACH_LIBRARY_DIR = Join-Path $OutDir 'library'
 $env:COACH_CLIENT_DIR = Join-Path $OutDir 'client'
 $env:COACH_TOKEN_FILE = Join-Path $OutDir 'unused-token'
 New-Item -ItemType Directory -Force $env:COACH_LIBRARY_DIR, $env:COACH_CLIENT_DIR | Out-Null
-$products = @(Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object DisplayName -eq 'LearningCoach')
-if ($products.Count -ne 1) { throw 'Expected exactly one installed LearningCoach MSI' }
-$exe = Join-Path $products[0].InstallLocation 'LearningCoach.exe'
+$install = Get-Content -Raw -Encoding UTF8 $InstallResult | ConvertFrom-Json
+if (-not $install.installedTo) { throw 'The MSI smoke did not record an install location' }
+$exe = Join-Path $install.installedTo 'LearningCoach.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw 'Installed executable missing' }
 $before = @(Get-CimInstance Win32_Process -Filter "Name='LearningCoach.exe'" | ForEach-Object { [int]$_.ProcessId })
 $app = Start-Process -FilePath $exe -PassThru

@@ -528,6 +528,81 @@ exit /b 0
             ([WD]::LastActivationFailure -eq 'WM_NULL confirmation failed')
         ) "ok=$zeroAct injected=$([WD]::LastActivationInjectedInput) fail=$([WD]::LastActivationFailure)"
 
+        # 8a-0. 标题栏点击分支替身回归：正常移动落入目标标题栏才点；移动失败 / 实际落点不可读 / 被系统裁出目标或裁出标题栏均零输入
+        if (-not ('CoachCaptionGuardCheck' -as [type])) {
+            $wdSrc = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'Win-Drive.ps1')
+            $cgStart = $wdSrc.IndexOf('    if (ForegroundAtConfirmation != h && IsWindowEnabled(h)) {')
+            $cgEnd = $wdSrc.IndexOf('    if (ForegroundAtConfirmation != h) {', $cgStart + 1)
+            if ($cgStart -lt 0 -or $cgEnd -le $cgStart) { throw 'Caption guard block not found in Win-Drive.ps1' }
+            $cgBlock = $wdSrc.Substring($cgStart, $cgEnd - $cgStart)
+            $cgDef = @"
+using System;
+public static class CoachCaptionGuardCheck {
+    struct RECT { public int L,T,R,B; }
+    struct POINT { public int X,Y; }
+    static readonly IntPtr Target = (IntPtr)10, Other = (IntPtr)20;
+    static IntPtr ForegroundAtConfirmation;
+    static string LastActivationFailure;
+    static bool LastActivationAccepted, LastActivationInjectedInput;
+    static string mode;
+    static int cursorX, cursorY;
+    public static int Events, OtherEvents;
+    public static bool InjectedInput;
+    static bool IsWindowEnabled(IntPtr h) { return true; }
+    static void GetWindowThreadProcessId(IntPtr h, out uint pid) { pid = 1; }
+    static bool GetWindowRect(IntPtr h, out RECT r) { r = new RECT { L = 200, T = 200, R = 1000, B = 900 }; return true; }
+    static bool SetWindowPos(IntPtr h, IntPtr z, int x, int y, int w, int b, uint flags) { return true; }
+    static IntPtr SendMessageTimeout(IntPtr h, uint m, UIntPtr w, IntPtr p, uint flags, uint ms, out UIntPtr result) { result = UIntPtr.Zero; return (IntPtr)1; }
+    static IntPtr WindowFromPoint(POINT p) { return (p.X >= 200 && p.X < 1000 && p.Y >= 200 && p.Y < 900) ? Target : Other; }
+    static IntPtr GetAncestor(IntPtr h, uint flags) { return h; }
+    static bool SetCursorPos(int x, int y) {
+        if (mode == "failed-move") return false;
+        if (mode == "normal" || mode == "unreadable-pos") { cursorX = x; cursorY = y; }
+        else if (mode == "clipped-client") { cursorX = x; cursorY = 500; }
+        return true;
+    }
+    static bool GetCursorPos(out POINT p) {
+        p = new POINT { X = cursorX, Y = cursorY };
+        return mode != "unreadable-pos";
+    }
+    static void mouse_event(uint flags, int x, int y, uint data, IntPtr extra) {
+        Events++;
+        if (WindowFromPoint(new POINT { X = cursorX, Y = cursorY }) != Target || cursorY >= 248) OtherEvents++;
+    }
+    static IntPtr ReadForegroundSettled(bool accepted) { return (OtherEvents == 0 && Events > 0) ? Target : Other; }
+    public static bool Run(string scenario) {
+        mode = scenario; cursorX = 0; cursorY = 0; Events = 0; OtherEvents = 0;
+        var h = Target; ForegroundAtConfirmation = Other; UIntPtr ignored; bool responsive = true;
+        LastActivationAccepted = false; LastActivationInjectedInput = false; LastActivationFailure = null;
+$cgBlock
+        InjectedInput = LastActivationInjectedInput;
+        if (ForegroundAtConfirmation != h) {
+            LastActivationFailure = LastActivationAccepted ? "activation accepted but target was not foreground" : "activation declined by Windows";
+            return false;
+        }
+        LastActivationFailure = null;
+        return true;
+    }
+}
+"@
+            Add-Type -TypeDefinition $cgDef
+        }
+        foreach ($cgCase in @(
+            @{ Name = 'caption-guard-normal-move'; Scenario = 'normal'; ExpectOk = $true; ExpectEvents = 2; ExpectInjected = $true }
+            @{ Name = 'caption-guard-failed-move'; Scenario = 'failed-move'; ExpectOk = $false; ExpectEvents = 0; ExpectInjected = $false }
+            @{ Name = 'caption-guard-unreadable-cursor-pos'; Scenario = 'unreadable-pos'; ExpectOk = $false; ExpectEvents = 0; ExpectInjected = $false }
+            @{ Name = 'caption-guard-clipped-off-target'; Scenario = 'clipped-move'; ExpectOk = $false; ExpectEvents = 0; ExpectInjected = $false }
+            @{ Name = 'caption-guard-clipped-outside-caption'; Scenario = 'clipped-client'; ExpectOk = $false; ExpectEvents = 0; ExpectInjected = $false }
+        )) {
+            $cgOk = [CoachCaptionGuardCheck]::Run($cgCase.Scenario)
+            Check $cgCase.Name (
+                $cgOk -eq $cgCase.ExpectOk -and
+                [CoachCaptionGuardCheck]::Events -eq $cgCase.ExpectEvents -and
+                [CoachCaptionGuardCheck]::OtherEvents -eq 0 -and
+                [CoachCaptionGuardCheck]::InjectedInput -eq $cgCase.ExpectInjected
+            ) "ok=$cgOk events=$([CoachCaptionGuardCheck]::Events) off=$([CoachCaptionGuardCheck]::OtherEvents) inj=$([CoachCaptionGuardCheck]::InjectedInput)"
+        }
+
         # 8a. Invoke-ForegroundStep 真实 20 次重试 + 放锁后双向切窗回归（覆盖激活被拒与动作中失焦两个入口）
         function Invoke-SwapRegressionCase([string]$name, [ValidateSet('entry1','entry2')][string]$entry, $stateA, $stateB, [bool]$expectContention) {
             $mainWin = [IntPtr]555501L

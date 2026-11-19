@@ -122,16 +122,21 @@ public class WD {
             POINT pt; pt.X = clickX; pt.Y = clickY;
             IntPtr under = WindowFromPoint(pt);
             IntPtr rootUnder = (under != IntPtr.Zero) ? GetAncestor(under, 2) : IntPtr.Zero; // GA_ROOT
-            if (rootUnder == h) {
-              SetCursorPos(clickX, clickY);
-              LastActivationInjectedInput = true;
-              mouse_event(2, 0, 0, 0, IntPtr.Zero);
-              System.Threading.Thread.Sleep(30);
-              mouse_event(4, 0, 0, 0, IntPtr.Zero);
-              responsive = SendMessageTimeout(h, 0, UIntPtr.Zero, IntPtr.Zero, 0x23, 500, out ignored) != IntPtr.Zero;
-              ForegroundAtConfirmation = ReadForegroundSettled(true);
-              if (ForegroundAtConfirmation == h) {
-                LastActivationAccepted = true;
+            POINT actualPt = new POINT();
+            if (rootUnder == h && SetCursorPos(clickX, clickY) && GetCursorPos(out actualPt)) {
+              IntPtr actualUnder = WindowFromPoint(actualPt);
+              IntPtr actualRoot = (actualUnder != IntPtr.Zero) ? GetAncestor(actualUnder, 2) : IntPtr.Zero; // GA_ROOT
+              bool inCaptionBand = actualPt.X >= r.L && actualPt.X < r.R && actualPt.Y >= r.T && actualPt.Y < Math.Min(r.B, r.T + 48);
+              if (actualRoot == h && inCaptionBand) {
+                LastActivationInjectedInput = true;
+                mouse_event(2, 0, 0, 0, IntPtr.Zero);
+                System.Threading.Thread.Sleep(30);
+                mouse_event(4, 0, 0, 0, IntPtr.Zero);
+                responsive = SendMessageTimeout(h, 0, UIntPtr.Zero, IntPtr.Zero, 0x23, 500, out ignored) != IntPtr.Zero;
+                ForegroundAtConfirmation = ReadForegroundSettled(true);
+                if (ForegroundAtConfirmation == h) {
+                  LastActivationAccepted = true;
+                }
               }
             }
           } finally {
@@ -152,6 +157,7 @@ public class WD {
     return true;
   }
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT pt);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, IntPtr e);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
 }

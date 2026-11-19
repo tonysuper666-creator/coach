@@ -41,10 +41,24 @@ private val PAPER = """
    "parts":[{"label":"a","prompt":"Compute it.","marks":10,"answer":"7","tolerance":0.5,"rubric":[]}]}]}]}
 """.trimIndent()
 
-private fun pack() = json("id" to "synthetic-pack", "kind" to "pack", "course" to "C1", "sections" to JsonArray(listOf(json("title" to "Pack",
+/** A pack of checked choices; drills only ever draw from packs whose answer keys a person has verified. */
+private fun pack(keyState: String = "VERIFIED") = json("id" to "synthetic-pack", "kind" to "pack", "course" to "C1", "key_state" to keyState,
+    "sections" to JsonArray(listOf(json("title" to "Pack",
     "items" to JsonArray((1..8).map { i -> json("id" to "P$i", "type" to "mcq", "kp_week" to (if (i <= 3) 1 else 2), "kp" to "drill topic",
         "marks" to 4, "stem" to "Synthetic drill question number $i?", "options" to JsonArray(listOf("Yes $i", "No $i", "Maybe $i").map(::JsonPrimitive)),
         "answer" to 0, "explanation" to "Synthetic explanation $i") })))))
+
+/** One drill choice; [keyState] left null falls back to the pack's state, the way a pack that stamps all its items does. */
+private fun drillItem(id: String, week: Int, keyState: String? = null): JsonObject = buildJsonObject {
+    put("id", id); put("type", "mcq"); put("kp_week", week); put("kp", "drill topic"); put("marks", 4)
+    put("stem", "Synthetic checked drill $id?")
+    put("options", JsonArray(listOf("Yes $id", "No $id", "Maybe $id").map(::JsonPrimitive)))
+    put("answer", 0); put("explanation", "Synthetic explanation $id")
+    keyState?.let { put("key_state", it) }
+}
+
+private fun drillPack(id: String, keyState: String, items: List<JsonObject>): JsonObject = json("id" to id, "kind" to "pack", "course" to "C1",
+    "key_state" to keyState, "sections" to JsonArray(listOf(json("title" to "Pack", "items" to JsonArray(items)))))
 
 class MockExamTest {
     @Test fun courseCodeAliasesListAndStartPapersAndDrillsWithoutCrossingCourses() {
@@ -250,7 +264,7 @@ class MockExamTest {
         val store = LedgerStore(Files.createDirectories(dir.resolve("db"))) { now.get() }
         val papers = Files.createDirectories(dir.resolve("papers"))
         // Names its knowledge point by outline id, the way a checked pack does.
-        Files.writeString(papers.resolve("checked.json"), JsonObject(pack() + ("id" to JsonPrimitive("checked")) + ("key_state" to JsonPrimitive("VERIFIED"))).toString()
+        Files.writeString(papers.resolve("checked.json"), JsonObject(pack() + ("id" to JsonPrimitive("checked"))).toString()
             .replace("\"drill topic\"", "\"kp-drill-1\""))
         val mocks = MockEngine(MockLibrary(papers), clock = { now.get() })
         try {
@@ -271,18 +285,54 @@ class MockExamTest {
         } finally { store.close(); dir.toFile().deleteRecursively() }
     }
 
-    @Test fun drillMistakesWithAnUncheckedKeyStayOutOfTheWeekMistakes() = runBlocking<Unit> {
+    @Test fun anUncheckedPackOffersNothingToDrillOrToRetry() = runBlocking<Unit> {
         val dir = Files.createTempDirectory("mock-drill-unchecked")
         val now = AtomicLong(1_800_000_000_000)
         val store = LedgerStore(Files.createDirectories(dir.resolve("db"))) { now.get() }
-        val mocks = MockEngine(library(dir.resolve("papers")), clock = { now.get() })
+        val papers = Files.createDirectories(dir.resolve("papers"))
+        Files.writeString(papers.resolve("draft.json"), pack("UNREVIEWED").toString())
+        val mocks = MockEngine(MockLibrary(papers), clock = { now.get() })
         try {
             store.append("C1", "outline_revised", json("knowledgePoints" to JsonArray(listOf(json("id" to "kp-drill-1", "title" to "drill topic", "week" to 1)))))
-            val drill = mocks.start(store, "C1", json("drill" to json("week" to 1)))
-            val keys = drill.getValue("paper").jsonObject.getValue("sections").jsonArray.single().jsonObject.getValue("items").jsonArray.map { it.jsonObject.str("id") }
-            mocks.submit(store, "C1", drill.str("mockId"), JsonObject(keys.associateWith { json("choice" to 1) }), false)
-            // Listing it would offer a retry the server must refuse.
+            assertEquals(0, mocks.home(store, "C1").getValue("drill").jsonObject.getValue("total").jsonPrimitive.int,
+                "an unchecked pack adds nothing the learner could actually practise")
+            assertEquals(404, assertFailsWith<MockError> { mocks.start(store, "C1", json("drill" to json("week" to 1))) }.status.value)
+            // Even so, nothing from it may ever reach the week's mistakes.
             assertEquals(emptyList(), weekMistakes(store.events("C1"), 1))
+        } finally { store.close(); dir.toFile().deleteRecursively() }
+    }
+
+    @Test fun drillDrawsOnlyCheckedChoicesAndCountsTheSamePool() = runBlocking<Unit> {
+        val dir = Files.createTempDirectory("mock-drill-checked-key")
+        val now = AtomicLong(1_800_000_000_000)
+        val store = LedgerStore(Files.createDirectories(dir.resolve("db"))) { now.get() }
+        val papers = Files.createDirectories(dir.resolve("papers"))
+        // Checked pack with one item whose own key is still unreviewed.
+        val checked = (1..6).map { drillItem("A$it", if (it <= 5) 1 else 2) } + drillItem("A7", 1, "UNREVIEWED")
+        // Unchecked pack whose items were each checked on their own; the blank one falls back to the pack.
+        val draft = (1..5).map { drillItem("B$it", 1, "VERIFIED") } + drillItem("B6", 1)
+        Files.writeString(papers.resolve("checked.json"), drillPack("checked", "VERIFIED", checked).toString())
+        Files.writeString(papers.resolve("draft.json"), drillPack("draft", "UNREVIEWED", draft).toString())
+        val mocks = MockEngine(MockLibrary(papers), clock = { now.get() })
+        try {
+            store.append("C1", "outline_revised", json("knowledgePoints" to JsonArray((1..2).map { w -> json("id" to "kp-drill-$w", "title" to "drill topic", "week" to w) })))
+            val home = mocks.home(store, "C1")
+            assertEquals(11, home.getValue("drill").jsonObject.getValue("total").jsonPrimitive.int, "total counts only checked choices")
+            assertEquals(JsonArray(listOf(json("week" to 1, "count" to 10), json("week" to 2, "count" to 1))),
+                home.getValue("drill").jsonObject.getValue("weeks"), "per-week counts use the same pool as the draw")
+            repeat(5) {
+                val started = mocks.start(store, "C1", json("drill" to JsonObject(emptyMap())))
+                val items = started.getValue("paper").jsonObject.getValue("sections").jsonArray.single().jsonObject.getValue("items").jsonArray.map { it.jsonObject }
+                assertEquals(7, items.map { it.str("id") }.distinct().size)
+                assertTrue(items.none { it.str("id").substringAfter('.') in setOf("A7", "B6") }, "an unreviewed key is never posed: ${items.map { it.str("id") }}")
+                mocks.submit(store, "C1", started.str("mockId"), JsonObject(emptyMap()), false)
+            }
+            val posed = store.events("C1").filter { it.type == "question_posed" && it.payload.str("purpose") == "TIMED" }
+            assertEquals(35, posed.size)
+            assertTrue(posed.all { it.payload.str("keyState") == "VERIFIED" }, "every posed drill question carries a checked key")
+            // A week whose only choices are unchecked offers no drill at all.
+            assertEquals(1, mocks.start(store, "C1", json("drill" to json("week" to 2))).getValue("paper").jsonObject
+                .getValue("sections").jsonArray.single().jsonObject.getValue("items").jsonArray.size)
         } finally { store.close(); dir.toFile().deleteRecursively() }
     }
 }

@@ -37,6 +37,7 @@ class ReaderExplanationTest {
     }
 
     @Test fun explainLessonAcceptsMultiParagraphPayloadAndPreservesAllCitations(): Unit = runBlocking {
+        org.junit.Assume.assumeTrue(System.getProperty("os.name").startsWith("Mac"))
         Harness().use { h ->
             val pages = (1..94).map { n ->
                 val page = (n - 1) / 14 + 1

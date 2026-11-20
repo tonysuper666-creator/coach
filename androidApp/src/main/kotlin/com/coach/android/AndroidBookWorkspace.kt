@@ -33,6 +33,7 @@ import com.coach.desktop.books.AndroidBookConnection
 import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
 import com.coach.ui.CoachTheme
+import com.coach.ui.adaptive.Hinge
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -48,7 +49,7 @@ private data class BookCopyProgress(val bytes: Long, val total: Long?)
 internal class PickedBookCancelled : Exception()
 
 @Composable
-internal fun AndroidBookWorkspace(onPersonalCourse: () -> Unit) {
+internal fun AndroidBookWorkspace(onPersonalCourse: () -> Unit, hinge: Hinge? = null) {
     val context = LocalContext.current.applicationContext
     val initialized by produceState<Result<TextbookController>?>(null, context) {
         value = withContext(Dispatchers.IO) {
@@ -84,7 +85,7 @@ internal fun AndroidBookWorkspace(onPersonalCourse: () -> Unit) {
         return
     }
     Box(Modifier.fillMaxSize().safeDrawingPadding().semantics { testTagsAsResourceId = true }) {
-        WindowsTextbookHost(library, onPersonalCourse = onPersonalCourse, releasePickedBook = { selected ->
+        WindowsTextbookHost(library, onPersonalCourse = onPersonalCourse, hinge = hinge, releasePickedBook = { selected ->
             val directory = selected.parent
             runCatching { Files.deleteIfExists(selected); Files.deleteIfExists(directory) }
         }, chooseBook = pick@{

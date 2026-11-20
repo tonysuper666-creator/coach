@@ -74,11 +74,12 @@ class CoachActivity : ComponentActivity() {
         setContent {
             // Update offers sit above every workspace so the first screen after launch can show one.
             AndroidUpdatePrompt()
+            val hinge = acceptanceHinge() ?: rememberWindowHinge()
             var personalCourse by rememberSaveable {
                 mutableStateOf(intent.hasExtra("openKp") || intent.hasExtra("tab") || intent.hasExtra("agentRunId"))
             }
             if (!personalCourse) {
-                AndroidBookWorkspace(onPersonalCourse = { personalCourse = true })
+                AndroidBookWorkspace(onPersonalCourse = { personalCourse = true }, hinge = hinge)
                 return@setContent
             }
             BackHandler { personalCourse = false }
@@ -90,7 +91,6 @@ class CoachActivity : ComponentActivity() {
                 }
             }
             CoachTheme(dark) {
-                val hinge = acceptanceHinge() ?: rememberWindowHinge()
                 Box(Modifier.semantics { testTagsAsResourceId = true }) {
                     PairingGate(store,serverUrl) { credentials ->
                         if(BuildConfig.COACH_COURSE.isBlank()) CoachNotice("课程还没有装好，请稍后重开。")

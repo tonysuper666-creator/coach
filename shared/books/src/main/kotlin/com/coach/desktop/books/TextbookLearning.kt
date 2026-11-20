@@ -2,6 +2,7 @@ package com.coach.desktop.books
 
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -9,8 +10,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.coach.ui.adaptive.Hinge
 import com.coach.ui.v7.Desk
 import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
@@ -45,7 +51,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
     citationFocus: MutableMap<Int, FocusRequester>, citationIndex: Int,
     onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit, onCitation: (Int, BookSourceTarget) -> Unit, onCitationRefused: () -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
     onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit, onQuestions: () -> Unit,
-    onRecapContinue: () -> Unit, onPair: () -> Unit = onSource) {
+    onRecapContinue: () -> Unit, onPair: () -> Unit = onSource, hinge: Hinge? = LocalBookHinge.current) {
     val book = checkNotNull(ui.book)
     val lesson = book.lessons.getOrNull(book.lessonIndex)
     LaunchedEffect(returnFocus, ui.busy) {
@@ -70,93 +76,142 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
         onFocusRestored()
     }
     Desk(crumb = book.title, onBack = onBack, backLabel = "返回书架", showNavigation = false, hasMargin = false,
+        paperMaxWidth = if (hinge != null) Dp.Infinity else Dp.Unspecified,
         status = if (lesson == null) "本书学习结束" else "第 ${book.lessonIndex + 1} / ${book.lessons.size} 节", directory = {
             Text("学习路线", style = MaterialTheme.typography.titleMedium)
             book.lessons.forEachIndexed { index, item -> V7TextButton({ onLesson(index) }, enabled = !ui.busy) { Text("${index + 1}. ${item.title}") } }
         }) {
-        // 学习页一屏放不下时，右侧有一道 V7 细滚动条：做题、小结都在同一个滚动区里，
-        // 拖得动滑块就知道下面还有卡，滚到底能看到最后的操作（desktop-polish W5、B9）。
-        Box(Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(24.dp).testTag("textbook-learning"),
-                verticalArrangement = Arrangement.spacedBy(18.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (lesson == null) "这一遍学完了" else ui.learningPath.label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                        color = com.coach.ui.theme.CoachTheme.colors.fgSecondary)
-                    V7TextButton(onSettings, enabled = !ui.busy, modifier = Modifier.testTag("question-settings")) { Text("出题：${book.questionMode.label}") }
+        val density = LocalDensity.current
+        var learningOriginDp by remember { mutableStateOf<Pair<Float, Float>?>(null) }
+        val rightScroll = rememberScrollState()
+        val lessonContent: @Composable (Boolean) -> Unit = { includeNav ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(if (lesson == null) "这一遍学完了" else ui.learningPath.label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                    color = com.coach.ui.theme.CoachTheme.colors.fgSecondary)
+                V7TextButton(onSettings, enabled = !ui.busy, modifier = Modifier.testTag("question-settings")) { Text("出题：${book.questionMode.label}") }
+            }
+            if (lesson == null) {
+                Text("已走完「${book.title}」的 ${book.lessons.size} 节内容。", style = MaterialTheme.typography.titleLarge)
+                Text("可以从目录回看。读完和掌握是两回事，复习时再试着用自己的话说明。")
+                PaperButton({ onLesson(0) }, enabled = !ui.busy) { Text("从头回看") }
+            } else {
+                Text(lesson.title, style = MaterialTheme.typography.headlineLarge, modifier = Modifier.testTag("lesson-title"))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(if (ui.learningPath == LearningPath.READ_AND_LEARN) "先理解讲解，再试着回答。" else "先试着回答，答后再看讲解；原文可以主动打开。",
+                        style = MaterialTheme.typography.bodySmall, color = com.coach.ui.theme.CoachTheme.colors.fgSecondary, modifier = Modifier.weight(1f, fill = false))
+                    V7TextButton(onSource, enabled = !ui.busy, modifier = Modifier.focusRequester(lessonSourceFocus).testTag("open-lesson-source")) { Text("本节原文 · ${book.pageLabel(lesson.firstPage)}") }
                 }
-                if (lesson == null) {
-                    Text("已走完「${book.title}」的 ${book.lessons.size} 节内容。", style = MaterialTheme.typography.titleLarge)
-                    Text("可以从目录回看。读完和掌握是两回事，复习时再试着用自己的话说明。")
-                    PaperButton({ onLesson(0) }, enabled = !ui.busy) { Text("从头回看") }
-                } else {
-                    Text(lesson.title, style = MaterialTheme.typography.headlineLarge, modifier = Modifier.testTag("lesson-title"))
-                    // 导语和整节原文入口并成一行小字：这里只按页打开，讲解后面的出处才指到具体那一块，两处不再一样重。
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(if (ui.learningPath == LearningPath.READ_AND_LEARN) "先理解讲解，再试着回答。" else "先试着回答，答后再看讲解；原文可以主动打开。",
-                            style = MaterialTheme.typography.bodySmall, color = com.coach.ui.theme.CoachTheme.colors.fgSecondary, modifier = Modifier.weight(1f, fill = false))
-                        V7TextButton(onSource, enabled = !ui.busy, modifier = Modifier.focusRequester(lessonSourceFocus).testTag("open-lesson-source")) { Text("本节原文 · ${book.pageLabel(lesson.firstPage)}") }
+                val recapOpen = ui.learningPath == LearningPath.QUESTION_FIRST && ui.ladder.recapOpen
+                val recap: @Composable () -> Unit = {
+                    if (recapOpen) KnowledgeRecapCard(ui.ladder) { onRecapContinue() }
+                }
+                val practice = remember(book.id, lesson.id, book.questionMode, ui.questionsOpen) {
+                    if (ui.questionsOpen) StudyCoachCourse.practice(book, lesson, book.questionMode) else null
+                }
+                val sourceRow: @Composable (List<BookPassage>) -> Unit = { sources ->
+                    BookSourceRow(sources, book, sourceResolver,
+                        focus = { i -> citationFocus.getOrPut(i) { FocusRequester() } }, onOpen = onCitation,
+                        onRefused = { onCitationRefused() })
+                }
+                val sourceSection: @Composable () -> Unit = {
+                    if (ui.learningPath == LearningPath.READ_AND_LEARN) {
+                        BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow, onRepair = onPair)
+                        if (!ui.questionsOpen && book.questionMode != QuestionMode.NONE) {
+                            PaperButton(onQuestions, enabled = !ui.busy, modifier = Modifier.testTag("guided-start-questions")) { Text("继续做题") }
+                        }
                     }
-                    // 做题学：累计到六题出知识小结。两张小结同屏时这一节在上、六题小结在下，继续/完成只留最下面一组。
-                    val recapOpen = ui.learningPath == LearningPath.QUESTION_FIRST && ui.ladder.recapOpen
-                    val recap: @Composable () -> Unit = {
-                        if (recapOpen) KnowledgeRecapCard(ui.ladder) { onRecapContinue() }
-                    }
-                    val practice = remember(book.id, lesson.id, book.questionMode, ui.questionsOpen) {
-                        if (ui.questionsOpen) StudyCoachCourse.practice(book, lesson, book.questionMode) else null
-                    }
-                    val sourceRow: @Composable (List<BookPassage>) -> Unit = { sources ->
-                        BookSourceRow(sources, book, sourceResolver,
-                            focus = { i -> citationFocus.getOrPut(i) { FocusRequester() } }, onOpen = onCitation,
-                            onRefused = { onCitationRefused() })
-                    }
-                    // 配对只决定「按本节原文现出题」；没连上 Mac 时这一节仍用原文出的题，读书和做题不依赖配对。
-                    val sourceSection: @Composable () -> Unit = {
-                        // 边看边学：先看讲解，再动手做题。
-                        if (ui.learningPath == LearningPath.READ_AND_LEARN) {
-                            BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow, onRepair = onPair)
-                            if (!ui.questionsOpen && book.questionMode != QuestionMode.NONE) {
-                                PaperButton(onQuestions, enabled = !ui.busy, modifier = Modifier.testTag("guided-start-questions")) { Text("继续做题") }
+                    if (book.questionMode == QuestionMode.NONE) Text("当前已关闭出题，可在出题设置中重新选择。", Modifier.testTag("book-questions-off"))
+                    else if (ui.questionsOpen) {
+                        if (practice == null) Text("这一节的原文太少，暂时无法生成选择题。可以继续学，或改为简答。")
+                        else {
+                            SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, { onPracticeSource(practice) }, !ui.busy, practiceSourceFocus, showReference = false)
+                            if (ui.reviews.any { it.book == book.id && it.lesson == lesson.id && it.mode == book.questionMode }) {
+                                Text("已加入复习，可在今天查看原题。", modifier = Modifier.testTag("local-review-saved"),
+                                    style = MaterialTheme.typography.bodySmall, color = com.coach.ui.theme.CoachTheme.colors.fgSecondary)
+                                V7TextButton(onReviews, enabled = !ui.busy, modifier = Modifier.testTag("open-local-reviews")) { Text("查看复习") }
                             }
                         }
-                        if (book.questionMode == QuestionMode.NONE) Text("当前已关闭出题，可在出题设置中重新选择。", Modifier.testTag("book-questions-off"))
-                        else if (ui.questionsOpen) {
-                            if (practice == null) Text("这一节的原文太少，暂时无法生成选择题。可以继续学，或改为简答。")
-                            else {
-                                SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, { onPracticeSource(practice) }, !ui.busy, practiceSourceFocus, showReference = false)
-                                if (ui.reviews.any { it.book == book.id && it.lesson == lesson.id && it.mode == book.questionMode }) {
-                                    Text("已加入复习，可在今天查看原题。", modifier = Modifier.testTag("local-review-saved"),
-                                        style = MaterialTheme.typography.bodySmall, color = com.coach.ui.theme.CoachTheme.colors.fgSecondary)
-                                    V7TextButton(onReviews, enabled = !ui.busy, modifier = Modifier.testTag("open-local-reviews")) { Text("查看复习") }
-                                }
-                            }
-                        }
-                        // 做题学：答完就讲，讲解在题下面；原文仍要点开才出现。讲完用小结给出下一步。
-                        val question = practice
-                        if (ui.learningPath == LearningPath.QUESTION_FIRST && ui.answer.revealed && question != null) {
-                            if (answerExplain != null) LessonAnswerExplanation(
-                                book, lesson, question, answerExplain, answerExplainReply, sources = sourceRow,
-                                onOpenSourcePage = onPair,
-                            ) else BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow, onRepair = onPair)
-                            val lessonNav: @Composable () -> Unit = { LessonNav(book, ui.busy, onLesson) }
-                            // 六题小结开着时，这一节只报刚才那一题、不铺按钮；走法让给最下面那张卡的「接着做题」。
-                            LessonSummaryCard(book, lesson, question, ui.answer, nav = if (recapOpen) null else lessonNav)
-                            recap()
-                        } else {
-                            recap()
-                            LessonNav(book, ui.busy, onLesson)
-                        }
                     }
-                    val gate = answerExplain
-                    if (ui.learningPath == LearningPath.QUESTION_FIRST && book.questionMode == QuestionMode.CHOICE && gate?.ask != null) {
-                        GeneratedLessonPractice(book, lesson, gate, practiceSourceFocus, sourceRow, onPracticeSource, onPair,
-                            fallback = sourceSection) { LessonNav(book, ui.busy, onLesson) }
+                    val question = practice
+                    if (ui.learningPath == LearningPath.QUESTION_FIRST && ui.answer.revealed && question != null) {
+                        if (answerExplain != null) LessonAnswerExplanation(
+                            book, lesson, question, answerExplain, answerExplainReply, sources = sourceRow,
+                            onOpenSourcePage = onPair,
+                        ) else BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow, onRepair = onPair)
+                        val lessonNav: @Composable () -> Unit = { if (includeNav) LessonNav(book, ui.busy, onLesson) }
+                        LessonSummaryCard(book, lesson, question, ui.answer, nav = if (recapOpen || !includeNav) null else lessonNav)
+                        recap()
                     } else {
-                        sourceSection()
+                        recap()
+                        if (includeNav) LessonNav(book, ui.busy, onLesson)
                     }
+                }
+                val gate = answerExplain
+                if (ui.learningPath == LearningPath.QUESTION_FIRST && book.questionMode == QuestionMode.CHOICE && gate?.ask != null) {
+                    GeneratedLessonPractice(book, lesson, gate, practiceSourceFocus, sourceRow, onPracticeSource, onPair,
+                        fallback = sourceSection) { if (includeNav) LessonNav(book, ui.busy, onLesson) }
+                } else {
+                    sourceSection()
                 }
             }
-            if (scroll.maxValue > 0) BookScrollbar(scroll,
-                Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 6.dp).testTag("learning-scrollbar"))
+        }
+        BoxWithConstraints(Modifier.fillMaxSize().onGloballyPositioned { coords ->
+            val pos = coords.positionInRoot()
+            learningOriginDp = (pos.x / density.density) to (pos.y / density.density)
+        }) {
+            val verticalSplit = bookVerticalSplit(maxWidth.value, maxHeight.value, learningOriginDp?.first ?: 0f, hinge)
+            val tabletopSplit = if (verticalSplit == null) bookTabletopSplit(maxWidth.value, maxHeight.value, learningOriginDp?.second ?: 0f, hinge) else null
+            if (verticalSplit != null) {
+                Row(Modifier.fillMaxSize()) {
+                    Box(Modifier.width(verticalSplit.leftDp.dp).fillMaxHeight().testTag("learning-half-fold-left")) {
+                        Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp).testTag("textbook-learning"),
+                            verticalArrangement = Arrangement.spacedBy(16.dp)) { lessonContent(true) }
+                        if (scroll.maxValue > 0) BookScrollbar(scroll,
+                            Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 6.dp).testTag("learning-scrollbar"))
+                    }
+                    Spacer(Modifier.width(verticalSplit.gapDp.dp).fillMaxHeight().testTag("learning-half-fold-hinge"))
+                    Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rightScroll).padding(16.dp).testTag("learning-half-fold-right"),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(lesson?.let { "本节原文 · ${book.pageLabel(it.firstPage)}" } ?: "学习路线",
+                            style = MaterialTheme.typography.titleMedium)
+                        lesson?.text?.takeIf { it.isNotBlank() }?.let { body ->
+                            Text(body.take(4_000), style = MaterialTheme.typography.bodyMedium, color = com.coach.ui.theme.CoachTheme.colors.fgSecondary)
+                        }
+                        if (lesson != null) {
+                            V7TextButton(onSource, enabled = !ui.busy) { Text("打开完整原文") }
+                        }
+                        Text("章节目录", style = MaterialTheme.typography.titleSmall)
+                        book.lessons.forEachIndexed { index, item ->
+                            V7TextButton({ onLesson(index) }, enabled = !ui.busy) { Text("${index + 1}. ${item.title}") }
+                        }
+                    }
+                }
+            } else if (tabletopSplit != null) {
+                Column(Modifier.fillMaxSize()) {
+                    Box(Modifier.height(tabletopSplit.topDp.dp).fillMaxWidth().testTag("learning-tabletop-content")) {
+                        Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp).testTag("textbook-learning"),
+                            verticalArrangement = Arrangement.spacedBy(16.dp)) { lessonContent(false) }
+                        if (scroll.maxValue > 0) BookScrollbar(scroll,
+                            Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 6.dp).testTag("learning-scrollbar"))
+                    }
+                    Spacer(Modifier.height(tabletopSplit.gapDp.dp).fillMaxWidth().testTag("learning-tabletop-hinge"))
+                    Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rightScroll).padding(16.dp).testTag("learning-tabletop-controls"),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (lesson != null) LessonNav(book, ui.busy, onLesson)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (lesson != null) V7TextButton(onSource, enabled = !ui.busy) { Text("本节原文") }
+                            V7TextButton(onSettings, enabled = !ui.busy) { Text("出题：${book.questionMode.label}") }
+                        }
+                    }
+                }
+            } else {
+                // 学习页一屏放不下时，右侧有一道 V7 细滚动条：做题、小结都在同一个滚动区里，
+                // 拖得动滑块就知道下面还有卡，滚到底能看到最后的操作（desktop-polish W5、B9）。
+                Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(24.dp).testTag("textbook-learning"),
+                    verticalArrangement = Arrangement.spacedBy(18.dp)) { lessonContent(true) }
+                if (scroll.maxValue > 0) BookScrollbar(scroll,
+                    Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 6.dp).testTag("learning-scrollbar"))
+            }
         }
     }
 }

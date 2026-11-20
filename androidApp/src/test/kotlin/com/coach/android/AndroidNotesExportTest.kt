@@ -50,8 +50,16 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import java.io.ByteArrayOutputStream
+import java.lang.reflect.Proxy
+import java.nio.file.FileStore
+import java.nio.file.FileSystem
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.PathMatcher
+import java.nio.file.WatchService
+import java.nio.file.attribute.PosixFilePermissions
+import java.nio.file.attribute.UserPrincipalLookupService
+import java.nio.file.spi.FileSystemProvider
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], qualifiers = "w800dp-h800dp-mdpi")
@@ -266,6 +274,60 @@ class AndroidNotesExportTest {
         } finally {
             repoRoot.toFile().deleteRecursively()
             outRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun privateDirectoryExportSkipsGetFileStoreAndAppliesPrivatePermissions() {
+        fun stubPath(viewsProvider: () -> Set<String>): Path {
+            val stubFs = object : FileSystem() {
+                override fun provider(): FileSystemProvider = throw AssertionError("getFileStore must not be called")
+                override fun close() {}
+                override fun isOpen(): Boolean = true
+                override fun isReadOnly(): Boolean = false
+                override fun getSeparator(): String = "/"
+                override fun getRootDirectories(): Iterable<Path> = emptyList()
+                override fun getFileStores(): Iterable<FileStore> = throw AssertionError("getFileStores must not be called")
+                override fun supportedFileAttributeViews(): Set<String> = viewsProvider()
+                override fun getPath(first: String, vararg more: String): Path = throw UnsupportedOperationException()
+                override fun getPathMatcher(syntaxAndPattern: String): PathMatcher = throw UnsupportedOperationException()
+                override fun getUserPrincipalLookupService(): UserPrincipalLookupService = throw UnsupportedOperationException()
+                override fun newWatchService(): WatchService = throw UnsupportedOperationException()
+            }
+            return Proxy.newProxyInstance(Path::class.java.classLoader, arrayOf(Path::class.java)) { _, method, _ ->
+                if (method.name == "getFileSystem") stubFs else throw UnsupportedOperationException(method.name)
+            } as Path
+        }
+
+        assertTrue(supportsPosixFileAttributes(stubPath { setOf("basic", "posix") }))
+        assertFalse(supportsPosixFileAttributes(stubPath { setOf("basic") }))
+        assertFalse(supportsPosixFileAttributes(stubPath { throw SecurityException("selinux /proc/mounts denied") }))
+
+        val outRoot = Files.createTempDirectory("coach-notes-priv-")
+        val fallbackRoot = Files.createTempDirectory("coach-notes-noposix-")
+        try {
+            val published = saveAndroidNotesToDirectory(outRoot, "# 私有目录导出\n内容", "%PDF-1.4\n%%EOF\n".toByteArray())
+            assertTrue(published.fileName.toString().startsWith("LearningCoach-复习-"))
+            val mdFile = published.resolve("复习提纲.md")
+            val pdfFile = published.resolve("复习提纲.pdf")
+            assertTrue(Files.readString(mdFile).contains("私有目录导出"))
+            assertEquals("%PDF-1.4\n%%EOF\n", Files.readString(pdfFile))
+            if (supportsPosixFileAttributes(outRoot)) {
+                assertEquals("rwx------", PosixFilePermissions.toString(Files.getPosixFilePermissions(published)))
+                assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(mdFile)))
+                assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(pdfFile)))
+            }
+
+            val fallback = saveAndroidNotesToDirectory(
+                fallbackRoot,
+                "# 非 POSIX 回退\n内容",
+                "%PDF-1.4\n%%EOF\n".toByteArray(),
+                posixSupported = false,
+            )
+            assertTrue(Files.readString(fallback.resolve("复习提纲.md")).contains("非 POSIX 回退"))
+            assertEquals("%PDF-1.4\n%%EOF\n", Files.readString(fallback.resolve("复习提纲.pdf")))
+        } finally {
+            outRoot.toFile().deleteRecursively()
+            fallbackRoot.toFile().deleteRecursively()
         }
     }
 

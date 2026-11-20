@@ -28,12 +28,18 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     answerExplain: AnswerExplain? = null,
     sourceResolver: BookSourceResolver = remember(controller.library) { BookSourceResolver(controller.library) },
     releasePickedBook: (Path) -> Unit = {}, chooseBook: suspend () -> Path?) {
-    val learningSupport = support ?: remember(controller.library) { PairedBookLearningSupport(controller.library) }
+    val explainer = remember(controller.library) { BookExplainer(library = controller.library) }
+    val learningSupport = support ?: remember(controller.library, explainer) {
+        PairedBookLearningSupport(controller.library,
+            sendLesson = { blocks, pages -> explainer.run { load(); explainLesson(blocks, pages) } },
+            send = { block, question -> explainer.run { load(); ask(block, question) } })
+    }
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
     var practiceSource by remember { mutableStateOf<PracticeSource?>(null) }
     var returnFocus by remember { mutableStateOf<SourceFocus?>(null) }
     var sourceOrigin by remember { mutableStateOf(SourceFocus.LESSON) }
+    var openPairing by remember { mutableStateOf(false) }
     var citationIndex by remember { mutableIntStateOf(0) }
     var readerHasFocus by remember { mutableStateOf(false) }
     var noteReader by remember { mutableStateOf<ReaderSession?>(null) }
@@ -50,6 +56,15 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     val explanationReply = remember(ui.book?.id, lessonId, learningSupport) { mutableStateOf<BookLearningReply?>(null) }
     // 答完就讲的话由另一条通道取，重开窗口会重新问一次；它不跟原文页的讲解共用缓存。
     val answerExplainReply = remember(ui.book?.id, lessonId, answerExplain) { mutableStateOf<BookLearningReply?>(null) }
+    val paired = explainer.identity != null
+    LaunchedEffect(paired) {
+        if (paired) {
+            if ((explanationReply.value as? BookLearningReply.Unavailable)?.trouble?.needsPairing == true)
+                explanationReply.value = null
+            if ((answerExplainReply.value as? BookLearningReply.Unavailable)?.trouble?.needsPairing == true)
+                answerExplainReply.value = null
+        }
+    }
     val citationFocus = remember(ui.book?.id, lessonId) { mutableMapOf<Int, FocusRequester>() }
     val learningScroll = remember(ui.book?.id, ui.book?.lessonIndex) { ScrollState(0) }
     LaunchedEffect(controller) {
@@ -61,6 +76,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     }
     fun run(action: suspend () -> Unit) { scope.launch { action() } }
     fun returnFromReader() {
+        openPairing = false
         if (ui.source != null) {
             // Only newly composed, ready rows may supply focus targets on return.
             if (sourceOrigin == SourceFocus.CITATION) citationFocus.clear()
@@ -74,6 +90,12 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
             ui.screen == BookScreen.READER -> returnFromReader()
             else -> run { controller.back() }
         }
+    }
+    fun openLessonSource(pairing: Boolean) {
+        openPairing = pairing
+        practiceSource = null
+        sourceOrigin = SourceFocus.LESSON
+        run { controller.source() }
     }
     fun openPracticeSource(practice: Practice) {
         val book = ui.book ?: return
@@ -159,7 +181,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 onAnswer = { drafts.saveReview(review, it) })
                         }
                         ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library, learningSupport,
-                            practiceSource = practiceSource, pageFocus = readerFocus,
+                            practiceSource = practiceSource, pageFocus = readerFocus, explainProvider = explainer,
+                            openPairing = openPairing,
                             onNoteSession = { noteReader = it },
                             onPage = { page ->
                                 val restoreFocus = ui.source != null && readerHasFocus
@@ -179,7 +202,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             TextbookLearning(displayed, learningSupport, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
                             explanationReply, answerExplain, answerExplainReply, sourceResolver, citationFocus, citationIndex,
                             onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
-                            onSource = { practiceSource = null; sourceOrigin = SourceFocus.LESSON; run { controller.source() } },
+                            onSource = { openLessonSource(pairing = false) }, onPair = { openLessonSource(pairing = true) },
                             onCitation = { index, target ->
                                 val current = controller.state.value
                                 if (current.screen == BookScreen.LEARNING && current.book?.id == target.book &&

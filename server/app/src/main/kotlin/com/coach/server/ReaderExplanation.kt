@@ -105,7 +105,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                                 }}
                                 Output exactly one JSON object, with no fences, commentary or self-correction outside it:
                                 {"paragraphs":[{"text":"one short Chinese paragraph","anchors":["S1"]}]}
-                                Use only these keys. One or two paragraphs; each needs nonempty text and one or more supporting anchor IDs.
+                                Use only these keys. ${if (lesson) "One to six short paragraphs" else "One or two paragraphs"}; each needs nonempty text and one or more supporting anchor IDs.
                                 Each text must be a single plain paragraph: no line breaks, headings, lists, Markdown or inline anchors.
                                 Never guess anchor IDs. In text values use no quotation marks of any kind; write source terms bare.
                                 Do not invent facts or citations, and do not write page numbers or document names; the application adds them.
@@ -123,9 +123,12 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                     }
                     if (result !is BridgeResult.Success) return reply("追问未完成，暂时无法确认。可返回阅读或手动重试。")
                     if (!sourcesCurrent()) return reply("原文已变化或当前不可见，暂时无法确认。")
-                    val checked = checkedReaderPayload(result.text, safePack) { reason ->
-                        throw ReaderFormat(result.call.servedBy, reason)
-                    } ?: error("Reader payload rejected without a reason")
+                    val checked = checkedReaderPayload(
+                        result.text,
+                        safePack,
+                        onReject = { reason -> throw ReaderFormat(result.call.servedBy, reason) },
+                        maxParagraphs = if (lesson) 6 else 2,
+                    ) ?: error("Reader payload rejected without a reason")
                     diagnostics?.citedAnchors = checked.second.size
                     outcome = "complete"
                     return reply(checked.first, checked.second)
@@ -174,7 +177,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
 
 /** Empty paragraphs mean insufficient evidence; every actual paragraph needs a declared citation. */
 internal fun checkedReaderPayload(payload: String, pack: SourcePack,
-    onReject: (ReaderFormatReason) -> Unit = {}): Pair<String, JsonArray>? {
+    onReject: (ReaderFormatReason) -> Unit = {}, maxParagraphs: Int = 2): Pair<String, JsonArray>? {
     fun reject(reason: ReaderFormatReason): Pair<String, JsonArray>? { onReject(reason); return null }
     if (payload.length > 12_000) return reject(ReaderFormatReason.PAYLOAD_SIZE)
     val root = runCatching { Json.parseToJsonElement(payload) as? JsonObject }.getOrNull()
@@ -182,7 +185,7 @@ internal fun checkedReaderPayload(payload: String, pack: SourcePack,
     if (root.keys != setOf("paragraphs")) return reject(ReaderFormatReason.ROOT_FIELDS)
     val paragraphs = root["paragraphs"] as? JsonArray ?: return reject(ReaderFormatReason.ROOT_FIELDS)
     if (paragraphs.isEmpty()) return "依据不足，无法确认。" to JsonArray(emptyList())
-    if (paragraphs.size !in 1..2) return reject(ReaderFormatReason.PARAGRAPH_COUNT)
+    if (paragraphs.size !in 1..maxParagraphs) return reject(ReaderFormatReason.PARAGRAPH_COUNT)
     val rendered = paragraphs.map { value ->
         val paragraph = value as? JsonObject ?: return reject(ReaderFormatReason.PARAGRAPH_FIELDS)
         if (paragraph.keys != setOf("text", "anchors")) return reject(ReaderFormatReason.PARAGRAPH_FIELDS)

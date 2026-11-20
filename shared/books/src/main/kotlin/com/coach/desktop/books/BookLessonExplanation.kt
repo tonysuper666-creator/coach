@@ -81,8 +81,10 @@ private fun LessonTroubleLine(reply: BookLearningReply.Unavailable, onRetry: () 
     Row(modifier.heightIn(min = 40.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically) {
         when {
-            trouble == ExplainTrouble.Revoked && onRepair != null ->
-                PaperButton(onRepair, modifier = Modifier.testTag("explain-trouble-repair")) { Text("去重新配对") }
+            trouble?.needsPairing == true && onRepair != null ->
+                PaperButton(onRepair, modifier = Modifier.testTag("explain-trouble-repair")) {
+                    Text(if (trouble == ExplainTrouble.Revoked) "去重新配对" else "去配对")
+                }
             trouble?.retry == true -> PaperButton(onRetry, modifier = Modifier.testTag("explain-trouble-retry")) { Text("再试一次") }
         }
         // 和选段讲解保持一致：暂时连不上用次要色，只有需要重新配对时才用朱色。

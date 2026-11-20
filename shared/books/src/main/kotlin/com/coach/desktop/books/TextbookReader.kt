@@ -98,7 +98,7 @@ internal fun locateCitedPdfRange(page: PdfPageText, text: String, range: IntRang
 internal fun TextbookReader(
     ui: LibraryUi, library: TextbookLibrary, support: BookLearningSupport, practiceSource: PracticeSource?,
     pageFocus: FocusRequester, onNoteSession: (ReaderSession?) -> Unit, onPage: (Int) -> Unit, onBack: () -> Unit,
-    onLearn: () -> Unit, explainProvider: BookExplainer? = null,
+    onLearn: () -> Unit, explainProvider: BookExplainer? = null, openPairing: Boolean = false,
 ) {
     val book = checkNotNull(ui.book)
     val page = book.page(ui.page)
@@ -139,7 +139,7 @@ internal fun TextbookReader(
     var jump by remember(book.id, ui.page) { mutableStateOf(ui.page.toString()) }
     var retry by remember { mutableIntStateOf(0) }
     var notesOpen by remember(book.id) { mutableStateOf(false) }
-    var explainOpen by remember(book.id) { mutableStateOf(false) }
+    var explainOpen by remember(book.id, openPairing) { mutableStateOf(openPairing) }
     var explainingSelection by remember(book.id) { mutableStateOf<SourceBlock?>(null) }
     var passageJump by remember(book.id) { mutableStateOf<BookPassage?>(null) }
     var passageJumpTick by remember(book.id) { mutableIntStateOf(0) }
@@ -697,7 +697,7 @@ internal fun TextbookReader(
         }
     }
     if (asking) BookPassageAsk(book, paragraphPage, support,
-        onRepair = { explainer.markRevoked(); asking = false; explainingSelection = learnableSelection; explainOpen = true },
+        onRepair = { asking = false; explainingSelection = learnableSelection; explainOpen = true },
         initialSelection = learnableSelection,
         onOpenOriginal = openPassage.takeIf { learnableSelection != null },
     ) { asking = false }

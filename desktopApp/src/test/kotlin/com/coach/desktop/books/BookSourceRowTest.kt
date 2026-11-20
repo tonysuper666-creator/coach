@@ -59,7 +59,9 @@ class BookSourceRowTest {
         assertIs<BookSourceState.WrongBook>(bookSourceState(pb, a, resolver))
         val label = bookSourceLabel(p2)
         assertTrue(label.startsWith("第 2 页 · “") && label.contains("…"), label)
-        assertFalse(Regex("[a-f0-9]{64}").containsMatchIn(label))
+        val paragraphLabel = bookSourceLabel(p2, a)
+        assertTrue(paragraphLabel.startsWith("第 2 页 · 第 1 段 · “") && paragraphLabel.contains("…"), paragraphLabel)
+        assertFalse(Regex("[a-f0-9]{64}").containsMatchIn(paragraphLabel))
         // Surrogate pair at the cut is never split.
         val emoji = p2.copy(text = "a".repeat(15) + "\uD83D\uDE00" + "tail")
         assertTrue(bookSourceLabel(emoji).contains("\uD83D\uDE00…"))
@@ -71,7 +73,7 @@ class BookSourceRowTest {
         val sources = listOf(p2, p3.copy(text = p3.text.dropLast(1) + "X"), passage(b, 2), p3)
         setContent { BookSourceRow(sources, a, resolver, { focus[it] }, { i, t -> opened += i to t }) }
         settled(0, 1, 2, 3)
-        onNodeWithTag("book-source-0").assertTextEquals("出处 · " + bookSourceLabel(p2)).assertHasClickAction()
+        onNodeWithTag("book-source-0").assertTextEquals("出处 · " + bookSourceLabel(p2, a)).assertHasClickAction()
         onNodeWithTag("book-source-1").assertDoesNotExist()
         onNodeWithTag("book-source-stale-1").assertExists()
         onNodeWithTag("book-source-wrong-2").assertExists()
@@ -139,7 +141,7 @@ class BookSourceRowTest {
         setContent { BookSourceRow(listOf(p2, p3), a, resolver, { FocusRequester() }, { _, _ -> }) }
         settled(0, 1)
         fun desc(i: Int) = onNodeWithTag("book-source-$i").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.ContentDescription].single()
-        assertTrue(desc(0).contains(bookSourceLabel(p2)) && desc(0).contains("《${a.title}》"))
+        assertTrue(desc(0).contains(bookSourceLabel(p2, a)) && desc(0).contains("《${a.title}》"))
         assertNotEquals(desc(0), desc(1))
     }
 

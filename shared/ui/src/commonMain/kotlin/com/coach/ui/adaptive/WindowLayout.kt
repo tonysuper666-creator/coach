@@ -70,6 +70,8 @@ object LayoutRules {
     const val TabletopMinControlsDp = 180f
     /** 一页至少这么宽，一行才排得下十来个字；再窄就退回单页，别把字挤成一条。 */
     const val ReadingPageMinDp = 300f
+    /** 书本半折时每一页（导航页、内容页）至少要有的宽度。 */
+    const val BookPaneMinDp = 240f
     /** 书脊处除铰链本身之外再留的空白。 */
     const val SpreadGutterDp = 16f
 

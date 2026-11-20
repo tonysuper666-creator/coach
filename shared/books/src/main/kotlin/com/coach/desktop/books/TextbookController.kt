@@ -61,12 +61,13 @@ internal class TextbookController(val library: TextbookLibrary) {
             val catalog = library.catalog()
             val active = library.activeReview()
             val book = active?.let { library.book(it.book) } ?: catalog.firstOrNull()?.let { library.book(it.id) }
+            val savedPath = book?.let { library.learningPath(it.id) }
             mutable.update { current ->
                 LibraryUi(
                     catalog = catalog, book = book, busy = true, reviews = library.reviews(),
                     review = active, answer = active?.answer ?: PracticeAnswer(),
-                    learningPath = book?.let(::restoredPath) ?: LearningPath.READ,
-                    learningPathSaved = book?.let { library.learningPath(it.id) != null } ?: false,
+                    learningPath = book?.let { LearningPath.restore(savedPath, it.learning) } ?: LearningPath.READ,
+                    learningPathSaved = savedPath != null,
                     ladder = book?.let { library.ladder(it.id) } ?: LadderSession(),
                     screen = if (active == null) BookScreen.HOME else BookScreen.REVIEWING,
                     importing = current.importing,

@@ -86,3 +86,26 @@ internal fun formatImportProgressLabel(progress: BookImportProgress): String = w
 internal fun interface BookOcr {
     fun recognize(image: BookBitmap, control: BookImportControl): String
 }
+
+internal interface BookXmlVisitor {
+    fun startElement(localName: String, attr: (String) -> String?)
+    fun text(value: String)
+    fun endElement(localName: String)
+}
+
+/** Privacy-safe OCR timing trace: logs only fixed stage labels, status, monotonic ms and raster size. */
+internal object OcrTiming {
+    fun mark(stage: String, status: String) {
+        println("CoachOcrTiming ms=${System.nanoTime() / 1_000_000} stage=$stage status=$status")
+    }
+
+    inline fun <T> measure(stage: String, action: () -> T): T {
+        mark(stage, "start")
+        try {
+            return action().also { mark(stage, "ok") }
+        } catch (failure: Throwable) {
+            mark(stage, if (failure is java.util.concurrent.TimeoutException) "timeout" else "error")
+            throw failure
+        }
+    }
+}

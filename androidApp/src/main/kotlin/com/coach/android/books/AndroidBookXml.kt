@@ -5,12 +5,62 @@ import org.w3c.dom.Element
 import org.w3c.dom.Node
 import org.xmlpull.v1.XmlPullParser
 import java.io.ByteArrayInputStream
+import java.io.IOException
+import java.io.InputStream
 import javax.xml.parsers.DocumentBuilderFactory
 
 internal object EpubXml {
     fun parse(bytes: ByteArray): Element = parseLocalBookXml(bytes, xhtml = true)
 }
 internal fun parseBookOfficeXml(bytes: ByteArray): Element = parseLocalBookXml(bytes, xhtml = false)
+
+/** Bounded streaming Office XML parser: O(depth) memory, rejects DTD/XXE, supports cancellation. */
+internal fun streamBookOfficeXml(input: InputStream, control: BookImportControl, visitor: BookXmlVisitor) {
+    val reader = Xml.newPullParser().apply {
+        setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
+        setFeature(XmlPullParser.FEATURE_PROCESS_DOCDECL, false)
+        setInput(input, null)
+    }
+    var events = 0
+    var chars = 0L
+    val maxChars = 32L * 1024 * 1024
+    while (true) {
+        if ((++events and 1023) == 0) control.check()
+        when (reader.nextToken()) {
+            XmlPullParser.START_TAG -> {
+                require(reader.depth <= 256) { "教材标记层级过多。" }
+                visitor.startElement(reader.name) { local ->
+                    var found: String? = null
+                    for (i in 0 until reader.attributeCount) {
+                        if (reader.getAttributeName(i) == local) {
+                            found = reader.getAttributeValue(i)
+                            break
+                        }
+                    }
+                    found
+                }
+            }
+            XmlPullParser.END_TAG -> visitor.endElement(reader.name)
+            XmlPullParser.TEXT, XmlPullParser.CDSECT -> {
+                val value = reader.text.orEmpty()
+                if (value.isNotEmpty()) {
+                    chars += value.length
+                    require(chars <= maxChars) { "教材正文文字超过上限，请拆分后导入。" }
+                    visitor.text(value)
+                }
+            }
+            XmlPullParser.ENTITY_REF -> {
+                val value = reader.text ?: throw IOException("教材含有无法确认的 XML 实体。")
+                chars += value.length
+                require(chars <= maxChars) { "教材正文文字超过上限，请拆分后导入。" }
+                visitor.text(value)
+            }
+            XmlPullParser.DOCDECL -> throw IOException("不支持自定义 DTD 或实体声明。")
+            XmlPullParser.END_DOCUMENT -> break
+        }
+    }
+    control.check()
+}
 
 private fun parseLocalBookXml(bytes: ByteArray, xhtml: Boolean): Element {
     val doc = DocumentBuilderFactory.newInstance().newDocumentBuilder().newDocument()

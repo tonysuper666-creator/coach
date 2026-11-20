@@ -1,6 +1,8 @@
 package com.coach.desktop.books
 
 import com.ibm.icu.text.CharsetDetector
+import java.io.FilterInputStream
+import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
@@ -105,10 +107,20 @@ internal object BookText {
 
 /** Bounded reads only; no archive entry is extracted to disk or fetched from a URL. */
 internal class SafeBookArchive(path: Path) : AutoCloseable {
+    companion object {
+        const val MAX_ENTRY_BYTES = 16L * 1024 * 1024
+        const val MAX_TOTAL_BYTES = 64L * 1024 * 1024
+        const val MAX_DOCX_DOCUMENT_BYTES = 128L * 1024 * 1024
+        const val MAX_DOCX_TOTAL_BYTES = 512L * 1024 * 1024
+    }
+
     private val zip = ZipFile(path.toFile())
     private var total = 0L
+    val declaredTotalBytes: Long
     init {
         try {
+            val isDocx = zip.getEntry("word/document.xml") != null
+            val totalLimit = if (isDocx) MAX_DOCX_TOTAL_BYTES else MAX_TOTAL_BYTES
             var declared = 0L
             var count = 0
             val names = HashSet<String>()
@@ -116,23 +128,45 @@ internal class SafeBookArchive(path: Path) : AutoCloseable {
                 checkName(entry.name)
                 require(names.add(entry.name)) { "教材压缩包含有重名文件，请重新保存后再导入。" }
                 require(++count <= 10000) { "这份教材的压缩包文件数量过多。" }
-                require(entry.size in 0..16L * 1024 * 1024) { "这份教材中有文件超过 16 MB，请拆分后导入。" }
+                val entryLimit = if (isDocx && entry.name == "word/document.xml") MAX_DOCX_DOCUMENT_BYTES else MAX_ENTRY_BYTES
+                require(entry.size in 0..entryLimit) {
+                    if (entryLimit == MAX_ENTRY_BYTES) "这份教材中有文件超过 16 MB，请拆分后导入。"
+                    else "这份 Word 正文超过 128 MB，请拆分后导入。"
+                }
                 declared += entry.size
-                require(declared <= 64L * 1024 * 1024) { "这份教材解压后超过 64 MB，请拆分后导入。" }
+                require(declared <= totalLimit) {
+                    if (totalLimit == MAX_TOTAL_BYTES) "这份教材解压后超过 64 MB，请拆分后导入。"
+                    else "这份 Word 解压后超过 512 MB，请拆分后导入。"
+                }
             }
+            declaredTotalBytes = declared
         } catch (e: Exception) { zip.close(); throw e }
     }
     fun names(): List<String> = zip.entries().asSequence().filter { !it.isDirectory }.map { it.name }.toList()
     fun contains(name: String) = zip.getEntry(name) != null
+    fun size(name: String): Long? {
+        checkName(name)
+        return zip.getEntry(name)?.size?.takeIf { it >= 0 }
+    }
+    fun remainingReadBudget(): Long = (MAX_TOTAL_BYTES - total).coerceAtLeast(0L)
     fun read(name: String): ByteArray {
         checkName(name)
         val entry = requireNotNull(zip.getEntry(name)) { "教材缺少正文文件，请重新保存后再导入。" }
         return zip.getInputStream(entry).use { input ->
-            val bytes = input.readNBytes(16 * 1024 * 1024 + 1)
-            require(bytes.size <= 16 * 1024 * 1024) { "这份教材的单个文件解压后超过 16 MB。" }
+            val bytes = input.readNBytes(MAX_ENTRY_BYTES.toInt() + 1)
+            require(bytes.size <= MAX_ENTRY_BYTES) { "这份教材的单个文件解压后超过 16 MB。" }
             total += bytes.size
-            require(total <= 64L * 1024 * 1024) { "这份教材解压后的正文超过 64 MB。" }
+            require(total <= MAX_TOTAL_BYTES) { "这份教材解压后的正文超过 64 MB。" }
             bytes
+        }
+    }
+    /** Stream a single entry with a hard bound on actual decompressed bytes, avoiding full-entry buffering. */
+    fun <T> stream(name: String, maxBytes: Long = MAX_ENTRY_BYTES, block: (InputStream) -> T): T {
+        checkName(name)
+        val entry = requireNotNull(zip.getEntry(name)) { "教材缺少正文文件，请重新保存后再导入。" }
+        return zip.getInputStream(entry).use { raw ->
+            val bounded = BoundedArchiveInputStream(raw, maxBytes)
+            block(bounded)
         }
     }
     fun resolve(from: String, target: String): String {
@@ -145,5 +179,18 @@ internal class SafeBookArchive(path: Path) : AutoCloseable {
     override fun close() = zip.close()
     private fun checkName(name: String) {
         require(!name.startsWith('/') && '\\' !in name && ':' !in name && name.split('/').none { it == ".." }) { "教材压缩包内含无效的文件位置，请重新保存后再导入。" }
+    }
+
+    private class BoundedArchiveInputStream(input: InputStream, private val limit: Long) : FilterInputStream(input) {
+        private var readBytes = 0L
+        private fun count(n: Int): Int {
+            if (n > 0) {
+                readBytes += n
+                require(readBytes <= limit) { "这份教材的单个文件解压后超过 ${limit / (1024 * 1024)} MB。" }
+            }
+            return n
+        }
+        override fun read(): Int = super.read().also { if (it >= 0) count(1) }
+        override fun read(b: ByteArray, off: Int, len: Int): Int = count(super.read(b, off, len))
     }
 }

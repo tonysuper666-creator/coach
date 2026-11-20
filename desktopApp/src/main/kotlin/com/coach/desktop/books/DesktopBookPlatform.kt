@@ -41,6 +41,7 @@ internal typealias BookPdfRenderer = org.apache.pdfbox.rendering.PDFRenderer
 
 internal object BookPdfLoader {
     private val mixedMemory = org.apache.pdfbox.io.MemoryUsageSetting.setupMixed(16L * 1024 * 1024).streamCache
+    fun <T> read(file: File, block: (BookPdfDocument) -> T): T = load(file).use(block)
     fun load(file: File): BookPdfDocument = Loader.loadPDF(file, mixedMemory)
     fun load(bytes: ByteArray): BookPdfDocument = Loader.loadPDF(bytes)
 }

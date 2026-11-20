@@ -123,4 +123,66 @@ class MultiformatBookTest {
         }
         assertEquals(text, pages.joinToString("") { it.text })
     }
+
+    @Test fun largeDocxOver64MiBStreamsWithBoundedMemoryAndSupportsCancellation() {
+        val root = Files.createTempDirectory("coach-large-docx-")
+        try {
+            val docx = root.resolve("elementary-large.docx")
+            val w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            val r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            val relNs = "http://schemas.openxmlformats.org/package/2006/relationships"
+            val a = "http://schemas.openxmlformats.org/drawingml/2006/main"
+            java.util.zip.ZipOutputStream(Files.newOutputStream(docx)).use { zip ->
+                fun entry(name: String, block: (java.io.OutputStream) -> Unit) {
+                    zip.putNextEntry(java.util.zip.ZipEntry(name))
+                    block(zip)
+                    zip.closeEntry()
+                }
+                entry("word/styles.xml") { out ->
+                    out.write("""<w:styles xmlns:w="$w"><w:style w:styleId="Heading1"><w:name w:val="heading 1"/></w:style></w:styles>""".toByteArray())
+                }
+                entry("word/footnotes.xml") { out ->
+                    out.write("""<w:footnotes xmlns:w="$w"><w:footnote w:id="1"><w:p><w:r><w:t>大文档脚注验证</w:t></w:r></w:p></w:footnote></w:footnotes>""".toByteArray())
+                }
+                entry("word/_rels/document.xml.rels") { out ->
+                    out.write("""<Relationships xmlns="$relNs"><Relationship Id="rId1" Type="$r/image" Target="media/eq.wmf"/></Relationships>""".toByteArray())
+                }
+                // >18 MiB word/document.xml (exceeds 16 MiB single-entry DOM limit) streamed without buffering.
+                entry("word/document.xml") { out ->
+                    out.write("""<w:document xmlns:w="$w" xmlns:r="$r" xmlns:a="$a"><w:body>""".toByteArray())
+                    out.write("""<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>第1章 代数基础</w:t></w:r></w:p>""".toByteArray())
+                    out.write("""<w:p><w:r><w:t>线性方程有一个唯一解</w:t><w:footnoteReference w:id="1"/><a:blip r:embed="rId1"/></w:r></w:p>""".toByteArray())
+                    val chunk = ("<w:p><w:r><w:rPr><w:b/><w:sz w:val=\"24\"/></w:rPr><w:t>a</w:t></w:r></w:p>").toByteArray()
+                    // Write ~19 MiB of valid Word XML markup while keeping extracted text concise.
+                    repeat(260_000) { out.write(chunk) }
+                    out.write("""<w:p><w:r><w:br w:type="page"/></w:r></w:p>""".toByteArray())
+                    out.write("""<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>第2章 尾章检查</w:t></w:r></w:p>""".toByteArray())
+                    out.write("""<w:p><w:r><w:t>尾页正文完好可读。</w:t></w:r></w:p></w:body></w:document>""".toByteArray())
+                }
+                // Add 4 x 14 MiB media blobs so total declared uncompressed size is ~75 MiB (>64 MiB).
+                val zeros = ByteArray(64 * 1024)
+                for (i in 1..4) {
+                    entry("word/media/pad$i.wmf") { out -> repeat(224) { out.write(zeros) } }
+                }
+            }
+            SafeBookArchive(docx).use { archive ->
+                assertTrue(archive.size("word/document.xml")!! > 16L * 1024 * 1024)
+                assertTrue(archive.declaredTotalBytes > 64L * 1024 * 1024)
+            }
+            val library = TextbookLibrary(root.resolve("library"))
+            // Cancellation during streaming XML leaves no partial book.
+            assertFailsWith<BookImportCancelled> {
+                library.importBook(docx, BookImportControl(cancelledExternally = { true }))
+            }
+            assertTrue(library.catalog().isEmpty())
+            val book = library.importBook(docx)
+            assertEquals("docx", book.format)
+            assertTrue(book.pages.size >= 2)
+            assertContains(book.pages.first().text, "第1章 代数基础")
+            assertContains(book.pages.first().text, "脚注 1：大文档脚注验证")
+            assertContains(book.pages.last().text, "尾页正文完好可读")
+            val reopened = TextbookLibrary(library.directory).book(book.id)
+            assertEquals(book.pages, reopened.pages)
+        } finally { root.toFile().deleteRecursively() }
+    }
 }

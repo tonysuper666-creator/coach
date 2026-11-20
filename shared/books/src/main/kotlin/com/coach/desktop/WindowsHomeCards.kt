@@ -104,7 +104,7 @@ internal fun HostSettings(directory: Path, onPersonalCourse: (() -> Unit)? = nul
     val paper = RoundedCornerShape(CoachV7.Radius.btn)
     AlertDialog(onDismissRequest = onClose, title = { Text("设置") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("教材和进度保存在这台电脑，不经过 Mac。", style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
+            Text("教材和进度保存在此设备，不经过 Mac。", style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("教材位置", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
                 Text(directory.toString(), style = MaterialTheme.typography.bodySmall, color = colors.fgPrimary,

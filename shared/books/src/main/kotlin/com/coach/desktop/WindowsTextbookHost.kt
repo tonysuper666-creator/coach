@@ -96,7 +96,8 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
     }
     // On the shelf with nothing being opened over it; a start prompt still belongs to the book being opened.
     val onShelf = book == null || (ui.screen == BookScreen.HOME && ui.prompt == null)
-    LaunchedEffect(book?.id) { book?.let { exams.load(it) } }
+    val onCourse = tab.hostDestination == AppTab.ROUTE
+    LaunchedEffect(book?.id, onCourse) { book?.let { exams.load(it, prepareReference = onCourse) } }
     LaunchedEffect(onShelf) { if (onShelf) origin = null }
     // The library is read once for the whole host, so 今天 and 课程 show existing books before 书架 is opened.
     LaunchedEffect(controller) {

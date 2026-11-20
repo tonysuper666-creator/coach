@@ -52,10 +52,10 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     ReaderFocusTicketEffect(readerFocusTicket, ui) { readerFocus.requestFocus() }
     val lessonSourceFocus = remember { FocusRequester() }
     val practiceSourceFocus = remember { FocusRequester() }
-    val lessonId = ui.book?.lessons?.getOrNull(ui.book?.lessonIndex ?: -1)?.id
-    val explanationReply = remember(ui.book?.id, lessonId, learningSupport) { mutableStateOf<BookLearningReply?>(null) }
+    val lessonIndex = ui.book?.lessonIndex
+    val explanationReply = remember(ui.book?.id, lessonIndex, learningSupport) { mutableStateOf<BookLearningReply?>(null) }
     // 答完就讲的话由另一条通道取，重开窗口会重新问一次；它不跟原文页的讲解共用缓存。
-    val answerExplainReply = remember(ui.book?.id, lessonId, answerExplain) { mutableStateOf<BookLearningReply?>(null) }
+    val answerExplainReply = remember(ui.book?.id, lessonIndex, answerExplain) { mutableStateOf<BookLearningReply?>(null) }
     val paired = explainer.identity != null
     LaunchedEffect(paired) {
         if (paired) {
@@ -65,7 +65,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                 answerExplainReply.value = null
         }
     }
-    val citationFocus = remember(ui.book?.id, lessonId) { mutableMapOf<Int, FocusRequester>() }
+    val citationFocus = remember(ui.book?.id, lessonIndex) { mutableMapOf<Int, FocusRequester>() }
     val learningScroll = remember(ui.book?.id, ui.book?.lessonIndex) { ScrollState(0) }
     LaunchedEffect(controller) {
         val current = controller.state.value

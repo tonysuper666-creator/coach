@@ -21,6 +21,32 @@ import kotlin.test.*
  */
 @OptIn(ExperimentalTestApi::class)
 class ReaderEntryParityTest {
+    @Test fun mixedPdfWithOcrCoverOpensTheOriginalFromTheImportPrompt() {
+        val root = Files.createTempDirectory("coach-mixed-cover-")
+        try {
+            val file = readerParityTextbook(root)
+            PDDocument().use { cover ->
+                cover.addPage(PDPage())
+                org.apache.pdfbox.Loader.loadPDF(file.toFile()).use { body ->
+                    cover.importPage(body.getPage(1))
+                    cover.save(root.resolve("mixed.pdf").toFile())
+                }
+            }
+            val library = TextbookLibrary(root.resolve("library"), ocr = BookOcr { _, _ -> "Cover" })
+            val controller = TextbookController(library)
+            kotlinx.coroutines.runBlocking { controller.importBook(root.resolve("mixed.pdf")) }
+            assertTrue(controller.state.value.book!!.pages.first().ocr)
+            runComposeUiTest {
+                setContent { TextbookWorkspace(controller) { null } }
+                onNodeWithTag("read-only").assertIsEnabled().performClick()
+                waitUntil(timeoutMillis = 20_000) { controller.state.value.prompt == BookPrompt.AFTER_READING }
+                onNodeWithTag("read-only").performClick()
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithContentDescription("mixed 第 1 页").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithText("看文字").assertExists()
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun shelfAndPracticeSourceOpenTheSameReaderOnTheSamePage() {
         val root = Files.createTempDirectory("coach-reader-parity-")
         val library = TextbookLibrary(root.resolve("library"))

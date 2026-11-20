@@ -421,11 +421,12 @@ internal object BookIllustrationStore {
         bookId: String,
         pageTexts: Map<Int, String>,
         illustrations: List<ExtractedIllustration>,
+        ensureSchema: Boolean = true,
     ): List<BookIllustration> {
         require(BookIllustrationAssets.isValidSha256(bookId)) { "非法的教材编号。" }
         if (illustrations.isEmpty()) return emptyList()
         BookIllustrationAnchors.requireValidForPages(pageTexts, illustrations)
-        migrate(db)
+        if (ensureSchema) migrate(db)
         val createdFiles = BookIllustrationAssets.writeUnique(libraryDirectory, bookId, illustrations)
         val pageOrdinals = HashMap<Int, Int>()
         val persisted = mutableListOf<BookIllustration>()
@@ -599,11 +600,12 @@ internal object BookPageTextBoxStore {
         bookId: String,
         pageTexts: Map<Int, String>,
         layouts: List<PageTextLayout>,
+        ensureSchema: Boolean = true,
     ) {
         require(BookIllustrationAssets.isValidSha256(bookId)) { "非法的教材编号。" }
         if (layouts.isEmpty()) return
         BookIllustrationAnchors.requireValidTextLayouts(pageTexts, layouts)
-        migrate(db)
+        if (ensureSchema) migrate(db)
         db.prepareStatement(
             "INSERT OR REPLACE INTO $TABLE(book,page,page_width,page_height,boxes) VALUES(?,?,?,?,?)",
         ).use { sql ->
@@ -709,9 +711,10 @@ internal object BookPageModelStore {
         pageTexts: Map<Int, String>,
         illustrations: List<ExtractedIllustration> = emptyList(),
         textLayouts: List<PageTextLayout> = emptyList(),
+        ensureSchema: Boolean = true,
     ): List<BookIllustration> {
-        val persisted = BookIllustrationStore.saveInTransaction(db, libraryDirectory, bookId, pageTexts, illustrations)
-        BookPageTextBoxStore.saveInTransaction(db, bookId, pageTexts, textLayouts)
+        val persisted = BookIllustrationStore.saveInTransaction(db, libraryDirectory, bookId, pageTexts, illustrations, ensureSchema)
+        BookPageTextBoxStore.saveInTransaction(db, bookId, pageTexts, textLayouts, ensureSchema)
         return persisted
     }
 

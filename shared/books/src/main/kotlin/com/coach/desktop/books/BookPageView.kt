@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class, kotlinx.coroutines.FlowPreview::class)
 
 package com.coach.desktop.books
 
@@ -25,6 +25,9 @@ import com.coach.ui.pageturn.ScrollReadView
 import com.coach.ui.pageturn.PageTurnStyle
 import com.coach.ui.pageturn.PageTurnView
 import androidx.compose.runtime.*
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
@@ -162,10 +165,15 @@ internal class BookPagingState(initial: BookPageAnchor) {
             ReaderTurn.First -> pages.indexOfFirst { it.chapter == pages[current].chapter }
             ReaderTurn.Last -> pages.indexOfLast { it.chapter == pages[current].chapter }
         }
+        // 没有实际翻页（到了边界，或首/末页键落在当前页）：保留读者明确定位过的那一句，不要换成页首。
+        if (target == current) return anchor
         anchor = pages[target].anchor
         return anchor
     }
 }
+
+/** 长书先排所在位置前后各这么多导入页，整本排完再无缝替换（TON-1724）。 */
+private const val NEAR_LAYOUT_PAGES = 2
 
 /** The same source anchor survives font/width reflow and original/text view changes. */
 @Composable
@@ -173,6 +181,7 @@ internal fun BookPageView(
     book: Textbook, state: BookPagingState, highlights: Map<Int, List<IntRange>>,
     onTurn: (ReaderTurn) -> Unit, modifier: Modifier = Modifier, mode: BookPageMode = BookPageMode.Auto,
     libraryDirectory: Path? = null, tableRows: Map<BookIllustration, BookTableRows> = emptyMap(), onPosition: (Int) -> Unit = {},
+    onSpot: (BookPageAnchor) -> Unit = {},
     /** 翻页效果。None 沿用原来的淡入换页；Flip/Slide 走共用的 PageTurnView（TON-1671）。 */
     turnStyle: PageTurnStyle = PageTurnStyle.None,
     /** 翻页读 / 滚动读（TON-1671）。两种共用同一套分页和锚点，切换时停在同一页。 */
@@ -235,6 +244,17 @@ internal fun BookPageView(
             }
             LaunchedEffect(state, inputs) {
                 if (result != null) return@LaunchedEffect
+                // 先只排读者所在位置前后几导入页，马上有字可读；整本排完后再换上（锚点按原文位置对齐，读位不动）。
+                val at = state.anchor.importPage
+                val near = layoutPages.filter { it.number in (at - NEAR_LAYOUT_PAGES)..(at + NEAR_LAYOUT_PAGES) }
+                if (near.isNotEmpty() && near.size < layoutPages.size) {
+                    result = withContext(Dispatchers.Default) {
+                        val context = currentCoroutineContext()
+                        val workerMeasurer = TextMeasurer(fontResolver, density, layoutDirection, cacheSize = 128)
+                        BookPageLayouter(workerMeasurer, density, typography, pdf)
+                            .layout(near, widthPx, bodyHeight, highlights, tableRows) { context.ensureActive() }
+                    }
+                }
                 // Measure with a worker-owned cache. Closing or switching views cancels this pagination.
                 val laidOut = withContext(Dispatchers.Default) {
                     val context = currentCoroutineContext()
@@ -249,6 +269,23 @@ internal fun BookPageView(
         } else remember(inputs) {
             BookPageLayouter(measurer, density, typography, pdf).layout(layoutPages, widthPx, bodyHeight, highlights, tableRows)
         }
+        // 读位只在读者自己动了锚点（翻页、滚动、点选、目录、出处）时写；重排（字号、宽度、字体、开合）
+        // 只按锚点找页、不改锚点也不写，且提在加载态提前返回之前，避免重排取消待写入的读位。
+        val spotSaved = remember(state) { arrayOf(state.anchor) }
+        val latestOnSpot by rememberUpdatedState(onSpot)
+        LaunchedEffect(state) {
+            snapshotFlow { state.anchor }.distinctUntilChanged().drop(1).debounce(300).collect { a ->
+                if (a.visualOrder == null) {
+                    spotSaved[0] = a
+                    withContext(Dispatchers.IO) { latestOnSpot(a) }
+                }
+            }
+        }
+        DisposableEffect(state) {
+            onDispose {
+                state.anchor.takeIf { it != spotSaved[0] && it.visualOrder == null }?.let(latestOnSpot)
+            }
+        }
         if (pages == null) {
             Text("正在排版…", Modifier.align(Alignment.Center).testTag("book-page-loading"), color = colors.fgSecondary)
             return@BoxWithConstraints
@@ -260,7 +297,11 @@ internal fun BookPageView(
         }
         val first = state.firstFor(pages, spread)
         SideEffect { state.groupFirst = first; state.groupPages = pages }
-        LaunchedEffect(pages, first, state.anchor) { onPosition(pages[first].anchor.importPage) }
+        LaunchedEffect(pages, first, state.anchor) {
+            val activeImportPage = state.anchor.importPage.takeIf { book.page(it) != null }
+                ?: pages[first].anchor.importPage
+            onPosition(activeImportPage)
+        }
         if (scrolling) {
             val itemHeightPx = with(density) { maxHeight.roundToPx() }.coerceAtLeast(1)
             val gapPx = with(density) { 24.dp.roundToPx() }
@@ -369,11 +410,12 @@ internal fun BookPageView(
                             val visible = if (spread) 2 else 1
                             repeat(visible) { side ->
                                 val page = pages.getOrNull(first + side)
+                                val sheetSpot = rememberUpdatedState { d: Offset, u: Offset, dragged: Boolean ->
+                                    state.anchor = spotAnchor(pages, first + side, spread, side, d, u, dragged, with(density) { sheetWidth.toPx() }, measurer, typography, widthPx) ?: state.anchor
+                                }
                                 Box(Modifier.width(sheetWidth).fillMaxHeight()
                                     .background(if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper)
-                                    .clipToBounds().readingSpot { d, u, dragged ->
-                                        state.anchor = spotAnchor(pages, first + side, spread, side, d, u, dragged, with(density) { sheetWidth.toPx() }, measurer, typography, widthPx) ?: state.anchor
-                                    }
+                                    .clipToBounds().readingSpot(sheetSpot)
                                     .testTag("book-sheet-$side")) {
                                     if (page != null) {
                                         val remaining = pages.count { it.chapter == page.chapter } - pages.take(first + side + 1).count { it.chapter == page.chapter }
@@ -403,15 +445,19 @@ internal fun BookPageView(
                             if (at != first && !turnState.turning) onTurn(if (at > first) ReaderTurn.Next else ReaderTurn.Previous)
                         }
                         val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
+                        val ignoreTurnGesture = rememberUpdatedState { downUptimeMs: Long ->
+                            turnState.lastHandledPointerDownUptimeMs == downUptimeMs
+                        }
                         PageTurnView(turnState, paper = paper, style = turnStyle, columns = visible, handleKeys = false,
                             modifier = Modifier.width(sheetWidth * visible).fillMaxHeight().testTag("book-page-turn"),
                             shadow = if (colors.dark) Color.Black else CoachV7.Light.ink) { index ->
                             val side = if (spread) Math.floorMod(index - turnState.shownPosition, 2) else 0
                             val page = pages[index]
+                            val sheetSpot = rememberUpdatedState { d: Offset, u: Offset, dragged: Boolean ->
+                                state.anchor = spotAnchor(pages, index, spread, side, d, u, dragged, with(density) { sheetWidth.toPx() }, measurer, typography, widthPx) ?: state.anchor
+                            }
                             Box(Modifier.width(sheetWidth).fillMaxHeight().background(paper).clipToBounds()
-                                .readingSpot { d, u, dragged ->
-                                    state.anchor = spotAnchor(pages, index, spread, side, d, u, dragged, with(density) { sheetWidth.toPx() }, measurer, typography, widthPx) ?: state.anchor
-                                }
+                                .readingSpot(sheetSpot, ignoreTurnGesture)
                                 .testTag("book-sheet-$side")) {
                                 val remaining = pages.count { it.chapter == page.chapter } - pages.take(index + 1).count { it.chapter == page.chapter }
                                 BookSheet(book, page, typography, measurer, widthPx,
@@ -430,9 +476,12 @@ internal fun BookPageView(
 
 /**
  * 版心里的阅读信号：点一下，或拖选文字。点（没有拖动）：点中的那一行。拖选：选区第一个字所在的那一行。
- * 回调拿到按下点、抬起点（本页坐标，抬起点可能越过本页宽度到了另一页）。图、按钮这类自己消费了点击的不算点。
+ * 回调拿到按下点、抬起点（本页坐标，抬起点可能越过本页宽度到了另一页）。图、按钮、翻页手势消费掉的不算点。
  */
-private fun Modifier.readingSpot(onSpot: (down: Offset, up: Offset, dragged: Boolean) -> Unit): Modifier = pointerInput(Unit) {
+private fun Modifier.readingSpot(
+    onSpot: State<(down: Offset, up: Offset, dragged: Boolean) -> Unit>,
+    ignoreDown: State<(Long) -> Boolean>? = null,
+): Modifier = pointerInput(Unit) {
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = true, pass = PointerEventPass.Final)
         var last = down.position
@@ -443,8 +492,9 @@ private fun Modifier.readingSpot(onSpot: (down: Offset, up: Offset, dragged: Boo
             last = change.position
             if (!change.pressed) { consumedUp = change.isConsumed; break }
         }
+        if (ignoreDown?.value?.invoke(down.uptimeMillis) == true) return@awaitEachGesture
         val dragged = (last - down.position).getDistance() > viewConfiguration.touchSlop
-        if (dragged || !consumedUp) onSpot(down.position, last, dragged)
+        if (dragged || !consumedUp) onSpot.value(down.position, last, dragged)
     }
 }
 

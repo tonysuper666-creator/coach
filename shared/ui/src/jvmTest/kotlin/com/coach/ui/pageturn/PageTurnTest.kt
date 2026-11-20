@@ -207,4 +207,59 @@ class PageTurnViewTest {
         assertFalse(everTurning); assertFalse(state.turning)
         assertEquals(2, state.position)
     }
+
+    @Test fun touchSwipeFromCenterTurnsForwardAndBackAndEdgeTapOnlyTurnsInEdge() = runSkikoComposeUiTest(
+        size = androidx.compose.ui.geometry.Size(800f, 1200f),
+    ) {
+        val state = PageTurnState(20)
+        lateinit var scope: CoroutineScope
+        host(state, minDp = androidx.compose.runtime.mutableStateOf(1400)) { scope = it }
+        assertEquals(1, state.columns)
+        // Tap center (50% width): must NOT turn page or mark gesture handled.
+        val beforeCenterTap = state.lastHandledPointerDownUptimeMs
+        onRoot().performTouchInput {
+            down(androidx.compose.ui.geometry.Offset(400f, 600f))
+            up()
+        }
+        mainClock.advanceTimeBy(600); waitForIdle()
+        assertEquals(0, state.position, "center tap should not flip page")
+        assertEquals(beforeCenterTap, state.lastHandledPointerDownUptimeMs)
+
+        // Swipe left from center: advances one page and marks gesture handled.
+        onRoot().performTouchInput {
+            down(androidx.compose.ui.geometry.Offset(440f, 600f))
+            moveTo(androidx.compose.ui.geometry.Offset(300f, 600f))
+            moveTo(androidx.compose.ui.geometry.Offset(120f, 600f))
+            up()
+        }
+        mainClock.advanceTimeBy(800); waitForIdle()
+        assertEquals(1, state.position, "left swipe from center should advance")
+        assertTrue(state.lastHandledPointerDownUptimeMs != Long.MIN_VALUE)
+
+        // Tap right edge (85% > 72%): advances again.
+        onRoot().performTouchInput {
+            down(androidx.compose.ui.geometry.Offset(680f, 600f))
+            up()
+        }
+        mainClock.advanceTimeBy(800); waitForIdle()
+        assertEquals(2, state.position, "right edge tap should advance")
+
+        // Swipe right from center: goes back one page.
+        onRoot().performTouchInput {
+            down(androidx.compose.ui.geometry.Offset(360f, 600f))
+            moveTo(androidx.compose.ui.geometry.Offset(520f, 600f))
+            moveTo(androidx.compose.ui.geometry.Offset(680f, 600f))
+            up()
+        }
+        mainClock.advanceTimeBy(800); waitForIdle()
+        assertEquals(1, state.position, "right swipe from center should go back")
+
+        // Tap left edge (15% < 28%): goes back to 0.
+        onRoot().performTouchInput {
+            down(androidx.compose.ui.geometry.Offset(120f, 600f))
+            up()
+        }
+        mainClock.advanceTimeBy(800); waitForIdle()
+        assertEquals(0, state.position, "left edge tap should go back")
+    }
 }

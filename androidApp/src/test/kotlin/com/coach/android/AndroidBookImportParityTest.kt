@@ -9,15 +9,26 @@ import com.coach.desktop.books.BookImportProgress
 import com.coach.desktop.books.BookOcr
 import com.coach.desktop.books.BundledBookOcr
 import com.coach.desktop.books.SafeBookArchive
+import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
 import com.coach.desktop.books.bookOcrMaxSide
+import com.coach.desktop.books.exam.LocalExamController
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.PDPage
+import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
+import com.tom_roush.pdfbox.pdmodel.font.PDType1Font
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -141,6 +152,58 @@ class AndroidBookImportParityTest {
             try { cancelLib.importBook(pdfFile) } catch (_: BookImportCancelled) { cancelled = true }
             assertTrue(cancelled)
             assertTrue(cancelLib.catalog().isEmpty())
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test
+    fun large620PagePdfStreamsImportAndColdStartsShelfWithoutLoadingTextBoxes() = runBlocking {
+        val root = Files.createTempDirectory("coach-android-620p-")
+        try {
+            val pdfFile = root.resolve("health-econ-620p.pdf")
+            PDDocument().use { doc ->
+                val font = PDType1Font.HELVETICA
+                for (i in 1..620) {
+                    val page = PDPage(PDRectangle.LETTER)
+                    doc.addPage(page)
+                    PDPageContentStream(doc, page).use { cs ->
+                        cs.beginText()
+                        cs.setFont(font, 11f)
+                        cs.newLineAtOffset(50f, 740f)
+                        cs.showText("Chapter ${(i - 1) / 20 + 1} Health Economics Page $i")
+                        cs.newLineAtOffset(0f, -18f)
+                        cs.showText("Demand for healthcare is derived from demand for health capital and market outcomes.")
+                        cs.endText()
+                    }
+                }
+                doc.save(pdfFile.toFile())
+            }
+            val libraryDir = root.resolve("library")
+            val library = TextbookLibrary(libraryDir, streamPdfExtras = true)
+            val imported = library.importBook(pdfFile)
+            assertEquals(620, imported.pages.size)
+            assertTrue("Imported book must not retain 620 PageTextLayouts in RAM", imported.pages.all { it.textLayout == null })
+
+            // Simulate Android cold start onto shelf with a 620-page book already persisted.
+            val t0 = System.nanoTime()
+            val reopened = TextbookLibrary(libraryDir, streamPdfExtras = true)
+            val controller = TextbookController(reopened)
+            controller.load()
+            val coldMs = (System.nanoTime() - t0) / 1_000_000
+            println("Android620PageColdStartMs=$coldMs")
+            val loaded = controller.state.value.book!!
+            assertEquals(620, loaded.pages.size)
+            assertTrue("Cold-start shelf must skip eager textLayout decode", loaded.pages.all { it.textLayout == null })
+            assertTrue("Cold-start shelf load with 620p book took ${coldMs}ms", coldMs < 10_000)
+
+            // Shelf entry defers reference paper creation while on-demand page text layers still work.
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            try {
+                val exams = LocalExamController(reopened, scope)
+                exams.load(loaded, prepareReference = false)
+                assertNull(exams.state.value.reference)
+            } finally { scope.cancel() }
+            assertNotNull(reopened.pdfTextLayer(loaded, loaded.pages.first()))
+            assertNotNull(reopened.pdfTextLayer(loaded, loaded.pages.last()))
         } finally { root.toFile().deleteRecursively() }
     }
 }

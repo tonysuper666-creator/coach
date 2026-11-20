@@ -42,10 +42,15 @@ internal typealias BookPdfTextPosition = com.tom_roush.pdfbox.text.TextPosition
 internal typealias BookPdfPasswordException = com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
 internal typealias BookPdfRenderer = com.tom_roush.pdfbox.rendering.PDFRenderer
 
+private class BoundedPdfResourceCache : com.tom_roush.pdfbox.pdmodel.DefaultResourceCache() {
+    // Keep fonts cached across 600+ pages, but never retain page-specific XObjects/images on the Android heap.
+    override fun put(indirect: com.tom_roush.pdfbox.cos.COSObject, xobject: com.tom_roush.pdfbox.pdmodel.graphics.PDXObject) = Unit
+}
+
 internal object BookPdfLoader {
     fun load(file: File): BookPdfDocument {
         val scratch = com.tom_roush.pdfbox.io.MemoryUsageSetting.setupTempFileOnly().setTempDir(file.parentFile)
-        return BookPdfDocument.load(file, scratch)
+        return BookPdfDocument.load(file, scratch).apply { resourceCache = BoundedPdfResourceCache() }
     }
     // Text layers, page aspect lookup and bitmap prefetch may run at the same time.
     // Hold one file-backed parser at a time on the Android app heap.

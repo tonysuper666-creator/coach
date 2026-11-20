@@ -31,7 +31,7 @@ import java.util.zip.ZipFile
 internal class TextbookLibrary(
     val directory: Path, private val clock: Clock = Clock.systemDefaultZone(), private val ocr: BookOcr = BundledBookOcr,
     private val streamPdfExtras: Boolean = false,
-    private val extractBook: (Path, String, String, BookOcr, BookImportControl) -> ExtractedBook = TextbookExtraction::extract,
+    private val extractBook: ((Path, String, String, BookOcr, BookImportControl) -> ExtractedBook)? = null,
 ) {
     private val reviewStore = TextbookReviewStore { LocalDate.now(clock).toEpochDay() }
     private class PendingTextView(val textView: Boolean)
@@ -59,8 +59,7 @@ internal class TextbookLibrary(
             sql.execute("""CREATE TABLE IF NOT EXISTS book_highlights(
                 book TEXT NOT NULL,page INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,quote TEXT NOT NULL,
                 PRIMARY KEY(book,page,start,end))""")
-        } }
-        database().use { db ->
+        }
             val pageColumns = db.createStatement().use { sql -> sql.executeQuery("PRAGMA table_info(pages)").use { rows ->
                 buildSet { while (rows.next()) add(rows.getString("name")) }
             } }
@@ -69,8 +68,8 @@ internal class TextbookLibrary(
             reviewStore.migrate(db)
             BookPageModelStore.migrate(db)
             BookNativeSourceStore.migrate(db)
+            backfillReviews(db)
         }
-        backfillReviews()
     }
     private fun database(): Connection = DriverManager.getConnection("jdbc:sqlite:${directory.resolve("library.sqlite")}").apply {
         createStatement().use { it.execute("PRAGMA busy_timeout=5000") }
@@ -451,13 +450,13 @@ internal class TextbookLibrary(
             val id = digest.digest().joinToString("") { "%02x".format(it) }
             if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
             val fallback = source.fileName.toString().substringBeforeLast('.')
-            if (format == "pdf" && streamPdfExtras && extractBook == TextbookExtraction::extract) {
+            if (format == "pdf" && streamPdfExtras && extractBook == null) {
                 return stageStreamedPdfBook(stage, id, fallback, control)
             }
-            val extracted = if (extractBook == TextbookExtraction::extract) {
+            val extracted = if (extractBook == null) {
                 TextbookExtraction.extractForStaging(stage, format, fallback, control)
             } else {
-                extractBook(stage, format, fallback, ocr, control)
+                extractBook.invoke(stage, format, fallback, ocr, control)
             }.let { book ->
                 when (format) {
                     "html" -> StructuredBookExtraction.htmlImages(
@@ -492,7 +491,7 @@ internal class TextbookLibrary(
                         val path = BookIllustrationAssets.imageFile(directory, id, image.contentSha256, image.extension)
                         if (!Files.exists(path)) newImages.add(path)
                     }
-                    BookPageModelStore.saveInTransaction(db, directory, id, texts, images, layouts)
+                    BookPageModelStore.saveInTransaction(db, directory, id, texts, images, layouts, ensureSchema = false)
                 }
                 val extracted = TextbookExtraction.extractForStaging(stage, "pdf", fallback, control) { page, images ->
                     saveExtras(mapOf(page.number to page.text), images, listOfNotNull(page.textLayout))
@@ -804,14 +803,15 @@ internal class TextbookLibrary(
     }
 
     /** Upgrade legacy submitted answers once. Their missing answer dates remain explicitly unknown. */
-    private fun backfillReviews() {
-        val old = database().use { db -> db.createStatement().use { sql ->
+    private fun backfillReviews(db: Connection) {
+        val old = db.createStatement().use { sql ->
             sql.executeQuery("""SELECT book,lesson,mode FROM answers a WHERE revealed=1
                 AND (mode='CHOICE' OR (mode='SHORT_ANSWER' AND understood IS NOT NULL))
                 AND NOT EXISTS(SELECT 1 FROM book_reviews r WHERE r.book=a.book AND r.lesson=a.lesson AND r.mode=a.mode)""").use { rows -> buildList {
                 while (rows.next()) add(Triple(rows.getString(1), rows.getString(2), QuestionMode.valueOf(rows.getString(3))))
             } }
-        } }
+        }
+        if (old.isEmpty()) return
         for ((id, lessonId, mode) in old) {
             val book = book(id)
             val lesson = book.lessons.find { it.id == lessonId } ?: continue

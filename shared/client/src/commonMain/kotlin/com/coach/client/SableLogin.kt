@@ -72,7 +72,7 @@ internal suspend fun sableLogin(
                     baseInterval += 5_000L
                     nextDelay = baseInterval
                 }
-                "access_denied" -> throw SableLoginError("你已拒绝授权。")
+                "access_denied" -> throw SableLoginError("授权已失效，请重新用 Sable 登录。")
                 "expired_token" -> throw SableLoginError(expired)
                 else -> throw SableLoginError(failure)
             }

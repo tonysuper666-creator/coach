@@ -134,7 +134,7 @@ class SableLoginTest {
             val err = assertFailsWith<SableLoginError> {
                 sableLogin(client, friendUrl, { _, _ -> }, issuer) { }
             }
-            assertEquals("你已拒绝授权。", err.message)
+            assertEquals("授权已失效，请重新用 Sable 登录。", err.message)
             assertEquals(1, tokenPolls)
         } finally {
             client.close()

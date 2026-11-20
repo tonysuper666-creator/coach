@@ -91,3 +91,46 @@ class BoydenFoldReflowTest {
         } finally { root.toFile().deleteRecursively() }
     }
 }
+
+/** TON-1724：翻页 → 保存 → 冷启 的锚点写入与解析（只输出页码和偏移）。BOYDEN_PDF 未设则跳过。 */
+@OptIn(ExperimentalTestApi::class)
+class BoydenSaveRestoreTest {
+    @Test fun turnSaveColdStart() { for (w in listOf(800, 1500)) turnSaveColdStartAt(w) }
+    private fun turnSaveColdStartAt(W: Int) {
+        val src = System.getenv("BOYDEN_PDF") ?: return
+        val root = Files.createTempDirectory("boyden-save")
+        try {
+            val library = TextbookLibrary(root)
+            val book = library.importBook(Paths.get(src))
+            var savedPage = 20
+            var savedSpot: BookPageAnchor? = null
+            fun shownFirst(state: BookPagingState) = state.pages[state.index].let { "${it.anchor.importPage}@${it.anchor.offsetUtf16}" }
+            runSkikoComposeUiTest(size = Size(1400f, 1000f), density = Density(1f)) {
+                val state = BookPagingState(BookPageAnchor(20))
+                setContent { CoachTheme { Box(Modifier.width(W.dp).height(900.dp)) {
+                    BookPageView(book, state, emptyMap(), onTurn = { state.move(it) }, libraryDirectory = root,
+                        onPosition = { savedPage = it }, onSpot = { savedSpot = it })
+                } } }
+                waitUntil(timeoutMillis = 600_000) { state.pages.size > 100 }
+                for (turn in 1..3) {
+                    state.move(ReaderTurn.Next); waitForIdle()
+                    println("DIAG w=$W spread=${state.spread} turn=$turn shown=${shownFirst(state)} anchor=${state.anchor.importPage}@${state.anchor.offsetUtf16} savedPage=$savedPage savedSpot=${savedSpot?.importPage}@${savedSpot?.offsetUtf16}")
+                }
+            }
+            library.saveReadSpot(book.id, savedSpot!!.importPage, savedSpot!!.offsetUtf16)
+            val spot = library.savedReadSpot(book.id)?.takeIf { it.first == savedPage }
+            println("DIAG cold restore savedPage=$savedPage spot=${library.savedReadSpot(book.id)} used=${spot != null}")
+            runSkikoComposeUiTest(size = Size(1400f, 1000f), density = Density(1f)) {
+                val state = BookPagingState(BookPageAnchor(savedPage, spot?.second ?: 0))
+                setContent { CoachTheme { Box(Modifier.width(W.dp).height(900.dp)) {
+                    BookPageView(book, state, emptyMap(), onTurn = { state.move(it) }, libraryDirectory = root)
+                } } }
+                waitUntil(timeoutMillis = 600_000) { state.pages.isNotEmpty() }
+                println("DIAG cold near-phase pages=${state.pages.size} shown=${shownFirst(state)} contains=${state.pages[state.index].sources.any { it.importPage == 20 && 1726 in it.startUtf16 until it.endUtf16 }}")
+                waitUntil(timeoutMillis = 600_000) { state.pages.size > 100 }
+                println("DIAG w=$W cold full pages=${state.pages.size} shown=${shownFirst(state)} contains=${state.pages[state.index].sources.any { it.importPage == 20 && 1726 in it.startUtf16 until it.endUtf16 }}")
+                println("DIAG cold shown=${shownFirst(state)} (should equal the last turn's shown)")
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+}

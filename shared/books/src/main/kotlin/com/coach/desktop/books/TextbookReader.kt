@@ -113,7 +113,9 @@ internal fun TextbookReader(
     }
     val paging = remember(book.id) {
         // 章内翻到后面的重排子页再退出：同一章里回到存下的偏移，而不是章首（TON-1724）。
-        val spot = library.savedReadSpot(book.id)?.takeIf { it.first == ui.page }
+        val saved = library.savedReadSpot(book.id)
+        val spot = saved?.takeIf { it.first == ui.page }
+        System.out.println("CoachReadSpot restore uiPage=${ui.page} saved=${saved?.first}@${saved?.second} used=${spot != null}") // 仅页码/偏移，无正文
         BookPagingState(BookPageAnchor(ui.page, spot?.second ?: 0))
     }
     val pdf = remember(library, book.id) { OriginalPdfReading(ui.page, !originalPdf || library.pdfScrollMode(book.id)) }
@@ -546,7 +548,7 @@ internal fun TextbookReader(
                     }
                     BookPageView(book, paging, ranges, turnLayout, libraryDirectory = library.directory,
                         turnStyle = turnStyle, readMode = readMode, onOpenTableRow = openPassage,
-                        onSpot = { library.saveReadSpot(book.id, it.importPage, it.offsetUtf16) }, onPosition = { number ->
+                        onSpot = { System.out.println("CoachReadSpot save ${it.importPage}@${it.offsetUtf16} uiPage=${ui.page}"); library.saveReadSpot(book.id, it.importPage, it.offsetUtf16) }, onPosition = { number ->
                         if (paging.publishImportPage(number)) {
                             onPage(number)
                             session.goToPage(number)

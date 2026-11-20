@@ -24,7 +24,9 @@ import com.coach.desktop.books.ReadingSettings
 import com.coach.desktop.books.LocalReadingFont
 import com.coach.desktop.books.ReadingSettingsPanel
 import com.coach.desktop.books.BookExplainer
+import com.coach.desktop.books.BookImportToast
 import com.coach.desktop.books.ExplainConsent
+import com.coach.desktop.books.LocalImportNoticeHandled
 import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
 import com.coach.desktop.books.TextbookWorkspace
@@ -132,10 +134,14 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
         val colors = com.coach.ui.theme.CoachTheme.colors
         Surface(Modifier.fillMaxSize().textbookFileDrop { files ->
             scope.launch {
-                try { if (drafts.flush() && exams.flush()) controller.importDroppedBooks(files) }
-                finally { files.forEach(releasePickedBook) }
+                if (drafts.flush() && exams.flush()) {
+                    controller.launchDroppedBooks(files) { files.forEach(releasePickedBook) }
+                } else {
+                    files.forEach(releasePickedBook)
+                }
             }
         }.testTag("windows-host"), color = colors.bgCanvas) {
+            Box(Modifier.fillMaxSize()) {
             BoxWithConstraints(Modifier.fillMaxSize()) {
                 val rail = maxWidth >= 700.dp
                 val settingsButton: @Composable () -> Unit = {
@@ -186,7 +192,7 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                     panel
                 } else null
                 CompositionLocalProvider(LocalDeskSelect provides deskSelect, LocalDeskTypeControl provides typeControl,
-                    LocalReadingFont provides preferences.font) {
+                    LocalReadingFont provides preferences.font, LocalImportNoticeHandled provides true) {
                     // No rules between bar, rail and page: V7 separates them with the desk colour and the paper alone.
                     if (rail) Row(Modifier.fillMaxSize()) {
                         Column(Modifier.width(76.dp).fillMaxHeight().padding(top = HostBarHeight + 8.dp, bottom = 12.dp),
@@ -208,6 +214,8 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                         }
                     }
                 }
+            }
+            BookImportToast(ui.importNotice, controller::dismissImportNotice, Modifier.align(Alignment.TopCenter))
             }
             if (settings) HostSettings(controller.library.directory, onPersonalCourse) { settings = false }
         }

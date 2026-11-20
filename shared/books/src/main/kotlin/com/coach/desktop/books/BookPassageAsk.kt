@@ -57,7 +57,7 @@ internal fun BookPassageAsk(
     }
     // 回答里的「出处」和原文弹窗要和讲解卡写同一种位置：「第 5 页 · 第 2 段」或「本章第 2 段」。
     // 数章内段号要往前找到章标题，只看这一页数不出来，所以按整本书的块算一次（弹窗开着时算一次）。
-    val bookBlocks = remember(book.id) { StudyCoachCourse.blocks(book.id, book.pages) }
+    val bookBlocks = remember(book.id, book.pages) { StudyCoachCourse.blocks(book.id, book.pages) }
     var selected by remember(book.id, page.number, initialSelection) { mutableStateOf(initialSelection) }
     var draft by remember(book.id, page.number) { mutableStateOf(TextFieldValue("")) }
     var request by remember(book.id, page.number) { mutableStateOf<BookPassageQuestion?>(null) }

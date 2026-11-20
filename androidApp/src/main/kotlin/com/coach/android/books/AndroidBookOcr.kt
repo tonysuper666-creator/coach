@@ -10,7 +10,7 @@ import java.util.concurrent.TimeUnit
 internal object BookScanImages {
     private const val MAX_PIXELS = 16_000_000L
     private const val MAX_SIDE = 8000
-    const val MAX_OCR_PAGES = 200
+    const val MAX_OCR_PAGES = 2000
 
     fun checkSize(width: Int, height: Int) {
         require(width in 1..MAX_SIDE && height in 1..MAX_SIDE && width.toLong() * height <= MAX_PIXELS) {

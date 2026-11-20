@@ -68,7 +68,7 @@ internal fun rememberOriginalPageImage(
             value = withContext(Dispatchers.IO) { PageImage.Ready(library.renderOriginal(book, page, pixelWidth).asBookImageBitmap()) }
         } catch (cancel: CancellationException) {
             throw cancel
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             if (value !is PageImage.Ready) value = PageImage.Failed
         }
     }
@@ -101,7 +101,9 @@ internal fun OriginalBookPage(
     Box(pageBounds) {
         when (image) {
             PageImage.Loading -> Box(Modifier.matchParentSize().background(paper).border(1.dp, line)
-                .testTag("reader-page-placeholder"))
+                .testTag("reader-page-placeholder"), contentAlignment = Alignment.Center) {
+                Text("正在加载页面…", color = colors.fgTertiary)
+            }
             PageImage.Failed -> Column(Modifier.matchParentSize().background(paper).border(1.dp, line)
                 .testTag("reader-page-placeholder"), horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center) {

@@ -19,7 +19,7 @@ import javax.imageio.ImageIO
 internal object BookScanImages {
     const val MAX_PIXELS = 16_000_000L
     const val MAX_SIDE = 8000
-    const val MAX_OCR_PAGES = 200
+    const val MAX_OCR_PAGES = 2000
 
     fun checkSize(width: Int, height: Int) {
         require(width in 1..MAX_SIDE && height in 1..MAX_SIDE && width.toLong() * height <= MAX_PIXELS) {

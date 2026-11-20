@@ -38,8 +38,72 @@ import com.coach.ui.v7.paperShadow
 import com.coach.ui.v7.v7FocusRing
 
 @Composable
+internal fun BookImportProgressBar(
+    progress: BookImportProgress,
+    onCancel: (() -> Unit)? = null,
+    compact: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
+    val colors = CoachTheme.colors
+    val pine = v7Pine()
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 6.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(
+                formatImportProgressLabel(progress),
+                Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgSecondary,
+                fontFamily = LocalV7Fonts.current.numbers,
+            )
+            if (onCancel != null) {
+                V7TextButton(onCancel, modifier = Modifier.testTag("book-import-cancel"), ringInside = true) {
+                    Text(if (compact) "取消" else "取消导入")
+                }
+            }
+        }
+        val barModifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).testTag("book-import-progress-bar")
+        if (!progress.recognizing && progress.total <= 0) {
+            LinearProgressIndicator(modifier = barModifier, color = pine, trackColor = colors.borderSubtle)
+        } else {
+            val fraction = if (progress.total <= 0) 0f else (progress.page.toFloat() / progress.total).coerceIn(0f, 1f)
+            LinearProgressIndicator(
+                progress = { fraction },
+                modifier = barModifier,
+                color = pine,
+                trackColor = colors.borderSubtle,
+                gapSize = 0.dp,
+                drawStopIndicator = {},
+            )
+        }
+    }
+}
+
+@Composable
+internal fun BookImportToast(notice: BookImportNotice?, onDismiss: (Long) -> Unit, modifier: Modifier = Modifier) {
+    if (notice == null) return
+    LaunchedEffect(notice.id) {
+        kotlinx.coroutines.delay(4_000)
+        onDismiss(notice.id)
+    }
+    val colors = CoachTheme.colors
+    val shape = RoundedCornerShape(CoachV7.Radius.btn)
+    Box(
+        modifier
+            .padding(top = 56.dp, start = 16.dp, end = 16.dp)
+            .paperShadow("card", colors.dark)
+            .clip(shape)
+            .background(colors.fgPrimary)
+            .padding(horizontal = 16.dp, vertical = 10.dp)
+            .testTag("book-import-toast"),
+    ) {
+        Text(notice.message, style = MaterialTheme.typography.bodySmall, color = colors.surface1)
+    }
+}
+
+@Composable
 internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String) -> Unit, onRead: () -> Unit, onLearn: () -> Unit,
-    onPath: (LearningPath) -> Unit) {
+    onPath: (LearningPath) -> Unit, onCancelImport: () -> Unit = {}) {
     val book = ui.book
     val colors = CoachTheme.colors
     val scroll = rememberScrollState()
@@ -81,7 +145,13 @@ internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String)
                     Column {
                         ShelfDivider(line)
                         for (item in ui.catalog) {
-                            ShelfBookRow(item, current = item.id == book.id, enabled = !ui.busy) { onSelect(item.id) }
+                            ShelfBookRow(
+                                item = item,
+                                current = item.id == book.id,
+                                enabled = !ui.busy,
+                                activeImport = ui.importing?.takeIf { it.recognizing && it.bookId == item.id },
+                                onCancelImport = onCancelImport,
+                            ) { onSelect(item.id) }
                             ShelfDivider(line)
                         }
                     }
@@ -128,19 +198,43 @@ private fun EntryRow(title: String, description: String, tag: String, enabled: B
 }
 
 @Composable
-private fun ShelfBookRow(item: BookSummary, current: Boolean, enabled: Boolean, onClick: () -> Unit) {
+private fun ShelfBookRow(
+    item: BookSummary,
+    current: Boolean,
+    enabled: Boolean,
+    activeImport: BookImportProgress? = null,
+    onCancelImport: () -> Unit = {},
+    onClick: () -> Unit,
+) {
     val colors = CoachTheme.colors
     val wash = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
-    Row(Modifier.fillMaxWidth().testTag("book-${item.id}")
-        .background(if (current) wash else androidx.compose.ui.graphics.Color.Transparent)
-        .shelfClick(enabled, onClick).padding(horizontal = CoachV7.Space.s3, vertical = CoachV7.Space.s3),
-        horizontalArrangement = Arrangement.spacedBy(CoachV7.Space.s3), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.width(CoachV7.Space.s1).height(CoachV7.Space.s7)
-            .background(if (current) v7Pine() else androidx.compose.ui.graphics.Color.Transparent))
-        Column(verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s1)) {
-            Text(item.title, style = MaterialTheme.typography.titleMedium, fontFamily = LocalV7Fonts.current.display)
-            Text("${item.pageCount} 页 · 读到第 ${item.readingPage} 页${if (item.learning) " · 在学" else ""}",
-                style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, fontFamily = LocalV7Fonts.current.numbers)
+    Column(Modifier.fillMaxWidth().background(if (current) wash else androidx.compose.ui.graphics.Color.Transparent)) {
+        Row(Modifier.fillMaxWidth().testTag("book-${item.id}")
+            .shelfClick(enabled, onClick).padding(horizontal = CoachV7.Space.s3, vertical = CoachV7.Space.s3),
+            horizontalArrangement = Arrangement.spacedBy(CoachV7.Space.s3), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.width(CoachV7.Space.s1).height(CoachV7.Space.s7)
+                .background(if (current) v7Pine() else androidx.compose.ui.graphics.Color.Transparent))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s1)) {
+                Text(item.title, style = MaterialTheme.typography.titleMedium, fontFamily = LocalV7Fonts.current.display)
+                val statusSuffix = when {
+                    activeImport != null -> " · 识别中 ${activeImport.page} / ${activeImport.total} 页"
+                    item.pendingOcrPages > 0 -> " · 待识别 ${item.pendingOcrPages} 页"
+                    item.learning -> " · 在学"
+                    else -> ""
+                }
+                Text("${item.pageCount} 页 · 读到第 ${item.readingPage} 页$statusSuffix",
+                    style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, fontFamily = LocalV7Fonts.current.numbers)
+            }
+        }
+        if (activeImport != null) {
+            BookImportProgressBar(
+                progress = activeImport,
+                onCancel = onCancelImport,
+                compact = true,
+                modifier = Modifier.fillMaxWidth()
+                    .padding(start = CoachV7.Space.s3 + CoachV7.Space.s1 + CoachV7.Space.s3, end = CoachV7.Space.s3, bottom = CoachV7.Space.s3)
+                    .testTag("book-import-progress"),
+            )
         }
     }
 }
@@ -211,7 +305,7 @@ internal fun BookEntryPrompt(ui: LibraryUi, onDismiss: () -> Unit, onRead: () ->
             Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text(book.title)
                 Text(when (ui.prompt) {
-                    BookPrompt.IMPORTED -> "可以先在阅读器里读，也可以直接按章节开始学。"
+                    BookPrompt.IMPORTED -> if (book.hasPendingOcr) "正在后台识别文字，可以先在阅读器里翻看原页，识别完的页也可以直接读和讲解。" else "可以先在阅读器里读，也可以直接按章节开始学。"
                     BookPrompt.AFTER_READING -> "阅读器已经打开。开启后会按教材章节继续学；暂不开启，就只读这本书。"
                     BookPrompt.QUESTIONS -> "出题类型只影响学习练习，切换后保留学习方式和原作答。"
                     else -> "从教材原文生成学习路线，按顺序理解、回忆和继续。"
@@ -225,7 +319,7 @@ internal fun BookEntryPrompt(ui: LibraryUi, onDismiss: () -> Unit, onRead: () ->
                     }
                 }
                 if (ui.learningPath != LearningPath.READ) QuestionModePicker(book.questionMode, !ui.busy, onMode)
-                if (book.pages.any { it.text.isBlank() }) Text("部分页面没有可提取文字，仍可在阅读器查看原页。学的时候只用能提取出文字的部分。", style = MaterialTheme.typography.bodySmall)
+                if (book.pages.any { it.text.isBlank() && !it.ocrPending }) Text("部分页面没有可提取文字，仍可在阅读器查看原页。学的时候只用能提取出文字的部分。", style = MaterialTheme.typography.bodySmall)
                 ui.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = v7Alert()) }
             }
         }, confirmButton = {

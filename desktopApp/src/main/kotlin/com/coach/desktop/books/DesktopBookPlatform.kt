@@ -40,9 +40,13 @@ internal typealias BookPdfPasswordException = org.apache.pdfbox.pdmodel.encrypti
 internal typealias BookPdfRenderer = org.apache.pdfbox.rendering.PDFRenderer
 
 internal object BookPdfLoader {
-    fun load(file: File): BookPdfDocument = Loader.loadPDF(file)
+    private val mixedMemory = org.apache.pdfbox.io.MemoryUsageSetting.setupMixed(16L * 1024 * 1024).streamCache
+    fun load(file: File): BookPdfDocument = Loader.loadPDF(file, mixedMemory)
     fun load(bytes: ByteArray): BookPdfDocument = Loader.loadPDF(bytes)
 }
+
+internal fun newBookPdfRenderer(pdf: BookPdfDocument): BookPdfRenderer =
+    BookPdfRenderer(pdf).apply { isSubsamplingAllowed = true }
 
 internal fun bookCffHasGlyph(font: BookPdfCffFont, code: Int) = font.hasGlyph(code)
 

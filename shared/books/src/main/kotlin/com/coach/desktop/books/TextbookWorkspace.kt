@@ -141,7 +141,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
             val noteKey = event.toReaderInput()
             if (editing != null && noteKey != null && editing.onKey(noteKey.first, noteKey.second)) true
             else if (event.key == Key.Escape && event.type == KeyEventType.KeyDown && ui.screen == BookScreen.READER &&
-                ui.source != null && ui.prompt == null && !ui.busy) {
+                ui.prompt == null && !ui.busy) {
                 returnFromReader(); true
             } else false
         }.onFocusChanged { readerHasFocus = it.hasFocus }
@@ -150,12 +150,15 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
             Box(Modifier.fillMaxSize()) {
                 Column {
                     ui.importing?.let { progress ->
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp).testTag("book-import-progress"),
-                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                            Text(if (progress.total == 0) "正在准备教材…" else
-                                "${if (progress.recognizing) "正在识别文字" else "正在读取教材"} · 第 ${progress.page} / ${progress.total} 页",
-                                Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                            TextButton(controller::cancelImport, Modifier.testTag("book-import-cancel")) { Text("取消导入") }
+                        val handledElsewhere = (ui.screen == BookScreen.HOME && progress.recognizing) ||
+                            ui.screen == BookScreen.READER
+                        if (!handledElsewhere) {
+                            BookImportProgressBar(
+                                progress = progress,
+                                onCancel = controller::cancelImport,
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                                    .testTag("book-import-progress"),
+                            )
                         }
                     }
                     ui.error?.let { error -> Text(error, color = MaterialTheme.colorScheme.error,
@@ -164,11 +167,12 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                     when {
                         ui.screen == BookScreen.HOME || book == null -> LibraryHome(ui,
                             onImport = { run { chooseBook()?.let { picked ->
-                                try { controller.importBook(picked) } finally { releasePickedBook(picked) }
+                                controller.launchImport(picked) { releasePickedBook(picked) }
                             } } },
                             onSelect = { run { controller.select(it) } }, onRead = { run { if (drafts.flush()) controller.learn(LearningPath.READ) } },
                             onLearn = { run { if (drafts.flush()) controller.learn() } },
-                            onPath = { path -> run { if (drafts.flush()) controller.learn(path) } })
+                            onPath = { path -> run { if (drafts.flush()) controller.learn(path) } },
+                            onCancelImport = controller::cancelImport)
                         ui.screen == BookScreen.REVIEWS -> LocalBookReviews(ui,
                             onBack = { run { controller.back() } },
                             onOpen = { entry -> run { if (drafts.flush()) controller.openReview(entry) } })
@@ -183,6 +187,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library, learningSupport,
                             practiceSource = practiceSource, pageFocus = readerFocus, explainProvider = explainer,
                             openPairing = openPairing,
+                            onCancelImport = controller::cancelImport,
                             onNoteSession = { noteReader = it },
                             onPage = { page ->
                                 val restoreFocus = ui.source != null && readerHasFocus
@@ -236,6 +241,10 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                 // Saving a reading bookmark must not resize the page being paginated.
                 // Overlay activity so the desk's bounds stay intact.
                 if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (!LocalImportNoticeHandled.current) {
+                    BookImportToast(ui.importNotice, controller::dismissImportNotice,
+                        Modifier.align(androidx.compose.ui.Alignment.TopCenter))
+                }
             }
             if (ui.prompt != null && ui.book != null) BookEntryPrompt(ui,
                 onDismiss = { run { controller.dismissPrompt() } }, onRead = { run { controller.read() } },
@@ -245,4 +254,5 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     }
 }
 
+internal val LocalImportNoticeHandled = staticCompositionLocalOf { false }
 internal enum class SourceFocus { LESSON, PRACTICE, CITATION }

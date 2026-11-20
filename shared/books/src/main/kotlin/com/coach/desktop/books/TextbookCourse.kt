@@ -17,6 +17,7 @@ internal enum class LearningPath(val label: String) {
 internal data class BookPage(
     val number: Int, val text: String, val ocr: Boolean = false,
     val illustrations: List<BookIllustration> = emptyList(), val textLayout: PageTextLayout? = null,
+    val ocrPending: Boolean = false,
 )
 internal data class SourceBlock(val id: String, val page: Int, val start: Int, val end: Int, val heading: Boolean, val text: String)
 
@@ -40,6 +41,7 @@ internal data class Textbook(
     val promptSeen: Boolean = false, val questionMode: QuestionMode = QuestionMode.CHOICE,
 ) {
     val lessons: List<BookLesson> by lazy { StudyCoachCourse.plan(id, title, pages) }
+    val hasPendingOcr: Boolean get() = pages.any { it.ocrPending }
     val finished get() = learning && lessonIndex >= lessons.size
     fun page(pdfPage: Int): BookPage? = pages.firstOrNull { it.number == pdfPage }
     fun pageLabel(number: Int): String {
@@ -49,7 +51,10 @@ internal data class Textbook(
         return "第 $number 页" + (chapter?.let { "（$it）" } ?: "")
     }
 }
-internal data class BookSummary(val id: String, val title: String, val pageCount: Int, val lastPage: Int, val readingPage: Int, val learning: Boolean)
+internal data class BookSummary(
+    val id: String, val title: String, val pageCount: Int, val lastPage: Int,
+    val readingPage: Int, val learning: Boolean, val pendingOcrPages: Int = 0,
+)
 internal data class Practice(val prompt: String, val reference: String, val answer: String, val options: List<String>)
 internal data class PracticeAnswer(val text: String = "", val revealed: Boolean = false, val understood: Boolean? = null,
     val guessed: Boolean = false)

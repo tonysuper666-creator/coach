@@ -314,6 +314,46 @@ internal class TextbookLibrary(
         }
     }
 
+    @Synchronized fun allHighlights(bookId: String): List<BookHighlightRecord> = database().use { db ->
+        db.prepareStatement("SELECT page,start,end,quote FROM book_highlights WHERE book=? ORDER BY page,start,end").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) add(BookHighlightRecord(rows.getInt(1), rows.getInt(2), rows.getInt(3), rows.getString(4)))
+                }
+            }
+        }
+    }
+
+    @Synchronized fun allReviews(bookId: String): List<LocalBookReview> = database().use { db ->
+        reviewStore.allForBook(db, bookId)
+    }
+
+    @Synchronized fun allAnswers(bookId: String): List<SavedBookAnswer> = database().use { db ->
+        db.prepareStatement("SELECT lesson,mode,text,revealed,understood,guessed FROM answers WHERE book=? ORDER BY rowid").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) {
+                        val mode = runCatching { QuestionMode.valueOf(rows.getString(2)) }.getOrNull() ?: continue
+                        val understoodRaw = rows.getObject(5)
+                        val understood = if (understoodRaw == null) null else rows.getInt(5) != 0
+                        add(
+                            SavedBookAnswer(
+                                lessonId = rows.getString(1),
+                                mode = mode,
+                                text = rows.getString(3),
+                                revealed = rows.getInt(4) != 0,
+                                understood = understood,
+                                guessed = rows.getInt(6) != 0,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     /** Persisted provenance only. Missing, stale, unsupported or damaged records return null. */
     @Synchronized fun nativeSources(bookId: String): BookNativeSources? {
         val book = book(bookId)

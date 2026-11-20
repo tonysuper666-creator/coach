@@ -99,7 +99,7 @@ class CoachActivity : ComponentActivity() {
                             CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"), initialTab = runCatching { com.coach.ui.AppTab.valueOf(intent.getStringExtra("tab").orEmpty()) }.getOrDefault(com.coach.ui.AppTab.TODAY), settings = { Column {
                                 TextButton(onClick = { personalCourse = false }) { Text("返回书架") }
                                 ReminderSettings(reminder)
-                            } }, hinge = hinge)
+                            } }, courseActions = { view -> math?.let { AndroidCourseNotesExportAction(view, controller, it) } }, hinge = hinge)
                         }
                     }
                 }

@@ -29,6 +29,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     answerExplain: AnswerExplain? = null,
     sourceResolver: BookSourceResolver = remember(controller.library) { BookSourceResolver(controller.library) },
     hinge: Hinge? = LocalBookHinge.current,
+    onExportNotes: ((Textbook, Int) -> Unit)? = null,
     releasePickedBook: (Path) -> Unit = {}, chooseBook: suspend () -> Path?) {
     val explainer = remember(controller.library) { BookExplainer(library = controller.library) }
     val learningSupport = support ?: remember(controller.library, explainer) {
@@ -175,7 +176,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             onLearn = { run { if (drafts.flush()) controller.learn() } },
                             onPath = { path -> run { if (drafts.flush()) controller.learn(path) } },
                             onCancelImport = controller::cancelImport,
-                            hinge = hinge)
+                            hinge = hinge,
+                            onExportNotes = onExportNotes)
                         ui.screen == BookScreen.REVIEWS -> LocalBookReviews(ui,
                             onBack = { run { controller.back() } },
                             onOpen = { entry -> run { if (drafts.flush()) controller.openReview(entry) } })
@@ -193,6 +195,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             onCancelImport = controller::cancelImport,
                             onReorganizeSections = { run { controller.reorganizeSections() } },
                             hinge = hinge,
+                            onExportNotes = onExportNotes,
                             onNoteSession = { noteReader = it },
                             onPage = { page ->
                                 val restoreFocus = ui.source != null && readerHasFocus

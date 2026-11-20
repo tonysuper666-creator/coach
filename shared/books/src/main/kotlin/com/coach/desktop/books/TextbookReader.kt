@@ -109,6 +109,7 @@ internal fun TextbookReader(
     onCancelImport: () -> Unit = {},
     onReorganizeSections: (() -> Unit)? = null,
     hinge: Hinge? = LocalBookHinge.current,
+    onExportNotes: ((Textbook, Int) -> Unit)? = null,
 ) {
     val book = checkNotNull(ui.book)
     val page = book.page(ui.page)
@@ -630,6 +631,16 @@ internal fun TextbookReader(
                     notesOpen = !notesOpen
                 }, enabled = !ui.busy && samePage, modifier = Modifier.testTag("books-notes-toggle"), contentPadding = toolPadding) {
                     Text(if (notesOpen) "收起批注" else "批注")
+                }
+                if (onExportNotes != null) {
+                    V7TextButton(
+                        onClick = { onExportNotes(book, ui.page) },
+                        enabled = !ui.busy,
+                        modifier = Modifier.testTag("book-export-notes"),
+                        contentPadding = toolPadding,
+                    ) {
+                        Text("导出")
+                    }
                 }
                 if (source == null) PaperButton(onLearn, enabled = !ui.busy) { Text(if (book.learning) "继续学" else "开始学") }
             }

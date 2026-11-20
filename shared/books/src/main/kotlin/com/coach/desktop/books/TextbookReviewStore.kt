@@ -135,6 +135,12 @@ internal class TextbookReviewStore(private val today: () -> Long) {
         s.executeQuery().use { r -> buildList { while (r.next()) add(read(db, r)) } }
     }
 
+    fun allForBook(db: Connection, bookId: String): List<LocalBookReview> = db.prepareStatement(
+        "SELECT * FROM book_reviews WHERE book=? ORDER BY rowid").use { s ->
+        s.setString(1, bookId)
+        s.executeQuery().use { r -> buildList { while (r.next()) add(read(db, r)) } }
+    }
+
     fun saveRetry(db: Connection, entry: LocalBookReview, answer: PracticeAnswer) {
         val old = checkNotNull(find(db, entry.book, entry.lesson, entry.mode)) { "这道复习题已不在书架中。" }
         val committed = answer.committed(old.mode)

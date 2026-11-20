@@ -86,6 +86,7 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
     answerExplain: AnswerExplain = rememberAnswerExplain(controller.library),
     learningSupport: com.coach.desktop.books.BookLearningSupport? = null, onPersonalCourse: (() -> Unit)? = null,
     hinge: Hinge? = null,
+    onExportNotes: ((com.coach.desktop.books.Textbook, Int) -> Unit)? = null,
     releasePickedBook: (Path) -> Unit = {}, chooseBook: suspend () -> Path?) {
     var tab by rememberSaveable { mutableStateOf(AppTab.RESOURCES) }
     // 今天 / 课程 open their book inside 书架's workspace; the rail keeps pointing where the reader came from
@@ -196,7 +197,7 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                                     Text("正在读取本书练习…")
                                 }
                             })
-                        else -> TextbookWorkspace(controller, drafts, loadOnMount = false, answerExplain = answerExplain, support = learningSupport, hinge = hinge, releasePickedBook = releasePickedBook, chooseBook = chooseBook)
+                        else -> TextbookWorkspace(controller, drafts, loadOnMount = false, answerExplain = answerExplain, support = learningSupport, hinge = hinge, onExportNotes = onExportNotes, releasePickedBook = releasePickedBook, chooseBook = chooseBook)
                     }
                 }
                 val deskSelect = remember { { picked: AppTab -> select(picked) } }

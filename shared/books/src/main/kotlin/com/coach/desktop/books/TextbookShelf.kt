@@ -107,7 +107,8 @@ internal fun BookImportToast(notice: BookImportNotice?, onDismiss: (Long) -> Uni
 
 @Composable
 internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String) -> Unit, onRead: () -> Unit, onLearn: () -> Unit,
-    onPath: (LearningPath) -> Unit, onCancelImport: () -> Unit = {}, hinge: Hinge? = LocalBookHinge.current) {
+    onPath: (LearningPath) -> Unit, onCancelImport: () -> Unit = {}, hinge: Hinge? = LocalBookHinge.current,
+    onExportNotes: ((Textbook, Int) -> Unit)? = null) {
     val book = ui.book
     val colors = CoachTheme.colors
     val scroll = rememberScrollState()
@@ -165,6 +166,12 @@ internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String)
                         ShelfDivider(line)
                         EntryRow("做题学", "先试题，答后看讲解；原文按需打开。", "home-question", !ui.busy) { onPath(LearningPath.QUESTION_FIRST) }
                         ShelfDivider(line)
+                        if (onExportNotes != null) {
+                            EntryRow("导出笔记与复习提纲", "生成本教材的 Markdown 笔记与可打印 PDF。", "book-export-notes", !ui.busy) {
+                                onExportNotes(book, book.readingPage)
+                            }
+                            ShelfDivider(line)
+                        }
                     }
                 }
             }

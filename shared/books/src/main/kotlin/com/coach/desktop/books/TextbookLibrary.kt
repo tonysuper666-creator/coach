@@ -499,6 +499,7 @@ internal class TextbookLibrary(
                     saveExtras(mapOf(page.number to page.text), images, listOfNotNull(page.textLayout))
                 }
                 require(extracted.pages.isNotEmpty()) { "教材中没有可打开的页面。" }
+                val structure = BookStructurePlanner.plan(id, extracted.title, "pdf", extracted.pages, extracted.outline)
                 control.check()
                 db.prepareStatement("INSERT INTO books(id,title,format,mode,touched,reading_page) VALUES(?,?,?,?,?,?)").use { sql ->
                     sql.setString(1, id); sql.setString(2, extracted.title); sql.setString(3, "pdf")
@@ -517,6 +518,7 @@ internal class TextbookLibrary(
                     extracted.pages.associate { it.number to it.text },
                     extracted.illustrations, extracted.pages.mapNotNull { it.textLayout },
                 )
+                BookStructureStore.saveStructure(db, id, structure)
                 control.check()
                 Files.move(stage, target, StandardCopyOption.REPLACE_EXISTING)
                 moved = true
@@ -729,7 +731,7 @@ internal class TextbookLibrary(
         val current = book(bookId)
         val file = runCatching { original(bookId, current.format) }.getOrNull()?.takeIf(Files::isRegularFile)
         val outline = if (file == null) emptyList() else when (current.format) {
-            "pdf" -> runCatching { BookPdfLoader.load(file.toFile()).use(::extractBookPdfOutline) }.getOrDefault(emptyList())
+            "pdf" -> runCatching { BookPdfLoader.read(file.toFile(), ::extractBookPdfOutline) }.getOrDefault(emptyList())
             "epub" -> BookStructurePlanner.extractEpubOutline(file, current.pages)
             "docx" -> BookStructurePlanner.extractWordOutline(file, current.pages)
             else -> emptyList()

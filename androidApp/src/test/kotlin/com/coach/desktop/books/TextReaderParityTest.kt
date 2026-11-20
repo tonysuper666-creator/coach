@@ -260,7 +260,7 @@ class TextReaderParityTest {
         AndroidBookConnection.resetForTest()
         context.getSharedPreferences("coach-book-connection", Context.MODE_PRIVATE).edit().clear().commit()
 
-        val root = Files.createTempDirectory(context.cacheDir.toPath(), "android-longpress-explain-")
+        val root = Files.createTempDirectory("coach-lp-")
         val pool = Executors.newCachedThreadPool()
         val explainRequests = CopyOnWriteArrayList<JsonObject>()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
@@ -331,7 +331,7 @@ class TextReaderParityTest {
             )
             AndroidBookConnection.syncFriendSaved(serverUrl, creds, context)
 
-            val libDir = root.resolve("library")
+            val libDir = root.resolve("lib")
             val library = TextbookLibrary(libDir)
             val sec1Body = (1..16).joinToString("\n\n") { i ->
                 "核心概念说明（${i}）：生物学课程立足学生真实探究经验，帮助理解生命系统的基本规律与科学思维方式。Biology inquiry builds concepts."

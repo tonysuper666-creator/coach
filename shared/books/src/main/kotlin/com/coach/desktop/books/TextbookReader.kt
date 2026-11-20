@@ -118,7 +118,11 @@ internal fun TextbookReader(
     }
     var viewSaveRevision by remember(library, book.id) { mutableIntStateOf(0) }
     var viewSaveError by remember(library, book.id) { mutableStateOf(false) }
-    val paging = remember(book.id) { BookPagingState(BookPageAnchor(ui.page)) }
+    val paging = remember(book.id) {
+        // 章内翻到后面的重排子页再退出：同一章里回到存下的偏移，而不是章首（TON-1724）。
+        val spot = if (ui.source == null) library.savedReadSpot(book.id)?.takeIf { it.first == ui.page } else null
+        BookPagingState(BookPageAnchor(ui.page, spot?.second ?: 0))
+    }
     val pdf = remember(library, book.id) { OriginalPdfReading(ui.page, !originalPdf || library.pdfScrollMode(book.id)) }
     val pdfLayers = remember(library, book.id) { OriginalPdfTextLayers(library, book) }
     val scroll = remember(book.id) { ScrollReadState(book.pages.size, ScrollReadPosition(book.pages.indexOf(page))) }
@@ -130,7 +134,9 @@ internal fun TextbookReader(
     val nextPage = if (pdfVisible && !pdf.scrolling) pdf.adjacent(true)
         else book.pages.firstOrNull { it.number > ui.page }?.number
     var turnStyle by remember { mutableStateOf(PageTurnStyle.Flip) }
-    var readMode by remember(book.id) { mutableStateOf(BookReadMode.Paged) }
+    var readMode by remember(library, book.id) {
+        mutableStateOf(if (library.textScrollMode(book.id)) BookReadMode.Scroll else BookReadMode.Paged)
+    }
     LaunchedEffect(ui.page, pdfVisible) {
         val previouslyPublished = paging.publishedImportPage
         paging.followImportPage(ui.page)
@@ -262,10 +268,8 @@ internal fun TextbookReader(
             val targetUnrecognized = hasOriginal && (targetPage.ocrPending || (targetPage.text.isBlank() && book.hasPendingOcr))
             if (pdfVisible || (originalPdf && targetUnrecognized)) pdf.jump(pageNumber)
             paging.anchor = BookPageAnchor(pageNumber)
-            val visiblePage = if (textView && !targetUnrecognized && paging.pages.isNotEmpty())
-                paging.pages[paging.index].anchor.importPage else pageNumber
-            if (paging.publishImportPage(visiblePage)) onPage(visiblePage)
-            session.goToPage(visiblePage)
+            if (paging.publishImportPage(pageNumber)) onPage(pageNumber)
+            session.goToPage(pageNumber)
         }
     }
 
@@ -436,7 +440,8 @@ internal fun TextbookReader(
         val colors = CoachTheme.colors
         val highlight = if (colors.dark) CoachV7.Dark.hl else CoachV7.Light.hl
         val touchPdf = originalPdf && originalPdfTouchEnabled
-        val toolPadding = if (touchPdf) PaddingValues(horizontal = 8.dp) else ButtonDefaults.TextButtonContentPadding
+        val compactTouch = originalPdfTouchEnabled
+        val toolPadding = if (compactTouch) PaddingValues(horizontal = 8.dp) else ButtonDefaults.TextButtonContentPadding
         Column(Modifier.fillMaxSize().padding(20.dp).testTag("textbook-reader"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             val actions: @Composable () -> Unit = {
                 if (hasOriginal) V7TextButton(onClick = {
@@ -514,7 +519,7 @@ internal fun TextbookReader(
                 }
                 if (source == null) PaperButton(onLearn, enabled = !ui.busy) { Text(if (book.learning) "继续学" else "开始学") }
             }
-            if (touchPdf) {
+            if (compactTouch) {
                 FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp),
                     itemVerticalAlignment = Alignment.CenterVertically) { actions() }
             } else {
@@ -609,7 +614,11 @@ internal fun TextbookReader(
                         result
                     }
                     BookPageView(book, paging, ranges, turnLayout, libraryDirectory = library.directory,
-                        turnStyle = turnStyle, readMode = readMode, onOpenTableRow = openPassage, onPosition = { number ->
+                        turnStyle = turnStyle, readMode = readMode, onOpenTableRow = openPassage,
+                        onSpot = { anchor ->
+                            if (ui.source == null) runCatching { library.saveReadSpot(book.id, anchor.importPage, anchor.offsetUtf16) }
+                        },
+                        onPosition = { number ->
                         if (paging.publishImportPage(number)) {
                             onPage(number)
                             session.goToPage(number)
@@ -663,15 +672,16 @@ internal fun TextbookReader(
                     }
                 }
             }
-            if (textView && !pageUnrecognizedOriginal) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center) {
+            if (textView && !pageUnrecognizedOriginal) FlowRow(Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(if (compactTouch) 8.dp else 20.dp, Alignment.CenterHorizontally),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                itemVerticalAlignment = Alignment.CenterVertically) {
                 val hasPrevBookPage = book.pages.any { it.number < ui.page }
                 val hasNextBookPage = book.pages.any { it.number > ui.page }
                 V7Tooltip("上一页", shortcut = "←  PageUp") {
                     PaperButton({ turnLayout(ReaderTurn.Previous) }, enabled = paging.canPrevious || hasPrevBookPage,
                         modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
                 }
-                Spacer(Modifier.width(20.dp))
                 if (!editingJump) Text(paging.pages.getOrNull(paging.index)?.sourceLabel ?: "第 ${ui.page} 页",
                     style = MaterialTheme.typography.bodyMedium, fontFamily = LocalV7Fonts.current.numbers,
                     modifier = Modifier.testTag("reader-page-number").clickable { editingJump = true })
@@ -696,20 +706,20 @@ internal fun TextbookReader(
                             }.background(colors.surface2).padding(9.dp))
                     LaunchedEffect(Unit) { jumpFocus.requestFocus() }
                 }
-                Spacer(Modifier.width(20.dp))
                 V7Tooltip("下一页", shortcut = "→  PageDown") {
                     PaperButton({ turnLayout(ReaderTurn.Next) }, enabled = paging.canNext || hasNextBookPage,
                         modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
                 }
-                // 阅读方式：翻页 / 滚动；本次打开内有效，按书记住并进阅读设置（TON-1654）。
-                Spacer(Modifier.width(20.dp))
+                // 阅读方式：翻页 / 滚动；按书记住（book_text_modes），重开仍是上次的读法（TON-1724）。
                 V7Tooltip("阅读方式") {
-                    PaperButton({ readMode = if (readMode == BookReadMode.Paged) BookReadMode.Scroll else BookReadMode.Paged
-                        runCatching { pageFocus.requestFocus() } },
-                        modifier = Modifier.testTag("read-mode")) { Text(if (readMode == BookReadMode.Paged) "翻页" else "滚动") }
+                    PaperButton({
+                        val next = if (readMode == BookReadMode.Paged) BookReadMode.Scroll else BookReadMode.Paged
+                        readMode = next
+                        runCatching { library.saveTextScrollMode(book.id, next == BookReadMode.Scroll) }
+                        runCatching { pageFocus.requestFocus() }
+                    }, modifier = Modifier.testTag("read-mode")) { Text(if (readMode == BookReadMode.Paged) "翻页" else "滚动") }
                 }
                 // 翻页效果：本次打开内有效；记住与入口以后并进阅读设置（TON-1654）。
-                Spacer(Modifier.width(20.dp))
                 V7Tooltip("翻页效果") {
                     PaperButton({ turnStyle = when (turnStyle) {
                         PageTurnStyle.Flip -> PageTurnStyle.Slide

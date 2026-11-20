@@ -18,10 +18,10 @@ import com.coach.ui.v7.*
 val LocalV7TextScale = staticCompositionLocalOf<MutableState<Float>> { mutableStateOf(1f) }
 
 @Composable
-fun CoachTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
+fun CoachTheme(dark: Boolean = isSystemInDarkTheme(), initialTextScale: Float = 1f, content: @Composable () -> Unit) {
     val fonts = rememberV7Fonts()
     val reduced = rememberReducedMotion()
-    val textScale = rememberSaveable { mutableStateOf(1f) }
+    val textScale = rememberSaveable { mutableStateOf(initialTextScale) }
     val scale = textScale.value
     val typography = remember(fonts, dark, scale) {
         val leading = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.None)

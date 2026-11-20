@@ -176,7 +176,9 @@ internal fun BookExplainPanel(
                     }
                     Text("没有 Sable 账号？用配对码", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                 }
-                V7Field(address, { address = it; pairError = null }, "Mac 地址", enabled = !pairing, paper = colors.surface2, modifier = Modifier.fillMaxWidth().testTag("explain-address"))
+                V7Field(address, { address = it; pairError = null },
+                    if (explainer.hasBuiltInAddress) "Mac 地址（留空连默认服务）" else "Mac 地址",
+                    enabled = !pairing, paper = colors.surface2, modifier = Modifier.fillMaxWidth().testTag("explain-address"))
                 V7Field(code, { code = it.filter(Char::isDigit).take(6); pairError = null }, "配对码", enabled = !pairing, paper = colors.surface2,
                     visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                     modifier = Modifier.width(200.dp).testTag("explain-code"))
@@ -188,7 +190,7 @@ internal fun BookExplainPanel(
                         else states.filterValues { (it as? BlockState.Failed)?.trouble?.needsPairing == true }.keys.forEach(states::remove)
                         code = ""; pairing = false
                     }
-                }, enabled = code.length == 6 && address.isNotBlank() && !pairing, modifier = Modifier.testTag("explain-pair")) { Text(if (pairing) "正在配对…" else "配对") }
+                }, enabled = code.length == 6 && (address.isNotBlank() || explainer.hasBuiltInAddress) && !pairing, modifier = Modifier.testTag("explain-pair")) { Text(if (pairing) "正在配对…" else "配对") }
                 pairError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = v7Alert(), modifier = Modifier.testTag("explain-pair-error")) }
             } else if (paired != null) Text("已连上 Mac。点一段原文旁的「讲解这段」。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
             if (onPage.isEmpty()) Text("这一页没有可讲的正文。", style = MaterialTheme.typography.bodyMedium, color = colors.fgSecondary)

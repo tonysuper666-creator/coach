@@ -172,8 +172,12 @@ android {
         // FileProvider authority follows the package name so isolated acceptance builds never collide.
         manifestPlaceholders["updateAuthority"] = "$appId.updates"
         buildConfigField("String", "COACH_UPDATE_CHANNEL", "\"${updateChannel.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
-        val friendUrl = localConfig.getProperty("coach.friendUrl", "")
-        require(friendUrl.isEmpty() || friendUrl.matches(Regex("https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?"))) { "Invalid private friend service origin" }
+        val friendUrl = (
+            providers.gradleProperty("coach.friendUrl").orNull
+                ?: System.getenv("COACH_FRIEND_URL")
+                ?: localConfig.getProperty("coach.friendUrl", "")
+            ).trim().trimEnd('/')
+        require(friendUrl.isEmpty() || friendUrl.matches(Regex("https://[A-Za-z0-9.-]+(:[0-9]{1,5})?"))) { "Invalid private friend service origin" }
         buildConfigField("String", "COACH_FRIEND_URL", "\"$friendUrl\"")
         buildConfigField("String", "COACH_TAIL_HOST", "\"$coachTailHost\"")
         // `-Pcoach.port=NNNN` builds against a non-production test server (real-device measurements must never pair with 18791).
@@ -219,7 +223,7 @@ dependencies {
     implementation("androidx.metrics:metrics-performance:1.0.0")
     testImplementation(project(":shared:domain"))
     testImplementation(project(":shared:protocol"))
-    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("com.squareup.okhttp3:mockwebserver:5.2.1")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.17")
     testImplementation("androidx.compose.ui:ui-test-junit4:1.12.1")
@@ -232,7 +236,7 @@ dependencies {
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4:1.12.1")
-    androidTestImplementation("com.squareup.okhttp3:okhttp:4.12.0")
+    androidTestImplementation("com.squareup.okhttp3:okhttp:5.2.1")
 }
 
 // Direct JVM screenshot invocation; no device, emulator or plugin-managed recording state.

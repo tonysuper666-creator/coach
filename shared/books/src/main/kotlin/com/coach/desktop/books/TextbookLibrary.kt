@@ -53,6 +53,8 @@ internal class TextbookLibrary(
             sql.execute("CREATE TABLE IF NOT EXISTS book_ladders(book TEXT PRIMARY KEY,session TEXT NOT NULL)")
             sql.execute("CREATE TABLE IF NOT EXISTS book_reader_views(book TEXT PRIMARY KEY,text_view INTEGER NOT NULL)")
             sql.execute("CREATE TABLE IF NOT EXISTS book_pdf_modes(book TEXT PRIMARY KEY,scrolling INTEGER NOT NULL)")
+            sql.execute("CREATE TABLE IF NOT EXISTS book_text_modes(book TEXT PRIMARY KEY,scrolling INTEGER NOT NULL)")
+            sql.execute("CREATE TABLE IF NOT EXISTS book_read_spots(book TEXT PRIMARY KEY,page INTEGER NOT NULL,offset_utf16 INTEGER NOT NULL)")
             sql.execute("""CREATE TABLE IF NOT EXISTS book_highlights(
                 book TEXT NOT NULL,page INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,quote TEXT NOT NULL,
                 PRIMARY KEY(book,page,start,end))""")
@@ -228,6 +230,39 @@ internal class TextbookLibrary(
         db.prepareStatement("INSERT OR REPLACE INTO book_pdf_modes(book,scrolling) VALUES(?,?)").use { sql ->
             sql.setString(1, bookId)
             sql.setBoolean(2, scrolling)
+            sql.executeUpdate()
+        }
+    }
+
+    /** 文字版阅读方式：默认翻页读，按书记住（TON-1724）。 */
+    fun textScrollMode(bookId: String): Boolean = database().use { db ->
+        db.prepareStatement("SELECT scrolling FROM book_text_modes WHERE book=?").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { it.next() && it.getBoolean(1) }
+        }
+    }
+
+    fun saveTextScrollMode(bookId: String, scrolling: Boolean) = database().use { db ->
+        db.prepareStatement("INSERT OR REPLACE INTO book_text_modes(book,scrolling) VALUES(?,?)").use { sql ->
+            sql.setString(1, bookId)
+            sql.setBoolean(2, scrolling)
+            sql.executeUpdate()
+        }
+    }
+
+    /** 文字版章内读位：导入页与 UTF-16 偏移，重开回到同一句附近（TON-1724）。 */
+    fun savedReadSpot(bookId: String): Pair<Int, Int>? = database().use { db ->
+        db.prepareStatement("SELECT page,offset_utf16 FROM book_read_spots WHERE book=?").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { if (it.next()) it.getInt(1) to it.getInt(2) else null }
+        }
+    }
+
+    fun saveReadSpot(bookId: String, page: Int, offsetUtf16: Int) = database().use { db ->
+        db.prepareStatement("INSERT OR REPLACE INTO book_read_spots(book,page,offset_utf16) VALUES(?,?,?)").use { sql ->
+            sql.setString(1, bookId)
+            sql.setInt(2, page)
+            sql.setInt(3, offsetUtf16)
             sql.executeUpdate()
         }
     }

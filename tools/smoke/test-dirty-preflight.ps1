@@ -390,6 +390,76 @@ Run-PidIdentityCase 'different-start' ([pscustomobject]@{ Id = 42424; StartTime 
 Run-PidIdentityCase 'missing-recorded-start' ([pscustomobject]@{ Id = 42424; StartTime = $t1 }) 0L 0 $true
 Run-PidIdentityCase 'missing-observed-start' ([pscustomobject]@{ Id = 42424; StartTime = $null }) $t1.Ticks 0 $true
 
+# 4c. 收尾时序（批次 20261119-234754-762-cbc33cfa：taskkill 成功后 55 ms 的第一次复查报 CLEANUP_UNVERIFIED，外层退 1）
+# 查到 PID 之后、读启动时间之前进程正好退出：.NET 读启动时间报「已退出」，不能当成身份不可核验。
+# 先用真实进程取一个「查到时还在、读时已退」的 Process 对象，确认 .NET 的真实行为。
+# 夹具不发任何停止请求：自有子进程睡 2 秒后自己退出。等它退出期间一直握着启动句柄，PID 不会被复用；
+# 退出后再关掉句柄（有人握着句柄时，退出的进程还能读到启动时间，就测不到这个时序），
+# 然后用退出前取得的 Process 对象读启动时间，应读不到。
+$raceLive = Start-Process powershell.exe -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 2"' -PassThru -WindowStyle Hidden
+$raceId = $raceLive.Id
+$raceTicks = Get-TrackedProcessStartTicks $raceLive
+$raceStale = Microsoft.PowerShell.Management\Get-Process -Id $raceId -ErrorAction SilentlyContinue
+$raceSame = $raceTicks -gt 0L -and (Get-TrackedProcessStartTicks (Microsoft.PowerShell.Management\Get-Process -Id $raceId -ErrorAction SilentlyContinue)) -eq $raceTicks
+$raceGone = $raceLive.WaitForExit(20000)
+$raceLive.Dispose(); $raceLive = $null; [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+$raceStaleTicks = Get-TrackedProcessStartTicks $raceStale
+Check 'cleanup-race-real-stale-start-unreadable' ($raceSame -and $raceGone -and $raceStale -and $raceStaleTicks -eq 0L) "pid=$raceId ticks=$raceTicks same=$raceSame selfExited=$raceGone staleTicks=$raceStaleTicks"
+$script:RaceSpy = $null
+function Invoke-CleanupRaceCase([string]$name, [scriptblock]$Lookup, [switch]$Tree, [int]$expectStops, [string]$expectErr) {
+    $script:RaceSpy = @{ lookup = $Lookup; stops = 0; killed = $false; calls = 0; afterKill = 0 }
+    function global:Get-Process([int]$Id, [string]$ErrorAction) {
+        $script:RaceSpy.calls++
+        if ($script:RaceSpy.killed) { $script:RaceSpy.afterKill++ }
+        return (& $script:RaceSpy.lookup $Id $script:RaceSpy)
+    }
+    function global:Stop-Process([int]$Id, [switch]$Force, [string]$ErrorAction) {
+        $script:RaceSpy.stops++; $script:RaceSpy.killed = $true
+    }
+    function global:Start-Process([string]$FilePath, [string]$ArgumentList, [string]$WindowStyle, [switch]$PassThru, [string]$RedirectStandardOutput, [string]$RedirectStandardError) {
+        $script:RaceSpy.stops++; $script:RaceSpy.killed = $true
+        $k = [pscustomobject]@{ Id = 1 }
+        $k | Add-Member ScriptMethod WaitForExit { param($ms) $true }
+        return $k
+    }
+    $errMsg = ''
+    try {
+        if ($Tree) { Stop-TrackedPid -ProcessId $script:RaceTargetId -StartTimeTicks $script:RaceTargetTicks -WaitMs 500 -Tree }
+        else { Stop-TrackedPid -ProcessId $script:RaceTargetId -StartTimeTicks $script:RaceTargetTicks -WaitMs 500 }
+    } catch {
+        $errMsg = $_.Exception.Message
+    } finally {
+        Remove-Item Function:\Get-Process, Function:\Stop-Process, Function:\Start-Process -ErrorAction SilentlyContinue
+    }
+    $ok = ($script:RaceSpy.stops -eq $expectStops) -and $(if ($expectErr) { $errMsg -like "$expectErr*" } else { -not $errMsg })
+    Check "cleanup-race-$name" $ok "stops=$($script:RaceSpy.stops)/$expectStops lookups=$($script:RaceSpy.calls) err=$errMsg"
+}
+# 停止前：第一次查到的是真实「读时已退」对象，再查已无此 PID → 已退出，0 次停止、不报错
+$script:RaceTargetId = $raceId; $script:RaceTargetTicks = $raceTicks
+Invoke-CleanupRaceCase 'exited-before-identity-read' {
+    param($id, $s) if ($s.calls -eq 1) { return $raceStale } ; return (Microsoft.PowerShell.Management\Get-Process -Id $id -ErrorAction SilentlyContinue)
+} -expectStops 0 -expectErr ''
+# 批次原样：身份确认 → taskkill 进程树 1 次 → 第一次复查读启动时间时已退出 → 不报 CLEANUP_UNVERIFIED
+$script:RaceTargetId = 42426; $script:RaceTargetTicks = $t1.Ticks
+$raceAlive = [pscustomobject]@{ Id = 42426; StartTime = $t1 }
+$raceExiting = [pscustomobject]@{ Id = 42426 }
+$raceExiting | Add-Member ScriptProperty StartTime { throw 'Process with an Id of 42426 is not running.' }
+Invoke-CleanupRaceCase 'exited-during-post-stop-check' {
+    param($id, $s) if (-not $s.killed) { return $raceAlive }; if ($s.afterKill -eq 1) { return $raceExiting }; return $null
+} -Tree -expectStops 1 -expectErr ''
+# 收尾期间连续几次仍查得到但读不到启动时间，随后消失：复查到退出为止，不补发停止
+Invoke-CleanupRaceCase 'transient-unreadable-then-gone' {
+    param($id, $s) if (-not $s.killed) { return $raceAlive }; if ($s.afterKill -le 4) { return $raceExiting }; return $null
+} -Tree -expectStops 1 -expectErr ''
+# 停止后一直读不到身份：到截止时间报 CLEANUP_UNVERIFIED，停止请求仍只有那 1 次
+Invoke-CleanupRaceCase 'persistent-unreadable-after-stop' {
+    param($id, $s) if (-not $s.killed) { return $raceAlive }; return $raceExiting
+} -Tree -expectStops 1 -expectErr 'CLEANUP_UNVERIFIED:'
+# 停止前就读不到身份且 PID 仍在：0 次停止，报 CLEANUP_UNVERIFIED（保护不变）
+Invoke-CleanupRaceCase 'unreadable-before-stop-still-zero' {
+    param($id, $s) return $raceExiting
+} -Tree -expectStops 0 -expectErr 'CLEANUP_UNVERIFIED:'
+
 # 5. friend-path.ps1 退出码隔离：环境脏=2，产品失败=1，全过=0
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('fp-preflight-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $smokeTmp = Join-Path $tmp 'tools\smoke'

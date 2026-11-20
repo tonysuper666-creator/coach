@@ -88,11 +88,82 @@ class LibraryExplainTest {
             assertTrue(repPrompt.contains("完整自写能量块 2。"), "选段提问应携带整节其余块作为上下文")
             assertTrue(repPrompt.contains("这段讲能量转化。"), "追问应携带历史问答")
 
-            // 3) 导读伪造出处仍会被严格拦截
+            // 3) 导读同一次调用返回 hardPoints（1–2 段校验存在）与 3 行 summary，且伪造段落 ID 被拦截剔除
+            h.stub.stream(
+                1,
+                """{"brief":["要点一","要点二"],"recap":"前情提要","summary":["小结1","小结2","小结3"],"hardPoints":[{"blockId":"S1","label":"核心转换","explanation":"这一段点明了能量形式的转化规律。"},{"blockId":"S99","label":"伪造段","explanation":"不存在的段不能通过。"},{"blockId":"deadbeef:p1:0","label":"伪造哈希","explanation":"不存在的哈希不能通过。"}],"paragraphs":[{"text":"本节说明能量转化。","anchors":["S1","S2"]}]}""",
+                StubTutor.terminal("complete"),
+                StubTutor.DONE,
+            )
+            val beforeHpReqs = h.stub.requests
+            val (hpStatus, hpBody) = h.post(guideInput)
+            assertEquals(200, hpStatus)
+            assertEquals(beforeHpReqs + 1, h.stub.requests, "难点标注和节末小结必须复用导读同一次调用")
+            assertEquals(listOf("小结1", "小结2", "小结3"), hpBody["summary"]!!.jsonArray.map { it.jsonPrimitive.content })
+            val returnedHps = hpBody["hardPoints"]!!.jsonArray
+            assertEquals(1, returnedHps.size, "不存在的段落 id（S99 / 伪造哈希）必须被服务端剔除")
+            assertEquals("${h.version}:p1:0", returnedHps.single().jsonObject.str("blockId"))
+            assertEquals(1L, returnedHps.single().jsonObject.num("pdfPage"))
+
+            // 4) 导读伪造出处仍会被严格拦截
             h.stub.stream(1, """{"brief":["要点"],"recap":"摘要","paragraphs":[{"text":"伪造出处。","anchors":["S9"]}]}""",
                 StubTutor.terminal("complete"), StubTutor.DONE)
             val (_, badGuide) = h.post(guideInput)
             assertTrue(badGuide["sources"]!!.jsonArray.isEmpty(), "导读里的伪造出处必须被拦截")
+
+            // 5) 无结构书分节（kind = structure）：单调递增合法块 id 通过；乱序/重复/不存在块 id 拒收且不重试
+            val structBook = "f".repeat(64)
+            val structBlocks = blocks(
+                "$structBook:p1:0" to "第一页开头片段",
+                "$structBook:p2:0" to "第二页开头片段",
+                "$structBook:p3:0" to "第三页开头片段",
+            )
+            val structInput = json(
+                "requestId" to "aa01",
+                "kind" to "structure",
+                "bookPages" to 3,
+                "blocks" to structBlocks,
+                "localSource" to json(
+                    "schema" to 1,
+                    "book" to structBook,
+                    "format" to "txt",
+                    "title" to "Unstructured book",
+                    "consented" to true,
+                    "pages" to JsonArray((1..3).map { n ->
+                        val txt = when (n) { 1 -> "第一页开头片段"; 2 -> "第二页开头片段"; else -> "第三页开头片段" }
+                        json("number" to n, "length" to txt.length, "ocr" to false, "sha256" to "a".repeat(64))
+                    }),
+                ),
+            )
+            h.stub.stream(
+                1,
+                """{"sections":[{"startBlockId":"S1","title":"第一主题"},{"startBlockId":"$structBook:p3:0","title":"第二主题"}]}""",
+                StubTutor.terminal("complete"),
+                StubTutor.DONE,
+            )
+            val reqBeforeStruct = h.stub.requests
+            val (okStructStatus, okStructBody) = h.post(structInput)
+            assertEquals(200, okStructStatus)
+            assertEquals(reqBeforeStruct + 1, h.stub.requests, "无结构分节只能单次调用")
+            assertEquals(true, okStructBody["valid"]?.jsonPrimitive?.booleanOrNull)
+            assertEquals(
+                listOf("$structBook:p1:0", "$structBook:p3:0"),
+                okStructBody["sections"]!!.jsonArray.map { it.jsonObject.str("startBlockId") },
+            )
+
+            for ((reqId, badPayload) in listOf(
+                "aa02" to """{"sections":[{"startBlockId":"S2","title":"乱序1"},{"startBlockId":"S1","title":"乱序2"}]}""",
+                "aa03" to """{"sections":[{"startBlockId":"S1","title":"重复1"},{"startBlockId":"S1","title":"重复2"}]}""",
+                "aa04" to """{"sections":[{"startBlockId":"S99","title":"不存在"}]}""",
+            )) {
+                h.stub.stream(1, badPayload, StubTutor.terminal("complete"), StubTutor.DONE)
+                val countBefore = h.stub.requests
+                val (badStatus, badBody) = h.post(JsonObject(structInput + ("requestId" to JsonPrimitive(reqId))))
+                assertEquals(200, badStatus)
+                assertEquals(countBefore + 1, h.stub.requests, "校验失败不重试")
+                assertEquals(false, badBody["valid"]?.jsonPrimitive?.booleanOrNull)
+                assertTrue(badBody["sections"]!!.jsonArray.isEmpty())
+            }
         }
     }
 

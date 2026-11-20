@@ -23,6 +23,24 @@ class ReaderTimingTest {
         val invalid = ReaderBodyProgress()
         assertFalse(invalid.push("not JSON"))
         assertFalse(invalid.push("{\"paragraphs\":[{\"text\":\"decoy\"}]}"))
+
+        val guide = ReaderBodyProgress(
+            maxSize = 16_000,
+            progressPaths = ReaderBodyProgress.GUIDE_PROGRESS_PATHS,
+            progressArrayPaths = ReaderBodyProgress.GUIDE_PROGRESS_ARRAY_PATHS,
+        )
+        assertTrue(guide.push("""{"brief":["要"""))
+        assertTrue(guide.push("""点"],"summary":["小"""))
+        assertTrue(guide.push("""结"],"hardPoints":[{"blockId":"S1","explanation":"难"""))
+        assertFalse(guide.invalid)
+
+        val struct = ReaderBodyProgress(
+            maxSize = 16_000,
+            progressPaths = ReaderBodyProgress.STRUCTURE_PROGRESS_PATHS,
+            allowNumbers = true,
+        )
+        assertTrue(struct.push("""{"sections":[{"startBlockId":"S1","title":"主题一","level":1}]}"""))
+        assertFalse(struct.invalid)
     }
     @Test fun validatesAllThreeIndependentSettings() {
         assertEquals(180_000, ReaderTimeouts.environment(emptyMap()).totalMs)

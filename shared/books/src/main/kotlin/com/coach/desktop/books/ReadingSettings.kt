@@ -8,6 +8,7 @@ import java.nio.file.Path
 import java.sql.DriverManager
 
 internal val LocalReadingAutoGuide = compositionLocalOf { true }
+internal val LocalReadingSectionSummary = compositionLocalOf { true }
 
 internal enum class ReadingSize(val label: String, val scale: Float) {
     SMALL("小", .9f), MEDIUM("中", 1f), LARGE("大", 1.15f)
@@ -36,6 +37,8 @@ internal class ReadingSettings(directory: Path) {
         private set
     var autoGuide by mutableStateOf(true)
         private set
+    var sectionSummary by mutableStateOf(true)
+        private set
 
     init {
         DriverManager.getConnection(url).use { db ->
@@ -49,6 +52,7 @@ internal class ReadingSettings(directory: Path) {
                             "font" -> font = ReadingFont.entries.firstOrNull { it.name == value } ?: ReadingFont.SONG
                             "paper" -> paper = PaperColor.entries.firstOrNull { it.name == value } ?: PaperColor.SYSTEM
                             "autoGuide" -> autoGuide = value != "false"
+                            "sectionSummary" -> sectionSummary = value != "false"
                         }
                     }
                 }
@@ -74,6 +78,11 @@ internal class ReadingSettings(directory: Path) {
     fun chooseAutoGuide(enabled: Boolean) {
         save("autoGuide", enabled.toString())
         autoGuide = enabled
+    }
+
+    fun chooseSectionSummary(enabled: Boolean) {
+        save("sectionSummary", enabled.toString())
+        sectionSummary = enabled
     }
 
     private fun save(name: String, value: String) {

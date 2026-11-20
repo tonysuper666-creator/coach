@@ -182,6 +182,55 @@ internal object StudyCoachCourse {
         return Practice("根据本节原文，补全这句话：\n${sentence.replaceFirst(answer, "____")}", sentence, answer, options)
     }
 
+    /** 节末可选 1–2 道选择题：第 1 题复用现有做题主线规则，第 2 题从本节另选不同句与知识点生成。 */
+    fun sectionPractices(book: Textbook, lesson: BookLesson, maxCount: Int = 2): List<Practice> {
+        if (maxCount <= 0) return emptyList()
+        val first = practice(book, lesson, QuestionMode.CHOICE) ?: return emptyList()
+        val results = mutableListOf(first)
+        if (maxCount == 1) return results
+        val sentences = lesson.text.split(Regex("(?<=[。！？.!?])\\s*|\\n")).map(String::trim).filter { it.length >= 12 }
+        val pool = (book.choiceCandidates +
+            words.findAll(lesson.text).map { it.value }.toList() +
+            book.pages.asSequence().flatMap { page -> words.findAll(page.text).map { it.value } }.take(40).toList())
+            .filter { it.length in 2..40 }
+            .distinctBy(::normalized)
+        val usedSentences = mutableSetOf(first.reference)
+        val usedAnswerKeys = mutableSetOf(normalized(first.answer))
+        val orderedCandidates = sentences.filter { definition.containsMatchIn(it) } + sentences.filterNot { definition.containsMatchIn(it) }
+        for (sentence in orderedCandidates) {
+            if (results.size >= maxCount) break
+            if (!usedSentences.add(sentence)) continue
+            val defined = definition.find(sentence)?.groupValues?.get(1)?.trim()?.trimEnd(',', '，', '：', ':')
+            val answer = defined?.takeIf { it.length in 2..40 && sentence.contains(it) }
+                ?: words.findAll(sentence).map { it.value }.firstOrNull { normalized(it) !in usedAnswerKeys }
+                ?: continue
+            val answerKey = normalized(answer)
+            if (answerKey in usedAnswerKeys) continue
+            val distractors = pool.filter { normalized(it) != answerKey }.take(3)
+            if (distractors.isEmpty()) continue
+            usedAnswerKeys += answerKey
+            val options = (distractors + answer).shuffled(Random(lesson.id.hashCode() + results.size * 31))
+            results += Practice("根据本节原文，补全这句话：\n${sentence.replaceFirst(answer, "____")}", sentence, answer, options)
+        }
+        return results
+    }
+
+    /** 离线或尚未生成导读时的节末三行小结兜底。 */
+    fun localSectionSummary(lesson: BookLesson): List<String> {
+        val sentences = lesson.text.split(Regex("(?<=[。！？.!?])\\s*|\\n"))
+            .map { it.trim() }
+            .filter { it.length >= 10 }
+            .distinct()
+        val picked = when {
+            sentences.size >= 3 -> listOf(sentences.first(), sentences[sentences.size / 2], sentences.last()).distinct()
+            sentences.isNotEmpty() -> sentences
+            else -> lesson.text.lineSequence().map(String::trim).filter(String::isNotEmpty).take(3).toList()
+        }.take(3)
+        return picked.map { line ->
+            if (line.length <= 64) line else line.take(62).trimEnd('，', ',', '；', ';', '、', ' ') + "…"
+        }
+    }
+
     private val words = Regex("[A-Za-z][A-Za-z'-]{3,}|[\\p{IsHan}]{2,6}")
     private val definition = Regex("^(.{2,40}?)(?:\\s+(?:is|are|means|refers to)\\b|是|指的是|表示|称为)", RegexOption.IGNORE_CASE)
 

@@ -108,6 +108,9 @@ internal fun TextbookReader(
     onLearn: () -> Unit, explainProvider: BookExplainer? = null, openPairing: Boolean = false,
     onCancelImport: () -> Unit = {},
     onReorganizeSections: (() -> Unit)? = null,
+    onSaveSectionQuiz: ((BookLesson, Int, Practice, PracticeAnswer) -> Unit)? = null,
+    onOpenSectionMainline: ((Int) -> Unit)? = null,
+    onEnsureUnstructuredSectioned: (() -> Unit)? = null,
     hinge: Hinge? = LocalBookHinge.current,
     onExportNotes: ((Textbook, Int) -> Unit)? = null,
 ) {
@@ -186,6 +189,7 @@ internal fun TextbookReader(
     val explainConsent = remember(library) { ExplainConsent(library.directory) }
     var consented by remember(book.id) { mutableStateOf(explainConsent.allowed(book.id)) }
     val autoGuide = LocalReadingAutoGuide.current
+    val sectionSummaryEnabled = LocalReadingSectionSummary.current
     val allBookBlocks = remember(book.id, book.pages, book.structure) { book.sourceBlocks() }
     val pageRole = remember(book.id, book.structure, allBookBlocks, ui.page) {
         book.structure?.pageRole(ui.page) ?: when (ExplainClassifier.analyzePage(allBookBlocks, ui.page).kind) {
@@ -199,20 +203,94 @@ internal fun TextbookReader(
     val guideController = remember(book.id, book.lessons, library, explainConsent, explainer) {
         SectionGuideController(book, library, explainConsent, explainer, scope)
     }
-    val currentSectionIndex = remember(book.id, book.lessons, ui.page) {
-        guideController.sectionIndexForPage(ui.page)
+    val currentSectionIndex = remember(book.id, book.lessons, ui.page, paging.anchor, textView, pageUnrecognizedOriginal) {
+        if (textView && !pageUnrecognizedOriginal) {
+            guideController.sectionIndexForAnchor(paging.anchor.importPage, paging.anchor.offsetUtf16)
+        } else {
+            guideController.sectionIndexForPage(ui.page)
+        }
     }
     val currentSection = book.lessons.getOrNull(currentSectionIndex)
     var guideExpanded by remember(book.id, currentSection?.id) { mutableStateOf(false) }
     var sectionGuidePinned by remember(book.id, currentSection?.id) { mutableStateOf(false) }
+    var activeHardPoint by remember(book.id, currentSection?.id) { mutableStateOf<Pair<SectionHardPoint, SourceBlock>?>(null) }
+    var dismissedSummarySectionId by remember(book.id, currentSection?.id) { mutableStateOf<String?>(null) }
+    val sectionQuizAnswers = remember(book.id) { mutableStateMapOf<String, PracticeAnswer>() }
     var inlineThread by remember(book.id) { mutableStateOf<InlineExplainThread?>(null) }
     var inlineDraft by remember(book.id) { mutableStateOf("") }
     var lastInlineAction by remember(book.id) { mutableStateOf<Pair<SelectionExplainAction, String?>?>(null) }
     var pendingInlineConsent by remember(book.id) { mutableStateOf<Triple<SourceBlock, SelectionExplainAction, String?>?>(null) }
+    val currentSectionLastBody = remember(currentSection) {
+        currentSection?.blocks?.lastOrNull { !it.heading && it.text.isNotBlank() }
+    }
+    val isAtSectionEnd = remember(
+        currentSection,
+        currentSectionLastBody,
+        ui.page,
+        textView,
+        pageUnrecognizedOriginal,
+        paging.pages,
+        paging.index,
+        paging.spread,
+        readMode,
+        paging.canNext,
+    ) {
+        val sec = currentSection ?: return@remember false
+        val lastBlock = currentSectionLastBody ?: return@remember false
+        if (textView && !pageUnrecognizedOriginal && paging.pages.isNotEmpty()) {
+            val visibleCount = if (paging.spread) 2 else 1
+            val visibleLaid = (0 until visibleCount).mapNotNull { paging.pages.getOrNull(paging.index + it) }
+            val endOffset = (lastBlock.end - 1).coerceAtLeast(lastBlock.start)
+            visibleLaid.any { laid ->
+                laid.sources.any { s -> s.importPage == lastBlock.page && endOffset in s.startUtf16 until s.endUtf16 }
+            } || (readMode == BookReadMode.Scroll && !paging.canNext && ui.page == sec.lastPage)
+        } else {
+            ui.page == sec.lastPage
+        }
+    }
+    val currentGuideState = currentSection?.let { guideController.states[it.id] }
+    val currentGuide = (currentGuideState as? SectionGuideState.Ready)?.guide
+    val sectionHardPoints = remember(currentSection, currentGuide, allBookBlocks) {
+        val sec = currentSection ?: return@remember emptyList()
+        val byId = (sec.blocks + allBookBlocks).associateBy { it.id }
+        currentGuide?.hardPoints.orEmpty().mapNotNull { hp ->
+            val block = byId[hp.blockId] ?: return@mapNotNull null
+            hp to block
+        }
+    }
+    val sectionEndSummaryLines = remember(currentSection, currentGuide) {
+        val sec = currentSection ?: return@remember emptyList()
+        currentGuide?.summary?.takeIf { it.isNotEmpty() }?.take(3)
+            ?: currentGuide?.brief?.takeIf { it.isNotEmpty() }?.take(3)
+            ?: StudyCoachCourse.localSectionSummary(sec)
+    }
+    val sectionEndPractices = remember(book.id, currentSection?.id) {
+        currentSection?.let { StudyCoachCourse.sectionPractices(book, it, maxCount = 2) }.orEmpty()
+    }
     LaunchedEffect(explainer) { if (!explainer.loaded) explainer.load() }
-    LaunchedEffect(book.id, ui.page, autoGuide, explainer.identity, consented) {
-        if (pageRole == BookPageRole.BODY && autoGuide && explainer.identity != null && consented) {
-            guideController.prefetchForPage(ui.page, autoGuide = true)
+    LaunchedEffect(book.id, book.structure?.needsModelSectioning, book.hasPendingOcr, explainer.identity, consented) {
+        if (book.structure?.needsModelSectioning == true && !book.hasPendingOcr && explainer.identity != null && consented) {
+            onEnsureUnstructuredSectioned?.invoke()
+        }
+    }
+    LaunchedEffect(book.id, currentSection?.id) {
+        val sec = currentSection ?: return@LaunchedEffect
+        for (qIdx in 0..1) {
+            val mapKey = "${sec.id}:$qIdx"
+            if (mapKey !in sectionQuizAnswers) {
+                val lessonKey = if (qIdx == 0) sec.id else "${sec.id}#q${qIdx + 1}"
+                val saved = withContext(Dispatchers.IO) { library.answer(book.id, lessonKey, QuestionMode.CHOICE) }
+                if (saved.revealed || saved.text.isNotEmpty()) sectionQuizAnswers[mapKey] = saved
+            }
+        }
+    }
+    LaunchedEffect(book.id, ui.page, autoGuide, sectionSummaryEnabled, isAtSectionEnd, explainer.identity, consented, currentSectionIndex) {
+        if (pageRole == BookPageRole.BODY && explainer.identity != null && consented && currentSectionIndex >= 0) {
+            if (autoGuide) {
+                guideController.prefetchForPage(ui.page, autoGuide = true, sectionIndexOverride = currentSectionIndex)
+            } else if (sectionSummaryEnabled && isAtSectionEnd) {
+                guideController.ensureSection(currentSectionIndex, prefetchNext = false)
+            }
         }
     }
     fun runInlineSelection(target: SourceBlock, action: SelectionExplainAction, questionText: String? = null) {
@@ -703,11 +781,80 @@ internal fun TextbookReader(
                         onAllowConsent = {
                             explainConsent.allow(book.id)
                             consented = true
-                            guideController.prefetchForPage(ui.page, autoGuide = true)
+                            guideController.prefetchForPage(ui.page, autoGuide = true, sectionIndexOverride = currentSectionIndex)
                         },
                         onRetry = { guideController.requestSection(currentSectionIndex) },
                         onOpenPair = { explainOpen = true },
                         onOpenCitation = { _, block -> openPassage(BookPassage.from(book, block)) },
+                    )
+                }
+                if (!textView && !explainOpen && pageRole == BookPageRole.BODY) {
+                    val pageMarkers = sectionHardPoints.filter { it.second.page == ui.page }
+                    if (pageMarkers.isNotEmpty()) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text("本页难点：", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
+                            pageMarkers.forEach { (hp, blk) ->
+                                V7TextButton(
+                                    onClick = { activeHardPoint = hp to blk; inlineThread = null },
+                                    modifier = Modifier.testTag("hard-point-marker-${hp.blockId}"),
+                                ) {
+                                    Text(hp.label)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            val hardPointCard: @Composable () -> Unit = {
+                val chosenHp = activeHardPoint
+                val sec = currentSection
+                if (chosenHp != null && sec != null && !explainOpen) {
+                    HardPointExplainCard(
+                        book = book,
+                        allBlocks = allBookBlocks,
+                        section = sec,
+                        hardPoint = chosenHp.first,
+                        block = chosenHp.second,
+                        onAskFollowUp = {
+                            val blk = chosenHp.second
+                            activeHardPoint = null
+                            runInlineSelection(blk, SelectionExplainAction.ASK)
+                        },
+                        onOpenOriginal = if (hasOriginal) { { openPassage(BookPassage.from(book, chosenHp.second)) } } else null,
+                        onClose = { activeHardPoint = null },
+                    )
+                }
+            }
+            val sectionEndSummaryCard: @Composable () -> Unit = {
+                val sec = currentSection
+                if (sectionSummaryEnabled && isAtSectionEnd && !explainOpen && pageRole == BookPageRole.BODY &&
+                    sec != null && inlineThread == null && activeHardPoint == null && dismissedSummarySectionId != sec.id) {
+                    val answersForSection = (0 until sectionEndPractices.size).mapNotNull { qIdx ->
+                        sectionQuizAnswers["${sec.id}:$qIdx"]?.let { qIdx to it }
+                    }.toMap()
+                    SectionEndSummaryCard(
+                        section = sec,
+                        summaryLines = sectionEndSummaryLines,
+                        practices = sectionEndPractices,
+                        answers = answersForSection,
+                        onAnswer = { qIdx, practice, answer ->
+                            sectionQuizAnswers["${sec.id}:$qIdx"] = answer
+                            if (answer.revealed) {
+                                if (onSaveSectionQuiz != null) {
+                                    onSaveSectionQuiz(sec, qIdx, practice, answer)
+                                } else {
+                                    scope.launch(Dispatchers.IO) {
+                                        library.saveSectionCheckAnswer(book.id, sec, qIdx, practice, answer)
+                                    }
+                                }
+                            }
+                        },
+                        onOpenMainline = onOpenSectionMainline?.let { open -> { open(currentSectionIndex) } },
+                        onDismiss = { dismissedSummarySectionId = sec.id },
                     )
                 }
             }
@@ -780,6 +927,13 @@ internal fun TextbookReader(
                         BookPageView(book, paging, ranges, turnLayout, libraryDirectory = library.directory,
                             turnStyle = turnStyle, readMode = readMode, onOpenTableRow = openPassage,
                             onSelectText = { textSelection = it },
+                            hardPoints = sectionHardPoints,
+                            onHardPointClick = { hp, blk ->
+                                activeHardPoint = hp to blk
+                                inlineThread = null
+                                textSelection = null
+                                pdf.selection = null
+                            },
                             onSpot = { anchor ->
                                 if (ui.source == null) runCatching { library.saveReadSpot(book.id, anchor.importPage, anchor.offsetUtf16) }
                             },
@@ -823,6 +977,19 @@ internal fun TextbookReader(
                             onDismiss = { pdf.selection = null; textSelection = null },
                             modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
                         )
+                    }
+                    if (verticalSplit == null && tabletopSplit == null && !explainOpen && inlineThread == null) {
+                        Box(
+                            Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(horizontal = 16.dp, vertical = 10.dp)
+                                .widthIn(max = 720.dp),
+                        ) {
+                            when {
+                                activeHardPoint != null -> hardPointCard()
+                                else -> sectionEndSummaryCard()
+                            }
+                        }
                     }
                 }
             }
@@ -990,10 +1157,12 @@ internal fun TextbookReader(
                                 BookExplainPanel(book, paragraphPage.number, explainConsent, explainer,
                                     selection = explainingSelection, library = library, onOpenOriginal = openPassage.takeIf { explainingSelection != null })
                             }
+                            activeHardPoint != null -> Box(Modifier.weight(1f).fillMaxWidth()) { hardPointCard() }
                             inlineThread != null -> Box(Modifier.weight(1f).fillMaxWidth()) { inlineCard() }
                             notesOpen && samePage && view != null -> notesPanel(Modifier.weight(1f))
                             else -> Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).testTag("book-half-fold-companion"),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                sectionEndSummaryCard()
                                 Text("教材目录", style = MaterialTheme.typography.titleMedium)
                                 for (lesson in book.lessons) {
                                     TextButton(onClick = { turnTo(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
@@ -1019,7 +1188,11 @@ internal fun TextbookReader(
                             itemVerticalAlignment = Alignment.CenterVertically) { actions() }
                         pagingBar()
                         noticesAndGuide()
-                        if (!explainOpen) inlineCard()
+                        if (!explainOpen) {
+                            hardPointCard()
+                            inlineCard()
+                            sectionEndSummaryCard()
+                        }
                         if (notesOpen && samePage && view != null) notesPanel(Modifier.fillMaxWidth())
                     }
                 }
@@ -1038,7 +1211,9 @@ internal fun TextbookReader(
                     }
                     noticesAndGuide()
                     pageSurface(Modifier.weight(1f))
-                    if (!explainOpen) inlineCard()
+                    if (!explainOpen) {
+                        inlineCard()
+                    }
                     if (notesOpen && samePage && view != null) notesPanel(Modifier.fillMaxWidth().heightIn(max = 300.dp))
                     pagingBar()
                 }

@@ -34,7 +34,7 @@ internal data class LibraryUi(
     val importNotice: BookImportNotice? = null,
 )
 
-internal class TextbookController(val library: TextbookLibrary) {
+internal class TextbookController(val library: TextbookLibrary, var structureProvider: BookStructureProvider? = null) {
     private val mutable = MutableStateFlow(LibraryUi())
     val state = mutable.asStateFlow()
     private val actions = Mutex()
@@ -144,6 +144,7 @@ internal class TextbookController(val library: TextbookLibrary) {
                             )
                         }
                     }
+                    ensureUnstructuredBookSectioned(book.id)
                     return@launch
                 }
                 val totalPages = book.pages.size
@@ -252,8 +253,8 @@ internal class TextbookController(val library: TextbookLibrary) {
         return job
     }
 
-    private fun runOcrLoop(bookId: String, control: BookImportControl, deleteOnEmptyFailure: Boolean) {
-        val finalBook = library.resumeBookOcr(bookId, control) { updatedBook, progress ->
+    private suspend fun runOcrLoop(bookId: String, control: BookImportControl, deleteOnEmptyFailure: Boolean) {
+        var finalBook = library.resumeBookOcr(bookId, control) { updatedBook, progress ->
             val remainingPending = updatedBook.pages.count { it.ocrPending }
             mutable.update { current ->
                 current.copy(
@@ -264,6 +265,10 @@ internal class TextbookController(val library: TextbookLibrary) {
                     importing = progress,
                 )
             }
+        }
+        if (!finalBook.hasPendingOcr && finalBook.pages.any { it.ocr }) {
+            finalBook = runCatching { library.reorganizeSections(bookId) }.getOrDefault(finalBook)
+            ensureUnstructuredBookSectioned(bookId)?.let { finalBook = it }
         }
         val catalog = library.catalog()
         mutable.update { current ->
@@ -439,8 +444,9 @@ internal class TextbookController(val library: TextbookLibrary) {
 
     suspend fun source() = action {
         val book = mutable.value.book ?: return@action
-        val lesson = mutable.value.review?.let { review -> book.lessons.find { it.id == review.lesson } }
-            ?: book.lessons.getOrNull(book.lessonIndex) ?: return@action
+        val lesson = mutable.value.review?.let { review ->
+            book.lessons.find { it.id == review.lesson || it.id == review.lesson.substringBefore("#q") }
+        } ?: book.lessons.getOrNull(book.lessonIndex) ?: return@action
         mutable.update { it.copy(screen = BookScreen.READER, source = lesson, page = lesson.firstPage, prompt = null) }
     }
 
@@ -554,5 +560,75 @@ internal class TextbookController(val library: TextbookLibrary) {
         val book = mutable.value.book ?: return@action
         val updated = library.reorganizeSections(book.id)
         mutable.update { it.copy(book = updated, catalog = library.catalog()) }
+        applyModelSectioningIfNeeded(book.id, structureProvider)
+    }
+
+    /** 若当前书无任何标题/书签/目录页且未尝试过模型分节，调用一次 Haiku 分节并按书缓存；失败退回段落边界切分。 */
+    suspend fun ensureUnstructuredBookSectioned(
+        bookId: String,
+        provider: BookStructureProvider? = structureProvider,
+    ): Textbook? = actions.withLock {
+        applyModelSectioningIfNeeded(bookId, provider)
+    }
+
+    private suspend fun applyModelSectioningIfNeeded(
+        bookId: String,
+        provider: BookStructureProvider?,
+    ): Textbook? {
+        val activeProvider = provider ?: return null
+        val currentBook = withContext(Dispatchers.IO) { library.book(bookId) }
+        val currentStructure = currentBook.structure ?: return null
+        if (!currentStructure.needsModelSectioning || currentBook.hasPendingOcr) return currentBook
+        val candidates = BookStructurePlanner.extractUnstructuredCandidates(
+            currentBook.id,
+            currentBook.pages,
+            currentStructure.pageRoles,
+        )
+        if (candidates.isEmpty()) return currentBook
+        val bookPages = maxOf(currentBook.pages.size, currentBook.pages.maxOfOrNull { it.number } ?: 1)
+        val result = runCatching { activeProvider.sectionUnstructuredBook(currentBook, candidates, bookPages) }
+            .getOrElse { e ->
+                if (e is CancellationException) throw e
+                ModelSectionResult.Failed("分节请求未完成，已退回段落边界切分。")
+            }
+        if (result is ModelSectionResult.Deferred) return currentBook
+        val boundaries = (result as? ModelSectionResult.Done)?.boundaries.orEmpty()
+        val updatedStructure = BookStructurePlanner.applyModelBoundaries(
+            bookId = currentBook.id,
+            title = currentBook.title,
+            format = currentBook.format,
+            pages = currentBook.pages,
+            boundaries = boundaries,
+            fallback = currentStructure,
+        )
+        val savedBook = withContext(Dispatchers.IO) { library.saveBookStructure(currentBook.id, updatedStructure) }
+        val catalog = withContext(Dispatchers.IO) { library.catalog() }
+        mutable.update { state ->
+            state.copy(
+                book = if (state.book?.id == savedBook.id) savedBook else state.book,
+                catalog = catalog,
+            )
+        }
+        return savedBook
+    }
+
+    suspend fun recordSectionQuizAnswer(
+        lesson: BookLesson,
+        questionIndex: Int,
+        practice: Practice,
+        answer: PracticeAnswer,
+    ) = action(showBusy = false) {
+        val book = mutable.value.book ?: return@action
+        library.saveSectionCheckAnswer(book.id, lesson, questionIndex, practice, answer)
+        mutable.update { it.copy(reviews = library.reviews(), ladder = library.ladder(book.id)) }
+    }
+
+    suspend fun openSectionPractice(sectionIndex: Int) = action {
+        val book = mutable.value.book ?: return@action
+        val idx = sectionIndex.coerceIn(0, (book.lessons.size - 1).coerceAtLeast(0))
+        val next = book.copy(learning = true, promptSeen = true, lessonIndex = idx, questionMode = QuestionMode.CHOICE)
+        library.saveLearningPath(book.id, LearningPath.QUESTION_FIRST.name)
+        persist(next)
+        openLearning(next, LearningPath.QUESTION_FIRST)
     }
 }

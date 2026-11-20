@@ -216,6 +216,7 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                 CompositionLocalProvider(LocalDeskSelect provides deskSelect, LocalDeskTypeControl provides typeControl,
                     LocalReadingFont provides preferences.font, LocalImportNoticeHandled provides true,
                     com.coach.desktop.books.LocalReadingAutoGuide provides preferences.autoGuide,
+                    com.coach.desktop.books.LocalReadingSectionSummary provides preferences.sectionSummary,
                     LocalBookHinge provides hinge) {
                     // No rules between bar, rail and page: V7 separates them with the desk colour and the paper alone.
                     if (hostTabletop != null) Column(Modifier.fillMaxSize()) {

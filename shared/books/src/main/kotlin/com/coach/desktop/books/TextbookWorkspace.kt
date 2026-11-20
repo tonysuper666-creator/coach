@@ -32,6 +32,23 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     onExportNotes: ((Textbook, Int) -> Unit)? = null,
     releasePickedBook: (Path) -> Unit = {}, chooseBook: suspend () -> Path?) {
     val explainer = remember(controller.library) { BookExplainer(library = controller.library) }
+    val consent = remember(controller.library) { ExplainConsent(controller.library.directory) }
+    val bookStructureProvider = remember(explainer, consent) {
+        BookStructureProvider { targetBook, candidates, bookPages ->
+            if (!explainer.loaded) explainer.load()
+            if (explainer.identity == null || !consent.allowed(targetBook.id)) {
+                ModelSectionResult.Deferred
+            } else {
+                explainer.structureUnstructuredBook(candidates, bookPages)
+            }
+        }
+    }
+    DisposableEffect(controller, bookStructureProvider) {
+        controller.structureProvider = bookStructureProvider
+        onDispose {
+            if (controller.structureProvider === bookStructureProvider) controller.structureProvider = null
+        }
+    }
     val learningSupport = support ?: remember(controller.library, explainer) {
         PairedBookLearningSupport(controller.library,
             sendLesson = { blocks, pages -> explainer.run { load(); explainLesson(blocks, pages) } },
@@ -102,8 +119,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     }
     fun openPracticeSource(practice: Practice) {
         val book = ui.book ?: return
-        val lesson = ui.review?.let { review -> book.lessons.find { it.id == review.lesson } }
-            ?: book.lessons.getOrNull(book.lessonIndex) ?: return
+        val lesson = ui.review?.let { review ->
+            book.lessons.find { it.id == review.lesson || it.id == review.lesson.substringBefore("#q") }
+        } ?: book.lessons.getOrNull(book.lessonIndex) ?: return
         // 本题依据取自整节正文（lesson.text 以 "\n\n" 拼接各正文块），
         // 所以整段查找后再回落到命中的那个块，才能定位到块所在页。
         val body = lesson.blocks.filterNot { it.heading }
@@ -194,6 +212,15 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             openPairing = openPairing,
                             onCancelImport = controller::cancelImport,
                             onReorganizeSections = { run { controller.reorganizeSections() } },
+                            onSaveSectionQuiz = { lesson, qIdx, practice, answer ->
+                                run { controller.recordSectionQuizAnswer(lesson, qIdx, practice, answer) }
+                            },
+                            onOpenSectionMainline = { secIdx ->
+                                run { if (drafts.flush()) controller.openSectionPractice(secIdx) }
+                            },
+                            onEnsureUnstructuredSectioned = {
+                                ui.book?.let { target -> run { controller.ensureUnstructuredBookSectioned(target.id, bookStructureProvider) } }
+                            },
                             hinge = hinge,
                             onExportNotes = onExportNotes,
                             onNoteSession = { noteReader = it },

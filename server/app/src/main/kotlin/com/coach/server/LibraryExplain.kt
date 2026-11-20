@@ -31,10 +31,11 @@ internal class LibraryExplainRequest private constructor(
     private val claimedBlock: String,
     val bookPages: Int? = null,
     val isGuide: Boolean = false,
+    val isStructure: Boolean = false,
     val hasSectionContext: Boolean = false,
 ) {
     val isLesson: Boolean get() = bookPages != null
-    val isSectionScoped: Boolean get() = isLesson || isGuide || hasSectionContext
+    val isSectionScoped: Boolean get() = isLesson || isGuide || isStructure || hasSectionContext
     val bookId: String get() = pages.first().docId.substringBefore(":p")
     val isLocalBook: Boolean get() = Regex("[0-9a-f]{64}").matches(bookId)
     fun authorize(store: LedgerStore, binding: ReaderDocument? = null): AuthorizedLibrarySelection {
@@ -62,6 +63,8 @@ internal class LibraryExplainRequest private constructor(
         }
         fun lesson(pages: List<SourcePage>, bookPages: Int, guide: Boolean = false) =
             LibraryExplainRequest("", pages, VisibleScope.NONE, "", bookPages, isGuide = guide)
+        fun structure(pages: List<SourcePage>, bookPages: Int) =
+            LibraryExplainRequest("", pages, VisibleScope.NONE, "", bookPages, isStructure = true)
     }
 }
 
@@ -89,7 +92,8 @@ internal fun libraryExplainRequest(input: JsonObject): LibraryExplainRequest {
     fun bad(): Nothing = throw MockError(HttpStatusCode.BadRequest, "选中追问格式不对。")
     val kind = input.str("kind")
     val guide = kind == "guide"
-    val lesson = kind == "lesson" || guide
+    val structure = kind == "structure"
+    val lesson = kind == "lesson" || guide || structure
     val hasSectionContext = input["sectionContext"] is JsonObject
     val sectionScoped = lesson || hasSectionContext
     fun tooLong(): Nothing = throw MockError(HttpStatusCode.PayloadTooLarge, "这一节太长，先选一段问。")
@@ -119,7 +123,8 @@ internal fun libraryExplainRequest(input: JsonObject): LibraryExplainRequest {
     if (books.size != 1 || !tutorSourceAllowed(books.single())) bad()
     if (lesson) {
         if (!books.single().matches(Regex("[0-9a-f]{64}"))) bad()
-        return LibraryExplainRequest.lesson(pages, checkNotNull(bookPages), guide = guide)
+        return if (structure) LibraryExplainRequest.structure(pages, checkNotNull(bookPages))
+        else LibraryExplainRequest.lesson(pages, checkNotNull(bookPages), guide = guide)
     }
     val selected = pages.firstOrNull { containsReaderSelection(it.text, quote) } ?: bad()
     if (hasSectionContext) {

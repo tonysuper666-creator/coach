@@ -35,13 +35,34 @@ internal enum class ReaderFormatReason {
 internal class ReaderFormat(val servedBy: String? = null,
     val reason: ReaderFormatReason = ReaderFormatReason.STREAM_JSON) : Exception("Invalid reader JSON")
 
-/** Prefix lexer: only decoded, non-whitespace characters at paragraphs[*].text count.
+/** Prefix lexer: only decoded, non-whitespace characters at configured body paths count.
  * Stores keys/grammar only, never source or explanation text. Final citation gate is separate.
  */
-internal class ReaderBodyProgress {
+internal class ReaderBodyProgress(
+    private val maxSize: Int = 12_000,
+    private val progressPaths: Set<Pair<List<String>, String>> = DEFAULT_PROGRESS_PATHS,
+    private val progressArrayPaths: Set<List<String>> = emptySet(),
+    private val allowNumbers: Boolean = false,
+) {
+    companion object {
+        val DEFAULT_PROGRESS_PATHS = setOf(listOf("paragraphs", "*") to "text")
+        val GUIDE_PROGRESS_PATHS = setOf(
+            listOf("paragraphs", "*") to "text",
+            listOf("hardPoints", "*") to "explanation",
+            emptyList<String>() to "recap",
+        )
+        val GUIDE_PROGRESS_ARRAY_PATHS = setOf(listOf("brief"), listOf("summary"))
+        val STRUCTURE_PROGRESS_PATHS = setOf(
+            listOf("sections", "*") to "title",
+            listOf("sections", "*") to "startBlockId",
+        )
+    }
+
     private data class Frame(val kind: Char, val path: List<String>, var phase: Int = 0, var key: String = "")
     private val stack = mutableListOf<Frame>()
     private var string = false
+    private var number = false
+    private var numberHasDigit = false
     private var keyString = false
     private var bodyString = false
     private var escape = false
@@ -54,7 +75,7 @@ internal class ReaderBodyProgress {
     fun push(delta: String): Boolean {
         var progress = false
         for (c in delta) {
-            if (++size > 12_000 || invalid) { invalid = true; break }
+            if (++size > maxSize || invalid) { invalid = true; break }
             fun decoded(d: Char) {
                 if (keyString) { if (key.length < 64) key.append(d) else invalid = true }
                 if (bodyString) {
@@ -65,6 +86,15 @@ internal class ReaderBodyProgress {
                     else if (d.isLowSurrogate()) invalid = true
                     else if (!d.isWhitespace() && !d.isISOControl() && Character.getType(d) != Character.FORMAT.toInt()) progress = true
                 }
+            }
+            if (number) {
+                if (c in '0'..'9') {
+                    numberHasDigit = true
+                    continue
+                }
+                number = false
+                if (!numberHasDigit) { invalid = true; continue }
+                stack.lastOrNull()?.phase = 3
             }
             if (string) {
                 val hex = unicode
@@ -98,7 +128,14 @@ internal class ReaderBodyProgress {
             when {
                 c == '"' && f != null && (f.phase == 0 && f.kind == '{' || f.phase == 2) -> {
                     string = true; keyString = f.kind == '{' && f.phase == 0; key = StringBuilder()
-                    bodyString = !keyString && f.kind == '{' && f.path == listOf("paragraphs", "*") && f.key == "text"
+                    bodyString = !keyString && (
+                        (f.kind == '{' && (f.path to f.key) in progressPaths) ||
+                        (f.kind == '[' && f.path in progressArrayPaths)
+                    )
+                }
+                (c == '-' || c in '0'..'9') && allowNumbers && f?.phase == 2 -> {
+                    number = true
+                    numberHasDigit = c in '0'..'9'
                 }
                 c == ':' && f?.phase == 1 -> f.phase = 2
                 c == ',' && f?.phase == 3 -> f.phase = if (f.kind == '{') 0 else 2
@@ -116,9 +153,13 @@ internal class ReaderBodyProgress {
     }
 }
 
-internal class ReaderTiming(private val limits: ReaderTimeouts, val started: Long = System.nanoTime()) {
+internal class ReaderTiming(
+    private val limits: ReaderTimeouts,
+    val started: Long = System.nanoTime(),
+    private val bodyProgressFactory: () -> ReaderBodyProgress = { ReaderBodyProgress() },
+) {
     private val signal = Channel<Unit>(Channel.CONFLATED)
-    private var parser = ReaderBodyProgress()
+    private var parser = bodyProgressFactory()
     @Volatile private var attemptStarted = System.nanoTime()
     @Volatile private var servedBy: String? = null
     @Volatile var first: Long? = null; private set
@@ -137,7 +178,7 @@ internal class ReaderTiming(private val limits: ReaderTimeouts, val started: Lon
                 override val supportsReset = true
                 override fun onMeta(servedBy: String) { this@ReaderTiming.servedBy = servedBy }
                 override fun onReset() {
-                    parser = ReaderBodyProgress()
+                    parser = bodyProgressFactory()
                     invalid = false
                     last = null
                     attemptStarted = System.nanoTime()

@@ -4,11 +4,11 @@ import com.coach.domain.LedgerJson
 import com.coach.domain.num
 import com.coach.domain.str
 import io.ktor.client.HttpClient
-import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.request.*
 import io.ktor.client.request.forms.submitForm
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.jsonObject
@@ -16,10 +16,12 @@ import kotlinx.serialization.json.jsonObject
 class SableLoginError(message: String) : Exception(message)
 
 const val SABLE_ORIGIN = "https://chat.tonysuper666.com"
+private const val MAX_POLL_BACKOFF_MS = 15_000L
 
 internal suspend fun sableLogin(
     client: HttpClient, friendUrl: String, open: suspend (uri: String, code: String) -> Unit,
     issuer: String = SABLE_ORIGIN,
+    pause: suspend (Long) -> Unit = ::delay,
 ): PairedCredentials {
     validateCoachBaseUrl(friendUrl)
     require(issuer == SABLE_ORIGIN || (Url(issuer).host == "127.0.0.1" && Url(issuer).protocol == URLProtocol.HTTP))
@@ -44,21 +46,32 @@ internal suspend fun sableLogin(
     }
     val lifetime = grant.num("expires_in")
     require(lifetime in 1..600)
-    var interval = grant.num("interval", 5).also { require(it in 1..600) } * 1000
-    val token = withTimeoutOrNull(lifetime * 1000) {
+    var baseInterval = grant.num("interval", 5).also { require(it in 1..600) } * 1000L
+    var nextDelay = baseInterval
+    val token = withTimeoutOrNull(lifetime * 1000L) {
         open(uri.toString(), code)
         var access: String? = null
         while (access == null) {
-            delay(interval)
-            val reply = try { client.submitForm("$issuer/api/device/token", form) { header("x-hermes-web", "1") } }
-                catch (_: HttpRequestTimeoutException) { interval *= 2; continue }
-                catch (_: io.ktor.client.network.sockets.ConnectTimeoutException) { interval *= 2; continue }
-            val body = LedgerJson.parseToJsonElement(reply.bodyAsText()).jsonObject
-            if (reply.status == HttpStatusCode.OK) {
+            pause(nextDelay)
+            val (status, raw) = try {
+                val reply = client.submitForm("$issuer/api/device/token", form) { header("x-hermes-web", "1") }
+                reply.status to reply.bodyAsText()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                nextDelay = minOf(nextDelay * 2, maxOf(baseInterval, MAX_POLL_BACKOFF_MS))
+                continue
+            }
+            nextDelay = baseInterval
+            val body = LedgerJson.parseToJsonElement(raw).jsonObject
+            if (status == HttpStatusCode.OK) {
                 access = body.str("access_token").also { require(it.isNotBlank()) }
             } else when (body.str("error")) {
                 "authorization_pending" -> Unit
-                "slow_down" -> interval += 5_000
+                "slow_down" -> {
+                    baseInterval += 5_000L
+                    nextDelay = baseInterval
+                }
                 "access_denied" -> throw SableLoginError("你已拒绝授权。")
                 "expired_token" -> throw SableLoginError(expired)
                 else -> throw SableLoginError(failure)

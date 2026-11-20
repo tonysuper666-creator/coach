@@ -25,8 +25,9 @@ import java.nio.file.Path
 import kotlin.test.*
 
 /**
- * TON-1659 第 3 项：每段的「讲解这段」平时只是首行右边一行 faint 小字，和正文第一行同一基线；
- * 鼠标扫到这一段、或这一段就是从阅读器选进来的，才浮成纸面按钮。两种状态的盒子一样大，段落不因鼠标挪位。
+ * TON-1659 + TON-1766：正常浏览正文时每行不再常驻「讲解这段」，节标题旁保留淡淡的「讲讲这一节」
+ *（平时 faint，悬停浮成纸面按钮且不挪位）；从阅读器选进某一段时该段按钮突出显示，
+ * 等待、失败与同段重试的排版稳定不跳动。
  */
 @OptIn(ExperimentalTestApi::class)
 class ExplainFaintControlTest {
@@ -35,31 +36,28 @@ class ExplainFaintControlTest {
     private var blockTag = ""
     /** 同一页第 2 段的正文，用来量它有没有被第 1 段的状态行推走。 */
     private var secondTag = ""
-    /** 这一轮用的假 Mac：测试可以核对它收到了哪几次请求。 */
+    /** 这一轮用的假服务：测试可以核对它收到了哪几次请求。 */
     private lateinit var mac: FakeMac
 
     @Test fun faintTextSitsOnTheParagraphsFirstBaselineInBothThemes() {
-        for (dark in listOf(false, true)) withPanel(dark) { dark ->
+        for (dark in listOf(false, true)) withPanel(dark, selected = false) { dark ->
             val faint = colors(dark).fgTertiary
-            assertEquals(faint, labelColor(), "默认应是 faint 文字，不是纸面按钮")
-            val paragraph = onNodeWithTag(paragraphTag).fetchSemanticsNode().boundsInRoot
-            val label = button().fetchSemanticsNode().boundsInRoot
-            assertEquals(firstBaseline(onNodeWithTag(paragraphTag).fetchSemanticsNode()), firstBaseline(button().fetchSemanticsNode()), 1.5f, "和段落首行基线对齐")
-            assertTrue(label.top >= paragraph.top - 2f && label.top < paragraph.top + 20f,
-                "「讲解这段」应贴着第一行，而不是掉到段落下面：label=${label.top} paragraph=${paragraph.top}")
-            assertEquals(colors(dark).surface1, pixel(label.left + 4f, label.center.y), "默认不该有纸面底（$dark）")
+            assertEquals(0, onAllNodesWithTag("explain-button").fetchSemanticsNodes().size, "正文各行不再挂常驻「讲解这段」")
+            val trigger = onNodeWithTag("explain-section-trigger")
+            assertEquals(faint, nodeColor(trigger), "默认「讲讲这一节」应是 faint 文字")
+            val before = trigger.fetchSemanticsNode().boundsInRoot
+            assertEquals(colors(dark).surface1, pixel(before.left + 4f, before.center.y), "默认不该有纸面底（$dark）")
 
-            onNodeWithTag(paragraphTag).performMouseInput { moveTo(center) }
+            trigger.performMouseInput { moveTo(center) }
             waitForIdle()
-            assertEquals(colors(dark).fgPrimary, labelColor(), "鼠标在这一段上时是正常字色")
-            assertNotEquals(colors(dark).surface1, pixel(label.left + 4f, label.center.y), "悬停时浮出纸面底")
-            assertEquals(label.top, button().fetchSemanticsNode().boundsInRoot.top, .5f,
+            assertEquals(colors(dark).fgPrimary, nodeColor(trigger), "鼠标悬停时是正常字色")
+            assertNotEquals(colors(dark).surface1, pixel(before.left + 4f, before.center.y), "悬停时浮出纸面底")
+            assertEquals(before.top, trigger.fetchSemanticsNode().boundsInRoot.top, .5f,
                 "鼠标经过不能把这一行挪位")
-            assertEquals(paragraph.top, onNodeWithTag(paragraphTag).fetchSemanticsNode().boundsInRoot.top, .5f)
 
-            onNodeWithTag(paragraphTag).performMouseInput { exit() }
+            trigger.performMouseInput { exit() }
             waitForIdle()
-            assertEquals(faint, labelColor(), "鼠标离开回到 faint")
+            assertEquals(faint, nodeColor(trigger), "鼠标离开回到 faint")
         }
     }
 
@@ -69,42 +67,40 @@ class ExplainFaintControlTest {
         assertNotEquals(colors(dark).surface1, pixel(label.left + 4f, label.center.y), "选中的段落上纸面底可见")
     }
 
-    @Test fun unpairedKeepsTheFaintLabelAndNoClick() = withPanel(false, paired = false) { _ ->
-        assertFalse(enabled(), "没配对时讲解这段不可点")
-        assertNotEquals(colors(false).fgPrimary, labelColor(), "不可点时不抢正文")
+    @Test fun unpairedKeepsTheFaintLabelAndNoClick() = withPanel(false, selected = false, paired = false) { _ ->
+        val trigger = onNodeWithTag("explain-section-trigger")
+        assertNotNull(trigger.fetchSemanticsNode().config.getOrNull(SemanticsProperties.Disabled), "没配对时「讲讲这一节」不可点")
+        assertNotEquals(colors(false).fgPrimary, nodeColor(trigger), "不可点时不抢正文")
     }
 
     /**
-     * 同一页的第 1 段请求讲解、断连失败、再在同段重试：请求前、等待中、失败后、重试等待中这四个时刻，
-     * 第 2 段的上沿都要和点之前一模一样。失败那一行（再试一次 + 那句话）占的是平时就留好的位置，
-     * 不是临时插进来把读者正在读的段落往下推（QA 退回 PR #448；desktop-polish D3）。
-     *
-     * 失败后「再试一次」必须还能点，点下去是同一个段 ID 的第二次请求；重试有结果后讲解照常出现。
+     * 选段请求讲解、断连失败、再在同段重试：请求前、等待中、失败后、重试等待中这四个时刻，
+     * 按钮所在块的上沿不跳动；失败后「再试一次」还能点且仍是同一个段 ID。
      */
     @Test fun theSecondParagraphStaysPutThroughWaitFailureAndInPlaceRetry() {
         for (dark in listOf(false, true)) {
             val theme = if (dark) "dark" else "light"
             val first = CompletableDeferred<ExplainResult>()
             val retry = CompletableDeferred<ExplainResult>()
-            withPanel(dark, gates = listOf(first, retry)) { _ ->
-                val before = top(secondTag)
+            withPanel(dark, selected = true, gates = listOf(first, retry)) { _ ->
+                val before = top(paragraphTag)
                 button().performClick()
                 waitForIdle()
                 assertFalse(enabled(), "点下去就进等待中")
-                val waiting = top(secondTag)
-                assertEquals(before, waiting, 1f, "等待中第 2 段被推动了（$theme）")
+                val waiting = top(paragraphTag)
+                assertEquals(before, waiting, 1f, "等待中正文被推动了（$theme）")
 
                 first.complete(ExplainResult.Refused(ExplainTrouble.UNREACHABLE, ExplainTrouble.Unreachable))
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-retry").fetchSemanticsNodes().isNotEmpty() }
-                val failed = top(secondTag)
-                assertEquals(before, failed, 1f, "失败后第 2 段被推动了（$theme）")
+                val failed = top(paragraphTag)
+                assertEquals(before, failed, 1f, "失败后正文被推动了（$theme）")
                 assertNull(onNodeWithTag("explain-retry").fetchSemanticsNode().config.getOrNull(SemanticsProperties.Disabled),
                     "失败后「再试一次」要还能点（$theme）")
 
                 onNodeWithTag("explain-retry").performClick()
                 waitForIdle()
-                val retrying = top(secondTag)
-                assertEquals(before, retrying, 1f, "同段重试时第 2 段被推动了（$theme）")
+                val retrying = top(paragraphTag)
+                assertEquals(before, retrying, 1f, "同段重试时正文被推动了（$theme）")
                 assertEquals(2, mac.asked.size, "重试要重新走一次请求（$theme）")
                 assertEquals(mac.asked[0].id, mac.asked[1].id, "重试要在当前段发起（$theme）")
 
@@ -142,7 +138,8 @@ class ExplainFaintControlTest {
                     }
                 }
             }
-            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-button").fetchSemanticsNodes().isNotEmpty() }
+            val expectedTag = if (selected) "explain-button" else "explain-section-trigger"
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag(expectedTag).fetchSemanticsNodes().isNotEmpty() }
             body(dark)
         }
         root.toFile().deleteRecursively()
@@ -153,9 +150,11 @@ class ExplainFaintControlTest {
     private fun ComposeUiTest.button() =
         onNode(hasTestTag("explain-button") and hasAnyAncestor(hasTestTag(blockTag)))
 
-    private fun ComposeUiTest.labelColor(): Color {
+    private fun ComposeUiTest.labelColor(): Color = nodeColor(button())
+
+    private fun nodeColor(node: SemanticsNodeInteraction): Color {
         val layouts = mutableListOf<TextLayoutResult>()
-        button().fetchSemanticsNode().config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts)
+        node.fetchSemanticsNode().config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts)
         return layouts.single().layoutInput.style.color
     }
 

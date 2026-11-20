@@ -104,7 +104,7 @@ internal fun HostSettings(directory: Path, onPersonalCourse: (() -> Unit)? = nul
     val paper = RoundedCornerShape(CoachV7.Radius.btn)
     AlertDialog(onDismissRequest = onClose, title = { Text("设置") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("教材和进度保存在此设备，不经过 Mac。", style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
+            Text("教材和进度保存在此设备，不经过服务。", style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("教材位置", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
                 Text(directory.toString(), style = MaterialTheme.typography.bodySmall, color = colors.fgPrimary,
@@ -113,7 +113,7 @@ internal fun HostSettings(directory: Path, onPersonalCourse: (() -> Unit)? = nul
                         .padding(horizontal = 12.dp, vertical = 10.dp).testTag("settings-library-directory"))
             }
             if (onPersonalCourse != null) TextButton(onPersonalCourse) { Text("打开已配对课程") }
-            Text("课程里可做本地教材参考练习；Mac 上的课程数据仍独立。",
+            Text("课程里可做本地教材参考练习；服务上的课程数据仍独立。",
                 style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
         }
     }, confirmButton = {

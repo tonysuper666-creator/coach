@@ -356,11 +356,49 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
         return send(BookLessonWire.request(requestId, blocks, bookPages), blocks, requestId)
     }
 
+    suspend fun explainSectionGuide(
+        context: ExplainSectionContext,
+        bookPages: Int,
+        requestId: String = UUID.randomUUID().toString().replace("-", ""),
+    ): SectionGuideResult {
+        val body = context.sectionBlocks.filterNot { it.heading }
+        if (!BookLessonWire.fits(body)) return SectionGuideResult.Refused(BookLessonWire.TOO_LONG)
+        val wire = ExplainWire.sectionGuideRequest(requestId, body, bookPages, context)
+        return sendGuide(wire, body, requestId)
+    }
+
+    suspend fun explainSelection(
+        kind: String,
+        chosen: SourceBlock,
+        context: ExplainSectionContext? = null,
+        question: String? = null,
+        history: List<FollowUpTurn> = emptyList(),
+        requestId: String = UUID.randomUUID().toString().replace("-", ""),
+    ): ExplainResult {
+        val blocks = context?.sectionBlocks?.filterNot { it.heading }
+            ?.takeIf { list -> list.isNotEmpty() && BookLessonWire.fits(list) && list.any { chosen.text.trim() in it.text || it.id == chosen.id } }
+            ?: listOf(chosen)
+        val wire = ExplainWire.selectionRequest(requestId, kind, chosen, blocks, context, question, history)
+        return send(wire, blocks, requestId)
+    }
+
     suspend fun ask(chosen: SourceBlock, question: String, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult =
         send(ExplainWire.question(requestId, chosen, question), listOf(chosen), requestId)
 
+    private suspend fun sendGuide(input: JsonObject, context: List<SourceBlock>, requestId: String): SectionGuideResult {
+        val (body, refused) = sendRaw(input, context, requestId)
+        if (refused != null) return SectionGuideResult.Refused(refused.message, refused.trouble)
+        return ExplainWire.parseGuide(checkNotNull(body), context)
+    }
+
     private suspend fun send(input: JsonObject, context: List<SourceBlock>, requestId: String): ExplainResult {
-        val paired = identity ?: return if (revoked) {
+        val (body, refused) = sendRaw(input, context, requestId)
+        if (refused != null) return refused
+        return ExplainWire.parse(checkNotNull(body), context)
+    }
+
+    private suspend fun sendRaw(input: JsonObject, context: List<SourceBlock>, requestId: String): Pair<JsonObject?, ExplainResult.Refused?> {
+        val paired = identity ?: return null to if (revoked) {
             ExplainResult.Refused(ExplainTrouble.revoked(sableLogin), ExplainTrouble.Revoked)
         } else {
             ExplainResult.Refused(ExplainTrouble.UNPAIRED, ExplainTrouble.Unpaired)
@@ -369,41 +407,42 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
         return try {
             val snapshot = withContext(Dispatchers.IO) { imports?.snapshot(context) }
             val kind = input["kind"]?.jsonPrimitive?.contentOrNull ?: "explain"
-            val wire = if (kind == "lesson") {
-                if (snapshot == null) return ExplainResult.Refused("请先打开个人导入的书并允许讲解。")
+            val sectionScoped = kind == "lesson" || kind == "guide" || input["sectionContext"] != null
+            val wire = if (sectionScoped) {
+                if (snapshot == null) return null to ExplainResult.Refused("请先打开个人导入的书并允许讲解。")
                 try { BookLessonWire.withSource(input, snapshot) }
-                catch (_: IllegalArgumentException) { return ExplainResult.Refused(BookLessonWire.TOO_LONG) }
+                catch (_: IllegalArgumentException) { return null to ExplainResult.Refused(BookLessonWire.TOO_LONG) }
             } else if (snapshot == null) input else JsonObject(input + ("localSource" to snapshot))
             val reply = withContext(Dispatchers.IO) { http.explainLibrary(wire) }
             if (BuildConfig.DEBUG) {
                 Log.i("CoachBookHttp", "kind=$kind requestId=$requestId status=${reply.statusCode ?: "unreachable"}")
             }
             if (snapshot != null && withContext(Dispatchers.IO) { imports!!.snapshot(context) } != snapshot)
-                return ExplainResult.Refused("保存的原文已变化，请重新打开这本书后重试。")
+                return null to ExplainResult.Refused("保存的原文已变化，请重新打开这本书后重试。")
             val body = reply.body
             // A 403 can mean either a revoked device or an unauthorized passage. Check only
             // the original server with the original identity; never resend the book text.
             val isRevoked = reply.statusCode == 401 ||
                 (reply.statusCode == 403 && withContext(Dispatchers.IO) { http.libraryAuthStatus() } == 401)
             // A late response must not invalidate a pairing made while the request was in flight.
-            if (identity != paired) return ExplainResult.Refused("连接已更换，请重新选择这段后再试。")
+            if (identity != paired) return null to ExplainResult.Refused("连接已更换，请重新选择这段后再试。")
             val trouble = if (isRevoked) ExplainTrouble.Revoked else ExplainTrouble.of(reply.statusCode, reply.code)
             when {
                 trouble == ExplainTrouble.Revoked -> {
                     stopped += paired.key()
                     withContext(Dispatchers.IO) { runCatching { AndroidBookConnection.revoke(paired) } }
                     load()
-                    if (identity == null) ExplainResult.Refused(ExplainTrouble.revoked(sableLogin), trouble)
+                    null to if (identity == null) ExplainResult.Refused(ExplainTrouble.revoked(sableLogin), trouble)
                     else ExplainResult.Refused("配对已更新，请再试一次。", ExplainTrouble.Other)
                 }
-                body == null -> ExplainResult.Refused(ExplainTrouble.message(trouble, reply.error), trouble)
-                else -> ExplainWire.parse(body, context)
+                body == null -> null to ExplainResult.Refused(ExplainTrouble.message(trouble, reply.error), trouble)
+                else -> body to null
             }
         } catch (cancelled: CancellationException) {
             withContext(Dispatchers.IO) { runCatching { http.cancelLibraryExplain(requestId) } }
             throw cancelled
         } catch (_: Exception) {
-            ExplainResult.Refused("保存的原文或发送许可无法核对，请重新打开这本书后重试。")
+            null to ExplainResult.Refused("保存的原文或发送许可无法核对，请重新打开这本书后重试。")
         } finally { http.close() }
     }
 

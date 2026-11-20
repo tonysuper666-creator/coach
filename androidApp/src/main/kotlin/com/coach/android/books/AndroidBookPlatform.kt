@@ -137,3 +137,26 @@ internal fun newBookPdfPoint(x: Float = 0f, y: Float = 0f): BookPdfPoint = BookP
 internal fun bookBitmapPixel(bitmap: BookBitmap, x: Int, y: Int) = bitmap.getPixel(x, y)
 
 internal fun bookWenKaiFontFamily() = FontFamily(Font(R.font.lxgw_wenkai))
+
+internal fun extractBookPdfOutline(pdf: BookPdfDocument): List<BookOutlineItem> {
+    val root = pdf.documentCatalog?.documentOutline ?: return emptyList()
+    val result = mutableListOf<BookOutlineItem>()
+    val seen = java.util.IdentityHashMap<Any, Boolean>()
+    fun walk(item: com.tom_roush.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem?, level: Int) {
+        var current = item
+        while (current != null && result.size < 1000) {
+            if (seen.put(current, true) != null) break
+            val title = current.title?.trim().orEmpty()
+            val page = runCatching { current.findDestinationPage(pdf) }.getOrNull()
+                ?.let { dest -> pdf.pages.indexOf(dest) + 1 }
+                ?.takeIf { it in 1..pdf.numberOfPages }
+            if (title.isNotEmpty() && page != null) {
+                result += BookOutlineItem(title, level.coerceIn(1, 6), page, HeadingSource.PDF_OUTLINE)
+            }
+            if (level < 6) walk(current.firstChild, level + 1)
+            current = current.nextSibling
+        }
+    }
+    walk(root.firstChild, 1)
+    return result
+}

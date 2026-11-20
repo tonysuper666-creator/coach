@@ -1,10 +1,13 @@
 package com.coach.desktop.books
 
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.nio.file.Path
 import java.sql.DriverManager
+
+internal val LocalReadingAutoGuide = compositionLocalOf { true }
 
 internal enum class ReadingSize(val label: String, val scale: Float) {
     SMALL("小", .9f), MEDIUM("中", 1f), LARGE("大", 1.15f)
@@ -18,6 +21,10 @@ internal enum class ReadingFont(val label: String) {
     SONG("宋体"), KAI("楷体")
 }
 
+internal enum class AutoGuideOption(val label: String, val enabled: Boolean) {
+    ON("开", true), OFF("关", false)
+}
+
 /** Global to the local library, including when a development launch uses an isolated library. */
 internal class ReadingSettings(directory: Path) {
     private val url = "jdbc:sqlite:${directory.resolve("library.sqlite")}"
@@ -26,6 +33,8 @@ internal class ReadingSettings(directory: Path) {
     var font by mutableStateOf(ReadingFont.SONG)
         private set
     var paper by mutableStateOf(PaperColor.SYSTEM)
+        private set
+    var autoGuide by mutableStateOf(true)
         private set
 
     init {
@@ -39,6 +48,7 @@ internal class ReadingSettings(directory: Path) {
                             "size" -> size = ReadingSize.entries.firstOrNull { it.name == value } ?: ReadingSize.MEDIUM
                             "font" -> font = ReadingFont.entries.firstOrNull { it.name == value } ?: ReadingFont.SONG
                             "paper" -> paper = PaperColor.entries.firstOrNull { it.name == value } ?: PaperColor.SYSTEM
+                            "autoGuide" -> autoGuide = value != "false"
                         }
                     }
                 }
@@ -59,6 +69,11 @@ internal class ReadingSettings(directory: Path) {
     fun chooseFont(value: ReadingFont) {
         save("font", value.name)
         font = value
+    }
+
+    fun chooseAutoGuide(enabled: Boolean) {
+        save("autoGuide", enabled.toString())
+        autoGuide = enabled
     }
 
     private fun save(name: String, value: String) {

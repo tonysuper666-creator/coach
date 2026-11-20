@@ -44,3 +44,108 @@ internal fun BookLaidPage.yOfAnchor(anchor: BookPageAnchor, measurer: TextMeasur
     }
     return null
 }
+
+/** 排版页上正文区域内某一点 (xPx, yPx) 对应的原文偏移（xPx/yPx 均相对正文起点）。 */
+internal fun BookLaidPage.textPositionAt(
+    xPx: Float,
+    yPx: Float,
+    measurer: TextMeasurer,
+    typography: BookPageTypography,
+    widthPx: Int,
+): BookPageAnchor? {
+    val run = runs.lastOrNull { it.topPx <= yPx } ?: runs.firstOrNull() ?: return null
+    if (run.sources.isEmpty() || run.text.isEmpty()) return null
+    val layout = measurer.measure(run.text, typography.body, placeholders = run.placeholders, constraints = Constraints(maxWidth = widthPx))
+    val localX = xPx.coerceIn(0f, widthPx.toFloat())
+    val localY = (yPx - run.topPx).coerceIn(0f, (layout.size.height - 1).coerceAtLeast(0).toFloat())
+    val display = layout.getOffsetForPosition(Offset(localX, localY)).coerceIn(0, run.text.length)
+    var at = 0
+    for (slice in run.sources) {
+        val length = slice.endUtf16 - slice.startUtf16
+        if (display <= at + length) return BookPageAnchor(slice.importPage, slice.startUtf16 + (display - at))
+        at += length
+    }
+    val last = run.sources.last()
+    return BookPageAnchor(last.importPage, last.endUtf16)
+}
+
+/** 将纸面坐标上的拖选起止点换算为对应书页的 [SourceBlock]（支持 EPUB/Word/TXT/OCR/PDF 文字版）。 */
+internal fun BookLaidPage.selectionBetween(
+    book: Textbook,
+    down: Offset,
+    up: Offset,
+    insetPx: Float,
+    topMarginPx: Float,
+    measurer: TextMeasurer,
+    typography: BookPageTypography,
+    widthPx: Int,
+): SourceBlock? {
+    val a = textPositionAt(down.x - insetPx, down.y - topMarginPx, measurer, typography, widthPx) ?: return null
+    val b = textPositionAt(up.x - insetPx, up.y - topMarginPx, measurer, typography, widthPx) ?: return null
+    val (pageNumber, rawStart, rawEnd) = if (a.importPage == b.importPage) {
+        Triple(a.importPage, minOf(a.offsetUtf16, b.offsetUtf16), maxOf(a.offsetUtf16, b.offsetUtf16))
+    } else {
+        val first = if (a.importPage < b.importPage) a else b
+        val storedLen = book.page(first.importPage)?.text?.length ?: return null
+        Triple(first.importPage, first.offsetUtf16, storedLen)
+    }
+    val stored = book.page(pageNumber)?.text ?: return null
+    var start = rawStart.coerceIn(0, stored.length)
+    var end = rawEnd.coerceIn(0, stored.length)
+    while (start < end && stored[start].isWhitespace()) start++
+    while (end > start && stored[end - 1].isWhitespace()) end--
+    if (end <= start) return null
+    val text = stored.substring(start, end)
+    return SourceBlock("${book.id}:p$pageNumber:$start", pageNumber, start, end, false, text)
+}
+
+/** 将纸面坐标上的单点长按换算为对应书页词/短语的 [SourceBlock]（支持中文分词与英文整词）。 */
+internal fun BookLaidPage.selectionAt(
+    book: Textbook,
+    point: Offset,
+    insetPx: Float,
+    topMarginPx: Float,
+    measurer: TextMeasurer,
+    typography: BookPageTypography,
+    widthPx: Int,
+): SourceBlock? {
+    if (point.x < insetPx - 8f || point.x > insetPx + widthPx + 8f || point.y < topMarginPx - 8f) return null
+    val localY = point.y - topMarginPx
+    val lastRun = runs.lastOrNull() ?: return null
+    val lastLayout = measurer.measure(lastRun.text, typography.body, placeholders = lastRun.placeholders, constraints = Constraints(maxWidth = widthPx))
+    if (localY > lastRun.topPx + lastLayout.size.height + 48f) return null
+    val anchor = textPositionAt(point.x - insetPx, localY, measurer, typography, widthPx) ?: return null
+    val stored = book.page(anchor.importPage)?.text ?: return null
+    if (stored.isEmpty()) return null
+    var offset = anchor.offsetUtf16.coerceIn(0, stored.lastIndex)
+    if (stored[offset].isWhitespace()) {
+        var right = offset
+        while (right < stored.length && stored[right].isWhitespace() && stored[right] != '\n') right++
+        var left = offset
+        while (left > 0 && stored[left].isWhitespace() && stored[left] != '\n') left--
+        offset = when {
+            right < stored.length && !stored[right].isWhitespace() -> right
+            !stored[left].isWhitespace() -> left
+            else -> return null
+        }
+    }
+    if (!stored[offset].isLetterOrDigit()) {
+        when {
+            offset > 0 && stored[offset - 1].isLetterOrDigit() -> offset -= 1
+            offset + 1 < stored.length && stored[offset + 1].isLetterOrDigit() -> offset += 1
+        }
+    }
+    val words = java.text.BreakIterator.getWordInstance(java.util.Locale.CHINA)
+    words.setText(stored)
+    var start = if (words.isBoundary(offset)) offset else words.preceding(offset).let { if (it == java.text.BreakIterator.DONE) offset else it }
+    var end = words.following(offset).let { if (it == java.text.BreakIterator.DONE) (offset + 1).coerceAtMost(stored.length) else it }
+    while (start < end && stored[start].isWhitespace()) start++
+    while (end > start && stored[end - 1].isWhitespace()) end--
+    if (end <= start) {
+        start = offset
+        end = (offset + 1).coerceAtMost(stored.length)
+        if (stored[start].isWhitespace()) return null
+    }
+    val text = stored.substring(start, end)
+    return SourceBlock("${book.id}:p${anchor.importPage}:$start", anchor.importPage, start, end, false, text)
+}

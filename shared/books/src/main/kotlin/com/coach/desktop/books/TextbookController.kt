@@ -548,4 +548,11 @@ internal class TextbookController(val library: TextbookLibrary) {
         library.saveLadder(book.id, next)
         mutable.update { it.copy(ladder = next) }
     }
+
+    /** 显式「重新整理章节」：按新版结构识别重算并缓存本书的章节划分。 */
+    suspend fun reorganizeSections() = action {
+        val book = mutable.value.book ?: return@action
+        val updated = library.reorganizeSections(book.id)
+        mutable.update { it.copy(book = updated, catalog = library.catalog()) }
+    }
 }

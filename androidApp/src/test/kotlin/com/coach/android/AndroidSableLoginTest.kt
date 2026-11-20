@@ -103,7 +103,8 @@ class AndroidSableLoginTest {
             compose.onNodeWithTag("explain-code").performTextInput("123456")
             compose.onNodeWithTag("explain-pair").performClick()
             compose.waitUntil(15_000) { compose.onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
-            compose.onNodeWithText("已连上 Mac", substring = true).assertIsDisplayed()
+            compose.onNodeWithTag("explain-section-trigger").assertIsEnabled()
+            assertTrue(compose.onAllNodesWithText("已连上", substring = true).fetchSemanticsNodes().isEmpty())
             assertEquals(1, friend.pairs.get())
         }
     }
@@ -135,7 +136,8 @@ class AndroidSableLoginTest {
             compose.onNodeWithText("用 Sable 账号登录").performClick()
 
             compose.waitUntil(25_000) { compose.onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
-            compose.onNodeWithText("已连上 Mac", substring = true).assertIsDisplayed()
+            compose.onNodeWithTag("explain-section-trigger").assertIsEnabled()
+            assertTrue(compose.onAllNodesWithText("已连上", substring = true).fetchSemanticsNodes().isEmpty())
             assertEquals(1, openedUris.size)
             assertEquals("${friend.issuerUrl}/link?code=BCDF-GHJK", openedUris.single())
             assertTrue("slow_down should widen poll interval", friend.tokenPolls.get() >= 3)
@@ -175,8 +177,8 @@ class AndroidSableLoginTest {
                 )
             })
 
-            // Request explanation for paragraph 1 and verify HTTP 200 + paragraph citation.
-            compose.onAllNodesWithTag("explain-button")[0].performClick()
+            // Request section explanation and verify HTTP 200 + paragraph citation.
+            compose.onNodeWithTag("explain-section-trigger").performClick()
             compose.onNodeWithTag("explain-consent-allow").performClick()
             compose.waitUntil(15_000) { compose.onAllNodesWithTag("explain-answer").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithTag("explain-text").assertTextContains("Plants convert light energy", substring = true)
@@ -222,14 +224,14 @@ class AndroidSableLoginTest {
                 }
             }
             compose.waitUntil(15_000) { firstExplainer.loaded }
-            compose.onAllNodesWithTag("explain-button")[0].performClick()
+            compose.onNodeWithTag("explain-section-trigger").performClick()
 
             compose.waitUntil(15_000) { compose.onAllNodesWithTag("explain-revoked").fetchSemanticsNodes().isNotEmpty() }
             assertNull("Credential store must be cleared after 401", stores["paired-friend"]?.load())
             assertNull(firstExplainer.identity)
             assertTrue(firstExplainer.revoked)
             compose.onNodeWithTag("explain-revoked").assertTextEquals("授权已撤销，请重新登录。读书和做题照常。")
-            compose.onNodeWithTag("explain-failed").assertTextEquals(ExplainTrouble.REVOKED_LOGIN)
+            compose.onNodeWithTag("section-guide-failed").assertTextEquals(ExplainTrouble.REVOKED_LOGIN)
             compose.onNodeWithText("用 Sable 账号登录").assertIsDisplayed()
             compose.onNodeWithTag("explain-code").assertExists()
 
@@ -246,7 +248,7 @@ class AndroidSableLoginTest {
             assertFalse(firstExplainer.revoked)
             assertNotNull(stores["paired-friend"]?.load())
 
-            compose.onAllNodesWithTag("explain-button")[0].performClick()
+            compose.onNodeWithTag("explain-section-trigger").performClick()
             compose.waitUntil(15_000) { compose.onAllNodesWithTag("explain-answer").fetchSemanticsNodes().isNotEmpty() }
 
             // Startup check sends X-Coach-Startup: 1 and clears store on 401.

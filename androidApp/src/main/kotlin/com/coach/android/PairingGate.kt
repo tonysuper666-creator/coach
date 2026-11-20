@@ -82,7 +82,7 @@ fun PairingGate(
         catch (_: DeviceAuthorizationException) {
             withContext(Dispatchers.IO) { store.revokeIfCurrent(paired) }
             credentials = null
-            error = "这台设备已取消配对，请在 Mac 上生成新配对码。"
+            error = "这台设备已取消配对，请找给你配对码的人生成新码。"
         }
         catch (_: Exception) { /* Offline use keeps its pairing; retry on the next connection. */ }
         finally { transport.close() }
@@ -94,7 +94,7 @@ fun PairingGate(
         }
         else if (paired != null) content(paired)
         else Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("连接你的 Mac", style = MaterialTheme.typography.headlineMedium)
+            Text("连接服务", style = MaterialTheme.typography.headlineMedium)
             com.coach.ui.SableLoginButton(busy, { busy = it }) { open ->
                 if (normalizedFriendUrl.isBlank()) throw SableLoginError("此安装包尚未配置朋友服务地址。")
                 val callbackDispatcher = currentCoroutineContext()[ContinuationInterceptor] ?: Dispatchers.Main.immediate
@@ -152,7 +152,7 @@ fun PairingGate(
                         code = ""
                     } catch (e: CancellationException) { throw e }
                     catch (_: Exception) {
-                        error = "未能配对。请确认 Tailscale 已连接，并在 Mac 上生成新配对码。"
+                        error = "未能配对。请确认 Tailscale 已连接，并找给你配对码的人生成新码。"
                     } finally { busy = false }
                 }
             }) { Text(if (busy) "正在配对…" else "配对") }

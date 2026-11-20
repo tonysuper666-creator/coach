@@ -224,7 +224,7 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
                         else if (image) listOf(executable("pdftoppm"), "-f", "$page", "-l", "$page", "-singlefile", "-scale-to", "1600", "-png", d.file.toString(), out.toString())
                         else listOf(executable("pdftotext"), "-f", "$page", "-l", "$page", "-layout", "-enc", "UTF-8", d.file.toString(), out.toString())
                     val process = try { ProcessBuilder(command).redirectOutput(if (rot) ProcessBuilder.Redirect.to(out.toFile()) else ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD).start() }
-                        catch (_: Exception) { throw ReaderFailure(io.ktor.http.HttpStatusCode.ServiceUnavailable, "Mac 缺少本地 PDF 渲染工具") }
+                        catch (_: Exception) { throw ReaderFailure(io.ktor.http.HttpStatusCode.ServiceUnavailable, "服务缺少本地 PDF 渲染工具") }
                     try {
                         if (!process.waitFor(20, TimeUnit.SECONDS) || process.exitValue() != 0)
                             throw ReaderFailure(io.ktor.http.HttpStatusCode.ServiceUnavailable, "本地 PDF 渲染失败，请重试")

@@ -6,6 +6,8 @@ import androidx.compose.material3.Text
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
@@ -37,7 +39,8 @@ class SableLoginEntryTest {
                 onNodeWithTag("explain-connect-hint").assertTextContains("配对码", substring = true)
                 pair(mac.url, "123456")
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
-                onNodeWithText("已连上 Mac", substring = true).assertExists()
+                onNodeWithTag("explain-section-trigger").assertIsEnabled()
+                assertTrue(onAllNodesWithText("已连上", substring = true).fetchSemanticsNodes().isEmpty(), "连接正常时不显示连接提示文案")
             }
             assertEquals(1, mac.pairs.get())
         }
@@ -57,7 +60,8 @@ class SableLoginEntryTest {
                 onNodeWithTag("explain-revoked").assertTextContains("新的配对码", substring = true)
                 pair(mac.url, "654321")
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
-                onNodeWithText("已连上 Mac", substring = true).assertExists()
+                onNodeWithTag("explain-section-trigger").assertIsEnabled()
+                assertTrue(onAllNodesWithText("已连上", substring = true).fetchSemanticsNodes().isEmpty(), "重新配对后不显示连接提示文案")
             }
             assertEquals(2, mac.pairs.get())
             assertFalse(ExplainTrouble.REVOKED.contains("登录"), "停用那一句不能再叫人去登录")
@@ -69,11 +73,15 @@ class SableLoginEntryTest {
             val (library, book) = sample()
             val settings = settings(Files.createTempDirectory("sable-hidden-existing-"))
             assertTrue(kotlinx.coroutines.runBlocking { BookExplainer(settings, library).pair(mac.url, "123456") })
-            // 重开程序：新的 explainer 从磁盘读回同一份配对，直接是「已连上」。
+            // 重开程序：新的 explainer 从磁盘读回同一份配对，直接可用且不显示连接文案。
             runSkikoComposeUiTest(size = Size(1100f, 850f), density = Density(1f)) {
                 setContent { CoachTheme(darkTheme = false) { BookExplainPanel(book, book.lessons.first().firstPage, ExplainConsent(library.directory), BookExplainer(settings, library)) } }
-                waitUntil(timeoutMillis = 20_000) { onAllNodesWithText("已连上 Mac", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                waitUntil(timeoutMillis = 20_000) {
+                    onAllNodesWithTag("explain-section-trigger").fetchSemanticsNodes()
+                        .any { it.config.getOrNull(SemanticsProperties.Disabled) == null }
+                }
                 onNodeWithTag("explain-pairing").assertDoesNotExist()
+                assertTrue(onAllNodesWithText("已连上", substring = true).fetchSemanticsNodes().isEmpty())
             }
             assertEquals(1, mac.pairs.get())
         }
@@ -123,7 +131,7 @@ class SableLoginEntryTest {
             val settings = settings(Files.createTempDirectory("sable-gate-"), sableLogin = shown)
             runComposeUiTest {
                 setContent { Box(Modifier.size(840.dp, 720.dp)) { DesktopPairingGate(settings) { Text("已进入学习", Modifier.testTag("desktop-paired")) } } }
-                waitUntil(timeoutMillis = 15_000) { onAllNodesWithText("连接你的 Mac").fetchSemanticsNodes().isNotEmpty() }
+                waitUntil(timeoutMillis = 15_000) { onAllNodesWithText("连接服务").fetchSemanticsNodes().isNotEmpty() }
                 onNode(hasText("配对") and hasClickAction()).assertExists()
                 if (shown) onNodeWithText("用 Sable 账号登录").assertExists() else assertNoSableText()
             }
@@ -148,7 +156,7 @@ class SableLoginEntryTest {
         onNodeWithTag("explain-pair").performClick()
     }
 
-    private fun settings(home: Path, sableLogin: Boolean = false) = DesktopConnectionSettings(home, { null }, mac = false, property = {
+    private fun settings(home: Path, sableLogin: Boolean = false) = DesktopConnectionSettings(home.toRealPath(), { null }, mac = false, property = {
         when (it) {
             "jpackage.app-path" -> "/synthetic/LearningCoach.exe"
             "coach.sableLogin" -> if (sableLogin) "true" else null

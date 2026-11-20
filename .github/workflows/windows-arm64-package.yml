@@ -92,7 +92,7 @@ jobs:
           $installer = New-Object -ComObject WindowsInstaller.Installer
           $db = $installer.OpenDatabase($msiFull, 0)
           $props = @{}
-          $view = $db.OpenView("SELECT Property, Value FROM Property WHERE Property IN ('ProductName','ProductVersion','UpgradeCode','ALLUSERS')")
+          $view = $db.OpenView("SELECT Property, Value FROM Property")
           $view.Execute()
           while ($rec = $view.Fetch()) {
             $props[$rec.StringData(1)] = $rec.StringData(2)

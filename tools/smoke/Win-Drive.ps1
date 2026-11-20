@@ -188,13 +188,33 @@ $script:Win = [IntPtr]::Zero
 $script:AppPid = 0
 $script:AppStartTicks = 0L
 $script:ForegroundTracePath = $null
+# Real drivers all share this name. Offline regressions use a private name so they
+# never contend with a supervisor's live run.
+$script:ForegroundMutexName = 'Global\Coach.WinDrive.Foreground'
 
 # Other agents may run their own Coach windows on this desktop. Only the process this script started is ever touched.
 $script:Known = @()
 $script:RepoMarker = ''   # 本次检出的目录；设置后只认命令行里带这个目录的客户端进程（别人的 Coach 窗口永远不是我的）
+# 命令行里的构建输出是否落在这个检出目录下。Windows 路径不分大小写，\ 与 / 等价，
+# 重复分隔符视同一个。两端都守目录边界：前面不能紧接文件名字符（coach 不认 mycoach），
+# 后面必须正好是 /desktopApp/build/（不认相邻的 coach-other，也不认嵌套在子目录里的另一个检出）。
+function Test-CheckoutCommandLine([string]$CommandLine, [string]$Repo) {
+    if (-not $CommandLine -or -not $Repo) { return $false }
+    $norm = { param([string]$t) [regex]::Replace($t.Replace('\', '/'), '/{2,}', '/') }
+    $cmd = & $norm $CommandLine
+    $root = (& $norm $Repo).TrimEnd('/')
+    if (-not $root) { return $false }
+    $needle = $root + '/desktopApp/build/'
+    $at = 0
+    while (($i = $cmd.IndexOf($needle, $at, [StringComparison]::OrdinalIgnoreCase)) -ge 0) {
+        if ($i -eq 0 -or -not ([char]::IsLetterOrDigit($cmd[$i - 1]) -or '_-.$~'.IndexOf($cmd[$i - 1]) -ge 0)) { return $true }
+        $at = $i + 1
+    }
+    return $false
+}
 function Get-ClientPids([switch]$Mine) {
     @(Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" | Where-Object {
-        ($_.CommandLine -like '*com.coach.desktop.MainKt*' -or $_.CommandLine -like '*com.coach.desktop.smoke.SmokeMain*') -and (-not $Mine -or -not $script:RepoMarker -or $_.CommandLine.Replace('\','/').Contains($script:RepoMarker.TrimEnd([char[]]'\/').Replace('\','/') + '/desktopApp/build/')) } | ForEach-Object { [int]$_.ProcessId })
+        ($_.CommandLine -like '*com.coach.desktop.MainKt*' -or $_.CommandLine -like '*com.coach.desktop.smoke.SmokeMain*') -and (-not $Mine -or -not $script:RepoMarker -or (Test-CheckoutCommandLine $_.CommandLine $script:RepoMarker)) } | ForEach-Object { [int]$_.ProcessId })
 }
 function Mark-ExistingClients { $script:Known = Get-ClientPids }
 function Find-CoachWindow {
@@ -714,6 +734,12 @@ function Find-DirtyDesktopWindow(
         foreach ($cpid in @(Get-ClientPids)) {
             if ($cpid -gt 0 -and $cpid -ne $script:AppPid) { [void]$clientPids.Add([int]$cpid) }
         }
+        # Clients launched from this same checkout share its build output and data
+        # scope; only those are leftovers of this run's scope.
+        $samePids = [Collections.Generic.HashSet[int]]::new()
+        if ($script:RepoMarker) {
+            foreach ($cpid in @(Get-ClientPids -Mine)) { [void]$samePids.Add([int]$cpid) }
+        }
         $found = New-Object System.Collections.ArrayList
         $seenPids = [Collections.Generic.HashSet[int]]::new()
         [WD]::EnumWindows({ param($h, $l)
@@ -723,11 +749,13 @@ function Find-DirtyDesktopWindow(
                     $pn = (Get-Process -Id $p -ErrorAction SilentlyContinue).ProcessName
                     if ($clientPids.Contains([int]$p) -or $pn -eq 'LearningCoach') {
                         [void]$seenPids.Add([int]$p)
+                        $same = $samePids.Contains([int]$p)
                         [void]$found.Add([pscustomobject]@{
                             Kind = 'coach-window'
                             Pid = [int]$p
                             Process = if ($pn) { $pn } else { 'java' }
-                            Summary = "coach-window $(if ($pn) { $pn } else { 'java' }) pid=$p"
+                            SameCheckout = $same
+                            Summary = "coach-window $(if ($pn) { $pn } else { 'java' }) pid=$p$(if ($same) { ' same-checkout' })"
                         })
                     }
                 }
@@ -757,7 +785,23 @@ function Test-DesktopPreflight(
     [scriptblock]$PortProbe = $null,
     [string]$ApolloLogPath = $script:ApolloLogPath
 ) {
-    $dirtyWindows = @(Find-DirtyDesktopWindow -RegistryDir $RegistryDir -CoachWindowProbe $CoachWindowProbe)
+    # A Coach window from another checkout is a separate client with its own scope:
+    # evidence only. Per-action ownership checks and the short foreground lock keep
+    # input on our own window. Registered test leftovers and clients from this same
+    # checkout still reject the whole round, and so does an active Apollo user.
+    $otherCoachWindows = New-Object System.Collections.ArrayList
+    $dirtyList = New-Object System.Collections.ArrayList
+    foreach ($w in @(Find-DirtyDesktopWindow -RegistryDir $RegistryDir -CoachWindowProbe $CoachWindowProbe)) {
+        if (-not $w) { continue }
+        $same = ($w.PSObject.Properties.Name -contains 'SameCheckout') -and [bool]$w.SameCheckout
+        if ($w.Kind -eq 'coach-window' -and -not $same) {
+            [void]$otherCoachWindows.Add($w)
+        } else {
+            [void]$dirtyList.Add($w)
+        }
+    }
+    $dirtyWindows = @($dirtyList)
+    $otherCoach = @($otherCoachWindows)
     $idle = Get-DesktopIdleEvidence -IdleProbe $IdleProbe -DriverInputFile $DriverInputFile -NowProbe $NowProbe
     $activeUser = Find-ActiveDesktopUser -MinIdleSeconds $MinIdleSeconds -IdleProbe { $idle.IdleSeconds } -StreamProbe $StreamProbe -DriverInputFile $DriverInputFile -NowProbe $NowProbe -HostProbe $HostProbe -PortProbe $PortProbe -ApolloLogPath $ApolloLogPath
     $fg = Find-ForeignForegroundWindow -Probe $ForegroundProbe
@@ -765,8 +809,9 @@ function Test-DesktopPreflight(
         $desc = ($dirtyWindows | ForEach-Object Summary) -join '; '
         return [pscustomobject]@{
             Clean = $false
-            Reason = "桌面存在测试遗留或本轮之外的 Coach 窗口（$desc）"
+            Reason = "桌面存在测试遗留或本检出的残留 Coach 窗口（$desc）"
             DirtyWindows = $dirtyWindows
+            OtherCoachWindows = $otherCoach
             ActiveUser = $activeUser
             IdleSeconds = $idle.IdleSeconds
             DriverInputMatched = $idle.DriverInputMatched
@@ -778,6 +823,7 @@ function Test-DesktopPreflight(
             Clean = $false
             Reason = $activeUser.Reason
             DirtyWindows = @()
+            OtherCoachWindows = $otherCoach
             ActiveUser = $activeUser
             IdleSeconds = $idle.IdleSeconds
             DriverInputMatched = $idle.DriverInputMatched
@@ -788,11 +834,21 @@ function Test-DesktopPreflight(
         Clean = $true
         Reason = ''
         DirtyWindows = @()
+        OtherCoachWindows = $otherCoach
         ActiveUser = $null
         IdleSeconds = $idle.IdleSeconds
         DriverInputMatched = $idle.DriverInputMatched
         Foreground = $fg
     }
+}
+# 前台短锁对本机所有已登录会话开放：SSH 起的驱动和桌面会话里的驱动属于不同登录会话，
+# 默认权限只给创建者那个登录会话，另一边打开同名锁会被 Windows 拒绝访问。锁已存在时沿用它原有的权限。
+function New-ForegroundMutex([string]$Name = $script:ForegroundMutexName) {
+    $sec = New-Object Security.AccessControl.MutexSecurity
+    $users = New-Object Security.Principal.SecurityIdentifier([Security.Principal.WellKnownSidType]::AuthenticatedUserSid, $null)
+    $sec.AddAccessRule((New-Object Security.AccessControl.MutexAccessRule($users, [Security.AccessControl.MutexRights]'Synchronize, Modify', 'Allow')))
+    $created = $false
+    [Threading.Mutex]::new($false, $Name, [ref]$created, $sec)
 }
 # All drivers share this mutex, but hold it for one input/capture only.
 # OCR, network waits, compilation and whole smoke runs stay outside.
@@ -805,7 +861,7 @@ function Invoke-ForegroundStep(
     [scriptblock]$ForegroundProbe = $null
 ) {
     if ($Window -eq [IntPtr]::Zero) { $Window = $script:Win }
-    $mutex = New-Object Threading.Mutex($false, 'Global\Coach.WinDrive.Foreground')
+    $mutex = New-ForegroundMutex
     $lastFocusLoss = ''
     $lastForegroundOwner = $null
     try {

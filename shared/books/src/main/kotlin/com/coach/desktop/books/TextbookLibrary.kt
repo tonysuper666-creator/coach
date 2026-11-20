@@ -30,6 +30,7 @@ import java.util.zip.ZipFile
 /** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
 internal class TextbookLibrary(
     val directory: Path, private val clock: Clock = Clock.systemDefaultZone(), private val ocr: BookOcr = BundledBookOcr,
+    private val streamPdfExtras: Boolean = false,
     private val extractBook: (Path, String, String, BookOcr, BookImportControl) -> ExtractedBook = TextbookExtraction::extract,
 ) {
     private val reviewStore = TextbookReviewStore { LocalDate.now(clock).toEpochDay() }
@@ -134,7 +135,7 @@ internal class TextbookLibrary(
             sql.setString(1, id)
             sql.executeQuery().use { row ->
                 check(row.next()) { "这本教材已不在书架中。" }
-                val extras = BookPageModelStore.loadExtrasByPage(db, id, includeTextLayouts = true)
+                val extras = BookPageModelStore.loadExtrasByPage(db, id, includeTextLayouts = !streamPdfExtras)
                 val pages = db.prepareStatement("SELECT page,text,ocr,ocr_pending FROM pages WHERE book=? ORDER BY page").use { query ->
                     query.setString(1, id)
                     query.executeQuery().use { p -> buildList { while (p.next()) {
@@ -161,17 +162,17 @@ internal class TextbookLibrary(
 
     fun pdfTextLayer(book: Textbook, page: BookPage): ReaderTextUnit? {
         if (book.format != "pdf" || page.ocr || page.text.isBlank()) return null
-        return BookPdfLoader.load(original(book.id, book.format).toFile()).use { pdf ->
-            if (!pdf.currentAccessPermission.canExtractContent()) return@use null
-            val saved = page.textLayout ?: pageTextLayout(book.id, page.number)
+        val saved = page.textLayout ?: pageTextLayout(book.id, page.number)
+        return BookPdfLoader.read(original(book.id, book.format).toFile()) { pdf ->
+            if (!pdf.currentAccessPermission.canExtractContent()) return@read null
             if (saved != null) {
                 val restored = try { PdfPageTextExtraction.restore(pdf, page, saved) }
                 catch (_: IllegalArgumentException) { null }
-                if (restored != null) return@use restored
+                if (restored != null) return@read restored
             }
             val extracted = PdfPageTextExtraction.extract(pdf, page.number)
             // Older books may have a different text layer. Attach nothing unless all offsets still agree.
-            if (extracted.unit.text != page.text) return@use null
+            if (extracted.unit.text != page.text) return@read null
             database().use { db ->
                 BookPageTextBoxStore.saveInTransaction(db, book.id, mapOf(page.number to page.text), listOf(extracted.pageLayout()))
             }
@@ -271,7 +272,7 @@ internal class TextbookLibrary(
 
     fun pdfPageAspects(book: Textbook): Map<Int, Float> {
         aspectCache[book.id]?.let { return it }
-        val computed = BookPdfLoader.load(original(book.id, book.format).toFile()).use { pdf ->
+        val computed = BookPdfLoader.read(original(book.id, book.format).toFile()) { pdf ->
             pdf.pages.withIndex().mapNotNull { (index, page) ->
                 val crop = page.cropBox
                 val aspect = if (page.rotation == 90 || page.rotation == 270) crop.height / crop.width else crop.width / crop.height
@@ -433,16 +434,26 @@ internal class TextbookLibrary(
         require(Files.size(source) <= 256L * 1024 * 1024) { "请选择不超过 256 MB 的教材。" }
         val stage = directory.resolve(".import-${UUID.randomUUID()}")
         try {
-            Files.copy(source, stage)
-            val format = BookFormats.detect(stage, source.fileName.toString())
             val digest = MessageDigest.getInstance("SHA-256")
-            Files.newInputStream(stage).use { input ->
-                val buffer = ByteArray(65536)
-                while (true) { val size = input.read(buffer); if (size < 0) break; control.check(); digest.update(buffer, 0, size) }
+            Files.newInputStream(source).use { input ->
+                Files.newOutputStream(stage).use { output ->
+                    val buffer = ByteArray(65536)
+                    while (true) {
+                        control.check()
+                        val size = input.read(buffer)
+                        if (size < 0) break
+                        digest.update(buffer, 0, size)
+                        output.write(buffer, 0, size)
+                    }
+                }
             }
+            val format = BookFormats.detect(stage, source.fileName.toString())
             val id = digest.digest().joinToString("") { "%02x".format(it) }
             if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
             val fallback = source.fileName.toString().substringBeforeLast('.')
+            if (format == "pdf" && streamPdfExtras && extractBook == TextbookExtraction::extract) {
+                return stageStreamedPdfBook(stage, id, fallback, control)
+            }
             val extracted = if (extractBook == TextbookExtraction::extract) {
                 TextbookExtraction.extractForStaging(stage, format, fallback, control)
             } else {
@@ -465,6 +476,59 @@ internal class TextbookLibrary(
             val nativeSources = BookNativeSourceStore.capture(stage, format, id, extracted.pages, control)
             return saveStagedBook(stage, id, format, extracted, nativeSources, control)
         } finally { Files.deleteIfExists(stage) }
+    }
+
+    @Synchronized
+    private fun stageStreamedPdfBook(stage: Path, id: String, fallback: String, control: BookImportControl): StagedBookImport {
+        if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
+        val target = original(id, "pdf")
+        val newImages = mutableSetOf<Path>()
+        database().use { db ->
+            db.autoCommit = false
+            var moved = false
+            try {
+                fun saveExtras(texts: Map<Int, String>, images: List<ExtractedIllustration>, layouts: List<PageTextLayout>) {
+                    for (image in images) {
+                        val path = BookIllustrationAssets.imageFile(directory, id, image.contentSha256, image.extension)
+                        if (!Files.exists(path)) newImages.add(path)
+                    }
+                    BookPageModelStore.saveInTransaction(db, directory, id, texts, images, layouts)
+                }
+                val extracted = TextbookExtraction.extractForStaging(stage, "pdf", fallback, control) { page, images ->
+                    saveExtras(mapOf(page.number to page.text), images, listOfNotNull(page.textLayout))
+                }
+                require(extracted.pages.isNotEmpty()) { "教材中没有可打开的页面。" }
+                control.check()
+                db.prepareStatement("INSERT INTO books(id,title,format,mode,touched,reading_page) VALUES(?,?,?,?,?,?)").use { sql ->
+                    sql.setString(1, id); sql.setString(2, extracted.title); sql.setString(3, "pdf")
+                    sql.setString(4, QuestionMode.CHOICE.name)
+                    sql.setLong(5, System.currentTimeMillis()); sql.setInt(6, extracted.pages.minOf { it.number }); sql.executeUpdate()
+                }
+                db.prepareStatement("INSERT INTO pages(book,page,text,ocr,ocr_pending) VALUES(?,?,?,?,?)").use { sql ->
+                    for (page in extracted.pages) {
+                        sql.setString(1, id); sql.setInt(2, page.number); sql.setString(3, page.text)
+                        sql.setInt(4, if (page.ocr) 1 else 0); sql.setInt(5, if (page.ocrPending) 1 else 0)
+                        sql.addBatch()
+                    }
+                    sql.executeBatch()
+                }
+                saveExtras(
+                    extracted.pages.associate { it.number to it.text },
+                    extracted.illustrations, extracted.pages.mapNotNull { it.textLayout },
+                )
+                control.check()
+                Files.move(stage, target, StandardCopyOption.REPLACE_EXISTING)
+                moved = true
+                control.check()
+                db.commit()
+            } catch (error: Throwable) {
+                db.rollback()
+                newImages.forEach { Files.deleteIfExists(it) }
+                if (moved) Files.deleteIfExists(target)
+                throw error
+            }
+        }
+        return StagedBookImport(book(id), alreadyExisted = false)
     }
 
     @Synchronized
@@ -541,32 +605,36 @@ internal class TextbookLibrary(
         }
         require(initial.format == "pdf") { "这份教材不支持后台文字识别。" }
         // Reopen the PDF in 25-page batches so PDFBox internal caches stay bounded on 250+ page books.
+        val file = sourceFile.toFile()
         for (batch in pending.chunked(25)) {
             control.check()
             try {
-                BookPdfLoader.load(sourceFile.toFile()).use { pdf ->
-                    val renderer = newBookPdfRenderer(pdf)
+                BookPdfLoader.read(file) { pdf ->
                     for (pageNumber in batch) {
                         control.check()
                         val etaBefore = estimator.estimateRemainingSeconds(pending.size - completedInSession)
-                        control.report(
-                            page = pageNumber,
-                            total = totalPages,
-                            recognizing = true,
-                            bookId = initial.id,
-                            bookTitle = initial.title,
-                            completedOcr = completedInSession,
-                            totalOcr = pending.size,
-                            estimatedRemainingSeconds = etaBefore,
-                        )
+                        OcrTiming.measure("page$pageNumber.progress") {
+                            control.report(
+                                page = pageNumber,
+                                total = totalPages,
+                                recognizing = true,
+                                bookId = initial.id,
+                                bookTitle = initial.title,
+                                completedOcr = completedInSession,
+                                totalOcr = pending.size,
+                                estimatedRemainingSeconds = etaBefore,
+                            )
+                        }
                         val started = System.nanoTime()
                         val bounds = pdf.getPage(pageNumber - 1).cropBox
                         require(bounds.width.isFinite() && bounds.height.isFinite() && bounds.width > 0 && bounds.height > 0) {
                             "这页 PDF 尺寸无效，请重新保存后导入。"
                         }
-                        val scale = minOf(300f / 72f, 4000f / maxOf(bounds.width, bounds.height))
+                        val scale = minOf(bookOcrTargetDpi / 72f, bookOcrMaxSide / maxOf(bounds.width, bounds.height))
                         BookScanImages.checkSize(kotlin.math.ceil(bounds.width * scale).toInt(), kotlin.math.ceil(bounds.height * scale).toInt())
-                        val image = renderer.renderImage(pageNumber - 1, scale)
+                        val image = OcrTiming.measure("page$pageNumber.render") {
+                            renderBookPdfPage(file, pdf, pageNumber - 1, scale)
+                        }
                         val recognized = try { ocr.recognize(image, control) } finally { releaseBookBitmap(image) }
                         estimator.record(((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L))
                         control.check()
@@ -839,7 +907,7 @@ internal class TextbookLibrary(
         }
         try {
             val t0 = System.nanoTime()
-            val image = BookPdfLoader.load(file).use { pdf ->
+            val image = BookPdfLoader.read(file) { pdf ->
                 val t1 = System.nanoTime()
                 val sheet = pdf.getPage(page - 1)
                 val bounds = sheet.cropBox
@@ -887,8 +955,12 @@ internal data class ExtractedBook(
 )
 
 internal object TextbookExtraction {
-    fun extract(path: Path, format: String, title: String, ocr: BookOcr = BundledBookOcr, control: BookImportControl = BookImportControl()): ExtractedBook = try {
-        extractContent(path, format, title, ocr, control, stageOcrOnly = false)
+    fun extract(path: Path, format: String, title: String, ocr: BookOcr = BundledBookOcr,
+        control: BookImportControl = BookImportControl(),
+        storePdfExtras: ((BookPage, List<ExtractedIllustration>) -> Unit)? = null,
+    ): ExtractedBook = try {
+        if (format == "pdf") pdf(path, title, ocr, control, stageOcrOnly = false, store = storePdfExtras)
+        else extractContent(path, format, title, ocr, control, stageOcrOnly = false)
     } catch (e: BookPdfPasswordException) {
         throw IllegalArgumentException("这本 PDF 有密码保护，请取消密码后再导入。", e)
     } catch (e: java.util.concurrent.CancellationException) {
@@ -899,8 +971,12 @@ internal object TextbookExtraction {
         throw IllegalArgumentException("这份教材不完整或已损坏，请重新保存或下载后再导入。", e)
     }
 
-    fun extractForStaging(path: Path, format: String, title: String, control: BookImportControl = BookImportControl()): ExtractedBook = try {
-        extractContent(path, format, title, BundledBookOcr, control, stageOcrOnly = true)
+    fun extractForStaging(path: Path, format: String, title: String,
+        control: BookImportControl = BookImportControl(),
+        storePdfExtras: ((BookPage, List<ExtractedIllustration>) -> Unit)? = null,
+    ): ExtractedBook = try {
+        if (format == "pdf") pdf(path, title, BundledBookOcr, control, stageOcrOnly = true, store = storePdfExtras)
+        else extractContent(path, format, title, BundledBookOcr, control, stageOcrOnly = true)
     } catch (e: BookPdfPasswordException) {
         throw IllegalArgumentException("这本 PDF 有密码保护，请取消密码后再导入。", e)
     } catch (e: java.util.concurrent.CancellationException) {
@@ -909,40 +985,67 @@ internal object TextbookExtraction {
         throw e
     } catch (e: Exception) {
         throw IllegalArgumentException("这份教材不完整或已损坏，请重新保存或下载后再导入。", e)
+    }
+
+    private fun pdf(path: Path, title: String, ocr: BookOcr, control: BookImportControl,
+        stageOcrOnly: Boolean = false,
+        store: ((BookPage, List<ExtractedIllustration>) -> Unit)? = null,
+    ): ExtractedBook = BookPdfLoader.read(path.toFile()) { pdf ->
+        require(pdf.numberOfPages in 1..5000) { "这本 PDF 的页数暂不支持。" }
+        require(pdf.currentAccessPermission.canExtractContent()) { "这本 PDF 限制了文字提取，请使用有阅读和提取权限的教材。" }
+        val pages = (1..pdf.numberOfPages).map { n ->
+            control.report(n, pdf.numberOfPages)
+            val extracted = PdfPageTextExtraction.extract(pdf, n)
+            val text = checkNotNull(extracted.unit.text)
+            val page = BookPage(n, text, textLayout = extracted.pageLayout().takeIf { text.isNotBlank() }, ocrPending = stageOcrOnly && text.isBlank())
+            if (store != null && page.textLayout != null) {
+                store(page, emptyList())
+                page.copy(textLayout = null)
+            } else page
+        }
+        require(pages.count { it.text.isBlank() } <= BookScanImages.MAX_OCR_PAGES) {
+            "扫描页超过 ${BookScanImages.MAX_OCR_PAGES} 页，请把 PDF 拆分后再导入。"
+        }
+        val file = path.toFile()
+        val recognized = if (stageOcrOnly) pages else pages.map { page ->
+            if (page.text.isNotBlank()) page else {
+                OcrTiming.measure("page${page.number}.progress") {
+                    control.report(page.number, pdf.numberOfPages, recognizing = true)
+                }
+                val bounds = pdf.getPage(page.number - 1).cropBox
+                require(bounds.width.isFinite() && bounds.height.isFinite() && bounds.width > 0 && bounds.height > 0) { "这页 PDF 尺寸无效，请重新保存后导入。" }
+                // Cap the OCR raster before allocating it (Android 200 dpi/2000 px, Desktop 300 dpi/4000 px).
+                val scale = minOf(bookOcrTargetDpi / 72f, bookOcrMaxSide / maxOf(bounds.width, bounds.height))
+                BookScanImages.checkSize(kotlin.math.ceil(bounds.width * scale).toInt(), kotlin.math.ceil(bounds.height * scale).toInt())
+                val image = OcrTiming.measure("page${page.number}.render") {
+                    renderBookPdfPage(file, pdf, page.number - 1, scale)
+                }
+                try { BookPage(page.number, ocr.recognize(image, control), ocr = true) }
+                finally { releaseBookBitmap(image) }
+            }
+        }
+        val visuals = if (store == null) importedPdfVisuals(pdf, recognized, control) else {
+            var count = 0
+            var bytes = 0L
+            for (page in recognized) {
+                if (count >= FormatBookImages.MAX_IMAGES || bytes >= FormatBookImages.MAX_TOTAL) break
+                val images = importedPdfVisuals(pdf, listOf(page), control)
+                val accepted = mutableListOf<ExtractedIllustration>()
+                for (image in images) {
+                    if (count >= FormatBookImages.MAX_IMAGES || bytes + image.bytes.size > FormatBookImages.MAX_TOTAL) break
+                    count++
+                    bytes += image.bytes.size
+                    accepted += image
+                }
+                if (accepted.isNotEmpty()) store(page, accepted)
+                if (accepted.size < images.size) break
+            }
+            emptyList()
+        }
+        ExtractedBook(pdf.documentInformation.title?.trim()?.takeIf(String::isNotEmpty) ?: title, recognized, visuals)
     }
 
     private fun extractContent(path: Path, format: String, title: String, ocr: BookOcr, control: BookImportControl, stageOcrOnly: Boolean): ExtractedBook = when (format) {
-        "pdf" -> BookPdfLoader.load(path.toFile()).use { pdf ->
-            require(pdf.numberOfPages in 1..5000) { "这本 PDF 的页数暂不支持。" }
-            require(pdf.currentAccessPermission.canExtractContent()) { "这本 PDF 限制了文字提取，请使用有阅读和提取权限的教材。" }
-            val pages = (1..pdf.numberOfPages).map { n ->
-                control.report(n, pdf.numberOfPages)
-                val extracted = PdfPageTextExtraction.extract(pdf, n)
-                val text = checkNotNull(extracted.unit.text)
-                BookPage(n, text, textLayout = extracted.pageLayout().takeIf { text.isNotBlank() }, ocrPending = stageOcrOnly && text.isBlank())
-            }
-            require(pages.count { it.text.isBlank() } <= BookScanImages.MAX_OCR_PAGES) {
-                "扫描页超过 ${BookScanImages.MAX_OCR_PAGES} 页，请把 PDF 拆分后再导入。"
-            }
-            val recognized = if (stageOcrOnly) pages else {
-                val renderer by lazy { newBookPdfRenderer(pdf) }
-                pages.map { page ->
-                    if (page.text.isNotBlank()) page else {
-                        control.report(page.number, pdf.numberOfPages, recognizing = true)
-                        val bounds = pdf.getPage(page.number - 1).cropBox
-                        require(bounds.width.isFinite() && bounds.height.isFinite() && bounds.width > 0 && bounds.height > 0) { "这页 PDF 尺寸无效，请重新保存后导入。" }
-                        // 300 dpi where possible; cap the decoded raster before allocating it.
-                        val scale = minOf(300f / 72f, 4000f / maxOf(bounds.width, bounds.height))
-                        BookScanImages.checkSize(kotlin.math.ceil(bounds.width * scale).toInt(), kotlin.math.ceil(bounds.height * scale).toInt())
-                        val image = renderer.renderImage(page.number - 1, scale)
-                        try { BookPage(page.number, ocr.recognize(image, control), ocr = true) }
-                        finally { releaseBookBitmap(image) }
-                    }
-                }
-            }
-            val visuals = importedPdfVisuals(pdf, recognized, control)
-            ExtractedBook(pdf.documentInformation.title?.trim()?.takeIf(String::isNotEmpty) ?: title, recognized, visuals)
-        }
         "png", "jpg" -> {
             if (stageOcrOnly) {
                 val image = BookScanImages.read(path)

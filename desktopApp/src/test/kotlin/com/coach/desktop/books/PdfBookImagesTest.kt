@@ -109,6 +109,39 @@ class PdfBookImagesTest {
         assertEquals(resolved, BookSourceResolver(reopenedLibrary).resolveAll(citations))
     }
 
+    @Test fun streamedExtrasRollBackWithCancellationAndReloadOnePageAtATime() = temporary { root ->
+        val file = root.resolve("diagrams.pdf")
+        fixture(file)
+        val library = TextbookLibrary(root.resolve("library"), streamPdfExtras = true)
+        // On the second visit to page two, page one's text layout and illustrations have been written.
+        var visits = 0
+        val stop = BookImportControl(progress = { if (it.page == 2 && ++visits == 2) throw BookImportCancelled() })
+        assertFailsWith<BookImportCancelled> { library.importBook(file, stop) }
+        assertTrue(library.catalog().isEmpty())
+        Files.walk(library.directory).use { paths ->
+            assertFalse(paths.anyMatch { it.toString().endsWith(".png") || it.toString().endsWith(".pdf") ||
+                it.fileName.toString().startsWith(".import-") })
+        }
+        java.sql.DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+            for (table in listOf("pages", "book_page_text_boxes", "book_illustrations")) {
+                db.createStatement().use { it.executeQuery("SELECT count(*) FROM $table").use { rows ->
+                    assertTrue(rows.next())
+                    assertEquals(0, rows.getInt(1))
+                } }
+            }
+        }
+        val book = library.importBook(file)
+        assertEquals(2, book.pages.size)
+        assertTrue(book.pages.all { it.textLayout == null })
+        val reopened = TextbookLibrary(library.directory, streamPdfExtras = true)
+        assertEquals(book.pages, reopened.book(book.id).pages)
+        assertEquals(3, book.pages.first().illustrations.size)
+        for (page in book.pages) {
+            assertNotNull(reopened.pageTextLayout(book.id, page.number))
+            assertEquals(page.text, reopened.pdfTextLayer(book, page)?.text)
+        }
+    }
+
     @Test fun unsupportedGeometryStaleTextAndCancellationNeverCreateGuessedSupplements() = temporary { root ->
         val file = root.resolve("self-authored.pdf"); fixture(file)
         Loader.loadPDF(file.toFile()).use { doc ->

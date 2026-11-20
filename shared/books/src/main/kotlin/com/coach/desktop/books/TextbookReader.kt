@@ -114,7 +114,11 @@ internal fun TextbookReader(
     val textOnlySource = !hasOriginal || page.ocr
     val lastPage = book.pages.maxOf { it.number }
     var textView by remember(library, book.id) {
-        mutableStateOf(!hasOriginal || (library.preferredTextView(book.id) ?: (page.ocr && !(originalPdf && originalPdfTouchEnabled))))
+        // A scanned cover is common in a digital PDF. Show its physical page first
+        // instead of typesetting every chapter just to display that cover.
+        mutableStateOf(!hasOriginal || (library.preferredTextView(book.id)
+            ?: (page.ocr && !(originalPdf && originalPdfTouchEnabled) &&
+                (!originalPdf || book.pages.none { !it.ocr && it.text.isNotBlank() }))))
     }
     var viewSaveRevision by remember(library, book.id) { mutableIntStateOf(0) }
     var viewSaveError by remember(library, book.id) { mutableStateOf(false) }

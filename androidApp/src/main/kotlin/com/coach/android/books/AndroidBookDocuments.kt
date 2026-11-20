@@ -32,7 +32,7 @@ internal fun importedPdfVisuals(pdf: BookPdfDocument, pages: List<BookPage>, con
     val output = mutableListOf<ExtractedIllustration>()
     var bytes = 0L
     for (page in pages) {
-        control.report(page.number, pages.size)
+        control.report(page.number, pdf.numberOfPages)
         for (image in PdfBookImages.extract(pdf, page, emptyList(), control)) {
             if (output.size >= FormatBookImages.MAX_IMAGES || bytes + image.bytes.size > FormatBookImages.MAX_TOTAL) return output
             output += image

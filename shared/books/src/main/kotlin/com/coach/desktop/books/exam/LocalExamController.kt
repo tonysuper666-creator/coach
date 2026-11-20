@@ -70,14 +70,22 @@ internal class LocalExamController(library: TextbookLibrary, private val scope: 
     }
 
     private fun refresh(book: Textbook, opened: String? = null) {
-        mutable.update { it.copy(book = book, reference = textbookReferencePaper(book), papers = store.papers(book.id),
+        mutable.update { it.copy(book = book, reference = if (it.book?.id == book.id) it.reference else null, papers = store.papers(book.id),
             active = store.active(book.id), history = store.history(book.id),
             attempt = opened?.let { id -> store.get(book.id, id) }, source = null, nowMillis = clock()) }
     }
 
-    suspend fun load(book: Textbook) {
-        if (mutable.value.book?.id == book.id) return
-        if (flush()) action { refresh(book) }
+    suspend fun load(book: Textbook, prepareReference: Boolean = true) {
+        val current = mutable.value
+        if (current.book?.id == book.id && (!prepareReference || current.reference != null)) return
+        if (flush()) action {
+            // Restore active attempts on every tab so the timer and autosave still work.
+            if (mutable.value.book?.id != book.id) refresh(book)
+            if (prepareReference && mutable.value.reference == null) {
+                val reference = textbookReferencePaper(book)
+                mutable.update { it.copy(reference = reference) }
+            }
+        }
     }
 
     suspend fun generateAndStart() {

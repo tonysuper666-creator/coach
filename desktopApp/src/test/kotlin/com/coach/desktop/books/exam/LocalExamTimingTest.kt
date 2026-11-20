@@ -218,6 +218,21 @@ class LocalExamTimingTest {
         record(f, "09-legacy-after", reopened.get(f.book.id, activeId))
     }
 
+    @Test fun shelfRestoresTimedAttemptAndOnlyCourseEntryPreparesReference() = runBlocking {
+        val f = TimedExamFixture()
+        val active = f.start()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val controller = LocalExamController(f.library, scope, f.now::get)
+            controller.load(f.book, prepareReference = false)
+            assertEquals(active.str("mockId"), controller.state.value.active?.str("mockId"))
+            assertNull(controller.state.value.reference)
+            controller.load(f.book)
+            assertNotNull(controller.state.value.reference)
+            assertEquals(active.str("mockId"), controller.state.value.active?.str("mockId"))
+        } finally { scope.cancel() }
+    }
+
     @Test fun controllerKeepsCountdownAndDraftAcrossScopeRecreationAndAutoSubmitsOffPane() = runBlocking {
         val f = TimedExamFixture()
         var scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

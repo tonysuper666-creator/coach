@@ -8,6 +8,7 @@ import org.w3c.dom.Element
 import org.w3c.dom.Node
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.Locale
 
 internal object StructuredBookExtraction {
     fun extract(path: Path, format: String, title: String, control: BookImportControl = BookImportControl()): ExtractedBook = when (format) {
@@ -19,7 +20,7 @@ internal object StructuredBookExtraction {
         else -> SafeBookArchive(path).use { zip ->
             val bookTitle = if (zip.contains("docProps/core.xml")) xml(zip.read("docProps/core.xml")).all("title").firstOrNull()?.textContent?.trim()?.takeIf(String::isNotEmpty) ?: title else title
             when (format) {
-                "docx" -> word(zip, bookTitle)
+                "docx" -> wordStream(zip, bookTitle, control)
                 "pptx" -> slides(zip, bookTitle, control)
                 "odt" -> odt(zip, title)
                 else -> throw IllegalArgumentException("请使用 PDF、电子书、Word、幻灯片、网页或文本教材。")
@@ -101,11 +102,227 @@ internal object StructuredBookExtraction {
 
     /** On-demand provenance, not yet persisted or used for rendering/hiding. */
     fun wordSourceMapping(path: Path, canonicalPages: List<BookPage>): WordSourceMapping = SafeBookArchive(path).use { zip ->
+        val docSize = zip.size("word/document.xml") ?: Long.MAX_VALUE
+        if (docSize > SafeBookArchive.MAX_ENTRY_BYTES || zip.declaredTotalBytes > SafeBookArchive.MAX_TOTAL_BYTES) {
+            return@use WordSourceMapping(WordSourceMapping.Status.STALE_TEXT, emptyList())
+        }
         val elements = mutableListOf<WordElementSource>()
         val book = word(zip, "", elements)
         if (book.pages.map { it.number to it.text } == canonicalPages.map { it.number to it.text })
             WordSourceMapping(WordSourceMapping.Status.MAPPED, elements)
         else WordSourceMapping(WordSourceMapping.Status.STALE_TEXT, emptyList())
+    }
+
+    /** Bounded streaming DOCX extractor: handles >64 MiB archives and >16 MiB word/document.xml in O(depth) memory. */
+    private fun wordStream(zip: SafeBookArchive, title: String, control: BookImportControl): ExtractedBook {
+        val footnotes = if (zip.contains("word/footnotes.xml")) {
+            xml(zip.read("word/footnotes.xml")).all("footnote")
+                .filter { it.attr("id").toIntOrNull()?.let { id -> id > 0 } == true }
+                .associate { note -> note.attr("id") to inline(note) }
+        } else emptyMap()
+        val headingStyles = if (zip.contains("word/styles.xml")) xml(zip.read("word/styles.xml")).all("style")
+            .filter { style -> style.all("outlineLvl").isNotEmpty() || style.all("name").any { it.attr("val").matches(Regex("(?i)heading\\s*\\d+")) } }
+            .map { it.attr("styleId") }.toSet() else emptySet()
+        val rels = if (zip.contains("word/_rels/document.xml.rels")) relationships(zip, "word/_rels/document.xml.rels") else emptyMap()
+        val output = StringBuilder()
+        val placements = mutableListOf<FormatBookImages.Placement>()
+        var imageBytes = 0L
+        val supportedImages = setOf("png", "jpg", "jpeg", "gif")
+        val headingRegex = Regex("(?i)heading[1-9]")
+
+        class TableFrame(val depth: Int, var cellIndex: Int = 0, var cellParagraphIndex: Int = 0)
+        val stack = ArrayDeque<String>()
+        val captions = ArrayDeque<String?>()
+        val tables = ArrayDeque<TableFrame>()
+        var skipDepth = 0
+        var topParagraphDepth = -1
+        var topParagraphHeaderEmitted = false
+        var topParagraphPageBreak = false
+        var topParagraphStyle = ""
+        var inTopPPrDepth = -1
+        var cellParagraphDepth = -1
+        var inSectPrDepth = -1
+        var inTextElement = false
+
+        fun flushTopParagraphHeader() {
+            if (topParagraphDepth < 0 || topParagraphHeaderEmitted) return
+            topParagraphHeaderEmitted = true
+            if (topParagraphPageBreak) output.append('\u000c')
+            output.append("\n\n")
+            if (topParagraphStyle in headingStyles || headingRegex.matches(topParagraphStyle)) output.append("# ")
+        }
+
+        fun inInline(): Boolean = topParagraphDepth >= 0 || cellParagraphDepth >= 0
+
+        fun nearestCaption(): String? {
+            for (i in stack.size - 1 downTo 0) {
+                val name = stack[i]
+                if (name in setOf("p", "tc", "body")) break
+                captions[i]?.let { return it }
+            }
+            return null
+        }
+
+        fun storeCaption(text: String) {
+            for (i in stack.size - 1 downTo 0) {
+                val name = stack[i]
+                if (name in setOf("p", "tc", "body")) break
+                if (captions[i] == null) captions[i] = text
+            }
+        }
+
+        zip.stream("word/document.xml", SafeBookArchive.MAX_DOCX_DOCUMENT_BYTES) { input ->
+            streamBookOfficeXml(input, control, object : BookXmlVisitor {
+                override fun startElement(localName: String, attr: (String) -> String?) {
+                    val parent = stack.lastOrNull()
+                    val depth = stack.size
+                    stack.addLast(localName)
+                    captions.addLast(null)
+                    if (skipDepth > 0) {
+                        if (localName == "del" || localName == "instrText") skipDepth++
+                        return
+                    }
+                    if (inInline() && (localName == "del" || localName == "instrText")) {
+                        skipDepth = 1
+                        return
+                    }
+                    if (topParagraphDepth >= 0 && !topParagraphHeaderEmitted) {
+                        if (localName == "pPr" && depth == topParagraphDepth + 1) {
+                            inTopPPrDepth = depth
+                            return
+                        }
+                        if (inTopPPrDepth >= 0) {
+                            when (localName) {
+                                "pageBreakBefore" -> {
+                                    val v = attr("val").orEmpty()
+                                    if (v !in setOf("0", "false", "off")) topParagraphPageBreak = true
+                                }
+                                "pStyle" -> if (topParagraphStyle.isEmpty()) topParagraphStyle = attr("val").orEmpty()
+                            }
+                            return
+                        }
+                        flushTopParagraphHeader()
+                    }
+                    if (!inInline()) {
+                        when (localName) {
+                            "p" -> {
+                                val topTable = tables.lastOrNull()
+                                if (topTable != null && parent == "tc" && depth == topTable.depth + 3) {
+                                    if (topTable.cellParagraphIndex++ > 0) output.append(" ")
+                                    cellParagraphDepth = depth
+                                } else if (tables.isEmpty()) {
+                                    topParagraphDepth = depth
+                                    topParagraphHeaderEmitted = false
+                                    topParagraphPageBreak = false
+                                    topParagraphStyle = ""
+                                    inTopPPrDepth = -1
+                                }
+                            }
+                            "tbl" -> if (tables.isEmpty()) tables.addLast(TableFrame(depth))
+                            "tr" -> {
+                                val topTable = tables.lastOrNull()
+                                if (topTable != null && depth == topTable.depth + 1) {
+                                    topTable.cellIndex = 0
+                                    output.append("\n\n")
+                                }
+                            }
+                            "tc" -> {
+                                val topTable = tables.lastOrNull()
+                                if (topTable != null && parent == "tr" && depth == topTable.depth + 2) {
+                                    if (topTable.cellIndex++ > 0) output.append(" | ")
+                                    topTable.cellParagraphIndex = 0
+                                }
+                            }
+                            "sectPr" -> if (tables.isEmpty() && inSectPrDepth < 0) inSectPrDepth = depth
+                            "type" -> if (inSectPrDepth >= 0 && attr("val") in setOf("nextPage", "evenPage", "oddPage")) {
+                                output.append('\u000c')
+                            }
+                        }
+                        return
+                    }
+                    // Inside inline paragraph content (either top-level <p> or table cell <p>).
+                    when (localName) {
+                        "t" -> inTextElement = true
+                        "tab" -> output.append('\t')
+                        "br" -> output.append(if (attr("type") == "page") '\u000c' else '\n')
+                        "cr" -> output.append('\n')
+                        "footnoteReference" -> output.append("【脚注 ${attr("id").orEmpty()}】")
+                        "docPr", "cNvPr" -> {
+                            val caption = attr("descr").orEmpty().ifBlank { attr("title").orEmpty() }.takeIf(String::isNotBlank)
+                            if (caption != null) storeCaption(caption)
+                        }
+                        "blip", "imagedata" -> {
+                            val id = if (localName == "blip") attr("embed").orEmpty() else attr("id").orEmpty()
+                            val target = rels[id] ?: return
+                            if (placements.size >= FormatBookImages.MAX_IMAGES) return
+                            val resolved = zip.resolve("word/document.xml", target)
+                            val ext = resolved.substringAfterLast('.', "").lowercase(Locale.ROOT)
+                            if (ext !in supportedImages || !zip.contains(resolved)) return
+                            val entrySize = zip.size(resolved) ?: return
+                            if (entrySize <= 0 || entrySize > FormatBookImages.MAX_BYTES ||
+                                imageBytes + entrySize > FormatBookImages.MAX_TOTAL ||
+                                zip.remainingReadBudget() < entrySize) return
+                            val bytes = zip.read(resolved)
+                            imageBytes += bytes.size
+                            placements += FormatBookImages.Placement(output.length, bytes, nearestCaption())
+                        }
+                    }
+                }
+
+                override fun text(value: String) {
+                    if (skipDepth == 0 && inTextElement && inInline()) output.append(value)
+                }
+
+                override fun endElement(localName: String) {
+                    val depth = stack.size - 1
+                    if (skipDepth > 0) {
+                        if (localName == "del" || localName == "instrText") skipDepth--
+                        stack.removeLast()
+                        captions.removeLast()
+                        return
+                    }
+                    if (inTextElement && localName == "t") inTextElement = false
+                    if (inTopPPrDepth == depth) inTopPPrDepth = -1
+                    if (topParagraphDepth == depth) {
+                        flushTopParagraphHeader()
+                        output.append("\n\n")
+                        topParagraphDepth = -1
+                        topParagraphHeaderEmitted = false
+                    } else if (cellParagraphDepth == depth) {
+                        cellParagraphDepth = -1
+                    } else if (tables.lastOrNull()?.let { it.depth + 1 == depth && localName == "tr" } == true) {
+                        output.append("\n\n")
+                    } else if (tables.lastOrNull()?.depth == depth) {
+                        tables.removeLast()
+                    } else if (inSectPrDepth == depth) {
+                        inSectPrDepth = -1
+                    }
+                    stack.removeLast()
+                    captions.removeLast()
+                }
+            })
+        }
+
+        val raw = output.toString()
+        val text = raw.trim()
+        require(text.isNotBlank()) { "这份 Word 文档没有可读取的文字。" }
+        val explicitPages = '\u000c' in text
+        val divided = if (explicitPages) {
+            text.split('\u000c').flatMap { section -> TextbookExtraction.paginate(section.trim()) }
+                .mapIndexed { i, page -> page.copy(number = i + 1) }
+        } else BookText.chapters(text)
+        val pages = divided.map { page ->
+            val ids = Regex("【脚注 ([0-9]+)】").findAll(page.text).map { it.groupValues[1] }.distinct().toList()
+            if (ids.isEmpty()) page else {
+                val suffix = StringBuilder()
+                for (id in ids) {
+                    suffix.append("\n\n脚注 $id：")
+                    suffix.append(footnotes[id] ?: "（原文件缺少这条脚注）")
+                }
+                page.copy(text = page.text + suffix)
+            }
+        }
+        return ExtractedBook(title, pages, FormatBookImages.attach(raw, divided, placements))
     }
 
     private fun word(zip: SafeBookArchive, title: String, elements: MutableList<WordElementSource>? = null): ExtractedBook {

@@ -16,6 +16,9 @@ import java.security.MessageDigest
 import java.util.zip.ZipInputStream
 import javax.imageio.ImageIO
 
+internal const val bookOcrTargetDpi = 300f
+internal const val bookOcrMaxSide = 4000f
+
 internal object BookScanImages {
     const val MAX_PIXELS = 16_000_000L
     const val MAX_SIDE = 8000

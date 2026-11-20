@@ -163,7 +163,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary, private val 
         val pdfFile = library.directory.resolve("${book.id}.pdf").toFile()
         if (!pdfFile.isFile) return ReaderReply(404, null)
 
-        val (w, h, words) = BookPdfLoader.load(pdfFile).use { pdf ->
+        val (w, h, words) = BookPdfLoader.read(pdfFile) { pdf ->
             val page = pdf.getPage(pdfPage - 1)
             val bounds = page.cropBox ?: page.mediaBox
             val pw = bounds.width.toDouble().coerceAtLeast(1.0)

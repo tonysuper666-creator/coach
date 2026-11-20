@@ -43,8 +43,13 @@ internal typealias BookPdfPasswordException = com.tom_roush.pdfbox.pdmodel.encry
 internal typealias BookPdfRenderer = com.tom_roush.pdfbox.rendering.PDFRenderer
 
 internal object BookPdfLoader {
-    private val mixedMemory = com.tom_roush.pdfbox.io.MemoryUsageSetting.setupMixed(16L * 1024 * 1024)
-    fun load(file: File): BookPdfDocument = BookPdfDocument.load(file, mixedMemory)
+    fun load(file: File): BookPdfDocument {
+        val scratch = com.tom_roush.pdfbox.io.MemoryUsageSetting.setupTempFileOnly().setTempDir(file.parentFile)
+        return BookPdfDocument.load(file, scratch)
+    }
+    // Text layers, page aspect lookup and bitmap prefetch may run at the same time.
+    // Hold one file-backed parser at a time on the Android app heap.
+    @Synchronized fun <T> read(file: File, block: (BookPdfDocument) -> T): T = load(file).use(block)
     fun load(bytes: ByteArray): BookPdfDocument = BookPdfDocument.load(bytes)
 }
 

@@ -13,10 +13,11 @@ param(
     [ValidatePattern('^[\p{L}\p{N}_-]{1,32}$')][string]$Marker = '',
     [int]$StartTimeoutSec = 150,
     [int]$BuildTimeoutSec = 900,
-    [int]$LessonNumber = 181,                   # 第⑤步要选的整节：目录里的序号（181 = 零基 180，物理第 150 页，在已授权的 131–156 页内）
+    # 第⑤步要选的整节：目录里的序号 = 书架缓存 book_structures 里的节序号（1 起）。默认 113 是
+    # 「6.6 Conclusion」，起止都是第 150 页，单页整节，讲解的出处只会是这一页，页码断言才站得住。
+    [int]$LessonNumber = 113,
     [int]$StopAfter = 7,                        # 只跑到这一步（5 = 只占第 ⑤ 步区段，不进第 ⑥ 步）
     [int]$LessonPage = 150,                     # 该节应落的物理页；界面标签不是这页就不发请求
-
     [switch]$KeepGoing                          # 某步失败后仍尝试后面不依赖它的步骤（默认停在第一个失败）
 )
 $ErrorActionPreference = 'Stop'
@@ -49,27 +50,6 @@ function Get-PassageServiceError($lines) {
         # 这支字号下 OCR 会把「电脑」「连接」认歪（如「这台电的遵接已停甲」），按骨架再认一次。
         if ($row -match '^这台电.{0,3}的.{0,4}接已停') { return '这台电脑的连接已停用' }
     }
-}
-function Get-AskReplyState($lines, [int]$page) {
-    $title = Find-Text $lines '就这段问一句'
-    $close = Find-Text $lines '回到阅读'
-    if (-not $title -or -not $close) { return 'waiting' }
-    # Only inspect text inside this dialog. The reader behind it has its own
-    # citation and page number even while the question is pending or refused.
-    $body = foreach ($line in $lines) {
-        $words = foreach ($word in $line.Words) {
-            $box = $word.BoundingRect
-            if ($box.X -ge $title.X1 -and $box.X + $box.Width -le $close.X2 -and
-                $box.Y -gt $title.Y2 -and $box.Y + $box.Height -lt $close.Y1) { $word.Text }
-        }
-        ($words -join '') -replace '\s', ''
-    }
-    if ($body -match '^(再试一次|重新配对)$' -or
-        $body -match '尚未接通|无法回答|不能回答|尚未核实|连不上|超时|暂时读不到回答|讲解服务暂时不可用|额度(?:已)?用完') { return 'refused' }
-    if ($body -match '正在读这段问题') { return 'waiting' }
-    # bookPassageLabel adds the paragraph number when it can resolve the source block.
-    if ($body -match "^出处[·•.．:：]?第${page}页(?:[·•.．:：]?第[1-9][0-9]*段)?$") { return 'answered' }
-    return 'waiting'
 }
 function Await-Text([int]$n, [string]$tag, [string[]]$needles, [int]$sec) {
     $deadline = (Get-Date).AddSeconds($sec)
@@ -127,6 +107,22 @@ function Get-OriginalPageNumber($lines, [string]$png) {
 }
 # The lowest on-screen occurrence of a label (e.g. the last button on a page).
 function Find-Lowest($lines, [string]$needle) { $best = $null; foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m -and (-not $best -or $m.Y -gt $best.Y)) { $best = $m } }; $best }
+# 滚动落点按窗口实际大小算：winbox 的控制台会话不一定跑在大屏上（现在只有 800×600），
+# 写死的 900/700 会落到窗口外，滚轮就滚到桌面上，列表一动不动。
+function Scroll-Point([double]$fx, [double]$fy) {
+    $r = Get-Rect
+    @([int](($r.R - $r.L) * $fx), [int](($r.B - $r.T) * $fy))
+}
+# 学习页一屏放不下：整节正文和选项列表下面才是「上一节 / 继续下一节」。当前帧找不到就往下滚着找。
+function Click-Folded([int]$n, [string[]]$labels, [string]$why) {
+    foreach ($k in 1..8) {
+        $m = Has $script:Last $labels
+        if ($m) { Click-At $m.X $m.Y; Start-Sleep -Milliseconds 800; return }
+        $sp = Scroll-Point 0.6 0.6; Scroll-At $sp[0] $sp[1] -4; Start-Sleep -Milliseconds 600
+        $null = Shot $n "fold$k"
+    }
+    Fail $n $why
+}
 function Find-All($lines, [string]$needle) { $all = @(); foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m) { $all += $m } }; $all | Sort-Object Y }
 # A whole OCR line's box: drag-selection needs both edges of the line, not just the first word.
 function Get-LineBox($line) {
@@ -447,7 +443,7 @@ try {
         else {
             # 讲解比选段卡的可视高度长时，「出处」在卡片正文下面：在卡片里下滚一次再等下一轮
             $closeCard = Find-Text $lines '收起'
-            if ($closeCard -and $n -ge 2) { Scroll-At 600 ([Math]::Min($closeCard.Y + 150, 720)) -3; Start-Sleep -Milliseconds 600 }
+            if ($closeCard -and $n -ge 2) { $lim = Get-Rect; Scroll-At 600 ([Math]::Min($closeCard.Y + 150, $lim.B - $lim.T - 30)) -3; Start-Sleep -Milliseconds 600 }
         }
     }
     if ($outcome -eq 'error') { Fail 4 "服务回了拒绝：$errText" }
@@ -460,7 +456,7 @@ try {
     foreach ($k in 0..8) {
         if ($k -gt 0) {
             $closeCard = Find-Text $script:Last '收起'
-            $y = if ($closeCard) { [Math]::Min($closeCard.Y + 150, 720) } else { 600 }
+            $lim = Get-Rect; $y = if ($closeCard) { [Math]::Min($closeCard.Y + 150, $lim.B - $lim.T - 30) } else { [int](($lim.B - $lim.T) * 0.8) }
             Scroll-At 600 $y $(if ($k -le 4) { -3 } else { 3 }); Start-Sleep -Milliseconds 700
         }
         $o = Await-Text 7 'cite' @('出处') 1
@@ -479,64 +475,83 @@ try {
             Click-At $back.X $back.Y; Start-Sleep -Milliseconds 600
             if (-not (Await-Text 4 'text-mode-again' @('看原页') 15)) { $cardOk = '从出处回跳后切不回文字视图' }
         }
-        Send-Keys '{ESC}'; Start-Sleep -Seconds 1
+        # 1.1.1 的 ESC 在阅读器里是「退出回书架」（TextbookWorkspace.returnFromReader），不能再用它关卡片。
     }
-    # 收起选段卡再走「选段提问」：卡片留着会盖住提问对话框后面的阅读区
-    $closeCard = Await-Text 4 'close-card' @('收起') 10
-    if ($closeCard) { Click-At $closeCard.X $closeCard.Y; Start-Sleep -Milliseconds 800 }
-
-    # ④（续）实际输入问题：选段提问 → 选中该段 → 粘贴问题（剪贴板，避开输入法）→ 点发送 → 等带出处的回答
+    # 1.1.1 没有「选段提问」按钮了：追问就在同一张选段卡底部的「继续追问」框里（讲解那轮是「就这段问一句」）。
+    # 点「出处」只是切回原页视图再切回来，不关卡（openPassage 不动 inlineThread），所以这里不用再拖选一次。
     $askWhy = $null
     try {
-        Click-Label 4 @('选段提问') '找不到「选段提问」'; Start-Sleep -Seconds 2
-        $lines = Shot 4 'ask-dlg'
-        $pp = Find-PickerParagraph $lines $words
-        if (-not $pp) { throw '提问对话框里找不到可信选段所在的段落' }
-        Click-At $pp.X $pp.Y; Start-Sleep -Seconds 2
-        $lines = Shot 4 'ask-picked'
-        # A long selected paragraph pushes the field below the dialog viewport.
-        # Require both edges of the input region before clicking inside it.
-        $ctr = $null; $lab = $null
-        foreach ($scrollTry in 0..10) {
-            $ctr = Has $lines @('0/500', '/500'); $lab = Has $lines @('想问什么')
-            if ($ctr -and $lab) { break }
-            $title = Has $lines @('就这段问一句')
-            if (-not $title) { throw '找不到提问对话框' }
-            Scroll-At ($title.X + 200) ($title.Y + 300) -3
+        $field = $null; $lines = @()
+        foreach ($k in 0..5) {
+            $lines = if ($k -eq 0) { Shot 4 'ask-card' } else { Shot 4 "ask-card$k" }
+            # 「继续追问」在这个字号下常被认成「组续追问」，所以只认后半截
+            $field = $lines | Where-Object { ($_.Text -replace '\s', '') -match '(续追问|问一句|问一旬)' } | Select-Object -First 1
+            if ($field) { break }
             Start-Sleep -Milliseconds 700
-            $lines = Shot 4 "ask-input-$scrollTry"
         }
-        if (-not $ctr -or -not $lab -or $ctr.Y -le $lab.Y) { throw '找不到完整可见的提问输入框' }
-        Click-At ($lab.X + 100) ([int](($lab.Y + $ctr.Y) / 2))
+        if (-not $field) { throw '从「出处」回到文字视图后，选段卡里没有「继续追问」输入框' }
         $question = '用大白话解释一下，这里的专用人力资本是什么意思？'
-        if ($Marker) { $question = "$Marker $question" }
-        Paste-Text $question; Start-Sleep -Seconds 1
-        if ($Marker) {
-            $typed = Shot 4 'ask-marker'
-            if (-not (Has $typed @($Marker))) { throw '本轮标记没有出现在自己的提问框中' }
+        # 框里的字太小，OCR 认不出来（截图上明明有字，识别结果是空的），所以不能用「框里有没有字」判断焦点；
+        # 标记直接写进问题里，回答轮的标题是「问：<原问题>」，标记出现在那行才算这一问真的发出去了。
+        $askText = if ($Marker) { "$Marker $question" } else { $question }
+        $fb = Get-LineBox $field
+        $hdr = Has $lines @('收起')
+        $scrollY = if ($hdr) { [int](($hdr.Y + $fb.Y1) / 2) } else { [Math]::Max(60, [int]($fb.Y1) - 120) }
+        # 框里的字 OCR 读不出来，但框里有字时「发送」会从灰变亮、OCR 就能认到 —— 拿它当焦点探针：
+        # 标签底往下逐格试落点，敲一个字后「发送」亮了就说明这一格真的点进了输入框。
+        $focusY = $null
+        foreach ($dy in 14, 20, 26, 32, 38, 44, 50, 56) {
+            $probeY = [int]$fb.Y2 + $dy
+            Click-At ([int]$fb.X1 + 150) $probeY; Start-Sleep -Milliseconds 500
+            if (-not $Marker) { $focusY = $probeY; break }
+            Send-Keys $Marker; Start-Sleep -Milliseconds 600
+            $probe = Shot 4 "ask-probe$dy"
+            if (Has $probe @('发送')) { $focusY = $probeY; break }
+            Send-Keys '^a'; Send-Keys '{BACKSPACE}'; Start-Sleep -Milliseconds 250
         }
-        # Locate the visible button after scrolling; the input may have reflowed.
-        $sent = $false
-        Scroll-At 1080 700 -3; Start-Sleep -Milliseconds 800   # 先滚一下让对话框布局稳定，再按截图定位
-        foreach ($try in 1..4) {
-            $lines = Shot 4 'ask-send'; $send = Has $lines @('发送')
-            if (-not $send) { Scroll-At 1080 700 -3; Start-Sleep -Milliseconds 600; continue }
-            Start-Sleep -Milliseconds 500
-            Click-At $send.X $send.Y; $sent = $true; break
-        }
-        if (-not $sent) { throw '找不到「发送」按钮的位置' }
-        $deadline = (Get-Date).AddSeconds(120); $got = $null; $i = 0
-        while ((Get-Date) -lt $deadline -and -not $got) {
-            Start-Sleep -Seconds 6; $i++
-            Scroll-At 1080 600 -10; Start-Sleep -Milliseconds 600
+        if (-not $focusY) { throw '点不进「继续追问」框：标签下八个落点都没能把「发送」点亮' }
+        Note "追问框落点：标签底 +$($focusY - $fb.Y2)"
+        # 探针敲进去的字要清掉，换成真问题
+        Send-Keys '^a'; Send-Keys '{BACKSPACE}'; Start-Sleep -Milliseconds 250
+        Paste-Text " $askText"; Start-Sleep -Milliseconds 900
+        $typed = Shot 4 'ask-typed'
+        $send = Has $typed @('发送')
+        if (-not $send) { throw '「继续追问」框里没粘进问题（发送没有亮）' }
+        # 回车和「发送」是同一条提交路径（onSubmitQuestion），点按钮的落点由 OCR 直接给出，比回车确定。
+        Click-At $send.X $send.Y
+        # 卡片正文最高 360dp，讲解本身就把滚动区撑满：新加的「问：…」和它的回答追加在下面，不滚卡片看不到。
+        # 一格一格往下找，找到标题就停；走到第 9 格还没出现说明滚过头，再往回找一轮，避免标题被推出视野。
+        $turn = $null; $cite = $null; $i = 0; $step = 0; $sawLoading = $false
+        $deadline = (Get-Date).AddSeconds(150)
+        while ((Get-Date) -lt $deadline -and -not $cite) {
+            Start-Sleep -Seconds 4; $i++
             $lines = Shot 4 "ask-wait$i"
-            $replyState = Get-AskReplyState $lines $physPage
-            if ($replyState -eq 'refused') { throw '选段提问弹框显示请求失败，见本轮私有截图' }
-            $got = $replyState -eq 'answered'
+            $allow = Has $lines @('允许并讲解')
+            if ($allow) { Click-At $allow.X $allow.Y; continue }
+            $serviceError = Get-PassageServiceError $lines
+            if ($serviceError) { throw "服务回了拒绝：$serviceError" }
+            $bad = $lines | Where-Object { $_.Text -match '无法回答|不能回答|尚未接通|暂时读不到回答|选中追问格式不对|无法确认|无氵去确认' } | Select-Object -First 1
+            if ($bad) { throw "提问被拒：$($bad.Text)" }
+            if (Has $lines @('思考')) { $sawLoading = $true }
+            $label = if ($Marker) { $lines | Where-Object { ($_.Text -replace '\s', '') -match '^问' -and $_.Text -like "*$Marker*" } | Select-Object -First 1 }
+                     else { $lines | Where-Object { ($_.Text -replace '\s', '') -match '^问[：:]' } | Select-Object -First 1 }
+            if ($label) { $turn = $label }
+            if ($turn) {
+                # 自己这一问的「出处」在它的标题下面；标题滚出视野以后，视野里的出处也只会是它的。
+                $tb = if ($label) { Get-LineBox $label } else { $null }
+                $cite = $lines | Where-Object { $_.Text -match '出处.*第\s*\d+\s*页' -and (-not $tb -or (Get-LineBox $_).Y -gt $tb.Y) } | Select-Object -Last 1
+                if (-not $cite) { Scroll-At 600 $scrollY -2; Start-Sleep -Milliseconds 500 }
+            } else {
+                $dir = if ($step -lt 9) { -1 } else { 1 }
+                Scroll-At 600 $scrollY $dir; Start-Sleep -Milliseconds 500; $step++
+            }
         }
-        if (-not $got) { throw '120 秒内提问没有得到带出处的回答' }
-        Send-Keys '{ESC}'; Start-Sleep -Seconds 1
-    } catch { if ("$_" -like 'DESKTOP_BUSY*' -or "$_" -like 'WIN_DRIVE_FOREGROUND_CONTENTION*') { throw }; $askWhy = "$_"; try { Send-Keys '{ESC}' } catch { } }
+        if (-not $turn) { throw "问题发出去了，但 150 秒内没出现「问：<自己这一问>」（加载态 $sawLoading）" }
+        if (-not $cite) { throw '提问有了回答，但没等到它自己的「出处 · 第 N 页」' }
+        Note "提问的回答出处：$($cite.Text)"
+        $closeCard = Await-Text 4 'ask-close' @('收起') 5
+        if ($closeCard) { Click-At $closeCard.X $closeCard.Y; Start-Sleep -Milliseconds 600 }
+    } catch { if ("$_" -like 'DESKTOP_BUSY*' -or "$_" -like 'WIN_DRIVE_FOREGROUND_CONTENTION*') { throw }; $askWhy = "$_"; try { $cc = Await-Text 4 'ask-cleanup' @('收起') 3; if ($cc) { Click-At $cc.X $cc.Y } } catch { } }
     if ($askWhy) {
         try { Fail 4 "选段讲解可用，但实际提问失败：$askWhy" } catch { if ("$_" -ne 'STEP_FAILED') { throw }; if (-not $KeepGoing) { throw 'STEP_FAILED' } }
     } else { Pass 4 '拖选一段点「讲讲」得到带出处的讲解，也能输入问题得到带出处的回答' }
@@ -554,13 +569,20 @@ try {
         Start-Sleep -Seconds 4
         Click-Label 5 @('目录') '找不到「目录」'; Start-Sleep -Seconds 3
         $entry = $null
-        foreach ($k in 1..60) {
+        # 一屏只放得下八行左右，滚一格约 1.2 行：固定用 -8 时两帧之间能跨过十行，目标会从中间漏掉。
+        # 离得远时大步赶路，接近后小步走；冲过头就按反方向退回几行。
+        $sp = Scroll-Point 0.25 0.6
+        for ($k = 1; $k -le 120; $k++) {
             $tocLines = Shot 5 "toc$k"
-            foreach ($tl in $tocLines) { if ($tl.Text -match ("^$LessonNumber" + '[\.．。,，、]')) { $entry = Find-Text @($tl) $tl.Text.Substring(0, "$LessonNumber".Length); break } }
+            foreach ($tl in $tocLines) { if (($tl.Text -replace '\s', '') -match ("^$LessonNumber" + '[\.．。,，、]')) { $entry = Find-Text @($tl) "$LessonNumber"; break } }
             if ($entry) { break }
-            Scroll-At 300 700 -8; Start-Sleep -Milliseconds 700
+            $nums = @(foreach ($tl in $tocLines) { if (($tl.Text -replace '\s', '') -match '^(\d{1,4})[\.．。,，、]') { [int]$Matches[1] } })
+            $maxN = if ($nums.Count) { ($nums | Measure-Object -Maximum).Maximum } else { 0 }
+            $minN = if ($nums.Count) { ($nums | Measure-Object -Minimum).Minimum } else { 0 }
+            $notches = if ($minN -gt $LessonNumber) { 3 } elseif ($maxN -lt ($LessonNumber - 24)) { -8 } else { -3 }
+            Scroll-At $sp[0] $sp[1] $notches; Start-Sleep -Milliseconds 500
         }
-        if (-not $entry) { Fail 5 "目录里滚了 60 次也没找到第 $LessonNumber 条，没有发请求" }
+        if (-not $entry) { Fail 5 "目录里滚了 120 次也没找到第 $LessonNumber 条，没有发请求" }
         Click-At $entry.X $entry.Y; Start-Sleep -Seconds 3
         Click-Label 5 @('收起目录') '找不到「收起目录」'; Start-Sleep -Seconds 2
         $sectionLines = Shot 5 'section'
@@ -568,25 +590,26 @@ try {
         $labelPage = if ($label) { [regex]::Match($label.Text, '第\s*(\d+)\s*页').Groups[1].Value } else { '' }
         if (-not $labelPage) { Fail 5 '选中节后界面没有「本节原文 · 第 N 页」标签，没有发请求' }
         if ([int]$labelPage -ne $LessonPage) { Fail 5 "选中的第 $LessonNumber 条落在第 $labelPage 页，不是授权页第 $LessonPage 页，没有发请求（见 5-section.png）" }
-        $deadline = (Get-Date).AddSeconds(90); $res = $null
+        $deadline = (Get-Date).AddSeconds(150); $res = $null; $sawBody = $false
         while ((Get-Date) -lt $deadline -and -not $res) {
             Start-Sleep -Seconds 5; $lines = Shot 5 'learn'
             $allow = Has $lines @('允许并讲解')
             if ($allow) { Click-At $allow.X $allow.Y; continue }
             $e = $lines | Where-Object { $_.Text -match '尚未接通|无法讲解|尚未核实|连不上|超时|没有可用的讲解|讲解暂时读不到|讲解服务暂时不可用|额度.*用完|没有可核对的出处|出处已过期' } | Select-Object -First 1
             if ($e) { $res = "拒绝：$($e.Text)"; continue }
-            # 「本节原文」不是讲解的出处。讲解标题与带页码的出处之间必须有正文。
-            $heading = $lines | Where-Object { ($_.Text -replace '\s', '') -eq '讲解' } | Select-Object -First 1
+            # 「本节原文」不是讲解的出处。先看正文有没有出来（这一屏的「讲解」小标题常被 OCR 漏掉，
+            # 所以按长句行数判），正文出来以后再找它自己的带页码出处。
             $source = $lines | Where-Object { $_.Text -match '出处.*第\s*\d+\s*页' } | Select-Object -First 1
-            if ($heading -and $source) {
-                $headingBox = Find-Text @($heading) $heading.Text
-                $sourceBox = Find-Text @($source) $source.Text
-                $body = @($lines | Where-Object {
-                    $box = Find-Text @($_) $_.Text
-                    $box -and $box.Y -gt $headingBox.Y -and $box.Y -lt $sourceBox.Y -and
-                        $_.Text -notmatch '正在读取|允许并讲解|发送原文'
-                })
-                if ($body.Count -gt 0) { $res = 'ok' }
+            $sourceBox = if ($source) { Find-Text @($source) $source.Text } else { $null }
+            $body = @($lines | Where-Object {
+                ($_.Text -replace '\s', '').Length -ge 20 -and
+                    $_.Text -notmatch '正在读取|正在结合|允许并讲解|发送原文|本节原文|先理解讲解|LearningCoach|Coach目录'
+            })
+            if ($body.Count -ge 3) { $sawBody = $true }
+            if ($sawBody -and $sourceBox) { $res = 'ok' }
+            elseif ($sawBody) {
+                # 出处行被正文挤到折叠线以下：往下滚，把它滚进视野再判。
+                $sp = Scroll-Point 0.6 0.6; Scroll-At $sp[0] $sp[1] -3
             }
         }
         if ($res -eq 'ok') {
@@ -621,7 +644,7 @@ try {
             if ($returned -and ($verified -or $KeepGoing)) { Click-At $returned.X $returned.Y }
             if (-not $verified) { Fail 5 $problem }
             Pass 5 "授权节（目录第 $LessonNumber 条，第 $LessonPage 页）出了讲解正文和自己的第 $sourcePage 页出处，点出处回到对应原文页"
-        } elseif ($res) { Fail 5 "边看边学的讲解没出来，界面说「$($res.Substring(3))」" } else { Fail 5 '90 秒内没有同时看到讲解正文和带页码的出处（见 5-learn.png）' }
+        } elseif ($res) { Fail 5 "边看边学的讲解没出来，界面说「$($res.Substring(3))」" } else { Fail 5 '150 秒内没有同时看到讲解正文和带页码的出处（见 5-learn.png）' }
     } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $five = 'failed' }
     if ($five -and -not $KeepGoing) { throw 'STEP_FAILED' }
     if ($StopAfter -le 5) { throw 'STEP_FAILED' }   # 按要求停在第 ⑤ 步之后；已记录的结果不变
@@ -629,9 +652,18 @@ try {
     # ⑥ 朋友自己的书：从正常界面进入授权章节后按节现出题，真实点一个选项，再等答后讲解和单题小结；不依赖整理题库准入。
     $six = $null
     try {
-        Scroll-At 900 700 30; Start-Sleep -Seconds 1
+        $sp = Scroll-Point 0.7 0.6; Scroll-At $sp[0] $sp[1] 30; Start-Sleep -Seconds 1
         Click-Label 6 @('返回书架') '无法从学习页返回书架'
-        Click-Label 6 @('做题学', '继续做题学') '书架没有做题学入口'
+        # 书架一屏放不下三条入口：做题学在折叠线以下，得先滚出来再点。
+        $path = $null
+        foreach ($k in 1..8) {
+            $shelf = Shot 6 "path$k"
+            $path = Has $shelf @('做题学', '继续做题学')
+            if ($path) { break }
+            $sp = Scroll-Point 0.7 0.6; Scroll-At $sp[0] $sp[1] -4; Start-Sleep -Milliseconds 600
+        }
+        if (-not $path) { Fail 6 '书架没有做题学入口' }
+        Click-At $path.X $path.Y; Start-Sleep -Milliseconds 800
         $enter = Await-Text 6 'learn-enter' @('本节原文') 15
         if (-not $enter) { Fail 6 '做题学页面没有显示「本节原文」' }
         $readTotalLessons = { param($lines)
@@ -739,7 +771,9 @@ try {
                     }
                     & $waitIdle "step-$hop"
                     $beforeLesson = Get-LessonLearningState $script:Last $script:LastPng
-                    if ($dir -eq 'next') { Click-Label 6 @('继续下一节') '做题学页面找不到「继续下一节」' } else { Click-Label 6 @('上一节') '做题学页面找不到「上一节」' }
+                    if ($dir -eq 'next') { Click-Folded 6 @('继续下一节') '做题学页面找不到「继续下一节」' } else { Click-Folded 6 @('上一节') '做题学页面找不到「上一节」' }
+                    # 找按钮时把整节正文滚到了底下，切完节再滚回顶部，后面按标题和「本节原文」认新节才看得见。
+                    $sp = Scroll-Point 0.6 0.6; Scroll-At $sp[0] $sp[1] 20; Start-Sleep -Milliseconds 400
                     $secDeadline = (Get-Date).AddSeconds(30)
                     $secReady = $false
                     while ((Get-Date) -lt $secDeadline) {
@@ -862,7 +896,7 @@ try {
             if (Has $lines @('出处')) { $cited = $true }
             if (Has $lines @('题目和作答只保留在这次练习中', '要回看时再打开', '小结')) { $summary = $true }
             if ($selected -and $explained -and $cited -and $summary) { break }
-            Scroll-At 900 700 -2; Start-Sleep -Seconds 1
+            $sp = Scroll-Point 0.7 0.6; Scroll-At $sp[0] $sp[1] -2; Start-Sleep -Seconds 1
         }
         if (-not $selected) { Fail 6 '点击选项后没有看到已选答案' }
         if (-not $explained -or -not $cited) { Fail 6 '已作答，但没有看到带出处的答后讲解' }

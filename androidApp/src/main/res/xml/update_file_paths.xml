@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Staged update packages for the system installer; app-private cache, shared by read-only URI. -->
+    <cache-path name="updates" path="updates/" />
+</paths>

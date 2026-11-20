@@ -2,8 +2,17 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- In-app updates hand a verified APK to the system installer; the learner grants this per app. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <application android:label="LearningCoach" android:theme="@style/Theme.Coach" android:networkSecurityConfig="@xml/network_security_config" android:allowBackup="false">
         <meta-data android:name="coach.port" android:value="${coachPort}" />
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${updateAuthority}"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/update_file_paths" />
+        </provider>
         <receiver android:name=".ReviewReminderReceiver" android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

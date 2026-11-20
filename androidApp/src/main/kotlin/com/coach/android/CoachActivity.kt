@@ -72,6 +72,8 @@ class CoachActivity : ComponentActivity() {
         val store=KeystoreCredentials(this,serverUrl)
         AndroidBookConnection.bind(this, serverUrl, store)
         setContent {
+            // Update offers sit above every workspace so the first screen after launch can show one.
+            AndroidUpdatePrompt()
             var personalCourse by rememberSaveable {
                 mutableStateOf(intent.hasExtra("openKp") || intent.hasExtra("tab") || intent.hasExtra("agentRunId"))
             }

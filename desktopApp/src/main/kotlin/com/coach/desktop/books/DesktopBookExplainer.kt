@@ -88,7 +88,11 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         send(ExplainWire.question(requestId, chosen, question), listOf(chosen), requestId)
 
     private suspend fun send(input: JsonObject, context: List<SourceBlock>, requestId: String): ExplainResult {
-        val paired = identity ?: return ExplainResult.Refused("还没连上你的 Mac。先在讲解页配对。")
+        val paired = identity ?: return if (revoked) {
+            ExplainResult.Refused(ExplainTrouble.revoked(sableLogin), ExplainTrouble.Revoked)
+        } else {
+            ExplainResult.Refused(ExplainTrouble.UNPAIRED, ExplainTrouble.Unpaired)
+        }
         val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library")
         return try {
             val snapshot = withContext(Dispatchers.IO) { imports?.snapshot(context) }

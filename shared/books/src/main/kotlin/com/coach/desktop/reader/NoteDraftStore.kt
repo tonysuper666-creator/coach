@@ -63,14 +63,14 @@ class FileNoteDraftStore(private val directory: Path, override val scope: String
                 if (draft.cleared) put("cleared", true)
             }
             val tmp = Files.createTempFile(directory, "draft-", ".tmp")
-            Files.writeString(tmp, body.toString())
+            Files.write(tmp, body.toString().toByteArray(Charsets.UTF_8))
             Files.move(tmp, file(i), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
             true
         } catch (_: java.io.IOException) { false } catch (_: SecurityException) { false } catch (_: UnsupportedOperationException) { false }
     }
 
     private fun parse(path: Path): StoredDraft? {
-        val o = runCatching { Json.parseToJsonElement(Files.readString(path)).jsonObject }.getOrNull() ?: return null
+        val o = runCatching { Json.parseToJsonElement(String(Files.readAllBytes(path), Charsets.UTF_8)).jsonObject }.getOrNull() ?: return null
         if ((o["schema"] as? JsonPrimitive)?.intOrNull != 1) return null
         fun s(k: String): String? = (o[k] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
         fun n(k: String): Int? = (o[k] as? JsonPrimitive)?.intOrNull
@@ -90,7 +90,7 @@ class FileNoteDraftStore(private val directory: Path, override val scope: String
     override fun listFor(doc: String, version: String, pdfPage: Int): List<StoredDraft> {
         if (!enabled || !Files.isDirectory(directory)) return emptyList()
         return Files.list(directory).use { s ->
-            s.filter { it.fileName.toString().endsWith(".json") }.toList().mapNotNull { parse(it) }
+            s.filter { it.fileName.toString().endsWith(".json") }.collect(java.util.stream.Collectors.toList()).mapNotNull { parse(it) }
         }.filter { it.identity.scope == scope && it.identity.doc == doc && it.identity.version == version && it.identity.pdfPage == pdfPage }
             .sortedBy { it.identity.start }
     }

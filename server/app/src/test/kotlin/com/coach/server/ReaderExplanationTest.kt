@@ -36,6 +36,42 @@ class ReaderExplanationTest {
         }
     }
 
+    @Test fun explainLessonAcceptsMultiParagraphPayloadAndPreservesAllCitations(): Unit = runBlocking {
+        Harness().use { h ->
+            val pages = (1..94).map { n ->
+                val page = (n - 1) / 14 + 1
+                SourcePage("${"a".repeat(64)}:p$page:${n * 100}", page, "Self authored plant process $n.")
+            }
+            val reader = ReaderExplanation(h.actor, BridgeClient(BridgeConfig(h.stub.baseUrl)))
+            val fourParagraphs = json("paragraphs" to JsonArray(listOf(
+                json("text" to "第一部分先讲起点。", "anchors" to JsonArray(listOf(JsonPrimitive("S1")))),
+                json("text" to "第二部分展开核心关系。", "anchors" to JsonArray(listOf(JsonPrimitive("S25")))),
+                json("text" to "第三部分说明条件变化。", "anchors" to JsonArray(listOf(JsonPrimitive("S60")))),
+                json("text" to "第四部分总结全节要点。", "anchors" to JsonArray(listOf(JsonPrimitive("S94")))),
+            ))).toString()
+            h.stub.stream(1, fourParagraphs, StubTutor.terminal("complete"), StubTutor.DONE)
+            val result = reader.explainLesson("d", json("requestId" to "ab13", "kind" to "lesson"), pages,
+                com.coach.domain.scope.VisibleScope.learner(), sourcesCurrent = { true })
+            assertEquals(listOf(pages[0].docId, pages[24].docId, pages[59].docId, pages[93].docId),
+                result.getValue("sources").jsonArray.map { it.jsonObject.str("docId") })
+            assertEquals(1, h.stub.requests)
+        }
+    }
+
+    @Test fun checkedReaderPayloadHonorsMaxParagraphsLimit() {
+        fun multi(count: Int) = json("paragraphs" to JsonArray((1..count).map {
+            json("text" to "第 $it 段有依据。", "anchors" to JsonArray(listOf(JsonPrimitive("S1"))))
+        })).toString()
+        val defaultReasons = mutableListOf<ReaderFormatReason>()
+        assertNull(checkedReaderPayload(multi(3), pack, onReject = defaultReasons::add))
+        assertEquals(listOf(ReaderFormatReason.PARAGRAPH_COUNT), defaultReasons)
+
+        assertNotNull(checkedReaderPayload(multi(6), pack, maxParagraphs = 6))
+        val lessonReasons = mutableListOf<ReaderFormatReason>()
+        assertNull(checkedReaderPayload(multi(7), pack, maxParagraphs = 6, onReject = lessonReasons::add))
+        assertEquals(listOf(ReaderFormatReason.PARAGRAPH_COUNT), lessonReasons)
+    }
+
     @Test fun rawTabMatchesFinalValidationWithoutCountingAsBodyProgress() {
         val prefix = "{\"paragraphs\":[{\"text\":\""
         val body = "的解释。"

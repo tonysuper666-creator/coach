@@ -25,14 +25,16 @@ class KeystoreCredentials(context: Context, private val serverUrl: String, stora
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
         }.generateKey()
     }
-    fun save(credentials: PairedCredentials) {
+    fun save(credentials: PairedCredentials) = synchronized(writeLock) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()); updateAAD(serverUrl.toByteArray()) }
         val plain = JSONObject().put("deviceId", credentials.deviceId).put("token", credentials.token).put("role", credentials.role).toString().toByteArray()
         val envelope = JSONObject().put("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
             .put("ciphertext", Base64.encodeToString(cipher.doFinal(plain), Base64.NO_WRAP)).toString()
-        check(preferences.edit().putString("credentials", envelope).commit()) { "Could not save pairing" }
+        check(preferences.edit().putString("credentials", envelope).remove("revoked").commit()) { "Could not save pairing" }
     }
-    fun load(): PairedCredentials? {
+    fun load(): PairedCredentials? = synchronized(writeLock) { readCredentials() }
+
+    private fun readCredentials(): PairedCredentials? {
         val envelope = preferences.getString("credentials", null) ?: return null
         return try {
             val value = JSONObject(envelope)
@@ -48,5 +50,20 @@ class KeystoreCredentials(context: Context, private val serverUrl: String, stora
             null
         }
     }
-    fun clear() { check(preferences.edit().clear().commit()) }
+    internal fun bookPairing(): Pair<PairedCredentials?, Boolean> = synchronized(writeLock) {
+        readCredentials() to preferences.getBoolean("revoked", false)
+    }
+
+    internal fun revokeIfCurrent(credentials: PairedCredentials) = synchronized(writeLock) {
+        val saved = readCredentials()
+        if (saved != null && saved.deviceId == credentials.deviceId && saved.token == credentials.token) {
+            check(preferences.edit().remove("credentials").putBoolean("revoked", true).commit())
+        }
+    }
+
+    fun clear() = synchronized(writeLock) { check(preferences.edit().clear().commit()) }
+
+    private companion object {
+        val writeLock = Any()
+    }
 }

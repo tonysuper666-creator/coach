@@ -172,7 +172,7 @@ internal fun BookExplainPanel(
                 if (sable) {
                     com.coach.ui.SableLoginButton(pairing, { pairing = it }) { open ->
                         explainer.sable(open)
-                        states.filterValues { (it as? BlockState.Failed)?.trouble == ExplainTrouble.Revoked }.keys.forEach(states::remove)
+                        states.filterValues { (it as? BlockState.Failed)?.trouble?.needsPairing == true }.keys.forEach(states::remove)
                     }
                     Text("没有 Sable 账号？用配对码", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                 }
@@ -184,8 +184,8 @@ internal fun BookExplainPanel(
                     pairing = true
                     scope.launch {
                         if (!explainer.pair(address, code)) pairError = "没配上。核对 Mac 地址，或请 Mac 那边生成新的配对码。"
-                        // 配好了：之前因停用而停下的段落回到「讲解这段」。
-                        else states.filterValues { (it as? BlockState.Failed)?.trouble == ExplainTrouble.Revoked }.keys.forEach(states::remove)
+                        // 配好了：之前因未配对或停用而停下的段落回到「讲解这段」。
+                        else states.filterValues { (it as? BlockState.Failed)?.trouble?.needsPairing == true }.keys.forEach(states::remove)
                         code = ""; pairing = false
                     }
                 }, enabled = code.length == 6 && address.isNotBlank() && !pairing, modifier = Modifier.testTag("explain-pair")) { Text(if (pairing) "正在配对…" else "配对") }
@@ -222,8 +222,10 @@ internal fun BookExplainPanel(
                     verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                     if (failed != null) {
                         when (failed.trouble) {
-                            ExplainTrouble.Revoked -> PaperButton(onClick = { scope.launch { scroll.animateScrollTo(0) } },
-                                modifier = Modifier.testTag("explain-repair")) { Text("重新配对") }
+                            ExplainTrouble.Unpaired, ExplainTrouble.Revoked -> PaperButton(onClick = { scope.launch { scroll.animateScrollTo(0) } },
+                                modifier = Modifier.testTag("explain-repair")) {
+                                Text(if (failed.trouble == ExplainTrouble.Revoked) "重新配对" else "配对")
+                            }
                             else -> QuietButton("再试一次", enabled = paired != null, modifier = Modifier.testTag("explain-retry")) { start(block) }
                         }
                         // 连不上、超时、暂时读不到都是会自己好的：中性灰字。只有要读者动手的（连接被停用、要重新配对）才用朱色。

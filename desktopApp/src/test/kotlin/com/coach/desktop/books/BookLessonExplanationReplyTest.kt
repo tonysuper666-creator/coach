@@ -8,6 +8,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import kotlinx.coroutines.CompletableDeferred
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.pdmodel.PDPage
+import org.apache.pdfbox.pdmodel.PDPageContentStream
+import org.apache.pdfbox.pdmodel.font.PDType1Font
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts
 import java.nio.file.Files
 import kotlin.test.*
 
@@ -48,7 +53,7 @@ class BookLessonExplanationReplyTest {
             onNodeWithTag("book-lesson-consent-allow").performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-source-0").fetchSemanticsNodes().size == 1 }
             onNodeWithTag("book-explanation-text").assertTextEquals("Plants connect these processes throughout the lesson.")
-            onNodeWithTag("book-source-0").assertTextContains("第 ${last.page} 页", substring = true).performClick()
+            onNodeWithTag("book-source-0").assertTextContains("本章第 9 段", substring = true).performClick()
             waitUntil(timeoutMillis = 20_000) { opened != null }
             runOnIdle {
                 val target = checkNotNull(opened)
@@ -58,6 +63,57 @@ class BookLessonExplanationReplyTest {
                 assertEquals(last.end, target.end)
                 assertEquals(last.text, target.quote)
                 assertEquals(1, calls)
+            }
+        }
+    }
+
+    @Test fun pdfWholeLessonSourceShowsPageAndParagraphNumberAndOpensExactTarget() {
+        val pdfFile = root.resolve("whole-lesson-paragraphs.pdf")
+        PDDocument().use { pdf ->
+            val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+            val page1 = PDPage(); pdf.addPage(page1)
+            PDPageContentStream(pdf, page1).use { out ->
+                out.beginText(); out.setFont(font, 18f); out.newLineAtOffset(50f, 710f); out.showText("Chapter 1 Energy")
+                out.newLineAtOffset(0f, -48f); out.setFont(font, 11f); out.showText("Sunlight provides the starting energy for leaves.")
+                out.endText()
+            }
+            val page2 = PDPage(); pdf.addPage(page2)
+            PDPageContentStream(pdf, page2).use { out ->
+                out.beginText(); out.setFont(font, 11f); out.newLineAtOffset(50f, 710f)
+                out.showText("Chloroplasts capture energy during daytime.")
+                out.newLineAtOffset(0f, -100f)
+                out.showText("Sugars store that chemical energy for growth.")
+                out.endText()
+            }
+            pdf.save(pdfFile.toFile())
+        }
+        val imported = library.importBook(pdfFile)
+        val whole = imported.lessons.first()
+        val body = whole.blocks.filterNot { it.heading }
+        val secondOnPage2 = body.last()
+        assertEquals(2, secondOnPage2.page)
+        val support = PairedBookLearningSupport(library, sendLesson = { _, _ ->
+            ExplainResult.Done(Explanation("Energy is captured and stored across the lesson.【S3】",
+                listOf(Citation("S3", secondOnPage2.id, secondOnPage2.page)), 1))
+        })
+        support.allow(imported.id)
+        val resolver = BookSourceResolver(library)
+        var opened: BookSourceTarget? = null
+        runSkikoComposeUiTest(size = Size(900f, 700f), density = Density(1f)) {
+            setContent {
+                BookLessonExplanation(imported, whole, support, sources = { sources ->
+                    BookSourceRow(sources, imported, resolver, { FocusRequester() }, { _, target -> opened = target })
+                })
+            }
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-source-0").fetchSemanticsNodes().size == 1 }
+            onNodeWithTag("book-source-0").assertTextContains("第 2 页 · 第 2 段", substring = true).performClick()
+            waitUntil(timeoutMillis = 20_000) { opened != null }
+            runOnIdle {
+                val target = checkNotNull(opened)
+                assertEquals(2, target.pdfPage)
+                assertEquals(secondOnPage2.start, target.start)
+                assertEquals(secondOnPage2.end, target.end)
+                assertEquals(secondOnPage2.text, target.quote)
             }
         }
     }

@@ -150,7 +150,7 @@ internal fun LessonAnswerExplanation(
             }
             // 停用之后在原文页重新配好了：留着的那条「已停用」作废，这一节重新去取讲解。
             LaunchedEffect(reply.value) {
-                if ((reply.value as? BookLearningReply.Unavailable)?.trouble == ExplainTrouble.Revoked && !gate.revoked()) reply.value = null
+                if ((reply.value as? BookLearningReply.Unavailable)?.trouble?.needsPairing == true && !gate.revoked()) reply.value = null
             }
             BookLessonExplanation(book, lesson, support, reply = reply, sources = sources, onRepair = onOpenSourcePage)
         }

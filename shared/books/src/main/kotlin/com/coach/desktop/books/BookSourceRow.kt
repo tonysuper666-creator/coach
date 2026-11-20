@@ -49,9 +49,18 @@ internal fun bookSourceStates(sources: List<BookPassage>, book: Textbook, resolv
     }
 }
 
-/** 「第 12 页 · “前 16 字…”」: no SHA, no offsets. Counts by code point so a surrogate pair is never split. */
-internal fun bookSourceLabel(p: BookPassage, book: Textbook? = null): String {
-    return "${book?.pageLabel(p.page) ?: "第 ${p.page} 页"} · ${shortQuote(p.text)}"
+/** 「第 12 页 · 第 3 段 · “前 16 字…”」或「本章第 3 段 · “前 16 字…”」: no SHA, no offsets. Counts by code point so a surrogate pair is never split. */
+internal fun bookSourceLabel(
+    p: BookPassage,
+    book: Textbook? = null,
+    blocks: List<SourceBlock>? = null,
+): String {
+    val location = if (book != null && p.book == book.id) {
+        bookPassageLabel(book, blocks ?: StudyCoachCourse.blocks(book.id, book.pages), p)
+    } else {
+        "第 ${p.page} 页"
+    }
+    return "$location · ${shortQuote(p.text)}"
 }
 
 /**
@@ -69,6 +78,7 @@ internal fun BookSourceRow(
 ) {
     var refreshed by remember(sources, book.id) { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
+    val blocks = remember(book.id, book.pages) { StudyCoachCourse.blocks(book.id, book.pages) }
     val states by produceState<List<BookSourceState>?>(null, sources, book.id, refreshed) {
         value = withContext(Dispatchers.IO) { bookSourceStates(sources, book, resolver) }
     }
@@ -78,9 +88,10 @@ internal fun BookSourceRow(
             return@Column
         }
         sources.forEachIndexed { i, p ->
+            val label = bookSourceLabel(p, book, blocks)
             when (val state = states?.getOrNull(i)) {
                 null -> Column(Modifier.testTag("book-source-pending-$i").nonButtonRow(), verticalArrangement = Arrangement.Center) {
-                    Text(bookSourceLabel(p, book), style = MaterialTheme.typography.labelLarge)
+                    Text(label, style = MaterialTheme.typography.labelLarge)
                 }
                 BookSourceState.Ready -> V7TextButton(
                     onClick = {
@@ -91,17 +102,17 @@ internal fun BookSourceRow(
                         }
                     },
                     modifier = Modifier.focusRequester(focus(i)).testTag("book-source-$i")
-                        .semantics { contentDescription = "打开出处：《${book.title}》${bookSourceLabel(p, book)}" },
+                        .semantics { contentDescription = "打开出处：《${book.title}》$label" },
                 ) {
                     // V7 出处：主色下划线小字，像书页边的注，不再是一排和正文抢眼的按钮。
-                    Text("出处 · " + bookSourceLabel(p, book), style = MaterialTheme.typography.labelLarge, color = v7Pine(), textDecoration = TextDecoration.Underline)
+                    Text("出处 · " + label, style = MaterialTheme.typography.labelLarge, color = v7Pine(), textDecoration = TextDecoration.Underline)
                 }
                 is BookSourceState.Stale -> Column(Modifier.testTag("book-source-stale-$i").nonButtonRow(), verticalArrangement = Arrangement.Center) {
-                    Text(bookSourceLabel(p, book), style = MaterialTheme.typography.labelLarge)
+                    Text(label, style = MaterialTheme.typography.labelLarge)
                     Text(state.message, style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.dangerFg)
                 }
                 is BookSourceState.WrongBook -> Column(Modifier.testTag("book-source-wrong-$i").nonButtonRow(), verticalArrangement = Arrangement.Center) {
-                    Text(bookSourceLabel(p, book), style = MaterialTheme.typography.labelLarge)
+                    Text(label, style = MaterialTheme.typography.labelLarge)
                     Text(state.message, style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.dangerFg)
                 }
             }

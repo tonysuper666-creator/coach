@@ -45,7 +45,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
     citationFocus: MutableMap<Int, FocusRequester>, citationIndex: Int,
     onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit, onCitation: (Int, BookSourceTarget) -> Unit, onCitationRefused: () -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
     onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit, onQuestions: () -> Unit,
-    onRecapContinue: () -> Unit) {
+    onRecapContinue: () -> Unit, onPair: () -> Unit = onSource) {
     val book = checkNotNull(ui.book)
     val lesson = book.lessons.getOrNull(book.lessonIndex)
     LaunchedEffect(returnFocus, ui.busy) {
@@ -113,7 +113,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                     val sourceSection: @Composable () -> Unit = {
                         // 边看边学：先看讲解，再动手做题。
                         if (ui.learningPath == LearningPath.READ_AND_LEARN) {
-                            BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow)
+                            BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow, onRepair = onPair)
                             if (!ui.questionsOpen && book.questionMode != QuestionMode.NONE) {
                                 PaperButton(onQuestions, enabled = !ui.busy, modifier = Modifier.testTag("guided-start-questions")) { Text("继续做题") }
                             }
@@ -135,8 +135,8 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                         if (ui.learningPath == LearningPath.QUESTION_FIRST && ui.answer.revealed && question != null) {
                             if (answerExplain != null) LessonAnswerExplanation(
                                 book, lesson, question, answerExplain, answerExplainReply, sources = sourceRow,
-                                onOpenSourcePage = onSource,
-                            ) else BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow)
+                                onOpenSourcePage = onPair,
+                            ) else BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow, onRepair = onPair)
                             val lessonNav: @Composable () -> Unit = { LessonNav(book, ui.busy, onLesson) }
                             // 六题小结开着时，这一节只报刚才那一题、不铺按钮；走法让给最下面那张卡的「接着做题」。
                             LessonSummaryCard(book, lesson, question, ui.answer, nav = if (recapOpen) null else lessonNav)
@@ -148,7 +148,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                     }
                     val gate = answerExplain
                     if (ui.learningPath == LearningPath.QUESTION_FIRST && book.questionMode == QuestionMode.CHOICE && gate?.ask != null) {
-                        GeneratedLessonPractice(book, lesson, gate, practiceSourceFocus, sourceRow, onPracticeSource, onSource,
+                        GeneratedLessonPractice(book, lesson, gate, practiceSourceFocus, sourceRow, onPracticeSource, onPair,
                             fallback = sourceSection) { LessonNav(book, ui.busy, onLesson) }
                     } else {
                         sourceSection()

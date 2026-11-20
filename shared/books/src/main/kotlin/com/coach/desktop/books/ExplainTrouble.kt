@@ -17,6 +17,8 @@ import com.coach.ui.v7.PaperButton
  * HTTP 状态码、服务端的 `code` 和异常名一概不显示。
  */
 internal enum class ExplainTrouble(val retry: Boolean) {
+    /** 还没有配对：可以读书和做题，讲解需要先配对。 */
+    Unpaired(false),
     /** 没连上：Mac 合盖、休眠、断网、超时，或中间的网关回了一页不是 JSON 的错误。 */
     Unreachable(true),
     /** 连上了，但讲解服务这会儿不可用：显示讲解请求返回的提示。 */
@@ -26,7 +28,10 @@ internal enum class ExplainTrouble(val retry: Boolean) {
     /** 其余：出处对不上、原文变了、服务端拒绝了这次请求。显示那句话，可以再试。 */
     Other(true);
 
+    val needsPairing: Boolean get() = this == Unpaired || this == Revoked
+
     companion object {
+        const val UNPAIRED = "讲解服务还没配对，读书和做题照常。"
         const val UNREACHABLE = "讲解服务暂时连不上，读书和做题照常。"
         /** 401 时的话，只指向这台电脑上真能用的入口：没放出 Sable 登录就只说配对码。 */
         const val REVOKED = "这台电脑的连接已停用，请用新的配对码重新配对。"
@@ -46,6 +51,7 @@ internal enum class ExplainTrouble(val retry: Boolean) {
         fun message(trouble: ExplainTrouble, serverError: String?): String {
             val said = serverError?.trim().orEmpty()
             return when (trouble) {
+                Unpaired -> UNPAIRED
                 Unreachable -> UNREACHABLE
                 Revoked -> REVOKED
                 Busy -> said.ifEmpty { "讲解服务这会儿没顾上，稍后再试一次。" }
@@ -65,8 +71,10 @@ internal fun ExplainTroubleLine(reply: BookLearningReply.Unavailable, onRetry: (
     val trouble = reply.trouble
     Row(modifier.heightIn(min = 40.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
         when {
-            trouble == ExplainTrouble.Revoked && onRepair != null ->
-                PaperButton(onRepair, modifier = Modifier.testTag("explain-trouble-repair")) { Text("去重新配对") }
+            trouble?.needsPairing == true && onRepair != null ->
+                PaperButton(onRepair, modifier = Modifier.testTag("explain-trouble-repair")) {
+                    Text(if (trouble == ExplainTrouble.Revoked) "去重新配对" else "去配对")
+                }
             trouble?.retry == true -> PaperButton(onRetry, modifier = Modifier.testTag("explain-trouble-retry")) { Text("再试一次") }
         }
         Text(reply.message, style = MaterialTheme.typography.bodySmall,

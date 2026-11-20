@@ -15,6 +15,27 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 @RunWith(AndroidJUnit4::class)
 class PairingKeystoreSmoke {
+    @Test fun staleUnauthorizedResponsePreservesNewBookPairing() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val base = "http://${BuildConfig.COACH_TAIL_HOST}:41000"
+        val storage = "book-pairing-revocation-smoke"
+        val oldCredentials = PairedCredentials("old-device", "a".repeat(43), "friend")
+        val newCredentials = PairedCredentials("new-device", "b".repeat(43), "friend")
+        val store = KeystoreCredentials(context, base, storage)
+        try {
+            store.save(oldCredentials)
+            store.save(newCredentials)
+            store.revokeIfCurrent(oldCredentials)
+            val reopened = KeystoreCredentials(context, base, storage)
+            assertEquals(newCredentials.deviceId, reopened.load()?.deviceId)
+            assertEquals("friend", reopened.load()?.role)
+            reopened.revokeIfCurrent(newCredentials)
+            assertEquals(null to true, store.bookPairing())
+            store.save(oldCredentials)
+            assertEquals(oldCredentials.deviceId, reopened.load()?.deviceId)
+            assertFalse(reopened.bookPairing().second)
+        } finally { store.clear() }
+    }
     @Test fun pairPersistAndReconnect(): Unit = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext

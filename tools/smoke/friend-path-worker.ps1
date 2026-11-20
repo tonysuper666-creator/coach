@@ -128,6 +128,40 @@ function Get-OriginalPageNumber($lines, [string]$png) {
 # The lowest on-screen occurrence of a label (e.g. the last button on a page).
 function Find-Lowest($lines, [string]$needle) { $best = $null; foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m -and (-not $best -or $m.Y -gt $best.Y)) { $best = $m } }; $best }
 function Find-All($lines, [string]$needle) { $all = @(); foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m) { $all += $m } }; $all | Sort-Object Y }
+# Locate controls inside the open question-mode dialog, ignoring the background toolbar button and hint copy.
+function Get-QuestionSettingsControls($lines) {
+    $title = Find-Text $lines '出题方式'
+    if (-not $title) { return $null }
+    $modeHeaders = @(@(foreach ($l in $lines) {
+        if ($l.Text -match '出题[:：]') { continue }
+        $m = Find-Text @($l) '出题'
+        if ($m -and $m.Y -gt $title.Y2 -and [Math]::Abs($m.X1 - $title.X1) -le 60) {
+            [pscustomobject]@{ Box = $m; Exact = (($l.Text -replace '\s', '') -eq '出题') }
+        }
+    }) | Sort-Object { $_.Box.Y })
+    $exactHeader = @($modeHeaders | Where-Object { $_.Exact } | Select-Object -First 1)
+    $modeHeader = if ($exactHeader.Count -gt 0) { $exactHeader[0].Box } elseif ($modeHeaders.Count -gt 0) { $modeHeaders[0].Box } else { $null }
+    $minChoiceY = if ($modeHeader) { $modeHeader.Y2 } else { $title.Y2 }
+    $choices = @(@(foreach ($l in $lines) {
+        if ($l.Text -match '出题[:：]' -or $l.Text -match '选择题') { continue }
+        $m = Find-Text @($l) '选择'
+        if ($m -and $m.Y -gt $minChoiceY -and $m.X1 -ge ($title.X1 - 40)) { $m }
+    }) | Sort-Object Y)
+    $choice = if ($choices.Count -gt 0) { $choices[0] } else { $null }
+    $minConfirmY = if ($choice) { $choice.Y2 } else { $minChoiceY }
+    $confirms = @(Find-All $lines '确定' | Where-Object {
+        $_.Y -gt $minConfirmY -and $_.X1 -ge ($title.X1 - 40)
+    })
+    $confirm = if ($confirms.Count -gt 0) { $confirms[0] } else { $null }
+    [pscustomobject]@{ Title = $title; ModeHeader = $modeHeader; Choice = $choice; Confirm = $confirm }
+}
+function Test-QuestionSettingsConfirmed($lines) {
+    if (Find-Text $lines '出题方式') { return $false }
+    foreach ($l in $lines) {
+        if (($l.Text -replace '\s', '') -match '出题[:：]选择') { return $true }
+    }
+    return $false
+}
 # A whole OCR line's box: drag-selection needs both edges of the line, not just the first word.
 function Get-LineBox($line) {
     $x1 = 1e9; $y1 = 1e9; $x2 = -1; $y2 = -1
@@ -826,11 +860,25 @@ try {
         Click-Label 6 @('出题：', '出题:') '找不到出题设置'
         $settings = Await-Text 6 'settings' @('出题方式') 15
         if (-not $settings) { Fail 6 '出题方式对话框没有打开' }
-        # 背景页也有「出题：选择」；只点击对话框标题下面的选项，避免点到背景而关闭弹窗。
-        $choice = Find-All $script:Last '选择' | Where-Object { $_.Y -gt $settings.Y } | Select-Object -First 1
-        if (-not $choice) { Fail 6 '出题方式对话框没有选择题选项' }
-        Click-At $choice.X $choice.Y; Start-Sleep -Milliseconds 800
-        Click-Label 6 @('确定') '无法确认选择题设置'
+        $ctrl = Get-QuestionSettingsControls $script:Last
+        if (-not $ctrl -or -not $ctrl.Choice) { Fail 6 '出题方式对话框没有选择题选项' }
+        Click-At $ctrl.Choice.X $ctrl.Choice.Y; Start-Sleep -Milliseconds 800
+        # 点完「选择」后再截图核对对话框内的「确定」文案与坐标，防止误点背景关闭弹窗。
+        $confirmLines = Shot 6 'settings-confirm'
+        $ctrlConfirm = Get-QuestionSettingsControls $confirmLines
+        if (-not $ctrlConfirm -or -not $ctrlConfirm.Confirm -or $ctrlConfirm.Confirm.Y -le $ctrl.Choice.Y -or ($ctrlConfirm.Choice -and $ctrlConfirm.Confirm.Y -le $ctrlConfirm.Choice.Y)) {
+            Fail 6 '出题方式对话框找不到「确定」按钮'
+        }
+        $choiceBox = if ($ctrlConfirm.Choice) { $ctrlConfirm.Choice } else { $ctrl.Choice }
+        Note "步骤6 设置确认：标题($($ctrlConfirm.Title.X),$($ctrlConfirm.Title.Y)) 选项「选择」($($choiceBox.X),$($choiceBox.Y)) 按钮「确定」($($ctrlConfirm.Confirm.X),$($ctrlConfirm.Confirm.Y))"
+        Click-At $ctrlConfirm.Confirm.X $ctrlConfirm.Confirm.Y
+        $confirmDeadline = (Get-Date).AddSeconds(10); $confirmed = $false
+        while ((Get-Date) -lt $confirmDeadline -and -not $confirmed) {
+            Start-Sleep -Milliseconds 500
+            $afterLines = Shot 6 'settings-after'
+            if (Test-QuestionSettingsConfirmed $afterLines) { $confirmed = $true }
+        }
+        if (-not $confirmed) { Fail 6 '点击「确定」后未关闭出题方式对话框或未确认为选择题' }
         $deadline = (Get-Date).AddSeconds(120); $question = $false; $picked = $null
         while ((Get-Date) -lt $deadline -and -not $question) {
             $lines = Shot 6 'question'

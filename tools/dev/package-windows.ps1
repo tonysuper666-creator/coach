@@ -43,6 +43,14 @@
     the update channel. The path and contents are never printed; the script only
     reports channel=injected|absent.
 
+.PARAMETER UserHome
+    Read build-time configuration (`Coach/config/local.properties`) from this
+    directory instead of the current user's profile. Passed to Gradle as
+    -Duser.home, so a release build can take one private friend-service origin
+    without that value ever reaching the shared profile or the repository.
+    GRADLE_OPTS alone is not enough: it configures the Gradle client JVM while
+    the build runs in a forked daemon, which silently keeps the old home.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File tools/dev/package-windows.ps1
 #>
@@ -53,7 +61,8 @@ param(
     [switch]$SableLogin,
     [string]$Version,
     [string]$VersionCode,
-    [string]$ChannelFile
+    [string]$ChannelFile,
+    [string]$UserHome
 )
 
 $ErrorActionPreference = 'Stop'
@@ -94,13 +103,19 @@ if ($WixZip) {
     }
 }
 
+$homeArg = @()
+if ($UserHome) {
+    if (-not (Test-Path -LiteralPath $UserHome)) { throw 'Missing private build config home' }
+    $homeArg = @("-Duser.home=$((Resolve-Path -LiteralPath $UserHome).Path)")
+}
+
 $previousPriority = (Get-Process -Id $PID).PriorityClass
 Push-Location $root
 try {
     (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
-    # --no-daemon: a release build may redirect user.home to a private config directory
-    # (GRADLE_OPTS=-Duser.home=...), and a reused daemon would keep the old one.
-    & (Join-Path $root 'gradlew.bat') --console=plain --no-daemon --priority=low --max-workers=2 `
+    # --no-daemon: the build JVM may be told to read another home, and a reused
+    # daemon would keep the previous one.
+    & (Join-Path $root 'gradlew.bat') --console=plain --no-daemon --priority=low --max-workers=2 @homeArg `
         '-Pcoach.release=true' "-Pcoach.release.version=$Version" "-Pcoach.release.versionCode=$VersionCode" `
         "-Pcoach.sableLogin=$(if ($SableLogin) { 'true' } else { 'false' })" `
         :desktopApp:verifyReleaseVersion ":desktopApp:$Task"
@@ -127,4 +142,5 @@ foreach ($installer in $installers) {
     Write-Host ("signature={0} {1}" -f $sig.Status, $signer)
     Write-Host ("sable-login={0}" -f $(if ($SableLogin) { 'shown' } else { 'hidden' }))
     Write-Host ("channel={0}" -f $channel)
+    Write-Host ("home={0}" -f $(if ($UserHome) { 'private' } else { 'profile' }))
 }

@@ -1,4 +1,8 @@
-"""Write latest.json for the two versioned Windows MSIs in a staging directory."""
+"""Write latest.json for the versioned Windows MSIs staged in a directory.
+
+One entry per architecture present: a release may ship x64 alone, and devices
+whose architecture has no entry simply see no update instead of a broken one.
+"""
 
 import argparse
 import hashlib
@@ -22,6 +26,8 @@ def main():
     packages = []
     for arch in ("x64", "arm64"):
         path = args.directory / f"LearningCoach-{args.version}-{arch}.msi"
+        if not path.exists():
+            continue
         with path.open("rb") as package:
             digest = hashlib.sha256()
             size = 0
@@ -31,6 +37,8 @@ def main():
         if not 0 < size <= 2 * 1024**3:
             parser.error(f"invalid size for {path.name}")
         packages.append(dict(version=args.version, arch=arch, file=path.name, size=size, sha256=digest.hexdigest()))
+    if not packages:
+        parser.error(f"no LearningCoach-{args.version}-<arch>.msi in {args.directory}")
 
     temporary = NamedTemporaryFile(dir=args.directory, mode="w", encoding="utf-8", delete=False)
     staged = Path(temporary.name)

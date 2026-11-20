@@ -9,11 +9,19 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import com.coach.desktop.books.exam.*
+import com.coach.desktop.books.LocalBookHinge
+import com.coach.desktop.books.bookTabletopSplit
+import com.coach.desktop.books.bookVerticalSplit
+import com.coach.ui.adaptive.Hinge
+import com.coach.ui.adaptive.HingeAxis
 import com.coach.desktop.books.textbookFileDrop
 import com.coach.desktop.books.bookWorkspaceThemeOverride
 import com.coach.desktop.books.AnswerDrafts
@@ -77,6 +85,8 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
     exams: LocalExamController = rememberLocalExamController(controller.library),
     answerExplain: AnswerExplain = rememberAnswerExplain(controller.library),
     learningSupport: com.coach.desktop.books.BookLearningSupport? = null, onPersonalCourse: (() -> Unit)? = null,
+    hinge: Hinge? = null,
+    onExportNotes: ((com.coach.desktop.books.Textbook, Int) -> Unit)? = null,
     releasePickedBook: (Path) -> Unit = {}, chooseBook: suspend () -> Path?) {
     var tab by rememberSaveable { mutableStateOf(AppTab.RESOURCES) }
     // 今天 / 课程 open their book inside 书架's workspace; the rail keeps pointing where the reader came from
@@ -143,8 +153,19 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
             }
         }.testTag("windows-host"), color = colors.bgCanvas) {
             Box(Modifier.fillMaxSize()) {
-            BoxWithConstraints(Modifier.fillMaxSize()) {
-                val rail = maxWidth >= 700.dp
+            val density = LocalDensity.current
+            var hostOriginDp by remember { mutableStateOf<Pair<Float, Float>?>(null) }
+            BoxWithConstraints(Modifier.fillMaxSize().onGloballyPositioned { coords ->
+                val pos = coords.positionInRoot()
+                hostOriginDp = (pos.x / density.density) to (pos.y / density.density)
+            }) {
+                val hostLeftDp = hostOriginDp?.first ?: 0f
+                val hostTopDp = hostOriginDp?.second ?: 0f
+                val verticalHalfFold = bookVerticalSplit(maxWidth.value, maxHeight.value, hostLeftDp, hinge) != null
+                val hostTabletop = if (!deskPage) bookTabletopSplit(maxWidth.value, maxHeight.value, hostTopDp, hinge) else null
+                val tabletopDesk = deskPage && bookTabletopSplit(maxWidth.value, maxHeight.value, hostTopDp, hinge) != null
+                val hideRailForHalfFold = deskPage && (verticalHalfFold || tabletopDesk || hinge?.axis == HingeAxis.Horizontal)
+                val rail = !hideRailForHalfFold && hostTabletop == null && maxWidth >= 700.dp
                 val settingsButton: @Composable () -> Unit = {
                     V7TextButton({ settings = true }, modifier = Modifier.testTag("open-settings"), ringInside = true) {
                         Text("设置", style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
@@ -176,7 +197,7 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                                     Text("正在读取本书练习…")
                                 }
                             })
-                        else -> TextbookWorkspace(controller, drafts, loadOnMount = false, answerExplain = answerExplain, support = learningSupport, releasePickedBook = releasePickedBook, chooseBook = chooseBook)
+                        else -> TextbookWorkspace(controller, drafts, loadOnMount = false, answerExplain = answerExplain, support = learningSupport, hinge = hinge, onExportNotes = onExportNotes, releasePickedBook = releasePickedBook, chooseBook = chooseBook)
                     }
                 }
                 val deskSelect = remember { { picked: AppTab -> select(picked) } }
@@ -194,9 +215,23 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                 } else null
                 CompositionLocalProvider(LocalDeskSelect provides deskSelect, LocalDeskTypeControl provides typeControl,
                     LocalReadingFont provides preferences.font, LocalImportNoticeHandled provides true,
-                    com.coach.desktop.books.LocalReadingAutoGuide provides preferences.autoGuide) {
+                    com.coach.desktop.books.LocalReadingAutoGuide provides preferences.autoGuide,
+                    LocalBookHinge provides hinge) {
                     // No rules between bar, rail and page: V7 separates them with the desk colour and the paper alone.
-                    if (rail) Row(Modifier.fillMaxSize()) {
+                    if (hostTabletop != null) Column(Modifier.fillMaxSize()) {
+                        Column(Modifier.height(hostTabletop.topDp.dp).fillMaxWidth().testTag("book-host-tabletop-content")) {
+                            HostBar(hostCrumb(destination)) { select(AppTab.TODAY) }
+                            Box(Modifier.weight(1f).fillMaxWidth()) { content() }
+                        }
+                        Spacer(Modifier.height(hostTabletop.gapDp.dp).fillMaxWidth().testTag("book-host-tabletop-hinge"))
+                        Column(Modifier.weight(1f).fillMaxWidth().background(colors.bgCanvas).testTag("book-host-tabletop-controls"),
+                            verticalArrangement = Arrangement.Bottom) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                navigation(Modifier.weight(1f))
+                                settingsButton()
+                            }
+                        }
+                    } else if (rail) Row(Modifier.fillMaxSize()) {
                         Column(Modifier.width(76.dp).fillMaxHeight().padding(top = HostBarHeight + 8.dp, bottom = 12.dp),
                             horizontalAlignment = Alignment.CenterHorizontally) {
                             navigation(Modifier.fillMaxWidth())

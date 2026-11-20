@@ -22,15 +22,19 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
 import com.coach.ui.theme.CoachTheme
+import com.coach.ui.adaptive.Hinge
 import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.LocalV7Fonts
 import com.coach.ui.v7.V7TextButton
@@ -103,18 +107,20 @@ internal fun BookImportToast(notice: BookImportNotice?, onDismiss: (Long) -> Uni
 
 @Composable
 internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String) -> Unit, onRead: () -> Unit, onLearn: () -> Unit,
-    onPath: (LearningPath) -> Unit, onCancelImport: () -> Unit = {}) {
+    onPath: (LearningPath) -> Unit, onCancelImport: () -> Unit = {}, hinge: Hinge? = LocalBookHinge.current,
+    onExportNotes: ((Textbook, Int) -> Unit)? = null) {
     val book = ui.book
     val colors = CoachTheme.colors
     val scroll = rememberScrollState()
+    val rightScroll = rememberScrollState()
+    val density = LocalDensity.current
+    var sheetOriginLeftDp by remember { mutableStateOf<Float?>(null) }
     val line = if (colors.dark) CoachV7.Dark.line else CoachV7.Light.line
-    BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = CoachV7.Space.s6, vertical = CoachV7.Space.s3), contentAlignment = Alignment.TopCenter) {
+    BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = if (hinge != null) CoachV7.Space.s3 else CoachV7.Space.s6, vertical = CoachV7.Space.s3), contentAlignment = Alignment.TopCenter) {
         val sectionSpacing = if (maxHeight < 560.dp) CoachV7.Space.s2 else CoachV7.Space.s5
         Box(Modifier.widthIn(max = 1000.dp).fillMaxWidth().fillMaxHeight().paperShadow("sheet", colors.dark)
             .clip(RoundedCornerShape(CoachV7.Radius.sheet)).background(colors.surface1).testTag("shelf-sheet")) {
-            Column(Modifier.fillMaxWidth().verticalScroll(scroll)
-                .padding(start = CoachV7.Space.s7, top = CoachV7.Space.s7, end = CoachV7.Space.s8, bottom = CoachV7.Space.s8),
-                verticalArrangement = Arrangement.spacedBy(sectionSpacing)) {
+            val catalogHeader: @Composable () -> Unit = {
                 Text("书架", style = MaterialTheme.typography.titleLarge, modifier = Modifier.testTag("library-title"))
                 Text("带来一本教材，从想读的地方开始。", color = colors.fgSecondary)
                 if (book == null) {
@@ -123,24 +129,12 @@ internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String)
                     V7TextButton(onImport, enabled = !ui.busy, modifier = Modifier.testTag("upload-textbook")) { Text("上传教材") }
                 }
                 Text("${BookFormats.description} · 教材和进度保存在此设备", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+            }
+            val catalogList: @Composable () -> Unit = {
                 if (book == null) {
                     Text("书架还是空的", style = MaterialTheme.typography.titleLarge)
                     Text("上传后，可以直接开始学，也可以先当一本书读。", color = colors.fgSecondary)
                 } else {
-                    Text(book.title, style = MaterialTheme.typography.headlineLarge, fontFamily = LocalV7Fonts.current.display)
-                    PrimaryButton(onLearn, enabled = !ui.busy, modifier = Modifier.testTag("home-learn")) {
-                        Text(if (!ui.learningPathSaved && !book.learning) "开始学"
-                        else "继续${ui.learningPath.label}" + if (ui.learningPath == LearningPath.READ) " · 第 ${book.readingPage} 页" else " · 第 ${book.lessonIndex + 1} 节")
-                    }
-                    Column {
-                        ShelfDivider(line)
-                        EntryRow("看书", "翻开第 ${book.readingPage} 页，可就原文段落提问。", "home-read", !ui.busy, onRead)
-                        ShelfDivider(line)
-                        EntryRow("边看边学", "先看讲解，再选择是否做题。", "home-guided", !ui.busy) { onPath(LearningPath.READ_AND_LEARN) }
-                        ShelfDivider(line)
-                        EntryRow("做题学", "先试题，答后看讲解；原文按需打开。", "home-question", !ui.busy) { onPath(LearningPath.QUESTION_FIRST) }
-                        ShelfDivider(line)
-                    }
                     Text("全部教材", style = MaterialTheme.typography.titleMedium, fontFamily = LocalV7Fonts.current.display)
                     Column {
                         ShelfDivider(line)
@@ -157,7 +151,59 @@ internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String)
                     }
                 }
             }
-            BookScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = CoachV7.Space.s4))
+            val selectedActions: @Composable () -> Unit = {
+                if (book != null) {
+                    Text(book.title, style = MaterialTheme.typography.headlineLarge, fontFamily = LocalV7Fonts.current.display)
+                    PrimaryButton(onLearn, enabled = !ui.busy, modifier = Modifier.testTag("home-learn")) {
+                        Text(if (!ui.learningPathSaved && !book.learning) "开始学"
+                        else "继续${ui.learningPath.label}" + if (ui.learningPath == LearningPath.READ) " · 第 ${book.readingPage} 页" else " · 第 ${book.lessonIndex + 1} 节")
+                    }
+                    Column {
+                        ShelfDivider(line)
+                        EntryRow("看书", "翻开第 ${book.readingPage} 页，可就原文段落提问。", "home-read", !ui.busy, onRead)
+                        ShelfDivider(line)
+                        EntryRow("边看边学", "先看讲解，再选择是否做题。", "home-guided", !ui.busy) { onPath(LearningPath.READ_AND_LEARN) }
+                        ShelfDivider(line)
+                        EntryRow("做题学", "先试题，答后看讲解；原文按需打开。", "home-question", !ui.busy) { onPath(LearningPath.QUESTION_FIRST) }
+                        ShelfDivider(line)
+                        if (onExportNotes != null) {
+                            EntryRow("导出笔记与复习提纲", "生成本教材的 Markdown 笔记与可打印 PDF。", "book-export-notes", !ui.busy) {
+                                onExportNotes(book, book.readingPage)
+                            }
+                            ShelfDivider(line)
+                        }
+                    }
+                }
+            }
+            BoxWithConstraints(Modifier.fillMaxSize()
+                .padding(start = if (hinge != null) CoachV7.Space.s4 else CoachV7.Space.s7,
+                    top = if (hinge != null) CoachV7.Space.s4 else CoachV7.Space.s7,
+                    end = if (hinge != null) CoachV7.Space.s4 else CoachV7.Space.s8,
+                    bottom = if (hinge != null) CoachV7.Space.s4 else CoachV7.Space.s8)
+                .onGloballyPositioned { coords -> sheetOriginLeftDp = coords.positionInRoot().x / density.density }) {
+                val verticalSplit = if (book != null) bookVerticalSplit(maxWidth.value, maxHeight.value, sheetOriginLeftDp ?: 0f, hinge) else null
+                if (verticalSplit != null) {
+                    Row(Modifier.fillMaxSize()) {
+                        Column(Modifier.width(verticalSplit.leftDp.dp).fillMaxHeight().verticalScroll(scroll)
+                            .testTag("shelf-half-fold-left"), verticalArrangement = Arrangement.spacedBy(sectionSpacing)) {
+                            catalogHeader()
+                            catalogList()
+                        }
+                        Spacer(Modifier.width(verticalSplit.gapDp.dp).fillMaxHeight().testTag("shelf-half-fold-hinge"))
+                        Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rightScroll)
+                            .testTag("shelf-half-fold-right"), verticalArrangement = Arrangement.spacedBy(sectionSpacing)) {
+                            selectedActions()
+                        }
+                    }
+                } else {
+                    Column(Modifier.fillMaxWidth().verticalScroll(scroll), verticalArrangement = Arrangement.spacedBy(sectionSpacing)) {
+                        catalogHeader()
+                        selectedActions()
+                        catalogList()
+                    }
+                    BookScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = CoachV7.Space.s4))
+                }
+            }
         }
     }
 }

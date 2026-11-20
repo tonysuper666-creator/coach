@@ -16,6 +16,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.coach.ui.CoachTheme
+import com.coach.ui.adaptive.Hinge
 import com.coach.desktop.reader.ReaderSession
 import com.coach.desktop.reader.toReaderInput
 import kotlinx.coroutines.flow.first
@@ -27,6 +28,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     support: BookLearningSupport? = null,
     answerExplain: AnswerExplain? = null,
     sourceResolver: BookSourceResolver = remember(controller.library) { BookSourceResolver(controller.library) },
+    hinge: Hinge? = LocalBookHinge.current,
+    onExportNotes: ((Textbook, Int) -> Unit)? = null,
     releasePickedBook: (Path) -> Unit = {}, chooseBook: suspend () -> Path?) {
     val explainer = remember(controller.library) { BookExplainer(library = controller.library) }
     val learningSupport = support ?: remember(controller.library, explainer) {
@@ -172,7 +175,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             onSelect = { run { controller.select(it) } }, onRead = { run { if (drafts.flush()) controller.learn(LearningPath.READ) } },
                             onLearn = { run { if (drafts.flush()) controller.learn() } },
                             onPath = { path -> run { if (drafts.flush()) controller.learn(path) } },
-                            onCancelImport = controller::cancelImport)
+                            onCancelImport = controller::cancelImport,
+                            hinge = hinge,
+                            onExportNotes = onExportNotes)
                         ui.screen == BookScreen.REVIEWS -> LocalBookReviews(ui,
                             onBack = { run { controller.back() } },
                             onOpen = { entry -> run { if (drafts.flush()) controller.openReview(entry) } })
@@ -189,6 +194,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             openPairing = openPairing,
                             onCancelImport = controller::cancelImport,
                             onReorganizeSections = { run { controller.reorganizeSections() } },
+                            hinge = hinge,
+                            onExportNotes = onExportNotes,
                             onNoteSession = { noteReader = it },
                             onPage = { page ->
                                 val restoreFocus = ui.source != null && readerHasFocus
@@ -235,7 +242,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 }
                             }, onReviews = { run { if (drafts.flush()) controller.showReviews() } },
                             onQuestions = { run { controller.beginQuestions() } },
-                            onRecapContinue = { run { controller.recapContinue() } })
+                            onRecapContinue = { run { controller.recapContinue() } },
+                            hinge = hinge)
                         }
                     }
                 }

@@ -163,6 +163,9 @@ private fun JsonObject.int(key: String): Int? = (get(key) as? JsonPrimitive)?.in
 private fun JsonObject.double(key: String): Double = (get(key) as? JsonPrimitive)?.doubleOrNull ?: 0.0
 private fun hundredths(marks: Double) = (marks * 100).roundToLong()
 
+/** An answer key a person has checked; anything else (including a blank state) is not taught or drilled. */
+private const val VERIFIED_KEY = "VERIFIED"
+
 /** Preserve exact decimal keys; normalize legacy key notation, never student input. */
 private fun analyticalAnswerLiteral(answer: String): String? {
     val literal = answer.trim().trimEnd { it in "。.，,；;！!？?、 \t" }
@@ -248,13 +251,13 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
         val events = store.events(course)
         val entries = library.entries(courseNames(events, course))
         val papers = entries.mapNotNull { it.paper }
-        val packItems = papers.filter { it.str("kind") == "pack" }.flatMap { MockPaper(it).units.filter { u -> u.type == "mcq" } }
+        val packItems = drillPool(papers, null)
         val sessions = store.mocks(course, 20)
         return json("papers" to JsonArray(papers.filter { it.str("kind") == "paper" }.map { p ->
             val paper = MockPaper(p)
             json("id" to paper.id, "title" to paper.title, "minutes" to (library.minutesOverride ?: p.int("minutes") ?: 120),
                 "items" to paper.units.map { it.itemId }.distinct().size, "max" to paper.max)
-        }), "drill" to json("total" to packItems.size, "weeks" to JsonArray(packItems.mapNotNull { it.week }.groupingBy { it }.eachCount()
+        }), "drill" to json("total" to packItems.size, "weeks" to JsonArray(packItems.mapNotNull { it.int("kp_week") }.groupingBy { it }.eachCount()
             .toSortedMap().map { (w, n) -> json("week" to w, "count" to n) }), "minutes" to (library.minutesOverride ?: 14), "size" to 7),
             "invalid" to JsonArray(entries.filter { it.error != null }.map { json("file" to it.file, "reason" to it.error) }),
             "active" to sessions.firstOrNull { it.submittedAt == null }?.let { json("mockId" to it.id, "title" to MockPaper(it.paper).title, "deadline" to it.deadline) },
@@ -286,15 +289,21 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
         return view(store, session)
     }
 
+    /** Choices the learner may practise: the item's own key state wins, the pack's is the fallback, and only a checked key is drawn. */
+    private fun drillPool(papers: List<JsonObject>, week: Int?): List<JsonObject> = papers.filter { it.str("kind") == "pack" }.flatMap { pack ->
+        val packKey = pack.str("key_state").trim()
+        (pack["sections"] as? JsonArray).orEmpty().flatMap { (it.jsonObject["items"] as? JsonArray).orEmpty() }.map { it.jsonObject }
+            .filter { it.str("type") == "mcq" && (week == null || it.int("kp_week") == week) }
+            .map { item -> item to item.str("key_state").trim().ifBlank { packKey } }
+            .filter { (_, keyState) -> keyState == VERIFIED_KEY }
+            .map { (item, keyState) -> JsonObject(item + ("id" to JsonPrimitive(pack.str("id") + "." + item.str("id"))) + ("key_state" to JsonPrimitive(keyState))) }
+    }
+
     /** Seven distinct choices from the packs: one week, or weighted by exam weight; recently drilled questions go last. */
     private fun drillPaper(store: LedgerStore, course: String, drill: JsonObject): JsonObject {
         val week = drill.int("week")
-        val pool = library.packs(courseNames(store.events(course), course)).flatMap { pack ->
-            val items = (pack["sections"] as JsonArray).flatMap { (it.jsonObject["items"] as? JsonArray).orEmpty() }.map { it.jsonObject }
-            items.filter { it.str("type") == "mcq" && (week == null || it.int("kp_week") == week) }
-                .map { JsonObject(it + ("id" to JsonPrimitive(pack.str("id") + "." + it.str("id"))) + ("key_state" to JsonPrimitive(it.str("key_state").ifBlank { pack.str("key_state") }))) }
-        }
-        if (pool.isEmpty()) throw MockError(HttpStatusCode.NotFound, if (week == null) "题包里还没有单选题" else "第 $week 周还没有单选题")
+        val pool = drillPool(library.packs(courseNames(store.events(course), course)), week)
+        if (pool.isEmpty()) throw MockError(HttpStatusCode.NotFound, if (week == null) "题包里还没有答案已核对的单选题" else "第 $week 周还没有答案已核对的单选题")
         val weights = examWeights(store, course)
         val recent = store.mocks(course, 10).filter { it.kind == "drill" }.flatMap { s -> MockPaper(s.paper).units.map { it.itemId } }.toSet()
         val picked = mutableListOf<JsonObject>()

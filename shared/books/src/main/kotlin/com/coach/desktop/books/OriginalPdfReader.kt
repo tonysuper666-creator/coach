@@ -207,7 +207,7 @@ internal fun OriginalPdfReader(
         val sheets = remember(pageNumbers, aspects, maxWidth, imageHeight) {
             originalPdfSheets(pageNumbers, aspects, maxWidth.value, imageHeight.value)
         }
-        SideEffect { reading.sheets = sheets }
+        SideEffect { if (reading.sheets != sheets) reading.sheets = sheets }
         val sheet = sheets.indexOfFirst { reading.page in it }.coerceAtLeast(0)
         val columns = sheets[sheet].size
         val maxAspect = sheets[sheet].maxOf { aspects[it] ?: FallbackPdfAspect }
@@ -281,7 +281,8 @@ private fun OriginalPdfLeaf(
     val layer = layers[page.number]?.getOrNull()
     val image = rememberOriginalPageImage(library, book, page.number, true, renderWidth, retry)
     val displayed = (image as? PageImage.Ready)?.image?.let { it.width.toFloat() / it.height }
-    SideEffect { reading.rasters[page.number] = PdfRasterStatus(displayed, image == PageImage.Failed) }
+    val rasterStatus = PdfRasterStatus(displayed, image == PageImage.Failed)
+    SideEffect { if (reading.rasters[page.number] != rasterStatus) reading.rasters[page.number] = rasterStatus }
     val active = reading.page == page.number
     val matchesCitation = citation?.takeIf { displayed != null && kotlin.math.abs(displayed - it.boxes.width / it.boxes.height) < .05 }
     val marks = remember(library, book.id, page, highlightRevision) { library.highlights(book.id, page) }

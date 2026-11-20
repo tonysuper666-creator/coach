@@ -77,8 +77,10 @@ internal fun FriendQuestion(url: String, credentials: PairedCredentials, revoked
                             "localSource" to json("schema" to 1, "book" to digest, "format" to "txt", "title" to "文本",
                                 "consented" to true, "pages" to JsonArray(listOf(json("number" to 1, "length" to book.length,
                                     "ocr" to false, "sha256" to digest)))))
-                        val reply = http.explainLibrary(body)
-                        if (reply.statusCode == 401) revoked()
+                        val reply = withContext(Dispatchers.IO) { http.explainLibrary(body) }
+                        val isRevoked = reply.statusCode == 401 ||
+                            (reply.statusCode == 403 && withContext(Dispatchers.IO) { http.libraryAuthStatus() } == 401)
+                        if (isRevoked) revoked()
                         else {
                             val result = reply.body
                             val sources = result?.get("sources") as? JsonArray

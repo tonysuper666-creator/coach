@@ -32,6 +32,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         protected set
     /** 配对表单上要不要放「用 Sable 账号登录」：跟着构建时的决定走，默认只给配对码。 */
     val sableLogin: Boolean get() = settings.sableLoginShown()
+    val hasBuiltInAddress: Boolean get() = false
 
     /** 别处（选段提问、答后讲解）先碰到了 401：讲解面板也回到配对，不再显示「已连上」。 */
     fun markRevoked() {

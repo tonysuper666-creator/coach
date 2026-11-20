@@ -4,7 +4,6 @@ import com.coach.domain.LedgerJson
 import com.coach.domain.json
 import com.coach.domain.str
 import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.*
 import io.ktor.client.statement.bodyAsText
@@ -27,7 +26,7 @@ fun validateCoachBaseUrl(baseUrl: String) {
 
 class PairingClient(private val baseUrl: String) {
     init { validateCoachBaseUrl(baseUrl) }
-    private val client = HttpClient(CIO) {
+    private val client = HttpClient(CoachHttpEngineFactory) {
         followRedirects = false
         install(HttpTimeout) { requestTimeoutMillis=10000; connectTimeoutMillis=3000; socketTimeoutMillis=10000 }
     }

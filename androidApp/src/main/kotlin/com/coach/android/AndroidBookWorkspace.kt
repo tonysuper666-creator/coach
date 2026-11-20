@@ -15,6 +15,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
@@ -26,6 +27,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import com.coach.desktop.WindowsTextbookHost
+import com.coach.desktop.books.AndroidBookConnection
 import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
 import com.coach.ui.CoachTheme
@@ -52,6 +54,13 @@ internal fun AndroidBookWorkspace(onPersonalCourse: () -> Unit) {
         }
     }
     var openError by remember { mutableStateOf(false) }
+    var revoked by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        revoked = withContext(Dispatchers.IO) {
+            val identity = runCatching { AndroidBookConnection.load().first }.getOrNull()
+            identity?.credentials?.role == "friend" && !AndroidBookConnection.stillAuthorized(identity, startup = true)
+        }
+    }
     val pending = remember { mutableListOf<CompletableDeferred<Uri?>>() }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { result ->
         pending.firstOrNull()?.complete(result)
@@ -84,6 +93,10 @@ internal fun AndroidBookWorkspace(onPersonalCourse: () -> Unit) {
         if (openError) AlertDialog(onDismissRequest = { openError = false },
             text = { Text("无法读取教材，请确认文件可用且不超过 256 MB。") },
             confirmButton = { TextButton(onClick = { openError = false }) { Text("知道了") } })
+        if (revoked) AlertDialog(onDismissRequest = { revoked = false },
+            title = { Text("授权已撤销，请重新登录") },
+            text = { Text("打开书中的讲解页即可重新登录。读书和做题照常。") },
+            confirmButton = { TextButton(onClick = { revoked = false }) { Text("知道了") } })
     }
 }
 

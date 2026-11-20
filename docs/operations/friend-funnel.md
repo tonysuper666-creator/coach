@@ -34,6 +34,10 @@
    installation 记录，再启动候选。五分钟内验证原配对、讲课、做题和子进程健康。
    任一失败立即停止候选、恢复原 plist/installation 并启动旧 release。
    **回滚保留当前数据库和切换后写入**；不能用备份覆盖用户的新学习记录。
+6. 升级后确认朋友服务的 `state/` 下有 `grant-allocation-anthropic.json`
+   （`COACH_API_STATE_DIR`，默认 `~/Coach/state`）。新版桥发现该文件缺失时会在启动阶段
+   记一行 `grant_allocation_missing` 并退出，不再等到第一次讲解才失败；文件内容和分发
+   规则见 `api-routing.md`「Sharing one provider grant」。
 
 ## 只公开朋友监听
 

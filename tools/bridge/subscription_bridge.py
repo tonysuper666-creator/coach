@@ -31,6 +31,7 @@ import os
 import re
 import secrets
 import signal
+import sys
 import tempfile
 import time
 from contextlib import asynccontextmanager, aclosing
@@ -1830,8 +1831,34 @@ async def chat(request: Request):
                             headers={"X-Request-Id": rid})
 
 
+def require_grant_plans(state: Path) -> None:
+    """Refuse to start an API-backed service that has no shared-grant plan.
+
+    A missing plan otherwise only shows up as `grant_allocation_unavailable` on the
+    first lecture, which the learner reads as the bridge being unreachable. Fail at
+    startup instead, where both the service log and the supervisor name the cause.
+    """
+    for provider in ("anthropic",):
+        if not os.environ.get(f"COACH_{provider.upper()}_API_KEY"):
+            continue
+        plan = state / f"grant-allocation-{provider}.json"
+        if plan.is_file():
+            continue
+        line = (f"{datetime.now().astimezone().isoformat(timespec='seconds')} startup "
+                f"status=failed reason=grant_allocation_missing provider={provider} path={plan}\n")
+        print(line, end="", file=sys.stderr, flush=True)
+        try:
+            with open(LOG_FILE, "a", encoding="utf-8") as out:
+                out.write(line)
+        except OSError:
+            pass
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
     for d in (WORK_DIR, TMP_DIR, CLAUDE_CWD, AGY_CWD, CODEX_CWD, LOG_FILE.parent, STATE_DIR):
         d.mkdir(parents=True, exist_ok=True)
+    if USER_ONLY or API_ONLY:
+        require_grant_plans(API_ROUTER.ledger.state)
     render_sandbox_profile()
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning", access_log=False)

@@ -1,7 +1,9 @@
 """Two independent ledger directories, real flock, synthetic identities and funds."""
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stderr
 from datetime import datetime, timezone
+import io
 import json
 import os
 from pathlib import Path
@@ -190,3 +192,33 @@ class SharedGrantTests(unittest.TestCase):
         with self.assertRaisesRegex(Denied, "95_percent"):
             asyncio.run(stream())
         self.assertEqual(1, len(requests))
+
+
+class StartupGrantPlanTests(unittest.TestCase):
+    """Name a missing shared-grant plan at startup, not on the first lecture."""
+
+    def setUp(self):
+        import subscription_bridge
+        self.bridge = subscription_bridge
+
+    def test_missing_plan_stops_startup_and_is_logged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            log, err = state / "bridge.log", io.StringIO()
+            with patch.dict(os.environ, {"COACH_ANTHROPIC_API_KEY": "synthetic"}), \
+                    patch.object(self.bridge, "LOG_FILE", log), redirect_stderr(err):
+                with self.assertRaises(SystemExit) as raised:
+                    self.bridge.require_grant_plans(state)
+            self.assertEqual(1, raised.exception.code)
+            for text in (err.getvalue(), log.read_text(encoding="utf-8")):
+                self.assertIn("reason=grant_allocation_missing", text)
+                self.assertIn("grant-allocation-anthropic.json", text)
+
+    def test_absent_key_or_installed_plan_starts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            with patch.dict(os.environ, {"COACH_ANTHROPIC_API_KEY": ""}):
+                self.bridge.require_grant_plans(state)
+            (state / "grant-allocation-anthropic.json").write_text("{}", encoding="utf-8")
+            with patch.dict(os.environ, {"COACH_ANTHROPIC_API_KEY": "synthetic"}):
+                self.bridge.require_grant_plans(state)

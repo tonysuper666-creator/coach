@@ -28,6 +28,21 @@
     Optional pre-downloaded wix311.zip for an offline host. Copied to
     ~/.gradle/compose-jb/wix311.zip before the build when that file is absent.
 
+.PARAMETER Version
+    Release version to package. Default: coach.release.version from
+    gradle.properties. Pass it to build a version cut without editing
+    gradle.properties, which would move an already-locked commit.
+
+.PARAMETER VersionCode
+    Android versionCode paired with -Version. Default: coach.release.versionCode
+    from gradle.properties.
+
+.PARAMETER ChannelFile
+    Path to a private UTF-8 file holding the https URL of the published
+    latest.json. Passed to Gradle as COACH_UPDATE_CHANNEL_FILE so the MSI carries
+    the update channel. The path and contents are never printed; the script only
+    reports channel=injected|absent.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File tools/dev/package-windows.ps1
 #>
@@ -35,7 +50,10 @@
 param(
     [string]$Task = 'packageDistributionForCurrentOS',
     [string]$WixZip,
-    [switch]$SableLogin
+    [switch]$SableLogin,
+    [string]$Version,
+    [string]$VersionCode,
+    [string]$ChannelFile
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,12 +66,23 @@ if (-not (Get-Command jpackage -ErrorAction SilentlyContinue)) {
 
 # Read the same release configuration as Android and Compose. Publishing records
 # v<version> tags; fetching them prevents an older checkout from emitting an old MSI.
-$versionLines = @(Get-Content -LiteralPath (Join-Path $root 'gradle.properties') |
-    Where-Object { $_ -match '^coach\.release\.version=' })
-if ($versionLines.Count -ne 1) { throw 'Expected one coach.release.version in gradle.properties' }
-$releaseVersion = $versionLines[0].Split('=', 2)[1].Trim()
+$property = @{}
+foreach ($line in Get-Content -LiteralPath (Join-Path $root 'gradle.properties')) {
+    if ($line -match '^(coach\.release\.[A-Za-z]+)\s*=\s*(.+)$') { $property[$Matches[1]] = $Matches[2].Trim() }
+}
+if (-not $Version) { $Version = $property['coach.release.version'] }
+if (-not $VersionCode) { $VersionCode = $property['coach.release.versionCode'] }
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Release version must be major.minor.patch: $Version" }
+if ($VersionCode -notmatch '^\d+$') { throw "Release versionCode must be an integer: $VersionCode" }
 & git -C $root fetch --tags origin
 if ($LASTEXITCODE -ne 0) { throw 'Cannot sync published release tags; no package built.' }
+
+$channel = 'absent'
+if ($ChannelFile) {
+    if (-not (Test-Path -LiteralPath $ChannelFile)) { throw 'Missing Windows update channel file' }
+    $env:COACH_UPDATE_CHANNEL_FILE = (Resolve-Path -LiteralPath $ChannelFile).Path
+    $channel = 'injected'
+}
 
 if ($WixZip) {
     $cache = Join-Path $env:USERPROFILE '.gradle\compose-jb'
@@ -70,7 +99,8 @@ Push-Location $root
 try {
     (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
     & (Join-Path $root 'gradlew.bat') --console=plain --priority=low --max-workers=2 `
-        '-Pcoach.release=true' "-Pcoach.sableLogin=$(if ($SableLogin) { 'true' } else { 'false' })" `
+        '-Pcoach.release=true' "-Pcoach.release.version=$Version" "-Pcoach.release.versionCode=$VersionCode" `
+        "-Pcoach.sableLogin=$(if ($SableLogin) { 'true' } else { 'false' })" `
         :desktopApp:verifyReleaseVersion ":desktopApp:$Task"
     $code = $LASTEXITCODE
 } finally {
@@ -80,7 +110,8 @@ try {
 if ($code -ne 0) { throw "Gradle exited with code $code (task :desktopApp:$Task)" }
 
 $msiDir = Join-Path $root 'desktopApp\build\compose\binaries\main\msi'
-$installers = @(Get-ChildItem -LiteralPath (Join-Path $msiDir "Coach-$releaseVersion.msi") -ErrorAction SilentlyContinue)
+# desktopApp sets packageName = LearningCoach; the old Coach-*.msi lookup never matched.
+$installers = @(Get-ChildItem -LiteralPath (Join-Path $msiDir "LearningCoach-$Version.msi") -ErrorAction SilentlyContinue)
 if ($installers.Count -eq 0) { throw "No MSI produced under $msiDir" }
 
 foreach ($installer in $installers) {
@@ -88,8 +119,10 @@ foreach ($installer in $installers) {
     $sig = Get-AuthenticodeSignature -FilePath $installer.FullName
     $signer = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '(none)' }
     Write-Host ("msi={0}" -f $installer.FullName)
+    Write-Host ("version={0} ({1})" -f $Version, $VersionCode)
     Write-Host ("size={0}" -f $installer.Length)
     Write-Host ("sha256={0}" -f $hash)
     Write-Host ("signature={0} {1}" -f $sig.Status, $signer)
     Write-Host ("sable-login={0}" -f $(if ($SableLogin) { 'shown' } else { 'hidden' }))
+    Write-Host ("channel={0}" -f $channel)
 }

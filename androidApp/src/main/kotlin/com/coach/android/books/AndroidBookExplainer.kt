@@ -382,6 +382,18 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
         return send(wire, blocks, requestId)
     }
 
+    suspend fun structureUnstructuredBook(
+        candidates: List<SourceBlock>,
+        bookPages: Int,
+        requestId: String = UUID.randomUUID().toString().replace("-", ""),
+    ): ModelSectionResult {
+        if (!BookLessonWire.fits(candidates)) return ModelSectionResult.Failed(BookLessonWire.TOO_LONG)
+        val wire = ExplainWire.bookStructureRequest(requestId, candidates, bookPages)
+        val (body, refused) = sendRaw(wire, candidates, requestId)
+        if (refused != null) return ModelSectionResult.Failed(refused.message)
+        return ExplainWire.parseStructure(checkNotNull(body), candidates)
+    }
+
     suspend fun ask(chosen: SourceBlock, question: String, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult =
         send(ExplainWire.question(requestId, chosen, question), listOf(chosen), requestId)
 
@@ -407,7 +419,7 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
         return try {
             val snapshot = withContext(Dispatchers.IO) { imports?.snapshot(context) }
             val kind = input["kind"]?.jsonPrimitive?.contentOrNull ?: "explain"
-            val sectionScoped = kind == "lesson" || kind == "guide" || input["sectionContext"] != null
+            val sectionScoped = kind == "lesson" || kind == "guide" || kind == "structure" || input["sectionContext"] != null
             val wire = if (sectionScoped) {
                 if (snapshot == null) return null to ExplainResult.Refused("请先打开个人导入的书并允许讲解。")
                 try { BookLessonWire.withSource(input, snapshot) }

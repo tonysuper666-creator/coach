@@ -931,12 +931,62 @@ internal class TextbookLibrary(
         return book(bookId)
     }
 
+    @Synchronized fun saveBookStructure(bookId: String, structure: BookStructure): Textbook {
+        val current = book(bookId)
+        val clampedIndex = current.lessonIndex.coerceIn(0, structure.resolvedLessons.size)
+        database().use { db ->
+            db.autoCommit = false
+            try {
+                BookStructureStore.saveStructure(db, bookId, structure)
+                BookStructureStore.clearGuides(db, bookId)
+                db.prepareStatement("UPDATE books SET lesson_index=?, touched=? WHERE id=?").use { sql ->
+                    sql.setInt(1, clampedIndex); sql.setLong(2, System.currentTimeMillis()); sql.setString(3, bookId)
+                    sql.executeUpdate()
+                }
+                db.commit()
+            } catch (e: Exception) { db.rollback(); throw e }
+        }
+        return book(bookId)
+    }
+
     @Synchronized fun sectionGuide(bookId: String, sectionId: String): CachedSectionGuide? = database().use { db ->
         BookStructureStore.loadGuide(db, bookId, sectionId)
     }
 
     @Synchronized fun saveSectionGuide(bookId: String, sectionId: String, guide: CachedSectionGuide) = database().use { db ->
         BookStructureStore.saveGuide(db, bookId, sectionId, guide)
+    }
+
+    /** 节末可选选择题作答：写入本地答案、错题/猜的复习队列与知识小结梯。 */
+    @Synchronized fun saveSectionCheckAnswer(
+        bookId: String,
+        lesson: BookLesson,
+        questionIndex: Int,
+        practice: Practice,
+        answer: PracticeAnswer,
+    ) {
+        val source = book(bookId)
+        val lessonKey = if (questionIndex == 0) lesson.id else "${lesson.id}#q${questionIndex + 1}"
+        val previous = this.answer(bookId, lessonKey, QuestionMode.CHOICE)
+        val storedLesson = if (questionIndex == 0) lesson else lesson.copy(id = lessonKey, title = "${lesson.title}（${questionIndex + 1}）")
+        val ladder = nextLadderSession(source, storedLesson, QuestionMode.CHOICE, practice, answer, forceRecord = true)
+        database().use { db ->
+            db.autoCommit = false
+            try {
+                db.prepareStatement("INSERT OR REPLACE INTO answers(book,lesson,mode,text,revealed,understood,guessed) VALUES(?,?,?,?,?,?,?)").use { sql ->
+                    sql.setString(1, bookId); sql.setString(2, lessonKey); sql.setString(3, QuestionMode.CHOICE.name)
+                    sql.setString(4, answer.text); sql.setInt(5, if (answer.revealed) 1 else 0)
+                    if (answer.understood == null) sql.setNull(6, java.sql.Types.INTEGER) else sql.setInt(6, if (answer.understood) 1 else 0)
+                    sql.setInt(7, if (answer.guessed) 1 else 0)
+                    sql.executeUpdate()
+                }
+                if (previous != answer && answer.committed(QuestionMode.CHOICE)) {
+                    reviewStore.recordLesson(db, source, storedLesson, QuestionMode.CHOICE, practice, answer)
+                }
+                if (ladder != null) saveLadderRow(db, bookId, ladder)
+                db.commit()
+            } catch (failure: Exception) { db.rollback(); throw failure }
+        }
     }
 
     private fun original(id: String, format: String): Path {
@@ -1001,8 +1051,8 @@ internal class TextbookLibrary(
      * 小结的内容取本节原文里出题用的那一句，所以「记住的」是知识，不是你选了什么。
      */
     private fun nextLadderSession(book: Textbook, lesson: BookLesson, mode: QuestionMode,
-        practice: Practice, answer: PracticeAnswer): LadderSession? {
-        if (learningPath(book.id) != LearningPath.QUESTION_FIRST.name) return null
+        practice: Practice, answer: PracticeAnswer, forceRecord: Boolean = false): LadderSession? {
+        if (!forceRecord && learningPath(book.id) != LearningPath.QUESTION_FIRST.name) return null
         val session = ladder(book.id)
         val question = LadderQuestion(
             id = "${book.id}:${lesson.id}:${mode.name}", kpId = lesson.id, sectionId = lesson.id,

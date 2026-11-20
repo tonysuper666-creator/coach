@@ -66,16 +66,28 @@ internal data class ExplainSectionContext(
 
 internal data class FollowUpTurn(val question: String, val answer: String)
 
+internal data class SectionHardPoint(
+    val blockId: String,
+    val anchor: String,
+    val page: Int,
+    val label: String,
+    val explanation: String,
+)
+
 internal data class SectionGuide(
     val brief: List<String>,
     val explanation: Explanation,
     val recap: String,
+    val hardPoints: List<SectionHardPoint> = emptyList(),
+    val summary: List<String> = emptyList(),
 ) {
     fun toCached(): CachedSectionGuide = CachedSectionGuide(
         brief = brief,
         text = explanation.text,
         citations = explanation.citations.map { CachedCitation(it.anchor, it.blockId, it.page) },
         recap = recap,
+        hardPoints = hardPoints.map { CachedHardPoint(it.blockId, it.anchor, it.page, it.label, it.explanation) },
+        summary = summary,
     )
 
     companion object {
@@ -87,6 +99,8 @@ internal data class SectionGuide(
                 elapsedMs = 0L,
             ),
             recap = cached.recap,
+            hardPoints = cached.hardPoints.map { SectionHardPoint(it.blockId, it.anchor, it.page, it.label, it.explanation) },
+            summary = cached.summary,
         )
     }
 }
@@ -142,6 +156,15 @@ internal object ExplainWire {
         ))
     }
 
+    fun bookStructureRequest(
+        requestId: String,
+        candidates: List<SourceBlock>,
+        bookPages: Int,
+    ): JsonObject {
+        val base = BookLessonWire.request(requestId, candidates, bookPages)
+        return JsonObject(base + mapOf("kind" to JsonPrimitive("structure")))
+    }
+
     fun selectionRequest(
         requestId: String,
         kind: String,
@@ -195,9 +218,53 @@ internal object ExplainWire {
                 }
                 val recap = (body["recap"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
                     ?: brief.joinToString(" ").take(150)
-                SectionGuideResult.Done(SectionGuide(brief, parsed.explanation, recap))
+                val summary = (body["summary"] as? JsonArray).orEmpty().mapNotNull {
+                    (it as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
+                }.take(3).ifEmpty { brief.take(3) }
+                val seenHp = HashSet<String>()
+                val hardPoints = (body["hardPoints"] as? JsonArray).orEmpty().mapNotNull { el ->
+                    val obj = el as? JsonObject ?: return@mapNotNull null
+                    val blockId = (obj["blockId"] as? JsonPrimitive)?.contentOrNull?.trim() ?: return@mapNotNull null
+                    val block = sent.firstOrNull { it.id == blockId } ?: return@mapNotNull null
+                    if (!seenHp.add(block.id)) return@mapNotNull null
+                    val page = (obj["pdfPage"] as? JsonPrimitive)?.intOrNull ?: block.page
+                    if (page != block.page) return@mapNotNull null
+                    val explanation = (obj["explanation"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
+                        ?: return@mapNotNull null
+                    val anchor = (obj["anchor"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+                    val label = (obj["label"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotEmpty) ?: "难点"
+                    SectionHardPoint(block.id, anchor, block.page, label, explanation)
+                }.take(2)
+                SectionGuideResult.Done(SectionGuide(brief, parsed.explanation, recap, hardPoints, summary))
             }
         }
+    }
+
+    fun parseStructure(body: JsonObject, sent: List<SourceBlock>): ModelSectionResult {
+        val valid = (body["valid"] as? JsonPrimitive)?.booleanOrNull == true
+        val rawSections = body["sections"] as? JsonArray
+        if (!valid || rawSections == null || rawSections.isEmpty()) {
+            val message = (body["text"] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                ?: "未识别出明确的章节边界，已按段落边界自动分节。"
+            return ModelSectionResult.Failed(message)
+        }
+        val sentIndex = sent.withIndex().associate { it.value.id to it.index }
+        var lastIdx = -1
+        val boundaries = mutableListOf<ModelSectionBoundary>()
+        for (el in rawSections) {
+            val obj = el as? JsonObject ?: return ModelSectionResult.Failed("分节格式无法核对，已退回段落边界切分。")
+            val blockId = (obj["startBlockId"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+            val idx = sentIndex[blockId] ?: return ModelSectionResult.Failed("分节位置不在原文中，已退回段落边界切分。")
+            if (idx <= lastIdx) return ModelSectionResult.Failed("分节顺序非单调递增，已退回段落边界切分。")
+            lastIdx = idx
+            val title = (obj["title"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+            if (title.isEmpty()) return ModelSectionResult.Failed("分节标题为空，已退回段落边界切分。")
+            val block = sent[idx]
+            val page = (obj["pdfPage"] as? JsonPrimitive)?.intOrNull ?: block.page
+            if (page != block.page) return ModelSectionResult.Failed("分节页码与原文不一致，已退回段落边界切分。")
+            boundaries += ModelSectionBoundary(block.id, title, block.page)
+        }
+        return ModelSectionResult.Done(boundaries)
     }
 
     fun parse(body: JsonObject, sent: List<SourceBlock>): ExplainResult {
@@ -260,6 +327,7 @@ internal fun BookExplainPanel(
     val states = remember(book.id) { mutableStateMapOf<String, BlockState>() }
     val sectionStates = remember(book.id) { mutableStateMapOf<String, SectionGuideState>() }
     var sectionExpanded by remember(book.id, currentSection?.id) { mutableStateOf(false) }
+    var activeHardPointId by remember(book.id, currentSection?.id) { mutableStateOf<String?>(null) }
     var pending by remember(book.id, page) { mutableStateOf<PendingExplain?>(null) }
     var opened by remember { mutableStateOf<Pair<Citation, SourceBlock>?>(null) }
     var address by remember(explainer.defaultAddress) { mutableStateOf(explainer.defaultAddress) }
@@ -416,8 +484,51 @@ internal fun BookExplainPanel(
             }
             for (block in onPage) {
                 if (selection == null) {
-                    Text(ReadableText.reflow(block.text), Modifier.fillMaxWidth().testTag("explain-paragraph-${block.id}"),
-                        style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary)
+                    val readyGuide = currentSection?.let { (sectionStates[it.id] as? SectionGuideState.Ready)?.guide }
+                    val hardPoint = readyGuide?.hardPoints?.firstOrNull { it.blockId == block.id }
+                    if (hardPoint != null && currentSection != null) {
+                        val pillShape = RoundedCornerShape(CoachV7.Radius.s)
+                        val pillBg = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
+                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Text(
+                                    ReadableText.reflow(block.text),
+                                    Modifier.weight(1f).testTag("explain-paragraph-${block.id}"),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = colors.fgPrimary,
+                                )
+                                Text(
+                                    "难点",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = v7Pine(),
+                                    modifier = Modifier
+                                        .clip(pillShape)
+                                        .background(pillBg)
+                                        .border(1.dp, v7Pine().copy(alpha = 0.35f), pillShape)
+                                        .clickable(role = Role.Button) {
+                                            activeHardPointId = if (activeHardPointId == block.id) null else block.id
+                                        }
+                                        .pointerHoverIcon(PointerIcon.Hand)
+                                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                                        .testTag("explain-hard-point-marker-${block.id}"),
+                                )
+                            }
+                            if (activeHardPointId == block.id) {
+                                HardPointExplainCard(
+                                    book = book,
+                                    allBlocks = blocks,
+                                    section = currentSection,
+                                    hardPoint = hardPoint,
+                                    block = block,
+                                    onOpenOriginal = onOpenOriginal?.let { open -> { open(BookPassage.from(book, block)) } },
+                                    onClose = { activeHardPointId = null },
+                                )
+                            }
+                        }
+                    } else {
+                        Text(ReadableText.reflow(block.text), Modifier.fillMaxWidth().testTag("explain-paragraph-${block.id}"),
+                            style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary)
+                    }
                     continue
                 }
                 Column(Modifier.fillMaxWidth().testTag("explain-block-${block.id}"), verticalArrangement = Arrangement.spacedBy(8.dp)) {

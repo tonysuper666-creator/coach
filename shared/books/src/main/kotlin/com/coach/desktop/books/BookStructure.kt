@@ -15,6 +15,24 @@ internal enum class HeadingSource {
     TOC_PAGE,
     HEADING_RULE,
     TYPOGRAPHY,
+    MODEL_HAIKU,
+    FALLBACK_LENGTH,
+}
+
+internal data class ModelSectionBoundary(
+    val startBlockId: String,
+    val title: String,
+    val page: Int = 0,
+)
+
+internal sealed interface ModelSectionResult {
+    data class Done(val boundaries: List<ModelSectionBoundary>) : ModelSectionResult
+    data class Failed(val message: String) : ModelSectionResult
+    data object Deferred : ModelSectionResult
+}
+
+internal fun interface BookStructureProvider {
+    suspend fun sectionUnstructuredBook(book: Textbook, candidates: List<SourceBlock>, bookPages: Int): ModelSectionResult
 }
 
 /** 整页在全书中的角色：只有 [BODY] 参与章节划分与讲解。 */
@@ -56,7 +74,13 @@ internal data class BookStructure(
     val pageRoles: Map<Int, BookPageRole>,
     val sections: List<BookSection>,
     val source: String,
+    val modelAttempted: Boolean = false,
 ) {
+    /** 无结构长书尚未尝试过模型分节时为 true；一旦尝试或回退后按书缓存不再重复调用。 */
+    val needsModelSectioning: Boolean
+        get() = !modelAttempted &&
+            source == HeadingSource.FALLBACK_LENGTH.name &&
+            resolvedLessons.sumOf { ExplainClassifier.nonWhitespaceLength(it.text) } > BookStructurePlanner.TARGET_MIN_CHARS
     /** 将缓存的节结构映射为当前书页的 [BookLesson] 列表，供阅读模式和「继续学」共用。 */
     fun toLessons(bookId: String, pages: List<BookPage>): List<BookLesson> {
         val byId = StudyCoachCourse.blocks(bookId, pages, snapSentences = true).associateBy { it.id }
@@ -340,6 +364,7 @@ internal object BookStructurePlanner {
         val rawSections = mutableListOf<RawSection>()
         var current: RawSection? = null
         val consumedOutline = HashSet<Pair<Int, String>>()
+        var matchedHeadingCount = 0
 
         fun pushHeading(level: Int, headingTitle: String): RawSection {
             while (stack.isNotEmpty() && stack.last().first >= level) stack.removeLast()
@@ -378,6 +403,7 @@ internal object BookStructurePlanner {
                     val appearsInPage = byPage[block.page].orEmpty().any { titlesMatch(it.text.trim(), item.title) }
                     if (!appearsInPage) {
                         consumedOutline += key
+                        matchedHeadingCount++
                         pushHeading(item.level, item.title)
                     }
                 }
@@ -398,14 +424,17 @@ internal object BookStructurePlanner {
             when {
                 matchedOutline != null -> {
                     consumedOutline += matchedOutline.page to normalizeTitle(matchedOutline.title)
+                    matchedHeadingCount++
                     val sec = pushHeading(matchedOutline.level, matchedOutline.title)
                     sec.blocks += if (block.heading) block else block.copy(heading = true)
                 }
                 matchedRule != null -> {
+                    matchedHeadingCount++
                     val sec = pushHeading(matchedRule.level, matchedRule.title)
                     sec.blocks += if (block.heading) block else block.copy(heading = true)
                 }
                 matchedTypo != null -> {
+                    matchedHeadingCount++
                     val sec = pushHeading(matchedTypo.level, matchedTypo.title)
                     sec.blocks += if (block.heading) block else block.copy(heading = true)
                 }
@@ -466,11 +495,188 @@ internal object BookStructurePlanner {
             }
         }
 
+        val resolvedSource = if (chosenOutline.isEmpty() && matchedHeadingCount == 0) {
+            HeadingSource.FALLBACK_LENGTH.name
+        } else {
+            primarySource
+        }
+
         return BookStructure(
             version = BookStructure.CURRENT_VERSION,
             pageRoles = pageRoles,
             sections = finalSections,
-            source = primarySource,
+            source = resolvedSource,
+        ).also { it.resolvedLessons = finalLessons }
+    }
+
+    /** 仅提取每页前几行与候选标题（保持原块 id 与 exact prefix 偏移，供无结构书单次分节使用）。 */
+    fun extractUnstructuredCandidates(
+        bookId: String,
+        pages: List<BookPage>,
+        pageRoles: Map<Int, BookPageRole> = emptyMap(),
+    ): List<SourceBlock> {
+        val allBlocks = StudyCoachCourse.blocks(bookId, pages, snapSentences = true)
+        val roles = pageRoles.ifEmpty { classifyPages(allBlocks, pages) }
+        val bodyPages = roles.filterValues { it == BookPageRole.BODY }.keys
+        val activePages = if (bodyPages.isNotEmpty()) bodyPages
+            else roles.filterValues { it != BookPageRole.BLANK && it != BookPageRole.TOC && it != BookPageRole.COPYRIGHT }.keys
+                .ifEmpty { pages.map { it.number }.toSet() }
+        val activeBlocks = allBlocks.filter { block ->
+            if (block.page !in activePages) return@filter false
+            val trimmed = block.text.trim()
+            if (trimmed.isEmpty() || PRINTED_PAGE_MARK.matches(trimmed)) return@filter false
+            val kind = ExplainClassifier.classifyBlock(block)
+            kind != ExplainBlockKind.PAGE_NUMBER && kind != ExplainBlockKind.HEADER_FOOTER
+        }
+        if (activeBlocks.isEmpty()) return emptyList()
+        val byPage = activeBlocks.groupBy { it.page }
+        val fewPages = byPage.size <= 4
+        fun isCandidateHeading(block: SourceBlock): Boolean {
+            val trimmed = block.text.trim()
+            if (trimmed.isEmpty()) return false
+            val len = ExplainClassifier.nonWhitespaceLength(trimmed)
+            if (len in 2..60 && trimmed.last() !in SENTENCE_ENDS) return true
+            val firstLine = trimmed.lineSequence().firstOrNull()?.trim().orEmpty()
+            return '\n' in trimmed && firstLine.length in 2..36 && firstLine.last() !in SENTENCE_ENDS
+        }
+        val primaryIds = LinkedHashSet<String>()
+        val secondaryIds = LinkedHashSet<String>()
+        for (pageNo in byPage.keys.sorted()) {
+            val pageBlocks = byPage[pageNo].orEmpty()
+            pageBlocks.firstOrNull()?.let { primaryIds += it.id }
+            pageBlocks.drop(1).firstOrNull()?.let { secondaryIds += it.id }
+            for (b in pageBlocks) {
+                if (isCandidateHeading(b)) primaryIds += b.id
+                else if (fewPages) secondaryIds += b.id
+            }
+        }
+        val selected = buildList {
+            val combinedIds = primaryIds + secondaryIds
+            val chosen = if (combinedIds.size <= 128) {
+                activeBlocks.filter { it.id in combinedIds }
+            } else if (primaryIds.size <= 128) {
+                val room = 128 - primaryIds.size
+                val extra = activeBlocks.filter { it.id in secondaryIds && it.id !in primaryIds }.take(room).map { it.id }.toSet()
+                activeBlocks.filter { it.id in primaryIds || it.id in extra }
+            } else {
+                val primaries = activeBlocks.filter { it.id in primaryIds }
+                val step = maxOf(1, (primaries.size + 127) / 128)
+                primaries.filterIndexed { i, _ -> i % step == 0 }.take(128)
+            }
+            var totalChars = 0
+            val perBlockMax = if (fewPages) 120 else 140
+            for (b in chosen) {
+                val snippet = previewSnippet(b, maxLines = if (fewPages) 1 else 2, maxChars = perBlockMax)
+                if (snippet.text.isBlank()) continue
+                if (totalChars + snippet.text.length > 20_000) break
+                totalChars += snippet.text.length
+                add(snippet)
+            }
+        }
+        return selected
+    }
+
+    private fun previewSnippet(block: SourceBlock, maxLines: Int = 2, maxChars: Int = 140): SourceBlock {
+        val raw = block.text
+        var lines = 0
+        var end = 0
+        while (end < raw.length && end < maxChars) {
+            if (raw[end] == '\n') {
+                lines++
+                if (lines >= maxLines) break
+            }
+            end++
+        }
+        if (end < raw.length && end > 0 && raw[end - 1].isHighSurrogate()) end--
+        var snippet = raw.substring(0, end)
+        if (snippet.isBlank()) {
+            val fallbackEnd = minOf(raw.length, maxChars).let { e ->
+                if (e < raw.length && e > 0 && raw[e - 1].isHighSurrogate()) e - 1 else e
+            }
+            snippet = raw.substring(0, fallbackEnd)
+        }
+        return block.copy(end = block.start + snippet.length, heading = false, text = snippet)
+    }
+
+    /** 校验模型返回的无结构分节边界：必须存在于当前书块中且顺序严格单调递增；失败退回段落边界切分。 */
+    fun applyModelBoundaries(
+        bookId: String,
+        title: String,
+        format: String,
+        pages: List<BookPage>,
+        boundaries: List<ModelSectionBoundary>,
+        fallback: BookStructure? = null,
+    ): BookStructure {
+        val baseFallback = fallback ?: plan(bookId, title, format, pages)
+        if (boundaries.isEmpty()) return baseFallback.copy(modelAttempted = true).also { it.resolvedLessons = baseFallback.resolvedLessons }
+        val allBlocks = StudyCoachCourse.blocks(bookId, pages, snapSentences = true)
+        val pageRoles = baseFallback.pageRoles.ifEmpty { classifyPages(allBlocks, pages) }
+        val bodyPages = pageRoles.filterValues { it == BookPageRole.BODY }.keys
+        val activePages = if (bodyPages.isNotEmpty()) bodyPages
+            else pageRoles.filterValues { it != BookPageRole.BLANK && it != BookPageRole.TOC && it != BookPageRole.COPYRIGHT }.keys
+                .ifEmpty { pages.map { it.number }.toSet() }
+        val activeBlocks = allBlocks.filter { block ->
+            if (block.page !in activePages) return@filter false
+            val trimmed = block.text.trim()
+            if (trimmed.isEmpty() || PRINTED_PAGE_MARK.matches(trimmed)) return@filter false
+            val kind = ExplainClassifier.classifyBlock(block)
+            kind != ExplainBlockKind.PAGE_NUMBER && kind != ExplainBlockKind.HEADER_FOOTER
+        }
+        val blockIndex = activeBlocks.withIndex().associate { it.value.id to it.index }
+        var prevIdx = -1
+        val resolvedIndices = mutableListOf<Pair<Int, String>>()
+        for (b in boundaries) {
+            val idx = blockIndex[b.startBlockId]
+            val cleanTitle = b.title.trim()
+            if (idx == null || idx <= prevIdx || cleanTitle.isEmpty()) {
+                return baseFallback.copy(modelAttempted = true).also { it.resolvedLessons = baseFallback.resolvedLessons }
+            }
+            prevIdx = idx
+            resolvedIndices += idx to cleanTitle
+        }
+        val ranges = mutableListOf<Triple<Int, Int, String>>()
+        val firstStart = resolvedIndices.first().first
+        if (firstStart > 0 && activeBlocks.subList(0, firstStart).any { !it.heading && it.text.isNotBlank() }) {
+            ranges += Triple(0, firstStart, title)
+        }
+        for (i in resolvedIndices.indices) {
+            val start = resolvedIndices[i].first
+            val end = if (i + 1 < resolvedIndices.size) resolvedIndices[i + 1].first else activeBlocks.size
+            val slice = activeBlocks.subList(start, end)
+            if (slice.any { !it.heading && it.text.isNotBlank() }) {
+                ranges += Triple(start, end, resolvedIndices[i].second)
+            }
+        }
+        if (ranges.isEmpty()) {
+            return baseFallback.copy(modelAttempted = true).also { it.resolvedLessons = baseFallback.resolvedLessons }
+        }
+        val finalSections = mutableListOf<BookSection>()
+        val finalLessons = mutableListOf<BookLesson>()
+        for ((start, end, secTitle) in ranges) {
+            val slice = activeBlocks.subList(start, end)
+            val chunks = splitOversized(slice)
+            chunks.forEachIndexed { idx, chunkBlocks ->
+                val chunkTitle = if (chunks.size == 1) secTitle else "$secTitle（${idx + 1}/${chunks.size}）"
+                val breadcrumb = if (chunkTitle == title) title else "$title › $chunkTitle"
+                val id = chunkBlocks.first().id
+                finalSections += BookSection(
+                    id = id,
+                    title = chunkTitle,
+                    breadcrumb = breadcrumb,
+                    level = 1,
+                    startPage = chunkBlocks.first().page,
+                    endPage = chunkBlocks.last().page,
+                    blockIds = chunkBlocks.map { it.id },
+                )
+                finalLessons += BookLesson(id, chunkTitle, chunkBlocks, breadcrumb)
+            }
+        }
+        return BookStructure(
+            version = BookStructure.CURRENT_VERSION,
+            pageRoles = pageRoles,
+            sections = finalSections,
+            source = HeadingSource.MODEL_HAIKU.name,
+            modelAttempted = true,
         ).also { it.resolvedLessons = finalLessons }
     }
 
@@ -675,12 +881,22 @@ internal object BookStructurePlanner {
     }.getOrDefault(emptyList())
 }
 
-/** 书的结构与每节导读/前情提要的本地 SQLite 缓存。 */
+/** 书的结构与每节导读/前情提要/难点标注/节末小结的本地 SQLite 缓存。 */
+internal data class CachedHardPoint(
+    val blockId: String,
+    val anchor: String,
+    val page: Int,
+    val label: String,
+    val explanation: String,
+)
+
 internal data class CachedSectionGuide(
     val brief: List<String>,
     val text: String,
     val citations: List<CachedCitation>,
     val recap: String,
+    val hardPoints: List<CachedHardPoint> = emptyList(),
+    val summary: List<String> = emptyList(),
 )
 
 internal data class CachedCitation(val anchor: String, val blockId: String, val page: Int)
@@ -700,6 +916,7 @@ internal object BookStructureStore {
         val json = buildJsonObject {
             put("version", structure.version)
             put("source", structure.source)
+            put("modelAttempted", structure.modelAttempted)
             put("pageRoles", buildJsonObject {
                 structure.pageRoles.forEach { (p, role) -> put(p.toString(), role.name) }
             })
@@ -728,6 +945,7 @@ internal object BookStructureStore {
                     val obj = LedgerJson.parseToJsonElement(row.getString(1)).jsonObject
                     val version = obj["version"]?.jsonPrimitive?.intOrNull ?: BookStructure.CURRENT_VERSION
                     val source = obj["source"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val modelAttempted = obj["modelAttempted"]?.jsonPrimitive?.booleanOrNull ?: false
                     val roles = obj["pageRoles"]?.jsonObject.orEmpty().mapNotNull { (k, v) ->
                         val p = k.toIntOrNull() ?: return@mapNotNull null
                         val r = BookPageRole.entries.firstOrNull { it.name == v.jsonPrimitive.contentOrNull } ?: return@mapNotNull null
@@ -745,7 +963,7 @@ internal object BookStructureStore {
                             blockIds = s.getValue("blockIds").jsonArray.map { it.jsonPrimitive.content },
                         )
                     }
-                    BookStructure(version, roles, sections, source).also {
+                    BookStructure(version, roles, sections, source, modelAttempted).also {
                         it.resolvedLessons = it.toLessons(bookId, pages)
                     }
                 }.getOrNull()
@@ -757,6 +975,18 @@ internal object BookStructureStore {
             put("brief", buildJsonArray { guide.brief.forEach { add(it) } })
             put("text", guide.text)
             put("recap", guide.recap)
+            put("summary", buildJsonArray { guide.summary.forEach { add(it) } })
+            put("hardPoints", buildJsonArray {
+                guide.hardPoints.forEach { hp ->
+                    add(buildJsonObject {
+                        put("blockId", hp.blockId)
+                        put("anchor", hp.anchor)
+                        put("page", hp.page)
+                        put("label", hp.label)
+                        put("explanation", hp.explanation)
+                    })
+                }
+            })
             put("citations", buildJsonArray {
                 guide.citations.forEach { c ->
                     add(buildJsonObject { put("anchor", c.anchor); put("blockId", c.blockId); put("page", c.page) })
@@ -793,6 +1023,17 @@ internal object BookStructureStore {
                             )
                         },
                         recap = obj["recap"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                        hardPoints = obj["hardPoints"]?.jsonArray.orEmpty().map { el ->
+                            val hp = el.jsonObject
+                            CachedHardPoint(
+                                blockId = hp.getValue("blockId").jsonPrimitive.content,
+                                anchor = hp["anchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                                page = hp.getValue("page").jsonPrimitive.int,
+                                label = hp["label"]?.jsonPrimitive?.contentOrNull ?: "难点",
+                                explanation = hp.getValue("explanation").jsonPrimitive.content,
+                            )
+                        },
+                        summary = obj["summary"]?.jsonArray.orEmpty().map { it.jsonPrimitive.content },
                     )
                 }.getOrNull()
             }

@@ -56,9 +56,9 @@ class FriendAccessTest {
                     "pages" to JsonArray(listOf(json("number" to 1, "length" to 200, "ocr" to false, "sha256" to "b".repeat(64))))))
             return request("/v1/library/explain", "POST", credential, input.toString())
         }
-        fun lesson(credential: JsonObject, requestId: String, blocks: Int = 8): HttpResponse<String> {
+        fun lesson(credential: JsonObject, requestId: String, blocks: Int = 8, kind: String = "lesson"): HttpResponse<String> {
             val book = "c".repeat(64)
-            val input = json("requestId" to requestId, "kind" to "lesson", "bookPages" to 8,
+            val input = json("requestId" to requestId, "kind" to kind, "bookPages" to 8,
                 "blocks" to JsonArray((1..blocks).map { n -> json("id" to "$book:p$n:0", "text" to "Self-authored lesson block $n.") }),
                 "localSource" to json("schema" to 1, "book" to book, "format" to "txt", "title" to "Self-authored lesson",
                     "consented" to true, "pages" to JsonArray((1..blocks).map { n -> json("number" to n, "length" to 200,
@@ -270,5 +270,24 @@ class FriendAccessTest {
         assertFalse("callsRemaining" in tokenLimited)
         assertEquals(10L, tokenLimited.num("tokensRemaining"))
         assertFalse(first.toString().contains(friendId("乙")))
+    }
+
+    @Test fun friendChannelSupportsUnstructuredBookSectioningOnceAndNeverLeaksText() = Harness().use { h ->
+        val friend = h.pair("分节朋友")
+        h.stub.stream(
+            1,
+            """{"sections":[{"startBlockId":"S1","title":"第一部分"},{"startBlockId":"S5","title":"第二部分"}]}""",
+            StubTutor.terminal("complete"),
+            StubTutor.DONE,
+        )
+        val res = h.lesson(friend, "f001", blocks = 8, kind = "structure")
+        assertEquals(200, res.statusCode())
+        val parsed = parse(res)
+        assertEquals(true, parsed["valid"]?.jsonPrimitive?.booleanOrNull)
+        assertEquals(listOf(1L, 5L), parsed["sections"]!!.jsonArray.map { it.jsonObject.num("pdfPage") })
+        assertEquals(1, h.stub.requests)
+        assertEquals(0L, runBlocking { h.actor.execute { supplyCallCount() } })
+        val log = Files.readString(h.root.resolve("friends").resolve(friendId("分节朋友")).resolve("requests.log"))
+        assertFalse("Self-authored" in log)
     }
 }

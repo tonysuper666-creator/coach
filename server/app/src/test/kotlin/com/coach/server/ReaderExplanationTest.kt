@@ -232,4 +232,40 @@ class ReaderExplanationTest {
             assertEquals(4, answer["sources"]!!.jsonArray.single().jsonObject.num("pdfPage"))
         }
     }
+
+    @Test fun checkedGuideAndStructureValidateBlockIdsAndStrictMonotonicOrder() {
+        val three = SourcePack(listOf(
+            SourcePage("a".repeat(64) + ":p1:0", 1, "First paragraph on page one."),
+            SourcePage("a".repeat(64) + ":p2:0", 2, "Second paragraph on page two."),
+            SourcePage("a".repeat(64) + ":p3:0", 3, "Third paragraph on page three."),
+        ))
+        // Legacy guide payload (without hardPoints/summary) remains accepted and derives fallback summary
+        val legacyGuide = """{"brief":["第一行","第二行"],"recap":"提要","paragraphs":[{"text":"解释。","anchors":["S1"]}]}"""
+        val parsedLegacy = assertNotNull(checkedGuidePayload(legacyGuide, three))
+        assertEquals(listOf("第一行", "第二行"), parsedLegacy.summary)
+        assertTrue(parsedLegacy.hardPoints.isEmpty())
+
+        // hardPoints strips non-existent IDs and fabricated quotes
+        val mixedHpGuide = """{"brief":["要点"],"recap":"提要","summary":["一","二","三"],"hardPoints":[{"blockId":"S2","label":"难点","explanation":"这里解释第二段。"},{"blockId":"S9","label":"不存在","explanation":"假段"},{"blockId":"S1","label":"假引文","explanation":"“not in source”在这里。"}],"paragraphs":[{"text":"解释。","anchors":["S1"]}]}"""
+        val parsedHp = assertNotNull(checkedGuidePayload(mixedHpGuide, three))
+        assertEquals(1, parsedHp.hardPoints.size)
+        assertEquals("a".repeat(64) + ":p2:0", parsedHp.hardPoints.single().blockId)
+        assertEquals(listOf("一", "二", "三"), parsedHp.summary)
+
+        // Structure validation: monotonic succeeds, non-monotonic / duplicate / unknown rejected
+        val okStruct = checkedStructurePayload("""{"sections":[{"startBlockId":"S1","title":"节一"},{"startBlockId":"S3","title":"节二"}]}""", three)
+        assertNotNull(okStruct)
+        assertEquals(listOf(1, 3), okStruct.map { it.pdfPage })
+        assertEquals(emptyList<CheckedStructureBoundary>(), checkedStructurePayload("""{"sections":[]}""", three))
+        for (bad in listOf(
+            """{"sections":[{"startBlockId":"S2","title":"乱序1"},{"startBlockId":"S1","title":"乱序2"}]}""",
+            """{"sections":[{"startBlockId":"S2","title":"重复1"},{"startBlockId":"S2","title":"重复2"}]}""",
+            """{"sections":[{"startBlockId":"S4","title":"越界"}]}""",
+            """{"sections":[{"startBlockId":"S1","title":"PDF page 1"}]}""",
+        )) {
+            val reasons = mutableListOf<ReaderFormatReason>()
+            assertNull(checkedStructurePayload(bad, three, reasons::add), bad)
+            assertEquals(1, reasons.size)
+        }
+    }
 }

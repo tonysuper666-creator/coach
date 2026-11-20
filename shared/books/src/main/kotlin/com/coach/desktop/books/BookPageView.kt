@@ -43,7 +43,9 @@ import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFontFamilyResolver
@@ -63,6 +65,7 @@ import com.coach.ui.LocalV7TextScale
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.LocalV7Fonts
 import com.coach.ui.v7.LocalV7ReducedMotion
+import com.coach.ui.v7.v7FocusRing
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
@@ -190,6 +193,8 @@ internal fun BookPageView(
     readMode: BookReadMode = BookReadMode.Paged,
     onOpenTableRow: ((BookPassage) -> Unit)? = null,
     onSelectText: ((SourceBlock?) -> Unit)? = null,
+    hardPoints: List<Pair<SectionHardPoint, SourceBlock>> = emptyList(),
+    onHardPointClick: ((SectionHardPoint, SourceBlock) -> Unit)? = null,
 ) {
     var preview by remember(book.id, libraryDirectory) { mutableStateOf<BookFigurePreview?>(null) }
     preview?.let { BookFigureDialog(it) { preview = null } }
@@ -394,7 +399,7 @@ internal fun BookPageView(
                                 val page = pages[index]
                                 val remaining = pages.count { it.chapter == page.chapter } - pages.take(index + 1).count { it.chapter == page.chapter }
                                 BookSheet(book, page, typography, measurer, widthPx, leftInset, remaining, false, 0,
-                                    libraryDirectory, onOpenTableRow, { preview = it }) { failed.add(it) }
+                                    libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick) { failed.add(it) }
                             }
                         }
                     }
@@ -446,7 +451,7 @@ internal fun BookPageView(
                                         val remaining = pages.count { it.chapter == page.chapter } - pages.take(first + side + 1).count { it.chapter == page.chapter }
                                         BookSheet(book, page, typography, measurer, widthPx,
                                             if (spread && side == 1) rightInset else leftInset,
-                                            remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }) { failed.add(it) }
+                                            remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick) { failed.add(it) }
                                     }
                                 }
                             }
@@ -494,7 +499,7 @@ internal fun BookPageView(
                                 val remaining = pages.count { it.chapter == page.chapter } - pages.take(index + 1).count { it.chapter == page.chapter }
                                 BookSheet(book, page, typography, measurer, widthPx,
                                     if (spread && side == 1) rightInset else leftInset,
-                                    remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }) { failed.add(it) }
+                                    remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick) { failed.add(it) }
                             }
                         }
                     }
@@ -597,7 +602,10 @@ private fun spotAnchor(pages: List<BookLaidPage>, index: Int, twoPages: Boolean,
 private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: BookPageTypography,
     measurer: TextMeasurer, widthPx: Int, inset: Dp, remaining: Int, spread: Boolean, side: Int,
     libraryDirectory: Path?, onOpenTableRow: ((BookPassage) -> Unit)?,
-    onExpand: (BookFigurePreview) -> Unit, onMissing: (BookIllustration) -> Unit) {
+    onExpand: (BookFigurePreview) -> Unit,
+    hardPoints: List<Pair<SectionHardPoint, SourceBlock>> = emptyList(),
+    onHardPointClick: ((SectionHardPoint, SourceBlock) -> Unit)? = null,
+    onMissing: (BookIllustration) -> Unit) {
     val density = LocalDensity.current
     val colors = CoachTheme.colors
     val column = with(density) { widthPx.toDp() }
@@ -642,6 +650,55 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
                     style = MaterialTheme.typography.labelSmall, fontFamily = LocalV7Fonts.current.numbers) }
             }
             offset += source.endUtf16 - source.startUtf16
+        }
+    }
+    if (hardPoints.isNotEmpty() && onHardPointClick != null) DisableSelection {
+        var lastMarkerTopPx = -1000f
+        val minGapPx = with(density) { 28.dp.toPx() }
+        val markerX = if (spread && side == 1) 10.dp else inset + column + 8.dp
+        val pillShape = RoundedCornerShape(CoachV7.Radius.s)
+        val pillBg = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
+        for (run in page.runs) {
+            val runLayout = remember(run, widthPx, typography) {
+                measurer.measure(run.text, typography.body, placeholders = run.placeholders, constraints = Constraints(maxWidth = widthPx))
+            }
+            for ((hp, block) in hardPoints) {
+                var offsetInRun = 0
+                var matchedDisplayOffset: Int? = null
+                for (slice in run.sources) {
+                    val sliceLen = slice.endUtf16 - slice.startUtf16
+                    if (slice.importPage == block.page && block.start in slice.startUtf16 until slice.endUtf16) {
+                        matchedDisplayOffset = offsetInRun + (block.start - slice.startUtf16)
+                        break
+                    }
+                    offsetInRun += sliceLen
+                }
+                if (matchedDisplayOffset == null) continue
+                val safeOffset = matchedDisplayOffset.coerceIn(0, (run.text.length - 1).coerceAtLeast(0))
+                val line = runLayout.getLineForOffset(safeOffset)
+                var lineTopPx = run.topPx + runLayout.getLineTop(line)
+                if (lineTopPx < lastMarkerTopPx + minGapPx) {
+                    lineTopPx = lastMarkerTopPx + minGapPx
+                }
+                lastMarkerTopPx = lineTopPx
+                val topDp = 52.dp + with(density) { lineTopPx.toDp() }
+                Box(
+                    Modifier
+                        .padding(start = markerX, top = topDp)
+                        .clip(pillShape)
+                        .background(pillBg)
+                        .border(1.dp, v7Pine().copy(alpha = 0.35f), pillShape)
+                        .v7FocusRing(pillShape)
+                        .clickable(role = Role.Button, onClickLabel = "查看难点讲解：${hp.label}") {
+                            onHardPointClick(hp, block)
+                        }
+                        .pointerHoverIcon(PointerIcon.Hand)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .testTag("hard-point-marker-${hp.blockId}"),
+                ) {
+                    Text("难点", style = MaterialTheme.typography.labelSmall, color = v7Pine(), maxLines = 1)
+                }
+            }
         }
     }
     for (block in page.visuals) key(book.id, block.item, block.band?.startY) {

@@ -67,6 +67,13 @@ internal class SectionGuideController(
     fun sectionIndexForPage(page: Int): Int =
         book.lessons.indexOfFirst { page in it.firstPage..it.lastPage }
 
+    fun sectionIndexForAnchor(page: Int, offsetUtf16: Int): Int {
+        val exact = book.lessons.indexOfFirst { lesson ->
+            lesson.blocks.any { b -> b.page == page && offsetUtf16 in b.start..b.end }
+        }
+        return if (exact >= 0) exact else sectionIndexForPage(page)
+    }
+
     fun sectionForPage(page: Int): BookLesson? =
         sectionIndexForPage(page).takeIf { it >= 0 }?.let { book.lessons[it] }
 
@@ -87,9 +94,9 @@ internal class SectionGuideController(
     }
 
     /** 读到 [page] 时：若开启自动导读且已连上并同意，后台按需预生成当前节和下一节。 */
-    fun prefetchForPage(page: Int, autoGuide: Boolean) {
+    fun prefetchForPage(page: Int, autoGuide: Boolean, sectionIndexOverride: Int? = null) {
         if (!autoGuide) return
-        val index = sectionIndexForPage(page)
+        val index = sectionIndexOverride?.takeIf { it in book.lessons.indices } ?: sectionIndexForPage(page)
         if (index < 0) return
         ensureSection(index, prefetchNext = true)
     }
@@ -98,7 +105,7 @@ internal class SectionGuideController(
         ensureSection(index, prefetchNext = false)
     }
 
-    private fun ensureSection(index: Int, prefetchNext: Boolean) {
+    internal fun ensureSection(index: Int, prefetchNext: Boolean = false) {
         val section = book.lessons.getOrNull(index) ?: return
         if (states[section.id] is SectionGuideState.Ready) {
             if (prefetchNext) ensureSection(index + 1, prefetchNext = false)
@@ -382,6 +389,169 @@ internal fun InlineSelectionExplainCard(
                     enabled = !thread.loading && BookPassageQuestion.accepts(draft),
                     modifier = Modifier.testTag("inline-followup-send"),
                 ) { Text("发送") }
+            }
+        }
+    }
+}
+
+/**
+ * 难点页边标记点开后的就地讲解卡：直接复用导读同一次调用返回的整节语境难点讲解，不额外调模型。
+ */
+@Composable
+internal fun HardPointExplainCard(
+    book: Textbook,
+    allBlocks: List<SourceBlock>,
+    section: BookLesson,
+    hardPoint: SectionHardPoint,
+    block: SourceBlock,
+    onAskFollowUp: (() -> Unit)? = null,
+    onOpenOriginal: (() -> Unit)? = null,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = CoachTheme.colors
+    PaperCard(
+        modifier.fillMaxWidth().testTag("hard-point-card"),
+        contentPadding = PaddingValues(14.dp),
+        contentSpacing = 8.dp,
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "难点 · ${hardPoint.label}",
+                style = MaterialTheme.typography.labelLarge,
+                color = v7Pine(),
+                modifier = Modifier.testTag("hard-point-title"),
+            )
+            Text(
+                section.breadcrumb,
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            V7TextButton(onClose, modifier = Modifier.testTag("hard-point-close")) { Text("收起") }
+        }
+        Text(
+            "${bookCitationLabel(book, allBlocks, Citation(hardPoint.anchor, block.id, block.page))} · ${shortQuote(block.text)}",
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.fgSecondary,
+            modifier = Modifier.testTag("hard-point-source"),
+        )
+        Text(
+            ReadableText.withoutCitationMarks(hardPoint.explanation),
+            style = MaterialTheme.typography.bodyMedium,
+            color = colors.fgPrimary,
+            modifier = Modifier.testTag("hard-point-explanation"),
+        )
+        if (onAskFollowUp != null || onOpenOriginal != null) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (onAskFollowUp != null) {
+                    V7TextButton(onAskFollowUp, modifier = Modifier.testTag("hard-point-followup")) { Text("追问这段") }
+                }
+                if (onOpenOriginal != null) {
+                    V7TextButton(onOpenOriginal, modifier = Modifier.testTag("hard-point-open-original")) { Text("查看原页") }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 节末三行小结与可选 1–2 道选择题（接上现有做题主线，设置里可关）。
+ */
+@Composable
+internal fun SectionEndSummaryCard(
+    section: BookLesson,
+    summaryLines: List<String>,
+    practices: List<Practice>,
+    answers: Map<Int, PracticeAnswer>,
+    onAnswer: (Int, Practice, PracticeAnswer) -> Unit,
+    onOpenMainline: (() -> Unit)? = null,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = CoachTheme.colors
+    var quizOpen by remember(section.id) { mutableStateOf(false) }
+    val shownLines = summaryLines.take(3)
+    PaperCard(
+        modifier.fillMaxWidth().heightIn(max = if (quizOpen) 340.dp else 210.dp).testTag("section-end-summary-card"),
+        contentPadding = PaddingValues(12.dp),
+        contentSpacing = 6.dp,
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("本节小结", style = MaterialTheme.typography.labelLarge, color = v7Pine(), modifier = Modifier.testTag("section-end-summary-label"))
+            Text(
+                section.title,
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            V7TextButton(onDismiss, modifier = Modifier.testTag("section-end-dismiss"), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                Text("收起")
+            }
+        }
+        Column(
+            Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Column(Modifier.fillMaxWidth().testTag("section-end-summary-lines"), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                shownLines.forEach { line ->
+                    Text("· $line", style = MaterialTheme.typography.bodySmall, color = colors.fgPrimary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (practices.isNotEmpty()) {
+                    PaperButton(
+                        onClick = { quizOpen = !quizOpen },
+                        modifier = Modifier.testTag("section-end-start-quiz"),
+                    ) {
+                        Text(if (quizOpen) "收起小题" else "做 ${practices.size} 道选择题")
+                    }
+                }
+                if (onOpenMainline != null) {
+                    V7TextButton(onOpenMainline, modifier = Modifier.testTag("section-end-open-mainline")) {
+                        Text("进入做题主线")
+                    }
+                }
+            }
+            if (quizOpen && practices.isNotEmpty()) {
+                Column(Modifier.fillMaxWidth().testTag("section-end-quiz-panel"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    practices.forEachIndexed { qIdx, practice ->
+                        val ans = answers[qIdx] ?: PracticeAnswer()
+                        Column(Modifier.fillMaxWidth().testTag("section-end-quiz-$qIdx"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("第 ${qIdx + 1} 题 · ${practice.prompt}", style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
+                            practice.options.forEachIndexed { optIdx, option ->
+                                val selected = ans.revealed && ans.text == option
+                                val correct = if (selected) option == practice.answer else null
+                                AnswerOption(
+                                    letter = ('A' + optIdx).toString(),
+                                    selected = selected,
+                                    correct = correct,
+                                    enabled = !ans.revealed,
+                                    modifier = Modifier.testTag("section-quiz-$qIdx-choice-$optIdx"),
+                                    onClick = { onAnswer(qIdx, practice, PracticeAnswer(text = option, revealed = true, guessed = false)) },
+                                ) {
+                                    Text(option, color = when (correct) { true -> colors.successFg; false -> colors.dangerFg; null -> colors.fgPrimary })
+                                }
+                            }
+                            if (ans.revealed) {
+                                val right = ans.text == practice.answer
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text(
+                                        if (right) "选对了。" else "正确答案：${practice.answer}（已加入复习队列）",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (right) colors.successFg else colors.fgSecondary,
+                                        modifier = Modifier.weight(1f).testTag("section-quiz-$qIdx-feedback"),
+                                    )
+                                    V7TextButton({ onAnswer(qIdx, practice, PracticeAnswer()) }) { Text("重答") }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

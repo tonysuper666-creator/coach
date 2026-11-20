@@ -98,7 +98,9 @@ $previousPriority = (Get-Process -Id $PID).PriorityClass
 Push-Location $root
 try {
     (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
-    & (Join-Path $root 'gradlew.bat') --console=plain --priority=low --max-workers=2 `
+    # --no-daemon: a release build may redirect user.home to a private config directory
+    # (GRADLE_OPTS=-Duser.home=...), and a reused daemon would keep the old one.
+    & (Join-Path $root 'gradlew.bat') --console=plain --no-daemon --priority=low --max-workers=2 `
         '-Pcoach.release=true' "-Pcoach.release.version=$Version" "-Pcoach.release.versionCode=$VersionCode" `
         "-Pcoach.sableLogin=$(if ($SableLogin) { 'true' } else { 'false' })" `
         :desktopApp:verifyReleaseVersion ":desktopApp:$Task"

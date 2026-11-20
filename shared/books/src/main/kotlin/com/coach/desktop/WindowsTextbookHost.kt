@@ -193,7 +193,8 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                     panel
                 } else null
                 CompositionLocalProvider(LocalDeskSelect provides deskSelect, LocalDeskTypeControl provides typeControl,
-                    LocalReadingFont provides preferences.font, LocalImportNoticeHandled provides true) {
+                    LocalReadingFont provides preferences.font, LocalImportNoticeHandled provides true,
+                    com.coach.desktop.books.LocalReadingAutoGuide provides preferences.autoGuide) {
                     // No rules between bar, rail and page: V7 separates them with the desk colour and the paper alone.
                     if (rail) Row(Modifier.fillMaxSize()) {
                         Column(Modifier.width(76.dp).fillMaxHeight().padding(top = HostBarHeight + 8.dp, bottom = 12.dp),

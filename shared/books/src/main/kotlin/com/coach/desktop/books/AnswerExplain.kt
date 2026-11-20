@@ -119,10 +119,10 @@ internal fun LessonAnswerExplanation(
     val ready = gate.ready()
     val paired = gate.paired()
     when {
-        !ready -> Text("正在看这台电脑和 Mac 的连接…", Modifier.testTag("answer-explain-loading"),
+        !ready -> Text("正在检查服务连接…", Modifier.testTag("answer-explain-loading"),
             style = MaterialTheme.typography.bodySmall)
         !paired -> Column(Modifier.fillMaxWidth().testTag("answer-explain-unpaired"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(if (gate.revoked()) ExplainTrouble.revoked(gate.sableLogin()) else "讲解由配对的 Mac 生成，这台电脑还没连上。读书和做题照常。",
+            Text(if (gate.revoked()) ExplainTrouble.revoked(gate.sableLogin()) else "讲解由配对的服务生成，这台电脑还没连上。读书和做题照常。",
                 style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("answer-explain-unpaired-text"))
             V7TextButton(onOpenSourcePage, modifier = Modifier.testTag("answer-explain-pair")) { Text("去原文页配对") }
         }
@@ -294,13 +294,13 @@ internal fun GeneratedLessonPractice(
         // 连不上的时候不能让这一节空着：配对只管「现出题」，原文出的题和作答照常。
         !gate.ready() -> fallback()
         !gate.paired() -> {
-            Text(if (gate.revoked()) ExplainTrouble.revoked(gate.sableLogin()) else "现出题和答后讲解要用配对的 Mac；连上之前，这一节先用原文出的题。")
+            Text(if (gate.revoked()) ExplainTrouble.revoked(gate.sableLogin()) else "现出题和答后讲解要用配对的服务；连上之前，这一节先用原文出的题。")
             V7TextButton(onRepair) { Text("去原文页配对") }
             fallback()
         }
         !allowed -> {
             // 允许与否只决定「按本节原文现出题」；这一节原文出的题始终在，读者不必先答应再答题。
-            Text(ExplainPrivacy.ask(book.title) + "允许后，这一节会用 Mac 按原文现出一题并给答后讲解；题目只用于这次练习。")
+            Text(ExplainPrivacy.ask(book.title) + "允许后，这一节会通过服务按原文现出一题并给答后讲解；题目只用于这次练习。")
             PrimaryButton({ gate.consent.allow(book.id); allowed = true }, Modifier.testTag("practice-allow")) { Text("允许并出题") }
             fallback()
         }

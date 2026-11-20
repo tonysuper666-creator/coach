@@ -49,6 +49,53 @@ class LibraryExplainTest {
         }
     }
 
+    @Test fun sectionGuideAndContextualRephraseWithFollowUpHistoryPreserveCitationGate() = runBlocking {
+        Harness(local = true, personal = true).use { h ->
+            h.catalog()
+            // 1) kind = guide 带四样上下文返回 brief + recap + 带出处校验的正文
+            h.stub.stream(1, """{"brief":["本节讲能量守恒","承接上一节做功概念","把握转化与守恒两个要点"],"recap":"本节说明能量在不同形式间转化但总量守恒。","paragraphs":[{"text":"承接上一节做功概念，本节系统阐述能量守恒定律。","anchors":["S1","S2"]}]}""",
+                StubTutor.terminal("complete"), StubTutor.DONE)
+            val baseGuide = lesson(h.version, 2) { "完整自写能量块 $it。" }
+            val guideInput = JsonObject(baseGuide + mapOf(
+                "kind" to JsonPrimitive("guide"),
+                "sectionContext" to json("location" to "物理 › 第二章 › 第二节", "previousRecap" to "上一节介绍了机械功的定义。", "nextTitle" to "第三节 功率"),
+            ))
+            val (guideStatus, guideBody) = h.post(guideInput)
+            assertEquals(200, guideStatus)
+            assertEquals(3, guideBody["brief"]!!.jsonArray.size)
+            assertTrue(guideBody.str("recap").contains("守恒"))
+            assertEquals(listOf(1L, 2L), guideBody["sources"]!!.jsonArray.map { it.jsonObject.num("pdfPage") })
+            val guidePrompt = LedgerJson.parseToJsonElement(h.stub.requestBodies.last()).jsonObject["messages"]!!.jsonArray
+                .map { it.jsonObject }.single { it.str("role") == "system" }.str("content")
+            assertTrue(guidePrompt.contains("物理 › 第二章 › 第二节"))
+            assertTrue(guidePrompt.contains("上一节介绍了机械功的定义。"))
+            assertTrue(guidePrompt.contains("第三节 功率"))
+
+            // 2) 选段 rephrase / ask 追问携带整节上下文和对话历史
+            h.stub.stream(1, """{"paragraphs":[{"text":"换个说法，能量只是换了形态并没有凭空消失。","anchors":["S1"]}]}""",
+                StubTutor.terminal("complete"), StubTutor.DONE)
+            val rephraseInput = JsonObject(baseGuide - "bookPages" + mapOf(
+                "kind" to JsonPrimitive("rephrase"),
+                "selection" to JsonPrimitive("完整自写能量块 1。"),
+                "sectionContext" to json("location" to "物理 › 第二章 › 第二节", "previousRecap" to "上一节介绍了机械功的定义。", "nextTitle" to "第三节 功率"),
+                "history" to JsonArray(listOf(json("question" to "讲讲", "answer" to "这段讲能量转化。"))),
+            ))
+            val (repStatus, repBody) = h.post(rephraseInput)
+            assertEquals(200, repStatus)
+            assertEquals(1, repBody["sources"]!!.jsonArray.size)
+            val repPrompt = LedgerJson.parseToJsonElement(h.stub.requestBodies.last()).jsonObject["messages"]!!.jsonArray
+                .map { it.jsonObject }.single { it.str("role") == "system" }.str("content")
+            assertTrue(repPrompt.contains("完整自写能量块 2。"), "选段提问应携带整节其余块作为上下文")
+            assertTrue(repPrompt.contains("这段讲能量转化。"), "追问应携带历史问答")
+
+            // 3) 导读伪造出处仍会被严格拦截
+            h.stub.stream(1, """{"brief":["要点"],"recap":"摘要","paragraphs":[{"text":"伪造出处。","anchors":["S9"]}]}""",
+                StubTutor.terminal("complete"), StubTutor.DONE)
+            val (_, badGuide) = h.post(guideInput)
+            assertTrue(badGuide["sources"]!!.jsonArray.isEmpty(), "导读里的伪造出处必须被拦截")
+        }
+    }
+
     @Test fun lessonRequiresPersonalConsentAndCannotReclassifyCatalogOrForgePages() = runBlocking {
         val lastPage = json("kind" to "lesson", "bookPages" to 100_000,
             "blocks" to blocks("${"a".repeat(64)}:p100000:0" to "自写尾页。"))

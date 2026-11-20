@@ -43,6 +43,7 @@ import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFontFamilyResolver
@@ -93,7 +94,8 @@ internal fun originalPagedBookSelection(selected: AnnotatedString): String {
 private class PageClipboard(private val delegate: Clipboard) : Clipboard by delegate {
     override suspend fun setClipEntry(clipEntry: ClipEntry?) {
         val selected = bookClipboardSelection(clipEntry)
-        if (selected != null) delegate.setClipEntry(bookClipboardText(originalPagedBookSelection(selected)))
+        val clean = selected?.let(::originalPagedBookSelection)
+        if (clean != null) delegate.setClipEntry(bookClipboardText(clean))
         else delegate.setClipEntry(clipEntry)
     }
 }
@@ -187,6 +189,7 @@ internal fun BookPageView(
     /** 翻页读 / 滚动读（TON-1671）。两种共用同一套分页和锚点，切换时停在同一页。 */
     readMode: BookReadMode = BookReadMode.Paged,
     onOpenTableRow: ((BookPassage) -> Unit)? = null,
+    onSelectText: ((SourceBlock?) -> Unit)? = null,
 ) {
     var preview by remember(book.id, libraryDirectory) { mutableStateOf<BookFigurePreview?>(null) }
     preview?.let { BookFigureDialog(it) { preview = null } }
@@ -211,6 +214,8 @@ internal fun BookPageView(
     val reduced = LocalV7ReducedMotion.current
     val clipboard = LocalClipboard.current
     val pageClipboard = remember(clipboard) { PageClipboard(clipboard) }
+    val latestOnSelectText by rememberUpdatedState(onSelectText)
+    val topMarginPx = with(density) { 52.dp.toPx() }
     BoxWithConstraints(modifier.fillMaxSize().testTag("book-page-layout")) {
         val column = with(density) { (body.fontSize * 33).toDp() }
         val scrolling = readMode == BookReadMode.Scroll
@@ -366,13 +371,26 @@ internal fun BookPageView(
             val viewHeight = maxHeight
             val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
             val desk = if (colors.dark) CoachV7.Dark.desk else CoachV7.Light.desk
+            val scrollInsetPx = with(density) { leftInset.toPx() }
             CompositionLocalProvider(LocalClipboard provides pageClipboard) {
                 SelectionContainer {
                     ScrollReadView(scrollState, desk = desk, paper = Color.Transparent, gap = 24.dp, handleKeys = false,
                         modifier = Modifier.fillMaxSize().testTag("book-scroll-read"),
                         scrollbar = { BookReadScrollbar(it) }) { index ->
+                        val downPos = remember(scrollState) { arrayOf<ScrollReadPosition?>(null) }
+                        val scrollSpot = rememberUpdatedState { g: ReadingPointerGesture ->
+                            val cb = latestOnSelectText ?: return@rememberUpdatedState
+                            val moved = downPos[0] != null && downPos[0] != scrollState.position
+                            when {
+                                !moved && (g.longPressed || (!g.isTouch && g.dragged)) ->
+                                    cb(pages.getOrNull(index)?.selectionForGesture(book, g, scrollInsetPx, topMarginPx, measurer, typography, widthPx))
+                                !g.dragged && !g.longPressed -> cb(null)
+                            }
+                        }
+                        val recordDown = rememberUpdatedState { downPos[0] = scrollState.position }
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
-                            Box(Modifier.width(sheetWidth).height(viewHeight).background(paper).clipToBounds().testTag("book-sheet-0")) {
+                            Box(Modifier.width(sheetWidth).height(viewHeight).background(paper).clipToBounds()
+                                .readingSpot(scrollSpot, onDown = recordDown).testTag("book-sheet-0")) {
                                 val page = pages[index]
                                 val remaining = pages.count { it.chapter == page.chapter } - pages.take(index + 1).count { it.chapter == page.chapter }
                                 BookSheet(book, page, typography, measurer, widthPx, leftInset, remaining, false, 0,
@@ -410,8 +428,15 @@ internal fun BookPageView(
                             val visible = if (spread) 2 else 1
                             repeat(visible) { side ->
                                 val page = pages.getOrNull(first + side)
-                                val sheetSpot = rememberUpdatedState { d: Offset, u: Offset, dragged: Boolean ->
-                                    state.anchor = spotAnchor(pages, first + side, spread, side, d, u, dragged, with(density) { sheetWidth.toPx() }, measurer, typography, widthPx) ?: state.anchor
+                                val insetPx = with(density) { (if (spread && side == 1) rightInset else leftInset).toPx() }
+                                val sheetSpot = rememberUpdatedState { g: ReadingPointerGesture ->
+                                    state.anchor = spotAnchor(pages, first + side, spread, side, g.down, g.up, g.dragged, with(density) { sheetWidth.toPx() }, measurer, typography, widthPx) ?: state.anchor
+                                    val cb = latestOnSelectText ?: return@rememberUpdatedState
+                                    when {
+                                        g.longPressed || (!g.isTouch && g.dragged) ->
+                                            cb(page?.selectionForGesture(book, g, insetPx, topMarginPx, measurer, typography, widthPx))
+                                        !g.dragged -> cb(null)
+                                    }
                                 }
                                 Box(Modifier.width(sheetWidth).fillMaxHeight()
                                     .background(if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper)
@@ -453,8 +478,15 @@ internal fun BookPageView(
                             shadow = if (colors.dark) Color.Black else CoachV7.Light.ink) { index ->
                             val side = if (spread) Math.floorMod(index - turnState.shownPosition, 2) else 0
                             val page = pages[index]
-                            val sheetSpot = rememberUpdatedState { d: Offset, u: Offset, dragged: Boolean ->
-                                state.anchor = spotAnchor(pages, index, spread, side, d, u, dragged, with(density) { sheetWidth.toPx() }, measurer, typography, widthPx) ?: state.anchor
+                            val insetPx = with(density) { (if (spread && side == 1) rightInset else leftInset).toPx() }
+                            val sheetSpot = rememberUpdatedState { g: ReadingPointerGesture ->
+                                state.anchor = spotAnchor(pages, index, spread, side, g.down, g.up, g.dragged, with(density) { sheetWidth.toPx() }, measurer, typography, widthPx) ?: state.anchor
+                                val cb = latestOnSelectText ?: return@rememberUpdatedState
+                                when {
+                                    g.longPressed || (!g.isTouch && g.dragged) ->
+                                        cb(page.selectionForGesture(book, g, insetPx, topMarginPx, measurer, typography, widthPx))
+                                    !g.dragged -> cb(null)
+                                }
                             }
                             Box(Modifier.width(sheetWidth).fillMaxHeight().background(paper).clipToBounds()
                                 .readingSpot(sheetSpot, ignoreTurnGesture)
@@ -474,27 +506,73 @@ internal fun BookPageView(
     }
 }
 
+private data class ReadingPointerGesture(
+    val down: Offset,
+    val up: Offset,
+    val dragged: Boolean,
+    val longPressed: Boolean,
+    val isTouch: Boolean,
+)
+
+private fun BookLaidPage.selectionForGesture(
+    book: Textbook,
+    gesture: ReadingPointerGesture,
+    insetPx: Float,
+    topMarginPx: Float,
+    measurer: TextMeasurer,
+    typography: BookPageTypography,
+    widthPx: Int,
+): SourceBlock? = when {
+    gesture.isTouch -> if (gesture.longPressed) {
+        if (gesture.dragged) {
+            selectionBetween(book, gesture.down, gesture.up, insetPx, topMarginPx, measurer, typography, widthPx)
+                ?: selectionAt(book, gesture.down, insetPx, topMarginPx, measurer, typography, widthPx)
+        } else {
+            selectionAt(book, gesture.down, insetPx, topMarginPx, measurer, typography, widthPx)
+        }
+    } else null
+    gesture.dragged -> selectionBetween(book, gesture.down, gesture.up, insetPx, topMarginPx, measurer, typography, widthPx)
+    else -> null
+}
+
 /**
- * 版心里的阅读信号：点一下，或拖选文字。点（没有拖动）：点中的那一行。拖选：选区第一个字所在的那一行。
- * 回调拿到按下点、抬起点（本页坐标，抬起点可能越过本页宽度到了另一页）。图、按钮、翻页手势消费掉的不算点。
+ * 版心里的阅读信号：点一下、鼠标拖选文字，或触屏长按选字。图、按钮、翻页手势消费掉的不算点。
  */
 private fun Modifier.readingSpot(
-    onSpot: State<(down: Offset, up: Offset, dragged: Boolean) -> Unit>,
+    onSpot: State<(ReadingPointerGesture) -> Unit>,
     ignoreDown: State<(Long) -> Boolean>? = null,
+    onDown: State<() -> Unit>? = null,
 ): Modifier = pointerInput(Unit) {
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = true, pass = PointerEventPass.Final)
+        onDown?.value?.invoke()
         var last = down.position
         var consumedUp = false
+        val isTouch = down.type == PointerType.Touch
+        val longPressMs = viewConfiguration.longPressTimeoutMillis
+        val slop = viewConfiguration.touchSlop
+        var movedBeforeLongPress = false
+        var longPressed = false
         while (true) {
             val event = awaitPointerEvent(PointerEventPass.Final)
             val change = event.changes.firstOrNull { it.id == down.id } ?: break
             last = change.position
-            if (!change.pressed) { consumedUp = change.isConsumed; break }
+            val elapsed = change.uptimeMillis - down.uptimeMillis
+            val dist = (last - down.position).getDistance()
+            if (!longPressed && !movedBeforeLongPress) {
+                if (elapsed >= longPressMs) longPressed = true
+                else if (dist > slop) movedBeforeLongPress = true
+            }
+            if (!change.pressed) {
+                consumedUp = change.isConsumed
+                break
+            }
         }
         if (ignoreDown?.value?.invoke(down.uptimeMillis) == true) return@awaitEachGesture
-        val dragged = (last - down.position).getDistance() > viewConfiguration.touchSlop
-        if (dragged || !consumedUp) onSpot.value(down.position, last, dragged)
+        val dragged = (last - down.position).getDistance() > slop
+        if (longPressed || dragged || !consumedUp) {
+            onSpot.value(ReadingPointerGesture(down.position, last, dragged, longPressed, isTouch))
+        }
     }
 }
 

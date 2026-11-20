@@ -31,7 +31,7 @@ internal fun DesktopPairingGate(settings: DesktopConnectionSettings, content: @C
             address = loaded.first.orEmpty()
             identity = loaded.second
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { error = "无法读取连接信息，请检查 Coach 文件夹的访问权限，或重新输入 Mac 地址和配对码。" }
+        catch (_: Exception) { error = "无法读取连接信息，请检查 Coach 文件夹的访问权限，或重新输入服务地址和配对码。" }
         finally { initialized = true }
     }
     LaunchedEffect(identity) {
@@ -40,7 +40,7 @@ internal fun DesktopPairingGate(settings: DesktopConnectionSettings, content: @C
             withContext(Dispatchers.IO) { pairing.awaitRevocation(current) }
             identity = null
             error = when {
-                current.credentials.role != "friend" -> "这台电脑已取消配对，请在 Mac 上生成新配对码。"
+                current.credentials.role != "friend" -> "这台电脑已取消配对，请找给你配对码的人生成新码。"
                 sable -> "授权已撤销，请重新登录。"
                 else -> ExplainTrouble.REVOKED
             }
@@ -56,13 +56,13 @@ internal fun DesktopPairingGate(settings: DesktopConnectionSettings, content: @C
             if (paired != null) content(paired)
             else if (!initialized) Box(Modifier.padding(24.dp)) { Text("正在读取连接信息…") }
             else Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Text("连接你的 Mac", style = MaterialTheme.typography.headlineMedium)
+                Text("连接服务", style = MaterialTheme.typography.headlineMedium)
                 if (sable) {
                     com.coach.ui.SableLoginButton(busy, { busy = it }) { open -> identity = pairing.sable(open) }
                     Text("没有 Sable 账号？用配对码")
                 }
                 OutlinedTextField(value = address, onValueChange = { address = it; error = null },
-                    label = { Text("Mac 地址") }, placeholder = { Text("http://你的Mac地址:18791") },
+                    label = { Text("服务地址") }, placeholder = { Text("http://服务地址:18791") },
                     singleLine = true, enabled = !busy)
                 OutlinedTextField(value = code, onValueChange = { code = it.filter { c -> c in '0'..'9' }.take(6); error = null },
                     label = { Text("配对码") }, singleLine = true, enabled = !busy,
@@ -77,7 +77,7 @@ internal fun DesktopPairingGate(settings: DesktopConnectionSettings, content: @C
                             }
                             code = ""
                         } catch (cancelled: CancellationException) { throw cancelled }
-                        catch (_: Exception) { error = "未能保存配对。请确认 Mac 地址、Tailscale 和文件夹访问权限，并在 Mac 上生成新配对码。" }
+                        catch (_: Exception) { error = "未能保存配对。请确认服务地址、Tailscale 和文件夹访问权限，并找给你配对码的人生成新码。" }
                         finally { busy = false }
                     }
                 }) { Text(if (busy) "正在配对…" else "配对") }

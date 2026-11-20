@@ -188,6 +188,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             practiceSource = practiceSource, pageFocus = readerFocus, explainProvider = explainer,
                             openPairing = openPairing,
                             onCancelImport = controller::cancelImport,
+                            onReorganizeSections = { run { controller.reorganizeSections() } },
                             onNoteSession = { noteReader = it },
                             onPage = { page ->
                                 val restoreFocus = ui.source != null && readerHasFocus

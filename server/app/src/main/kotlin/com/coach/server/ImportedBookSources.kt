@@ -30,7 +30,7 @@ class ImportedBookSources internal constructor(directory: Path) {
             source.str("format") !in setOf("pdf", "epub", "md", "txt", "docx", "pptx", "html", "mobi", "azw3", "rtf", "odt", "png", "jpg") ||
             source.str("title").length !in 1..300 || !tutorSourceAllowed(source.str("title"))) bad()
         val pages = source["pages"] as? JsonArray ?: bad()
-        if (pages.isEmpty() || pages.size > (if (parsed.isLesson) 128 else 4)) bad()
+        if (pages.isEmpty() || pages.size > (if (parsed.isSectionScoped) 128 else 4)) bad()
         val pageMap = pages.map { value ->
             val page = value as? JsonObject ?: bad()
             if (page.keys != setOf("number", "length", "ocr", "sha256") || page.num("number") !in 1L..100_000L ||
@@ -67,7 +67,7 @@ class ImportedBookSources internal constructor(directory: Path) {
                 db.prepareStatement("SELECT count(*) FROM blocks WHERE device=?").use { sql ->
                     sql.setString(1, device); sql.executeQuery().use { row ->
                         row.next(); if (row.getInt(1) + added > 25_000)
-                            throw MockError(HttpStatusCode.PayloadTooLarge, "已保存的讲解原文过多，请先清理 Mac 上的个人导入来源。")
+                            throw MockError(HttpStatusCode.PayloadTooLarge, "已保存的讲解原文过多，请先清理服务上的个人导入来源。")
                     }
                 }
                 db.prepareStatement("INSERT OR IGNORE INTO blocks(device,book,page,start,end,text,snapshot) VALUES(?,?,?,?,?,?,?)").use { sql ->

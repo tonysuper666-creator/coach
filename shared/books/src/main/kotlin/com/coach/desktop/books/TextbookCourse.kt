@@ -30,7 +30,12 @@ internal val PRINTED_PAGE_MARK = Regex("""<!--\s*PDF 第 \d+ 页 · 书第 .*? �
  */
 internal val SourceBlock.isBodyParagraph: Boolean get() = !heading && !PRINTED_PAGE_MARK.matches(text.trim())
 
-internal data class BookLesson(val id: String, val title: String, val blocks: List<SourceBlock>) {
+internal data class BookLesson(
+    val id: String,
+    val title: String,
+    val blocks: List<SourceBlock>,
+    val breadcrumb: String = title,
+) {
     val firstPage get() = blocks.first().page
     val lastPage get() = blocks.last().page
     val text get() = blocks.filterNot { it.heading }.joinToString("\n\n") { it.text }
@@ -39,11 +44,15 @@ internal data class Textbook(
     val id: String, val title: String, val format: String, val pages: List<BookPage>,
     val readingPage: Int = 1, val lessonIndex: Int = 0, val learning: Boolean = false,
     val promptSeen: Boolean = false, val questionMode: QuestionMode = QuestionMode.CHOICE,
+    val structure: BookStructure? = null,
 ) {
-    val lessons: List<BookLesson> by lazy { StudyCoachCourse.plan(id, title, pages) }
+    val lessons: List<BookLesson> by lazy {
+        structure?.toLessons()?.takeIf { it.isNotEmpty() } ?: StudyCoachCourse.plan(id, title, pages)
+    }
     val hasPendingOcr: Boolean get() = pages.any { it.ocrPending }
     // At most one distinct candidate is the answer, and a question needs only three others.
     val choiceCandidates: List<String> by lazy { StudyCoachCourse.choiceCandidates(this) }
+    fun sourceBlocks(): List<SourceBlock> = StudyCoachCourse.blocks(id, pages, snapSentences = structure != null)
     val finished get() = learning && lessonIndex >= lessons.size
     fun page(pdfPage: Int): BookPage? = pages.firstOrNull { it.number == pdfPage }
     fun pageLabel(number: Int): String {
@@ -87,7 +96,7 @@ internal object StudyCoachCourse {
         }
         .firstOrNull { it.isNotEmpty() }
 
-    fun blocks(bookId: String, pages: List<BookPage>): List<SourceBlock> = buildList {
+    fun blocks(bookId: String, pages: List<BookPage>, snapSentences: Boolean = false): List<SourceBlock> = buildList {
         for (page in pages) {
             // Keep offsets in the original extracted page. Normalize only fingerprints:
             // NFKC changes string length and must never move a reader source anchor.
@@ -103,9 +112,14 @@ internal object StudyCoachCourse {
                     if (pending.isNotBlank()) {
                         var start = pendingStart
                         var left = pending
-                        // Bound lesson chunks without dropping any extracted source text.
+                        // Legacy books (snapSentences=false) keep exact 2400-char boundaries so saved lesson/review IDs never drift.
+                        // New structured books (snapSentences=true) snap cuts to sentence boundaries.
                         while (left.isNotEmpty()) {
                             var count = minOf(left.length, 2400)
+                            if (snapSentences && count < left.length) {
+                                val cut = sentenceBoundaryBefore(left, count, minIndex = 1000)
+                                if (cut != null) count = cut
+                            }
                             if (count < left.length && Character.isHighSurrogate(left[count - 1])) count--
                             val text = left.take(count)
                             add(SourceBlock("$bookId:p${page.number}:$start", page.number, start, start + count, false, text))
@@ -181,4 +195,24 @@ internal object StudyCoachCourse {
     }
 
     private fun normalized(value: String) = Normalizer.normalize(value, Normalizer.Form.NFKC).lowercase().trim()
+
+    /** 在 [maxIndex] 之前寻找最近的句末或换行切点，避免把完整句子硬切在中间。 */
+    internal fun sentenceBoundaryBefore(text: String, maxIndex: Int, minIndex: Int = 1): Int? {
+        val closers = setOf('”', '’', '」', '』', '）', ')', '"', '\'', '》', '】')
+        val stops = setOf('。', '！', '？', '!', '?', '\n')
+        for (i in minOf(maxIndex, text.length) - 1 downTo maxOf(minIndex, 1)) {
+            val ch = text[i]
+            if (ch in stops) {
+                var end = i + 1
+                while (end < maxIndex && end < text.length && text[end] in closers) end++
+                return end
+            }
+            if (ch == '.' && (i + 1 >= text.length || text[i + 1].isWhitespace() || text[i + 1] in closers)) {
+                var end = i + 1
+                while (end < maxIndex && end < text.length && text[end] in closers) end++
+                return end
+            }
+        }
+        return null
+    }
 }

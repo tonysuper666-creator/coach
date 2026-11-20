@@ -89,9 +89,10 @@ internal fun ExplainTroubleLine(reply: BookLearningReply.Unavailable, onRetry: (
  */
 internal object ExplainPrivacy {
     const val TITLE = "这段原文会发到哪里"
-    private const val ROUTE = "会经李政的 Mac 发给 Anthropic 或 OpenAI 的 API，不发到别处。API 默认不拿它训练模型。"
+    private const val ROUTE = "会经服务发给 Anthropic 或 OpenAI 的 API，不发到别处。API 默认不拿它训练模型。"
 
     fun explain(title: String) = "这段和前后各一段原文${ROUTE}整本书留在这台电脑上，《$title》只问这一次。"
+    fun page(title: String) = "这一页的正文${ROUTE}整本书留在这台电脑上，《$title》只问这一次。"
     fun ask(title: String) = "你选的这段原文和你的问题${ROUTE}整本书留在这台电脑上，《$title》只问这一次。"
     fun answer(title: String) = "刚做的这段原文和前后各一段${ROUTE}整本书留在这台电脑上，《$title》只问这一次。"
 }

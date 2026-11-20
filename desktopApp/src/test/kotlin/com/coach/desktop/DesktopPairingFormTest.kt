@@ -75,9 +75,9 @@ class DesktopPairingFormTest {
             var pairedDevice: String? = null
             runComposeUiTest {
                 show(settings) { pairedDevice = it.credentials.deviceId }
-                waitUntil(timeoutMillis = 15_000) { onAllNodesWithText("连接你的 Mac").fetchSemanticsNodes().isNotEmpty() }
-                typeInto("Mac 地址", service.url)
-                assertEquals(service.url, editable("Mac 地址").enteredText())
+                waitUntil(timeoutMillis = 15_000) { onAllNodesWithText("连接服务").fetchSemanticsNodes().isNotEmpty() }
+                typeInto("服务地址", service.url)
+                assertEquals(service.url, editable("服务地址").enteredText())
                 onNode(hasText("配对") and hasClickAction()).assertIsNotEnabled()
                 typeInto("配对码", bad)
                 assertEquals("\u2022".repeat(6), editable("配对码").enteredText())
@@ -85,20 +85,20 @@ class DesktopPairingFormTest {
                 pair.assertIsEnabled()
                 pair.performClick()
                 waitUntil(timeoutMillis = 15_000) { onAllNodesWithText("未能保存配对。", substring = true).fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithText("连接你的 Mac").assertExists()
+                onNodeWithText("连接服务").assertExists()
                 assertFalse(Files.exists(store.file))
                 assertEquals(devicesBefore, service.deviceNames())
 
                 pairedDevice = null
                 show(settings) { pairedDevice = it.credentials.deviceId }
-                waitUntil(timeoutMillis = 15_000) { onAllNodesWithText("连接你的 Mac").fetchSemanticsNodes().isNotEmpty() }
-                typeInto("Mac 地址", service.url)
-                assertEquals(service.url, editable("Mac 地址").enteredText())
+                waitUntil(timeoutMillis = 15_000) { onAllNodesWithText("连接服务").fetchSemanticsNodes().isNotEmpty() }
+                typeInto("服务地址", service.url)
+                assertEquals(service.url, editable("服务地址").enteredText())
                 typeInto("配对码", good)
                 assertEquals("\u2022".repeat(6), editable("配对码").enteredText())
                 onNode(hasText("配对") and hasClickAction()).performClick()
                 waitUntil(timeoutMillis = 15_000) { onAllNodesWithTag("desktop-paired").fetchSemanticsNodes().isNotEmpty() }
-                assertTrue(onAllNodesWithText("连接你的 Mac").fetchSemanticsNodes().isEmpty())
+                assertTrue(onAllNodesWithText("连接服务").fetchSemanticsNodes().isEmpty())
             }
             val device = checkNotNull(pairedDevice)
             assertTrue(service.deviceNames().contains(pairedDeviceName()), "os.name=${System.getProperty("os.name")}")
@@ -109,7 +109,7 @@ class DesktopPairingFormTest {
                 show(settings) { pairedDevice = it.credentials.deviceId }
                 waitUntil(timeoutMillis = 15_000) { onAllNodesWithTag("desktop-paired").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithTag("desktop-paired").assertExists()
-                assertTrue(onAllNodesWithText("连接你的 Mac").fetchSemanticsNodes().isEmpty())
+                assertTrue(onAllNodesWithText("连接服务").fetchSemanticsNodes().isEmpty())
                 assertTrue(onAllNodesWithText("配对码").fetchSemanticsNodes().isEmpty())
             }
             assertEquals(device, pairedDevice)

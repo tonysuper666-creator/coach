@@ -49,6 +49,7 @@ import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.Desk
 import com.coach.ui.v7.LocalV7Fonts
 import com.coach.ui.v7.PaperButton
+import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.V7TextButton
 import com.coach.ui.v7.V7Tooltip
 import com.coach.ui.v7.v7FocusRing
@@ -102,6 +103,7 @@ internal fun TextbookReader(
     pageFocus: FocusRequester, onNoteSession: (ReaderSession?) -> Unit, onPage: (Int) -> Unit, onBack: () -> Unit,
     onLearn: () -> Unit, explainProvider: BookExplainer? = null, openPairing: Boolean = false,
     onCancelImport: () -> Unit = {},
+    onReorganizeSections: (() -> Unit)? = null,
 ) {
     val book = checkNotNull(ui.book)
     val page = book.page(ui.page)
@@ -162,15 +164,94 @@ internal fun TextbookReader(
     var savingMark by remember(book.id) { mutableStateOf(false) }
     var markError by remember(book.id, ui.page) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val chosen = pdf.selection?.let { selected ->
+    var textSelection by remember(book.id) { mutableStateOf<SourceBlock?>(null) }
+    LaunchedEffect(ui.page, textView, explainOpen) {
+        if (explainOpen || !textView) textSelection = null
+    }
+    val pdfChosen = pdf.selection?.let { selected ->
         val range = selected.range
         val stored = book.page(selected.page)?.text ?: return@let null
         SourceBlock("${book.id}:p${selected.page}:${range.startUtf16}", selected.page, range.startUtf16, range.endUtf16,
             false, stored.substring(range.startUtf16, range.endUtf16))
     }?.takeIf { it.text.isNotBlank() }
+    val chosen = (if (textView) textSelection else pdfChosen)?.takeIf { it.text.isNotBlank() }
     val learnableSelection = chosen?.takeIf { it.text.trim().length <= 4_000 }
     val explainer = remember(library, explainProvider) { explainProvider ?: BookExplainer(library = library) }
     val explainConsent = remember(library) { ExplainConsent(library.directory) }
+    var consented by remember(book.id) { mutableStateOf(explainConsent.allowed(book.id)) }
+    val autoGuide = LocalReadingAutoGuide.current
+    val allBookBlocks = remember(book.id, book.pages, book.structure) { book.sourceBlocks() }
+    val pageRole = remember(book.id, book.structure, allBookBlocks, ui.page) {
+        book.structure?.pageRole(ui.page) ?: when (ExplainClassifier.analyzePage(allBookBlocks, ui.page).kind) {
+            ExplainPageKind.TOC -> BookPageRole.TOC
+            ExplainPageKind.COPYRIGHT -> BookPageRole.COPYRIGHT
+            ExplainPageKind.BLANK -> BookPageRole.BLANK
+            ExplainPageKind.HEADINGS_ONLY -> BookPageRole.FRONT_MATTER
+            ExplainPageKind.BODY -> BookPageRole.BODY
+        }
+    }
+    val guideController = remember(book.id, book.lessons, library, explainConsent, explainer) {
+        SectionGuideController(book, library, explainConsent, explainer, scope)
+    }
+    val currentSectionIndex = remember(book.id, book.lessons, ui.page) {
+        guideController.sectionIndexForPage(ui.page)
+    }
+    val currentSection = book.lessons.getOrNull(currentSectionIndex)
+    var guideExpanded by remember(book.id, currentSection?.id) { mutableStateOf(false) }
+    var sectionGuidePinned by remember(book.id, currentSection?.id) { mutableStateOf(false) }
+    var inlineThread by remember(book.id) { mutableStateOf<InlineExplainThread?>(null) }
+    var inlineDraft by remember(book.id) { mutableStateOf("") }
+    var lastInlineAction by remember(book.id) { mutableStateOf<Pair<SelectionExplainAction, String?>?>(null) }
+    var pendingInlineConsent by remember(book.id) { mutableStateOf<Triple<SourceBlock, SelectionExplainAction, String?>?>(null) }
+    LaunchedEffect(explainer) { if (!explainer.loaded) explainer.load() }
+    LaunchedEffect(book.id, ui.page, autoGuide, explainer.identity, consented) {
+        if (pageRole == BookPageRole.BODY && autoGuide && explainer.identity != null && consented) {
+            guideController.prefetchForPage(ui.page, autoGuide = true)
+        }
+    }
+    fun runInlineSelection(target: SourceBlock, action: SelectionExplainAction, questionText: String? = null) {
+        val secIdx = guideController.sectionIndexForPage(target.page).takeIf { it >= 0 } ?: currentSectionIndex
+        val secCtx = guideController.contextForSection(secIdx)
+        if (action == SelectionExplainAction.ASK && questionText == null) {
+            inlineThread = (inlineThread?.takeIf { it.selection.id == target.id }
+                ?: InlineExplainThread(target, secCtx)).copy(askingOpen = true, error = null)
+            return
+        }
+        if (!consented) {
+            pendingInlineConsent = Triple(target, action, questionText)
+            return
+        }
+        lastInlineAction = action to questionText
+        val existing = inlineThread?.takeIf { it.selection.id == target.id } ?: InlineExplainThread(target, secCtx)
+        val history = existing.turns.map { FollowUpTurn(it.label, ReadableText.withoutCitationMarks(it.explanation.text)) }
+        inlineThread = existing.copy(loading = true, error = null, askingOpen = true)
+        scope.launch {
+            val result = explainer.explainSelection(
+                kind = action.kind,
+                chosen = target,
+                context = secCtx,
+                question = questionText,
+                history = history,
+            )
+            val sent = secCtx?.sectionBlocks?.filterNot { it.heading }
+                ?.takeIf { list -> list.isNotEmpty() && list.any { target.text.trim() in it.text || it.id == target.id } }
+                ?: listOf(target)
+            val label = if (action == SelectionExplainAction.ASK && !questionText.isNullOrBlank()) "问：${questionText.trim()}" else action.label
+            inlineThread = when (result) {
+                is ExplainResult.Done -> existing.copy(
+                    turns = existing.turns + InlineExplainEntry(label, result.explanation, sent),
+                    loading = false,
+                    error = null,
+                    askingOpen = true,
+                )
+                is ExplainResult.Refused -> existing.copy(
+                    loading = false,
+                    error = result.message to result.trouble,
+                    askingOpen = true,
+                )
+            }
+        }
+    }
     val source = ui.source
     LaunchedEffect(book.id, source, practiceSource) {
         if (source == null && practiceSource == null) return@LaunchedEffect
@@ -244,7 +325,7 @@ internal fun TextbookReader(
     val focusManager = LocalFocusManager.current
     var jumpFocused by remember { mutableStateOf(false) }
     var pageFocused by remember { mutableStateOf(false) }
-    val typing = readerTyping(asking, jumpFocused, notesOpen, session.noting)
+    val typing = readerTyping(asking, jumpFocused, notesOpen, session.noting) || inlineThread?.askingOpen == true
     LaunchedEffect(book.id, ui.page, typing, pdfScrolling) {
         if (typing) return@LaunchedEffect
         // A successful request already owns focus. Do not leave another frame's
@@ -279,6 +360,15 @@ internal fun TextbookReader(
 
     // Keep the event handler connected to the current neighbours after recomposition.
     // A remembered key callback must not retain a local function's old page captures.
+    fun visibleImportPageRange(): IntRange {
+        val visible = (0 until if (paging.spread) 2 else 1)
+            .mapNotNull { paging.pages.getOrNull(paging.index + it) }
+            .flatMap { it.sources }
+            .map { it.importPage }
+        val first = visible.minOrNull() ?: paging.anchor.importPage
+        val last = visible.maxOrNull() ?: paging.anchor.importPage
+        return first..last
+    }
     val turnLayout by rememberUpdatedState<(ReaderTurn) -> Unit> { turn ->
         if (!textView || pageUnrecognizedOriginal) {
             when (turn) {
@@ -289,9 +379,9 @@ internal fun TextbookReader(
             }
         } else when {
             turn == ReaderTurn.Next && !paging.canNext ->
-                book.pages.firstOrNull { it.number > ui.page }?.number?.let(turnTo)
+                book.pages.firstOrNull { it.number > visibleImportPageRange().last }?.number?.let(turnTo)
             turn == ReaderTurn.Previous && !paging.canPrevious ->
-                book.pages.lastOrNull { it.number < ui.page }?.number?.let(turnTo)
+                book.pages.lastOrNull { it.number < visibleImportPageRange().first }?.number?.let(turnTo)
             turn == ReaderTurn.Last && book.pages.last().ocrPending ->
                 turnTo(book.pages.last().number)
             else -> paging.move(turn)?.let { anchor ->
@@ -438,7 +528,14 @@ internal fun TextbookReader(
             }
         },
         status = "${book.pageLabel(ui.page)} · 共 $lastPage ${if (book.format == "pptx") "张" else "页"}", directory = {
-            Text("教材目录", style = MaterialTheme.typography.titleMedium)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("教材目录", style = MaterialTheme.typography.titleMedium)
+                if (onReorganizeSections != null) {
+                    V7TextButton(onReorganizeSections, enabled = !ui.busy, modifier = Modifier.testTag("reorganize-sections")) {
+                        Text("重新整理章节")
+                    }
+                }
+            }
             for (lesson in book.lessons) TextButton(onClick = { turnTo(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
         }) {
         val colors = CoachTheme.colors
@@ -523,14 +620,34 @@ internal fun TextbookReader(
                 }
                 if (source == null) PaperButton(onLearn, enabled = !ui.busy) { Text(if (book.learning) "继续学" else "开始学") }
             }
+            val sectionTitleBar: @Composable (Modifier) -> Unit = { barModifier ->
+                Row(barModifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(if (source != null) "学习原文 · ${source.title}" else currentSection?.title ?: "教材阅读",
+                        style = MaterialTheme.typography.titleMedium)
+                    if (!explainOpen && pageRole == BookPageRole.BODY && currentSection != null) {
+                        val secState = guideController.states[currentSection.id] ?: SectionGuideState.Idle
+                        FaintSectionExplainButton(
+                            expanded = guideExpanded && sectionGuidePinned,
+                            enabled = explainer.identity != null && secState != SectionGuideState.Loading,
+                            onClick = {
+                                sectionGuidePinned = true
+                                guideExpanded = !guideExpanded
+                                if (guideExpanded && consented && explainer.identity != null) {
+                                    guideController.requestSection(currentSectionIndex)
+                                }
+                            },
+                        )
+                    }
+                }
+            }
             if (compactTouch) {
+                sectionTitleBar(Modifier.fillMaxWidth())
                 FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp),
                     itemVerticalAlignment = Alignment.CenterVertically) { actions() }
             } else {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(if (source != null) "学习原文 · ${source.title}" else "教材阅读",
-                        modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    sectionTitleBar(Modifier.weight(1f))
                     actions()
                 }
             }
@@ -557,12 +674,38 @@ internal fun TextbookReader(
             if (source != null) Text("对应教材第 ${source.firstPage}–${source.lastPage} 页 · 返回后保留学习进度", style = MaterialTheme.typography.bodySmall)
             sourceWarning?.let { Text(it, color = v7Alert(), style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("source-anchor-status")) }
+            val showSectionGuide = !explainOpen && pageRole == BookPageRole.BODY && currentSection != null &&
+                ((autoGuide && ui.page == currentSection.firstPage && inlineThread == null) || sectionGuidePinned)
+            if (showSectionGuide && currentSection != null) {
+                SectionGuideCard(
+                    book = book,
+                    blocks = allBookBlocks,
+                    section = currentSection,
+                    state = guideController.states[currentSection.id] ?: SectionGuideState.Idle,
+                    paired = explainer.identity != null,
+                    consented = consented,
+                    expanded = guideExpanded,
+                    onToggleExpand = { guideExpanded = !guideExpanded },
+                    onAllowConsent = {
+                        explainConsent.allow(book.id)
+                        consented = true
+                        guideController.prefetchForPage(ui.page, autoGuide = true)
+                    },
+                    onRetry = { guideController.requestSection(currentSectionIndex) },
+                    onOpenPair = { explainOpen = true },
+                    onOpenCitation = { _, block -> openPassage(BookPassage.from(book, block)) },
+                )
+            }
             Box(Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surface).testTag("reader-page")
                 .focusRequester(pageFocus).onFocusChanged { pageFocused = it.isFocused }
                 .onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                     // Ctrl/Alt/Win 组合留给系统；纯方向键才翻页。
                     if (event.isCtrlPressed || event.isAltPressed || event.isMetaPressed) return@onPreviewKeyEvent false
+                    if (!explainOpen && !typing && learnableSelection != null && event.key == Key.Enter) {
+                        runInlineSelection(learnableSelection, SelectionExplainAction.EXPLAIN)
+                        return@onPreviewKeyEvent true
+                    }
                     if (pdfScrolling && !typing) when (event.key) {
                         Key.PageDown, Key.PageUp, Key.Spacebar, Key.MoveHome, Key.MoveEnd, Key.DirectionDown, Key.DirectionUp -> {
                             pdf.selection = null
@@ -584,9 +727,9 @@ internal fun TextbookReader(
                     true
                 }.focusable()) {
                 if (explainOpen) BookExplainPanel(book, paragraphPage.number, explainConsent, explainer,
-                    selection = explainingSelection, onOpenOriginal = openPassage.takeIf { explainingSelection != null })
+                    selection = explainingSelection, library = library, onOpenOriginal = openPassage.takeIf { explainingSelection != null })
                 else if (textView && !pageUnrecognizedOriginal) {
-                    val ranges = remember(book.pages, source, practiceSource, ui.page, quoteAnchor, located, aspectOk, marks, passageJump) {
+                    val ranges = remember(book.pages, source, practiceSource, ui.page, quoteAnchor, located, aspectOk, marks, passageJump, textSelection) {
                         val result = mutableMapOf<Int, List<IntRange>>()
                         if (practiceSource == null) {
                             source?.blocks.orEmpty().groupBy { it.page }.forEach { (number, blocks) ->
@@ -613,17 +756,20 @@ internal fun TextbookReader(
                             if (number != null && range != null) result[number] = listOf(range)
                         }
                         passageJump?.let { result[it.page] = result[it.page].orEmpty() + listOf(it.start until it.end) }
+                        textSelection?.let { result[it.page] = result[it.page].orEmpty() + listOf(it.start until it.end) }
                         if (marks.isNotEmpty()) result[ui.page] = result[ui.page].orEmpty() +
                             marks.map { it.startUtf16 until it.endUtf16 }
                         result
                     }
                     BookPageView(book, paging, ranges, turnLayout, libraryDirectory = library.directory,
                         turnStyle = turnStyle, readMode = readMode, onOpenTableRow = openPassage,
+                        onSelectText = { textSelection = it },
                         onSpot = { anchor ->
                             if (ui.source == null) runCatching { library.saveReadSpot(book.id, anchor.importPage, anchor.offsetUtf16) }
                         },
                         onPosition = { number ->
                         if (paging.publishImportPage(number)) {
+                            if (textSelection?.page != number) textSelection = null
                             onPage(number)
                             session.goToPage(number)
                         }
@@ -655,6 +801,39 @@ internal fun TextbookReader(
                         ReaderScrollbar(imageScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                     }
                 }
+                if (!explainOpen && learnableSelection != null && inlineThread == null) {
+                    SelectionExplainToolbar(
+                        onAction = { action -> runInlineSelection(learnableSelection, action) },
+                        onDismiss = { pdf.selection = null; textSelection = null },
+                        modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
+                    )
+                }
+            }
+            inlineThread?.let { thread ->
+                if (!explainOpen) {
+                    InlineSelectionExplainCard(
+                        book = book,
+                        allBlocks = allBookBlocks,
+                        thread = thread,
+                        draft = inlineDraft,
+                        onDraftChange = { inlineDraft = it },
+                        onSubmitQuestion = {
+                            val q = inlineDraft.trim()
+                            if (BookPassageQuestion.accepts(q)) {
+                                inlineDraft = ""
+                                runInlineSelection(thread.selection, SelectionExplainAction.ASK, q)
+                            }
+                        },
+                        onRetry = {
+                            val (act, q) = lastInlineAction ?: (SelectionExplainAction.EXPLAIN to null)
+                            runInlineSelection(thread.selection, act, q)
+                        },
+                        onOpenPair = { explainOpen = true },
+                        onOpenCitation = { _, block -> openPassage(BookPassage.from(book, block)) },
+                        onClose = { inlineThread = null; inlineDraft = ""; pdf.selection = null; textSelection = null },
+                        modifier = Modifier.heightIn(max = 360.dp),
+                    )
+                }
             }
             if (notesOpen && samePage && view != null) {
                 Column(Modifier.fillMaxWidth().heightIn(max = 300.dp).verticalScroll(rememberScrollState())
@@ -680,8 +859,9 @@ internal fun TextbookReader(
                 horizontalArrangement = Arrangement.spacedBy(if (compactTouch) 8.dp else 20.dp, Alignment.CenterHorizontally),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
                 itemVerticalAlignment = Alignment.CenterVertically) {
-                val hasPrevBookPage = book.pages.any { it.number < ui.page }
-                val hasNextBookPage = book.pages.any { it.number > ui.page }
+                val visibleImportRange = visibleImportPageRange()
+                val hasPrevBookPage = book.pages.any { it.number < visibleImportRange.first }
+                val hasNextBookPage = book.pages.any { it.number > visibleImportRange.last }
                 V7Tooltip("上一页", shortcut = "←  PageUp") {
                     PaperButton({ turnLayout(ReaderTurn.Previous) }, enabled = paging.canPrevious || hasPrevBookPage,
                         modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
@@ -769,6 +949,20 @@ internal fun TextbookReader(
                     contentPadding = toolPadding) { Text("前往") }
             }
         }
+    }
+    pendingInlineConsent?.let { (target, action, q) ->
+        AlertDialog(
+            onDismissRequest = { pendingInlineConsent = null },
+            title = { Text(ExplainPrivacy.TITLE) },
+            text = { Text(ExplainPrivacy.ask(book.title), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("explain-consent")) },
+            confirmButton = {
+                PrimaryButton({
+                    explainConsent.allow(book.id); consented = true; pendingInlineConsent = null
+                    runInlineSelection(target, action, q)
+                }, modifier = Modifier.testTag("explain-consent-allow")) { Text("允许并讲解") }
+            },
+            dismissButton = { V7TextButton({ pendingInlineConsent = null }, modifier = Modifier.testTag("explain-consent-deny")) { Text("不允许") } },
+        )
     }
     if (asking) BookPassageAsk(book, paragraphPage, support,
         onRepair = { asking = false; explainingSelection = learnableSelection; explainOpen = true },

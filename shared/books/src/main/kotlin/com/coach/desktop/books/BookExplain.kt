@@ -56,6 +56,46 @@ internal sealed interface ExplainResult {
     }
 }
 
+/** 每节讲解与选段追问共用的整节上下文。 */
+internal data class ExplainSectionContext(
+    val location: String,
+    val previousRecap: String?,
+    val nextTitle: String?,
+    val sectionBlocks: List<SourceBlock>,
+)
+
+internal data class FollowUpTurn(val question: String, val answer: String)
+
+internal data class SectionGuide(
+    val brief: List<String>,
+    val explanation: Explanation,
+    val recap: String,
+) {
+    fun toCached(): CachedSectionGuide = CachedSectionGuide(
+        brief = brief,
+        text = explanation.text,
+        citations = explanation.citations.map { CachedCitation(it.anchor, it.blockId, it.page) },
+        recap = recap,
+    )
+
+    companion object {
+        fun fromCached(cached: CachedSectionGuide): SectionGuide = SectionGuide(
+            brief = cached.brief,
+            explanation = Explanation(
+                text = cached.text,
+                citations = cached.citations.map { Citation(it.anchor, it.blockId, it.page) },
+                elapsedMs = 0L,
+            ),
+            recap = cached.recap,
+        )
+    }
+}
+
+internal sealed interface SectionGuideResult {
+    data class Done(val guide: SectionGuide) : SectionGuideResult
+    data class Refused(val message: String, val trouble: ExplainTrouble = ExplainTrouble.Other) : SectionGuideResult
+}
+
 /** Sending a book's text off this computer needs a yes from the reader, per book. Nothing is sent before it. */
 internal class ExplainConsent(private val directory: Path) {
     private fun file(bookId: String): Path? =
@@ -89,6 +129,77 @@ internal object ExplainWire {
         put("blocks", buildJsonArray { for (b in context) add(buildJsonObject { put("id", b.id); put("text", b.text) }) })
     }
 
+    fun sectionGuideRequest(
+        requestId: String,
+        blocks: List<SourceBlock>,
+        bookPages: Int,
+        sectionContext: ExplainSectionContext,
+    ): JsonObject {
+        val base = BookLessonWire.request(requestId, blocks, bookPages)
+        return JsonObject(base + mapOf(
+            "kind" to JsonPrimitive("guide"),
+            "sectionContext" to encodeSectionContext(sectionContext),
+        ))
+    }
+
+    fun selectionRequest(
+        requestId: String,
+        kind: String,
+        chosen: SourceBlock,
+        blocks: List<SourceBlock>,
+        sectionContext: ExplainSectionContext? = null,
+        question: String? = null,
+        history: List<FollowUpTurn> = emptyList(),
+    ): JsonObject = buildJsonObject {
+        require(kind in setOf("explain", "example", "rephrase", "ask"))
+        require(chosen.text.trim().length in 1..4_000)
+        put("requestId", requestId)
+        put("kind", kind)
+        put("selection", chosen.text.trim().take(4_000))
+        if (kind == "ask") {
+            val q = requireNotNull(question)
+            require(BookPassageQuestion.accepts(q))
+            put("question", q.trim())
+        }
+        put("blocks", buildJsonArray { for (b in blocks) add(buildJsonObject { put("id", b.id); put("text", b.text) }) })
+        sectionContext?.let { put("sectionContext", encodeSectionContext(it)) }
+        if (history.isNotEmpty()) {
+            put("history", buildJsonArray {
+                history.takeLast(8).forEach { turn ->
+                    add(buildJsonObject {
+                        put("question", turn.question.trim().take(500))
+                        put("answer", turn.answer.trim().take(2000))
+                    })
+                }
+            })
+        }
+    }
+
+    private fun encodeSectionContext(ctx: ExplainSectionContext): JsonObject = buildJsonObject {
+        put("location", ctx.location.trim().take(300))
+        ctx.previousRecap?.trim()?.takeIf { it.isNotEmpty() }?.let { put("previousRecap", it.take(600)) }
+        ctx.nextTitle?.trim()?.takeIf { it.isNotEmpty() }?.let { put("nextTitle", it.take(200)) }
+    }
+
+    fun parseGuide(body: JsonObject, sent: List<SourceBlock>): SectionGuideResult {
+        return when (val parsed = parse(body, sent)) {
+            is ExplainResult.Refused -> SectionGuideResult.Refused(parsed.message, parsed.trouble)
+            is ExplainResult.Done -> {
+                val brief = (body["brief"] as? JsonArray).orEmpty().mapNotNull {
+                    (it as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
+                }.take(5).ifEmpty {
+                    parsed.explanation.text.split("\n\n")
+                        .map { ReadableText.withoutCitationMarks(it) }
+                        .filter { it.isNotBlank() }
+                        .take(4)
+                }
+                val recap = (body["recap"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
+                    ?: brief.joinToString(" ").take(150)
+                SectionGuideResult.Done(SectionGuide(brief, parsed.explanation, recap))
+            }
+        }
+    }
+
     fun parse(body: JsonObject, sent: List<SourceBlock>): ExplainResult {
         val text = (body["text"] as? JsonPrimitive)?.contentOrNull.orEmpty()
         val citations = (body["sources"] as? JsonArray).orEmpty().map { value ->
@@ -113,22 +224,43 @@ private sealed interface BlockState {
     data class Failed(val message: String, val trouble: ExplainTrouble) : BlockState
 }
 
+private sealed interface PendingExplain {
+    data class Block(val block: SourceBlock) : PendingExplain
+    data class Section(val context: ExplainSectionContext, val sectionId: String) : PendingExplain
+}
+
 /**
- * 「讲解」视图：本页每一段原文旁一个「讲解」按钮。点了才把这一段和前后各一段发给已配对的 Mac；
- * 讲解里的块编号点开就是这一块原文。
+ * 「讲解」视图：按这本书自己的章节来讲，不再每行挂「讲解这段」，也不再放「讲解这一页」。
+ * 目录页、版权页、前言/索引/参考文献和空白页只显示灰字提示，不挂讲解入口；
+ * 正文节标题旁保留淡淡的「讲讲这一节」，点了展开整节完整讲解与段号出处。
  */
 @Composable
 internal fun BookExplainPanel(
     book: Textbook, page: Int, consent: ExplainConsent, explainer: BookExplainer, modifier: Modifier = Modifier,
-    selection: SourceBlock? = null, onOpenOriginal: ((BookPassage) -> Unit)? = null,
+    selection: SourceBlock? = null, library: TextbookLibrary? = null, onOpenOriginal: ((BookPassage) -> Unit)? = null,
 ) {
-    val blocks = remember(book.id, book.pages) { StudyCoachCourse.blocks(book.id, book.pages) }
+    val blocks = remember(book.id, book.pages, book.structure) { book.sourceBlocks() }
+    val pageRole = remember(book.id, book.structure, blocks, page) {
+        book.structure?.pageRole(page) ?: when (ExplainClassifier.analyzePage(blocks, page).kind) {
+            ExplainPageKind.TOC -> BookPageRole.TOC
+            ExplainPageKind.COPYRIGHT -> BookPageRole.COPYRIGHT
+            ExplainPageKind.BLANK -> BookPageRole.BLANK
+            ExplainPageKind.HEADINGS_ONLY -> BookPageRole.FRONT_MATTER
+            ExplainPageKind.BODY -> BookPageRole.BODY
+        }
+    }
+    val sectionIndex = remember(book.id, book.lessons, page) {
+        book.lessons.indexOfFirst { page in it.firstPage..it.lastPage }
+    }
+    val currentSection = book.lessons.getOrNull(sectionIndex)
     val onPage = remember(blocks, page, selection) {
-        if (selection != null) listOf(selection) else blocks.filter { it.page == page && !it.heading }
+        if (selection != null) listOf(selection) else blocks.filter { it.page == page && it.isBodyParagraph }
     }
     var consented by remember(book.id) { mutableStateOf(consent.allowed(book.id)) }
     val states = remember(book.id) { mutableStateMapOf<String, BlockState>() }
-    var pending by remember(book.id, page) { mutableStateOf<SourceBlock?>(null) }
+    val sectionStates = remember(book.id) { mutableStateMapOf<String, SectionGuideState>() }
+    var sectionExpanded by remember(book.id, currentSection?.id) { mutableStateOf(false) }
+    var pending by remember(book.id, page) { mutableStateOf<PendingExplain?>(null) }
     var opened by remember { mutableStateOf<Pair<Citation, SourceBlock>?>(null) }
     var address by remember(explainer.defaultAddress) { mutableStateOf(explainer.defaultAddress) }
     var code by remember { mutableStateOf("") }
@@ -138,11 +270,24 @@ internal fun BookExplainPanel(
     val scroll = rememberScrollState()
     LaunchedEffect(explainer) { if (!explainer.loaded) explainer.load() }
 
+    fun sectionContext(): ExplainSectionContext? {
+        val sec = currentSection ?: return null
+        val prev = book.lessons.getOrNull(sectionIndex - 1)
+        val prevRecap = prev?.let { p ->
+            (sectionStates[p.id] as? SectionGuideState.Ready)?.guide?.recap
+                ?: library?.sectionGuide(book.id, p.id)?.recap
+        }
+        return ExplainSectionContext(
+            location = sec.breadcrumb,
+            previousRecap = prevRecap,
+            nextTitle = book.lessons.getOrNull(sectionIndex + 1)?.title,
+            sectionBlocks = sec.blocks,
+        )
+    }
+
     fun start(block: SourceBlock) {
         states[block.id] = BlockState.Waiting
         scope.launch {
-            // The selected words can also occur in a neighbouring block. Send the
-            // chosen range alone so the server cannot attach their reply to that neighbour.
             val candidates = if (selection == null) blocks else listOf(block)
             val result = explainer.explain(block, candidates)
             states[block.id] = when (result) {
@@ -150,6 +295,33 @@ internal fun BookExplainPanel(
                 is ExplainResult.Refused -> BlockState.Failed(result.message, result.trouble)
             }
         }
+    }
+
+    fun startSection(context: ExplainSectionContext, sectionId: String) {
+        sectionExpanded = true
+        sectionStates[sectionId] = SectionGuideState.Loading
+        scope.launch {
+            val cached = withContext(Dispatchers.IO) { library?.sectionGuide(book.id, sectionId) }
+            if (cached != null) {
+                sectionStates[sectionId] = SectionGuideState.Ready(SectionGuide.fromCached(cached), context.sectionBlocks)
+                return@launch
+            }
+            val bookPages = maxOf(book.pages.size, book.pages.maxOfOrNull { it.number } ?: 1)
+            when (val result = explainer.explainSectionGuide(context, bookPages)) {
+                is SectionGuideResult.Done -> {
+                    sectionStates[sectionId] = SectionGuideState.Ready(result.guide, context.sectionBlocks)
+                    withContext(Dispatchers.IO) { library?.saveSectionGuide(book.id, sectionId, result.guide.toCached()) }
+                }
+                is SectionGuideResult.Refused -> {
+                    sectionStates[sectionId] = SectionGuideState.Failed(result.message, result.trouble)
+                }
+            }
+        }
+    }
+
+    fun clearPairingFailures() {
+        states.filterValues { (it as? BlockState.Failed)?.trouble?.needsPairing == true }.keys.forEach(states::remove)
+        sectionStates.filterValues { (it as? SectionGuideState.Failed)?.trouble?.needsPairing == true }.keys.forEach(sectionStates::remove)
     }
 
     val colors = CoachTheme.colors
@@ -162,22 +334,22 @@ internal fun BookExplainPanel(
                 val sable = explainer.sableLogin
                 if (explainer.revoked) {
                     Text("这台电脑的连接已停用", style = MaterialTheme.typography.titleMedium)
-                    Text(if (sable) "授权已撤销，请重新登录。读书和做题照常。" else "请 Mac 那边生成新的配对码，填在下面重新配对。读书和做题照常。",
+                    Text(if (sable) "授权已撤销，请重新登录。读书和做题照常。" else "请找给你配对码的人生成新的配对码，填在下面重新配对。读书和做题照常。",
                         style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("explain-revoked"))
                 } else {
-                    Text("先连上 Mac", style = MaterialTheme.typography.titleMedium)
-                    Text(if (sable) "登录后可以提问，也可以让朋友服务讲解选中的原文。" else "填上 Mac 地址和配对码，连上后可以提问，也可以讲解选中的原文。",
+                    Text("先连上服务", style = MaterialTheme.typography.titleMedium)
+                    Text(if (sable) "登录后可以提问，也可以让朋友服务讲解选中的原文。" else "填上服务地址和配对码，连上后可以提问，也可以讲解选中的原文。",
                         style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("explain-connect-hint"))
                 }
                 if (sable) {
                     com.coach.ui.SableLoginButton(pairing, { pairing = it }) { open ->
                         explainer.sable(open)
-                        states.filterValues { (it as? BlockState.Failed)?.trouble?.needsPairing == true }.keys.forEach(states::remove)
+                        clearPairingFailures()
                     }
                     Text("没有 Sable 账号？用配对码", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                 }
                 V7Field(address, { address = it; pairError = null },
-                    if (explainer.hasBuiltInAddress) "Mac 地址（留空连默认服务）" else "Mac 地址",
+                    if (explainer.hasBuiltInAddress) "服务地址（留空连默认服务）" else "服务地址",
                     enabled = !pairing, paper = colors.surface2, modifier = Modifier.fillMaxWidth().testTag("explain-address"))
                 V7Field(code, { code = it.filter(Char::isDigit).take(6); pairError = null }, "配对码", enabled = !pairing, paper = colors.surface2,
                     visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
@@ -185,61 +357,107 @@ internal fun BookExplainPanel(
                 PrimaryButton(onClick = {
                     pairing = true
                     scope.launch {
-                        if (!explainer.pair(address, code)) pairError = "没配上。核对 Mac 地址，或请 Mac 那边生成新的配对码。"
-                        // 配好了：之前因未配对或停用而停下的段落回到「讲解这段」。
-                        else states.filterValues { (it as? BlockState.Failed)?.trouble?.needsPairing == true }.keys.forEach(states::remove)
+                        if (!explainer.pair(address, code)) pairError = "没配上。核对服务地址，或请找给你配对码的人生成新的配对码。"
+                        else clearPairingFailures()
                         code = ""; pairing = false
                     }
                 }, enabled = code.length == 6 && (address.isNotBlank() || explainer.hasBuiltInAddress) && !pairing, modifier = Modifier.testTag("explain-pair")) { Text(if (pairing) "正在配对…" else "配对") }
                 pairError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = v7Alert(), modifier = Modifier.testTag("explain-pair-error")) }
-            } else if (paired != null) Text("已连上 Mac。点一段原文旁的「讲解这段」。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
-            if (onPage.isEmpty()) Text("这一页没有可讲的正文。", style = MaterialTheme.typography.bodyMedium, color = colors.fgSecondary)
-            for (block in onPage) Column(Modifier.fillMaxWidth().testTag("explain-block-${block.id}"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                val state = states[block.id]
-                val failed = state as? BlockState.Failed
-                val selected = selection?.id == block.id
-                val interaction = remember(block.id) { MutableInteractionSource() }
-                val hovered by interaction.collectIsHoveredAsState()
-                val canExplain = paired != null && state != BlockState.Waiting
-                // 「讲解这段」平时只是段落首行右边一行 faint 小字：鼠标扫到这一段、或这一段就是从阅读器选进来的，
-                // 才浮成纸面按钮。它和正文第一行同一基线，段落多长都不会掉到段落下面（desktop-polish A10）。
-                Row(Modifier.fillMaxWidth().hoverable(interaction)) {
-                    Text(ReadableText.reflow(block.text), Modifier.weight(1f).alignByBaseline().testTag("explain-paragraph-${block.id}"),
-                        style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary)
-                    // 失败时这一行留一个看不见的同款盒子：正文的折行不能因为入口消失而变，
-                    // 否则段落会缩短一行，把下面的段落整体顶上去。
-                    FaintExplainButton(
-                        label = if (state == BlockState.Waiting) "讲解中…" else "讲解这段",
-                        enabled = canExplain, waiting = state == BlockState.Waiting,
-                        emphasised = failed == null && canExplain && (selected || hovered),
-                        placeholder = failed != null,
-                        modifier = Modifier.alignByBaseline().padding(start = 12.dp)
-                            .then(if (failed == null) Modifier.testTag("explain-button") else Modifier),
-                        onClick = { if (consented) start(block) else pending = block })
-                }
-                // 失败时按钮就地换成下一步（再试一次 / 重新配对），右边写那句话。这一行任何时候都占着位置：
-                // 平时是留白，失败时才填内容，所以点下去、等回复、失败回来这三种状态里，下面正在读的段落
-                // 一个像素都不动（desktop-polish A10、D3、E3）。块编号是内部的，不给读者看。
-                Row(Modifier.fillMaxWidth().heightIn(min = 40.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                    if (failed != null) {
-                        when (failed.trouble) {
-                            ExplainTrouble.Unpaired, ExplainTrouble.Revoked -> PaperButton(onClick = { scope.launch { scroll.animateScrollTo(0) } },
-                                modifier = Modifier.testTag("explain-repair")) {
-                                Text(if (failed.trouble == ExplainTrouble.Revoked) "重新配对" else "配对")
-                            }
-                            else -> QuietButton("再试一次", enabled = paired != null, modifier = Modifier.testTag("explain-retry")) { start(block) }
-                        }
-                        // 连不上、超时、暂时读不到都是会自己好的：中性灰字。只有要读者动手的（连接被停用、要重新配对）才用朱色。
-                        Text(failed.message, style = MaterialTheme.typography.bodySmall, maxLines = 2,
-                            color = if (failed.trouble.needsReader) v7Alert() else colors.fgSecondary,
-                            modifier = Modifier.weight(1f).testTag("explain-failed"))
+            }
+            if (selection == null) {
+                if (pageRole != BookPageRole.BODY || currentSection == null) {
+                    Text(pageRole.notice ?: "这一页没有可讲的正文。", style = MaterialTheme.typography.bodyMedium,
+                        color = colors.fgSecondary, modifier = Modifier.testTag("explain-page-notice"))
+                } else {
+                    val secState = sectionStates[currentSection.id] ?: SectionGuideState.Idle
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(currentSection.breadcrumb, style = MaterialTheme.typography.titleSmall, color = colors.fgPrimary, modifier = Modifier.weight(1f))
+                        FaintSectionExplainButton(
+                            expanded = sectionExpanded && secState is SectionGuideState.Ready,
+                            enabled = paired != null && secState != SectionGuideState.Loading,
+                            onClick = {
+                                if (secState is SectionGuideState.Ready) {
+                                    sectionExpanded = !sectionExpanded
+                                } else {
+                                    val ctx = sectionContext() ?: return@FaintSectionExplainButton
+                                    if (consented) startSection(ctx, currentSection.id)
+                                    else pending = PendingExplain.Section(ctx, currentSection.id)
+                                }
+                            },
+                        )
+                    }
+                    if (sectionExpanded || secState != SectionGuideState.Idle) {
+                        SectionGuideCard(
+                            book = book,
+                            blocks = blocks,
+                            section = currentSection,
+                            state = secState,
+                            paired = paired != null,
+                            consented = consented,
+                            expanded = sectionExpanded,
+                            onToggleExpand = { sectionExpanded = !sectionExpanded },
+                            onAllowConsent = {
+                                val ctx = sectionContext() ?: return@SectionGuideCard
+                                consent.allow(book.id); consented = true
+                                startSection(ctx, currentSection.id)
+                            },
+                            onRetry = {
+                                val ctx = sectionContext() ?: return@SectionGuideCard
+                                startSection(ctx, currentSection.id)
+                            },
+                            onOpenPair = { scope.launch { scroll.animateScrollTo(0) } },
+                            onOpenCitation = { citation, block ->
+                                if (onOpenOriginal != null) onOpenOriginal(BookPassage.from(book, block))
+                                else opened = citation to block
+                            },
+                        )
                     }
                 }
-                if (state is BlockState.Done) ExplanationView(book, blocks, state.explanation, state.context) { citation ->
-                    state.context.firstOrNull { it.id == citation.blockId }?.let {
-                        if (onOpenOriginal != null) onOpenOriginal(BookPassage.from(book, it))
-                        else opened = citation to it
+            }
+            for (block in onPage) {
+                if (selection == null) {
+                    Text(ReadableText.reflow(block.text), Modifier.fillMaxWidth().testTag("explain-paragraph-${block.id}"),
+                        style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary)
+                    continue
+                }
+                Column(Modifier.fillMaxWidth().testTag("explain-block-${block.id}"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val state = states[block.id]
+                    val failed = state as? BlockState.Failed
+                    val interaction = remember(block.id) { MutableInteractionSource() }
+                    val hovered by interaction.collectIsHoveredAsState()
+                    val canExplain = paired != null && state != BlockState.Waiting
+                    Row(Modifier.fillMaxWidth().hoverable(interaction)) {
+                        Text(ReadableText.reflow(block.text), Modifier.weight(1f).alignByBaseline().testTag("explain-paragraph-${block.id}"),
+                            style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary)
+                        FaintExplainButton(
+                            label = if (state == BlockState.Waiting) "讲解中…" else "讲讲",
+                            enabled = canExplain, waiting = state == BlockState.Waiting,
+                            emphasised = failed == null && canExplain && (true || hovered),
+                            placeholder = failed != null,
+                            modifier = Modifier.alignByBaseline().padding(start = 12.dp)
+                                .then(if (failed == null) Modifier.testTag("explain-button") else Modifier),
+                            onClick = { if (consented) start(block) else pending = PendingExplain.Block(block) })
+                    }
+                    Row(Modifier.fillMaxWidth().heightIn(min = 40.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                        if (failed != null) {
+                            when (failed.trouble) {
+                                ExplainTrouble.Unpaired, ExplainTrouble.Revoked -> PaperButton(onClick = { scope.launch { scroll.animateScrollTo(0) } },
+                                    modifier = Modifier.testTag("explain-repair")) {
+                                    Text(if (failed.trouble == ExplainTrouble.Revoked) "重新配对" else "配对")
+                                }
+                                else -> QuietButton("再试一次", enabled = paired != null, modifier = Modifier.testTag("explain-retry")) { start(block) }
+                            }
+                            Text(failed.message, style = MaterialTheme.typography.bodySmall, maxLines = 2,
+                                color = if (failed.trouble.needsReader) v7Alert() else colors.fgSecondary,
+                                modifier = Modifier.weight(1f).testTag("explain-failed"))
+                        }
+                    }
+                    if (state is BlockState.Done) ExplanationView(book, blocks, state.explanation, state.context) { citation ->
+                        state.context.firstOrNull { it.id == citation.blockId }?.let {
+                            if (onOpenOriginal != null) onOpenOriginal(BookPassage.from(book, it))
+                            else opened = citation to it
+                        }
                     }
                 }
             }
@@ -247,12 +465,21 @@ internal fun BookExplainPanel(
         if (scroll.maxValue > 0) BookScrollbar(scroll,
             Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 6.dp).testTag("explain-scrollbar"))
     }
-    pending?.let { block ->
+    pending?.let { request ->
         AlertDialog(onDismissRequest = { pending = null }, title = { Text(ExplainPrivacy.TITLE) },
-            text = { Text(ExplainPrivacy.explain(book.title),
+            text = { Text(when (request) {
+                is PendingExplain.Block -> ExplainPrivacy.explain(book.title)
+                is PendingExplain.Section -> ExplainPrivacy.page(book.title)
+            },
                 style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("explain-consent")) },
             confirmButton = {
-                PrimaryButton({ consent.allow(book.id); consented = true; pending = null; start(block) }, modifier = Modifier.testTag("explain-consent-allow")) { Text("允许并讲解") }
+                PrimaryButton({
+                    consent.allow(book.id); consented = true; pending = null
+                    when (request) {
+                        is PendingExplain.Block -> start(request.block)
+                        is PendingExplain.Section -> startSection(request.context, request.sectionId)
+                    }
+                }, modifier = Modifier.testTag("explain-consent-allow")) { Text("允许并讲解") }
             }, dismissButton = { V7TextButton({ pending = null }, modifier = Modifier.testTag("explain-consent-deny")) { Text("不允许") } })
     }
     opened?.let { (citation, block) ->
@@ -268,7 +495,7 @@ internal fun BookExplainPanel(
 }
 
 @Composable
-private fun ExplanationView(book: Textbook, blocks: List<SourceBlock>, explanation: Explanation, context: List<SourceBlock>,
+internal fun ExplanationView(book: Textbook, blocks: List<SourceBlock>, explanation: Explanation, context: List<SourceBlock>,
     onOpen: (Citation) -> Unit) {
     val citations = explanation.citations
     // 正文里的【S1】换成主色小号上标数字，点它和点下面「出处 1」一样打开原文；读者看不到任何块编号。

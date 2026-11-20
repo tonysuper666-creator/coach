@@ -204,7 +204,7 @@ internal fun NotesExportPanel(state: NotesExportState, onPickDirectory: () -> Un
                         .padding(horizontal = 12.dp, vertical = 10.dp).testTag("notes-directory"))
                 PaperButton(onPickDirectory, enabled = !busy, modifier = Modifier.testTag("notes-pick-directory")) { Text("选择本机文件夹…") }
             }
-            Text("文件只保存在所选目录的新文件夹内。PDF 里的公式由你的 Mac 画出；画不出来的会照原样写出来并标明。",
+            Text("文件只保存在所选目录的新文件夹内。PDF 里的公式由服务画出；画不出来的会照原样写出来并标明。",
                 style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
         }
         status?.let {

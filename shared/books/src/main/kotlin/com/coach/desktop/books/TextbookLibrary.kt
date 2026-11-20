@@ -68,6 +68,7 @@ internal class TextbookLibrary(
             reviewStore.migrate(db)
             BookPageModelStore.migrate(db)
             BookNativeSourceStore.migrate(db)
+            BookStructureStore.migrate(db)
             backfillReviews(db)
         }
     }
@@ -148,9 +149,10 @@ internal class TextbookLibrary(
                     } } }
                 }
                 val storedPage = row.getInt("reading_page")
+                val structure = BookStructureStore.loadStructure(db, id, pages)
                 Textbook(id, row.getString("title"), row.getString("format"), pages, if (pages.any { it.number == storedPage }) storedPage else pages.first().number,
                     row.getInt("lesson_index"), row.getInt("learning") == 1, row.getInt("prompt_seen") == 1,
-                    QuestionMode.valueOf(row.getString("mode")))
+                    QuestionMode.valueOf(row.getString("mode")), structure)
             }
         }
     }
@@ -497,6 +499,7 @@ internal class TextbookLibrary(
                     saveExtras(mapOf(page.number to page.text), images, listOfNotNull(page.textLayout))
                 }
                 require(extracted.pages.isNotEmpty()) { "教材中没有可打开的页面。" }
+                val structure = BookStructurePlanner.plan(id, extracted.title, "pdf", extracted.pages, extracted.outline)
                 control.check()
                 db.prepareStatement("INSERT INTO books(id,title,format,mode,touched,reading_page) VALUES(?,?,?,?,?,?)").use { sql ->
                     sql.setString(1, id); sql.setString(2, extracted.title); sql.setString(3, "pdf")
@@ -515,6 +518,7 @@ internal class TextbookLibrary(
                     extracted.pages.associate { it.number to it.text },
                     extracted.illustrations, extracted.pages.mapNotNull { it.textLayout },
                 )
+                BookStructureStore.saveStructure(db, id, structure)
                 control.check()
                 Files.move(stage, target, StandardCopyOption.REPLACE_EXISTING)
                 moved = true
@@ -536,6 +540,7 @@ internal class TextbookLibrary(
         nativeSources: ByteArray?, control: BookImportControl,
     ): StagedBookImport {
         if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
+        val structure = BookStructurePlanner.plan(id, extracted.title, format, extracted.pages, extracted.outline)
         val target = original(id, format)
         // The immutable source is in place before the single transaction makes it visible.
         Files.move(stage, target, StandardCopyOption.REPLACE_EXISTING)
@@ -563,6 +568,7 @@ internal class TextbookLibrary(
                     extracted.illustrations, extracted.pages.mapNotNull { it.textLayout },
                 )
                 nativeSources?.let { BookNativeSourceStore.saveInTransaction(db, id, it) }
+                BookStructureStore.saveStructure(db, id, structure)
                 control.check()
                 db.commit()
             } catch (error: Exception) {
@@ -702,7 +708,7 @@ internal class TextbookLibrary(
                 for (table in listOf(
                     "pages", "book_illustrations", "book_page_text_boxes", "book_native_sources",
                     "book_learning_paths", "book_ladders", "book_reader_views", "book_pdf_modes",
-                    "book_highlights", "answers", "book_reviews",
+                    "book_highlights", "answers", "book_reviews", "book_structures", "book_section_cache",
                 )) {
                     val exists = db.createStatement().use { s -> s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='$table'").use { it.next() } }
                     if (exists) db.prepareStatement("DELETE FROM $table WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }
@@ -719,6 +725,40 @@ internal class TextbookLibrary(
             runCatching { Files.deleteIfExists(original(bookId, format)) }
         }
         runCatching { directory.resolve(bookId).toFile().deleteRecursively() }
+    }
+
+    @Synchronized fun reorganizeSections(bookId: String): Textbook {
+        val current = book(bookId)
+        val file = runCatching { original(bookId, current.format) }.getOrNull()?.takeIf(Files::isRegularFile)
+        val outline = if (file == null) emptyList() else when (current.format) {
+            "pdf" -> runCatching { BookPdfLoader.read(file.toFile(), ::extractBookPdfOutline) }.getOrDefault(emptyList())
+            "epub" -> BookStructurePlanner.extractEpubOutline(file, current.pages)
+            "docx" -> BookStructurePlanner.extractWordOutline(file, current.pages)
+            else -> emptyList()
+        }
+        val structure = BookStructurePlanner.plan(current.id, current.title, current.format, current.pages, outline)
+        val clampedIndex = current.lessonIndex.coerceIn(0, structure.resolvedLessons.size)
+        database().use { db ->
+            db.autoCommit = false
+            try {
+                BookStructureStore.saveStructure(db, bookId, structure)
+                BookStructureStore.clearGuides(db, bookId)
+                db.prepareStatement("UPDATE books SET lesson_index=?, touched=? WHERE id=?").use { sql ->
+                    sql.setInt(1, clampedIndex); sql.setLong(2, System.currentTimeMillis()); sql.setString(3, bookId)
+                    sql.executeUpdate()
+                }
+                db.commit()
+            } catch (e: Exception) { db.rollback(); throw e }
+        }
+        return book(bookId)
+    }
+
+    @Synchronized fun sectionGuide(bookId: String, sectionId: String): CachedSectionGuide? = database().use { db ->
+        BookStructureStore.loadGuide(db, bookId, sectionId)
+    }
+
+    @Synchronized fun saveSectionGuide(bookId: String, sectionId: String, guide: CachedSectionGuide) = database().use { db ->
+        BookStructureStore.saveGuide(db, bookId, sectionId, guide)
     }
 
     private fun original(id: String, format: String): Path {
@@ -951,7 +991,10 @@ internal class TextbookLibrary(
 internal data class RenderTrace(val book: String, val page: Int, val outcome: String, val loadMs: Double, val pageBoxMs: Double, val renderMs: Double, val totalMs: Double, val thread: String)
 
 internal data class ExtractedBook(
-    val title: String, val pages: List<BookPage>, val illustrations: List<ExtractedIllustration> = emptyList(),
+    val title: String,
+    val pages: List<BookPage>,
+    val illustrations: List<ExtractedIllustration> = emptyList(),
+    val outline: List<BookOutlineItem> = emptyList(),
 )
 
 internal object TextbookExtraction {
@@ -1042,7 +1085,8 @@ internal object TextbookExtraction {
             }
             emptyList()
         }
-        ExtractedBook(pdf.documentInformation.title?.trim()?.takeIf(String::isNotEmpty) ?: title, recognized, visuals)
+        val outline = extractBookPdfOutline(pdf)
+        ExtractedBook(pdf.documentInformation.title?.trim()?.takeIf(String::isNotEmpty) ?: title, recognized, visuals, outline)
     }
 
     private fun extractContent(path: Path, format: String, title: String, ocr: BookOcr, control: BookImportControl, stageOcrOnly: Boolean): ExtractedBook = when (format) {
@@ -1058,12 +1102,17 @@ internal object TextbookExtraction {
                 finally { releaseBookBitmap(image) }
             }
         }
-        "epub" -> epub(path, title, control = control)
+        "epub" -> epub(path, title, control = control).let { extracted ->
+            extracted.copy(outline = BookStructurePlanner.extractEpubOutline(path, extracted.pages))
+        }
         "mobi", "azw3" -> com.coach.desktop.books.mobi.KindleText.read(Files.readAllBytes(path)).let { book ->
             val name = book.title().ifBlank { title }
             StructuredBookExtraction.kindle(book, name)
         }
-        "docx", "pptx", "html", "rtf", "odt" -> StructuredBookExtraction.extract(path, format, title, control)
+        "docx" -> StructuredBookExtraction.extract(path, format, title, control).let { extracted ->
+            extracted.copy(outline = BookStructurePlanner.extractWordOutline(path, extracted.pages))
+        }
+        "pptx", "html", "rtf", "odt" -> StructuredBookExtraction.extract(path, format, title, control)
         else -> {
             require(Files.size(path) <= 32L * 1024 * 1024) { "文本教材请控制在 32 MB 以内。" }
             val text = BookText.decode(Files.readAllBytes(path))

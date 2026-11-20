@@ -272,6 +272,9 @@ fun PageTurnView(
                         while (true) {
                             val ev = awaitPointerEvent()
                             val c = ev.changes.firstOrNull { it.id == down.id } ?: break
+                            if (touch && !dragging && !swiped && (c.uptimeMillis - down.uptimeMillis) >= viewConfiguration.longPressTimeoutMillis) {
+                                return@awaitEachGesture
+                            }
                             if (!c.pressed) {
                                 upConsumed = c.isConsumed
                                 if (!dragging && !swiped && inEdge && !upConsumed) {

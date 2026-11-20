@@ -1,5 +1,6 @@
-import java.util.zip.ZipFile
+import java.net.URI
 import java.util.Properties
+import java.util.zip.ZipFile
 
 plugins {
     alias(libs.plugins.android.application)
@@ -76,26 +77,47 @@ require(coachTailHost.isEmpty() || coachTailHost.matches(Regex("[0-9]+(\\.[0-9]+
     "coach.tailHost must be an IPv4 literal in ~/Coach/config/local.properties"
 }
 
+// The packager supplies the same private UTF-8 channel file the Windows MSI carries. Without it the
+// app never checks for updates; the URL never becomes a command-line argument or a repository file.
+val updateChannel = providers.environmentVariable("COACH_UPDATE_CHANNEL_FILE").orNull?.let { path ->
+    val file = File(path)
+    require(file.isFile) { "Missing update channel file" }
+    file.readText(Charsets.UTF_8).trim().also { value ->
+        val uri = runCatching { URI(value) }.getOrNull()
+        // Plain HTTP is an acceptance-only convenience for a local server; release builds refuse it at runtime.
+        val localTest = uri?.scheme == "http" && uri.host in setOf("10.0.2.2", "127.0.0.1", "localhost")
+        require(uri != null && (uri.scheme == "https" || localTest) && uri.host != null &&
+            uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null &&
+            uri.path.endsWith("/latest.json")) { "Invalid Android update channel" }
+    }
+}.orEmpty()
+
 abstract class GenerateNetworkSecurityConfig : DefaultTask() {
     @get:Input abstract val host: Property<String>
+    @get:Input abstract val extraHosts: ListProperty<String>
     @get:OutputDirectory abstract val outputDirectory: DirectoryProperty
     @TaskAction fun generate() {
         require(host.get().isNotEmpty()) { "Set coach.tailHost in ~/Coach/config/local.properties" }
         val output = outputDirectory.file("xml/network_security_config.xml").get().asFile
         output.parentFile.mkdirs()
-        output.writeText("""
-            <?xml version="1.0" encoding="utf-8"?>
-            <network-security-config>
-                <base-config cleartextTrafficPermitted="false" />
-                <domain-config cleartextTrafficPermitted="true">
-                    <domain includeSubdomains="false">${host.get()}</domain>
-                </domain-config>
-            </network-security-config>
-        """.trimIndent())
+        val domains = (listOf(host.get()) + extraHosts.get()).joinToString("\n") {
+            """        <domain includeSubdomains="false">$it</domain>"""
+        }
+        output.writeText(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
+                "<network-security-config>\n" +
+                "    <base-config cleartextTrafficPermitted=\"false\" />\n" +
+                "    <domain-config cleartextTrafficPermitted=\"true\">\n" +
+                domains + "\n" +
+                "    </domain-config>\n" +
+                "</network-security-config>\n",
+        )
     }
 }
 val generateNetworkSecurityConfig = tasks.register<GenerateNetworkSecurityConfig>("generateNetworkSecurityConfig") {
     host.set(coachTailHost)
+    // A local update-channel acceptance build serves latest.json over plain HTTP from the build host.
+    extraHosts.set(if (updateChannel.startsWith("http://")) listOf("10.0.2.2", "127.0.0.1") else emptyList())
     outputDirectory.set(layout.buildDirectory.dir("generated/coachNetworkRes"))
 }
 androidComponents.onVariants { variant ->
@@ -145,7 +167,11 @@ android {
     buildToolsVersion = "37.0.0"
     defaultConfig {
         // Separate package for concurrent, isolated acceptance on the shared OPPO.
-        applicationId = providers.gradleProperty("coachApplicationId").orElse("com.coach.android").get()
+        val appId = providers.gradleProperty("coachApplicationId").orElse("com.coach.android").get()
+        applicationId = appId
+        // FileProvider authority follows the package name so isolated acceptance builds never collide.
+        manifestPlaceholders["updateAuthority"] = "$appId.updates"
+        buildConfigField("String", "COACH_UPDATE_CHANNEL", "\"${updateChannel.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
         val friendUrl = localConfig.getProperty("coach.friendUrl", "")
         require(friendUrl.isEmpty() || friendUrl.matches(Regex("https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?"))) { "Invalid private friend service origin" }
         buildConfigField("String", "COACH_FRIEND_URL", "\"$friendUrl\"")

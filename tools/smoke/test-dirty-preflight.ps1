@@ -1,6 +1,8 @@
 ﻿# 离线验证桌面脏前景检查与 PID 清理核对（退出码：0 = 全部通过）。
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Win-Drive.ps1')
+# 测试专用前台锁：本文件里的前台重试、Click-At 和临时 worker 都不碰真实驱动的全局锁。
+$script:ForegroundMutexName = "Local\Coach.WinDrive.Foreground.test-$([guid]::NewGuid().ToString('N'))"
 
 $checks = New-Object System.Collections.ArrayList
 function Check([string]$name, [bool]$ok, [string]$detail = '') {
@@ -207,6 +209,58 @@ try {
     Check 'preflight-rejects-apollo-with-other-coach' (-not $pfCoachStream.Clean -and $pfCoachStream.Reason -like '*Apollo/Moonlight*' -and $pfCoachStream.DirtyWindows.Count -eq 0 -and @($pfCoachStream.OtherCoachWindows).Count -eq 1) $pfCoachStream.Reason
 
     $pfSame = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe { @([pscustomobject]@{ Kind = 'coach-window'; Pid = 21117; Process = 'java'; SameCheckout = $true; Summary = 'coach-window java pid=21117 same-checkout' }) } -ForegroundProbe $edgeFg
+    # 归属不靠直接传入 SameCheckout：只模拟系统观测（一个可见窗口 + 它的 java 命令行），
+    # 走真实的 Get-ClientPids -Mine / Find-DirtyDesktopWindow / Test-DesktopPreflight。
+    # Windows 路径不分大小写、\ 与 / 等价：同一检出换大小写或斜杠仍算本检出残留；相邻检出、嵌套子检出放行。
+    $caseRoot = Join-Path $regTmp 'case-root\coach'
+    $script:caseCmdRoot = $null
+    $savedMarker = $script:RepoMarker
+    try {
+        & {
+            if (-not ('TdpCaseWindow' -as [type])) {
+                Add-Type @'
+using System;
+public class TdpCaseWindow {
+    public delegate bool EnumCallback(IntPtr h, IntPtr l);
+    public static bool EnumWindows(EnumCallback cb, IntPtr l) { return cb((IntPtr)101, l); }
+    public static bool IsWindowVisible(IntPtr h) { return true; }
+    public static bool IsCloaked(IntPtr h) { return false; }
+    public static uint GetWindowThreadProcessId(IntPtr h, ref int p) { p = 71001; return 1; }
+}
+'@
+            }
+            $enumDef = (Get-Command Find-DirtyDesktopWindow).Definition
+            Check 'checkout-case-harness-uses-real-enum' ($enumDef.Contains('[WD]::EnumWindows') -and $enumDef.Contains('Get-ClientPids -Mine'))
+            Set-Item Function:Find-DirtyDesktopWindow ([scriptblock]::Create($enumDef.Replace('[WD]', '[TdpCaseWindow]')))
+            function Get-CimInstance { [pscustomobject]@{ ProcessId = 71001; CommandLine = "java.exe -cp `"$script:caseCmdRoot\desktopApp\build\classes\kotlin\main`" com.coach.desktop.MainKt" } }
+            function Get-Process { [pscustomobject]@{ ProcessName = 'java' } }
+            $caseSep = [string][char]92
+            $cases = @(
+                @{ Name = 'exact'; Marker = $caseRoot; Cmd = $caseRoot; Same = $true },
+                @{ Name = 'case-only'; Marker = $caseRoot; Cmd = $caseRoot.ToUpperInvariant(); Same = $true },
+                @{ Name = 'marker-case-only'; Marker = $caseRoot.ToLowerInvariant(); Cmd = $caseRoot; Same = $true },
+                @{ Name = 'forward-slashes'; Marker = $caseRoot + $caseSep; Cmd = $caseRoot.Replace($caseSep, '/').Replace(':/', '://'); Same = $true },
+                @{ Name = 'other'; Marker = $caseRoot; Cmd = $caseRoot + '-other'; Same = $false },
+                @{ Name = 'nested-child'; Marker = $caseRoot; Cmd = Join-Path $caseRoot 'child'; Same = $false },
+                @{ Name = 'prefix-sibling'; Marker = 'oach'; Cmd = $caseRoot; Same = $false }
+            )
+            foreach ($c in $cases) {
+                $script:RepoMarker = $c.Marker
+                $script:caseCmdRoot = $c.Cmd
+                $mine = @(Get-ClientPids -Mine)
+                $pf = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -ForegroundProbe $edgeFg
+                $ok = if ($c.Same) {
+                    $mine.Count -eq 1 -and -not $pf.Clean -and $pf.DirtyWindows.Count -eq 1 -and $pf.DirtyWindows[0].Pid -eq 71001 -and @($pf.OtherCoachWindows).Count -eq 0
+                } else {
+                    $mine.Count -eq 0 -and $pf.Clean -and $pf.DirtyWindows.Count -eq 0 -and @($pf.OtherCoachWindows).Count -eq 1 -and $pf.OtherCoachWindows[0].Pid -eq 71001
+                }
+                Check "checkout-case-$($c.Name)" ([bool]$ok) "mine=$($mine.Count) clean=$($pf.Clean) dirty=$($pf.DirtyWindows.Count) other=$(@($pf.OtherCoachWindows).Count)"
+            }
+        }
+    } finally {
+        $script:RepoMarker = $savedMarker
+    }
+
     Check 'preflight-rejects-same-checkout-leftover-coach' (-not $pfSame.Clean -and $pfSame.DirtyWindows.Count -eq 1 -and $pfSame.DirtyWindows[0].Pid -eq 21117 -and @($pfSame.OtherCoachWindows).Count -eq 0) $pfSame.Reason
 
     # 测试登记的遗留外窗（PID + StartTime 对得上）-> 算脏；死掉/复用后的过期登记自动清理并放行
@@ -832,6 +886,7 @@ powershell -NoProfile -Command "Start-Sleep -Seconds 30"
 exit /b 0
 "@ | Set-Content -Encoding ascii (Join-Path $fgRepo 'gradlew.bat')
     @'
+$script:ForegroundMutexName = "Local\Coach.WinDrive.Foreground.test-$([guid]::NewGuid().ToString('N'))"
 function Test-DesktopPreflight { [pscustomobject]@{ Clean = $true; Reason = ''; DirtyWindows = @(); OtherCoachWindows = @([pscustomobject]@{ Kind = 'coach-window'; Pid = 6832; Process = 'java'; SameCheckout = $false; Summary = 'coach-window java pid=6832' }); ActiveUser = $null; IdleSeconds = 900.0; Foreground = $null } }
 function Mark-ExistingClients { }
 function Stop-MyClient { $script:AppPid = 0; $script:AppStartTicks = 0L }
@@ -881,6 +936,7 @@ function Save-Shot([string]$path, [IntPtr]$Window = [IntPtr]::Zero) {
             }
             return $script:e2eSwap.stateB
         }
+        if ($script:ForegroundMutexName -notlike 'Local\Coach.WinDrive.Foreground.test-*') { throw "临时 worker 仍在用生产前台锁 $script:ForegroundMutexName" }
         Invoke-ForegroundStep -Window $mainWin -TargetOwnerProbe $targetProbe -ActivateProbe $actProbe -ForegroundProbe $fgProbe -Action {
             Assert-OurForeground -Expected $mainWin -ForegroundProbe $fgProbe
         }

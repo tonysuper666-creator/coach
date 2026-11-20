@@ -195,9 +195,26 @@ $script:ForegroundMutexName = 'Global\Coach.WinDrive.Foreground'
 # Other agents may run their own Coach windows on this desktop. Only the process this script started is ever touched.
 $script:Known = @()
 $script:RepoMarker = ''   # 本次检出的目录；设置后只认命令行里带这个目录的客户端进程（别人的 Coach 窗口永远不是我的）
+# 命令行里的构建输出是否落在这个检出目录下。Windows 路径不分大小写，\ 与 / 等价，
+# 重复分隔符视同一个。两端都守目录边界：前面不能紧接文件名字符（coach 不认 mycoach），
+# 后面必须正好是 /desktopApp/build/（不认相邻的 coach-other，也不认嵌套在子目录里的另一个检出）。
+function Test-CheckoutCommandLine([string]$CommandLine, [string]$Repo) {
+    if (-not $CommandLine -or -not $Repo) { return $false }
+    $norm = { param([string]$t) [regex]::Replace($t.Replace('\', '/'), '/{2,}', '/') }
+    $cmd = & $norm $CommandLine
+    $root = (& $norm $Repo).TrimEnd('/')
+    if (-not $root) { return $false }
+    $needle = $root + '/desktopApp/build/'
+    $at = 0
+    while (($i = $cmd.IndexOf($needle, $at, [StringComparison]::OrdinalIgnoreCase)) -ge 0) {
+        if ($i -eq 0 -or -not ([char]::IsLetterOrDigit($cmd[$i - 1]) -or '_-.$~'.IndexOf($cmd[$i - 1]) -ge 0)) { return $true }
+        $at = $i + 1
+    }
+    return $false
+}
 function Get-ClientPids([switch]$Mine) {
     @(Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" | Where-Object {
-        ($_.CommandLine -like '*com.coach.desktop.MainKt*' -or $_.CommandLine -like '*com.coach.desktop.smoke.SmokeMain*') -and (-not $Mine -or -not $script:RepoMarker -or $_.CommandLine.Replace('\','/').Contains($script:RepoMarker.TrimEnd([char[]]'\/').Replace('\','/') + '/desktopApp/build/')) } | ForEach-Object { [int]$_.ProcessId })
+        ($_.CommandLine -like '*com.coach.desktop.MainKt*' -or $_.CommandLine -like '*com.coach.desktop.smoke.SmokeMain*') -and (-not $Mine -or -not $script:RepoMarker -or (Test-CheckoutCommandLine $_.CommandLine $script:RepoMarker)) } | ForEach-Object { [int]$_.ProcessId })
 }
 function Mark-ExistingClients { $script:Known = Get-ClientPids }
 function Find-CoachWindow {
@@ -824,6 +841,15 @@ function Test-DesktopPreflight(
         Foreground = $fg
     }
 }
+# 前台短锁对本机所有已登录会话开放：SSH 起的驱动和桌面会话里的驱动属于不同登录会话，
+# 默认权限只给创建者那个登录会话，另一边打开同名锁会被 Windows 拒绝访问。锁已存在时沿用它原有的权限。
+function New-ForegroundMutex([string]$Name = $script:ForegroundMutexName) {
+    $sec = New-Object Security.AccessControl.MutexSecurity
+    $users = New-Object Security.Principal.SecurityIdentifier([Security.Principal.WellKnownSidType]::AuthenticatedUserSid, $null)
+    $sec.AddAccessRule((New-Object Security.AccessControl.MutexAccessRule($users, [Security.AccessControl.MutexRights]'Synchronize, Modify', 'Allow')))
+    $created = $false
+    [Threading.Mutex]::new($false, $Name, [ref]$created, $sec)
+}
 # All drivers share this mutex, but hold it for one input/capture only.
 # OCR, network waits, compilation and whole smoke runs stay outside.
 function Invoke-ForegroundStep(
@@ -835,7 +861,7 @@ function Invoke-ForegroundStep(
     [scriptblock]$ForegroundProbe = $null
 ) {
     if ($Window -eq [IntPtr]::Zero) { $Window = $script:Win }
-    $mutex = New-Object Threading.Mutex($false, $script:ForegroundMutexName)
+    $mutex = New-ForegroundMutex
     $lastFocusLoss = ''
     $lastForegroundOwner = $null
     try {

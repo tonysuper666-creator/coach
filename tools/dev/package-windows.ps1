@@ -40,8 +40,11 @@
 .PARAMETER ChannelFile
     Path to a private UTF-8 file holding the https URL of the published
     latest.json. Passed to Gradle as COACH_UPDATE_CHANNEL_FILE so the MSI carries
-    the update channel. The path and contents are never printed; the script only
-    reports channel=injected|absent.
+    the update channel. The path and contents are never printed; the script
+    reports channel=injected with the SHA-256 of that file, or channel=absent.
+    The variable is set only for the duration of the build and the caller's
+    previous value — including "unset" — is restored before the script exits,
+    whether the build succeeds or fails.
 
 .PARAMETER UserHome
     Read build-time configuration (`Coach/config/local.properties`) from this
@@ -86,45 +89,67 @@ if ($VersionCode -notmatch '^\d+$') { throw "Release versionCode must be an inte
 & git -C $root fetch --tags origin
 if ($LASTEXITCODE -ne 0) { throw 'Cannot sync published release tags; no package built.' }
 
+# COACH_UPDATE_CHANNEL_FILE is process state, not a parameter: it outlives the
+# Gradle call and every child this script starts. Save the caller's value before
+# touching it and put it back on the way out, including failures raised below
+# the assignment, so one build never changes what the next one packages.
 $channel = 'absent'
-if ($ChannelFile) {
-    if (-not (Test-Path -LiteralPath $ChannelFile)) { throw 'Missing Windows update channel file' }
-    $env:COACH_UPDATE_CHANNEL_FILE = (Resolve-Path -LiteralPath $ChannelFile).Path
-    $channel = 'injected'
-}
+$channelDigest = 'none'
+$channelBefore = [Environment]::GetEnvironmentVariable('COACH_UPDATE_CHANNEL_FILE', 'Process')
+$channelOverridden = $false
+try {
+    if ($ChannelFile) {
+        if (-not (Test-Path -LiteralPath $ChannelFile)) { throw 'Missing Windows update channel file' }
+        $resolvedChannel = (Resolve-Path -LiteralPath $ChannelFile).Path
+        $env:COACH_UPDATE_CHANNEL_FILE = $resolvedChannel
+        $channelOverridden = $true
+        $channel = 'injected'
+        # Digest of the file Gradle actually reads, so the evidence names the input
+        # that went into the MSI rather than the path that was asked for.
+        $channelDigest = (Get-FileHash -LiteralPath $resolvedChannel -Algorithm SHA256).Hash.ToLowerInvariant().Substring(0, 12)
+    }
 
-if ($WixZip) {
-    $cache = Join-Path $env:USERPROFILE '.gradle\compose-jb'
-    $target = Join-Path $cache 'wix311.zip'
-    if (-not (Test-Path $target)) {
-        New-Item -ItemType Directory -Force -Path $cache | Out-Null
-        Copy-Item -Path $WixZip -Destination $target
-        Write-Host "wix-cache=seeded from $WixZip"
+    if ($WixZip) {
+        $cache = Join-Path $env:USERPROFILE '.gradle\compose-jb'
+        $target = Join-Path $cache 'wix311.zip'
+        if (-not (Test-Path $target)) {
+            New-Item -ItemType Directory -Force -Path $cache | Out-Null
+            Copy-Item -Path $WixZip -Destination $target
+            Write-Host "wix-cache=seeded from $WixZip"
+        }
+    }
+
+    $homeArg = @()
+    if ($UserHome) {
+        if (-not (Test-Path -LiteralPath $UserHome)) { throw 'Missing private build config home' }
+        $homeArg = @("-Duser.home=$((Resolve-Path -LiteralPath $UserHome).Path)")
+    }
+
+    $previousPriority = (Get-Process -Id $PID).PriorityClass
+    Push-Location $root
+    try {
+        (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
+        # --no-daemon: the build JVM may be told to read another home, and a reused
+        # daemon would keep the previous one.
+        & (Join-Path $root 'gradlew.bat') --console=plain --no-daemon --priority=low --max-workers=2 @homeArg `
+            '-Pcoach.release=true' "-Pcoach.release.version=$Version" "-Pcoach.release.versionCode=$VersionCode" `
+            "-Pcoach.sableLogin=$(if ($SableLogin) { 'true' } else { 'false' })" `
+            :desktopApp:verifyReleaseVersion ":desktopApp:$Task"
+        $code = $LASTEXITCODE
+    } finally {
+        Pop-Location
+        (Get-Process -Id $PID).PriorityClass = $previousPriority
+    }
+    if ($code -ne 0) { throw "Gradle exited with code $code (task :desktopApp:$Task)" }
+} finally {
+    if ($channelOverridden) {
+        if ($null -eq $channelBefore) {
+            Remove-Item Env:\COACH_UPDATE_CHANNEL_FILE -ErrorAction SilentlyContinue
+        } else {
+            $env:COACH_UPDATE_CHANNEL_FILE = $channelBefore
+        }
     }
 }
-
-$homeArg = @()
-if ($UserHome) {
-    if (-not (Test-Path -LiteralPath $UserHome)) { throw 'Missing private build config home' }
-    $homeArg = @("-Duser.home=$((Resolve-Path -LiteralPath $UserHome).Path)")
-}
-
-$previousPriority = (Get-Process -Id $PID).PriorityClass
-Push-Location $root
-try {
-    (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
-    # --no-daemon: the build JVM may be told to read another home, and a reused
-    # daemon would keep the previous one.
-    & (Join-Path $root 'gradlew.bat') --console=plain --no-daemon --priority=low --max-workers=2 @homeArg `
-        '-Pcoach.release=true' "-Pcoach.release.version=$Version" "-Pcoach.release.versionCode=$VersionCode" `
-        "-Pcoach.sableLogin=$(if ($SableLogin) { 'true' } else { 'false' })" `
-        :desktopApp:verifyReleaseVersion ":desktopApp:$Task"
-    $code = $LASTEXITCODE
-} finally {
-    Pop-Location
-    (Get-Process -Id $PID).PriorityClass = $previousPriority
-}
-if ($code -ne 0) { throw "Gradle exited with code $code (task :desktopApp:$Task)" }
 
 $msiDir = Join-Path $root 'desktopApp\build\compose\binaries\main\msi'
 # desktopApp sets packageName = LearningCoach; the old Coach-*.msi lookup never matched.
@@ -141,6 +166,6 @@ foreach ($installer in $installers) {
     Write-Host ("sha256={0}" -f $hash)
     Write-Host ("signature={0} {1}" -f $sig.Status, $signer)
     Write-Host ("sable-login={0}" -f $(if ($SableLogin) { 'shown' } else { 'hidden' }))
-    Write-Host ("channel={0}" -f $channel)
+    Write-Host ("channel={0} sha256={1}" -f $channel, $channelDigest)
     Write-Host ("home={0}" -f $(if ($UserHome) { 'private' } else { 'profile' }))
 }

@@ -158,6 +158,18 @@ function Test-QuestionSettingsConfirmed($lines) {
     }
     return $false
 }
+# Windows OCR at 12-13px frequently misreads the leading 「问：」 as 「同：」/「间：」/「向：」.
+function Find-AskTurnLabel($lines, [string]$marker) {
+    foreach ($l in $lines) {
+        $compact = $l.Text -replace '\s', ''
+        if ($marker) {
+            if ($compact -match '^(?:问|同|间|向)[：:.．]?' -and $l.Text -like "*$marker*") { return $l }
+        } elseif ($compact -match '^(?:问|同|间|向)[：:.．].*(?:用大白话|专用人力资本)') {
+            return $l
+        }
+    }
+    return $null
+}
 # A whole OCR line's box: drag-selection needs both edges of the line, not just the first word.
 function Get-LineBox($line) {
     $x1 = 1e9; $y1 = 1e9; $x2 = -1; $y2 = -1
@@ -567,8 +579,7 @@ try {
             $bad = $lines | Where-Object { $_.Text -match '无法回答|不能回答|尚未接通|暂时读不到回答|选中追问格式不对|无法确认|无氵去确认' } | Select-Object -First 1
             if ($bad) { throw "提问被拒：$($bad.Text)" }
             if (Has $lines @('思考')) { $sawLoading = $true }
-            $label = if ($Marker) { $lines | Where-Object { ($_.Text -replace '\s', '') -match '^问' -and $_.Text -like "*$Marker*" } | Select-Object -First 1 }
-                     else { $lines | Where-Object { ($_.Text -replace '\s', '') -match '^问[：:]' } | Select-Object -First 1 }
+            $label = Find-AskTurnLabel $lines $Marker
             if ($label) { $turn = $label }
             if ($turn) {
                 # 自己这一问的「出处」在它的标题下面；标题滚出视野以后，视野里的出处也只会是它的。

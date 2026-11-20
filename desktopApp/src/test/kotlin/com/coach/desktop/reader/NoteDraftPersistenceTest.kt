@@ -2,6 +2,8 @@ package com.coach.desktop.reader
 
 import com.coach.client.CourseHttp
 import kotlinx.coroutines.runBlocking
+import java.nio.file.AccessDeniedException
+import java.nio.file.FileSystemException
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.*
@@ -55,6 +57,88 @@ class NoteDraftPersistenceTest {
         assertNull(s.get(id(start = 0, end = 16))); assertEquals("二", s.get(id(start = 17, end = 35))!!.note)
         s.remove(id(doc = "other")) // 没有的身份：什么都不删
         assertEquals(1, s.listFor("a", "va1", 1).size)
+    }
+
+    @Test fun transientAccessDeniedDuringReplaceRetriesSucceedsAndLeavesNoTmpFile() = withEnv { env ->
+        var attempts = 0
+        val delays = mutableListOf<Long>()
+        val flakyReplace = FileNoteDraftStore(
+            directory = env.dir,
+            scope = env.scope,
+            moveFile = { tmp, target ->
+                attempts++
+                if (attempts <= 2) throw AccessDeniedException(tmp.toString(), target.toString(), "simulated Windows lock")
+                FileNoteDraftStore.atomicReplace(tmp, target)
+            },
+            pause = { delays += it },
+            retryDelaysMs = longArrayOf(5L, 10L, 20L),
+        )
+        val (s, r) = env.session(flakyReplace)
+        openLine(s, 0)
+        s.editNote("第一次写")
+        assertTrue(s.draftsKept(), "短暂替换被锁经重试成功后，不应误报本机草稿没留住")
+        assertFalse(s.persistFailed)
+        assertEquals(3, attempts)
+        assertEquals(listOf(5L, 10L), delays)
+        assertEquals("第一次写", flakyReplace.listFor(r.current!!.id, r.current!!.version, 1).single().note)
+        val leftoverTmp = Files.list(env.dir).use { stream -> stream.filter { it.fileName.toString().endsWith(".tmp") }.toList() }
+        assertTrue(leftoverTmp.isEmpty(), "成功后不应残留 .tmp：$leftoverTmp")
+    }
+
+    @Test fun permanentAccessDeniedCleansUpTmpPreservesPreviousDraftAndFlagsPersistFailed() = withEnv { env ->
+        val dir = env.dir
+        val baseline = FileNoteDraftStore(dir, env.scope)
+        val (s0, r0) = env.session(baseline)
+        openLine(s0, 0)
+        s0.editNote("已有草稿")
+        assertTrue(s0.draftsKept())
+
+        var attempts = 0
+        val alwaysDenied = FileNoteDraftStore(
+            directory = dir,
+            scope = env.scope,
+            moveFile = { tmp, target ->
+                attempts++
+                throw AccessDeniedException(tmp.toString(), target.toString(), "persistent Windows lock")
+            },
+            pause = {},
+            retryDelaysMs = longArrayOf(1L, 2L),
+        )
+        val (s, _) = env.session(alwaysDenied)
+        openLine(s, 0)
+        s.editNote("新文字写不进去")
+        assertTrue(s.persistFailed, "重试耗尽后仍失败，必须诚实标 persistFailed")
+        assertFalse(s.draftsKept())
+        assertEquals(3, attempts, "1 次初试 + 2 次重试")
+        val leftoverTmp = Files.list(dir).use { stream -> stream.filter { it.fileName.toString().endsWith(".tmp") }.toList() }
+        assertTrue(leftoverTmp.isEmpty(), "失败时必须清理 .tmp，不能残留：$leftoverTmp")
+        assertEquals("已有草稿", baseline.listFor(r0.current!!.id, r0.current!!.version, 1).single().note, "旧草稿不应被破坏")
+    }
+
+    @Test fun transientSharingViolationFileSystemExceptionAlsoRetriesAndCleansUpOnFailure() {
+        val dir = Files.createTempDirectory("drafts-sharing-")
+        try {
+            var attempts = 0
+            val recovering = FileNoteDraftStore(
+                directory = dir,
+                scope = scope,
+                moveFile = { tmp, target ->
+                    attempts++
+                    if (attempts == 1) throw FileSystemException(tmp.toString(), target.toString(), "sharing violation")
+                    FileNoteDraftStore.atomicReplace(tmp, target)
+                },
+                pause = {},
+                retryDelaysMs = longArrayOf(1L, 2L),
+            )
+            val draft = StoredDraft(id(), "n1", "q", "共享锁恢复")
+            assertTrue(recovering.put(draft))
+            assertEquals(2, attempts)
+            assertEquals(draft, recovering.get(id()))
+            val leftoverTmp = Files.list(dir).use { stream -> stream.filter { it.fileName.toString().endsWith(".tmp") }.toList() }
+            assertTrue(leftoverTmp.isEmpty())
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
     }
 
     // ---------------- 生产会话路径 ----------------

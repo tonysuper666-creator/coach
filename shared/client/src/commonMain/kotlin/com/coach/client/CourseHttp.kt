@@ -1,7 +1,6 @@
 package com.coach.client
 
 import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.HttpClientEngineConfig
 import io.ktor.client.engine.HttpClientEngineFactory
@@ -60,7 +59,7 @@ data class EssayBankView(val prompts: List<EssayPrompt>, val weeks: List<Int>, v
  * 返回 null 的意思就是「这次拿不到」（离线、或 Mac 上的服务还没更新到有这个接口），界面照实说，不拿占位内容顶。
  */
 class CourseHttp internal constructor(baseUrl: String, private val deviceId: String, private val token: String, private val course: String, createEngine: () -> HttpClientEngine) {
-    constructor(baseUrl: String, deviceId: String, token: String, course: String) : this(baseUrl, deviceId, token, course, { CIO.create() })
+    constructor(baseUrl: String, deviceId: String, token: String, course: String) : this(baseUrl, deviceId, token, course, { createCoachHttpEngine() })
     private val base = baseUrl.trimEnd('/')
     // Only a digest of this paired account scope reaches SQLite; credentials never enter note data.
     fun readerState(sync: SyncEngine, week: Int): JsonObject = sync.readerState(course, week, "$base\u0000$deviceId\u0000$token")
@@ -123,7 +122,7 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     suspend fun explainSelection(week: Int, input: JsonObject): MockReply = try {
         val response = http.post("$base/v1/courses/${course.encodeURLPathPart()}/mainline/$week/explain") {
             // Includes server processing and its final JSON response; coordinate with COACH_READER_TOTAL_TIMEOUT_MS.
-            timeout { requestTimeoutMillis = ReaderTimeoutPolicy.CLIENT_REQUEST_MS }
+            timeout { requestTimeoutMillis = ReaderTimeoutPolicy.CLIENT_REQUEST_MS; socketTimeoutMillis = ReaderTimeoutPolicy.CLIENT_REQUEST_MS }
             setBody(TextContent(input.toString(), ContentType.Application.Json))
         }
         val parsed = Json.parseToJsonElement(response.bodyAsText()).jsonObject
@@ -135,7 +134,7 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     /** 本机书架里的书：选中段加相邻原文块（带块编号）发给已配对的 Mac，讲解只引用这些块编号。 */
     suspend fun explainLibrary(input: JsonObject): MockReply = try {
         val response = http.post("$base/v1/library/explain") {
-            timeout { requestTimeoutMillis = ReaderTimeoutPolicy.CLIENT_REQUEST_MS }
+            timeout { requestTimeoutMillis = ReaderTimeoutPolicy.CLIENT_REQUEST_MS; socketTimeoutMillis = ReaderTimeoutPolicy.CLIENT_REQUEST_MS }
             setBody(TextContent(input.toString(), ContentType.Application.Json))
         }
         if (response.status.value == 401) MockReply(null, "这台电脑的配对已失效，请在 Mac 上生成新配对码重新配对。", statusCode = 401)

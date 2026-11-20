@@ -1,56 +1,143 @@
 package com.coach.desktop.books
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.coach.android.BuildConfig
+import com.coach.android.CoachCredentialStore
 import com.coach.android.KeystoreCredentials
 import com.coach.client.CourseHttp
+import com.coach.client.DeviceAuthorizationException
+import com.coach.client.HttpLedgerTransport
 import com.coach.client.PairedCredentials
 import com.coach.client.PairingClient
+import com.coach.client.SABLE_ORIGIN
+import com.coach.client.SableLoginError
 import com.coach.client.validateCoachBaseUrl
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import java.net.URI
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.ContinuationInterceptor
 
-internal data class AndroidBookIdentity(val serverUrl: String, val credentials: PairedCredentials)
+/** Deliberately not a data class: never include serverUrl, deviceId, or token in toString(). */
+internal class AndroidBookIdentity(val serverUrl: String, val credentials: PairedCredentials) {
+    override fun equals(other: Any?): Boolean = other is AndroidBookIdentity &&
+        serverUrl == other.serverUrl &&
+        credentials.deviceId == other.credentials.deviceId &&
+        credentials.token == other.credentials.token &&
+        credentials.role == other.credentials.role
+
+    override fun hashCode(): Int {
+        var result = serverUrl.hashCode()
+        result = 31 * result + credentials.deviceId.hashCode()
+        result = 31 * result + credentials.token.hashCode()
+        result = 31 * result + credentials.role.hashCode()
+        return result
+    }
+
+    override fun toString(): String = "AndroidBookIdentity(role=${credentials.role})"
+}
 
 internal object AndroidBookConnection {
-    private data class Route(val context: Context, val url: String, val store: KeystoreCredentials)
+    private const val PREFS_NAME = "coach-book-connection"
+    private const val KEY_MODE = "mode"
+    private const val KEY_ADDRESS = "address"
+    private const val MODE_FRIEND = "friend"
+    private const val MODE_CUSTOM = "custom"
+
+    private data class Route(
+        val context: Context,
+        val url: String,
+        val store: CoachCredentialStore,
+        val friendUrl: String,
+        val sableIssuer: String,
+        val credentialFactory: (Context, String, String) -> CoachCredentialStore,
+    )
+
     @Volatile private var route: Route? = null
 
-    fun bind(context: Context, url: String, store: KeystoreCredentials) {
-        route = Route(context.applicationContext, url.trim().trimEnd('/'), store)
+    fun bind(
+        context: Context,
+        url: String,
+        store: CoachCredentialStore,
+        friendUrl: String = BuildConfig.COACH_FRIEND_URL,
+        sableIssuer: String = SABLE_ORIGIN,
+        credentialFactory: (Context, String, String) -> CoachCredentialStore = ::KeystoreCredentials,
+    ) {
+        route = Route(
+            context = context.applicationContext,
+            url = normalizeOptionalOrigin(url),
+            store = store,
+            friendUrl = normalizeOptionalOrigin(friendUrl),
+            sableIssuer = sableIssuer,
+            credentialFactory = credentialFactory,
+        )
+    }
+
+    internal fun resetForTest() {
+        BookExplainer.clearStoppedForTest()
+        route = null
+    }
+
+    internal fun normalizeOptionalOrigin(origin: String): String {
+        val trimmed = origin.trim().trimEnd('/')
+        if (trimmed.isEmpty()) return ""
+        return runCatching { normalizeUnchecked(trimmed) }.getOrDefault("")
+    }
+
+    fun configuredFriendUrl(): String =
+        route?.friendUrl ?: normalizeOptionalOrigin(BuildConfig.COACH_FRIEND_URL)
+
+    fun hasBuiltInAddress(): Boolean =
+        route?.let { it.friendUrl.isNotEmpty() || it.url.isNotEmpty() } == true
+
+    private fun fallbackPairAddress(): String =
+        route?.let { it.friendUrl.ifEmpty { it.url } }.orEmpty()
+
+    private fun normalizeUnchecked(address: String): String {
+        val trimmed = address.trim().trimEnd('/')
+        val hasScheme = trimmed.contains("://")
+        val uri = URI(if (hasScheme) trimmed else "http://$trimmed")
+        require(!uri.host.isNullOrBlank()) { "Invalid Coach server address" }
+        val selected = if (!hasScheme && uri.scheme == "http" && uri.port == -1 &&
+            uri.rawUserInfo == null && uri.rawPath.orEmpty().isBlank() && uri.rawQuery == null && uri.rawFragment == null) {
+            URI("http", null, uri.host.lowercase(), 18791, null, null, null).toString()
+        } else {
+            URI(uri.scheme?.lowercase(), uri.rawUserInfo, uri.host.lowercase(), uri.port, uri.rawPath, uri.rawQuery, uri.rawFragment).toString()
+        }
+        validateCoachBaseUrl(selected)
+        return selected
     }
 
     private fun normalize(address: String): String {
-        val trimmed = address.trim().trimEnd('/')
-        val uri = URI(if (trimmed.contains("://")) trimmed else "http://$trimmed")
-        val selected = if (uri.scheme == "http" && uri.port == -1 && uri.host != null &&
-            uri.rawUserInfo == null && uri.rawPath.orEmpty().isBlank() && uri.rawQuery == null && uri.rawFragment == null) {
-            URI("http", null, uri.host, 18791, null, null, null).toString()
-        } else uri.toString()
-        validateCoachBaseUrl(selected)
+        val selected = normalizeUnchecked(address)
         val active = requireNotNull(route)
         if (active.context.packageName != "com.coach.android") {
-            require(URI(selected) == URI(active.url)) { "Use this build's isolated Coach server" }
+            val allowed = listOf(active.url, active.friendUrl).filter(String::isNotEmpty).map(::URI)
+            require(URI(selected) in allowed) { "Use this build's isolated Coach server" }
         }
         return selected
     }
 
-    private fun store(address: String): KeystoreCredentials {
+    private fun store(address: String): CoachCredentialStore {
         val active = requireNotNull(route)
-        if (address.trim().trimEnd('/') == active.url) return active.store
+        val clean = address.trim().trimEnd('/')
+        if (active.friendUrl.isNotEmpty() && clean == active.friendUrl) {
+            return active.credentialFactory(active.context, active.friendUrl, "paired-friend")
+        }
+        if (active.url.isNotEmpty() && clean == active.url) return active.store
         val key = MessageDigest.getInstance("SHA-256").digest(address.toByteArray())
             .joinToString("") { "%02x".format(it) }.take(32)
-        return KeystoreCredentials(active.context, address, "paired-book-$key")
+        return active.credentialFactory(active.context, address, "paired-book-$key")
     }
 
     fun load(address: String): Pair<AndroidBookIdentity?, Boolean> = runCatching {
@@ -59,54 +146,132 @@ internal object AndroidBookConnection {
         credentials?.let { AndroidBookIdentity(normalized, it) } to revoked
     }.getOrDefault(null to false)
 
-    suspend fun pair(address: String, code: String): AndroidBookIdentity {
-        val normalized = normalize(address)
+    fun load(): Pair<AndroidBookIdentity?, Boolean> {
+        val active = route ?: return null to false
+        val prefs = active.context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val mode = prefs.getString(KEY_MODE, null)
+        val customAddress = prefs.getString(KEY_ADDRESS, null)
+        if (mode == MODE_CUSTOM && !customAddress.isNullOrBlank()) {
+            return load(customAddress)
+        }
+        if (active.friendUrl.isNotEmpty()) {
+            val friend = load(active.friendUrl)
+            if (friend.first != null || friend.second || mode == MODE_FRIEND) return friend
+        }
+        if (mode == null && !customAddress.isNullOrBlank()) {
+            return load(customAddress)
+        }
+        if (active.url.isNotEmpty()) {
+            return load(active.url)
+        }
+        return null to false
+    }
+
+    private fun saveFriend(url: String, credentials: PairedCredentials) {
+        val active = requireNotNull(route)
+        store(url).save(credentials)
+        syncFriendSaved(url, credentials, active.context)
+    }
+
+    internal fun syncFriendSaved(url: String, credentials: PairedCredentials, contextOverride: Context? = null) {
+        val ctx = contextOverride ?: route?.context ?: return
+        check(ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putString(KEY_MODE, MODE_FRIEND)
+            .remove(KEY_ADDRESS)
+            .commit())
+        BookExplainer.clearStopped(url, credentials)
+    }
+
+    private fun saveCustom(url: String, credentials: PairedCredentials) {
+        val active = requireNotNull(route)
+        store(url).save(credentials)
+        check(active.context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putString(KEY_MODE, MODE_CUSTOM)
+            .putString(KEY_ADDRESS, url)
+            .commit())
+        BookExplainer.clearStopped(url, credentials)
+    }
+
+    fun revoke(identity: AndroidBookIdentity) {
+        BookExplainer.markStopped(identity)
+        store(identity.serverUrl).revokeIfCurrent(identity.credentials)
+    }
+
+    internal fun markFriendRevoked(url: String, credentials: PairedCredentials) {
+        if (url.isBlank()) return
+        val normalized = normalizeOptionalOrigin(url).ifEmpty { url }
+        revoke(AndroidBookIdentity(normalized, credentials))
+    }
+
+    /** Offline is not revocation. Only an authenticated endpoint's explicit 401 retires a pairing. */
+    suspend fun stillAuthorized(identity: AndroidBookIdentity, startup: Boolean = false): Boolean = withContext(Dispatchers.IO) {
+        if (identity.credentials.role == "friend") {
+            val client = PairingClient(identity.serverUrl)
+            try {
+                client.friendAuthorized(identity.credentials, startup).also { authorized ->
+                    if (!authorized) runCatching { revoke(identity) }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                true
+            } finally {
+                client.close()
+            }
+        } else {
+            val transport = HttpLedgerTransport(identity.serverUrl, identity.credentials.deviceId, identity.credentials.token)
+            try {
+                transport.hello(null)
+                true
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: DeviceAuthorizationException) {
+                runCatching { revoke(identity) }
+                false
+            } catch (_: Exception) {
+                true
+            } finally {
+                transport.close()
+            }
+        }
+    }
+
+    suspend fun pair(address: String, code: String): AndroidBookIdentity = withContext(Dispatchers.IO) {
+        val active = requireNotNull(route)
+        val rawTarget = address.trim().ifBlank { fallbackPairAddress() }
+        val normalized = normalize(rawTarget)
+        val deviceName = Build.MODEL.orEmpty().trim().take(80).ifBlank { "安卓" }
         val client = PairingClient(normalized)
         try {
-            val credentials = client.pair(code, "安卓")
-            store(normalized).save(credentials)
-            val active = requireNotNull(route)
-            check(active.context.getSharedPreferences("coach-book-connection", Context.MODE_PRIVATE).edit()
-                .putString("address", normalized).commit())
-            return AndroidBookIdentity(normalized, credentials)
+            val credentials = client.pair(code, deviceName)
+            if (credentials.role == "friend") check(client.friendAuthorized(credentials))
+            else {
+                val transport = HttpLedgerTransport(normalized, credentials.deviceId, credentials.token)
+                try { transport.hello(null) } finally { transport.close() }
+            }
+            if (active.friendUrl.isNotEmpty() && normalized == active.friendUrl) {
+                saveFriend(normalized, credentials)
+            } else {
+                saveCustom(normalized, credentials)
+            }
+            AndroidBookIdentity(normalized, credentials)
         } finally { client.close() }
     }
 
     /** 与安卓登录门同一个朋友服务地址；没配地址的安装包照旧只能用配对码。 */
     suspend fun sable(open: suspend (String, String) -> Unit): AndroidBookIdentity {
-        val friendUrl = BuildConfig.COACH_FRIEND_URL
-        if (friendUrl.isBlank()) throw com.coach.client.SableLoginError("此安装包尚未配置朋友服务地址。")
-        val normalized = normalize(friendUrl)
-        val client = PairingClient(normalized)
-        try {
-            val credentials = client.sable(open)
-            withContext(Dispatchers.IO) {
-                store(normalized).save(credentials)
-                val active = requireNotNull(route)
-                check(active.context.getSharedPreferences("coach-book-connection", Context.MODE_PRIVATE).edit()
-                    .putString("address", normalized).commit())
-            }
-            return AndroidBookIdentity(normalized, credentials)
-        } finally { client.close() }
-    }
-
-    fun preferredAddress(): String = route?.let { active ->
-        active.context.getSharedPreferences("coach-book-connection", Context.MODE_PRIVATE)
-            .getString("address", active.url).orEmpty().trim().trimEnd('/').ifBlank { active.url }
-    }.orEmpty()
-
-    fun revoke(identity: AndroidBookIdentity) { store(identity.serverUrl).revokeIfCurrent(identity.credentials) }
-
-    suspend fun stillAuthorized(identity: AndroidBookIdentity): Boolean {
-        val client = PairingClient(identity.serverUrl)
-        return try {
-            client.friendAuthorized(identity.credentials)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            true
-        } finally {
-            client.close()
+        val active = requireNotNull(route) { "请先打开应用后再登录。" }
+        if (active.friendUrl.isEmpty()) throw SableLoginError("此安装包尚未配置朋友服务地址。")
+        val callbackDispatcher = currentCoroutineContext()[ContinuationInterceptor] ?: Dispatchers.Main.immediate
+        return withContext(Dispatchers.IO) {
+            val client = PairingClient(active.friendUrl)
+            try {
+                val credentials = client.sable({ uri, code ->
+                    withContext(callbackDispatcher) { open(uri, code) }
+                }, active.sableIssuer)
+                saveFriend(active.friendUrl, credentials)
+                AndroidBookIdentity(active.friendUrl, credentials)
+            } finally { client.close() }
         }
     }
 }
@@ -117,12 +282,14 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
         private set
     var loaded by mutableStateOf(false)
         private set
+    /** 安卓始终不在文本框预填朋友服务地址，避免私密地址出现在界面与截图中。 */
     var defaultAddress by mutableStateOf("")
         private set
     var revoked by mutableStateOf(false)
         private set
     /** 安卓的配对页一直放着「用 Sable 账号登录」，讲解面板跟它一致。 */
     val sableLogin: Boolean get() = true
+    val hasBuiltInAddress: Boolean get() = AndroidBookConnection.hasBuiltInAddress()
 
     fun markRevoked() {
         identity?.let { revokedIdentity ->
@@ -134,21 +301,16 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
     }
 
     suspend fun load() {
-        val (url, pairing) = withContext(Dispatchers.IO) {
-            val address = AndroidBookConnection.preferredAddress()
-            address to AndroidBookConnection.load(address)
-        }
-        defaultAddress = url
+        val pairing = withContext(Dispatchers.IO) { AndroidBookConnection.load() }
+        defaultAddress = ""
         val saved = pairing.first
         val stale = saved != null && saved.key() in stopped
         val authorized = saved == null || saved.credentials.role != "friend" || withContext(Dispatchers.IO) {
             AndroidBookConnection.stillAuthorized(saved)
         }
         if (!authorized) {
-            saved?.let {
-                stopped += it.key()
-                withContext(Dispatchers.IO) { runCatching { AndroidBookConnection.revoke(it) } }
-            }
+            stopped += saved.key()
+            withContext(Dispatchers.IO) { runCatching { AndroidBookConnection.revoke(saved) } }
             identity = null
             revoked = true
             loaded = true
@@ -160,8 +322,8 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
     }
 
     suspend fun pair(address: String, code: String): Boolean = try {
-        identity = withContext(Dispatchers.IO) { AndroidBookConnection.pair(address, code) }
-        defaultAddress = identity?.serverUrl.orEmpty()
+        identity = AndroidBookConnection.pair(address, code)
+        defaultAddress = ""
         revoked = false
         true
     } catch (c: CancellationException) { throw c }
@@ -171,9 +333,16 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
     }
 
     suspend fun sable(open: suspend (String, String) -> Unit) {
-        identity = AndroidBookConnection.sable(open)
-        defaultAddress = identity?.serverUrl.orEmpty()
-        revoked = false
+        try {
+            identity = AndroidBookConnection.sable(open)
+            defaultAddress = ""
+            revoked = false
+        } catch (c: CancellationException) { throw c }
+        catch (e: SableLoginError) { throw e }
+        catch (e: Exception) {
+            Log.w("CoachSable", "sable failed: ${e.javaClass.simpleName}")
+            throw e
+        }
     }
 
     suspend fun explain(chosen: SourceBlock, blocks: List<SourceBlock>, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult {
@@ -205,7 +374,7 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
                 try { BookLessonWire.withSource(input, snapshot) }
                 catch (_: IllegalArgumentException) { return ExplainResult.Refused(BookLessonWire.TOO_LONG) }
             } else if (snapshot == null) input else JsonObject(input + ("localSource" to snapshot))
-            val reply = http.explainLibrary(wire)
+            val reply = withContext(Dispatchers.IO) { http.explainLibrary(wire) }
             if (BuildConfig.DEBUG) {
                 Log.i("CoachBookHttp", "kind=$kind requestId=$requestId status=${reply.statusCode ?: "unreachable"}")
             }
@@ -215,7 +384,7 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
             // A 403 can mean either a revoked device or an unauthorized passage. Check only
             // the original server with the original identity; never resend the book text.
             val isRevoked = reply.statusCode == 401 ||
-                (reply.statusCode == 403 && http.libraryAuthStatus() == 401)
+                (reply.statusCode == 403 && withContext(Dispatchers.IO) { http.libraryAuthStatus() } == 401)
             // A late response must not invalidate a pairing made while the request was in flight.
             if (identity != paired) return ExplainResult.Refused("连接已更换，请重新选择这段后再试。")
             val trouble = if (isRevoked) ExplainTrouble.Revoked else ExplainTrouble.of(reply.statusCode, reply.code)
@@ -231,16 +400,28 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
                 else -> ExplainWire.parse(body, context)
             }
         } catch (cancelled: CancellationException) {
-            runCatching { http.cancelLibraryExplain(requestId) }
+            withContext(Dispatchers.IO) { runCatching { http.cancelLibraryExplain(requestId) } }
             throw cancelled
         } catch (_: Exception) {
             ExplainResult.Refused("保存的原文或发送许可无法核对，请重新打开这本书后重试。")
         } finally { http.close() }
     }
 
-    private companion object {
+    internal companion object {
         /** 原文页、答后讲解、选段提问各有一个 explainer；谁先碰到 401，其他的读到同一份凭据时也算停用。 */
-        val stopped: MutableSet<Triple<String, String, String>> = ConcurrentHashMap.newKeySet()
-        fun AndroidBookIdentity.key() = Triple(serverUrl, credentials.deviceId, credentials.token)
+        private val stopped: MutableSet<Triple<String, String, String>> = ConcurrentHashMap.newKeySet()
+        private fun AndroidBookIdentity.key() = Triple(serverUrl, credentials.deviceId, credentials.token)
+
+        fun markStopped(identity: AndroidBookIdentity) {
+            stopped += identity.key()
+        }
+
+        fun clearStopped(url: String, credentials: PairedCredentials) {
+            stopped.remove(Triple(url, credentials.deviceId, credentials.token))
+        }
+
+        fun clearStoppedForTest() {
+            stopped.clear()
+        }
     }
 }

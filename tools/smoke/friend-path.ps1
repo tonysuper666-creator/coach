@@ -2,7 +2,7 @@
 #   powershell -File tools\smoke\friend-path.ps1 [-Url http://<mac>:<隔离端口>] [-PairCode 123456]
 # 输出 N/7，每步一张截图在 D:\agent\evidence\friend-path\<时间>\（含教材原文，只留在 winbox，不上传）。
 param(
-    [string]$Url = '', [string]$PairCode = '', [string]$ClientSeed = '', [string]$Selection = '', [switch]$KeepGoing, [int]$LessonNumber = 181, [int]$LessonPage = 150, [int]$StopAfter = 7,
+    [string]$Url = '', [string]$PairCode = '', [string]$ClientSeed = '', [string]$Selection = '', [switch]$KeepGoing, [int]$LessonNumber = 113, [int]$LessonPage = 150, [int]$StopAfter = 7,
     [switch]$Background,
     [string]$Runtime = '',
     [ValidatePattern('^[\p{L}\p{N}_-]{1,32}$')][string]$Marker = '',

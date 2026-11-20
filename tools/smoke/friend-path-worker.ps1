@@ -468,9 +468,17 @@ try {
     }
     if (-not $o) { $cardOk = '选段卡里没有「出处」链接（见 4-result*.png）' }
     else {
-        Click-At $o.X $o.Y; Start-Sleep -Seconds 3
-        $lines = Shot 7 'card'
-        if (-not (Has $lines @('原文')) -or -not (Has $lines @("第$physPage页", "第 $physPage 页"))) { $cardOk = '点了出处但没有弹出标着页码的原文卡' }
+        # 1.1.1 的「出处」不弹原文卡：openPassage 把阅读器切回原页视图（按钮变回「看文字」）、
+        # 跳到被引句那一页并高亮。所以这里校验「回到原页 + 页码对上」，再切回文字视图接着问。
+        Click-At $o.X $o.Y
+        $back = Await-Text 7 'original' @('看文字') 15
+        if (-not $back) { $cardOk = '点了出处没有切回原页视图（见 7-card.png）' }
+        else {
+            $pg = Page-NearNav (Shot 7 'card')
+            if ($pg -ne "$physPage") { $cardOk = "点了出处切回原页但页码不是 $physPage（现在 $pg，见 7-card.png）" }
+            Click-At $back.X $back.Y; Start-Sleep -Milliseconds 600
+            if (-not (Await-Text 4 'text-mode-again' @('看原页') 15)) { $cardOk = '从出处回跳后切不回文字视图' }
+        }
         Send-Keys '{ESC}'; Start-Sleep -Seconds 1
     }
     # 收起选段卡再走「选段提问」：卡片留着会盖住提问对话框后面的阅读区
@@ -863,7 +871,7 @@ try {
     } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $six = 'failed' }
     if ($six -and -not $KeepGoing) { throw 'STEP_FAILED' }
 
-    if ($cardOk) { Fail 7 $cardOk } else { Pass 7 "点出处弹出第 $physPage 页原文卡" }
+    if ($cardOk) { Fail 7 $cardOk } else { Pass 7 "点出处切回第 $physPage 页原页" }
 } catch {
     if ("$_" -like 'WIN_DRIVE_FOREGROUND_CONTENTION*') {
         $stopStep = [Math]::Min($results.Count + 1, 7)

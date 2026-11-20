@@ -146,7 +146,8 @@ function Test-BlockAndCitation {
     Click-CapturedControl 'explain-consent.png' '04-consent.png'
     Click-CapturedControl 'block-reply-text.png' '04-block.png' -VerifyOnly -ScrollNotches -1
     Select-TutorLabel '07-citation' @('出处1', '出处') -2
-    $null = Find-TutorLabel '07-original' @('关闭')
+    # 1.1.1 的「出处」不弹原文卡：阅读器切回原页（按钮变回「看文字」）并高亮被引句。
+    $null = Find-TutorLabel '07-original' @('看文字')
     Send-Keys '{ESC}'
 }
 

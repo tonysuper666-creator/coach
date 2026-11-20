@@ -8,12 +8,6 @@ import com.coach.domain.reader.ReaderResource
 import com.coach.domain.reader.ReaderTextGeometry
 import com.coach.domain.reader.ReaderTextRange
 import com.coach.domain.reader.ReaderTextUnit
-import org.apache.pdfbox.pdmodel.PDDocument
-import org.apache.pdfbox.pdmodel.common.PDRectangle
-import org.apache.pdfbox.pdmodel.font.PDType1CFont
-import org.apache.pdfbox.pdmodel.graphics.state.RenderingMode
-import org.apache.pdfbox.text.PDFTextStripper
-import org.apache.pdfbox.text.TextPosition
 import java.io.StringWriter
 import java.text.Normalizer
 import java.util.IdentityHashMap
@@ -37,24 +31,24 @@ internal data class PdfPageText(
 
 /** One extraction pass, with exactly the text and cleaning used by TextbookExtraction. */
 internal object PdfPageTextExtraction {
-    fun extract(document: PDDocument, page: Int): PdfPageText = extract(document, page, null)
+    fun extract(document: BookPdfDocument, page: Int): PdfPageText = extract(document, page, null)
 
-    /** Review only: CFF math ink can extend below the baseline used by TextPosition.heightDir.
+    /** Review only: CFF math ink can extend below the baseline used by BookPdfTextPosition.heightDir.
      * Keep ordinary extraction/offsets unchanged. One raster pixel cushions outline bounds.
      * This is text geometry, not proof that a selected object or its labels are complete.
      */
-    fun extractForVisualReview(document: PDDocument, page: Int, rasterScale: Double): PdfPageText {
+    fun extractForVisualReview(document: BookPdfDocument, page: Int, rasterScale: Double): PdfPageText {
         require(rasterScale.isFinite() && rasterScale > 0 && rasterScale <= 2)
         return extract(document, page, 1 / rasterScale)
     }
 
-    private fun extract(document: PDDocument, page: Int, inkPadding: Double?): PdfPageText {
+    private fun extract(document: BookPdfDocument, page: Int, inkPadding: Double?): PdfPageText {
         require(page in 1..document.numberOfPages)
         require(document.currentAccessPermission.canExtractContent()) { "这本 PDF 限制了文字提取。" }
         return PositionStripper(page, frame(document, page), inkPadding).extract(document)
     }
 
-    fun restore(document: PDDocument, page: BookPage, layout: PageTextLayout): ReaderTextUnit? {
+    fun restore(document: BookPdfDocument, page: BookPage, layout: PageTextLayout): ReaderTextUnit? {
         val frame = frame(document, page.number)
         if (layout.page != page.number || layout.pageWidth != frame.cropBox.right - frame.cropBox.left ||
             layout.pageHeight != frame.cropBox.top - frame.cropBox.bottom) return null
@@ -65,50 +59,39 @@ internal object PdfPageTextExtraction {
         return ReaderTextUnit(ReaderResource(pdfPageIndex0 = page.number - 1), page.text, spans)
     }
 
-    private fun frame(document: PDDocument, page: Int): PdfPageFrame {
+    private fun frame(document: BookPdfDocument, page: Int): PdfPageFrame {
         val source = document.getPage(page - 1)
-        fun PDRectangle.points() = PdfPointRect(lowerLeftX.toDouble(), lowerLeftY.toDouble(),
+        fun BookPdfRectangle.points() = PdfPointRect(lowerLeftX.toDouble(), lowerLeftY.toDouble(),
             upperRightX.toDouble(), upperRightY.toDouble())
         return PdfPageFrame(source.mediaBox.points(), source.cropBox.points(), Math.floorMod(source.rotation, 360))
     }
 
     private class PositionStripper(private val page: Int, private val frame: PdfPageFrame,
-        private val inkPadding: Double?) : PDFTextStripper() {
+        private val inkPadding: Double?) : BookPdfStripper() {
         private val raw = StringWriter()
         private data class Span(val start: Int, val end: Int, val bounds: ReaderRect)
         private val spans = mutableListOf<Span>()
         private val unmapped = mutableListOf<IntRange>()
         private data class Ink(val unicode: String, val bounds: ReaderRect?)
-        private val cffInk = IdentityHashMap<TextPosition, Ink>()
+        private val cffInk = IdentityHashMap<BookPdfTextPosition, Ink>()
 
-        override fun processTextPosition(position: TextPosition) {
-            if (inkPadding != null && position.font is PDType1CFont) {
+        override fun processTextPosition(position: BookPdfTextPosition) {
+            if (inkPadding != null && position.font is BookPdfCffFont) {
                 cffInk[position] = Ink(position.unicode, cffBounds(position, inkPadding))
             }
             super.processTextPosition(position)
         }
 
-        private fun cffBounds(position: TextPosition, padding: Double): ReaderRect? {
-            val font = position.font as PDType1CFont
+        private fun cffBounds(position: BookPdfTextPosition, padding: Double): ReaderRect? {
+            val font = position.font as BookPdfCffFont
             if (cffInk.size >= 100_000 || !font.isEmbedded || font.isDamaged || font.isVertical ||
                 position.dir != 0f || position.characterCodes.size != 1 ||
-                graphicsState.textState.renderingMode != RenderingMode.FILL || graphicsState.softMask != null) return null
+                graphicsState.textState.renderingMode != BookPdfRenderingMode.FILL || graphicsState.softMask != null) return null
             return try {
                 val code = position.characterCodes.single()
-                if (!font.hasGlyph(code)) return null
-                val path = font.getPath(code)
-                // Empty whitespace has no ink; retain its existing advance geometry.
-                if (path.bounds2D.isEmpty) return if (position.unicode.all { it.isWhitespace() }) legacyBounds(position) else null
-                val iterator = path.getPathIterator(null)
-                var segments = 0
-                while (!iterator.isDone) {
-                    if (++segments > 10_000) return null
-                    iterator.next()
-                }
-                val transform = position.textMatrix.createAffineTransform()
-                transform.concatenate(font.fontMatrix.createAffineTransform())
-                // PDFBox already translates TextPosition's matrix by the CropBox origin.
-                val ink = transform.createTransformedShape(path).bounds2D
+                if (!bookCffHasGlyph(font, code)) return null
+                val ink = measureBookCffInk(font, code, position)
+                if (ink == null) return if (position.unicode.all { it.isWhitespace() }) legacyBounds(position) else null
                 val width = frame.cropBox.right - frame.cropBox.left
                 val height = frame.cropBox.top - frame.cropBox.bottom
                 val left = ink.minX - padding; val right = ink.maxX + padding
@@ -128,7 +111,7 @@ internal object PdfPageTextExtraction {
             paragraphEnd = "\n\n"
         }
 
-        fun extract(document: PDDocument): PdfPageText {
+        fun extract(document: BookPdfDocument): PdfPageText {
             writeText(document, raw)
             val text = raw.toString()
             // Boundary map includes generated spaces/newlines, CRLF folding and removed NULs.
@@ -153,7 +136,7 @@ internal object PdfPageTextExtraction {
                 })
         }
 
-        override fun writeString(text: String, textPositions: List<TextPosition>) {
+        override fun writeString(text: String, textPositions: List<BookPdfTextPosition>) {
             val start = raw.buffer.length
             super.writeString(text, textPositions)
             // PDFBox expands presentation ligatures but deliberately preserves full-width CJK,
@@ -174,8 +157,8 @@ internal object PdfPageTextExtraction {
             }
         }
 
-        private fun bounds(position: TextPosition): ReaderRect? {
-            if (inkPadding != null && position.font is PDType1CFont) {
+        private fun bounds(position: BookPdfTextPosition): ReaderRect? {
+            if (inkPadding != null && position.font is BookPdfCffFont) {
                 // PDFBox may merge a combining mark into a position after processTextPosition.
                 // Its original outline cannot certify the merged run.
                 val ink = cffInk[position] ?: return null
@@ -184,7 +167,7 @@ internal object PdfPageTextExtraction {
             return legacyBounds(position)
         }
 
-        private fun legacyBounds(position: TextPosition): ReaderRect? {
+        private fun legacyBounds(position: BookPdfTextPosition): ReaderRect? {
             val width = frame.cropBox.right - frame.cropBox.left
             val height = frame.cropBox.top - frame.cropBox.bottom
             val direction = position.dir.toInt()

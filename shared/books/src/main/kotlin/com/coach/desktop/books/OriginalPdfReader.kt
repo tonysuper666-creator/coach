@@ -21,7 +21,6 @@ import com.coach.domain.reader.ReaderTextUnit
 import com.coach.ui.pageturn.PageTurnState
 import com.coach.ui.pageturn.PageTurnStyle
 import com.coach.ui.pageturn.PageTurnView
-import com.coach.ui.pageturn.ReadScrollbarDesktop
 import com.coach.ui.pageturn.ScrollReadPosition
 import com.coach.ui.pageturn.ScrollReadState
 import com.coach.ui.pageturn.ScrollReadView
@@ -180,7 +179,7 @@ internal fun OriginalPdfReader(
         }
         ScrollReadView(scroll, desk = colors.bgCanvas, paper = Color.Transparent,
             modifier = Modifier.fillMaxSize().testTag("original-pdf-scroll"), gap = 24.dp, handleKeys = false,
-            scrollbar = { ReadScrollbarDesktop(it) }) { index ->
+            scrollbar = { BookReadScrollbar(it) }) { index ->
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
                 Column(Modifier.widthIn(max = 1198.dp).fillMaxWidth()
                     .paperShadow("sheet", colors.dark).clip(RoundedCornerShape(CoachV7.Radius.sheet)).background(paper)) {

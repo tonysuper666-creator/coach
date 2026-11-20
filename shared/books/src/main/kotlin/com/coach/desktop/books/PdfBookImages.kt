@@ -1,18 +1,7 @@
 package com.coach.desktop.books
 
 import com.coach.domain.reader.ReaderRect
-import org.apache.pdfbox.contentstream.PDFGraphicsStreamEngine
-import org.apache.pdfbox.cos.COSName
-import org.apache.pdfbox.pdmodel.PDDocument
-import org.apache.pdfbox.pdmodel.PDPage
-import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject
-import org.apache.pdfbox.pdmodel.graphics.image.PDImage
-import org.apache.pdfbox.rendering.PDFRenderer
-import java.awt.geom.Point2D
-import java.awt.geom.Rectangle2D
-import java.io.ByteArrayOutputStream
 import java.util.concurrent.CancellationException
-import javax.imageio.ImageIO
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.sqrt
@@ -24,7 +13,7 @@ internal object PdfBookImages {
     private data class Caption(val text: String, val offset: Int, val box: ReaderRect)
     private data class Candidate(val box: ReaderRect, val caption: Caption?, val bitmap: Boolean)
 
-    fun extract(document: PDDocument, page: BookPage, enclosed: List<ExtractedIllustration>,
+    fun extract(document: BookPdfDocument, page: BookPage, enclosed: List<ExtractedIllustration>,
         control: BookImportControl): List<ExtractedIllustration> {
         control.check()
         if (page.ocr || page.text.isBlank()) return enclosed
@@ -33,7 +22,7 @@ internal object PdfBookImages {
         catch (_: Exception) { enclosed } // Unsupported supplements cannot break readable books.
     }
 
-    private fun supported(document: PDDocument, page: BookPage, enclosed: List<ExtractedIllustration>,
+    private fun supported(document: BookPdfDocument, page: BookPage, enclosed: List<ExtractedIllustration>,
         control: BookImportControl): List<ExtractedIllustration> {
         val physical = document.getPage(page.number - 1)
         val crop = physical.cropBox
@@ -44,7 +33,7 @@ internal object PdfBookImages {
         if (graphics.unsupported || graphics.images.isEmpty() && graphics.paths.isEmpty()) return enclosed
         val source = PdfPageTextExtraction.extract(document, page.number)
         if (source.unit.text != page.text || source.unmappedRanges.isNotEmpty()) return enclosed
-        fun normalize(r: Rectangle2D): ReaderRect? {
+        fun normalize(r: BookPdfBounds): ReaderRect? {
             if (r.width <= 0 || r.height <= 0 || r.minX <= crop.lowerLeftX || r.maxX >= crop.upperRightX ||
                 r.minY <= crop.lowerLeftY || r.maxY >= crop.upperRightY) return null
             return ReaderRect((r.minX - crop.lowerLeftX) / crop.width,
@@ -89,7 +78,7 @@ internal object PdfBookImages {
         }.sortedBy { it.box.y }
         if (unique.isEmpty()) return result
         val scale = minOf(2f, 4096f / maxOf(crop.width, crop.height))
-        val image = PDFRenderer(document).renderImage(page.number - 1, scale)
+        val image = BookPdfRenderer(document).renderImage(page.number - 1, scale)
         try {
             var bytesUsed = result.sumOf { it.bytes.size.toLong() }
             for (candidate in unique) {
@@ -102,7 +91,7 @@ internal object PdfBookImages {
                 val y1 = ceil(((box.y + box.height) * crop.height + 2) * scale).toInt()
                 if (x0 < 0 || y0 < 0 || x1 > image.width || y1 > image.height || x1 - x0 < 5 || y1 - y0 < 5) continue
                 fun white(x: Int, y: Int): Boolean {
-                    val rgb = image.getRGB(x, y)
+                    val rgb = bookBitmapPixel(image, x, y)
                     return (rgb shr 16 and 255) >= 250 && (rgb shr 8 and 255) >= 250 && (rgb and 255) >= 250
                 }
                 // Reject crops that cut adjacent labels, captions or unrelated ink.
@@ -117,14 +106,14 @@ internal object PdfBookImages {
                 }.minByOrNull { it.range.startUtf16 }?.range?.startUtf16 ?: page.text.length
                 val anchor = candidate.caption?.offset ?: if (following < page.text.length)
                     page.text.lastIndexOf('\n', following - 1) + 1 else page.text.length
-                val bytes = ByteArrayOutputStream().also { ImageIO.write(image.getSubimage(x0, y0, x1 - x0, y1 - y0), "png", it) }.toByteArray()
+                val bytes = bookBitmapCropPng(image, x0, y0, x1 - x0, y1 - y0)
                 if (bytes.size > FormatBookImages.MAX_BYTES || bytesUsed + bytes.size > 16 * 1024 * 1024) continue
                 bytesUsed += bytes.size
                 result += ExtractedIllustration(page.number,
                     BookIllustrationAnchors.snapToValidUtf16Boundary(page.text, anchor), bytes, "png", x1 - x0, y1 - y0,
                     candidate.caption?.text, sourceRegion = region)
             }
-        } finally { image.flush() }
+        } finally { releaseBookBitmap(image) }
         return result
     }
 
@@ -155,16 +144,16 @@ internal object PdfBookImages {
         return ReaderRect(x, y, maxOf(a.x + a.width, b.x + b.width) - x, maxOf(a.y + a.height, b.y + b.height) - y)
     }
 
-    private fun connected(paths: List<Rectangle2D.Double>): List<Rectangle2D.Double> {
-        val result = mutableListOf<Rectangle2D.Double>()
+    private fun connected(paths: List<BookPdfBounds>): List<BookPdfBounds> {
+        val result = mutableListOf<BookPdfBounds>()
         for (path in paths) {
-            var merged = path.clone() as Rectangle2D.Double
+            var merged = path.copy()
             var index = 0
             while (index < result.size) {
                 val old = result[index]
                 if (old.minX <= merged.maxX + 4 && merged.minX <= old.maxX + 4 &&
                     old.minY <= merged.maxY + 4 && merged.minY <= old.maxY + 4) {
-                    merged = merged.createUnion(old) as Rectangle2D.Double
+                    merged = merged.createUnion(old)
                     result.removeAt(index); index = 0
                 } else index++
             }
@@ -173,26 +162,26 @@ internal object PdfBookImages {
         return result
     }
 
-    private class Graphics(page: PDPage, private val control: BookImportControl) : PDFGraphicsStreamEngine(page) {
-        val images = mutableListOf<Rectangle2D.Double>()
-        val paths = mutableListOf<Rectangle2D.Double>()
+    private class Graphics(page: BookPdfPage, private val control: BookImportControl) : BookPdfGraphicsEngine(page) {
+        val images = mutableListOf<BookPdfBounds>()
+        val paths = mutableListOf<BookPdfBounds>()
         var unsupported = false
-        private var path: Rectangle2D.Double? = null
-        private var current = Point2D.Float()
-        private var subpath = Point2D.Float()
+        private var path: BookPdfBounds? = null
+        private var current = newBookPdfPoint()
+        private var subpath = newBookPdfPoint()
         private var operations = 0
         private fun tick() { control.check(); require(++operations <= 100_000 && images.size + paths.size < 2048) }
         private fun point(x: Double, y: Double) {
             tick(); require(x.isFinite() && y.isFinite())
-            path?.add(x, y) ?: run { path = Rectangle2D.Double(x, y, 0.0, 0.0) }
+            path?.add(x, y) ?: run { path = BookPdfBounds(x, y, 0.0, 0.0) }
         }
-        override fun moveTo(x: Float, y: Float) { point(x.toDouble(), y.toDouble()); current = Point2D.Float(x, y); subpath = current }
-        override fun lineTo(x: Float, y: Float) { point(x.toDouble(), y.toDouble()); current = Point2D.Float(x, y) }
+        override fun moveTo(x: Float, y: Float) { point(x.toDouble(), y.toDouble()); current = newBookPdfPoint(x, y); subpath = current }
+        override fun lineTo(x: Float, y: Float) { point(x.toDouble(), y.toDouble()); current = newBookPdfPoint(x, y) }
         override fun curveTo(x1: Float, y1: Float, x2: Float, y2: Float, x3: Float, y3: Float) {
             point(x1.toDouble(), y1.toDouble()); point(x2.toDouble(), y2.toDouble()); lineTo(x3, y3)
         }
-        override fun appendRectangle(a: Point2D, b: Point2D, c: Point2D, d: Point2D) {
-            listOf(a, b, c, d).forEach { point(it.x, it.y) }; current = Point2D.Float(a.x.toFloat(), a.y.toFloat()); subpath = current
+        override fun appendRectangle(a: BookPdfPoint, b: BookPdfPoint, c: BookPdfPoint, d: BookPdfPoint) {
+            listOf(a, b, c, d).forEach { point(it.x.toDouble(), it.y.toDouble()) }; current = newBookPdfPoint(a.x.toFloat(), a.y.toFloat()); subpath = current
         }
         private fun paint(stroke: Boolean) {
             tick()
@@ -200,25 +189,25 @@ internal object PdfBookImages {
             val norm = sqrt((matrix.scaleX * matrix.scaleX + matrix.scaleY * matrix.scaleY + matrix.shearX * matrix.shearX + matrix.shearY * matrix.shearY).toDouble())
             val pad = if (stroke) graphicsState.lineWidth * norm / 2 else 0.0
             if (!pad.isFinite() || pad > 12 || graphicsState.softMask != null) unsupported = true
-            else path?.let { paths += Rectangle2D.Double(it.x - pad, it.y - pad, it.width + pad * 2, it.height + pad * 2) }
+            else path?.let { paths += BookPdfBounds(it.x - pad, it.y - pad, it.width + pad * 2, it.height + pad * 2) }
             path = null
         }
         override fun strokePath() = paint(true)
-        override fun fillPath(windingRule: Int) = paint(false)
-        override fun fillAndStrokePath(windingRule: Int) = paint(true)
+        override fun fillPath(windingRule: BookPdfFillRule) = paint(false)
+        override fun fillAndStrokePath(windingRule: BookPdfFillRule) = paint(true)
         override fun endPath() { path = null }
         override fun closePath() { current = subpath }
-        override fun getCurrentPoint(): Point2D = current
-        override fun clip(windingRule: Int) { unsupported = true }
-        override fun shadingFill(shadingName: COSName) { unsupported = true }
-        override fun showForm(form: PDFormXObject) { unsupported = true }
-        override fun drawImage(image: PDImage) {
+        override fun getCurrentPoint(): BookPdfPoint = current
+        override fun clip(windingRule: BookPdfFillRule) { unsupported = true }
+        override fun shadingFill(shadingName: BookPdfName) { unsupported = true }
+        override fun showForm(form: BookPdfForm) { unsupported = true }
+        override fun drawImage(image: BookPdfImage) {
             tick()
             val matrix = graphicsState.currentTransformationMatrix
             val points = listOf(matrix.transformPoint(0f, 0f), matrix.transformPoint(1f, 0f), matrix.transformPoint(1f, 1f), matrix.transformPoint(0f, 1f))
             val x = points.minOf { it.x }.toDouble(); val y = points.minOf { it.y }.toDouble()
             val w = points.maxOf { it.x } - x; val h = points.maxOf { it.y } - y
-            if (listOf(x, y, w, h).all { it.isFinite() }) images += Rectangle2D.Double(x, y, w, h)
+            if (listOf(x, y, w, h).all { it.isFinite() }) images += BookPdfBounds(x, y, w, h)
         }
     }
 }

@@ -10,7 +10,6 @@ import androidx.compose.foundation.text.appendInlineContent
 import androidx.compose.ui.platform.Clipboard
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
-import androidx.compose.ui.platform.asAwtTransferable
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.ParagraphStyle
 import androidx.compose.ui.text.TextStyle
@@ -24,8 +23,6 @@ import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
-import java.awt.datatransfer.DataFlavor
-import java.awt.datatransfer.StringSelection
 
 private const val ORIGINAL_CHARACTER = "coach.book.original-character"
 
@@ -118,12 +115,9 @@ internal fun originalBookSelection(selected: AnnotatedString): String {
 
 internal class BookClipboard(private val delegate: Clipboard) : Clipboard by delegate {
     override suspend fun setClipEntry(clipEntry: ClipEntry?) {
-        val transferable = clipEntry?.asAwtTransferable
-        val flavor = DataFlavor(AnnotatedString::class.java, "AnnotatedString")
-        val selected = if (transferable?.isDataFlavorSupported(flavor) == true)
-            transferable.getTransferData(flavor) as? AnnotatedString else null
+        val selected = bookClipboardSelection(clipEntry)
         if (selected != null && selected.getStringAnnotations(ORIGINAL_CHARACTER, 0, selected.length).isNotEmpty())
-            delegate.setClipEntry(ClipEntry(StringSelection(originalBookSelection(selected))))
+            delegate.setClipEntry(bookClipboardText(originalBookSelection(selected)))
         else delegate.setClipEntry(clipEntry)
     }
 }

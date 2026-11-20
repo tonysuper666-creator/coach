@@ -19,7 +19,6 @@ import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import com.coach.ui.pageturn.PageTurnState
-import com.coach.ui.pageturn.ReadScrollbarDesktop
 import com.coach.ui.pageturn.ScrollReadPosition
 import com.coach.ui.pageturn.ScrollReadState
 import com.coach.ui.pageturn.ScrollReadView
@@ -42,14 +41,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFontFamilyResolver
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.Clipboard
 import androidx.compose.ui.platform.ClipEntry
-import androidx.compose.ui.platform.asAwtTransferable
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
@@ -62,18 +59,14 @@ import com.coach.ui.LocalV7TextScale
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.LocalV7Fonts
 import com.coach.ui.v7.LocalV7ReducedMotion
-import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import java.nio.file.Path
-import javax.imageio.ImageIO
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import java.awt.datatransfer.DataFlavor
-import java.awt.datatransfer.StringSelection
 
 private const val CROP_GAP = "coach.book.crop-gap"
 private const val PAGE_BODY = "coach.book.page-body"
@@ -96,10 +89,8 @@ internal fun originalPagedBookSelection(selected: AnnotatedString): String {
 
 private class PageClipboard(private val delegate: Clipboard) : Clipboard by delegate {
     override suspend fun setClipEntry(clipEntry: ClipEntry?) {
-        val data = clipEntry?.asAwtTransferable
-        val flavor = DataFlavor(AnnotatedString::class.java, "AnnotatedString")
-        val selected = if (data?.isDataFlavorSupported(flavor) == true) data.getTransferData(flavor) as? AnnotatedString else null
-        if (selected != null) delegate.setClipEntry(ClipEntry(StringSelection(originalPagedBookSelection(selected))))
+        val selected = bookClipboardSelection(clipEntry)
+        if (selected != null) delegate.setClipEntry(bookClipboardText(originalPagedBookSelection(selected)))
         else delegate.setClipEntry(clipEntry)
     }
 }
@@ -338,7 +329,7 @@ internal fun BookPageView(
                 SelectionContainer {
                     ScrollReadView(scrollState, desk = desk, paper = Color.Transparent, gap = 24.dp, handleKeys = false,
                         modifier = Modifier.fillMaxSize().testTag("book-scroll-read"),
-                        scrollbar = { ReadScrollbarDesktop(it) }) { index ->
+                        scrollbar = { BookReadScrollbar(it) }) { index ->
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
                             Box(Modifier.width(sheetWidth).height(viewHeight).background(paper).clipToBounds().testTag("book-sheet-0")) {
                                 val page = pages[index]
@@ -355,13 +346,21 @@ internal fun BookPageView(
         val fade = remember { Animatable(1f) }
         LaunchedEffect(first, pages) { fade.snapTo(if (reduced) 1f else 0f); fade.animateTo(1f, tween(if (reduced) 0 else 150)) }
         var wheelAt by remember { mutableLongStateOf(0L) }
-        Box(Modifier.fillMaxSize().onPointerEvent(PointerEventType.Scroll) { event ->
-            val delta = event.changes.sumOf { it.scrollDelta.y.toDouble() }
-            val now = System.nanoTime()
-            if (delta != 0.0 && now - wheelAt > 220_000_000L) {
-                wheelAt = now; onTurn(if (delta > 0) ReaderTurn.Next else ReaderTurn.Previous)
+        val turn by rememberUpdatedState(onTurn)
+        // 滚轮翻页：和桌面 onPointerEvent(Scroll) 同一个事件阶段，安卓也能编译。
+        Box(Modifier.fillMaxSize().pointerInput(Unit) {
+            awaitPointerEventScope {
+                while (true) {
+                    val event = awaitPointerEvent()
+                    if (event.type != PointerEventType.Scroll) continue
+                    val delta = event.changes.sumOf { it.scrollDelta.y.toDouble() }
+                    val now = System.nanoTime()
+                    if (delta != 0.0 && now - wheelAt > 220_000_000L) {
+                        wheelAt = now; turn(if (delta > 0) ReaderTurn.Next else ReaderTurn.Previous)
+                    }
+                    event.changes.forEach { it.consume() }
+                }
             }
-            event.changes.forEach { it.consume() }
         }, contentAlignment = Alignment.Center) {
             CompositionLocalProvider(LocalClipboard provides pageClipboard) {
                 SelectionContainer {
@@ -527,8 +526,8 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
             if (libraryDirectory != null) {
                 bitmap = withContext(Dispatchers.IO) {
                     try {
-                        ImageIO.read(BookIllustrationAssets.imageFile(libraryDirectory, book.id, item).toFile())
-                            ?.takeIf { block.band == null || (it.width == item.width && it.height == item.height) }?.toComposeImageBitmap()
+                        decodeBookBitmap(BookIllustrationAssets.imageFile(libraryDirectory, book.id, item).toFile())
+                            ?.takeIf { block.band == null || (it.width == item.width && it.height == item.height) }?.asBookImageBitmap()
                     } catch (_: java.io.IOException) { null }
                 }
                 if (bitmap == null) onMissing(item)

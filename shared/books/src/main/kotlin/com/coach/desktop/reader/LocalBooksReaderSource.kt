@@ -1,6 +1,9 @@
 package com.coach.desktop.reader
 
 import com.coach.client.ReaderReply
+import com.coach.desktop.books.BookPdfLoader
+import com.coach.desktop.books.BookPdfStripper
+import com.coach.desktop.books.BookPdfTextPosition
 import com.coach.desktop.books.Textbook
 import com.coach.desktop.books.StudyCoachCourse
 import com.coach.desktop.books.TextbookLibrary
@@ -14,10 +17,6 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import org.apache.pdfbox.Loader
-import org.apache.pdfbox.text.PDFTextStripper
-import org.apache.pdfbox.text.TextPosition
-import java.awt.image.BufferedImage
 import java.security.MessageDigest
 
 /**
@@ -31,7 +30,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary, private val 
     // 书库（SQLite）、PDFBox、PNG 编码都是阻塞工作。调用方在 EDT 上时挪到 IO 线程执行，EDT 只挂起等待、结果由调用方的调度器接回，
     // 状态提交仍在调用方；调用方本来就不在 EDT（后台线程、离屏测试）时原地执行，行为与以前完全一致。
     private suspend inline fun <T> offEdt(crossinline block: () -> T): T =
-        if (java.awt.EventQueue.isDispatchThread()) withContext(Dispatchers.IO) { block() } else block()
+        if (isBookUiThread()) withContext(Dispatchers.IO) { block() } else block()
 
     private val localId = Regex("[0-9a-f]{64}")
 
@@ -119,26 +118,6 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary, private val 
         return encodeReaderPng(bufferedImage)
     }
 
-    private fun renderFallbackImage(book: Textbook, pdfPage: Int): BufferedImage {
-        val img = BufferedImage(1200, 1600, BufferedImage.TYPE_INT_RGB)
-        val g = img.createGraphics()
-        try {
-            g.color = java.awt.Color(0xFA, 0xF8, 0xF3)
-            g.fillRect(0, 0, 1200, 1600)
-            g.color = java.awt.Color(0x22, 0x22, 0x22)
-            g.drawString("${book.title} · 第 $pdfPage 页", 50, 80)
-            val p = book.page(pdfPage)
-            var y = 140
-            for (line in p?.text?.lines().orEmpty().take(40)) {
-                g.drawString(line, 50, y)
-                y += 30
-            }
-        } finally {
-            g.dispose()
-        }
-        return img
-    }
-
     override suspend fun study(document: String, pdfPage: Int): ReaderReply = offEdt { studyBlocking(document, pdfPage) }
 
     private fun studyBlocking(document: String, pdfPage: Int): ReaderReply {
@@ -184,7 +163,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary, private val 
         val pdfFile = library.directory.resolve("${book.id}.pdf").toFile()
         if (!pdfFile.isFile) return ReaderReply(404, null)
 
-        val (w, h, words) = Loader.loadPDF(pdfFile).use { pdf ->
+        val (w, h, words) = BookPdfLoader.load(pdfFile).use { pdf ->
             val page = pdf.getPage(pdfPage - 1)
             val bounds = page.cropBox ?: page.mediaBox
             val pw = bounds.width.toDouble().coerceAtLeast(1.0)
@@ -234,7 +213,7 @@ internal class PdfBoxWordStripper(
     targetPage: Int,
     private val pageWidth: Double,
     private val pageHeight: Double,
-) : PDFTextStripper() {
+) : BookPdfStripper() {
     init {
         startPage = targetPage
         endPage = targetPage
@@ -243,7 +222,7 @@ internal class PdfBoxWordStripper(
 
     val words = mutableListOf<WordBox>()
 
-    override fun writeString(text: String, textPositions: List<TextPosition>) {
+    override fun writeString(text: String, textPositions: List<BookPdfTextPosition>) {
         var currentToken = StringBuilder()
         var minX = Double.MAX_VALUE
         var minY = Double.MAX_VALUE

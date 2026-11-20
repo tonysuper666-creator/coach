@@ -12,11 +12,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
-import org.apache.pdfbox.Loader
-import org.apache.pdfbox.rendering.PDFRenderer
 import org.w3c.dom.Element
 import org.w3c.dom.Node
-import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -154,7 +151,7 @@ internal class TextbookLibrary(
 
     fun pdfTextLayer(book: Textbook, page: BookPage): ReaderTextUnit? {
         if (book.format != "pdf" || page.ocr || page.text.isBlank()) return null
-        return Loader.loadPDF(original(book.id, book.format).toFile()).use { pdf ->
+        return BookPdfLoader.load(original(book.id, book.format).toFile()).use { pdf ->
             if (!pdf.currentAccessPermission.canExtractContent()) return@use null
             val saved = page.textLayout ?: pageTextLayout(book.id, page.number)
             if (saved != null) {
@@ -227,7 +224,7 @@ internal class TextbookLibrary(
         }
     }
 
-    fun pdfPageAspects(book: Textbook): Map<Int, Float> = Loader.loadPDF(original(book.id, book.format).toFile()).use { pdf ->
+    fun pdfPageAspects(book: Textbook): Map<Int, Float> = BookPdfLoader.load(original(book.id, book.format).toFile()).use { pdf ->
         pdf.pages.withIndex().mapNotNull { (index, page) ->
             val crop = page.cropBox
             val aspect = if (page.rotation == 90 || page.rotation == 270) crop.height / crop.width else crop.width / crop.height
@@ -576,10 +573,10 @@ internal class TextbookLibrary(
     // ---- 同一页、同一显示宽度合并并发调用并缓存，每次调用留下分段计时 ----
     private data class RenderKey(val id: String, val page: Int, val stamp: Long, val pixelWidth: Int?)
     private val renderLock = Any()
-    private val renderCache = object : LinkedHashMap<RenderKey, BufferedImage>(16, .75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<RenderKey, BufferedImage>) = size > 6
+    private val renderCache = object : LinkedHashMap<RenderKey, BookBitmap>(16, .75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<RenderKey, BookBitmap>) = size > 6
     }
-    private val renderInflight = HashMap<RenderKey, java.util.concurrent.CompletableFuture<BufferedImage>>()
+    private val renderInflight = HashMap<RenderKey, java.util.concurrent.CompletableFuture<BookBitmap>>()
     private val traces = java.util.concurrent.ConcurrentLinkedQueue<RenderTrace>()
 
     /** 最近的渲染记录（最多 64 条）：outcome = render（真正渲染）/ joined（并发时等同一次渲染）/ hit（缓存命中）。 */
@@ -594,7 +591,7 @@ internal class TextbookLibrary(
      * 返回的图片是只读共享的（调用方只转换/编码，不修改）。渲染分三段计时：loadPDF / 取页框 / renderImage，另记总耗时。
      * 同一本书同一页（文件大小+修改时间一致）并发调用只会真正渲染一次，其余等同一结果；失败不缓存。
      */
-    fun renderOriginal(book: Textbook, page: Int, pixelWidth: Int? = null): BufferedImage {
+    fun renderOriginal(book: Textbook, page: Int, pixelWidth: Int? = null): BookBitmap {
         require(book.page(page) != null)
         return if (book.format == "pdf") renderPdf(book, page, pixelWidth)
         else {
@@ -603,14 +600,14 @@ internal class TextbookLibrary(
         }
     }
 
-    fun renderPdf(book: Textbook, page: Int, pixelWidth: Int? = null): BufferedImage {
+    fun renderPdf(book: Textbook, page: Int, pixelWidth: Int? = null): BookBitmap {
         require(book.format == "pdf" && page in 1..book.pages.size)
         require(pixelWidth == null || pixelWidth > 0)
         val file = original(book.id, book.format).toFile()
         val key = RenderKey(book.id, page, file.length() xor file.lastModified(), pixelWidth)
         val started = System.nanoTime()
         var owner = false
-        val future: java.util.concurrent.CompletableFuture<BufferedImage>
+        val future: java.util.concurrent.CompletableFuture<BookBitmap>
         synchronized(renderLock) {
             renderCache[key]?.let { record(RenderTrace(book.id, page, "hit", 0.0, 0.0, 0.0, (System.nanoTime() - started) / 1_000_000.0, Thread.currentThread().name)); return it }
             val running = renderInflight[key]
@@ -623,7 +620,7 @@ internal class TextbookLibrary(
         }
         try {
             val t0 = System.nanoTime()
-            val image = Loader.loadPDF(file).use { pdf ->
+            val image = BookPdfLoader.load(file).use { pdf ->
                 val t1 = System.nanoTime()
                 val sheet = pdf.getPage(page - 1)
                 val bounds = sheet.cropBox
@@ -635,7 +632,7 @@ internal class TextbookLibrary(
                     minOf(Math.nextUp(pixelWidth / displayedWidth), 4096f / longEdge)
                 }
                 val t2 = System.nanoTime()
-                val img = PDFRenderer(pdf).renderImage(page - 1, scale)
+                val img = BookPdfRenderer(pdf).renderImage(page - 1, scale)
                 val t3 = System.nanoTime()
                 record(RenderTrace(book.id, page, "render", (t1 - t0) / 1_000_000.0, (t2 - t1) / 1_000_000.0, (t3 - t2) / 1_000_000.0, (t3 - started) / 1_000_000.0, Thread.currentThread().name))
                 img
@@ -651,39 +648,6 @@ internal class TextbookLibrary(
     }
 }
 
-/**
- * 进程内只做一次的 PDF 渲染预热：用内存里生成的一页带字 PDF 走一遍 loadPDF → renderImage，
- * 把 PDFBox 类加载、字体缓存和 JIT 的冷启动代价挪到后台（打开书本/阅读器时就开始），不占目标页的首次绘制。
- * 只在内存里造 PDF，不读用户文件；失败静默（预热不是功能）。[done] 返回预热耗时毫秒，失败为 -1。
- */
-internal object PdfWarmup {
-    val done = java.util.concurrent.CompletableFuture<Long>()
-    private val started = java.util.concurrent.atomic.AtomicBoolean(false)
-
-    fun start() {
-        if (!started.compareAndSet(false, true)) return
-        Thread({
-            val t0 = System.nanoTime()
-            val ms = try {
-                val out = java.io.ByteArrayOutputStream()
-                org.apache.pdfbox.pdmodel.PDDocument().use { doc ->
-                    val page = org.apache.pdfbox.pdmodel.PDPage(); doc.addPage(page)
-                    org.apache.pdfbox.pdmodel.PDPageContentStream(doc, page).use { cs ->
-                        cs.beginText()
-                        cs.setFont(org.apache.pdfbox.pdmodel.font.PDType1Font(org.apache.pdfbox.pdmodel.font.Standard14Fonts.FontName.HELVETICA), 14f)
-                        cs.newLineAtOffset(72f, 700f); cs.showText("Warm up 0123456789"); cs.endText()
-                    }
-                    doc.save(out)
-                }
-                Loader.loadPDF(out.toByteArray()).use { pdf -> PDFRenderer(pdf).renderImage(0, 1.5f) }
-                (System.nanoTime() - t0) / 1_000_000
-            } catch (_: Throwable) { -1L }
-            if (java.lang.Boolean.getBoolean("coach.render.trace")) println("COACH_RENDER_WARMUP ms=$ms")
-            done.complete(ms)
-        }, "pdf-warmup").apply { isDaemon = true; priority = Thread.NORM_PRIORITY - 1 }.start()
-    }
-}
-
 /** 一次页图渲染的分段计时（毫秒）。 */
 internal data class RenderTrace(val book: String, val page: Int, val outcome: String, val loadMs: Double, val pageBoxMs: Double, val renderMs: Double, val totalMs: Double, val thread: String)
 
@@ -694,7 +658,7 @@ internal data class ExtractedBook(
 internal object TextbookExtraction {
     fun extract(path: Path, format: String, title: String, ocr: BookOcr = BundledBookOcr, control: BookImportControl = BookImportControl()): ExtractedBook = try {
         extractContent(path, format, title, ocr, control)
-    } catch (e: org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException) {
+    } catch (e: BookPdfPasswordException) {
         throw IllegalArgumentException("这本 PDF 有密码保护，请取消密码后再导入。", e)
     } catch (e: java.util.concurrent.CancellationException) {
         throw e
@@ -705,7 +669,7 @@ internal object TextbookExtraction {
     }
 
     private fun extractContent(path: Path, format: String, title: String, ocr: BookOcr, control: BookImportControl): ExtractedBook = when (format) {
-        "pdf" -> Loader.loadPDF(path.toFile()).use { pdf ->
+        "pdf" -> BookPdfLoader.load(path.toFile()).use { pdf ->
             require(pdf.numberOfPages in 1..5000) { "这本 PDF 的页数暂不支持。" }
             require(pdf.currentAccessPermission.canExtractContent()) { "这本 PDF 限制了文字提取，请使用有阅读和提取权限的教材。" }
             val pages = (1..pdf.numberOfPages).map { n ->
@@ -717,7 +681,7 @@ internal object TextbookExtraction {
             require(pages.count { it.text.isBlank() } <= BookScanImages.MAX_OCR_PAGES) {
                 "扫描页超过 200 页，请把 PDF 拆分后再导入。"
             }
-            val renderer by lazy { PDFRenderer(pdf) }
+            val renderer by lazy { BookPdfRenderer(pdf) }
             val recognized = pages.map { page ->
                 if (page.text.isNotBlank()) page else {
                     control.report(page.number, pdf.numberOfPages, recognizing = true)
@@ -728,31 +692,17 @@ internal object TextbookExtraction {
                     BookScanImages.checkSize(kotlin.math.ceil(bounds.width * scale).toInt(), kotlin.math.ceil(bounds.height * scale).toInt())
                     val image = renderer.renderImage(page.number - 1, scale)
                     try { BookPage(page.number, ocr.recognize(image, control), ocr = true) }
-                    finally { image.flush() }
+                    finally { releaseBookBitmap(image) }
                 }
             }
-            // Preserve canonical text and store supplemental enclosed regions through the
-            // same content-addressed transaction as other page visuals. Display is separate.
-            val visuals = mutableListOf<ExtractedIllustration>()
-            var visualBytes = 0L
-            for (page in recognized) {
-                control.report(page.number, pdf.numberOfPages)
-                if (visuals.size >= FormatBookImages.MAX_IMAGES || visualBytes >= FormatBookImages.MAX_TOTAL) break
-                val enclosed = PdfBoxedVisuals.extract(pdf, page, control)
-                val tables = PdfPrintedTables.extract(pdf, page, control, enclosed)
-                for (crop in PdfBookImages.extract(pdf, page, enclosed + tables, control)) {
-                    if (visuals.size >= FormatBookImages.MAX_IMAGES || visualBytes + crop.bytes.size > FormatBookImages.MAX_TOTAL) break
-                    visuals += crop
-                    visualBytes += crop.bytes.size
-                }
-            }
+            val visuals = importedPdfVisuals(pdf, recognized, control)
             ExtractedBook(pdf.documentInformation.title?.trim()?.takeIf(String::isNotEmpty) ?: title, recognized, visuals)
         }
         "png", "jpg" -> {
             control.report(1, 1, recognizing = true)
             val image = BookScanImages.read(path)
             try { ExtractedBook(title, listOf(BookPage(1, ocr.recognize(image, control), ocr = true))) }
-            finally { image.flush() }
+            finally { releaseBookBitmap(image) }
         }
         "epub" -> epub(path, title, control = control)
         "mobi", "azw3" -> com.coach.desktop.books.mobi.KindleText.read(Files.readAllBytes(path)).let { book ->

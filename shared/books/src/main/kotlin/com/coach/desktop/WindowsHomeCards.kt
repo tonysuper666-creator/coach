@@ -99,7 +99,7 @@ internal fun HostEmptyState(tag: String, title: String, text: String) {
  * 路径用数字字体、可以整段换行；说明是 fgSecondary 小字，「知道了」走纸面按钮。
  */
 @Composable
-internal fun HostSettings(directory: Path, onClose: () -> Unit) {
+internal fun HostSettings(directory: Path, onPersonalCourse: (() -> Unit)? = null, onClose: () -> Unit) {
     val colors = CoachTheme.colors
     val paper = RoundedCornerShape(CoachV7.Radius.btn)
     AlertDialog(onDismissRequest = onClose, title = { Text("设置") }, text = {
@@ -112,6 +112,7 @@ internal fun HostSettings(directory: Path, onClose: () -> Unit) {
                     modifier = Modifier.fillMaxWidth().clip(paper).background(colors.surface1).border(1.dp, colors.borderSubtle, paper)
                         .padding(horizontal = 12.dp, vertical = 10.dp).testTag("settings-library-directory"))
             }
+            if (onPersonalCourse != null) TextButton(onPersonalCourse) { Text("打开已配对课程") }
             Text("课程里可做本地教材参考练习；Mac 上的课程数据仍独立。",
                 style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
         }

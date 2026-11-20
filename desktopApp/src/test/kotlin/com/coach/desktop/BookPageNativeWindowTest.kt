@@ -16,7 +16,6 @@ import org.apache.pdfbox.pdmodel.font.PDType0Font
 import org.junit.Assume.assumeTrue
 import com.sun.jna.Native
 import com.sun.jna.Pointer
-import com.sun.jna.WString
 import com.sun.jna.win32.StdCallLibrary
 import java.awt.AWTEvent
 import java.awt.GraphicsEnvironment
@@ -290,14 +289,7 @@ class BookPageNativeWindowTest {
 
     private fun <T> foreground(block: () -> T): T {
         // Same short action mutex as Win-Drive. Never hold it while waiting for reflow or saving.
-        val mutex = NativeKernel.CreateMutexW(null, false, WString("Global\\Coach.WinDrive.Foreground"))!!
-        var held = false
-        try {
-            val result = NativeKernel.WaitForSingleObject(mutex, 30_000)
-            held = result == 0 || result == 0x80 // An abandoned mutex also grants ownership.
-            check(held) { "Foreground action mutex failed: $result" }
-            return block()
-        } finally { if (held) NativeKernel.ReleaseMutex(mutex); NativeKernel.CloseHandle(mutex) }
+        return WinDriveForegroundLock.hold(block = block)
     }
     private fun waitFor(label: String, condition: () -> Boolean) {
         val deadline = System.nanoTime() + 20_000_000_000L
@@ -312,10 +304,6 @@ class BookPageNativeWindowTest {
 }
 
 private interface Kernel : StdCallLibrary {
-    fun CreateMutexW(attributes: Pointer?, owner: Boolean, name: WString): Pointer?
-    fun WaitForSingleObject(handle: Pointer, timeout: Int): Int
-    fun ReleaseMutex(handle: Pointer): Boolean
-    fun CloseHandle(handle: Pointer): Boolean
     fun GetCurrentThreadId(): Int
 }
 private interface User : StdCallLibrary {

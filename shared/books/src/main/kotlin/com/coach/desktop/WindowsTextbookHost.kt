@@ -34,6 +34,7 @@ import com.coach.desktop.books.rememberAnswerDrafts
 import com.coach.ui.AppTab
 import com.coach.ui.CoachTheme
 import com.coach.ui.DeskNavigation
+import com.coach.ui.LocalV7TextScale
 import com.coach.ui.v7.LocalDeskSelect
 import com.coach.ui.v7.DeskTypeControl
 import com.coach.ui.v7.LocalDeskTypeControl
@@ -124,7 +125,10 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
     val systemDark = isSystemInDarkTheme()
     val dark = remember { bookWorkspaceThemeOverride() }
     val preferences = remember(controller.library) { ReadingSettings(controller.library.directory) }
-    CoachTheme(dark ?: preferences.paper.dark ?: systemDark) {
+    CoachTheme(dark ?: preferences.paper.dark ?: systemDark, initialTextScale = preferences.size.scale) {
+        val textScale = LocalV7TextScale.current
+        val preferredScale = preferences.size.scale
+        SideEffect { if (textScale.value != preferredScale) textScale.value = preferredScale }
         val colors = com.coach.ui.theme.CoachTheme.colors
         Surface(Modifier.fillMaxSize().textbookFileDrop { files ->
             scope.launch {

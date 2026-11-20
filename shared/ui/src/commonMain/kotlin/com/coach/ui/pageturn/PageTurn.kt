@@ -79,6 +79,9 @@ class PageTurnState(val pageCount: Int, initialPosition: Int = 0, private val al
     /** 布局改变（单双页切换）或手势取消时加一，让旧的翻页动画作废、不再提交位置。 */
     private var epoch = 0
     private var dragging = false
+    /** 最近一次被翻页手势（横滑、拖页角、点边缘）消费掉的按下时间戳，避免正文 readingSpot 覆盖新页锚点。 */
+    var lastHandledPointerDownUptimeMs: Long = Long.MIN_VALUE
+        internal set
 
     private val instant get() = reduced || style == PageTurnStyle.None
 
@@ -251,28 +254,47 @@ fun PageTurnView(
                     if (!handleTouch && down.type == PointerType.Touch) return@awaitEachGesture
                     val w = size.width.toFloat()
                     val h = size.height.toFloat()
-                    val edge = w * (if (cols == 2) 0.08f else 0.14f)
-                    val fwd = down.position.x > w / 2f
+                    val touch = down.type == PointerType.Touch
+                    // 手指：单页左右 28% / 双页左右 14%（各页 28%）点一下翻页，整页任何位置横滑都能翻；鼠标：只认窄边和页角
+                    val edge = w * (if (touch) (if (cols == 2) 0.14f else 0.28f) else if (cols == 2) 0.08f else 0.14f)
+                    var fwd = down.position.x > w / 2f
                     val inEdge = down.position.x < edge || down.position.x > w - edge
                     val inCorner = inEdge && (down.position.y < h * 0.18f || down.position.y > h * 0.82f)
-                    if (!inEdge) return@awaitEachGesture
+                    if (!inEdge && !touch) return@awaitEachGesture
                     val tracker = VelocityTracker()
                     tracker.addPosition(down.uptimeMillis, down.position)
                     val instantMode = state.reduced || state.style == PageTurnStyle.None
                     var dragging = false
                     var swiped = false
+                    var upConsumed = false
                     var lastX = down.position.x
                     try {
                         while (true) {
                             val ev = awaitPointerEvent()
                             val c = ev.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!c.pressed) {
+                                upConsumed = c.isConsumed
+                                if (!dragging && !swiped && inEdge && !upConsumed) {
+                                    state.lastHandledPointerDownUptimeMs = down.uptimeMillis
+                                    c.consume()
+                                }
+                                break
+                            }
+                            if (!dragging && !swiped && c.isConsumed) return@awaitEachGesture
                             tracker.addPosition(c.uptimeMillis, c.position)
                             lastX = c.position.x
-                            val slop = abs(c.position.x - down.position.x) > viewConfiguration.touchSlop
+                            val dx = c.position.x - down.position.x
+                            val dy = c.position.y - down.position.y
+                            val slop = abs(dx) > viewConfiguration.touchSlop && (!touch || abs(dx) > abs(dy))
                             if (slop && (inCorner || c.type == PointerType.Touch)) {
-                                if (instantMode) { swiped = true; c.consume() }
-                                else if (!dragging) {
+                                if (!dragging && !swiped && !inEdge) fwd = dx < 0f
+                                if (instantMode) {
+                                    swiped = true
+                                    state.lastHandledPointerDownUptimeMs = down.uptimeMillis
+                                    c.consume()
+                                } else if (!dragging) {
                                     dragging = true
+                                    state.lastHandledPointerDownUptimeMs = down.uptimeMillis
                                     scope.launch { if (!state.beginDrag(fwd)) dragging = false }
                                 }
                             }
@@ -281,7 +303,6 @@ fun PageTurnView(
                                 val p = dragProgress(down.position.x, c.position.x, fwd, w * travelFactor)
                                 scope.launch { state.dragTo(p) }
                             }
-                            if (!c.pressed) break
                         }
                         val p = dragProgress(down.position.x, lastX, fwd, w * travelFactor)
                         val vx = tracker.calculateVelocity().x
@@ -289,7 +310,7 @@ fun PageTurnView(
                         when {
                             dragging -> { dragging = false; scope.launch { state.endDrag(complete) } }
                             swiped -> if (complete) launchTurn(fwd)
-                            else -> launchTurn(fwd)
+                            inEdge && !upConsumed -> launchTurn(fwd) // 没拖动的轻点，只有落在边缘且未被子控件消费才翻页
                         }
                     } finally {
                         // 手势协程被撤（缩放窗口、pointerInput 重启）：没走到 endDrag 就回弹，不留 turning

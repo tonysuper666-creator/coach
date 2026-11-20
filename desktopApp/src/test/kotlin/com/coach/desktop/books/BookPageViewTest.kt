@@ -290,4 +290,121 @@ class BookPageViewTest {
         onNodeWithTag("book-sheet-1").assertDoesNotExist()
         assertEquals(anchor, state.anchor)
     }
+
+    private val spotSentence = "The multiplication of two whole numbers is the repeated addition of one of them, and the order of the factors does not alter the product. "
+    private fun spotBook(): Textbook {
+        val raw = "CHAPTER 1\n\n" + (1..90).joinToString("\n\n") { n -> "Paragraph $n. " + spotSentence.repeat(2) }
+        return Textbook("spot-roundtrip", "Elements of arithmetic", "epub", listOf(BookPage(1, raw)))
+    }
+
+    @Test fun reflowRoundTripKeepsAnchorAndWritesNothing() = runSkikoComposeUiTest(
+        size = Size(900f, 1000f), density = Density(1f),
+    ) {
+        val book = spotBook()
+        val state = BookPagingState(BookPageAnchor(1, book.pages.single().text.indexOf("Paragraph 70.")))
+        var scale by mutableStateOf<androidx.compose.runtime.MutableState<Float>?>(null)
+        var width by mutableStateOf(800)
+        val writes = mutableListOf<BookPageAnchor>()
+        setContent { CoachTheme {
+            scale = com.coach.ui.LocalV7TextScale.current
+            Box(Modifier.width(width.dp).height(900.dp)) {
+                BookPageView(book, state, emptyMap(), onTurn = { state.move(it) }, onSpot = { writes += it })
+            }
+        } }
+        waitUntil(timeoutMillis = 30_000) { state.pages.isNotEmpty() }
+        runOnIdle { state.anchor = state.pages[state.index].anchor }
+        mainClock.advanceTimeBy(1_500); waitForIdle()
+        waitUntil(timeoutMillis = 10_000) { writes.isNotEmpty() }
+        val k = state.index
+        val head = state.anchor
+        val startUtf16 = state.pages[k].sources.first().startUtf16
+        writes.clear()
+        for (step in listOf<() -> Unit>({ scale!!.value = 1.15f }, { scale!!.value = 1f }, { width = 560 }, { width = 800 })) {
+            runOnIdle { step() }
+            waitForIdle(); mainClock.advanceTimeBy(1_500); waitForIdle()
+            waitUntil(timeoutMillis = 30_000) { state.pages.isNotEmpty() }
+        }
+        assertEquals(head, state.anchor, "reflow round trip must keep anchor")
+        assertEquals(k, state.index)
+        assertEquals(startUtf16, state.pages[state.index].sources.first().startUtf16)
+        assertEquals(0, writes.size, "reflow must not overwrite saved spot: $writes")
+    }
+
+    @Test fun coldStartRoundTripReturnsToTheSamePage() {
+        val book = spotBook()
+        var savedPage: BookPageAnchor? = null
+        var k = -1
+        fun open(anchor: BookPageAnchor, textScale: Float, onShown: (BookPagingState) -> Unit) =
+            runSkikoComposeUiTest(size = Size(900f, 1000f), density = Density(1f)) {
+                val state = BookPagingState(anchor)
+                setContent { CoachTheme(initialTextScale = textScale) {
+                    Box(Modifier.width(800.dp).height(900.dp)) { BookPageView(book, state, emptyMap(), onTurn = { state.move(it) }) }
+                } }
+                waitUntil(timeoutMillis = 30_000) { state.pages.isNotEmpty() }
+                waitForIdle(); mainClock.advanceTimeBy(1_500); waitForIdle()
+                onShown(state)
+            }
+        val start = BookPageAnchor(1, book.pages.single().text.indexOf("Paragraph 70."))
+        open(start, 1f) { s -> savedPage = s.pages[s.index].anchor; k = s.index }
+        open(savedPage!!, 1.15f) { s -> assertEquals(savedPage, s.anchor, "large cold start keeps anchor") }
+        open(savedPage!!, 1f) { s -> assertEquals(k, s.index, "medium cold start returns to exact same page") }
+    }
+
+    @Test fun turningThePageByTouchAndButtonSavesTheNewSpotWithoutCorruption() = runSkikoComposeUiTest(
+        size = Size(600f, 900f), density = Density(1f),
+    ) {
+        val book = spotBook()
+        val state = BookPagingState(BookPageAnchor(1))
+        val writes = mutableListOf<BookPageAnchor>()
+        setContent { CoachTheme { Box(Modifier.width(560.dp).height(860.dp)) {
+            BookPageView(book, state, emptyMap(), onTurn = { state.move(it) },
+                turnStyle = com.coach.ui.pageturn.PageTurnStyle.Flip, onSpot = { writes += it })
+        } } }
+        waitUntil(timeoutMillis = 30_000) { state.pages.size >= 4 }
+        val expected1 = state.pages[1].anchor
+        // Swipe left from center on touch: advances to page 1 without readingSpot corrupting anchor back to page 0.
+        onNodeWithTag("book-page-turn").performTouchInput {
+            down(Offset(width * 0.55f, height * 0.5f))
+            moveTo(Offset(width * 0.35f, height * 0.5f))
+            moveTo(Offset(width * 0.10f, height * 0.5f))
+            up()
+        }
+        mainClock.advanceTimeBy(1_500); waitForIdle()
+        waitUntil(timeoutMillis = 10_000) { writes.lastOrNull() == expected1 }
+        assertEquals(expected1, state.anchor, "touch swipe must land on page 1 anchor")
+
+        // Tap right edge: advances to page 2 without readingSpot corrupting anchor back to page 1.
+        val expected2 = state.pages[2].anchor
+        onNodeWithTag("book-page-turn").performTouchInput {
+            down(Offset(width * 0.88f, height * 0.5f))
+            up()
+        }
+        mainClock.advanceTimeBy(1_500); waitForIdle()
+        waitUntil(timeoutMillis = 10_000) { writes.lastOrNull() == expected2 }
+        assertEquals(expected2, state.anchor, "right edge tap must land on page 2 anchor")
+    }
+
+    @Test fun scrollModeReflowKeepsTheReadingLine() = runSkikoComposeUiTest(
+        size = Size(900f, 1000f), density = Density(1f),
+    ) {
+        val book = spotBook()
+        val line = BookPageAnchor(1, book.pages.single().text.indexOf("Paragraph 70."))
+        val state = BookPagingState(line)
+        var scale by mutableStateOf<androidx.compose.runtime.MutableState<Float>?>(null)
+        val writes = mutableListOf<BookPageAnchor>()
+        setContent { CoachTheme {
+            scale = com.coach.ui.LocalV7TextScale.current
+            Box(Modifier.width(800.dp).height(900.dp)) {
+                BookPageView(book, state, emptyMap(), onTurn = { state.move(it) }, readMode = BookReadMode.Scroll, onSpot = { writes += it })
+            }
+        } }
+        waitUntil(timeoutMillis = 30_000) { state.pages.isNotEmpty() }
+        waitForIdle(); mainClock.advanceTimeBy(1_500); waitForIdle()
+        for (v in listOf(1.15f, 1f)) {
+            runOnIdle { scale!!.value = v }
+            waitForIdle(); mainClock.advanceTimeBy(1_500); waitForIdle()
+        }
+        assertEquals(line, state.anchor)
+        assertEquals(0, writes.size, "$writes")
+    }
 }

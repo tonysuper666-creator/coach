@@ -166,4 +166,26 @@ class TextbookLibraryTest {
         assertEquals(1, library.catalog().size)
         assertTrue(Files.list(library.directory).use { paths -> paths.noneMatch { it.fileName.toString().startsWith(".import-") } })
     }
+
+    @Test fun textReadModeAndReadSpotPersistPerBookAcrossReopen() {
+        val root = Files.createTempDirectory("coach-text-mode-spot-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val a = library.importBook(root.resolve("a.md").also { Files.writeString(it, "# Chapter 1\n\n" + "Alpha sentence. ".repeat(80)) })
+            val b = library.importBook(root.resolve("b.md").also { Files.writeString(it, "# Chapter 1\n\n" + "Beta sentence. ".repeat(80)) })
+            assertFalse(library.textScrollMode(a.id))
+            assertFalse(library.textScrollMode(b.id))
+            assertNull(library.savedReadSpot(a.id))
+
+            library.saveTextScrollMode(a.id, true)
+            library.saveReadSpot(a.id, 1, 420)
+            library.saveReadSpot(b.id, 1, 128)
+
+            val reopened = TextbookLibrary(root.resolve("library"))
+            assertTrue(reopened.textScrollMode(a.id))
+            assertFalse(reopened.textScrollMode(b.id))
+            assertEquals(1 to 420, reopened.savedReadSpot(a.id))
+            assertEquals(1 to 128, reopened.savedReadSpot(b.id))
+        } finally { root.toFile().deleteRecursively() }
+    }
 }

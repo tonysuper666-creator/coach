@@ -2,7 +2,6 @@ package com.coach.desktop
 
 import com.sun.jna.Native
 import com.sun.jna.Pointer
-import com.sun.jna.WString
 import com.sun.jna.win32.StdCallLibrary
 import java.awt.AWTEvent
 import java.awt.Component
@@ -28,24 +27,16 @@ import javax.swing.SwingUtilities
  * 只在测试源集里用，产品代码不引用。
  */
 internal object NativeWindowForeground {
-    private const val MUTEX = "Global\\Coach.WinDrive.Foreground"
     // 同一线程里嵌套调用直接复用外层那把锁：Win32 互斥量不可重入，重入会把自己锁死。
     private val depth = ThreadLocal.withInitial { 0 }
 
     fun <T> action(block: () -> T): T {
         if (depth.get() > 0) return block()
-        val mutex = Kernel32.CreateMutexW(null, false, WString(MUTEX)) ?: error("CreateMutexW failed")
-        var held = false
         depth.set(1)
         try {
-            val result = Kernel32.WaitForSingleObject(mutex, 30_000)
-            held = result == 0 || result == 0x80 // WAIT_OBJECT_0 / WAIT_ABANDONED
-            check(held) { "Foreground action mutex timed out: $result" }
-            return block()
+            return WinDriveForegroundLock.hold(block = block)
         } finally {
             depth.set(0)
-            if (held) Kernel32.ReleaseMutex(mutex)
-            Kernel32.CloseHandle(mutex)
         }
     }
 
@@ -173,10 +164,6 @@ private fun windowOf(source: Any?): Window? {
 }
 
 private interface FocusKernel : StdCallLibrary {
-    fun CreateMutexW(attributes: Pointer?, owner: Boolean, name: WString): Pointer?
-    fun WaitForSingleObject(handle: Pointer, timeout: Int): Int
-    fun ReleaseMutex(handle: Pointer): Boolean
-    fun CloseHandle(handle: Pointer): Boolean
     fun GetCurrentThreadId(): Int
 }
 

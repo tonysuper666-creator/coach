@@ -46,12 +46,20 @@ import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption.WRITE
-import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.LocalDate
 import java.util.UUID
 
-internal fun saveAndroidNotesToDirectory(directory: Path, markdown: String, pdf: ByteArray?): Path {
+/** Avoid `Files.getFileStore`: Android SELinux denies `/proc/mounts` reads from the app sandbox. */
+internal fun supportsPosixFileAttributes(path: Path): Boolean =
+    runCatching { "posix" in path.fileSystem.supportedFileAttributeViews() }.getOrDefault(false)
+
+internal fun saveAndroidNotesToDirectory(
+    directory: Path,
+    markdown: String,
+    pdf: ByteArray?,
+    posixSupported: Boolean? = null,
+): Path {
     val requested = directory.toAbsolutePath().normalize()
     require(generateSequence(requested) { it.parent }.none { Files.exists(it.resolve(".git")) }) {
         "请选择 Git 仓库之外的私人目录"
@@ -62,16 +70,12 @@ internal fun saveAndroidNotesToDirectory(directory: Path, markdown: String, pdf:
     require(generateSequence(chosen) { it.parent }.none { Files.exists(it.resolve(".git")) }) {
         "请选择 Git 仓库之外的私人目录"
     }
-    val posixSupported = Files.getFileStore(chosen).supportsFileAttributeView(PosixFileAttributeView::class.java)
-    val staging = if (posixSupported) {
-        Files.createTempDirectory(chosen, ".coach-notes-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
-    } else {
-        Files.createTempDirectory(chosen, ".coach-notes-")
-    }
+    val usePosix = posixSupported ?: supportsPosixFileAttributes(chosen)
+    val staging = createPrivateTempDirectory(chosen, usePosix)
     var failure: Throwable? = null
     try {
-        writePrivateFile(staging.resolve("复习提纲.md"), markdown.toByteArray(Charsets.UTF_8), posixSupported)
-        if (pdf != null) writePrivateFile(staging.resolve("复习提纲.pdf"), pdf, posixSupported)
+        writePrivateFile(staging.resolve("复习提纲.md"), markdown.toByteArray(Charsets.UTF_8), usePosix)
+        if (pdf != null) writePrivateFile(staging.resolve("复习提纲.pdf"), pdf, usePosix)
         val target = chosen.resolve("LearningCoach-复习-${LocalDate.now()}-${UUID.randomUUID().toString().take(8)}")
         if (Files.exists(target, NOFOLLOW_LINKS)) throw FileAlreadyExistsException(target.toString())
         return Files.move(staging, target, StandardCopyOption.ATOMIC_MOVE)
@@ -90,9 +94,28 @@ internal fun saveAndroidNotesToDirectory(directory: Path, markdown: String, pdf:
     }
 }
 
+private fun createPrivateTempDirectory(parent: Path, posixSupported: Boolean): Path =
+    if (posixSupported) {
+        try {
+            Files.createTempDirectory(
+                parent,
+                ".coach-notes-",
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")),
+            )
+        } catch (_: UnsupportedOperationException) {
+            Files.createTempDirectory(parent, ".coach-notes-")
+        }
+    } else {
+        Files.createTempDirectory(parent, ".coach-notes-")
+    }
+
 private fun writePrivateFile(path: Path, bytes: ByteArray, posixSupported: Boolean) {
     if (posixSupported) {
-        Files.createFile(path, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))
+        try {
+            Files.createFile(path, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))
+        } catch (_: UnsupportedOperationException) {
+            Files.createFile(path)
+        }
     } else {
         Files.createFile(path)
     }

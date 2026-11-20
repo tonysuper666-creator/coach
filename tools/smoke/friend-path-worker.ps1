@@ -908,12 +908,18 @@ try {
         $ctrl = Get-QuestionSettingsControls $script:Last
         if (-not $ctrl -or -not $ctrl.Choice) { Fail 6 '出题方式对话框没有选择题选项' }
         Click-At $ctrl.Choice.X $ctrl.Choice.Y; Start-Sleep -Milliseconds 800
-        # 点完「选择」后再截图核对对话框内的「确定」文案与坐标，防止误点背景关闭弹窗。
-        $confirmLines = Shot 6 'settings-confirm'
-        $ctrlConfirm = Get-QuestionSettingsControls $confirmLines
-        if (-not $ctrlConfirm -or -not $ctrlConfirm.Confirm -or $ctrlConfirm.Confirm.Y -le $ctrl.Choice.Y -or ($ctrlConfirm.Choice -and $ctrlConfirm.Confirm.Y -le $ctrlConfirm.Choice.Y)) {
-            Fail 6 '出题方式对话框找不到「确定」按钮'
+        # 点完「选择」触发 mode() 落盘期间 ui.busy=true 会暂时置灰「确定」；轮询等对话框内「确定」恢复可认再点。
+        $confirmDeadline = (Get-Date).AddSeconds(15); $ctrlConfirm = $null
+        while ((Get-Date) -lt $confirmDeadline) {
+            $confirmLines = Shot 6 'settings-confirm'
+            $cand = Get-QuestionSettingsControls $confirmLines
+            if (-not $cand -or -not $cand.Title) { $ctrlConfirm = $null; break }
+            if ($cand.Confirm -and $cand.Confirm.Y -gt $ctrl.Choice.Y -and (-not $cand.Choice -or $cand.Confirm.Y -gt $cand.Choice.Y)) {
+                $ctrlConfirm = $cand; break
+            }
+            Start-Sleep -Milliseconds 500
         }
+        if (-not $ctrlConfirm) { Fail 6 '出题方式对话框找不到「确定」按钮' }
         $choiceBox = if ($ctrlConfirm.Choice) { $ctrlConfirm.Choice } else { $ctrl.Choice }
         Note "步骤6 设置确认：标题($($ctrlConfirm.Title.X),$($ctrlConfirm.Title.Y)) 选项「选择」($($choiceBox.X),$($choiceBox.Y)) 按钮「确定」($($ctrlConfirm.Confirm.X),$($ctrlConfirm.Confirm.Y))"
         Click-At $ctrlConfirm.Confirm.X $ctrlConfirm.Confirm.Y

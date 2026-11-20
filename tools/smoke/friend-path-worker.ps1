@@ -495,36 +495,8 @@ try {
     if ($outcome -eq 'error') { Fail 4 "服务回了拒绝：$errText" }
     if ($outcome -ne 'ok') { Fail 4 '120 秒内既没有讲解也没有报错' }
     $explainOk = $true
-    # ⑦ 先做（依赖第 4 步留在屏幕上的选段卡）：点「出处」，应弹出原文卡
-    $cardOk = $null
-    # 出处可能在选段卡正文下方：先在卡片里往下找，再往上找，最多 8 次
-    $o = $null
-    foreach ($k in 0..8) {
-        if ($k -gt 0) {
-            $closeCard = Find-Text $script:Last '收起'
-            $lim = Get-Rect; $y = if ($closeCard) { [Math]::Min($closeCard.Y + 150, $lim.B - $lim.T - 30) } else { [int](($lim.B - $lim.T) * 0.8) }
-            Scroll-At 600 $y $(if ($k -le 4) { -3 } else { 3 }); Start-Sleep -Milliseconds 700
-        }
-        $o = Await-Text 7 'cite' @('出处') 1
-        if ($o) { break }
-    }
-    if (-not $o) { $cardOk = '选段卡里没有「出处」链接（见 4-result*.png）' }
-    else {
-        # 1.1.1 的「出处」不弹原文卡：openPassage 把阅读器切回原页视图（按钮变回「看文字」）、
-        # 跳到被引句那一页并高亮。所以这里校验「回到原页 + 页码对上」，再切回文字视图接着问。
-        Click-At $o.X $o.Y
-        $back = Await-Text 7 'original' @('看文字') 15
-        if (-not $back) { $cardOk = '点了出处没有切回原页视图（见 7-card.png）' }
-        else {
-            $pg = Page-NearNav (Shot 7 'card')
-            if ($pg -ne "$physPage") { $cardOk = "点了出处切回原页但页码不是 $physPage（现在 $pg，见 7-card.png）" }
-            Click-At $back.X $back.Y; Start-Sleep -Milliseconds 600
-            if (-not (Await-Text 4 'text-mode-again' @('看原页') 15)) { $cardOk = '从出处回跳后切不回文字视图' }
-        }
-        # 1.1.1 的 ESC 在阅读器里是「退出回书架」（TextbookWorkspace.returnFromReader），不能再用它关卡片。
-    }
-    # 1.1.1 没有「选段提问」按钮了：追问就在同一张选段卡底部的「继续追问」框里（讲解那轮是「就这段问一句」）。
-    # 点「出处」只是切回原页视图再切回来，不关卡（openPassage 不动 inlineThread），所以这里不用再拖选一次。
+    # 1.1.1 没有「选段提问」按钮了：追问就在同一张选段卡底部的「继续追问」框里；先完成追问，再在⑦里点「出处」并「收起」卡片，
+    # 避免 800×600 窗口里 360dp 的选段卡把底栏「上一页 / 下一页」推到屏幕外。
     $askWhy = $null
     try {
         $field = $null; $lines = @()
@@ -535,7 +507,7 @@ try {
             if ($field) { break }
             Start-Sleep -Milliseconds 700
         }
-        if (-not $field) { throw '从「出处」回到文字视图后，选段卡里没有「继续追问」输入框' }
+        if (-not $field) { throw '选段卡里没有「继续追问」输入框' }
         $question = '用大白话解释一下，这里的专用人力资本是什么意思？'
         # 框里的字太小，OCR 认不出来（截图上明明有字，识别结果是空的），所以不能用「框里有没有字」判断焦点；
         # 标记直接写进问题里，回答轮的标题是「问：<原问题>」，标记出现在那行才算这一问真的发出去了。
@@ -594,9 +566,41 @@ try {
         if (-not $turn) { throw "问题发出去了，但 150 秒内没出现「问：<自己这一问>」（加载态 $sawLoading）" }
         if (-not $cite) { throw '提问有了回答，但没等到它自己的「出处 · 第 N 页」' }
         Note "提问的回答出处：$($cite.Text)"
-        $closeCard = Await-Text 4 'ask-close' @('收起') 5
-        if ($closeCard) { Click-At $closeCard.X $closeCard.Y; Start-Sleep -Milliseconds 600 }
-    } catch { if ("$_" -like 'DESKTOP_BUSY*' -or "$_" -like 'WIN_DRIVE_FOREGROUND_CONTENTION*') { throw }; $askWhy = "$_"; try { $cc = Await-Text 4 'ask-cleanup' @('收起') 3; if ($cc) { Click-At $cc.X $cc.Y } } catch { } }
+    } catch { if ("$_" -like 'DESKTOP_BUSY*' -or "$_" -like 'WIN_DRIVE_FOREGROUND_CONTENTION*') { throw }; $askWhy = "$_" }
+
+    # ⑦ 依赖选段卡：点「出处」切回原页（按钮变回「看文字」），再点「收起」露出底栏核对页码，最后切回文字视图。
+    $cardOk = $null
+    $o = $null
+    foreach ($k in 0..8) {
+        if ($k -gt 0) {
+            $closeCard = Find-Text $script:Last '收起'
+            $lim = Get-Rect; $y = if ($closeCard) { [Math]::Min($closeCard.Y + 150, $lim.B - $lim.T - 30) } else { [int](($lim.B - $lim.T) * 0.8) }
+            Scroll-At 600 $y $(if ($k -le 4) { -3 } else { 3 }); Start-Sleep -Milliseconds 700
+        }
+        $o = Await-Text 7 'cite' @('出处') 1
+        if ($o) { break }
+    }
+    if (-not $o) { $cardOk = '选段卡里没有「出处」链接（见 4-result*.png）' }
+    else {
+        Click-At $o.X $o.Y
+        $back = Await-Text 7 'original' @('看文字') 15
+        if (-not $back) { $cardOk = '点了出处没有切回原页视图（见 7-card.png）' }
+        else {
+            $closeCard = Await-Text 7 'card-close' @('收起') 5
+            if ($closeCard) { Click-At $closeCard.X $closeCard.Y; Start-Sleep -Milliseconds 500 }
+            $pg = $null
+            for ($try = 0; $try -lt 4 -and $pg -ne "$physPage"; $try++) {
+                if ($try -gt 0) { Start-Sleep -Milliseconds 500 }
+                $pg = Page-NearNav (Shot 7 'card')
+            }
+            if ($pg -ne "$physPage") { $cardOk = "点了出处切回原页但页码不是 $physPage（现在 $pg，见 7-card.png）" }
+            $backNow = Has $script:Last @('看文字')
+            if (-not $backNow) { $backNow = $back }
+            Click-At $backNow.X $backNow.Y; Start-Sleep -Milliseconds 600
+            if (-not (Await-Text 4 'text-mode-again' @('看原页') 15)) { $cardOk = '从出处回跳后切不回文字视图' }
+        }
+    }
+    try { $cc = Has $script:Last @('收起'); if ($cc) { Click-At $cc.X $cc.Y; Start-Sleep -Milliseconds 400 } } catch { }
     if ($askWhy) {
         try { Fail 4 "选段讲解可用，但实际提问失败：$askWhy" } catch { if ("$_" -ne 'STEP_FAILED') { throw }; if (-not $KeepGoing) { throw 'STEP_FAILED' } }
     } else { Pass 4 '拖选一段点「讲讲」得到带出处的讲解，也能输入问题得到带出处的回答' }

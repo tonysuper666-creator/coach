@@ -14,6 +14,10 @@ import com.coach.ui.v7.DeskTypeControl
 import com.coach.ui.v7.LocalDeskTypeControl
 import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
+import java.sql.DriverManager
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
@@ -132,6 +136,105 @@ class ReadingSettingsTest {
                 onNodeWithTag("reading-font-KAI").assertIsEnabled().performClick()
                 onNodeWithTag("original-mode-scroll").assertDoesNotExist()
             }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun changingFontSizeAndReopeningWhileLibrarySqliteIsTemporarilyLockedWaitsAndPersists() {
+        val root = Files.createTempDirectory("coach-reading-busy-")
+        try {
+            val library = TextbookLibrary(root)
+            val settings = ReadingSettings(root)
+            val dbUrl = "jdbc:sqlite:${library.directory.resolve("library.sqlite")}"
+            val locked = CountDownLatch(1)
+            var blockerError: Throwable? = null
+            val blocker = thread {
+                try {
+                    DriverManager.getConnection(dbUrl).use { db ->
+                        db.createStatement().use { sql ->
+                            sql.execute("BEGIN IMMEDIATE")
+                            sql.executeUpdate("INSERT OR REPLACE INTO book_reader_views(book,text_view) VALUES('large-book',1)")
+                        }
+                        locked.countDown()
+                        Thread.sleep(350)
+                        db.createStatement().use { it.execute("COMMIT") }
+                    }
+                } catch (error: Throwable) {
+                    blockerError = error
+                    locked.countDown()
+                }
+            }
+            assertTrue(locked.await(5, TimeUnit.SECONDS))
+            assertNull(blockerError)
+            settings.chooseSize(ReadingSize.LARGE)
+            blocker.join(5_000)
+            assertNull(blockerError)
+            assertEquals(ReadingSize.LARGE, settings.size)
+
+            val lockedForOpen = CountDownLatch(1)
+            val reopenBlocker = thread {
+                try {
+                    DriverManager.getConnection(dbUrl).use { db ->
+                        db.createStatement().use { sql ->
+                            sql.execute("BEGIN IMMEDIATE")
+                            sql.executeUpdate("INSERT OR REPLACE INTO book_reader_views(book,text_view) VALUES('large-book',1)")
+                        }
+                        lockedForOpen.countDown()
+                        Thread.sleep(350)
+                        db.createStatement().use { it.execute("COMMIT") }
+                    }
+                } catch (error: Throwable) {
+                    blockerError = error
+                    lockedForOpen.countDown()
+                }
+            }
+            assertTrue(lockedForOpen.await(5, TimeUnit.SECONDS))
+            val reopened = ReadingSettings(root)
+            reopenBlocker.join(5_000)
+            assertNull(blockerError)
+            assertEquals(ReadingSize.LARGE, reopened.size)
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun switchingPdfToTextViewAndChangingFontSizeUnderConcurrentWriteLockPersists() {
+        val root = Files.createTempDirectory("coach-reading-pdf-busy-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val controller = TextbookController(library)
+            runBlocking {
+                controller.importBook(wordedChapterPdf(root))
+                controller.learn(LearningPath.READ)
+            }
+            val bookId = controller.state.value.book!!.id
+            val dbUrl = "jdbc:sqlite:${library.directory.resolve("library.sqlite")}"
+            runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
+                setContent { WindowsTextbookHost(controller) { null } }
+                onNodeWithTag("book-original-toggle").performClick()
+                onNodeWithTag("v7-type-menu").performClick()
+                val locked = CountDownLatch(1)
+                var blockerError: Throwable? = null
+                val blocker = thread {
+                    try {
+                        DriverManager.getConnection(dbUrl).use { db ->
+                            db.createStatement().use { sql ->
+                                sql.execute("BEGIN IMMEDIATE")
+                                sql.executeUpdate("INSERT OR REPLACE INTO book_read_spots(book,page,offset_utf16) VALUES('$bookId',1,0)")
+                            }
+                            locked.countDown()
+                            Thread.sleep(300)
+                            db.createStatement().use { it.execute("COMMIT") }
+                        }
+                    } catch (error: Throwable) {
+                        blockerError = error
+                        locked.countDown()
+                    }
+                }
+                assertTrue(locked.await(5, TimeUnit.SECONDS))
+                onNodeWithTag("reading-size-LARGE").assertIsEnabled().performClick()
+                blocker.join(5_000)
+                assertNull(blockerError)
+                waitForIdle()
+            }
+            assertEquals(ReadingSize.LARGE, ReadingSettings(library.directory).size)
         } finally { root.toFile().deleteRecursively() }
     }
 }

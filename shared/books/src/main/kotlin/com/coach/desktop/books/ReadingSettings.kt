@@ -4,8 +4,11 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import java.nio.file.Files
 import java.nio.file.Path
+import java.sql.Connection
 import java.sql.DriverManager
+import java.sql.SQLException
 
 internal val LocalReadingAutoGuide = compositionLocalOf { true }
 internal val LocalReadingSectionSummary = compositionLocalOf { true }
@@ -27,7 +30,7 @@ internal enum class AutoGuideOption(val label: String, val enabled: Boolean) {
 }
 
 /** Global to the local library, including when a development launch uses an isolated library. */
-internal class ReadingSettings(directory: Path) {
+internal class ReadingSettings(directory: Path, private val busyTimeoutMs: Int = DEFAULT_BUSY_TIMEOUT_MS) {
     private val url = "jdbc:sqlite:${directory.resolve("library.sqlite")}"
     var size by mutableStateOf(ReadingSize.MEDIUM)
         private set
@@ -41,9 +44,15 @@ internal class ReadingSettings(directory: Path) {
         private set
 
     init {
-        DriverManager.getConnection(url).use { db ->
+        Files.createDirectories(directory)
+        withBusyRetry { db ->
             db.createStatement().use { sql ->
-                sql.execute("CREATE TABLE IF NOT EXISTS reading_settings(name TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                val exists = sql.executeQuery(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reading_settings'"
+                ).use { it.next() }
+                if (!exists) {
+                    sql.execute("CREATE TABLE IF NOT EXISTS reading_settings(name TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                }
                 sql.executeQuery("SELECT name, value FROM reading_settings").use { rows ->
                     while (rows.next()) {
                         val value = rows.getString("value")
@@ -56,6 +65,21 @@ internal class ReadingSettings(directory: Path) {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    private fun database(): Connection = DriverManager.getConnection(url).apply {
+        createStatement().use { it.execute("PRAGMA busy_timeout=$busyTimeoutMs") }
+    }
+
+    private fun <T> withBusyRetry(attempts: Int = BUSY_RETRY_ATTEMPTS, block: (Connection) -> T): T {
+        var remaining = attempts
+        while (true) {
+            try {
+                return database().use(block)
+            } catch (error: SQLException) {
+                if ((error.errorCode and 0xff) != SQLITE_BUSY || --remaining <= 0) throw error
             }
         }
     }
@@ -85,13 +109,20 @@ internal class ReadingSettings(directory: Path) {
         sectionSummary = enabled
     }
 
+    @Synchronized
     private fun save(name: String, value: String) {
-        DriverManager.getConnection(url).use { db ->
+        withBusyRetry { db ->
             db.prepareStatement("INSERT OR REPLACE INTO reading_settings(name,value) VALUES(?,?)").use { sql ->
                 sql.setString(1, name)
                 sql.setString(2, value)
                 sql.executeUpdate()
             }
         }
+    }
+
+    companion object {
+        internal const val DEFAULT_BUSY_TIMEOUT_MS = 5_000
+        private const val BUSY_RETRY_ATTEMPTS = 2
+        private const val SQLITE_BUSY = 5
     }
 }

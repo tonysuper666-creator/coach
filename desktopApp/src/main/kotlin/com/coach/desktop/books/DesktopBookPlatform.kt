@@ -27,6 +27,8 @@ import java.nio.file.Path
 import javax.imageio.ImageIO
 import javax.swing.text.rtf.RTFEditorKit
 
+internal const val originalPdfTouchEnabled = false
+
 internal typealias BookBitmap = BufferedImage
 internal typealias BookPdfDocument = org.apache.pdfbox.pdmodel.PDDocument
 internal typealias BookPdfRectangle = org.apache.pdfbox.pdmodel.common.PDRectangle

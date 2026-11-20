@@ -30,6 +30,8 @@ import com.coach.ui.theme.CoachTheme
 import java.io.ByteArrayOutputStream
 import java.io.File
 
+internal const val originalPdfTouchEnabled = true
+
 internal typealias BookBitmap = Bitmap
 internal typealias BookPdfDocument = com.tom_roush.pdfbox.pdmodel.PDDocument
 internal typealias BookPdfRectangle = com.tom_roush.pdfbox.pdmodel.common.PDRectangle

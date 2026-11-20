@@ -10,6 +10,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -21,6 +22,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsPropertyKey
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import coach.design.tokens.CoachV7
 import com.coach.domain.reader.ReaderRect
 import com.coach.domain.reader.ReaderTextRange
 import com.coach.domain.reader.ReaderTextUnit
@@ -30,22 +32,22 @@ internal val OriginalPdfSelectionRange = SemanticsPropertyKey<ReaderTextRange>("
 /** The overlay and the bitmap have identical bounds. Display boxes have already been rotated. */
 @Composable
 internal fun BoxScope.OriginalPdfSelection(
-    unit: ReaderTextUnit,
-    text: String,
+    geometry: PdfSelectionGeometry,
     selection: ReaderTextRange?,
     highlights: List<ReaderTextRange>,
     selectionColor: Color,
     highlightColor: Color,
     onSelection: (ReaderTextRange?) -> Unit,
     layerTag: String = "original-pdf-text-layer",
+    touchZoom: PdfTouchZoom? = null,
 ) {
-    val geometry = remember(unit, text) { PdfSelectionGeometry(unit, text) }
     val marked = remember(geometry, highlights) { highlights.flatMap(geometry::verifiedBoxes) }
     val selected = remember(geometry, selection) { selection?.let(geometry::verifiedBoxes).orEmpty() }
     val update = rememberUpdatedState(onSelection)
-    Canvas(Modifier.matchParentSize().testTag(layerTag).semantics {
+    val layer = Modifier.matchParentSize().testTag(layerTag).semantics {
         if (selected.isNotEmpty() && selection != null) this[OriginalPdfSelectionRange] = selection
-    }.pointerHoverIcon(PointerIcon.Text).pointerInput(geometry) {
+    }
+    val input = if (touchZoom != null) layer else layer.pointerHoverIcon(PointerIcon.Text).pointerInput(geometry) {
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
             if (down.type == PointerType.Mouse && !currentEvent.buttons.isPrimaryPressed) return@awaitEachGesture
@@ -77,7 +79,8 @@ internal fun BoxScope.OriginalPdfSelection(
                 }
             }
         }
-    }) {
+    }
+    Canvas(input) {
         fun paint(boxes: List<ReaderRect>, color: Color) {
             for (box in boxes) drawRect(
                 color,
@@ -87,7 +90,17 @@ internal fun BoxScope.OriginalPdfSelection(
         }
         paint(marked, highlightColor)
         paint(mergePdfLineBoxes(selected, size.width, size.height), selectionColor)
+        if (touchZoom != null && selection != null && selected.isNotEmpty()) {
+            for (handle in pdfSelectionHandles(selected, size.width, size.height, 5.dp.toPx() / touchZoom.scale)) {
+                paintPdfHandle(handle, CoachV7.Light.zhu, touchZoom.scale)
+            }
+        }
     }
+}
+
+private fun DrawScope.paintPdfHandle(handle: PdfSelectionHandle, color: Color, scale: Float) {
+    drawLine(color, handle.anchor, handle.center, strokeWidth = 2.dp.toPx() / scale)
+    drawCircle(color, radius = 5.dp.toPx() / scale, center = handle.center)
 }
 
 /** Join adjacent glyphs on the same line, leaving distinct columns and lines separate. */
@@ -111,10 +124,26 @@ internal fun mergePdfLineBoxes(boxes: List<ReaderRect>, width: Float, height: Fl
     return lines
 }
 
-private class PdfSelectionGeometry(private val unit: ReaderTextUnit, private val text: String) {
+internal class PdfSelectionGeometry(private val unit: ReaderTextUnit, private val text: String) {
     private val glyphs = unit.spans.flatMap { span -> span.geometry.displayBoxes().map { it to span.range } }
 
     fun verifiedBoxes(range: ReaderTextRange) = PdfTextSelection.boxesForVerifiedRange(unit, text, range)
+
+    fun wordAt(hit: ReaderTextRange): ReaderTextRange? {
+        if (unit.text != text || hit.endUtf16 > text.length) return null
+        val start = hit.startUtf16
+        // CJK selections begin on the pressed glyph. The handles can include adjacent glyphs.
+        when (Character.UnicodeScript.of(text.codePointAt(start))) {
+            Character.UnicodeScript.HAN, Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA -> return hit
+            else -> Unit
+        }
+        val words = java.text.BreakIterator.getWordInstance()
+        words.setText(text)
+        val from = if (words.isBoundary(start)) start else words.preceding(start)
+        val to = words.following(start).coerceAtLeast(hit.endUtf16)
+        val word = ReaderTextRange(from, to)
+        return word.takeIf { verifiedBoxes(it).isNotEmpty() } ?: hit
+    }
 
     fun nearest(position: Offset, width: Float, height: Float, maxDistance: Float = Float.POSITIVE_INFINITY): ReaderTextRange? {
         var distance = maxDistance.toDouble() * maxDistance

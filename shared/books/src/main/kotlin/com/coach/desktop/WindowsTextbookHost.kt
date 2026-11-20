@@ -28,6 +28,7 @@ import com.coach.desktop.books.ExplainConsent
 import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
 import com.coach.desktop.books.TextbookWorkspace
+import com.coach.desktop.books.originalPdfTouchEnabled
 import com.coach.desktop.books.answerExplainWith
 import com.coach.desktop.books.rememberAnswerDrafts
 import com.coach.ui.AppTab
@@ -169,7 +170,9 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                 }
                 val deskSelect = remember { { picked: AppTab -> select(picked) } }
                 val typeControl: DeskTypeControl? = if (destination == AppTab.RESOURCES && ui.screen == BookScreen.READER && book != null) {
-                    val defaultTextView = remember(book.id) { book.page(ui.page)?.ocr == true }
+                    val defaultTextView = remember(book.id) {
+                        book.page(ui.page)?.ocr == true && !(book.format == "pdf" && originalPdfTouchEnabled)
+                    }
                     val panel: DeskTypeControl = { extra ->
                         ReadingSettingsPanel(preferences, isOriginal = {
                             (book.format == "pdf" || book.format in BookFormats.images) &&

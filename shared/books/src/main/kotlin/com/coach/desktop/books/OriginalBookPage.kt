@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,13 +17,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
@@ -77,6 +83,7 @@ internal fun OriginalBookPage(
     citation: CitedPdfLocation?, quote: String?, onResize: (IntSize) -> Unit, onRetry: () -> Unit,
     onSelection: (ReaderTextRange?) -> Unit, modifier: Modifier = Modifier, roundPdfCorners: Boolean = false,
     active: Boolean = true, inactivePage: Int = 0, knownAspect: Float? = null,
+    touchZoom: PdfTouchZoom? = null,
 ) {
     val colors = CoachTheme.colors
     val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
@@ -84,6 +91,9 @@ internal fun OriginalBookPage(
     val highlight = if (colors.dark) CoachV7.Dark.hl else CoachV7.Light.hl
     val selectionColor = if (colors.dark) CoachV7.Dark.selBg else CoachV7.Light.selBg
     val bitmap = (image as? PageImage.Ready)?.image
+    val geometry = remember(layer, pageText) {
+        layer?.takeIf { it.spans.isNotEmpty() }?.let { PdfSelectionGeometry(it, pageText) }
+    }
     // Use the bitmap ratio once known, while the first layout uses this physical page's paper ratio.
     val ratio = knownAspect ?: bitmap?.let { it.width.toFloat() / it.height } ?: placeholderAspect
     val bounds = modifier.fillMaxWidth().aspectRatio(ratio).onSizeChanged(onResize)
@@ -99,29 +109,55 @@ internal fun OriginalBookPage(
                 TextButton(onClick = onRetry) { Text("重试") }
             }
             is PageImage.Ready -> {
-                Image(image.image, label, contentScale = ContentScale.FillBounds, modifier = Modifier.matchParentSize()
-                    .testTag(if (active) "remote-image" else "original-pdf-image-$inactivePage")
-                    .semantics { this[OriginalPageBitmapWidth] = image.image.width })
-                if (citation?.located is Located.Found) Canvas(Modifier.testTag("remote-highlight")
-                    .semantics { contentDescription = "原句：$quote" }.matchParentSize()) {
-                    val boxes = citation.boxes
-                    val lines = mergePdfLineBoxes(citation.located.rects.map { rect ->
-                        ReaderRect(rect.x0 / boxes.width, rect.y0 / boxes.height,
-                            (rect.x1 - rect.x0) / boxes.width, (rect.y1 - rect.y0) / boxes.height)
-                    }, size.width, size.height)
-                    val padding = 2.dp.toPx()
-                    for (rect in lines) drawRect(
-                        highlight,
-                        topLeft = Offset((rect.x * size.width).toFloat() - padding, (rect.y * size.height).toFloat() - padding),
-                        size = Size((rect.width * size.width).toFloat() + 2 * padding, (rect.height * size.height).toFloat() + 2 * padding),
-                        style = Stroke(padding),
-                    )
+                val viewport = if (touchZoom == null) Modifier else
+                    Modifier.clipToBounds().originalPdfTouch(touchZoom, geometry, selected, onSelection)
+                val transform = if (touchZoom == null) Modifier else Modifier.graphicsLayer {
+                    transformOrigin = TransformOrigin(0f, 0f)
+                    scaleX = touchZoom.scale
+                    scaleY = touchZoom.scale
+                    val translation = touchZoom.translation(size.width, size.height)
+                    translationX = translation.x
+                    translationY = translation.y
                 }
-                if (layer != null && layer.spans.isNotEmpty()) {
-                    OriginalPdfSelection(layer, pageText, selected, marks, selectionColor, highlight, onSelection,
-                        layerTag = if (active) "original-pdf-text-layer" else "original-pdf-text-layer-$inactivePage")
+                Box(Modifier.matchParentSize().then(viewport)) {
+                    Box(Modifier.matchParentSize().then(transform)) {
+                        OriginalPageContent(label, image, citation, quote, highlight, geometry, selected, marks,
+                            selectionColor, onSelection, active, inactivePage, touchZoom)
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun BoxScope.OriginalPageContent(
+    label: String, image: PageImage.Ready, citation: CitedPdfLocation?, quote: String?,
+    highlight: Color, geometry: PdfSelectionGeometry?, selected: ReaderTextRange?,
+    marks: List<ReaderTextRange>, selectionColor: Color,
+    onSelection: (ReaderTextRange?) -> Unit, active: Boolean, inactivePage: Int, zoom: PdfTouchZoom?,
+) {
+    Image(image.image, label, contentScale = ContentScale.FillBounds, modifier = Modifier.matchParentSize()
+        .testTag(if (active) "remote-image" else "original-pdf-image-$inactivePage")
+        .semantics { this[OriginalPageBitmapWidth] = image.image.width })
+    if (citation?.located is Located.Found) Canvas(Modifier.testTag("remote-highlight")
+        .semantics { contentDescription = "原句：$quote" }.matchParentSize()) {
+        val boxes = citation.boxes
+        val lines = mergePdfLineBoxes(citation.located.rects.map { rect ->
+            ReaderRect(rect.x0 / boxes.width, rect.y0 / boxes.height,
+                (rect.x1 - rect.x0) / boxes.width, (rect.y1 - rect.y0) / boxes.height)
+        }, size.width, size.height)
+        val padding = 2.dp.toPx()
+        for (rect in lines) drawRect(
+            highlight,
+            topLeft = Offset((rect.x * size.width).toFloat() - padding, (rect.y * size.height).toFloat() - padding),
+            size = Size((rect.width * size.width).toFloat() + 2 * padding, (rect.height * size.height).toFloat() + 2 * padding),
+            style = Stroke(padding),
+        )
+    }
+    if (geometry != null) {
+        OriginalPdfSelection(geometry, selected, marks, selectionColor, highlight, onSelection,
+            layerTag = if (active) "original-pdf-text-layer" else "original-pdf-text-layer-$inactivePage",
+            touchZoom = zoom)
     }
 }

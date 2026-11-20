@@ -103,8 +103,8 @@ class BookOcrTest {
             controller.importBook(good)
             assertEquals(1, failed.catalog().size); assertNull(controller.state.value.error)
             assertFailsWith<IllegalArgumentException> { BookScanImages.checkSize(5000, 5000) }
-            val tooMany = mixedPdf(root, 201)
-            assertContains(assertFailsWith<IllegalArgumentException> { library.importBook(tooMany) }.message!!, "200")
+            val tooMany = mixedPdf(root, BookScanImages.MAX_OCR_PAGES + 1)
+            assertContains(assertFailsWith<IllegalArgumentException> { library.importBook(tooMany) }.message!!, BookScanImages.MAX_OCR_PAGES.toString())
             assertTrue(library.catalog().isEmpty())
             // Metadata limit rejects the image before allocating a 25-million-pixel raster.
             val image = root.resolve("oversize.png")

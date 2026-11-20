@@ -40,7 +40,7 @@ internal fun renderBookPdfPage(file: File, pdf: BookPdfDocument, index: Int, sca
             // A native page or its raster bounds were rejected. Keep the shared frame.
         }
     }
-    return OriginalBookPdfRenderer(pdf).renderImage(index, scale)
+    return OriginalBookPdfRenderer(pdf).apply { isSubsamplingAllowed = true }.renderImage(index, scale)
 }
 
 private class OriginalBookPdfRenderer(pdf: BookPdfDocument) : BookPdfRenderer(pdf) {

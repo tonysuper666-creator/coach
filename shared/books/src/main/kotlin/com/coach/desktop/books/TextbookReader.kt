@@ -101,6 +101,7 @@ internal fun TextbookReader(
     ui: LibraryUi, library: TextbookLibrary, support: BookLearningSupport, practiceSource: PracticeSource?,
     pageFocus: FocusRequester, onNoteSession: (ReaderSession?) -> Unit, onPage: (Int) -> Unit, onBack: () -> Unit,
     onLearn: () -> Unit, explainProvider: BookExplainer? = null, openPairing: Boolean = false,
+    onCancelImport: () -> Unit = {},
 ) {
     val book = checkNotNull(ui.book)
     val page = book.page(ui.page)
@@ -121,7 +122,8 @@ internal fun TextbookReader(
     val pdf = remember(library, book.id) { OriginalPdfReading(ui.page, !originalPdf || library.pdfScrollMode(book.id)) }
     val pdfLayers = remember(library, book.id) { OriginalPdfTextLayers(library, book) }
     val scroll = remember(book.id) { ScrollReadState(book.pages.size, ScrollReadPosition(book.pages.indexOf(page))) }
-    val pdfVisible = originalPdf && !textView
+    val pageUnrecognizedOriginal = hasOriginal && (page.ocrPending || (page.text.isBlank() && book.hasPendingOcr))
+    val pdfVisible = originalPdf && (!textView || pageUnrecognizedOriginal)
     val pdfScrolling = pdfVisible && pdf.scrolling
     val previousPage = if (pdfVisible && !pdf.scrolling) pdf.adjacent(false)
         else book.pages.lastOrNull { it.number < ui.page }?.number
@@ -129,10 +131,10 @@ internal fun TextbookReader(
         else book.pages.firstOrNull { it.number > ui.page }?.number
     var turnStyle by remember { mutableStateOf(PageTurnStyle.Flip) }
     var readMode by remember(book.id) { mutableStateOf(BookReadMode.Paged) }
-    LaunchedEffect(ui.page) {
+    LaunchedEffect(ui.page, pdfVisible) {
         val previouslyPublished = paging.publishedImportPage
         paging.followImportPage(ui.page)
-        if (pdfVisible && previouslyPublished != paging.publishedImportPage && pdf.page != ui.page) {
+        if (pdfVisible && (previouslyPublished != paging.publishedImportPage || pageUnrecognizedOriginal) && pdf.page != ui.page) {
             pdf.selection = null
             pdf.jump(ui.page)
         }
@@ -253,12 +255,14 @@ internal fun TextbookReader(
         session.goToPage(number)
     }
     val turnTo: (Int?) -> Unit = { pageNumber ->
-        if (pageNumber != null && book.page(pageNumber) != null) {
+        val targetPage = pageNumber?.let(book::page)
+        if (pageNumber != null && targetPage != null) {
             passageJump = null
             pdf.selection = null
-            if (pdfVisible) pdf.jump(pageNumber)
+            val targetUnrecognized = hasOriginal && (targetPage.ocrPending || (targetPage.text.isBlank() && book.hasPendingOcr))
+            if (pdfVisible || (originalPdf && targetUnrecognized)) pdf.jump(pageNumber)
             paging.anchor = BookPageAnchor(pageNumber)
-            val visiblePage = if (textView && paging.pages.isNotEmpty())
+            val visiblePage = if (textView && !targetUnrecognized && paging.pages.isNotEmpty())
                 paging.pages[paging.index].anchor.importPage else pageNumber
             if (paging.publishImportPage(visiblePage)) onPage(visiblePage)
             session.goToPage(visiblePage)
@@ -268,17 +272,25 @@ internal fun TextbookReader(
     // Keep the event handler connected to the current neighbours after recomposition.
     // A remembered key callback must not retain a local function's old page captures.
     val turnLayout by rememberUpdatedState<(ReaderTurn) -> Unit> { turn ->
-        if (!textView) {
+        if (!textView || pageUnrecognizedOriginal) {
             when (turn) {
                 ReaderTurn.Previous -> turnTo(previousPage)
                 ReaderTurn.Next -> turnTo(nextPage)
                 ReaderTurn.First -> turnTo(book.pages.first().number)
                 ReaderTurn.Last -> turnTo(lastPage)
             }
-        } else paging.move(turn)?.let { anchor ->
-            if (paging.publishImportPage(anchor.importPage)) {
-                onPage(anchor.importPage)
-                session.goToPage(anchor.importPage)
+        } else when {
+            turn == ReaderTurn.Next && !paging.canNext ->
+                book.pages.firstOrNull { it.number > ui.page }?.number?.let(turnTo)
+            turn == ReaderTurn.Previous && !paging.canPrevious ->
+                book.pages.lastOrNull { it.number < ui.page }?.number?.let(turnTo)
+            turn == ReaderTurn.Last && book.pages.last().ocrPending ->
+                turnTo(book.pages.last().number)
+            else -> paging.move(turn)?.let { anchor ->
+                if (paging.publishImportPage(anchor.importPage)) {
+                    onPage(anchor.importPage)
+                    session.goToPage(anchor.importPage)
+                }
             }
         }
     }
@@ -322,7 +334,7 @@ internal fun TextbookReader(
     }
     var originalSize by remember(book.id) { mutableStateOf(IntSize.Zero) }
     val image = rememberOriginalPageImage(library, book, page.number,
-        hasOriginal && !pdfVisible && (!textView || source != null), null, retry)
+        hasOriginal && !pdfVisible && (!textView || source != null || pageUnrecognizedOriginal), null, retry)
     // 页图还没回来时先铺纸：这一页自己有尺寸就按它铺，量不到才借上一张成功页图的比例。
     // 图到了原地换掉，后面的按钮不往下跳；横竖混排的书也不会先铺上一页那张的纸再塌下来。
     var paperAspect by remember(book.id) { mutableStateOf<Float?>(null) }
@@ -513,6 +525,21 @@ internal fun TextbookReader(
                     actions()
                 }
             }
+            ui.importing?.let { progress ->
+                BookImportProgressBar(
+                    progress = progress,
+                    onCancel = onCancelImport,
+                    compact = true,
+                    modifier = Modifier.fillMaxWidth().testTag("book-import-progress"),
+                )
+            }
+            if (page.ocrPending) {
+                val countText = ui.importing?.takeIf { it.bookId == book.id && it.recognizing }
+                    ?.let { "${it.page} / ${it.total}" }
+                    ?: "${book.pages.count { !it.ocrPending }} / ${book.pages.size}"
+                Text("这一页还在识别（$countText）", style = MaterialTheme.typography.bodySmall,
+                    color = colors.fgSecondary, modifier = Modifier.testTag("page-ocr-pending"))
+            }
             if (page.ocr) Text(OCR_NOTICE, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("book-ocr-notice"))
             if (viewSaveError) Text("阅读视图暂未保存。切换视图后会再试一次。", style = MaterialTheme.typography.bodySmall, color = v7Alert())
             if (markError) Text("高亮暂未保存，请再试一次。", style = MaterialTheme.typography.bodySmall, color = v7Alert())
@@ -549,7 +576,7 @@ internal fun TextbookReader(
                 }.focusable()) {
                 if (explainOpen) BookExplainPanel(book, paragraphPage.number, explainConsent, explainer,
                     selection = explainingSelection, onOpenOriginal = openPassage.takeIf { explainingSelection != null })
-                else if (textView) {
+                else if (textView && !pageUnrecognizedOriginal) {
                     val ranges = remember(book.pages, source, practiceSource, ui.page, quoteAnchor, located, aspectOk, marks, passageJump) {
                         val result = mutableMapOf<Int, List<IntRange>>()
                         if (practiceSource == null) {
@@ -636,10 +663,12 @@ internal fun TextbookReader(
                     }
                 }
             }
-            if (textView) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            if (textView && !pageUnrecognizedOriginal) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center) {
+                val hasPrevBookPage = book.pages.any { it.number < ui.page }
+                val hasNextBookPage = book.pages.any { it.number > ui.page }
                 V7Tooltip("上一页", shortcut = "←  PageUp") {
-                    PaperButton({ turnLayout(ReaderTurn.Previous) }, enabled = paging.canPrevious,
+                    PaperButton({ turnLayout(ReaderTurn.Previous) }, enabled = paging.canPrevious || hasPrevBookPage,
                         modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
                 }
                 Spacer(Modifier.width(20.dp))
@@ -669,7 +698,7 @@ internal fun TextbookReader(
                 }
                 Spacer(Modifier.width(20.dp))
                 V7Tooltip("下一页", shortcut = "→  PageDown") {
-                    PaperButton({ turnLayout(ReaderTurn.Next) }, enabled = paging.canNext,
+                    PaperButton({ turnLayout(ReaderTurn.Next) }, enabled = paging.canNext || hasNextBookPage,
                         modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
                 }
                 // 阅读方式：翻页 / 滚动；本次打开内有效，按书记住并进阅读设置（TON-1654）。

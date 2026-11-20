@@ -107,7 +107,7 @@ class OcrNativeWindowTest {
                     waitFor("visible progress") { node(window, "book-import-progress") != null }
                     shot(window, dark, "import-progress")
                     click(window, "book-import-cancel")
-                    waitFor("cancelled") { !controller.state.value.busy }
+                    waitFor("cancelled") { !controller.state.value.busy && controller.state.value.importing == null && controller.state.value.catalog.isEmpty() }
                     assertTrue(controller.state.value.catalog.isEmpty())
                     assertContains(controller.state.value.error!!, "取消")
                     shot(window, dark, "import-cancelled")
@@ -115,7 +115,7 @@ class OcrNativeWindowTest {
                     for ((index, file) in files.withIndex()) {
                         drop(file)
                         waitFor("native drop ${file.fileName}; ${controller.state.value.error}") {
-                            controller.state.value.let { !it.busy && it.prompt == BookPrompt.IMPORTED && it.catalog.size == index + 1 }
+                            controller.state.value.let { !it.busy && it.importing == null && it.prompt == BookPrompt.IMPORTED && it.catalog.size == index + 1 }
                         }
                         assertNull(controller.state.value.error)
                         click(window, "read-only")

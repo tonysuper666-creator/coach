@@ -3,10 +3,15 @@ package com.coach.desktop.books
 import com.coach.domain.LadderSession
 import com.coach.domain.QuestionLadder
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -26,14 +31,20 @@ internal data class LibraryUi(
     /** 这本书「做题学」的累计会话：六题一次小结，继续后接着累计。 */
     val ladder: LadderSession = LadderSession(),
     val importing: BookImportProgress? = null,
+    val importNotice: BookImportNotice? = null,
 )
 
 internal class TextbookController(val library: TextbookLibrary) {
     private val mutable = MutableStateFlow(LibraryUi())
     val state = mutable.asStateFlow()
     private val actions = Mutex()
+    private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var activeImport: BookImportControl? = null
+    @Volatile private var activeImportJob: Job? = null
     fun cancelImport() { activeImport?.cancel() }
+    fun dismissImportNotice(id: Long) {
+        mutable.update { if (it.importNotice?.id == id) it.copy(importNotice = null) else it }
+    }
 
     private suspend fun action(showBusy: Boolean = true, block: suspend () -> Unit) = actions.withLock {
         mutable.update { it.copy(busy = showBusy, error = null) }
@@ -45,16 +56,37 @@ internal class TextbookController(val library: TextbookLibrary) {
         } finally { mutable.update { it.copy(busy = false) } }
     }
 
-    suspend fun load() = action {
-        val catalog = library.catalog()
-        val active = library.activeReview()
-        val book = active?.let { library.book(it.book) } ?: catalog.firstOrNull()?.let { library.book(it.id) }
-        mutable.value = LibraryUi(catalog = catalog, book = book, busy = true, reviews = library.reviews(),
-            review = active, answer = active?.answer ?: PracticeAnswer(),
-            learningPath = book?.let(::restoredPath) ?: LearningPath.READ,
-            learningPathSaved = book?.let { library.learningPath(it.id) != null } ?: false,
-            ladder = book?.let { library.ladder(it.id) } ?: LadderSession(),
-            screen = if (active == null) BookScreen.HOME else BookScreen.REVIEWING)
+    suspend fun load() {
+        action {
+            val catalog = library.catalog()
+            val active = library.activeReview()
+            val book = active?.let { library.book(it.book) } ?: catalog.firstOrNull()?.let { library.book(it.id) }
+            mutable.update { current ->
+                LibraryUi(
+                    catalog = catalog, book = book, busy = true, reviews = library.reviews(),
+                    review = active, answer = active?.answer ?: PracticeAnswer(),
+                    learningPath = book?.let(::restoredPath) ?: LearningPath.READ,
+                    learningPathSaved = book?.let { library.learningPath(it.id) != null } ?: false,
+                    ladder = book?.let { library.ladder(it.id) } ?: LadderSession(),
+                    screen = if (active == null) BookScreen.HOME else BookScreen.REVIEWING,
+                    importing = current.importing,
+                    importNotice = current.importNotice,
+                )
+            }
+        }
+        val pending = withContext(Dispatchers.IO) { library.catalog().firstOrNull { it.pendingOcrPages > 0 } }
+        if (pending != null && activeImport == null) {
+            resumePendingOcrInBackground(pending.id)
+        }
+    }
+
+    fun launchDroppedBooks(paths: List<Path>, onStaged: () -> Unit = {}): Job? {
+        if (paths.size != 1) {
+            onStaged()
+            mutable.update { it.copy(error = "请一次拖入一份教材。") }
+            return null
+        }
+        return launchImport(paths.single(), onStaged)
     }
 
     suspend fun importDroppedBooks(paths: List<Path>) {
@@ -62,40 +94,258 @@ internal class TextbookController(val library: TextbookLibrary) {
         else importBook(paths.single())
     }
 
-    suspend fun importBook(path: Path) = action {
-        val job = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
-        val control = BookImportControl({ job?.isActive == false }) { progress ->
-            mutable.update { it.copy(importing = progress) }
+    fun launchImport(path: Path, onStaged: () -> Unit = {}): Job {
+        if (activeImport != null) {
+            onStaged()
+            mutable.update { it.copy(error = "上一本教材还在准备中，请稍候或先取消后再导入。") }
+            return Job().apply { complete() }
         }
+        val control = BookImportControl(
+            progress = { progress -> mutable.update { it.copy(importing = progress) } },
+        )
         activeImport = control
-        try {
-            val book = library.importBook(path, control)
-            library.closeReview()
-            mutable.value = LibraryUi(library.catalog(), book, prompt = BookPrompt.IMPORTED, page = book.readingPage,
-                busy = true, reviews = library.reviews(),
-                learningPath = library.learningPath(book.id)?.let { LearningPath.restore(it, book.learning) } ?: LearningPath.QUESTION_FIRST,
-                learningPathSaved = library.learningPath(book.id) != null,
-                ladder = library.ladder(book.id))
-        } catch (_: BookImportCancelled) {
-            mutable.update { it.copy(error = "已取消导入，书架没有新增教材。") }
-        } finally {
-            activeImport = null
-            mutable.update { it.copy(importing = null) }
+        val job = backgroundScope.launch {
+            var staged: TextbookLibrary.StagedBookImport? = null
+            var stagedNotified = false
+            fun releaseOnce() {
+                if (!stagedNotified) {
+                    stagedNotified = true
+                    onStaged()
+                }
+            }
+            try {
+                mutable.update { it.copy(error = null, importing = BookImportProgress(0, 0)) }
+                val result = library.stageBookImport(path, control)
+                staged = result
+                releaseOnce()
+                val book = result.book
+                if (!book.hasPendingOcr) {
+                    actions.withLock {
+                        library.closeReview()
+                        val catalog = library.catalog()
+                        val reviews = library.reviews()
+                        val pathSaved = library.learningPath(book.id)
+                        val ladder = library.ladder(book.id)
+                        mutable.update { current ->
+                            current.copy(
+                                catalog = catalog,
+                                book = book,
+                                prompt = BookPrompt.IMPORTED,
+                                page = book.readingPage,
+                                busy = false,
+                                error = null,
+                                reviews = reviews,
+                                review = null,
+                                learningPath = pathSaved?.let { LearningPath.restore(it, book.learning) } ?: LearningPath.QUESTION_FIRST,
+                                learningPathSaved = pathSaved != null,
+                                ladder = ladder,
+                                importing = null,
+                            )
+                        }
+                    }
+                    return@launch
+                }
+                val totalPages = book.pages.size
+                val donePages = book.pages.count { !it.ocrPending }
+                val totalOcr = book.pages.count { it.ocrPending }
+                val initialProgress = BookImportProgress(
+                    page = donePages,
+                    total = totalPages,
+                    recognizing = true,
+                    bookId = book.id,
+                    bookTitle = book.title,
+                    completedOcr = 0,
+                    totalOcr = totalOcr,
+                )
+                actions.withLock {
+                    library.closeReview()
+                    val catalog = library.catalog()
+                    val reviews = library.reviews()
+                    val pathSaved = library.learningPath(book.id)
+                    val ladder = library.ladder(book.id)
+                    mutable.update { current ->
+                        val stayElsewhere = current.screen != BookScreen.HOME && current.book != null && current.book.id != book.id
+                        current.copy(
+                            catalog = catalog,
+                            book = if (stayElsewhere) current.book else book,
+                            prompt = if (stayElsewhere) current.prompt else BookPrompt.IMPORTED,
+                            page = if (stayElsewhere) current.page else book.readingPage,
+                            busy = false,
+                            error = null,
+                            reviews = reviews,
+                            review = if (stayElsewhere) current.review else null,
+                            learningPath = if (stayElsewhere) current.learningPath else (pathSaved?.let { LearningPath.restore(it, book.learning) } ?: LearningPath.QUESTION_FIRST),
+                            learningPathSaved = if (stayElsewhere) current.learningPathSaved else (pathSaved != null),
+                            ladder = if (stayElsewhere) current.ladder else ladder,
+                            importing = initialProgress,
+                        )
+                    }
+                }
+                runOcrLoop(book.id, control, deleteOnEmptyFailure = !result.alreadyExisted)
+            } catch (_: BookImportCancelled) {
+                releaseOnce()
+                handleCancelledImport(staged?.book?.id)
+            } catch (cancel: CancellationException) {
+                releaseOnce()
+                handleCancelledImport(staged?.book?.id)
+                throw cancel
+            } catch (failure: Exception) {
+                releaseOnce()
+                handleFailedImport(staged?.book?.id, staged?.alreadyExisted == false, failure)
+            } finally {
+                releaseOnce()
+                if (activeImport === control) {
+                    activeImport = null
+                    activeImportJob = null
+                }
+                mutable.update { it.copy(importing = null) }
+            }
         }
+        activeImportJob = job
+        return job
+    }
+
+    private fun resumePendingOcrInBackground(bookId: String): Job {
+        val control = BookImportControl(
+            progress = { progress -> mutable.update { it.copy(importing = progress) } },
+        )
+        activeImport = control
+        val job = backgroundScope.launch {
+            try {
+                val book = library.book(bookId)
+                val totalPages = book.pages.size
+                val donePages = book.pages.count { !it.ocrPending }
+                val totalOcr = book.pages.count { it.ocrPending }
+                if (totalOcr > 0) {
+                    mutable.update {
+                        it.copy(
+                            importing = BookImportProgress(
+                                page = donePages,
+                                total = totalPages,
+                                recognizing = true,
+                                bookId = book.id,
+                                bookTitle = book.title,
+                                completedOcr = 0,
+                                totalOcr = totalOcr,
+                            ),
+                        )
+                    }
+                    runOcrLoop(bookId, control, deleteOnEmptyFailure = false)
+                }
+            } catch (_: BookImportCancelled) {
+                handleCancelledImport(bookId)
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (failure: Exception) {
+                runCatching { library.clearPendingOcr(bookId) }
+                handleFailedImport(bookId, deleteIfNoOcrYet = false, failure = failure)
+            } finally {
+                if (activeImport === control) {
+                    activeImport = null
+                    activeImportJob = null
+                }
+                mutable.update { it.copy(importing = null) }
+            }
+        }
+        activeImportJob = job
+        return job
+    }
+
+    private fun runOcrLoop(bookId: String, control: BookImportControl, deleteOnEmptyFailure: Boolean) {
+        val finalBook = library.resumeBookOcr(bookId, control) { updatedBook, progress ->
+            val remainingPending = updatedBook.pages.count { it.ocrPending }
+            mutable.update { current ->
+                current.copy(
+                    catalog = current.catalog.map { summary ->
+                        if (summary.id == updatedBook.id) summary.copy(pendingOcrPages = remainingPending) else summary
+                    },
+                    book = if (current.book?.id == updatedBook.id) updatedBook else current.book,
+                    importing = progress,
+                )
+            }
+        }
+        val catalog = library.catalog()
+        mutable.update { current ->
+            current.copy(
+                catalog = catalog,
+                book = if (current.book?.id == finalBook.id) finalBook else current.book,
+                importing = null,
+                importNotice = BookImportNotice(System.nanoTime(), "《${finalBook.title}》识别完了"),
+            )
+        }
+    }
+
+    private suspend fun handleCancelledImport(bookId: String?) = withContext(NonCancellable) {
+        if (bookId != null) runCatching { library.deleteBook(bookId) }
+        val catalog = runCatching { library.catalog() }.getOrElse { emptyList() }
+        val fallbackBook = catalog.firstOrNull()?.let { runCatching { library.book(it.id) }.getOrNull() }
+        mutable.update { current ->
+            val removedOpen = bookId != null && current.book?.id == bookId
+            current.copy(
+                catalog = catalog,
+                book = if (removedOpen) fallbackBook else current.book,
+                screen = if (removedOpen) BookScreen.HOME else current.screen,
+                prompt = if (removedOpen) null else current.prompt,
+                source = if (removedOpen) null else current.source,
+                page = if (removedOpen) (fallbackBook?.readingPage ?: 1) else current.page,
+                busy = false,
+                importing = null,
+                error = "已取消导入，书架没有新增教材。",
+            )
+        }
+    }
+
+    private suspend fun handleFailedImport(bookId: String?, deleteIfNoOcrYet: Boolean, failure: Exception) = withContext(NonCancellable) {
+        val message = failure.message.takeIf { failure is IllegalArgumentException && ReadableText.readsAsChinese(it) }
+            ?: "暂时无法读取或保存教材，请确认文件完整、未加密，然后重试。"
+        val shouldDelete = bookId != null && deleteIfNoOcrYet &&
+            runCatching { library.book(bookId).pages.none { it.ocr } }.getOrDefault(false)
+        if (shouldDelete) {
+            runCatching { library.deleteBook(checkNotNull(bookId)) }
+        }
+        val catalog = runCatching { library.catalog() }.getOrElse { emptyList() }
+        val fallbackBook = catalog.firstOrNull()?.let { runCatching { library.book(it.id) }.getOrNull() }
+        mutable.update { current ->
+            val removedOpen = shouldDelete && current.book?.id == bookId
+            current.copy(
+                catalog = catalog,
+                book = if (removedOpen) fallbackBook else current.book,
+                screen = if (removedOpen) BookScreen.HOME else current.screen,
+                prompt = if (removedOpen) null else current.prompt,
+                source = if (removedOpen) null else current.source,
+                page = if (removedOpen) (fallbackBook?.readingPage ?: 1) else current.page,
+                busy = false,
+                importing = null,
+                error = message,
+            )
+        }
+    }
+
+    suspend fun importBook(path: Path) {
+        launchImport(path).join()
     }
 
     suspend fun select(id: String) = action {
         val book = library.book(id)
         library.save(book)
         library.closeReview()
-        mutable.value = LibraryUi(library.catalog(), book, page = book.readingPage, busy = true, reviews = library.reviews(),
-            learningPath = restoredPath(book), learningPathSaved = library.learningPath(book.id) != null,
-            ladder = library.ladder(book.id))
+        val catalog = library.catalog()
+        val reviews = library.reviews()
+        val pathSaved = library.learningPath(book.id) != null
+        val ladder = library.ladder(book.id)
+        mutable.update { current ->
+            LibraryUi(
+                catalog = catalog, book = book, page = book.readingPage, busy = true, reviews = reviews,
+                learningPath = restoredPath(book), learningPathSaved = pathSaved,
+                ladder = ladder, importing = current.importing, importNotice = current.importNotice,
+            )
+        }
     }
 
     private fun persist(book: Textbook) {
         library.save(book)
-        mutable.update { it.copy(book = book, catalog = library.catalog()) }
+        val latest = library.book(book.id)
+        mutable.update { it.copy(book = latest, catalog = library.catalog()) }
     }
 
     private fun restoredPath(book: Textbook) = LearningPath.restore(library.learningPath(book.id), book.learning)
@@ -154,7 +404,10 @@ internal class TextbookController(val library: TextbookLibrary) {
             mutable.update { it.copy(learningPathSaved = true) }
             openReading(book); return@action
         }
-        require(book.lessons.isNotEmpty()) { "这本书没有可提取或识别出的学习文字。仍可翻看 PDF 原页或图片原件；要开始学，请换用有文字或更清晰的版本后重试。" }
+        require(book.lessons.isNotEmpty()) {
+            if (book.hasPendingOcr) "这本书还在后台识别文字，请等识别出部分内容后再开始学，或先翻看 PDF 原页。"
+            else "这本书没有可提取或识别出的学习文字。仍可翻看 PDF 原页或图片原件；要开始学，请换用有文字或更清晰的版本后重试。"
+        }
         val enabled = book.copy(learning = true, promptSeen = true)
         library.saveLearningPath(book.id, path.name)
         mutable.update { it.copy(learningPathSaved = true) }

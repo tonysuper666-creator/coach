@@ -122,7 +122,7 @@ internal fun BookExplainPanel(
     book: Textbook, page: Int, consent: ExplainConsent, explainer: BookExplainer, modifier: Modifier = Modifier,
     selection: SourceBlock? = null, onOpenOriginal: ((BookPassage) -> Unit)? = null,
 ) {
-    val blocks = remember(book.id) { StudyCoachCourse.blocks(book.id, book.pages) }
+    val blocks = remember(book.id, book.pages) { StudyCoachCourse.blocks(book.id, book.pages) }
     val onPage = remember(blocks, page, selection) {
         if (selection != null) listOf(selection) else blocks.filter { it.page == page && !it.heading }
     }

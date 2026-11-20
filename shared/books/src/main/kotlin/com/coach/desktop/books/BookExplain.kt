@@ -114,8 +114,10 @@ private sealed interface BlockState {
 }
 
 /**
- * 「讲解」视图：本页每一段原文旁一个「讲解」按钮。点了才把这一段和前后各一段发给已配对的 Mac；
- * 讲解里的块编号点开就是这一块原文。
+ * 「讲解」视图：顶部一个「讲解这一页」，把这一页的正文当一个整体讲（主旨、脉络、难点，每点带段号出处）；
+ * 正文段落旁各一个「讲解这段」，点了才把这一段和前后各一段发给讲解服务。目录、标题、页眉页脚、页码和很短的行
+ * 不给入口（[BookBlockKinds]）。目录页、版权页、空白页、只有标题的页不给「讲解这一页」，只写一句灰字。
+ * 什么都要读者点了才发请求；连接正常时不写任何连接文案，只有没连上或出错时才提示。
  */
 @Composable
 internal fun BookExplainPanel(
@@ -123,12 +125,22 @@ internal fun BookExplainPanel(
     selection: SourceBlock? = null, onOpenOriginal: ((BookPassage) -> Unit)? = null,
 ) {
     val blocks = remember(book.id) { StudyCoachCourse.blocks(book.id, book.pages) }
-    val onPage = remember(blocks, page, selection) {
-        if (selection != null) listOf(selection) else blocks.filter { it.page == page && !it.heading }
+    val running = remember(blocks) { BookBlockKinds.running(blocks) }
+    val pageBlocks = remember(blocks, page) { blocks.filter { it.page == page } }
+    val pageKind = remember(pageBlocks, running) { BookBlockKinds.page(pageBlocks, running) }
+    // 拿去整页讲的只有正文段落；标题、目录行、页码都不发。
+    val pageBody = remember(pageBlocks, running, pageKind) {
+        if (pageKind == BookPageKind.Body) pageBlocks.filter { BookBlockKinds.explainable(it, running) } else emptyList()
+    }
+    val onPage = remember(pageBlocks, selection) {
+        if (selection != null) listOf(selection) else pageBlocks.filter { !it.heading }
     }
     var consented by remember(book.id) { mutableStateOf(consent.allowed(book.id)) }
     val states = remember(book.id) { mutableStateMapOf<String, BlockState>() }
+    // 整页讲解按页号存：翻走再翻回来还在，不重新请求。
+    val pageStates = remember(book.id) { mutableStateMapOf<Int, BlockState>() }
     var pending by remember(book.id, page) { mutableStateOf<SourceBlock?>(null) }
+    var pendingPage by remember(book.id, page) { mutableStateOf(false) }
     var opened by remember { mutableStateOf<Pair<Citation, SourceBlock>?>(null) }
     var address by remember(explainer.defaultAddress) { mutableStateOf(explainer.defaultAddress) }
     var code by remember { mutableStateOf("") }
@@ -152,6 +164,23 @@ internal fun BookExplainPanel(
         }
     }
 
+    fun startPage() {
+        val at = page
+        val body = pageBody
+        pageStates[at] = BlockState.Waiting
+        scope.launch {
+            pageStates[at] = when (val result = explainer.explainLesson(body, book.pages.size)) {
+                is ExplainResult.Done -> BlockState.Done(result.explanation, body)
+                is ExplainResult.Refused -> BlockState.Failed(result.message, result.trouble)
+            }
+        }
+    }
+    // 配好了：之前因未配对或停用而停下的段落和整页回到原来的入口。
+    fun clearPairingFailures() {
+        states.filterValues { (it as? BlockState.Failed)?.trouble?.needsPairing == true }.keys.forEach(states::remove)
+        pageStates.filterValues { (it as? BlockState.Failed)?.trouble?.needsPairing == true }.keys.forEach(pageStates::remove)
+    }
+
     val colors = CoachTheme.colors
     // 讲解长过一屏时，右侧这道 V7 细滚动条跟着同一个 ScrollState 走：不用滚轮也能看出下面还有内容，
     // 拖动滑块能读到底（desktop-polish A11）。条子宽 12dp，落在正文右侧 16dp 的内边距里，不盖住字。
@@ -162,22 +191,22 @@ internal fun BookExplainPanel(
                 val sable = explainer.sableLogin
                 if (explainer.revoked) {
                     Text("这台电脑的连接已停用", style = MaterialTheme.typography.titleMedium)
-                    Text(if (sable) "授权已撤销，请重新登录。读书和做题照常。" else "请 Mac 那边生成新的配对码，填在下面重新配对。读书和做题照常。",
+                    Text(if (sable) "授权已撤销，请重新登录。读书和做题照常。" else "请找给你配对码的人生成新码，填在下面重新配对。读书和做题照常。",
                         style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("explain-revoked"))
                 } else {
-                    Text("先连上 Mac", style = MaterialTheme.typography.titleMedium)
-                    Text(if (sable) "登录后可以提问，也可以让朋友服务讲解选中的原文。" else "填上 Mac 地址和配对码，连上后可以提问，也可以讲解选中的原文。",
+                    Text("先连上服务", style = MaterialTheme.typography.titleMedium)
+                    Text(if (sable) "登录后可以提问，也可以让朋友服务讲解选中的原文。" else "填上服务地址和配对码，连上后可以提问，也可以讲解选中的原文。",
                         style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("explain-connect-hint"))
                 }
                 if (sable) {
                     com.coach.ui.SableLoginButton(pairing, { pairing = it }) { open ->
                         explainer.sable(open)
-                        states.filterValues { (it as? BlockState.Failed)?.trouble?.needsPairing == true }.keys.forEach(states::remove)
+                        clearPairingFailures()
                     }
                     Text("没有 Sable 账号？用配对码", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                 }
                 V7Field(address, { address = it; pairError = null },
-                    if (explainer.hasBuiltInAddress) "Mac 地址（留空连默认服务）" else "Mac 地址",
+                    if (explainer.hasBuiltInAddress) "服务地址（留空连默认服务）" else "服务地址",
                     enabled = !pairing, paper = colors.surface2, modifier = Modifier.fillMaxWidth().testTag("explain-address"))
                 V7Field(code, { code = it.filter(Char::isDigit).take(6); pairError = null }, "配对码", enabled = !pairing, paper = colors.surface2,
                     visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
@@ -185,16 +214,28 @@ internal fun BookExplainPanel(
                 PrimaryButton(onClick = {
                     pairing = true
                     scope.launch {
-                        if (!explainer.pair(address, code)) pairError = "没配上。核对 Mac 地址，或请 Mac 那边生成新的配对码。"
-                        // 配好了：之前因未配对或停用而停下的段落回到「讲解这段」。
-                        else states.filterValues { (it as? BlockState.Failed)?.trouble?.needsPairing == true }.keys.forEach(states::remove)
+                        if (!explainer.pair(address, code)) pairError = "没配上。核对服务地址，或请找给你配对码的人生成新码。"
+                        else clearPairingFailures()
                         code = ""; pairing = false
                     }
                 }, enabled = code.length == 6 && (address.isNotBlank() || explainer.hasBuiltInAddress) && !pairing, modifier = Modifier.testTag("explain-pair")) { Text(if (pairing) "正在配对…" else "配对") }
                 pairError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = v7Alert(), modifier = Modifier.testTag("explain-pair-error")) }
-            } else if (paired != null) Text("已连上 Mac。点一段原文旁的「讲解这段」。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
-            if (onPage.isEmpty()) Text("这一页没有可讲的正文。", style = MaterialTheme.typography.bodyMedium, color = colors.fgSecondary)
-            for (block in onPage) Column(Modifier.fillMaxWidth().testTag("explain-block-${block.id}"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            }
+            // 连上了就不写连接文案。从阅读器选进来的一段只讲那一段，不放整页入口。
+            if (selection == null) PageExplain(pageKind, pageBody.isNotEmpty() && BookLessonWire.fits(pageBody), pageStates[page],
+                enabled = paired != null, onExplain = { if (consented) startPage() else pendingPage = true },
+                onRepair = { scope.launch { scroll.animateScrollTo(0) } }) { done ->
+                ExplanationView(book, blocks, done.explanation, done.context) { citation ->
+                    done.context.firstOrNull { it.id == citation.blockId }?.let {
+                        if (onOpenOriginal != null) onOpenOriginal(BookPassage.from(book, it)) else opened = citation to it
+                    }
+                }
+            }
+            // 选进来的一段是读者自己挑的，照样给讲；其余只有正文段落才挂「讲解这段」，目录行、页码、短行只照常显示。
+            for (block in onPage) if (selection == null && (pageKind == BookPageKind.Copyright || !BookBlockKinds.explainable(block, running)))
+                Text(ReadableText.reflow(block.text), Modifier.fillMaxWidth().testTag("explain-plain-${block.id}"),
+                    style = MaterialTheme.typography.bodyLarge, color = colors.fgSecondary)
+            else Column(Modifier.fillMaxWidth().testTag("explain-block-${block.id}"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 val state = states[block.id]
                 val failed = state as? BlockState.Failed
                 val selected = selection?.id == block.id
@@ -247,6 +288,12 @@ internal fun BookExplainPanel(
         if (scroll.maxValue > 0) BookScrollbar(scroll,
             Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 6.dp).testTag("explain-scrollbar"))
     }
+    if (pendingPage) AlertDialog(onDismissRequest = { pendingPage = false }, title = { Text(ExplainPrivacy.TITLE) },
+        text = { Text(ExplainPrivacy.page(book.title), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("explain-consent")) },
+        confirmButton = {
+            PrimaryButton({ consent.allow(book.id); consented = true; pendingPage = false; startPage() },
+                modifier = Modifier.testTag("explain-consent-allow")) { Text("允许并讲解") }
+        }, dismissButton = { V7TextButton({ pendingPage = false }, modifier = Modifier.testTag("explain-consent-deny")) { Text("不允许") } })
     pending?.let { block ->
         AlertDialog(onDismissRequest = { pending = null }, title = { Text(ExplainPrivacy.TITLE) },
             text = { Text(ExplainPrivacy.explain(book.title),
@@ -264,6 +311,33 @@ internal fun BookExplainPanel(
                     }
                 }
             }, confirmButton = { V7TextButton({ opened = null }, modifier = Modifier.testTag("explain-source-close")) { Text("关闭") } })
+    }
+}
+
+/**
+ * 面板顶部的「讲解这一页」。不是正文页（目录、版权、空白、只有标题）就换成一句灰字；
+ * 讲完的结果和失败后的下一步都在这一块里，不挪动下面的段落。
+ */
+@Composable
+private fun PageExplain(kind: BookPageKind, fits: Boolean, state: BlockState?, enabled: Boolean,
+    onExplain: () -> Unit, onRepair: () -> Unit, done: @Composable (BlockState.Done) -> Unit) {
+    val colors = CoachTheme.colors
+    val note = kind.note ?: if (!fits) "这一页太长，挑一段讲解。" else null
+    if (note != null) Text(note, style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("explain-page-note"))
+    else Column(Modifier.fillMaxWidth().testTag("explain-page-section"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        val waiting = state == BlockState.Waiting
+        val failed = state as? BlockState.Failed
+        if (state !is BlockState.Done) Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (failed?.trouble?.needsPairing == true) PaperButton(onClick = onRepair, modifier = Modifier.testTag("explain-page-repair")) {
+                Text(if (failed.trouble == ExplainTrouble.Revoked) "重新配对" else "配对")
+            } else PaperButton(onClick = onExplain, enabled = enabled && !waiting, modifier = Modifier.testTag("explain-page")) {
+                Text(when { waiting -> "讲解中…"; failed != null -> "再讲一次"; else -> "讲解这一页" })
+            }
+            if (failed != null) Text(failed.message, style = MaterialTheme.typography.bodySmall, maxLines = 2,
+                color = if (failed.trouble.needsReader) v7Alert() else colors.fgSecondary,
+                modifier = Modifier.weight(1f, fill = false).testTag("explain-page-failed"))
+        }
+        if (state is BlockState.Done) done(state)
     }
 }
 

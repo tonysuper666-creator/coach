@@ -37,7 +37,7 @@ class SableLoginEntryTest {
                 onNodeWithTag("explain-connect-hint").assertTextContains("配对码", substring = true)
                 pair(mac.url, "123456")
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
-                onNodeWithText("已连上 Mac", substring = true).assertExists()
+                assertConnectedQuietly()
             }
             assertEquals(1, mac.pairs.get())
         }
@@ -54,10 +54,10 @@ class SableLoginEntryTest {
                 setContent { CoachTheme(darkTheme = true) { BookExplainPanel(book, book.lessons.first().firstPage, ExplainConsent(library.directory), explainer) } }
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-revoked").fetchSemanticsNodes().isNotEmpty() }
                 assertNoSable()
-                onNodeWithTag("explain-revoked").assertTextContains("新的配对码", substring = true)
+                onNodeWithTag("explain-revoked").assertTextContains("生成新码", substring = true)
                 pair(mac.url, "654321")
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
-                onNodeWithText("已连上 Mac", substring = true).assertExists()
+                assertConnectedQuietly()
             }
             assertEquals(2, mac.pairs.get())
             assertFalse(ExplainTrouble.REVOKED.contains("登录"), "停用那一句不能再叫人去登录")
@@ -72,8 +72,10 @@ class SableLoginEntryTest {
             // 重开程序：新的 explainer 从磁盘读回同一份配对，直接是「已连上」。
             runSkikoComposeUiTest(size = Size(1100f, 850f), density = Density(1f)) {
                 setContent { CoachTheme(darkTheme = false) { BookExplainPanel(book, book.lessons.first().firstPage, ExplainConsent(library.directory), BookExplainer(settings, library)) } }
-                waitUntil(timeoutMillis = 20_000) { onAllNodesWithText("已连上 Mac", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                // 读回配对之后「讲解这一页」才可点。
+                waitUntil(timeoutMillis = 20_000) { onAllNodes(hasTestTag("explain-page") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithTag("explain-pairing").assertDoesNotExist()
+                assertConnectedQuietly()
             }
             assertEquals(1, mac.pairs.get())
         }
@@ -128,6 +130,14 @@ class SableLoginEntryTest {
                 if (shown) onNodeWithText("用 Sable 账号登录").assertExists() else assertNoSableText()
             }
         }
+    }
+
+    /** 连上了就不写连接文案（TON-1766）：「讲解这一页」和「讲解这段」都能点，页面上没有「已连上」一类的话。 */
+    private fun ComposeUiTest.assertConnectedQuietly() {
+        onNodeWithTag("explain-page").assertIsEnabled()
+        onAllNodesWithTag("explain-button")[0].assertIsEnabled()
+        assertTrue(onAllNodesWithText("已连上", substring = true, useUnmergedTree = true).fetchSemanticsNodes().isEmpty(),
+            "连接正常时不该有连接文案")
     }
 
     /** 隐藏模式：讲解页的配对表单里没有 Sable 字样，地址和配对码两格都在。 */

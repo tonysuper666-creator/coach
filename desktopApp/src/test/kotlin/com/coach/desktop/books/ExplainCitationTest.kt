@@ -37,21 +37,21 @@ class ExplainCitationTest {
             PDPageContentStream(pdf, sheet).use { out ->
                 out.beginText(); out.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 11f)
                 out.newLineAtOffset(50f, 710f); out.showText("Chapter 1 Light")
-                out.newLineAtOffset(0f, -110f); out.showText("Alpha light.")
-                out.newLineAtOffset(0f, -100f); out.showText("Beta water.")
+                out.newLineAtOffset(0f, -110f); out.showText(ALPHA)
+                out.newLineAtOffset(0f, -100f); out.showText(BETA)
                 out.endText()
             }
             pdf.save(file.toFile())
         }
         val book = TextbookLibrary(root.resolve("library")).importBook(file)
         val paragraphs = StudyCoachCourse.blocks(book.id, book.pages).filter { !it.heading }
-        assertEquals(listOf("Alpha light.", "Beta water."), paragraphs.map { it.text }, "PDF 一页两段正文")
+        assertEquals(listOf(ALPHA, BETA), paragraphs.map { it.text }, "PDF 一页两段正文")
         assertEquals(listOf(1, 1), paragraphs.map { it.page })
 
         assertCitations(root, book, paragraphs,
             links = listOf(
-                "出处 1 · 第 1 页 · 第 1 段 · “Alpha light.”",
-                "出处 2 · 第 1 页 · 第 2 段 · “Beta water.”",
+                "出处 1 · 第 1 页 · 第 1 段 · “Alpha light fall…”",
+                "出处 2 · 第 1 页 · 第 2 段 · “Beta water rises…”",
             ),
             titles = listOf("原文 · 第 1 页 · 第 1 段", "原文 · 第 1 页 · 第 2 段"))
         root.toFile().deleteRecursively()
@@ -64,15 +64,15 @@ class ExplainCitationTest {
         assertEquals("txt", book.format)
         val blocks = StudyCoachCourse.blocks(book.id, book.pages)
         val paragraphs = blocks.filter { !it.heading }
-        assertEquals(listOf("Alpha light.", "Beta water."), paragraphs.map { it.text }, "同一章两段正文")
+        assertEquals(listOf(ALPHA, BETA), paragraphs.map { it.text }, "同一章两段正文")
         // 文本导入把章节切块从 1 编号，这个号只用来定位原文，不是书里的页码。
         assertEquals(listOf(1, 1), paragraphs.map { it.page })
         assertEquals("第 1 页（1 Light）", book.pageLabel(paragraphs[0].page), "导入时编的页号")
 
         assertCitations(root, book, paragraphs,
             links = listOf(
-                "出处 1 · 本章第 1 段 · “Alpha light.”",
-                "出处 2 · 本章第 2 段 · “Beta water.”",
+                "出处 1 · 本章第 1 段 · “Alpha light fall…”",
+                "出处 2 · 本章第 2 段 · “Beta water rises…”",
             ),
             titles = listOf("原文 · 本章第 1 段", "原文 · 本章第 2 段"))
         root.toFile().deleteRecursively()
@@ -107,7 +107,7 @@ class ExplainCitationTest {
             onAllNodesWithTag("explain-citation")[1].performClick()
             waitForIdle()
             onNodeWithTag("explain-source-title").assertTextEquals(titles[1])
-            onNodeWithTag("explain-source-text").assertTextEquals("Beta water.")
+            onNodeWithTag("explain-source-text").assertTextEquals(BETA)
             onNodeWithTag("explain-source-close").performClick()
             waitForIdle()
 
@@ -115,7 +115,7 @@ class ExplainCitationTest {
             onAllNodesWithTag("explain-citation")[0].performClick()
             waitForIdle()
             onNodeWithTag("explain-source-title").assertTextEquals(titles[0])
-            onNodeWithTag("explain-source-text").assertTextEquals("Alpha light.")
+            onNodeWithTag("explain-source-text").assertTextEquals(ALPHA)
         }
     }
 
@@ -132,13 +132,15 @@ class ExplainCitationTest {
     }
 
     private companion object {
-        /** 章标题下面同一页两段：短到摘句不被截断，弹窗里的原文可以逐字比对。 */
+        const val ALPHA = "Alpha light falls on the upper side of the leaf in the morning."
+        const val BETA = "Beta water rises from the roots to the leaves through the stem."
+        /** 章标题下面同一页两段：每段都够 40 字（TON-1766 起短行不给讲解入口），摘句截到 16 字，弹窗里的原文仍逐字比对。 */
         val TEXT = """
             # 1 Light
 
-            Alpha light.
+            Alpha light falls on the upper side of the leaf in the morning.
 
-            Beta water.
+            Beta water rises from the roots to the leaves through the stem.
         """.trimIndent()
     }
 }

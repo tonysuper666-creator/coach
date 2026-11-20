@@ -325,7 +325,7 @@ A second English paragraph lets us inspect the space between paragraphs and the 
         val root = Files.createTempDirectory("coach-v7-explain-")
         val directory = root.resolve("library")
         val controller = TextbookController(TextbookLibrary(directory))
-        runBlocking { controller.importBook(knowledgeRecapTextbook(root)) }
+        runBlocking { controller.importBook(explainTextbook(root)) }
         val book = controller.state.value.book!!
         val blocks = StudyCoachCourse.blocks(book.id, book.pages).filterNot { it.heading }
         val page = blocks.groupBy { it.page }.maxBy { it.value.size }.key
@@ -622,6 +622,22 @@ A second English paragraph lets us inspect the space between paragraphs and the 
             shot("short-answer-revealed")
         }
         return shots
+    }
+
+    /**
+     * 讲解面板用的样例书：和 [knowledgeRecapTextbook] 同样六节，但每段都够 40 字——
+     * TON-1766 起不到 40 字的短行不给「讲解这段」。文字全是自拟。
+     */
+    private fun explainTextbook(root: Path): Path {
+        Files.createDirectories(root)
+        val sections = listOf(
+            "细胞" to "细胞是生物体结构和功能的基本单位。细胞里有细胞核，外面包着一层细胞膜，中间是细胞质，各司其职。",
+            "细胞膜" to "细胞膜是包围细胞的一层薄膜。它控制物质进出，该进来的养料放进来，该排出去的废物送出去。",
+            "细胞核" to "细胞核是细胞里储存遗传信息的结构。它里面有染色体，决定细胞长成什么样、什么时候分裂。",
+        )
+        return Files.writeString(root.resolve("explain-sample.md"), sections.mapIndexed { index, (title, body) ->
+            "## 第${index + 1}节 $title\n\n$body"
+        }.joinToString("\n\n"))
     }
 
     private class FakeMac(home: Path) : BookExplainer(DesktopConnectionSettings(home = home, environment = { null })) {

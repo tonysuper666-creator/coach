@@ -53,7 +53,7 @@ internal fun BookLessonExplanation(
             Text("讲解", style = MaterialTheme.typography.titleMedium)
             if (!allowed) {
                 Text("讲解这一节需要发送原文", style = MaterialTheme.typography.titleSmall)
-                Text("这一节的原文会经李政的 Mac 发给 Anthropic 或 OpenAI 的 API，不发到别处。API 默认不拿它训练模型。整本书留在这台电脑上。你可以继续读书和做题，允许后才会请求讲解。",
+                Text("这一节的原文会经讲解服务发给 Anthropic 或 OpenAI 的 API，不发到别处。API 默认不拿它训练模型。整本书留在这台电脑上。你可以继续读书和做题，允许后才会请求讲解。",
                     style = MaterialTheme.typography.bodySmall,
                     color = com.coach.ui.theme.CoachTheme.colors.fgSecondary,
                     modifier = Modifier.testTag("book-lesson-consent"))

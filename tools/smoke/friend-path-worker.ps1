@@ -934,7 +934,7 @@ try {
             if (Test-QuestionSettingsConfirmed $afterLines) { $confirmed = $true }
         }
         if (-not $confirmed) { Fail 6 '点击「确定」后未关闭出题方式对话框或未确认为选择题' }
-        $deadline = (Get-Date).AddSeconds(120); $question = $false; $picked = $null
+        $deadline = (Get-Date).AddSeconds(120); $question = $false; $picked = $null; $sawQuestion = $false; $optAnchorX1 = 0; $qScroll = 0
         while ((Get-Date) -lt $deadline -and -not $question) {
             $lines = Shot 6 'question'
             $allow = Has $lines @('允许并出题')
@@ -943,29 +943,41 @@ try {
                 Fail 6 '本节出题被拒绝或不可用，见 winbox 私有截图 6-question.png'
             }
             $anchor = Has $lines @('查看对应原文')
-            if ((Has $lines @('本次练习')) -and $anchor) {
+            if ((Has $lines @('本次练习')) -and $anchor) { $sawQuestion = $true; $optAnchorX1 = [int]$anchor.X1 }
+            if ($sawQuestion) {
                 # 只在题目原文按钮下找独立的选项字母；不以固定屏幕位置或「猜的」芯片当成作答。
-                # 深色下的选项字母对比度低，OCR 常漏读 A、B，或把 C 读成 c：取最靠上的那个单字母选项。
+                # 深色 800x600 下首屏可能只露出 A 且单字母对比度低易漏读：若未命中则滚动露出 B/C/D 再扫。
+                $minOptY = if ($anchor) { $anchor.Y + 10 } else { 180 }
                 foreach ($line in $lines) { foreach ($word in $line.Words) {
                     $b = $word.BoundingRect
-                    if ($word.Text -cmatch '^[A-Da-d]$' -and $b.Y -gt $anchor.Y + 10 -and (-not $picked -or $b.Y -lt $picked.Y)) { $picked = $b }
+                    if ($word.Text -cmatch '^[A-Da-d](?:[\.．、])?$' -and $b.Y -gt $minOptY -and $b.X -le ($optAnchorX1 + 22) -and $b.X -ge ($optAnchorX1 - 20) -and (-not $picked -or $b.Y -lt $picked.Y)) { $picked = $b }
                 } }
                 if ($picked) { $question = $true }
             }
-            if (-not $question) { Start-Sleep -Seconds 3 }
+            if (-not $question) {
+                if ($sawQuestion) {
+                    $sp = Scroll-Point 0.7 0.6
+                    $dir = if (($qScroll % 10) -lt 5) { -2 } else { 2 }
+                    Scroll-At $sp[0] $sp[1] $dir; $qScroll++
+                    Start-Sleep -Seconds 1
+                } else {
+                    Start-Sleep -Seconds 3
+                }
+            }
         }
         if (-not $question) { Fail 6 '120 秒内没有出现可作答的本次练习选择题' }
         Click-At ([int]$picked.X + 45) ([int]$picked.Y + 12)
         Start-Sleep -Seconds 2
         $selected = $false; $explained = $false; $cited = $false; $summary = $false
-        foreach ($view in 0..8) {
+        foreach ($view in 0..10) {
             $lines = Shot 6 "answered-$view"
             if (Has $lines @('你选择：', '你选择:')) { $selected = $true }
             if (Has $lines @('答后讲解')) { $explained = $true }
             if (Has $lines @('出处')) { $cited = $true }
             if (Has $lines @('题目和作答只保留在这次练习中', '要回看时再打开', '小结')) { $summary = $true }
             if ($selected -and $explained -and $cited -and $summary) { break }
-            $sp = Scroll-Point 0.7 0.6; Scroll-At $sp[0] $sp[1] -2; Start-Sleep -Seconds 1
+            $sp = Scroll-Point 0.7 0.6; $dir = if ($view -lt 5) { -2 } else { 2 }
+            Scroll-At $sp[0] $sp[1] $dir; Start-Sleep -Seconds 1
         }
         if (-not $selected) { Fail 6 '点击选项后没有看到已选答案' }
         if (-not $explained -or -not $cited) { Fail 6 '已作答，但没有看到带出处的答后讲解' }

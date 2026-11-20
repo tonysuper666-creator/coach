@@ -13,6 +13,8 @@ import androidx.compose.ui.test.performClick
 import com.coach.client.CourseView
 import com.coach.client.RenderedMath
 import com.coach.desktop.books.BookHighlightRecord
+import com.coach.desktop.books.BookNoteRecord
+import com.coach.desktop.books.BookNoteWriteResult
 import com.coach.desktop.books.BookNotesScope
 import com.coach.desktop.books.BookPassage
 import com.coach.desktop.books.LibraryHome
@@ -102,6 +104,18 @@ class AndroidNotesExportTest {
             val p1 = book.pages.first()
             val q1 = p1.text.take(minOf(16, p1.text.length))
             library.setHighlight(BookPassage(book.id, p1.number, 0, q1.length, q1), true)
+            val p1Sha = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(p1.text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+            val noteSaveResult = library.saveNote(
+                book.id,
+                BookNoteRecord("note-1", "1", p1.number, 0, q1.length, q1, "第一页保存的批注", p1Sha, 0L),
+                baseRevision = 0L,
+                mutationId = "mut-export-1",
+            )
+            assertEquals(BookNoteWriteResult.Saved(1L), noteSaveResult)
+            val dbNotes = library.allNotes(book.id)
+            assertEquals(1, dbNotes.size)
+            assertEquals("第一页保存的批注", dbNotes.single().note)
 
             val firstLesson = book.lessons.first()
             library.saveAnswer(
@@ -143,16 +157,23 @@ class AndroidNotesExportTest {
                 guessed = true,
             )
 
-            val full = buildBookNotesOutline(book, highlightsWithFarPage, listOf(syntheticReview), extraAnswers, BookNotesScope.FULL_BOOK, p1.number)
+            val notesWithFarPage = dbNotes + BookNoteRecord("note-far", "1", p1.number + 50, 0, 4, "远页原句", "远页保存的批注", p1Sha, 1L)
+
+            val full = buildBookNotesOutline(book, highlightsWithFarPage, listOf(syntheticReview), extraAnswers, BookNotesScope.FULL_BOOK, p1.number, notesWithFarPage)
             assertTrue(full.markdown.contains("# ${book.title} · 复习提纲"))
             assertTrue(full.markdown.contains(q1))
             assertTrue(full.markdown.contains("远页摘录"))
+            assertTrue(full.markdown.contains("## 批注笔记"))
+            assertTrue(full.markdown.contains("第一页保存的批注"))
+            assertTrue(full.markdown.contains("远页保存的批注"))
             assertTrue(full.markdown.contains("价值尺度职能依托于哪种形态的货币"))
             assertTrue(full.markdown.contains("劳动二重性决定具体劳动与抽象劳动"))
             assertTrue(full.markdown.contains("远章补充作答"))
 
-            val nearby = buildBookNotesOutline(book, highlightsWithFarPage, listOf(syntheticReview), extraAnswers, BookNotesScope.CURRENT_PAGE, p1.number)
+            val nearby = buildBookNotesOutline(book, highlightsWithFarPage, listOf(syntheticReview), extraAnswers, BookNotesScope.CURRENT_PAGE, p1.number, notesWithFarPage)
             assertTrue(nearby.markdown.contains(q1))
+            assertTrue(nearby.markdown.contains("第一页保存的批注"))
+            assertFalse(nearby.markdown.contains("远页保存的批注"))
             assertFalse(nearby.markdown.contains("远页摘录"))
             assertFalse(nearby.markdown.contains("远章补充作答"))
         } finally {

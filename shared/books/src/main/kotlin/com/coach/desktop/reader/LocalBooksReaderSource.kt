@@ -1,6 +1,8 @@
 package com.coach.desktop.reader
 
 import com.coach.client.ReaderReply
+import com.coach.desktop.books.BookNoteRecord
+import com.coach.desktop.books.BookNoteWriteResult
 import com.coach.desktop.books.BookPdfLoader
 import com.coach.desktop.books.BookPdfStripper
 import com.coach.desktop.books.BookPdfTextPosition
@@ -12,8 +14,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -24,7 +27,7 @@ import java.security.MessageDigest
  *
  * 仅识别经书架显式导入的内容 SHA-256 ID；本地不可变副本的版本为 1。
  * HTTP 的 opaque ID 与页文本哈希都不是本地文件身份。读取不会隐式导入文件。
- * 书签仍由书架控制器保存；没有持久 CAS/幂等与批注存储时，拒绝 ReaderSource 写入。
+ * 书签仍由书架控制器保存；批注经 SQLite `book_notes` 提供 CAS 与幂等持久化。
  */
 internal class LocalBooksReaderSource(val library: TextbookLibrary, private val loadPageImages: Boolean = true) : ReaderSource {
     // 书库（SQLite）、PDFBox、PNG 编码都是阻塞工作。调用方在 EDT 上时挪到 IO 线程执行，EDT 只挂起等待、结果由调用方的调度器接回，
@@ -63,10 +66,36 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary, private val 
         return ReaderReply(200, buildJsonObject { put("documents", array) })
     }
 
+    private fun pageTextSha256(text: String): String =
+        MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+
     override suspend fun state(document: String): ReaderReply = offEdt { stateBlocking(document) }
 
     private fun stateBlocking(document: String): ReaderReply {
         val book = findBook(document) ?: return ReaderReply(404, null)
+        val notesArray = buildJsonArray {
+            for (n in library.allNotes(book.id)) {
+                val p = book.page(n.pdfPage)
+                val stale = n.version != "1" ||
+                    p == null ||
+                    n.textSha256 != pageTextSha256(p.text) ||
+                    n.start !in 0 until n.end ||
+                    n.end > p.text.length ||
+                    p.text.substring(n.start, n.end) != n.quote
+                add(buildJsonObject {
+                    put("id", n.id)
+                    put("version", n.version)
+                    put("pdfPage", n.pdfPage)
+                    put("start", n.start)
+                    put("end", n.end)
+                    put("quote", n.quote)
+                    put("note", n.note)
+                    put("textSha256", n.textSha256)
+                    put("revision", n.revision)
+                    put("stale", stale)
+                })
+            }
+        }
         val body = buildJsonObject {
             put("document", buildJsonObject {
                 put("id", book.id)
@@ -80,7 +109,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary, private val 
                 put("revision", 0L) // 只读投影；不宣称提供 CAS 修订号。
                 put("stale", false)
             })
-            put("notes", JsonArray(emptyList()))
+            put("notes", notesArray)
         }
         return ReaderReply(200, body)
     }
@@ -91,7 +120,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary, private val 
         val book = findBook(document) ?: return ReaderReply(404, null)
         locationFailure(book, pdfPage)?.let { return it }
         val p = checkNotNull(book.page(pdfPage))
-        val sha = MessageDigest.getInstance("SHA-256").digest(p.text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        val sha = pageTextSha256(p.text)
         val body = buildJsonObject {
             put("documentId", book.id)
             put("pdfPage", pdfPage)
@@ -199,13 +228,50 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary, private val 
         return refused(501, "本地阅读进度由书架保存，暂不支持此写入方式")
     }
 
-    override suspend fun saveNote(document: String, body: JsonObject): ReaderReply {
+    override suspend fun saveNote(document: String, body: JsonObject): ReaderReply = offEdt { saveNoteBlocking(document, body) }
+
+    private fun saveNoteBlocking(document: String, body: JsonObject): ReaderReply {
         val book = findBook(document) ?: return ReaderReply(404, null)
         val version = (body["version"] as? JsonPrimitive)?.takeIf { it.isString }?.content.orEmpty()
-        val pdfPage = (body["pdfPage"] as? JsonPrimitive)?.intOrNull
+        val pdfPage = (body["pdfPage"] as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull
             ?: return refused(409, "批注缺少可确认的页码")
         locationFailure(book, pdfPage, version)?.let { return it }
-        return refused(501, "本地阅读器暂不支持保存批注，草稿仍保留")
+
+        val id = (body["id"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.isNotBlank() && it.length <= 128 }
+            ?: return refused(400, "批注锚点或字段不完整")
+        val mutationId = (body["mutationId"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.isNotBlank() && it.length <= 128 }
+            ?: return refused(400, "批注锚点或字段不完整")
+        val baseRevision = (body["baseRevision"] as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull?.takeIf { it >= 0L }
+            ?: return refused(400, "批注锚点或字段不完整")
+        val start = (body["start"] as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull
+        val end = (body["end"] as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull
+        if (start == null || end == null || start !in 0 until end || end - start > 4000) {
+            return refused(400, "批注锚点或字段不完整")
+        }
+        val quote = (body["quote"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            ?: return refused(400, "批注锚点或字段不完整")
+        val noteText = (body["note"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.length <= 8000 }
+            ?: return refused(400, "批注锚点或字段不完整")
+        val textSha256 = (body["textSha256"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.isNotBlank() }
+            ?: return refused(400, "批注锚点或字段不完整")
+        val deleted = (body["deleted"] as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull ?: false
+
+        val page = checkNotNull(book.page(pdfPage))
+        if (textSha256 != pageTextSha256(page.text)) {
+            return refused(409, "页文字已变化，请重新定位后再保存")
+        }
+        if (end > page.text.length || page.text.substring(start, end) != quote) {
+            return refused(409, "批注引文与当前页文字不符")
+        }
+        return when (val result = library.saveNote(
+            bookId = book.id,
+            record = BookNoteRecord(id, version, pdfPage, start, end, quote, noteText, textSha256, baseRevision, deleted),
+            baseRevision = baseRevision,
+            mutationId = mutationId,
+        )) {
+            is BookNoteWriteResult.Saved -> ReaderReply(200, buildJsonObject { put("revision", result.revision) })
+            BookNoteWriteResult.Conflict -> refused(409, "批注已被更新，请刷新后处理冲突")
+        }
     }
 }
 

@@ -90,13 +90,53 @@ class ReaderLocalContractTest {
                 assertNotNull(reply.body?.get("error"))
             }
         }
-        assertEquals(501, source.saveNote(book.id, note()).status)
+        assertEquals(400, source.saveNote(book.id, note()).status)
         assertEquals(before, disk(library))
+
+        val p1 = source.page(book.id, 1).body!!
+        val text = p1["text"]!!.jsonPrimitive.content
+        val sha = p1["textSha256"]!!.jsonPrimitive.content
+        val end = minOf(12, text.length)
+        val quote = text.substring(0, end)
+        fun anchoredNote(noteText: String, baseRevision: Long, mutationId: String) = buildJsonObject {
+            put("id", "synthetic-note")
+            put("version", "1")
+            put("pdfPage", 1)
+            put("textSha256", sha)
+            put("start", 0)
+            put("end", end)
+            put("quote", quote)
+            put("note", noteText)
+            put("deleted", false)
+            put("baseRevision", baseRevision)
+            put("mutationId", mutationId)
+        }
+
+        val created = source.saveNote(book.id, anchoredNote("Saved anchored note", 0L, "mut-1"))
+        assertEquals(200, created.status)
+        assertEquals(1L, created.body?.get("revision")?.jsonPrimitive?.long)
+
+        val replayed = source.saveNote(book.id, anchoredNote("Saved anchored note", 0L, "mut-1"))
+        assertEquals(200, replayed.status)
+        assertEquals(1L, replayed.body?.get("revision")?.jsonPrimitive?.long)
+
+        assertEquals(409, source.saveNote(book.id, anchoredNote("Conflicting note", 0L, "mut-2")).status)
+
+        val updated = source.saveNote(book.id, anchoredNote("Updated anchored note", 1L, "mut-3"))
+        assertEquals(200, updated.status)
+        assertEquals(2L, updated.body?.get("revision")?.jsonPrimitive?.long)
+
         val reopened = TextbookLibrary(library.directory)
         assertEquals(book, reopened.book(book.id))
         assertEquals(answer, reopened.answer(book.id, lesson.id, book.questionMode))
-        assertEquals(0, (source.state(book.id).body!!["notes"] as JsonArray).size)
-        println("valid progress/notes=501, repeated IDs and stale revisions never acknowledge; bookmark=3, lesson=1, learning/mode/answer and disk unchanged")
+        val notes = LocalBooksReaderSource(reopened).state(book.id).body!!["notes"] as JsonArray
+        assertEquals(1, notes.size)
+        val persisted = notes.single().jsonObject
+        assertEquals("synthetic-note", persisted["id"]?.jsonPrimitive?.content)
+        assertEquals("Updated anchored note", persisted["note"]?.jsonPrimitive?.content)
+        assertEquals(2L, persisted["revision"]?.jsonPrimitive?.long)
+        assertEquals(false, persisted["stale"]?.jsonPrimitive?.boolean)
+        println("progress=501, anchorless note=400; anchored note=200/CAS+idempotent/reopen reload ok; bookmark=3, lesson=1, answer unchanged")
     }
 
     @Test fun resolverUsesBooksGuardForDefaultAndAliasLibraries() {
@@ -163,11 +203,11 @@ class ReaderLocalContractTest {
         println("changed PDF bytes -> new ID (same page text hash); firstImageSHA=${sha(firstImage)}, lastImageSHA=${sha(lastImage)}")
     }
 
-    @Test fun rejectedNoteKeepsActuallyTypedDraft() {
+    @Test fun savedLocalNotePersistsAndReloadsOnReopen() {
         val (library, book) = fixture()
-        val before = disk(library)
         val remote = ReaderRemote(LocalBooksReaderSource(library))
         val session = ReaderSession(ReaderFixture("Synthetic", emptyList(), emptyList()), 1200, remote)
+        var savedId = ""
         runComposeUiTest {
             setContent { ReaderWindow(session) }
             runBlocking { remote.loadCatalog(); session.openRemoteAt(book.id, 1) }
@@ -175,21 +215,26 @@ class ReaderLocalContractTest {
             onNodeWithTag("bar-Body").performClick()
             onNodeWithTag("reader-root").performKeyInput { pressKey(Key.N); pressKey(Key.Enter) }
             waitUntil(timeoutMillis = 20_000) { session.noteDraft != null }
-            onNodeWithTag("note-input").performTextInput("Synthetic unsaved note")
-            val id = session.noteDraft!!.id
+            onNodeWithTag("note-input").performTextInput("Synthetic persisted note")
+            savedId = session.noteDraft!!.id
             onNodeWithTag("note-input").performKeyInput {
                 keyDown(Key.CtrlLeft); pressKey(Key.Enter); keyUp(Key.CtrlLeft)
             }
-            waitUntil(timeoutMillis = 20_000) { remote.noteSave is NoteSaveState.Failed }
-            onNodeWithTag("note-input").assertTextEquals("Synthetic unsaved note")
-            onNodeWithTag("note-status", useUnmergedTree = true).assertTextEquals("没有保存")
-            assertEquals(id, session.noteDraft?.id)
-            assertEquals("Synthetic unsaved note", session.noteText)
-            assertEquals(before, disk(library))
+            waitUntil(timeoutMillis = 20_000) { remote.noteSave is NoteSaveState.Saved }
+            onNodeWithTag("note-input").assertTextEquals("Synthetic persisted note")
+            onNodeWithTag("note-status", useUnmergedTree = true).assertTextEquals("已保存")
+            onNodeWithTag("note-$savedId", useUnmergedTree = true).assertExists()
             val evidence = System.getProperty("review.root")?.let(Path::of)
-            if (evidence != null) ImageIO.write(onNodeWithTag("reader-root").captureToImage().toAwtImage(), "png", evidence.resolve("rejected-note.png").toFile())
+            if (evidence != null) ImageIO.write(onNodeWithTag("reader-root").captureToImage().toAwtImage(), "png", evidence.resolve("saved-note.png").toFile())
         }
-        println("real Compose N/Enter + text input + Ctrl/Enter: rejection displayed; original draft ID/text and disk retained")
+        val reopenedRemote = ReaderRemote(LocalBooksReaderSource(TextbookLibrary(library.directory)))
+        runBlocking { reopenedRemote.loadCatalog(); reopenedRemote.open(book.id) }
+        val reloaded = reopenedRemote.notes.single()
+        assertEquals(savedId, reloaded.id)
+        assertEquals("Synthetic persisted note", reloaded.note)
+        assertEquals(1L, reloaded.revision)
+        assertFalse(reloaded.stale)
+        println("real Compose N/Enter + text input + Ctrl/Enter: saved, displayed, and reloaded on reopen")
     }
 
     @Test fun choiceResultReturnsToSameControllerWithoutChangingBookmark() {

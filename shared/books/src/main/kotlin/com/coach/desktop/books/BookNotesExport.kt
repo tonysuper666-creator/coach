@@ -19,6 +19,24 @@ internal data class BookHighlightRecord(
     val quote: String,
 )
 
+internal data class BookNoteRecord(
+    val id: String,
+    val version: String,
+    val pdfPage: Int,
+    val start: Int,
+    val end: Int,
+    val quote: String,
+    val note: String,
+    val textSha256: String,
+    val revision: Long,
+    val deleted: Boolean = false,
+)
+
+internal sealed interface BookNoteWriteResult {
+    data class Saved(val revision: Long) : BookNoteWriteResult
+    data object Conflict : BookNoteWriteResult
+}
+
 internal data class SavedBookAnswer(
     val lessonId: String,
     val mode: QuestionMode,
@@ -46,6 +64,7 @@ internal fun buildBookNotesOutline(
     answers: List<SavedBookAnswer>,
     scope: BookNotesScope = BookNotesScope.FULL_BOOK,
     currentPage: Int = book.readingPage,
+    notes: List<BookNoteRecord> = emptyList(),
 ): NotesExportDraft {
     val activeLesson = book.lessons.firstOrNull { currentPage in it.firstPage..it.lastPage }
     val pageWindow = if (scope == BookNotesScope.FULL_BOOK) {
@@ -65,6 +84,7 @@ internal fun buildBookNotesOutline(
     }
     val lessonIds = selectedLessons.map { it.id }.toSet()
     val filteredHighlights = highlights.filter { scope == BookNotesScope.FULL_BOOK || it.page in pageWindow }
+    val filteredNotes = notes.filter { !it.deleted && (scope == BookNotesScope.FULL_BOOK || it.pdfPage in pageWindow) }
     val filteredReviews = reviews.filter { scope == BookNotesScope.FULL_BOOK || it.lesson in lessonIds }
     val reviewKeys = filteredReviews.mapTo(HashSet()) { it.lesson to it.mode }
     val extraAnswers = answers.filter {
@@ -77,7 +97,7 @@ internal fun buildBookNotesOutline(
     val md = buildString {
         appendLine("# ${book.title} · 复习提纲")
         appendLine()
-        appendLine("导出范围：${scope.label} · 当前进度第 ${book.readingPage} / ${book.pages.size} 页 · 高亮 ${filteredHighlights.size} 条 · 复习与练习 ${filteredReviews.size + extraAnswers.size} 条")
+        appendLine("导出范围：${scope.label} · 当前进度第 ${book.readingPage} / ${book.pages.size} 页 · 高亮 ${filteredHighlights.size} 条 · 批注 ${filteredNotes.size} 条 · 复习与练习 ${filteredReviews.size + extraAnswers.size} 条")
         appendLine()
         if (filteredHighlights.isNotEmpty()) {
             appendLine("## 划线与原文摘录")
@@ -86,6 +106,20 @@ internal fun buildBookNotesOutline(
                 appendLine("### 第 $pageNum 页")
                 marks.forEach { mark ->
                     appendLine("- ${mark.quote.replace("\n", " ").trim()}")
+                }
+                appendLine()
+            }
+        }
+        if (filteredNotes.isNotEmpty()) {
+            appendLine("## 批注笔记")
+            appendLine()
+            filteredNotes.groupBy { it.pdfPage }.toSortedMap().forEach { (pageNum, entries) ->
+                appendLine("### 第 $pageNum 页")
+                entries.forEach { entry ->
+                    val quoteText = entry.quote.replace("\n", " ").trim()
+                    val noteText = entry.note.replace("\n", " ").trim()
+                    if (noteText.isNotEmpty()) appendLine("- $quoteText — 批注：$noteText")
+                    else appendLine("- $quoteText")
                 }
                 appendLine()
             }
@@ -132,14 +166,14 @@ internal fun buildBookNotesOutline(
             }
             appendLine()
         }
-        if (filteredHighlights.isEmpty() && filteredReviews.isEmpty() && extraAnswers.isEmpty()) {
-            appendLine("当前范围内还没有划线或练习作答，已先保留教材章节提纲。")
+        if (filteredHighlights.isEmpty() && filteredNotes.isEmpty() && filteredReviews.isEmpty() && extraAnswers.isEmpty()) {
+            appendLine("当前范围内还没有划线、批注或练习作答，已先保留教材章节提纲。")
         }
     }
     return NotesExportDraft(
         title = book.title,
         markdown = md.trimEnd() + "\n",
-        itemCount = filteredHighlights.size + filteredReviews.size + extraAnswers.size,
+        itemCount = filteredHighlights.size + filteredNotes.size + filteredReviews.size + extraAnswers.size,
     )
 }
 

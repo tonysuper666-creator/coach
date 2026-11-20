@@ -62,9 +62,15 @@ def audit_extracted_root(
     )
     if not pe_files:
         raise AssertionError("No standalone PE files found in MSI")
+    skiko_arm64_checked = False
     for pe_file in pe_files:
         rel = pe_file.relative_to(app_root).as_posix()
         assert_aa64(pe_file.read_bytes(), rel)
+        lower_name = pe_file.name.lower()
+        if lower_name == "skiko-windows-x64.dll":
+            raise AssertionError(f"Unexpected standalone skiko-windows-x64.dll: {rel}")
+        if lower_name == "skiko-windows-arm64.dll":
+            skiko_arm64_checked = True
 
     cfg = app_root / "app" / "LearningCoach.cfg"
     if not cfg.is_file():
@@ -82,7 +88,6 @@ def audit_extracted_root(
     if not jars:
         raise AssertionError(f"No jars found under {app_dir}")
 
-    skiko_arm64_checked = False
     ocr_checked = False
     ocr_entry_count = 0
 
@@ -139,7 +144,7 @@ def audit_extracted_root(
                 ocr_entry_count = len(expected_hashes)
 
     if not skiko_arm64_checked:
-        raise AssertionError("skiko-windows-arm64.dll not found in packaged app jars")
+        raise AssertionError("skiko-windows-arm64.dll not found in extracted MSI files or packaged app jars")
     if not ocr_checked:
         raise AssertionError("ocr/windows-arm64.zip not found in packaged app jars")
 

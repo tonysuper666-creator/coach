@@ -33,6 +33,7 @@ def build_synthetic_tree(
     include_x64_ocr: bool = False,
     sable_line: str = "java-options=-Dcoach.sableLogin=true",
     tamper_manifest: bool = False,
+    standalone_skiko: bool = False,
 ) -> Path:
     app_root = root / "LearningCoach"
     (app_root / "runtime" / "bin" / "server").mkdir(parents=True)
@@ -41,8 +42,11 @@ def build_synthetic_tree(
     (app_root / "runtime" / "bin" / "server" / "jvm.dll").write_bytes(fake_pe(0xAA64))
     (app_root / "app" / "LearningCoach.cfg").write_text(f"[JavaOptions]\n{sable_line}\n", encoding="utf-8")
 
-    with zipfile.ZipFile(app_root / "app" / "skiko-awt-runtime-windows-arm64-0.1.jar", "w") as jar:
-        jar.writestr("skiko-windows-arm64.dll", fake_pe(0xAA64))
+    if standalone_skiko:
+        (app_root / "app" / "skiko-windows-arm64.dll").write_bytes(fake_pe(0xAA64))
+    else:
+        with zipfile.ZipFile(app_root / "app" / "skiko-awt-runtime-windows-arm64-0.1.jar", "w") as jar:
+            jar.writestr("skiko-windows-arm64.dll", fake_pe(0xAA64))
 
     ocr_files = {
         "libtesseract55.dll": fake_pe(tess_machine),
@@ -79,6 +83,13 @@ class AuditArm64MsiTest(unittest.TestCase):
             self.assertIn("ocr/libtesseract55.dll=AA64", lines)
             self.assertIn("ocr_manifest_verified=3/3", lines)
             self.assertIn("sable_login_cfg=true", lines)
+
+    def test_valid_arm64_tree_with_standalone_skiko_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = build_synthetic_tree(Path(tmp), standalone_skiko=True)
+            lines = audit.audit_extracted_root(tree, sable_login="true", forbid_private_config=True)
+            self.assertIn("standalone_pe_aa64=3/3", lines)
+            self.assertIn("skiko-windows-arm64.dll=AA64", lines)
 
     def test_rejects_x64_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

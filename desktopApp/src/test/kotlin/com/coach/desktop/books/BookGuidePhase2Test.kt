@@ -8,6 +8,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
@@ -25,6 +26,7 @@ import org.apache.pdfbox.pdmodel.PDPageContentStream
 import org.apache.pdfbox.pdmodel.font.PDType0Font
 import java.nio.file.Files
 import java.nio.file.Path
+import java.sql.DriverManager
 import javax.imageio.ImageIO
 import kotlin.test.*
 
@@ -250,6 +252,169 @@ class BookGuidePhase2Test {
                 waitForIdle()
                 onNodeWithTag("hard-point-card").assertDoesNotExist()
             }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun legacySectionGuideCacheInvalidatesAndUpgradesInReaderAndExplainPanel() {
+        val root = Files.createTempDirectory("ton1768-legacy-guide-")
+        try {
+            val pdf = writeStructuredPdf(root.resolve("legacy-cache-upgrade.pdf"))
+            val library = TextbookLibrary(root.resolve("library"))
+            val book = library.importBook(pdf)
+            library.saveTextView(book.id, true)
+            ExplainConsent(library.directory).allow(book.id)
+
+            val firstSection = book.lessons.first()
+            val bodyBlocks = firstSection.blocks.filter { !it.heading && it.isBodyParagraph }
+            assertTrue(bodyBlocks.size >= 2)
+            val markerTag0 = "hard-point-marker-${bodyBlocks[0].id}"
+            val panelMarkerTag0 = "explain-hard-point-marker-${bodyBlocks[0].id}"
+            val dbPath = library.directory.resolve("library.sqlite")
+
+            fun writeLegacyV1GuideRow() {
+                // 模拟 1.1.1 写入的旧版导读缓存 JSON：只有 brief/text/recap/citations，无 version/hardPoints/summary。
+                val v1Json = """
+                    {"brief":["旧版要点"],"text":"旧版导读【S1】","recap":"旧版前情提要","citations":[{"anchor":"S1","blockId":"${bodyBlocks[0].id}","page":${bodyBlocks[0].page}}]}
+                """.trimIndent()
+                DriverManager.getConnection("jdbc:sqlite:$dbPath").use { db ->
+                    db.prepareStatement(
+                        "INSERT OR REPLACE INTO book_section_cache(book, section_id, kind, payload, updated_at) VALUES(?,?,?,?,?)",
+                    ).use { sql ->
+                        sql.setString(1, book.id)
+                        sql.setString(2, firstSection.id)
+                        sql.setString(3, "guide")
+                        sql.setString(4, v1Json)
+                        sql.setLong(5, 1_700_000_000_000L)
+                        sql.executeUpdate()
+                    }
+                }
+            }
+
+            // 1) 1.1.1 旧缓存读出来必须失效（返回 null），不能直接当新版使用
+            writeLegacyV1GuideRow()
+            assertNull(library.sectionGuide(book.id, firstSection.id), "1.1.1 旧格式导读缓存必须失效以触发重生成")
+
+            // 2) 阅读器路径（SectionGuideUi）：旧缓存失效 -> 用新版提示词重生成 1 次 -> 出现难点标并升级缓存；重开不再重调
+            val explainer1 = Phase2FakeExplainer(root.resolve("home-1"))
+            runSkikoComposeUiTest(size = Size(1080f, 820f), density = Density(1f)) {
+                var activePage by mutableStateOf(firstSection.firstPage)
+                setContent {
+                    val focus = remember { FocusRequester() }
+                    CoachTheme(darkTheme = false) {
+                        CompositionLocalProvider(
+                            LocalReadingAutoGuide provides true,
+                            LocalReadingSectionSummary provides false,
+                        ) {
+                            TextbookReader(
+                                ui = LibraryUi(library.catalog(), book, screen = BookScreen.READER, page = activePage),
+                                library = library,
+                                support = UnconnectedBookLearningSupport,
+                                practiceSource = null,
+                                pageFocus = focus,
+                                onNoteSession = {},
+                                onPage = { activePage = it },
+                                onBack = {},
+                                onLearn = {},
+                                explainProvider = explainer1,
+                            )
+                        }
+                    }
+                }
+                waitUntil(timeoutMillis = 20_000) {
+                    onAllNodesWithTag(markerTag0).fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+            }
+            assertEquals(1, explainer1.guideCalls.size, "命中 1.1.1 旧缓存应重调一次新版导读")
+            val upgraded = assertNotNull(library.sectionGuide(book.id, firstSection.id))
+            assertEquals(CachedSectionGuide.CURRENT_VERSION, upgraded.version)
+            assertTrue(upgraded.hardPoints.isNotEmpty(), "升级后缓存应包含难点列表")
+            assertTrue(upgraded.summary.isNotEmpty(), "升级后缓存应包含节末小结")
+
+            val explainer2 = Phase2FakeExplainer(root.resolve("home-2"))
+            runSkikoComposeUiTest(size = Size(1080f, 820f), density = Density(1f)) {
+                var activePage by mutableStateOf(firstSection.firstPage)
+                setContent {
+                    val focus = remember { FocusRequester() }
+                    CoachTheme(darkTheme = false) {
+                        CompositionLocalProvider(
+                            LocalReadingAutoGuide provides true,
+                            LocalReadingSectionSummary provides false,
+                        ) {
+                            TextbookReader(
+                                ui = LibraryUi(library.catalog(), book, screen = BookScreen.READER, page = activePage),
+                                library = library,
+                                support = UnconnectedBookLearningSupport,
+                                practiceSource = null,
+                                pageFocus = focus,
+                                onNoteSession = {},
+                                onPage = { activePage = it },
+                                onBack = {},
+                                onLearn = {},
+                                explainProvider = explainer2,
+                            )
+                        }
+                    }
+                }
+                waitUntil(timeoutMillis = 20_000) {
+                    onAllNodesWithTag(markerTag0).fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+            }
+            assertEquals(0, explainer2.guideCalls.size, "升级为 v2 缓存后重开阅读器应直接命中缓存")
+
+            // 3) 讲解面板路径（BookExplain）：旧缓存失效 -> 点击「讲讲这一节」重生成 1 次并展示难点标
+            writeLegacyV1GuideRow()
+            assertNull(library.sectionGuide(book.id, firstSection.id))
+            val explainer3 = Phase2FakeExplainer(root.resolve("home-3"))
+            runSkikoComposeUiTest(size = Size(960f, 760f), density = Density(1f)) {
+                setContent {
+                    CoachTheme(darkTheme = false) {
+                        Surface(Modifier.fillMaxSize(), color = CoachTheme.colors.surface1) {
+                            BookExplainPanel(
+                                book = book,
+                                page = firstSection.firstPage,
+                                consent = ExplainConsent(library.directory),
+                                explainer = explainer3,
+                                selection = null,
+                                library = library,
+                            )
+                        }
+                    }
+                }
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("explain-section-trigger").fetchSemanticsNodes()
+                        .firstOrNull()?.config?.contains(SemanticsProperties.Disabled) == false
+                }
+                onNodeWithTag("explain-section-trigger").performClick()
+                waitUntil(timeoutMillis = 20_000) {
+                    onAllNodesWithTag(panelMarkerTag0).fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+            }
+            assertEquals(1, explainer3.guideCalls.size, "讲解面板遇到 1.1.1 旧缓存也必须重新生成一次")
+            val panelUpgraded = assertNotNull(library.sectionGuide(book.id, firstSection.id))
+            assertEquals(CachedSectionGuide.CURRENT_VERSION, panelUpgraded.version)
+            assertTrue(panelUpgraded.hardPoints.isNotEmpty())
+
+            // 4) 新版（v2）本身无难点（hardPoints = []）的合法结果不得被误判失效导致死循环重生成
+            library.saveSectionGuide(
+                book.id,
+                firstSection.id,
+                CachedSectionGuide(
+                    brief = listOf("要点一"),
+                    text = "无难点节讲解【S1】",
+                    citations = emptyList(),
+                    recap = "本节前情提要",
+                    hardPoints = emptyList(),
+                    summary = listOf("小结一"),
+                ),
+            )
+            val emptyHpV2 = assertNotNull(library.sectionGuide(book.id, firstSection.id))
+            assertEquals(CachedSectionGuide.CURRENT_VERSION, emptyHpV2.version)
+            assertTrue(emptyHpV2.hardPoints.isEmpty())
         } finally {
             root.toFile().deleteRecursively()
         }

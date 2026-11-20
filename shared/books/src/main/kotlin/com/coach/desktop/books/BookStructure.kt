@@ -897,7 +897,12 @@ internal data class CachedSectionGuide(
     val recap: String,
     val hardPoints: List<CachedHardPoint> = emptyList(),
     val summary: List<String> = emptyList(),
-)
+    val version: Int = CURRENT_VERSION,
+) {
+    companion object {
+        const val CURRENT_VERSION = 2
+    }
+}
 
 internal data class CachedCitation(val anchor: String, val blockId: String, val page: Int)
 
@@ -972,6 +977,7 @@ internal object BookStructureStore {
 
     fun saveGuide(db: Connection, bookId: String, sectionId: String, guide: CachedSectionGuide) {
         val json = buildJsonObject {
+            put("version", guide.version)
             put("brief", buildJsonArray { guide.brief.forEach { add(it) } })
             put("text", guide.text)
             put("recap", guide.recap)
@@ -1011,30 +1017,39 @@ internal object BookStructureStore {
                 if (!row.next()) null
                 else runCatching {
                     val obj = LedgerJson.parseToJsonElement(row.getString(1)).jsonObject
-                    CachedSectionGuide(
-                        brief = obj["brief"]?.jsonArray.orEmpty().map { it.jsonPrimitive.content },
-                        text = obj.getValue("text").jsonPrimitive.content,
-                        citations = obj["citations"]?.jsonArray.orEmpty().map { el ->
-                            val c = el.jsonObject
-                            CachedCitation(
-                                c.getValue("anchor").jsonPrimitive.content,
-                                c.getValue("blockId").jsonPrimitive.content,
-                                c.getValue("page").jsonPrimitive.int,
-                            )
-                        },
-                        recap = obj["recap"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                        hardPoints = obj["hardPoints"]?.jsonArray.orEmpty().map { el ->
-                            val hp = el.jsonObject
-                            CachedHardPoint(
-                                blockId = hp.getValue("blockId").jsonPrimitive.content,
-                                anchor = hp["anchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                                page = hp.getValue("page").jsonPrimitive.int,
-                                label = hp["label"]?.jsonPrimitive?.contentOrNull ?: "难点",
-                                explanation = hp.getValue("explanation").jsonPrimitive.content,
-                            )
-                        },
-                        summary = obj["summary"]?.jsonArray.orEmpty().map { it.jsonPrimitive.content },
-                    )
+                    val version = obj["version"]?.jsonPrimitive?.intOrNull ?: 1
+                    val hardPointsEl = obj["hardPoints"] as? JsonArray
+                    val summaryEl = obj["summary"] as? JsonArray
+                    // Reject 1.1.1 cached guides lacking version/hardPoints/summary so both reader and panel regenerate once on upgrade.
+                    if (version < CachedSectionGuide.CURRENT_VERSION || hardPointsEl == null || summaryEl == null) {
+                        null
+                    } else {
+                        CachedSectionGuide(
+                            brief = obj["brief"]?.jsonArray.orEmpty().map { it.jsonPrimitive.content },
+                            text = obj.getValue("text").jsonPrimitive.content,
+                            citations = obj["citations"]?.jsonArray.orEmpty().map { el ->
+                                val c = el.jsonObject
+                                CachedCitation(
+                                    c.getValue("anchor").jsonPrimitive.content,
+                                    c.getValue("blockId").jsonPrimitive.content,
+                                    c.getValue("page").jsonPrimitive.int,
+                                )
+                            },
+                            recap = obj["recap"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                            hardPoints = hardPointsEl.map { el ->
+                                val hp = el.jsonObject
+                                CachedHardPoint(
+                                    blockId = hp.getValue("blockId").jsonPrimitive.content,
+                                    anchor = hp["anchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                                    page = hp.getValue("page").jsonPrimitive.int,
+                                    label = hp["label"]?.jsonPrimitive?.contentOrNull ?: "难点",
+                                    explanation = hp.getValue("explanation").jsonPrimitive.content,
+                                )
+                            },
+                            summary = summaryEl.map { it.jsonPrimitive.content },
+                            version = version,
+                        )
+                    }
                 }.getOrNull()
             }
         }

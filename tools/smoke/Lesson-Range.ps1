@@ -159,3 +159,51 @@ function Resolve-SourceReturnAction([bool]$ReturnedToLearning, [bool]$SawFocusLo
     }
     return [pscustomobject]@{ Action = 'wait_learning'; Button = $null }
 }
+function Find-PracticeOptionClick($lines, [int]$OptAnchorX1, [int]$MinOptY) {
+    if (-not $lines -or $OptAnchorX1 -le 0) { return $null }
+    foreach ($l in $lines) {
+        $compact = $l.Text -replace '\s', ''
+        if ($compact -match '简答自检|写下你的理解|对照原文自检|你选择[:：]|答后讲解|重新作答') { return $null }
+    }
+    $maxOptY = [int]::MaxValue
+    foreach ($l in $lines) {
+        foreach ($lbl in @('上一节', '继续下一节')) {
+            $m = Find-Text @($l) $lbl
+            if ($m -and $m.Y1 -gt $MinOptY -and [int]$m.Y1 -lt $maxOptY) { $maxOptY = [int]$m.Y1 }
+        }
+    }
+    $picked = $null
+    foreach ($l in $lines) {
+        foreach ($w in $l.Words) {
+            $b = $w.BoundingRect
+            if ($w.Text -cmatch '^[A-Da-d](?:[\.．、])?$' -and $b.Y -gt $MinOptY -and ($b.Y + $b.Height) -lt $maxOptY -and $b.X -le ($OptAnchorX1 + 22) -and $b.X -ge ($OptAnchorX1 - 20) -and (-not $picked -or $b.Y -lt $picked.Y)) {
+                $picked = $b
+            }
+        }
+    }
+    if ($picked) {
+        return [pscustomobject]@{ X = ([int]$picked.X + 45); Y = ([int]$picked.Y + 12); Mode = 'letter' }
+    }
+    # 深色 800x600 下 8x9 选项字母 A/B/C/D 常被 Windows OCR 整列漏读；改认「查看对应原文」右侧缩进的选项正文行（整张 AnswerOption 卡片都可点）。
+    $bestWord = $null
+    foreach ($l in $lines) {
+        $compact = $l.Text -replace '\s', ''
+        if ($compact.Length -lt 2) { continue }
+        if ($compact -match '^(?:上一节|继续下一节|查看对应原文|这题我是猜的|正在|已加入复习|查看复习|当前已关闭出题|这一节的原文太少|先试着回答|先理解讲解|本次练习|本节原文|出题[:：])') { continue }
+        $first = $null
+        foreach ($w in $l.Words) {
+            $b = $w.BoundingRect
+            if ($b.Y -gt ($MinOptY + 6) -and ($b.Y + $b.Height) -lt ($maxOptY - 6)) {
+                if (-not $first -or $b.X -lt $first.X) { $first = $b }
+            }
+        }
+        if (-not $first) { continue }
+        if ($first.X -ge ($OptAnchorX1 + 20) -and $first.X -le ($OptAnchorX1 + 56)) {
+            if (-not $bestWord -or $first.Y -lt $bestWord.Y) { $bestWord = $first }
+        }
+    }
+    if ($bestWord) {
+        return [pscustomobject]@{ X = ([int]$bestWord.X + 24); Y = ([int]($bestWord.Y + $bestWord.Height / 2)); Mode = 'option-text' }
+    }
+    return $null
+}

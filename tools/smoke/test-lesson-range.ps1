@@ -136,6 +136,45 @@ foreach ($a in @(
     if (-not $a.ok) { $fail++ }; $extra++
 }
 
+# 第⑥步选择题选项点击：能读出字母时走 letter；深色主题漏读 A-D 字母时兜底点「查看对应原文」右侧缩进正文。
+$optWithLetter = Find-PracticeOptionClick @(
+    (Rec '查看对应原文' 121 433),
+    (Rec '这题我是猜的' 237 433),
+    (Rec 'A' 120 497),
+    (Rec '教育行业' 148 497)
+) 121 449
+$optDarkNoLetter = Find-PracticeOptionClick @(
+    (Rec '根据这段材料提供的信息，下列哪一项是正确的？' 108 110),
+    (Rec '查看对应原文' 121 151),
+    (Rec '这题我是猜的' 237 151),
+    (Rec '这是医疗卫生部门的人力资本研究。' 148 210),
+    (Rec '这是一本书中的章节。' 149 296),
+    (Rec '继续下一节' 209 493)
+) 121 167
+$optShortMode = Find-PracticeOptionClick @(
+    (Rec '简答自检' 108 110),
+    (Rec '查看对应原文' 121 151),
+    (Rec '写下你的理解' 148 210)
+) 121 167
+$optAnswered = Find-PracticeOptionClick @(
+    (Rec '查看对应原文' 121 151),
+    (Rec '你选择：这是医疗卫生部门的人力资本研究。' 148 210)
+) 121 167
+$optBottomNavOnly = Find-PracticeOptionClick @(
+    (Rec '查看对应原文' 121 151),
+    (Rec '继续下一节' 148 493)
+) 121 167
+foreach ($oc in @(
+    @{ n = 'practice-opt-letter-mode'; ok = ($optWithLetter -and $optWithLetter.Mode -eq 'letter' -and $optWithLetter.X -eq 165 -and $optWithLetter.Y -eq 509) },
+    @{ n = 'practice-opt-text-fallback'; ok = ($optDarkNoLetter -and $optDarkNoLetter.Mode -eq 'option-text' -and $optDarkNoLetter.X -eq 172 -and $optDarkNoLetter.Y -eq 221) },
+    @{ n = 'practice-opt-reject-short-mode'; ok = (-not $optShortMode) },
+    @{ n = 'practice-opt-reject-answered'; ok = (-not $optAnswered) },
+    @{ n = 'practice-opt-reject-nav-only'; ok = (-not $optBottomNavOnly) }
+)) {
+    '{0} {1}' -f $(if ($oc.ok) { 'PASS' } else { 'FAIL' }), $oc.n
+    if (-not $oc.ok) { $fail++ }; $extra++
+}
+
 if ($BatchDir) {
     $bStep4 = Join-Path $BatchDir '6-busy-step-4.png'
     $bSec4 = Join-Path $BatchDir '6-sec-4.png'

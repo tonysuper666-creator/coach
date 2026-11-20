@@ -10,6 +10,13 @@ import sqlite3
 import sys
 
 
+# Same rule as the real server's containsReaderSelection: whitespace is squashed, then the
+# selection must be a slice of one supplied block. 1.1.1 sends the whole section, so the
+# selection (a dragged line) is a substring of one of those blocks, never equal to it.
+def squash(value):
+    return re.sub(r"\s+", " ", value).strip()
+
+
 class Tutor(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -30,8 +37,9 @@ class Tutor(BaseHTTPRequestHandler):
             if not blocks or not all(self.server.block.fullmatch(b["id"]) for b in blocks):
                 raise ValueError("unexpected book")
             kind = req["kind"]
+            selection = squash(req.get("selection", ""))
             chosen = blocks[0] if kind == "lesson" else next(
-                b for b in blocks if b["text"].strip() == req["selection"].strip())
+                b for b in blocks if selection and selection in squash(b["text"]))
             if kind == "ask" and "选项A" in req["question"]:
                 kind = "practice"
                 text = ("题干：Which method checks recall? 选项A：Recall before checking "

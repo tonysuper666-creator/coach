@@ -373,18 +373,19 @@ class BookPageViewTest {
         assertTrue(shows(moved), "翻页后")
         reflow(1200); assertTrue(shows(moved) && state.anchor == moved, "展开后仍在新页")
         reflow(520); assertTrue(shows(moved) && state.anchor == moved, "再合起仍在新页")
+    }
 
 
     private val spotSentence = "The multiplication of two whole numbers is the repeated addition of one of them, and the order of the factors does not alter the product. "
     private fun spotBook(): Textbook {
-        val raw = "CHAPTER 1\n\n" + (1..200).joinToString("\n\n") { n -> "Paragraph $n. " + spotSentence.repeat(3) }
+        val raw = "CHAPTER 1\n\n" + (1..110).joinToString("\n\n") { n -> "Paragraph $n. " + spotSentence.repeat(3) }
         return Textbook("spot-roundtrip", "Elements of arithmetic", "epub", listOf(BookPage(1, raw)))
     }
 
     /** a / c: 改字号再改回、改宽度再改回，锚点不动、页不退、不写读位。 */
     @Test fun reflowRoundTripKeepsAnchorAndWritesNothing() = runSkikoComposeUiTest(size = Size(900f, 1000f), density = Density(1f)) {
         val book = spotBook()
-        val state = BookPagingState(BookPageAnchor(1, book.pages.single().text.indexOf("Paragraph 150.")))
+        val state = BookPagingState(BookPageAnchor(1, book.pages.single().text.indexOf("Paragraph 90.")))
         var scale by mutableStateOf<androidx.compose.runtime.MutableState<Float>?>(null)
         var width by mutableStateOf(800)
         val writes = mutableListOf<BookPageAnchor>()
@@ -398,6 +399,7 @@ class BookPageViewTest {
         // 读者翻到第 k 页页首：锚点落在页首
         state.anchor = state.pages[state.index].anchor
         mainClock.advanceTimeBy(2_000); waitForIdle()
+        waitUntil(timeoutMillis = 10_000) { writes.isNotEmpty() } // 读者这次定位的写入在 IO 线程，等它落地再清零
         val k = state.index; val head = state.anchor
         val startUtf16 = state.pages[k].sources.first().startUtf16
         writes.clear()
@@ -427,7 +429,7 @@ class BookPageViewTest {
                 waitForIdle(); mainClock.advanceTimeBy(2_000); waitForIdle()
                 onShown(state)
             }
-        val start = BookPageAnchor(1, book.pages.single().text.indexOf("Paragraph 150."))
+        val start = BookPageAnchor(1, book.pages.single().text.indexOf("Paragraph 90."))
         open(start, 1f) { s -> savedPage = s.pages[s.index].anchor; k = s.index }
         open(savedPage!!, 1.4f) { s -> assertEquals(savedPage, s.anchor, "大号冷启锚点不变") }
         open(savedPage!!, 1f) { s -> assertEquals(k, s.index, "改回中号回到原页") }
@@ -451,7 +453,7 @@ class BookPageViewTest {
     /** e: 滚动读中改字号再改回，锚点不被改成别的行，也不写读位。 */
     @Test fun scrollModeReflowKeepsTheReadingLine() = runSkikoComposeUiTest(size = Size(900f, 1000f), density = Density(1f)) {
         val book = spotBook()
-        val line = BookPageAnchor(1, book.pages.single().text.indexOf("Paragraph 150."))
+        val line = BookPageAnchor(1, book.pages.single().text.indexOf("Paragraph 90."))
         val state = BookPagingState(line)
         var scale by mutableStateOf<androidx.compose.runtime.MutableState<Float>?>(null)
         val writes = mutableListOf<BookPageAnchor>()

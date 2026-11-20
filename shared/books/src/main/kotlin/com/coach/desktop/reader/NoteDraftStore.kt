@@ -10,6 +10,10 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
+import java.io.IOException
+import java.nio.file.AccessDeniedException
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.FileSystemException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -41,8 +45,17 @@ interface NoteDraftStore {
 }
 
 /** 目录里一份草稿一个 JSON（schema=1）；文件名是身份的哈希，不含文档 id/正文；写入先临时文件再原子替换。 */
-class FileNoteDraftStore(private val directory: Path, override val scope: String) : NoteDraftStore {
+class FileNoteDraftStore internal constructor(
+    private val directory: Path,
+    override val scope: String,
+    private val moveFile: (Path, Path) -> Unit,
+    private val pause: (Long) -> Unit,
+    private val retryDelaysMs: LongArray = DEFAULT_RETRY_DELAYS_MS,
+) : NoteDraftStore {
+    constructor(directory: Path, scope: String) : this(directory, scope, ::atomicReplace, Thread::sleep)
+
     private val enabled get() = scope.isNotBlank()
+    private val dirLock: Any = lockFor(directory)
 
     private fun key(i: DraftIdentity): String {
         val canonical = listOf(i.scope, i.doc, i.version, i.pdfPage, i.start, i.end, i.textSha256).joinToString("\u0000")
@@ -50,23 +63,58 @@ class FileNoteDraftStore(private val directory: Path, override val scope: String
     }
     private fun file(i: DraftIdentity) = directory.resolve(key(i) + ".json")
 
+    private fun replaceWithRetry(tmp: Path, target: Path) {
+        var attempt = 0
+        while (true) {
+            try {
+                moveFile(tmp, target)
+                return
+            } catch (e: IOException) {
+                if (!isTransientReplaceLock(e) || attempt >= retryDelaysMs.size) throw e
+                val delayMs = retryDelaysMs[attempt++]
+                if (delayMs > 0L) {
+                    try {
+                        pause(delayMs)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        throw e
+                    }
+                }
+            }
+        }
+    }
+
     override fun put(draft: StoredDraft): Boolean {
         if (!enabled || draft.identity.scope != scope || (draft.note.isEmpty() && !draft.cleared)) return false
-        return try {
-            Files.createDirectories(directory)
-            val i = draft.identity
-            val body = buildJsonObject {
-                put("schema", 1); put("scope", i.scope); put("doc", i.doc); put("version", i.version); put("pdfPage", i.pdfPage)
-                put("start", i.start); put("end", i.end); put("textSha256", i.textSha256)
-                put("noteId", draft.noteId); put("quote", draft.quote); put("note", draft.note)
-                draft.baseRevision?.let { put("baseRevision", it) }
-                if (draft.cleared) put("cleared", true)
+        return synchronized(dirLock) {
+            var tmp: Path? = null
+            var moved = false
+            try {
+                Files.createDirectories(directory)
+                val i = draft.identity
+                val body = buildJsonObject {
+                    put("schema", 1); put("scope", i.scope); put("doc", i.doc); put("version", i.version); put("pdfPage", i.pdfPage)
+                    put("start", i.start); put("end", i.end); put("textSha256", i.textSha256)
+                    put("noteId", draft.noteId); put("quote", draft.quote); put("note", draft.note)
+                    draft.baseRevision?.let { put("baseRevision", it) }
+                    if (draft.cleared) put("cleared", true)
+                }
+                val tempFile = Files.createTempFile(directory, "draft-", ".tmp")
+                tmp = tempFile
+                Files.write(tempFile, body.toString().toByteArray(Charsets.UTF_8))
+                replaceWithRetry(tempFile, file(i))
+                moved = true
+                true
+            } catch (_: IOException) {
+                false
+            } catch (_: SecurityException) {
+                false
+            } catch (_: UnsupportedOperationException) {
+                false
+            } finally {
+                if (!moved) tmp?.let { runCatching { Files.deleteIfExists(it) } }
             }
-            val tmp = Files.createTempFile(directory, "draft-", ".tmp")
-            Files.write(tmp, body.toString().toByteArray(Charsets.UTF_8))
-            Files.move(tmp, file(i), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-            true
-        } catch (_: java.io.IOException) { false } catch (_: SecurityException) { false } catch (_: UnsupportedOperationException) { false }
+        }
     }
 
     private fun parse(path: Path): StoredDraft? {
@@ -83,21 +131,49 @@ class FileNoteDraftStore(private val directory: Path, override val scope: String
 
     override fun get(identity: DraftIdentity): StoredDraft? {
         if (!enabled || identity.scope != scope) return null
-        val path = file(identity).takeIf { Files.isRegularFile(it) } ?: return null
-        return parse(path)?.takeIf { it.identity == identity } // 文件内容的身份必须和请求逐项一致
+        return synchronized(dirLock) {
+            val path = file(identity).takeIf { Files.isRegularFile(it) } ?: return null
+            parse(path)?.takeIf { it.identity == identity } // 文件内容的身份必须和请求逐项一致
+        }
     }
 
     override fun listFor(doc: String, version: String, pdfPage: Int): List<StoredDraft> {
-        if (!enabled || !Files.isDirectory(directory)) return emptyList()
-        return Files.list(directory).use { s ->
-            s.filter { it.fileName.toString().endsWith(".json") }.collect(java.util.stream.Collectors.toList()).mapNotNull { parse(it) }
-        }.filter { it.identity.scope == scope && it.identity.doc == doc && it.identity.version == version && it.identity.pdfPage == pdfPage }
-            .sortedBy { it.identity.start }
+        if (!enabled) return emptyList()
+        return synchronized(dirLock) {
+            if (!Files.isDirectory(directory)) return emptyList()
+            Files.list(directory).use { s ->
+                s.filter { it.fileName.toString().endsWith(".json") }.collect(java.util.stream.Collectors.toList()).mapNotNull { parse(it) }
+            }.filter { it.identity.scope == scope && it.identity.doc == doc && it.identity.version == version && it.identity.pdfPage == pdfPage }
+                .sortedBy { it.identity.start }
+        }
     }
 
     override fun remove(identity: DraftIdentity) {
         if (!enabled || identity.scope != scope) return
-        runCatching { Files.deleteIfExists(file(identity)) } // 只删这一个身份对应的文件；失败不抛
+        synchronized(dirLock) {
+            runCatching { Files.deleteIfExists(file(identity)) } // 只删这一个身份对应的文件；失败不抛
+        }
+    }
+
+    internal companion object {
+        val DEFAULT_RETRY_DELAYS_MS = longArrayOf(10L, 20L, 40L, 80L, 120L)
+        private val stripedLocks = Array(64) { Any() }
+
+        private fun lockFor(directory: Path): Any {
+            val idx = (directory.toAbsolutePath().normalize().hashCode() and 0x7fffffff) % stripedLocks.size
+            return stripedLocks[idx]
+        }
+
+        internal fun isTransientReplaceLock(error: IOException): Boolean =
+            error is AccessDeniedException || error.javaClass == FileSystemException::class.java
+
+        internal fun atomicReplace(tmp: Path, target: Path) {
+            try {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING)
+            }
+        }
     }
 }
 

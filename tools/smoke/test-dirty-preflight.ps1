@@ -393,17 +393,18 @@ Run-PidIdentityCase 'missing-observed-start' ([pscustomobject]@{ Id = 42424; Sta
 # 4c. 收尾时序（批次 20261119-234754-762-cbc33cfa：taskkill 成功后 55 ms 的第一次复查报 CLEANUP_UNVERIFIED，外层退 1）
 # 查到 PID 之后、读启动时间之前进程正好退出：.NET 读启动时间报「已退出」，不能当成身份不可核验。
 # 先用真实进程取一个「查到时还在、读时已退」的 Process 对象，确认 .NET 的真实行为。
-# 启动方的进程句柄要先关掉：有人握着句柄时，退出的进程还能读到启动时间，就测不到这个时序。
-$raceLive = Start-Process powershell.exe -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 60"' -PassThru -WindowStyle Hidden
+# 夹具不发任何停止请求：自有子进程睡 2 秒后自己退出。等它退出期间一直握着启动句柄，PID 不会被复用；
+# 退出后再关掉句柄（有人握着句柄时，退出的进程还能读到启动时间，就测不到这个时序），
+# 然后用退出前取得的 Process 对象读启动时间，应读不到。
+$raceLive = Start-Process powershell.exe -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 2"' -PassThru -WindowStyle Hidden
 $raceId = $raceLive.Id
+$raceTicks = Get-TrackedProcessStartTicks $raceLive
+$raceStale = Microsoft.PowerShell.Management\Get-Process -Id $raceId -ErrorAction SilentlyContinue
+$raceSame = $raceTicks -gt 0L -and (Get-TrackedProcessStartTicks (Microsoft.PowerShell.Management\Get-Process -Id $raceId -ErrorAction SilentlyContinue)) -eq $raceTicks
+$raceGone = $raceLive.WaitForExit(20000)
 $raceLive.Dispose(); $raceLive = $null; [GC]::Collect(); [GC]::WaitForPendingFinalizers()
-$raceStale = Microsoft.PowerShell.Management\Get-Process -Id $raceId
-$raceTicks = Get-TrackedProcessStartTicks (Microsoft.PowerShell.Management\Get-Process -Id $raceId)
-Microsoft.PowerShell.Management\Stop-Process -Id $raceId -Force
-for ($i = 0; $i -lt 50 -and (Microsoft.PowerShell.Management\Get-Process -Id $raceId -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Milliseconds 100 }
-$raceGone = -not (Microsoft.PowerShell.Management\Get-Process -Id $raceId -ErrorAction SilentlyContinue)
 $raceStaleTicks = Get-TrackedProcessStartTicks $raceStale
-Check 'cleanup-race-real-stale-start-unreadable' ($raceTicks -gt 0L -and $raceGone -and $raceStaleTicks -eq 0L) "pid=$raceId ticks=$raceTicks gone=$raceGone staleTicks=$raceStaleTicks"
+Check 'cleanup-race-real-stale-start-unreadable' ($raceSame -and $raceGone -and $raceStale -and $raceStaleTicks -eq 0L) "pid=$raceId ticks=$raceTicks same=$raceSame selfExited=$raceGone staleTicks=$raceStaleTicks"
 $script:RaceSpy = $null
 function Invoke-CleanupRaceCase([string]$name, [scriptblock]$Lookup, [switch]$Tree, [int]$expectStops, [string]$expectErr) {
     $script:RaceSpy = @{ lookup = $Lookup; stops = 0; killed = $false; calls = 0; afterKill = 0 }

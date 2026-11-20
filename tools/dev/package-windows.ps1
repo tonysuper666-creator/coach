@@ -40,8 +40,11 @@
 .PARAMETER ChannelFile
     Path to a private UTF-8 file holding the https URL of the published
     latest.json. Passed to Gradle as COACH_UPDATE_CHANNEL_FILE so the MSI carries
-    the update channel. The path and contents are never printed; the script
-    reports channel=injected with the SHA-256 of that file, or channel=absent.
+    the update channel. Without this parameter a COACH_UPDATE_CHANNEL_FILE the
+    caller already set still reaches Gradle and is packaged the same way. The
+    path and contents are never printed; the script reports channel=injected
+    with the SHA-256 of whichever file Gradle reads, plus channel-source=
+    parameter|environment, or channel=absent when neither is set.
     The variable is set only for the duration of the build and the caller's
     previous value — including "unset" — is restored before the script exits,
     whether the build succeeds or fails.
@@ -98,15 +101,26 @@ $channelDigest = 'none'
 $channelBefore = [Environment]::GetEnvironmentVariable('COACH_UPDATE_CHANNEL_FILE', 'Process')
 $channelOverridden = $false
 try {
+    $channelSource = 'none'
     if ($ChannelFile) {
-        if (-not (Test-Path -LiteralPath $ChannelFile)) { throw 'Missing Windows update channel file' }
-        $resolvedChannel = (Resolve-Path -LiteralPath $ChannelFile).Path
-        $env:COACH_UPDATE_CHANNEL_FILE = $resolvedChannel
+        if (-not (Test-Path -LiteralPath $ChannelFile -PathType Leaf)) { throw 'Missing Windows update channel file' }
+        $env:COACH_UPDATE_CHANNEL_FILE = (Resolve-Path -LiteralPath $ChannelFile).Path
         $channelOverridden = $true
+        $channelSource = 'parameter'
+    } elseif ($channelBefore) {
+        $channelSource = 'environment'
+    }
+    # Report the file Gradle will actually read, however it arrived. A variable
+    # inherited from the caller packages the channel exactly like -ChannelFile, so
+    # calling that build channel=absent would pass a private MSI off as a public
+    # test build. Gradle resolves a relative path against the desktopApp project,
+    # so the digest is taken from the same place.
+    $effectiveChannel = [Environment]::GetEnvironmentVariable('COACH_UPDATE_CHANNEL_FILE', 'Process')
+    if ($effectiveChannel) {
+        $channelPath = if ([IO.Path]::IsPathRooted($effectiveChannel)) { $effectiveChannel } else { Join-Path (Join-Path $root 'desktopApp') $effectiveChannel }
+        if (-not (Test-Path -LiteralPath $channelPath -PathType Leaf)) { throw 'Missing Windows update channel file' }
         $channel = 'injected'
-        # Digest of the file Gradle actually reads, so the evidence names the input
-        # that went into the MSI rather than the path that was asked for.
-        $channelDigest = (Get-FileHash -LiteralPath $resolvedChannel -Algorithm SHA256).Hash.ToLowerInvariant().Substring(0, 12)
+        $channelDigest = (Get-FileHash -LiteralPath $channelPath -Algorithm SHA256).Hash.ToLowerInvariant().Substring(0, 12)
     }
 
     if ($WixZip) {
@@ -167,5 +181,6 @@ foreach ($installer in $installers) {
     Write-Host ("signature={0} {1}" -f $sig.Status, $signer)
     Write-Host ("sable-login={0}" -f $(if ($SableLogin) { 'shown' } else { 'hidden' }))
     Write-Host ("channel={0} sha256={1}" -f $channel, $channelDigest)
+    Write-Host ("channel-source={0}" -f $channelSource)
     Write-Host ("home={0}" -f $(if ($UserHome) { 'private' } else { 'profile' }))
 }

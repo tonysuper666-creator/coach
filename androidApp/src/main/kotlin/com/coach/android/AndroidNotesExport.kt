@@ -222,6 +222,7 @@ internal fun AndroidBookNotesExportDialog(
                                 answers = library.allAnswers(book.id),
                                 scope = scopeMode,
                                 currentPage = currentPage,
+                                notes = library.allNotes(book.id),
                             )
                         },
                     )

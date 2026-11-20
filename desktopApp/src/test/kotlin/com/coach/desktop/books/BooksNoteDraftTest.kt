@@ -37,15 +37,13 @@ class BooksNoteDraftTest {
         waitUntil(timeoutMillis = 20_000) { onAllNodes(hasTestTag("books-notes-toggle") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
         onNodeWithTag("books-notes-toggle").performClick()
     }
-    private fun ComposeUiTest.refused(text: String) {
+    private fun ComposeUiTest.unsavedDraft(text: String) {
         onNodeWithTag("books-note-new").performScrollTo().performClick()
         onNodeWithTag("books-note-line-1").performScrollTo().performClick()
         onNodeWithTag("note-input").performScrollTo().performTextInput(text)
-        onNodeWithTag("books-note-save").performScrollTo().performClick()
-        waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("note-failure-reason").fetchSemanticsNodes().isNotEmpty() }
-        onNodeWithTag("note-failure-reason").assertTextContains("本地阅读器暂不支持保存批注", substring = true)
-        onNodeWithTag("note-failure-reason").assertTextContains("这条草稿已留在本机", substring = true)
-        onNodeWithTag("note-status").assertTextEquals("没有保存")
+        onNodeWithTag("note-status").assertTextEquals("有未保存的修改")
+        onNodeWithTag("books-note-close").performScrollTo().performClick()
+        waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("note-input").fetchSemanticsNodes().isEmpty() }
     }
     private fun store(library: TextbookLibrary) = assertNotNull(ReaderDraftScope.forSource(LocalBooksReaderSource(library), library.directory))
     private fun ComposeUiTest.shot(name: String) {
@@ -53,13 +51,70 @@ class BooksNoteDraftTest {
         ImageIO.write(onNodeWithTag("windows-textbooks").captureToImage().toAwtImage(), "png", File(dir, "$name.png"))
     }
 
-    @Test fun bookshelfPdfRefusalSurvivesClosingBookAndNewWorkspaceWithoutChangingAnswerOrBookmark() {
+    @Test fun savedNotePersistsAcrossReopenWithoutChangingAnswerOrBookmark() {
+        val root = Files.createTempDirectory("synthetic-books-saved-note-")
+        val pdf = wordedChapterPdf(root)
+        val directory = root.resolve("library")
+        val first = TextbookController(TextbookLibrary(directory))
+        val answer = "Synthetic unsubmitted answer"
+        val note = "Synthetic persisted note across reopen"
+        var id = ""; var lesson = ""
+        runComposeUiTest {
+            setContent { TextbookWorkspace(first) { pdf } }
+            uploadAndRead(first)
+            repeat(2) { onNodeWithTag("next-page").performClick(); ready(first) { ui -> ui.page == it + 2 } }
+            onNodeWithText("返回书架").performClick(); ready(first) { it.screen == BookScreen.HOME }
+            onNodeWithTag("home-question").performClick(); ready(first) { it.prompt == BookPrompt.START }
+            onNodeWithTag("question-mode-SHORT_ANSWER").performClick(); ready(first) { it.book?.questionMode == QuestionMode.SHORT_ANSWER }
+            onNodeWithTag("enable-learning").performClick(); ready(first) { it.screen == BookScreen.LEARNING }
+            onNodeWithTag("short-answer").performScrollTo().performTextInput(answer)
+            id = first.state.value.book!!.id; lesson = first.state.value.book!!.lessons[0].id
+            onNodeWithTag("open-practice-source").performScrollTo().performClick()
+            ready(first) { it.screen == BookScreen.READER && it.source != null }
+            notes()
+            onNodeWithTag("books-note-new").performScrollTo().performClick()
+            onNodeWithTag("books-note-line-1").performScrollTo().performClick()
+            onNodeWithTag("note-input").performScrollTo().performTextInput(note)
+            onNodeWithTag("books-note-save").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) {
+                onAllNodes(hasTestTag("note-status") and hasText("已保存")).fetchSemanticsNodes().isNotEmpty()
+            }
+            onNodeWithTag("note-failure-reason").assertDoesNotExist()
+            assertTrue(store(first.library).listFor(id, "1", 1).isEmpty())
+            val savedRecord = first.library.allNotes(id).single()
+            assertEquals(note, savedRecord.note)
+            assertEquals(1L, savedRecord.revision)
+            onNodeWithTag("books-note-close").performScrollTo().performClick()
+            onNodeWithTag("note-${savedRecord.id}").assertExists()
+            onNodeWithTag("local-draft-0").assertDoesNotExist()
+            onNodeWithText("返回学习").performClick(); ready(first) { it.screen == BookScreen.LEARNING }
+            onNodeWithText("返回书架").performClick(); ready(first) { it.screen == BookScreen.HOME }
+        }
+        val second = TextbookController(TextbookLibrary(directory))
+        runComposeUiTest {
+            setContent { TextbookWorkspace(second) { null } }
+            ready(second) { it.book != null }
+            onNodeWithTag("home-learn").performClick(); ready(second) { it.screen == BookScreen.LEARNING }
+            onNodeWithTag("open-practice-source").performScrollTo().performClick(); ready(second) { it.screen == BookScreen.READER }
+            notes()
+            val savedId = second.library.allNotes(id).single().id
+            onNodeWithTag("note-$savedId").assertExists()
+            onNodeWithText("我的批注：$note").assertExists()
+            onNodeWithTag("local-draft-0").assertDoesNotExist()
+        }
+        val reread = TextbookLibrary(directory)
+        assertEquals(3, reread.book(id).readingPage)
+        assertEquals(PracticeAnswer(answer), reread.answer(id, lesson, QuestionMode.SHORT_ANSWER))
+        assertEquals(note, reread.allNotes(id).single().note)
+    }
+
+    @Test fun bookshelfPdfDraftSurvivesClosingBookAndNewWorkspaceWithoutChangingAnswerOrBookmark() {
         val root = Files.createTempDirectory("synthetic-books-note-")
         val pdf = wordedChapterPdf(root)
         val directory = root.resolve("library")
         val first = TextbookController(TextbookLibrary(directory))
         val answer = "Synthetic unsubmitted answer"
-        val note = "Synthetic note kept after 501"
+        val note = "Synthetic unsaved draft across reopen"
         var id = ""; var lesson = ""; var noteId = ""
         runComposeUiTest {
             setContent { TextbookWorkspace(first) { pdf } }
@@ -74,11 +129,11 @@ class BooksNoteDraftTest {
             id = first.state.value.book!!.id; lesson = first.state.value.book!!.lessons[0].id
             onNodeWithTag("open-practice-source").performScrollTo().performClick()
             ready(first) { it.screen == BookScreen.READER && it.source != null }
-            notes(); refused(note)
+            notes(); unsavedDraft(note)
             val saved = store(first.library).listFor(id, "1", 1).single()
             noteId = saved.noteId
             assertEquals(note, saved.note); assertEquals(0L, saved.baseRevision)
-            shot("01-refused")
+            shot("01-draft")
             repeat(2) { onNodeWithTag("books-notes-toggle").performClick() }
             onNodeWithTag("local-draft-0").performScrollTo().performClick()
             onNodeWithTag("note-input").assertTextEquals(note)
@@ -105,9 +160,9 @@ class BooksNoteDraftTest {
             onNodeWithTag("local-draft-0").performScrollTo().performClick()
             onNodeWithTag("note-input").assertTextEquals(note)
             onNodeWithTag("note-status").assertTextEquals("有未保存的修改")
-            onNodeWithTag("note-failure-reason").assertDoesNotExist() // no automatic send to the real 501 source
+            onNodeWithTag("note-failure-reason").assertDoesNotExist()
             assertEquals(noteId, store(second.library).listFor(id, "1", 1).single().noteId)
-            // Hiding/showing the panel must not resend the previous save tick.
+            // Hiding/showing the panel must not send an unrequested save.
             repeat(2) { onNodeWithTag("books-notes-toggle").performClick() }
             onNodeWithTag("local-draft-0").performScrollTo().performClick()
             onNodeWithTag("note-input").assertTextEquals(note)
@@ -135,7 +190,7 @@ class BooksNoteDraftTest {
         runComposeUiTest {
             setContent { TextbookWorkspace(first) { selected } }
             uploadAndRead(first); id = first.state.value.book!!.id
-            notes(); refused("Only library A and original PDF")
+            notes(); unsavedDraft("Only library A and original PDF")
             onNodeWithText("返回书架").performClick(); ready(first) { it.screen == BookScreen.HOME }
             selected = other
             uploadAndRead(first)

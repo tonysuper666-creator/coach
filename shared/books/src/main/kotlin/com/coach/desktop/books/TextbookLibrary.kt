@@ -59,6 +59,11 @@ internal class TextbookLibrary(
             sql.execute("""CREATE TABLE IF NOT EXISTS book_highlights(
                 book TEXT NOT NULL,page INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,quote TEXT NOT NULL,
                 PRIMARY KEY(book,page,start,end))""")
+            sql.execute("""CREATE TABLE IF NOT EXISTS book_notes(
+                book TEXT NOT NULL,id TEXT NOT NULL,version TEXT NOT NULL,page INTEGER NOT NULL,
+                start INTEGER NOT NULL,end INTEGER NOT NULL,quote TEXT NOT NULL,note TEXT NOT NULL,
+                text_sha256 TEXT NOT NULL,revision INTEGER NOT NULL,last_mutation_id TEXT NOT NULL,
+                deleted INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(book,id))""")
         }
             val pageColumns = db.createStatement().use { sql -> sql.executeQuery("PRAGMA table_info(pages)").use { rows ->
                 buildSet { while (rows.next()) add(rows.getString("name")) }
@@ -351,6 +356,139 @@ internal class TextbookLibrary(
                     }
                 }
             }
+        }
+    }
+
+    /** Load persisted reader notes for [bookId] in reading order. */
+    @Synchronized fun allNotes(bookId: String): List<BookNoteRecord> = database().use { db ->
+        db.prepareStatement(
+            "SELECT id,version,page,start,end,quote,note,text_sha256,revision,deleted FROM book_notes WHERE book=? AND deleted=0 ORDER BY page,start,end,rowid",
+        ).use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) {
+                        add(
+                            BookNoteRecord(
+                                id = rows.getString(1),
+                                version = rows.getString(2),
+                                pdfPage = rows.getInt(3),
+                                start = rows.getInt(4),
+                                end = rows.getInt(5),
+                                quote = rows.getString(6),
+                                note = rows.getString(7),
+                                textSha256 = rows.getString(8),
+                                revision = rows.getLong(9),
+                                deleted = rows.getInt(10) != 0,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /** Persist a reader note atomically with CAS revision checks and mutationId idempotency. */
+    @Synchronized fun saveNote(
+        bookId: String,
+        record: BookNoteRecord,
+        baseRevision: Long,
+        mutationId: String,
+    ): BookNoteWriteResult = database().use { db ->
+        db.autoCommit = false
+        try {
+            val existing = db.prepareStatement(
+                "SELECT version,page,start,end,quote,note,text_sha256,revision,last_mutation_id,deleted FROM book_notes WHERE book=? AND id=?",
+            ).use { sql ->
+                sql.setString(1, bookId)
+                sql.setString(2, record.id)
+                sql.executeQuery().use { r ->
+                    if (!r.next()) null else Triple(
+                        BookNoteRecord(
+                            id = record.id,
+                            version = r.getString(1),
+                            pdfPage = r.getInt(2),
+                            start = r.getInt(3),
+                            end = r.getInt(4),
+                            quote = r.getString(5),
+                            note = r.getString(6),
+                            textSha256 = r.getString(7),
+                            revision = r.getLong(8),
+                            deleted = r.getInt(10) != 0,
+                        ),
+                        r.getLong(8),
+                        r.getString(9),
+                    )
+                }
+            }
+            if (existing != null && existing.third == mutationId) {
+                val stored = existing.first
+                val matches = stored.version == record.version &&
+                    stored.pdfPage == record.pdfPage &&
+                    stored.start == record.start &&
+                    stored.end == record.end &&
+                    stored.quote == record.quote &&
+                    stored.note == record.note &&
+                    stored.textSha256 == record.textSha256 &&
+                    stored.deleted == record.deleted
+                db.rollback()
+                return@use if (matches) BookNoteWriteResult.Saved(existing.second) else BookNoteWriteResult.Conflict
+            }
+            if (existing == null) {
+                if (baseRevision != 0L) {
+                    db.rollback()
+                    return@use BookNoteWriteResult.Conflict
+                }
+                val rev = 1L
+                db.prepareStatement(
+                    """INSERT INTO book_notes(book,id,version,page,start,end,quote,note,text_sha256,revision,last_mutation_id,deleted)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ).use { sql ->
+                    sql.setString(1, bookId)
+                    sql.setString(2, record.id)
+                    sql.setString(3, record.version)
+                    sql.setInt(4, record.pdfPage)
+                    sql.setInt(5, record.start)
+                    sql.setInt(6, record.end)
+                    sql.setString(7, record.quote)
+                    sql.setString(8, record.note)
+                    sql.setString(9, record.textSha256)
+                    sql.setLong(10, rev)
+                    sql.setString(11, mutationId)
+                    sql.setInt(12, if (record.deleted) 1 else 0)
+                    sql.executeUpdate()
+                }
+                db.commit()
+                return@use BookNoteWriteResult.Saved(rev)
+            }
+            if (baseRevision != existing.second) {
+                db.rollback()
+                return@use BookNoteWriteResult.Conflict
+            }
+            val nextRev = existing.second + 1L
+            db.prepareStatement(
+                """UPDATE book_notes SET version=?,page=?,start=?,end=?,quote=?,note=?,text_sha256=?,revision=?,last_mutation_id=?,deleted=?
+                   WHERE book=? AND id=?""",
+            ).use { sql ->
+                sql.setString(1, record.version)
+                sql.setInt(2, record.pdfPage)
+                sql.setInt(3, record.start)
+                sql.setInt(4, record.end)
+                sql.setString(5, record.quote)
+                sql.setString(6, record.note)
+                sql.setString(7, record.textSha256)
+                sql.setLong(8, nextRev)
+                sql.setString(9, mutationId)
+                sql.setInt(10, if (record.deleted) 1 else 0)
+                sql.setString(11, bookId)
+                sql.setString(12, record.id)
+                sql.executeUpdate()
+            }
+            db.commit()
+            BookNoteWriteResult.Saved(nextRev)
+        } catch (error: Throwable) {
+            runCatching { db.rollback() }
+            throw error
         }
     }
 
@@ -748,7 +886,7 @@ internal class TextbookLibrary(
                 for (table in listOf(
                     "pages", "book_illustrations", "book_page_text_boxes", "book_native_sources",
                     "book_learning_paths", "book_ladders", "book_reader_views", "book_pdf_modes",
-                    "book_highlights", "answers", "book_reviews", "book_structures", "book_section_cache",
+                    "book_highlights", "book_notes", "answers", "book_reviews", "book_structures", "book_section_cache",
                 )) {
                     val exists = db.createStatement().use { s -> s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='$table'").use { it.next() } }
                     if (exists) db.prepareStatement("DELETE FROM $table WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }

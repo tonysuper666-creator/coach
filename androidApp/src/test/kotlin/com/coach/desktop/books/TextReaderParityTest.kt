@@ -23,14 +23,17 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.dp
@@ -177,18 +180,21 @@ class TextReaderParityTest {
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("book-scroll-read").fetchSemanticsNodes().isNotEmpty() }
         assertTrue(library1.textScrollMode(book.id))
 
-        // 5. Notes draft persists across reopen (matching Windows 1.1.0 LocalBooksReaderSource contract).
+        // 5. Save a note to SQLite (revision 1), verify draft store clears and saved note persists across cold restart.
         compose.waitUntil(10_000) {
             compose.onAllNodes(hasTestTag("books-notes-toggle") and isEnabled()).fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag("books-notes-toggle").performClick()
         compose.onNodeWithTag("books-note-new").performScrollTo().performClick()
         compose.onNodeWithTag("books-note-line-0").performScrollTo().performClick()
-        compose.onNodeWithTag("note-input").performScrollTo().performTextInput("Android note draft check")
+        compose.onNodeWithTag("note-input").performScrollTo().performTextInput("Android saved note check")
         compose.onNodeWithTag("books-note-save").performScrollTo().performClick()
-        compose.waitUntil(10_000) { compose.onAllNodesWithTag("note-failure-reason").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil(10_000) {
+            compose.onAllNodes(hasTestTag("note-status") and hasText("已保存")).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag("books-note-close").performScrollTo().performClick()
 
-        // 6. Cold start with fresh TextbookLibrary + TextbookController: restores scroll mode, read spot, Aa settings, highlight, and note draft.
+        // 6. Cold start with fresh TextbookLibrary + TextbookController: restores scroll mode, read spot, Aa settings, highlight, and saved note.
         compose.runOnIdle { activeController.value = null }
         compose.waitForIdle()
         val library2 = TextbookLibrary(libDir)
@@ -198,7 +204,10 @@ class TextReaderParityTest {
         assertEquals(PaperColor.DARK, ReadingSettings(libDir).paper)
         assertEquals(1, library2.highlights(book.id, book.pages.first()).size)
         val draftStore = ReaderDraftScope.forSource(LocalBooksReaderSource(library2), libDir)!!
-        assertEquals("Android note draft check", draftStore.listFor(book.id, "1", 1).single().note)
+        assertTrue(draftStore.listFor(book.id, "1", 1).isEmpty())
+        val persistedNote = library2.allNotes(book.id).single()
+        assertEquals("Android saved note check", persistedNote.note)
+        assertEquals(1L, persistedNote.revision)
 
         val controller2 = TextbookController(library2)
         runBlocking {
@@ -215,7 +224,18 @@ class TextReaderParityTest {
             compose.onAllNodes(hasTestTag("books-notes-toggle") and isEnabled()).fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag("books-notes-toggle").performClick()
-        compose.onNodeWithTag("local-draft-0").assertExists()
+        compose.onNodeWithTag("note-${persistedNote.id}").assertExists()
+        compose.onNodeWithText("我的批注：Android saved note check").assertExists()
+
+        // Re-edit the same anchored line -> saves revision 2 cleanly via CAS.
+        compose.onNodeWithTag("books-note-new").performScrollTo().performClick()
+        compose.onNodeWithTag("books-note-line-0").performScrollTo().performClick()
+        compose.onNodeWithTag("note-input").performScrollTo().performTextReplacement("Android saved note check v2")
+        compose.onNodeWithTag("books-note-save").performScrollTo().performClick()
+        compose.waitUntil(10_000) {
+            library2.allNotes(book.id).singleOrNull()?.revision == 2L
+        }
+        assertEquals("Android saved note check v2", library2.allNotes(book.id).single().note)
     }
 
     @Test fun foldUnfoldSpreadPreservesNewPageAfterManualTurn() {

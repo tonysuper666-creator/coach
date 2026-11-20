@@ -1,7 +1,9 @@
 package com.coach.desktop
 
+import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.sun.jna.ptr.ShortByReference
+import org.junit.Assume.assumeTrue
 import java.net.URI
 import java.nio.file.Files
 import java.security.MessageDigest
@@ -40,6 +42,32 @@ class WindowsUpdateTest {
         assertNull(prism.candidate(x64))
         val nativeX64 = WindowsUpdate(URI("https://updates.invalid/channel/latest.json"), "1.0.1", "x64")
         assertEquals(WindowsRelease("1.1.0", "LearningCoach-1.1.0-x64.msi", bytes.size.toLong(), hash), nativeX64.candidate(manifest))
+    }
+
+    @Test fun windowsUpdateArchMapsNativeX64AndRejectsUnknownOrFailedCalls() {
+        fun kernel(ok: Boolean, nativeMachine: Int) = object : UpdateKernel32 {
+            override fun GetCurrentProcess(): Pointer = Pointer.createConstant(-1L)
+            override fun IsWow64Process2(process: Pointer, processMachine: ShortByReference, outNative: ShortByReference): Boolean {
+                outNative.value = nativeMachine.toShort()
+                return ok
+            }
+        }
+        assertEquals("x64", windowsUpdateArch(kernel(ok = true, nativeMachine = 0x8664)))
+        assertEquals("arm64", windowsUpdateArch(kernel(ok = true, nativeMachine = 0xaa64)))
+        assertNull(windowsUpdateArch(kernel(ok = true, nativeMachine = 0x014c)))
+        assertNull(windowsUpdateArch(kernel(ok = false, nativeMachine = 0xaa64)))
+    }
+
+    @Test fun liveKernel32ReportsNativeArchitectureOnWindows() {
+        assumeTrue(System.getProperty("os.name").startsWith("Windows"))
+        val jvmArch = System.getProperty("os.arch").lowercase()
+        val detected = assertNotNull(windowsUpdateArch(Native.load("kernel32", UpdateKernel32::class.java)))
+        println("LIVE_WINDOWS_UPDATE_ARCH=$detected jvm_arch=$jvmArch")
+        when (jvmArch) {
+            "aarch64", "arm64" -> assertEquals("arm64", detected)
+            "amd64", "x86_64" -> assertTrue(detected in setOf("x64", "arm64"), "unexpected host arch: $detected")
+            else -> fail("Unexpected Windows JVM os.arch: $jvmArch")
+        }
     }
 
     @Test fun confinesDownloadsToPackagedHttpsDirectory() {

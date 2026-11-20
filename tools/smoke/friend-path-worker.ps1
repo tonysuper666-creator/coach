@@ -42,11 +42,12 @@ function Fail([int]$n, [string]$why) {
 function Pass([int]$n, [string]$what) { [void]$results.Add([pscustomobject]@{ Step = $n; Name = $steps[$n - 1]; Ok = $true; Why = $what }); Note "步骤$n 通过：$what" }
 function Has($lines, [string[]]$needles) { foreach ($s in $needles) { $m = Find-Text $lines $s; if ($m) { return $m } }; $null }
 function Get-PassageServiceError($lines) {
-    # Match the status row on current and older installed clients.
+    # 讲解没拿到时，客户端在选段卡里给一句固定的说明（ExplainTrouble 的文案，不含状态码）。
     foreach ($line in $lines) {
         $row = $line.Text -replace '\s', ''
-        if ($row -match '^讲解这段((?:今天的|这个月的)?讲解额度用完了)(?:[，,。.]|$)') { return $Matches[1] }
-        if ($row -match '^(?:再试一次)?(讲解服务暂时不可用)(?:[，,。.]|$)') { return $Matches[1] }
+        if ($row -match '^(?:再试一次)?(讲解服务暂时连不上|讲解服务还没配对|讲解服务这会儿没顾上|这台电脑的连接已停用|这次没讲成)') { return $Matches[1] }
+        # 这支字号下 OCR 会把「电脑」「连接」认歪（如「这台电的遵接已停甲」），按骨架再认一次。
+        if ($row -match '^这台电.{0,3}的.{0,4}接已停') { return '这台电脑的连接已停用' }
     }
 }
 function Get-AskReplyState($lines, [int]$page) {
@@ -76,6 +77,18 @@ function Await-Text([int]$n, [string]$tag, [string[]]$needles, [int]$sec) {
     return $null
 }
 function Page-Of($lines) { foreach ($l in $lines) { $mm = [regex]::Match($l.Text, '(\d+)[/／](\d+)'); if ($mm.Success) { return "$($mm.Groups[1].Value)/$($mm.Groups[2].Value)" } }; return $null }
+# 底栏页号夹在「上一页」「下一页」之间。正文和别的卡片里也有「2/2」这种分数，只认这一行。
+function Page-NearNav($lines) {
+    $prev = Find-Text $lines '上一页'; $next = Find-Text $lines '下一页'
+    if (-not $prev -or -not $next) { return $null }
+    foreach ($l in $lines) {
+        $mm = [regex]::Match(($l.Text -replace '\s', ''), '^(\d+)(?:[/／](\d+))?[^\d]{0,3}$')
+        if (-not $mm.Success) { continue }
+        $b = Get-LineBox $l
+        if ([Math]::Abs($b.Y - $prev.Y) -le 16 -and $b.X1 -ge ($prev.X2 - 2) -and $b.X2 -le ($next.X1 + 2)) { return $mm.Groups[1].Value }
+    }
+    return $null
+}
 # At either edge of the book the disabled navigation label may disappear in OCR.
 # Enlarge the counter beside its visible neighbour; keep the current page and total strictly numeric.
 function Get-OriginalPageNumber($lines, [string]$png) {
@@ -112,9 +125,31 @@ function Get-OriginalPageNumber($lines, [string]$png) {
         }
     } finally { $src.Dispose() }
 }
-# The lowest on-screen occurrence of a label (e.g. the last 「讲解这段」 button on a page).
+# The lowest on-screen occurrence of a label (e.g. the last button on a page).
 function Find-Lowest($lines, [string]$needle) { $best = $null; foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m -and (-not $best -or $m.Y -gt $best.Y)) { $best = $m } }; $best }
 function Find-All($lines, [string]$needle) { $all = @(); foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m) { $all += $m } }; $all | Sort-Object Y }
+# A whole OCR line's box: drag-selection needs both edges of the line, not just the first word.
+function Get-LineBox($line) {
+    $x1 = 1e9; $y1 = 1e9; $x2 = -1; $y2 = -1
+    foreach ($w in $line.Words) {
+        $b = $w.BoundingRect
+        if ($b.X -lt $x1) { $x1 = [int]$b.X }
+        if (($b.X + $b.Width) -gt $x2) { $x2 = [int]($b.X + $b.Width) }
+        if ($b.Y -lt $y1) { $y1 = [int]$b.Y }
+        if (($b.Y + $b.Height) -gt $y2) { $y2 = [int]($b.Y + $b.Height) }
+    }
+    [pscustomobject]@{ X1 = [int]$x1; X2 = [int]$x2; Y1 = [int]$y1; Y2 = [int]$y2; Y = [int](($y1 + $y2) / 2) }
+}
+# The occurrence of $needle on the same visual row as $ref (the floating toolbar draws its buttons in one row).
+function Find-OnRow($lines, [string]$needle, $ref, [int]$tol = 14) {
+    if (-not $ref) { return $null }
+    $best = $null
+    foreach ($l in $lines) {
+        $m = Find-Text @($l) $needle
+        if ($m -and [Math]::Abs($m.Y - $ref.Y) -le $tol -and (-not $best -or $m.X -lt $best.X)) { $best = $m }
+    }
+    return $best
+}
 function Click-Label([int]$n, [string[]]$labels, [string]$why, [int]$sec = 15) {
     $m = Await-Text $n 'find' $labels $sec
     if (-not $m) { Fail $n "$why（屏幕上找不到「$($labels -join '」或「')」）" }
@@ -297,10 +332,18 @@ try {
     Pass 2 '书出现在书架'
 
     # ③ 翻页
-    Click-Label 3 @('先读', '继续看书') '找不到「先读」'
-    $d = Await-Text 3 'dismiss' @('要开始学吗') 8
-    if ($d) { Send-Keys '{ESC}'; Start-Sleep -Seconds 1 }   # 暂不开启：只读这本书
-    $m = Await-Text 3 'reader' @('下一页') 60
+    # 上传后的「这次怎么读」卡上点「先读」只读；导入收尾时按钮可能还没亮，点不动就再点，直到阅读器出来。
+    $lines = Shot 3 'find'
+    $m = Has $lines @('下一页')
+    $deadline = (Get-Date).AddSeconds(90)
+    while (-not $m -and (Get-Date) -lt $deadline) {
+        $b = Has $lines @('先读', '继续看书')
+        if ($b) { Click-At $b.X $b.Y; Start-Sleep -Seconds 1 }
+        $d = Await-Text 3 'dismiss' @('要开始学吗') 2
+        if ($d) { Send-Keys '{ESC}'; Start-Sleep -Seconds 1 }   # 暂不开启：只读这本书
+        $lines = Shot 3 'reader'
+        $m = Has $lines @('下一页')
+    }
     if (-not $m) { Fail 3 '没有进到阅读器' }
     $page0 = $null
     foreach ($try in 1..5) {
@@ -330,62 +373,109 @@ try {
     $tcp.Close()
     if (-not $reach) { Fail 4 "测试服务 $($u.Host):$($u.Port) 5 秒内连不上，讲解问不出去（端口写错或服务没起）" }
     if (-not $Selection -or -not (Test-Path $Selection)) { Fail 4 '没有可信选段文件（-Selection）' }
-    # ④ 选中就问出讲解：跳到可信选段所在页 → 文字视图 → 点该段的「讲解这段」→ 同意发给 Mac → 等讲解或报错
+    # ④ 选中就问出讲解：跳到可信选段所在页 → 文字视图 → 拖选该段 → 浮条「讲讲」→ 同意发给 Mac → 等带出处的讲解
+    # 1.1.1（TON-1766）删掉了每段的「讲解这段」：选中文字后浮出的工具条「讲讲」才是这条路径的入口。
     $sel = Get-Content $Selection -Raw -Encoding UTF8 | ConvertFrom-Json
     $physPage = [int]([regex]::Match($sel.blocks[0].id, ':p(\d+):').Groups[1].Value)
-    $g = Await-Text 4 'goto' @('前往') 10
-    if (-not $g) { Fail 4 '找不到页码跳转的「前往」' }
-    Click-At ($g.X - 106) $g.Y; Send-Keys '^a'; Send-Keys "$physPage"; Start-Sleep -Milliseconds 500
-    Click-At $g.X $g.Y; Start-Sleep -Seconds 3
+    if (-not (Await-Text 4 'goto' @('前往') 10)) { Fail 4 '找不到页码跳转的「前往」' }
+    # 底栏页码框夹在「页码」标签和「前往」按钮之间，只有 64dp 宽，OCR 读不出框里刚敲的数字；
+    # 所以以「点完「前往」页码真的变成这一页」为准，哪个落点跳不过去就换下一个落点再试。
+    $go = Find-Lowest $script:Last '前往'
+    $goX = [int]$go.X; $goY = [int]$go.Y; $goX1 = [int]$go.X1
+    $cands = New-Object 'System.Collections.Generic.List[int]'
+    $lbl = Find-Lowest $script:Last '页码'
+    if ($lbl) { $cands.Add([int](([int]$lbl.X2 + $goX1) / 2)) }
+    foreach ($off in 106, 70, 40) { $cands.Add($goX - $off) }
+    $pageNow = $null
+    foreach ($fx in $cands) {
+        Click-At $fx $goY; Start-Sleep -Milliseconds 400
+        Send-Keys '^a'; Send-Keys "$physPage"; Start-Sleep -Milliseconds 500
+        $btn = Find-Lowest (Shot 4 'goto-typed') '前往'
+        if ($btn) { Click-At ([int]$btn.X) ([int]$btn.Y) }
+        foreach ($try in 1..5) {
+            Start-Sleep -Seconds 2; $pageNow = Page-NearNav (Shot 4 'jumped')
+            if ($pageNow -eq "$physPage") { break }
+        }
+        if ($pageNow -eq "$physPage") { Note "页码框点在第 $fx 像素处跳页成功"; break }
+        if ($btn) { Send-Keys '^a'; Send-Keys '{BACKSPACE}'; Start-Sleep -Milliseconds 300 }
+    }
+    if ($pageNow -ne "$physPage") { Fail 4 "页码没跳到 $physPage（现在 $pageNow）" }
     Click-Label 4 @('看文字') '找不到「看文字」'
     if (-not (Await-Text 4 'text-mode' @('看原页') 15)) { Fail 4 '点击「看文字」后没有切换到文字视图' }
-    Click-Label 4 @('讲解') '找不到「讲解」'
-    if (-not (Await-Text 4 'explain-mode' @('回到原文') 15)) { Fail 4 '点击「讲解」后没有进入讲解模式' }
-    $lines = Shot 4 'blocks'
-    # 可信选段所在的段落：用它开头的几个词在屏幕上定位，再取它下面最近的「讲解这段」
+    # 文字视图一屏只放得下一页的一部分：这一页开头是页眉，可信选段在这页下半部分，往下滚才看得见。
     $words = (($sel.selection -replace '[^A-Za-z ]', ' ').Trim() -split '\s+' | Select-Object -First 4) -join ''
-    $para = $null; foreach ($l in $lines) { if ($l.Text -replace '[^A-Za-z]', '' -like "*$words*") { $para = Find-Text @($l) ($l.Text.Substring(0, 6)); break } }
-    $buttons = @(Find-All $lines '讲解这段')
-    $target = if ($para) { $buttons | Where-Object { $_.Y -gt $para.Y } | Select-Object -First 1 } else { $null }
-    if (-not $target) { Fail 4 '讲解模式下找不到可信选段所在段落的「讲解这段」' }
-    Click-At $target.X $target.Y
+    $paraLine = $null; $lines = @()
+    foreach ($round in 1..6) {
+        if ($round -eq 1) { $lines = Shot 4 'blocks' } else { $lines = Shot 4 'blocks-down' }
+        foreach ($l in $lines) { if ($l.Text -replace '[^A-Za-z]', '' -like "*$words*") { $paraLine = $l; break } }
+        if ($paraLine) { break }
+        Scroll-At 600 400 -3; Start-Sleep -Milliseconds 800
+    }
+    if (-not $paraLine) { Fail 4 '文字视图里找不到可信选段所在的段落（见 4-blocks.png）' }
+    $box = Get-LineBox $paraLine
+    if (($box.X2 - $box.X1) -lt 40) { Fail 4 '可信选段那一行太窄，拖选不出文字（见 4-blocks.png）' }
+    $lineH = [Math]::Max(12, $box.Y2 - $box.Y1)
+    # 拖选：浮条落在阅读区顶端；一种落点没选出文字就换一种再试
+    $toolbar = $null
+    foreach ($drag in 1..3) {
+        switch ($drag) {
+            1 { Drag-Between ($box.X1 + 4) $box.Y ($box.X2 - 4) $box.Y }
+            2 { Drag-Between ($box.X1 + 4) $box.Y ($box.X2 - 4) ($box.Y + 2 * $lineH) }
+            3 { Drag-Between ($box.X1 + 4) ([Math]::Max(1, $box.Y - $lineH)) ($box.X2 - 4) ($box.Y + 2 * $lineH) }
+        }
+        $toolbar = Await-Text 4 "selected$drag" @('举个例子', '换个说法') 8
+        if ($toolbar) { break }
+    }
+    if (-not $toolbar) { Fail 4 '拖选这一行后没有浮出选中工具条（见 4-selected3.png）' }
+    # 工具条一行是「讲讲」「举个例子」「换个说法」「问…」：取和「举个例子」同一行、在它左边的「讲讲」
+    $explainBtn = Find-OnRow $script:Last '讲讲' $toolbar
+    if (-not $explainBtn) { Fail 4 '选中工具条里找不到「讲讲」' }
+    Click-At $explainBtn.X $explainBtn.Y; Start-Sleep -Milliseconds 800
     $c = Await-Text 4 'consent' @('允许并讲解') 15
     if ($c) { Click-At $c.X $c.Y }       # 这本书第一次讲解的同意框（开发验收允许点）
     $deadline = (Get-Date).AddSeconds(120); $outcome = $null; $errText = $null; $n = 0
+    $failWords = @('无法讲解', '尚未核实', '尚未接通', '连不上', '超时', '没顾上', '没讲成', '没有得到可核对', '出处无法核对', '没有可核对的讲解', '连接已更换', '还没配对', '额度', '选中追问格式不对', '保存页', '这一节太长', '请先导入自己的书')
+    $failPattern = '无法讲解|尚未核实|尚未接通|连不上|超时|没顾上|没讲成|没有得到可核对|出处无法核对|没有可核对的讲解|连接已更换|还没配对|额度|选中追问格式不对|保存页|这一节太长|请先导入自己的书'
     while ((Get-Date) -lt $deadline -and -not $outcome) {
-        Start-Sleep -Seconds 4; $n++
-        $seen = @()
-        foreach ($view in 0, 1) {                       # 讲解出现在原文段落下面：每轮看顶部和滚到底各一次，不累计滚动
-            if ($view -eq 1) { Scroll-At 900 700 -10; Start-Sleep -Milliseconds 800 }
-            $lines = Shot 4 "result$n-$view"
-            $serviceError = Get-PassageServiceError $lines
-            if ($serviceError) { Fail 4 "服务回了拒绝：$serviceError" }
-            $seen += $lines
+        Start-Sleep -Seconds 3; $n++
+        $lines = Shot 4 "result$n"
+        $serviceError = Get-PassageServiceError $lines
+        if ($serviceError) { Fail 4 "服务回了拒绝：$serviceError" }
+        $e = Has $lines $failWords
+        if ($e) { $outcome = 'error'; $errText = (($lines | Where-Object { $_.Text -match $failPattern } | Select-Object -First 1).Text) }
+        elseif (Has $lines @('出处')) { $outcome = 'ok' }
+        else {
+            # 讲解比选段卡的可视高度长时，「出处」在卡片正文下面：在卡片里下滚一次再等下一轮
+            $closeCard = Find-Text $lines '收起'
+            if ($closeCard -and $n -ge 2) { Scroll-At 600 ([Math]::Min($closeCard.Y + 150, 720)) -3; Start-Sleep -Milliseconds 600 }
         }
-        Scroll-At 900 700 20; Start-Sleep -Milliseconds 500
-        $e = Has $seen @('无法讲解', '尚未核实', '尚未接通', '连不上', '超时', '没有得到可核对')
-        if ($e) { $outcome = 'error'; $errText = (($seen | Where-Object { $_.Text -match '无法讲解|尚未核实|尚未接通|连不上|超时|没有得到可核对' } | Select-Object -First 1).Text) }
-        elseif (Has $seen @('出处')) { $outcome = 'ok' }
     }
     if ($outcome -eq 'error') { Fail 4 "服务回了拒绝：$errText" }
     if ($outcome -ne 'ok') { Fail 4 '120 秒内既没有讲解也没有报错' }
     $explainOk = $true
-    # ⑦ 先做（依赖第 4 步留在屏幕上的讲解）：点「出处」，应弹出原文卡
+    # ⑦ 先做（依赖第 4 步留在屏幕上的选段卡）：点「出处」，应弹出原文卡
     $cardOk = $null
-    # 出处可能在视口外：先看当前屏，找不到就先往下再往上有界滚动（最多 8 次）
+    # 出处可能在选段卡正文下方：先在卡片里往下找，再往上找，最多 8 次
     $o = $null
     foreach ($k in 0..8) {
-        if ($k -gt 0) { Scroll-At 900 700 $(if ($k -le 4) { -5 } else { 5 }); Start-Sleep -Milliseconds 700 }
+        if ($k -gt 0) {
+            $closeCard = Find-Text $script:Last '收起'
+            $y = if ($closeCard) { [Math]::Min($closeCard.Y + 150, 720) } else { 600 }
+            Scroll-At 600 $y $(if ($k -le 4) { -3 } else { 3 }); Start-Sleep -Milliseconds 700
+        }
         $o = Await-Text 7 'cite' @('出处') 1
         if ($o) { break }
     }
-    if (-not $o) { $cardOk = '讲解下面没有「出处」链接' }
+    if (-not $o) { $cardOk = '选段卡里没有「出处」链接（见 4-result*.png）' }
     else {
         Click-At $o.X $o.Y; Start-Sleep -Seconds 3
         $lines = Shot 7 'card'
         if (-not (Has $lines @('原文')) -or -not (Has $lines @("第$physPage页", "第 $physPage 页"))) { $cardOk = '点了出处但没有弹出标着页码的原文卡' }
         Send-Keys '{ESC}'; Start-Sleep -Seconds 1
     }
+    # 收起选段卡再走「选段提问」：卡片留着会盖住提问对话框后面的阅读区
+    $closeCard = Await-Text 4 'close-card' @('收起') 10
+    if ($closeCard) { Click-At $closeCard.X $closeCard.Y; Start-Sleep -Milliseconds 800 }
 
     # ④（续）实际输入问题：选段提问 → 选中该段 → 粘贴问题（剪贴板，避开输入法）→ 点发送 → 等带出处的回答
     $askWhy = $null
@@ -440,8 +530,8 @@ try {
         Send-Keys '{ESC}'; Start-Sleep -Seconds 1
     } catch { if ("$_" -like 'DESKTOP_BUSY*' -or "$_" -like 'WIN_DRIVE_FOREGROUND_CONTENTION*') { throw }; $askWhy = "$_"; try { Send-Keys '{ESC}' } catch { } }
     if ($askWhy) {
-        try { Fail 4 "讲解这段可用，但实际提问失败：$askWhy" } catch { if ("$_" -ne 'STEP_FAILED') { throw }; if (-not $KeepGoing) { throw 'STEP_FAILED' } }
-    } else { Pass 4 '选中一段能得到带出处的讲解，也能输入问题得到带出处的回答' }
+        try { Fail 4 "选段讲解可用，但实际提问失败：$askWhy" } catch { if ("$_" -ne 'STEP_FAILED') { throw }; if (-not $KeepGoing) { throw 'STEP_FAILED' } }
+    } else { Pass 4 '拖选一段点「讲讲」得到带出处的讲解，也能输入问题得到带出处的回答' }
 
     # ⑤ 边看边学出讲解
     # 客户端对「已同意」的书，进入或切换整节就会自动发讲解请求（BookLessonExplanation）。④ 已经替这本书同意过，

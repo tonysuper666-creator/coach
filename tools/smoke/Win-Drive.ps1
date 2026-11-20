@@ -251,7 +251,12 @@ function Get-TrackedPidState([int]$ProcessId, [long]$StartTimeTicks = 0L) {
     if (-not $proc) { return 'exited' }
     if ($StartTimeTicks -le 0L) { return 'unverified' }
     $observedTicks = Get-TrackedProcessStartTicks $proc
-    if ($observedTicks -le 0L) { return 'unverified' }
+    if ($observedTicks -le 0L) {
+        # 查到 PID 之后、读启动时间之前进程正好退出，.NET 读启动时间会报「已退出」。
+        # 重新按 PID 查一次：查不到就是已退出；还在才算身份不可核验。
+        if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { return 'exited' }
+        return 'unverified'
+    }
     if ($observedTicks -ne $StartTimeTicks) { return 'exited' }
     return 'alive'
 }
@@ -288,14 +293,16 @@ function Stop-TrackedPid(
     } else {
         Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
     }
+    # 停止请求已发，下面只读不停：进程收尾期间启动时间可能短暂读不到，
+    # 一直复查到截止时间；到点仍读不到才报 CLEANUP_UNVERIFIED，不再补发停止。
     $deadline = [DateTime]::UtcNow.AddMilliseconds($WaitMs)
     while ($true) {
         $state = Get-TrackedPidState $ProcessId $StartTimeTicks
         if ($state -eq 'exited') { return }
-        if ($state -eq 'unverified') {
-            throw "CLEANUP_UNVERIFIED: pid $ProcessId identity could not be verified after stop (recordedStartTicks=$StartTimeTicks)"
-        }
         if ([DateTime]::UtcNow -ge $deadline) {
+            if ($state -eq 'unverified') {
+                throw "CLEANUP_UNVERIFIED: pid $ProcessId identity could not be verified after stop (recordedStartTicks=$StartTimeTicks)"
+            }
             throw "CLEANUP_FAILED: owned pid $ProcessId did not exit"
         }
         Start-Sleep -Milliseconds 100

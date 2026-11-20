@@ -28,6 +28,35 @@
     Optional pre-downloaded wix311.zip for an offline host. Copied to
     ~/.gradle/compose-jb/wix311.zip before the build when that file is absent.
 
+.PARAMETER Version
+    Release version to package. Default: coach.release.version from
+    gradle.properties. Pass it to build a version cut without editing
+    gradle.properties, which would move an already-locked commit.
+
+.PARAMETER VersionCode
+    Android versionCode paired with -Version. Default: coach.release.versionCode
+    from gradle.properties.
+
+.PARAMETER ChannelFile
+    Path to a private UTF-8 file holding the https URL of the published
+    latest.json. Passed to Gradle as COACH_UPDATE_CHANNEL_FILE so the MSI carries
+    the update channel. Without this parameter a COACH_UPDATE_CHANNEL_FILE the
+    caller already set still reaches Gradle and is packaged the same way. The
+    path and contents are never printed; the script reports channel=injected
+    with the SHA-256 of whichever file Gradle reads, plus channel-source=
+    parameter|environment, or channel=absent when neither is set.
+    The variable is set only for the duration of the build and the caller's
+    previous value — including "unset" — is restored before the script exits,
+    whether the build succeeds or fails.
+
+.PARAMETER UserHome
+    Read build-time configuration (`Coach/config/local.properties`) from this
+    directory instead of the current user's profile. Passed to Gradle as
+    -Duser.home, so a release build can take one private friend-service origin
+    without that value ever reaching the shared profile or the repository.
+    GRADLE_OPTS alone is not enough: it configures the Gradle client JVM while
+    the build runs in a forked daemon, which silently keeps the old home.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File tools/dev/package-windows.ps1
 #>
@@ -35,7 +64,11 @@
 param(
     [string]$Task = 'packageDistributionForCurrentOS',
     [string]$WixZip,
-    [switch]$SableLogin
+    [switch]$SableLogin,
+    [string]$Version,
+    [string]$VersionCode,
+    [string]$ChannelFile,
+    [string]$UserHome
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,39 +81,93 @@ if (-not (Get-Command jpackage -ErrorAction SilentlyContinue)) {
 
 # Read the same release configuration as Android and Compose. Publishing records
 # v<version> tags; fetching them prevents an older checkout from emitting an old MSI.
-$versionLines = @(Get-Content -LiteralPath (Join-Path $root 'gradle.properties') |
-    Where-Object { $_ -match '^coach\.release\.version=' })
-if ($versionLines.Count -ne 1) { throw 'Expected one coach.release.version in gradle.properties' }
-$releaseVersion = $versionLines[0].Split('=', 2)[1].Trim()
+$property = @{}
+foreach ($line in Get-Content -LiteralPath (Join-Path $root 'gradle.properties')) {
+    if ($line -match '^(coach\.release\.[A-Za-z]+)\s*=\s*(.+)$') { $property[$Matches[1]] = $Matches[2].Trim() }
+}
+if (-not $Version) { $Version = $property['coach.release.version'] }
+if (-not $VersionCode) { $VersionCode = $property['coach.release.versionCode'] }
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Release version must be major.minor.patch: $Version" }
+if ($VersionCode -notmatch '^\d+$') { throw "Release versionCode must be an integer: $VersionCode" }
 & git -C $root fetch --tags origin
 if ($LASTEXITCODE -ne 0) { throw 'Cannot sync published release tags; no package built.' }
 
-if ($WixZip) {
-    $cache = Join-Path $env:USERPROFILE '.gradle\compose-jb'
-    $target = Join-Path $cache 'wix311.zip'
-    if (-not (Test-Path $target)) {
-        New-Item -ItemType Directory -Force -Path $cache | Out-Null
-        Copy-Item -Path $WixZip -Destination $target
-        Write-Host "wix-cache=seeded from $WixZip"
+# COACH_UPDATE_CHANNEL_FILE is process state, not a parameter: it outlives the
+# Gradle call and every child this script starts. Save the caller's value before
+# touching it and put it back on the way out, including failures raised below
+# the assignment, so one build never changes what the next one packages.
+$channel = 'absent'
+$channelDigest = 'none'
+$channelBefore = [Environment]::GetEnvironmentVariable('COACH_UPDATE_CHANNEL_FILE', 'Process')
+$channelOverridden = $false
+try {
+    $channelSource = 'none'
+    if ($ChannelFile) {
+        if (-not (Test-Path -LiteralPath $ChannelFile -PathType Leaf)) { throw 'Missing Windows update channel file' }
+        $env:COACH_UPDATE_CHANNEL_FILE = (Resolve-Path -LiteralPath $ChannelFile).Path
+        $channelOverridden = $true
+        $channelSource = 'parameter'
+    } elseif ($channelBefore) {
+        $channelSource = 'environment'
+    }
+    # Report the file Gradle will actually read, however it arrived. A variable
+    # inherited from the caller packages the channel exactly like -ChannelFile, so
+    # calling that build channel=absent would pass a private MSI off as a public
+    # test build. Gradle resolves a relative path against the desktopApp project,
+    # so the digest is taken from the same place.
+    $effectiveChannel = [Environment]::GetEnvironmentVariable('COACH_UPDATE_CHANNEL_FILE', 'Process')
+    if ($effectiveChannel) {
+        $channelPath = if ([IO.Path]::IsPathRooted($effectiveChannel)) { $effectiveChannel } else { Join-Path (Join-Path $root 'desktopApp') $effectiveChannel }
+        if (-not (Test-Path -LiteralPath $channelPath -PathType Leaf)) { throw 'Missing Windows update channel file' }
+        $channel = 'injected'
+        $channelDigest = (Get-FileHash -LiteralPath $channelPath -Algorithm SHA256).Hash.ToLowerInvariant().Substring(0, 12)
+    }
+
+    if ($WixZip) {
+        $cache = Join-Path $env:USERPROFILE '.gradle\compose-jb'
+        $target = Join-Path $cache 'wix311.zip'
+        if (-not (Test-Path $target)) {
+            New-Item -ItemType Directory -Force -Path $cache | Out-Null
+            Copy-Item -Path $WixZip -Destination $target
+            Write-Host "wix-cache=seeded from $WixZip"
+        }
+    }
+
+    $homeArg = @()
+    if ($UserHome) {
+        if (-not (Test-Path -LiteralPath $UserHome)) { throw 'Missing private build config home' }
+        $homeArg = @("-Duser.home=$((Resolve-Path -LiteralPath $UserHome).Path)")
+    }
+
+    $previousPriority = (Get-Process -Id $PID).PriorityClass
+    Push-Location $root
+    try {
+        (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
+        # --no-daemon: the build JVM may be told to read another home, and a reused
+        # daemon would keep the previous one.
+        & (Join-Path $root 'gradlew.bat') --console=plain --no-daemon --priority=low --max-workers=2 @homeArg `
+            '-Pcoach.release=true' "-Pcoach.release.version=$Version" "-Pcoach.release.versionCode=$VersionCode" `
+            "-Pcoach.sableLogin=$(if ($SableLogin) { 'true' } else { 'false' })" `
+            :desktopApp:verifyReleaseVersion ":desktopApp:$Task"
+        $code = $LASTEXITCODE
+    } finally {
+        Pop-Location
+        (Get-Process -Id $PID).PriorityClass = $previousPriority
+    }
+    if ($code -ne 0) { throw "Gradle exited with code $code (task :desktopApp:$Task)" }
+} finally {
+    if ($channelOverridden) {
+        if ($null -eq $channelBefore) {
+            Remove-Item Env:\COACH_UPDATE_CHANNEL_FILE -ErrorAction SilentlyContinue
+        } else {
+            $env:COACH_UPDATE_CHANNEL_FILE = $channelBefore
+        }
     }
 }
 
-$previousPriority = (Get-Process -Id $PID).PriorityClass
-Push-Location $root
-try {
-    (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
-    & (Join-Path $root 'gradlew.bat') --console=plain --priority=low --max-workers=2 `
-        '-Pcoach.release=true' "-Pcoach.sableLogin=$(if ($SableLogin) { 'true' } else { 'false' })" `
-        :desktopApp:verifyReleaseVersion ":desktopApp:$Task"
-    $code = $LASTEXITCODE
-} finally {
-    Pop-Location
-    (Get-Process -Id $PID).PriorityClass = $previousPriority
-}
-if ($code -ne 0) { throw "Gradle exited with code $code (task :desktopApp:$Task)" }
-
 $msiDir = Join-Path $root 'desktopApp\build\compose\binaries\main\msi'
-$installers = @(Get-ChildItem -LiteralPath (Join-Path $msiDir "Coach-$releaseVersion.msi") -ErrorAction SilentlyContinue)
+# desktopApp sets packageName = LearningCoach; the old Coach-*.msi lookup never matched.
+$installers = @(Get-ChildItem -LiteralPath (Join-Path $msiDir "LearningCoach-$Version.msi") -ErrorAction SilentlyContinue)
 if ($installers.Count -eq 0) { throw "No MSI produced under $msiDir" }
 
 foreach ($installer in $installers) {
@@ -88,8 +175,12 @@ foreach ($installer in $installers) {
     $sig = Get-AuthenticodeSignature -FilePath $installer.FullName
     $signer = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '(none)' }
     Write-Host ("msi={0}" -f $installer.FullName)
+    Write-Host ("version={0} ({1})" -f $Version, $VersionCode)
     Write-Host ("size={0}" -f $installer.Length)
     Write-Host ("sha256={0}" -f $hash)
     Write-Host ("signature={0} {1}" -f $sig.Status, $signer)
     Write-Host ("sable-login={0}" -f $(if ($SableLogin) { 'shown' } else { 'hidden' }))
+    Write-Host ("channel={0} sha256={1}" -f $channel, $channelDigest)
+    Write-Host ("channel-source={0}" -f $channelSource)
+    Write-Host ("home={0}" -f $(if ($UserHome) { 'private' } else { 'profile' }))
 }

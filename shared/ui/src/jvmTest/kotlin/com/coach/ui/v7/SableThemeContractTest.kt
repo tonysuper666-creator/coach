@@ -10,6 +10,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
@@ -60,6 +61,23 @@ class SableThemeContractTest {
             }
             assertTrue(contrast(colors.focusRing, colors.bgCanvas) >= 3.0, "$mode focusRing on bgCanvas < 3.0")
             assertTrue(contrast(colors.focusRing, colors.surface1) >= 3.0, "$mode focusRing on surface1 < 3.0")
+        }
+    }
+
+    @Test fun primaryAndDangerInteractiveStatesPassContrast() {
+        // Mirrors ButtonFeedback.jvm.kt:25-28 hover/pressed washes and UX state banners across light & dark.
+        for ((mode, colors) in listOf("light" to CoachColors.light(), "dark" to CoachColors.dark())) {
+            val primaryBase = colors.fgPrimary
+            val primaryInk = colors.surface1
+            val primaryHoverBg = colors.borderSubtle.copy(alpha = 0.16f).compositeOver(primaryBase)
+            val primaryPressedBg = colors.borderSubtle.copy(alpha = if (colors.dark) 0.30f else 0.08f).compositeOver(primaryBase)
+            assertTrue(contrast(primaryInk, primaryBase) >= 4.5, "$mode PrimaryButton normal below AA: ${contrast(primaryInk, primaryBase)}")
+            assertTrue(contrast(primaryInk, primaryHoverBg) >= 4.5, "$mode PrimaryButton hover below AA: ${contrast(primaryInk, primaryHoverBg)}")
+            assertTrue(contrast(primaryInk, primaryPressedBg) >= 4.5, "$mode PrimaryButton pressed below AA: ${contrast(primaryInk, primaryPressedBg)}")
+
+            assertTrue(contrast(colors.onAccent, colors.actionDanger) >= 4.5, "$mode DangerButton normal below AA: ${contrast(colors.onAccent, colors.actionDanger)}")
+            assertTrue(contrast(colors.dangerFg, colors.dangerBg) >= 4.5, "$mode CoachErrorBanner below AA: ${contrast(colors.dangerFg, colors.dangerBg)}")
+            assertTrue(contrast(colors.fgPrimary, colors.surface2) >= 4.5, "$mode CoachOfflineBanner below AA: ${contrast(colors.fgPrimary, colors.surface2)}")
         }
     }
 

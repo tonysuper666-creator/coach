@@ -303,6 +303,27 @@ function Click-Until-Dialog([int]$n, [string]$label, [scriptblock]$IsOpen, [int]
     }
     Fail $n "点了 $tries 次「$label」，选书框都没出来"
 }
+# 点一下、等状态变：状态没变就按新一帧重定位再点。第 7 步那三下（出处→切回原页、收起→露出底栏、
+# 看文字→切回文字视图）在四路交锁时都会落空：11-21 04:46 L3 抬完手 1.0 ms 前台就被别路接走，
+# 点出处后仍停在「看原页」；L2 点收起只留下 hover 底色，卡片没动。这两下都是幂等切换，
+# 看到状态没变就再点一次是安全的。返回 $true 表示看到了状态；按钮找不到、或点满 $tries 次
+# 都没变，都返回 $false，怎么报由调用方决定（第 7 步要留着后面几步跑完，不能在这里 throw）。
+function Click-Confirm([int]$n, [scriptblock]$Find, [scriptblock]$Done, [int]$tries = 4, [int]$waitSec = 5, [int]$pauseMs = 600) {
+    if (& $Done (Shot $n 'confirm')) { return $true }
+    foreach ($try in 1..$tries) {
+        $m = & $Find (Shot $n "confirm$try")
+        if (-not $m) { return $false }
+        Click-At $m.X $m.Y
+        $stop = (Get-Date).AddSeconds($waitSec)
+        while ((Get-Date) -lt $stop) {
+            if (& $Done (Shot $n "confirm${try}done")) { return $true }
+            Start-Sleep -Milliseconds 800
+        }
+        Note ("第 {0} 步第 {1} 次点完状态没变，重定位再点" -f $n, $try)
+        if ($pauseMs -gt 0) { Start-Sleep -Milliseconds $pauseMs }
+    }
+    return $false
+}
 # 书架右栏本来就有「看书 / 边看边学 / 做题学」三行，弹窗盖上去以后 OCR 两处都读得到，
 # 从上往下取首命中会点回书架上（弹窗底下那层被遮罩吃掉，点了没反应）。
 # 弹窗里这三个是并排的三个 chip（同一行），书架里是上下三行，所以先认和另外两个同排的那一个；
@@ -743,6 +764,8 @@ try {
     } catch { if ("$_" -like 'DESKTOP_BUSY*' -or "$_" -like 'WIN_DRIVE_FOREGROUND_CONTENTION*') { throw }; $askWhy = "$_" }
 
     # ⑦ 依赖选段卡：点「出处」切回原页（按钮变回「看文字」），再点「收起」露出底栏核对页码，最后切回文字视图。
+    # 这三下在四路交锁时都可能落空（点了但窗口没处理），所以每下都认状态，没变就重定位再点；
+    # 失败不在这里 throw——后面几步不依赖它，留到最后统一报，免得少记几步通过。
     $cardOk = $null
     $o = $null
     foreach ($k in 0..8) {
@@ -756,22 +779,29 @@ try {
     }
     if (-not $o) { $cardOk = '选段卡里没有「出处」链接（见 4-result*.png）' }
     else {
-        Click-At $o.X $o.Y
-        $back = Await-Text 7 'original' @('看文字') 15
+        # 切回原页的标志是右侧按钮从「看原页」变成「看文字」。只有还停在「看原页」才重点同一个链接；
+        # 认不出当前视图（两个都没有）就停手，别把点击打到已经变过的界面上。
+        $citeAt = $o
+        $clicked = Click-Confirm 7 { param($l) if (Find-Text $l '看原页') { $citeAt } } { param($l) [bool](Find-Text $l '看文字') }
+        $back = if ($clicked) { Has $script:Last @('看文字') } else { $null }
         if (-not $back) { $cardOk = '点了出处没有切回原页视图（见 7-card.png）' }
         else {
-            $closeCard = Await-Text 7 'card-close' @('收起') 5
-            if ($closeCard) { Click-At $closeCard.X $closeCard.Y; Start-Sleep -Milliseconds 500 }
+            # 收起选段卡底栏才露出来：L2 那次鼠标确实落在按钮正中（hover 底色还在）卡片却没动，
+            # 所以以「收起」消失为准，没消失就再点。
+            $closed = Click-Confirm 7 { param($l) Find-Text $l '收起' } { param($l) -not (Find-Text $l '收起') } -tries 4 -waitSec 4
             $pg = $null
             for ($try = 0; $try -lt 4 -and $pg -ne "$physPage"; $try++) {
                 if ($try -gt 0) { Start-Sleep -Milliseconds 500 }
                 $pg = Page-NearNav (Shot 7 'card')
             }
-            if ($pg -ne "$physPage") { $cardOk = "点了出处切回原页但页码不是 $physPage（现在 $pg，见 7-card.png）" }
+            if ($pg -ne "$physPage") {
+                $cardOk = if ($closed) { "点了出处切回原页但页码不是 $physPage（现在 $pg，见 7-card.png）" } else { '点了「收起」选段卡没收起，底栏页码读不到（见 7-card.png）' }
+            }
+            # 切回文字视图：按钮这时叫「看文字」，切过去以后变成「看原页」，同样认状态。
             $backNow = Has $script:Last @('看文字')
             if (-not $backNow) { $backNow = $back }
-            Click-At $backNow.X $backNow.Y; Start-Sleep -Milliseconds 600
-            if (-not (Await-Text 4 'text-mode-again' @('看原页') 15)) { $cardOk = '从出处回跳后切不回文字视图' }
+            $okBack = Click-Confirm 7 { param($l) $b = Find-Text $l '看文字'; if ($b) { $b } else { $backNow } } { param($l) [bool](Find-Text $l '看原页') } -tries 3
+            if (-not $okBack) { $cardOk = '从出处回跳后切不回文字视图' }
         }
     }
     try { $cc = Has $script:Last @('收起'); if ($cc) { Click-At $cc.X $cc.Y; Start-Sleep -Milliseconds 400 } } catch { }

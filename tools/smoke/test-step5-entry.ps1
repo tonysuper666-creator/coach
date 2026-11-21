@@ -1,9 +1,10 @@
-﻿# 离线回归：第 5 步入口那三下的重试闭环、弹窗内定位、第 2 步「上传教材」补点（退出码：0 = 全部通过）。
+﻿# 离线回归：第 5 步入口那三下的重试闭环、弹窗内定位、第 2 步「上传教材」补点、第 7 步三下的状态确认（退出码：0 = 全部通过）。
 #  - 状态没变才算没点成：Done 一成立就停手，不重复点；
 #  - 位置找不到就不再拿旧坐标点第二下（否则会点在弹窗关掉之后的页面上）；
 #  - 「边看边学」只认弹窗里和「看书」「做题学」并排的那个 chip，不认书架右栏那一行；
 #  - 工具栏被 ui.busy 禁用的十几秒里按钮还在，靠多给几次机会 + 每次隔一拍扛过去；
-#  - 「上传教材」只认原生选书框弹出来，没弹就重定位补点，弹过以后不重点。
+#  - 「上传教材」只认原生选书框弹出来，没弹就重定位补点，弹过以后不重点；
+#  - 第 7 步的出处/收起/切回文字点落空时补点，点满就返回假，不 throw（后面几步还要跑）。
 # 函数体从 friend-path-worker.ps1 里按原文截取，屏幕与输入都换成本文件的假实现。
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -131,6 +132,68 @@ $script:screen = @((New-Line '书架' 620 80 80 30)); $script:clicks.Clear(); $s
 $err = ''
 try { Click-Until-Dialog 2 '上传教材' { $false } -findSec 1 -sec 5 -tries 2 -openSec 1 } catch { $err = "$_" }
 Check 'upload-fails-when-button-absent' ($script:clicks.Count -eq 0 -and $err -like '*找不到「上传教材」*') "clicks=$($script:clicks.Count) err=$err"
+
+# ---- 第 7 步：出处 → 切回原页 / 收起 → 露出底栏 / 看文字 → 切回文字视图，三下都要认状态 ----
+# 文字视图的右上是「看原页」，原页视图的右上是「看文字」；「出处」链接在卡片里。
+$textView = @(
+    (New-Line '书架' 620 80 80 30),
+    (New-Line '看原页' 1200 40 80 28),
+    (New-Line '出处 1 · 第 154 页' 159 385 210 24)
+)
+$origView = @(
+    (New-Line '书架' 620 80 80 30),
+    (New-Line '看文字' 1200 40 80 28),
+    (New-Line '出处 1 · 第 154 页' 159 385 210 24)
+)
+$citeAnchor = Find-Text $textView '出处'
+$citeFind = { param($l) if (Find-Text $l '看原页') { $citeAnchor } }
+$citeDone = { param($l) [bool](Find-Text $l '看文字') }
+
+# 12. 点出处那下被别路抢前台吞掉（仍停在「看原页」）：按状态重试，第二下切过去。
+$script:screen = $textView; $script:clicks.Clear(); $script:swallow = 1
+$script:onClick = { if ($script:swallow -gt 0) { $script:swallow-- } else { $script:screen = $origView } }
+$ok = Click-Confirm 7 $citeFind $citeDone -tries 4 -waitSec 1 -pauseMs 1
+Check 'step7-cite-retries-until-original-view' ($ok -and $script:clicks.Count -eq 2) "ok=$ok clicks=$($script:clicks.Count)"
+
+# 13. 已经在原页视图：一下都不点。
+$script:screen = $origView; $script:clicks.Clear(); $script:onClick = $null
+$ok = Click-Confirm 7 $citeFind $citeDone -tries 3 -waitSec 1 -pauseMs 1
+Check 'step7-cite-no-click-when-already-original' ($ok -and $script:clicks.Count -eq 0) "ok=$ok clicks=$($script:clicks.Count)"
+
+# 14. 两个视图按钮都认不出来：不拿旧坐标乱点，返回假让调用方报。
+$script:screen = @((New-Line '书架' 620 80 80 30), (New-Line '出处 1 · 第 154 页' 159 385 210 24))
+$script:clicks.Clear(); $script:onClick = $null
+$ok = Click-Confirm 7 $citeFind $citeDone -tries 3 -waitSec 1 -pauseMs 1
+Check 'step7-cite-no-click-when-view-unknown' ((-not $ok) -and $script:clicks.Count -eq 0) "ok=$ok clicks=$($script:clicks.Count)"
+
+$cardOpen = @(
+    (New-Line '书架' 620 80 80 30),
+    (New-Line '看文字' 1200 40 80 28),
+    (New-Line '收起' 682 222 70 28),
+    (New-Line '上一页' 900 900 70 28),
+    (New-Line '154 / 620' 980 900 90 24),
+    (New-Line '下一页' 1060 900 70 28)
+)
+$cardClosed = @($cardOpen | Where-Object { $_.Text -ne '收起' })
+$cardFind = { param($l) Find-Text $l '收起' }
+$cardDone = { param($l) -not (Find-Text $l '收起') }
+
+# 15. 点收起只留下 hover 底色、卡片没动（L2 那次）：再点，直到「收起」消失。
+$script:screen = $cardOpen; $script:clicks.Clear(); $script:swallow = 1
+$script:onClick = { if ($script:swallow -gt 0) { $script:swallow-- } else { $script:screen = $cardClosed } }
+$ok = Click-Confirm 7 $cardFind $cardDone -tries 4 -waitSec 1 -pauseMs 1
+Check 'step7-card-close-retries-until-gone' ($ok -and $script:clicks.Count -eq 2) "ok=$ok clicks=$($script:clicks.Count)"
+
+# 16. 点满也不 throw：第 7 步的失败要留到最后报，后面几步还得跑。
+$script:screen = $cardOpen; $script:clicks.Clear(); $script:onClick = $null
+$err = ''; $ok = $true
+try { $ok = Click-Confirm 7 $cardFind $cardDone -tries 3 -waitSec 1 -pauseMs 1 } catch { $err = "$_" }
+Check 'step7-card-close-gives-up-quietly' ((-not $ok) -and -not $err -and $script:clicks.Count -eq 3) "ok=$ok clicks=$($script:clicks.Count) err=$err"
+
+# 17. 切回文字视图：按钮叫「看文字」，点一下变成「看原页」就收手。
+$script:screen = $origView; $script:clicks.Clear(); $script:onClick = { $script:screen = $textView }
+$ok = Click-Confirm 7 { param($l) Find-Text $l '看文字' } { param($l) [bool](Find-Text $l '看原页') } -tries 3 -waitSec 1 -pauseMs 1
+Check 'step7-back-to-text-one-click' ($ok -and $script:clicks.Count -eq 1) "ok=$ok clicks=$($script:clicks.Count)"
 
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"

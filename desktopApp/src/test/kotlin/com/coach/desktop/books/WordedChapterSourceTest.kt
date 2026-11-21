@@ -57,14 +57,14 @@ class WordedChapterSourceTest {
         val library = TextbookLibrary(root.resolve("library"))
         val book = library.importBook(wordedChapterPdf(root))
         val lesson = book.lessons.first()
-        val before = StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE)
+        val before = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)
         assertEquals("Chlorophyll", before?.answer, "The existing lesson/question must not be re-planned by a reader quote fix")
         val reply = LocalBooksReaderSource(library).study(book.id, 1)
         assertEquals(200, reply.status)
         val question = reply.body!!["questions"]!!.jsonArray.first().jsonObject
         assertEquals(WORDED_BODY, question["anchor"]!!.jsonPrimitive.content)
         assertEquals(lesson.id, question["id"]!!.jsonPrimitive.content)
-        assertEquals(before, StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE))
+        assertEquals(before, com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE))
     }
 
     @Test fun sourceHighlightMustEqualBodySentenceForChapterOne() {

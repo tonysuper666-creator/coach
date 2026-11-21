@@ -133,10 +133,10 @@ class CoachController(
             try {
                 withContext(io) { sync.syncOnce() }
                 val receipt = sync.receipt(cmd.commandId)
-                if (receipt == null) s.note = "Mac 未连接：已交卷，连上后自动送去批改。"
-                else if (receipt.status !in setOf("OK", "DUPLICATE")) s.note = "Mac 没有收下这篇（${receipt.status}）。原文还在下面，可以复制保存。"
+                if (receipt == null) s.note = "Coach 服务未连接：已交卷，连上后自动送去批改。"
+                else if (receipt.status !in setOf("OK", "DUPLICATE")) s.note = "Coach 服务没有收下这篇（${receipt.status}）。原文还在下面，可以复制保存。"
             } catch (e: CancellationException) { throw e }
-            catch (_: Exception) { s.note = "Mac 未连接：已交卷，连上后自动送去批改。" }
+            catch (_: Exception) { s.note = "Coach 服务未连接：已交卷，连上后自动送去批改。" }
         }
     }
 
@@ -586,7 +586,7 @@ private fun OfflineBanner(ui: TutorUiState, c: CoachController) {
     val last = ui.lastSeenAtMs
     Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
         Text(
-            if (last == null) "Mac 未连接" else "Mac 未连接（最后同步 ${c.formatClock(last)}）",
+            if (last == null) "Coach 服务未连接" else "Coach 服务未连接（最后同步 ${c.formatClock(last)}）",
             Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
             color = MaterialTheme.colorScheme.onErrorContainer,
             style = MaterialTheme.typography.bodyMedium,

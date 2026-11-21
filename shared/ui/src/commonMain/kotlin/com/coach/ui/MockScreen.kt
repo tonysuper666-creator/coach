@@ -48,7 +48,7 @@ fun MockScreen(c: CoachController, view: CourseView, onBack: () -> Unit, initial
     Column(Modifier.fillMaxSize()) {
         if (http == null) {
             BackRow("模拟考", backLabel, onBack)
-            CenterMessage("模拟考要连接 Mac。")
+            CenterMessage("模拟考需要连接 Coach 服务。")
         } else if (open == null) MockHome(c, http, view, onBack, backLabel) { open = it }
         // Opened straight from the records page: back goes back there, not to the exam list.
         else key(open) { MockSessionPane(c, http, view, open!!, onReviewWeek, leave) }
@@ -81,16 +81,16 @@ private fun MockHome(c: CoachController, http: CourseHttp, view: CourseView, onB
             try {
                 val r = call()
                 val id = r.body?.str("mockId")
-                if (!id.isNullOrBlank()) onOpen(id) else { error = r.error ?: "连不上 Mac，没能开考。"; reload++ }
+                if (!id.isNullOrBlank()) onOpen(id) else { error = r.error ?: "连不上 Coach 服务，没能开考。"; reload++ }
             } finally { busy = false }
         }
     }
     BackRow("模拟考", backLabel, onBack)
     val home = reply?.body
-    if (reply == null) return CenterMessage("正在问 Mac…")
+    if (reply == null) return CenterMessage("正在连接 Coach 服务…")
     if (home == null) {
         Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(reply?.error ?: "连不上 Mac。模拟考的卷子和判分都在 Mac 上，要联网才能考。", style = MaterialTheme.typography.bodyLarge)
+            Text(reply?.error ?: "连不上 Coach 服务。模拟考的卷子和判分都在服务端，需联网才能考。", style = MaterialTheme.typography.bodyLarge)
             Button(onClick = { reload++ }, modifier = Modifier.heightIn(min = 48.dp)) { Text("重试") }
         }
         return
@@ -114,7 +114,7 @@ private fun MockHome(c: CoachController, http: CourseHttp, view: CourseView, onB
             }
         }
         item { SectionTitle("整卷模拟") }
-        if (papers.isEmpty()) item { Hint("还没有可用的仿真卷。卷子放进 Mac 上的卷库后会出现在这里。") }
+        if (papers.isEmpty()) item { Hint("还没有可用的仿真卷。卷子放进卷库后会出现在这里。") }
         items(papers.size) { i ->
             val p = papers[i]
             Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
@@ -197,7 +197,7 @@ private fun MockSessionPane(c: CoachController, http: CourseHttp, view: CourseVi
     LaunchedEffect(reload, if (submitted || body == null) revision else -1L) {
         // A save from the last visit may still be on its way: read after it, or the paper comes back with older answers.
         val r = c.mockSaving.withLock { http.mock(mockId) }
-        if (r.body != null) { body = r.body; error = null } else error = r.error ?: "连不上 Mac，取不到这场考试。"
+        if (r.body != null) { body = r.body; error = null } else error = r.error ?: "连不上 Coach 服务，取不到这场考试。"
     }
     val current = body
     when {
@@ -259,7 +259,7 @@ internal fun MockExam(c: CoachController, http: CourseHttp, exam: JsonObject, on
         submitting = true; submitError = null
         try {
             val r = http.submitMock(mockId, answers, auto)
-            if (r.body != null) finished(r.body!!) else submitError = r.error ?: "交卷没送到 Mac。答案还在这里，连上后再点一次交卷。"
+            if (r.body != null) finished(r.body!!) else submitError = r.error ?: "交卷未送达 Coach 服务。答案还在这里，连上后再点一次交卷。"
         } catch (e: CancellationException) { throw e }
         finally { submitting = false }
     }
@@ -275,7 +275,7 @@ internal fun MockExam(c: CoachController, http: CourseHttp, exam: JsonObject, on
             when {
                 r?.body?.str("status") == "submitted" -> { finished(r.body!!); return@LaunchedEffect }
                 r == null || r.body != null -> saveNote = null
-                else -> saveNote = r.error ?: "未保存：连不上 Mac，答案先留在这里"
+                else -> saveNote = r.error ?: "未保存：连不上 Coach 服务，答案先留在这里"
             }
         }
     }
@@ -307,7 +307,7 @@ internal fun MockExam(c: CoachController, http: CourseHttp, exam: JsonObject, on
                 label = { Text("${row.number}") }, modifier = Modifier.heightIn(min = 48.dp))
         }
     }
-    Text(saveNote ?: if (!unsaved) "答案已存到 Mac · 退出不停表，可回来续考" else "正在保存…",
+    Text(saveNote ?: if (!unsaved) "答案已保存 · 退出不停表，可回来续考" else "正在保存…",
         Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelSmall,
         color = if (saveNote != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
     submitError?.let { Text(it, Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error) }
@@ -459,7 +459,7 @@ private fun MockResult(c: CoachController, result: JsonObject, view: CourseView,
                 val spent = result.num("submittedAt") - result.num("startedAt")
                 Text((if (result.flag("auto")) "到点自动交卷" else "手动交卷") + " · 用时 ${clock(spent)}" + if (result.str("purpose") == "FULL_MOCK") " · 计入整卷模拟证据" else " · 计入限时证据",
                     style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (result.num("pending") > 0) Text("还有 ${result.num("pending")} 题在批改：Mac 上按评分细则逐条打分，批完这里自动更新，总分会变。", style = MaterialTheme.typography.bodyMedium)
+                if (result.num("pending") > 0) Text("还有 ${result.num("pending")} 题在批改：服务按评分细则逐条打分，批完这里自动更新，总分会变。", style = MaterialTheme.typography.bodyMedium)
                 if (result.num("drafts") > 0) Text("${result.num("drafts")} 题待复核，分数可能调整。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -538,7 +538,7 @@ private fun ResultItem(c: CoachController, it: JsonObject, number: Int) {
             }
             if (it.str("feedback").isNotBlank()) QuizText(it.str("feedback"), "mockf:$key", c.math)
             it.str("reviewNote").takeIf { n -> n.isNotBlank() }?.let { n -> Text("复核：$n", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            if (status == "FAILED") Text("这题自动批改没成功，Mac 上会重试；总分暂不含这题。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+            if (status == "FAILED") Text("这题自动批改没成功，服务会自动重试；总分暂不含这题。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
             if (it.str("reference").isNotBlank()) {
                 TextButton(onClick = { showReference = !showReference }, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (showReference) "收起参考答案" else "看参考答案") }
                 if (showReference) QuizText(it.str("reference"), "mockref:$key", c.math)

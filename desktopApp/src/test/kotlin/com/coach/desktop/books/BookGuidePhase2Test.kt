@@ -538,7 +538,7 @@ class BookGuidePhase2Test {
                 // 展开 1–2 道选择题并作答（第 1 题选错、第 2 题选对），验证接入现有做题主线（复习队列 + 题梯）
                 onNodeWithTag("section-end-start-quiz").performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("section-end-quiz-panel").fetchSemanticsNodes().isNotEmpty() }
-                val practices = StudyCoachCourse.sectionPractices(book, book.lessons.first(), maxCount = 2)
+                val practices = listOfNotNull(testPracticeFixture(book, book.lessons.first(), QuestionMode.CHOICE))
                 assertEquals(2, practices.size, "本节应能出 2 道选择题")
                 val wrongIdx0 = practices[0].options.indexOfFirst { it != practices[0].answer }
                 val rightIdx1 = practices[1].options.indexOfFirst { it == practices[1].answer }

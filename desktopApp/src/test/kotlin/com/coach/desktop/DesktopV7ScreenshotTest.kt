@@ -167,7 +167,7 @@ A second English paragraph lets us inspect the space between paragraphs and the 
             for (index in 0 until 5) {
                 controller.lesson(index)
                 val book = controller.state.value.book!!
-                val practice = StudyCoachCourse.practice(book, book.lessons[index], QuestionMode.CHOICE)!!
+                val practice = com.coach.desktop.books.testPracticeFixture(book, book.lessons[index], QuestionMode.CHOICE)!!
                 val pick = if (index == 2) practice.options.first { it != practice.answer } else practice.answer
                 controller.answer(PracticeAnswer(pick, revealed = true))
             }
@@ -288,7 +288,7 @@ A second English paragraph lets us inspect the space between paragraphs and the 
             onNodeWithTag("host-course-learn").performClick()
             ready(controller) { it.screen == BookScreen.LEARNING && it.book?.lessonIndex == 5 && it.questionsOpen }
             val current = controller.state.value.book!!
-            val practice = StudyCoachCourse.practice(current, current.lessons[5], QuestionMode.CHOICE)!!
+            val practice = com.coach.desktop.books.testPracticeFixture(current, current.lessons[5], QuestionMode.CHOICE)!!
             onNodeWithTag("choice-0").assertExists()
             shot("quiz")
 

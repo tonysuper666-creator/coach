@@ -45,7 +45,7 @@ class AnswerExplainCardTest {
         }
         val book = controller.state.value.book!!
         val lesson = book.lessons[book.lessonIndex]
-        return Fixture(root, directory, controller, book, StudyCoachCourse.practice(book, lesson, book.questionMode)!!)
+        return Fixture(root, directory, controller, book, com.coach.desktop.books.testPracticeFixture(book, lesson, book.questionMode)!!)
     }
 
     private fun ComposeUiTest.ready(c: TextbookController, condition: (LibraryUi) -> Boolean) {

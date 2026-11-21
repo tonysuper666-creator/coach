@@ -132,30 +132,9 @@ internal data class LocalExamItem(val key: String, val type: String, val max: Lo
 
 internal data class LocalPaperAvailability(val paper: LocalExamPaper?, val gaps: List<String>)
 
-/** Reuses StudyCoachCourse's actual source practice. These are reference drills, never reviewed exam keys. */
-internal fun textbookReferencePaper(book: Textbook): LocalPaperAvailability {
-    val gaps = mutableListOf<String>()
-    val items = book.lessons.mapNotNull { lesson ->
-        val practice = StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE)
-        val page = practice?.let { p -> book.pages.firstOrNull { page ->
-            lesson.blocks.any { it.page == page.number } && p.reference in page.text
-        } }
-        if (practice == null || page == null) {
-            // 只记章节名：怎么补、去哪儿补由课程页说，人不需要看懂生成规则。
-            gaps += lesson.title
-            null
-        } else json("id" to lesson.id, "type" to "mcq", "stem" to practice.prompt, "marks" to 1,
-            "options" to JsonArray(practice.options.map(::JsonPrimitive)), "answer" to practice.options.indexOf(practice.answer),
-            "source" to json("docId" to book.id, "lessonId" to lesson.id, "pdfPage" to page.number, "quote" to practice.reference))
-    }
-    if (items.isEmpty()) return LocalPaperAvailability(null, gaps.ifEmpty { listOf("整本教材") })
-    val content = json("bookId" to book.id, "title" to "${book.title} · 教材参考练习",
-        "kind" to "drill", "origin" to "TEXTBOOK_REFERENCE", "key_state" to "UNREVIEWED",
-        "sections" to JsonArray(listOf(json("title" to "原文选择", "items" to JsonArray(items)))))
-    // A changed generated question set is a new paper; old attempts retain their original frozen version.
-    return LocalPaperAvailability(LocalExamPaper(JsonObject(content +
-        ("id" to JsonPrimitive("reference-" + localExamHash(canonicalJson(content)))))), gaps)
-}
+/** 2.0 已移除正则挖空题生成器（`StudyCoachCourse.practice`）；不再合成低质挖空参考练习。 */
+internal fun textbookReferencePaper(book: Textbook): LocalPaperAvailability =
+    LocalPaperAvailability(null, listOf("整本教材"))
 
 internal fun localExamHash(value: String): String =
     MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }

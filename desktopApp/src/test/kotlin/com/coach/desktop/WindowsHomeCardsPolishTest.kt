@@ -108,7 +108,7 @@ class WindowsHomeCardsPolishTest {
                     controller.chooseLearningPath(LearningPath.QUESTION_FIRST)
                     controller.enableLearning()
                     val book = controller.state.value.book!!
-                    val practice = StudyCoachCourse.practice(book, book.lessons.first(), QuestionMode.CHOICE)!!
+                    val practice = com.coach.desktop.books.testPracticeFixture(book, book.lessons.first(), QuestionMode.CHOICE)!!
                     val wrong = practice.options.first { it != practice.answer }
                     controller.answer(PracticeAnswer(wrong, revealed = true))
                     controller.back()

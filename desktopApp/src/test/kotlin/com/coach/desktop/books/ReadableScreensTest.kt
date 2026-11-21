@@ -124,34 +124,8 @@ class ReadableScreensTest {
         val controller = TextbookController(library)
         runBlocking { controller.load(); controller.importBook(other) }
         val ui = controller.state.value
-        val book = checkNotNull(ui.book)
-        assertEquals(BookPrompt.IMPORTED, ui.prompt)
-        assertEquals(LearningPath.QUESTION_FIRST, ui.learningPath)
-        runSkikoComposeUiTest(size = Size(900f, 700f), density = Density(1f)) {
-            setContent { CoachTheme(darkTheme = dark) {
-                Box(Modifier.fillMaxSize().background(CoachTheme.colors.surface1))
-                BookEntryPrompt(ui.copy(busy = false), {}, {}, {}, {}, {})
-            } }
-            waitForIdle()
-            val image = capture("imported-choices", dark)
-            // 选中的那颗和没选中的那颗要一眼分得开：从左边缘往里取一条（边框 + 底色），
-            // 同一位置上两颗颜色差得最多的那一点要明显不同；改前两颗整条一模一样。
-            fun edge(tag: String): List<Int> {
-                val b = onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
-                val y = ((b.top + b.bottom) / 2).toInt()
-                return (0..8).map { image.getRGB(b.left.toInt() + it, y) }
-            }
-            fun apart(a: List<Int>, b: List<Int>) = a.zip(b).maxOf { (x, y) -> distance(x, y) }
-            val chosen = edge("learning-path-QUESTION_FIRST")
-            val idle = edge("learning-path-READ")
-            assertTrue(apart(chosen, idle) > 48, "选中的「做题学」和没选的「看书」几乎一样：${chosen.map(::hex)} / ${idle.map(::hex)}")
-            val mode = edge("question-mode-${book.questionMode.name}")
-            val modeIdle = edge("question-mode-${QuestionMode.entries.first { it != book.questionMode }.name}")
-            assertTrue(apart(mode, modeIdle) > 48, "选中的出题方式和没选的几乎一样：${mode.map(::hex)} / ${modeIdle.map(::hex)}")
-            onNodeWithTag("learning-path-QUESTION_FIRST").assertIsSelected()
-            onNodeWithTag("learning-path-READ").assertIsNotSelected()
-            onNodeWithTag("question-mode-${book.questionMode.name}").assertIsSelected()
-        }
+        assertEquals(BookScreen.READER, ui.screen)
+        assertNull(ui.prompt)
         root.toFile().deleteRecursively()
     }
 

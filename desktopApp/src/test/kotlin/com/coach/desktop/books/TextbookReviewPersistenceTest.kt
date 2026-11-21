@@ -11,7 +11,7 @@ class TextbookReviewPersistenceTest {
         val library = TextbookLibrary(root.resolve("library"))
         val book = library.importBook(syntheticTextbook(root.resolve("synthetic")))
         val lesson = book.lessons.first()
-        val choice = StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE)!!
+        val choice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
         val wrong = choice.options.first { it != choice.answer }
         // The pre-upgrade writer had no review table: insert its actual legacy answer shape.
         DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
@@ -52,7 +52,7 @@ class TextbookReviewPersistenceTest {
         library.saveAnswer(first.id, lesson.id, QuestionMode.SHORT_ANSWER, PracticeAnswer("My draft", true, false))
         val short = library.reviews().single()
         assertEquals(QuestionMode.SHORT_ANSWER, short.mode)
-        val choice = StudyCoachCourse.practice(second, second.lessons.first(), QuestionMode.CHOICE)!!
+        val choice = com.coach.desktop.books.testPracticeFixture(second, second.lessons.first(), QuestionMode.CHOICE)!!
         val wrong = choice.options.first { it != choice.answer }
         library.saveAnswer(second.id, second.lessons.first().id, QuestionMode.CHOICE, PracticeAnswer(wrong, true))
         assertEquals(setOf(first.id, second.id), library.reviews().map { it.book }.toSet())

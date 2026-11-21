@@ -42,7 +42,7 @@ class WindowsLearningEntryTest {
             assertTrue(book.learning)
             assertEquals(QuestionMode.CHOICE, book.questionMode)
             val lesson = book.lessons[book.lessonIndex]
-            val question = assertNotNull(StudyCoachCourse.practice(book, lesson, book.questionMode))
+            val question = assertNotNull(com.coach.desktop.books.testPracticeFixture(book, lesson, book.questionMode))
             assertEquals("Orbit", question.answer)
             assertTrue(question.options.size >= 2)
             assertEquals(1, question.options.count { it == question.answer })

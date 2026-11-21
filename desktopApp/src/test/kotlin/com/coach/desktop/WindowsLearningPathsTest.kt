@@ -141,7 +141,7 @@ class WindowsLearningPathsTest {
             ready(controller) { it.prompt == null }
             assertEquals(LearningPath.QUESTION_FIRST, controller.state.value.learningPath)
             onNodeWithTag("book-lesson-explanation").assertDoesNotExist()
-            val q0 = StudyCoachCourse.practice(b, b.lessons[0], QuestionMode.CHOICE)!!
+            val q0 = com.coach.desktop.books.testPracticeFixture(b, b.lessons[0], QuestionMode.CHOICE)!!
             onNodeWithTag("choice-${q0.options.indexOf(q0.answer)}").performScrollTo().performClick()
             ready(controller) { it.answer.revealed }
             // 答完就讲：没配对时指路而不发原文，题下给小结卡接着走。
@@ -156,7 +156,7 @@ class WindowsLearningPathsTest {
             onNodeWithTag("next-lesson").performScrollTo().performClick()
             ready(controller) { it.book?.lessonIndex == 1 }
             val currentB = controller.state.value.book!!
-            val q1 = StudyCoachCourse.practice(currentB, currentB.lessons[1], QuestionMode.CHOICE)!!
+            val q1 = com.coach.desktop.books.testPracticeFixture(currentB, currentB.lessons[1], QuestionMode.CHOICE)!!
             onNodeWithTag("choice-${q1.options.indexOf(q1.answer)}").performScrollTo().performClick()
             ready(controller) { it.answer.revealed }
             assertEquals(PracticeAnswer(q1.answer, true), library.answer(b.id, currentB.lessons[1].id, QuestionMode.CHOICE))

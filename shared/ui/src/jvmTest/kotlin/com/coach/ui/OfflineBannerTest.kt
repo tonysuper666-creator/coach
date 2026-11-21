@@ -58,7 +58,7 @@ class OfflineBannerTest {
         setContent { CoachApp(CoachController(courseId = "C", sync = sync, tutor = tutor, formatClock = { "10:00" })) }
     }
 
-    private fun ComposeUiTest.bannerShown() = onAllNodesWithText("Mac 未连接", substring = true).fetchSemanticsNodes().isNotEmpty()
+    private fun ComposeUiTest.bannerShown() = onAllNodesWithText("Coach 服务未连接", substring = true).fetchSemanticsNodes().isNotEmpty()
 
     @AfterTest fun closeClient() = tutor.close()
 

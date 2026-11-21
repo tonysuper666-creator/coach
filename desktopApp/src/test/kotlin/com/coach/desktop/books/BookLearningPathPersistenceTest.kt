@@ -70,7 +70,7 @@ class BookLearningPathPersistenceTest {
         c.importBook(learningPathTextbook(root, "Synthetic astronomy")); c.enableLearning(); c.lesson(1)
         val a = c.state.value.book!!
         val lesson = a.lessons[1]
-        val choice = StudyCoachCourse.practice(a, lesson, QuestionMode.CHOICE)!!
+        val choice = com.coach.desktop.books.testPracticeFixture(a, lesson, QuestionMode.CHOICE)!!
         c.answer(PracticeAnswer(choice.answer, true))
         c.mode(QuestionMode.SHORT_ANSWER); c.answer(PracticeAnswer("A retained guided draft"))
         c.read(); c.page(2); c.back(); c.learn(LearningPath.READ_AND_LEARN)

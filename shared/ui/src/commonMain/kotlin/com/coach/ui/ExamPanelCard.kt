@@ -43,7 +43,7 @@ internal fun ExamPanelCard(
                     check(receipt.status in setOf("OK", "DUPLICATE")) { receipt.error.orEmpty() }
                 }
             } catch (e: CancellationException) { throw e }
-            catch (_: Exception) { error = "考试日期没存上，请连接 Mac 后重试。" }
+            catch (_: Exception) { error = "考试日期没存上，请连接 Coach 服务后重试。" }
             finally { busy = false }
         }
     }

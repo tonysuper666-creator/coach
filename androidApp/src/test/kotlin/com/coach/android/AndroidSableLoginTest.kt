@@ -91,32 +91,26 @@ class AndroidSableLoginTest {
             val (library, book) = sampleLibrary()
             bindConnection(friend.url, friend.issuerUrl)
             val explainer = BookExplainer(library)
+            var reloginClicked = false
 
             compose.setContent {
-                CoachTheme(darkTheme = false) {
-                    BookExplainPanel(book, 1, ExplainConsent(library.directory), explainer)
+                CompositionLocalProvider(LocalBookRelogin provides { reloginClicked = true }) {
+                    CoachTheme(darkTheme = false) {
+                        BookExplainPanel(book, 1, ExplainConsent(library.directory), explainer)
+                    }
                 }
             }
-            compose.waitUntil(15_000) { compose.onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isNotEmpty() }
+            compose.waitUntil(15_000) { compose.onAllNodesWithTag("explain-connect-hint").fetchSemanticsNodes().isNotEmpty() }
 
-            compose.onNodeWithText("用 Sable 账号登录").assertIsDisplayed()
-            compose.onNodeWithText("没有 Sable 账号？用配对码").assertIsDisplayed()
-            compose.onNodeWithTag("explain-connect-hint").assertTextContains("登录后可以提问", substring = true)
-            compose.onNodeWithTag("explain-code").assertExists()
-            compose.onNodeWithTag("explain-pair").assertExists()
-
-            // Must not pre-fill or render the secret friend URL on screen.
-            val addressNode = compose.onNodeWithTag("explain-address").fetchSemanticsNode()
-            val editable = addressNode.config.getOrNull(SemanticsProperties.EditableText)?.text.orEmpty()
-            assertEquals("", editable)
+            // 2.0 removes inline pairing form from reader; unauthenticated panel directs user to full-screen login.
+            compose.onNodeWithTag("explain-pairing").assertDoesNotExist()
+            compose.onNodeWithTag("explain-code").assertDoesNotExist()
+            compose.onNodeWithTag("explain-relogin").assertIsDisplayed().performClick()
+            assertTrue(reloginClicked)
             assertTrue(compose.onAllNodesWithText(friend.url, substring = true).fetchSemanticsNodes().isEmpty())
 
-            // Backup 6-digit pairing code works with blank address against built-in friend URL.
-            compose.onNodeWithTag("explain-code").performTextInput("123456")
-            compose.onNodeWithTag("explain-pair").performClick()
-            compose.waitUntil(15_000) { compose.onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
-            compose.onNodeWithTag("explain-section-trigger").assertIsEnabled()
-            assertTrue(compose.onAllNodesWithText("已连上", substring = true).fetchSemanticsNodes().isEmpty())
+            // Backup 6-digit pairing code still works via BookExplainer.pair against built-in friend URL.
+            runBlocking { assertTrue(explainer.pair("", "123456")) }
             assertEquals(1, friend.pairs.get())
         }
     }
@@ -129,27 +123,13 @@ class AndroidSableLoginTest {
             val openedUris = mutableListOf<String>()
             val http = HttpClient.newHttpClient()
 
-            compose.setContent {
-                val handler = object : UriHandler {
-                    override fun openUri(uri: String) {
-                        openedUris += uri
-                        bgExecutor.submit {
-                            http.send(HttpRequest.newBuilder(URI(uri)).GET().build(), HttpResponse.BodyHandlers.discarding())
-                        }
-                    }
+            runBlocking {
+                explainer.sable { uri, _ ->
+                    openedUris += uri
+                    http.send(HttpRequest.newBuilder(URI(uri)).GET().build(), HttpResponse.BodyHandlers.discarding())
                 }
-                CompositionLocalProvider(LocalUriHandler provides handler) {
-                    CoachTheme(darkTheme = false) {
-                        BookExplainPanel(book, 1, ExplainConsent(library.directory), explainer)
-                    }
-                }
+                explainer.load()
             }
-            compose.waitUntil(15_000) { compose.onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isNotEmpty() }
-            compose.onNodeWithText("用 Sable 账号登录").performClick()
-
-            compose.waitUntil(25_000) { compose.onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
-            compose.onNodeWithTag("explain-section-trigger").assertIsEnabled()
-            assertTrue(compose.onAllNodesWithText("已连上", substring = true).fetchSemanticsNodes().isEmpty())
             assertEquals(1, openedUris.size)
             assertEquals("${friend.issuerUrl}/link?code=BCDF-GHJK", openedUris.single())
             assertTrue("slow_down should widen poll interval", friend.tokenPolls.get() >= 3)
@@ -164,12 +144,10 @@ class AndroidSableLoginTest {
             assertEquals("friend", stored.role)
             assertFalse(stored.token.contains(friend.upstreamGrant))
 
-            // SharedPreferences must not leak the built-in friendUrl.
             val connPrefs = ApplicationProvider.getApplicationContext<android.content.Context>()
                 .getSharedPreferences("coach-book-connection", android.content.Context.MODE_PRIVATE).all
             assertFalse(connPrefs.values.joinToString().contains(friend.url))
 
-            // Cold start simulation: brand new BookExplainer loads the persisted credential and verifies status=200.
             val coldExplainer = BookExplainer(library)
             runBlocking { coldExplainer.load() }
             assertNotNull(coldExplainer.identity)
@@ -177,7 +155,6 @@ class AndroidSableLoginTest {
             assertEquals("", coldExplainer.defaultAddress)
             assertTrue(friend.statusCalls.get() >= 1)
 
-            // Offline status (503 / closed port) must NOT drop valid pairing.
             friend.status503.set(true)
             assertTrue(runBlocking { AndroidBookConnection.stillAuthorized(savedIdentity, startup = true) })
             friend.status503.set(false)
@@ -189,9 +166,13 @@ class AndroidSableLoginTest {
                 )
             })
 
-            // Request section explanation and verify HTTP 200 + paragraph citation.
-            compose.onNodeWithTag("explain-section-trigger").performClick()
-            compose.onNodeWithTag("explain-consent-allow").performClick()
+            // 2.0 removes per-book consent dialog: clicking explain trigger goes straight to explanation.
+            compose.setContent {
+                CoachTheme(darkTheme = false) {
+                    BookExplainPanel(book, 1, ExplainConsent(library.directory), explainer)
+                }
+            }
+            compose.onNodeWithTag("explain-section-trigger").assertIsEnabled().performClick()
             compose.waitUntil(15_000) { compose.onAllNodesWithTag("explain-answer").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithTag("explain-text").assertTextContains("Plants convert light energy", substring = true)
             compose.onNodeWithTag("explain-citation").assertTextContains("第 1 段", substring = true)
@@ -205,7 +186,6 @@ class AndroidSableLoginTest {
             bindConnection(friend.url, friend.issuerUrl)
             val http = HttpClient.newHttpClient()
 
-            // First sign in cleanly via Sable and confirm loaded state is connected.
             val firstExplainer = BookExplainer(library)
             runBlocking {
                 firstExplainer.sable { uri, _ ->
@@ -217,19 +197,12 @@ class AndroidSableLoginTest {
             assertNotNull(firstExplainer.identity)
             assertTrue(firstExplainer.loaded)
 
-            // Server revokes the credential -> next explain gets 401 -> clears store and prompts re-login.
             friend.revokedTokens += firstCreds.token
-            val consent = ExplainConsent(library.directory).also { it.allow(book.id) }
+            val consent = ExplainConsent(library.directory)
+            var reloginReason: String? = null
 
             compose.setContent {
-                val handler = object : UriHandler {
-                    override fun openUri(uri: String) {
-                        bgExecutor.submit {
-                            http.send(HttpRequest.newBuilder(URI(uri)).GET().build(), HttpResponse.BodyHandlers.discarding())
-                        }
-                    }
-                }
-                CompositionLocalProvider(LocalUriHandler provides handler) {
+                CompositionLocalProvider(LocalBookRelogin provides { reloginReason = it }) {
                     CoachTheme(darkTheme = true) {
                         BookExplainPanel(book, 1, consent, firstExplainer)
                     }
@@ -242,12 +215,11 @@ class AndroidSableLoginTest {
             assertNull("Credential store must be cleared after 401", stores["paired-friend"]?.load())
             assertNull(firstExplainer.identity)
             assertTrue(firstExplainer.revoked)
-            compose.onNodeWithTag("explain-revoked").assertTextEquals("授权已撤销，请重新登录。读书和做题照常。")
+            compose.onNodeWithTag("explain-revoked").assertTextContains("授权已撤销，请重新登录", substring = true)
             compose.onNodeWithTag("section-guide-failed").assertTextEquals(ExplainTrouble.REVOKED_LOGIN)
-            compose.onNodeWithText("用 Sable 账号登录").assertIsDisplayed()
-            compose.onNodeWithTag("explain-code").assertExists()
+            compose.onNodeWithTag("explain-relogin").assertIsDisplayed().performClick()
+            assertNotNull(reloginReason)
 
-            // A freshly created explainer (like TextbookReader opening after AnswerExplain 401) also sees revoked=true.
             val secondExplainer = BookExplainer(library)
             runBlocking { secondExplainer.load() }
             assertNull(secondExplainer.identity)
@@ -255,15 +227,17 @@ class AndroidSableLoginTest {
 
             // Re-login via Sable clears revoked state and restores explanation.
             friend.nextFriendToken = "c".repeat(43)
-            compose.onNodeWithText("用 Sable 账号登录").performClick()
-            compose.waitUntil(25_000) { compose.onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
+            runBlocking {
+                firstExplainer.sable { uri, _ ->
+                    http.send(HttpRequest.newBuilder(URI(uri)).GET().build(), HttpResponse.BodyHandlers.discarding())
+                }
+            }
             assertFalse(firstExplainer.revoked)
             assertNotNull(stores["paired-friend"]?.load())
 
             compose.onNodeWithTag("explain-section-trigger").performClick()
             compose.waitUntil(15_000) { compose.onAllNodesWithTag("explain-answer").fetchSemanticsNodes().isNotEmpty() }
 
-            // Startup check sends X-Coach-Startup: 1 and clears store on 401.
             val newToken = requireNotNull(stores["paired-friend"]?.load()).token
             friend.revokedTokens += newToken
             val savedIdentity = requireNotNull(firstExplainer.identity)
@@ -375,7 +349,7 @@ class AndroidSableLoginTest {
             compose.onNodeWithText("没有 Sable 账号？用配对码").assertIsDisplayed()
             compose.onNodeWithText("用 Sable 账号登录").performClick()
 
-            compose.waitUntil(25_000) { compose.onAllNodesWithText("选段提问").fetchSemanticsNodes().isNotEmpty() }
+            compose.waitUntil(25_000) { compose.onAllNodesWithText("owner-content").fetchSemanticsNodes().isNotEmpty() }
             val gateCreds = requireNotNull(friendStore.load())
             assertEquals("friend", gateCreds.role)
 

@@ -73,31 +73,16 @@ class ReadingSettingsTest {
                         }
                     }
                     onNodeWithTag("v7-type-menu").performClick()
-                    for (paper in PaperColor.entries) for (size in ReadingSize.entries) for (font in ReadingFont.entries) {
+                    for (paper in PaperColor.entries) for (size in ReadingSize.entries) {
                         onNodeWithTag("reading-paper-${paper.name}").performClick()
                         onNodeWithTag("reading-size-${size.name}").performClick()
-                        onNodeWithTag("reading-font-${font.name}").performClick()
                         waitForIdle()
                         val saved = ReadingSettings(root)
                         assertEquals(size, saved.size)
-                        assertEquals(font, saved.font)
                         assertEquals(paper, saved.paper)
                         val layout = mutableListOf<TextLayoutResult>()
                         onNodeWithTag("reader-text").performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layout) }
                         assertEquals(18f * size.scale, layout.single().layoutInput.style.fontSize.value, .01f)
-                        val text = layout.single().layoutInput.text
-                        val kai = text.spanStyles.filter { it.item == wenKaiBody }
-                        assertEquals(font == ReadingFont.SONG, kai.isEmpty())
-                        if (font == ReadingFont.KAI) {
-                            val mixed = text.text.indexOf("记录𠮷字和 English")
-                            assertTrue(mixed >= 0)
-                            assertTrue(kai.any { it.start <= mixed && it.end >= mixed + "记录𠮷字和".length })
-                            for (sample in listOf("观察", "English")) {
-                                val start = text.text.indexOf(sample)
-                                assertTrue(start >= 0)
-                                assertFalse(kai.any { it.start < start + sample.length && it.end > start })
-                            }
-                        }
                         assertEquals(raw.length, paging.pages.sumOf { it.text.length })
                         val display = paging.pages.joinToString("") { it.text.text }
                         for (i in raw.indices) if (!raw[i].isWhitespace()) assertEquals(raw[i], display[i])
@@ -122,10 +107,11 @@ class ReadingSettingsTest {
             }
             runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                waitForIdle()
                 for (mode in listOf("paged", "scroll")) {
                     onNodeWithTag("v7-type-menu").performClick()
                     onNodeWithTag("reading-size-LARGE").assertIsNotEnabled()
-                    onNodeWithTag("reading-font-KAI").assertIsNotEnabled()
                     onNodeWithTag("original-mode-$mode").performClick()
                     assertEquals(mode == "scroll", library.pdfScrollMode(controller.state.value.book!!.id))
                     onNodeWithTag("reading-settings-panel").assertDoesNotExist()
@@ -133,7 +119,6 @@ class ReadingSettingsTest {
                 onNodeWithTag("book-original-toggle").performClick()
                 onNodeWithTag("v7-type-menu").performClick()
                 onNodeWithTag("reading-size-LARGE").assertIsEnabled().performClick()
-                onNodeWithTag("reading-font-KAI").assertIsEnabled().performClick()
                 onNodeWithTag("original-mode-scroll").assertDoesNotExist()
             }
         } finally { root.toFile().deleteRecursively() }
@@ -208,6 +193,8 @@ class ReadingSettingsTest {
             val dbUrl = "jdbc:sqlite:${library.directory.resolve("library.sqlite")}"
             runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                waitForIdle()
                 onNodeWithTag("book-original-toggle").performClick()
                 onNodeWithTag("v7-type-menu").performClick()
                 val locked = CountDownLatch(1)

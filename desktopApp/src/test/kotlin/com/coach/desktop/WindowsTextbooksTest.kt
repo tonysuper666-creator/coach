@@ -64,7 +64,7 @@ class WindowsTextbooksTest {
             ready(controller) { it.screen == BookScreen.LEARNING && it.prompt == null }
             capture("learning")
             val learning = controller.state.value.book!!
-            val practice = StudyCoachCourse.practice(learning, learning.lessons[0], QuestionMode.CHOICE)!!
+            val practice = com.coach.desktop.books.testPracticeFixture(learning, learning.lessons[0], QuestionMode.CHOICE)!!
             onNodeWithTag("choice-${practice.options.indexOf(practice.answer)}").performScrollTo().performClick()
             ready(controller) { it.answer.text == practice.answer && it.answer.revealed }
             onNodeWithText("与原文一致。").assertExists()
@@ -185,7 +185,7 @@ class WindowsTextbooksTest {
 
             // 作答、出处和翻页照旧；去今天再回书架，学习位置和作答都还在。
             val learning = controller.state.value.book!!
-            val practice = StudyCoachCourse.practice(learning, learning.lessons[0], QuestionMode.CHOICE)!!
+            val practice = com.coach.desktop.books.testPracticeFixture(learning, learning.lessons[0], QuestionMode.CHOICE)!!
             onNodeWithTag("choice-${practice.options.indexOf(practice.answer)}").performScrollTo().performClick()
             ready(controller) { it.answer.revealed }
             onNodeWithText("与原文一致。").assertExists()
@@ -256,7 +256,7 @@ class WindowsTextbooksTest {
 
             // 作答后去今天：同一份进度，继续学回到同一节，作答还在。
             val learning = controller.state.value.book!!
-            val practice = StudyCoachCourse.practice(learning, learning.lessons[0], QuestionMode.CHOICE)!!
+            val practice = com.coach.desktop.books.testPracticeFixture(learning, learning.lessons[0], QuestionMode.CHOICE)!!
             onNodeWithTag("choice-${practice.options.indexOf(practice.answer)}").performScrollTo().performClick()
             ready(controller) { it.answer.revealed }
             nav("今天").performClick()

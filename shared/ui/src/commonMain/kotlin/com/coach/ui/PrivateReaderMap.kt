@@ -91,7 +91,7 @@ internal fun ChapterMapDialog(reader: ReaderHttp, documentId: String, pages: Int
                 when (val r = result) {
                     ReaderLoad.Loading -> CenterMessage("正在读取章节脉络…")
                     ReaderLoad.Failed -> Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("章节脉络暂时读不到，请检查 Mac 连接。", modifier = Modifier.testTag("private-map-failed"))
+                        Text("章节脉络暂时读不到，请检查 Coach 服务连接。", modifier = Modifier.testTag("private-map-failed"))
                         OutlinedButton(onClick = { retry++ }, modifier = Modifier.testTag("private-map-retry")) { Text("重试") }
                     }
                     is ReaderLoad.Ready -> {

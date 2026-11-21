@@ -17,7 +17,7 @@ class BookLearningPathTest {
             promptSeen = true, questionMode = QuestionMode.CHOICE)
         library.save(progressed)
         val lesson = progressed.lessons[1]
-        val practice = assertNotNull(StudyCoachCourse.practice(progressed, lesson, QuestionMode.CHOICE))
+        val practice = assertNotNull(com.coach.desktop.books.testPracticeFixture(progressed, lesson, QuestionMode.CHOICE))
         library.saveAnswer(first.id, lesson.id, QuestionMode.CHOICE,
             PracticeAnswer(practice.options.first { it != practice.answer }, true))
         assertEquals(1, library.reviews().size)

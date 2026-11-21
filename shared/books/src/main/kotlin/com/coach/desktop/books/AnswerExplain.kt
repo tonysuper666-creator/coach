@@ -114,7 +114,7 @@ internal fun LessonAnswerExplanation(
     onOpenSourcePage: () -> Unit,
 ) {
     LaunchedEffect(gate) { gate.load() }
-    var allowed by remember(book.id) { mutableStateOf(gate.consent.allowed(book.id)) }
+    val allowed = LocalReadingAiExplain.current && gate.consent.allowed(book.id)
     var skipped by remember(book.id, lesson.id) { mutableStateOf(false) }
     val ready = gate.ready()
     val paired = gate.paired()
@@ -124,12 +124,12 @@ internal fun LessonAnswerExplanation(
         !paired -> {
             val onRelogin = LocalBookRelogin.current
             Column(Modifier.fillMaxWidth().testTag("answer-explain-unpaired"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(if (gate.revoked()) ExplainTrouble.revoked(gate.sableLogin()) else "讲解由配对的服务生成，这台电脑还没连上。读书和做题照常。",
+                Text(if (gate.revoked()) ExplainTrouble.revoked(gate.sableLogin()) else "登录 Coach 服务后可查看答后讲解。",
                     style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("answer-explain-unpaired-text"))
                 V7TextButton(
                     onClick = { if (onRelogin != null) onRelogin("授权已撤销，请重新登录。") else onOpenSourcePage() },
                     modifier = Modifier.testTag("answer-explain-pair"),
-                ) { Text(if (onRelogin != null) "重新登录" else "去原文页配对") }
+                ) { Text("重新登录") }
             }
         }
         skipped -> Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
@@ -137,19 +137,7 @@ internal fun LessonAnswerExplanation(
             Text("这次先不看讲解。", style = MaterialTheme.typography.bodySmall)
             V7TextButton({ skipped = false }, modifier = Modifier.testTag("answer-explain-resume")) { Text("还是看一下") }
         }
-        !allowed -> V7ExpandIn {
-            PaperCard(Modifier.testTag("answer-explain-consent"), contentPadding = PaddingValues(16.dp)) {
-                Text("答完了，看看这段怎么讲", style = MaterialTheme.typography.titleMedium)
-                Text(ExplainPrivacy.answer(book.title),
-                    style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.fgSecondary)
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                    PrimaryButton({ gate.consent.allow(book.id); allowed = true }, modifier = Modifier.testTag("answer-explain-allow")) {
-                        Text("允许并讲解")
-                    }
-                    V7TextButton({ skipped = true }, modifier = Modifier.testTag("answer-explain-skip")) { Text("先不看") }
-                }
-            }
-        }
+        !allowed -> Text("已在设置中关闭伴读讲解与提问。", style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.fgSecondary)
         else -> {
             val support = remember(book.id, lesson.id, practice.reference, gate) {
                 PairedBookExplainSupport(gate, practice.reference)
@@ -241,7 +229,7 @@ internal fun GeneratedLessonPractice(
     nav: @Composable () -> Unit,
 ) {
     val key = "${book.id}:${lesson.id}"
-    var allowed by remember(book.id) { mutableStateOf(gate.consent.allowed(book.id)) }
+    val allowed = LocalReadingAiExplain.current && gate.consent.allowed(book.id)
     var attempt by remember(key) { mutableStateOf(0) }
     var failure by remember(key) { mutableStateOf<BookLearningReply.Unavailable?>(null) }
     val generated = gate.practices[key]
@@ -276,11 +264,6 @@ internal fun GeneratedLessonPractice(
             Text("本次练习", Modifier.testTag("generated-practice"), style = MaterialTheme.typography.labelMedium)
             SourcePractice(lesson.id, QuestionMode.CHOICE, generated.practice, answer, { updated ->
                 gate.answers[key] = updated
-                if (updated.revealed) {
-                    val q = com.coach.domain.LadderQuestion(key, lesson.id, lesson.id, "concept", 1, key, key, syntheticOnly = true)
-                    gate.recaps[book.id] = com.coach.domain.QuestionLadder.record(gate.recaps[book.id] ?: com.coach.domain.LadderSession(),
-                        q, false, generated.explanation.text)
-                }
             }, { onSource(generated.practice) }, true, sourceFocus, showReference = false, temporary = true)
             if (answer.revealed) {
                 PaperCard(Modifier.testTag("book-lesson-explanation"), contentPadding = PaddingValues(16.dp)) {
@@ -288,29 +271,20 @@ internal fun GeneratedLessonPractice(
                     Text(generated.explanation.text, Modifier.testTag("book-explanation-text"))
                     sources(generated.explanation.sources)
                 }
-                val recap = gate.recaps[book.id]?.takeIf { it.recapOpen }
-                // 两张小结同屏：这一节在上、六题小结在下，继续/完成只留最下面一组。
-                LessonSummaryCard(book, lesson, generated.practice, answer, temporary = true,
-                    nav = if (recap == null) nav else null)
-                if (recap != null) KnowledgeRecapCard(recap) {
-                    gate.recaps[book.id] = com.coach.domain.QuestionLadder.closeRecap(recap)
-                }
+                LessonSummaryCard(book, lesson, generated.practice, answer, temporary = true, nav = nav)
             } else nav()
         }
-        // 连不上的时候不能让这一节空着：配对只管「现出题」，原文出的题和作答照常。
         !gate.ready() -> fallback()
         !gate.paired() -> {
             val onRelogin = LocalBookRelogin.current
-            Text(if (gate.revoked()) ExplainTrouble.revoked(gate.sableLogin()) else "现出题和答后讲解要用配对的服务；连上之前，这一节先用原文出的题。")
+            Text(if (gate.revoked()) ExplainTrouble.revoked(gate.sableLogin()) else "练习与答后讲解需登录 Coach 服务。")
             V7TextButton({ if (onRelogin != null) onRelogin("授权已撤销，请重新登录。") else onRepair() }) {
-                Text(if (onRelogin != null) "重新登录" else "去原文页配对")
+                Text("重新登录")
             }
             fallback()
         }
         !allowed -> {
-            // 允许与否只决定「按本节原文现出题」；这一节原文出的题始终在，读者不必先答应再答题。
-            Text(ExplainPrivacy.ask(book.title) + "允许后，这一节会通过服务按原文现出一题并给答后讲解；题目只用于这次练习。")
-            PrimaryButton({ gate.consent.allow(book.id); allowed = true }, Modifier.testTag("practice-allow")) { Text("允许并出题") }
+            Text("已在设置中关闭伴读讲解与提问。", style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.fgSecondary)
             fallback()
         }
         failure != null -> {

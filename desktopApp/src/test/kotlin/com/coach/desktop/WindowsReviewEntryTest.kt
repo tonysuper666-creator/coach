@@ -145,7 +145,7 @@ class WindowsReviewEntryTest {
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("choice-0").fetchSemanticsNodes().isNotEmpty() }
             val book = library.book(library.catalog().single().id)
             val lesson = book.lessons[book.lessonIndex]
-            val question = assertNotNull(StudyCoachCourse.practice(book, lesson, book.questionMode))
+            val question = assertNotNull(com.coach.desktop.books.testPracticeFixture(book, lesson, book.questionMode))
             localBook = book.id; localLesson = lesson.id; localAnswer = question.answer
             onNodeWithTag("choice-${question.options.indexOf(question.answer)}").performScrollTo().performClick()
             waitUntil(timeoutMillis = 15_000) { onAllNodesWithText("与原文一致。").fetchSemanticsNodes().isNotEmpty() }

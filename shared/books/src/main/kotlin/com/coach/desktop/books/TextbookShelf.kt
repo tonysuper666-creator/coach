@@ -49,7 +49,7 @@ internal fun BookImportProgressBar(
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
-    val pine = v7Pine()
+    val pine = colors.actionPrimary
     Column(modifier, verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 6.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -115,7 +115,7 @@ internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String)
     val rightScroll = rememberScrollState()
     val density = LocalDensity.current
     var sheetOriginLeftDp by remember { mutableStateOf<Float?>(null) }
-    val line = if (colors.dark) CoachV7.Dark.line else CoachV7.Light.line
+    val line = colors.borderSubtle
     BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = if (hinge != null) CoachV7.Space.s3 else CoachV7.Space.s6, vertical = CoachV7.Space.s3), contentAlignment = Alignment.TopCenter) {
         val sectionSpacing = if (maxHeight < 560.dp) CoachV7.Space.s2 else CoachV7.Space.s5
         Box(Modifier.widthIn(max = 1000.dp).fillMaxWidth().fillMaxHeight().paperShadow("sheet", colors.dark)
@@ -135,7 +135,7 @@ internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String)
                     Text("书架还是空的", style = MaterialTheme.typography.titleLarge)
                     Text("上传后，可以直接开始学，也可以先当一本书读。", color = colors.fgSecondary)
                 } else {
-                    Text("全部教材", style = MaterialTheme.typography.titleMedium, fontFamily = LocalV7Fonts.current.display)
+                    Text("全部教材", style = MaterialTheme.typography.titleMedium)
                     Column {
                         ShelfDivider(line)
                         for (item in ui.catalog) {
@@ -145,7 +145,9 @@ internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String)
                                 enabled = !ui.busy,
                                 activeImport = ui.importing?.takeIf { it.recognizing && it.bookId == item.id },
                                 onCancelImport = onCancelImport,
-                            ) { onSelect(item.id) }
+                            ) {
+                                if (item.id == book.id) onRead() else onSelect(item.id)
+                            }
                             ShelfDivider(line)
                         }
                     }
@@ -154,19 +156,12 @@ internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String)
             val selectedActions: @Composable () -> Unit = {
                 if (book != null) {
                     Text(book.title, style = MaterialTheme.typography.headlineLarge, fontFamily = LocalV7Fonts.current.display)
-                    PrimaryButton(onLearn, enabled = !ui.busy, modifier = Modifier.testTag("home-learn")) {
-                        Text(if (!ui.learningPathSaved && !book.learning) "开始学"
-                        else "继续${ui.learningPath.label}" + if (ui.learningPath == LearningPath.READ) " · 第 ${book.readingPage} 页" else " · 第 ${book.lessonIndex + 1} 节")
+                    PrimaryButton(onRead, enabled = !ui.busy, modifier = Modifier.testTag("home-read")) {
+                        Text(if (book.readingPage > 1) "继续阅读 · 第 ${book.readingPage} 页" else "开始阅读")
                     }
-                    Column {
-                        ShelfDivider(line)
-                        EntryRow("看书", "翻开第 ${book.readingPage} 页，可就原文段落提问。", "home-read", !ui.busy, onRead)
-                        ShelfDivider(line)
-                        EntryRow("边看边学", "先看讲解，再选择是否做题。", "home-guided", !ui.busy) { onPath(LearningPath.READ_AND_LEARN) }
-                        ShelfDivider(line)
-                        EntryRow("做题学", "先试题，答后看讲解；原文按需打开。", "home-question", !ui.busy) { onPath(LearningPath.QUESTION_FIRST) }
-                        ShelfDivider(line)
-                        if (onExportNotes != null) {
+                    if (onExportNotes != null) {
+                        Column {
+                            ShelfDivider(line)
                             EntryRow("导出笔记与复习提纲", "生成本教材的 Markdown 笔记与可打印 PDF。", "book-export-notes", !ui.busy) {
                                 onExportNotes(book, book.readingPage)
                             }
@@ -253,15 +248,15 @@ private fun ShelfBookRow(
     onClick: () -> Unit,
 ) {
     val colors = CoachTheme.colors
-    val wash = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
+    val wash = colors.actionPrimary.copy(alpha = 0.12f)
     Column(Modifier.fillMaxWidth().background(if (current) wash else androidx.compose.ui.graphics.Color.Transparent)) {
         Row(Modifier.fillMaxWidth().testTag("book-${item.id}")
             .shelfClick(enabled, onClick).padding(horizontal = CoachV7.Space.s3, vertical = CoachV7.Space.s3),
             horizontalArrangement = Arrangement.spacedBy(CoachV7.Space.s3), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.width(CoachV7.Space.s1).height(CoachV7.Space.s7)
-                .background(if (current) v7Pine() else androidx.compose.ui.graphics.Color.Transparent))
+                .background(if (current) colors.actionPrimary else androidx.compose.ui.graphics.Color.Transparent))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s1)) {
-                Text(item.title, style = MaterialTheme.typography.titleMedium, fontFamily = LocalV7Fonts.current.display)
+                Text(item.title, style = MaterialTheme.typography.titleMedium)
                 val statusSuffix = when {
                     activeImport != null -> " · 识别中 ${activeImport.page} / ${activeImport.total} 页"
                     item.pendingOcrPages > 0 -> " · 待识别 ${item.pendingOcrPages} 页"
@@ -294,87 +289,4 @@ internal fun PaperTile(enabled: Boolean, modifier: Modifier, onClick: () -> Unit
     Column(modifier.v7FocusRing(shape).paperShadow("card", colors.dark).clip(shape).background(colors.surface2)
         .clickable(enabled = enabled, role = Role.Button, onClick = onClick).alpha(if (enabled) 1f else .5f).padding(padding),
         verticalArrangement = Arrangement.spacedBy(spacing), content = content)
-}
-
-/**
- * 一组单选里的一格（这次怎么读、出题）。没选是 surface1 的纸配细描边；选中是松绿描边、松绿淡底、松绿字，
- * 左边一个画出来的对勾，和笔记导出、答对的选项同一套颜色。对勾的位置每格都留着，选中时文字不跳。
- */
-@Composable
-private fun V7Choice(label: String, selected: Boolean, enabled: Boolean, tag: String, onClick: () -> Unit) {
-    val colors = CoachTheme.colors
-    val shape = RoundedCornerShape(CoachV7.Radius.btn)
-    val pine = v7Pine()
-    val wash = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
-    Row(Modifier.testTag(tag).v7FocusRing(shape).clip(shape).background(if (selected) wash else colors.surface1)
-        .border(1.dp, if (selected) pine else colors.borderSubtle, shape)
-        .selectable(selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
-        .alpha(if (enabled) 1f else .5f).heightIn(min = 36.dp).padding(start = 10.dp, end = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-        Canvas(Modifier.size(14.dp)) {
-            if (!selected) return@Canvas
-            val w = size.width
-            drawPath(Path().apply { moveTo(w * 0.12f, w * 0.52f); lineTo(w * 0.40f, w * 0.78f); lineTo(w * 0.88f, w * 0.24f) },
-                pine, style = Stroke(1.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
-        }
-        Text(label, style = MaterialTheme.typography.labelLarge, color = if (selected) pine else colors.fgPrimary)
-    }
-}
-
-@Composable
-private fun QuestionModePicker(selected: QuestionMode, enabled: Boolean, onMode: (QuestionMode) -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("出题", style = MaterialTheme.typography.titleSmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            for (mode in QuestionMode.entries) V7Choice(mode.label, selected == mode, enabled, "question-mode-${mode.name}") { onMode(mode) }
-        }
-        Text(when (selected) {
-            QuestionMode.NONE -> "只学教材内容，随时可以再开启练习。"
-            QuestionMode.CHOICE -> "用原文填空选择题回忆教材内容。"
-            QuestionMode.SHORT_ANSWER -> "用自己的话作答，再对照原文自检。"
-        }, style = MaterialTheme.typography.bodySmall)
-    }
-}
-
-@Composable
-internal fun BookEntryPrompt(ui: LibraryUi, onDismiss: () -> Unit, onRead: () -> Unit, onEnable: () -> Unit, onMode: (QuestionMode) -> Unit,
-    onPath: (LearningPath) -> Unit) {
-    val book = checkNotNull(ui.book)
-    val settings = ui.prompt == BookPrompt.QUESTIONS
-    AlertDialog(onDismissRequest = { if (!ui.busy) onDismiss() },
-        title = { Text(when (ui.prompt) {
-            BookPrompt.IMPORTED -> "教材已加入书架"
-            BookPrompt.AFTER_READING -> "要开始学吗？"
-            BookPrompt.QUESTIONS -> "出题方式"
-            else -> "开始学这本教材"
-        }) }, text = {
-            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Text(book.title)
-                Text(when (ui.prompt) {
-                    BookPrompt.IMPORTED -> if (book.hasPendingOcr) "正在后台识别文字，可以先在阅读器里翻看原页，识别完的页也可以直接读和讲解。" else "可以先在阅读器里读，也可以直接按章节开始学。"
-                    BookPrompt.AFTER_READING -> "阅读器已经打开。开启后会按教材章节继续学；暂不开启，就只读这本书。"
-                    BookPrompt.QUESTIONS -> "出题类型只影响学习练习，切换后保留学习方式和原作答。"
-                    else -> "从教材原文生成学习路线，按顺序理解、回忆和继续。"
-                })
-                if (!settings) {
-                    Text("这次怎么读", style = MaterialTheme.typography.titleSmall)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        LearningPath.entries.forEach { path ->
-                            V7Choice(path.label, ui.learningPath == path, !ui.busy, "learning-path-${path.name}") { onPath(path) }
-                        }
-                    }
-                }
-                if (ui.learningPath != LearningPath.READ) QuestionModePicker(book.questionMode, !ui.busy, onMode)
-                if (book.pages.any { it.text.isBlank() && !it.ocrPending }) Text("部分页面没有可提取文字，仍可在阅读器查看原页。学的时候只用能提取出文字的部分。", style = MaterialTheme.typography.bodySmall)
-                ui.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = v7Alert()) }
-            }
-        }, confirmButton = {
-            V7TextButton(onClick = if (settings) onDismiss else onEnable, enabled = !ui.busy,
-                modifier = Modifier.testTag(if (settings) "close-question-settings" else "enable-learning")) {
-                Text(if (settings) "确定" else "开始${ui.learningPath.label}")
-            }
-        }, dismissButton = {
-            if (!settings) V7TextButton(onClick = if (ui.prompt == BookPrompt.IMPORTED) onRead else onDismiss, enabled = !ui.busy,
-                modifier = Modifier.testTag("read-only")) { Text(if (ui.prompt == BookPrompt.IMPORTED) "先读" else "暂不开启") }
-        })
 }

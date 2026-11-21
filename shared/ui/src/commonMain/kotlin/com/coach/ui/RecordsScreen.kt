@@ -295,7 +295,7 @@ private fun ConstructedBlock(d: AttemptDetail, rubric: RubricView?, canAskMac: B
         Text("评分标准与得分", style = MaterialTheme.typography.labelLarge)
         val items = grade?.items.orEmpty()
         if (rubric == null) {
-            Text(if (canAskMac) "完整评分标准要从 Mac 取，现在没取到（离线，或 Mac 上的服务还没更新）。下面是账本里已有的逐项得分。" else "完整评分标准要联网从 Mac 取。下面是账本里已有的逐项得分。",
+            Text(if (canAskMac) "完整评分标准需从 Coach 服务获取，当前暂未取到。下面是已保存的逐项得分。" else "完整评分标准需联网获取。下面是已保存的逐项得分。",
                 style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else if (rubric.referenceAnswer.isNotBlank()) {
             Text("参考答案：${rubric.referenceAnswer}", style = MaterialTheme.typography.bodyMedium)

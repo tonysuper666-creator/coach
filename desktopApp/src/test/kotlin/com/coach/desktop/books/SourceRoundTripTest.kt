@@ -58,7 +58,7 @@ class SourceRoundTripTest {
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             val book = controller.state.value.book!!
             val lesson = book.lessons[book.lessonIndex]
-            val prompt = StudyCoachCourse.practice(book, lesson, QuestionMode.SHORT_ANSWER)!!.prompt
+            val prompt = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.SHORT_ANSWER)!!.prompt
             onNodeWithTag("short-answer").performScrollTo().performTextInput("My unfinished draft")
             waitUntil(timeoutMillis = 20_000) { controller.state.value.answer.text == "My unfinished draft" }
             onNodeWithTag("open-practice-source").performScrollTo()
@@ -154,7 +154,7 @@ class SourceRoundTripTest {
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             val book = controller.state.value.book!!
             val lesson = book.lessons[book.lessonIndex]
-            val practice = StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE)!!
+            val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
             assertEquals(1, lesson.firstPage)
             assertEquals("Photosynthesis is the process by which plants use light to make sugars.", practice.reference)
             val selected = practice.options.first { it != practice.answer }
@@ -246,7 +246,7 @@ class SourceRoundTripTest {
             val quote = lesson.blocks.first { it.page == lesson.firstPage && !it.heading }.text
             assertEquals("Chlorophyll is a green pigment that absorbs light in plant cells.", quote)
             assertEquals(2, Regex(Regex.escape(quote)).findAll(book.pages[lesson.firstPage - 1].text).count())
-            val prompt = StudyCoachCourse.practice(book, lesson, QuestionMode.SHORT_ANSWER)!!.prompt
+            val prompt = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.SHORT_ANSWER)!!.prompt
             onNodeWithTag("short-answer").performScrollTo().performTextInput("My unfinished draft")
             waitUntil(timeoutMillis = 20_000) { controller.state.value.answer.text == "My unfinished draft" }
             onNodeWithTag("open-practice-source").performScrollTo().performClick()
@@ -288,7 +288,7 @@ class SourceRoundTripTest {
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             val book = controller.state.value.book!!
             val lesson = book.lessons[book.lessonIndex]
-            val practice = StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE)!!
+            val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
             val selected = practice.options.first { it != practice.answer }
             onNodeWithTag("choice-${practice.options.indexOf(selected)}").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.answer == PracticeAnswer(selected, revealed = true) }

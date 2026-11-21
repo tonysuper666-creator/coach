@@ -55,7 +55,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     val imeOpen = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
 
     fun open() = c.tutor.open(thread, c.courseId, kp.id, kp.conceptIds, kp.title, review = reviewMode)
-    fun fail() = c.tutor.model.onFailure(thread, "Mac 未连接，这一步没有发出去。")
+    fun fail() = c.tutor.model.onFailure(thread, "Coach 服务未连接，这一步没有发出去。")
     fun next(test: Boolean, recordTap: Boolean = true) {
         pinned = true
         focus.clearFocus()

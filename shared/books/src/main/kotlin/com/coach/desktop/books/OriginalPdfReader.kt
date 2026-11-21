@@ -114,16 +114,26 @@ internal class OriginalPdfTextLayers(private val library: TextbookLibrary, priva
 }
 
 /** Landscape pages occupy a sheet alone. Portrait pairs retain their physical order. */
-internal fun originalPdfSheets(pages: List<Int>, aspects: Map<Int, Float>, width: Float, imageHeight: Float): List<List<Int>> {
+internal fun originalPdfSheets(
+    pages: List<Int>,
+    aspects: Map<Int, Float>,
+    width: Float,
+    imageHeight: Float,
+    immersive: Boolean = false,
+): List<List<Int>> {
     val result = mutableListOf<List<Int>>()
+    val perPageChrome = if (immersive) 10f else 88f
+    val gutter = if (immersive) 4f else 48f
     var index = 0
     while (index < pages.size) {
         val left = pages[index]
         val right = pages.getOrNull(index + 1)
         val a = aspects[left] ?: FallbackPdfAspect
         val b = right?.let(aspects::get) ?: FallbackPdfAspect
-        val spreadWidth = 2 * (maxOf(a, b) * imageHeight + 88) + 48
-        if (right != null && a <= 1f && b <= 1f && width >= spreadWidth) {
+        val spreadWidth = 2 * (maxOf(a, b) * imageHeight + perPageChrome) + gutter
+        // 沉浸式宽屏（含并排伴读态）只要双页总书页面积大于单页且总宽 >= 1000dp，就保持双页对开，避免打开伴读后退回单页导致书页面积骤降。
+        val canPair = if (immersive) width >= 1000f && width >= spreadWidth * 0.72f else width >= spreadWidth
+        if (right != null && a <= 1f && b <= 1f && canPair) {
             result.add(listOf(left, right))
             index += 2
         } else {
@@ -139,6 +149,8 @@ internal fun OriginalPdfReader(
     book: Textbook, library: TextbookLibrary, reading: OriginalPdfReading, scroll: ScrollReadState,
     layers: OriginalPdfTextLayers, citation: CitedPdfLocation?, quote: String?, highlightRevision: Int,
     turnStyle: PageTurnStyle, onPage: (Int) -> Unit, onTurn: (Int) -> Unit,
+    immersive: Boolean = false,
+    bitmapCache: OriginalPdfBitmapCache = remember(library, book.id) { OriginalPdfBitmapCache() },
 ) {
     val pageNumbers = remember(book.id, book.pages.size) { book.pages.map(BookPage::number) }
     val aspects by produceState(emptyMap<Int, Float>(), library, book.id) {
@@ -149,6 +161,7 @@ internal fun OriginalPdfReader(
     val currentPage by rememberUpdatedState(onPage)
     val colors = CoachTheme.colors
     val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
+    val lastRenderWidth = remember(book.id) { mutableIntStateOf(0) }
     val turnByTouch: (Boolean) -> Unit = { forward ->
         val target = if (reading.scrolling) {
             val position = pageNumbers.indexOf(reading.page)
@@ -157,15 +170,40 @@ internal fun OriginalPdfReader(
         target?.let(onTurn)
     }
 
+    // 吸收 TON-1463：后台预取当前页/当前对开的前后相邻页到有界 LRU 位图缓存（优先下一页再上一页）。
+    val prefetchTargets = remember(pageNumbers, reading.sheets, reading.page, reading.scrolling) {
+        adjacentPdfPrefetchPages(pageNumbers, reading.sheets, reading.page, reading.scrolling)
+    }
+    LaunchedEffect(library, book.id, prefetchTargets, lastRenderWidth.intValue) {
+        val width = lastRenderWidth.intValue
+        if (width <= 0 || prefetchTargets.isEmpty()) return@LaunchedEffect
+        kotlinx.coroutines.delay(40)
+        for (adj in prefetchTargets) {
+            val key = PdfBitmapCacheKey(book.id, adj, width)
+            if (bitmapCache.get(key) != null) continue
+            try {
+                val rendered = withContext(Dispatchers.IO) {
+                    library.renderOriginal(book, adj, width).asBookImageBitmap()
+                }
+                bitmapCache.put(key, rendered)
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (_: Throwable) {
+                // 预取失败不影响当前页正常展示。
+            }
+        }
+    }
+
     val leaf: @Composable (Int, Modifier) -> Unit = { number, modifier ->
         val page = checkNotNull(book.page(number))
         OriginalPdfLeaf(book, page, library, reading, layers, aspects[number],
-            citation.takeIf { reading.page == number }, quote, highlightRevision, modifier, currentPage)
+            citation.takeIf { reading.page == number }, quote, highlightRevision, modifier, currentPage,
+            bitmapCache = bitmapCache, onRenderWidth = { if (it > 0) lastRenderWidth.intValue = it })
     }
 
     if (reading.scrolling) {
         val target = reading.destination
-        val footer = with(LocalDensity.current) { 48.dp.roundToPx() }
+        val footer = with(LocalDensity.current) { (if (immersive) 8.dp else 48.dp).roundToPx() }
         LaunchedEffect(scroll, target, aspects, footer) {
             val index = pageNumbers.indexOf(target.page).coerceAtLeast(0)
             val position = ScrollReadPosition(index, target.fraction)
@@ -187,38 +225,53 @@ internal fun OriginalPdfReader(
                 }
         }
         val swipe = if (originalPdfTouchEnabled) Modifier.originalPdfSwipe(onTurn = turnByTouch) else Modifier
-        ScrollReadView(scroll, desk = colors.bgCanvas, paper = Color.Transparent,
-            modifier = Modifier.fillMaxSize().testTag("original-pdf-scroll").then(swipe), gap = 24.dp, handleKeys = false,
+        ScrollReadView(scroll, desk = if (immersive) paper else colors.bgCanvas, paper = Color.Transparent,
+            modifier = Modifier.fillMaxSize().testTag("original-pdf-scroll").then(swipe),
+            gap = if (immersive) 8.dp else 24.dp, handleKeys = false,
             scrollbar = { BookReadScrollbar(it) }) { index ->
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
-                Column(Modifier.widthIn(max = 1198.dp).fillMaxWidth()
-                    .paperShadow("sheet", colors.dark).clip(RoundedCornerShape(CoachV7.Radius.sheet)).background(paper)) {
-                    BoxWithConstraints(Modifier.fillMaxWidth()) {
-                        leaf(pageNumbers[index], Modifier.padding(horizontal = minOf(64.dp, maxWidth * .10f)))
+            if (immersive) {
+                BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 8.dp), contentAlignment = Alignment.TopCenter) {
+                    val pageWidth = minOf(maxWidth * 0.94f, 1520.dp).coerceAtLeast(1.dp)
+                    Box(Modifier.width(pageWidth).background(paper)) {
+                        leaf(pageNumbers[index], Modifier.fillMaxWidth())
                     }
-                    PdfPageFooter(book, pageNumbers[index])
+                }
+            } else {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+                    Column(Modifier.widthIn(max = 1198.dp).fillMaxWidth()
+                        .paperShadow("sheet", colors.dark).clip(RoundedCornerShape(CoachV7.Radius.sheet)).background(paper)) {
+                        BoxWithConstraints(Modifier.fillMaxWidth()) {
+                            leaf(pageNumbers[index], Modifier.padding(horizontal = minOf(64.dp, maxWidth * .10f)))
+                        }
+                        PdfPageFooter(book, pageNumbers[index])
+                    }
                 }
             }
         }
-    } else BoxWithConstraints(Modifier.fillMaxSize().background(colors.bgCanvas), contentAlignment = Alignment.Center) {
-        val top = minOf(52.dp, maxHeight * .12f)
-        val bottom = minOf(64.dp, maxHeight * .14f)
+    } else BoxWithConstraints(Modifier.fillMaxSize().background(if (immersive) paper else colors.bgCanvas), contentAlignment = Alignment.Center) {
+        val top = if (immersive) 4.dp else minOf(52.dp, maxHeight * .12f)
+        val bottom = if (immersive) 6.dp else minOf(64.dp, maxHeight * .14f)
         val imageHeight = (maxHeight - top - bottom).coerceAtLeast(1.dp)
-        val sheets = remember(pageNumbers, aspects, maxWidth, imageHeight) {
-            originalPdfSheets(pageNumbers, aspects, maxWidth.value, imageHeight.value)
+        val sheets = remember(pageNumbers, aspects, maxWidth, imageHeight, immersive) {
+            originalPdfSheets(pageNumbers, aspects, maxWidth.value, imageHeight.value, immersive = immersive)
         }
         SideEffect { if (reading.sheets != sheets) reading.sheets = sheets }
         val sheet = sheets.indexOfFirst { reading.page in it }.coerceAtLeast(0)
         val columns = sheets[sheet].size
         val maxAspect = sheets[sheet].maxOf { aspects[it] ?: FallbackPdfAspect }
-        val sheetWidth = minOf(maxWidth, (imageHeight * maxAspect + if (columns == 2) 88.dp else 128.dp) * columns)
+        val sheetWidth = if (immersive) {
+            minOf(maxWidth, (imageHeight * maxAspect + if (columns == 2) 10.dp else 12.dp) * columns)
+        } else {
+            minOf(maxWidth, (imageHeight * maxAspect + if (columns == 2) 88.dp else 128.dp) * columns)
+        }
         val state = remember(sheets, columns) { PageTurnState(sheets.size * columns, sheet * columns) }
         LaunchedEffect(state, sheet) {
             val distance = sheet - state.position / columns
             if (kotlin.math.abs(distance) == 1 && !state.turning) state.turn(distance > 0)
             else if (distance != 0) state.snapTo(sheet * columns)
-            snapshotFlow { state.position / columns }.collect { position ->
-                if (position != sheet) {
+            // 等待程序触发的翻页/跳转彻底落位后再监听用户手势翻页，避免动画中途把旧页位置回写造成回弹。
+            snapshotFlow { state.position / columns to state.turning }.collect { (position, turning) ->
+                if (!turning && position != sheet && position in sheets.indices) {
                     val number = sheets[position].first()
                     reading.selection = null
                     reading.jump(number)
@@ -240,14 +293,16 @@ internal fun OriginalPdfReader(
                 val right = columns == 2 && slot % columns == 1
                 BoxWithConstraints(Modifier.fillMaxSize().testTag(if (right) "original-pdf-right" else "original-pdf-left"),
                     contentAlignment = Alignment.Center) {
-                    val outside = minOf(64.dp, maxWidth * .16f)
-                    val inside = if (columns == 2) minOf(24.dp, maxWidth * .08f) else outside
+                    val outside = if (immersive) 4.dp else minOf(64.dp, maxWidth * .16f)
+                    val inside = if (immersive) (if (columns == 2) 2.dp else 4.dp) else (if (columns == 2) minOf(24.dp, maxWidth * .08f) else outside)
                     val start = if (right) inside else outside
                     val end = if (right) outside else inside
                     val width = minOf(maxWidth - start - end, imageHeight * (aspects[number] ?: FallbackPdfAspect))
                     Box(Modifier.fillMaxSize().padding(start = start, end = end, top = top, bottom = bottom),
                         contentAlignment = Alignment.Center) { leaf(number, Modifier.width(width.coerceAtLeast(1.dp))) }
-                    Box(Modifier.align(Alignment.BottomCenter)) { PdfPageFooter(book, number, bottom) }
+                    if (!immersive) {
+                        Box(Modifier.align(Alignment.BottomCenter)) { PdfPageFooter(book, number, bottom) }
+                    }
                 }
             }
         }
@@ -267,6 +322,8 @@ private fun OriginalPdfLeaf(
     book: Textbook, page: BookPage, library: TextbookLibrary, reading: OriginalPdfReading,
     layers: OriginalPdfTextLayers, aspect: Float?, citation: CitedPdfLocation?, quote: String?,
     highlightRevision: Int, modifier: Modifier, onPage: (Int) -> Unit,
+    bitmapCache: OriginalPdfBitmapCache? = null,
+    onRenderWidth: (Int) -> Unit = {},
 ) {
     var pixelWidth by remember { mutableIntStateOf(0) }
     var retry by remember { mutableIntStateOf(0) }
@@ -277,9 +334,10 @@ private fun OriginalPdfLeaf(
         val target = (pixelWidth * zoom.scale / 128f).roundToInt() * 128
         target.coerceIn(pixelWidth.coerceAtMost(TouchPdfRasterLimit), TouchPdfRasterLimit)
     }
+    LaunchedEffect(renderWidth) { if (renderWidth > 0) onRenderWidth(renderWidth) }
     LaunchedEffect(layers, page.number, retry) { layers.keep(page) }
     val layer = layers[page.number]?.getOrNull()
-    val image = rememberOriginalPageImage(library, book, page.number, true, renderWidth, retry)
+    val image = rememberOriginalPageImage(library, book, page.number, true, renderWidth, retry, bitmapCache = bitmapCache)
     val displayed = (image as? PageImage.Ready)?.image?.let { it.width.toFloat() / it.height }
     val rasterStatus = PdfRasterStatus(displayed, image == PageImage.Failed)
     SideEffect { if (reading.rasters[page.number] != rasterStatus) reading.rasters[page.number] = rasterStatus }

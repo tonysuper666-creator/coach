@@ -102,13 +102,13 @@ private fun EssayPicker(c: CoachController, onStarted: (EssaySession) -> Unit) {
                 }
                 val posed = receipt?.result?.get("posedSnapshot") as? JsonObject
                 when {
-                    receipt == null -> error = "Mac 未连接，题目发不出来；连上后再开始。"
+                    receipt == null -> error = "Coach 服务未连接，题目发不出来；连上后再开始。"
                     receipt.status !in setOf("OK", "DUPLICATE") || posed == null -> error = "这道题现在练不了（题库刚更新，或这一周还没有知识点）。换一道试试。"
                     // 计时从题目到手这一刻开始：Mac 判超时用它自己的时钟，另有 ${Essay.GRACE_SEC} 秒宽限。
                     else -> onStarted(EssaySession(attemptId, posed, c.nowMillis() + c.essayLimitSec * 1000L))
                 }
             } catch (e: CancellationException) { throw e }
-            catch (_: Exception) { error = "Mac 未连接，题目发不出来；连上后再开始。" }
+            catch (_: Exception) { error = "Coach 服务未连接，题目发不出来；连上后再开始。" }
             finally { busy = false }
         }
     }
@@ -121,7 +121,7 @@ private fun EssayPicker(c: CoachController, onStarted: (EssaySession) -> Unit) {
             FilterChip(selected = pasting, onClick = { pasting = true }, label = { Text("自己贴题") }, modifier = Modifier.heightIn(min = 48.dp))
         }
         if (!pasting) {
-            if (!loaded) Text("正在从 Mac 取题库…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (!loaded) Text("正在从 Coach 服务获取题库…", color = MaterialTheme.colorScheme.onSurfaceVariant)
             prompts.forEach { p ->
                 val selected = picked == p.id
                 Surface(onClick = { picked = p.id }, tonalElevation = if (selected) 6.dp else 1.dp, shape = MaterialTheme.shapes.medium,
@@ -137,13 +137,13 @@ private fun EssayPicker(c: CoachController, onStarted: (EssaySession) -> Unit) {
             if ((bank?.unmatched ?: 0) > 0) Text("还有 ${bank!!.unmatched} 道题所在的周课程里还没有知识点，暂时不列。",
                 style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else {
-            if (loaded && bank == null) Text("取不到 Mac 上的题库（Mac 未连接，或服务还没更新）。也可以先贴一道题。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (loaded && bank == null) Text("暂时获取不到题库（Coach 服务未连接，或服务尚未更新）。也可以先贴一道题。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             OutlinedTextField(stem, { stem = it }, Modifier.fillMaxWidth().testTag("essay-stem"), label = { Text("题目（英文原样贴进来）") }, minLines = 3)
             Text("属于第几周", style = MaterialTheme.typography.labelLarge)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 weeks.forEach { w -> FilterChip(selected = week == w, onClick = { week = w }, label = { Text("第 $w 周") }, modifier = Modifier.heightIn(min = 48.dp)) }
             }
-            if (weeks.isEmpty() && loaded) Text("要连上 Mac 才知道课程有哪几周。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (weeks.isEmpty() && loaded) Text("连上 Coach 服务后可查看课程周次。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("自己贴的题没有核验过的参考答案：照样逐项批改、给示范，但不计入掌握。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Button(onClick = ::start, enabled = ready, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
@@ -184,7 +184,7 @@ private fun EssayResult(c: CoachController, view: CourseView, s: EssaySession, o
     }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         val status = when {
-            detail == null -> s.note ?: "已交卷，正在送到 Mac…"
+            detail == null -> s.note ?: "已交卷，正在提交…"
             detail.grade == null -> "正在批改：结构、论点、证据、例子逐项给分，一般一两分钟。"
             detail.review == null -> "初评出来了，正在由另一家模型复核；复核后的分数才算数。"
             else -> null

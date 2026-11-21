@@ -27,7 +27,7 @@ class UnifiedBookReviewTest {
         val clock = ReviewTestClock()
         val (store, book) = library(clock)
         val lesson = book.lessons.first()
-        val practice = StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE)!!
+        val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
         val wrong = PracticeAnswer(practice.options.first { it != practice.answer }, true)
         store.saveAnswer(book.id, lesson.id, QuestionMode.CHOICE, wrong)
         store.saveAnswer(book.id, lesson.id, QuestionMode.CHOICE, wrong)
@@ -52,7 +52,7 @@ class UnifiedBookReviewTest {
         val clock = ReviewTestClock()
         val (store, book) = library(clock)
         val lesson = book.lessons.first()
-        val practice = StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE)!!
+        val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
         val correct = PracticeAnswer(practice.answer, true)
         store.saveAnswer(book.id, lesson.id, QuestionMode.CHOICE, correct)
         assertTrue(store.reviews().isEmpty())
@@ -84,7 +84,7 @@ class UnifiedBookReviewTest {
         val c = TextbookController(store)
         c.load(); c.learn(); c.enableLearning()
         val lesson = book.lessons.first()
-        val practice = StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE)!!
+        val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
         c.answer(PracticeAnswer(practice.answer, true))
         c.answer(PracticeAnswer("Unfinished next answer"))
         assertTrue(c.state.value.reviews.isEmpty())
@@ -122,7 +122,7 @@ class UnifiedBookReviewTest {
         val clock = ReviewTestClock()
         val (store, book) = library(clock)
         val lesson = book.lessons.first()
-        val practice = StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE)!!
+        val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
         val wrong = practice.options.first { it != practice.answer }
         store.saveAnswer(book.id, lesson.id, QuestionMode.CHOICE, PracticeAnswer(wrong, true))
         store.saveReviewAnswer(store.reviews().single(), PracticeAnswer(practice.answer, true))
@@ -155,7 +155,7 @@ class UnifiedBookReviewTest {
         val c = TextbookController(store)
         c.load(); c.learn(); c.enableLearning()
         val book = c.state.value.book!!
-        val questions = book.lessons.take(3).map { StudyCoachCourse.practice(book, it, QuestionMode.CHOICE)!! }
+        val questions = book.lessons.take(3).map { com.coach.desktop.books.testPracticeFixture(book, it, QuestionMode.CHOICE)!! }
         c.answer(PracticeAnswer(questions[0].options.first { it != questions[0].answer }, true))
         c.lesson(1)
         c.answer(PracticeAnswer(questions[1].answer, true, guessed = true))

@@ -110,15 +110,15 @@ internal sealed interface SectionGuideResult {
     data class Refused(val message: String, val trouble: ExplainTrouble = ExplainTrouble.Other) : SectionGuideResult
 }
 
-/** Sending a book's text off this computer needs a yes from the reader, per book. Nothing is sent before it. */
+/**
+ * 2.0 取消逐书 AI 隐私同意墙：改由首次登录页一句说明 + 设置全局开关（`ReadingSettings.aiExplain`）控制。
+ * 保留类签名以兼容既有调用方与测试夹具，默认允许发送所选片段，可在设置中全局关闭。
+ */
 internal class ExplainConsent(private val directory: Path) {
-    private fun file(bookId: String): Path? =
-        bookId.takeIf { Regex("[A-Za-z0-9._-]{1,80}").matches(it) }?.let { directory.resolve("explain-consent").resolve(it) }
-    fun allowed(bookId: String): Boolean = file(bookId)?.let(Files::isRegularFile) == true
-    fun allow(bookId: String) {
-        val target = file(bookId) ?: return
-        Files.createDirectories(target.parent)
-        Files.write(target, "allowed".toByteArray(Charsets.UTF_8))
+    private val settings by lazy { runCatching { ReadingSettings(directory) }.getOrNull() }
+    fun allowed(@Suppress("UNUSED_PARAMETER") bookId: String): Boolean = settings?.aiExplain ?: true
+    fun allow(@Suppress("UNUSED_PARAMETER") bookId: String) {
+        runCatching { settings?.chooseAiExplain(true) }
     }
 }
 
@@ -323,17 +323,12 @@ internal fun BookExplainPanel(
     val onPage = remember(blocks, page, selection) {
         if (selection != null) listOf(selection) else blocks.filter { it.page == page && it.isBodyParagraph }
     }
-    var consented by remember(book.id) { mutableStateOf(consent.allowed(book.id)) }
+    val aiEnabled = LocalReadingAiExplain.current
     val states = remember(book.id) { mutableStateMapOf<String, BlockState>() }
     val sectionStates = remember(book.id) { mutableStateMapOf<String, SectionGuideState>() }
     var sectionExpanded by remember(book.id, currentSection?.id) { mutableStateOf(false) }
     var activeHardPointId by remember(book.id, currentSection?.id) { mutableStateOf<String?>(null) }
-    var pending by remember(book.id, page) { mutableStateOf<PendingExplain?>(null) }
     var opened by remember { mutableStateOf<Pair<Citation, SourceBlock>?>(null) }
-    var address by remember(explainer.defaultAddress) { mutableStateOf(explainer.defaultAddress) }
-    var code by remember { mutableStateOf("") }
-    var pairError by remember { mutableStateOf<String?>(null) }
-    var pairing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val scroll = rememberScrollState()
     LaunchedEffect(explainer) { if (!explainer.loaded) explainer.load() }
@@ -399,51 +394,27 @@ internal fun BookExplainPanel(
     Box(modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp).testTag("book-explain"), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             val paired = explainer.identity
-            if (paired == null && explainer.loaded) {
-                if (onRelogin != null) {
-                    if (explainer.revoked) {
-                        Column(Modifier.testTag("explain-revoked-action"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Text("授权已撤销，请重新登录。读书和做题照常。",
-                                style = MaterialTheme.typography.bodySmall, color = v7Alert(), modifier = Modifier.testTag("explain-revoked"))
-                            PrimaryButton(
-                                onClick = { onRelogin("授权已撤销，请重新登录。") },
-                                modifier = Modifier.testTag("explain-relogin"),
-                            ) { Text("重新登录") }
-                        }
+            if (!aiEnabled) {
+                Text(
+                    "已在设置中关闭伴读讲解与提问，开启后可在此查看本节讲解。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.fgSecondary,
+                    modifier = Modifier.testTag("explain-ai-disabled"),
+                )
+            } else if (paired == null && explainer.loaded) {
+                Column(Modifier.testTag("explain-revoked-action"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        if (explainer.revoked) "授权已撤销，请重新登录。阅读照常。" else "尚未登录 Coach 服务，登录后可使用伴读讲解与提问。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (explainer.revoked) v7Alert() else colors.fgSecondary,
+                        modifier = Modifier.testTag(if (explainer.revoked) "explain-revoked" else "explain-connect-hint"),
+                    )
+                    if (onRelogin != null) {
+                        PrimaryButton(
+                            onClick = { onRelogin(if (explainer.revoked) "授权已撤销，请重新登录。" else null) },
+                            modifier = Modifier.testTag("explain-relogin"),
+                        ) { Text(if (explainer.revoked) "重新登录" else "登录 Coach 服务") }
                     }
-                } else Column(Modifier.testTag("explain-pairing"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                val sable = explainer.sableLogin
-                if (explainer.revoked) {
-                    Text("这台电脑的连接已停用", style = MaterialTheme.typography.titleMedium)
-                    Text(if (sable) "授权已撤销，请重新登录。读书和做题照常。" else "请找给你配对码的人生成新的配对码，填在下面重新配对。读书和做题照常。",
-                        style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("explain-revoked"))
-                } else {
-                    Text("先连上服务", style = MaterialTheme.typography.titleMedium)
-                    Text(if (sable) "登录后可以提问，也可以讲解选中的原文。" else "填上服务地址和配对码，连上后可以提问，也可以讲解选中的原文。",
-                        style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("explain-connect-hint"))
-                }
-                if (sable) {
-                    com.coach.ui.SableLoginButton(pairing, { pairing = it }) { open ->
-                        explainer.sable(open)
-                        clearPairingFailures()
-                    }
-                    Text("没有 Sable 账号？用配对码", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
-                }
-                V7Field(address, { address = it; pairError = null },
-                    if (explainer.hasBuiltInAddress) "服务地址（留空连默认服务）" else "服务地址",
-                    enabled = !pairing, paper = colors.surface2, modifier = Modifier.fillMaxWidth().testTag("explain-address"))
-                V7Field(code, { code = it.filter(Char::isDigit).take(6); pairError = null }, "配对码", enabled = !pairing, paper = colors.surface2,
-                    visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                    modifier = Modifier.width(200.dp).testTag("explain-code"))
-                PrimaryButton(onClick = {
-                    pairing = true
-                    scope.launch {
-                        if (!explainer.pair(address, code)) pairError = "没配上。核对服务地址，或请找给你配对码的人生成新的配对码。"
-                        else clearPairingFailures()
-                        code = ""; pairing = false
-                    }
-                }, enabled = code.length == 6 && (address.isNotBlank() || explainer.hasBuiltInAddress) && !pairing, modifier = Modifier.testTag("explain-pair")) { Text(if (pairing) "正在配对…" else "配对") }
-                pairError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = v7Alert(), modifier = Modifier.testTag("explain-pair-error")) }
                 }
             }
             if (selection == null) {
@@ -456,14 +427,13 @@ internal fun BookExplainPanel(
                         Text(currentSection.breadcrumb, style = MaterialTheme.typography.titleSmall, color = colors.fgPrimary, modifier = Modifier.weight(1f))
                         FaintSectionExplainButton(
                             expanded = sectionExpanded && secState is SectionGuideState.Ready,
-                            enabled = paired != null && secState != SectionGuideState.Loading,
+                            enabled = aiEnabled && paired != null && secState != SectionGuideState.Loading,
                             onClick = {
                                 if (secState is SectionGuideState.Ready) {
                                     sectionExpanded = !sectionExpanded
                                 } else {
                                     val ctx = sectionContext() ?: return@FaintSectionExplainButton
-                                    if (consented) startSection(ctx, currentSection.id)
-                                    else pending = PendingExplain.Section(ctx, currentSection.id)
+                                    startSection(ctx, currentSection.id)
                                 }
                             },
                         )
@@ -475,12 +445,11 @@ internal fun BookExplainPanel(
                             section = currentSection,
                             state = secState,
                             paired = paired != null,
-                            consented = consented,
+                            consented = aiEnabled,
                             expanded = sectionExpanded,
                             onToggleExpand = { sectionExpanded = !sectionExpanded },
                             onAllowConsent = {
                                 val ctx = sectionContext() ?: return@SectionGuideCard
-                                consent.allow(book.id); consented = true
                                 startSection(ctx, currentSection.id)
                             },
                             onRetry = {
@@ -488,8 +457,7 @@ internal fun BookExplainPanel(
                                 startSection(ctx, currentSection.id)
                             },
                             onOpenPair = {
-                                if (onRelogin != null) onRelogin("授权已撤销，请重新登录。")
-                                else scope.launch { scroll.animateScrollTo(0) }
+                                onRelogin?.invoke("授权已撤销，请重新登录。")
                             },
                             onOpenCitation = { citation, block ->
                                 if (onOpenOriginal != null) onOpenOriginal(BookPassage.from(book, block))
@@ -559,29 +527,22 @@ internal fun BookExplainPanel(
                             style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary)
                         FaintExplainButton(
                             label = if (state == BlockState.Waiting) "讲解中…" else "讲讲",
-                            enabled = canExplain, waiting = state == BlockState.Waiting,
-                            emphasised = failed == null && canExplain && (true || hovered),
+                            enabled = aiEnabled && canExplain, waiting = state == BlockState.Waiting,
+                            emphasised = failed == null && aiEnabled && canExplain && (true || hovered),
                             placeholder = failed != null,
                             modifier = Modifier.alignByBaseline().padding(start = 12.dp)
                                 .then(if (failed == null) Modifier.testTag("explain-button") else Modifier),
-                            onClick = { if (consented) start(block) else pending = PendingExplain.Block(block) })
+                            onClick = { if (aiEnabled) start(block) })
                     }
                     Row(Modifier.fillMaxWidth().heightIn(min = 40.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                         if (failed != null) {
                             when (failed.trouble) {
                                 ExplainTrouble.Unpaired, ExplainTrouble.Revoked -> PaperButton(
-                                    onClick = {
-                                        if (onRelogin != null) onRelogin("授权已撤销，请重新登录。")
-                                        else scope.launch { scroll.animateScrollTo(0) }
-                                    },
+                                    onClick = { onRelogin?.invoke("授权已撤销，请重新登录。") },
                                     modifier = Modifier.testTag("explain-repair"),
                                 ) {
-                                    Text(when {
-                                        onRelogin != null -> "重新登录"
-                                        failed.trouble == ExplainTrouble.Revoked -> "重新配对"
-                                        else -> "配对"
-                                    })
+                                    Text("重新登录")
                                 }
                                 else -> QuietButton("再试一次", enabled = paired != null, modifier = Modifier.testTag("explain-retry")) { start(block) }
                             }
@@ -601,23 +562,6 @@ internal fun BookExplainPanel(
         }
         if (scroll.maxValue > 0) BookScrollbar(scroll,
             Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 6.dp).testTag("explain-scrollbar"))
-    }
-    pending?.let { request ->
-        AlertDialog(onDismissRequest = { pending = null }, title = { Text(ExplainPrivacy.TITLE) },
-            text = { Text(when (request) {
-                is PendingExplain.Block -> ExplainPrivacy.explain(book.title)
-                is PendingExplain.Section -> ExplainPrivacy.page(book.title)
-            },
-                style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("explain-consent")) },
-            confirmButton = {
-                PrimaryButton({
-                    consent.allow(book.id); consented = true; pending = null
-                    when (request) {
-                        is PendingExplain.Block -> start(request.block)
-                        is PendingExplain.Section -> startSection(request.context, request.sectionId)
-                    }
-                }, modifier = Modifier.testTag("explain-consent-allow")) { Text("允许并讲解") }
-            }, dismissButton = { V7TextButton({ pending = null }, modifier = Modifier.testTag("explain-consent-deny")) { Text("不允许") } })
     }
     opened?.let { (citation, block) ->
         AlertDialog(onDismissRequest = { opened = null }, title = { Text("原文 · ${bookCitationLabel(book, blocks, citation)}", modifier = Modifier.testTag("explain-source-title")) },

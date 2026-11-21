@@ -59,7 +59,7 @@ fun MainlineScreen(c: CoachController, view: CourseView, onBack: () -> Unit, onO
     AppBackHandler(week != null) { closeWeek() }
     when {
         http == null -> com.coach.ui.v7.Desk(crumb = "选择题主线", onBack = onBack, backLabel = "← 复习") {
-            Column { Header("选择题主线", "← 复习", onBack); CenterMessage("选择题主线要连接 Mac。") }
+            Column { Header("选择题主线", "← 复习", onBack); CenterMessage("选择题主线需要连接 Coach 服务。") }
         }
         week == null -> com.coach.ui.v7.Desk(crumb = "选择题主线", onBack = onBack, backLabel = "← 复习",
             directory = { com.coach.ui.v7.WeekDirectory(view, null, onBrowseWeek) }) {
@@ -102,7 +102,7 @@ private fun MainlineHome(c: CoachController, http: CourseHttp, view: CourseView,
     val body = reply?.body
     when {
         reply == null -> CenterMessage("正在读取…")
-        body == null -> CenterMessage(reply!!.error ?: "连不上 Mac，正在自动重连…")
+        body == null -> CenterMessage(reply!!.error ?: "连不上 Coach 服务，正在自动重连…")
         else -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             val weeks = (body["weeks"] as? JsonArray).orEmpty().map { it.jsonObject }
             if (weeks.isEmpty()) Text("还没有生成选择题主线。", style = MaterialTheme.typography.bodyMedium)
@@ -228,7 +228,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         if (page.value["pending"] is JsonObject && body != null) return@LaunchedEffect
         do {
             val r = withContext(Dispatchers.IO) { http.mainlineWeek(number, c.tutor.agentRunId) }
-            error = r.error ?: if (r.body == null) "连不上 Mac，正在自动重连…" else null
+            error = r.error ?: if (r.body == null) "连不上 Coach 服务，正在自动重连…" else null
             retryable = r.retryable
             if (r.body != null) {
                 val restored = restoreActiveQuestionOptions(r.body!!, page.value)
@@ -907,7 +907,7 @@ internal fun PagePracticeBody(c: CoachController, view: CourseView?, week: Int, 
     val http = c.course
     Column(Modifier.fillMaxSize()) {
         when {
-            http == null -> { Header("本页练习", "← 回到阅读", onClose); CenterMessage("要连接 Mac 才能做题。") }
+            http == null -> { Header("本页练习", "← 回到阅读", onClose); CenterMessage("需要连接 Coach 服务才能做题。") }
             ids.isEmpty() -> { Header("本页练习", "← 回到阅读", onClose); CenterMessage("本页没有登记的题。") }
             view == null -> { Header("本页练习", "← 回到阅读", onClose); CenterMessage("本机还没有这门课的学习记录，暂时不能开始练习。") }
             else -> MainlineWeek(c, http, view, week, "quiz", onBack = onClose, onOpenSteps = onClose, onOpenEssay = onClose, onReviewWeek = { onClose() }, only = ids)

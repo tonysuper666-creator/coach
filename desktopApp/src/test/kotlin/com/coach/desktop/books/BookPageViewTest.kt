@@ -148,10 +148,12 @@ class BookPageViewTest {
                         onNoteSession = {}, onPage = { writes += it }, onBack = {}, onLearn = {})
                 } }
                 waitForIdle()
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                waitForIdle()
                 fun sources() = onNodeWithTag("reader-text").fetchSemanticsNode().config[BookPageSources]
                 val first = sources()
                 while (sources().first().importPage < 3) {
-                    onNodeWithText("下一页").assertIsEnabled().performClick()
+                    onNodeWithTag("next-page").assertIsEnabled().performClick()
                     waitForIdle()
                 }
                 assertEquals(listOf(2, 3), writes)
@@ -162,13 +164,13 @@ class BookPageViewTest {
                 runOnIdle { ui = ui.copy(page = 3) }
                 waitForIdle()
                 assertEquals(latest, sources())
-                while (isEnabled().matches(onNodeWithText("上一页").fetchSemanticsNode())) {
-                    onNodeWithText("上一页").performClick()
+                while (isEnabled().matches(onNodeWithTag("previous-page").fetchSemanticsNode())) {
+                    onNodeWithTag("previous-page").performClick()
                     waitForIdle()
                 }
                 assertEquals(first, sources(), "pending saves cannot stop a continuous reverse traversal")
                 assertEquals(listOf(2, 3, 2, 1), writes)
-                onNodeWithText("上一页").assertIsNotEnabled()
+                onNodeWithTag("previous-page").assertIsNotEnabled()
             }
         } finally { root.toFile().deleteRecursively() }
     }
@@ -228,12 +230,14 @@ class BookPageViewTest {
                 waitUntil(timeoutMillis = 20_000) { controller.state.value.book != null && !controller.state.value.busy }
                 onNodeWithTag("home-read").performClick()
                 waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER }
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                waitForIdle()
                 onNodeWithTag("book-original-toggle").performClick()
                 waitForIdle()
                 fun displayed() = onNodeWithTag("reader-text").fetchSemanticsNode()
                     .config[SemanticsProperties.Text].single().text
                 val opening = displayed()
-                onNodeWithText("下一页").performClick()
+                onNodeWithTag("next-page").performClick()
                 waitForIdle()
                 val continuation = displayed()
                 assertNotEquals(opening, continuation)

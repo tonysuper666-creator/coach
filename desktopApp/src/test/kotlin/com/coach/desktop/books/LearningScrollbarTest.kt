@@ -147,14 +147,14 @@ class LearningScrollbarTest {
             ready(controller) { it.screen == BookScreen.LEARNING && it.questionsOpen }
             repeat(5) { index ->
                 val current = controller.state.value.book!!
-                val practice = StudyCoachCourse.practice(current, current.lessons[index], QuestionMode.CHOICE)!!
+                val practice = com.coach.desktop.books.testPracticeFixture(current, current.lessons[index], QuestionMode.CHOICE)!!
                 onNodeWithTag("choice-${practice.options.indexOf(practice.answer)}").performScrollTo().performClick()
                 ready(controller) { it.answer.revealed }
                 onNodeWithTag("next-lesson").performScrollTo().performClick()
                 ready(controller) { it.book?.lessonIndex == index + 1 }
             }
             val last = controller.state.value.book!!
-            body(dark, controller, StudyCoachCourse.practice(last, last.lessons[5], QuestionMode.CHOICE)!!)
+            body(dark, controller, com.coach.desktop.books.testPracticeFixture(last, last.lessons[5], QuestionMode.CHOICE)!!)
         }
         root.toFile().deleteRecursively()
     }

@@ -2,6 +2,8 @@ package com.coach.desktop.books
 
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -84,10 +86,16 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
         onFocusRestored()
     }
     Desk(crumb = book.title, onBack = onBack, backLabel = "返回书架", showNavigation = false, hasMargin = false,
-        paperMaxWidth = if (hinge != null) Dp.Infinity else Dp.Unspecified,
+        showFocusToggle = false, scrollDirectory = false, paperMaxWidth = if (hinge != null) Dp.Infinity else Dp.Unspecified,
         status = if (lesson == null) "本书学习结束" else "第 ${book.lessonIndex + 1} / ${book.lessons.size} 节", directory = {
-            Text("学习路线", style = MaterialTheme.typography.titleMedium)
-            book.lessons.forEachIndexed { index, item -> V7TextButton({ onLesson(index) }, enabled = !ui.busy) { Text("${index + 1}. ${item.title}") } }
+            Column(Modifier.fillMaxSize()) {
+                Text("学习路线", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(bottom = 8.dp))
+                LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
+                    itemsIndexed(book.lessons, key = { idx, item -> "${idx}:${item.id}" }) { index, item ->
+                        V7TextButton({ onLesson(index) }, enabled = !ui.busy) { Text("${index + 1}. ${item.title}") }
+                    }
+                }
+            }
         }) {
         val density = LocalDensity.current
         var learningOriginDp by remember { mutableStateOf<Pair<Float, Float>?>(null) }
@@ -109,12 +117,10 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                         style = MaterialTheme.typography.bodySmall, color = com.coach.ui.theme.CoachTheme.colors.fgSecondary, modifier = Modifier.weight(1f, fill = false))
                     V7TextButton(onSource, enabled = !ui.busy, modifier = Modifier.focusRequester(lessonSourceFocus).testTag("open-lesson-source")) { Text("本节原文 · ${book.pageLabel(lesson.firstPage)}") }
                 }
-                val recapOpen = ui.learningPath == LearningPath.QUESTION_FIRST && ui.ladder.recapOpen
-                val recap: @Composable () -> Unit = {
-                    if (recapOpen) KnowledgeRecapCard(ui.ladder) { onRecapContinue() }
-                }
                 val practice = remember(book.id, lesson.id, book.questionMode, ui.questionsOpen) {
-                    if (ui.questionsOpen) StudyCoachCourse.practice(book, lesson, book.questionMode) else null
+                    if (ui.questionsOpen && book.questionMode == QuestionMode.SHORT_ANSWER && lesson.text.isNotBlank()) {
+                        Practice("合上原文，用自己的话说明「${lesson.title}」的主要内容，并举一个例子。", lesson.text, "", emptyList())
+                    } else null
                 }
                 val sourceRow: @Composable (List<BookPassage>) -> Unit = { sources ->
                     BookSourceRow(sources, book, sourceResolver,
@@ -130,7 +136,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                     }
                     if (book.questionMode == QuestionMode.NONE) Text("当前已关闭出题，可在出题设置中重新选择。", Modifier.testTag("book-questions-off"))
                     else if (ui.questionsOpen) {
-                        if (practice == null) Text("这一节的原文太少，暂时无法生成选择题。可以继续学，或改为简答。")
+                        if (practice == null) Text("本节选择题需登录 Coach 服务生成，可先点击「本节原文」在阅读器中伴读学习。")
                         else {
                             SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, { onPracticeSource(practice) }, !ui.busy, practiceSourceFocus, showReference = false)
                             if (ui.reviews.any { it.book == book.id && it.lesson == lesson.id && it.mode == book.questionMode }) {
@@ -147,10 +153,8 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                             onOpenSourcePage = onPair,
                         ) else BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow, onRepair = onPair)
                         val lessonNav: @Composable () -> Unit = { if (includeNav) LessonNav(book, ui.busy, onLesson) }
-                        LessonSummaryCard(book, lesson, question, ui.answer, nav = if (recapOpen || !includeNav) null else lessonNav)
-                        recap()
+                        LessonSummaryCard(book, lesson, question, ui.answer, nav = if (!includeNav) null else lessonNav)
                     } else {
-                        recap()
                         if (includeNav) LessonNav(book, ui.busy, onLesson)
                     }
                 }

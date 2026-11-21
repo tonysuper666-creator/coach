@@ -234,7 +234,7 @@ class WeekTodayFlowTest : WeekFlowFixture() {
     }
     @Test fun missingOfflineContentIsAnHonestEmptyState() {
         course(empty = true); show()
-        compose.onNodeWithText("还没有同步到课程内容，且 Mac 未连接。").assertExists()
+        compose.onNodeWithText("还没有同步到课程内容，且 Coach 服务未连接。").assertExists()
         compose.onNodeWithTag("today-continue").assertDoesNotExist()
     }
 }

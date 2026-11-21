@@ -26,7 +26,7 @@ class WindowsLearningPathsEntryTest {
     @Test fun answeringNeverOpensRawSourceUntilRequestedAndReturnKeepsTheAnswer() = entry { controller, library ->
         val book = controller.state.value.book!!
         val lesson = book.lessons[book.lessonIndex]
-        val practice = StudyCoachCourse.practice(book, lesson, book.questionMode)!!
+        val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, book.questionMode)!!
         onNodeWithText(lesson.text).assertDoesNotExist()
         onNodeWithText("原文：${practice.reference}").assertDoesNotExist()
         onNodeWithTag("choice-${practice.options.indexOf(practice.answer)}").performScrollTo().performClick()

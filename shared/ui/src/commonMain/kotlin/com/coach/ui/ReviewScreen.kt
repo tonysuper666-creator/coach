@@ -227,7 +227,7 @@ private fun OfflinePractice(c: CoachController) {
                     scope.launch {
                         try { withContext(Dispatchers.IO) { c.sync.downloadOfflinePack(c.courseId) } }
                         catch (e: kotlinx.coroutines.CancellationException) { throw e }
-                        catch (_: Exception) { c.tutor.telemetry?.record("error", "offline_pack"); error = "Mac 未连接，下载未完成；已有题仍可练习。" }
+                        catch (_: Exception) { c.tutor.telemetry?.record("error", "offline_pack"); error = "Coach 服务未连接，下载未完成；已有题仍可练习。" }
                         finally { downloading = false }
                     }
                 },enabled = !downloading,modifier = Modifier.heightIn(min = 56.dp)) { Text(if (downloading) "正在存到本机…" else "存到本机") }

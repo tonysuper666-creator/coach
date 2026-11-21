@@ -17,7 +17,9 @@
 #    交给 -StallAction 当场处理一次再确认，不拿旧判断继续点；
 #  - 服务端拒答「回答缺少可核对的页码依据，暂时无法确认」要认（含 OCR 错字「依框，暫时无氵去确认」），
 #    带「再试一次」就先重放一次，第二次还拒就带着原话失败，不干等满 150 秒；
-#  - 追问找标题时见过「思考」就不再往回滚（那会把刚追加的回答推出视野）。
+#  - 追问找标题时见过「思考」就不再往回滚（那会把刚追加的回答推出视野）；
+#  - 第 2 步要见到首页书卡才算过：阅读器底栏读出页号、退回首页却没读到「读到第 / 上次停在」就明确失败；
+#  - 第 7 步出处那行解析不出页码时直接失败，不许跳过跳页断言后还 Pass 7。
 # 函数体从 friend-path-worker.ps1 里按原文截取，屏幕与输入都换成本文件的假实现。
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -453,6 +455,27 @@ $okRetry = Click-Confirm 6 { param($l) Find-Text $l '返回学习' } { param($l)
     [bool](Find-Text $script:screen '返回学习') -and -not (Find-Text $script:screen '返回书架')
 }
 Check 'click-confirm-beforepress-retries-when-click-drops' ($okRetry -and $script:clicks.Count -eq 2) "ok=$okRetry clicks=$($script:clicks.Count)"
+
+# 38. 第 2 步不能只凭「阅读器底栏读出页号」通过：书得真出现在 2.0 首页上。
+#     20:05 评审指出旧逻辑在退回首页没读到书卡时仍 Pass 2，等于没验「书上首页」。
+$homeRow = New-Line '6 页 · 读到第 2 页' 620 420 320 26
+$v2card = Resolve-Step2HomeVerdict $homeRow '2'
+$v2reader = Resolve-Step2HomeVerdict $null '2'
+$v2none = Resolve-Step2HomeVerdict $null $null
+Check 'step2-passes-only-with-home-card' ((-not $v2card.Fail) -and $v2card.Pass -match '书在首页上') "fail=$($v2card.Fail)"
+Check 'step2-fails-when-home-card-missing' ([bool]$v2reader.Fail -and -not $v2reader.Pass) "fail=$($v2reader.Fail)"
+Check 'step2-fails-when-nothing-read' ([bool]$v2none.Fail) "fail=$($v2none.Fail)"
+
+# 39. 第 7 步：出处那行没解析出页码时不能跳过跳页断言（旧逻辑会一路走到 Pass 7）。
+$citeOcr = New-Line '出 处 · 第 1 5 0 页' 480 600 300 30
+Check 'cite-page-parsed-despite-ocr-spacing' ((Get-CitePageNumber $citeOcr.Text) -eq '150') "got=$(Get-CitePageNumber $citeOcr.Text)"
+Check 'cite-page-empty-when-no-page' (-not (Get-CitePageNumber '出处 · 见上文')) "got=$(Get-CitePageNumber '出处 · 见上文')"
+Check 'step7-fails-when-cite-page-missing' ([bool](Resolve-Step7PageVerdict '' '150')) "why=$(Resolve-Step7PageVerdict '' '150')"
+Check 'step7-fails-when-counter-missing' ([bool](Resolve-Step7PageVerdict '150' $null)) "why=$(Resolve-Step7PageVerdict '150' $null)"
+Check 'step7-fails-when-click-did-not-jump' ([bool](Resolve-Step7PageVerdict '150' '33')) "why=$(Resolve-Step7PageVerdict '150' '33')"
+Check 'step7-passes-when-page-matches' (-not (Resolve-Step7PageVerdict '150' '150')) "why=$(Resolve-Step7PageVerdict '150' '150')"
+Check 'step7-close-fails-when-page-unread' ([bool](Resolve-Step7AfterCloseVerdict '150' $null)) "why=$(Resolve-Step7AfterCloseVerdict '150' $null)"
+Check 'step7-close-passes-on-same-page' (-not (Resolve-Step7AfterCloseVerdict '150' '150')) "why=$(Resolve-Step7AfterCloseVerdict '150' '150')"
 
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"

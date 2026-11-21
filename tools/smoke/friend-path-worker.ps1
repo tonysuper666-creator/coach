@@ -613,6 +613,40 @@ function Resolve-LectureRefusalAction($lines, [bool]$AlreadyRetried) {
     }
     return [pscustomobject]@{ Action = 'fail'; Reason = $e.Text; Button = $null }
 }
+# 第 2 步：书必须真出现在 2.0 首页上（焦点卡「上次停在第 N / M 页」或书卡「N 页 · 读到第 M 页」）。
+# 阅读器底栏读出页号只证明书导进来了、阅读器开了，不证明首页上有这本书——退回首页那三下都没读到卡片时，
+# 曾经走一条「导入后直接打开在阅读器」的 Pass，等于没验「书上首页」就过了（20:05 评审指出的假绿）。
+function Resolve-Step2HomeVerdict($Row, [string]$ReaderPage) {
+    if ($Row) {
+        $when = if ($ReaderPage) { "导入后先打开在阅读器第 $ReaderPage 页" } else { '导入后没读到阅读器底栏页号，首页这一帧直接认出了书' }
+        return [pscustomobject]@{ Fail = $null; Pass = "书在首页上（行：$($Row.Text)），$when" }
+    }
+    if ($ReaderPage) {
+        return [pscustomobject]@{ Fail = "书导入后确实打开在阅读器（底栏读到第 $ReaderPage 页），但退回首页 3 次都没读到书卡上的「读到第 / 上次停在」——「书上首页」没验成，不能算过（见 2-shelf*.png）"; Pass = $null }
+    }
+    return [pscustomobject]@{ Fail = '既没读到阅读器底栏页号，也没在首页读到「读到第 / 上次停在」的书卡'; Pass = $null }
+}
+# 阅读器顶栏/底栏的页码在 OCR 里可能被拆成「第 1 5 0 页」，先去空白再取数。
+function Get-CitePageNumber([string]$CiteText) {
+    $m = [regex]::Match(($CiteText -replace '\s', ''), '第(\d+)页')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return $null
+}
+# 第 7 步：出处那行自己写的页码必须解析得出来，且点完底栏得停在那一页。
+# 解析不出页码时过去会跳过整段跳页断言、最后还能 Pass 7（20:05 评审指出的第二处假绿），现在一律算失败。
+function Resolve-Step7PageVerdict([string]$CitePage, [string]$NowPage) {
+    if (-not $CitePage) { return '「出处」那行没解析出页码，跳页没法核对（见 7-cite.png）' }
+    if (-not $NowPage) { return '点了出处底栏读不到页号（见 7-cite.png）' }
+    if ($NowPage -ne $CitePage) { return "点了出处没跳到第 $CitePage 页（现在第 $NowPage 页，见 7-cite.png）" }
+    return $null
+}
+# 收起伴读抽屉后仍要停在出处写的页；读不到页号也算没验成，不默认通过。
+function Resolve-Step7AfterCloseVerdict([string]$CitePage, [string]$NowPage) {
+    if (-not $CitePage) { return '「出处」那行没解析出页码，收起伴读后的页码没法核对（见 7-card.png）' }
+    if (-not $NowPage) { return "收起伴读后底栏读不到页号，没法确认还停在第 $CitePage 页（见 7-card.png）" }
+    if ($NowPage -ne $CitePage) { return "收起伴读后页码不是出处写的第 $CitePage 页（现在第 $NowPage 页，见 7-card.png）" }
+    return $null
+}
 
 $env:JAVA_HOME = 'C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot'; $env:GRADLE_USER_HOME = 'D:\agent\gradle-home'; $env:Path = "$env:JAVA_HOME\bin;$env:Path"
 $lib = Join-Path $OutDir 'bookshelf'; $client = Join-Path $OutDir 'client'
@@ -846,9 +880,11 @@ try {
             Note "退回后这一帧没读到书行（见 2-shelf$try.png）"
         }
     }
-    if ($row) { Pass 2 "书在首页上（行：$($row.Text)），导入后先打开在阅读器第 $readerPage 页" }
-    elseif ($readerPage) { Pass 2 "书导入后直接打开在阅读器（底栏读到第 $readerPage 页）；退回首页那一下没读出书卡，见 2-shelf*.png" }
-    else { Pass 2 '书出现在首页（焦点卡或书卡上读到了「读到第」/「上次停在」）' }
+    # 导入那一帧直接看到首页时（书没经过阅读器），书行就是那一下读到的「读到第 / 上次停在」。
+    if (-not $row) { $row = $shelfHit }
+    $v2 = Resolve-Step2HomeVerdict $row $readerPage
+    if ($v2.Fail) { Fail 2 $v2.Fail }
+    Pass 2 $v2.Pass
 
     # ③ 翻页
     # 2.0（#573）首页一条单栏：有书时首屏是焦点卡（封面 + 书名 +「上次停在第 N / M 页」），
@@ -1214,29 +1250,31 @@ try {
     }
     if (-not $cite) { $cardOk = '伴读抽屉里找不到「出处」链接（见 4-result*.png）' }
     else {
-        $citePage = [regex]::Match($cite.Text, '第\s*(\d+)\s*页').Groups[1].Value
+        $citePage = Get-CitePageNumber $cite.Text
         # 四路交锁时这一下也会被吞：点完底栏还停在第 33 页（11-21 04:46 L3 就这样）。
         # #577 对这同一颗「出处」的处理是——认出点的还是那颗出处才重点，最多 3 次；
         # 页号一对上就不再点（再点会把跳转切回去）。这里沿用，落点每次按新一帧重定位。
+        # 出处那行解析不出页码时一下都不点：没有目标页，点了也无从核对（过去会跳过整段断言，见 20:05 评审）。
         $c7 = $null
-        foreach ($try in 1..3) {
-            $pressed = Click-At $cite.X $cite.Y -BeforePress {
-                [bool](Find-Text (Shot 7 'cite-guard') '出处')
+        if ($citePage) {
+            foreach ($try in 1..3) {
+                $pressed = Click-At $cite.X $cite.Y -BeforePress {
+                    [bool](Find-Text (Shot 7 'cite-guard') '出处')
+                }
+                if (-not $pressed) { Note "第 $try 次按下前那一帧已经没有「出处」了，不再点" }
+                Start-Sleep -Seconds 2
+                Hover $midX $hoverY; Start-Sleep -Milliseconds 800
+                $null = Shot 7 $(if ($try -eq 1) { 'cite' } else { "cite$try" })
+                $c7 = Get-HudCounter $script:LastPng
+                if (-not $pressed -or -not $c7 -or "$($c7.Cur)" -eq "$citePage") { break }
+                $again = @(Find-All $script:Last '出处') | Select-Object -Last 1
+                if (-not $again) { break }
+                Note "第 $try 次点「出处」后停在第 $($c7.Cur) 页，出处写的是第 $citePage 页，重定位再点"
+                $cite = $again
             }
-            if (-not $pressed) { Note "第 $try 次按下前那一帧已经没有「出处」了，不再点" }
-            Start-Sleep -Seconds 2
-            Hover $midX $hoverY; Start-Sleep -Milliseconds 800
-            $null = Shot 7 $(if ($try -eq 1) { 'cite' } else { "cite$try" })
-            $c7 = Get-HudCounter $script:LastPng
-            if (-not $pressed -or -not $c7 -or -not $citePage -or "$($c7.Cur)" -eq "$citePage") { break }
-            $again = @(Find-All $script:Last '出处') | Select-Object -Last 1
-            if (-not $again) { break }
-            Note "第 $try 次点「出处」后停在第 $($c7.Cur) 页，出处写的是第 $citePage 页，重定位再点"
-            $cite = $again
         }
-        if (-not $c7) { $cardOk = '点了出处底栏读不到页号（见 7-cite.png）' }
-        elseif ($citePage -and "$($c7.Cur)" -ne "$citePage") { $cardOk = "点了出处没跳到第 $citePage 页（现在第 $($c7.Cur) 页，见 7-cite.png）" }
-        else {
+        $cardOk = Resolve-Step7PageVerdict $citePage $(if ($c7) { "$($c7.Cur)" } else { $null })
+        if (-not $cardOk) {
             # 抽屉半屏高、盖着正文：把它关掉再看页码没被带走。三种关法按把握从大到小试，每次点完都认状态：
             #   a) 顶栏那颗「收起」= immersive-companion-toggle（ImmersiveReaderChrome 252-266 行，companionOpen 时
             #      窄窗写「收起」、宽窗写「收起伴读」）。OCR 认不出这两个字（21 日六帧全缺），但顶栏那一行
@@ -1288,7 +1326,7 @@ try {
                     $p = Get-HudCounter $script:LastPng
                     if ($p) { $pg = "$($p.Cur)" }
                 }
-                if ($citePage -and $pg -ne "$citePage") { $cardOk = "收起伴读后页码不是出处写的第 $citePage 页（现在 $pg，见 7-card.png）" }
+                $cardOk = Resolve-Step7AfterCloseVerdict $citePage $pg
             }
         }
     }

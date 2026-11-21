@@ -122,6 +122,55 @@ class RenderPdfOnceTest {
         }
         assertContentEquals(pixelsOf(bgrImg.toComposeImageBitmap()), pixelsOf(bgrImg.asBookImageBitmap()))
     }
+
+    @Test fun startupReopenReusesNearWidthDiskCachedPageWithoutReopeningPdf() {
+        val root = Files.createTempDirectory("coach-render-near-width-")
+        try {
+            val libDir = root.resolve("library")
+            val pdfPath = syntheticTextbook(root.resolve("src"))
+            val library1 = TextbookLibrary(libDir, lazyPdfExtras = true)
+            val book1 = library1.importBook(pdfPath)
+            library1.saveOpenSession(book1.id, "READER")
+            library1.renderPdf(book1, 1, pixelWidth = 680)
+
+            val cacheDir = libDir.resolve(".render-cache")
+            val deadline = System.nanoTime() + 2_000_000_000L
+            while (System.nanoTime() < deadline) {
+                val ready = Files.isDirectory(cacheDir) && Files.list(cacheDir).use { stream ->
+                    stream.anyMatch { p -> p.fileName.toString().let { it.startsWith("${book1.id}-p1-w680-") && it.endsWith(".cbm") } }
+                }
+                if (ready) break
+                Thread.sleep(20)
+            }
+            assertTrue(
+                Files.isDirectory(cacheDir) && Files.list(cacheDir).use { stream ->
+                    stream.anyMatch { it.fileName.toString().endsWith(".cbm") }
+                },
+                "磁盘渲染缓存应已落盘",
+            )
+
+            BookPdfLoader.clearCache()
+            val library2 = TextbookLibrary(libDir, lazyPdfExtras = true)
+            val snap = library2.loadStartupSnapshot()
+            val book2 = assertNotNull(snap.book)
+
+            val near = library2.renderPdf(book2, 1, pixelWidth = 630)
+            assertTrue(near.width > 0)
+            val nearTrace = library2.renderTraces().last { it.book == book2.id && it.page == 1 }
+            assertTrue(
+                nearTrace.outcome == "hit" || nearTrace.outcome == "disk-hit",
+                "热重启首帧近似宽度应命中缓存而非重开 PDF：${nearTrace}",
+            )
+
+            val exactWide = library2.renderPdf(book2, 1, pixelWidth = 1400)
+            assertEquals(1400, exactWide.width)
+            val wideTrace = library2.renderTraces().last { it.book == book2.id && it.page == 1 }
+            assertEquals("render", wideTrace.outcome)
+        } finally {
+            BookPdfLoader.clearCache()
+            root.toFile().deleteRecursively()
+        }
+    }
 }
 
 class PdfWarmupTest {

@@ -214,36 +214,46 @@ internal class TextbookLibrary(
                 startupFirstRenderCompletedAtNs = 0L
                 startupReaderBookId = session.first
                 val partner = if (earlyPage % 2 == 1) earlyPage + 1 else (earlyPage - 1).coerceAtLeast(1)
+                startupNearWidthBookId = session.first
+                startupNearWidthPrimaryPage = earlyPage
+                startupNearWidthPartnerPage = partner
+                startupNearWidthUntilNs = System.nanoTime() + 1_500_000_000L
                 prefetchRenderDiskCacheAsync(session.first, earlyPage, partner)
             }
         }
         val targetId = active?.book ?: session?.first ?: catalog.firstOrNull()?.id
         val loadedBook = targetId?.let { book(db, it) }
         if (loadedBook != null) {
-            if (loadedBook.format == "pdf" && !aspectCache.containsKey(loadedBook.id)) {
-                val aspects = BookAspectStore.loadAspects(db, loadedBook.id)
-                if (aspects.isNotEmpty()) {
-                    if (aspectCache.size >= 16) aspectCache.clear()
-                    aspectCache[loadedBook.id] = aspects
-                }
-            }
             if (loadedBook.format == "pdf" && session?.second == "READER") {
-                startupReaderBookId = loadedBook.id
-                if (prefetchedPage != loadedBook.readingPage) {
-                    startupFirstRenderCompletedAtNs = 0L
-                    val p = loadedBook.readingPage
-                    val partner = if (p % 2 == 1) p + 1 else (p - 1).coerceAtLeast(1)
-                    prefetchRenderDiskCacheAsync(loadedBook.id, p, partner)
-                }
                 startupWarmupExecutor.execute {
                     runCatching {
                         loadedBook.sourceBlocks()
                         loadedBook.lessons
                     }
                 }
+                startupReaderBookId = loadedBook.id
+                val p = loadedBook.readingPage
+                val partner = if (p % 2 == 1) p + 1 else (p - 1).coerceAtLeast(1)
+                startupNearWidthBookId = loadedBook.id
+                startupNearWidthPrimaryPage = p
+                startupNearWidthPartnerPage = partner
+                startupNearWidthUntilNs = System.nanoTime() + 1_500_000_000L
+                if (prefetchedPage != p) {
+                    startupFirstRenderCompletedAtNs = 0L
+                    prefetchRenderDiskCacheAsync(loadedBook.id, p, partner)
+                }
             } else {
                 startupFirstRenderCompletedAtNs = 0L
                 startupReaderBookId = null
+                startupNearWidthBookId = null
+                startupNearWidthUntilNs = 0L
+            }
+            if (loadedBook.format == "pdf" && !aspectCache.containsKey(loadedBook.id)) {
+                val aspects = BookAspectStore.loadAspects(db, loadedBook.id)
+                if (aspects.isNotEmpty()) {
+                    if (aspectCache.size >= 16) aspectCache.clear()
+                    aspectCache[loadedBook.id] = aspects
+                }
             }
             savedTextViewCache[loadedBook.id] = CachedValue(savedTextViewFromDb(db, loadedBook.id))
             pdfScrollModeCache[loadedBook.id] = pdfScrollModeFromDb(db, loadedBook.id)
@@ -254,6 +264,8 @@ internal class TextbookLibrary(
         } else {
             startupFirstRenderCompletedAtNs = 0L
             startupReaderBookId = null
+            startupNearWidthBookId = null
+            startupNearWidthUntilNs = 0L
         }
         val learningPath = loadedBook?.let { learningPath(db, it.id) }
         val reviews = reviewStore.pending(db)
@@ -2048,6 +2060,15 @@ internal class TextbookLibrary(
     private val firstRenderGates = ConcurrentHashMap<String, CompletableFuture<Unit>>()
     @Volatile private var startupReaderBookId: String? = null
     @Volatile private var startupFirstRenderCompletedAtNs: Long = 0L
+    @Volatile private var startupNearWidthBookId: String? = null
+    @Volatile private var startupNearWidthPrimaryPage: Int = 0
+    @Volatile private var startupNearWidthPartnerPage: Int = 0
+    @Volatile private var startupNearWidthUntilNs: Long = 0L
+
+    private fun allowStartupNearWidth(bookId: String, page: Int): Boolean =
+        bookId == startupNearWidthBookId &&
+            (page == startupNearWidthPrimaryPage || page == startupNearWidthPartnerPage) &&
+            System.nanoTime() <= startupNearWidthUntilNs
 
     private fun markFirstRenderCompleted(bookId: String) {
         val gate = firstRenderGates.computeIfAbsent(bookId) { CompletableFuture() }
@@ -2074,7 +2095,7 @@ internal class TextbookLibrary(
         renderCache[key] = bitmap
         val entries = renderCache.values.iterator()
         var bytes = renderCache.values.sumOf(::bookPdfBitmapBytes)
-        while (renderCache.size > 6 || bytes > bookPdfCacheBytes) {
+        while (renderCache.size > 12 || bytes > bookPdfCacheBytes) {
             bytes -= bookPdfBitmapBytes(entries.next())
             entries.remove()
         }
@@ -2102,6 +2123,7 @@ internal class TextbookLibrary(
                         val match = prefixes.firstOrNull { (_, prefix) -> name.startsWith(prefix) } ?: continue
                         matches += Triple(match.first, match.second, path)
                     }
+                    matches.sortBy { if (it.first == pageList.first()) 0 else 1 }
                     matches
                 }
                 for ((page, prefix, path) in candidates) {
@@ -2136,7 +2158,7 @@ internal class TextbookLibrary(
                             .sorted(Comparator.comparingLong<Path> { Files.getLastModifiedTime(it).toMillis() }.reversed())
                             .toList()
                     }
-                    files.drop(6).forEach { runCatching { Files.deleteIfExists(it) } }
+                    files.drop(16).forEach { runCatching { Files.deleteIfExists(it) } }
                 }
             }
         }
@@ -2163,6 +2185,58 @@ internal class TextbookLibrary(
         }
     }
 
+    private fun findNearWidthCachedLocked(bookId: String, page: Int, stamp: Long, pixelWidth: Int): BookBitmap? {
+        val minW = (pixelWidth * 0.75).toInt()
+        val maxW = (pixelWidth * 1.35).toInt()
+        var best: BookBitmap? = null
+        var bestDist = Int.MAX_VALUE
+        var bestW = -1
+        for ((k, bmp) in renderCache) {
+            if (k.id != bookId || k.page != page || k.stamp != stamp) continue
+            val w = k.pixelWidth ?: continue
+            if (w !in minW..maxW) continue
+            val dist = kotlin.math.abs(w - pixelWidth)
+            if (dist < bestDist || (dist == bestDist && w >= pixelWidth && bestW < pixelWidth)) {
+                best = bmp
+                bestDist = dist
+                bestW = w
+            }
+        }
+        return best
+    }
+
+    private fun findNearWidthDiskCached(bookId: String, page: Int, stamp: Long, pixelWidth: Int): Pair<Int, BookBitmap>? {
+        val cacheDir = directory.resolve(".render-cache")
+        if (!Files.isDirectory(cacheDir)) return null
+        val prefix = "$bookId-p$page-w"
+        val suffix = "-s${java.lang.Long.toUnsignedString(stamp, 36)}.cbm"
+        val minW = (pixelWidth * 0.75).toInt()
+        val maxW = (pixelWidth * 1.35).toInt()
+        val candidates = runCatching {
+            Files.list(cacheDir).use { stream ->
+                val matches = mutableListOf<Pair<Int, Path>>()
+                val it = stream.iterator()
+                while (it.hasNext()) {
+                    val path = it.next()
+                    val name = path.fileName.toString()
+                    if (!name.startsWith(prefix) || !name.endsWith(suffix)) continue
+                    val w = name.removePrefix(prefix).removeSuffix(suffix).toIntOrNull() ?: continue
+                    if (w in minW..maxW) matches += w to path
+                }
+                matches
+            }
+        }.getOrNull().orEmpty()
+        if (candidates.isEmpty()) return null
+        val ordered = candidates.sortedWith(
+            compareBy<Pair<Int, Path>>({ kotlin.math.abs(it.first - pixelWidth) }, { if (it.first >= pixelWidth) 0 else 1 }),
+        )
+        for ((w, path) in ordered) {
+            val bmp = readCachedPageBitmap(path) ?: continue
+            return w to bmp
+        }
+        return null
+    }
+
     fun renderPdf(book: Textbook, page: Int, pixelWidth: Int? = null): BookBitmap {
         require(book.format == "pdf" && page in 1..book.pages.size)
         require(pixelWidth == null || pixelWidth > 0)
@@ -2177,6 +2251,13 @@ internal class TextbookLibrary(
                 markFirstRenderCompleted(book.id)
                 return it
             }
+            if (pixelWidth != null && allowStartupNearWidth(book.id, page)) {
+                findNearWidthCachedLocked(book.id, page, key.stamp, pixelWidth)?.let { nearBmp ->
+                    record(RenderTrace(book.id, page, "hit", 0.0, 0.0, 0.0, (System.nanoTime() - started) / 1_000_000.0, Thread.currentThread().name))
+                    markFirstRenderCompleted(book.id)
+                    return nearBmp
+                }
+            }
             val running = renderInflight[key]
             if (running != null) future = running else { future = CompletableFuture(); renderInflight[key] = future; owner = true }
         }
@@ -2187,12 +2268,19 @@ internal class TextbookLibrary(
         }
         activeRenders.incrementAndGet()
         try {
-            val diskCached = readCachedPageBitmap(renderDiskCacheFile(key))
+            val exactDisk = readCachedPageBitmap(renderDiskCacheFile(key))
+            val nearDisk = if (exactDisk == null && pixelWidth != null && allowStartupNearWidth(book.id, page)) {
+                findNearWidthDiskCached(book.id, page, key.stamp, pixelWidth)
+            } else null
+            val diskCached = exactDisk ?: nearDisk?.second
             if (diskCached != null) {
                 val tEnd = System.nanoTime()
                 record(RenderTrace(book.id, page, "disk-hit", 0.0, 0.0, (tEnd - started) / 1_000_000.0, (tEnd - started) / 1_000_000.0, Thread.currentThread().name))
                 synchronized(renderLock) {
                     putRenderCacheLocked(key, diskCached)
+                    if (nearDisk != null) {
+                        putRenderCacheLocked(RenderKey(book.id, page, key.stamp, nearDisk.first), diskCached)
+                    }
                     renderInflight.remove(key)
                 }
                 markFirstRenderCompleted(book.id)

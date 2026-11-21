@@ -199,7 +199,7 @@ function Get-QuestionSettingsControls($lines) {
     $title = Find-Text $lines '出题方式'
     if (-not $title) { return $null }
     $modeHeaders = @(@(foreach ($l in $lines) {
-        if ($l.Text -match '出题[:：]') { continue }
+        if ($l.Text -match '(出题|题型)[:：]') { continue }
         $m = Find-Text @($l) '出题'
         if ($m -and $m.Y -gt $title.Y2 -and [Math]::Abs($m.X1 - $title.X1) -le 60) {
             [pscustomobject]@{ Box = $m; Exact = (($l.Text -replace '\s', '') -eq '出题') }
@@ -209,7 +209,7 @@ function Get-QuestionSettingsControls($lines) {
     $modeHeader = if ($exactHeader.Count -gt 0) { $exactHeader[0].Box } elseif ($modeHeaders.Count -gt 0) { $modeHeaders[0].Box } else { $null }
     $minChoiceY = if ($modeHeader) { $modeHeader.Y2 } else { $title.Y2 }
     $choices = @(@(foreach ($l in $lines) {
-        if ($l.Text -match '出题[:：]' -or $l.Text -match '选择题') { continue }
+        if ($l.Text -match '(出题|题型)[:：]' -or $l.Text -match '选择题') { continue }
         $m = Find-Text @($l) '选择'
         if ($m -and $m.Y -gt $minChoiceY -and $m.X1 -ge ($title.X1 - 40)) { $m }
     }) | Sort-Object Y)
@@ -224,7 +224,7 @@ function Get-QuestionSettingsControls($lines) {
 function Test-QuestionSettingsConfirmed($lines) {
     if (Find-Text $lines '出题方式') { return $false }
     foreach ($l in $lines) {
-        if (($l.Text -replace '\s', '') -match '出题[:：]选择') { return $true }
+        if (($l.Text -replace '\s', '') -match '(出题|题型)[:：]选择') { return $true }
     }
     return $false
 }
@@ -1033,7 +1033,8 @@ try {
         }
         if ($range) { Note "步骤6 落点：本节对应教材第 $($range.First)–$($range.Last) 页，目标第 $physPage 页" }
         # 已开启的书直接进入学习页；出题方式仍沿用这本书的设置。
-        Click-Label 6 @('出题：', '出题:') '找不到出题设置'
+        # 1.1.1 起学习页标签写作「题型：选择题」（#547/TON-1733），旧版是「出题：选择」；两种都认。
+        Click-Label 6 @('题型：', '题型:', '出题：', '出题:') '找不到题型设置'
         $settings = Await-Text 6 'settings' @('出题方式') 15
         if (-not $settings) { Fail 6 '出题方式对话框没有打开' }
         $ctrl = Get-QuestionSettingsControls $script:Last

@@ -53,7 +53,7 @@ class ReviewQueueEntryTest {
                 val index = board.items.indexOfFirst { it.variantAttemptId != null }
                 onAllNodesWithText("开始")[index].performScrollTo().performClick()
                 runOnIdle { assertTrue(opened.isEmpty(), "No exact practice host: a KP callback must never start a different question") }
-                onNodeWithText("这道题的练习入口尚未接通，尚未开始。", substring = true).assertIsDisplayed()
+                onNodeWithText("这道题的练习入口还没接上", substring = true).assertIsDisplayed()
             }
         } finally { e.close() }
     }
@@ -150,7 +150,7 @@ class ReviewQueueEntryTest {
                 onAllNodesWithText("开始").onFirst().performClick()
                 assertTrue(opened.isEmpty(), "缺题不能退回任意考点题")
                 assertNull(reviewCursor(e.c.sync, "C"), "缺题不覆盖已有选择")
-                onNodeWithText("这项复习还没有可用的已核变式", substring = true).assertIsDisplayed()
+                onNodeWithText("这项复习还没有可用的新题", substring = true).assertIsDisplayed()
 
                 // 重新组合（等价于离开复习页再回来）：光标从本机存储读回，不靠界面内状态。
                 generation += 1
@@ -273,10 +273,10 @@ class ReviewQueueEntryTest {
                 setContent { CoachTheme(false) { Surface { Box(Modifier.size(420.dp, 880.dp)) {
                     ReviewScreen(e.c, view, { _, _ -> }, onBack = {})
                 } } } }
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("今天复习什么还确认不了。").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithText("今天复习什么还确认不了。").assertIsDisplayed()
-                onNodeWithText("要先取服务端的权威快照", substring = true).assertIsDisplayed()
-                onNodeWithText("本机已经做过的练习还在", substring = true).assertIsDisplayed()
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("今天的复习暂时排不出来。").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithText("今天的复习暂时排不出来。").assertIsDisplayed()
+                onNodeWithText("要先和 Coach 服务对上才能排", substring = true).assertIsDisplayed()
+                onNodeWithText("本机做过的练习都还在", substring = true).assertIsDisplayed()
                 onNodeWithText("今天没有到期的复习。").assertDoesNotExist()
                 onNodeWithText("开始").assertDoesNotExist()
             }

@@ -13,6 +13,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.coach.client.ReaderHttp
 import kotlinx.serialization.json.*
+import com.coach.ui.v7.CoachLoadingScreen
+import com.coach.ui.v7.CoachEmptyScreen
+import com.coach.ui.v7.CoachErrorBanner
 
 internal data class MapFact(val id: String, val text: String, val pdfPage: Int, val mastered: Boolean)
 internal data class MapQuestion(val id: String, val week: Int, val stem: String, val status: String, val pdfPage: Int)
@@ -89,14 +92,16 @@ internal fun ChapterMapDialog(reader: ReaderHttp, documentId: String, pages: Int
                 }
                 HorizontalDivider()
                 when (val r = result) {
-                    ReaderLoad.Loading -> CenterMessage("正在读取章节脉络…")
-                    ReaderLoad.Failed -> Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("章节脉络暂时读不到，请检查 Coach 服务连接。", modifier = Modifier.testTag("private-map-failed"))
-                        OutlinedButton(onClick = { retry++ }, modifier = Modifier.testTag("private-map-retry")) { Text("重试") }
-                    }
+                    ReaderLoad.Loading -> CoachLoadingScreen("正在读取章节脉络…")
+                    ReaderLoad.Failed -> CoachErrorBanner(
+                        "章节脉络暂时读不到，连不上 Coach 服务。资料本身还在，重试只会重新读这一屏。",
+                        Modifier.padding(16.dp).testTag("private-map-failed"),
+                        onRetry = { retry++ },
+                        retryTag = "private-map-retry",
+                    )
                     is ReaderLoad.Ready -> {
                         val map = r.value
-                        if (!map.hasOutline || map.chapters.isEmpty()) Box(Modifier.fillMaxSize().testTag("private-map-empty")) { CenterMessage("这份资料没有登记章节结构，不能生成脉络图。") }
+                        if (!map.hasOutline || map.chapters.isEmpty()) Box(Modifier.fillMaxSize().testTag("private-map-empty")) { CoachEmptyScreen("这份资料没有登记章节结构，不能生成脉络图。") }
                         else {
                             val flat = remember(map) { rows(map.chapters, 0) }
                             if (map.unlocated + map.ambiguous + map.outside > 0) Text(

@@ -20,7 +20,7 @@ class MessageFailureCopyTest {
             "timeout" to "等待回答超时",
             "max_output_tokens" to "这次回答达到长度上限",
             "unknown_internal_reason" to "暂时没法确认原因",
-            "rate_limited" to "Claude 这会儿忙，正在换一个模型接着答",
+            "rate_limited" to "这会儿有点忙，正在换个方式接着答",
             "exam_protection" to "考前保护时段，这段时间先不答"
         )
         for ((code, explanation) in reasons) {
@@ -28,6 +28,8 @@ class MessageFailureCopyTest {
             onNodeWithText("这条没有生成出来（$explanation）。").assertIsDisplayed()
             onAllNodesWithText(code, substring = true).assertCountEquals(0)
         }
-        onNodeWithText("导师 · claude-sonnet-5-5").assertIsDisplayed()
+        // UX-13：模型名是内部细节，界面上只说「导师」。
+        onNodeWithText("导师").assertIsDisplayed()
+        onAllNodesWithText("claude", substring = true, ignoreCase = true).assertCountEquals(0)
     }
 }

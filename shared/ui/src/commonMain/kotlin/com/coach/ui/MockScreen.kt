@@ -25,6 +25,9 @@ import com.coach.client.CourseView
 import com.coach.client.MockReply
 import com.coach.domain.*
 import com.coach.domain.grade.AnalyticalNumber
+import com.coach.ui.v7.CoachEmptyScreen
+import com.coach.ui.v7.CoachErrorBanner
+import com.coach.ui.v7.CoachLoadingScreen
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.flow.first
@@ -48,7 +51,7 @@ fun MockScreen(c: CoachController, view: CourseView, onBack: () -> Unit, initial
     Column(Modifier.fillMaxSize()) {
         if (http == null) {
             BackRow("模拟考", backLabel, onBack)
-            CenterMessage("模拟考需要连接 Coach 服务。")
+            CoachEmptyScreen("模拟考要用到卷子和判分，连上 Coach 服务才能开始。")
         } else if (open == null) MockHome(c, http, view, onBack, backLabel) { open = it }
         // Opened straight from the records page: back goes back there, not to the exam list.
         else key(open) { MockSessionPane(c, http, view, open!!, onReviewWeek, leave) }
@@ -74,8 +77,10 @@ private fun MockHome(c: CoachController, http: CourseHttp, view: CourseView, onB
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirm by remember { mutableStateOf<JsonObject?>(null) }
+    var lastStart by remember { mutableStateOf<(() -> Unit)?>(null) }
     fun start(call: suspend () -> MockReply) {
         if (busy) return
+        lastStart = { start(call) }
         busy = true; error = null
         scope.launch {
             try {
@@ -87,11 +92,10 @@ private fun MockHome(c: CoachController, http: CourseHttp, view: CourseView, onB
     }
     BackRow("模拟考", backLabel, onBack)
     val home = reply?.body
-    if (reply == null) return CenterMessage("正在连接 Coach 服务…")
+    if (reply == null) return CoachLoadingScreen("正在打开模拟考…")
     if (home == null) {
         Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(reply?.error ?: "连不上 Coach 服务。模拟考的卷子和判分都在服务端，需联网才能考。", style = MaterialTheme.typography.bodyLarge)
-            Button(onClick = { reload++ }, modifier = Modifier.heightIn(min = 48.dp)) { Text("重试") }
+            CoachErrorBanner(reply?.error ?: "连不上 Coach 服务。模拟考要用到卷子和判分，请联网后再试。", onRetry = { reload++ })
         }
         return
     }
@@ -145,7 +149,7 @@ private fun MockHome(c: CoachController, http: CourseHttp, view: CourseView, onB
                 if (active != null) Hint("先交掉进行中的那一场，才能开新的。")
             }
         }
-        error?.let { item { Text(it, color = MaterialTheme.colorScheme.error) } }
+        error?.let { message -> item { CoachErrorBanner(message, onRetry = lastStart) } }
         val history = (home["history"] as? JsonArray).orEmpty().map { it.jsonObject }
         if (history.isNotEmpty()) {
             item { SectionTitle("历次成绩") }
@@ -203,14 +207,13 @@ private fun MockSessionPane(c: CoachController, http: CourseHttp, view: CourseVi
     when {
         current == null -> {
             BackRow("模拟考", "← 返回", onBack)
-            if (error == null) CenterMessage("正在打开…") else Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(error!!, style = MaterialTheme.typography.bodyLarge)
-                Button(onClick = { reload++ }, modifier = Modifier.heightIn(min = 48.dp)) { Text("重试") }
+            if (error == null) CoachLoadingScreen("正在打开…") else Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                CoachErrorBanner(error!!, onRetry = { reload++ })
             }
         }
         current.str("status") == "active" -> MockExam(c, http, current, onBack) { body = it }
         current.str("status") == "submitted" -> MockResult(c, current, view, onReviewWeek, onBack)
-        else -> { BackRow(current.str("title"), "← 返回", onBack); CenterMessage("已交卷，正在判分…") }
+        else -> { BackRow(current.str("title"), "← 返回", onBack); CoachLoadingScreen("已交卷，正在判分…") }
     }
 }
 
@@ -310,7 +313,9 @@ internal fun MockExam(c: CoachController, http: CourseHttp, exam: JsonObject, on
     Text(saveNote ?: if (!unsaved) "答案已保存 · 退出不停表，可回来续考" else "正在保存…",
         Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelSmall,
         color = if (saveNote != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
-    submitError?.let { Text(it, Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error) }
+    submitError?.let { message ->
+        CoachErrorBanner(message, Modifier.padding(horizontal = 16.dp), onRetry = { scope.launch { submit(false) } })
+    }
     HorizontalDivider()
     LazyColumn(Modifier.fillMaxSize().testTag("mock-paper"), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         itemsIndexed(rows) { _, row ->

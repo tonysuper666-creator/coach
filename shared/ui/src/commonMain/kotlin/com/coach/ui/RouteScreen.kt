@@ -18,6 +18,8 @@ import com.coach.client.KpRow
 import com.coach.client.KpStatus
 import com.coach.domain.today
 import kotlin.math.roundToInt
+import com.coach.ui.v7.CoachLoadingScreen
+import com.coach.ui.v7.CoachEmptyScreen
 
 /** 一个章节在路线上的小计。 */
 internal data class ModuleProgress(val module: String, val kps: List<KpRow>) {
@@ -41,9 +43,9 @@ internal fun unmetPrereqs(kp: KpRow, view: CourseView): List<KpRow> =
 /** 路线：顶部是期末面板，下面全部知识点按章节排开，两层状态各自按知识点个数的比例显示（分值口径的「学了多少」在今天页顶部）。 */
 @Composable
 fun RouteScreen(c: CoachController, view: CourseView?, selectedKpId: String?, onOpen: (kpId: String, startNow: Boolean) -> Unit, onPractice: (week: Int) -> Unit = {}, onBrowseWeek: (Int) -> Unit = {}) {
-    if (view == null) return CenterMessage("正在加载课程…")
+    if (view == null) return CoachLoadingScreen("正在加载课程…")
     val kps = view.kps
-    if (kps.isEmpty()) return CenterMessage("课程里还没有知识点。")
+    if (kps.isEmpty()) return CoachEmptyScreen("课程里还没有知识点。")
     // 每个知识点有几道已复核的构答题：只有 Mac 服务返回了才显示；拿不到就什么都不说，不猜。
     val supply by produceState<Map<String, Int>?>(null, c) { value = c.course?.constructedSupply() }
     // 押题权重在 Mac 的私有配置里；先拿到（或确认拿不到）再画面板，免得排序先按无权重闪一下。

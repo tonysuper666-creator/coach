@@ -20,6 +20,7 @@ import com.coach.protocol.CommandBody
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonArray
+import com.coach.ui.v7.CoachErrorBanner
 
 /** Reuse verified original questions with fresh attempt IDs and server grading. Never alters the weekly cursor. */
 @Composable
@@ -31,9 +32,12 @@ fun WeekMistakesScreen(c: CoachController, view: CourseView, week: Int, back: St
     AppBackHandler(thread != null, onBack = goUp)
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    // 原位重试：重发同一条命令，已选好的选项和已经打开的错题都不动。
+    var retryAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     fun command(type: String, payload: JsonObject, onResult: (JsonObject) -> Unit) {
         if (busy) return
         busy = true; error = null
+        retryAction = { command(type, payload, onResult) }
         scope.launch {
             try {
                 val receipt = withContext(Dispatchers.IO) {
@@ -43,7 +47,7 @@ fun WeekMistakesScreen(c: CoachController, view: CourseView, week: Int, back: St
                 }
                 when {
                     receipt == null -> error = "请求尚未确认，已保留；稍后会自动重试。"
-                    receipt.status in setOf("OK", "DUPLICATE") -> onResult(receipt.result)
+                    receipt.status in setOf("OK", "DUPLICATE") -> { retryAction = null; onResult(receipt.result) }
                     receipt.error == "QUESTION_OPTIONS_UNAVAILABLE" -> error = "这道历史题没有可用的选项，无法再练。请继续其他错题。"
                     receipt.error == "QUESTION_UNAVAILABLE" -> error = "这道题目前没有可用的已核验答案，请继续其他错题。"
                     receipt.error == "MISTAKE_CHANGED" -> error = "这道题已不在本周待练错题中，请刷新后继续。"
@@ -79,7 +83,7 @@ fun WeekMistakesScreen(c: CoachController, view: CourseView, week: Int, back: St
                     }
                 }
             }
-            error?.let { item { Text(it, color = MaterialTheme.colorScheme.error) } }
+            error?.let { message -> item { CoachErrorBanner(message, onRetry = retryAction) } }
         }
     }
 }

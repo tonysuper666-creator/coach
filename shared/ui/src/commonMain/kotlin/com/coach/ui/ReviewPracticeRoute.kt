@@ -14,6 +14,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.*
+import com.coach.ui.v7.CoachErrorBanner
+import com.coach.ui.v7.CoachLoadingScreen
 
 /** Allowed review-specific controller port; does not modify shared navigation or the mainline controller. */
 fun CoachController.restoreReviewPractice(kpId: String, view: CourseView): ReviewPracticeSession =
@@ -82,11 +84,12 @@ fun ReviewPracticeScreen(c: CoachController, expectedAttemptId: String? = null, 
         TextButton(onClick = onClose) { Text("← 复习") }
         Text("复习这道题", style = MaterialTheme.typography.titleLarge)
         when {
-            loading -> Text("正在确认选中的题…")
-            ready == null -> {
-                Text(error ?: "这道题的身份或可用状态暂时无法确认。原作答已保留，没有换成另一题。")
-                TextButton(onClick = { retry++ }) { Text("重试这道题") }
-            }
+            loading -> CoachLoadingScreen("正在确认选中的题…")
+            ready == null -> CoachErrorBanner(
+                error ?: "这道题的身份或可用状态暂时无法确认。原作答已保留，没有换成另一题。",
+                onRetry = { retry++ },
+                retryLabel = "重试这道题",
+            )
             else -> {
                 QuizCardView(1, 1, ready.group.cards.single(), locked, chosen, c.math) { choice ->
                     if (!locked) {
@@ -104,7 +107,7 @@ fun ReviewPracticeScreen(c: CoachController, expectedAttemptId: String? = null, 
                     else -> Button(onClick = { submit() }, enabled = chosen != null && !busy,
                         modifier = Modifier.testTag("review-submit")) { Text("提交答案") }
                 }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                error?.let { message -> CoachErrorBanner(message, onRetry = { submit() }) }
             }
         }
     }

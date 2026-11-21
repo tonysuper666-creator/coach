@@ -17,17 +17,20 @@ import com.coach.domain.today
 import com.coach.client.KpRow
 import com.coach.client.KpStatus
 import com.coach.client.TutorUiState
+import com.coach.ui.v7.CoachLoadingScreen
+import com.coach.ui.v7.CoachEmptyScreen
+import com.coach.ui.v7.CoachErrorBanner
 
 @Composable
 fun TodayScreen(
     c: CoachController, view: CourseView?, ui: TutorUiState, selectedKpId: String?,
     onOpenReview: () -> Unit, onOpen: (kpId: String, startNow: Boolean) -> Unit, weekActions: WeekActions? = null,
 ) {
-    if (view == null) return CenterMessage("正在加载课程…")
+    if (view == null) return CoachLoadingScreen("正在加载课程…")
     val now = rememberCourseNow(c)
     val kps = view.kps
     if (kps.isEmpty()) {
-        return CenterMessage(
+        return CoachEmptyScreen(
             if (ui.connected) "课程「${c.courseId}」里还没有知识点（课程内容尚未装载，或课程号不对）。" else "还没有同步到课程内容，且 Coach 服务未连接。",
         )
     }
@@ -44,7 +47,9 @@ fun TodayScreen(
                     } else {
                         Text("今天的都做完了。可以到路线浏览其他节。", style = MaterialTheme.typography.titleMedium)
                     }
-                    weekActions?.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    weekActions?.error?.let { message ->
+                        CoachErrorBanner(message, onRetry = weekActions.retryAction)
+                    }
                     ReviewCard(view.dueReviews(now).size, onOpenReview)
                     Text(view.examCountdownText(now), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.tertiary)
                 }

@@ -22,13 +22,13 @@ internal fun LearnerBubble(text: String) {
     }
 }
 
-/** 导师消息：消息头写实际出答的模型名（兜底时标「兜底」）；流式正文用 PR #5 的增量 Markdown 与公式渲染。 */
+/** 导师消息：消息头只说「导师」，兜底时标「兜底」；模型和厂商名属于内部细节，不上界面。 */
 @Composable
 internal fun TutorBubble(message: TutorMessage, math: MathAssets, onStop: () -> Unit) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (!message.done || message.fallback) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            // The model name matters only when someone other than the usual tutor answered (rate-limit fallback); otherwise it is internal detail.
-            Text("导师" + if (message.fallback && message.model.isNotBlank()) " · ${message.model}" else "", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            // 出答的模型是内部细节：界面上只说「导师」，兜底用标签讲清，不暴露厂商和模型名。
+            Text("导师", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
             if (message.fallback) StatusChip("兜底", MaterialTheme.colorScheme.tertiary)
             if (!message.done) TextButton(onClick = onStop, modifier = Modifier.heightIn(min = 32.dp)) { Text("停止") }
         }
@@ -47,7 +47,7 @@ internal fun TutorBubble(message: TutorMessage, math: MathAssets, onStop: () -> 
 private fun Notice(text: String) = Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
 
 private fun reasonText(reason: String?) = when (reason) {
-    "rate_limited" -> "Claude 这会儿忙，正在换一个模型接着答"
+    "rate_limited" -> "这会儿有点忙，正在换个方式接着答"
     "exam_protection" -> "考前保护时段，这段时间先不答"
     "first_token_timeout" -> "25 秒没有出字"
     "stall" -> "30 秒没有新内容"

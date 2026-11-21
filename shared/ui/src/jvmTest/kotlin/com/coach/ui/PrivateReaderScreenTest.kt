@@ -634,7 +634,7 @@ class PrivateReaderScreenTest {
             setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) { PrivateSourceReference(fake.http.reader, "教材 p.1", "Alpha") } } } }
             fake.version = "v2" // the catalog moves on before the citation resolves: resolve says v1, so it must not open or mark anything
             onNodeWithTag("private-citation").performClick()
-            waitUntil(timeoutMillis = 10000) { onAllNodesWithText("无法定位出处", substring = true).fetchSemanticsNodes().isNotEmpty() }
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithText("找不到这句话在哪一页", substring = true).fetchSemanticsNodes().isNotEmpty() }
             onAllNodesWithTag("private-highlight-0").assertCountEquals(0)
         }
     }

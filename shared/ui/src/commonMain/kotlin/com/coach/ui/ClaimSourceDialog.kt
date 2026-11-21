@@ -18,6 +18,7 @@ import com.coach.domain.reader.ClaimSourceAnchor
 import com.coach.domain.reader.KnowledgeSourceKind
 import kotlinx.coroutines.ensureActive
 import kotlin.coroutines.coroutineContext
+import com.coach.ui.v7.CoachLoadingScreen
 
 private data class SourceClaim(val ref: String?, val subpoint: String?) {
     val label: String get() = subpoint ?: ref.orEmpty()
@@ -104,7 +105,7 @@ private fun ClaimSourceContent(reader: ReaderHttp, kp: KpRow, backLabel: String,
                         modifier = Modifier.fillMaxWidth().testTag("claim-source-claim-$index")) { Text(claims[index].label) }
                 }
             }
-            loaded == null -> CenterMessage("正在确认出处…")
+            loaded == null -> CoachLoadingScreen("正在确认出处…")
             else -> when (val read = loaded.read) {
                 is ClaimSourceRead.ChooseSource -> LazyColumn(Modifier.fillMaxSize().padding(16.dp)) {
                     item {

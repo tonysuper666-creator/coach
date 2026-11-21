@@ -59,7 +59,7 @@ fun MainlineScreen(c: CoachController, view: CourseView, onBack: () -> Unit, onO
     AppBackHandler(week != null) { closeWeek() }
     when {
         http == null -> com.coach.ui.v7.Desk(crumb = "选择题主线", onBack = onBack, backLabel = "← 复习") {
-            Column { Header("选择题主线", "← 复习", onBack); CenterMessage("选择题主线需要连接 Coach 服务。") }
+            Column { Header("选择题主线", "← 复习", onBack); CoachEmptyScreen("选择题要用到题目和判分，连上 Coach 服务才能开始。") }
         }
         week == null -> com.coach.ui.v7.Desk(crumb = "选择题主线", onBack = onBack, backLabel = "← 复习",
             directory = { com.coach.ui.v7.WeekDirectory(view, null, onBrowseWeek) }) {
@@ -89,7 +89,9 @@ private fun MainlineHome(c: CoachController, http: CourseHttp, view: CourseView,
     val revision by c.sync.revision.collectAsState()
     val cached = c.mainlineState("home")["body"] as? JsonObject
     val knownWeeks = json("weeks" to JsonArray(view.weeks.map { n -> json("week" to n, "title" to weekName(view.weekKps(n))) }))
-    val reply by produceState<MockReply?>(MockReply(cached ?: knownWeeks, null), revision) {
+    // 原位重试：重拉这一屏，不换周次、不丢已选中的选项。
+    var retry by remember { mutableStateOf(0) }
+    val reply by produceState<MockReply?>(MockReply(cached ?: knownWeeks, null), revision, retry) {
         // Blocking endpoint: fetch off the composition dispatcher so the screen can keep drawing while it waits.
         do {
             val r = withContext(Dispatchers.IO) { http.mainline(c.tutor.agentRunId) }
@@ -101,8 +103,12 @@ private fun MainlineHome(c: CoachController, http: CourseHttp, view: CourseView,
     Header("选择题主线", "← 复习", onBack)
     val body = reply?.body
     when {
-        reply == null -> CenterMessage("正在读取…")
-        body == null -> CenterMessage(reply!!.error ?: "连不上 Coach 服务，正在自动重连…")
+        reply == null -> CoachLoadingScreen("正在读取选择题主线…")
+        body == null -> CoachErrorBanner(
+            reply!!.error ?: "连不上 Coach 服务，读不到这一周的题。已经做过的记录都还在，重试不会清掉。",
+            Modifier.padding(16.dp),
+            onRetry = { retry++ },
+        )
         else -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             val weeks = (body["weeks"] as? JsonArray).orEmpty().map { it.jsonObject }
             if (weeks.isEmpty()) Text("还没有生成选择题主线。", style = MaterialTheme.typography.bodyMedium)
@@ -483,7 +489,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         return
     }
     if (item == null) {
-        if (only != null) { CenterMessage("这题当前暂不能开始练习。本页登记的题在这一周的选择题里找不到，请稍后重试或回到选择题主线。"); return }
+        if (only != null) { CoachEmptyScreen("这题当前暂不能开始练习。本页登记的题在这一周的选择题里找不到，请稍后重试或回到选择题主线。"); return }
         if (items.isEmpty()) {
             Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("这一周还没有可用题目。请返回课程，选择已有内容继续学习。")
@@ -736,8 +742,13 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 if (!dockActions) Box(Modifier.onGloballyPositioned {
                     inlineActionsBottom = it.positionInRoot().y + it.size.height + scroll.value
                 }) { actions() }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                if (pending != null && !retryable) TextButton(onClick = { retry++ }) { Text("重试原答案") }
+                error?.let { message ->
+                    CoachErrorBanner(
+                        message,
+                        Modifier.testTag("mainline-action-error"),
+                        onRetry = if (pending != null && !retryable) ({ retry++ }) else null,
+                    )
+                }
                 if (done == null) Text("拿不准就点「我是猜的」：答对也不算掌握，会排进复习。", Modifier.padding(top = 12.dp), style = MaterialTheme.typography.labelMedium)
                 }
                 if (done != null) {
@@ -907,9 +918,9 @@ internal fun PagePracticeBody(c: CoachController, view: CourseView?, week: Int, 
     val http = c.course
     Column(Modifier.fillMaxSize()) {
         when {
-            http == null -> { Header("本页练习", "← 回到阅读", onClose); CenterMessage("需要连接 Coach 服务才能做题。") }
-            ids.isEmpty() -> { Header("本页练习", "← 回到阅读", onClose); CenterMessage("本页没有登记的题。") }
-            view == null -> { Header("本页练习", "← 回到阅读", onClose); CenterMessage("本机还没有这门课的学习记录，暂时不能开始练习。") }
+            http == null -> { Header("本页练习", "← 回到阅读", onClose); CoachEmptyScreen("本页练习要用到题目和判分，连上 Coach 服务才能开始。") }
+            ids.isEmpty() -> { Header("本页练习", "← 回到阅读", onClose); CoachEmptyScreen("本页没有登记的题。") }
+            view == null -> { Header("本页练习", "← 回到阅读", onClose); CoachEmptyScreen("本机还没有这门课的学习记录，暂时不能开始练习。") }
             else -> MainlineWeek(c, http, view, week, "quiz", onBack = onClose, onOpenSteps = onClose, onOpenEssay = onClose, onReviewWeek = { onClose() }, only = ids)
         }
     }

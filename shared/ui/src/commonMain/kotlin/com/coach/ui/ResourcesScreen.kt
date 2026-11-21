@@ -14,6 +14,9 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.coach.client.SourceDoc
 import com.coach.client.SourcePage
+import com.coach.ui.v7.CoachLoadingScreen
+import com.coach.ui.v7.CoachEmptyScreen
+import com.coach.ui.v7.CoachErrorBanner
 
 /** 从学习页「本次参考」跳来的目标：文档与 PDF 页。 */
 data class SourceJump(val docId: String, val pdfPage: Int)
@@ -66,15 +69,15 @@ fun ResourcesScreen(c: CoachController, jump: SourceJump?, onBack: (() -> Unit)?
         val list = (docs as? Load.Ready)?.value
         val key = open
         when {
-            http == null -> CenterMessage("这个版本没有接入资料浏览。")
+            http == null -> CoachEmptyScreen("这个版本没有接入资料浏览。")
             key != null -> PageReader(c, list, key, onPage = { openDoc = it.docId; openPage = it.pdfPage }, onRetry = { attempt++ })
-            docs is Load.Pending -> CenterMessage("正在取课程原文…")
-            list == null -> Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("取不到课程原文：Coach 服务未连接，或服务端尚未更新。", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(12.dp))
-                OutlinedButton(onClick = { attempt++ }, modifier = Modifier.heightIn(min = 56.dp)) { Text("重试") }
-            }
-            list.isEmpty() -> CenterMessage("课程里还没有可浏览的原文。")
+            docs is Load.Pending -> CoachLoadingScreen("正在取课程原文…")
+            list == null -> CoachErrorBanner(
+                "取不到课程原文：连不上 Coach 服务，或者这个版本还没带上原文。重试只重新取一次，不会动书架里已有的内容。",
+                Modifier.padding(24.dp),
+                onRetry = { attempt++ },
+            )
+            list.isEmpty() -> CoachEmptyScreen("课程里还没有可浏览的原文。")
             else -> DocList(list) { doc -> openDoc = doc.docId; openPage = doc.firstPdfPage }
         }
     }
@@ -120,11 +123,11 @@ private fun PageReader(c: CoachController, docs: List<SourceDoc>?, key: PageKey,
                     Markdown(loaded.text, true, "src:${key.docId}:${key.pdfPage}", c.math)
                 }
                 page is Load.Pending -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp) }
-                else -> Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("这一页取不到：Coach 服务未连接，或服务端尚未更新。", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.height(12.dp))
-                    OutlinedButton(onClick = { retry++; onRetry() }, modifier = Modifier.heightIn(min = 56.dp)) { Text("重试") }
-                }
+                else -> CoachErrorBanner(
+                    "这一页取不到：连不上 Coach 服务，或者这个版本还没带上原文。停在这一页，重试只重新取这一页。",
+                    Modifier.padding(24.dp),
+                    onRetry = { retry++; onRetry() },
+                )
             }
         }
         HorizontalDivider()

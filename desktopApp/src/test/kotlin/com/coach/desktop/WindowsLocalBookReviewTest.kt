@@ -75,12 +75,16 @@ class WindowsLocalBookReviewTest {
             onNodeWithTag("host-today-review").performClick()
             ready(c) { it.screen.name == "REVIEWS" }
             capture("01b-review-list")
+            // Today's review is one ordered queue, started from a single primary action.
+            onNodeWithTag("local-review-summary").assertTextContains("今日 1 题")
+            onNodeWithText("1 天、3 天、7 天", substring = true).assertDoesNotExist()
             onNodeWithTag("local-review-item-0").performScrollTo().performClick()
             ready(c) { it.screen.name == "REVIEWING" }
             onNodeWithText(practice.prompt).assertExists()
             onNodeWithText("上次作答：$wrong").assertExists()
             onNodeWithTag("choice-${practice.options.indexOf(wrong)}").performScrollTo().performClick()
             ready(c) { it.answer == PracticeAnswer(wrong, true) }
+            onNodeWithTag("local-review-position").assertTextContains("1 / 1")
             capture("02-review-same-question")
         }
 
@@ -120,6 +124,10 @@ class WindowsLocalBookReviewTest {
             ready(reopened) { it.answer == PracticeAnswer(practice.answer, true) }
             onNodeWithText("这题已复习。").performScrollTo().assertIsDisplayed()
             capture("05-review-completed")
+            onNodeWithTag("local-review-next").performScrollTo().performClick()
+            ready(reopened) { it.screen.name == "REVIEWS" }
+            onNodeWithTag("local-review-done").assertTextContains("今日复习已完成。")
+            capture("06-today-review-done")
             nav("今天").performClick()
             onNodeWithTag("host-today-review").assertDoesNotExist()
             assertEquals(1, reopenedLibrary.book(book.id).lessonIndex)

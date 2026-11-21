@@ -118,7 +118,8 @@ internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String)
     val line = colors.borderSubtle
     BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = if (hinge != null) CoachV7.Space.s3 else CoachV7.Space.s6, vertical = CoachV7.Space.s3), contentAlignment = Alignment.TopCenter) {
         val sectionSpacing = if (maxHeight < 560.dp) CoachV7.Space.s2 else CoachV7.Space.s5
-        Box(Modifier.widthIn(max = 1000.dp).fillMaxWidth().fillMaxHeight().paperShadow("sheet", colors.dark)
+        // V7 首页：居中单栏，最宽 720dp；折叠屏横放时才按铰链分左右两页。
+        Box(Modifier.widthIn(max = if (hinge != null) 1000.dp else 720.dp).fillMaxWidth().fillMaxHeight().paperShadow("sheet", colors.dark)
             .clip(RoundedCornerShape(CoachV7.Radius.sheet)).background(colors.surface1).testTag("shelf-sheet")) {
             val catalogHeader: @Composable () -> Unit = {
                 Text("书架", style = MaterialTheme.typography.titleLarge, modifier = Modifier.testTag("library-title"))

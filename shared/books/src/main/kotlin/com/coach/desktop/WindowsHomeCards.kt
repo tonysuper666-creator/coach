@@ -17,6 +17,9 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
+import com.coach.desktop.books.PaperColor
+import com.coach.desktop.books.ReadingFont
+import com.coach.desktop.books.ReadingSize
 import com.coach.desktop.books.Textbook
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.LocalV7Fonts
@@ -200,6 +203,35 @@ internal fun HostEmptyState(tag: String, title: String, text: String) {
     }
 }
 
+@Composable
+private fun SettingsSection(title: String, tag: String) {
+    Text(title, style = MaterialTheme.typography.titleSmall, color = CoachTheme.colors.fgPrimary,
+        modifier = Modifier.padding(top = 4.dp).testTag(tag))
+}
+
+@Composable
+private fun <T> SettingsChoice(label: String, options: List<T>, selected: T, name: (T) -> String, tag: String, onChoose: (T) -> Unit) {
+    val colors = CoachTheme.colors
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(label, style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary, modifier = Modifier.weight(1f))
+        options.forEachIndexed { index, option ->
+            V7TextButton(onClick = { onChoose(option) }, modifier = Modifier.testTag("$tag-$index"), ringInside = true) {
+                Text(name(option), style = MaterialTheme.typography.labelMedium,
+                    color = if (option == selected) colors.fgPrimary else colors.fgTertiary,
+                    fontWeight = if (option == selected) androidx.compose.ui.text.font.FontWeight.SemiBold else null)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsSwitch(label: String, checked: Boolean, tag: String, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, style = MaterialTheme.typography.labelLarge, color = CoachTheme.colors.fgPrimary, modifier = Modifier.weight(1f))
+        Switch(checked = checked, onCheckedChange = onChange, modifier = Modifier.testTag(tag))
+    }
+}
+
 /**
  * V7：设置弹窗和其他弹窗一样是 surface2 的纸。教材位置降为 fgSecondary 小字并把用户主目录缩写为「用户文件夹」，
  * 同时保留完整路径的复制与选中能力；「知道了」走纸面按钮。
@@ -222,9 +254,22 @@ internal fun HostSettings(
     val clipboard = LocalClipboardManager.current
 
     AlertDialog(onDismissRequest = onClose, title = { Text("设置") }, text = {
-        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        // 单页四段：账号与连接 / 阅读与外观 / 学习默认项 / 数据与关于。没有二级页，往下滚就能看全。
+        Column(Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState()).testTag("settings-page"),
+            verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            SettingsSection("账号与连接", "settings-section-account")
             Text("教材和进度保存在此设备。提问与讲解时只发送当前所选片段或本节正文至 Coach 服务。", style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
+            if (onPersonalCourse != null) TextButton(onPersonalCourse) { Text("打开已配对课程") }
+            Text("课程里可做本地教材参考练习；服务上的课程数据仍独立。",
+                style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
             if (preferences != null) {
+                SettingsSection("阅读与外观", "settings-section-reading")
+                SettingsChoice("字号", ReadingSize.entries, preferences.size, { it.label }, "settings-size") { preferences.chooseSize(it) }
+                SettingsChoice("字体", ReadingFont.entries, preferences.font, { it.label }, "settings-font") { preferences.chooseFont(it) }
+                SettingsChoice("纸色", PaperColor.entries, preferences.paper, { it.label }, "settings-paper") { preferences.choosePaper(it) }
+                SettingsSection("学习默认项", "settings-section-learning")
+                SettingsSwitch("读完一节先给导读", preferences.autoGuide, "settings-auto-guide") { preferences.chooseAutoGuide(it) }
+                SettingsSwitch("每节读完给小结", preferences.sectionSummary, "settings-section-summary") { preferences.chooseSectionSummary(it) }
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -245,6 +290,7 @@ internal fun HostSettings(
                     )
                 }
             }
+            SettingsSection("数据与关于", "settings-section-data")
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("教材位置", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
                 SelectionContainer {
@@ -291,9 +337,6 @@ internal fun HostSettings(
                     }
                 }
             }
-            if (onPersonalCourse != null) TextButton(onPersonalCourse) { Text("打开已配对课程") }
-            Text("课程里可做本地教材参考练习；服务上的课程数据仍独立。",
-                style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
         }
     }, confirmButton = {
         PaperButton(onClose, modifier = Modifier.testTag("close-settings")) { Text("知道了") }

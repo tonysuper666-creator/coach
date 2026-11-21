@@ -1995,6 +1995,13 @@ internal class TextbookLibrary(
         reviewStore.pending(db)
     }
 
+    /** Today's FSRS-ranked single-card queue: at most 20 shown, the rest stay due and roll to tomorrow. */
+    @Synchronized fun reviewQueue(): LocalReviewQueue = database().use { db -> reviewStore.queue(db) }
+
+    @Synchronized fun fsrsState(book: String, lesson: String, mode: QuestionMode) = database().use { db ->
+        reviewStore.fsrsState(db, book, lesson, mode)
+    }
+
     @Synchronized fun review(book: String, lesson: String, mode: QuestionMode): LocalBookReview = database().use { db ->
         checkNotNull(reviewStore.find(db, book, lesson, mode)) { "这道复习题已不在书架中。" }
     }

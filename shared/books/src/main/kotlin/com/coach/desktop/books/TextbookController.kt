@@ -27,6 +27,8 @@ internal data class LibraryUi(
     val page: Int = 1, val source: BookLesson? = null,
     val answer: PracticeAnswer = PracticeAnswer(), val busy: Boolean = false, val error: String? = null,
     val reviews: List<LocalBookReview> = emptyList(), val review: LocalBookReview? = null,
+    /** 今日复习的顺序：开列表时定下，复习途中不重排，答完才刷新。 */
+    val todayQueue: LocalReviewQueue = LocalReviewQueue(emptyList(), 0),
     val learningPath: LearningPath = LearningPath.READ, val questionsOpen: Boolean = false,
     /** Whether this book already has a chosen walk in the library, as opposed to the READ preview. */
     val learningPathSaved: Boolean = false,
@@ -678,7 +680,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             library.closeReview()
             if (!fromReview) library.clearOpenSession()
             mutable.update { it.copy(screen = if (fromReview) BookScreen.REVIEWS else BookScreen.HOME,
-                review = null, prompt = null, reviews = library.reviews()) }
+                review = null, prompt = null, reviews = library.reviews(), todayQueue = library.reviewQueue()) }
         }
     }
 
@@ -693,7 +695,25 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         library.closeReview()
         library.clearOpenSession()
         mutable.update { it.copy(screen = BookScreen.REVIEWS, review = null, source = null,
-            prompt = null, reviews = library.reviews()) }
+            prompt = null, reviews = library.reviews(), todayQueue = library.reviewQueue()) }
+    }
+
+    /** 单卡流：打开今日队列里的下一题；没有下一题就回到复习页，显示刷新后的队列或「今日复习已完成」。 */
+    suspend fun nextReview() = action {
+        val ui = mutable.value
+        val cards = ui.todayQueue.cards
+        val at = ui.review?.let { open -> cards.indexOfFirst { it.book == open.book && it.lesson == open.lesson && it.mode == open.mode } } ?: -1
+        val next = cards.getOrNull(at + 1)
+        if (next == null) {
+            library.closeReview()
+            mutable.update { it.copy(screen = BookScreen.REVIEWS, review = null, source = null, prompt = null,
+                reviews = library.reviews(), todayQueue = library.reviewQueue()) }
+        } else {
+            val review = library.review(next.book, next.lesson, next.mode)
+            library.openReview(review)
+            mutable.update { it.copy(book = library.book(review.book), screen = BookScreen.REVIEWING, source = null,
+                prompt = null, review = review, answer = review.answer, reviews = library.reviews()) }
+        }
     }
 
     /** The mounted host refreshes this projection across local midnight, including on 今天. */
@@ -701,7 +721,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val current = mutable.value.review
         val updated = current?.let { library.review(it.book, it.lesson, it.mode) }
         mutable.update { it.copy(reviews = library.reviews(), review = updated,
-            answer = updated?.answer ?: it.answer) }
+            answer = updated?.answer ?: it.answer, todayQueue = if (current == null) library.reviewQueue() else it.todayQueue) }
     }
 
     suspend fun openReview(entry: LocalBookReview) = action {

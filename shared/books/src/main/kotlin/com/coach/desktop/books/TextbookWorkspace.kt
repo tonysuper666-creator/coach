@@ -251,7 +251,10 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                     val book = ui.book
                     when {
                         !ui.initialized && ui.screen == BookScreen.HOME && book == null && ui.catalog.isEmpty() -> {
-                            Box(Modifier.fillMaxSize().testTag("library-loading"))
+                            // 首次从 SQLite 载入时只给一组安静的呼吸点，不闪「书架还是空的」。
+                            Box(Modifier.fillMaxSize().testTag("library-loading"), contentAlignment = androidx.compose.ui.Alignment.Center) {
+                                com.coach.ui.v7.CoachLoadingDots()
+                            }
                         }
                         ui.screen == BookScreen.HOME || book == null -> LibraryHome(ui,
                             onImport = {
@@ -276,7 +279,11 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             LocalBookReviewQuestion(review, !ui.busy, practiceSourceFocus, returnFocus,
                                 onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
                                 onSource = { openPracticeSource(review.practice) },
-                                onAnswer = { drafts.saveReview(review, it) })
+                                onAnswer = { drafts.saveReview(review, it) },
+                                position = ui.todayQueue.cards.indexOfFirst {
+                                    it.book == review.book && it.lesson == review.lesson && it.mode == review.mode
+                                }.takeIf { it >= 0 }?.let { it + 1 to ui.todayQueue.cards.size },
+                                onNext = { run { if (drafts.flush()) controller.nextReview() } })
                         }
                         ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library, learningSupport,
                             practiceSource = practiceSource, pageFocus = readerFocus, explainProvider = explainer,

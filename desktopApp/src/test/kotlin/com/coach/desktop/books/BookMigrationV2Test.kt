@@ -66,7 +66,7 @@ class BookMigrationV2Test {
             assertTrue("Backup library.sqlite.v1.bak should exist", Files.isRegularFile(backupFile))
             assertTrue("Backup should pass PRAGMA quick_check", BookSchemaMigration.isHealthySqlite(backupFile))
             DriverManager.getConnection("jdbc:sqlite:$libraryDb").use { conn ->
-                assertEquals(BookSchemaMigration.V2_SCHEMA_VERSION, BookSchemaMigration.readUserVersion(conn))
+                assertEquals(BookSchemaMigration.CURRENT_SCHEMA_VERSION, BookSchemaMigration.readUserVersion(conn))
                 for (v2Table in listOf("collections", "collection_materials", "book_toc_nodes", "book_study_chunks", "book_bookmarks", "book_page_aspects", "book_visual_pages", "pages_fts")) {
                     assertTrue("Missing v2 table $v2Table", BookSchemaMigration.tableExists(conn, v2Table))
                 }

@@ -66,7 +66,7 @@ class UnifiedLocalReviewUiTest {
             assertEquals(0, c.state.value.reviews.size)
             assertEquals(3, c.state.value.review!!.history.size)
         }
-        clock.day++
+        clock.day = library.review(book.id, lesson.id, QuestionMode.CHOICE).dueDay
         val reopened = TextbookController(TextbookLibrary(library.directory, clock))
         runSkikoComposeUiTest(size = Size(1440f, 1000f), density = Density(1f)) {
             setContent { WindowsTextbookHost(reopened) { null } }
@@ -79,6 +79,6 @@ class UnifiedLocalReviewUiTest {
             onNodeWithTag(choice).performScrollTo().assertIsEnabled()
             onNodeWithText(question.reference).assertDoesNotExist()
         }
-        println("UNIFIED_REVIEW_UI guessed-correct -> today=1 -> same review -> guessed remains -> independent correct=0 -> next day=1; original/history retained")
+        println("UNIFIED_REVIEW_UI guessed-correct -> today=1 -> same review -> guessed remains -> independent correct=0 -> FSRS due day=1; original/history retained")
     }
 }

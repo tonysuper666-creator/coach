@@ -335,7 +335,8 @@ function Find-ExplainButton($lines) {
 # 点完「讲讲」算不算生效：同意框弹出、或者已经进了加载态（「思考」）、或者回答已经出来（「出处」）。
 # 只认这几种看得见的状态——「点过一次」不算，四路交锁时那一下常常被别的窗口吃掉。
 function Test-ExplainStarted($lines) {
-    foreach ($s in '允许并讲解', '这段原文会发到哪里', '思考', '出处') {
+    if (Test-ConsentUp $lines) { return $true }
+    foreach ($s in '思考', '出处') {
         if (Find-Text $lines $s) { return $true }
     }
     return $false
@@ -348,6 +349,63 @@ function Get-AskScrollDir([bool]$sawLoading, [int]$step) {
     if ($step -lt 9) { return -1 }
     if ($step -lt 18) { return 1 }
     return -1
+}
+# 第 4 步的同意框：按钮字小，Windows OCR 常认错字——11-21 05:58 那轮同一条按钮，
+# 一帧读成「允许百甫」、一帧读成「允许并讲鱈」。所以「框在不在」「截到的是不是那一下」
+# 都不能只认一个整词，也不能只拿一帧判死。
+function Test-ConsentUp($lines) {
+    foreach ($s in '允许并讲解', '这段原文会发到哪里', '不允许', '允许并') {
+        if (Find-Text $lines $s) { return $true }
+    }
+    return $false
+}
+# 同意按钮的落点：先认整词，再认「允许并」（吃掉末两字的错字），最后退到「标题下面含「允许」、
+# 又不是「不允许」」的那一行（「允许百甫」这种第 3 个字也认错的只剩这条路）。
+function Find-ConsentAllow($lines) {
+    foreach ($s in '允许并讲解', '允许并') {
+        $m = Find-Text $lines $s
+        if ($m) { return $m }
+    }
+    $title = Find-Text $lines '这段原文会发到哪里'
+    # 退化到这一条时必须有标题做锚：没有标题就没法区分「框里的允许」和正文里的「允许」，
+    # 宁可不点（外面 Click-Confirm 会重拍新帧再找）也不往正文上点。
+    if (-not $title) { return $null }
+    $best = $null
+    foreach ($l in $lines) {
+        $t = $l.Text -replace '\s', ''
+        if ($t -notmatch '允许' -or $t -match '不允许') { continue }
+        $b = Get-LineBox $l
+        $y = [int](($b.Y1 + $b.Y2) / 2)
+        if ($y -le $title.Y) { continue }
+        if (-not $best -or $y -gt $best.Y) {
+            $best = [pscustomobject]@{ X = [int](($b.X1 + $b.X2) / 2); Y = $y; X1 = [int]$b.X1; X2 = [int]$b.X2; Y1 = [int]$b.Y1; Y2 = [int]$b.Y2 }
+        }
+    }
+    return $best
+}
+# 同意框关没关：标题和两个按钮都不在才算关；已经进了加载态或出了回答也算（那时框必然没了）。
+# 只看「允许并讲解」一个词会被错字骗——认不出来就当成框关了，其实框还开着，随后空等 120 秒。
+# 这里不拿光秃秃的「允许」当证据：正文里出现「允许」也会命中，正常的阅读器页会被当成框还在。
+function Test-ConsentGone($lines) {
+    if (Find-Text $lines '思考') { return $true }
+    if (Find-Text $lines '出处') { return $true }
+    foreach ($s in '允许并讲解', '这段原文会发到哪里', '不允许', '允许并') {
+        if (Find-Text $lines $s) { return $false }
+    }
+    return $true
+}
+# 认按钮别拿单帧判死：弹窗淡出的过渡帧里标题还留着残影、按钮已经不在这一帧了
+# （11-21 05:58 L3 的第 3 步就是这样，单帧找不到就被判成「认不出来」）。
+# 隔一拍再拍，最多 $tries 帧；中途弹窗整个退掉（$Gone 成立）就直接返回 $null——那是自己散了，不用点。
+function Find-AcrossFrames([int]$n, [string]$tag, [scriptblock]$Find, [scriptblock]$Gone, [int]$tries = 3, [int]$pauseMs = 400) {
+    $lines = $script:Last
+    foreach ($k in 0..($tries - 1)) {
+        if ($k -gt 0) { Start-Sleep -Milliseconds $pauseMs; $lines = Shot $n "$tag$k" }
+        $m = & $Find $lines
+        if ($m) { return $m }
+        if (& $Gone $lines) { return $null }
+    }
+    return $null
 }
 # 书架右栏本来就有「看书 / 边看边学 / 做题学」三行，弹窗盖上去以后 OCR 两处都读得到，
 # 从上往下取首命中会点回书架上（弹窗底下那层被遮罩吃掉，点了没反应）。
@@ -561,6 +619,7 @@ try {
     # 提示卡自己收起或点空了会停在书架卡上（11-21 00:47 那轮就是这样），这时「看书」那一行才是进阅读器的入口，两条路都试。
     $lines = Shot 3 'find'
     $m = Find-PageNav $lines '下一页'
+    $dismissStuck = 0
     $deadline = (Get-Date).AddSeconds(90)
     while (-not $m -and (Get-Date) -lt $deadline) {
         $b = Has $lines @('先读')
@@ -574,15 +633,24 @@ try {
         if ($d) {
             # 只读这本书：点「暂不开启」而不是按 ESC（1.1.1 的 ESC 会退回书架）。按钮是暗底灰字，放大两倍才认得出来；
             # 阅读器刚打开时它可能还是灰的（ui.busy），点不动就下一轮再点，循环有 90 秒。
-            $off = Find-Text $script:Last '暂不开启'
-            if (-not $off) { $off = Find-DimButton $script:LastPng '暂不开启' }
-            if (-not $off) { Fail 3 '「要开始学吗」上的「暂不开启」认不出来（见 3-dismiss.png）' }
-            Click-At ([int]$off.X) ([int]$off.Y); Start-Sleep -Seconds 1
+            # Await-Text 命中的那一帧可能正卡在弹窗淡出的过渡上：标题留着残影、按钮已经不在这一帧
+            # （11-21 05:58 L3 就是这样，单帧找不到就 Fail 3，把整个 90 秒循环打断了）。所以多拍几帧再判。
+            $findOff = { param($l) $btn = Find-Text $l '暂不开启'; if (-not $btn) { $btn = Find-DimButton $script:LastPng '暂不开启' }; $btn }
+            $goneOff = { param($l) -not (Find-Text $l '要开始学吗') }
+            $off = Find-AcrossFrames 3 'dismiss' $findOff $goneOff
+            if ($off) { Click-At ([int]$off.X) ([int]$off.Y); Start-Sleep -Seconds 1 }
+            elseif (Find-Text $script:Last '要开始学吗') {
+                # 弹窗还在、三帧都没认出按钮：不在这里打断，下一轮点了入口还会再等一次弹窗。
+                $dismissStuck++
+                Note '「要开始学吗」还在，但「暂不开启」三帧都没认出来（多半是淡出过渡），下一轮再试'
+            }
         }
         $lines = Shot 3 'reader'
         $m = Find-PageNav $lines '下一页'
     }
-    if (-not $m) { Fail 3 '没有进到阅读器' }
+    if (-not $m) {
+        Fail 3 $(if ($dismissStuck -gt 0) { "「要开始学吗」见过 $dismissStuck 次，每次都没认出「暂不开启」（见 3-dismiss*.png），没进到阅读器" } else { '没有进到阅读器' })
+    }
     # 页号只从底栏「上一页」「下一页」之间那一条读：整帧 OCR 会把「2 / 620」拆成「2」+「/62@」
     # （11-21 03:49 的 2b 四路全栽在这，页其实已经翻过去了）。读不出就一直重拍到 10 秒。
     $page0 = $null
@@ -682,11 +750,15 @@ try {
     # 所以两下都认状态：状态没变就按新一帧重定位再点，点了三次还没动就当场说清是哪一下没成。
     $started = Click-Confirm 4 { param($l) Find-ExplainButton $l } { param($l) Test-ExplainStarted $l } -tries 3 -waitSec 6 -pauseMs 800
     # 同意框有时要十几秒才弹（后台先把这段原文送出去），点完状态没变也再宽限一次，别比原来等得还短。
-    if (-not $started) { $started = [bool](Await-Text 4 'explain-late' @('允许并讲解', '这段原文会发到哪里', '思考', '出处') 15) }
+    if (-not $started) { $started = [bool](Await-Text 4 'explain-late' @('允许并讲解', '这段原文会发到哪里', '不允许', '思考', '出处') 15) }
     if (-not $started) { Fail 4 '点了三次「讲讲」都没有同意框、加载态或讲解出现（见 4-confirm*.png）' }
-    if (Find-Text (Shot 4 'consent') '允许并讲解') {
+    # 这一帧是不是同意框：按钮标签会被 OCR 认错字（11-21 05:58 L1 在这一帧读成「允许并讲鱈」，
+    # 只认「允许并讲解」就整段跳过、后面空等 120 秒），所以标题和「不允许」也认。
+    if (Test-ConsentUp (Shot 4 'consent')) {
         # 这本书第一次讲解要先同意；框没关就是没点上，按新一帧重定位再点（开发验收允许点）。
-        $allowed = Click-Confirm 4 { param($l) Find-Text $l '允许并讲解' } { param($l) -not (Find-Text $l '允许并讲解') } -tries 3 -waitSec 6 -pauseMs 800
+        # 落点用 Find-ConsentAllow（整词 → 「允许并」→ 标题下面含「允许」的那一行），
+        # 「关没关」用 Test-ConsentGone（标题和两个按钮都不在），两边都不靠单个整词。
+        $allowed = Click-Confirm 4 { param($l) Find-ConsentAllow $l } { param($l) Test-ConsentGone $l } -tries 3 -waitSec 6 -pauseMs 800
         if (-not $allowed) { Fail 4 '同意框里的「允许并讲解」点了三次框都没关（见 4-consent*.png）' }
     }
     $deadline = (Get-Date).AddSeconds(120); $outcome = $null; $errText = $null; $n = 0

@@ -537,7 +537,7 @@ if ($mode -eq 'dirty') {
     $buildSmoke = Join-Path $buildRepo 'tools\smoke'
     $evBuild = Join-Path $tmp 'ev-build'
     New-Item -ItemType Directory -Force $buildSmoke, $evBuild | Out-Null
-    foreach ($name in @('friend-path.ps1', 'friend-path-worker.ps1', 'Win-Drive.ps1', 'Smoke-Memory.ps1', 'Lesson-Range.ps1')) {
+    foreach ($name in @('friend-path.ps1', 'friend-path-worker.ps1', 'Win-Drive.ps1', 'Smoke-Memory.ps1', 'Lesson-Range.ps1', 'Page-Counter.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $buildSmoke $name)
     }
     @'
@@ -953,7 +953,7 @@ $cgBlock
     $fgSmoke = Join-Path $fgRepo 'tools\smoke'
     $evFg = Join-Path $tmp 'ev-fg'
     New-Item -ItemType Directory -Force $fgSmoke, $evFg | Out-Null
-    foreach ($name in @('friend-path.ps1', 'friend-path-worker.ps1', 'Win-Drive.ps1', 'Smoke-Memory.ps1', 'Lesson-Range.ps1')) {
+    foreach ($name in @('friend-path.ps1', 'friend-path-worker.ps1', 'Win-Drive.ps1', 'Smoke-Memory.ps1', 'Lesson-Range.ps1', 'Page-Counter.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $fgSmoke $name)
     }
     Copy-Item -LiteralPath (Join-Path $buildSmoke 'Run-Interactive.ps1') -Destination (Join-Path $fgSmoke 'Run-Interactive.ps1')

@@ -24,6 +24,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Win-Drive.ps1')
 . (Join-Path $PSScriptRoot 'Smoke-Memory.ps1')
 . (Join-Path $PSScriptRoot 'Lesson-Range.ps1')
+. (Join-Path $PSScriptRoot 'Page-Counter.ps1')
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $script:ForegroundTracePath = Join-Path $OutDir 'foreground.jsonl'
 $steps = @('启动', '上传一本书', '翻页', '选中就问出讲解', '边看边学出讲解', '做题（答完出讲解和小结）', '点出处弹原文卡')
@@ -56,8 +57,6 @@ function Await-Text([int]$n, [string]$tag, [string[]]$needles, [int]$sec) {
     do { $lines = Shot $n $tag; $m = Has $lines $needles; if ($m) { return $m }; Start-Sleep -Seconds 2 } while ((Get-Date) -lt $deadline)
     return $null
 }
-function Page-Of($lines) { foreach ($l in $lines) { $mm = [regex]::Match($l.Text, '(\d+)[/／](\d+)'); if ($mm.Success) { return "$($mm.Groups[1].Value)/$($mm.Groups[2].Value)" } }; return $null }
-# 底栏页号夹在「上一页」「下一页」之间。正文和别的卡片里也有「2/2」这种分数，只认这一行。
 function Page-NearNav($lines) {
     $prev = Find-PageNav $lines '上一页'; $next = Find-PageNav $lines '下一页'
     if (-not $prev -or -not $next) { return $null }
@@ -69,41 +68,11 @@ function Page-NearNav($lines) {
     }
     return $null
 }
-# At either edge of the book the disabled navigation label may disappear in OCR.
-# Enlarge the counter beside its visible neighbour; keep the current page and total strictly numeric.
+# 讲到的原文页：书首书尾时一边的翻页按钮会消失，认不出按钮就放弃（不猜）。
 function Get-OriginalPageNumber($lines, [string]$png) {
-    $prev = Find-PageNav $lines '上一页'
-    $next = Find-PageNav $lines '下一页'
-    if (-not $prev -and -not $next) { return }
-    $anchor = if ($next) { $next } else { $prev }
-    $height = $anchor.Y2 - $anchor.Y1
-    $src = [Drawing.Bitmap]::new($png)
-    try {
-        $left = if ($prev) { $prev.X2 } else { [math]::Max(0, $next.X1 - 16 * $height) }
-        $right = if ($next) { $next.X1 } else { [math]::Min($src.Width, $prev.X2 + 16 * $height) }
-        $top = [math]::Max(0, $anchor.Y1 - $height)
-        $bottom = [math]::Min($src.Height, $anchor.Y2 + $height)
-        if ($left -ge $right -or $top -ge $bottom) { return }
-        $rect = [Drawing.Rectangle]::new($left, $top, $right - $left, $bottom - $top)
-        $zoom = [Drawing.Bitmap]::new($rect.Width * 3, $rect.Height * 3)
-        $file = Join-Path (Split-Path -Parent $png) ('counter-' + [guid]::NewGuid() + '.png')
-        try {
-            $g = [Drawing.Graphics]::FromImage($zoom)
-            try {
-                $g.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-                $g.DrawImage($src, [Drawing.Rectangle]::new(0, 0, $zoom.Width, $zoom.Height), $rect, [Drawing.GraphicsUnit]::Pixel)
-            } finally { $g.Dispose() }
-            $zoom.Save($file, [Drawing.Imaging.ImageFormat]::Png)
-            $pages = @(foreach ($line in Read-Screen $file) {
-                if (($line.Text -replace '\s', '') -match '^([1-9]\d*)[/／]([1-9]\d*)$') { $Matches[1] }
-            })
-            $unique = @($pages | Sort-Object -Unique)
-            if ($unique.Count -eq 1) { return $unique[0] }
-        } finally {
-            $zoom.Dispose()
-            Remove-Item -LiteralPath $file, ([IO.Path]::ChangeExtension($file, 'inv.png')) -ErrorAction SilentlyContinue
-        }
-    } finally { $src.Dispose() }
+    $c = Get-PageCounter $lines $png
+    if ($c) { return "$($c.Cur)" }
+    return $null
 }
 # 「暂不开启」是暗底上最暗的一档字（实测字 46–68、底色 32，放大两倍也认不出来）。
 # 把对话框底栏那一条抠出来，按它自己的底色二值化成白底黑字再放大三倍，才能认出按钮；坐标换算回原图。
@@ -162,19 +131,7 @@ function Find-Exact($lines, [string]$needle) {
 function Find-Lowest($lines, [string]$needle) { $best = $null; foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m -and (-not $best -or $m.Y -gt $best.Y)) { $best = $m } }; $best }
 # 光标停在底栏按钮上时 Compose 会浮出「下一页 → PageDown」的 tooltip，它比底栏还高一行；
 # Find-Text 从上往下取首命中就会点到浮层上（11-21 03:12 L3 三次重试都戳在正文区，页码一直 1/62）。
-# 翻页按钮只认底栏那一条：先剔掉带 PageDown/PageUp 的提示行，再取最靠下的一条。
-function Find-PageNav($lines, [string]$needle) {
-    $best = $null; $any = $null
-    foreach ($l in $lines) {
-        $m = Find-Text @($l) $needle
-        if (-not $m) { continue }
-        if (-not $any -or $m.Y -gt $any.Y) { $any = $m }
-        if (($l.Text -replace '\s', '') -match '(?i)page\s*(down|up)|pgdn|pgup') { continue }
-        if (-not $best -or $m.Y -gt $best.Y) { $best = $m }
-    }
-    if ($best) { return $best }
-    return $any
-}
+# 认翻页按钮的 Find-PageNav 在 Page-Counter.ps1（第 3 步读页号也要用它算底栏那一条的边界）。
 # 滚动落点按窗口实际大小算：winbox 的控制台会话不一定跑在大屏上（现在只有 800×600），
 # 写死的 900/700 会落到窗口外，滚轮就滚到桌面上，列表一动不动。
 function Scroll-Point([double]$fx, [double]$fy) {
@@ -546,11 +503,13 @@ try {
         $m = Find-PageNav $lines '下一页'
     }
     if (-not $m) { Fail 3 '没有进到阅读器' }
+    # 页号只从底栏「上一页」「下一页」之间那一条读：整帧 OCR 会把「2 / 620」拆成「2」+「/62@」
+    # （11-21 03:49 的 2b 四路全栽在这，页其实已经翻过去了）。读不出就一直重拍到 10 秒。
     $page0 = $null
     foreach ($try in 1..5) {
         $before = Shot 3 'page-before'
-        $page0 = Page-Of $before
-        if ($page0) { break }; Start-Sleep -Seconds 2
+        $c0 = Get-PageCounter $before $script:LastPng
+        if ($c0) { $page0 = $c0.Text; break }; Start-Sleep -Seconds 2
     }
     $page1 = $page0
     foreach ($try in 1..3) {
@@ -563,7 +522,8 @@ try {
         $stop = (Get-Date).AddSeconds(8)
         while ((Get-Date) -lt $stop -and (-not $page1 -or $page1 -eq $page0)) {
             Start-Sleep -Seconds 2; $after = Shot 3 'page-after'
-            $page1 = Page-Of $after
+            $c1 = Get-PageCounter $after $script:LastPng
+            if ($c1) { $page1 = $c1.Text }
         }
         if ($page1 -and $page1 -ne $page0) { break }
     }

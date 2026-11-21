@@ -17,7 +17,8 @@ internal val observedFriend = AttributeKey<String>("coach.friend")
 internal fun friendId(name: String) = sha256(name.toByteArray(Charsets.UTF_8))
 internal fun friendPath(call: ApplicationCall): Boolean = when (call.request.httpMethod to call.request.path()) {
     HttpMethod.Post to "/v1/public/sable", HttpMethod.Post to "/v1/pair", HttpMethod.Get to "/v1/public/status",
-    HttpMethod.Post to "/v1/library/explain", HttpMethod.Post to "/v1/library/explain/cancel" -> true
+    HttpMethod.Post to "/v1/library/explain", HttpMethod.Post to "/v1/library/explain/cancel",
+    HttpMethod.Post to "/v1/library/companion/chapter" -> true
     else -> false
 }
 

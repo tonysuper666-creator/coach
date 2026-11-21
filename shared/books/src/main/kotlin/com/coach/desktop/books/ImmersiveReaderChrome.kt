@@ -911,7 +911,7 @@ internal fun ImmersiveSelectionPill(
                 Text(if (highlighted) "取消高亮" else "高亮", style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary, maxLines = 1, softWrap = false)
             }
         }
-        for (action in listOf(SelectionExplainAction.EXPLAIN, SelectionExplainAction.EXAMPLE, SelectionExplainAction.ASK)) {
+        for (action in listOf(SelectionExplainAction.EXPLAIN, SelectionExplainAction.SPLIT, SelectionExplainAction.EXAMPLE, SelectionExplainAction.ASK)) {
             V7TextButton(
                 onClick = { onAction(action) },
                 modifier = Modifier.testTag(action.tag),

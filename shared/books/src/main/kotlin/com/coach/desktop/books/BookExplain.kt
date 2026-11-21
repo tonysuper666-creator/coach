@@ -174,7 +174,7 @@ internal object ExplainWire {
         question: String? = null,
         history: List<FollowUpTurn> = emptyList(),
     ): JsonObject = buildJsonObject {
-        require(kind in setOf("explain", "example", "rephrase", "ask"))
+        require(kind in setOf("explain", "example", "rephrase", "split", "ask"))
         require(chosen.text.trim().length in 1..4_000)
         put("requestId", requestId)
         put("kind", kind)

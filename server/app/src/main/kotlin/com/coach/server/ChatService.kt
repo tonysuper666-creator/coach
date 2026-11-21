@@ -66,7 +66,7 @@ data class ChatTimings(
 class ChatService(
     private val actor: LedgerActor,
     private val scope: CoroutineScope,
-    private val bridge: BridgeClient = BridgeClient(),
+    internal val bridge: BridgeClient = BridgeClient(),
     private val timings: ChatTimings = ChatTimings(),
     private val fallbackModel: String = BridgeClient.CODEX,
     private val fallbackOnFirstTokenTimeout: Boolean = true,
@@ -78,12 +78,13 @@ class ChatService(
     private val enrichSourcePages: Boolean = true,
     private val packsDirectory: java.nio.file.Path = java.nio.file.Path.of(System.getenv("COACH_PACKS_DIR")
         ?: java.io.File(System.getProperty("user.home"), "Coach/corpus/packs").path),
+    internal val tokenLedger: BookTokenLedger? = null,
 ) {
 
     val hub = ChatHub(log)
     val tutor = TutorMachine(actor)
     val journals = JournalService(actor, bridge)
-    val reader = ReaderExplanation(actor, bridge)
+    val reader = ReaderExplanation(actor, bridge, tokenLedger = tokenLedger)
     private val preparation = LessonPreparation(actor,bridge,packsDirectory)
     private val supplyLock = Mutex()
     private val waitingPools = ConcurrentHashMap.newKeySet<String>()

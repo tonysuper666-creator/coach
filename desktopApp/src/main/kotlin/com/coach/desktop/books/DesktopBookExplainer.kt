@@ -131,6 +131,52 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
     suspend fun ask(chosen: SourceBlock, question: String, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult =
         send(ExplainWire.question(requestId, chosen, question), listOf(chosen), requestId)
 
+    open suspend fun fetchChapterCompanion(
+        requestJson: JsonObject,
+        blocks: List<SourceBlock> = emptyList(),
+    ): ChapterCompanionFetchResult {
+        val paired = identity ?: return if (revoked) {
+            ChapterCompanionFetchResult.Failed(ExplainTrouble.revoked(sableLogin), ExplainTrouble.Revoked)
+        } else {
+            ChapterCompanionFetchResult.Failed(ExplainTrouble.UNPAIRED, ExplainTrouble.Unpaired)
+        }
+        val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library")
+        return try {
+            val snapshot = if (blocks.isNotEmpty()) {
+                withContext(Dispatchers.IO) { runCatching { imports?.snapshot(blocks) }.getOrNull() }
+                    ?: return ChapterCompanionFetchResult.Failed("请先打开个人导入的书并允许讲解。")
+            } else null
+            val wire = if (snapshot != null) JsonObject(requestJson + ("localSource" to snapshot)) else requestJson
+            val reply = http.companionChapter(wire)
+            if (snapshot != null && withContext(Dispatchers.IO) { runCatching { imports?.snapshot(blocks) }.getOrNull() } != snapshot) {
+                return ChapterCompanionFetchResult.Failed("保存的原文已变化，请重新打开这本书后重试。")
+            }
+            val body = reply.body
+            val isRevoked = reply.statusCode == 401 ||
+                (reply.statusCode == 403 && http.libraryAuthStatus() == 401)
+            if (identity != paired) return ChapterCompanionFetchResult.Failed("连接已更换，请重试。")
+            val trouble = if (isRevoked) ExplainTrouble.Revoked else ExplainTrouble.of(reply.statusCode, reply.code)
+            when {
+                trouble == ExplainTrouble.Revoked -> {
+                    markRevoked()
+                    ChapterCompanionFetchResult.Failed(ExplainTrouble.revoked(sableLogin), trouble)
+                }
+                body == null -> ChapterCompanionFetchResult.Failed(ExplainTrouble.message(trouble, reply.error), trouble)
+                else -> {
+                    val parsed = runCatching { CompanionJson.decodePack(body) }.getOrNull()
+                    if (parsed != null) ChapterCompanionFetchResult.Ready(parsed)
+                    else ChapterCompanionFetchResult.Failed("章节伴读返回格式无法解析，请稍后重试。")
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            ChapterCompanionFetchResult.Failed("连不上学习服务，本地阅读与草稿已保留。")
+        } finally {
+            http.close()
+        }
+    }
+
     private suspend fun sendGuide(input: JsonObject, context: List<SourceBlock>, requestId: String): SectionGuideResult {
         val (body, refused) = sendRaw(input, context, requestId)
         if (refused != null) return SectionGuideResult.Refused(refused.message, refused.trouble)

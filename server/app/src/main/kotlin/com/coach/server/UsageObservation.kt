@@ -124,7 +124,7 @@ class UsageObservation(private val logs: Path, private val state: Path,
 
 /** Log only route templates: arbitrary paths/queries can contain private text. */
 internal fun usageRoute(path: String): String {
-    if (path in setOf("/v1/pair", "/v1/pairing-code", "/v1/devices", "/v1/prewarm", "/v1/usage", "/v1/hello", "/v1/commands", "/v1/ws", "/v1/math", "/offline-pack")) return path
+    if (path in setOf("/v1/pair", "/v1/pairing-code", "/v1/devices", "/v1/prewarm", "/v1/usage", "/v1/hello", "/v1/commands", "/v1/ws", "/v1/math", "/offline-pack", "/v1/library/companion/chapter", "/v1/library/companion/ledger")) return path
     if (Regex("/v1/devices/[^/]+").matches(path)) return "/v1/devices/{device}"
     val parts = path.split('/')
     if (parts.size >= 5 && parts[1] == "v1" && parts[2] == "courses") {

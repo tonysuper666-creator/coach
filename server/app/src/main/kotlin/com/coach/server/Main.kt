@@ -54,8 +54,9 @@ fun main(args: Array<String>): Unit = runBlocking {
     val actor = LedgerActor(this,store)
     val children = if (managed) ChildServices(this) else null
     val pushes = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity=64)
+    val tokenLedger = BookTokenLedger(data.resolve("companion"))
     // 导师流式链路：Ktor ↔ 桥副本 8791 ↔ WS（M1-01）
-    val chat = ChatService(actor, this, ledgerChanged={ pushes.emit(it) }, allowSourceLookup = System.getenv("COACH_SOURCE_LOOKUP") == "true")
+    val chat = ChatService(actor, this, ledgerChanged={ pushes.emit(it) }, allowSourceLookup = System.getenv("COACH_SOURCE_LOOKUP") == "true", tokenLedger = tokenLedger)
     actor.execute { recoverSuspension() }
     chat.tutor.recoverInterruptedReplies()
     val supplyWorker = chat.startSupplyWorker()
@@ -116,13 +117,19 @@ fun main(args: Array<String>): Unit = runBlocking {
     val mainline=Mainline(library)
     val reader = ReaderLibrary.configured()
     val imports = ImportedBookSources(data.resolve("personal-imports"))
+    val companionCache = ChapterCompanionCache(data.resolve("companion"))
+    val companionTransport = RoutedBatchAiTransport(
+        primary = CodeBuddyDeepSeekTransport(),
+        overflow = HaikuBatchBridgeTransport(chat.bridge),
+    )
+    val companionPipeline = SectionConcurrentCompanionPipeline(companionTransport, tokenLedger, companionCache)
     val port = System.getenv("COACH_PORT")?.toInt() ?: 18791
     val publicPort = System.getenv("COACH_PUBLIC_PORT")?.toInt()?.also {
         require(it in 1..65535 && it != 18791 && it != port) { "COACH_PUBLIC_PORT must be a distinct non-production port" }
     }
     val sable = publicPort?.let { SableSessions(actor, data.resolveSibling("${data.fileName}-sable-credentials")) }
     val friends = FriendAccess(data.resolve("friends"), sableSessions = sable)
-    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation,friends); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); libraryExplainRoutes(actor,chat.reader,reader,imports,friends); readerRoutes(actor,pushes,reader,mainline) }
+    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation,friends); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); libraryExplainRoutes(actor,chat.reader,reader,imports,friends,companionPipeline,tokenLedger); readerRoutes(actor,pushes,reader,mainline) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")
@@ -144,7 +151,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     }
     val public = publicPort?.let { p -> embeddedServer(Netty, host = "127.0.0.1", port = p) {
         ledgerRoutes(actor,pushes,adminDevice=device,friends=friends,publicOnly=true)
-        libraryExplainRoutes(actor,chat.reader,friends=friends)
+        libraryExplainRoutes(actor,chat.reader,friends=friends,companionPipeline=companionPipeline,tokenLedger=tokenLedger)
     }.apply { engineConfig.apply { connectionGroupSize=1; workerGroupSize=1; callGroupSize=2 }; start(false) } }
     local.start(wait = false)
     println("COACH loopback ready http://127.0.0.1:$port/v1/hello")

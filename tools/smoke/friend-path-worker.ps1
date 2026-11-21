@@ -1353,8 +1353,10 @@ try {
         #   「讲解服务暂时连不上，读书和做题照常。」，旁边带「重试」。两种都算终态，别再干等满。
         # 出错时像人一样点一次「重试」（最多两次），服务补上就直接往下走；补不上就把卡上那句话原样带出来。
         # 620 页的书按节整理要点要时间，最多等 180 秒；认出任何一种终态就往下走，不干等满。
-        $why5re = '本章暂无提取要点|当前页暂未归入正文小节|登录后可使用本章伴读|伴读整理已在设置中关闭|去连接服务|暂时连不上|连不上学习服务|没顾上|这次没讲成'
-        $transient5 = '暂时连不上|连不上学习服务|没顾上|这次没讲成'
+        # OCR 把「讲解服务」读成「讠爿解务」、「暂」读成「暫」，只有「连不上」三个字一直干净：
+        # 认这句就认「连不上」，别再依赖它前面的主语（20:02 那轮因此把「服务连不上」当成「界面变了」）。
+        $why5re = '本章暂无提取要点|当前页暂未归入正文小节|登录后可使用本章伴读|伴读整理已在设置中关闭|去连接服务|连不上|没顾上|这次没讲成'
+        $transient5 = '连不上|没顾上|这次没讲成'
         $deadline = (Get-Date).AddSeconds(180); $kp = $null; $why5 = $null; $waited = 0; $retries5 = 0
         while ((Get-Date) -lt $deadline -and -not $kp -and -not $why5) {
             Start-Sleep -Seconds 2; $waited++
@@ -1382,7 +1384,16 @@ try {
             }
         }
         if (-not $kp) {
-            if ($why5) { Fail 5 "伴读「讲解」页签没整理出本节要点：$($why5.Text)（见 5-explain-wait*.png）" }
+            if ($why5) {
+                # 「讲解服务暂时连不上，读书和做题照常。」是 ExplainTrouble.UNREACHABLE：客户端连一页 JSON 都没拿到
+                # （伴读包走 POST /v1/library/companion/chapter，隔离门没这条 location 时回的就是 nginx 的 404 页）。
+                # 这句原样带出来，再点明该查哪儿——别让人以为界面又改了。
+                $said5 = ($why5.Text -replace '\s', '')
+                if ($said5 -match '连不上') {
+                    Fail 5 "伴读包没拿到：卡上写「$said5」——客户端没收到 JSON 回复。先查 $($env:COACH_URL) 这道门有没有转发 POST /v1/library/companion/chapter（只转 status 和 explain 时它回 nginx 404），门通了再跑（见 5-explain-wait*.png）"
+                }
+                Fail 5 "伴读「讲解」页签没整理出本节要点：$said5（见 5-explain-wait*.png）"
+            }
             Fail 5 '切到「讲解」页签后 180 秒内没等到本章要点（见 5-explain-wait*.png）'
         }
         # 要点标题和锚点不一定同屏：标题认到了还看不到「原文第 N 页」，就往下滚抽屉体把它滚进视野；
@@ -1477,6 +1488,10 @@ try {
             $lines = $script:Last
             $q = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^第\d+[/／]\d+题' } | Select-Object -First 1
             if ($q) { break }
+            # 伴读包没拿到时同一句话顶在模块下面（和第 ⑤ 步同一个 ExplainTrouble.UNREACHABLE）：
+            # 这不是「界面变了」，是客户端没收到 JSON（门没转发 companion/chapter 时回的是 nginx 404 页）。
+            $why6 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '连不上' } | Select-Object -First 1
+            if ($why6) { Fail 6 "伴读包没拿到，读前自测出不来：卡上写「$($why6.Text -replace '\s', '')」——先查 $($env:COACH_URL) 这道门有没有转发 POST /v1/library/companion/chapter（见 6-pretest*.png）" }
             $noQ = $lines | Where-Object { ($_.Text -replace '\s', '') -match '本章暂无读前自测题' } | Select-Object -First 1
             if ($noQ) { Fail 6 "读前自测是空的：$($noQ.Text)（见 6-pretest*.png）" }
             Start-Sleep -Seconds 1; $null = Shot 6 'pretest-wait'

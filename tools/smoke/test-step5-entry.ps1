@@ -1,7 +1,9 @@
-﻿# 离线回归：第 5 步入口那三下的重试闭环和弹窗内定位（退出码：0 = 全部通过）。
+﻿# 离线回归：第 5 步入口那三下的重试闭环、弹窗内定位、第 2 步「上传教材」补点（退出码：0 = 全部通过）。
 #  - 状态没变才算没点成：Done 一成立就停手，不重复点；
 #  - 位置找不到就不再拿旧坐标点第二下（否则会点在弹窗关掉之后的页面上）；
-#  - 「边看边学」只认弹窗里和「看书」「做题学」并排的那个 chip，不认书架右栏那一行。
+#  - 「边看边学」只认弹窗里和「看书」「做题学」并排的那个 chip，不认书架右栏那一行；
+#  - 工具栏被 ui.busy 禁用的十几秒里按钮还在，靠多给几次机会 + 每次隔一拍扛过去；
+#  - 「上传教材」只认原生选书框弹出来，没弹就重定位补点，弹过以后不重点。
 # 函数体从 friend-path-worker.ps1 里按原文截取，屏幕与输入都换成本文件的假实现。
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -35,6 +37,12 @@ function Shot([int]$n, [string]$tag) { return , $script:screen }
 function Click-At($x, $y) { [void]$script:clicks.Add("$x,$y"); if ($script:onClick) { & $script:onClick } }
 function Fail([int]$n, [string]$why) { throw "STEP_FAILED: $why" }
 function Note([string]$m) { }
+# 原生选书框：本文件用计数代替真窗口——点够 $script:needClicks 下以后才算框真的开了。
+$script:needClicks = 0
+function Find-AppWindowByTitle([string]$prefix) {
+    if ($script:clicks.Count -ge $script:needClicks) { return [IntPtr]1 }
+    return [IntPtr]::Zero
+}
 
 $shelf = @(
     (New-Line '书架' 620 80 80 30),
@@ -94,6 +102,35 @@ $script:swallow = 1
 $script:onClick = { if ($script:swallow -gt 0) { $script:swallow-- } else { $script:screen = $dialog } }
 Click-Until 5 $find $done '入口没开' -sec 1 -tries 4
 Check 'click-until-retries-until-done' ($script:clicks.Count -eq 2) "clicks=$($script:clicks.Count)"
+
+# 7. 工具栏被 ui.busy 禁用（第 4 步切回文字视图后后台写库）：点 5 下都没反应、第 6 下才开，
+#    第 5 步入口靠 8 次机会 + 每次隔一拍扛过去。
+$script:screen = $shelf; $script:clicks.Clear(); $script:swallow = 5
+$script:onClick = { if ($script:swallow -gt 0) { $script:swallow-- } else { $script:screen = $dialog } }
+Click-Until 5 $find $done '入口没开' -sec 1 -tries 8 -pauseMs 1
+Check 'click-until-rides-out-busy-toolbar' ($script:clicks.Count -eq 6) "clicks=$($script:clicks.Count)"
+
+# 8. 一直没反应：点满 $tries 就停手，不无限点。
+$script:screen = $shelf; $script:clicks.Clear(); $script:onClick = $null
+$err = ''
+try { Click-Until 5 $find $done '入口没开' -sec 1 -tries 3 -pauseMs 1 } catch { $err = "$_" }
+Check 'click-until-stops-after-tries' ($script:clicks.Count -eq 3 -and $err -like 'STEP_FAILED*') "clicks=$($script:clicks.Count) err=$err"
+
+# 9. 重拍时选书框已经开着：一下都不点。
+$script:screen = @((New-Line '上传教材' 300 120 120 30)); $script:clicks.Clear(); $script:needClicks = 0
+Click-Until-Dialog 2 '上传教材' { (Find-AppWindowByTitle '上传教材') -ne [IntPtr]::Zero } -findSec 1 -sec 5 -tries 3 -openSec 1
+Check 'upload-no-click-when-dialog-open' ($script:clicks.Count -eq 0) "clicks=$($script:clicks.Count)"
+
+# 10. 第一下被别路抢前台吞掉（框没开）：按新一帧重定位补点，第二下开框。
+$script:clicks.Clear(); $script:needClicks = 2
+Click-Until-Dialog 2 '上传教材' { (Find-AppWindowByTitle '上传教材') -ne [IntPtr]::Zero } -findSec 1 -sec 20 -tries 3 -openSec 1
+Check 'upload-reclicks-until-dialog-opens' ($script:clicks.Count -eq 2) "clicks=$($script:clicks.Count)"
+
+# 11. 上传按钮根本不在：不点，直接说找不到。
+$script:screen = @((New-Line '书架' 620 80 80 30)); $script:clicks.Clear(); $script:needClicks = 99
+$err = ''
+try { Click-Until-Dialog 2 '上传教材' { $false } -findSec 1 -sec 5 -tries 2 -openSec 1 } catch { $err = "$_" }
+Check 'upload-fails-when-button-absent' ($script:clicks.Count -eq 0 -and $err -like '*找不到「上传教材」*') "clicks=$($script:clicks.Count) err=$err"
 
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"

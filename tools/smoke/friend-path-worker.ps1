@@ -245,7 +245,7 @@ function Click-Label([int]$n, [string[]]$labels, [string]$why, [int]$sec = 15) {
 # L2 底按钮已变「开始边看边学」但点完弹窗没提交，而 L4 独跑时三下都一次过。
 # 所以「点过一次」不算数，只认这一帧的状态；状态没变就按新一帧重定位再点，
 # 连位置都找不到了就停手（用旧坐标再点一下只会点在别的控件上）。
-function Click-Until([int]$n, [scriptblock]$Find, [scriptblock]$Done, [string]$why, [int]$sec = 15, [int]$tries = 4) {
+function Click-Until([int]$n, [scriptblock]$Find, [scriptblock]$Done, [string]$why, [int]$sec = 15, [int]$tries = 4, [int]$pauseMs = 0) {
     if (& $Done (Shot $n 'entry-check')) { return }
     $m = $null; $deadline = (Get-Date).AddSeconds($sec)
     do {
@@ -258,6 +258,9 @@ function Click-Until([int]$n, [scriptblock]$Find, [scriptblock]$Done, [string]$w
         Start-Sleep -Milliseconds 1000
         $lines = Shot $n "entry$try"
         if (& $Done $lines) { return }
+        # 按钮在、点了却没反应，多半是 ui.busy 把工具栏禁用了（第 4 步切回文字视图时后台写库，
+        # 四路同写会 SQLITE_BUSY 卡十几秒）。这里等一拍再按新一帧重定位，别把重试额度在几百毫秒里烧光。
+        if ($pauseMs -gt 0) { Start-Sleep -Milliseconds $pauseMs; $lines = Shot $n "entry${try}p" }
         $again = & $Find $lines
         if (-not $again) {
             Start-Sleep -Milliseconds 800
@@ -270,6 +273,35 @@ function Click-Until([int]$n, [scriptblock]$Find, [scriptblock]$Done, [string]$w
     }
     $last = (Shot $n 'entry-fail') | ForEach-Object { $_.Text }
     Fail $n "$why（点了 $try 次状态没变；屏上：$((@($last) -join ' / ')))"
+}
+# 点一下等一个原生窗口真的出现：$IsOpen 成立才算这一下生效。第 2 步「上传教材」在四路并行时会丢：
+# 11-21 04:26 L4 点完交锁后 3 ms 就被别路抢走前台，选书框根本没开，Choose-File 只会干等 20 秒判失败。
+# 所以没弹框就按新一帧重新定位再点；框开过以后的失败（路径没填进去、回车没关掉）不重点——
+# 那种情况 Choose-File 自己会关框并报原因，再点一下反而可能点在残留的框上。
+function Click-Until-Dialog([int]$n, [string]$label, [scriptblock]$IsOpen, [int]$sec = 40, [int]$tries = 4, [int]$findSec = 15, [int]$openSec = 6) {
+    $m = $null; $deadline = (Get-Date).AddSeconds($findSec)
+    do {
+        $m = Find-Text (Shot $n 'find') $label
+        if (-not $m) { Start-Sleep -Seconds 2 }
+    } while (-not $m -and (Get-Date) -lt $deadline)
+    if (-not $m) { Fail $n "屏幕上找不到「$label」" }
+    $deadline = (Get-Date).AddSeconds($sec)
+    foreach ($try in 1..$tries) {
+        if (& $IsOpen) { return }
+        if ($try -gt 1) {
+            # 上一轮点空了：光标可能被别路挪走，按新一帧重新定位。
+            $m = Find-Text (Shot $n 'dialog-find') $label
+            if (-not $m) { Fail $n "点了 $($try - 1) 次「$label」，选书框都没出来，按钮也找不到了" }
+        }
+        Click-At $m.X $m.Y
+        $stop = (Get-Date).AddSeconds($openSec); if ($stop -gt $deadline) { $stop = $deadline }
+        while ((Get-Date) -lt $stop) {
+            if (& $IsOpen) { return }
+            Start-Sleep -Milliseconds 400
+        }
+        Note ("第 {0} 步第 {1} 次点「{2}」没弹出选书框，重定位后再点" -f $n, $try, $label)
+    }
+    Fail $n "点了 $tries 次「$label」，选书框都没出来"
 }
 # 书架右栏本来就有「看书 / 边看边学 / 做题学」三行，弹窗盖上去以后 OCR 两处都读得到，
 # 从上往下取首命中会点回书架上（弹窗底下那层被遮罩吃掉，点了没反应）。
@@ -470,7 +502,9 @@ try {
     Pass 1 '客户端窗口出现，书架可见'
 
     # ② 上传一本书
-    Click-Label 2 @('上传教材') '找不到上传按钮'
+    # 只认原生选书框弹出来：四路同时开框时这一下可能在交锁后 3 ms 被别路抢前台吞掉（11-21 04:26 L4），
+    # 框根本没开，Choose-File 干等 20 秒才判失败。没弹框就重定位再点，弹过框以后的失败交给 Choose-File 报。
+    Click-Until-Dialog 2 '上传教材' { (Find-AppWindowByTitle '上传教材') -ne [IntPtr]::Zero }
     if (-not (Choose-File '上传教材' $Book)) { Fail 2 $script:ChooseFileWhy }
     $m = Await-Text 2 'shelf' @('教材已加入书架', '先读') 120
     if (-not $m) { Fail 2 '选了书但 120 秒内书架里没出现这本书' }
@@ -751,11 +785,22 @@ try {
     try { Clear-ExplainConsent $lib } catch { Fail 5 "没能撤掉这本测试书的同意（$_），不进默认节，避免自动发送" }
     $five = $null
     try {
+        # 第 4 步从「看原页」切回「看文字」时，客户端会在后台把视图状态写进 library.sqlite。四路同写会
+        # SQLITE_BUSY：弹「阅读视图暂未保存。切换视图后会再试一次。」、顶栏进度条亮着、工具栏全灰
+        # （11-21 04:15 L1/L2 有这条提示，L3/L4 只剩进度条）。这段窗口里点「开始学」不算数，
+        # 先等提示条消失（最多 20 秒）再点；没有提示条时也借这一帧确认工具栏已经画回来。
+        $settleStop = (Get-Date).AddSeconds(20)
+        while ((Get-Date) -lt $settleStop) {
+            $null = Shot 5 'settle'
+            if (-not (Has $script:Last @('阅读视图暂未保存'))) { break }
+            Start-Sleep -Seconds 2
+        }
         # 入口三下都要看到状态才走下一句：弹窗开了（「这次怎么读」）、底按钮换成「开始边看边学」、弹窗关掉。
         # 弹窗标题「开始学这本教材」里也有「开始学」，所以认按钮时跳过这一行，别把标题当按钮点。
-        Click-Until 5 { param($l) foreach ($line in $l) { if ($line.Text -match '这本教材') { continue }; $m = Find-Text @($line) '开始学'; if ($m) { return $m } } } { param($l) [bool](Find-Text $l '这次怎么读') } '点了「开始学」但开始学的弹窗一直没开'
-        Click-Until 5 { param($l) Find-DialogPath $l '边看边学' } { param($l) [bool](Find-Text $l '开始边看边学') } '点了「边看边学」但底按钮没换成「开始边看边学」'
-        Click-Until 5 { param($l) Find-Text $l '开始边看边学' } { param($l) -not (Find-Text $l '这次怎么读') } '点了「开始边看边学」但弹窗没关'
+        # 写库没完时按钮是灰的、点了不算数，所以每下给 8 次机会、每次隔 2 秒。
+        Click-Until 5 { param($l) foreach ($line in $l) { if ($line.Text -match '这本教材') { continue }; $m = Find-Text @($line) '开始学'; if ($m) { return $m } } } { param($l) [bool](Find-Text $l '这次怎么读') } '点了「开始学」但开始学的弹窗一直没开' -tries 8 -pauseMs 2000
+        Click-Until 5 { param($l) Find-DialogPath $l '边看边学' } { param($l) [bool](Find-Text $l '开始边看边学') } '点了「边看边学」但底按钮没换成「开始边看边学」' -tries 8 -pauseMs 2000
+        Click-Until 5 { param($l) Find-Text $l '开始边看边学' } { param($l) -not (Find-Text $l '这次怎么读') } '点了「开始边看边学」但弹窗没关' -tries 8 -pauseMs 2000
         # 选中经授权的整节：目录 → 滚到序号 → 点 → 收起；核对「本节原文 · 第 N 页」就是授权页，才允许发请求
         Start-Sleep -Seconds 4
         Click-Label 5 @('目录') '找不到「目录」'; Start-Sleep -Seconds 3

@@ -554,6 +554,9 @@ internal fun ImmersiveTocDrawer(
     onToggleBookmark: (Int) -> Unit,
     onReorganizeSections: (() -> Unit)?,
     onClose: () -> Unit,
+    chapterReadStates: Map<String, ChapterReadState> = emptyMap(),
+    lessonChapterId: ((BookLesson, Int) -> String)? = null,
+    onToggleChapterRead: ((BookLesson, Int, Boolean) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
@@ -643,6 +646,8 @@ internal fun ImmersiveTocDrawer(
                                     val active = idx == currentSectionIndex
                                     val depth = (lesson.breadcrumb.count { it == '›' }).coerceAtMost(2)
                                     val indent = (depth * 12).dp
+                                    val chapterId = lessonChapterId?.invoke(lesson, idx) ?: lesson.id
+                                    val isRead = chapterReadStates[chapterId] == ChapterReadState.READ
                                     Row(
                                         Modifier
                                             .fillMaxWidth()
@@ -653,7 +658,7 @@ internal fun ImmersiveTocDrawer(
                                             .padding(start = 10.dp + indent, end = 10.dp, top = 8.dp, bottom = 8.dp)
                                             .testTag("toc-item-$idx"),
                                         verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     ) {
                                         Text(
                                             lesson.title,
@@ -664,6 +669,23 @@ internal fun ImmersiveTocDrawer(
                                             overflow = TextOverflow.Ellipsis,
                                             modifier = Modifier.weight(1f),
                                         )
+                                        if (onToggleChapterRead != null) {
+                                            Text(
+                                                if (isRead) "已读" else "标为已读",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = if (isRead) v7Pine() else colors.fgTertiary,
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                modifier = Modifier
+                                                    .clip(rowShape)
+                                                    .clickable(enabled = !busy, role = Role.Button) {
+                                                        onToggleChapterRead(lesson, idx, !isRead)
+                                                    }
+                                                    .pointerHoverIcon(PointerIcon.Hand)
+                                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                                                    .testTag("toc-read-toggle-$idx"),
+                                            )
+                                        }
                                         Text(
                                             "${lesson.firstPage}",
                                             style = MaterialTheme.typography.labelSmall,

@@ -71,6 +71,7 @@ internal fun SingleBookCompanionPanel(
     onAskAboutText: (String) -> Unit,
     onOpenLogin: () -> Unit,
     onInputFocusChanged: (Boolean) -> Unit = {},
+    bottomContent: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
@@ -362,6 +363,7 @@ internal fun SingleBookCompanionPanel(
                         }
                     }
                 }
+                bottomContent?.invoke()
             }
             if (scroll.maxValue > 0) {
                 BookScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 6.dp))

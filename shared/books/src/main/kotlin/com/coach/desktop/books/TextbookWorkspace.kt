@@ -67,9 +67,32 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     onNewBooklist: () -> Unit = {},
     onOpenCollection: (CollectionSummary) -> Unit = {},
     onPickCourseFiles: (suspend () -> List<Path>)? = null,
+    onPickBooklistFiles: (suspend () -> List<Path>)? = null,
     chooseBook: suspend () -> Path?) {
     val explainer = remember(controller.library) { BookExplainer(library = controller.library) }
     val aiEnabled = LocalReadingAiExplain.current
+    val currentAiEnabled by rememberUpdatedState(aiEnabled)
+    val booklistJudge = remember(explainer) {
+        RemoteBooklistSemanticJudge(
+            explainer = explainer,
+            allowRemote = { currentAiEnabled },
+        )
+    }
+    DisposableEffect(controller, booklistJudge, aiEnabled) {
+        controller.allowRemoteBooklistAi = { currentAiEnabled }
+        val desiredJudge: ConceptSemanticJudge = if (aiEnabled) booklistJudge else HeuristicConceptSemanticJudge
+        val existing = controller.conceptSemanticJudge
+        if (existing == null || existing === booklistJudge || existing === HeuristicConceptSemanticJudge) {
+            controller.conceptSemanticJudge = desiredJudge
+        }
+        onDispose {
+            controller.allowRemoteBooklistAi = { true }
+            val installed = controller.conceptSemanticJudge
+            if (installed === booklistJudge || installed === HeuristicConceptSemanticJudge) {
+                controller.conceptSemanticJudge = null
+            }
+        }
+    }
     val bookStructureProvider = remember(explainer, aiEnabled) {
         BookStructureProvider { _, candidates, bookPages ->
             if (!explainer.loaded) explainer.load()
@@ -261,7 +284,39 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 com.coach.ui.v7.CoachLoadingDots(label = "正在打开书架…")
                             }
                         }
-                        ui.screen == BookScreen.HOME || (book == null && ui.screen != BookScreen.REVIEWS && ui.screen != BookScreen.REVIEWING && ui.screen != BookScreen.COURSE) -> LibraryHome(
+                        ui.screen == BookScreen.BOOKLIST && ui.activeBooklistId != null -> {
+                            val activeBooklist = ui.collections.firstOrNull { it.record.id == ui.activeBooklistId }
+                            if (activeBooklist == null) {
+                                LaunchedEffect(ui.activeBooklistId) { controller.back() }
+                            } else {
+                                BooklistScreen(
+                                    collection = activeBooklist,
+                                    catalog = ui.catalog,
+                                    library = controller.library,
+                                    aligning = ui.booklistAligning,
+                                    busy = ui.busy,
+                                    revision = ui.booklistRevision,
+                                    onBack = { run { controller.back() } },
+                                    onOpenBook = { bookId, targetPage -> run { controller.openBook(bookId, targetPage) } },
+                                    onAddBooks = { existingIds, newFiles ->
+                                        controller.addBooksToBooklist(
+                                            collectionId = activeBooklist.record.id,
+                                            existingBookIds = existingIds,
+                                            newFiles = newFiles,
+                                            onStaged = { newFiles.forEach(releasePickedBook) },
+                                        )
+                                    },
+                                    onPickFiles = {
+                                        if (onPickBooklistFiles != null) onPickBooklistFiles()
+                                        else chooseBook()?.let(::listOf).orEmpty()
+                                    },
+                                    onRealign = { controller.launchBooklistAlignment(activeBooklist.record.id) },
+                                    onMuteConcept = { conceptId, muted -> controller.setConceptMuted(conceptId, muted) },
+                                    onSaveSharedNote = { conceptId, note -> controller.saveConceptSharedNote(conceptId, note) },
+                                )
+                            }
+                        }
+                        ui.screen == BookScreen.HOME || (book == null && ui.screen != BookScreen.REVIEWS && ui.screen != BookScreen.REVIEWING && ui.screen != BookScreen.COURSE && ui.screen != BookScreen.BOOKLIST) -> LibraryHome(
                             ui = ui,
                             onImport = {
                                 scope.launch {
@@ -411,6 +466,18 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 },
                                 onEnsureUnstructuredSectioned = {
                                     ui.book?.let { target -> run { controller.ensureUnstructuredBookSectioned(target.id, bookStructureProvider) } }
+                                },
+                                onRecordPageDwell = { bId, nodeId, p, total, dwellMs ->
+                                    controller.recordPageDwell(bId, nodeId, p, total, dwellMs)
+                                },
+                                onToggleChapterRead = { bId, nodeId, total, read ->
+                                    controller.setChapterManualReadState(bId, nodeId, total, read)
+                                },
+                                onMuteConcept = { conceptId ->
+                                    controller.setConceptMuted(conceptId, true)
+                                },
+                                onOpenCrossBookPage = { targetBookId, targetPage, _ ->
+                                    run { controller.openBook(targetBookId, targetPage) }
                                 },
                                 hinge = hinge,
                                 onExportNotes = onExportNotes,

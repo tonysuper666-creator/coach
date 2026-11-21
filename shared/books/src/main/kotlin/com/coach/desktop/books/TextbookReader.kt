@@ -106,6 +106,8 @@ internal fun TextbookReader(
     ui: LibraryUi, library: TextbookLibrary, support: BookLearningSupport, practiceSource: PracticeSource?,
     pageFocus: FocusRequester, onNoteSession: (ReaderSession?) -> Unit, onPage: (Int) -> Unit, onBack: () -> Unit,
     onLearn: () -> Unit, explainProvider: BookExplainer? = null, openPairing: Boolean = false,
+    resumeDraft: ChapterPracticeDraft? = null,
+    onPracticeDraftChange: ((ChapterPracticeDraft, Int) -> Unit)? = null,
     onCancelImport: () -> Unit = {},
     onReorganizeSections: (() -> Unit)? = null,
     onSaveSectionQuiz: ((BookLesson, Int, Practice, PracticeAnswer) -> Unit)? = null,
@@ -371,12 +373,43 @@ internal fun TextbookReader(
     }
     var pageFocused by remember { mutableStateOf(false) }
     var tocOpen by remember(book.id) { mutableStateOf(false) }
-    var companionOpen by remember(book.id, openPairing) { mutableStateOf(openPairing) }
-    var companionTab by remember(book.id) { mutableStateOf(ReaderCompanionTab.EXPLAIN) }
+    val initialCompanionOpen = openPairing || (ui.source == null && resumeDraft?.companionOpen == true && resumeDraft.hasMeaningfulDraft())
+    val initialCompanionTab = remember(book.id, resumeDraft?.companionTab) {
+        ReaderCompanionTab.entries.firstOrNull { it.name.equals(resumeDraft?.companionTab, ignoreCase = true) }
+            ?: ReaderCompanionTab.EXPLAIN
+    }
+    var companionOpen by remember(book.id, openPairing) { mutableStateOf(initialCompanionOpen) }
+    var companionTab by remember(book.id) { mutableStateOf(initialCompanionTab) }
     var askInputFocused by remember(book.id) { mutableStateOf(false) }
+    var practiceInputFocused by remember(book.id) { mutableStateOf(false) }
+    val currentChapterGroup = remember(book.id, book.lessons, currentSectionIndex) {
+        ChapterCompanionGrouping.groupForSection(book, currentSectionIndex)
+    }
+    var practiceDraft by remember(book.id, currentChapterGroup?.chapterId) {
+        val nodeId = currentChapterGroup?.chapterId ?: currentSection?.id ?: "p${ui.page}"
+        val restored = resumeDraft?.takeIf { it.bookId == book.id && it.tocNodeId == nodeId }
+            ?: runCatching { library.loadChapterPracticeDraft(book.id, nodeId) }.getOrNull()
+            ?: resumeDraft?.takeIf { it.bookId == book.id && it.hasMeaningfulDraft() }
+            ?: ChapterPracticeDraft(bookId = book.id, tocNodeId = nodeId, page = ui.page)
+        mutableStateOf(restored)
+    }
+    fun persistPracticeDraft(updated: ChapterPracticeDraft) {
+        practiceDraft = updated
+        val pagesTotal = currentChapterGroup?.pageCount ?: book.pages.size.coerceAtLeast(1)
+        if (onPracticeDraftChange != null) {
+            onPracticeDraftChange(updated, pagesTotal)
+        } else {
+            scope.launch(Dispatchers.IO) {
+                runCatching { library.saveChapterPracticeDraft(updated.bookId, updated.tocNodeId, pagesTotal, updated) }
+            }
+        }
+    }
     LaunchedEffect(companionOpen, companionTab) {
         if (!companionOpen || companionTab != ReaderCompanionTab.ASK) {
             askInputFocused = false
+        }
+        if (!companionOpen || companionTab != ReaderCompanionTab.EXPLAIN) {
+            practiceInputFocused = false
         }
     }
     fun closeCompanion() {
@@ -384,12 +417,13 @@ internal fun TextbookReader(
         explainOpen = false
         notesOpen = false
         askInputFocused = false
+        practiceInputFocused = false
         inlineThread = inlineThread?.copy(askingOpen = false)
         focusManager.clearFocus()
     }
     // 仅在输入框真实聚焦或页码/批注/搜索正在输入时屏蔽翻页键，绝不用持久的 inlineThread.askingOpen 锁死键盘。
     val typing = readerTyping(asking, jumpFocused, false, session.noting) ||
-        askInputFocused || searchOpen || searchFocused
+        askInputFocused || practiceInputFocused || searchOpen || searchFocused
     LaunchedEffect(book.id, ui.page, typing, pdfScrolling, companionOpen, tocOpen) {
         if (typing) return@LaunchedEffect
         // A successful request already owns focus. Do not leave another frame's
@@ -984,11 +1018,50 @@ internal fun TextbookReader(
                     HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle)
                 }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
-                    BookExplainPanel(
-                        book, paragraphPage.number, explainConsent, explainer,
-                        selection = explainingSelection, library = library,
-                        onOpenOriginal = handleCitationJump,
-                    )
+                    if (explainingSelection != null) {
+                        BookExplainPanel(
+                            book, paragraphPage.number, explainConsent, explainer,
+                            selection = explainingSelection, library = library,
+                            onOpenOriginal = handleCitationJump,
+                        )
+                    } else {
+                        SingleBookCompanionPanel(
+                            book = book,
+                            currentPage = paragraphPage.number,
+                            currentSectionIndex = currentSectionIndex,
+                            explainer = explainer,
+                            library = library,
+                            draft = practiceDraft,
+                            onDraftChange = { persistPracticeDraft(it) },
+                            onOpenAnchor = { anchor ->
+                                val targetPage = book.page(anchor.pdfPage)
+                                val exactPassage = if (targetPage != null &&
+                                    anchor.startUtf16 in 0 until anchor.endUtf16 &&
+                                    anchor.endUtf16 <= targetPage.text.length &&
+                                    targetPage.text.substring(anchor.startUtf16, anchor.endUtf16) == anchor.quoteAnchor
+                                ) {
+                                    BookPassage(book.id, anchor.pdfPage, anchor.startUtf16, anchor.endUtf16, anchor.quoteAnchor)
+                                } else null
+                                if (exactPassage != null) {
+                                    handleCitationJump(exactPassage)
+                                } else {
+                                    turnTo(anchor.pdfPage)
+                                }
+                            },
+                            onCommitQuizAnswer = { sec, qIdx, prac, ans ->
+                                onSaveSectionQuiz?.invoke(sec, qIdx, prac, ans)
+                            },
+                            onAskAboutText = { promptText ->
+                                companionTab = ReaderCompanionTab.ASK
+                                inlineDraft = promptText
+                            },
+                            onOpenLogin = {
+                                if (onRelogin != null) onRelogin(if (explainer.revoked) "授权已撤销，请重新登录。" else null)
+                                else companionTab = ReaderCompanionTab.EXPLAIN
+                            },
+                            onInputFocusChanged = { practiceInputFocused = it },
+                        )
+                    }
                 }
             }
         }

@@ -315,6 +315,10 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library, learningSupport,
                             practiceSource = practiceSource, pageFocus = readerFocus, explainProvider = explainer,
                             openPairing = openPairing,
+                            resumeDraft = ui.activePracticeDraft?.takeIf { it.bookId == book?.id },
+                            onPracticeDraftChange = { draft, pagesTotal ->
+                                controller.saveChapterPracticeDraft(draft, pagesTotal)
+                            },
                             onCancelImport = controller::cancelImport,
                             onReorganizeSections = { run { controller.reorganizeSections() } },
                             onSaveSectionQuiz = { lesson, qIdx, practice, answer ->

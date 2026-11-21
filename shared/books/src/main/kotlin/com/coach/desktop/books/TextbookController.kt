@@ -46,6 +46,8 @@ internal data class LibraryUi(
     val pendingMultiDrop: PendingMultiDrop? = null,
     /** 最近一次单文件导入直达正文首页的耗时（毫秒），供性能回归核验（<3000ms）。 */
     val lastImportDurationMs: Long? = null,
+    /** 当前书最近落盘的伴读练习草稿（`book_chapter_progress.practice_draft_json`），供首页「继续」精确续接。 */
+    val activePracticeDraft: ChapterPracticeDraft? = null,
 )
 
 internal class TextbookController(val library: TextbookLibrary, var structureProvider: BookStructureProvider? = null) {
@@ -123,6 +125,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         indexing = current.indexing,
                         pendingMultiDrop = current.pendingMultiDrop,
                         lastImportDurationMs = current.lastImportDurationMs,
+                        activePracticeDraft = snap.activePracticeDraft,
                     )
                 }
             }
@@ -706,6 +709,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             val todayQueue = library.reviewQueue()
             val pathSaved = library.learningPath(book.id) != null
             val ladder = library.ladder(book.id)
+            val draft = library.latestChapterPracticeDraft(book.id)
             mutable.update { current ->
                 LibraryUi(
                     catalog = catalog, book = book, collections = collections, page = book.readingPage, busy = true,
@@ -715,6 +719,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     initialized = true, indexing = current.indexing,
                     pendingMultiDrop = current.pendingMultiDrop,
                     lastImportDurationMs = current.lastImportDurationMs,
+                    activePracticeDraft = draft,
                 )
             }
         }
@@ -741,23 +746,29 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             val todayQueue = library.reviewQueue()
             val pathSaved = library.learningPath(book.id) != null
             val ladder = library.ladder(book.id)
+            val draft = library.latestChapterPracticeDraft(book.id)
+            val resumePage = if (targetPage == null && draft != null && draft.hasMeaningfulDraft() && book.page(draft.page) != null) {
+                draft.page
+            } else book.readingPage
+            val activeBook = if (resumePage != book.readingPage) book.copy(readingPage = resumePage) else book
             mutable.update { current ->
                 current.copy(
                     catalog = catalog,
                     collections = collections,
-                    book = book,
+                    book = activeBook,
                     screen = BookScreen.READER,
                     prompt = null,
                     source = null,
-                    page = book.readingPage,
+                    page = activeBook.readingPage,
                     review = null,
                     reviews = reviews,
                     todayQueue = todayQueue,
-                    learningPath = restoredPath(book),
+                    learningPath = restoredPath(activeBook),
                     learningPathSaved = pathSaved,
                     questionsOpen = false,
                     ladder = ladder,
                     initialized = true,
+                    activePracticeDraft = draft,
                 )
             }
         }
@@ -777,10 +788,34 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
 
     private fun openReading(book: Textbook) {
         library.closeReview()
-        library.saveOpenSession(book.id, "READER")
-        mutable.update { it.copy(review = null, questionsOpen = false,
-            screen = BookScreen.READER, page = book.readingPage, source = null,
-            prompt = null, initialized = true) }
+        val draft = library.latestChapterPracticeDraft(book.id)
+        val resumePage = if (draft != null && draft.hasMeaningfulDraft() && book.page(draft.page) != null) {
+            draft.page
+        } else book.readingPage
+        val activeBook = if (resumePage != book.readingPage) {
+            book.copy(readingPage = resumePage).also { library.save(it) }
+        } else book
+        library.saveOpenSession(activeBook.id, "READER")
+        mutable.update { it.copy(book = activeBook, review = null, questionsOpen = false,
+            screen = BookScreen.READER, page = activeBook.readingPage, source = null,
+            prompt = null, initialized = true, activePracticeDraft = draft) }
+    }
+
+    /** 实时持久化单书伴读与练习草稿到 `book_chapter_progress.practice_draft_json`，退出后点「继续」精确恢复。 */
+    fun saveChapterPracticeDraft(draft: ChapterPracticeDraft, pagesTotal: Int) {
+        val nodeId = draft.tocNodeId.ifBlank { "p${draft.page}" }
+        val normalized = draft.copy(tocNodeId = nodeId, updatedAt = System.currentTimeMillis())
+        mutable.update { current ->
+            if (current.book?.id == normalized.bookId) current.copy(activePracticeDraft = normalized) else current
+        }
+        val saveJob = backgroundScope.launch {
+            pageSaveLock.withLock {
+                runCatching {
+                    library.saveChapterPracticeDraft(normalized.bookId, normalized.tocNodeId, pagesTotal, normalized)
+                }
+            }
+        }
+        pendingPageSaveJob = saveJob
     }
 
     suspend fun read() = action { mutable.value.book?.let { openReading(it) } }

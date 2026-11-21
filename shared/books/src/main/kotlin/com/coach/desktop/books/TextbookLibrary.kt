@@ -47,6 +47,7 @@ internal data class StartupLoadSnapshot(
     val ladder: LadderSession,
     val todayQueue: LocalReviewQueue = LocalReviewQueue(emptyList(), 0),
     val collections: List<CollectionSummary> = emptyList(),
+    val activePracticeDraft: ChapterPracticeDraft? = null,
 )
 
 /** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
@@ -281,7 +282,8 @@ internal class TextbookLibrary(
         val todayQueue = reviewStore.queue(db)
         val collections = collectionSummaries(db)
         val ladder = loadedBook?.let { ladder(db, it.id) } ?: LadderSession()
-        StartupLoadSnapshot(catalog, active, session, loadedBook, learningPath, reviews, ladder, todayQueue, collections)
+        val activeDraft = loadedBook?.let { ChapterProgressStore.latestPracticeDraft(db, it.id) }
+        StartupLoadSnapshot(catalog, active, session, loadedBook, learningPath, reviews, ladder, todayQueue, collections, activeDraft)
     }
 
     @Synchronized fun pageTextLayout(bookId: String, page: Int): PageTextLayout? = database().use { db ->
@@ -1974,6 +1976,26 @@ internal class TextbookLibrary(
 
     @Synchronized fun saveSectionGuide(bookId: String, sectionId: String, guide: CachedSectionGuide) = database().use { db ->
         BookStructureStore.saveGuide(db, bookId, sectionId, guide)
+    }
+
+    @Synchronized fun saveChapterPracticeDraft(bookId: String, tocNodeId: String, pagesTotal: Int, draft: ChapterPracticeDraft) = database().use { db ->
+        ChapterProgressStore.savePracticeDraft(db, bookId, tocNodeId, pagesTotal, draft)
+    }
+
+    @Synchronized fun loadChapterPracticeDraft(bookId: String, tocNodeId: String): ChapterPracticeDraft? = database().use { db ->
+        ChapterProgressStore.loadPracticeDraft(db, bookId, tocNodeId)
+    }
+
+    @Synchronized fun latestChapterPracticeDraft(bookId: String): ChapterPracticeDraft? = database().use { db ->
+        ChapterProgressStore.latestPracticeDraft(db, bookId)
+    }
+
+    @Synchronized fun cachedChapterCompanion(bookId: String, chapterId: String): BookCompanionPack? = database().use { db ->
+        ChapterProgressStore.loadCachedPack(db, bookId, chapterId)
+    }
+
+    @Synchronized fun saveChapterCompanion(bookId: String, chapterId: String, pack: BookCompanionPack) = database().use { db ->
+        ChapterProgressStore.saveCachedPack(db, bookId, chapterId, pack)
     }
 
     /** 节末可选选择题作答：写入本地答案、错题/猜的复习队列与知识小结梯。 */

@@ -644,6 +644,7 @@ class BridgeClient(
 
     companion object {
         const val CLAUDE = "claude-sonnet-5-5"
+        const val HAIKU = "claude-haiku-5-5"
         const val CODEX = "gpt-6.1-sol"
     }
 }

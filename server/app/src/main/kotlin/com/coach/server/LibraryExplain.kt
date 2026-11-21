@@ -134,8 +134,16 @@ internal fun libraryExplainRequest(input: JsonObject): LibraryExplainRequest {
     return LibraryExplainRequest.selected(quote, selected)
 }
 
-fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanation?, library: ReaderLibrary? = null,
-    imports: ImportedBookSources? = null, friends: FriendAccess? = null) {
+fun Application.libraryExplainRoutes(
+    actor: LedgerActor,
+    reader: ReaderExplanation?,
+    library: ReaderLibrary? = null,
+    imports: ImportedBookSources? = null,
+    friends: FriendAccess? = null,
+    companionPipeline: SectionConcurrentCompanionPipeline? = null,
+    tokenLedger: BookTokenLedger? = null,
+) {
+    val companionJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     routing {
         post("/v1/library/explain") { call.withReaderConnection {
             val friend = call.attributes.getOrNull(observedFriend)
@@ -217,5 +225,94 @@ fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanati
             reader?.cancel(call.attributes[observedDevice], "library", input?.str("requestId").orEmpty())
             call.respondText("{}", ContentType.Application.Json)
         }
+        post("/v1/library/companion/chapter") { call.withReaderConnection {
+            val friend = call.attributes.getOrNull(observedFriend)
+            val pipeline = companionPipeline
+                ?: return@withReaderConnection call.respondText(
+                    json("error" to "章节伴读管线暂未开启，请稍后重试。").toString(),
+                    ContentType.Application.Json,
+                    HttpStatusCode.ServiceUnavailable,
+                )
+            try {
+                val channel = call.receiveChannel()
+                val bytes = ByteArray(524_289)
+                var size = 0
+                while (size < bytes.size) {
+                    val n = channel.readAvailable(bytes, size, bytes.size - size)
+                    if (n < 0) break
+                    size += n
+                }
+                if (size > 524_288) throw MockError(HttpStatusCode.PayloadTooLarge, "章节请求体过大，请按节拆开后重试。")
+                val input = LedgerJson.parseToJsonElement(bytes.decodeToString(0, size)).jsonObject
+                val req = parseCompanionChapterRequest(input)
+                if (friend != null && input["localSource"] == null) {
+                    throw MockError(HttpStatusCode.Forbidden, "请先导入自己的书，再生成章节伴读。")
+                }
+                val bypassCache = (input["bypassCache"] as? JsonPrimitive)?.booleanOrNull == true
+                val pack = pipeline.generateChapter(req, bypassCache = bypassCache)
+                call.respondText(
+                    ChapterCompanionCodec.encode(pack).toString(),
+                    ContentType.Application.Json,
+                )
+            } catch (e: MockError) {
+                call.respondText(json("error" to e.message).toString(), ContentType.Application.Json, e.status)
+            } catch (e: IllegalArgumentException) {
+                call.respondText(json("error" to (e.message ?: "章节伴读请求格式不对。")).toString(), ContentType.Application.Json, HttpStatusCode.BadRequest)
+            } catch (_: kotlinx.serialization.SerializationException) {
+                call.respondText(json("error" to "章节伴读请求格式不对。").toString(), ContentType.Application.Json, HttpStatusCode.BadRequest)
+            } catch (_: Exception) {
+                call.respondText(json("error" to "章节伴读生成暂时不可用，请稍后重试。").toString(), ContentType.Application.Json, HttpStatusCode.ServiceUnavailable)
+            }
+        } }
+        get("/v1/library/companion/ledger") {
+            if (call.attributes.getOrNull(observedFriend) != null) {
+                return@get call.respondText(json("error" to "无权读取全站账本。").toString(), ContentType.Application.Json, HttpStatusCode.Forbidden)
+            }
+            val ledger = tokenLedger
+                ?: return@get call.respondText(json("error" to "账本尚未初始化。").toString(), ContentType.Application.Json, HttpStatusCode.ServiceUnavailable)
+            val bookId = call.request.queryParameters["bookId"]?.trim().orEmpty()
+            if (!Regex("[0-9a-f]{64}|[A-Za-z0-9._-]{1,80}").matches(bookId)) {
+                return@get call.respondText(json("error" to "缺少有效的书籍编号。").toString(), ContentType.Application.Json, HttpStatusCode.BadRequest)
+            }
+            call.respondText(ledger.bookSummary(bookId).toJson().toString(), ContentType.Application.Json)
+        }
     }
+}
+
+private fun parseCompanionChapterRequest(input: JsonObject): ChapterCompanionRequest {
+    val bookId = input.str("bookId").trim()
+    val chapterId = input.str("chapterId").trim()
+    val chapterTitle = input.str("chapterTitle").trim()
+    require(Regex("[0-9a-f]{64}|[A-Za-z0-9._-]{1,80}").matches(bookId) && tutorSourceAllowed(bookId)) { "书籍编号格式无效。" }
+    require(chapterId.length in 1..120 && chapterTitle.length in 1..300) { "章节信息不完整。" }
+    val rawSections = input["sections"] as? JsonArray ?: throw IllegalArgumentException("缺少章节小节内容。")
+    require(rawSections.size in 1..48) { "章节小节数量超出上限。" }
+    val sections = rawSections.map { el ->
+        val obj = el as? JsonObject ?: throw IllegalArgumentException("小节格式不对。")
+        val sid = obj.str("sectionId").trim()
+        val title = obj.str("title").trim()
+        val isEx = (obj["isExerciseSection"] as? JsonPrimitive)?.booleanOrNull ?: false
+        require(sid.length in 1..120 && title.length in 1..300) { "小节标题格式不对。" }
+        val blocksArr = obj["blocks"] as? JsonArray ?: throw IllegalArgumentException("小节缺少文本块。")
+        val blocks = blocksArr.map { bEl ->
+            val bObj = bEl as? JsonObject ?: throw IllegalArgumentException("文本块格式不对。")
+            val id = bObj.str("id")
+            val page = (bObj["pdfPage"] as? JsonPrimitive)?.intOrNull
+                ?: id.substringAfter(":p", "").substringBefore(':').toIntOrNull()
+                ?: throw IllegalArgumentException("文本块缺少页码。")
+            val start = (bObj["startUtf16"] as? JsonPrimitive)?.intOrNull
+                ?: id.substringAfterLast(':').toIntOrNull()
+                ?: 0
+            val text = bObj.str("text")
+            require(page in 1..100_000 && start >= 0 && text.isNotBlank() && text.length <= 24_000) { "文本块内容无效。" }
+            SectionBlockInput(id = id, pdfPage = page, startUtf16 = start, text = text)
+        }
+        SectionBatchInput(sectionId = sid, title = title, isExerciseSection = isEx, blocks = blocks)
+    }
+    return ChapterCompanionRequest(
+        bookId = bookId,
+        chapterId = chapterId,
+        chapterTitle = chapterTitle,
+        sections = sections,
+    )
 }

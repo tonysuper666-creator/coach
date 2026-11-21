@@ -32,9 +32,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** 选段浮动工具条的四种动作。 */
+/** 选段浮动工具条的动作：讲讲 / 拆句 / 举个例子 / 换个说法 / 问…。 */
 internal enum class SelectionExplainAction(val label: String, val kind: String, val tag: String) {
     EXPLAIN("讲讲", "explain", "selection-action-explain"),
+    SPLIT("拆句", "split", "selection-action-split"),
     EXAMPLE("举个例子", "example", "selection-action-example"),
     REPHRASE("换个说法", "rephrase", "selection-action-rephrase"),
     ASK("问…", "ask", "selection-action-ask"),

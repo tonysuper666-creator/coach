@@ -273,12 +273,17 @@ internal fun LibraryHome(
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.testTag("home-focus-title"),
                                     )
+                                    val savedDraft = ui.activePracticeDraft?.takeIf {
+                                        it.bookId == focusBook.id && it.hasMeaningfulDraft()
+                                    }
                                     val metaText = buildString {
                                         if (!chapterTitle.isNullOrBlank() && chapterTitle != focusBook.title) {
                                             append(chapterTitle)
                                             append(" · ")
                                         }
-                                        append("上次停在第 ${focusBook.readingPage} / $pageTotal 页")
+                                        val shownPage = savedDraft?.page ?: focusBook.readingPage
+                                        append("上次停在第 $shownPage / $pageTotal 页")
+                                        if (savedDraft != null) append(" · 练习草稿已保存")
                                     }
                                     CoachCardMeta(metaText, Modifier.testTag("home-focus-meta"))
                                 }

@@ -9,6 +9,7 @@
   },
   "tasks": {
     "TEACH": "teaching", "READER_SELECTION": "teaching", "SOURCE_LOOKUP": "teaching", "PREPARE_TEACH": "teaching",
+    "BOOK_SECTION_BATCH": "draft", "BOOK_EXERCISE_HINTS": "draft",
     "gen_mcq": "draft", "repair_mcq_sources": "draft", "gen_constructed": "draft", "repair_constructed_sources": "draft",
     "grade_constructed": "draft", "grade_essay": "draft", "repair_grade": "draft", "repair_essay": "draft", "JOURNAL_SUMMARY": "draft",
     "blind_review": "review", "blind_review_existing": "review", "blind_review_planted": "review",

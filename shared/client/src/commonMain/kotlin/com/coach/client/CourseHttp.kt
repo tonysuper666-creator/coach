@@ -161,6 +161,29 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         http.get("$base/v1/public/status").status.value
     } catch (e: kotlinx.coroutines.CancellationException) { throw e }
       catch (_: Exception) { null }
+    /** 2.0-W2-B: 按节并发批量生成单书章节伴读五模块（要点/读前自测/推导模板/选做练习/章末习题三级提示）。 */
+    suspend fun companionChapter(input: JsonObject): MockReply = try {
+        val response = http.post("$base/v1/library/companion/chapter") {
+            timeout { requestTimeoutMillis = 180_000L; socketTimeoutMillis = 180_000L }
+            setBody(TextContent(input.toString(), ContentType.Application.Json))
+        }
+        if (response.status.value == 401) MockReply(null, "授权已失效，请重新登录学习服务。", statusCode = 401)
+        else {
+            val text = response.bodyAsText()
+            val parsed = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull()
+            val status = response.status.value
+            val code = parsed?.s("code")?.ifBlank { null }
+            when {
+                parsed == null && status != 403 -> MockReply(null, "连不上学习服务，可继续阅读或稍后重试。")
+                response.status.isSuccess() -> MockReply(parsed, null, statusCode = status)
+                status == 429 || code == "daily_quota" || code == "monthly_quota" ->
+                    MockReply(null, "伴读服务暂时繁忙，请稍后再试。", retryable = true, statusCode = status, code = "unavailable")
+                else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "章节伴读暂时不可用，请稍后重试。", statusCode = status, code = code)
+            }
+        }
+    } catch (_: HttpRequestTimeoutException) { MockReply(null, "章节伴读等待超时，请重试。") }
+      catch (e: kotlinx.coroutines.CancellationException) { throw e }
+      catch (_: Exception) { MockReply(null, "连不上学习服务，本地阅读与草稿已保留。") }
     suspend fun cancelLibraryExplain(id: String) {
         runCatching { http.post("$base/v1/library/explain/cancel") {
             setBody(TextContent(buildJsonObject { put("requestId", id) }.toString(), ContentType.Application.Json)) } }

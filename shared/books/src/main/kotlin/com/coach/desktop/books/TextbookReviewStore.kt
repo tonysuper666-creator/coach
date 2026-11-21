@@ -258,6 +258,41 @@ internal class TextbookReviewStore(private val today: () -> Long) {
         if (newAttempt) append(db, old.book, old.lesson, old.mode, answer, "REVIEW", today())
     }
 
+    /** Explicit single-card self-rating: 没记住 -> AGAIN, 记住了 -> GOOD (guessed cards never count as independent GOOD). */
+    fun saveRating(db: Connection, entry: LocalBookReview, rating: FsrsRating, currentAnswer: PracticeAnswer) {
+        val old = checkNotNull(find(db, entry.book, entry.lesson, entry.mode)) { "这道复习题已不在书架中。" }
+        val remembered = rating != FsrsRating.AGAIN && !currentAnswer.guessed
+        val recordedText = currentAnswer.text.ifBlank {
+            if (old.mode == QuestionMode.CHOICE && remembered && old.practice.answer.isNotBlank()) old.practice.answer
+            else if (remembered) "记住了" else "没记住"
+        }
+        val recordedAnswer = currentAnswer.copy(
+            text = recordedText,
+            revealed = true,
+            understood = remembered,
+        )
+        val streak = if (remembered) old.confidentStreak + 1 else 0
+        val next = schedule(db, old, old.book, old.lesson, old.mode, remembered)
+        val extraSource = when {
+            currentAnswer.guessed -> LocalReviewSource.GUESSED.bit
+            !remembered -> if (old.mode == QuestionMode.CHOICE) LocalReviewSource.WRONG.bit else LocalReviewSource.SELF_CHECK.bit
+            else -> 0
+        }
+        val mergedSources = old.sources.fold(extraSource) { bits, source -> bits or source.bit }
+        db.prepareStatement("""UPDATE book_reviews SET answer_text=?,revealed=?,understood=?,guessed=?,completed=?,
+            sources=?,due_day=?,streak=? WHERE book=? AND lesson=? AND mode=?""").use { s ->
+            s.setString(1, recordedAnswer.text); s.setInt(2, 1)
+            s.setInt(3, if (remembered) 1 else 0)
+            s.setInt(4, if (recordedAnswer.guessed) 1 else 0)
+            s.setInt(5, if (remembered) 1 else 0)
+            s.setInt(6, mergedSources)
+            s.setLong(7, next.dueDay); s.setInt(8, streak)
+            s.setString(9, old.book); s.setString(10, old.lesson); s.setString(11, old.mode.name)
+            check(s.executeUpdate() == 1) { "无法保存复习评分。" }
+        }
+        append(db, old.book, old.lesson, old.mode, recordedAnswer, "REVIEW", today())
+    }
+
     fun active(db: Connection): LocalBookReview? = db.createStatement().use { s -> s.executeQuery("""SELECT r.*
         FROM book_reviews r JOIN book_review_position p ON r.book=p.book AND r.lesson=p.lesson AND r.mode=p.mode
         WHERE p.slot=1""").use { r -> if (r.next()) read(db, r) else null } }

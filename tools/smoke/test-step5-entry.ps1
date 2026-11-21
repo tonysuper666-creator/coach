@@ -60,7 +60,14 @@ function Shot([int]$n, [string]$tag) {
     $script:Last = $script:screen
     return , $script:screen
 }
-function Click-At($x, $y) { [void]$script:clicks.Add("$x,$y"); if ($script:onClick) { & $script:onClick } }
+function Click-At($x, $y, [scriptblock]$BeforePress = $null) {
+    if ($BeforePress) {
+        if (-not (& $BeforePress)) { return $false }
+    }
+    [void]$script:clicks.Add("$x,$y")
+    if ($script:onClick) { & $script:onClick }
+    return $true
+}
 function Fail([int]$n, [string]$why) { throw "STEP_FAILED: $why" }
 function Note([string]$m) { }
 # 暗底灰字那一路（放大两倍再认）本文件不跑真缩图，默认认不出。
@@ -424,6 +431,53 @@ Check 'lecture-refusal-matches-ocr-garble' ($r1.Action -eq 'retry' -and $r1.Reas
 Check 'lecture-refusal-second-time-fails-fast' ($r2.Action -eq 'fail' -and [bool]$r2.Reason) "action=$($r2.Action)"
 Check 'lecture-refusal-fails-when-no-retry-button' ($r3.Action -eq 'fail') "action=$($r3.Action)"
 Check 'lecture-body-not-mistaken-for-refusal' ($r4.Action -eq 'none') "action=$($r4.Action)"
+
+# 37. 第 5 步出处跳转后「看原页」点击偶发被吞（08:27Z 冒烟 5-source.png）：
+#     4 秒后仍停在「看原页」要允许补点（最多 3 次），切到「看文字」后绝不回点。
+$srcOrigPage = @(
+    (New-Line 'Coach目录返回学习' 80 30 220 30),
+    (New-Line '看原页' 980 90 90 30)
+)
+$srcTextPage = @(
+    (New-Line 'Coach目录返回学习' 80 30 220 30),
+    (New-Line '看文字' 980 90 90 30)
+)
+$srcRefusalPage = @(
+    (New-Line 'Coach目录返回学习' 80 30 220 30),
+    (New-Line '无法确认原句' 300 200 200 30)
+)
+$sv0 = Resolve-SourceOriginalViewAction $srcOrigPage 0 0.0
+$sv1 = Resolve-SourceOriginalViewAction $srcOrigPage 1 1.5
+$sv2 = Resolve-SourceOriginalViewAction $srcOrigPage 1 4.2
+$sv3 = Resolve-SourceOriginalViewAction $srcOrigPage 3 5.0
+$sv4 = Resolve-SourceOriginalViewAction $srcTextPage 1 5.0
+$sv5 = Resolve-SourceOriginalViewAction $srcRefusalPage 0 0.0
+Check 'source-view-clicks-original-first-time' ($sv0.Action -eq 'click_original' -and [bool]$sv0.Button) "action=$($sv0.Action)"
+Check 'source-view-waits-before-cooldown' ($sv1.Action -eq 'wait') "action=$($sv1.Action)"
+Check 'source-view-retries-original-after-cooldown' ($sv2.Action -eq 'click_original' -and [bool]$sv2.Button) "action=$($sv2.Action)"
+Check 'source-view-stops-at-max-tries' ($sv3.Action -eq 'wait') "action=$($sv3.Action)"
+Check 'source-view-never-reclicks-once-text-visible' ($sv4.Action -eq 'check_page') "action=$($sv4.Action)"
+Check 'source-view-reports-refusal' ($sv5.Action -eq 'refusal') "action=$($sv5.Action)"
+
+# 38. Click-Confirm 支持 -BeforePress：切回学习页后立刻停手，不误点同坐标的「返回书架」；
+#     点落空时重定位再点直至出现「返回书架」。
+$srcLeaveScreen = @((New-Line '返回学习' 115 42 90 30))
+$learnScreen = @((New-Line '返回书架' 115 42 90 30))
+$script:screen = $srcLeaveScreen; $script:Last = $srcLeaveScreen; $script:queue = $null; $script:clicks.Clear(); $script:onClick = $null
+$script:bpCalls = 0
+$okVeto = Click-Confirm 6 { param($l) Find-Text $l '返回学习' } { param($l) [bool](Find-Text $l '返回书架') } -tries 3 -waitSec 1 -pauseMs 1 -BeforePress {
+    $script:bpCalls++
+    $script:screen = $learnScreen; $script:Last = $learnScreen
+    return $false
+}
+Check 'click-confirm-beforepress-vetoes-and-accepts-done' ($okVeto -and $script:clicks.Count -eq 0 -and $script:bpCalls -eq 1) "ok=$okVeto clicks=$($script:clicks.Count) bp=$($script:bpCalls)"
+
+$script:screen = $srcLeaveScreen; $script:Last = $srcLeaveScreen; $script:queue = $null; $script:clicks.Clear()
+$script:onClick = { if ($script:clicks.Count -ge 2) { $script:screen = $learnScreen } }
+$okRetry = Click-Confirm 6 { param($l) Find-Text $l '返回学习' } { param($l) [bool](Find-Text $l '返回书架') } -tries 3 -waitSec 1 -pauseMs 1 -BeforePress {
+    [bool](Find-Text $script:screen '返回学习') -and -not (Find-Text $script:screen '返回书架')
+}
+Check 'click-confirm-beforepress-retries-when-click-drops' ($okRetry -and $script:clicks.Count -eq 2) "ok=$okRetry clicks=$($script:clicks.Count)"
 
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"

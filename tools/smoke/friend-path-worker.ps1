@@ -351,12 +351,17 @@ function Click-Until-Dialog([int]$n, [string]$label, [scriptblock]$IsOpen, [int]
 # 点出处后仍停在「看原页」；L2 点收起只留下 hover 底色，卡片没动。这两下都是幂等切换，
 # 看到状态没变就再点一次是安全的。返回 $true 表示看到了状态；按钮找不到、或点满 $tries 次
 # 都没变，都返回 $false，怎么报由调用方决定（第 7 步要留着后面几步跑完，不能在这里 throw）。
-function Click-Confirm([int]$n, [scriptblock]$Find, [scriptblock]$Done, [int]$tries = 4, [int]$waitSec = 5, [int]$pauseMs = 600) {
+function Click-Confirm([int]$n, [scriptblock]$Find, [scriptblock]$Done, [int]$tries = 4, [int]$waitSec = 5, [int]$pauseMs = 600, [scriptblock]$BeforePress = $null) {
     if (& $Done (Shot $n 'confirm')) { return $true }
     foreach ($try in 1..$tries) {
         $m = & $Find (Shot $n "confirm$try")
         if (-not $m) { return $false }
-        Click-At $m.X $m.Y
+        $pressed = if ($BeforePress) { Click-At $m.X $m.Y -BeforePress $BeforePress } else { $null = Click-At $m.X $m.Y; $true }
+        if (-not $pressed) {
+            if (& $Done $script:Last) { return $true }
+            if ($pauseMs -gt 0) { Start-Sleep -Milliseconds $pauseMs }
+            continue
+        }
         $stop = (Get-Date).AddSeconds($waitSec)
         while ((Get-Date) -lt $stop) {
             if (& $Done (Shot $n "confirm${try}done")) { return $true }
@@ -366,6 +371,30 @@ function Click-Confirm([int]$n, [scriptblock]$Find, [scriptblock]$Done, [int]$tr
         if ($pauseMs -gt 0) { Start-Sleep -Milliseconds $pauseMs }
     }
     return $false
+}
+# 第 5 步出处跳转后切「看原页」：ui.busy 或后台准备导读时单次点击可能被吞，
+# 等满 retryWaitSec 仍停在「看原页」且未见到「看文字」才重点击（最多 maxTries 次）；见到「看文字」后绝不回点。
+function Resolve-SourceOriginalViewAction(
+    $lines,
+    [int]$switchTries = 0,
+    [double]$elapsedSinceClickSec = 0.0,
+    [int]$maxTries = 3,
+    [double]$retryWaitSec = 4.0
+) {
+    if (-not (Find-Text $lines '返回学习')) {
+        return [pscustomobject]@{ Action = 'wait'; Button = $null }
+    }
+    if ((Find-Text $lines '无法确认原句') -or (Find-Text $lines '出处已过期') -or (Find-Text $lines '无法定位')) {
+        return [pscustomobject]@{ Action = 'refusal'; Button = $null }
+    }
+    if (Find-Text $lines '看文字') {
+        return [pscustomobject]@{ Action = 'check_page'; Button = $null }
+    }
+    $original = Find-Text $lines '看原页'
+    if ($original -and $switchTries -lt $maxTries -and ($switchTries -eq 0 -or $elapsedSinceClickSec -ge $retryWaitSec)) {
+        return [pscustomobject]@{ Action = 'click_original'; Button = $original }
+    }
+    return [pscustomobject]@{ Action = 'wait'; Button = $null }
 }
 # 第 4 步「讲讲」在第几：工具条一行是「讲讲」「举个例子」「换个说法」「问…」，
 # 只认和「举个例子」同一行、在它左边的那个，免得点到正文里别的「讲讲」。
@@ -1135,30 +1164,38 @@ try {
             Click-At $sourceBox.X $sourceBox.Y
             $deadline = (Get-Date).AddSeconds(30)
             $verified = $false
-            $switched = $false
+            $switchTries = 0
+            $lastSwitchAt = [datetime]::MinValue
             $problem = '出处没有回到标注页的原文（见 5-source.png）'
             do {
                 $lines = Shot 5 'source'
                 $returned = Find-Text $lines '返回学习'
-                if ($returned) {
-                    if (Has $lines @('无法确认原句', '出处已过期', '无法定位')) {
-                        $problem = '出处页打开了，但原句未能核对（见 5-source.png）'
-                        break
+                $elapsed = if ($switchTries -gt 0) { ((Get-Date) - $lastSwitchAt).TotalSeconds } else { 0.0 }
+                $svAct = Resolve-SourceOriginalViewAction $lines $switchTries $elapsed
+                if ($svAct.Action -eq 'refusal') {
+                    $problem = '出处页打开了，但原句未能核对（见 5-source.png）'
+                    break
+                } elseif ($svAct.Action -eq 'click_original') {
+                    $pressed = Click-At $svAct.Button.X $svAct.Button.Y -BeforePress {
+                        $guard = Shot 5 'source-switch-guard'
+                        [bool](Find-Text $guard '看原页') -and -not (Find-Text $guard '看文字')
                     }
-                    # A saved text view reports a reflowed range, sometimes spanning two PDF pages.
-                    # Switch presentation once, without using the jump field or turning a page.
-                    $original = Find-Text $lines '看原页'
-                    if ($original -and -not $switched) {
-                        Click-At $original.X $original.Y
-                        $switched = $true
-                    } elseif ((Find-Text $lines '看文字') -and (Get-OriginalPageNumber $lines (Join-Path $OutDir '5-source.png')) -eq $sourcePage) {
-                        $verified = $true
-                        break
+                    if ($pressed) {
+                        $switchTries++
+                        $lastSwitchAt = Get-Date
                     }
+                } elseif ($svAct.Action -eq 'check_page' -and (Get-OriginalPageNumber $lines (Join-Path $OutDir '5-source.png')) -eq $sourcePage) {
+                    $verified = $true
+                    break
                 }
                 Start-Sleep -Seconds 1
             } while ((Get-Date) -lt $deadline)
-            if ($returned -and ($verified -or $KeepGoing)) { Click-At $returned.X $returned.Y }
+            if ($returned -and ($verified -or $KeepGoing)) {
+                $null = Click-At $returned.X $returned.Y -BeforePress {
+                    $guard = Shot 5 'source-leave-guard'
+                    [bool](Find-Text $guard '返回学习') -and -not (Find-Text $guard '返回书架')
+                }
+            }
             if (-not $verified) { Fail 5 $problem }
             Pass 5 "授权节（目录第 $LessonNumber 条，第 $LessonPage 页）出了讲解正文和自己的第 $sourcePage 页出处，点出处回到对应原文页"
         } elseif ($res) { Fail 5 "边看边学的讲解没出来，界面说「$($res.Substring(3))」" } else { Fail 5 '150 秒内没有同时看到讲解正文和带页码的出处（见 5-learn.png）' }
@@ -1170,11 +1207,32 @@ try {
     $six = $null
     try {
         $sp = Scroll-Point 0.7 0.6; Scroll-At $sp[0] $sp[1] 30; Start-Sleep -Seconds 1
-        # 第⑤步收尾点出处后停在原文页，顶栏是「返回学习」而不是「返回书架」：先退回做题学再回书架。
-        if (Has (Shot 6 'leave') @('返回学习')) {
-            Click-Label 6 @('返回学习') '无法从本节原文返回做题学页面'
+        # 第⑤步收尾点出处后停在原文页，顶栏是「返回学习」而不是「返回书架」：先确认回到学习页（「返回书架」出现），再点「返回书架」。
+        $leaveLines = Shot 6 'leave'
+        if ((Find-Text $leaveLines '返回学习') -and -not (Find-Text $leaveLines '返回书架')) {
+            $leftSource = Click-Confirm 6 { param($l)
+                if (Find-Text $l '返回书架') { $null } else { Find-Text $l '返回学习' }
+            } { param($l)
+                [bool](Has $l @('返回书架', '上传教材', '全部教材', '做题学', '继续做题学')) -and -not (Find-Text $l '返回学习')
+            } -tries 3 -waitSec 6 -pauseMs 600 -BeforePress {
+                $guard = Shot 6 'leave-guard'
+                [bool](Find-Text $guard '返回学习') -and -not (Find-Text $guard '返回书架')
+            }
+            if (-not $leftSource) { Fail 6 '无法从本节原文返回做题学页面（点了「返回学习」仍停在原文页）' }
         }
-        Click-Label 6 @('返回书架') '无法从学习页返回书架'
+        $onShelf = { param($l) [bool](Has $l @('上传教材', '全部教材', '带来一本教材', '做题学', '继续做题学')) -and -not (Find-Text $l '返回书架') -and -not (Find-Text $l '返回学习') }
+        if (-not (& $onShelf $script:Last)) {
+            if (-not (Await-Text 6 'find' @('返回书架', '上传教材', '全部教材', '带来一本教材', '做题学', '继续做题学') 15)) {
+                Fail 6 '无法从学习页返回书架（屏幕上找不到「返回书架」）'
+            }
+            if (-not (& $onShelf $script:Last)) {
+                $backToShelf = Click-Confirm 6 { param($l) Find-Text $l '返回书架' } $onShelf -tries 3 -waitSec 6 -pauseMs 600 -BeforePress {
+                    $guard = Shot 6 'shelf-guard'
+                    [bool](Find-Text $guard '返回书架')
+                }
+                if (-not $backToShelf) { Fail 6 '无法从学习页返回书架（点了「返回书架」但仍停在学习页）' }
+            }
+        }
         # 书架一屏放不下三条入口：做题学在折叠线以下，得先滚出来再点。
         $path = Find-ShelfPractice 6 'path'
         if (-not $path) {

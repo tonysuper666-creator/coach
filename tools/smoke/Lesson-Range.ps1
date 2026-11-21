@@ -247,3 +247,17 @@ function Find-PracticeOptionClick($lines, [int]$OptAnchorX1, [int]$MinOptY) {
     }
     return $null
 }
+# 一帧 OCR 的内容指纹：只用来回答「这一下滚动到底有没有让画面动」。
+function Get-FrameSignature($lines) {
+    return ((@($lines | ForEach-Object { ($_.Text -replace '\s', '') }) | Where-Object { $_ }) -join '|')
+}
+# 第 6 步作答后「答后讲解 / 出处 / 单题小结」都在折叠线以下，只能往下滚去找。原来的写法给了 10 次
+# 下滚额度，用完立刻反转方向；11-21 07:26 L3 正好在第 10 次才滚到「你选择…本题答案是…重新作答」，
+# 接着 4 帧全在往回滚，把刚露出来的讲解又推回视野外，判成「没有带出处的答后讲解」。
+# 所以下滚不再数次数：只有这一帧和上一帧一模一样（真的滚不动、到底了）才允许回头。
+# 至少滚过 3 次再认「没动」——刚点完选项那一两帧画面本来就可能还没换，别把它当成到底。
+function Resolve-AnsweredScroll([string]$Signature, [string]$PrevSignature, [int]$DownScrolls, [int]$Dir) {
+    if ($Dir -ge 0) { return 2 }
+    if ($DownScrolls -ge 3 -and $Signature -and $Signature -eq $PrevSignature) { return 2 }
+    return -2
+}

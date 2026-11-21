@@ -252,6 +252,27 @@ foreach ($vc in @(
     if (-not $vc.ok) { $fail++ }; $extra++
 }
 
+# 第 6 步作答后的滚屏方向：一路往下，滚不动了才回头。11-21 07:26 L3 是固定 10 次后立刻反转，
+# 而它第 10 次才刚滚到「你选择…本题答案是…重新作答」，随后把讲解和出处又推出视野。
+$answered12 = Resolve-AnsweredScroll 'a1|b2|c3' 'a0|b1|c2' 11 -2
+$answeredBottom = Resolve-AnsweredScroll 'x|y' 'x|y' 6 -2
+$answeredLoading = Resolve-AnsweredScroll 'x|y' 'x|y' 1 -2
+$answeredReverse = Resolve-AnsweredScroll 'x|y' 'x|y' 9 2
+$sigLines = @(
+    [pscustomobject]@{ Text = '你选择： B' },
+    [pscustomobject]@{ Text = '本题答案是： D' }
+)
+foreach ($ac in @(
+    @{ n = 'answered-scroll-stays-down-past-ten'; ok = ($answered12 -eq -2) },
+    @{ n = 'answered-scroll-reverses-only-at-bottom'; ok = ($answeredBottom -eq 2) },
+    @{ n = 'answered-scroll-ignores-early-identical-frames'; ok = ($answeredLoading -eq -2) },
+    @{ n = 'answered-scroll-keeps-direction-after-reverse'; ok = ($answeredReverse -eq 2) },
+    @{ n = 'frame-signature-joins-compact-text'; ok = ((Get-FrameSignature $sigLines) -eq '你选择：B|本题答案是：D') }
+)) {
+    '{0} {1}' -f $(if ($ac.ok) { 'PASS' } else { 'FAIL' }), $ac.n
+    if (-not $ac.ok) { $fail++ }; $extra++
+}
+
 if ($BatchDir) {
     $bStep4 = Join-Path $BatchDir '6-busy-step-4.png'
     $bSec4 = Join-Path $BatchDir '6-sec-4.png'
@@ -275,7 +296,7 @@ if ($BatchDir) {
     }
 }
 
-$total = $cases.Count + 5 + $extra
+$total = $cases.Count + 10 + $extra
 Remove-Item -Recurse -Force $out
 "RESULT $($total - $fail)/$total target=$target"
 exit $(if ($fail) { 1 } else { 0 })

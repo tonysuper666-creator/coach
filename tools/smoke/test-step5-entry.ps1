@@ -13,6 +13,8 @@
 #    再「这次怎么读」下面含「始边」的最低一行（弹窗 chip 在上面，不会误认），最后才用放大两倍的暗字识别；
 #  - 弹窗还在时按钮一时认不出来，就隔一拍重拍等文字恢复或弹窗自己关（-stuckSec），不因一次认不出就 break；
 #    真等到头还认不出才报「认不出来了」，不拿旧坐标再点；
+#  - 弹窗隔一拍才画出来时，等完那一拍也要判 Done；点不动且屏幕上这时才挂出别的状态（写库失败提示），
+#    交给 -StallAction 当场处理一次再确认，不拿旧判断继续点；
 #  - 服务端拒答「回答缺少可核对的页码依据，暂时无法确认」要认（含 OCR 错字「依框，暫时无氵去确认」），
 #    带「再试一次」就先重放一次，第二次还拒就带着原话失败，不干等满 150 秒；
 #  - 追问找标题时见过「思考」就不再往回滚（那会把刚追加的回答推出视野）。
@@ -51,7 +53,9 @@ $script:onClick = $null
 function Shot([int]$n, [string]$tag) {
     if ($script:queue -and $script:queue.Count -gt 0) {
         $script:screen = $script:queue[0]
-        $script:queue = if ($script:queue.Count -gt 1) { @($script:queue[1..($script:queue.Count - 1)]) } else { @() }
+        # 一次直接赋值、别写成 if 表达式的输出：语句输出会把整屏数组拆成一行一行，
+        # 队列里按「一屏」存的用例（一帧 5 行）就会退化成每帧只有一行。
+        if ($script:queue.Count -gt 1) { $script:queue = @($script:queue[1..($script:queue.Count - 1)]) } else { $script:queue = @() }
     }
     $script:Last = $script:screen
     return , $script:screen
@@ -377,7 +381,24 @@ $err = ''
 try { Click-Until 5 $findBlind $done5 '点了「开始边看边学」但弹窗没关' -sec 1 -tries 8 -pauseMs 1 -stuckSec 3 } catch { $err = "$_" }
 Check 'click-until-done-while-waiting' ($script:clicks.Count -eq 1 -and -not $err) "clicks=$($script:clicks.Count) err=$err"
 
-# 34. 第 5 步服务端拒答「回答缺少可核对的页码依据，暂时无法确认。」并给「再试一次」：
+# 34. 弹窗是隔一拍才画出来的：点完 1 秒的那一帧还没有、再等 2 秒的这一帧已经有了。
+#     这一帧必须判 Done，否则又去认「开始学」（弹窗标题「开始学这本教材」也算命中），
+#     下一轮就把刚开的弹窗点没了——11-21 07:22 L1/L4 的 5-entry5p/7p 就是这样。
+$script:screen = $shelf; $script:clicks.Clear(); $script:onClick = $null
+$script:queue = @($shelf, $shelf, $shelf, $dialog)
+Click-Until 5 $find $done '入口没开' -sec 1 -tries 4 -pauseMs 1
+Check 'click-until-done-on-pause-frame-stops-clicking' ($script:clicks.Count -eq 1) "clicks=$($script:clicks.Count)"
+$script:queue = $null
+
+# 35. 点不动是因为屏幕上这时才换了状态（写库失败后挂出的「阅读视图暂未保存」）：
+#     -StallAction 在这一帧上处理一次，处理完按新一帧再确认，不再拿旧判断点第二下。
+$script:screen = $shelf; $script:clicks.Clear(); $script:queue = $null
+$script:stalls = 0
+$stall = { param($l) $script:stalls++; $script:screen = $dialog; return $true }
+Click-Until 5 $find $done '入口没开' -sec 1 -tries 3 -pauseMs 1 -StallAction $stall
+Check 'click-until-stall-action-runs-then-verifies' ($script:clicks.Count -eq 1 -and $script:stalls -eq 1) "clicks=$($script:clicks.Count) stalls=$script:stalls"
+
+# 36. 第 5 步服务端拒答「回答缺少可核对的页码依据，暂时无法确认。」并给「再试一次」：
 #     第一次点它重放，第二次还拒就把原话写进失败，不再干等满 150 秒（11-21 06:37 L1）。
 #     OCR 会读成「依框，暫时无氵去确认」，所以认拒答要按残片和容错骨架认。
 $refusalFull = @(

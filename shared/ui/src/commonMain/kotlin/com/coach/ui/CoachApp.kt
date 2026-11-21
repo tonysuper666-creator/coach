@@ -2,6 +2,9 @@ package com.coach.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
+import com.coach.ui.v7.CoachEmptyScreen
+import com.coach.ui.v7.CoachLoadingScreen
+import com.coach.ui.v7.CoachOfflineBanner
 import com.coach.ui.v7.paperShadow
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.background
@@ -372,15 +375,15 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                             onOpenPractice = { target ->
                                                 if (target == com.coach.client.reviewPracticeTarget(c.sync, c.courseId, run))
                                                     navigation.push(AppEntry(AppPage.REVIEW_PRACTICE, id = target.attemptId, label = "复习这道题"))
-                                            }) else CenterMessage("正在加载课程…")
+                                            }) else CoachLoadingScreen("正在加载课程…")
                                         AppTab.RECORDS -> RecordsScreen(c, current, layout.nav != NavStyle.BottomBar, onOpenMock = { id -> navigation.push(AppEntry(AppPage.MOCK, id = id, label = "模拟考")) }) { id -> openStudy(id, false) }
                                         AppTab.RESOURCES -> ResourcesScreen(c, null, null)
                                     }
-                                    AppPage.WEEK -> if (current != null && page.week != null) com.coach.ui.v7.WeekPage(c, current, ui, weekActions, openKp, page.week) else CenterMessage("暂时无法打开原来的周次，已保留任务。")
+                                    AppPage.WEEK -> if (current != null && page.week != null) com.coach.ui.v7.WeekPage(c, current, ui, weekActions, openKp, page.week) else CoachEmptyScreen("暂时无法打开原来的周次，已保留任务。")
                                     AppPage.STUDY -> current?.kp(page.id)?.let { kp ->
                                         StudyScreen(c, kp, current, ui, page.autoStart, { navigation.back() }, initialDraft, openReference,
                                             if (page.review) null else weekActions, page.review, backLabel = "← ${navigation.entries.getOrNull(navigation.entries.indexOf(page) - 1)?.label ?: page.tab.label}")
-                                    } ?: CenterMessage("正在加载课程…")
+                                    } ?: CoachLoadingScreen("正在加载课程…")
                                     AppPage.MAINLINE -> if (current != null) MainlineScreen(c, current, { navigation.back() },
                                         { openTask(AppPage.MOCK, "模拟考") }, openEssay, weekActions.onReview, directEntry = page.id in setOf("continue", "week-practice"), parentLabel = navigation.parentLabel,
                                         initialWeek = page.week, browseOnly = page.id == "catalog", onBrowseWeek = weekActions::select,
@@ -388,7 +391,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                         onNextSection = { id -> navigation.back(); openKp(id, true) })
                                     AppPage.MOCK -> if (current != null) MockScreen(c, current, { navigation.back() }, page.id.ifEmpty { null }, weekActions.onReview, backLabel = "← ${navigation.parentLabel}")
                                     AppPage.ESSAY -> if (current != null) EssayScreen(c, current, { navigation.back() }, backLabel = "暂离 · ${navigation.parentLabel}")
-                                    AppPage.WEEK_REVIEW -> if (current != null && page.week != null) WeekMistakesScreen(c, current, page.week, "← ${navigation.parentLabel}") { navigation.back() } else CenterMessage("暂时无法打开原来的周次，已保留任务。")
+                                    AppPage.WEEK_REVIEW -> if (current != null && page.week != null) WeekMistakesScreen(c, current, page.week, "← ${navigation.parentLabel}") { navigation.back() } else CoachEmptyScreen("暂时无法打开原来的周次，已保留任务。")
                                     AppPage.SETTINGS -> Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                                         Text("设置", style = MaterialTheme.typography.headlineSmall)
                                         settings()
@@ -478,7 +481,7 @@ internal fun CourseHome(onMock: () -> Unit, onEssay: () -> Unit, onRecords: () -
 
 @Composable
 private fun UnsupportedDestination() {
-    CenterMessage("保留了原来的任务，这个版本暂时无法打开。可以返回，或从今天、课程、书架继续。")
+    CoachEmptyScreen("保留了原来的任务，这个版本暂时无法打开。可以返回，或从今天、课程、书架继续。")
 }
 
 /** Pad 横屏：左讲解、右原文并排。讲解窗格是同一个 movable 内容，从单栏/两栏布局挪过来时保留它的组合状态。 */
@@ -584,14 +587,11 @@ internal const val STARTUP_GRACE_MS = 3_000L
 private fun OfflineBanner(ui: TutorUiState, c: CoachController) {
     if (steadyConnected(ui.connected)) return
     val last = ui.lastSeenAtMs
-    Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
-        Text(
-            if (last == null) "Coach 服务未连接" else "Coach 服务未连接（最后同步 ${c.formatClock(last)}）",
-            Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-            color = MaterialTheme.colorScheme.onErrorContainer,
-            style = MaterialTheme.typography.bodyMedium,
-        )
-    }
+    CoachOfflineBanner(
+        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+        message = if (last == null) "当前离线。本地记录已保留，恢复连接后会继续同步。"
+        else "当前离线。本地记录已保留（最后同步 ${c.formatClock(last)}），恢复连接后会继续同步。",
+    )
 }
 
 /** V7 status labels use plain ink on the current paper/desk; StudyChromeTest checks both actual surfaces. */
@@ -606,11 +606,4 @@ internal fun StatusChip(text: String, color: Color) {
 
 /** 整屏居中的一句说明（未配对、缺课程号这类进不了主界面的情况）。 */
 @Composable
-fun CoachNotice(text: String) = Surface(Modifier.fillMaxSize()) { CenterMessage(text) }
-
-@Composable
-internal fun CenterMessage(text: String) {
-    Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-        Text(text, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
+fun CoachNotice(text: String) = Surface(Modifier.fillMaxSize()) { CoachEmptyScreen(text) }

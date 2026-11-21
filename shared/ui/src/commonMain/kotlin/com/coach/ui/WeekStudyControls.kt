@@ -14,11 +14,14 @@ import com.coach.ui.v7.V7TextButton
 import com.coach.ui.v7.v7FocusRing
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.JsonObject
+import com.coach.ui.v7.CoachErrorBanner
 
 /** UI only owns transient submission state; scope and cursor are ledger facts. */
 class WeekActions(private val c: CoachController, private val scope: CoroutineScope) {
     var busy by mutableStateOf(false); private set
     var error by mutableStateOf<String?>(null); private set
+    /** 上一次没成功的动作：横幅上的「重试」原样再跑一次，不重新选周、不丢已填内容。 */
+    internal var retryAction: (() -> Unit)? = null; private set
     var onOpen: (String?) -> Unit = {}
     var onReview: (Int) -> Unit = {}
     var onPractice: (Int) -> Unit = {}
@@ -41,6 +44,7 @@ class WeekActions(private val c: CoachController, private val scope: CoroutineSc
     private fun run(type: String, payload: JsonObject, after: ((String?) -> Unit)? = null) {
         if (busy) return
         busy = true; error = null
+        retryAction = { run(type, payload, after) }
         scope.launch {
             try {
                 val target = withContext(Dispatchers.IO) {
@@ -50,6 +54,7 @@ class WeekActions(private val c: CoachController, private val scope: CoroutineSc
                     check(receipt.status in setOf("OK", "DUPLICATE")) { receipt.error.orEmpty() }
                     receipt.result.str("target").ifBlank { null }
                 }
+                retryAction = null
                 (after ?: onOpen)(target)
             } catch (e: CancellationException) { throw e }
             catch (_: Exception) { error = "未能更新学习范围，请连接 Coach 服务后重试；若已在别的设备推进，以最新进度为准。" }
@@ -74,7 +79,7 @@ fun WeekPicker(view: CourseView, actions: WeekActions, connected: Boolean) {
             if (view.projection.studyScope != null) DropdownMenuItem(text = { Text("全部课程") }, onClick = { expanded = false; actions.select(0) }, modifier = Modifier.v7FocusRingInside())
         }
     }
-    actions.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
+    actions.error?.let { message -> CoachErrorBanner(message, onRetry = actions.retryAction) }
 }
 
 /**

@@ -25,6 +25,9 @@ import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
+import com.coach.ui.v7.CoachLoadingScreen
+import com.coach.ui.v7.CoachEmptyScreen
+import com.coach.ui.v7.CoachErrorBanner
 
 internal expect fun decodeReaderImage(bytes: ByteArray): ImageBitmap?
 
@@ -72,14 +75,15 @@ internal fun PrivateReaderScreen(reader: ReaderHttp, practice: (@Composable (wee
         val selected = document
         when {
             selected != null -> PrivatePdfDocument(reader, selected, practice = practice) { document = null }
-            catalog is ReaderLoad.Loading -> CenterMessage("正在读取教材目录…")
-            catalog is ReaderLoad.Failed -> Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("教材目录暂时不可用，请检查 Coach 服务连接。")
-                OutlinedButton(onClick = { retry++ }) { Text("重试") }
-            }
+            catalog is ReaderLoad.Loading -> CoachLoadingScreen("正在读取教材目录…")
+            catalog is ReaderLoad.Failed -> CoachErrorBanner(
+                "教材目录暂时打不开，连不上 Coach 服务。已经加进来的书还在，重试只会重新读一次目录。",
+                Modifier.padding(16.dp),
+                onRetry = { retry++ },
+            )
             else -> {
                 val docs = (catalog as ReaderLoad.Ready).value
-                if (docs.isEmpty()) CenterMessage("这门课还没有加入教材。")
+                if (docs.isEmpty()) CoachEmptyScreen("这门课还没有加入教材。")
                 else LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(docs, key = { it.id }) { doc ->
                         Surface(onClick = { document = doc }, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("private-book-${doc.id}"), tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium) {
@@ -106,11 +110,12 @@ internal fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initia
         value = if (response.ok && body != null && version == doc.version) ReaderLoad.Ready(body) else ReaderLoad.Failed
     }
     when (val loaded = state) {
-        ReaderLoad.Loading -> CenterMessage("正在读取上次位置…")
-        ReaderLoad.Failed -> Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("无法读取教材位置，或教材版本已变化。请返回目录重试。")
-            OutlinedButton(onClick = { retry++ }) { Text("重试") }
-        }
+        ReaderLoad.Loading -> CoachLoadingScreen("正在读取上次位置…")
+        ReaderLoad.Failed -> CoachErrorBanner(
+            "读不到上次读到哪儿了，也可能教材换过版本。返回目录再打开一次就行，原来的进度记录还留着。",
+            Modifier.padding(16.dp),
+            onRetry = { retry++ },
+        )
         is ReaderLoad.Ready -> {
             val progress = loaded.value["progress"] as? JsonObject
             val stale = (progress?.get("stale") as? JsonPrimitive)?.booleanOrNull == true ||
@@ -281,10 +286,13 @@ internal fun PrivateSourceReference(reader: ReaderHttp, source: String, anchor: 
                 value = if (document != null && page != null && page in 1..document.pages) ReaderLoad.Ready(document to page) else ReaderLoad.Failed
             }
             when (val result = target) {
-                ReaderLoad.Loading -> CenterMessage("正在定位出处…")
+                ReaderLoad.Loading -> CoachLoadingScreen("正在定位出处…")
                 ReaderLoad.Failed -> Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("无法定位出处：资料未登记、出处不唯一或 Coach 服务暂不可用。", Modifier.testTag("private-citation-failed"))
-                    TextButton(onClick = { retry++ }) { Text("重试") }
+                    CoachErrorBanner(
+                        "找不到这句话在哪一页：资料还没加进来、同一句出现多处，或者暂时连不上 Coach 服务。",
+                        Modifier.padding(horizontal = 16.dp).testTag("private-citation-failed"),
+                        onRetry = { retry++ },
+                    )
                     TextButton(onClick = { opened = false }) { Text("返回题目") }
                 }
                 is ReaderLoad.Ready -> PrivatePdfDocument(reader, result.value.first, result.value.second, anchor) { opened = false }

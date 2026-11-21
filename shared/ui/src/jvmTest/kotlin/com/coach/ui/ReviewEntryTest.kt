@@ -97,7 +97,7 @@ class ReviewEntryTest {
                     onNodeWithTag("navigation-back").performClick()
                     onNodeWithText("每日提醒 08:00").assertDoesNotExist()
                     onNodeWithTag("open-mock").performScrollTo().assertIsDisplayed().performClick()
-                    onNodeWithText("模拟考需要连接 Coach 服务。").assertIsDisplayed()
+                    onNodeWithText("模拟考要用到卷子和判分，连上 Coach 服务才能开始。").assertIsDisplayed()
                     onNodeWithText("← 复习").performClick()
                     onNodeWithTag("open-mock").performScrollTo().assertIsDisplayed()
                     onNodeWithText("1 节到期").performScrollTo().assertIsDisplayed()
@@ -109,11 +109,11 @@ class ReviewEntryTest {
                     onNodeWithText("练同知识点变式", substring = true).assertIsDisplayed()
                     onNodeWithText("已备", substring = true).assertDoesNotExist()
                     onNodeWithText("开始", substring = false).performScrollTo().assertIsDisplayed().performClick()
-                    onNodeWithText("这项复习还没有可用的已核变式", substring = true).assertIsDisplayed()
+                    onNodeWithText("这项复习还没有可用的新题", substring = true).assertIsDisplayed()
                     onNodeWithText("复习这道题").assertDoesNotExist()
                     onNodeWithText("1 节到期").performScrollTo().assertIsDisplayed()
                     onNodeWithTag("open-mock").performScrollTo().assertIsDisplayed().performClick()
-                    onNodeWithText("模拟考需要连接 Coach 服务。").assertIsDisplayed()
+                    onNodeWithText("模拟考要用到卷子和判分，连上 Coach 服务才能开始。").assertIsDisplayed()
                     onNodeWithText("← 复习").performClick()
                 } else {
                     // 已备变式才显示可开始；这一行真的把「这道变式」交给练习宿主，而不是任意考点题。

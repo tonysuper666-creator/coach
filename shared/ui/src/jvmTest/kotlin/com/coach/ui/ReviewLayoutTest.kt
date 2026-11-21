@@ -100,7 +100,7 @@ class ReviewLayoutTest {
                     onNodeWithText("复习 3 题").assertIsNotEnabled()
                     onNodeWithText("存到本机").reveal().performClick()
                     waitUntil(timeoutMillis = 10_000) {
-                        onAllNodesWithText("Coach 服务未连接，下载未完成；已有题仍可练习。").fetchSemanticsNodes().isNotEmpty()
+                        onAllNodesWithText("连不上 Coach 服务，没能存到本机；已经有的题还能接着做。").fetchSemanticsNodes().isNotEmpty()
                     }
                 }
                 onNodeWithTag("open-mainline").assertDoesNotExist()
@@ -142,7 +142,7 @@ class ReviewLayoutTest {
                     onNodeWithTag("study-option-offline-A").reveal().assertIsSelected()
                     onNodeWithText("提交本组答案").reveal().assertIsEnabled()
                 } else {
-                    onNodeWithText("Coach 服务未连接，下载未完成；已有题仍可练习。").reveal()
+                    onNodeWithText("连不上 Coach 服务，没能存到本机；已经有的题还能接着做。").reveal()
                 }
                 onNodeWithTag("open-mock").reveal()
                 onNodeWithText("← 今天").assertIsDisplayed().performClick()

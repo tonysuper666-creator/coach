@@ -46,7 +46,7 @@ class ThreeDestinationNavigationTest {
             runDesktopComposeUiTest(1440, 900) {
                 setContent { CoachApp(controller, dark = dark, settings = { Text("合成提醒设置") }) }
                 if (legacy) {
-                    waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("模拟考需要连接 Coach 服务。").fetchSemanticsNodes().isNotEmpty() }
+                    waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("模拟考要用到卷子和判分，连上 Coach 服务才能开始。").fetchSemanticsNodes().isNotEmpty() }
                     waitForIdle()
                     val stored = sync.mainlineState("SYN", "navigation").getValue("stack").jsonPrimitive.content
                     assertEquals(2, Json.parseToJsonElement(stored).jsonObject.getValue("version").jsonPrimitive.int)
@@ -73,7 +73,7 @@ class ThreeDestinationNavigationTest {
                 // Two real clicks from Today to the existing mock task (one from Course).
                 onNodeWithContentDescription("导航：课程").performClick()
                 onNodeWithTag("course-mock").assertIsDisplayed().performClick()
-                onNodeWithText("模拟考需要连接 Coach 服务。").assertIsDisplayed()
+                onNodeWithText("模拟考要用到卷子和判分，连上 Coach 服务才能开始。").assertIsDisplayed()
                 onAllNodesWithTag("app-navigation").assertCountEquals(0)
                 assertEquals(AppPage.MOCK, AppNavigation.restore(sync.mainlineState("SYN", "navigation").getValue("stack").jsonPrimitive.content)!!.current.page)
                 onNodeWithText("← 课程").performClick()

@@ -91,21 +91,15 @@ internal fun ReadingSettingsPanel(settings: ReadingSettings, isOriginal: () -> B
                 HorizontalDivider(color = if (colors.dark) CoachV7.Dark.menuSep else CoachV7.Light.menuSep)
             }
             SettingRow("字号", "size", ReadingSize.entries, settings.size, { it.label }, sizes, !original,
-                previousRow = { focusSummary() }, nextRow = { focusFont() }, choose = settings::chooseSize)
+                previousRow = { focusGuide() }, nextRow = { focusPaper() }, choose = settings::chooseSize)
             if (original) Text("原版按原书大小显示", style = MaterialTheme.typography.labelSmall, color = colors.fgTertiary)
-            SettingRow("正文字体", "font", ReadingFont.entries, settings.font, { it.label }, fonts, !original,
-                previousRow = { focusSize() }, nextRow = { focusPaper() }, choose = settings::chooseFont)
             SettingRow("纸色", "paper", PaperColor.entries, settings.paper, { it.label }, papers, true,
-                previousRow = { if (!original) focusFont() else focusSummary() }, nextRow = { focusGuide() },
+                previousRow = { if (!original) focusSize() else focusGuide() }, nextRow = { focusGuide() },
                 choose = settings::choosePaper)
-            SettingRow("自动导读", "autoGuide", AutoGuideOption.entries,
+            SettingRow("自动备好导读", "autoGuide", AutoGuideOption.entries,
                 if (settings.autoGuide) AutoGuideOption.ON else AutoGuideOption.OFF, { it.label }, guides, true,
-                previousRow = { focusPaper() }, nextRow = { focusSummary() },
+                previousRow = { focusPaper() }, nextRow = { if (!original) focusSize() else focusPaper() },
                 choose = { settings.chooseAutoGuide(it.enabled) })
-            SettingRow("节末小结", "sectionSummary", AutoGuideOption.entries,
-                if (settings.sectionSummary) AutoGuideOption.ON else AutoGuideOption.OFF, { it.label }, summaries, true,
-                previousRow = { focusGuide() }, nextRow = { if (!original) focusSize() else focusPaper() },
-                choose = { settings.chooseSectionSummary(it.enabled) })
         }
         LaunchedEffect(Unit) { if (original) focusPaper() else focusSize() }
     }

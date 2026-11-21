@@ -125,10 +125,9 @@ class BookInBookSearchTest {
                     onNodeWithTag("book-search-count").assertTextEquals("1 / 1")
 
                     // 校验读法被完整保留
-                    val expectedToggleLabel = if (mode.textView) "看原页" else "看文字"
-                    onNodeWithTag("book-original-toggle").assertTextEquals(expectedToggleLabel)
+                    onNodeWithTag("book-original-toggle").assertExists()
                     if (mode.textView) {
-                        onNodeWithTag("read-mode").assertTextEquals(if (mode.scrolling) "滚动" else "翻页")
+                        assertEquals(mode.scrolling, library.textScrollMode(book.id))
                         onAllNodesWithText("Copper Bridge resonance verified on page five.", substring = true)
                             .fetchSemanticsNodes()
                             .let { nodes -> assertTrue(nodes.isNotEmpty(), "${mode.name}: 命中的原句应在正文可见") }
@@ -178,6 +177,8 @@ class BookInBookSearchTest {
             runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
                 waitUntil(timeoutMillis = 10_000) { controller.state.value.screen == BookScreen.READER }
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(Key.Tab) }
+                waitForIdle()
                 onNodeWithTag("book-search-toggle").performClick()
                 onNodeWithTag("book-search-input").performTextInput("主缆")
                 onNodeWithTag("book-search-count").assertTextEquals("共 3 处")

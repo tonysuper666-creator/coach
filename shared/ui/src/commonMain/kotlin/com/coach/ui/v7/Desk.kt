@@ -88,6 +88,8 @@ fun Desk(
     /** Opt in to a wider paper, for example a reader's two facing pages. */
     paperMaxWidth: Dp = Dp.Unspecified,
     typeMenuExtra: @Composable (() -> Unit) -> Unit = {},
+    showFocusToggle: Boolean = true,
+    scrollDirectory: Boolean = true,
     content: @Composable () -> Unit,
 ) {
     val managed = com.coach.ui.LocalAppManagedNavigation.current
@@ -118,7 +120,13 @@ fun Desk(
         drawerContent = {
             ModalDrawerSheet(Modifier.width(300.dp)) {
                 V7TextButton(onClick = { scope.launch { drawerState.close() } }, ringInside = true) { Text("收起目录") }
-                if (drawerState.isOpen) Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()).testTag("v7-directory-drawer")) { directory() }
+                if (drawerState.isOpen || drawerState.targetValue == DrawerValue.Open) {
+                    if (scrollDirectory) {
+                        Column(Modifier.weight(1f).fillMaxWidth().padding(16.dp).verticalScroll(rememberScrollState()).testTag("v7-directory-drawer")) { directory() }
+                    } else {
+                        Box(Modifier.weight(1f).fillMaxWidth().padding(16.dp).testTag("v7-directory-drawer")) { directory() }
+                    }
+                }
             }
         }) {
     BoxWithConstraints(modifier.fillMaxSize().background(if (focused) colors.surface1 else colors.bgCanvas).testTag("v7-desk")) {
@@ -181,7 +189,7 @@ fun Desk(
                         }
                         if (!focused && hasMargin) Text(if (inner && !marginCollapsed) "收起" else "出处与批注",
                             Modifier.v7FocusRing().clickable { if (inner) marginCollapsed = !marginCollapsed else marginSheet = true }.testTag("v7-margin-toggle"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
-                        Text(if (focused) "退出专心读" else "专心读",
+                        if (showFocusToggle) Text(if (focused) "退出专心读" else "专心读",
                             Modifier.v7FocusRing().clickable { if (onFocus != null) onFocus() else localFocus = !localFocus }.testTag("v7-focus"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                     }
                 }

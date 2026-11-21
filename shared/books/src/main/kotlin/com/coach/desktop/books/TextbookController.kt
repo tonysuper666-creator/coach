@@ -32,6 +32,8 @@ internal data class LibraryUi(
     val ladder: LadderSession = LadderSession(),
     val importing: BookImportProgress? = null,
     val importNotice: BookImportNotice? = null,
+    /** 首次从 SQLite 载入目录和上次会话完成前为 false，避免重开时先闪现「书架还是空的」。 */
+    val initialized: Boolean = false,
 )
 
 internal class TextbookController(val library: TextbookLibrary, var structureProvider: BookStructureProvider? = null) {
@@ -41,9 +43,16 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var activeImport: BookImportControl? = null
     @Volatile private var activeImportJob: Job? = null
+    @Volatile private var pendingPageSaveJob: Job? = null
+    private val pageSaveLock = Mutex()
     fun cancelImport() { activeImport?.cancel() }
     fun dismissImportNotice(id: Long) {
         mutable.update { if (it.importNotice?.id == id) it.copy(importNotice = null) else it }
+    }
+
+    /** 窗口关闭前等待在途页码写入落盘，避免快速退出丢失最后翻到的页码。 */
+    suspend fun flushPendingSaves() {
+        pendingPageSaveJob?.join()
     }
 
     private suspend fun action(showBusy: Boolean = true, block: suspend () -> Unit) = actions.withLock {
@@ -88,8 +97,12 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     screen = restoredScreen,
                     importing = current.importing,
                     importNotice = current.importNotice,
+                    initialized = true,
                 )
             }
+        }
+        if (!mutable.value.initialized) {
+            mutable.update { it.copy(initialized = true) }
         }
         val pending = withContext(Dispatchers.IO) { library.catalog().firstOrNull { it.pendingOcrPages > 0 } }
         if (pending != null && activeImport == null) {
@@ -139,6 +152,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 if (!book.hasPendingOcr) {
                     actions.withLock {
                         library.closeReview()
+                        library.saveOpenSession(book.id, "READER")
                         val catalog = library.catalog()
                         val reviews = library.reviews()
                         val pathSaved = library.learningPath(book.id)
@@ -147,16 +161,19 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                             current.copy(
                                 catalog = catalog,
                                 book = book,
-                                prompt = BookPrompt.IMPORTED,
+                                screen = BookScreen.READER,
+                                prompt = null,
+                                source = null,
                                 page = book.readingPage,
                                 busy = false,
                                 error = null,
                                 reviews = reviews,
                                 review = null,
-                                learningPath = pathSaved?.let { LearningPath.restore(it, book.learning) } ?: LearningPath.QUESTION_FIRST,
+                                learningPath = pathSaved?.let { LearningPath.restore(it, book.learning) } ?: LearningPath.READ,
                                 learningPathSaved = pathSaved != null,
                                 ladder = ladder,
                                 importing = null,
+                                initialized = true,
                             )
                         }
                     }
@@ -181,21 +198,25 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     val reviews = library.reviews()
                     val pathSaved = library.learningPath(book.id)
                     val ladder = library.ladder(book.id)
+                    val stayElsewhere = mutable.value.let { it.screen != BookScreen.HOME && it.book != null && it.book.id != book.id }
+                    if (!stayElsewhere) library.saveOpenSession(book.id, "READER")
                     mutable.update { current ->
-                        val stayElsewhere = current.screen != BookScreen.HOME && current.book != null && current.book.id != book.id
                         current.copy(
                             catalog = catalog,
                             book = if (stayElsewhere) current.book else book,
-                            prompt = if (stayElsewhere) current.prompt else BookPrompt.IMPORTED,
+                            screen = if (stayElsewhere) current.screen else BookScreen.READER,
+                            prompt = null,
+                            source = if (stayElsewhere) current.source else null,
                             page = if (stayElsewhere) current.page else book.readingPage,
                             busy = false,
                             error = null,
                             reviews = reviews,
                             review = if (stayElsewhere) current.review else null,
-                            learningPath = if (stayElsewhere) current.learningPath else (pathSaved?.let { LearningPath.restore(it, book.learning) } ?: LearningPath.QUESTION_FIRST),
+                            learningPath = if (stayElsewhere) current.learningPath else (pathSaved?.let { LearningPath.restore(it, book.learning) } ?: LearningPath.READ),
                             learningPathSaved = if (stayElsewhere) current.learningPathSaved else (pathSaved != null),
                             ladder = if (stayElsewhere) current.ladder else ladder,
                             importing = initialProgress,
+                            initialized = true,
                         )
                     }
                 }
@@ -361,6 +382,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 catalog = catalog, book = book, page = book.readingPage, busy = true, reviews = reviews,
                 learningPath = restoredPath(book), learningPathSaved = pathSaved,
                 ladder = ladder, importing = current.importing, importNotice = current.importNotice,
+                initialized = true,
             )
         }
     }
@@ -368,40 +390,44 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     private fun persist(book: Textbook) {
         library.save(book)
         val latest = library.book(book.id)
-        mutable.update { it.copy(book = latest, catalog = library.catalog()) }
+        mutable.update { it.copy(book = latest, catalog = library.catalog(), initialized = true) }
     }
 
     private fun restoredPath(book: Textbook) = LearningPath.restore(library.learningPath(book.id), book.learning)
 
-    private fun openReading(book: Textbook, promptToLearn: Boolean = false) {
+    private fun openReading(book: Textbook) {
         library.closeReview()
         library.saveOpenSession(book.id, "READER")
         mutable.update { it.copy(review = null, questionsOpen = false,
             screen = BookScreen.READER, page = book.readingPage, source = null,
-            prompt = if (promptToLearn && !book.promptSeen && !book.learning) BookPrompt.AFTER_READING else null) }
+            prompt = null, initialized = true) }
     }
 
-    suspend fun read() = action { mutable.value.book?.let { openReading(it, promptToLearn = true) } }
+    suspend fun read() = action { mutable.value.book?.let { openReading(it) } }
 
     /** An explicit entry changes the walk; the shared continue action restores the saved walk. */
     suspend fun learn(path: LearningPath? = null) = action {
         val book = mutable.value.book ?: return@action
-        // A legacy book with no chosen walk keeps the original start-learning action,
-        // even after ordinary reading. An explicit saved READ still continues reading.
-        val target = path ?: if (library.learningPath(book.id) == null)
-            LearningPath.QUESTION_FIRST else restoredPath(book)
+        val target = path ?: restoredPath(book)
         if (target == LearningPath.READ) {
             if (path != null) library.saveLearningPath(book.id, target.name)
             mutable.update { it.copy(learningPath = target, learningPathSaved = it.learningPathSaved || path != null) }
             openReading(book); return@action
         }
         library.closeReview()
-        mutable.update { it.copy(review = null, learningPath = target, learningPathSaved = it.learningPathSaved || book.learning) }
-        if (!book.learning) mutable.update { it.copy(prompt = BookPrompt.START) }
-        else {
-            library.saveLearningPath(book.id, target.name)
-            openLearning(book, target)
+        mutable.update { it.copy(learningPath = target) }
+        require(book.lessons.isNotEmpty()) {
+            if (book.hasPendingOcr) "这本书还在后台识别文字，请等识别出部分内容后再开始学，或先翻看 PDF 原页。"
+            else "这本书没有可提取或识别出的学习文字。仍可翻看 PDF 原页或图片原件；要开始学，请换用有文字或更清晰的版本后重试。"
         }
+        val readyBook = if (!book.learning) {
+            val enabled = book.copy(learning = true, promptSeen = true)
+            library.save(enabled)
+            enabled
+        } else book
+        library.saveLearningPath(readyBook.id, target.name)
+        mutable.update { it.copy(book = readyBook, review = null, prompt = null, learningPath = target, learningPathSaved = true) }
+        openLearning(readyBook, target)
     }
 
     private fun openLearning(book: Textbook, path: LearningPath = mutable.value.learningPath) {
@@ -454,11 +480,36 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         mutable.update { it.copy(answer = answer) }
     }
 
-    suspend fun page(number: Int) = action {
-        val book = mutable.value.book ?: return@action
-        require(book.page(number) != null) { "页码超出了这本教材的范围。" }
-        if (mutable.value.source == null) persist(book.copy(readingPage = number))
-        mutable.update { it.copy(page = number) }
+    suspend fun page(number: Int) {
+        val current = mutable.value
+        val book = current.book ?: return
+        if (book.page(number) == null) {
+            mutable.update { it.copy(error = "页码超出了这本教材的范围。") }
+            return
+        }
+        val updatingBook = current.source == null
+        val updatedBook = if (updatingBook) book.copy(readingPage = number) else book
+        // 立刻同步更新 UI 页码与内存中的 book.readingPage，绝不重读 620 页 SQLite 导致标题/页码滞后 2–5 秒。
+        mutable.update { state ->
+            if (state.book?.id != book.id) state
+            else state.copy(
+                page = number,
+                book = if (state.source == null) state.book.copy(readingPage = number) else state.book,
+                catalog = if (state.source == null) state.catalog.map { s ->
+                    if (s.id == book.id) s.copy(readingPage = number) else s
+                } else state.catalog,
+                error = null,
+            )
+        }
+        if (updatingBook) {
+            val saveJob = backgroundScope.launch {
+                pageSaveLock.withLock {
+                    runCatching { library.save(updatedBook) }
+                }
+            }
+            pendingPageSaveJob = saveJob
+            saveJob.join()
+        }
     }
 
     suspend fun source() = action {

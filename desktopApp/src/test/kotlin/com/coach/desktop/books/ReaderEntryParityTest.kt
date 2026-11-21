@@ -87,7 +87,7 @@ class ReaderEntryParityTest {
             onNodeWithTag("home-question").performClick()  // 看书已保存为当前走法，「继续」会回到看书；题目出处走显式的「做题学」入口
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             val lesson = controller.state.value.book!!.lessons[controller.state.value.book!!.lessonIndex]
-            val practice = StudyCoachCourse.practice(controller.state.value.book!!, lesson, QuestionMode.CHOICE)!!
+            val practice = com.coach.desktop.books.testPracticeFixture(controller.state.value.book!!, lesson, QuestionMode.CHOICE)!!
             assertEquals(2, lesson.blocks.single { !it.heading }.page, "这一节正文在第 2 页")
             onNodeWithTag("open-practice-source").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && !controller.state.value.busy }
@@ -131,7 +131,7 @@ class ReaderEntryParityTest {
 
             val book = controller.state.value.book!!
             val lesson = book.lessons[book.lessonIndex]
-            val practice = StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE)!!
+            val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
             val selected = practice.options.first { it != practice.answer }
             val index = practice.options.indexOf(selected)
             onNodeWithTag("choice-$index").performScrollTo().performClick()

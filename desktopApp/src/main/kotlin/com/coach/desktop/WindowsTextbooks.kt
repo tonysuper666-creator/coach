@@ -179,8 +179,11 @@ internal fun runWindowsTextbooks() {
         val drafts = rememberAnswerDrafts(controller)
         val exams = rememberLocalExamController(controller.library)
         val scope = rememberCoroutineScope()
-        val saveDrafts: suspend () -> Boolean = remember(drafts, exams) {
-            { drafts.flush() && exams.flush() }
+        val saveDrafts: suspend () -> Boolean = remember(drafts, exams, controller) {
+            {
+                controller.flushPendingSaves()
+                drafts.flush() && exams.flush()
+            }
         }
         val closeGuard = remember(saveDrafts, scope) {
             TextbookCloseGuard(saveDrafts, scope, ::exitApplication)

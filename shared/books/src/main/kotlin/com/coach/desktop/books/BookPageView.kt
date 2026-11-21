@@ -195,6 +195,7 @@ internal fun BookPageView(
     onSelectText: ((SourceBlock?) -> Unit)? = null,
     hardPoints: List<Pair<SectionHardPoint, SourceBlock>> = emptyList(),
     onHardPointClick: ((SectionHardPoint, SourceBlock) -> Unit)? = null,
+    immersive: Boolean = false,
 ) {
     var preview by remember(book.id, libraryDirectory) { mutableStateOf<BookFigurePreview?>(null) }
     preview?.let { BookFigureDialog(it) { preview = null } }
@@ -220,20 +221,24 @@ internal fun BookPageView(
     val clipboard = LocalClipboard.current
     val pageClipboard = remember(clipboard) { PageClipboard(clipboard) }
     val latestOnSelectText by rememberUpdatedState(onSelectText)
-    val topMarginPx = with(density) { 52.dp.toPx() }
-    BoxWithConstraints(modifier.fillMaxSize().testTag("book-page-layout")) {
-        val column = with(density) { (body.fontSize * 33).toDp() }
+    val topMargin = if (immersive) 20.dp else 52.dp
+    val topMarginPx = with(density) { topMargin.toPx() }
+    val paperBg = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
+    BoxWithConstraints(modifier.fillMaxSize().then(if (immersive) Modifier.background(paperBg) else Modifier).testTag("book-page-layout")) {
+        val column = with(density) { (body.fontSize * (if (immersive) 38 else 33)).toDp() }
         val scrolling = readMode == BookReadMode.Scroll
         val spread = !scrolling && bookSpread(maxWidth.value, column.value, mode, state.spread)
         val sheetWidth = when {
+            immersive && spread -> maxWidth / 2
+            immersive -> maxWidth
             !spread -> minOf(maxWidth, column + 128.dp)
             mode == BookPageMode.Spread -> minOf((maxWidth - 48.dp) / 2, column + 112.dp)
             else -> minOf(maxWidth / 2, column + 112.dp)
         }
-        val leftInset = 64.dp
-        val rightInset = if (spread) 48.dp else 64.dp
+        val leftInset = if (immersive) minOf(24.dp, maxWidth * 0.025f) else 64.dp
+        val rightInset = if (immersive) minOf(24.dp, maxWidth * 0.025f) else if (spread) 48.dp else 64.dp
         val widthPx = with(density) { (sheetWidth - leftInset - rightInset).roundToPx().coerceAtLeast(1) }
-        val bodyHeight = with(density) { (maxHeight - 116.dp).roundToPx().coerceAtLeast(1) }
+        val bodyHeight = with(density) { (maxHeight - if (immersive) 40.dp else 116.dp).roundToPx().coerceAtLeast(1) }
         val failed = remember(book.id, libraryDirectory) { mutableStateListOf<BookIllustration>() }
         val layoutPages = remember(book.pages, libraryDirectory, failed.toList()) {
             if (libraryDirectory != null && failed.isEmpty()) book.pages else book.pages.map { page ->
@@ -375,11 +380,11 @@ internal fun BookPageView(
             }
             val viewHeight = maxHeight
             val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
-            val desk = if (colors.dark) CoachV7.Dark.desk else CoachV7.Light.desk
+            val desk = if (immersive) paper else if (colors.dark) CoachV7.Dark.desk else CoachV7.Light.desk
             val scrollInsetPx = with(density) { leftInset.toPx() }
             CompositionLocalProvider(LocalClipboard provides pageClipboard) {
                 SelectionContainer {
-                    ScrollReadView(scrollState, desk = desk, paper = Color.Transparent, gap = 24.dp, handleKeys = false,
+                    ScrollReadView(scrollState, desk = desk, paper = Color.Transparent, gap = if (immersive) 8.dp else 24.dp, handleKeys = false,
                         modifier = Modifier.fillMaxSize().testTag("book-scroll-read"),
                         scrollbar = { BookReadScrollbar(it) }) { index ->
                         val downPos = remember(scrollState) { arrayOf<ScrollReadPosition?>(null) }
@@ -399,7 +404,8 @@ internal fun BookPageView(
                                 val page = pages[index]
                                 val remaining = pages.count { it.chapter == page.chapter } - pages.take(index + 1).count { it.chapter == page.chapter }
                                 BookSheet(book, page, typography, measurer, widthPx, leftInset, remaining, false, 0,
-                                    libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick) { failed.add(it) }
+                                    libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
+                                    topMargin = topMargin) { failed.add(it) }
                             }
                         }
                     }
@@ -451,7 +457,8 @@ internal fun BookPageView(
                                         val remaining = pages.count { it.chapter == page.chapter } - pages.take(first + side + 1).count { it.chapter == page.chapter }
                                         BookSheet(book, page, typography, measurer, widthPx,
                                             if (spread && side == 1) rightInset else leftInset,
-                                            remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick) { failed.add(it) }
+                                            remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
+                                            topMargin = topMargin) { failed.add(it) }
                                     }
                                 }
                             }
@@ -499,7 +506,8 @@ internal fun BookPageView(
                                 val remaining = pages.count { it.chapter == page.chapter } - pages.take(index + 1).count { it.chapter == page.chapter }
                                 BookSheet(book, page, typography, measurer, widthPx,
                                     if (spread && side == 1) rightInset else leftInset,
-                                    remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick) { failed.add(it) }
+                                    remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
+                                    topMargin = topMargin) { failed.add(it) }
                             }
                         }
                     }
@@ -605,12 +613,13 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
     onExpand: (BookFigurePreview) -> Unit,
     hardPoints: List<Pair<SectionHardPoint, SourceBlock>> = emptyList(),
     onHardPointClick: ((SectionHardPoint, SourceBlock) -> Unit)? = null,
+    topMargin: Dp = 52.dp,
     onMissing: (BookIllustration) -> Unit) {
     val density = LocalDensity.current
     val colors = CoachTheme.colors
     val column = with(density) { widthPx.toDp() }
     DisableSelection { if (!page.opener) Text(if (spread && side == 0) book.title else page.title.orEmpty(),
-        Modifier.align(Alignment.TopStart).padding(start = inset, top = 20.dp).width(column),
+        Modifier.align(Alignment.TopStart).padding(start = inset, top = if (topMargin < 44.dp) 8.dp else 20.dp).width(column),
         textAlign = androidx.compose.ui.text.style.TextAlign.Center, color = colors.fgTertiary,
         style = MaterialTheme.typography.labelSmall.copy(fontSize = CoachV7.Size.cap,
             fontWeight = androidx.compose.ui.text.font.FontWeight.Normal, letterSpacing = CoachV7.Tracking.cap), maxLines = 1) }
@@ -628,12 +637,12 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
         if (index == 0 && page.chapterNumber != null) DisableSelection {
             val number = bookChapterDisplayNumber(page.chapterNumber)
             val baseline = measurer.measure(number, typography.number).firstBaseline
-            Text(number, Modifier.padding(start = inset, top = 52.dp + top +
+            Text(number, Modifier.padding(start = inset, top = topMargin + top +
                 with(density) { (layout.firstBaseline - baseline).toDp() }),
                 style = typography.number, color = colors.fgSecondary)
         }
         Text(selectable, style = typography.body, inlineContent = inline,
-            modifier = Modifier.padding(start = inset, top = 52.dp + top).width(column)
+            modifier = Modifier.padding(start = inset, top = topMargin + top).width(column)
                 .semantics {
                     this[BookPageSources] = run.sources
                     // Expose original heading/citation ranges, as the reader did before
@@ -646,7 +655,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
             if (i > 0 || (index > 0 && page.runs[index - 1].sources.last().importPage != source.importPage)) {
                 val y = with(density) { layout.getLineTop(layout.getLineForOffset(offset.coerceAtMost(run.text.lastIndex))).toDp() }
                 DisableSelection { Text(source.importPage.toString(), Modifier.padding(start = if (spread && side == 1) inset + column + 10.dp else 12.dp,
-                    top = 52.dp + top + y).width(36.dp), color = colors.fgSecondary,
+                    top = topMargin + top + y).width(36.dp), color = colors.fgSecondary,
                     style = MaterialTheme.typography.labelSmall, fontFamily = LocalV7Fonts.current.numbers) }
             }
             offset += source.endUtf16 - source.startUtf16
@@ -681,7 +690,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
                     lineTopPx = lastMarkerTopPx + minGapPx
                 }
                 lastMarkerTopPx = lineTopPx
-                val topDp = 52.dp + with(density) { lineTopPx.toDp() }
+                val topDp = topMargin + with(density) { lineTopPx.toDp() }
                 Box(
                     Modifier
                         .padding(start = markerX, top = topDp)
@@ -704,7 +713,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
     for (block in page.visuals) key(book.id, block.item, block.band?.startY) {
         val width = with(density) { block.widthPx.toDp() }
         val left = inset + (column - width) / 2
-        val y = 52.dp + with(density) { block.topPx.toDp() }
+        val y = topMargin + with(density) { block.topPx.toDp() }
         val item = block.item
         var bitmap by remember(libraryDirectory) { mutableStateOf<ImageBitmap?>(null) }
         LaunchedEffect(libraryDirectory, item) {

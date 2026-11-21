@@ -74,7 +74,7 @@ internal fun PrivateReaderScreen(reader: ReaderHttp, practice: (@Composable (wee
             selected != null -> PrivatePdfDocument(reader, selected, practice = practice) { document = null }
             catalog is ReaderLoad.Loading -> CenterMessage("正在读取教材目录…")
             catalog is ReaderLoad.Failed -> Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("教材目录暂时不可用，请检查 Mac 连接。")
+                Text("教材目录暂时不可用，请检查 Coach 服务连接。")
                 OutlinedButton(onClick = { retry++ }) { Text("重试") }
             }
             else -> {
@@ -283,7 +283,7 @@ internal fun PrivateSourceReference(reader: ReaderHttp, source: String, anchor: 
             when (val result = target) {
                 ReaderLoad.Loading -> CenterMessage("正在定位出处…")
                 ReaderLoad.Failed -> Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("无法定位出处：资料未登记、出处不唯一或 Mac 暂不可用。", Modifier.testTag("private-citation-failed"))
+                    Text("无法定位出处：资料未登记、出处不唯一或 Coach 服务暂不可用。", Modifier.testTag("private-citation-failed"))
                     TextButton(onClick = { retry++ }) { Text("重试") }
                     TextButton(onClick = { opened = false }) { Text("返回题目") }
                 }

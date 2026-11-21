@@ -26,7 +26,7 @@ internal fun QuizGroupFooter(group: QuizGroup, kp: KpRow, c: CoachController, vi
                 onClick = {
                     onSubmitted()
                     val sent = c.tutor.answer(thread, c.courseId, group.groupId, group.cards.associate { it.attemptId to chosen.getValue(it.attemptId) }, "ui-${group.groupId}")
-                    if (!sent) c.tutor.model.onFailure(thread, "Mac 未连接，答案没有提交；选择还在，连上后再点提交。")
+                    if (!sent) c.tutor.model.onFailure(thread, "Coach 服务未连接，答案没有提交；选择还在，连上后再点提交。")
                 },
                 enabled = ready,
                 modifier = Modifier.fillMaxWidth().heightIn(min = OPTION_MIN_HEIGHT),

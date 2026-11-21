@@ -97,7 +97,7 @@ class ReviewEntryTest {
                     onNodeWithTag("navigation-back").performClick()
                     onNodeWithText("每日提醒 08:00").assertDoesNotExist()
                     onNodeWithTag("open-mock").performScrollTo().assertIsDisplayed().performClick()
-                    onNodeWithText("模拟考要连接 Mac。").assertIsDisplayed()
+                    onNodeWithText("模拟考需要连接 Coach 服务。").assertIsDisplayed()
                     onNodeWithText("← 复习").performClick()
                     onNodeWithTag("open-mock").performScrollTo().assertIsDisplayed()
                     onNodeWithText("1 节到期").performScrollTo().assertIsDisplayed()
@@ -113,7 +113,7 @@ class ReviewEntryTest {
                     onNodeWithText("复习这道题").assertDoesNotExist()
                     onNodeWithText("1 节到期").performScrollTo().assertIsDisplayed()
                     onNodeWithTag("open-mock").performScrollTo().assertIsDisplayed().performClick()
-                    onNodeWithText("模拟考要连接 Mac。").assertIsDisplayed()
+                    onNodeWithText("模拟考需要连接 Coach 服务。").assertIsDisplayed()
                     onNodeWithText("← 复习").performClick()
                 } else {
                     // 已备变式才显示可开始；这一行真的把「这道变式」交给练习宿主，而不是任意考点题。

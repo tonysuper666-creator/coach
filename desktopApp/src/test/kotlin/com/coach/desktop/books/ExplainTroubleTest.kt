@@ -270,7 +270,7 @@ class ExplainTroubleTest {
     @Test fun answerExplainComesBackAfterRepairingOnTheSourcePage() {
         val (library, book, _) = sample()
         val lesson = book.lessons.first()
-        val practice = assertNotNull(StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE))
+        val practice = assertNotNull(com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE))
         FakeMac().use { mac ->
             val home = Files.createTempDirectory("explain-repair-home-").toRealPath()
             val settings = DesktopConnectionSettings(home, { null }, mac = false,
@@ -319,7 +319,7 @@ class ExplainTroubleTest {
     @Test fun answerExplain401PointsToLoginWhenTheSableEntryIsShown() {
         val (library, book, _) = sample()
         val lesson = book.lessons.first()
-        val practice = assertNotNull(StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE))
+        val practice = assertNotNull(com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE))
         FakeMac().use { mac ->
             val settings = DesktopConnectionSettings(Files.createTempDirectory("explain-sable-401-").toRealPath(), { null }, mac = false,
                 property = { when (it) { "jpackage.app-path" -> "/synthetic/Coach.exe"; "coach.sableLogin" -> "true"; else -> null } })

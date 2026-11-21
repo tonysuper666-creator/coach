@@ -52,7 +52,7 @@ class WeekActions(private val c: CoachController, private val scope: CoroutineSc
                 }
                 (after ?: onOpen)(target)
             } catch (e: CancellationException) { throw e }
-            catch (_: Exception) { error = "未能更新学习范围，请连接 Mac 后重试；若已在别的设备推进，以最新进度为准。" }
+            catch (_: Exception) { error = "未能更新学习范围，请连接 Coach 服务后重试；若已在别的设备推进，以最新进度为准。" }
             finally { busy = false }
         }
     }

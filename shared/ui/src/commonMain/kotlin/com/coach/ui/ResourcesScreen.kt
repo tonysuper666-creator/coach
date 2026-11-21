@@ -70,7 +70,7 @@ fun ResourcesScreen(c: CoachController, jump: SourceJump?, onBack: (() -> Unit)?
             key != null -> PageReader(c, list, key, onPage = { openDoc = it.docId; openPage = it.pdfPage }, onRetry = { attempt++ })
             docs is Load.Pending -> CenterMessage("正在取课程原文…")
             list == null -> Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("取不到课程原文：Mac 没连上，或 Mac 上的服务还没更新到有资料接口。", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("取不到课程原文：Coach 服务未连接，或服务端尚未更新。", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(12.dp))
                 OutlinedButton(onClick = { attempt++ }, modifier = Modifier.heightIn(min = 56.dp)) { Text("重试") }
             }
@@ -121,7 +121,7 @@ private fun PageReader(c: CoachController, docs: List<SourceDoc>?, key: PageKey,
                 }
                 page is Load.Pending -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp) }
                 else -> Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("这一页取不到：Mac 没连上，或 Mac 上的服务还没更新到有资料接口。", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("这一页取不到：Coach 服务未连接，或服务端尚未更新。", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(12.dp))
                     OutlinedButton(onClick = { retry++; onRetry() }, modifier = Modifier.heightIn(min = 56.dp)) { Text("重试") }
                 }

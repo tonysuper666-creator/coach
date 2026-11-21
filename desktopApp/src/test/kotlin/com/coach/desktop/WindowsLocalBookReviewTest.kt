@@ -57,7 +57,7 @@ class WindowsLocalBookReviewTest {
             onNodeWithTag("enable-learning").performClick()
             ready(c) { it.screen == BookScreen.LEARNING }
             book = c.state.value.book!!
-            practice = StudyCoachCourse.practice(book, book.lessons[0], QuestionMode.CHOICE)!!
+            practice = com.coach.desktop.books.testPracticeFixture(book, book.lessons[0], QuestionMode.CHOICE)!!
             wrong = practice.options.first { it != practice.answer }
             onNodeWithTag("choice-${practice.options.indexOf(wrong)}").performScrollTo().performClick()
             ready(c) { it.answer == PracticeAnswer(wrong, true) }

@@ -121,7 +121,7 @@ class MockAutosaveTest {
             mainClock.advanceTimeBy(10_000)
             waitUntil(timeoutMillis = 5000) { mac.choice == 0 }
             settle()
-            onNodeWithText("答案已存到 Mac", substring = true).assertExists()
+            onNodeWithText("答案已保存", substring = true).assertExists()
         }
     }
 
@@ -138,7 +138,7 @@ class MockAutosaveTest {
             mainClock.advanceTimeBy(30_000)
             waitUntil(timeoutMillis = 5000) { mac.choice == 0 }
             settle()
-            onNodeWithText("答案已存到 Mac", substring = true).assertExists()
+            onNodeWithText("答案已保存", substring = true).assertExists()
         }
     }
 

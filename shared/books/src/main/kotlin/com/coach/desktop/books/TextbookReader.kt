@@ -35,6 +35,9 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
@@ -50,13 +53,10 @@ import androidx.compose.ui.unit.sp
 import coach.design.tokens.CoachV7
 import com.coach.ui.adaptive.Hinge
 import com.coach.ui.theme.CoachTheme
-import com.coach.ui.v7.Desk
+import com.coach.ui.v7.LocalDeskTypeControl
 import com.coach.ui.v7.LocalV7Fonts
-import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.V7TextButton
-import com.coach.ui.v7.V7Tooltip
-import com.coach.ui.v7.v7FocusRing
 import com.coach.desktop.reader.ReaderSession
 import com.coach.desktop.reader.ReaderDraftScope
 import com.coach.desktop.reader.NotesSection
@@ -187,9 +187,8 @@ internal fun TextbookReader(
     val learnableSelection = chosen?.takeIf { it.text.trim().length <= 4_000 }
     val explainer = remember(library, explainProvider) { explainProvider ?: BookExplainer(library = library) }
     val explainConsent = remember(library) { ExplainConsent(library.directory) }
-    var consented by remember(book.id) { mutableStateOf(explainConsent.allowed(book.id)) }
+    val aiEnabled = LocalReadingAiExplain.current
     val autoGuide = LocalReadingAutoGuide.current
-    val sectionSummaryEnabled = LocalReadingSectionSummary.current
     val allBookBlocks = remember(book.id, book.pages, book.structure) { book.sourceBlocks() }
     val pageRole = remember(book.id, book.structure, allBookBlocks, ui.page) {
         book.structure?.pageRole(ui.page) ?: when (ExplainClassifier.analyzePage(allBookBlocks, ui.page).kind) {
@@ -212,42 +211,10 @@ internal fun TextbookReader(
     }
     val currentSection = book.lessons.getOrNull(currentSectionIndex)
     var guideExpanded by remember(book.id, currentSection?.id) { mutableStateOf(false) }
-    var sectionGuidePinned by remember(book.id, currentSection?.id) { mutableStateOf(false) }
     var activeHardPoint by remember(book.id, currentSection?.id) { mutableStateOf<Pair<SectionHardPoint, SourceBlock>?>(null) }
-    var dismissedSummarySectionId by remember(book.id, currentSection?.id) { mutableStateOf<String?>(null) }
-    val sectionQuizAnswers = remember(book.id) { mutableStateMapOf<String, PracticeAnswer>() }
     var inlineThread by remember(book.id) { mutableStateOf<InlineExplainThread?>(null) }
     var inlineDraft by remember(book.id) { mutableStateOf("") }
     var lastInlineAction by remember(book.id) { mutableStateOf<Pair<SelectionExplainAction, String?>?>(null) }
-    var pendingInlineConsent by remember(book.id) { mutableStateOf<Triple<SourceBlock, SelectionExplainAction, String?>?>(null) }
-    val currentSectionLastBody = remember(currentSection) {
-        currentSection?.blocks?.lastOrNull { !it.heading && it.text.isNotBlank() }
-    }
-    val isAtSectionEnd = remember(
-        currentSection,
-        currentSectionLastBody,
-        ui.page,
-        textView,
-        pageUnrecognizedOriginal,
-        paging.pages,
-        paging.index,
-        paging.spread,
-        readMode,
-        paging.canNext,
-    ) {
-        val sec = currentSection ?: return@remember false
-        val lastBlock = currentSectionLastBody ?: return@remember false
-        if (textView && !pageUnrecognizedOriginal && paging.pages.isNotEmpty()) {
-            val visibleCount = if (paging.spread) 2 else 1
-            val visibleLaid = (0 until visibleCount).mapNotNull { paging.pages.getOrNull(paging.index + it) }
-            val endOffset = (lastBlock.end - 1).coerceAtLeast(lastBlock.start)
-            visibleLaid.any { laid ->
-                laid.sources.any { s -> s.importPage == lastBlock.page && endOffset in s.startUtf16 until s.endUtf16 }
-            } || (readMode == BookReadMode.Scroll && !paging.canNext && ui.page == sec.lastPage)
-        } else {
-            ui.page == sec.lastPage
-        }
-    }
     val currentGuideState = currentSection?.let { guideController.states[it.id] }
     val currentGuide = (currentGuideState as? SectionGuideState.Ready)?.guide
     val sectionHardPoints = remember(currentSection, currentGuide, allBookBlocks) {
@@ -258,39 +225,15 @@ internal fun TextbookReader(
             hp to block
         }
     }
-    val sectionEndSummaryLines = remember(currentSection, currentGuide) {
-        val sec = currentSection ?: return@remember emptyList()
-        currentGuide?.summary?.takeIf { it.isNotEmpty() }?.take(3)
-            ?: currentGuide?.brief?.takeIf { it.isNotEmpty() }?.take(3)
-            ?: StudyCoachCourse.localSectionSummary(sec)
-    }
-    val sectionEndPractices = remember(book.id, currentSection?.id) {
-        currentSection?.let { StudyCoachCourse.sectionPractices(book, it, maxCount = 2) }.orEmpty()
-    }
     LaunchedEffect(explainer) { if (!explainer.loaded) explainer.load() }
-    LaunchedEffect(book.id, book.structure?.needsModelSectioning, book.hasPendingOcr, explainer.identity, consented) {
-        if (book.structure?.needsModelSectioning == true && !book.hasPendingOcr && explainer.identity != null && consented) {
+    LaunchedEffect(book.id, book.structure?.needsModelSectioning, book.hasPendingOcr, explainer.identity, aiEnabled) {
+        if (book.structure?.needsModelSectioning == true && !book.hasPendingOcr && explainer.identity != null && aiEnabled) {
             onEnsureUnstructuredSectioned?.invoke()
         }
     }
-    LaunchedEffect(book.id, currentSection?.id) {
-        val sec = currentSection ?: return@LaunchedEffect
-        for (qIdx in 0..1) {
-            val mapKey = "${sec.id}:$qIdx"
-            if (mapKey !in sectionQuizAnswers) {
-                val lessonKey = if (qIdx == 0) sec.id else "${sec.id}#q${qIdx + 1}"
-                val saved = withContext(Dispatchers.IO) { library.answer(book.id, lessonKey, QuestionMode.CHOICE) }
-                if (saved.revealed || saved.text.isNotEmpty()) sectionQuizAnswers[mapKey] = saved
-            }
-        }
-    }
-    LaunchedEffect(book.id, ui.page, autoGuide, sectionSummaryEnabled, isAtSectionEnd, explainer.identity, consented, currentSectionIndex) {
-        if (pageRole == BookPageRole.BODY && explainer.identity != null && consented && currentSectionIndex >= 0) {
-            if (autoGuide) {
-                guideController.prefetchForPage(ui.page, autoGuide = true, sectionIndexOverride = currentSectionIndex)
-            } else if (sectionSummaryEnabled && isAtSectionEnd) {
-                guideController.ensureSection(currentSectionIndex, prefetchNext = false)
-            }
+    LaunchedEffect(book.id, ui.page, autoGuide, explainer.identity, aiEnabled, currentSectionIndex) {
+        if (pageRole == BookPageRole.BODY && explainer.identity != null && aiEnabled && autoGuide && currentSectionIndex >= 0) {
+            guideController.prefetchForPage(ui.page, autoGuide = true, sectionIndexOverride = currentSectionIndex)
         }
     }
     fun runInlineSelection(target: SourceBlock, action: SelectionExplainAction, questionText: String? = null) {
@@ -301,8 +244,13 @@ internal fun TextbookReader(
                 ?: InlineExplainThread(target, secCtx)).copy(askingOpen = true, error = null)
             return
         }
-        if (!consented) {
-            pendingInlineConsent = Triple(target, action, questionText)
+        if (!aiEnabled) {
+            val existing = inlineThread?.takeIf { it.selection.id == target.id } ?: InlineExplainThread(target, secCtx)
+            inlineThread = existing.copy(
+                loading = false,
+                error = ("已在设置中关闭伴读讲解与提问，可在设置中重新开启。" to ExplainTrouble.Other),
+                askingOpen = true,
+            )
             return
         }
         lastInlineAction = action to questionText
@@ -634,12 +582,100 @@ internal fun TextbookReader(
         }
     }
 
-    Desk(crumb = book.title, onBack = onBack, backLabel = if (source != null) { if (ui.review != null) "返回复习" else "返回学习" } else "返回书架", showNavigation = false, hasMargin = false,
-        paperMaxWidth = if (textView || pdfVisible || hinge != null) Dp.Infinity else Dp.Unspecified,
-        typeMenuExtra = { close ->
-            if (pdfVisible) for (scrolling in listOf(false, true)) {
-                val label = if (scrolling) "滚动" else "翻页"
-                DropdownMenuItem(text = { Text(label + if (pdf.scrolling == scrolling) " ✓" else "") },
+    // 2.0 单层沉浸阅读器状态：默认隐藏全部工具栏（嵌套 = 1 层），按需浮出 HUD 与统一伴读抽屉。
+    var hudVisible by remember(book.id) { mutableStateOf(false) }
+    var hudPinned by remember(book.id) { mutableStateOf(false) }
+    var tocOpen by remember(book.id) { mutableStateOf(false) }
+    var companionOpen by remember(book.id, openPairing) { mutableStateOf(openPairing) }
+    var companionTab by remember(book.id) { mutableStateOf(ReaderCompanionTab.EXPLAIN) }
+    var askInputFocused by remember(book.id) { mutableStateOf(false) }
+    // 宽屏（>=1280dp）默认并排停靠（Split-Pane，正文零像素遮挡），保留一键切浮层。
+    var companionDocked by remember(book.id) { mutableStateOf(true) }
+    val bookmarkStore = remember(library.directory) { BookBookmarkStore(library.directory) }
+    val pdfBitmapCache = remember(library, book.id) { OriginalPdfBitmapCache() }
+    var bookmarks by remember(book.id) {
+        mutableStateOf(runCatching { bookmarkStore.list(book.id) }.getOrDefault(emptyList()))
+    }
+    LaunchedEffect(explainOpen) {
+        if (explainOpen) {
+            companionOpen = true
+            companionTab = ReaderCompanionTab.EXPLAIN
+        }
+    }
+    LaunchedEffect(notesOpen) {
+        if (notesOpen) {
+            companionOpen = true
+            companionTab = ReaderCompanionTab.NOTES
+        }
+    }
+    LaunchedEffect(activeHardPoint) {
+        if (activeHardPoint != null) {
+            companionOpen = true
+            companionTab = ReaderCompanionTab.EXPLAIN
+        }
+    }
+    fun switchView(nextTextView: Boolean) {
+        if (nextTextView == textView) return
+        val touchPdf = originalPdf && originalPdfTouchEnabled
+        if (!nextTextView) {
+            // 文字 -> 原页：以当前 BookPageAnchor 为唯一真源，避免来回切时回弹旧页。
+            val targetPage = paging.anchor.importPage.takeIf { book.page(it) != null } ?: ui.page
+            val passage = passageJump?.takeIf {
+                touchPdf && it.page == paging.anchor.importPage && it.start == paging.anchor.offsetUtf16
+            }
+            if (passage != null) openPassage(passage)
+            else {
+                if (touchPdf) passageJump = null
+                if (originalPdf) pdf.jump(targetPage)
+                paging.anchor = BookPageAnchor(targetPage, paging.anchor.offsetUtf16)
+                if (paging.publishImportPage(targetPage)) onPage(targetPage)
+            }
+        } else {
+            // 原页 -> 文字：先锁死当前可视 PDF 页码（或选区所在页）到同一 BookPageAnchor。
+            val targetPage = chosen?.page ?: pdf.page.takeIf { book.page(it) != null } ?: ui.page
+            val targetOffset = chosen?.start
+                ?: if (paging.anchor.importPage == targetPage) paging.anchor.offsetUtf16 else 0
+            paging.anchor = BookPageAnchor(targetPage, targetOffset)
+            if (paging.publishImportPage(targetPage)) onPage(targetPage)
+            if (chosen != null && touchPdf) passageJump = BookPassage.from(book, chosen)
+        }
+        textView = nextTextView
+        pdf.selection = null
+        viewSaveError = false
+        val revision = ++viewSaveRevision
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                library.persistTextView(book.id, nextTextView)
+            } catch (_: SQLException) {
+                if (revision == viewSaveRevision) viewSaveError = true
+            }
+        }
+    }
+    fun toggleBookmark(pageNumber: Int) {
+        val note = currentSection?.title.orEmpty()
+        val exists = bookmarks.any { it.page == pageNumber }
+        bookmarks = if (exists) bookmarks.filterNot { it.page == pageNumber }
+        else (bookmarks + BookBookmark(book.id, pageNumber, note)).sortedBy { it.page }
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                if (exists) bookmarkStore.remove(book.id, pageNumber)
+                else bookmarkStore.add(book.id, pageNumber, note)
+            }
+        }
+    }
+
+    val colors = CoachTheme.colors
+    val paperCanvas = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
+    val highlight = if (colors.dark) CoachV7.Dark.hl else CoachV7.Light.hl
+    val density = LocalDensity.current
+    val onRelogin = LocalBookRelogin.current
+    var readerOriginDp by remember { mutableStateOf<Pair<Float, Float>?>(null) }
+    val typeMenuExtra: @Composable (() -> Unit) -> Unit = { close ->
+        if (pdfVisible) {
+            for (scrolling in listOf(false, true)) {
+                val label = if (scrolling) "单页滚动" else "双页对开"
+                DropdownMenuItem(
+                    text = { Text(label + if (pdf.scrolling == scrolling) " ✓" else "") },
                     modifier = Modifier.testTag(if (scrolling) "original-mode-scroll" else "original-mode-paged"),
                     onClick = {
                         if (pdf.scrolling != scrolling) {
@@ -648,693 +684,705 @@ internal fun TextbookReader(
                             publishPdfPage(pdf.page)
                         }
                         close()
-                    })
+                    },
+                )
             }
-        },
-        status = "${book.pageLabel(ui.page)} · 共 $lastPage ${if (book.format == "pptx") "张" else "页"}", directory = {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("教材目录", style = MaterialTheme.typography.titleMedium)
-                if (onReorganizeSections != null) {
-                    V7TextButton(onReorganizeSections, enabled = !ui.busy, modifier = Modifier.testTag("reorganize-sections")) {
-                        Text("重新整理章节")
-                    }
-                }
+        } else {
+            for (mode in listOf(BookReadMode.Paged, BookReadMode.Scroll)) {
+                val label = if (mode == BookReadMode.Scroll) "文字滚动" else "文字翻页"
+                DropdownMenuItem(
+                    text = { Text(label + if (readMode == mode) " ✓" else "") },
+                    modifier = Modifier.testTag(if (mode == BookReadMode.Scroll) "text-mode-scroll" else "text-mode-paged"),
+                    onClick = {
+                        readMode = mode
+                        runCatching { library.saveTextScrollMode(book.id, mode == BookReadMode.Scroll) }
+                        close()
+                    },
+                )
             }
-            for (lesson in book.lessons) TextButton(onClick = { turnTo(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
-        }) {
-        val colors = CoachTheme.colors
-        val highlight = if (colors.dark) CoachV7.Dark.hl else CoachV7.Light.hl
-        val touchPdf = originalPdf && originalPdfTouchEnabled
-        val compactTouch = originalPdfTouchEnabled
-        val toolPadding = if (compactTouch) PaddingValues(horizontal = 8.dp) else ButtonDefaults.TextButtonContentPadding
-        val density = LocalDensity.current
-        var readerOriginDp by remember { mutableStateOf<Pair<Float, Float>?>(null) }
-        BoxWithConstraints(Modifier.fillMaxSize().padding(if (hinge != null) 12.dp else 20.dp).testTag("textbook-reader")
+        }
+    }
+
+    // 单层全铺画布（容器嵌套 = 1 层）：无左轨、无 Desk 纸卡外框、无常驻顶底栏。
+    BoxWithConstraints(
+        Modifier
+            .fillMaxSize()
+            .background(paperCanvas)
+            .testTag("textbook-reader")
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                if ((event.isCtrlPressed || event.isMetaPressed) && !event.isAltPressed && event.key == Key.F) {
-                    searchOpen = true
-                    searchFocusTick++
-                    true
-                } else if (event.key == Key.Escape && searchOpen) {
-                    searchOpen = false
-                    searchFocused = false
-                    true
-                } else false
+                val mod = event.isCtrlPressed || event.isMetaPressed
+                val typingNow = typing || askInputFocused
+                when {
+                    mod && !event.isAltPressed && event.key == Key.F -> {
+                        searchOpen = true
+                        hudVisible = true
+                        searchFocusTick++
+                        true
+                    }
+                    mod && !event.isAltPressed && event.key == Key.G -> {
+                        hudVisible = true
+                        editingJump = true
+                        jump = ui.page.toString()
+                        true
+                    }
+                    mod && !event.isAltPressed && event.key == Key.D -> {
+                        toggleBookmark(ui.page)
+                        true
+                    }
+                    event.key == Key.F11 || (!typingNow && !mod && event.key == Key.F) -> {
+                        if (hudVisible || tocOpen || companionOpen || searchOpen) {
+                            hudVisible = false
+                            hudPinned = false
+                            tocOpen = false
+                            companionOpen = false
+                            explainOpen = false
+                            notesOpen = false
+                            searchOpen = false
+                            searchFocused = false
+                        } else {
+                            hudVisible = true
+                        }
+                        true
+                    }
+                    !typingNow && !mod && event.key == Key.Tab -> {
+                        hudVisible = !hudVisible
+                        if (!hudVisible) hudPinned = false
+                        true
+                    }
+                    !typingNow && !mod && (event.key == Key.T || event.key == Key.LeftBracket) -> {
+                        tocOpen = !tocOpen
+                        true
+                    }
+                    !typingNow && !mod && (event.key == Key.L || event.key == Key.RightBracket) -> {
+                        companionOpen = !companionOpen
+                        if (!companionOpen) {
+                            explainOpen = false
+                            notesOpen = false
+                        }
+                        true
+                    }
+                    !typingNow && !mod && event.key == Key.V && hasOriginal -> {
+                        switchView(!textView)
+                        true
+                    }
+                    event.key == Key.Escape -> {
+                        when {
+                            searchOpen -> { searchOpen = false; searchFocused = false; true }
+                            editingJump -> { editingJump = false; focusManager.clearFocus(); true }
+                            tocOpen -> { tocOpen = false; true }
+                            companionOpen -> { companionOpen = false; explainOpen = false; notesOpen = false; true }
+                            hudVisible && !hudPinned -> { hudVisible = false; true }
+                            else -> false
+                        }
+                    }
+                    else -> false
+                }
+            }
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    val topEdgePx = with(density) { 48.dp.toPx() }
+                    val bottomEdgePx = with(density) { 48.dp.toPx() }
+                    while (true) {
+                        val ev = awaitPointerEvent(PointerEventPass.Initial)
+                        if (ev.type == PointerEventType.Move) {
+                            val y = ev.changes.firstOrNull()?.position?.y ?: continue
+                            val h = size.height.toFloat()
+                            if (y <= topEdgePx || y >= h - bottomEdgePx) {
+                                hudVisible = true
+                            } else if (!hudPinned && !editingJump && !searchOpen && y > topEdgePx + 48f && y < h - bottomEdgePx - 48f) {
+                                hudVisible = false
+                            }
+                        }
+                    }
+                }
             }
             .onGloballyPositioned { coords ->
                 val pos = coords.positionInRoot()
                 readerOriginDp = (pos.x / density.density) to (pos.y / density.density)
-            }) {
-            val verticalSplit = bookVerticalSplit(maxWidth.value, maxHeight.value, readerOriginDp?.first ?: 0f, hinge)
-            val tabletopSplit = if (verticalSplit == null) bookTabletopSplit(maxWidth.value, maxHeight.value, readerOriginDp?.second ?: 0f, hinge) else null
-            val actions: @Composable () -> Unit = {
-                if (hasOriginal) V7TextButton(onClick = {
-                    val nextTextView = !textView
-                    // A reflowed sheet can start on an earlier page than its reading anchor.
-                    if (!nextTextView) {
-                        val passage = passageJump?.takeIf {
-                            touchPdf && it.page == paging.anchor.importPage && it.start == paging.anchor.offsetUtf16
-                        }
-                        if (passage != null) openPassage(passage)
-                        else {
-                            if (touchPdf) passageJump = null
-                            if (originalPdf) pdf.jump(paragraphPage.number)
-                            if (paging.publishImportPage(paragraphPage.number)) onPage(paragraphPage.number)
-                        }
-                    } else if (chosen != null) {
-                        paging.anchor = BookPageAnchor(chosen.page, chosen.start)
-                        if (touchPdf) passageJump = BookPassage.from(book, chosen)
-                    }
-                    textView = nextTextView
-                    pdf.selection = null
-                    viewSaveError = false
-                    val revision = ++viewSaveRevision
-                    scope.launch(start = CoroutineStart.UNDISPATCHED) {
-                        try {
-                            library.persistTextView(book.id, nextTextView)
-                        } catch (_: SQLException) {
-                            if (revision == viewSaveRevision) viewSaveError = true
-                        }
-                    }
-                }, modifier = Modifier.testTag("book-original-toggle"), contentPadding = toolPadding) {
-                    Text(if (textView) "看原页" else "看文字")
-                }
-                V7TextButton(onClick = {
-                    if (searchOpen) {
-                        searchOpen = false
-                        searchFocused = false
-                    } else {
-                        searchOpen = true
-                        searchFocusTick++
-                    }
-                }, enabled = !ui.busy, modifier = Modifier.testTag("book-search-toggle"), contentPadding = toolPadding) {
-                    Text(if (searchOpen) "收起查找" else "查找")
-                }
-                V7TextButton(onClick = { asking = true }, enabled = chosen == null || learnableSelection != null,
-                    modifier = Modifier.testTag("ask-book-passage"), contentPadding = toolPadding) { Text("选段提问") }
-                V7TextButton(onClick = {
-                    explainingSelection = if (explainOpen) null else learnableSelection
-                    explainOpen = !explainOpen
-                }, enabled = !ui.busy && (explainOpen || chosen == null || learnableSelection != null),
-                    modifier = Modifier.testTag("book-explain-toggle"), contentPadding = toolPadding) {
-                    Text(if (explainOpen) "回到原文" else if (chosen != null) "讲解选段" else "讲解")
-                }
-                if (!textView && !explainOpen && chosen != null) {
-                    val selected = checkNotNull(pdf.selection)
-                    val highlighted = remember(library, book.id, selected, highlightRevision) {
-                        val selectedPage = checkNotNull(book.page(selected.page))
-                        selected.range in library.highlights(book.id, selectedPage)
-                    }
-                    V7TextButton(onClick = {
-                        val passage = BookPassage.from(book, chosen)
-                        savingMark = true
-                        markError = false
-                        scope.launch {
-                            try {
-                                withContext(Dispatchers.IO) { library.setHighlight(passage, !highlighted) }
-                                highlightRevision++
-                                // 高亮后选区会清掉；先把阅读位置记在选区首字，之后切到文字版还回到这里
-                                paging.anchor = BookPageAnchor(chosen.page, chosen.start)
-                                if (pdf.selection == selected) pdf.selection = null
-                            } catch (cancel: CancellationException) { throw cancel }
-                            catch (_: Exception) { markError = true }
-                            finally { savingMark = false }
-                        }
-                    }, enabled = !savingMark, modifier = Modifier.testTag("original-pdf-highlight"), contentPadding = toolPadding) {
-                        Text(if (highlighted) "取消高亮" else "高亮")
-                    }
-                } else if (touchPdf && !textView && !explainOpen) {
-                    V7TextButton(onClick = {}, enabled = false, contentPadding = toolPadding) { Text("高亮") }
-                }
-                V7TextButton(onClick = {
-                    if (notesOpen) session.cancelNote()
-                    notesOpen = !notesOpen
-                }, enabled = !ui.busy && samePage, modifier = Modifier.testTag("books-notes-toggle"), contentPadding = toolPadding) {
-                    Text(if (notesOpen) "收起批注" else "批注")
-                }
-                if (onExportNotes != null) {
-                    V7TextButton(
-                        onClick = { onExportNotes(book, ui.page) },
-                        enabled = !ui.busy,
-                        modifier = Modifier.testTag("book-export-notes"),
-                        contentPadding = toolPadding,
-                    ) {
-                        Text("导出")
-                    }
-                }
-                if (source == null) PaperButton(onLearn, enabled = !ui.busy) { Text(if (book.learning) "继续学" else "开始学") }
-            }
-            val sectionTitleBar: @Composable (Modifier) -> Unit = { barModifier ->
-                Row(barModifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(if (source != null) "学习原文 · ${source.title}" else currentSection?.title ?: "教材阅读",
-                        style = MaterialTheme.typography.titleMedium)
-                    if (!explainOpen && pageRole == BookPageRole.BODY && currentSection != null) {
-                        val secState = guideController.states[currentSection.id] ?: SectionGuideState.Idle
-                        FaintSectionExplainButton(
-                            expanded = guideExpanded && sectionGuidePinned,
-                            enabled = explainer.identity != null && secState != SectionGuideState.Loading,
-                            onClick = {
-                                sectionGuidePinned = true
-                                guideExpanded = !guideExpanded
-                                if (guideExpanded && consented && explainer.identity != null) {
-                                    guideController.requestSection(currentSectionIndex)
-                                }
-                            },
-                        )
-                    }
-                }
-            }
-            val noticesAndGuide: @Composable () -> Unit = {
-                if (searchOpen) {
-                    BookSearchPanel(
-                        book = book,
-                        query = searchQuery,
-                        result = searchResult,
-                        activeIndex = searchActiveIndex,
-                        focusRequester = searchFocus,
-                        onQueryChange = { next ->
-                            searchQuery = next
-                            searchActiveIndex = -1
-                        },
-                        onFocusChange = { searchFocused = it },
-                        onPick = selectSearchHit,
-                        onPrevious = {
-                            val total = searchResult.hits.size
-                            if (total > 0) {
-                                val next = if (searchActiveIndex <= 0) total - 1 else searchActiveIndex - 1
-                                selectSearchHit(next)
-                            }
-                        },
-                        onNext = {
-                            val total = searchResult.hits.size
-                            if (total > 0) {
-                                val next = if (searchActiveIndex !in 0 until total - 1) 0 else searchActiveIndex + 1
-                                selectSearchHit(next)
-                            }
-                        },
-                        onClose = {
-                            searchOpen = false
-                            searchFocused = false
-                        },
-                    )
-                }
-                ui.importing?.let { progress ->
-                    BookImportProgressBar(
-                        progress = progress,
-                        onCancel = onCancelImport,
-                        compact = true,
-                        modifier = Modifier.fillMaxWidth().testTag("book-import-progress"),
-                    )
-                }
-                if (page.ocrPending) {
-                    val countText = ui.importing?.takeIf { it.bookId == book.id && it.recognizing }
-                        ?.let { "${it.page} / ${it.total}" }
-                        ?: "${book.pages.count { !it.ocrPending }} / ${book.pages.size}"
-                    Text("这一页还在识别（$countText）", style = MaterialTheme.typography.bodySmall,
-                        color = colors.fgSecondary, modifier = Modifier.testTag("page-ocr-pending"))
-                }
-                if (page.ocr) Text(OCR_NOTICE, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("book-ocr-notice"))
-                if (viewSaveError) Text("阅读视图暂未保存。切换视图后会再试一次。", style = MaterialTheme.typography.bodySmall, color = v7Alert())
-                if (markError) Text("高亮暂未保存，请再试一次。", style = MaterialTheme.typography.bodySmall, color = v7Alert())
-                if (chosen != null && learnableSelection == null) Text("选段超过 4000 字。请选短一些再讲解或提问。",
-                    style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
-                if (source != null) Text("对应教材第 ${source.firstPage}–${source.lastPage} 页 · 返回后保留学习进度", style = MaterialTheme.typography.bodySmall)
-                sourceWarning?.let { Text(it, color = v7Alert(), style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.testTag("source-anchor-status")) }
-                val showSectionGuide = !explainOpen && pageRole == BookPageRole.BODY && currentSection != null &&
-                    ((autoGuide && ui.page == currentSection.firstPage && inlineThread == null) || sectionGuidePinned)
-                if (showSectionGuide && currentSection != null) {
-                    SectionGuideCard(
-                        book = book,
-                        blocks = allBookBlocks,
-                        section = currentSection,
-                        state = guideController.states[currentSection.id] ?: SectionGuideState.Idle,
-                        paired = explainer.identity != null,
-                        consented = consented,
-                        expanded = guideExpanded,
-                        onToggleExpand = { guideExpanded = !guideExpanded },
-                        onAllowConsent = {
-                            explainConsent.allow(book.id)
-                            consented = true
-                            guideController.prefetchForPage(ui.page, autoGuide = true, sectionIndexOverride = currentSectionIndex)
-                        },
-                        onRetry = { guideController.requestSection(currentSectionIndex) },
-                        onOpenPair = { explainOpen = true },
-                        onOpenCitation = { _, block -> openPassage(BookPassage.from(book, block)) },
-                    )
-                }
-                if (!textView && !explainOpen && pageRole == BookPageRole.BODY) {
-                    val pageMarkers = sectionHardPoints.filter { it.second.page == ui.page }
-                    if (pageMarkers.isNotEmpty()) {
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Text("本页难点：", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
-                            pageMarkers.forEach { (hp, blk) ->
-                                V7TextButton(
-                                    onClick = { activeHardPoint = hp to blk; inlineThread = null },
-                                    modifier = Modifier.testTag("hard-point-marker-${hp.blockId}"),
-                                ) {
-                                    Text(hp.label)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            val hardPointCard: @Composable () -> Unit = {
-                val chosenHp = activeHardPoint
-                val sec = currentSection
-                if (chosenHp != null && sec != null && !explainOpen) {
-                    HardPointExplainCard(
-                        book = book,
-                        allBlocks = allBookBlocks,
-                        section = sec,
-                        hardPoint = chosenHp.first,
-                        block = chosenHp.second,
-                        onAskFollowUp = {
-                            val blk = chosenHp.second
-                            activeHardPoint = null
-                            runInlineSelection(blk, SelectionExplainAction.ASK)
-                        },
-                        onOpenOriginal = if (hasOriginal) { { openPassage(BookPassage.from(book, chosenHp.second)) } } else null,
-                        onClose = { activeHardPoint = null },
-                    )
-                }
-            }
-            val sectionEndSummaryCard: @Composable () -> Unit = {
-                val sec = currentSection
-                if (sectionSummaryEnabled && isAtSectionEnd && !explainOpen && pageRole == BookPageRole.BODY &&
-                    sec != null && inlineThread == null && activeHardPoint == null && dismissedSummarySectionId != sec.id) {
-                    val answersForSection = (0 until sectionEndPractices.size).mapNotNull { qIdx ->
-                        sectionQuizAnswers["${sec.id}:$qIdx"]?.let { qIdx to it }
-                    }.toMap()
-                    SectionEndSummaryCard(
-                        section = sec,
-                        summaryLines = sectionEndSummaryLines,
-                        practices = sectionEndPractices,
-                        answers = answersForSection,
-                        onAnswer = { qIdx, practice, answer ->
-                            sectionQuizAnswers["${sec.id}:$qIdx"] = answer
-                            if (answer.revealed) {
-                                if (onSaveSectionQuiz != null) {
-                                    onSaveSectionQuiz(sec, qIdx, practice, answer)
-                                } else {
-                                    scope.launch(Dispatchers.IO) {
-                                        library.saveSectionCheckAnswer(book.id, sec, qIdx, practice, answer)
-                                    }
-                                }
-                            }
-                        },
-                        onOpenMainline = onOpenSectionMainline?.let { open -> { open(currentSectionIndex) } },
-                        onDismiss = { dismissedSummarySectionId = sec.id },
-                    )
-                }
-            }
-            val pageSurface: @Composable (Modifier) -> Unit = { boxModifier ->
-                Box(boxModifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).testTag("reader-page")
-                    .focusRequester(pageFocus).onFocusChanged { pageFocused = it.isFocused }
+            },
+    ) {
+        val rootWidth = maxWidth
+        val rootHeight = maxHeight
+        val presentation = companionPresentationForWidth(rootWidth.value)
+        val canDockCompanion = presentation == CompanionPresentation.WIDE_SPLIT && hinge == null
+        val isBottomSheetCompanion = presentation == CompanionPresentation.BOTTOM_SHEET && hinge == null
+        val verticalSplit = bookVerticalSplit(rootWidth.value, rootHeight.value, readerOriginDp?.first ?: 0f, hinge)
+        val tabletopSplit = if (verticalSplit == null) bookTabletopSplit(rootWidth.value, rootHeight.value, readerOriginDp?.second ?: 0f, hinge) else null
+        val effectiveSideDocked = companionOpen && companionDocked && canDockCompanion && verticalSplit == null && tabletopSplit == null
+        val effectiveBottomSheet = companionOpen && isBottomSheetCompanion && verticalSplit == null && tabletopSplit == null
+        val effectiveSideOverlay = companionOpen && !effectiveSideDocked && !effectiveBottomSheet && verticalSplit == null && tabletopSplit == null
+        val showHud = hudVisible || hudPinned || editingJump || searchOpen
+        val sideDrawerWidth = companionSideWidth(rootWidth.value)
+        val bottomDrawerHeight = (rootHeight * 0.50f).coerceIn(220.dp, (rootHeight - 160.dp).coerceAtLeast(220.dp))
+
+        val pageSurface: @Composable (Modifier) -> Unit = { boxModifier ->
+            Box(
+                boxModifier
+                    .fillMaxSize()
+                    .background(paperCanvas)
+                    .testTag("reader-page")
+                    .focusRequester(pageFocus)
+                    .onFocusChanged { pageFocused = it.isFocused }
                     .onPreviewKeyEvent { event ->
                         if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                        // Ctrl/Alt/Win 组合留给系统；纯方向键才翻页。
                         if (event.isCtrlPressed || event.isAltPressed || event.isMetaPressed) return@onPreviewKeyEvent false
-                        if (!explainOpen && !typing && learnableSelection != null && event.key == Key.Enter) {
+                        val typingNow = typing || askInputFocused
+                        if (!typingNow && learnableSelection != null && event.key == Key.Enter) {
+                            companionOpen = true
+                            companionTab = ReaderCompanionTab.ASK
                             runInlineSelection(learnableSelection, SelectionExplainAction.EXPLAIN)
                             return@onPreviewKeyEvent true
                         }
-                        if (pdfScrolling && !typing) when (event.key) {
-                            Key.PageDown, Key.PageUp, Key.Spacebar, Key.MoveHome, Key.MoveEnd, Key.DirectionDown, Key.DirectionUp -> {
-                                pdf.selection = null
-                                passageJump = null
-                                scope.launch {
-                                    when (event.key) {
-                                        Key.MoveEnd -> scroll.scrollToEnd()
-                                        Key.MoveHome -> scroll.scrollTo(ScrollReadPosition(0))
-                                        Key.DirectionDown, Key.DirectionUp -> scroll.scrollLine(event.key == Key.DirectionDown)
-                                        else -> scroll.scrollScreen(event.key == Key.PageDown || (event.key == Key.Spacebar && !event.isShiftPressed))
-                                    }
+                        if (pdfScrolling && !typingNow && event.key in setOf(
+                                Key.DirectionDown, Key.DirectionUp, Key.PageDown, Key.PageUp,
+                                Key.Spacebar, Key.MoveHome, Key.MoveEnd,
+                            )) {
+                            pdf.selection = null
+                            passageJump = null
+                            scope.launch {
+                                when (event.key) {
+                                    Key.MoveEnd -> scroll.scrollToEnd()
+                                    Key.MoveHome -> scroll.scrollTo(ScrollReadPosition(0))
+                                    Key.DirectionDown, Key.DirectionUp -> scroll.scrollLine(event.key == Key.DirectionDown)
+                                    else -> scroll.scrollScreen(event.key == Key.PageDown || (event.key == Key.Spacebar && !event.isShiftPressed))
                                 }
-                                return@onPreviewKeyEvent true
                             }
+                            return@onPreviewKeyEvent true
                         }
-                        val turn = if (textView && !typing && event.key == Key.Spacebar) (if (event.isShiftPressed) ReaderTurn.Previous else ReaderTurn.Next)
-                            else readerPagingTurn(event.key, typing)
+                        if (!typingNow && event.key == Key.Spacebar) {
+                            turnLayout(if (event.isShiftPressed) ReaderTurn.Previous else ReaderTurn.Next)
+                            return@onPreviewKeyEvent true
+                        }
+                        val turn = readerPagingTurn(event.key, typingNow)
                         turn?.let(turnLayout) ?: return@onPreviewKeyEvent false
                         true
-                    }.focusable()) {
-                    if (explainOpen && verticalSplit == null) BookExplainPanel(book, paragraphPage.number, explainConsent, explainer,
-                        selection = explainingSelection, library = library, onOpenOriginal = openPassage.takeIf { explainingSelection != null })
-                    else if (textView && !pageUnrecognizedOriginal) {
-                        val ranges = remember(book.pages, source, practiceSource, ui.page, quoteAnchor, located, aspectOk, marks, passageJump, textSelection) {
-                            val result = mutableMapOf<Int, List<IntRange>>()
-                            if (practiceSource == null) {
-                                source?.blocks.orEmpty().groupBy { it.page }.forEach { (number, blocks) ->
-                                    val stored = book.page(number)?.text.orEmpty()
-                                    val confirmed = if (book.format != "pdf" || book.page(number)?.ocr == true) blocks
-                                        else if (number == ui.page && located is com.coach.desktop.reader.Located.Found && aspectOk)
-                                            blocks.filter { !it.heading && it.text == quoteAnchor }.take(1)
-                                        else emptyList()
-                                    result[number] = confirmed.filter { it.start >= 0 && it.end > it.start &&
-                                        it.end <= stored.length && stored.substring(it.start, it.end) == it.text }
-                                        .map { it.start until it.end }
-                                }
-                            } else {
-                                val target = practiceSource.target
-                                val number = target?.pdfPage ?: practiceSource.page
-                                val stored = number?.let { book.page(it)?.text }.orEmpty()
-                                val range = if (target != null) {
-                                    if (target.start >= 0 && target.end > target.start && target.end <= stored.length &&
-                                        stored.substring(target.start, target.end) == target.quote) target.start until target.end else null
-                                } else practiceSource.quote?.takeIf { it.isNotEmpty() }?.let { quote ->
-                                    val at = stored.indexOf(quote)
-                                    if (at >= 0 && stored.indexOf(quote, at + 1) < 0) at until at + quote.length else null
-                                }
-                                if (number != null && range != null) result[number] = listOf(range)
+                    }
+                    .focusable(),
+            ) {
+                if (textView && !pageUnrecognizedOriginal) {
+                    val ranges = remember(book.pages, source, practiceSource, ui.page, quoteAnchor, located, aspectOk, marks, passageJump, textSelection) {
+                        val result = mutableMapOf<Int, List<IntRange>>()
+                        if (practiceSource == null) {
+                            source?.blocks.orEmpty().groupBy { it.page }.forEach { (number, blocks) ->
+                                val stored = book.page(number)?.text.orEmpty()
+                                val confirmed = if (book.format != "pdf" || book.page(number)?.ocr == true) blocks
+                                    else if (number == ui.page && located is com.coach.desktop.reader.Located.Found && aspectOk)
+                                        blocks.filter { !it.heading && it.text == quoteAnchor }.take(1)
+                                    else emptyList()
+                                result[number] = confirmed.filter { it.start >= 0 && it.end > it.start &&
+                                    it.end <= stored.length && stored.substring(it.start, it.end) == it.text }
+                                    .map { it.start until it.end }
                             }
-                            passageJump?.let { result[it.page] = result[it.page].orEmpty() + listOf(it.start until it.end) }
-                            textSelection?.let { result[it.page] = result[it.page].orEmpty() + listOf(it.start until it.end) }
-                            if (marks.isNotEmpty()) result[ui.page] = result[ui.page].orEmpty() +
-                                marks.map { it.startUtf16 until it.endUtf16 }
-                            result
+                        } else {
+                            val target = practiceSource.target
+                            val number = target?.pdfPage ?: practiceSource.page
+                            val stored = number?.let { book.page(it)?.text }.orEmpty()
+                            val range = if (target != null) {
+                                if (target.start >= 0 && target.end > target.start && target.end <= stored.length &&
+                                    stored.substring(target.start, target.end) == target.quote) target.start until target.end else null
+                            } else practiceSource.quote?.takeIf { it.isNotEmpty() }?.let { quote ->
+                                val at = stored.indexOf(quote)
+                                if (at >= 0 && stored.indexOf(quote, at + 1) < 0) at until at + quote.length else null
+                            }
+                            if (number != null && range != null) result[number] = listOf(range)
                         }
-                        BookPageView(book, paging, ranges, turnLayout, libraryDirectory = library.directory,
-                            turnStyle = turnStyle, readMode = readMode, onOpenTableRow = openPassage,
-                            onSelectText = { textSelection = it },
-                            hardPoints = sectionHardPoints,
-                            onHardPointClick = { hp, blk ->
-                                activeHardPoint = hp to blk
-                                inlineThread = null
-                                textSelection = null
-                                pdf.selection = null
-                            },
-                            onSpot = { anchor ->
-                                if (ui.source == null) runCatching { library.saveReadSpot(book.id, anchor.importPage, anchor.offsetUtf16) }
-                            },
-                            onPosition = { number ->
+                        passageJump?.let { result[it.page] = result[it.page].orEmpty() + listOf(it.start until it.end) }
+                        textSelection?.let { result[it.page] = result[it.page].orEmpty() + listOf(it.start until it.end) }
+                        if (marks.isNotEmpty()) result[ui.page] = result[ui.page].orEmpty() +
+                            marks.map { it.startUtf16 until it.endUtf16 }
+                        result
+                    }
+                    BookPageView(
+                        book, paging, ranges, turnLayout, libraryDirectory = library.directory,
+                        turnStyle = turnStyle, readMode = readMode, onOpenTableRow = openPassage,
+                        onSelectText = { textSelection = it },
+                        hardPoints = sectionHardPoints,
+                        onHardPointClick = { hp, blk ->
+                            activeHardPoint = hp to blk
+                            companionOpen = true
+                            companionTab = ReaderCompanionTab.EXPLAIN
+                            textSelection = null
+                            pdf.selection = null
+                        },
+                        onSpot = { anchor ->
+                            if (ui.source == null) runCatching { library.saveReadSpot(book.id, anchor.importPage, anchor.offsetUtf16) }
+                        },
+                        onPosition = { number ->
                             if (paging.publishImportPage(number)) {
                                 if (textSelection?.page != number) textSelection = null
                                 onPage(number)
                                 session.goToPage(number)
                             }
-                        })
-
-                    } else if (originalPdf) {
-                        val citation = if (boxes != null && located is com.coach.desktop.reader.Located.Found)
-                            CitedPdfLocation(boxes, located) else null
-                        OriginalPdfReader(book, library, pdf, scroll, pdfLayers, citation, quoteAnchor, highlightRevision,
-                            turnStyle, publishPdfPage, onTurn = turnTo)
-                    } else {
-                        // 页图就位前先铺一张同尺寸的纸（纸面底色、一道细边），图到了原地换掉：
-                        // 不出现转圈，下面的按钮和批注也不被推下去。打不开时同一张纸上给重试。
-                        val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
-                        // 只有 pdf 的非 OCR 页，boxes 才是这一页真实的 cropBox；图片书和 OCR 页那份是
-                        // 1200x1600 的占位常数，按它铺纸反而会和真图差一截，所以只认真量过的几何。
-                        val pageBoxes = if (readerBoxesAreGeometry(book.format, page.ocr)) boxes else null
-                        val aspect = readerPaperAspect(pageBoxes?.width, pageBoxes?.height, paperAspect)
-                        val citation = if (aspectOk && boxes != null && located is com.coach.desktop.reader.Located.Found)
-                            CitedPdfLocation(boxes, located) else null
-                        Box(Modifier.fillMaxSize().background(paper)) {
-                            Column(Modifier.fillMaxSize().verticalScroll(imageScroll).padding(end = 12.dp).testTag("remote-pages")) {
-                                OriginalBookPage(
-                                    "${book.title} ${book.pageLabel(ui.page)}", image, aspect, layer, page.text, null, marks,
-                                    citation, quoteAnchor, onResize = { originalSize = it }, onRetry = { retry++ },
-                                    onSelection = {},
-                                )
-                            }
-                            ReaderScrollbar(imageScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                        },
+                        immersive = true,
+                    )
+                } else if (originalPdf) {
+                    val citation = if (boxes != null && located is com.coach.desktop.reader.Located.Found)
+                        CitedPdfLocation(boxes, located) else null
+                    OriginalPdfReader(
+                        book, library, pdf, scroll, pdfLayers, citation, quoteAnchor, highlightRevision,
+                        turnStyle, publishPdfPage, onTurn = turnTo, immersive = true, bitmapCache = pdfBitmapCache,
+                    )
+                } else {
+                    val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
+                    val pageBoxes = if (readerBoxesAreGeometry(book.format, page.ocr)) boxes else null
+                    val aspect = readerPaperAspect(pageBoxes?.width, pageBoxes?.height, paperAspect)
+                    val citation = if (aspectOk && boxes != null && located is com.coach.desktop.reader.Located.Found)
+                        CitedPdfLocation(boxes, located) else null
+                    Box(Modifier.fillMaxSize().background(paper)) {
+                        Column(Modifier.fillMaxSize().verticalScroll(imageScroll).padding(end = 12.dp).testTag("remote-pages")) {
+                            OriginalBookPage(
+                                "${book.title} ${book.pageLabel(ui.page)}", image, aspect, layer, page.text, null, marks,
+                                citation, quoteAnchor, onResize = { originalSize = it }, onRetry = { retry++ },
+                                onSelection = {},
+                            )
                         }
+                        ReaderScrollbar(imageScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                     }
-                    if (!explainOpen && learnableSelection != null && inlineThread == null) {
-                        SelectionExplainToolbar(
-                            onAction = { action -> runInlineSelection(learnableSelection, action) },
-                            onDismiss = { pdf.selection = null; textSelection = null },
-                            modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
-                        )
-                    }
-                    if (verticalSplit == null && tabletopSplit == null && !explainOpen && inlineThread == null) {
-                        Box(
-                            Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(horizontal = 16.dp, vertical = 10.dp)
-                                .widthIn(max = 720.dp),
-                        ) {
-                            when {
-                                activeHardPoint != null -> hardPointCard()
-                                else -> sectionEndSummaryCard()
-                            }
-                        }
-                    }
-                }
-            }
-            val inlineCard: @Composable () -> Unit = {
-                inlineThread?.let { thread ->
-                    if (!explainOpen) {
-                        InlineSelectionExplainCard(
-                            book = book,
-                            allBlocks = allBookBlocks,
-                            thread = thread,
-                            draft = inlineDraft,
-                            onDraftChange = { inlineDraft = it },
-                            onSubmitQuestion = {
-                                val q = inlineDraft.trim()
-                                if (BookPassageQuestion.accepts(q)) {
-                                    inlineDraft = ""
-                                    runInlineSelection(thread.selection, SelectionExplainAction.ASK, q)
-                                }
-                            },
-                            onRetry = {
-                                val (act, q) = lastInlineAction ?: (SelectionExplainAction.EXPLAIN to null)
-                                runInlineSelection(thread.selection, act, q)
-                            },
-                            onOpenPair = { explainOpen = true },
-                            onOpenCitation = { _, block -> openPassage(BookPassage.from(book, block)) },
-                            onClose = { inlineThread = null; inlineDraft = ""; pdf.selection = null; textSelection = null },
-                            modifier = Modifier.heightIn(max = 360.dp),
-                        )
-                    }
-                }
-            }
-            val notesPanel: @Composable (Modifier) -> Unit = { panelModifier ->
-                if (notesOpen && samePage && view != null) {
-                    Column(panelModifier.fillMaxWidth().verticalScroll(rememberScrollState())
-                        .testTag("books-notes"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        if (!session.noting) TextButton(onClick = { session.beginNote() }, modifier = Modifier.testTag("books-note-new")) { Text("写批注") }
-                        if (session.noteLine >= 0) {
-                            Text("选一句原文写批注", style = MaterialTheme.typography.bodySmall)
-                            session.pageLines().forEachIndexed { index, range ->
-                                TextButton(onClick = { session.chooseNoteLine(index) }, modifier = Modifier.fillMaxWidth().testTag("books-note-line-$index"),
-                                    colors = ButtonDefaults.textButtonColors(containerColor = if (session.noteLine == index) highlight else Color.Transparent)) {
-                                    Text(view.text.substring(range), modifier = Modifier.fillMaxWidth())
-                                }
-                            }
-                        }
-                        NotesSection(session, remote, view, textColor = MaterialTheme.colorScheme.onSurface, keyboardHint = false)
-                        if (session.noteDraft != null) Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            TextButton(onClick = { session.requestNoteSave() }, enabled = !session.noteSaving, modifier = Modifier.testTag("books-note-save")) { Text("保存批注") }
-                            TextButton(onClick = { session.cancelNote() }, modifier = Modifier.testTag("books-note-close")) { Text("关闭编辑区") }
-                        }
-                    }
-                }
-            }
-            val pagingBar: @Composable () -> Unit = {
-                if (textView && !pageUnrecognizedOriginal) FlowRow(Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(if (compactTouch || verticalSplit != null) 8.dp else 20.dp, Alignment.CenterHorizontally),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                    itemVerticalAlignment = Alignment.CenterVertically) {
-                    val visibleImportRange = visibleImportPageRange()
-                    val hasPrevBookPage = book.pages.any { it.number < visibleImportRange.first }
-                    val hasNextBookPage = book.pages.any { it.number > visibleImportRange.last }
-                    V7Tooltip("上一页", shortcut = "←  PageUp") {
-                        PaperButton({ turnLayout(ReaderTurn.Previous) }, enabled = paging.canPrevious || hasPrevBookPage,
-                            modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
-                    }
-                    if (!editingJump) Text(paging.pages.getOrNull(paging.index)?.sourceLabel ?: "第 ${ui.page} 页",
-                        style = MaterialTheme.typography.bodyMedium, fontFamily = LocalV7Fonts.current.numbers,
-                        modifier = Modifier.testTag("reader-page-number").clickable { editingJump = true })
-                    else {
-                        val jumpFocus = remember { FocusRequester() }
-                        fun submitJump() {
-                            jump.toIntOrNull()?.takeIf { book.page(it) != null }?.let {
-                                turnTo(it); editingJump = false; focusManager.clearFocus()
-                            }
-                        }
-                        BasicTextField(jump, { jump = it.filter(Char::isDigit).take(5) }, singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.fgPrimary, textAlign = TextAlign.Center),
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                            keyboardActions = KeyboardActions(onGo = { submitJump() }),
-                            modifier = Modifier.width(80.dp).testTag("page-jump").focusRequester(jumpFocus)
-                                .onFocusChanged { jumpFocused = it.isFocused }
-                                .onPreviewKeyEvent { event ->
-                                    if (event.type == KeyEventType.KeyDown && event.key == Key.Enter) { submitJump(); true }
-                                    else if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
-                                        editingJump = false; focusManager.clearFocus(); true
-                                    } else false
-                                }.background(colors.surface2).padding(9.dp))
-                        LaunchedEffect(Unit) { jumpFocus.requestFocus() }
-                    }
-                    V7Tooltip("下一页", shortcut = "→  PageDown") {
-                        PaperButton({ turnLayout(ReaderTurn.Next) }, enabled = paging.canNext || hasNextBookPage,
-                            modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
-                    }
-                    // 阅读方式：翻页 / 滚动；按书记住（book_text_modes），重开仍是上次的读法（TON-1724）。
-                    V7Tooltip("阅读方式") {
-                        PaperButton({
-                            val next = if (readMode == BookReadMode.Paged) BookReadMode.Scroll else BookReadMode.Paged
-                            readMode = next
-                            runCatching { library.saveTextScrollMode(book.id, next == BookReadMode.Scroll) }
-                            runCatching { pageFocus.requestFocus() }
-                        }, modifier = Modifier.testTag("read-mode")) { Text(if (readMode == BookReadMode.Paged) "翻页" else "滚动") }
-                    }
-                    // 翻页效果：本次打开内有效；记住与入口以后并进阅读设置（TON-1654）。
-                    V7Tooltip("翻页效果") {
-                        PaperButton({ turnStyle = when (turnStyle) {
-                            PageTurnStyle.Flip -> PageTurnStyle.Slide
-                            PageTurnStyle.Slide -> PageTurnStyle.None
-                            PageTurnStyle.None -> PageTurnStyle.Flip
-                        }
-                            runCatching { pageFocus.requestFocus() } }, modifier = Modifier.testTag("turn-style")) {
-                            Text(when (turnStyle) { PageTurnStyle.Flip -> "翻转"; PageTurnStyle.Slide -> "滑动"; PageTurnStyle.None -> "无" })
-                        }
-                    }
-                } else
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(if (touchPdf || verticalSplit != null) 4.dp else 10.dp)) {
-                    // 快捷键写在悬停提示里：不用记，也不用在页面上多一行说明。提示用共享的 V7Tooltip，
-                    // 快捷键那半截走数字字体，跟面板上的其他提示一致。
-                    V7Tooltip("上一页", shortcut = "←  PageUp") {
-                        PaperButton({ turnTo(previousPage) }, enabled = !ui.busy && previousPage != null, modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
-                    }
-                    // 页面下方不再常驻说明行；同一句挪到页码的悬停提示里，图片书/文字版各自说清。
-                    V7Tooltip(when {
-                        book.format == "pdf" -> "页码按 PDF 原文件计算。"
-                        book.format in BookFormats.images -> "一张图片为一页。"
-                        else -> "页码按阅读器中的正文分页计算。"
-                    }) {
-                        Text("${ui.page} / $lastPage", color = colors.fgSecondary, fontFamily = LocalV7Fonts.current.numbers,
-                            style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("reader-page-number"))
-                    }
-                    V7Tooltip("下一页", shortcut = "→  PageDown") {
-                        PaperButton({ turnTo(nextPage) }, enabled = !ui.busy && nextPage != null, modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
-                    }
-                    Spacer(Modifier.weight(1f))
-                    if (!touchPdf && verticalSplit == null) Text("页码", color = colors.fgSecondary, style = MaterialTheme.typography.bodySmall)
-                    val field = RoundedCornerShape(8.dp)
-                    BasicTextField(jump, { jump = it.filter(Char::isDigit).take(5) }, singleLine = true,
-                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.fgPrimary, textAlign = TextAlign.Center),
-                        cursorBrush = SolidColor(colors.fgPrimary),
-                        modifier = Modifier.width(if (touchPdf || verticalSplit != null) 52.dp else 64.dp).testTag("page-jump")
-                            .semantics { contentDescription = "页码" }.v7FocusRing(field).clip(field).background(colors.surface2)
-                            .border(1.dp, colors.borderSubtle, field).onFocusChanged { jumpFocused = it.isFocused }
-                            .padding(horizontal = 10.dp, vertical = 9.dp))
-                    V7TextButton({ jump.toIntOrNull()?.let { turnTo(it); focusManager.clearFocus() } },
-                        enabled = !ui.busy && jump.toIntOrNull()?.let { book.page(it) != null } == true,
-                        contentPadding = toolPadding) { Text("前往") }
-                }
-            }
-            if (verticalSplit != null) {
-                Row(Modifier.fillMaxSize()) {
-                    Column(Modifier.width(verticalSplit.leftDp.dp).fillMaxHeight().testTag("book-half-fold-left"),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        pageSurface(Modifier.weight(1f))
-                        pagingBar()
-                    }
-                    Spacer(Modifier.width(verticalSplit.gapDp.dp).fillMaxHeight().testTag("book-half-fold-hinge"))
-                    Column(Modifier.weight(1f).fillMaxHeight().padding(start = 4.dp).testTag("book-half-fold-right"),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        sectionTitleBar(Modifier.fillMaxWidth())
-                        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            itemVerticalAlignment = Alignment.CenterVertically) { actions() }
-                        noticesAndGuide()
-                        when {
-                            explainOpen -> Box(Modifier.weight(1f).fillMaxWidth()) {
-                                BookExplainPanel(book, paragraphPage.number, explainConsent, explainer,
-                                    selection = explainingSelection, library = library, onOpenOriginal = openPassage.takeIf { explainingSelection != null })
-                            }
-                            activeHardPoint != null -> Box(Modifier.weight(1f).fillMaxWidth()) { hardPointCard() }
-                            inlineThread != null -> Box(Modifier.weight(1f).fillMaxWidth()) { inlineCard() }
-                            notesOpen && samePage && view != null -> notesPanel(Modifier.weight(1f))
-                            else -> Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).testTag("book-half-fold-companion"),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                sectionEndSummaryCard()
-                                Text("教材目录", style = MaterialTheme.typography.titleMedium)
-                                for (lesson in book.lessons) {
-                                    TextButton(onClick = { turnTo(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
-                                }
-                                if (marks.isNotEmpty()) {
-                                    Text("本页高亮 ${marks.size} 处", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
-                                }
-                            }
-                        }
-                    }
-                }
-            } else if (tabletopSplit != null) {
-                Column(Modifier.fillMaxSize()) {
-                    Column(Modifier.height(tabletopSplit.topDp.dp).fillMaxWidth().testTag("book-tabletop-content"),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        sectionTitleBar(Modifier.fillMaxWidth())
-                        pageSurface(Modifier.weight(1f))
-                    }
-                    Spacer(Modifier.height(tabletopSplit.gapDp.dp).fillMaxWidth().testTag("book-tabletop-hinge"))
-                    Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).testTag("book-tabletop-controls"),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            itemVerticalAlignment = Alignment.CenterVertically) { actions() }
-                        pagingBar()
-                        noticesAndGuide()
-                        if (!explainOpen) {
-                            hardPointCard()
-                            inlineCard()
-                            sectionEndSummaryCard()
-                        }
-                        if (notesOpen && samePage && view != null) notesPanel(Modifier.fillMaxWidth())
-                    }
-                }
-            } else {
-                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    if (compactTouch) {
-                        sectionTitleBar(Modifier.fillMaxWidth())
-                        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            itemVerticalAlignment = Alignment.CenterVertically) { actions() }
-                    } else {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            sectionTitleBar(Modifier.weight(1f))
-                            actions()
-                        }
-                    }
-                    noticesAndGuide()
-                    pageSurface(Modifier.weight(1f))
-                    if (!explainOpen) {
-                        inlineCard()
-                    }
-                    if (notesOpen && samePage && view != null) notesPanel(Modifier.fillMaxWidth().heightIn(max = 300.dp))
-                    pagingBar()
                 }
             }
         }
-    }
-    pendingInlineConsent?.let { (target, action, q) ->
-        AlertDialog(
-            onDismissRequest = { pendingInlineConsent = null },
-            title = { Text(ExplainPrivacy.TITLE) },
-            text = { Text(ExplainPrivacy.ask(book.title), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("explain-consent")) },
-            confirmButton = {
-                PrimaryButton({
-                    explainConsent.allow(book.id); consented = true; pendingInlineConsent = null
-                    runInlineSelection(target, action, q)
-                }, modifier = Modifier.testTag("explain-consent-allow")) { Text("允许并讲解") }
-            },
-            dismissButton = { V7TextButton({ pendingInlineConsent = null }, modifier = Modifier.testTag("explain-consent-deny")) { Text("不允许") } },
+
+        val handleCitationJump: (BookPassage) -> Unit = { passage ->
+            openPassage(passage)
+            // 仅窄桌面浮层模式下自动收起抽屉，以免盖住刚跳转到的出处；并排与底部半屏抽屉下保留对照。
+            if (effectiveSideOverlay) companionOpen = false
+        }
+
+        val explainTabContent: @Composable () -> Unit = {
+            Column(Modifier.fillMaxSize()) {
+                val chosenHp = activeHardPoint
+                val sec = currentSection
+                if (chosenHp != null && sec != null) {
+                    Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("难点 · ${chosenHp.first.label}", style = MaterialTheme.typography.labelLarge, color = v7Pine(), modifier = Modifier.weight(1f))
+                            V7TextButton({ activeHardPoint = null }) { Text("关闭") }
+                        }
+                        Text(chosenHp.first.explanation, style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            V7TextButton({
+                                val blk = chosenHp.second
+                                activeHardPoint = null
+                                companionTab = ReaderCompanionTab.ASK
+                                runInlineSelection(blk, SelectionExplainAction.ASK)
+                            }) { Text("继续追问") }
+                            if (hasOriginal) {
+                                V7TextButton({ handleCitationJump(BookPassage.from(book, chosenHp.second)) }) { Text("定位原文") }
+                            }
+                        }
+                    }
+                    HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle)
+                }
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    BookExplainPanel(
+                        book, paragraphPage.number, explainConsent, explainer,
+                        selection = explainingSelection, library = library,
+                        onOpenOriginal = handleCitationJump,
+                    )
+                }
+            }
+        }
+
+        val currentPageBodyBlocks = remember(allBookBlocks, paragraphPage.number) {
+            allBookBlocks.filter { it.page == paragraphPage.number && it.isBodyParagraph }
+        }
+        val askTabContent: @Composable () -> Unit = {
+            CompanionAskPane(
+                book = book,
+                allBlocks = allBookBlocks,
+                pageBlocks = currentPageBodyBlocks,
+                activeSelection = learnableSelection,
+                currentSection = currentSection,
+                thread = inlineThread,
+                draft = inlineDraft,
+                compact = effectiveBottomSheet,
+                onDraftChange = { inlineDraft = it },
+                onPickPassage = { picked ->
+                    val secIdx = guideController.sectionIndexForPage(picked.page).takeIf { it >= 0 } ?: currentSectionIndex
+                    val secCtx = guideController.contextForSection(secIdx)
+                    inlineThread = InlineExplainThread(picked, secCtx, askingOpen = true)
+                },
+                onSubmitQuestion = {
+                    val q = inlineDraft.trim()
+                    val target = inlineThread?.selection ?: learnableSelection
+                        ?: currentPageBodyBlocks.firstOrNull()
+                        ?: currentSection?.blocks?.firstOrNull { !it.heading && it.text.isNotBlank() }
+                        ?: allBookBlocks.firstOrNull { it.page == ui.page && it.text.isNotBlank() }
+                    if (target != null && BookPassageQuestion.accepts(q)) {
+                        inlineDraft = ""
+                        runInlineSelection(target, SelectionExplainAction.ASK, q)
+                    }
+                },
+                onRetry = {
+                    val target = inlineThread?.selection ?: return@CompanionAskPane
+                    val (act, q) = lastInlineAction ?: (SelectionExplainAction.EXPLAIN to null)
+                    runInlineSelection(target, act, q)
+                },
+                onOpenLogin = {
+                    if (onRelogin != null) onRelogin("授权已撤销，请重新登录。")
+                    else companionTab = ReaderCompanionTab.EXPLAIN
+                },
+                onOpenCitation = { _, block -> handleCitationJump(BookPassage.from(book, block)) },
+                onClearSelection = { inlineThread = null; pdf.selection = null; textSelection = null },
+                onInputFocusChanged = { askInputFocused = it },
+            )
+        }
+
+        val notesTabContent: @Composable () -> Unit = {
+            Column(
+                Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp).testTag("books-notes"),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (!session.noting && samePage && view != null) {
+                        V7TextButton({ session.beginNote() }, modifier = Modifier.testTag("books-note-new")) { Text("＋ 写批注") }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    if (onExportNotes != null) {
+                        V7TextButton({ onExportNotes(book, ui.page) }, enabled = !ui.busy, modifier = Modifier.testTag("book-export-notes")) {
+                            Text("导出笔记")
+                        }
+                    }
+                }
+                if (marks.isNotEmpty()) {
+                    Text("本页高亮（${marks.size} 处）", style = MaterialTheme.typography.labelMedium, color = v7Pine())
+                    HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.6f))
+                }
+                if (samePage && view != null) {
+                    if (session.noteLine >= 0) {
+                        Text("点选一句原文添加批注：", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+                        session.pageLines().forEachIndexed { index, range ->
+                            TextButton(
+                                onClick = { session.chooseNoteLine(index) },
+                                modifier = Modifier.fillMaxWidth().testTag("books-note-line-$index"),
+                                colors = ButtonDefaults.textButtonColors(containerColor = if (session.noteLine == index) highlight else Color.Transparent),
+                            ) { Text(view.text.substring(range), modifier = Modifier.fillMaxWidth()) }
+                        }
+                    }
+                    NotesSection(session, remote, view, textColor = MaterialTheme.colorScheme.onSurface, keyboardHint = false)
+                    if (session.noteDraft != null) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            PrimaryButton({ session.requestNoteSave() }, enabled = !session.noteSaving, modifier = Modifier.testTag("books-note-save")) { Text("保存") }
+                            V7TextButton({ session.cancelNote() }, modifier = Modifier.testTag("books-note-close")) { Text("取消") }
+                        }
+                    }
+                } else {
+                    Text("当前页暂无可批注文本。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+                }
+            }
+        }
+
+        // 1. 主体布局：
+        // - Fold8 / Duo 半折：左书右伴读或上书下伴读（铰链零吃字）；
+        // - 小窗与手机（<1000dp，含 winbox 752×552）：上书下伴读半屏抽屉，正文绝不归零；
+        // - 宽屏（>=1280dp）：默认左书右伴读并排（正文零像素被遮挡）；
+        // - 窄桌面（1000..1279dp）或手动切浮层：正文全铺 + 右侧浮层抽屉。
+        if (verticalSplit != null) {
+            Row(Modifier.fillMaxSize()) {
+                Box(Modifier.width(verticalSplit.leftDp.dp).fillMaxHeight().testTag("book-half-fold-left")) {
+                    pageSurface(Modifier.fillMaxSize())
+                }
+                Spacer(Modifier.width(verticalSplit.gapDp.dp).fillMaxHeight().testTag("book-half-fold-hinge"))
+                Box(Modifier.weight(1f).fillMaxHeight().background(colors.surface1).testTag("book-half-fold-right")) {
+                    ImmersiveCompanionDrawer(
+                        visible = true,
+                        docked = true,
+                        canDock = false,
+                        drawerWidth = rootWidth - verticalSplit.leftDp.dp - verticalSplit.gapDp.dp,
+                        activeTab = companionTab,
+                        onSelectTab = { companionTab = it },
+                        onToggleDock = {},
+                        onClose = {},
+                        explainContent = explainTabContent,
+                        askContent = askTabContent,
+                        notesContent = notesTabContent,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
+        } else if (tabletopSplit != null) {
+            Column(Modifier.fillMaxSize()) {
+                Box(Modifier.height(tabletopSplit.topDp.dp).fillMaxWidth().testTag("book-tabletop-content")) {
+                    pageSurface(Modifier.fillMaxSize())
+                }
+                Spacer(Modifier.height(tabletopSplit.gapDp.dp).fillMaxWidth().testTag("book-tabletop-hinge"))
+                Box(Modifier.weight(1f).fillMaxWidth().background(colors.surface1).testTag("book-tabletop-controls")) {
+                    ImmersiveCompanionDrawer(
+                        visible = true,
+                        docked = true,
+                        canDock = false,
+                        bottomSheet = true,
+                        bottomHeight = rootHeight - tabletopSplit.topDp.dp - tabletopSplit.gapDp.dp,
+                        activeTab = companionTab,
+                        onSelectTab = { companionTab = it },
+                        onToggleDock = {},
+                        onClose = {},
+                        explainContent = explainTabContent,
+                        askContent = askTabContent,
+                        notesContent = notesTabContent,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
+        } else if (effectiveBottomSheet) {
+            Column(Modifier.fillMaxSize()) {
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    pageSurface(Modifier.fillMaxSize())
+                }
+                ImmersiveCompanionDrawer(
+                    visible = true,
+                    docked = true,
+                    canDock = false,
+                    bottomSheet = true,
+                    bottomHeight = bottomDrawerHeight,
+                    activeTab = companionTab,
+                    onSelectTab = { companionTab = it },
+                    onToggleDock = {},
+                    onClose = { companionOpen = false; explainOpen = false; notesOpen = false },
+                    explainContent = explainTabContent,
+                    askContent = askTabContent,
+                    notesContent = notesTabContent,
+                )
+            }
+        } else if (effectiveSideDocked) {
+            Row(Modifier.fillMaxSize()) {
+                Box(Modifier.weight(1f).fillMaxHeight()) {
+                    pageSurface(Modifier.fillMaxSize())
+                }
+                ImmersiveCompanionDrawer(
+                    visible = true,
+                    docked = true,
+                    canDock = canDockCompanion,
+                    drawerWidth = sideDrawerWidth,
+                    activeTab = companionTab,
+                    onSelectTab = { companionTab = it },
+                    onToggleDock = { companionDocked = false },
+                    onClose = { companionOpen = false; explainOpen = false; notesOpen = false },
+                    explainContent = explainTabContent,
+                    askContent = askTabContent,
+                    notesContent = notesTabContent,
+                )
+            }
+        } else {
+            pageSurface(Modifier.fillMaxSize())
+        }
+
+        // 2. 底边 2dp 静默进度细线（HUD 隐藏且非底抽屉时可见，占面积 <0.2%）。
+        if (!showHud && !effectiveBottomSheet) {
+            ImmersiveProgressHairline(
+                currentPage = ui.page,
+                lastPage = lastPage,
+                modifier = Modifier.align(Alignment.BottomCenter),
+            )
+        }
+
+        // 3. 选中文字浮出操作胶囊（高亮 / 讲讲 / 举个例子 / 问… / 笔记）。
+        if (learnableSelection != null) {
+            val selectedPdf = pdf.selection
+            val highlighted = if (!textView && selectedPdf != null) {
+                remember(library, book.id, selectedPdf, highlightRevision) {
+                    val selectedPage = checkNotNull(book.page(selectedPdf.page))
+                    selectedPdf.range in library.highlights(book.id, selectedPage)
+                }
+            } else false
+            ImmersiveSelectionPill(
+                showHighlight = !textView && selectedPdf != null,
+                highlighted = highlighted,
+                highlightBusy = savingMark,
+                onHighlight = {
+                    val sel = selectedPdf ?: return@ImmersiveSelectionPill
+                    val passage = BookPassage.from(book, learnableSelection)
+                    savingMark = true
+                    markError = false
+                    scope.launch {
+                        try {
+                            withContext(Dispatchers.IO) { library.setHighlight(passage, !highlighted) }
+                            highlightRevision++
+                            paging.anchor = BookPageAnchor(learnableSelection.page, learnableSelection.start)
+                            if (pdf.selection == sel) pdf.selection = null
+                        } catch (cancel: CancellationException) { throw cancel }
+                        catch (_: Exception) { markError = true }
+                        finally { savingMark = false }
+                    }
+                },
+                onAction = { action ->
+                    companionOpen = true
+                    companionTab = ReaderCompanionTab.ASK
+                    runInlineSelection(learnableSelection, action)
+                },
+                onNote = {
+                    companionOpen = true
+                    companionTab = ReaderCompanionTab.NOTES
+                    notesOpen = true
+                    if (!session.noting && samePage && view != null) session.beginNote()
+                },
+                onDismiss = { pdf.selection = null; textSelection = null },
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = if (showHud) 54.dp else 14.dp),
+            )
+        }
+
+        // 4. 浮动书内查找面板（不挤压正文）。
+        if (searchOpen) {
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 52.dp, end = 16.dp)
+                    .widthIn(max = minOf(420.dp, maxWidth - 32.dp)),
+            ) {
+                BookSearchPanel(
+                    book = book,
+                    query = searchQuery,
+                    result = searchResult,
+                    activeIndex = searchActiveIndex,
+                    focusRequester = searchFocus,
+                    onQueryChange = { next -> searchQuery = next; searchActiveIndex = -1 },
+                    onFocusChange = { searchFocused = it },
+                    onPick = selectSearchHit,
+                    onPrevious = {
+                        val total = searchResult.hits.size
+                        if (total > 0) selectSearchHit(if (searchActiveIndex <= 0) total - 1 else searchActiveIndex - 1)
+                    },
+                    onNext = {
+                        val total = searchResult.hits.size
+                        if (total > 0) selectSearchHit(if (searchActiveIndex !in 0 until total - 1) 0 else searchActiveIndex + 1)
+                    },
+                    onClose = { searchOpen = false; searchFocused = false },
+                )
+            }
+        }
+
+        // 5. 左侧浮动抽屉（目录 + 书签）。
+        ImmersiveTocDrawer(
+            visible = tocOpen,
+            availableWidth = maxWidth,
+            book = book,
+            currentPage = ui.page,
+            currentSectionIndex = currentSectionIndex,
+            bookmarks = bookmarks,
+            busy = ui.busy,
+            onJumpPage = { target -> turnTo(target); tocOpen = false },
+            onToggleBookmark = { toggleBookmark(it) },
+            onReorganizeSections = onReorganizeSections,
+            onClose = { tocOpen = false },
+            modifier = Modifier.align(Alignment.CenterStart).padding(top = if (showHud) 44.dp else 0.dp),
         )
+
+        // 6. 右侧浮层伴读抽屉（窄桌面 1000..1279dp 或宽屏手动切换浮层时渲染）。
+        if (effectiveSideOverlay) {
+            ImmersiveCompanionDrawer(
+                visible = true,
+                docked = false,
+                canDock = canDockCompanion,
+                drawerWidth = sideDrawerWidth,
+                activeTab = companionTab,
+                onSelectTab = { companionTab = it },
+                onToggleDock = { companionDocked = true },
+                onClose = { companionOpen = false; explainOpen = false; notesOpen = false },
+                explainContent = explainTabContent,
+                askContent = askTabContent,
+                notesContent = notesTabContent,
+                modifier = Modifier.align(Alignment.CenterEnd).padding(top = if (showHud) 44.dp else 0.dp),
+            )
+        }
+
+        // 7. 顶部浮动工具栏（44dp，默认隐藏，悬停/Tab 呼出）。
+        ImmersiveTopHud(
+            visible = showHud,
+            availableWidth = maxWidth,
+            bookTitle = book.title,
+            sectionTitle = if (source != null) "出处 · ${source.title}" else currentSection?.title,
+            backLabel = if (source != null) { if (ui.review != null) "返回复习" else "返回学习" } else "书架",
+            hasOriginal = hasOriginal,
+            textView = textView,
+            tocOpen = tocOpen,
+            companionOpen = companionOpen,
+            searchOpen = searchOpen,
+            bookmarked = bookmarks.any { it.page == ui.page },
+            pinnedHud = hudPinned,
+            busy = ui.busy,
+            showLearnAction = false,
+            learnLabel = "",
+            onBack = onBack,
+            onToggleToc = { tocOpen = !tocOpen },
+            onSelectView = { switchView(it) },
+            onToggleSearch = {
+                if (searchOpen) { searchOpen = false; searchFocused = false }
+                else { searchOpen = true; searchFocusTick++ }
+            },
+            onToggleBookmark = { toggleBookmark(ui.page) },
+            onToggleCompanion = {
+                companionOpen = !companionOpen
+                if (!companionOpen) { explainOpen = false; notesOpen = false }
+            },
+            onTogglePinHud = {
+                hudPinned = !hudPinned
+                if (hudPinned) hudVisible = true
+            },
+            onLearn = onLearn,
+            typeControl = {
+                val control = LocalDeskTypeControl.current
+                if (control != null) control(typeMenuExtra)
+            },
+            modifier = Modifier.align(Alignment.TopCenter),
+        )
+
+        // 8. 底部浮动进度与跳页栏（44dp，默认隐藏，悬停/Tab/Ctrl+G 呼出）。
+        val visibleImportRange = visibleImportPageRange()
+        val canPrev = if (textView && !pageUnrecognizedOriginal) paging.canPrevious || book.pages.any { it.number < visibleImportRange.first }
+            else !ui.busy && previousPage != null
+        val canNext = if (textView && !pageUnrecognizedOriginal) paging.canNext || book.pages.any { it.number > visibleImportRange.last }
+            else !ui.busy && nextPage != null
+        ImmersiveBottomScrubber(
+            visible = showHud,
+            availableWidth = maxWidth,
+            currentPage = ui.page,
+            lastPage = lastPage,
+            pageLabel = if (textView && !pageUnrecognizedOriginal) paging.pages.getOrNull(paging.index)?.sourceLabel ?: "第 ${ui.page} 页" else "第 ${ui.page} 页",
+            sectionTitle = currentSection?.title,
+            canPrev = canPrev,
+            canNext = canNext,
+            editingJump = editingJump,
+            jumpText = jump,
+            onJumpTextChange = { jump = it },
+            onStartEditJump = { editingJump = true; jump = ui.page.toString() },
+            onCancelEditJump = { editingJump = false; focusManager.clearFocus() },
+            onJumpFocusChange = { jumpFocused = it },
+            onSubmitJump = { target ->
+                if (book.page(target) != null) {
+                    turnTo(target)
+                    editingJump = false
+                    focusManager.clearFocus()
+                }
+            },
+            onPrev = { turnLayout(ReaderTurn.Previous) },
+            onNext = { turnLayout(ReaderTurn.Next) },
+            onScrubToPage = { target -> turnTo(target) },
+            modifier = Modifier.align(Alignment.BottomCenter),
+        )
+
+        // 9. 轻提示（后台导入进度 / 出处警告），仅异常或进行中时浮在顶栏下方。
+        val noticeText = sourceWarning
+            ?: (if (viewSaveError) "视图设置暂未保存，下次切换将重试。" else null)
+            ?: (if (markError) "高亮暂未保存，请重试。" else null)
+            ?: (if (chosen != null && learnableSelection == null) "选段超过 4000 字，请缩窄范围后再问。" else null)
+        if (noticeText != null) {
+            Text(
+                noticeText,
+                style = MaterialTheme.typography.labelMedium,
+                color = v7Alert(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = if (showHud) 52.dp else 12.dp)
+                    .clip(RoundedCornerShape(CoachV7.Radius.btn))
+                    .background(colors.surface1.copy(alpha = 0.95f))
+                    .border(1.dp, colors.borderSubtle, RoundedCornerShape(CoachV7.Radius.btn))
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                    .testTag("source-anchor-status"),
+            )
+        }
     }
-    if (asking) BookPassageAsk(book, paragraphPage, support,
-        onRepair = { asking = false; explainingSelection = learnableSelection; explainOpen = true },
-        initialSelection = learnableSelection,
-        onOpenOriginal = openPassage.takeIf { learnableSelection != null },
-    ) { asking = false }
 }
 
 /** 键盘翻页的去向。 */

@@ -70,10 +70,16 @@ internal fun TextbookLoginScreen(
                     modifier = Modifier.testTag("login-title"),
                 )
                 Text(
-                    "登录后，看书和做题时可以随时提问和查看讲解。",
+                    "登录后，看书和学习时可随时查看讲解、提问与同步进度。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = colors.fgSecondary,
                     modifier = Modifier.testTag("login-subtitle"),
+                )
+                Text(
+                    "使用讲解与提问时，仅发送所选片段或当前节内容至 Coach 服务，可在设置中随时关闭。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.fgTertiary,
+                    modifier = Modifier.testTag("login-privacy-note"),
                 )
                 revokedReason?.takeIf(String::isNotBlank)?.let { reason ->
                     Text(

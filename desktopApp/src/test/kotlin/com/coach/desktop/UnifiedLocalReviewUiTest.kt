@@ -28,7 +28,7 @@ class UnifiedLocalReviewUiTest {
         }
         val book = c.state.value.book!!
         val lesson = book.lessons.first()
-        val question = StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE)!!
+        val question = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
         val choice = "choice-${question.options.indexOf(question.answer)}"
         runSkikoComposeUiTest(size = Size(1440f, 1000f), density = Density(1f)) {
             setContent { WindowsTextbookHost(c) { null } }

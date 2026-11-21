@@ -182,7 +182,7 @@ class WindowsLocalExamUiTest {
         val store = LocalExamStore(library)
         lateinit var attempt: String
         val first = book.lessons.first()
-        val practice = StudyCoachCourse.practice(book, first, QuestionMode.CHOICE)!!
+        val practice = com.coach.desktop.books.testPracticeFixture(book, first, QuestionMode.CHOICE)!!
         val correct = practice.options.indexOf(practice.answer)
         runSkikoComposeUiTest(size = Size(1440f, 900f), density = Density(1f)) {
             setContent { WindowsTextbookHost(c) { null } }
@@ -359,7 +359,7 @@ class WindowsLocalExamUiTest {
         val c = TextbookController(library)
         val store = LocalExamStore(library)
         val first = book.lessons.first()
-        val practice = StudyCoachCourse.practice(book, first, QuestionMode.CHOICE)!!
+        val practice = com.coach.desktop.books.testPracticeFixture(book, first, QuestionMode.CHOICE)!!
         val correct = practice.options.indexOf(practice.answer)
         val choice = hasTestTag("local-choice-${first.id}-$correct")
         var windowOpen by mutableStateOf(true)

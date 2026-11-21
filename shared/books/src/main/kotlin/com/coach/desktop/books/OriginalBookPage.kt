@@ -59,13 +59,26 @@ internal val OriginalPageBitmapWidth = SemanticsPropertyKey<Int>("OriginalPageBi
 @Composable
 internal fun rememberOriginalPageImage(
     library: TextbookLibrary, book: Textbook, page: Int, enabled: Boolean, pixelWidth: Int?, retry: Int,
+    bitmapCache: OriginalPdfBitmapCache? = null,
 ): PageImage = key(library, book.id, page) {
-    val image by produceState<PageImage>(PageImage.Loading, enabled, pixelWidth, retry) {
+    val cacheKey = if (enabled && pixelWidth != 0 && retry == 0) PdfBitmapCacheKey(book.id, page, pixelWidth) else null
+    val initial: PageImage = cacheKey?.let { bitmapCache?.get(it) }?.let { PageImage.Ready(it) } ?: PageImage.Loading
+    val image by produceState(initial, enabled, pixelWidth, retry) {
         if (!enabled || pixelWidth == 0) return@produceState
+        val keyNow = PdfBitmapCacheKey(book.id, page, pixelWidth)
+        if (retry > 0) bitmapCache?.removePage(book.id, page)
+        else {
+            bitmapCache?.get(keyNow)?.let { cached ->
+                value = PageImage.Ready(cached)
+                return@produceState
+            }
+        }
         // Keep the current raster and all its overlays during an active resize.
         if (value is PageImage.Ready) delay(200)
         try {
-            value = withContext(Dispatchers.IO) { PageImage.Ready(library.renderOriginal(book, page, pixelWidth).asBookImageBitmap()) }
+            val rendered = withContext(Dispatchers.IO) { library.renderOriginal(book, page, pixelWidth).asBookImageBitmap() }
+            bitmapCache?.put(keyNow, rendered)
+            value = PageImage.Ready(rendered)
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (_: Throwable) {

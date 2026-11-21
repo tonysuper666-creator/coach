@@ -52,7 +52,7 @@ private fun reasonText(reason: String?) = when (reason) {
     "first_token_timeout" -> "25 秒没有出字"
     "stall" -> "30 秒没有新内容"
     "total_timeout" -> "超过 180 秒"
-    "suspended" -> "Mac 休眠过"
+    "suspended" -> "服务曾休眠"
     "cancelled" -> "已取消"
     "client_gone" -> "连接断开"
     "cli_exit" -> "回答意外中断"

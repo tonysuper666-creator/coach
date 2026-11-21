@@ -18,7 +18,7 @@ import java.time.format.DateTimeFormatter
 
 @Composable
 internal fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalBookReview) -> Unit) {
-    Desk(crumb = "复习", onBack = onBack, backLabel = "返回书架", showNavigation = false, hasMargin = false) {
+    Desk(crumb = "复习", onBack = onBack, backLabel = "返回书架", showNavigation = false, hasMargin = false, showFocusToggle = false) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp).testTag("local-reviews"),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("复习 ${ui.reviews.size} 题", style = MaterialTheme.typography.headlineMedium)
@@ -58,7 +58,7 @@ internal fun LocalBookReviewQuestion(review: LocalBookReview, enabled: Boolean, 
             onFocusRestored()
         }
     }
-    Desk(crumb = review.bookTitle, onBack = onBack, backLabel = "返回复习列表", showNavigation = false, hasMargin = false) {
+    Desk(crumb = review.bookTitle, onBack = onBack, backLabel = "返回复习列表", showNavigation = false, hasMargin = false, showFocusToggle = false) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp).testTag("local-review-question"),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("复习 · ${review.lessonTitle}", style = MaterialTheme.typography.headlineMedium)

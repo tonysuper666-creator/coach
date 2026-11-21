@@ -64,11 +64,11 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     onExportNotes: ((Textbook, Int) -> Unit)? = null,
     releasePickedBook: (Path) -> Unit = {}, retryState: ShellRetryState? = null, chooseBook: suspend () -> Path?) {
     val explainer = remember(controller.library) { BookExplainer(library = controller.library) }
-    val consent = remember(controller.library) { ExplainConsent(controller.library.directory) }
-    val bookStructureProvider = remember(explainer, consent) {
-        BookStructureProvider { targetBook, candidates, bookPages ->
+    val aiEnabled = LocalReadingAiExplain.current
+    val bookStructureProvider = remember(explainer, aiEnabled) {
+        BookStructureProvider { _, candidates, bookPages ->
             if (!explainer.loaded) explainer.load()
-            if (explainer.identity == null || !consent.allowed(targetBook.id)) {
+            if (explainer.identity == null || !aiEnabled) {
                 ModelSectionResult.Deferred
             } else {
                 explainer.structureUnstructuredBook(candidates, bookPages)
@@ -250,6 +250,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                     }
                     val book = ui.book
                     when {
+                        !ui.initialized && ui.screen == BookScreen.HOME && book == null && ui.catalog.isEmpty() -> {
+                            Box(Modifier.fillMaxSize().testTag("library-loading"))
+                        }
                         ui.screen == BookScreen.HOME || book == null -> LibraryHome(ui,
                             onImport = {
                                 scope.launch {
@@ -258,8 +261,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                     }
                                 }
                             },
-                            onSelect = { run { controller.select(it) } }, onRead = { run { if (drafts.flush()) controller.learn(LearningPath.READ) } },
-                            onLearn = { run { if (drafts.flush()) controller.learn() } },
+                            onSelect = { run { controller.select(it) } }, onRead = { run { controller.read() } },
+                            onLearn = { run { controller.read() } },
                             onPath = { path -> run { if (drafts.flush()) controller.learn(path) } },
                             onCancelImport = controller::cancelImport,
                             hinge = hinge,
@@ -357,10 +360,6 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         Modifier.align(androidx.compose.ui.Alignment.TopCenter))
                 }
             }
-            if (ui.prompt != null && ui.book != null) BookEntryPrompt(ui,
-                onDismiss = { run { controller.dismissPrompt() } }, onRead = { run { controller.read() } },
-                onEnable = { run { controller.enableLearning() } }, onMode = { run { controller.mode(it) } },
-                onPath = { run { controller.chooseLearningPath(it) } })
         }
     }
 }

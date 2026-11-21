@@ -205,7 +205,12 @@ internal fun HostEmptyState(tag: String, title: String, text: String) {
  * 同时保留完整路径的复制与选中能力；「知道了」走纸面按钮。
  */
 @Composable
-internal fun HostSettings(directory: Path, onPersonalCourse: (() -> Unit)? = null, onClose: () -> Unit) {
+internal fun HostSettings(
+    directory: Path,
+    onPersonalCourse: (() -> Unit)? = null,
+    preferences: com.coach.desktop.books.ReadingSettings? = null,
+    onClose: () -> Unit,
+) {
     val colors = CoachTheme.colors
     val paper = RoundedCornerShape(CoachV7.Radius.btn)
     val effectiveDirectory = LocalSettingsDirectoryOverride.current ?: directory
@@ -218,7 +223,28 @@ internal fun HostSettings(directory: Path, onPersonalCourse: (() -> Unit)? = nul
 
     AlertDialog(onDismissRequest = onClose, title = { Text("设置") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("教材和进度保存在此设备，不经过服务。", style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
+            Text("教材和进度保存在此设备。提问与讲解时只发送当前所选片段或本节正文至 Coach 服务。", style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
+            if (preferences != null) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("伴读讲解与提问", style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary)
+                        Text(
+                            if (preferences.aiExplain) "已开启，可在阅读时使用讲解与提问" else "已关闭，仅本地阅读不发送正文",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.fgSecondary,
+                        )
+                    }
+                    Switch(
+                        checked = preferences.aiExplain,
+                        onCheckedChange = { preferences.chooseAiExplain(it) },
+                        modifier = Modifier.testTag("settings-ai-toggle"),
+                    )
+                }
+            }
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("教材位置", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
                 SelectionContainer {

@@ -34,7 +34,7 @@ class PracticeSourceMultiBlockTest {
 
             val book = controller.state.value.book!!
             val lesson = book.lessons[book.lessonIndex]
-            val practice = StudyCoachCourse.practice(book, lesson, QuestionMode.SHORT_ANSWER)!!
+            val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.SHORT_ANSWER)!!
             assertEquals(lesson.text, practice.reference, "简答依据是整节正文")
             val body = lesson.blocks.filterNot { it.heading }
             assertTrue(body.size >= 2, "本节必须有多块正文才能复现这个缺陷")
@@ -106,7 +106,7 @@ class PracticeSourceMultiBlockTest {
             val lesson = book.lessons[book.lessonIndex]
             assertEquals(listOf(2, 3), lesson.blocks.filterNot { it.heading }.map { it.page },
                 "同一节两块正文分别落在第 2 页与第 3 页")
-            val practice = StudyCoachCourse.practice(book, lesson, QuestionMode.SHORT_ANSWER)!!
+            val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.SHORT_ANSWER)!!
             assertEquals(lesson.text, practice.reference, "简答依据跨两个 SourceBlock（第 2 页与第 3 页）")
 
             onNodeWithTag("open-practice-source").performScrollTo().performClick()

@@ -12,6 +12,7 @@ import java.sql.SQLException
 
 internal val LocalReadingAutoGuide = compositionLocalOf { true }
 internal val LocalReadingSectionSummary = compositionLocalOf { true }
+internal val LocalReadingAiExplain = compositionLocalOf { true }
 
 internal enum class ReadingSize(val label: String, val scale: Float) {
     SMALL("小", .9f), MEDIUM("中", 1f), LARGE("大", 1.15f)
@@ -42,6 +43,8 @@ internal class ReadingSettings(directory: Path, private val busyTimeoutMs: Int =
         private set
     var sectionSummary by mutableStateOf(true)
         private set
+    var aiExplain by mutableStateOf(true)
+        private set
 
     init {
         Files.createDirectories(directory)
@@ -62,6 +65,7 @@ internal class ReadingSettings(directory: Path, private val busyTimeoutMs: Int =
                             "paper" -> paper = PaperColor.entries.firstOrNull { it.name == value } ?: PaperColor.SYSTEM
                             "autoGuide" -> autoGuide = value != "false"
                             "sectionSummary" -> sectionSummary = value != "false"
+                            "aiExplain" -> aiExplain = value != "false"
                         }
                     }
                 }
@@ -107,6 +111,11 @@ internal class ReadingSettings(directory: Path, private val busyTimeoutMs: Int =
     fun chooseSectionSummary(enabled: Boolean) {
         save("sectionSummary", enabled.toString())
         sectionSummary = enabled
+    }
+
+    fun chooseAiExplain(enabled: Boolean) {
+        save("aiExplain", enabled.toString())
+        aiExplain = enabled
     }
 
     @Synchronized

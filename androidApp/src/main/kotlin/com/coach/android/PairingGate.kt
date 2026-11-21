@@ -89,10 +89,7 @@ fun PairingGate(
     }
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         val paired = credentials
-        if (paired?.role == "friend") FriendQuestion(friendEndpoint, paired) {
-            scope.launch { revokeCurrent(); error = "授权已撤销，请重新登录。" }
-        }
-        else if (paired != null) content(paired)
+        if (paired != null) content(paired)
         else Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("连接服务", style = MaterialTheme.typography.headlineMedium)
             com.coach.ui.SableLoginButton(busy, { busy = it }) { open ->

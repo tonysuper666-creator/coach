@@ -44,7 +44,7 @@ class RecordsScreenshotTest {
         waitForIdle()
         val card = onNodeWithTag("attempt")
         card.assertExists()
-        if (!offline) onNodeWithText("参考答案", substring = true).assertExists() else onNodeWithText("没取到", substring = true).assertExists()
+        if (!offline) onNodeWithText("参考答案", substring = true).assertExists() else onNodeWithText("暂未取到", substring = true).assertExists()
         onNodeWithText("复核：claude-sonnet-5-5", substring = true).assertExists()
         onNodeWithText("初评：gpt-5", substring = true).assertExists()
         val image = card.captureToImage().toAwtImage()

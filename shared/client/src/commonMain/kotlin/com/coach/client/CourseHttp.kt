@@ -130,21 +130,21 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         else MockReply(null, parsed.s("error").ifBlank { "暂时无法确认，请稍后重试。" })
     } catch (_: HttpRequestTimeoutException) { MockReply(null, "讲解请求等待超时。可继续阅读或手动重试。") }
       catch (e: kotlinx.coroutines.CancellationException) { throw e }
-      catch (_: Exception) { MockReply(null, "连不上 Mac，阅读位置已保存。可返回做题或手动重试。") }
-    /** 本机书架里的书：选中段加相邻原文块（带块编号）发给已配对的 Mac，讲解只引用这些块编号。 */
+      catch (_: Exception) { MockReply(null, "连不上 Coach 服务，阅读位置已保存。可返回做题或手动重试。") }
+    /** 本机书架里的书：选中段加相邻原文块（带块编号）发给已连接的 Coach 服务，讲解只引用这些块编号。 */
     suspend fun explainLibrary(input: JsonObject): MockReply = try {
         val response = http.post("$base/v1/library/explain") {
             timeout { requestTimeoutMillis = ReaderTimeoutPolicy.CLIENT_REQUEST_MS; socketTimeoutMillis = ReaderTimeoutPolicy.CLIENT_REQUEST_MS }
             setBody(TextContent(input.toString(), ContentType.Application.Json))
         }
-        if (response.status.value == 401) MockReply(null, "这台电脑的配对已失效，请在 Mac 上生成新配对码重新配对。", statusCode = 401)
+        if (response.status.value == 401) MockReply(null, "授权已失效，请重新登录 Coach 服务。", statusCode = 401)
         else {
             val text = response.bodyAsText()
             val parsed = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull()
             val status = response.status.value
             val code = parsed?.s("code")?.ifBlank { null }
             when {
-                parsed == null && status != 403 -> MockReply(null, "连不上 Mac，可继续阅读或稍后重试。")
+                parsed == null && status != 403 -> MockReply(null, "连不上 Coach 服务，可继续阅读或稍后重试。")
                 response.status.isSuccess() -> MockReply(parsed, null, statusCode = status)
                 // Older friend services return a quota sentence. Use the same service guidance on both clients.
                 status == 429 || code == "daily_quota" || code == "monthly_quota" ->
@@ -154,7 +154,7 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         }
     } catch (_: HttpRequestTimeoutException) { MockReply(null, "讲解请求等待超时。可继续阅读或手动重试。") }
       catch (e: kotlinx.coroutines.CancellationException) { throw e }
-      catch (_: Exception) { MockReply(null, "连不上 Mac，可继续阅读或稍后重试。") }
+      catch (_: Exception) { MockReply(null, "连不上 Coach 服务，可继续阅读或稍后重试。") }
 
     /** Check this same server and device without sending any book text. Only 401 proves revocation. */
     suspend fun libraryAuthStatus(): Int? = try {

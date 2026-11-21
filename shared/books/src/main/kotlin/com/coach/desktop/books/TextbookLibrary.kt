@@ -230,7 +230,7 @@ internal class TextbookLibrary(
     fun pdfScrollMode(bookId: String): Boolean = database().use { db ->
         db.prepareStatement("SELECT scrolling FROM book_pdf_modes WHERE book=?").use { sql ->
             sql.setString(1, bookId)
-            sql.executeQuery().use { !it.next() || it.getBoolean(1) }
+            sql.executeQuery().use { it.next() && it.getBoolean(1) }
         }
     }
 
@@ -1024,7 +1024,9 @@ internal class TextbookLibrary(
         val previous = this.answer(book, lesson, mode)
         val source = if (answered) book(book) else null
         val section = source?.lessons?.find { it.id == lesson }
-        val practice = section?.let { StudyCoachCourse.practice(checkNotNull(source), it, mode) }
+        val practice = section?.takeIf { mode == QuestionMode.SHORT_ANSWER && it.text.isNotBlank() }?.let {
+            Practice("合上原文，用自己的话说明「${it.title}」的主要内容，并举一个例子。", it.text, "", emptyList())
+        }
         // 题梯会话和作答写在同一个事务里：读到一半的会话不会和刚保存的答案对不上。
         // 会话按「这本书 + 当前走法」累计，只在「做题学」里记，别的走法不改这张表。
         val ladder = if (source != null && section != null && practice != null)
@@ -1085,7 +1087,9 @@ internal class TextbookLibrary(
         for ((id, lessonId, mode) in old) {
             val book = book(id)
             val lesson = book.lessons.find { it.id == lessonId } ?: continue
-            val practice = StudyCoachCourse.practice(book, lesson, mode) ?: continue
+            val practice = if (mode == QuestionMode.SHORT_ANSWER && lesson.text.isNotBlank()) {
+                Practice("合上原文，用自己的话说明「${lesson.title}」的主要内容，并举一个例子。", lesson.text, "", emptyList())
+            } else continue
             val answer = answer(id, lessonId, mode)
             if (answer.committed(mode)) database().use { db ->
                 db.autoCommit = false

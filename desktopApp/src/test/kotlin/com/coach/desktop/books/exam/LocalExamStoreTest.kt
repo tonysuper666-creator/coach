@@ -131,7 +131,7 @@ class LocalExamStoreTest {
         assertEquals("TEXTBOOK_REFERENCE", drill.origin)
         assertEquals("drill", drill.kind)
         assertEquals(f.book.lessons.size, drill.items.size)
-        val practice = StudyCoachCourse.practice(f.book, f.book.lessons[0], QuestionMode.CHOICE)!!
+        val practice = com.coach.desktop.books.testPracticeFixture(f.book, f.book.lessons[0], QuestionMode.CHOICE)!!
         assertEquals(practice.prompt, drill.items.first().stem)
         assertEquals(practice.options, drill.items.first().options.map { it.text })
         assertEquals(practice.reference, drill.items.first().source.str("quote"))

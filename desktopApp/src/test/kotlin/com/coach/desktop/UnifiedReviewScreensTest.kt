@@ -31,7 +31,7 @@ class UnifiedReviewScreensTest {
                     c.chooseLearningPath(LearningPath.QUESTION_FIRST)
                     c.enableLearning()
                     val book = c.state.value.book!!
-                    val practice = StudyCoachCourse.practice(book, book.lessons.first(), QuestionMode.CHOICE)!!
+                    val practice = com.coach.desktop.books.testPracticeFixture(book, book.lessons.first(), QuestionMode.CHOICE)!!
                     c.answer(PracticeAnswer(practice.options.first { it != practice.answer }, true))
                 }
                 runSkikoComposeUiTest(size = Size(1440f, 1000f), density = Density(1.5f)) {

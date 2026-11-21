@@ -99,9 +99,8 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
     val examUi by exams.state.collectAsState()
     val scope = rememberCoroutineScope()
     val book = ui.book
-    LaunchedEffect(ui.prompt, book?.id) {
-        if (ui.prompt == com.coach.desktop.books.BookPrompt.IMPORTED) {
-            origin = null
+    LaunchedEffect(ui.screen, book?.id) {
+        if (ui.screen == BookScreen.READER && book != null) {
             settings = false
             tab = AppTab.RESOURCES
         }
@@ -174,8 +173,9 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                 val verticalHalfFold = bookVerticalSplit(maxWidth.value, maxHeight.value, hostLeftDp, hinge) != null
                 val hostTabletop = if (!deskPage) bookTabletopSplit(maxWidth.value, maxHeight.value, hostTopDp, hinge) else null
                 val tabletopDesk = deskPage && bookTabletopSplit(maxWidth.value, maxHeight.value, hostTopDp, hinge) != null
+                val immersiveReader = destination == AppTab.RESOURCES && ui.screen == BookScreen.READER && book != null
                 val hideRailForHalfFold = deskPage && (verticalHalfFold || tabletopDesk || hinge?.axis == HingeAxis.Horizontal)
-                val rail = !hideRailForHalfFold && hostTabletop == null && maxWidth >= 700.dp
+                val rail = !immersiveReader && !hideRailForHalfFold && hostTabletop == null && maxWidth >= 700.dp
                 val settingsButton: @Composable () -> Unit = {
                     V7TextButton({ settings = true }, modifier = Modifier.testTag("open-settings"), ringInside = true) {
                         Text("设置", style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
@@ -242,6 +242,7 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                     LocalReadingFont provides preferences.font, LocalImportNoticeHandled provides true,
                     com.coach.desktop.books.LocalReadingAutoGuide provides preferences.autoGuide,
                     com.coach.desktop.books.LocalReadingSectionSummary provides preferences.sectionSummary,
+                    com.coach.desktop.books.LocalReadingAiExplain provides preferences.aiExplain,
                     LocalBookHinge provides hinge) {
                     // No rules between bar, rail and page: V7 separates them with the desk colour and the paper alone.
                     if (hostTabletop != null) Column(Modifier.fillMaxSize()) {
@@ -268,6 +269,8 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                             if (!deskPage) HostBar(hostCrumb(destination)) { select(AppTab.TODAY) }
                             Box(Modifier.weight(1f).fillMaxWidth()) { content() }
                         }
+                    } else if (immersiveReader) {
+                        Box(Modifier.fillMaxSize()) { content() }
                     } else Column(Modifier.fillMaxSize()) {
                         if (!deskPage) HostBar(hostCrumb(destination)) { select(AppTab.TODAY) }
                         Box(Modifier.weight(1f).fillMaxWidth()) { content() }
@@ -280,7 +283,7 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
             }
             BookImportToast(ui.importNotice, controller::dismissImportNotice, Modifier.align(Alignment.TopCenter))
             }
-            if (settings) HostSettings(controller.library.directory, onPersonalCourse) { settings = false }
+            if (settings) HostSettings(controller.library.directory, onPersonalCourse, preferences) { settings = false }
         }
     }
 }

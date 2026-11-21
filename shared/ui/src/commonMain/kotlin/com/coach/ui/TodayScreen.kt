@@ -28,7 +28,7 @@ fun TodayScreen(
     val kps = view.kps
     if (kps.isEmpty()) {
         return CenterMessage(
-            if (ui.connected) "课程「${c.courseId}」里还没有知识点（课程内容尚未装载，或课程号不对）。" else "还没有同步到课程内容，且 Mac 未连接。",
+            if (ui.connected) "课程「${c.courseId}」里还没有知识点（课程内容尚未装载，或课程号不对）。" else "还没有同步到课程内容，且 Coach 服务未连接。",
         )
     }
     val decision = c.learningTarget(view)

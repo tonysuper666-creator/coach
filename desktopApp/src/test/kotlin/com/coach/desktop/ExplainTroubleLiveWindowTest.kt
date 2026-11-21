@@ -206,7 +206,7 @@ class ExplainTroubleLiveWindowTest {
             click(window, "host-course-learn")
             waitFor("learning") { controller.state.value.screen == BookScreen.LEARNING && node(window, "choice-0") != null }
             val current = controller.state.value.book!!
-            val practice = assertNotNull(StudyCoachCourse.practice(current, current.lessons[current.lessonIndex], QuestionMode.CHOICE))
+            val practice = assertNotNull(com.coach.desktop.books.testPracticeFixture(current, current.lessons[current.lessonIndex], QuestionMode.CHOICE))
             click(window, "choice-${practice.options.indexOf(practice.answer)}")
             waitFor("revealed") { controller.state.value.answer.revealed }
             waitFor("answer revoked") { node(window, "answer-explain-unpaired") != null }

@@ -406,7 +406,7 @@ internal fun BookExplainPanel(
                         style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("explain-revoked"))
                 } else {
                     Text("先连上服务", style = MaterialTheme.typography.titleMedium)
-                    Text(if (sable) "登录后可以提问，也可以让朋友服务讲解选中的原文。" else "填上服务地址和配对码，连上后可以提问，也可以讲解选中的原文。",
+                    Text(if (sable) "登录后可以提问，也可以讲解选中的原文。" else "填上服务地址和配对码，连上后可以提问，也可以讲解选中的原文。",
                         style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("explain-connect-hint"))
                 }
                 if (sable) {

@@ -261,7 +261,7 @@ internal object AndroidBookConnection {
     /** 与安卓登录门同一个朋友服务地址；没配地址的安装包照旧只能用配对码。 */
     suspend fun sable(open: suspend (String, String) -> Unit): AndroidBookIdentity {
         val active = requireNotNull(route) { "请先打开应用后再登录。" }
-        if (active.friendUrl.isEmpty()) throw SableLoginError("此安装包尚未配置朋友服务地址。")
+        if (active.friendUrl.isEmpty()) throw SableLoginError("此安装包尚未配置 Coach 服务地址。")
         val callbackDispatcher = currentCoroutineContext()[ContinuationInterceptor] ?: Dispatchers.Main.immediate
         return withContext(Dispatchers.IO) {
             val client = PairingClient(active.friendUrl)

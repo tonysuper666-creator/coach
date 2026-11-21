@@ -54,7 +54,7 @@ internal class DesktopConnectionSettings(
     }
 
     fun sableFriendUrl(): String = configuredFriendUrl()
-        ?: throw com.coach.client.SableLoginError("请先在连接配置中设置朋友服务地址。")
+        ?: throw com.coach.client.SableLoginError("请先在连接配置中设置 Coach 服务地址。")
 
     fun serverUrl(): String? {
         environment("COACH_URL")?.takeIf(String::isNotBlank)?.let { return desktopServerUrl(it) }

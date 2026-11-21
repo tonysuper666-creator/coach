@@ -4,7 +4,9 @@
 #  - 「边看边学」只认弹窗里和「看书」「做题学」并排的那个 chip，不认书架右栏那一行；
 #  - 工具栏被 ui.busy 禁用的十几秒里按钮还在，靠多给几次机会 + 每次隔一拍扛过去；
 #  - 「上传教材」只认原生选书框弹出来，没弹就重定位补点，弹过以后不重点；
-#  - 第 7 步的出处/收起/切回文字点落空时补点，点满就返回假，不 throw（后面几步还要跑）。
+#  - 第 7 步的出处/收起/切回文字点落空时补点，点满就返回假，不 throw（后面几步还要跑）；
+#  - 第 4 步「讲讲」/「允许并讲解」点落空时补点，只认同意框、加载态、回答这三种看得见的状态；
+#  - 追问找标题时见过「思考」就不再往回滚（那会把刚追加的回答推出视野）。
 # 函数体从 friend-path-worker.ps1 里按原文截取，屏幕与输入都换成本文件的假实现。
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -194,6 +196,46 @@ Check 'step7-card-close-gives-up-quietly' ((-not $ok) -and -not $err -and $scrip
 $script:screen = $origView; $script:clicks.Clear(); $script:onClick = { $script:screen = $textView }
 $ok = Click-Confirm 7 { param($l) Find-Text $l '看文字' } { param($l) [bool](Find-Text $l '看原页') } -tries 3 -waitSec 1 -pauseMs 1
 Check 'step7-back-to-text-one-click' ($ok -and $script:clicks.Count -eq 1) "ok=$ok clicks=$($script:clicks.Count)"
+
+# 18. 第 4 步「讲讲」只认工具条那一行里、在「举个例子」左边的那个；正文里别的「讲讲」不算。
+$explainRow = @(
+    (New-Line '讲讲 这一段课文的意思' 300 300 300 26),
+    (New-Line '讲讲' 200 560 60 26),
+    (New-Line '举个例子' 280 560 90 26),
+    (New-Line '换个说法' 390 560 90 26)
+)
+$hit = Find-ExplainButton $explainRow
+Check 'step4-explain-picks-toolbar-row' ($hit -and [Math]::Abs($hit.Y - 560) -le 14) "y=$(if ($hit) { $hit.Y } else { 'null' })"
+Check 'step4-explain-none-without-toolbar' ($null -eq (Find-ExplainButton @((New-Line '讲讲' 200 560 60 26)))) ''
+
+# 19. 「讲讲」生效只认看得见的状态：同意框 / 加载态 / 回答出来了；工具条还挂着就是没点上。
+$consentFrame = @(
+    (New-Line '这段原文会发到哪里' 400 400 300 26),
+    (New-Line '允许并讲解' 500 500 140 30),
+    (New-Line '先不' 380 500 80 30)
+)
+$loadingFrame = @((New-Line '思考中' 300 600 90 24))
+Check 'step4-started-on-consent' (Test-ExplainStarted $consentFrame) ''
+Check 'step4-started-on-loading' (Test-ExplainStarted $loadingFrame) ''
+Check 'step4-not-started-on-toolbar' (-not (Test-ExplainStarted $explainRow)) ''
+
+# 20. 点「讲讲」被吞掉一下：按状态重试，第二下弹出同意框。
+$script:screen = $explainRow; $script:clicks.Clear(); $script:swallow = 1
+$script:onClick = { if ($script:swallow -gt 0) { $script:swallow-- } else { $script:screen = $consentFrame } }
+$ok = Click-Confirm 4 { param($l) Find-ExplainButton $l } { param($l) Test-ExplainStarted $l } -tries 3 -waitSec 1 -pauseMs 1
+Check 'step4-explain-retries-until-consent' ($ok -and $script:clicks.Count -eq 2) "ok=$ok clicks=$($script:clicks.Count)"
+
+# 21. 「允许并讲解」被吞掉一下：框没关就重定位再点，关上才算成。
+$script:screen = $consentFrame; $script:clicks.Clear(); $script:swallow = 1
+$script:onClick = { if ($script:swallow -gt 0) { $script:swallow-- } else { $script:screen = $loadingFrame } }
+$ok = Click-Confirm 4 { param($l) Find-Text $l '允许并讲解' } { param($l) -not (Find-Text $l '允许并讲解') } -tries 3 -waitSec 1 -pauseMs 1
+Check 'step4-allow-retries-until-dialog-closed' ($ok -and $script:clicks.Count -eq 2) "ok=$ok clicks=$($script:clicks.Count)"
+
+# 22. 追问找标题：没见过加载态时下扫 9 格后往回扫 9 格再转回往下；见过加载态就一直往下，不倒滚回页顶。
+$sweep = @(0, 8, 9, 17, 18) | ForEach-Object { Get-AskScrollDir $false $_ }
+Check 'step4-ask-scroll-sweeps-both-ways' (($sweep -join ',') -eq '-1,-1,1,1,-1') "dirs=$($sweep -join ',')"
+$downOnly = @(0, 9, 18, 27) | ForEach-Object { Get-AskScrollDir $true $_ }
+Check 'step4-ask-scroll-never-backtracks-after-loading' (($downOnly -join ',') -eq '-1,-1,-1,-1') "dirs=$($downOnly -join ',')"
 
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"

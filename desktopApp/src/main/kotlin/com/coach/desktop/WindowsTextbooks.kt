@@ -175,7 +175,7 @@ internal fun runWindowsTextbooks() {
     val initialBounds = windowsInitialWindowBounds()
     val settings = DesktopConnectionSettings()
     application {
-        val controller = remember { TextbookController(TextbookLibrary(directory)) }
+        val controller = remember { TextbookController(TextbookLibrary(directory, streamPdfExtras = true, lazyPdfExtras = true)) }
         val drafts = rememberAnswerDrafts(controller)
         val exams = rememberLocalExamController(controller.library)
         val scope = rememberCoroutineScope()
@@ -257,6 +257,6 @@ internal fun TextbookCloseWarning(guard: TextbookCloseGuard) {
 /** Production host content with an owned library for offscreen tests. */
 @Composable
 internal fun WindowsTextbooksContent(directory: Path, chooseBook: suspend () -> Path?) {
-    val controller = remember(directory) { TextbookController(TextbookLibrary(directory)) }
+    val controller = remember(directory) { TextbookController(TextbookLibrary(directory, streamPdfExtras = true, lazyPdfExtras = true)) }
     WindowsTextbookHost(controller, chooseBook = chooseBook)
 }

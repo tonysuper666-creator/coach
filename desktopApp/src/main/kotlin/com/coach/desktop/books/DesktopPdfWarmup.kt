@@ -32,6 +32,6 @@ internal object PdfWarmup {
             } catch (_: Throwable) { -1L }
             if (java.lang.Boolean.getBoolean("coach.render.trace")) println("COACH_RENDER_WARMUP ms=$ms")
             done.complete(ms)
-        }, "pdf-warmup").apply { isDaemon = true; priority = Thread.NORM_PRIORITY - 1 }.start()
+        }, "pdf-warmup").apply { isDaemon = true; priority = Thread.NORM_PRIORITY }.start()
     }
 }

@@ -3,6 +3,7 @@ package com.coach.desktop.books.exam
 import com.coach.desktop.books.TextbookLibrary
 import com.coach.domain.*
 import kotlinx.serialization.json.*
+import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
@@ -22,31 +23,54 @@ internal class LocalExamStore(
     val databasePath: Path = library.directory.resolve("exams.sqlite")
 
     init {
-        transaction { db -> db.createStatement().use { sql ->
-            sql.execute("""CREATE TABLE IF NOT EXISTS local_exam_papers(
-                book TEXT NOT NULL,paper_id TEXT NOT NULL,paper_json TEXT NOT NULL,paper_hash TEXT NOT NULL,
-                PRIMARY KEY(book,paper_id))""")
-            sql.execute("""CREATE TABLE IF NOT EXISTS local_exam_attempts(
-                id TEXT PRIMARY KEY,owner TEXT NOT NULL,book TEXT NOT NULL,paper_id TEXT NOT NULL,
-                paper_json TEXT NOT NULL,paper_hash TEXT NOT NULL,started_at INTEGER NOT NULL,
-                answers_json TEXT NOT NULL DEFAULT '{}',answers_seq INTEGER NOT NULL DEFAULT 0 CHECK(answers_seq>=0),
-                submitted_at INTEGER,result_json TEXT,
-                FOREIGN KEY(book,paper_id) REFERENCES local_exam_papers(book,paper_id),
-                CHECK((submitted_at IS NULL)=(result_json IS NULL)))""")
-            // One transaction also serializes migration by independently opened windows/processes.
-            val columns = sql.executeQuery("PRAGMA table_info(local_exam_attempts)").use { rows ->
-                buildSet { while (rows.next()) add(rows.getString("name")) }
+        val needsMigrate = !Files.isRegularFile(databasePath) || Files.size(databasePath) == 0L || database().use { db ->
+            db.createStatement().use { sql ->
+                val version = sql.executeQuery("PRAGMA user_version").use { if (it.next()) it.getInt(1) else 0 }
+                if (version < 1) {
+                    true
+                } else {
+                    val tables = sql.executeQuery("SELECT name FROM sqlite_master WHERE type='table'").use { rows ->
+                        buildSet { while (rows.next()) add(rows.getString(1)) }
+                    }
+                    if ("local_exam_papers" !in tables || "local_exam_attempts" !in tables) {
+                        true
+                    } else {
+                        val columns = sql.executeQuery("PRAGMA table_info(local_exam_attempts)").use { rows ->
+                            buildSet { while (rows.next()) add(rows.getString("name")) }
+                        }
+                        "timing" !in columns || "duration_minutes" !in columns ||
+                            "deadline" !in columns || "auto_submitted" !in columns
+                    }
+                }
             }
-            listOf("timing TEXT NOT NULL DEFAULT 'UNTIMED'", "duration_minutes INTEGER", "deadline INTEGER",
-                "auto_submitted INTEGER NOT NULL DEFAULT 0").forEach { definition ->
-                if (definition.substringBefore(' ') !in columns)
-                    sql.execute("ALTER TABLE local_exam_attempts ADD COLUMN $definition")
-            }
-            val version = sql.executeQuery("PRAGMA user_version").use { it.next(); it.getInt(1) }
-            if (version == 0) sql.execute("PRAGMA user_version=1")
-            sql.execute("""CREATE UNIQUE INDEX IF NOT EXISTS local_exam_one_active
-                ON local_exam_attempts(owner,book) WHERE submitted_at IS NULL""")
-        } }
+        }
+        if (needsMigrate) {
+            transaction { db -> db.createStatement().use { sql ->
+                sql.execute("""CREATE TABLE IF NOT EXISTS local_exam_papers(
+                    book TEXT NOT NULL,paper_id TEXT NOT NULL,paper_json TEXT NOT NULL,paper_hash TEXT NOT NULL,
+                    PRIMARY KEY(book,paper_id))""")
+                sql.execute("""CREATE TABLE IF NOT EXISTS local_exam_attempts(
+                    id TEXT PRIMARY KEY,owner TEXT NOT NULL,book TEXT NOT NULL,paper_id TEXT NOT NULL,
+                    paper_json TEXT NOT NULL,paper_hash TEXT NOT NULL,started_at INTEGER NOT NULL,
+                    answers_json TEXT NOT NULL DEFAULT '{}',answers_seq INTEGER NOT NULL DEFAULT 0 CHECK(answers_seq>=0),
+                    submitted_at INTEGER,result_json TEXT,
+                    FOREIGN KEY(book,paper_id) REFERENCES local_exam_papers(book,paper_id),
+                    CHECK((submitted_at IS NULL)=(result_json IS NULL)))""")
+                // One transaction also serializes migration by independently opened windows/processes.
+                val columns = sql.executeQuery("PRAGMA table_info(local_exam_attempts)").use { rows ->
+                    buildSet { while (rows.next()) add(rows.getString("name")) }
+                }
+                listOf("timing TEXT NOT NULL DEFAULT 'UNTIMED'", "duration_minutes INTEGER", "deadline INTEGER",
+                    "auto_submitted INTEGER NOT NULL DEFAULT 0").forEach { definition ->
+                    if (definition.substringBefore(' ') !in columns)
+                        sql.execute("ALTER TABLE local_exam_attempts ADD COLUMN $definition")
+                }
+                val version = sql.executeQuery("PRAGMA user_version").use { it.next(); it.getInt(1) }
+                if (version == 0) sql.execute("PRAGMA user_version=1")
+                sql.execute("""CREATE UNIQUE INDEX IF NOT EXISTS local_exam_one_active
+                    ON local_exam_attempts(owner,book) WHERE submitted_at IS NULL""")
+            } }
+        }
     }
 
     private fun database(): Connection = DriverManager.getConnection("jdbc:sqlite:$databasePath").apply {

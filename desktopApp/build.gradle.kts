@@ -259,6 +259,13 @@ val smokeRuntime by tasks.registering(Sync::class) {
 // The Mac heavy caller can prepare the same Windows runtime before test starts.
 tasks.test {
     if (providers.gradleProperty("coach.smoke.prepare").orNull == "true") dependsOn(smokeRuntime)
+    for (key in listOf(
+        "coach.w1aTocBench", "coach.w1aSample1", "coach.w1aGroundTruth",
+        "coach.w1aSample3Paper", "coach.w1aSample3Slides",
+        "coach.w1aLiveWindow", "coach.w1aBookPath", "coach.w1aOutDir",
+    )) {
+        (System.getProperty(key) ?: providers.gradleProperty(key).orNull)?.let { systemProperty(key, it) }
+    }
 }
 
 // The local textbook workspace is also compiled into the Android host.

@@ -12,6 +12,20 @@ import java.io.StringWriter
 import java.text.Normalizer
 import java.util.IdentityHashMap
 
+internal data class PageLineTypography(
+    val page: Int,
+    val text: String,
+    val rowText: String,
+    val fontSizePt: Double,
+    val bold: Boolean,
+    val yNorm: Double,
+)
+
+internal data class FastPdfPageText(
+    val text: String,
+    val lines: List<PageLineTypography>,
+)
+
 /** Geometry uses the existing reader contract; TON-1665 owns its on-disk page model. */
 internal data class PdfPageText(
     val frame: PdfPageFrame,
@@ -29,9 +43,46 @@ internal data class PdfPageText(
     )
 }
 
+/** Reusable single-thread stripper for plain UTF-16 PDF page text without allocating per-glyph/line metadata. */
+internal class ReusablePlainPdfTextExtractor {
+    private val stripper = BookPdfStripper().apply {
+        sortByPosition = true
+        paragraphEnd = "\n\n"
+    }
+
+    fun extractPage(document: BookPdfDocument, page: Int): String {
+        stripper.startPage = page
+        stripper.endPage = page
+        val raw = StringWriter()
+        stripper.writeText(document, raw)
+        return TextbookExtraction.clean(raw.toString())
+    }
+}
+
 /** One extraction pass, with exactly the text and cleaning used by TextbookExtraction. */
 internal object PdfPageTextExtraction {
     fun extract(document: BookPdfDocument, page: Int): PdfPageText = extract(document, page, null)
+
+    fun extractPlainText(document: BookPdfDocument, page: Int): String {
+        require(page in 1..document.numberOfPages)
+        require(document.currentAccessPermission.canExtractContent()) { "这本 PDF 限制了文字提取。" }
+        return ReusablePlainPdfTextExtractor().extractPage(document, page)
+    }
+
+    /**
+     * Fast Tier 1 extraction: emits UTF-16 text identical to [extract] while capturing only
+     * compact per-line typography (font size, bold, normalized Y, and Y-row merged text for TOC pages),
+     * avoiding 1M+ per-glyph box allocations.
+     */
+    fun extractPlainTextAndTypography(document: BookPdfDocument, page: Int): FastPdfPageText {
+        require(page in 1..document.numberOfPages)
+        require(document.currentAccessPermission.canExtractContent()) { "这本 PDF 限制了文字提取。" }
+        val source = document.getPage(page - 1)
+        val box = source.cropBox
+        val sideways = Math.floorMod(source.rotation, 360) in setOf(90, 270)
+        val pageHeight = (if (sideways) box.width else box.height).toDouble().coerceAtLeast(1.0)
+        return FastTypographyStripper(page, pageHeight).extract(document)
+    }
 
     /** Review only: CFF math ink can extend below the baseline used by BookPdfTextPosition.heightDir.
      * Keep ordinary extraction/offsets unchanged. One raster pixel cushions outline bounds.
@@ -187,6 +238,154 @@ internal object PdfPageTextExtraction {
                 180 -> ReaderRect(maxOf(0.0, 1 - x - bw), maxOf(0.0, 1 - y - bh), bw, bh)
                 270 -> ReaderRect(maxOf(0.0, 1 - y - bh), x, bh, bw)
                 else -> ReaderRect(x, y, bw, bh)
+            }
+        }
+    }
+
+    private class FastTypographyStripper(
+        private val page: Int,
+        private val pageHeight: Double,
+    ) : BookPdfStripper() {
+        private val raw = StringWriter()
+        private data class Segment(
+            val text: String,
+            val xStart: Double,
+            val xEnd: Double,
+            val y: Double,
+            val height: Double,
+            val fontSizePt: Double,
+            val bold: Boolean,
+        )
+        private val segments = mutableListOf<Segment>()
+        private val boldFontCache = IdentityHashMap<Any, Boolean>()
+
+        init {
+            startPage = page
+            endPage = page
+            sortByPosition = true
+            paragraphEnd = "\n\n"
+        }
+
+        private fun isFontBold(pos: BookPdfTextPosition): Boolean {
+            val font = pos.font ?: return false
+            return boldFontCache.getOrPut(font) {
+                val desc = font.fontDescriptor ?: return@getOrPut false
+                val name = desc.fontName.orEmpty()
+                desc.isForceBold || desc.fontWeight >= 600f ||
+                    name.contains("Bold", ignoreCase = true) ||
+                    name.contains("Black", ignoreCase = true) ||
+                    name.contains("Heavy", ignoreCase = true) ||
+                    name.contains("Demi", ignoreCase = true) ||
+                    name.contains("Semibold", ignoreCase = true)
+            }
+        }
+
+        fun extract(document: BookPdfDocument): FastPdfPageText {
+            writeText(document, raw)
+            val clean = TextbookExtraction.clean(raw.toString())
+            val lines = buildTypographyLines()
+            return FastPdfPageText(clean, lines)
+        }
+
+        override fun writeString(text: String, textPositions: List<BookPdfTextPosition>) {
+            super.writeString(text, textPositions)
+            val trimmed = text.trim()
+            if (trimmed.isEmpty() || textPositions.isEmpty()) return
+            var minX = Double.MAX_VALUE
+            var maxX = Double.MIN_VALUE
+            var ySum = 0.0
+            var hSum = 0.0
+            var ptSum = 0.0
+            var ptCount = 0
+            var boldChars = 0
+            var visibleChars = 0
+            for (pos in textPositions) {
+                val x0 = pos.xDirAdj.toDouble()
+                val x1 = x0 + pos.widthDirAdj.toDouble()
+                if (x0 < minX) minX = x0
+                if (x1 > maxX) maxX = x1
+                ySum += pos.yDirAdj.toDouble()
+                hSum += pos.heightDir.toDouble()
+                val pt = pos.fontSizeInPt.toDouble().let { if (it.isFinite() && it > 0.0) it else pos.heightDir.toDouble() }
+                if (pt.isFinite() && pt > 0.0) {
+                    ptSum += pt
+                    ptCount++
+                }
+                val u = pos.unicode
+                if (!u.isNullOrBlank()) {
+                    visibleChars++
+                    if (isFontBold(pos)) boldChars++
+                }
+            }
+            val n = textPositions.size.coerceAtLeast(1)
+            val avgY = ySum / n
+            val avgH = (hSum / n).coerceAtLeast(4.0)
+            val avgPt = if (ptCount > 0) ptSum / ptCount else avgH
+            val isBold = visibleChars > 0 && boldChars * 2 >= visibleChars
+            segments += Segment(trimmed, minX, maxX, avgY, avgH, avgPt, isBold)
+        }
+
+        private fun buildTypographyLines(): List<PageLineTypography> {
+            if (segments.isEmpty()) return emptyList()
+            val sorted = segments.sortedWith(compareBy<Segment> { it.y }.thenBy { it.xStart })
+            val rows = mutableListOf<MutableList<Segment>>()
+            for (seg in sorted) {
+                val current = rows.lastOrNull()
+                if (current == null) {
+                    rows += mutableListOf(seg)
+                } else {
+                    val rowY = current.first().y
+                    val tol = maxOf(3.0, current.first().height * 0.45)
+                    if (kotlin.math.abs(seg.y - rowY) <= tol) {
+                        current += seg
+                    } else {
+                        rows += mutableListOf(seg)
+                    }
+                }
+            }
+            return rows.flatMap { row ->
+                row.sortBy { it.xStart }
+                val rowText = buildString {
+                    var prevEnd = Double.NaN
+                    for (seg in row) {
+                        if (isNotEmpty()) {
+                            if (prevEnd.isNaN() || seg.xStart - prevEnd > 1.5) append(' ')
+                        }
+                        append(seg.text)
+                        prevEnd = seg.xEnd
+                    }
+                }.trim()
+                val yNorm = (row.first().y / pageHeight).coerceIn(0.0, 1.0)
+                // Split into column-local clusters when horizontal gap exceeds ~2.5x line height so
+                // multi-column pages keep headings in right columns intact while preserving full rowText for TOC parsing.
+                val clusters = mutableListOf<MutableList<Segment>>()
+                for (seg in row) {
+                    val last = clusters.lastOrNull()
+                    if (last == null) {
+                        clusters += mutableListOf(seg)
+                    } else {
+                        val prev = last.last()
+                        val gap = seg.xStart - prev.xEnd
+                        if (gap <= maxOf(28.0, prev.height * 2.5)) {
+                            last += seg
+                        } else {
+                            clusters += mutableListOf(seg)
+                        }
+                    }
+                }
+                clusters.mapIndexed { idx, cluster ->
+                    val primaryText = cluster.joinToString(" ") { it.text }.trim()
+                    val fontPt = cluster.maxOf { it.fontSizePt }
+                    val bold = cluster.any { it.bold }
+                    PageLineTypography(
+                        page = page,
+                        text = primaryText,
+                        rowText = if (idx == 0) rowText else "",
+                        fontSizePt = fontPt,
+                        bold = bold,
+                        yNorm = yNorm,
+                    )
+                }
             }
         }
     }

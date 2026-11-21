@@ -706,10 +706,11 @@ internal object HeuristicConceptSemanticJudge : ConceptSemanticJudge {
 
 /**
  * 经配对学习服务调用远端 DeepSeek 语义对齐端点（`/v1/library/booklist/align`）；
- * 离线或未登录时无缝退回 [HeuristicConceptSemanticJudge]。
+ * 当用户关闭「伴读讲解与提问」、离线或未登录时，严格退回本地 [HeuristicConceptSemanticJudge]，不发送正文。
  */
 internal class RemoteBooklistSemanticJudge(
     private val explainer: BookExplainer,
+    private val allowRemote: () -> Boolean = { true },
     private val fallback: ConceptSemanticJudge = HeuristicConceptSemanticJudge,
 ) : ConceptSemanticJudge {
     var lastUsedRemote: Boolean = false
@@ -721,6 +722,7 @@ internal class RemoteBooklistSemanticJudge(
     ): List<ConceptAlignmentDecision> {
         lastUsedRemote = false
         if (candidates.isEmpty()) return emptyList()
+        if (!allowRemote()) return fallback.judge(collectionTitle, candidates)
         if (!explainer.loaded) runCatching { explainer.load() }
         if (explainer.identity == null) return fallback.judge(collectionTitle, candidates)
 

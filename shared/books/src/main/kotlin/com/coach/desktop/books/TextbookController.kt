@@ -64,6 +64,9 @@ internal data class LibraryUi(
 
 internal class TextbookController(val library: TextbookLibrary, var structureProvider: BookStructureProvider? = null) {
     var conceptSemanticJudge: ConceptSemanticJudge? = null
+    @Volatile var allowRemoteBooklistAi: () -> Boolean = { true }
+    @Volatile private var activeBooklistAlignJob: Job? = null
+    suspend fun awaitBooklistAlignment() { activeBooklistAlignJob?.join() }
     private val mutable = MutableStateFlow(LibraryUi(initialized = false))
     val state = mutable.asStateFlow()
     private val actions = Mutex()
@@ -439,11 +442,17 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
-    fun launchBooklistAlignment(collectionId: String, judgeOverride: ConceptSemanticJudge? = null): Job =
-        backgroundScope.launch {
+    fun launchBooklistAlignment(collectionId: String, judgeOverride: ConceptSemanticJudge? = null): Job {
+        val job = backgroundScope.launch {
             mutable.update { it.copy(booklistAligning = true) }
             try {
-                val judge = judgeOverride ?: conceptSemanticJudge ?: HeuristicConceptSemanticJudge
+                val remoteAllowed = allowRemoteBooklistAi() && library.isReadingAiExplainEnabled()
+                val requestedJudge = judgeOverride ?: conceptSemanticJudge ?: HeuristicConceptSemanticJudge
+                val judge = if (!remoteAllowed && requestedJudge is RemoteBooklistSemanticJudge) {
+                    HeuristicConceptSemanticJudge
+                } else {
+                    requestedJudge
+                }
                 BooklistAlignmentEngine.alignBooklist(library, collectionId, judge)
                 val collections = library.collectionSummaries()
                 mutable.update { current ->
@@ -456,6 +465,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 mutable.update { it.copy(booklistAligning = false) }
             }
         }
+        activeBooklistAlignJob = job
+        return job
+    }
 
     fun recordPageDwell(bookId: String, tocNodeId: String, page: Int, pagesTotal: Int, dwellMs: Long = ChapterReadPolicy.MIN_DWELL_MS) {
         backgroundScope.launch {

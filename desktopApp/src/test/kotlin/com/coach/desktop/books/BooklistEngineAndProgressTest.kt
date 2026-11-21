@@ -1,8 +1,18 @@
 package com.coach.desktop.books
 
+import com.coach.client.PairedCredentials
+import com.coach.desktop.DesktopConnectionSettings
+import com.coach.desktop.DesktopIdentity
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.*
 
 /**
@@ -276,6 +286,145 @@ class BooklistEngineAndProgressTest {
             )
             assertTrue(afterRestore.muted.none { it.entity.conceptId == mutedConceptId })
             assertTrue(afterRestore.active.any { it.entity.conceptId == mutedConceptId })
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun aiExplainDisabledStrictlyUsesLocalAlignmentOnAutoCreateAddAndManualRealign() = runBlocking {
+        val root = Files.createTempDirectory("coach-w2d-privacy-")
+        try {
+            val mdA = writeBook(
+                root,
+                "privacy-a.md",
+                """
+                # Chapter 1 Asymmetric Information
+
+                Adverse selection arises in insurance contracts when high-risk individuals conceal private morbidity signals from insurers.
+                Compulsory participation stabilizes risk pooling by preventing healthy enrollees from exiting.
+                Moral hazard increases healthcare utilization once coinsurance drops below marginal cost.
+                """.trimIndent(),
+            )
+            val mdB = writeBook(
+                root,
+                "privacy-b.md",
+                """
+                # Chapter 1 Empirical Insurance Evidence
+
+                Contrary to simple adverse selection theory, empirical evidence finds advantageous selection driven by cognitive ability.
+                Compulsory participation mandates reduced uncompensated hospital care and lowered pooled premiums.
+                Moral hazard estimates from field experiments show rising outpatient utilization after coverage expansion.
+                """.trimIndent(),
+            )
+            val mdC = writeBook(
+                root,
+                "privacy-c.md",
+                """
+                # Chapter 1 Risk Adjustment Policies
+
+                Compulsory participation combined with risk adjustment mitigates adverse selection across competing insurers.
+                Moral hazard can be moderated through tiered coinsurance schedules that preserve risk protection.
+                """.trimIndent(),
+            )
+
+            val libDir = root.resolve("library")
+            val library = TextbookLibrary(libDir)
+            val bookA = library.importBook(mdA)
+            val bookB = library.importBook(mdB)
+            val bookC = library.importBook(mdC)
+
+            // Turn OFF "伴读讲解与提问" ("已关闭，仅本地阅读不发送正文。")
+            val settings = ReadingSettings(libDir)
+            settings.chooseAiExplain(false)
+            assertFalse(library.isReadingAiExplainEnabled())
+
+            val loadCalls = AtomicInteger(0)
+            val alignCalls = AtomicInteger(0)
+            val spyExplainer = object : BookExplainer(DesktopConnectionSettings(root.resolve("conn")), library) {
+                init {
+                    identity = DesktopIdentity("http://127.0.0.1:18791", PairedCredentials("dev-test", "tok-test"))
+                    loaded = true
+                }
+
+                override suspend fun load() {
+                    loadCalls.incrementAndGet()
+                    loaded = true
+                }
+
+                override suspend fun alignBooklistConcepts(requestJson: JsonObject): JsonObject {
+                    alignCalls.incrementAndGet()
+                    val pairs = (requestJson["candidates"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+                    return buildJsonObject {
+                        put("decisions", buildJsonArray {
+                            for (p in pairs) {
+                                val pid = (p["pairId"] as? JsonPrimitive)?.content ?: continue
+                                add(buildJsonObject {
+                                    put("pairId", pid)
+                                    put("keep", true)
+                                    put("canonicalName", "Adverse Selection")
+                                    put("aliases", buildJsonArray { add(JsonPrimitive("逆向选择")) })
+                                    put("relationType", "OPPOSING_VIEW")
+                                    put("diffSummary", "远端返回摘要。")
+                                    put("confidence", 0.94)
+                                    put("rejectReason", "")
+                                })
+                            }
+                        })
+                    }
+                }
+            }
+
+            // 1. Direct RemoteBooklistSemanticJudge with allowRemote={false} must NEVER call remote explainer.
+            val blockedJudge = RemoteBooklistSemanticJudge(spyExplainer, allowRemote = { false })
+            val colDirect = "booklist-privacy-direct"
+            library.upsertCollection(MaterialCollectionRecord(colDirect, CollectionKind.BOOKLIST, "隐私测试直调"))
+            library.attachMaterial(CollectionMaterialRecord(colDirect, bookA.id, role = "LIST_BOOK", ordinal = 0))
+            library.attachMaterial(CollectionMaterialRecord(colDirect, bookB.id, role = "LIST_BOOK", ordinal = 1))
+            val directReport = BooklistAlignmentEngine.alignBooklist(library, colDirect, blockedJudge)
+            assertFalse(directReport.usedRemoteJudge)
+            assertFalse(blockedJudge.lastUsedRemote)
+            assertTrue(directReport.alignedConcepts >= 2, "Local fallback must still align concepts")
+            assertEquals(0, alignCalls.get(), "Remote align endpoint must not be called when allowRemote=false")
+
+            // 2. Controller automatic alignment on createCollection + addBooksToBooklist AND manual launchBooklistAlignment.
+            val controller = TextbookController(library)
+            controller.conceptSemanticJudge = RemoteBooklistSemanticJudge(spyExplainer, allowRemote = { true })
+            controller.load()
+
+            // Auto path A: createCollection(BOOKLIST) with >= 2 books triggers automatic alignment.
+            controller.createCollection(
+                kind = CollectionKind.BOOKLIST,
+                title = "仅本地书单",
+                existingBookIds = listOf(bookA.id, bookB.id),
+                newFiles = emptyList(),
+            ).join()
+            controller.awaitBooklistAlignment()
+            val createdId = controller.state.value.collections.first { it.record.title == "仅本地书单" }.record.id
+            assertEquals(0, alignCalls.get(), "Auto alignment on createCollection must stay strictly local when aiExplain=false")
+            assertEquals(0, loadCalls.get())
+            assertTrue(
+                library.booklistConcepts(createdId, mapOf(bookA.id to bookA.title, bookB.id to bookB.title), emptyMap()).active.size >= 2,
+                "Local alignment on createCollection must still produce concepts",
+            )
+
+            // Auto path B: addBooksToBooklist triggers automatic alignment.
+            controller.addBooksToBooklist(
+                collectionId = createdId,
+                existingBookIds = listOf(bookC.id),
+                newFiles = emptyList(),
+            ).join()
+            controller.awaitBooklistAlignment()
+            assertEquals(0, alignCalls.get(), "Auto alignment on addBooksToBooklist must stay strictly local when aiExplain=false")
+
+            // Manual path: explicit launchBooklistAlignment ("重新整理共同主题").
+            controller.launchBooklistAlignment(createdId).join()
+            assertEquals(0, alignCalls.get(), "Manual realign must stay strictly local when aiExplain=false")
+
+            // 3. Re-enabling aiExplain restores remote adjudication cleanly.
+            settings.chooseAiExplain(true)
+            assertTrue(library.isReadingAiExplainEnabled())
+            controller.launchBooklistAlignment(createdId).join()
+            assertEquals(1, alignCalls.get(), "Remote alignment should resume once aiExplain=true")
         } finally {
             root.toFile().deleteRecursively()
         }

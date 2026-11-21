@@ -333,6 +333,107 @@ class BooklistLiveWindowTest {
         }
     }
 
+    @Test
+    fun aiExplainDisabledInWorkspaceInstallsLocalJudgeOnlyAndCoversAutoAndManualRealign() {
+        assumeTrue(!GraphicsEnvironment.isHeadless())
+        val root = Files.createTempDirectory("coach-w2d-live-privacy-")
+        try {
+            val mdA = root.resolve("local-a.md").also {
+                Files.writeString(
+                    it,
+                    """
+                    # Chapter 1 Asymmetric Information
+
+                    Adverse selection arises when insured buyers hold private risk information that insurers cannot observe.
+                    Compulsory participation stabilizes pooled insurance premiums by retaining low-risk households.
+                    """.trimIndent(),
+                )
+            }
+            val mdB = root.resolve("local-b.md").also {
+                Files.writeString(
+                    it,
+                    """
+                    # Chapter 1 Empirical Insurance Evidence
+
+                    Contrary to textbook adverse selection models, empirical evidence reveals advantageous selection.
+                    Compulsory participation mandates reduced uncompensated hospital care and stabilized risk pools.
+                    """.trimIndent(),
+                )
+            }
+
+            val libDir = root.resolve("library")
+            val library = TextbookLibrary(libDir)
+            val bookA = library.importBook(mdA)
+            val bookB = library.importBook(mdB)
+            ReadingSettings(libDir).chooseAiExplain(false)
+
+            val controller = TextbookController(library)
+            runBlocking { controller.load() }
+
+            val window = edt {
+                ComposeWindow().apply {
+                    title = "Coach W2-D Privacy Gate Live Window"
+                    val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
+                    setBounds(
+                        screen.x + 20,
+                        screen.y + 20,
+                        minOf(1280, (screen.width - 40).coerceAtLeast(800)),
+                        minOf(840, (screen.height - 80).coerceAtLeast(600)),
+                    )
+                    setContent {
+                        WindowsTextbookHost(controller) { null }
+                    }
+                    isVisible = true
+                }
+            }
+            try {
+                waitFor("workspace installs strictly local judge when aiExplain=false", window) {
+                    controller.conceptSemanticJudge === HeuristicConceptSemanticJudge &&
+                        !controller.allowRemoteBooklistAi()
+                }
+
+                // Automatic alignment when creating a booklist while aiExplain=false
+                runBlocking {
+                    controller.createCollection(
+                        kind = CollectionKind.BOOKLIST,
+                        title = "本地隐私书单",
+                        existingBookIds = listOf(bookA.id, bookB.id),
+                        newFiles = emptyList(),
+                    ).join()
+                    controller.awaitBooklistAlignment()
+                }
+                val colId = controller.state.value.collections.first { it.record.title == "本地隐私书单" }.record.id
+                assertTrue(
+                    "Auto alignment must use local judge only when aiExplain=false",
+                    controller.conceptSemanticJudge === HeuristicConceptSemanticJudge,
+                )
+                assertTrue(
+                    "Auto local alignment should produce concepts",
+                    library.booklistConcepts(colId, mapOf(bookA.id to bookA.title, bookB.id to bookB.title), emptyMap()).active.isNotEmpty(),
+                )
+
+                // Open BooklistScreen and trigger manual realign ("⋯" -> "重新整理共同主题")
+                runBlocking { controller.openBooklist(colId) }
+                waitFor("BooklistScreen visible", window) { node(window, "booklist-screen") != null }
+                val revBefore = controller.state.value.booklistRevision
+                click(window, "booklist-more-menu")
+                waitFor("realign menu item", window) { node(window, "booklist-realign") != null }
+                click(window, "booklist-realign")
+                waitFor("manual realign completed locally", window) {
+                    controller.state.value.booklistRevision > revBefore && !controller.state.value.booklistAligning
+                }
+                assertTrue(
+                    "Manual realign must stay on local judge when aiExplain=false",
+                    controller.conceptSemanticJudge === HeuristicConceptSemanticJudge && !controller.allowRemoteBooklistAi(),
+                )
+            } finally {
+                edt { if (window.isDisplayable) window.dispose() }
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
     private fun openTocDrawer(window: ComposeWindow) {
         if (node(window, "immersive-toc-drawer") != null) return
         revealHudViaMediator(window)

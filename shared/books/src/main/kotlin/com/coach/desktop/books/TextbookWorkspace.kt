@@ -71,13 +71,26 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     chooseBook: suspend () -> Path?) {
     val explainer = remember(controller.library) { BookExplainer(library = controller.library) }
     val aiEnabled = LocalReadingAiExplain.current
-    val booklistJudge = remember(explainer) { RemoteBooklistSemanticJudge(explainer) }
-    DisposableEffect(controller, booklistJudge) {
-        if (controller.conceptSemanticJudge == null) {
-            controller.conceptSemanticJudge = booklistJudge
+    val currentAiEnabled by rememberUpdatedState(aiEnabled)
+    val booklistJudge = remember(explainer) {
+        RemoteBooklistSemanticJudge(
+            explainer = explainer,
+            allowRemote = { currentAiEnabled },
+        )
+    }
+    DisposableEffect(controller, booklistJudge, aiEnabled) {
+        controller.allowRemoteBooklistAi = { currentAiEnabled }
+        val desiredJudge: ConceptSemanticJudge = if (aiEnabled) booklistJudge else HeuristicConceptSemanticJudge
+        val existing = controller.conceptSemanticJudge
+        if (existing == null || existing === booklistJudge || existing === HeuristicConceptSemanticJudge) {
+            controller.conceptSemanticJudge = desiredJudge
         }
         onDispose {
-            if (controller.conceptSemanticJudge === booklistJudge) controller.conceptSemanticJudge = null
+            controller.allowRemoteBooklistAi = { true }
+            val installed = controller.conceptSemanticJudge
+            if (installed === booklistJudge || installed === HeuristicConceptSemanticJudge) {
+                controller.conceptSemanticJudge = null
+            }
         }
     }
     val bookStructureProvider = remember(explainer, aiEnabled) {

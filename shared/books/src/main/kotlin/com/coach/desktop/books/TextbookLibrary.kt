@@ -2070,6 +2070,14 @@ internal class TextbookLibrary(
         ConceptStore.queryCompanionCardsForSection(db, currentBookId, currentChapterId, currentPageRange, activeBooklistId)
     }
 
+    /** 读取全局「伴读讲解与提问」开关持久化状态；关闭时所有书单对齐均严禁发送正文到远端。 */
+    @Synchronized fun isReadingAiExplainEnabled(): Boolean = database().use { db ->
+        if (!BookSchemaMigration.tableExists(db, "reading_settings")) return@use true
+        db.prepareStatement("SELECT value FROM reading_settings WHERE name='aiExplain'").use { q ->
+            q.executeQuery().use { r -> if (r.next()) r.getString(1) != "false" else true }
+        }
+    }
+
     /** 节末可选选择题作答：写入本地答案、错题/猜的复习队列与知识小结梯。 */
     @Synchronized fun saveSectionCheckAnswer(
         bookId: String,

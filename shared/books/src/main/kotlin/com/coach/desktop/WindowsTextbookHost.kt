@@ -31,6 +31,8 @@ import com.coach.desktop.books.BookFormats
 import com.coach.desktop.books.ReadingSettings
 import com.coach.desktop.books.LocalReadingFont
 import com.coach.desktop.books.ReadingSettingsPanel
+import com.coach.desktop.books.ShellErrorRow
+import com.coach.desktop.books.ShellRetryState
 import com.coach.desktop.books.BookExplainer
 import com.coach.desktop.books.BookImportToast
 import com.coach.desktop.books.ExplainConsent
@@ -118,9 +120,12 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
             controller.refreshReviews()
         }
     }
+    val retryState = remember(controller, releasePickedBook) { ShellRetryState(releasePickedBook) }
+    DisposableEffect(retryState) { onDispose { retryState.releasePending() } }
     fun openInWorkspace(action: suspend () -> Unit) {
         origin = tab.hostDestination
         tab = AppTab.RESOURCES
+        retryState.recordAction(action)
         scope.launch {
             action()
             // Nothing opened (a draft could not be saved, say): the rail goes back to 书架 with the shelf.
@@ -146,7 +151,12 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
         Surface(Modifier.fillMaxSize().textbookFileDrop { files ->
             scope.launch {
                 if (drafts.flush() && exams.flush()) {
-                    controller.launchDroppedBooks(files) { files.forEach(releasePickedBook) }
+                    if (files.size == 1) {
+                        retryState.importPicked(controller, files.single())
+                    } else {
+                        retryState.releasePending()
+                        controller.launchDroppedBooks(files) { files.forEach(releasePickedBook) }
+                    }
                 } else {
                     files.forEach(releasePickedBook)
                 }
@@ -193,11 +203,26 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                             exams = {
                                 if (examUi.book?.id == book.id) LocalExamsSummary(exams)
                                 else {
-                                    examUi.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                                    Text("正在读取本书练习…")
+                                    val examError = examUi.error
+                                    if (examError != null) {
+                                        ShellErrorRow(
+                                            message = examError,
+                                            busy = examUi.busy,
+                                            onRetry = { scope.launch { exams.load(book, prepareReference = true) } },
+                                            textTag = "host-exam-error",
+                                            retryTag = "host-exam-retry",
+                                            surfaceCard = false,
+                                        )
+                                    } else {
+                                        Text(
+                                            "正在读取本书练习…",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = colors.fgSecondary,
+                                        )
+                                    }
                                 }
                             })
-                        else -> TextbookWorkspace(controller, drafts, loadOnMount = false, answerExplain = answerExplain, support = learningSupport, hinge = hinge, onExportNotes = onExportNotes, releasePickedBook = releasePickedBook, chooseBook = chooseBook)
+                        else -> TextbookWorkspace(controller, drafts, loadOnMount = false, answerExplain = answerExplain, support = learningSupport, hinge = hinge, onExportNotes = onExportNotes, releasePickedBook = releasePickedBook, retryState = retryState, chooseBook = chooseBook)
                     }
                 }
                 val deskSelect = remember { { picked: AppTab -> select(picked) } }

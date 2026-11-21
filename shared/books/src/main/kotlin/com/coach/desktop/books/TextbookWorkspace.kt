@@ -1,24 +1,56 @@
 package com.coach.desktop.books
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
+import coach.design.tokens.CoachV7
 import com.coach.ui.CoachTheme
 import com.coach.ui.adaptive.Hinge
 import com.coach.desktop.reader.ReaderSession
 import com.coach.desktop.reader.toReaderInput
+import com.coach.ui.v7.LocalDeskMetrics
+import com.coach.ui.v7.LocalV7ReducedMotion
+import com.coach.ui.v7.paperShadow
+import com.coach.ui.v7.v7FocusRing
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.nio.file.Path
@@ -30,7 +62,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     sourceResolver: BookSourceResolver = remember(controller.library) { BookSourceResolver(controller.library) },
     hinge: Hinge? = LocalBookHinge.current,
     onExportNotes: ((Textbook, Int) -> Unit)? = null,
-    releasePickedBook: (Path) -> Unit = {}, chooseBook: suspend () -> Path?) {
+    releasePickedBook: (Path) -> Unit = {}, retryState: ShellRetryState? = null, chooseBook: suspend () -> Path?) {
     val explainer = remember(controller.library) { BookExplainer(library = controller.library) }
     val consent = remember(controller.library) { ExplainConsent(controller.library.directory) }
     val bookStructureProvider = remember(explainer, consent) {
@@ -87,14 +119,29 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     }
     val citationFocus = remember(ui.book?.id, lessonIndex) { mutableMapOf<Int, FocusRequester>() }
     val learningScroll = remember(ui.book?.id, ui.book?.lessonIndex) { ScrollState(0) }
+    val ownedRetryState = if (retryState == null) remember(controller, releasePickedBook) { ShellRetryState(releasePickedBook) } else null
+    if (ownedRetryState != null) {
+        DisposableEffect(ownedRetryState) { onDispose { ownedRetryState.releasePending() } }
+    }
+    val activeRetry = retryState ?: checkNotNull(ownedRetryState)
+    LaunchedEffect(ui.importing?.recognizing) {
+        if (ui.importing?.recognizing == true) activeRetry.releasePending()
+    }
     LaunchedEffect(controller) {
         val current = controller.state.value
-        if (loadOnMount && current.catalog.isEmpty() && current.book == null && current.prompt == null) controller.load()
+        if (loadOnMount && current.catalog.isEmpty() && current.book == null && current.prompt == null) {
+            val loadAction: suspend () -> Unit = { controller.load() }
+            activeRetry.recordAction(loadAction)
+            loadAction()
+        }
     }
     LaunchedEffect(ui.screen, ui.source) {
         if (ui.screen == BookScreen.READER && ui.source != null) readerFocus.requestFocus()
     }
-    fun run(action: suspend () -> Unit) { scope.launch { action() } }
+    fun run(action: suspend () -> Unit) {
+        activeRetry.recordAction(action)
+        scope.launch { action() }
+    }
     fun returnFromReader() {
         openPairing = false
         if (ui.source != null) {
@@ -182,14 +229,35 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             )
                         }
                     }
-                    ui.error?.let { error -> Text(error, color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.fillMaxWidth().padding(12.dp).testTag("book-error")) }
+                    ui.error?.let { error ->
+                        ShellErrorRow(
+                            message = error,
+                            busy = ui.busy || ui.importing != null,
+                            onRetry = {
+                                scope.launch {
+                                    if (drafts.flush() && controller.state.value.error != null) {
+                                        (activeRetry.lastAction ?: { controller.load() })()
+                                    }
+                                }
+                            },
+                            textTag = "book-error",
+                            retryTag = "book-error-retry",
+                            surfaceCard = true,
+                            modifier = Modifier
+                                .padding(horizontal = CoachV7.Space.s6, vertical = CoachV7.Space.s2)
+                                .testTag("book-error-banner"),
+                        )
+                    }
                     val book = ui.book
                     when {
                         ui.screen == BookScreen.HOME || book == null -> LibraryHome(ui,
-                            onImport = { run { chooseBook()?.let { picked ->
-                                controller.launchImport(picked) { releasePickedBook(picked) }
-                            } } },
+                            onImport = {
+                                scope.launch {
+                                    chooseBook()?.let { picked ->
+                                        activeRetry.importPicked(controller, picked)
+                                    }
+                                }
+                            },
                             onSelect = { run { controller.select(it) } }, onRead = { run { if (drafts.flush()) controller.learn(LearningPath.READ) } },
                             onLearn = { run { if (drafts.flush()) controller.learn() } },
                             onPath = { path -> run { if (drafts.flush()) controller.learn(path) } },
@@ -275,8 +343,15 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                     }
                 }
                 // Saving a reading bookmark must not resize the page being paginated.
-                // Overlay activity so the desk's bounds stay intact.
-                if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                // Overlay the V7 paper hairline so the desk's bounds stay intact.
+                if (ui.busy) {
+                    WorkspaceBusyBar(
+                        Modifier
+                            .align(Alignment.TopCenter)
+                            .fillMaxWidth()
+                            .testTag("workspace-busy-bar"),
+                    )
+                }
                 if (!LocalImportNoticeHandled.current) {
                     BookImportToast(ui.importNotice, controller::dismissImportNotice,
                         Modifier.align(androidx.compose.ui.Alignment.TopCenter))
@@ -292,3 +367,230 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
 
 internal val LocalImportNoticeHandled = staticCompositionLocalOf { false }
 internal enum class SourceFocus { LESSON, PRACTICE, CITATION }
+
+/**
+ * 记住可恢复外壳操作，使点击「再试一次」重放真实失败的操作；
+ * 当所选教材因可恢复错误（如 SQLITE_BUSY）导入失败时保留原文件，待重试成功、进入后台识别、
+ * 出现非可恢复错误/取消、切走其他动作或离开界面后再释放。
+ */
+internal class ShellRetryState(private val releasePickedBook: (Path) -> Unit) {
+    var lastAction: (suspend () -> Unit)? by mutableStateOf(null)
+        private set
+    private var pendingImport: Path? = null
+    private var importGeneration: Long = 0L
+
+    fun releasePending(keep: Path? = null) {
+        val previous = pendingImport
+        if (previous != null && previous != keep) {
+            pendingImport = null
+            releasePickedBook(previous)
+        }
+    }
+
+    fun recordAction(action: suspend () -> Unit) {
+        releasePending()
+        importGeneration++
+        lastAction = action
+    }
+
+    suspend fun importPicked(controller: TextbookController, picked: Path) {
+        releasePending(keep = picked)
+        val generation = ++importGeneration
+        pendingImport = picked
+        val retryAction: suspend () -> Unit = { importPicked(controller, picked) }
+        lastAction = retryAction
+        val job = controller.launchImport(picked)
+        try {
+            job.join()
+        } finally {
+            val error = controller.state.value.error
+            val keepForRetry = error != null && classifyShellError(error) == ShellErrorKind.RECOVERABLE
+            if (importGeneration == generation) {
+                if (!keepForRetry && pendingImport == picked) {
+                    pendingImport = null
+                    releasePickedBook(picked)
+                }
+                if (!keepForRetry && error == null && lastAction === retryAction) {
+                    lastAction = null
+                }
+            }
+        }
+    }
+}
+
+/**
+ * V7 纸面顶部的加载细条：2dp 线槽（borderSubtle）配松绿（v7Pine()）滑动条；
+ * 减弱动态开启时（LocalV7ReducedMotion）只画静止的居中一段，不起无限动画。
+ */
+@Composable
+internal fun WorkspaceBusyBar(modifier: Modifier = Modifier) {
+    val colors = com.coach.ui.theme.CoachTheme.colors
+    val pine = v7Pine()
+    val track = colors.borderSubtle
+    val reduced = LocalV7ReducedMotion.current
+    val baseModifier = modifier
+        .fillMaxWidth()
+        .height(2.dp)
+        .semantics {
+            progressBarRangeInfo = ProgressBarRangeInfo.Indeterminate
+            stateDescription = if (reduced) "static" else "animated"
+        }
+    if (reduced) {
+        Canvas(baseModifier) {
+            drawRect(color = track)
+            val width = size.width * 0.40f
+            drawRect(color = pine, topLeft = Offset(size.width * 0.30f, 0f), size = Size(width, size.height))
+        }
+    } else {
+        val transition = rememberInfiniteTransition(label = "workspace-busy")
+        val head by transition.animateFloat(
+            initialValue = -0.35f,
+            targetValue = 1.0f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1200, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "workspace-busy-head",
+        )
+        Canvas(baseModifier) {
+            clipRect {
+                drawRect(color = track)
+                val segWidth = size.width * 0.35f
+                drawRect(color = pine, topLeft = Offset(head * size.width, 0f), size = Size(segWidth, size.height))
+            }
+        }
+    }
+}
+
+internal enum class ShellErrorKind {
+    /** 能自己好的（断连、超时、暂时读不到/存不上等）：给「再试一次」和一句灰字。 */
+    RECOVERABLE,
+    /** 需要用户处理或找人的（额度用完、连接停用/撤销、权限/文件/格式问题等）：用朱色写清下一步或找谁，不给误导性重试。 */
+    USER_ACTION,
+    /** 用户主动取消一类的轻提示：灰字，不给重试。 */
+    NOTICE,
+}
+
+private val userActionKeywords = listOf(
+    "额度", "停用", "撤销", "配对", "重新登录", "权限", "未授权",
+    "另一个窗口", "计时已结束", "无法确认这次作答",
+    "限制了文字提取", "请使用", "以内", "超过", "过多", "换用", "损坏",
+    "请一次拖入", "空文件", "不能直接导入", "超出", "没有这一节", "还没有可用练习",
+    "没有可提取", "已不在书架", "先恢复或交卷", "还在准备中", "不能覆盖", "可以计时",
+    "快照校验失败", "找不到这本教材",
+)
+
+internal fun classifyShellError(message: String): ShellErrorKind {
+    val trimmed = message.trim()
+    if ("已取消" in trimmed) return ShellErrorKind.NOTICE
+    if (userActionKeywords.any { it in trimmed }) return ShellErrorKind.USER_ACTION
+    return ShellErrorKind.RECOVERABLE
+}
+
+internal fun shellErrorMessage(raw: String, kind: ShellErrorKind): String {
+    val text = raw.trim()
+    if (text.isBlank() || !ReadableText.readsAsChinese(text)) {
+        return when (kind) {
+            ShellErrorKind.RECOVERABLE -> "暂时打不开，请稍后再试一次。"
+            ShellErrorKind.USER_ACTION -> "需要处理后才能继续，请检查当前设置或联系给你配对码的人。"
+            ShellErrorKind.NOTICE -> "操作已取消。"
+        }
+    }
+    if (kind == ShellErrorKind.USER_ACTION) {
+        if ("额度" in text && "找" !in text && "联系" !in text && "配对码" !in text) {
+            return "$text 如需继续，请联系给你配对码的人。"
+        }
+        if (("停用" in text || "撤销" in text) && "找" !in text && "联系" !in text && "登录" !in text && "配对" !in text) {
+            return "$text 请重新登录，或找给你配对码的人生成新码。"
+        }
+    }
+    return text
+}
+
+/**
+ * 窗口外壳里的报错行（对齐 BookExplain.kt E3 约定）：
+ * - 能自己好的：中性灰字（fgSecondary）+ 中性纸面按钮「再试一次」；
+ * - 需要用户动手或找人的：朱色（v7Alert()）写清下一步或找谁，不给误导性重试；
+ * - 取消类轻提示：灰字，不给重试。
+ */
+@Composable
+internal fun ShellErrorRow(
+    message: String,
+    busy: Boolean,
+    onRetry: (() -> Unit)?,
+    textTag: String,
+    retryTag: String,
+    modifier: Modifier = Modifier,
+    surfaceCard: Boolean = false,
+) {
+    val colors = com.coach.ui.theme.CoachTheme.colors
+    val kind = classifyShellError(message)
+    val shown = shellErrorMessage(message, kind)
+    val textColor = if (kind == ShellErrorKind.USER_ACTION) v7Alert() else colors.fgSecondary
+    val row: @Composable (Modifier) -> Unit = { rowModifier ->
+        Row(
+            rowModifier.fillMaxWidth().heightIn(min = 40.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (kind == ShellErrorKind.RECOVERABLE && onRetry != null) {
+                ShellQuietButton(
+                    label = "再试一次",
+                    enabled = !busy,
+                    modifier = Modifier.testTag(retryTag),
+                    onClick = onRetry,
+                )
+            }
+            Text(
+                shown,
+                style = MaterialTheme.typography.bodySmall,
+                color = textColor,
+                modifier = Modifier.weight(1f).testTag(textTag),
+            )
+        }
+    }
+    if (surfaceCard) {
+        val shape = RoundedCornerShape(CoachV7.Radius.btn)
+        Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            row(
+                Modifier
+                    .widthIn(max = 1000.dp)
+                    .clip(shape)
+                    .background(colors.surface1)
+                    .border(1.dp, colors.borderSubtle, shape)
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            )
+        }
+    } else {
+        row(modifier)
+    }
+}
+
+/** 中性悬停底的纸面按钮（「再试一次」用中性灰悬停，不套朱色淡底，对齐 BookExplain.QuietButton）。 */
+@Composable
+private fun ShellQuietButton(label: String, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val colors = com.coach.ui.theme.CoachTheme.colors
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val shape = RoundedCornerShape(CoachV7.Radius.btn)
+    val base = if (colors.dark) CoachV7.Dark.btnBg else CoachV7.Light.btnBg
+    Row(
+        modifier
+            .v7FocusRing(shape)
+            .paperShadow("button", colors.dark)
+            .clip(shape)
+            .background(if (enabled && hovered) colors.borderSubtle.copy(alpha = .16f).compositeOver(base) else base)
+            .hoverable(interaction, enabled)
+            .clickable(interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
+            .pointerHoverIcon(if (enabled) PointerIcon.Hand else PointerIcon.Default)
+            .defaultMinSize(minHeight = if (LocalDeskMetrics.current.inner) 36.dp else 44.dp)
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelLarge,
+            color = colors.fgPrimary.copy(alpha = if (enabled) 1f else .4f),
+        )
+    }
+}

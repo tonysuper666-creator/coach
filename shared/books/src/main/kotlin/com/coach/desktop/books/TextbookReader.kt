@@ -408,8 +408,22 @@ internal fun TextbookReader(
     // 正在输入文字时不接管：提问弹窗、页码框、批注编辑区自己要用方向键。
     val focusManager = LocalFocusManager.current
     var jumpFocused by remember { mutableStateOf(false) }
+    var searchOpen by remember(book.id) { mutableStateOf(false) }
+    var searchFocused by remember(book.id) { mutableStateOf(false) }
+    var searchFocusTick by remember(book.id) { mutableIntStateOf(0) }
+    var searchQuery by remember(book.id) { mutableStateOf("") }
+    var searchActiveIndex by remember(book.id) { mutableIntStateOf(-1) }
+    val searchFocus = remember(book.id) { FocusRequester() }
+    val searchResult = remember(book.pages, searchQuery) { searchBookPages(book.pages, searchQuery) }
+    LaunchedEffect(searchOpen, searchFocusTick) {
+        if (searchOpen) {
+            withFrameNanos { }
+            runCatching { searchFocus.requestFocus() }
+        }
+    }
     var pageFocused by remember { mutableStateOf(false) }
-    val typing = readerTyping(asking, jumpFocused, notesOpen, session.noting) || inlineThread?.askingOpen == true
+    val typing = readerTyping(asking, jumpFocused, notesOpen, session.noting) ||
+        inlineThread?.askingOpen == true || searchOpen || searchFocused
     LaunchedEffect(book.id, ui.page, typing, pdfScrolling) {
         if (typing) return@LaunchedEffect
         // A successful request already owns focus. Do not leave another frame's
@@ -490,6 +504,32 @@ internal fun TextbookReader(
         pdf.jump(passage.page)
         paging.anchor = BookPageAnchor(passage.page, passage.start)
         if (paging.publishImportPage(passage.page)) onPage(passage.page)
+    }
+    /** 书内查找跳转：保留当前视图（原版/文字版）和读法（翻页/滚动），定位到命中页和精确 UTF-16 区间。 */
+    val openSearchHit: (BookSearchHit) -> Unit = jump@{ hit ->
+        val target = book.page(hit.page) ?: return@jump
+        if (hit.start !in 0 until hit.end || hit.end > target.text.length ||
+            target.text.substring(hit.start, hit.end) != hit.quote) return@jump
+        val passage = hit.toPassage(book.id)
+        pdf.selection = null
+        asking = false
+        explainOpen = false
+        passageJump = passage
+        passageJumpTick++
+        val targetUnrecognized = hasOriginal && (target.ocrPending || (target.text.isBlank() && book.hasPendingOcr))
+        if (!textView || targetUnrecognized) {
+            if (originalPdf) pdf.jump(hit.page)
+        }
+        paging.anchor = BookPageAnchor(hit.page, hit.start)
+        if (paging.publishImportPage(hit.page)) onPage(hit.page)
+        session.goToPage(hit.page)
+    }
+    val selectSearchHit: (Int) -> Unit = { index ->
+        val hit = searchResult.hits.getOrNull(index)
+        if (hit != null) {
+            searchActiveIndex = index
+            openSearchHit(hit)
+        }
     }
     val quoteAnchor = remember(ui.page, source, practiceSource, passageJump) {
         if (passageJump?.page == ui.page) passageJump?.text
@@ -630,6 +670,18 @@ internal fun TextbookReader(
         val density = LocalDensity.current
         var readerOriginDp by remember { mutableStateOf<Pair<Float, Float>?>(null) }
         BoxWithConstraints(Modifier.fillMaxSize().padding(if (hinge != null) 12.dp else 20.dp).testTag("textbook-reader")
+            .onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                if ((event.isCtrlPressed || event.isMetaPressed) && !event.isAltPressed && event.key == Key.F) {
+                    searchOpen = true
+                    searchFocusTick++
+                    true
+                } else if (event.key == Key.Escape && searchOpen) {
+                    searchOpen = false
+                    searchFocused = false
+                    true
+                } else false
+            }
             .onGloballyPositioned { coords ->
                 val pos = coords.positionInRoot()
                 readerOriginDp = (pos.x / density.density) to (pos.y / density.density)
@@ -667,6 +719,17 @@ internal fun TextbookReader(
                     }
                 }, modifier = Modifier.testTag("book-original-toggle"), contentPadding = toolPadding) {
                     Text(if (textView) "看原页" else "看文字")
+                }
+                V7TextButton(onClick = {
+                    if (searchOpen) {
+                        searchOpen = false
+                        searchFocused = false
+                    } else {
+                        searchOpen = true
+                        searchFocusTick++
+                    }
+                }, enabled = !ui.busy, modifier = Modifier.testTag("book-search-toggle"), contentPadding = toolPadding) {
+                    Text(if (searchOpen) "收起查找" else "查找")
                 }
                 V7TextButton(onClick = { asking = true }, enabled = chosen == null || learnableSelection != null,
                     modifier = Modifier.testTag("ask-book-passage"), contentPadding = toolPadding) { Text("选段提问") }
@@ -743,6 +806,39 @@ internal fun TextbookReader(
                 }
             }
             val noticesAndGuide: @Composable () -> Unit = {
+                if (searchOpen) {
+                    BookSearchPanel(
+                        book = book,
+                        query = searchQuery,
+                        result = searchResult,
+                        activeIndex = searchActiveIndex,
+                        focusRequester = searchFocus,
+                        onQueryChange = { next ->
+                            searchQuery = next
+                            searchActiveIndex = -1
+                        },
+                        onFocusChange = { searchFocused = it },
+                        onPick = selectSearchHit,
+                        onPrevious = {
+                            val total = searchResult.hits.size
+                            if (total > 0) {
+                                val next = if (searchActiveIndex <= 0) total - 1 else searchActiveIndex - 1
+                                selectSearchHit(next)
+                            }
+                        },
+                        onNext = {
+                            val total = searchResult.hits.size
+                            if (total > 0) {
+                                val next = if (searchActiveIndex !in 0 until total - 1) 0 else searchActiveIndex + 1
+                                selectSearchHit(next)
+                            }
+                        },
+                        onClose = {
+                            searchOpen = false
+                            searchFocused = false
+                        },
+                    )
+                }
                 ui.importing?.let { progress ->
                     BookImportProgressBar(
                         progress = progress,

@@ -174,8 +174,9 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                 val verticalHalfFold = bookVerticalSplit(maxWidth.value, maxHeight.value, hostLeftDp, hinge) != null
                 val hostTabletop = if (!deskPage) bookTabletopSplit(maxWidth.value, maxHeight.value, hostTopDp, hinge) else null
                 val tabletopDesk = deskPage && bookTabletopSplit(maxWidth.value, maxHeight.value, hostTopDp, hinge) != null
+                val immersiveReader = destination == AppTab.RESOURCES && ui.screen == BookScreen.READER && book != null
                 val hideRailForHalfFold = deskPage && (verticalHalfFold || tabletopDesk || hinge?.axis == HingeAxis.Horizontal)
-                val rail = !hideRailForHalfFold && hostTabletop == null && maxWidth >= 700.dp
+                val rail = !immersiveReader && !hideRailForHalfFold && hostTabletop == null && maxWidth >= 700.dp
                 val settingsButton: @Composable () -> Unit = {
                     V7TextButton({ settings = true }, modifier = Modifier.testTag("open-settings"), ringInside = true) {
                         Text("设置", style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
@@ -268,6 +269,8 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                             if (!deskPage) HostBar(hostCrumb(destination)) { select(AppTab.TODAY) }
                             Box(Modifier.weight(1f).fillMaxWidth()) { content() }
                         }
+                    } else if (immersiveReader) {
+                        Box(Modifier.fillMaxSize()) { content() }
                     } else Column(Modifier.fillMaxSize()) {
                         if (!deskPage) HostBar(hostCrumb(destination)) { select(AppTab.TODAY) }
                         Box(Modifier.weight(1f).fillMaxWidth()) { content() }

@@ -143,7 +143,7 @@ private fun EssayPicker(c: CoachController, onStarted: (EssaySession) -> Unit) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 weeks.forEach { w -> FilterChip(selected = week == w, onClick = { week = w }, label = { Text("第 $w 周") }, modifier = Modifier.heightIn(min = 48.dp)) }
             }
-            if (weeks.isEmpty() && loaded) Text("要连上 Mac 才知道课程有哪几周。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (weeks.isEmpty() && loaded) Text("连上 Coach 服务后可查看课程周次。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("自己贴的题没有核验过的参考答案：照样逐项批改、给示范，但不计入掌握。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Button(onClick = ::start, enabled = ready, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {

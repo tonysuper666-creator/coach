@@ -127,6 +127,15 @@ public final class SmokeMain implements AutoCloseable {
                         pointer(x, y, MouseEvent.MOUSE_RELEASED, 0, MouseEvent.BUTTON1);
                         pointer(x, y, MouseEvent.MOUSE_CLICKED, 0, MouseEvent.BUTTON1);
                     }
+                    case "/hover" -> {
+                        double x = number(query, "x"), y = number(query, "y");
+                        pointer(x, y, MouseEvent.MOUSE_MOVED, 0, MouseEvent.NOBUTTON);
+                    }
+                    case "/resize" -> {
+                        int w = (int)number(query, "w"), h = (int)number(query, "h");
+                        window.setBounds(0, 0, w, h);
+                        window.validate();
+                    }
                     case "/drag" -> {
                         double x1 = number(query, "x1"), y1 = number(query, "y1");
                         double x2 = number(query, "x2"), y2 = number(query, "y2");

@@ -22,6 +22,14 @@ internal fun windowsInitialWindowBounds(
 }
 
 internal fun windowsInitialWindowBounds(): Rectangle {
+    val override = System.getenv("COACH_WINDOW")?.trim()?.split('x', 'X')
+    if (override != null && override.size == 2) {
+        val w = override[0].toIntOrNull()
+        val h = override[1].toIntOrNull()
+        if (w != null && h != null && w >= 480 && h >= 560) {
+            return Rectangle(0, 0, w, h)
+        }
+    }
     val configuration = GraphicsEnvironment.getLocalGraphicsEnvironment()
         .defaultScreenDevice.defaultConfiguration
     return windowsInitialWindowBounds(configuration.bounds, Toolkit.getDefaultToolkit().getScreenInsets(configuration))

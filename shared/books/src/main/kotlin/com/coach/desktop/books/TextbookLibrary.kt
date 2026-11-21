@@ -229,7 +229,7 @@ internal class TextbookLibrary(
     fun pdfScrollMode(bookId: String): Boolean = database().use { db ->
         db.prepareStatement("SELECT scrolling FROM book_pdf_modes WHERE book=?").use { sql ->
             sql.setString(1, bookId)
-            sql.executeQuery().use { !it.next() || it.getBoolean(1) }
+            sql.executeQuery().use { it.next() && it.getBoolean(1) }
         }
     }
 

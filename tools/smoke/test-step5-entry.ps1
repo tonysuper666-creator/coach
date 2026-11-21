@@ -6,6 +6,9 @@
 #  - 「上传教材」只认原生选书框弹出来，没弹就重定位补点，弹过以后不重点；
 #  - 第 7 步的出处/收起/切回文字点落空时补点，点满就返回假，不 throw（后面几步还要跑）；
 #  - 第 4 步「讲讲」/「允许并讲解」点落空时补点，只认同意框、加载态、回答这三种看得见的状态；
+#  - 同意框的按钮字小，OCR 会把「允许并讲解」认成「允许百甫」「允许并讲鱈」：判断框在不在认标题和「不允许」，
+#    落点从整词退化到「允许并」再到标题下面含「允许」的那一行，「关没关」要标题和两个按钮都不在；
+#  - 弹窗淡出的过渡帧里标题还剩残影、按钮已经不在这一帧：判「暂不开启」要连拍几帧，不拿单帧判死；
 #  - 追问找标题时见过「思考」就不再往回滚（那会把刚追加的回答推出视野）。
 # 函数体从 friend-path-worker.ps1 里按原文截取，屏幕与输入都换成本文件的假实现。
 $ErrorActionPreference = 'Stop'
@@ -19,9 +22,9 @@ function Check([string]$name, [bool]$ok, [string]$detail = '') {
     "$tag $name$(if ($detail) { " ($detail)" })"
 }
 
-# 把 Find-OnRow / Click-Label / Click-Until / Find-DialogPath 原样取出来跑。
+# 把 Get-LineBox / Find-OnRow / Click-Label / Click-Until / Find-DialogPath 原样取出来跑。
 $src = Get-Content -LiteralPath (Join-Path $repo 'tools/smoke/friend-path-worker.ps1') -Raw -Encoding UTF8
-$start = $src.IndexOf('function Find-OnRow')
+$start = $src.IndexOf('function Get-LineBox')
 $end = $src.IndexOf('$env:JAVA_HOME', $start)
 if ($start -lt 0 -or $end -lt 0) { throw 'friend-path-worker.ps1: step-5 entry helpers not found' }
 . ([scriptblock]::Create($src.Substring($start, $end - $start)))
@@ -33,13 +36,24 @@ function New-Line([string]$text, [int]$x, [int]$y, [int]$w, [int]$h) {
 }
 
 # 假屏幕：Shot 返回当前这一帧，Click-At 按本用例的脚本换屏——和真机一样，屏幕只因点击而变。
+# $script:queue 非空时按帧序换屏（淡出过渡那种「这一帧没有、下一帧才有」的用例要用）。
 $script:screen = @()
+$script:queue = $null
 $script:clicks = New-Object System.Collections.ArrayList
 $script:onClick = $null
-function Shot([int]$n, [string]$tag) { return , $script:screen }
+function Shot([int]$n, [string]$tag) {
+    if ($script:queue -and $script:queue.Count -gt 0) {
+        $script:screen = $script:queue[0]
+        $script:queue = if ($script:queue.Count -gt 1) { @($script:queue[1..($script:queue.Count - 1)]) } else { @() }
+    }
+    $script:Last = $script:screen
+    return , $script:screen
+}
 function Click-At($x, $y) { [void]$script:clicks.Add("$x,$y"); if ($script:onClick) { & $script:onClick } }
 function Fail([int]$n, [string]$why) { throw "STEP_FAILED: $why" }
 function Note([string]$m) { }
+# 暗底灰字那一路（放大两倍再认）本文件不跑真缩图，默认认不出。
+function Find-DimButton($png, $needle) { return $null }
 # 原生选书框：本文件用计数代替真窗口——点够 $script:needClicks 下以后才算框真的开了。
 $script:needClicks = 0
 function Find-AppWindowByTitle([string]$prefix) {
@@ -236,6 +250,64 @@ $sweep = @(0, 8, 9, 17, 18) | ForEach-Object { Get-AskScrollDir $false $_ }
 Check 'step4-ask-scroll-sweeps-both-ways' (($sweep -join ',') -eq '-1,-1,1,1,-1') "dirs=$($sweep -join ',')"
 $downOnly = @(0, 9, 18, 27) | ForEach-Object { Get-AskScrollDir $true $_ }
 Check 'step4-ask-scroll-never-backtracks-after-loading' (($downOnly -join ',') -eq '-1,-1,-1,-1') "dirs=$($downOnly -join ',')"
+
+# 23. 同意框的按钮标签被 OCR 认错字（11-21 05:58 L1 实测两帧）：「允许百甫」「允许并讲鱈」。
+$consentMis1 = @(
+    (New-Line '这段原文会发到哪里' 400 380 300 26),
+    (New-Line '允许百甫' 520 520 120 30)
+)
+$consentMis2 = @(
+    (New-Line '这段原文会发到哪里' 400 380 300 26),
+    (New-Line '不允许' 300 520 90 30),
+    (New-Line '允许并讲鱈' 460 520 140 30)
+)
+Check 'step4-consent-up-on-misread-frames' ((Test-ConsentUp $consentMis1) -and (Test-ConsentUp $consentMis2)) ''
+Check 'step4-consent-up-not-on-toolbar' (-not (Test-ConsentUp $explainRow)) ''
+
+# 24. 认错字也必须落到「允许…」那个按钮上，不能点到左边的「不允许」。
+$hit1 = Find-ConsentAllow $consentMis1
+$hit2 = Find-ConsentAllow $consentMis2
+$noBtn = Find-Text $consentMis2 '不允许'
+Check 'step4-allow-found-when-third-char-garbled' ($hit1 -and [Math]::Abs($hit1.Y - 520) -le 20) "y=$(if ($hit1) { $hit1.Y } else { 'null' })"
+Check 'step4-allow-not-the-cancel-button' ($hit2 -and $hit2.X -gt ([int]$noBtn.X + 40)) "x=$(if ($hit2) { $hit2.X } else { 'null' }) cancel=$([int]$noBtn.X)"
+
+# 24b. 没有标题当锚就不往正文里的「允许」上点：那张框没认出来，宁可不点等下一帧。
+$bodyAllow = @((New-Line '本课程允许携带计算器进入考场。' 300 620 400 28))
+Check 'step4-allow-no-title-anchor-no-click' ($null -eq (Find-ConsentAllow $bodyAllow)) ''
+
+# 25. 框关没关：错字帧算「还开着」（只看整词就会当成关了）；进了加载态才算关。
+Check 'step4-consent-not-gone-on-misread-frame' (-not (Test-ConsentGone $consentMis1)) ''
+Check 'step4-consent-gone-when-thinking' ((Test-ConsentGone $loadingFrame) -and (Test-ConsentGone $explainRow)) ''
+
+# 26. 错字帧上点一下、屏换成加载态：一次就成，不再空等。
+$script:screen = $consentMis2; $script:Last = $consentMis2; $script:queue = $null; $script:clicks.Clear()
+$script:onClick = { $script:screen = $loadingFrame }
+$ok = Click-Confirm 4 { param($l) Find-ConsentAllow $l } { param($l) Test-ConsentGone $l } -tries 3 -waitSec 1 -pauseMs 1
+Check 'step4-allow-click-through-misread-frame' ($ok -and $script:clicks.Count -eq 1) "ok=$ok clicks=$($script:clicks.Count)"
+
+# 27. 第 3 步弹窗淡出过渡：这一帧只有标题残影，下一帧按钮才齐 → 多拍一帧就拿到，不判死。
+$ghost = @((New-Line '要开始学吗？' 380 300 200 26))
+$dismissFull = @(
+    (New-Line '要开始学吗？' 380 300 200 26),
+    (New-Line '暂不开启' 380 420 120 30),
+    (New-Line '开始学' 560 420 100 30)
+)
+$readerFrame = @((New-Line '下一页' 1060 900 70 28))
+$findOff = { param($l) Find-Text $l '暂不开启' }
+$goneOff = { param($l) -not (Find-Text $l '要开始学吗') }
+$script:screen = $ghost; $script:Last = $ghost; $script:queue = @($dismissFull); $script:clicks.Clear()
+$off = Find-AcrossFrames 3 'dismiss' $findOff $goneOff
+Check 'step4-dismiss-waits-for-next-frame' ($off -and [Math]::Abs($off.Y - 420) -le 20 -and $script:clicks.Count -eq 0) "y=$(if ($off) { $off.Y } else { 'null' })"
+
+# 28. 弹窗自己退掉了（按钮和标题都没了）：不点，也不再空拍。
+$script:screen = $ghost; $script:Last = $ghost; $script:queue = @($readerFrame); $script:clicks.Clear()
+$off = Find-AcrossFrames 3 'dismiss' $findOff $goneOff
+Check 'step4-dismiss-stops-when-dialog-gone' (($null -eq $off) -and $script:queue.Count -eq 0) "off=$off left=$($script:queue.Count)"
+
+# 29. 三帧都只有残影：返回空，由调用方决定（不在这里 throw），留着的标题能被调用方读到。
+$script:screen = $ghost; $script:Last = $ghost; $script:queue = @($ghost, $ghost); $script:clicks.Clear()
+$off = Find-AcrossFrames 3 'dismiss' $findOff $goneOff
+Check 'step4-dismiss-null-while-still-up' (($null -eq $off) -and (Find-Text $script:Last '要开始学吗')) "off=$off"
 
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"

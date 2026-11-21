@@ -26,10 +26,8 @@ data class QueuedCard(
     val retrievability: Double,
     /** `syllabusWeight × (1 − R(t))` — the deferral order the product promises. */
     val urgency: Double,
-    /** Whole days past its due day; 0 on the due day itself. */
+    /** Whole days past its due day; 0 on the due day itself. Breaks ties, never outranks urgency. */
     val waitingDays: Long,
-    /** A card waiting [FsrsDailyQueue.starvingAfterDays] or more is promoted ahead of weight. */
-    val starving: Boolean,
 )
 
 data class DailyQueuePlan(
@@ -53,20 +51,24 @@ data class DailyQueuePlan(
  * FIFO-free daily cap: due cards are ranked by exam value against current forgetting, the first
  * [capFor] are shown, the rest stay due and are reported as deferred instead of silently vanishing.
  *
- * Fairness bound: a card deferred for [starvingAfterDays] days outranks non-starving cards whatever
- * its weight, so a low-weight chapter cannot be starved forever by the exam-weighted order.
- * Inside each band the order is exactly `syllabusWeight × (1 − R(t))` descending.
+ * The order is exactly `syllabusWeight × (1 − R(t))` descending — the deferral rule the product
+ * promises — with waiting days only breaking exact ties. Nothing else may outrank exam value:
+ * a FIFO or longest-waiting-first rule would quietly turn the queue back into a backlog drainer
+ * and starve the heavy chapters before an exam.
+ *
+ * Inside the exam window the queue also *pulls cards forward*: a card another scheduler left due
+ * after the exam is eligible today, because the compression promise is about the exam date, not
+ * about the day some earlier interval happened to land on. Such a card enters at its true (high)
+ * R(t), so it sorts last and only takes a slot the more at-risk cards do not need.
  */
 class FsrsDailyQueue(
     val defaultCap: Int = 20,
     val preExamCap: Int = 30,
     val preExamWindowDays: Long = 21,
-    val starvingAfterDays: Long = 3,
-    private val config: FsrsConfig = FsrsConfig(),
 ) {
     init {
         require(defaultCap >= 0 && preExamCap >= defaultCap)
-        require(preExamWindowDays >= 0 && starvingAfterDays >= 1)
+        require(preExamWindowDays >= 0)
     }
 
     fun isPreExam(day: Long, examDay: Long?): Boolean {
@@ -78,11 +80,11 @@ class FsrsDailyQueue(
 
     fun plan(cards: List<FsrsQueueCard>, day: Long, examDay: Long? = null): DailyQueuePlan {
         val cap = capFor(day, examDay)
-        val due = cards.filter { it.state.dueDay <= day }.map { rank(it, day) }
+        val ceiling = examIntervalCeiling(day, examDay)
+        val due = cards.filter { isDue(it, day, ceiling) }.map { rank(it, day) }
         val ordered = due.sortedWith(
-            compareByDescending<QueuedCard> { it.starving }
+            compareByDescending<QueuedCard> { it.urgency }
                 .thenByDescending { it.waitingDays }
-                .thenByDescending { it.urgency }
                 .thenBy { it.card.cardId }
         )
         return DailyQueuePlan(
@@ -94,6 +96,20 @@ class FsrsDailyQueue(
         )
     }
 
+    /**
+     * Interval ceiling in force today: the exam-window cap, or null outside the window.
+     * Exposed so the simulation and the UI can explain why a not-yet-due card is on the list.
+     */
+    fun examIntervalCeiling(day: Long, examDay: Long?): Int? =
+        if (examDay != null && isPreExam(day, examDay)) FsrsConfig.examIntervalCeiling(examDay - day) else null
+
+    private fun isDue(card: FsrsQueueCard, day: Long, ceiling: Int?): Boolean {
+        val dueDay = card.state.dueDay
+        if (dueDay <= day) return true
+        // Scheduled beyond the exam-window ceiling: the compression pulls it back into the window.
+        return ceiling != null && dueDay - day > ceiling
+    }
+
     fun rank(card: FsrsQueueCard, day: Long): QueuedCard {
         val retrievability = Fsrs5.retrievability(card.state, day)
         val waitingDays = (day - card.state.dueDay).coerceAtLeast(0)
@@ -102,7 +118,6 @@ class FsrsDailyQueue(
             retrievability = retrievability,
             urgency = card.syllabusWeight * (1.0 - retrievability),
             waitingDays = waitingDays,
-            starving = waitingDays >= starvingAfterDays,
         )
     }
 

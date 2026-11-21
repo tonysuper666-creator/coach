@@ -78,13 +78,26 @@ class FsrsDailyQueueTest {
     }
 
     @Test
-    fun aLongDeferredCardIsShownBeforeTodayHighWeight() {
-        val starved = card("starved", weight = 0.05, dueDay = 4)
-        val heavy = card("heavy", weight = 1.0, dueDay = 10)
-        val plan = queue.plan(listOf(heavy, starved), day = 10)
-        assertEquals(listOf("starved", "heavy"), plan.priority.map { it.card.cardId })
-        assertTrue(plan.priority.first().starving)
-        assertEquals(6, plan.priority.first().waitingDays)
+    fun aCardDueTodayWithMoreAtStakeOutranksOneThatWaitedADayLonger() {
+        // Two days versus zero days of waiting: the fresher card still wins because more is at stake.
+        val waited = card("low", weight = 0.05, dueDay = 8, stability = 1_000.0)
+        val fresh = card("high", weight = 1.0, dueDay = 10, stability = 2.0)
+        val plan = queue.plan(listOf(waited, fresh), day = 10)
+        assertEquals(2, plan.priority.single { it.card.cardId == "low" }.waitingDays)
+        assertEquals(0, plan.priority.single { it.card.cardId == "high" }.waitingDays)
+        assertEquals(listOf("high", "low"), plan.priority.map { it.card.cardId })
+        assertTrue(plan.priority.first().urgency > plan.priority.last().urgency)
+    }
+
+    @Test
+    fun waitingDaysNeverOutrankExamValueEvenAfterAWeek() {
+        // The red-team repro: a low-value card that waited a week must still lose to the card
+        // whose weight times forgetting says today matters more.
+        val old = card("old", weight = 0.05, dueDay = 3, stability = 5_000.0)
+        val heavy = card("heavy", weight = 1.0, dueDay = 10, stability = 3.0)
+        val plan = queue.plan(listOf(old, heavy), day = 10)
+        assertEquals(7, plan.priority.single { it.card.cardId == "old" }.waitingDays)
+        assertEquals(listOf("heavy", "old"), plan.priority.map { it.card.cardId })
     }
 
     @Test

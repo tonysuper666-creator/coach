@@ -50,6 +50,38 @@ data class FsrsConfig(
         require(desiredRetention > 0.0 && desiredRetention <= 1.0) { "desiredRetention must be in (0, 1]" }
         require(maximumIntervalDays >= 1)
     }
+
+    /**
+     * Pre-exam compression from the V2 plan (C-learning proposal §2, sample chapter §05):
+     * inside the last [EXAM_WINDOW_DAYS] days the target retention rises to
+     * [EXAM_DESIRED_RETENTION] and no interval may outlive a quarter of the days left, so every
+     * card is seen roughly four times before the exam and at least once on the final day.
+     *
+     * Both values are product assumptions picked from Cepeda et al. (2006), not fitted
+     * parameters; callers can pass their own config and this function only tightens it.
+     */
+    fun forExamWindow(daysToExam: Long): FsrsConfig {
+        require(daysToExam >= 0) { "daysToExam must not be negative" }
+        if (daysToExam > EXAM_WINDOW_DAYS) return this
+        return copy(
+            desiredRetention = max(desiredRetention, EXAM_DESIRED_RETENTION),
+            maximumIntervalDays = min(maximumIntervalDays, examIntervalCeiling(daysToExam)),
+        )
+    }
+
+    companion object {
+        /** Days before the exam when compression starts (V2 plan: the last three weeks). */
+        const val EXAM_WINDOW_DAYS: Long = 21
+
+        /** Target retention inside the exam window (V2 plan: 0.94 against the 0.90 default). */
+        const val EXAM_DESIRED_RETENTION: Double = 0.94
+
+        /** Interval ceiling inside the window: a quarter of the days left, never below one day. */
+        fun examIntervalCeiling(daysToExam: Long): Int {
+            require(daysToExam >= 0) { "daysToExam must not be negative" }
+            return max(1, (daysToExam / 4).toInt())
+        }
+    }
 }
 
 /**

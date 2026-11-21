@@ -66,6 +66,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     onNewCourse: () -> Unit = {},
     onNewBooklist: () -> Unit = {},
     onOpenCollection: (CollectionSummary) -> Unit = {},
+    onPickCourseFiles: (suspend () -> List<Path>)? = null,
     chooseBook: suspend () -> Path?) {
     val explainer = remember(controller.library) { BookExplainer(library = controller.library) }
     val aiEnabled = LocalReadingAiExplain.current
@@ -260,7 +261,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 com.coach.ui.v7.CoachLoadingDots(label = "正在打开书架…")
                             }
                         }
-                        ui.screen == BookScreen.HOME || (book == null && ui.screen != BookScreen.REVIEWS && ui.screen != BookScreen.REVIEWING) -> LibraryHome(
+                        ui.screen == BookScreen.HOME || (book == null && ui.screen != BookScreen.REVIEWS && ui.screen != BookScreen.REVIEWING && ui.screen != BookScreen.COURSE) -> LibraryHome(
                             ui = ui,
                             onImport = {
                                 scope.launch {
@@ -284,6 +285,53 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             onMultiDropAction = { action -> controller.resolveMultiDrop(action) },
                             onDismissMultiDrop = controller::dismissMultiDrop,
                         )
+                        ui.screen == BookScreen.COURSE && ui.activeCourseDetail != null -> {
+                            val detail = checkNotNull(ui.activeCourseDetail)
+                            CourseScreen(
+                                detail = detail,
+                                busy = ui.busy || ui.courseBusy,
+                                notice = ui.courseNotice,
+                                onBack = { run { controller.back() } },
+                                onOpenTopic = { topic -> run { controller.openCourseTopic(detail.courseId, topic.topicId, explainer) } },
+                                onAddMaterials = {
+                                    scope.launch {
+                                        val picked = if (onPickCourseFiles != null) {
+                                            onPickCourseFiles()
+                                        } else {
+                                            listOfNotNull(chooseBook())
+                                        }
+                                        if (picked.isNotEmpty()) {
+                                            controller.addMaterialsToCourse(detail.courseId, picked) {
+                                                picked.forEach(releasePickedBook)
+                                            }
+                                        }
+                                    }
+                                },
+                                onRealign = { run { controller.realignCourse(detail.courseId, explainer) } },
+                                onUpdateMaterialAssignment = { bookId, weekNum, role ->
+                                    run { controller.updateCourseMaterialAssignment(detail.courseId, bookId, weekNum, role) }
+                                },
+                                onRemoveMaterial = { bookId ->
+                                    run { controller.removeCourseMaterial(detail.courseId, bookId) }
+                                },
+                                onRunHandwrittenVision = { bookId ->
+                                    run { controller.runCourseHandwrittenVision(detail.courseId, bookId, explainer) }
+                                },
+                                onRenameTopic = { topicId, newTitle ->
+                                    run { controller.renameCourseTopic(detail.courseId, topicId, newTitle) }
+                                },
+                                onUnlinkTopicSource = { topicId, bookId ->
+                                    run { controller.unlinkCourseTopicSource(detail.courseId, topicId, bookId) }
+                                },
+                                onSetTopicStatus = { topicId, status ->
+                                    run { controller.setCourseTopicStatus(detail.courseId, topicId, status) }
+                                },
+                                onUpdateExamProfile = { profile ->
+                                    run { controller.updateCourseExamProfile(detail.courseId, profile) }
+                                },
+                                onDismissNotice = controller::dismissCourseNotice,
+                            )
+                        }
                         ui.screen == BookScreen.REVIEWS -> LocalBookReviews(ui,
                             onBack = { run { controller.back() } },
                             onOpen = { entry -> run { if (drafts.flush()) controller.openReview(entry) } })
@@ -312,38 +360,73 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 },
                             )
                         }
-                        ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library, learningSupport,
-                            practiceSource = practiceSource, pageFocus = readerFocus, explainProvider = explainer,
-                            openPairing = openPairing,
-                            resumeDraft = ui.activePracticeDraft?.takeIf { it.bookId == book?.id },
-                            onPracticeDraftChange = { draft, pagesTotal ->
-                                controller.saveChapterPracticeDraft(draft, pagesTotal)
-                            },
-                            onCancelImport = controller::cancelImport,
-                            onReorganizeSections = { run { controller.reorganizeSections() } },
-                            onSaveSectionQuiz = { lesson, qIdx, practice, answer ->
-                                run { controller.recordSectionQuizAnswer(lesson, qIdx, practice, answer) }
-                            },
-                            onOpenSectionMainline = { secIdx ->
-                                run { if (drafts.flush()) controller.openSectionPractice(secIdx) }
-                            },
-                            onEnsureUnstructuredSectioned = {
-                                ui.book?.let { target -> run { controller.ensureUnstructuredBookSectioned(target.id, bookStructureProvider) } }
-                            },
-                            hinge = hinge,
-                            onExportNotes = onExportNotes,
-                            onNoteSession = { noteReader = it },
-                            onPage = { page ->
-                                val restoreFocus = ui.source != null && readerHasFocus
-                                val startBookId = ui.book?.id; val startSource = ui.source
-                                run {
-                                    controller.page(page)
-                                    if (restoreFocus) awaitReaderFocusRestore(startBookId, startSource, { readerHasFocus }, { controller.state.value }) {
-                                        readerFocusTicket = it
+                        ui.screen == BookScreen.READER -> {
+                            val activeCourse = ui.activeCourseDetail
+                            val activeTopic = activeCourse?.allTopics?.firstOrNull { it.topicId == ui.activeCourseTopicId }
+                            val courseContext = if (activeCourse != null && activeTopic != null) {
+                                CourseReaderContext(
+                                    courseId = activeCourse.courseId,
+                                    courseTitle = activeCourse.title,
+                                    topicId = activeTopic.topicId,
+                                    topicTitle = activeTopic.title,
+                                    weekLabel = activeTopic.weekLabel,
+                                    authorityNotice = activeTopic.pack?.authorityNotice.orEmpty(),
+                                    examProfile = activeCourse.examProfile,
+                                    orderedSources = activeTopic.sources,
+                                    pack = activeTopic.pack,
+                                    resumeDraft = activeTopic.practiceDraft,
+                                )
+                            } else null
+                            TextbookReader(ui, controller.library, learningSupport,
+                                practiceSource = practiceSource, pageFocus = readerFocus, explainProvider = explainer,
+                                openPairing = openPairing,
+                                resumeDraft = ui.activePracticeDraft?.takeIf { it.bookId == book?.id },
+                                onPracticeDraftChange = { draft, pagesTotal ->
+                                    controller.saveChapterPracticeDraft(draft, pagesTotal)
+                                },
+                                courseContext = courseContext,
+                                pendingCourseJump = ui.pendingCourseJump,
+                                onConsumePendingCourseJump = controller::consumePendingCourseJump,
+                                onSwitchCourseSource = { targetBookId, targetPage ->
+                                    run { controller.switchCourseSource(targetBookId, targetPage) }
+                                },
+                                onSaveCoursePracticeDraft = { draft ->
+                                    activeCourse?.let { controller.saveCoursePracticeDraft(it.courseId, draft) }
+                                },
+                                onRefreshCoursePack = {
+                                    if (activeCourse != null && activeTopic != null) {
+                                        scope.launch { controller.refreshCourseTopicPack(activeCourse.courseId, activeTopic.topicId, explainer) }
                                     }
-                                }
-                            }, onBack = { returnFromReader() },
-                            onLearn = { run { if (drafts.flush()) controller.learn(LearningPath.QUESTION_FIRST) } })
+                                },
+                                onJumpCourseCitation = { citation ->
+                                    run { controller.jumpToCourseCitation(citation) }
+                                },
+                                onCancelImport = controller::cancelImport,
+                                onReorganizeSections = { run { controller.reorganizeSections() } },
+                                onSaveSectionQuiz = { lesson, qIdx, practice, answer ->
+                                    run { controller.recordSectionQuizAnswer(lesson, qIdx, practice, answer) }
+                                },
+                                onOpenSectionMainline = { secIdx ->
+                                    run { if (drafts.flush()) controller.openSectionPractice(secIdx) }
+                                },
+                                onEnsureUnstructuredSectioned = {
+                                    ui.book?.let { target -> run { controller.ensureUnstructuredBookSectioned(target.id, bookStructureProvider) } }
+                                },
+                                hinge = hinge,
+                                onExportNotes = onExportNotes,
+                                onNoteSession = { noteReader = it },
+                                onPage = { page ->
+                                    val restoreFocus = ui.source != null && readerHasFocus
+                                    val startBookId = ui.book?.id; val startSource = ui.source
+                                    run {
+                                        controller.page(page)
+                                        if (restoreFocus) awaitReaderFocusRestore(startBookId, startSource, { readerHasFocus }, { controller.state.value }) {
+                                            readerFocusTicket = it
+                                        }
+                                    }
+                                }, onBack = { returnFromReader() },
+                                onLearn = { run { if (drafts.flush()) controller.learn(LearningPath.QUESTION_FIRST) } })
+                        }
                         else -> {
                             val activeBook = checkNotNull(book)
                             val lesson = activeBook.lessons.getOrNull(activeBook.lessonIndex)

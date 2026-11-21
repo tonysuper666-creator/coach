@@ -1943,6 +1943,15 @@ internal class TextbookLibrary(
         MaterialCollectionStore.materials(db, collectionId)
     }
 
+    @Synchronized fun <T> withCourseDatabase(block: (Connection) -> T): T = database().use(block)
+
+    @Synchronized fun originalFileIfExists(bookId: String, format: String): Path? =
+        runCatching { original(bookId, format) }.getOrNull()?.takeIf(Files::isRegularFile)
+
+    @Synchronized fun courseDetail(courseId: String): CourseDetailSnapshot = database().use { db ->
+        CourseStore.loadCourseDetail(db, courseId)
+    }
+
     fun searchAllBooks(rawQuery: String, limitPerBook: Int = 5): List<Pair<BookSummary, BookSearchResult>> {
         val query = rawQuery.trim()
         if (query.isEmpty()) return emptyList()
@@ -2623,6 +2632,12 @@ internal object TextbookExtraction {
             extracted.copy(outline = BookStructurePlanner.extractWordOutline(path, extracted.pages))
         }
         "pptx", "html", "rtf", "odt" -> StructuredBookExtraction.extract(path, format, title, control)
+        "srt", "vtt" -> {
+            require(Files.size(path) <= 32L * 1024 * 1024) { "文本教材请控制在 32 MB 以内。" }
+            val text = BookText.decode(Files.readAllBytes(path))
+            require(text.isNotBlank()) { "转写或字幕文件中没有文字。" }
+            ExtractedBook(title, CourseTranscriptParser.extractToBookPages(text, format))
+        }
         else -> {
             require(Files.size(path) <= 32L * 1024 * 1024) { "文本教材请控制在 32 MB 以内。" }
             val text = BookText.decode(Files.readAllBytes(path))
@@ -2635,7 +2650,11 @@ internal object TextbookExtraction {
             ExtractedBook(title, marked.ifEmpty {
                 val cleaned = clean(text)
                 require(cleaned.isNotBlank()) { "教材中没有文字。" }
-                BookText.chapters(cleaned)
+                if (CourseTranscriptParser.looksLikeTranscript(cleaned, format)) {
+                    CourseTranscriptParser.extractToBookPages(cleaned, format)
+                } else {
+                    BookText.chapters(cleaned)
+                }
             })
         }
     }

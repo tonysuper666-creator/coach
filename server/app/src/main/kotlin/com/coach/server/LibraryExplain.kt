@@ -142,6 +142,9 @@ fun Application.libraryExplainRoutes(
     friends: FriendAccess? = null,
     companionPipeline: SectionConcurrentCompanionPipeline? = null,
     tokenLedger: BookTokenLedger? = null,
+    courseAlignPipeline: CourseAlignmentPipeline? = null,
+    courseTopicPipeline: CourseTopicSynthesisPipeline? = null,
+    courseVisionService: CourseVisionService? = null,
 ) {
     val companionJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     routing {
@@ -356,6 +359,14 @@ fun Application.libraryExplainRoutes(
             }
             call.respondText(ledger.bookSummary(bookId).toJson().toString(), ContentType.Application.Json)
         }
+        courseRoutes(
+            actor = actor,
+            library = library,
+            friends = friends,
+            alignPipeline = courseAlignPipeline,
+            topicPipeline = courseTopicPipeline,
+            visionService = courseVisionService,
+        )
     }
 }
 

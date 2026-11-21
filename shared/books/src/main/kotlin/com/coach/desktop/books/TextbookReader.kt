@@ -115,6 +115,13 @@ internal fun TextbookReader(
     onEnsureUnstructuredSectioned: (() -> Unit)? = null,
     hinge: Hinge? = LocalBookHinge.current,
     onExportNotes: ((Textbook, Int) -> Unit)? = null,
+    courseContext: CourseReaderContext? = null,
+    pendingCourseJump: BookPassage? = null,
+    onConsumePendingCourseJump: () -> Unit = {},
+    onSwitchCourseSource: ((String, Int) -> Unit)? = null,
+    onSaveCoursePracticeDraft: ((CourseTopicPracticeDraft) -> Unit)? = null,
+    onRefreshCoursePack: (() -> Unit)? = null,
+    onJumpCourseCitation: ((CourseCitationRef) -> Unit)? = null,
 ) {
     val book = checkNotNull(ui.book)
     val page = book.page(ui.page)
@@ -373,12 +380,17 @@ internal fun TextbookReader(
     }
     var pageFocused by remember { mutableStateOf(false) }
     var tocOpen by remember(book.id) { mutableStateOf(false) }
-    val initialCompanionOpen = openPairing || (ui.source == null && resumeDraft?.companionOpen == true && resumeDraft.hasMeaningfulDraft())
+    val initialCompanionOpen = openPairing || (
+        ui.source == null && (
+            (resumeDraft?.companionOpen == true && resumeDraft.hasMeaningfulDraft()) ||
+                (courseContext != null && courseContext.resumeDraft?.companionOpen != false)
+            )
+        )
     val initialCompanionTab = remember(book.id, resumeDraft?.companionTab) {
         ReaderCompanionTab.entries.firstOrNull { it.name.equals(resumeDraft?.companionTab, ignoreCase = true) }
             ?: ReaderCompanionTab.EXPLAIN
     }
-    var companionOpen by remember(book.id, openPairing) { mutableStateOf(initialCompanionOpen) }
+    var companionOpen by remember(book.id, courseContext?.topicId, openPairing) { mutableStateOf(initialCompanionOpen) }
     var companionTab by remember(book.id) { mutableStateOf(initialCompanionTab) }
     var askInputFocused by remember(book.id) { mutableStateOf(false) }
     var practiceInputFocused by remember(book.id) { mutableStateOf(false) }
@@ -504,6 +516,14 @@ internal fun TextbookReader(
         pdf.jump(passage.page)
         paging.anchor = BookPageAnchor(passage.page, passage.start)
         if (paging.publishImportPage(passage.page)) onPage(passage.page)
+    }
+
+    LaunchedEffect(pendingCourseJump, book.id) {
+        val jump = pendingCourseJump
+        if (jump != null && jump.book == book.id) {
+            openPassage(jump)
+            onConsumePendingCourseJump()
+        }
     }
     /** 书内查找跳转：保留当前视图（原版/文字版）和读法（翻页/滚动），定位到命中页和精确 UTF-16 区间。 */
     val openSearchHit: (BookSearchHit) -> Unit = jump@{ hit ->
@@ -1023,6 +1043,24 @@ internal fun TextbookReader(
                             book, paragraphPage.number, explainConsent, explainer,
                             selection = explainingSelection, library = library,
                             onOpenOriginal = handleCitationJump,
+                        )
+                    } else if (courseContext != null) {
+                        CourseCompanionPanel(
+                            courseContext = courseContext,
+                            activeBookId = book.id,
+                            activePage = paragraphPage.number,
+                            onSwitchSource = { targetId, targetPage ->
+                                onSwitchCourseSource?.invoke(targetId, targetPage)
+                            },
+                            onJumpCitation = { ref ->
+                                onJumpCourseCitation?.invoke(ref)
+                            },
+                            onSavePracticeDraft = { draft ->
+                                onSaveCoursePracticeDraft?.invoke(draft)
+                            },
+                            onRefreshPack = {
+                                onRefreshCoursePack?.invoke()
+                            },
                         )
                     } else {
                         SingleBookCompanionPanel(

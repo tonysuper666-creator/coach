@@ -14,7 +14,7 @@ import java.util.zip.ZipFile
 /** Canonical names are also the extensions of immutable, content-addressed originals. */
 internal object BookFormats {
     val images = setOf("png", "jpg")
-    val supported = images + setOf("pdf", "epub", "md", "txt", "docx", "pptx", "html", "mobi", "azw3", "rtf", "odt")
+    val supported = images + setOf("pdf", "epub", "md", "txt", "docx", "pptx", "html", "mobi", "azw3", "rtf", "odt", "srt", "vtt")
     const val description = "PDF、电子书、Word、幻灯片、网页、文本和扫描图片"
 
     fun detect(path: Path, filename: String): String = try {
@@ -53,6 +53,8 @@ internal object BookFormats {
         val text = try { BookText.decode(Files.readAllBytes(path)) } catch (e: IllegalArgumentException) {
             if (binarySuffix) throw IllegalArgumentException(damaged, e) else throw e
         }
+        if (suffix == "vtt" || text.trimStart('\uFEFF').startsWith("WEBVTT")) return "vtt"
+        if (suffix == "srt") return "srt"
         if (suffix in setOf("html", "htm") || Regex("(?is)^\\s*(?:<!--.*?-->\\s*)*(?:<!doctype\\s+html|<html\\b|<head\\b|<body\\b|<article\\b)").containsMatchIn(text)) return "html"
         require(!binarySuffix) { damaged }
         return if (suffix in setOf("md", "markdown")) "md" else "txt"

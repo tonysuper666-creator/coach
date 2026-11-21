@@ -136,6 +136,7 @@ internal fun WindowsTextbookHost(
 
     val isEmptyLibrary = ui.catalog.isEmpty() && ui.collections.none { !it.record.archived }
     val deskPage = (book != null && ui.screen != BookScreen.HOME) ||
+        ui.screen == BookScreen.COURSE ||
         ui.screen == BookScreen.REVIEWS || ui.screen == BookScreen.REVIEWING
     val systemDark = isSystemInDarkTheme()
     val dark = remember { bookWorkspaceThemeOverride() }
@@ -161,7 +162,13 @@ internal fun WindowsTextbookHost(
                 .textbookFileDrop { files ->
                     scope.launch {
                         if (drafts.flush() && exams.flush()) {
-                            if (files.size == 1) {
+                            val currentCourseId = ui.activeCourseId
+                            if (ui.screen == BookScreen.COURSE && currentCourseId != null && files.isNotEmpty()) {
+                                retryState.releasePending()
+                                controller.addMaterialsToCourse(currentCourseId, files) {
+                                    files.forEach(releasePickedBook)
+                                }
+                            } else if (files.size == 1) {
                                 retryState.importPicked(controller, files.single())
                             } else if (files.size > 1) {
                                 retryState.releasePending()
@@ -224,7 +231,14 @@ internal fun WindowsTextbookHost(
                             retryState = retryState,
                             onNewCourse = { creatingKind = CollectionKind.COURSE },
                             onNewBooklist = { creatingKind = CollectionKind.BOOKLIST },
-                            onOpenCollection = { activeCollection = it },
+                            onOpenCollection = { col ->
+                                if (col.record.kind == CollectionKind.COURSE) {
+                                    scope.launch { controller.openCourse(col.record.id) }
+                                } else {
+                                    activeCollection = col
+                                }
+                            },
+                            onPickCourseFiles = pickMultiple,
                             chooseBook = chooseBook,
                         )
                     }
@@ -303,7 +317,11 @@ internal fun WindowsTextbookHost(
                     },
                     onOpenCollection = { col ->
                         searchOpen = false
-                        activeCollection = col
+                        if (col.record.kind == CollectionKind.COURSE) {
+                            scope.launch { controller.openCourse(col.record.id) }
+                        } else {
+                            activeCollection = col
+                        }
                     },
                     onClose = { searchOpen = false },
                 )

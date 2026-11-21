@@ -18,7 +18,7 @@ import kotlinx.coroutines.withContext
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 
-internal enum class BookScreen { HOME, READER, LEARNING, REVIEWS, REVIEWING }
+internal enum class BookScreen { HOME, COURSE, READER, LEARNING, REVIEWS, REVIEWING }
 internal enum class BookPrompt { IMPORTED, START, AFTER_READING, QUESTIONS }
 internal enum class MultiDropAction { COURSE, BOOKLIST, SEPARATE }
 internal data class PendingMultiDrop(val paths: List<Path>, val onStaged: () -> Unit = {})
@@ -48,6 +48,12 @@ internal data class LibraryUi(
     val lastImportDurationMs: Long? = null,
     /** 当前书最近落盘的伴读练习草稿（`book_chapter_progress.practice_draft_json`），供首页「继续」精确续接。 */
     val activePracticeDraft: ChapterPracticeDraft? = null,
+    val activeCourseId: String? = null,
+    val activeCourseTopicId: String? = null,
+    val activeCourseDetail: CourseDetailSnapshot? = null,
+    val pendingCourseJump: BookPassage? = null,
+    val courseNotice: String? = null,
+    val courseBusy: Boolean = false,
 )
 
 internal class TextbookController(val library: TextbookLibrary, var structureProvider: BookStructureProvider? = null) {
@@ -101,6 +107,10 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     book != null && session?.second == "LEARNING" && book.learning -> BookScreen.LEARNING
                     else -> BookScreen.HOME
                 }
+                val restoredCoursePair = resolveRestoredCourse(snap.collections, restoredScreen, book?.id)
+                val restoredCourseId = restoredCoursePair?.first
+                val restoredCourseDetail = restoredCoursePair?.second
+                val restoredCourseTopicId = restoredCourseDetail?.activeAnchor?.topicId
                 loadedScreen = restoredScreen
                 loadedBookId = book?.id
                 val restoredLesson = if (restoredScreen == BookScreen.LEARNING && book != null) book.lessons.getOrNull(book.lessonIndex) else null
@@ -126,6 +136,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         pendingMultiDrop = current.pendingMultiDrop,
                         lastImportDurationMs = current.lastImportDurationMs,
                         activePracticeDraft = snap.activePracticeDraft,
+                        activeCourseId = restoredCourseId,
+                        activeCourseTopicId = restoredCourseTopicId,
+                        activeCourseDetail = restoredCourseDetail,
                     )
                 }
             }
@@ -249,8 +262,14 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 val cleanTitle = title.trim()
                 require(cleanTitle.isNotEmpty()) { if (kind == CollectionKind.COURSE) "请填写课程名。" else "请填写书单名。" }
                 val importedBooks = mutableListOf<Textbook>()
+                val preRejectedPastExams = mutableListOf<String>()
                 for (path in newFiles) {
-                    val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
+                    val fileName = path.fileName?.toString().orEmpty()
+                    if (kind == CollectionKind.COURSE && CourseClientGates.isPastExamMaterial(fileName, fileName)) {
+                        preRejectedPastExams += fileName
+                        continue
+                    }
+                    val useTier0 = library.lazyPdfExtras && fileName.endsWith(".pdf", ignoreCase = true)
                     val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
                     if (kind == CollectionKind.COURSE && !staged.alreadyExisted) {
                         library.setBookShowStandalone(staged.book.id, false)
@@ -261,29 +280,46 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 val now = System.currentTimeMillis()
                 val id = "${kind.name.lowercase()}-${java.util.UUID.randomUUID().toString().take(8)}"
                 val cleanExamDate = examDate?.trim()?.takeIf(String::isNotEmpty)
-                library.upsertCollection(
-                    MaterialCollectionRecord(
-                        id = id,
-                        kind = kind,
-                        title = cleanTitle,
-                        createdAt = now,
-                        updatedAt = now,
-                        examDate = cleanExamDate,
-                    ),
-                )
-                allIds.forEachIndexed { idx, bookId ->
-                    val role = if (kind == CollectionKind.COURSE) {
-                        if (idx == 0) "CORE_TEXTBOOK" else "LECTURE_SLIDES"
-                    } else "LIST_BOOK"
-                    library.attachMaterial(
-                        CollectionMaterialRecord(
-                            collectionId = id,
-                            materialId = bookId,
-                            role = role,
-                            ordinal = idx,
-                            addedAt = now,
+                var alignedCourseDetail: CourseDetailSnapshot? = null
+                var rejectedPastExams: List<String> = emptyList()
+                if (kind == CollectionKind.COURSE) {
+                    val (_, rejected) = library.withCourseDatabase { db ->
+                        val (cid, skipped) = CourseStore.createCourse(
+                            db = db,
+                            title = cleanTitle,
+                            examProfile = CourseExamProfile(examDate = cleanExamDate.orEmpty()),
+                            materialBookIds = allIds,
+                            existingId = id,
+                        )
+                        val detail = CourseAutoAligner.alignLocally(db, cid)
+                        Triple(cid, skipped, detail)
+                    }.let { (cid, skipped, detail) ->
+                        alignedCourseDetail = detail
+                        cid to skipped
+                    }
+                    rejectedPastExams = preRejectedPastExams + rejected
+                } else {
+                    library.upsertCollection(
+                        MaterialCollectionRecord(
+                            id = id,
+                            kind = kind,
+                            title = cleanTitle,
+                            createdAt = now,
+                            updatedAt = now,
+                            examDate = cleanExamDate,
                         ),
                     )
+                    allIds.forEachIndexed { idx, bookId ->
+                        library.attachMaterial(
+                            CollectionMaterialRecord(
+                                collectionId = id,
+                                materialId = bookId,
+                                role = "LIST_BOOK",
+                                ordinal = idx,
+                                addedAt = now,
+                            ),
+                        )
+                    }
                 }
                 val catalog = library.catalog()
                 val collections = library.collectionSummaries()
@@ -293,7 +329,12 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     ?: allIds.firstOrNull()?.let { runCatching { library.book(it) }.getOrNull() }
                     ?: mutable.value.book
                     ?: catalog.firstOrNull()?.let { library.book(it.id) }
-                val noticeLabel = if (kind == CollectionKind.COURSE) "已创建课程《$cleanTitle》" else "已创建书单《$cleanTitle》"
+                val noticeLabel = buildString {
+                    append(if (kind == CollectionKind.COURSE) "已创建课程《$cleanTitle》" else "已创建书单《$cleanTitle》")
+                    if (rejectedPastExams.isNotEmpty()) {
+                        append("（已拦截 ${rejectedPastExams.size} 份历年真题文件）")
+                    }
+                }
                 mutable.update { current ->
                     current.copy(
                         catalog = catalog,
@@ -306,6 +347,12 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         todayQueue = todayQueue,
                         initialized = true,
                         importNotice = BookImportNotice(System.nanoTime(), noticeLabel),
+                        activeCourseId = if (kind == CollectionKind.COURSE) id else current.activeCourseId,
+                        activeCourseTopicId = null,
+                        activeCourseDetail = if (kind == CollectionKind.COURSE) alignedCourseDetail else current.activeCourseDetail,
+                        courseNotice = if (rejectedPastExams.isNotEmpty()) {
+                            "历年真题文件已由门禁拦截，未进入备考题库。"
+                        } else null,
                     )
                 }
             }
@@ -946,14 +993,42 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     }
 
     suspend fun back() = action {
-        if (mutable.value.source != null) mutable.update {
-            it.copy(screen = if (it.review == null) BookScreen.LEARNING else BookScreen.REVIEWING, source = null)
+        val cur = mutable.value
+        if (cur.source != null) {
+            mutable.update {
+                it.copy(screen = if (it.review == null) BookScreen.LEARNING else BookScreen.REVIEWING, source = null)
+            }
+        } else if (cur.activeCourseId != null && cur.screen != BookScreen.COURSE && cur.screen != BookScreen.HOME) {
+            val refreshed = library.withCourseDatabase { db ->
+                CourseStore.loadCourseDetail(db, cur.activeCourseId)
+            }
+            library.clearOpenSession()
+            mutable.update {
+                it.copy(
+                    screen = BookScreen.COURSE,
+                    activeCourseTopicId = null,
+                    activeCourseDetail = refreshed,
+                    pendingCourseJump = null,
+                )
+            }
         } else {
-            val fromReview = mutable.value.review != null
+            val fromReview = cur.review != null
             library.closeReview()
             if (!fromReview) library.clearOpenSession()
-            mutable.update { it.copy(screen = if (fromReview) BookScreen.REVIEWS else BookScreen.HOME,
-                review = null, prompt = null, reviews = library.reviews(), todayQueue = library.reviewQueue()) }
+            mutable.update {
+                it.copy(
+                    screen = if (fromReview) BookScreen.REVIEWS else BookScreen.HOME,
+                    review = null,
+                    prompt = null,
+                    activeCourseId = null,
+                    activeCourseTopicId = null,
+                    activeCourseDetail = null,
+                    pendingCourseJump = null,
+                    courseNotice = null,
+                    reviews = library.reviews(),
+                    todayQueue = library.reviewQueue(),
+                )
+            }
         }
     }
 
@@ -1161,5 +1236,461 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         library.saveLearningPath(book.id, LearningPath.QUESTION_FIRST.name)
         persist(next)
         openLearning(next, LearningPath.QUESTION_FIRST)
+    }
+
+    private fun resolveRestoredCourse(
+        collections: List<CollectionSummary>,
+        screen: BookScreen,
+        openBookId: String?,
+    ): Pair<String, CourseDetailSnapshot>? {
+        if (screen == BookScreen.READER && openBookId != null) {
+            for (col in collections) {
+                if (col.record.kind != CollectionKind.COURSE) continue
+                val anchor = CourseJson.decodeActiveAnchor(col.record.lastActiveAnchorJson) ?: continue
+                if (anchor.topicId != null && (anchor.bookId == openBookId || openBookId in col.materialIds)) {
+                    val detail = runCatching { library.courseDetail(col.record.id) }.getOrNull()
+                    if (detail != null) return col.record.id to detail
+                }
+            }
+        }
+        return null
+    }
+
+    suspend fun openCourse(courseId: String) = action {
+        val detail = library.withCourseDatabase { db ->
+            val current = CourseStore.loadCourseDetail(db, courseId)
+            if (current.examinableTopics.isEmpty() && current.pendingTopics.isEmpty() && current.materials.isNotEmpty()) {
+                CourseAutoAligner.alignLocally(db, courseId)
+            } else {
+                current
+            }
+        }
+        library.clearOpenSession()
+        mutable.update {
+            it.copy(
+                screen = BookScreen.COURSE,
+                activeCourseId = courseId,
+                activeCourseTopicId = null,
+                activeCourseDetail = detail,
+                pendingCourseJump = null,
+                courseNotice = null,
+                collections = library.collectionSummaries(),
+            )
+        }
+    }
+
+    suspend fun openCourseTopic(courseId: String, topicId: String, explainer: BookExplainer? = null) = action {
+        var detail = library.withCourseDatabase { db -> CourseStore.loadCourseDetail(db, courseId) }
+        val topic = detail.allTopics.firstOrNull { it.topicId == topicId }
+            ?: throw IllegalArgumentException("找不到该课程专题。")
+        val resumeDraft = topic.practiceDraft
+        val targetSource = resumeDraft?.activeSourceBookId?.let { bid ->
+            topic.sources.firstOrNull { it.bookId == bid }
+        } ?: topic.sources.firstOrNull()
+            ?: throw IllegalStateException("该专题下还没有绑定任何材料。")
+
+        val targetPage = (resumeDraft?.takeIf { it.activeSourceBookId == targetSource.bookId }?.activePage
+            ?: targetSource.startPage).coerceAtLeast(1)
+
+        if (topic.pack == null && topic.sources.isNotEmpty()) {
+            val pagesByBook = library.withCourseDatabase { db ->
+                topic.sources.associate { s -> s.bookId to CourseStore.loadPagesForBook(db, s.bookId) }
+            }
+            val pack = CourseAutoAligner.buildOfflineTopicPack(detail, topic, pagesByBook)
+            val hash = topic.packSourcesHash.orEmpty()
+            library.withCourseDatabase { db ->
+                CourseStore.saveTopicPack(db, topic.topicId, pack, hash)
+                CourseStore.saveActiveAnchor(
+                    db,
+                    CourseActiveAnchor(
+                        courseId = courseId,
+                        topicId = topic.topicId,
+                        bookId = targetSource.bookId,
+                        page = targetPage,
+                        companionOpen = true,
+                    ),
+                )
+            }
+            detail = library.withCourseDatabase { db -> CourseStore.loadCourseDetail(db, courseId) }
+        } else {
+            library.withCourseDatabase { db ->
+                CourseStore.saveActiveAnchor(
+                    db,
+                    CourseActiveAnchor(
+                        courseId = courseId,
+                        topicId = topic.topicId,
+                        bookId = targetSource.bookId,
+                        page = targetPage,
+                        companionOpen = true,
+                    ),
+                )
+            }
+        }
+
+        val loaded = library.book(targetSource.bookId)
+        val clampedPage = if (loaded.page(targetPage) != null) targetPage else 1
+        val activeBook = loaded.copy(readingPage = clampedPage)
+        library.save(activeBook)
+        library.saveOpenSession(activeBook.id, "READER")
+        mutable.update { current ->
+            current.copy(
+                book = activeBook,
+                page = clampedPage,
+                screen = BookScreen.READER,
+                source = null,
+                prompt = null,
+                activeCourseId = courseId,
+                activeCourseTopicId = topic.topicId,
+                activeCourseDetail = detail,
+                pendingCourseJump = null,
+                catalog = library.catalog(),
+                collections = library.collectionSummaries(),
+            )
+        }
+        if (explainer != null && topic.pack?.serverBacked != true) {
+            backgroundScope.launch {
+                runCatching { refreshCourseTopicPack(courseId, topicId, explainer) }
+            }
+        }
+    }
+
+    suspend fun switchCourseSource(bookId: String, targetPage: Int = 1) = action {
+        val courseId = mutable.value.activeCourseId ?: return@action
+        val topicId = mutable.value.activeCourseTopicId
+        val loaded = library.book(bookId)
+        val clampedPage = if (loaded.page(targetPage) != null) targetPage else 1
+        val updatedBook = loaded.copy(readingPage = clampedPage)
+        library.save(updatedBook)
+        library.saveOpenSession(updatedBook.id, "READER")
+        library.withCourseDatabase { db ->
+            CourseStore.saveActiveAnchor(
+                db,
+                CourseActiveAnchor(
+                    courseId = courseId,
+                    topicId = topicId,
+                    bookId = updatedBook.id,
+                    page = clampedPage,
+                    companionOpen = true,
+                ),
+            )
+            if (topicId != null) {
+                val curDraft = CourseStore.loadCourseDetail(db, courseId).allTopics
+                    .firstOrNull { it.topicId == topicId }?.practiceDraft
+                    ?: CourseTopicPracticeDraft(topicId = topicId)
+                CourseStore.savePracticeDraft(
+                    db,
+                    courseId,
+                    curDraft.copy(
+                        activeSourceBookId = updatedBook.id,
+                        activePage = clampedPage,
+                        companionOpen = true,
+                    ),
+                )
+            }
+        }
+        val detail = library.courseDetail(courseId)
+        mutable.update {
+            it.copy(
+                book = updatedBook,
+                page = clampedPage,
+                activeCourseDetail = detail,
+            )
+        }
+    }
+
+    suspend fun jumpToCourseCitation(ref: CourseCitationRef) = action {
+        val loaded = library.book(ref.bookId)
+        val verified = CourseClientGates.verifySingleCitation(ref, loaded.pages)
+        val targetPage = verified?.page ?: ref.page.coerceIn(1, loaded.pages.size.coerceAtLeast(1))
+        val pageObj = loaded.page(targetPage)
+        val passage = if (verified != null && pageObj != null &&
+            verified.startUtf16 in 0 until verified.endUtf16 &&
+            verified.endUtf16 <= pageObj.text.length &&
+            pageObj.text.substring(verified.startUtf16, verified.endUtf16) == verified.quote
+        ) {
+            BookPassage(loaded.id, targetPage, verified.startUtf16, verified.endUtf16, verified.quote)
+        } else {
+            val anchor = ref.timestampLabel?.let { CourseTranscriptParser.findTimestampAnchor(loaded.pages, it) }
+            if (anchor != null) {
+                BookPassage(loaded.id, anchor.pageNumber, anchor.startUtf16, anchor.endUtf16, anchor.excerpt)
+            } else {
+                null
+            }
+        }
+        val finalPage = passage?.page ?: targetPage
+        val updatedBook = loaded.copy(readingPage = finalPage)
+        library.save(updatedBook)
+        library.saveOpenSession(updatedBook.id, "READER")
+        mutable.value.activeCourseId?.let { cid ->
+            library.withCourseDatabase { db ->
+                CourseStore.saveActiveAnchor(
+                    db,
+                    CourseActiveAnchor(
+                        courseId = cid,
+                        topicId = mutable.value.activeCourseTopicId,
+                        bookId = updatedBook.id,
+                        page = finalPage,
+                        companionOpen = true,
+                    ),
+                )
+            }
+        }
+        mutable.update {
+            it.copy(
+                book = updatedBook,
+                page = finalPage,
+                pendingCourseJump = passage,
+                activeCourseDetail = it.activeCourseId?.let { cid -> library.courseDetail(cid) },
+            )
+        }
+    }
+
+    fun consumePendingCourseJump() {
+        mutable.update { it.copy(pendingCourseJump = null) }
+    }
+
+    fun dismissCourseNotice() {
+        mutable.update { it.copy(courseNotice = null) }
+    }
+
+    fun addMaterialsToCourse(courseId: String, files: List<Path>, onStaged: () -> Unit = {}): Job = backgroundScope.launch {
+        try {
+            action {
+                val importedIds = mutableListOf<String>()
+                val preRejected = mutableListOf<String>()
+                for (path in files) {
+                    val fileName = path.fileName?.toString().orEmpty()
+                    if (CourseClientGates.isPastExamMaterial(fileName, fileName)) {
+                        preRejected += fileName
+                        continue
+                    }
+                    val useTier0 = library.lazyPdfExtras && fileName.endsWith(".pdf", ignoreCase = true)
+                    val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
+                    if (!staged.alreadyExisted) library.setBookShowStandalone(staged.book.id, false)
+                    importedIds += staged.book.id
+                }
+                val (detail, rejected) = library.withCourseDatabase { db ->
+                    val addRes = CourseStore.addMaterials(db, courseId, importedIds)
+                    val refreshed = CourseAutoAligner.alignLocally(db, courseId)
+                    refreshed to (preRejected + addRes.rejectedPastExamTitles)
+                }
+                val notice = when {
+                    rejected.isNotEmpty() -> "已拦截 ${rejected.size} 份历年真题文件；其余 ${detail.materials.size} 份材料已对齐。"
+                    importedIds.isNotEmpty() -> "已补充 ${importedIds.size} 份材料并更新本周对齐。"
+                    else -> null
+                }
+                mutable.update {
+                    it.copy(
+                        catalog = library.catalog(),
+                        collections = library.collectionSummaries(),
+                        activeCourseDetail = detail,
+                        courseNotice = notice,
+                    )
+                }
+            }
+        } finally {
+            onStaged()
+        }
+    }
+
+    suspend fun updateCourseMaterialAssignment(
+        courseId: String,
+        bookId: String,
+        weekNum: Int?,
+        role: CourseMaterialRole,
+    ) = action {
+        val detail = library.withCourseDatabase { db ->
+            CourseStore.updateMaterialAssignment(db, courseId, bookId, weekNum, role)
+            CourseStore.loadCourseDetail(db, courseId)
+        }
+        mutable.update {
+            it.copy(
+                activeCourseDetail = detail,
+                collections = library.collectionSummaries(),
+                courseNotice = "已锁定材料归属（${weekNum?.let { w -> "第 $w 周" } ?: "未分周"} · ${role.labelZh}），后续重排不会覆盖。",
+            )
+        }
+    }
+
+    suspend fun removeCourseMaterial(courseId: String, bookId: String) = action {
+        val detail = library.withCourseDatabase { db ->
+            CourseStore.removeMaterialFromCourse(db, courseId, bookId)
+            CourseStore.loadCourseDetail(db, courseId)
+        }
+        mutable.update {
+            it.copy(
+                activeCourseDetail = detail,
+                collections = library.collectionSummaries(),
+                courseNotice = "已从本课移除该材料（书架中的原文件仍保留）。",
+            )
+        }
+    }
+
+    suspend fun unlinkCourseTopicSource(courseId: String, topicId: String, bookId: String) = action {
+        val detail = library.withCourseDatabase { db ->
+            CourseStore.unlinkTopicSource(db, courseId, topicId, bookId)
+            CourseStore.loadCourseDetail(db, courseId)
+        }
+        mutable.update {
+            it.copy(
+                activeCourseDetail = detail,
+                courseNotice = "已移除该专题下的误挂关联，重新对齐时不会再次挂回。",
+            )
+        }
+    }
+
+    suspend fun renameCourseTopic(courseId: String, topicId: String, newTitle: String) = action {
+        val detail = library.withCourseDatabase { db ->
+            CourseStore.renameTopic(db, topicId, newTitle)
+            CourseStore.loadCourseDetail(db, courseId)
+        }
+        mutable.update { it.copy(activeCourseDetail = detail) }
+    }
+
+    suspend fun setCourseTopicStatus(courseId: String, topicId: String, status: CourseTopicStatus) = action {
+        val detail = library.withCourseDatabase { db ->
+            CourseStore.setTopicExamStatus(db, topicId, status)
+            CourseStore.loadCourseDetail(db, courseId)
+        }
+        val msg = if (status == CourseTopicStatus.EXAMINABLE) "已恢复为必考专题并锁定。" else "已移入本课不考内容并锁定。"
+        mutable.update { it.copy(activeCourseDetail = detail, courseNotice = msg) }
+    }
+
+    suspend fun updateCourseExamProfile(courseId: String, profile: CourseExamProfile) = action {
+        val detail = library.withCourseDatabase { db ->
+            CourseStore.updateExamProfile(db, courseId, profile)
+            CourseStore.loadCourseDetail(db, courseId)
+        }
+        mutable.update {
+            it.copy(
+                activeCourseDetail = detail,
+                collections = library.collectionSummaries(),
+                courseNotice = "已更新考试信息与暂定标识。",
+            )
+        }
+    }
+
+    suspend fun realignCourse(courseId: String, explainer: BookExplainer? = null) = action {
+        val existing = library.courseDetail(courseId)
+        if (explainer != null) {
+            runCatching { explainer.load() }
+            if (explainer.identity != null) {
+                val req = library.withCourseDatabase { db -> CourseAutoAligner.buildAlignRequest(db, existing) }
+                val res = explainer.courseAlign(req)
+                if (res.body != null) {
+                    val remotePlan = CourseAutoAligner.parseAlignResponse(res.body, existing)
+                    if (remotePlan.topics.isNotEmpty()) {
+                        val updated = library.withCourseDatabase { db ->
+                            CourseStore.applyAlignmentRespectingLocks(db, courseId, remotePlan)
+                            CourseStore.loadCourseDetail(db, courseId)
+                        }
+                        mutable.update {
+                            it.copy(
+                                activeCourseDetail = updated,
+                                courseNotice = "已完成智能对齐，所有手动锁定条目已保留。",
+                            )
+                        }
+                        return@action
+                    }
+                }
+            }
+        }
+        val updated = library.withCourseDatabase { db ->
+            CourseAutoAligner.alignLocally(db, courseId)
+        }
+        mutable.update {
+            it.copy(
+                activeCourseDetail = updated,
+                courseNotice = "已按本地规则重新对齐，所有手动锁定条目已保留。",
+            )
+        }
+    }
+
+    suspend fun refreshCourseTopicPack(courseId: String, topicId: String, explainer: BookExplainer? = null) = action(showBusy = false) {
+        val detail = library.courseDetail(courseId)
+        val topic = detail.allTopics.firstOrNull { it.topicId == topicId } ?: return@action
+        val pagesByBook = library.withCourseDatabase { db ->
+            topic.sources.associate { s -> s.bookId to CourseStore.loadPagesForBook(db, s.bookId) }
+        }
+        var pack: CourseTopicPack? = null
+        if (explainer != null) {
+            runCatching { explainer.load() }
+            if (explainer.identity != null) {
+                val req = CourseAutoAligner.buildTopicPackRequest(detail, topic, pagesByBook)
+                val res = explainer.courseTopicPack(req)
+                if (res.body != null) {
+                    pack = CourseAutoAligner.decodeVerifiedTopicPack(res.body, topic, pagesByBook)
+                }
+            }
+        }
+        val resolved = pack ?: CourseAutoAligner.buildOfflineTopicPack(detail, topic, pagesByBook)
+        library.withCourseDatabase { db ->
+            CourseStore.saveTopicPack(db, topicId, resolved, topic.packSourcesHash.orEmpty())
+        }
+        val refreshed = library.courseDetail(courseId)
+        mutable.update { it.copy(activeCourseDetail = refreshed) }
+    }
+
+    suspend fun runCourseHandwrittenVision(courseId: String, bookId: String, explainer: BookExplainer?) = action {
+        val prepared = CourseVisionCacheStore.prepareHandwrittenPages(library, bookId)
+        if (prepared.pendingPages.isEmpty()) {
+            val refreshed = library.courseDetail(courseId)
+            mutable.update {
+                it.copy(
+                    activeCourseDetail = refreshed,
+                    courseNotice = "已全部命中本地缓存（${prepared.cachedHits.size} 页），无需重复计费。",
+                )
+            }
+            return@action
+        }
+        if (explainer == null) {
+            mutable.update { it.copy(courseNotice = "请先配对学习服务后再识别手写板书页。") }
+            return@action
+        }
+        runCatching { explainer.load() }
+        if (explainer.identity == null) {
+            mutable.update { it.copy(courseNotice = "请先配对学习服务后再识别手写板书页。") }
+            return@action
+        }
+        val requestJson = CourseVisionCacheStore.buildVisionRequest(prepared)
+        val reply = explainer.courseVision(requestJson)
+        val body = reply.body
+        if (body == null) {
+            mutable.update { it.copy(courseNotice = reply.error ?: "视觉识别暂未成功，请稍后重试。") }
+            return@action
+        }
+        val outputs = CourseVisionCacheStore.parseVisionOutputs(body)
+        library.withCourseDatabase { db ->
+            CourseVisionCacheStore.saveRecognizedPages(db, bookId, outputs, visionTag = "vision-remote")
+        }
+        val refreshed = library.courseDetail(courseId)
+        mutable.update {
+            it.copy(
+                activeCourseDetail = refreshed,
+                courseNotice = "手写页识别完成并已缓存（新识别 ${outputs.size} 页，命中缓存 ${prepared.cachedHits.size} 页）。",
+            )
+        }
+    }
+
+    fun saveCoursePracticeDraft(courseId: String, draft: CourseTopicPracticeDraft) {
+        library.withCourseDatabase { db ->
+            CourseStore.savePracticeDraft(db, courseId, draft)
+        }
+        mutable.update { cur ->
+            val detail = cur.activeCourseDetail
+            if (detail == null || detail.courseId != courseId) cur
+            else {
+                val updateList: (List<CourseTopicEntry>) -> List<CourseTopicEntry> = { list ->
+                    list.map { t -> if (t.topicId == draft.topicId) t.copy(practiceDraft = draft) else t }
+                }
+                cur.copy(
+                    activeCourseDetail = detail.copy(
+                        examinableTopics = updateList(detail.examinableTopics),
+                        pendingTopics = updateList(detail.pendingTopics),
+                        excludedTopics = updateList(detail.excludedTopics),
+                    ),
+                )
+            }
+        }
     }
 }

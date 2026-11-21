@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.coach.client.CourseHttp
+import com.coach.client.MockReply
 import com.coach.desktop.DesktopConnectionSettings
 import com.coach.desktop.DesktopIdentity
 import com.coach.desktop.DesktopPairing
@@ -172,6 +173,48 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
             throw cancelled
         } catch (_: Exception) {
             ChapterCompanionFetchResult.Failed("连不上学习服务，本地阅读与草稿已保留。")
+        } finally {
+            http.close()
+        }
+    }
+
+    open suspend fun courseAlign(input: JsonObject): CourseServerCallResult =
+        callCourseEndpoint { http -> http.courseAlign(input) }
+
+    open suspend fun courseTopicPack(input: JsonObject): CourseServerCallResult =
+        callCourseEndpoint { http -> http.courseTopicPack(input) }
+
+    open suspend fun courseVision(input: JsonObject): CourseServerCallResult =
+        callCourseEndpoint { http -> http.courseVision(input) }
+
+    private suspend fun callCourseEndpoint(
+        block: suspend (CourseHttp) -> MockReply,
+    ): CourseServerCallResult {
+        val paired = identity ?: return if (revoked) {
+            CourseServerCallResult(null, ExplainTrouble.revoked(sableLogin), ExplainTrouble.Revoked)
+        } else {
+            CourseServerCallResult(null, ExplainTrouble.UNPAIRED, ExplainTrouble.Unpaired)
+        }
+        val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library")
+        return try {
+            val reply = block(http)
+            val body = reply.body
+            val isRevoked = reply.statusCode == 401 ||
+                (reply.statusCode == 403 && http.libraryAuthStatus() == 401)
+            if (identity != paired) return CourseServerCallResult(null, "连接已更换，请重试。")
+            val trouble = if (isRevoked) ExplainTrouble.Revoked else ExplainTrouble.of(reply.statusCode, reply.code)
+            when {
+                trouble == ExplainTrouble.Revoked -> {
+                    markRevoked()
+                    CourseServerCallResult(null, ExplainTrouble.revoked(sableLogin), trouble)
+                }
+                body == null -> CourseServerCallResult(null, ExplainTrouble.message(trouble, reply.error), trouble)
+                else -> CourseServerCallResult(body, null)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            CourseServerCallResult(null, "连不上学习服务，已保留本地数据与草稿。")
         } finally {
             http.close()
         }

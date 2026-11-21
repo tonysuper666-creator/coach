@@ -1373,7 +1373,7 @@ class WeekFocusRingTest {
                                 "$mode page paper must be light before the click, got ${hex(beforeFlip[paperAt.first, paperAt.second])}")
                             assertTrue(contrast(beforeFlip[probeAt.first, probeAt.second], beforeFlip[paperAt.first, paperAt.second]) > 1f,
                                 "$mode the app-theme ink probe is painted")
-                            assertEquals(if (outerDark) "#E6E0D5" else "#24211C", hex(beforeFlip[probeAt.first, probeAt.second]),
+                            assertEquals(hex((if (outerDark) com.coach.ui.theme.CoachColors.dark() else com.coach.ui.theme.CoachColors.light()).focusRing), hex(beforeFlip[probeAt.first, probeAt.second]),
                                 "$mode the app theme's ink is ${if (outerDark) "dark" else "light"} before the click")
 
                             // Only the page's own button is used: the app theme stays as it was.
@@ -1387,7 +1387,7 @@ class WeekFocusRingTest {
                                 "$mode page paper must be light after 浅色阅读, got ${hex(afterFlip[paperAt.first, paperAt.second])}")
                             else assertTrue(afterFlip[paperAt.first, paperAt.second].luminance() < 0.1f,
                                 "$mode page paper must be dark after 深色阅读, got ${hex(afterFlip[paperAt.first, paperAt.second])}")
-                            assertEquals(if (outerDark) "#E6E0D5" else "#24211C", hex(afterFlip[probeAt.first, probeAt.second]),
+                            assertEquals(hex((if (outerDark) com.coach.ui.theme.CoachColors.dark() else com.coach.ui.theme.CoachColors.light()).focusRing), hex(afterFlip[probeAt.first, probeAt.second]),
                                 "$mode the app theme's ink must not follow the page's toggle")
 
                             select()

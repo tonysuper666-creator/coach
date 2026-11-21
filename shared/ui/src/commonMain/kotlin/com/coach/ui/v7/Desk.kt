@@ -209,7 +209,7 @@ fun Desk(
             }
         }
         if (marginSheet && hasMargin && !inner && !focused) ModalBottomSheet(onDismissRequest = { marginSheet = false }) {
-            Box(Modifier.fillMaxWidth().height(sheetHeight).padding(16.dp).testTag("v7-margin-sheet")) { margin() }
+            Box(Modifier.fillMaxWidth().height(sheetHeight).padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp).testTag("v7-margin-sheet")) { margin() }
         }
     }
     }
@@ -218,7 +218,14 @@ fun Desk(
 
 /** CSS shadows use blur radius and offset, rather than Material elevation. */
 fun Modifier.paperShadow(kind: String, dark: Boolean): Modifier {
-    val shape = RoundedCornerShape(if (kind == "sheet") 14.dp else if (kind == "button") 8.dp else 10.dp)
+    val shape = RoundedCornerShape(
+        when (kind) {
+            "sheet" -> CoachV7.Radius.sheet
+            "card" -> CoachV7.Radius.lg
+            "button" -> CoachV7.Radius.btn
+            else -> CoachV7.Radius.m
+        },
+    )
     return V7Surfaces.shadows(kind, dark).fold(this) { modifier, css ->
         val shadow = Shadow(radius = css.blur / 2, spread = css.spread, color = css.color, offset = DpOffset(css.x, css.y))
         if (css.inset) modifier.innerShadow(shape, shadow) else modifier.dropShadow(shape, shadow)
@@ -260,8 +267,9 @@ fun PaperCard(modifier: Modifier = Modifier, color: Color = CoachTheme.colors.su
     contentSpacing: Dp = 8.dp,
     contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
     content: @Composable ColumnScope.() -> Unit) {
-    val dark = CoachTheme.colors.dark
-    Column(modifier.fillMaxWidth().paperShadow("card", dark).clip(RoundedCornerShape(10.dp)).background(color).padding(contentPadding),
+    val colors = CoachTheme.colors
+    val shape = RoundedCornerShape(CoachV7.Radius.lg)
+    Column(modifier.fillMaxWidth().paperShadow("card", colors.dark).clip(shape).background(color).border(BorderStroke(1.dp, colors.borderSubtle), shape).padding(contentPadding),
         verticalArrangement = Arrangement.spacedBy(contentSpacing), content = content)
 }
 
@@ -271,7 +279,14 @@ fun AnswerOption(letter: String, selected: Boolean, correct: Boolean?, enabled: 
     val colors = CoachTheme.colors
     val bg = when (correct) { true -> colors.successBg; false -> colors.dangerBg; null -> if (colors.dark) CoachV7.Dark.optBg else CoachV7.Light.optBg }
     val verdictColor = if (correct == true) colors.successFg else colors.dangerFg
-    Surface(onClick = onClick, enabled = enabled, color = bg, contentColor = colors.fgPrimary, shape = RoundedCornerShape(10.dp),
+    val borderColor = when {
+        correct == true -> colors.successFg.copy(alpha = 0.45f)
+        correct == false -> colors.dangerFg.copy(alpha = 0.45f)
+        selected -> colors.accent
+        else -> colors.borderSubtle
+    }
+    Surface(onClick = onClick, enabled = enabled, color = bg, contentColor = colors.fgPrimary, shape = RoundedCornerShape(CoachV7.Radius.m),
+        border = BorderStroke(1.dp, borderColor),
         modifier = modifier.fillMaxWidth().paperShadow("option", colors.dark).heightIn(min = LocalDeskMetrics.current.optionHeight), selected = selected) {
         Row(Modifier.padding(horizontal = if (LocalDeskMetrics.current.inner) 16.dp else 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(letter, Modifier.width(16.2.dp), fontFamily = LocalV7Fonts.current.numbers, style = MaterialTheme.typography.labelLarge, color = if (correct != null) verdictColor else colors.fgSecondary)
@@ -282,7 +297,7 @@ fun AnswerOption(letter: String, selected: Boolean, correct: Boolean?, enabled: 
                 VerdictIcon(correct, Modifier.size(14.dp), verdictColor)
                 Text(if (correct) "正确" else "你选的", style = MaterialTheme.typography.labelMedium, color = verdictColor)
             }
-            else if (selected) Text("●", style = MaterialTheme.typography.labelMedium, color = colors.fgPrimary)
+            else if (selected) Text("●", style = MaterialTheme.typography.labelMedium, color = colors.accent)
         }
     }
 }

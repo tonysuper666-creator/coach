@@ -30,13 +30,15 @@ fun CoachTheme(dark: Boolean = isSystemInDarkTheme(), initialTextScale: Float = 
             fontWeight = if (dark) CoachV7.Weight.bodyDark else CoachV7.Weight.body)
         val ui = TextStyle(lineHeightStyle = leading, fontFamily = fonts.ui, fontSize = ReadingSizes.ui * scale, lineHeight = 18.sp * scale)
         val cap = ui.copy(fontSize = ReadingSizes.caption * scale, lineHeight = 16.sp * scale, fontWeight = CoachV7.Weight.cap, letterSpacing = CoachV7.Tracking.cap)
-        val title = reading.copy(fontSize = ReadingSizes.section * scale, lineHeight = 29.sp * scale,
+        val displayTitle = reading.copy(fontSize = ReadingSizes.section * scale, lineHeight = 26.sp * scale,
             fontWeight = CoachV7.Weight.title, letterSpacing = CoachV7.Tracking.title)
-        Typography(displayLarge = title, displayMedium = title, displaySmall = title,
-            headlineLarge = title.copy(fontSize = ReadingSizes.week * scale, lineHeight = 34.sp * scale), headlineMedium = title, headlineSmall = title,
-            titleLarge = title,
-            titleMedium = reading.copy(fontSize = ReadingSizes.stem * scale, lineHeight = 25.sp * scale, fontWeight = CoachV7.Weight.stem),
-            titleSmall = ui.copy(fontSize = ReadingSizes.body * scale, lineHeight = 23.sp * scale, fontWeight = CoachV7.Weight.uiStrong),
+        val uiHeading = ui.copy(fontSize = ReadingSizes.section * scale, lineHeight = 26.sp * scale,
+            fontWeight = CoachV7.Weight.title, letterSpacing = CoachV7.Tracking.title)
+        Typography(displayLarge = displayTitle, displayMedium = displayTitle, displaySmall = displayTitle,
+            headlineLarge = displayTitle.copy(fontSize = ReadingSizes.week * scale, lineHeight = 32.sp * scale), headlineMedium = uiHeading, headlineSmall = uiHeading,
+            titleLarge = uiHeading,
+            titleMedium = ui.copy(fontSize = ReadingSizes.stem * scale, lineHeight = 24.sp * scale, fontWeight = CoachV7.Weight.uiStrong),
+            titleSmall = ui.copy(fontSize = CoachV7.Size.uiBody * scale, lineHeight = 22.sp * scale, fontWeight = CoachV7.Weight.uiStrong),
             bodyLarge = reading, bodyMedium = reading,
             bodySmall = ui, labelLarge = ui, labelMedium = cap, labelSmall = cap)
     }

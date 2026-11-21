@@ -22,11 +22,15 @@ internal actual fun Modifier.v7ButtonSurface(base: Color, interaction: MutableIn
     val hovered by interaction.collectIsHoveredAsState()
     val pressed by interaction.collectIsPressedAsState()
     val c = CoachTheme.colors
-    val wash = if (primary) c.borderSubtle.copy(alpha = if (pressed) (if (c.dark) .30f else .08f) else .16f)
-        else if (pressed) (if (c.dark) CoachV7.Dark.selBg else CoachV7.Light.selBg)
-        else (if (c.dark) CoachV7.Dark.zhuWash else CoachV7.Light.zhuWash)
-    return background(if (enabled && (hovered || pressed)) wash.compositeOver(base) else base)
-        .pointerHoverIcon(if (enabled) PointerIcon.Hand else PointerIcon.Default)
+    val bg = when {
+        !enabled -> base
+        primary && pressed -> Color.Black.copy(alpha = if (c.dark) .16f else .18f).compositeOver(base)
+        primary && hovered -> c.accentHi
+        pressed -> (if (c.dark) CoachV7.Dark.selBg else CoachV7.Light.selBg).compositeOver(base)
+        hovered -> (if (c.dark) CoachV7.Dark.zhuWash else CoachV7.Light.zhuWash).compositeOver(base)
+        else -> base
+    }
+    return background(bg).pointerHoverIcon(if (enabled) PointerIcon.Hand else PointerIcon.Default)
 }
 
 @Composable

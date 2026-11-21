@@ -185,10 +185,14 @@ A second English paragraph lets us inspect the space between paragraphs and the 
                         "后半句说它常附着在内质网上，是在告诉你去哪儿找它。【S1】",
                     listOf(Citation("S1", chosen.id, chosen.page)), 12))
             })
+        val settingsSample = Path.of(System.getProperty("user.home"), "Coach", "books")
         val shots = mutableListOf<Shot>()
         runSkikoComposeUiTest(size = Size(screen.width.toFloat(), screen.height.toFloat()), density = Density(scale)) {
             setContent {
-                CompositionLocalProvider(LocalSystemTheme provides if (dark) SystemTheme.Dark else SystemTheme.Light) {
+                CompositionLocalProvider(
+                    LocalSystemTheme provides if (dark) SystemTheme.Dark else SystemTheme.Light,
+                    LocalSettingsDirectoryOverride provides settingsSample,
+                ) {
                     // 选段提问这一场要的是「本机没接问答」那一句：不接 support 的话工作区会自己建一套
                     // 跟着这台机器配对状态走的实现，配过对的机器上会真的往 Mac 发一次请求（Mac 离线时
                     // 要挂到 20 秒超时）。这里显式给未接通的那一份，截图才不随机器变。
@@ -202,9 +206,9 @@ A second English paragraph lets us inspect the space between paragraphs and the 
             onNodeWithTag("library-title").assertExists()
             shot("bookshelf")
 
-            // 设置弹窗（第 10 刀）：弹窗在另一层，整幅画面一起拍。
+            // 设置弹窗（第 10 刀 / P7 B6）：使用真实形状路径样例，主目录缩写成「用户文件夹」。
             onNodeWithTag("open-settings").performClick(); waitForIdle()
-            onNodeWithTag("settings-library-directory").assertTextEquals(directory.toString())
+            onNodeWithTag("settings-library-directory").assertTextEquals(formatLibraryPathForDisplay(settingsSample))
             shots += capture("settings", screen, dark, whole = true)
             onNodeWithTag("close-settings").performClick(); waitForIdle()
             onNodeWithTag("settings-library-directory").assertDoesNotExist()

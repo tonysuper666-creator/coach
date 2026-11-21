@@ -140,9 +140,9 @@ class WindowsTextbooksTest {
             onNodeWithTag("library-title").assertTextEquals("书架")
             capture("host-library-1440x900", "windows-host")
 
-            // 设置在导航栏底部，内容是本机的书架位置。
+            // 设置在导航栏底部，内容是本机的书架位置（主目录缩写成「用户文件夹」）。
             onNodeWithTag("open-settings").assertIsDisplayed().performClick()
-            onNodeWithTag("settings-library-directory").assertTextEquals(root.resolve("library").toString())
+            onNodeWithTag("settings-library-directory").assertTextEquals(formatLibraryPathForDisplay(root.resolve("library")))
             onNodeWithTag("close-settings").performClick()
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("settings-library-directory").fetchSemanticsNodes().isEmpty() }
 

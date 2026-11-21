@@ -75,7 +75,8 @@ class WindowsHostCrossReviewTest {
             assertFalse(c.state.value.answer.revealed)
             nav("今天").performClick()
             onNodeWithTag("host-today-book").assertExists()
-            onNodeWithText("《Alpha》读到第 2 页，学习停在第 2 / 3 节").assertExists()
+            onNodeWithTag("host-today-title").assertTextEquals("Alpha")
+            onNodeWithTag("host-today-progress").assertTextEquals("读到第 2 页，学习停在第 2 / 3 节")
             onNodeWithTag("host-today-learn").performClick()
             ready(c) { it.screen == BookScreen.LEARNING }
             onNodeWithTag("short-answer").performScrollTo().assertTextContains("alpha revised but not submitted")
@@ -98,7 +99,8 @@ class WindowsHostCrossReviewTest {
             onNodeWithTag("short-answer").performTextReplacement("beta revised but not submitted")
             ready(c) { it.answer.text == "beta revised but not submitted" }
             nav("今天").performClick()
-            onNodeWithText("《Beta》读到第 3 页，学习停在第 1 / 3 节").assertExists()
+            onNodeWithTag("host-today-title").assertTextEquals("Beta")
+            onNodeWithTag("host-today-progress").assertTextEquals("读到第 3 页，学习停在第 1 / 3 节")
             onNodeWithTag("host-today-read").performClick()
             ready(c) { it.book?.id == f.b.id && it.page == 3 && it.screen == BookScreen.READER }
             onNodeWithText("返回书架").performClick()

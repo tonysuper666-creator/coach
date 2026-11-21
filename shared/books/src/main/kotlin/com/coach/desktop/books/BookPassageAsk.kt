@@ -171,10 +171,10 @@ internal fun BookPassageAsk(
     pendingConsent?.let { input ->
         AlertDialog(onDismissRequest = { pendingConsent = null }, title = { Text(ExplainPrivacy.TITLE) },
             text = { Text(ExplainPrivacy.ask(book.title), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("ask-consent")) },
-            confirmButton = { V7TextButton({
+            confirmButton = { PrimaryButton({
                 support.allow(book.id); pendingConsent = null; send(input)
-            }, Modifier.testTag("ask-consent-allow")) { Text("允许并提问") } },
-            dismissButton = { V7TextButton({ pendingConsent = null }, Modifier.testTag("ask-consent-deny")) { Text("不允许") } })
+            }, Modifier.testTag("ask-consent-allow")) { Text("开启并提问") } },
+            dismissButton = { V7TextButton({ pendingConsent = null }, Modifier.testTag("ask-consent-deny")) { Text("先不用") } })
     }
     source?.let { passage ->
         AlertDialog(onDismissRequest = { source = null }, title = { Text("原文 · ${bookPassageLabel(book, bookBlocks, passage)}", modifier = Modifier.testTag("book-passage-source-title")) },

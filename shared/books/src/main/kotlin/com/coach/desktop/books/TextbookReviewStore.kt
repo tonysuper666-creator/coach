@@ -1,13 +1,28 @@
 package com.coach.desktop.books
 
+import com.coach.domain.fsrs.Fsrs5
+import com.coach.domain.fsrs.FsrsConfig
+import com.coach.domain.fsrs.FsrsDailyQueue
+import com.coach.domain.fsrs.FsrsQueueCard
+import com.coach.domain.fsrs.FsrsRating
+import com.coach.domain.fsrs.FsrsState
+import com.coach.domain.fsrs.LegacyAnswer
+import com.coach.domain.fsrs.LegacyCardRecord
+import com.coach.domain.fsrs.LegacyStreakMigration
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.sql.Connection
 import java.sql.ResultSet
 import java.sql.Types
 
-/** Local calendar-day policy: 1, 3, then 7 days after consecutive independent correct answers.
+/** Today's review in one order, capped like the product promises; deferred cards stay due for tomorrow. */
+internal data class LocalReviewQueue(val cards: List<LocalBookReview>, val deferred: Int) {
+    val summary: String get() = if (deferred == 0) "今日 ${cards.size} 题" else "今日优先 ${cards.size} 题 · 另有 $deferred 题顺延"
+}
+
+/** Local calendar-day FSRS-5 policy: an independent correct answer is GOOD, anything else AGAIN.
  * Wrong/guessed answers stay in today's same queue. No server identity or exam policy is inferred.
+ * Rows from the retired 1/3/7 scheme are mapped once by [LegacyStreakMigration] and never become due later.
  */
 internal class TextbookReviewStore(private val today: () -> Long) {
     fun migrate(db: Connection, manageTransaction: Boolean = true) {
@@ -47,6 +62,8 @@ internal class TextbookReviewStore(private val today: () -> Long) {
                     SELECT book,lesson,mode,'MIGRATED_REVIEW',answer_text,revealed,understood,guessed FROM book_reviews
                     WHERE revealed=1 AND (mode='CHOICE' OR understood IS NOT NULL) ORDER BY rowid""")
             }
+            db.createStatement().use { it.execute(BookSchemaMigration.BOOK_FSRS_CARDS_DDL) }
+            seedLegacyCards(db)
             if (manageTransaction) db.commit()
         } catch (failure: Exception) {
             if (manageTransaction) db.rollback()
@@ -56,7 +73,82 @@ internal class TextbookReviewStore(private val today: () -> Long) {
         }
     }
 
-    private fun interval(streak: Int) = when (streak) { 0, 1 -> 1L; 2 -> 3L; else -> 7L }
+    private val fsrsConfig = FsrsConfig()
+    private val dailyQueue = FsrsDailyQueue()
+
+    private fun rating(correct: Boolean) = if (correct) FsrsRating.GOOD else FsrsRating.AGAIN
+
+    fun fsrsState(db: Connection, book: String, lesson: String, mode: QuestionMode): FsrsState? =
+        db.prepareStatement("SELECT * FROM book_fsrs_cards WHERE book=? AND lesson=? AND mode=?").use { s ->
+            s.setString(1, book); s.setString(2, lesson); s.setString(3, mode.name)
+            s.executeQuery().use { r -> if (r.next()) FsrsState(
+                dueDay = r.getLong("due_day"),
+                stability = r.getDouble("stability").let { if (r.wasNull()) null else it },
+                difficulty = r.getDouble("difficulty").let { if (r.wasNull()) null else it },
+                lastReviewDay = r.getLong("last_review_day").let { if (r.wasNull()) null else it },
+                reps = r.getInt("reps"), lapses = r.getInt("lapses"),
+            ) else null }
+        }
+
+    private fun writeFsrs(db: Connection, book: String, lesson: String, mode: QuestionMode, state: FsrsState, origin: String) {
+        db.prepareStatement("""INSERT INTO book_fsrs_cards(book,lesson,mode,stability,difficulty,last_review_day,due_day,
+            reps,lapses,origin,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(book,lesson,mode) DO UPDATE SET stability=excluded.stability,difficulty=excluded.difficulty,
+            last_review_day=excluded.last_review_day,due_day=excluded.due_day,reps=excluded.reps,lapses=excluded.lapses,
+            updated_at=excluded.updated_at""").use { s ->
+            s.setString(1, book); s.setString(2, lesson); s.setString(3, mode.name)
+            val stability = state.stability; val difficulty = state.difficulty; val last = state.lastReviewDay
+            if (stability == null) s.setNull(4, Types.REAL) else s.setDouble(4, stability)
+            if (difficulty == null) s.setNull(5, Types.REAL) else s.setDouble(5, difficulty)
+            if (last == null) s.setNull(6, Types.BIGINT) else s.setLong(6, last)
+            s.setLong(7, state.dueDay); s.setInt(8, state.reps); s.setInt(9, state.lapses)
+            s.setString(10, origin); s.setLong(11, System.currentTimeMillis()); s.executeUpdate()
+        }
+    }
+
+    /** Maps one retired 1/3/7 row: dated answers are replayed, otherwise the streak is assumed. */
+    private fun seedLegacy(db: Connection, old: LocalBookReview): FsrsState {
+        val answers = old.history.mapNotNull { attempt ->
+            attempt.day?.let { LegacyAnswer(it, old.practice.independentlyCorrect(old.mode, attempt.answer)) }
+        }
+        val migrated = LegacyStreakMigration.migrate(
+            LegacyCardRecord("${old.book}/${old.lesson}/${old.mode}", old.book, old.lesson, old.dueDay,
+                old.confidentStreak, answers = answers), fsrsConfig)
+        // The legacy row itself stays byte-identical; its stored due day still decides when it next shows.
+        writeFsrs(db, old.book, old.lesson, old.mode, migrated.state, migrated.path.name)
+        return migrated.state
+    }
+
+    private fun seedLegacyCards(db: Connection) {
+        val missing = db.createStatement().use { s -> s.executeQuery("""SELECT r.* FROM book_reviews r
+            WHERE NOT EXISTS(SELECT 1 FROM book_fsrs_cards f WHERE f.book=r.book AND f.lesson=r.lesson AND f.mode=r.mode)
+            ORDER BY r.rowid""").use { r -> buildList { while (r.next()) add(read(db, r)) } } }
+        for (row in missing) seedLegacy(db, row)
+    }
+
+    /** Applies one committed answer to the card's FSRS state and returns the new state. */
+    private fun schedule(db: Connection, old: LocalBookReview?, book: String, lesson: String, mode: QuestionMode,
+        correct: Boolean): FsrsState {
+        val prior = fsrsState(db, book, lesson, mode) ?: old?.let { seedLegacy(db, it) } ?: Fsrs5.newCard(today())
+        val next = Fsrs5.review(prior, rating(correct), today(), fsrsConfig)
+        writeFsrs(db, book, lesson, mode, next, "NEW")
+        return next
+    }
+
+    /** Today's due cards ranked by `syllabusWeight x (1 - R)`; the first [FsrsDailyQueue.defaultCap] are shown. */
+    fun queue(db: Connection): LocalReviewQueue {
+        val due = pending(db)
+        val day = today()
+        val byId = due.associateBy { "${it.book}/${it.lesson}/${it.mode}" }
+        val cards = due.map { row ->
+            val state = fsrsState(db, row.book, row.lesson, row.mode) ?: Fsrs5.newCard(row.dueDay)
+            // A wrong or guessed answer today keeps the card in today's queue even though FSRS points to tomorrow.
+            FsrsQueueCard("${row.book}/${row.lesson}/${row.mode}", row.book, row.lesson, 0.5,
+                state.copy(dueDay = minOf(state.dueDay, day)))
+        }
+        val plan = dailyQueue.plan(cards, day)
+        return LocalReviewQueue(plan.priority.mapNotNull { byId[it.card.cardId] }, plan.deferred.size)
+    }
 
     private fun sources(mode: QuestionMode, practice: Practice, answer: PracticeAnswer): Int {
         var bits = if (answer.guessed) LocalReviewSource.GUESSED.bit else 0
@@ -70,6 +162,7 @@ internal class TextbookReviewStore(private val today: () -> Long) {
         val old = find(db, book.id, lesson.id, mode)
         val correct = (old?.practice ?: practice).independentlyCorrect(mode, answer)
         val streak = if (correct) (old?.confidentStreak ?: 0) + 1 else 0
+        val next = schedule(db, old, book.id, lesson.id, mode, correct)
         db.prepareStatement("""INSERT INTO book_reviews(book,lesson,mode,book_title,lesson_title,prompt,reference,
             solution,options,wrong_text,completed,sources,due_day,streak) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(book,lesson,mode) DO UPDATE SET
@@ -84,7 +177,7 @@ internal class TextbookReviewStore(private val today: () -> Long) {
             s.setString(7, practice.reference); s.setString(8, practice.answer)
             s.setString(9, Json.encodeToString(practice.options)); s.setString(10, answer.text)
             s.setInt(11, if (correct) 1 else 0); s.setInt(12, sources(mode, old?.practice ?: practice, answer))
-            s.setLong(13, today() + interval(streak)); s.setInt(14, streak); s.executeUpdate()
+            s.setLong(13, next.dueDay); s.setInt(14, streak); s.executeUpdate()
         }
         append(db, book.id, lesson.id, mode, answer, if (migrated) "MIGRATED" else "LESSON", if (migrated) null else today())
     }
@@ -103,7 +196,7 @@ internal class TextbookReviewStore(private val today: () -> Long) {
     }
 
     private fun history(db: Connection, book: String, lesson: String, mode: QuestionMode): List<LocalReviewAttempt> =
-        db.prepareStatement("SELECT * FROM book_review_history WHERE book=? AND lesson=? AND mode=? ORDER BY id").use { s ->
+        db.prepareStatement("SELECT * FROM book_review_history WHERE book=? AND lesson=? AND mode=? ORDER BY rowid").use { s ->
             s.setString(1, book); s.setString(2, lesson); s.setString(3, mode.name)
             s.executeQuery().use { r -> buildList {
                 while (r.next()) add(LocalReviewAttempt(size + 1, r.getString("kind"), r.answer("text"),
@@ -151,7 +244,7 @@ internal class TextbookReviewStore(private val today: () -> Long) {
         val newAttempt = committed && answer != old.answer
         val correct = old.practice.independentlyCorrect(old.mode, answer)
         val streak = if (newAttempt) { if (correct) old.confidentStreak + 1 else 0 } else old.confidentStreak
-        val due = if (newAttempt) today() + interval(streak) else old.dueDay
+        val due = if (newAttempt) schedule(db, old, old.book, old.lesson, old.mode, correct).dueDay else old.dueDay
         db.prepareStatement("""UPDATE book_reviews SET answer_text=?,revealed=?,understood=?,guessed=?,completed=?,
             sources=sources | ?,due_day=?,streak=? WHERE book=? AND lesson=? AND mode=?""").use { s ->
             s.setString(1, answer.text); s.setInt(2, if (answer.revealed) 1 else 0)
@@ -163,6 +256,41 @@ internal class TextbookReviewStore(private val today: () -> Long) {
             check(s.executeUpdate() == 1) { "无法保存复习作答。" }
         }
         if (newAttempt) append(db, old.book, old.lesson, old.mode, answer, "REVIEW", today())
+    }
+
+    /** Explicit single-card self-rating: 没记住 -> AGAIN, 记住了 -> GOOD (guessed cards never count as independent GOOD). */
+    fun saveRating(db: Connection, entry: LocalBookReview, rating: FsrsRating, currentAnswer: PracticeAnswer) {
+        val old = checkNotNull(find(db, entry.book, entry.lesson, entry.mode)) { "这道复习题已不在书架中。" }
+        val remembered = rating != FsrsRating.AGAIN && !currentAnswer.guessed
+        val recordedText = currentAnswer.text.ifBlank {
+            if (old.mode == QuestionMode.CHOICE && remembered && old.practice.answer.isNotBlank()) old.practice.answer
+            else if (remembered) "记住了" else "没记住"
+        }
+        val recordedAnswer = currentAnswer.copy(
+            text = recordedText,
+            revealed = true,
+            understood = remembered,
+        )
+        val streak = if (remembered) old.confidentStreak + 1 else 0
+        val next = schedule(db, old, old.book, old.lesson, old.mode, remembered)
+        val extraSource = when {
+            currentAnswer.guessed -> LocalReviewSource.GUESSED.bit
+            !remembered -> if (old.mode == QuestionMode.CHOICE) LocalReviewSource.WRONG.bit else LocalReviewSource.SELF_CHECK.bit
+            else -> 0
+        }
+        val mergedSources = old.sources.fold(extraSource) { bits, source -> bits or source.bit }
+        db.prepareStatement("""UPDATE book_reviews SET answer_text=?,revealed=?,understood=?,guessed=?,completed=?,
+            sources=?,due_day=?,streak=? WHERE book=? AND lesson=? AND mode=?""").use { s ->
+            s.setString(1, recordedAnswer.text); s.setInt(2, 1)
+            s.setInt(3, if (remembered) 1 else 0)
+            s.setInt(4, if (recordedAnswer.guessed) 1 else 0)
+            s.setInt(5, if (remembered) 1 else 0)
+            s.setInt(6, mergedSources)
+            s.setLong(7, next.dueDay); s.setInt(8, streak)
+            s.setString(9, old.book); s.setString(10, old.lesson); s.setString(11, old.mode.name)
+            check(s.executeUpdate() == 1) { "无法保存复习评分。" }
+        }
+        append(db, old.book, old.lesson, old.mode, recordedAnswer, "REVIEW", today())
     }
 
     fun active(db: Connection): LocalBookReview? = db.createStatement().use { s -> s.executeQuery("""SELECT r.*

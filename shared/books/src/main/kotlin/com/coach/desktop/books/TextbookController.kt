@@ -20,13 +20,18 @@ import java.util.concurrent.ConcurrentHashMap
 
 internal enum class BookScreen { HOME, READER, LEARNING, REVIEWS, REVIEWING }
 internal enum class BookPrompt { IMPORTED, START, AFTER_READING, QUESTIONS }
+internal enum class MultiDropAction { COURSE, BOOKLIST, SEPARATE }
+internal data class PendingMultiDrop(val paths: List<Path>, val onStaged: () -> Unit = {})
 internal data class BookIndexProgress(val bookId: String, val page: Int, val total: Int)
 internal data class LibraryUi(
     val catalog: List<BookSummary> = emptyList(), val book: Textbook? = null,
+    val collections: List<CollectionSummary> = emptyList(),
     val screen: BookScreen = BookScreen.HOME, val prompt: BookPrompt? = null,
     val page: Int = 1, val source: BookLesson? = null,
     val answer: PracticeAnswer = PracticeAnswer(), val busy: Boolean = false, val error: String? = null,
     val reviews: List<LocalBookReview> = emptyList(), val review: LocalBookReview? = null,
+    /** 今日复习的顺序：开列表时定下，复习途中不重排，答完才刷新。 */
+    val todayQueue: LocalReviewQueue = LocalReviewQueue(emptyList(), 0),
     val learningPath: LearningPath = LearningPath.READ, val questionsOpen: Boolean = false,
     /** Whether this book already has a chosen walk in the library, as opposed to the READ preview. */
     val learningPathSaved: Boolean = false,
@@ -37,6 +42,10 @@ internal data class LibraryUi(
     /** 首次从 SQLite 载入目录和上次会话完成前为 false，避免重开时先闪现「书架还是空的」。 */
     val initialized: Boolean = false,
     val indexing: BookIndexProgress? = null,
+    /** 一次拖入多份文件时，在底部展示单行询问条（建课程 / 建书单 / 分开单放）。 */
+    val pendingMultiDrop: PendingMultiDrop? = null,
+    /** 最近一次单文件导入直达正文首页的耗时（毫秒），供性能回归核验（<3000ms）。 */
+    val lastImportDurationMs: Long? = null,
 )
 
 internal class TextbookController(val library: TextbookLibrary, var structureProvider: BookStructureProvider? = null) {
@@ -96,10 +105,12 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 val restoredAnswer = active?.answer
                     ?: restoredLesson?.let { library.answer(book!!.id, it.id, book.questionMode) }
                     ?: PracticeAnswer()
+                val restoredQueue = ensureQueueIncludes(snap.todayQueue, active)
                 mutable.update { current ->
                     LibraryUi(
-                        catalog = catalog, book = book, page = book?.readingPage ?: 1, busy = true, reviews = snap.reviews,
-                        review = active, answer = restoredAnswer,
+                        catalog = catalog, book = book, collections = snap.collections,
+                        page = book?.readingPage ?: 1, busy = true, reviews = snap.reviews,
+                        review = active, todayQueue = restoredQueue, answer = restoredAnswer,
                         learningPath = restoredPath,
                         learningPathSaved = savedPath != null,
                         questionsOpen = restoredScreen == BookScreen.LEARNING &&
@@ -110,6 +121,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         importNotice = current.importNotice,
                         initialized = true,
                         indexing = current.indexing,
+                        pendingMultiDrop = current.pendingMultiDrop,
+                        lastImportDurationMs = current.lastImportDurationMs,
                     )
                 }
             }
@@ -129,13 +142,173 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
+    private fun ensureQueueIncludes(queue: LocalReviewQueue, active: LocalBookReview?): LocalReviewQueue {
+        if (active == null) return queue
+        val present = queue.cards.any { it.book == active.book && it.lesson == active.lesson && it.mode == active.mode }
+        return if (present) queue else queue.copy(cards = listOf(active) + queue.cards)
+    }
+
     fun launchDroppedBooks(paths: List<Path>, onStaged: () -> Unit = {}): Job? {
-        if (paths.size != 1) {
+        if (paths.isEmpty()) {
             onStaged()
-            mutable.update { it.copy(error = "请一次拖入一份教材。") }
             return null
         }
-        return launchImport(paths.single(), onStaged)
+        if (paths.size == 1) {
+            return launchImport(paths.single(), onStaged)
+        }
+        val previous = mutable.value.pendingMultiDrop
+        mutable.update { it.copy(error = null, pendingMultiDrop = PendingMultiDrop(paths.toList(), onStaged)) }
+        previous?.onStaged?.invoke()
+        return null
+    }
+
+    fun dismissMultiDrop() {
+        val pending = mutable.value.pendingMultiDrop ?: return
+        mutable.update { it.copy(pendingMultiDrop = null) }
+        pending.onStaged()
+    }
+
+    fun resolveMultiDrop(action: MultiDropAction, customTitle: String? = null, examDate: String? = null): Job {
+        val pending = mutable.value.pendingMultiDrop ?: return Job().apply { complete() }
+        mutable.update { it.copy(pendingMultiDrop = null) }
+        val defaultTitle = customTitle?.trim()?.takeIf(String::isNotEmpty)
+            ?: pending.paths.first().fileName?.toString()?.substringBeforeLast('.')?.takeIf(String::isNotBlank)
+            ?: when (action) {
+                MultiDropAction.COURSE -> "新课程"
+                MultiDropAction.BOOKLIST -> "新书单"
+                MultiDropAction.SEPARATE -> ""
+            }
+        return when (action) {
+            MultiDropAction.COURSE -> createCollection(
+                kind = CollectionKind.COURSE,
+                title = defaultTitle,
+                examDate = examDate,
+                existingBookIds = emptyList(),
+                newFiles = pending.paths,
+                onStaged = pending.onStaged,
+            )
+            MultiDropAction.BOOKLIST -> createCollection(
+                kind = CollectionKind.BOOKLIST,
+                title = defaultTitle,
+                examDate = null,
+                existingBookIds = emptyList(),
+                newFiles = pending.paths,
+                onStaged = pending.onStaged,
+            )
+            MultiDropAction.SEPARATE -> importMultipleStandalone(pending.paths, pending.onStaged)
+        }
+    }
+
+    private fun importMultipleStandalone(paths: List<Path>, onStaged: () -> Unit = {}): Job = backgroundScope.launch {
+        try {
+            action {
+                var lastBook: Textbook? = null
+                for (path in paths) {
+                    val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
+                    val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
+                    lastBook = staged.book
+                }
+                val catalog = library.catalog()
+                val collections = library.collectionSummaries()
+                val reviews = library.reviews()
+                val todayQueue = library.reviewQueue()
+                val opened = lastBook ?: catalog.firstOrNull()?.let { library.book(it.id) }
+                mutable.update { current ->
+                    current.copy(
+                        catalog = catalog,
+                        collections = collections,
+                        book = opened,
+                        screen = BookScreen.HOME,
+                        prompt = null,
+                        page = opened?.readingPage ?: 1,
+                        reviews = reviews,
+                        todayQueue = todayQueue,
+                        initialized = true,
+                        importNotice = BookImportNotice(System.nanoTime(), "已分开导入 ${paths.size} 份文件。"),
+                    )
+                }
+            }
+        } finally {
+            onStaged()
+        }
+    }
+
+    fun createCollection(
+        kind: CollectionKind,
+        title: String,
+        examDate: String? = null,
+        existingBookIds: List<String> = emptyList(),
+        newFiles: List<Path> = emptyList(),
+        onStaged: () -> Unit = {},
+    ): Job = backgroundScope.launch {
+        try {
+            action {
+                val cleanTitle = title.trim()
+                require(cleanTitle.isNotEmpty()) { if (kind == CollectionKind.COURSE) "请填写课程名。" else "请填写书单名。" }
+                val importedBooks = mutableListOf<Textbook>()
+                for (path in newFiles) {
+                    val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
+                    val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
+                    if (kind == CollectionKind.COURSE && !staged.alreadyExisted) {
+                        library.setBookShowStandalone(staged.book.id, false)
+                    }
+                    importedBooks += staged.book
+                }
+                val allIds = (existingBookIds + importedBooks.map { it.id }).distinct()
+                val now = System.currentTimeMillis()
+                val id = "${kind.name.lowercase()}-${java.util.UUID.randomUUID().toString().take(8)}"
+                val cleanExamDate = examDate?.trim()?.takeIf(String::isNotEmpty)
+                library.upsertCollection(
+                    MaterialCollectionRecord(
+                        id = id,
+                        kind = kind,
+                        title = cleanTitle,
+                        createdAt = now,
+                        updatedAt = now,
+                        examDate = cleanExamDate,
+                    ),
+                )
+                allIds.forEachIndexed { idx, bookId ->
+                    val role = if (kind == CollectionKind.COURSE) {
+                        if (idx == 0) "CORE_TEXTBOOK" else "LECTURE_SLIDES"
+                    } else "LIST_BOOK"
+                    library.attachMaterial(
+                        CollectionMaterialRecord(
+                            collectionId = id,
+                            materialId = bookId,
+                            role = role,
+                            ordinal = idx,
+                            addedAt = now,
+                        ),
+                    )
+                }
+                val catalog = library.catalog()
+                val collections = library.collectionSummaries()
+                val reviews = library.reviews()
+                val todayQueue = library.reviewQueue()
+                val focusBook = importedBooks.firstOrNull()
+                    ?: allIds.firstOrNull()?.let { runCatching { library.book(it) }.getOrNull() }
+                    ?: mutable.value.book
+                    ?: catalog.firstOrNull()?.let { library.book(it.id) }
+                val noticeLabel = if (kind == CollectionKind.COURSE) "已创建课程《$cleanTitle》" else "已创建书单《$cleanTitle》"
+                mutable.update { current ->
+                    current.copy(
+                        catalog = catalog,
+                        collections = collections,
+                        book = focusBook,
+                        screen = BookScreen.HOME,
+                        prompt = null,
+                        page = focusBook?.readingPage ?: 1,
+                        reviews = reviews,
+                        todayQueue = todayQueue,
+                        initialized = true,
+                        importNotice = BookImportNotice(System.nanoTime(), noticeLabel),
+                    )
+                }
+            }
+        } finally {
+            onStaged()
+        }
     }
 
     suspend fun importDroppedBooks(paths: List<Path>) {
@@ -149,6 +322,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             mutable.update { it.copy(error = "上一本教材还在准备中，请稍候或先取消后再导入。") }
             return Job().apply { complete() }
         }
+        val startedAtNs = System.nanoTime()
         val control = BookImportControl(
             progress = { progress -> mutable.update { it.copy(importing = progress) } },
         )
@@ -178,12 +352,16 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         library.closeReview()
                         library.saveOpenSession(book.id, "READER")
                         val catalog = library.catalog()
+                        val collections = library.collectionSummaries()
                         val reviews = library.reviews()
+                        val todayQueue = library.reviewQueue()
                         val pathSaved = library.learningPath(book.id)
                         val ladder = library.ladder(book.id)
+                        val elapsedMs = ((System.nanoTime() - startedAtNs) / 1_000_000L).coerceAtLeast(0L)
                         mutable.update { current ->
                             current.copy(
                                 catalog = catalog,
+                                collections = collections,
                                 book = book,
                                 screen = BookScreen.READER,
                                 prompt = null,
@@ -192,12 +370,14 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                                 busy = false,
                                 error = null,
                                 reviews = reviews,
+                                todayQueue = todayQueue,
                                 review = null,
                                 learningPath = pathSaved?.let { LearningPath.restore(it, book.learning) } ?: LearningPath.READ,
                                 learningPathSaved = pathSaved != null,
                                 ladder = ladder,
                                 importing = null,
                                 initialized = true,
+                                lastImportDurationMs = elapsedMs,
                             )
                         }
                     }
@@ -209,12 +389,16 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         library.closeReview()
                         library.saveOpenSession(book.id, "READER")
                         val catalog = library.catalog()
+                        val collections = library.collectionSummaries()
                         val reviews = library.reviews()
+                        val todayQueue = library.reviewQueue()
                         val pathSaved = library.learningPath(book.id)
                         val ladder = library.ladder(book.id)
+                        val elapsedMs = ((System.nanoTime() - startedAtNs) / 1_000_000L).coerceAtLeast(0L)
                         mutable.update { current ->
                             current.copy(
                                 catalog = catalog,
+                                collections = collections,
                                 book = book,
                                 screen = BookScreen.READER,
                                 prompt = null,
@@ -223,12 +407,14 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                                 busy = false,
                                 error = null,
                                 reviews = reviews,
+                                todayQueue = todayQueue,
                                 review = null,
                                 learningPath = pathSaved?.let { LearningPath.restore(it, book.learning) } ?: LearningPath.READ,
                                 learningPathSaved = pathSaved != null,
                                 ladder = ladder,
                                 importing = null,
                                 initialized = true,
+                                lastImportDurationMs = elapsedMs,
                             )
                         }
                     }
@@ -250,14 +436,18 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 actions.withLock {
                     library.closeReview()
                     val catalog = library.catalog()
+                    val collections = library.collectionSummaries()
                     val reviews = library.reviews()
+                    val todayQueue = library.reviewQueue()
                     val pathSaved = library.learningPath(book.id)
                     val ladder = library.ladder(book.id)
                     val stayElsewhere = mutable.value.let { it.screen != BookScreen.HOME && it.book != null && it.book.id != book.id }
                     if (!stayElsewhere) library.saveOpenSession(book.id, "READER")
+                    val elapsedMs = ((System.nanoTime() - startedAtNs) / 1_000_000L).coerceAtLeast(0L)
                     mutable.update { current ->
                         current.copy(
                             catalog = catalog,
+                            collections = collections,
                             book = if (stayElsewhere) current.book else book,
                             screen = if (stayElsewhere) current.screen else BookScreen.READER,
                             prompt = null,
@@ -266,12 +456,14 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                             busy = false,
                             error = null,
                             reviews = reviews,
+                            todayQueue = todayQueue,
                             review = if (stayElsewhere) current.review else null,
                             learningPath = if (stayElsewhere) current.learningPath else (pathSaved?.let { LearningPath.restore(it, book.learning) } ?: LearningPath.READ),
                             learningPathSaved = if (stayElsewhere) current.learningPathSaved else (pathSaved != null),
                             ladder = if (stayElsewhere) current.ladder else ladder,
                             importing = initialProgress,
                             initialized = true,
+                            lastImportDurationMs = elapsedMs,
                         )
                     }
                 }
@@ -509,21 +701,69 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             library.closeReview()
             library.clearOpenSession()
             val catalog = library.catalog()
+            val collections = library.collectionSummaries()
             val reviews = library.reviews()
+            val todayQueue = library.reviewQueue()
             val pathSaved = library.learningPath(book.id) != null
             val ladder = library.ladder(book.id)
             mutable.update { current ->
                 LibraryUi(
-                    catalog = catalog, book = book, page = book.readingPage, busy = true, reviews = reviews,
+                    catalog = catalog, book = book, collections = collections, page = book.readingPage, busy = true,
+                    reviews = reviews, todayQueue = todayQueue,
                     learningPath = restoredPath(book), learningPathSaved = pathSaved,
                     ladder = ladder, importing = current.importing, importNotice = current.importNotice,
                     initialized = true, indexing = current.indexing,
+                    pendingMultiDrop = current.pendingMultiDrop,
+                    lastImportDurationMs = current.lastImportDurationMs,
                 )
             }
         }
         val pendingId = selectedPendingId
         if (pendingId != null && !indexingJobs.containsKey(pendingId)) {
             launchTier1Indexing(pendingId, waitForFirstRender = false)
+        }
+    }
+
+    suspend fun openBook(id: String, targetPage: Int? = null) {
+        var selectedPendingId: String? = null
+        action {
+            val loaded = library.book(id)
+            val book = if (targetPage != null && loaded.page(targetPage) != null) {
+                loaded.copy(readingPage = targetPage)
+            } else loaded
+            if (book.indexState != "READY") selectedPendingId = book.id
+            library.save(book)
+            library.closeReview()
+            library.saveOpenSession(book.id, "READER")
+            val catalog = library.catalog()
+            val collections = library.collectionSummaries()
+            val reviews = library.reviews()
+            val todayQueue = library.reviewQueue()
+            val pathSaved = library.learningPath(book.id) != null
+            val ladder = library.ladder(book.id)
+            mutable.update { current ->
+                current.copy(
+                    catalog = catalog,
+                    collections = collections,
+                    book = book,
+                    screen = BookScreen.READER,
+                    prompt = null,
+                    source = null,
+                    page = book.readingPage,
+                    review = null,
+                    reviews = reviews,
+                    todayQueue = todayQueue,
+                    learningPath = restoredPath(book),
+                    learningPathSaved = pathSaved,
+                    questionsOpen = false,
+                    ladder = ladder,
+                    initialized = true,
+                )
+            }
+        }
+        val pendingId = selectedPendingId
+        if (pendingId != null && !indexingJobs.containsKey(pendingId)) {
+            launchTier1Indexing(pendingId, waitForFirstRender = true)
         }
     }
 
@@ -678,7 +918,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             library.closeReview()
             if (!fromReview) library.clearOpenSession()
             mutable.update { it.copy(screen = if (fromReview) BookScreen.REVIEWS else BookScreen.HOME,
-                review = null, prompt = null, reviews = library.reviews()) }
+                review = null, prompt = null, reviews = library.reviews(), todayQueue = library.reviewQueue()) }
         }
     }
 
@@ -693,7 +933,25 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         library.closeReview()
         library.clearOpenSession()
         mutable.update { it.copy(screen = BookScreen.REVIEWS, review = null, source = null,
-            prompt = null, reviews = library.reviews()) }
+            prompt = null, reviews = library.reviews(), todayQueue = library.reviewQueue()) }
+    }
+
+    /** 单卡流：打开今日队列里的下一题；没有下一题就回到复习页，显示刷新后的队列或「今日复习已完成」。 */
+    suspend fun nextReview() = action {
+        val ui = mutable.value
+        val cards = ui.todayQueue.cards
+        val at = ui.review?.let { open -> cards.indexOfFirst { it.book == open.book && it.lesson == open.lesson && it.mode == open.mode } } ?: -1
+        val next = cards.getOrNull(at + 1)
+        if (next == null) {
+            library.closeReview()
+            mutable.update { it.copy(screen = BookScreen.REVIEWS, review = null, source = null, prompt = null,
+                reviews = library.reviews(), todayQueue = library.reviewQueue()) }
+        } else {
+            val review = library.review(next.book, next.lesson, next.mode)
+            library.openReview(review)
+            mutable.update { it.copy(book = library.book(review.book), screen = BookScreen.REVIEWING, source = null,
+                prompt = null, review = review, answer = review.answer, reviews = library.reviews()) }
+        }
     }
 
     /** The mounted host refreshes this projection across local midnight, including on 今天. */
@@ -701,15 +959,41 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val current = mutable.value.review
         val updated = current?.let { library.review(it.book, it.lesson, it.mode) }
         mutable.update { it.copy(reviews = library.reviews(), review = updated,
-            answer = updated?.answer ?: it.answer) }
+            answer = updated?.answer ?: it.answer, todayQueue = if (current == null) library.reviewQueue() else it.todayQueue) }
     }
 
     suspend fun openReview(entry: LocalBookReview) = action {
         val review = library.review(entry.book, entry.lesson, entry.mode)
         val book = library.book(review.book)
         library.openReview(review)
+        val existingQueue = mutable.value.todayQueue
+        val hydratedQueue = ensureQueueIncludes(
+            if (existingQueue.cards.isEmpty()) library.reviewQueue() else existingQueue,
+            review,
+        )
         mutable.update { it.copy(book = book, screen = BookScreen.REVIEWING, source = null,
-            prompt = null, review = review, answer = review.answer, reviews = library.reviews()) }
+            prompt = null, review = review, answer = review.answer, reviews = library.reviews(),
+            todayQueue = hydratedQueue) }
+    }
+
+    /** 单卡自评：点「没记住」(AGAIN) 或「记住了」(GOOD) 后写入 FSRS 并推进到今日队列下一题。 */
+    suspend fun rateReview(rating: com.coach.domain.fsrs.FsrsRating, currentAnswer: PracticeAnswer) = action {
+        val ui = mutable.value
+        val open = ui.review ?: return@action
+        library.saveReviewRating(open, rating, currentAnswer)
+        val cards = ui.todayQueue.cards
+        val at = cards.indexOfFirst { it.book == open.book && it.lesson == open.lesson && it.mode == open.mode }
+        val next = if (at >= 0) cards.getOrNull(at + 1) else null
+        if (next == null) {
+            library.closeReview()
+            mutable.update { it.copy(screen = BookScreen.REVIEWS, review = null, source = null, prompt = null,
+                reviews = library.reviews(), todayQueue = library.reviewQueue()) }
+        } else {
+            val review = library.review(next.book, next.lesson, next.mode)
+            library.openReview(review)
+            mutable.update { it.copy(book = library.book(review.book), screen = BookScreen.REVIEWING, source = null,
+                prompt = null, review = review, answer = review.answer, reviews = library.reviews()) }
+        }
     }
 
     suspend fun saveReviewDraft(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer): Boolean {
@@ -752,7 +1036,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
 
     private fun writeAnswer(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) {
         library.saveAnswer(book, lesson, mode, answer)
-        mutable.update { it.copy(reviews = library.reviews()) }
+        mutable.update { it.copy(reviews = library.reviews(), todayQueue = if (it.review == null) library.reviewQueue() else it.todayQueue) }
         val open = mutable.value.book
         if (mutable.value.review == null && open?.id == book && open.lessons.getOrNull(open.lessonIndex)?.id == lesson && open.questionMode == mode) {
             mutable.update { it.copy(answer = answer, ladder = library.ladder(book)) }
@@ -832,7 +1116,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     ) = action(showBusy = false) {
         val book = mutable.value.book ?: return@action
         library.saveSectionCheckAnswer(book.id, lesson, questionIndex, practice, answer)
-        mutable.update { it.copy(reviews = library.reviews(), ladder = library.ladder(book.id)) }
+        mutable.update { it.copy(reviews = library.reviews(), todayQueue = library.reviewQueue(), ladder = library.ladder(book.id)) }
     }
 
     suspend fun openSectionPractice(sectionIndex: Int) = action {

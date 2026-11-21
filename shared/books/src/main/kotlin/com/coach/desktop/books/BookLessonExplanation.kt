@@ -52,13 +52,13 @@ internal fun BookLessonExplanation(
         PaperCard(Modifier.v7Resize().testTag("book-lesson-explanation"), contentPadding = PaddingValues(16.dp)) {
             Text("讲解", style = MaterialTheme.typography.titleMedium)
             if (!allowed) {
-                Text("讲解这一节需要发送原文", style = MaterialTheme.typography.titleSmall)
-                Text("这一节的原文会经服务发给 Anthropic 或 OpenAI 的 API，不发到别处。API 默认不拿它训练模型。整本书留在这台电脑上。你可以继续读书和做题，允许后才会请求讲解。",
+                Text("伴读讲解已在设置中关闭", style = MaterialTheme.typography.titleSmall)
+                Text("开启后，提问与讲解时仅发送本节正文至学习服务。整本书留在本地设备，可随时在设置里关闭。",
                     style = MaterialTheme.typography.bodySmall,
                     color = com.coach.ui.theme.CoachTheme.colors.fgSecondary,
                     modifier = Modifier.testTag("book-lesson-consent"))
                 PrimaryButton({ support.allow(book.id); allowed = !support.consentRequired(book.id) },
-                    modifier = Modifier.testTag("book-lesson-consent-allow")) { Text("允许并讲解") }
+                    modifier = Modifier.testTag("book-lesson-consent-allow")) { Text("开启讲解") }
             } else {
                 when (val result = reply.value) {
                     null -> Text("正在读取这节的讲解…", color = com.coach.ui.theme.CoachTheme.colors.fgSecondary)

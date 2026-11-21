@@ -1,5 +1,8 @@
 package com.coach.desktop.books
 
+import com.coach.domain.fsrs.Fsrs5
+import com.coach.domain.fsrs.FsrsConfig
+import com.coach.domain.fsrs.FsrsRating
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.net.URLClassLoader
@@ -27,13 +30,13 @@ class UnifiedBookReviewTest {
         val clock = ReviewTestClock()
         val (store, book) = library(clock)
         val lesson = book.lessons.first()
-        val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
+        val practice = testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
         val wrong = PracticeAnswer(practice.options.first { it != practice.answer }, true)
-        store.saveAnswer(book.id, lesson.id, QuestionMode.CHOICE, wrong)
-        store.saveAnswer(book.id, lesson.id, QuestionMode.CHOICE, wrong)
+        store.saveSectionCheckAnswer(book.id, lesson, 0, practice, wrong)
+        store.saveSectionCheckAnswer(book.id, lesson, 0, practice, wrong)
         val guessed = PracticeAnswer(practice.answer, true, guessed = true)
-        store.saveAnswer(book.id, lesson.id, QuestionMode.CHOICE, guessed)
-        store.saveAnswer(book.id, lesson.id, QuestionMode.CHOICE, guessed)
+        store.saveSectionCheckAnswer(book.id, lesson, 0, practice, guessed)
+        store.saveSectionCheckAnswer(book.id, lesson, 0, practice, guessed)
         assertEquals(1, store.reviews().size)
         val original = store.reviews().single()
         assertEquals(setOf(LocalReviewSource.WRONG, LocalReviewSource.GUESSED), original.sources)
@@ -52,13 +55,17 @@ class UnifiedBookReviewTest {
         val clock = ReviewTestClock()
         val (store, book) = library(clock)
         val lesson = book.lessons.first()
-        val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
+        val practice = testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
         val correct = PracticeAnswer(practice.answer, true)
-        store.saveAnswer(book.id, lesson.id, QuestionMode.CHOICE, correct)
+        val first = clock.day
+        store.saveSectionCheckAnswer(book.id, lesson, 0, practice, correct)
         assertTrue(store.reviews().isEmpty())
-        assertEquals(clock.day + 1, store.review(book.id, lesson.id, QuestionMode.CHOICE).dueDay)
-        clock.day++
-        store.saveAnswer(book.id, lesson.id, QuestionMode.CHOICE, correct)
+        // Due days come from the shared FSRS-5 kernel; a new card answered independently is GOOD.
+        val s1 = Fsrs5.review(Fsrs5.newCard(first), FsrsRating.GOOD, first, FsrsConfig())
+        assertTrue(s1.dueDay > first)
+        assertEquals(s1.dueDay, store.review(book.id, lesson.id, QuestionMode.CHOICE).dueDay)
+        clock.day = s1.dueDay
+        store.saveSectionCheckAnswer(book.id, lesson, 0, practice, correct)
         val due = store.reviews().single()
         assertEquals(setOf(LocalReviewSource.DUE), due.sources)
         assertEquals(PracticeAnswer(), due.answer)
@@ -68,13 +75,17 @@ class UnifiedBookReviewTest {
         store.saveReviewAnswer(due, correct)
         val completed = store.review(book.id, lesson.id, QuestionMode.CHOICE)
         assertTrue(completed.completed)
-        assertEquals(clock.day + 3, completed.dueDay)
+        val s2 = Fsrs5.review(s1, FsrsRating.GOOD, clock.day, FsrsConfig())
+        assertEquals(s2.dueDay, completed.dueDay)
+        assertTrue(s2.dueDay - clock.day > s1.dueDay - first, "a remembered card waits longer each time")
         assertEquals(2, completed.history.size)
-        clock.day += 3
+        clock.day = s2.dueDay
         val next = TextbookLibrary(store.directory, clock).reviews().single()
         store.openReview(next)
         store.saveReviewAnswer(next, correct)
-        assertEquals(clock.day + 7, store.review(book.id, lesson.id, QuestionMode.CHOICE).dueDay)
+        val s3 = Fsrs5.review(s2, FsrsRating.GOOD, clock.day, FsrsConfig())
+        assertEquals(s3.dueDay, store.review(book.id, lesson.id, QuestionMode.CHOICE).dueDay)
+        assertEquals(s3, store.fsrsState(book.id, lesson.id, QuestionMode.CHOICE))
         assertEquals(practice.answer, store.review(book.id, lesson.id, QuestionMode.CHOICE).originalAnswer)
     }
 
@@ -82,13 +93,13 @@ class UnifiedBookReviewTest {
         val clock = ReviewTestClock()
         val (store, book) = library(clock)
         val c = TextbookController(store)
-        c.load(); c.learn(); c.enableLearning()
+        c.load(); c.chooseLearningPath(LearningPath.QUESTION_FIRST); c.enableLearning()
         val lesson = book.lessons.first()
-        val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
-        c.answer(PracticeAnswer(practice.answer, true))
+        val practice = testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
+        c.recordSectionQuizAnswer(lesson, 0, practice, PracticeAnswer(practice.answer, true))
         c.answer(PracticeAnswer("Unfinished next answer"))
         assertTrue(c.state.value.reviews.isEmpty())
-        clock.day++
+        clock.day = store.review(book.id, lesson.id, QuestionMode.CHOICE).dueDay
         c.refreshReviews()
         assertEquals(1, c.state.value.reviews.size)
         assertEquals(store.reviews(), c.state.value.reviews)
@@ -122,9 +133,9 @@ class UnifiedBookReviewTest {
         val clock = ReviewTestClock()
         val (store, book) = library(clock)
         val lesson = book.lessons.first()
-        val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
+        val practice = testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
         val wrong = practice.options.first { it != practice.answer }
-        store.saveAnswer(book.id, lesson.id, QuestionMode.CHOICE, PracticeAnswer(wrong, true))
+        store.saveSectionCheckAnswer(book.id, lesson, 0, practice, PracticeAnswer(wrong, true))
         store.saveReviewAnswer(store.reviews().single(), PracticeAnswer(practice.answer, true))
         // Recreate main's pre-change tables from their real columns, retaining every stored value.
         DriverManager.getConnection("jdbc:sqlite:${store.directory.resolve("library.sqlite")}").use { db -> db.createStatement().use { s ->
@@ -149,28 +160,66 @@ class UnifiedBookReviewTest {
         assertEquals(1, TextbookLibrary(store.directory, clock).reviews().size)
     }
 
+    @Test fun loadRestoringReviewingHydratesTodayQueueAndNextReviewAdvances() = runBlocking {
+        val clock = ReviewTestClock()
+        val (store, book) = library(clock)
+        val lessons = book.lessons.filter { it.text.isNotBlank() }.take(2)
+        assertEquals(2, lessons.size)
+        for (l in lessons) {
+            store.saveAnswer(book.id, l.id, QuestionMode.SHORT_ANSWER, PracticeAnswer("Need review", true, false))
+        }
+        val firstController = TextbookController(store)
+        firstController.load()
+        firstController.showReviews()
+        val firstCard = firstController.state.value.todayQueue.cards.first()
+        firstController.openReview(firstCard)
+        assertEquals(BookScreen.REVIEWING, firstController.state.value.screen)
+
+        // Simulate app restart with a fresh controller and library opening the same SQLite file.
+        val restarted = TextbookController(TextbookLibrary(store.directory, clock))
+        restarted.load()
+        assertEquals(BookScreen.REVIEWING, restarted.state.value.screen)
+        assertEquals(2, restarted.state.value.todayQueue.cards.size, "todayQueue must be hydrated on REVIEWING restore")
+        val idxBefore = restarted.state.value.todayQueue.cards.indexOfFirst {
+            it.lesson == restarted.state.value.review?.lesson
+        }
+        assertEquals(0, idxBefore, "Restored review should sit at position 1 / 2")
+
+        // Clicking 下一题 advances to card 2 / 2 instead of jumping back to REVIEWS list.
+        restarted.nextReview()
+        assertEquals(BookScreen.REVIEWING, restarted.state.value.screen)
+        assertNotEquals(firstCard.lesson, restarted.state.value.review?.lesson)
+
+        // Self-rating: 没记住 -> AGAIN (stays due), 记住了 -> GOOD (completed & advances to REVIEWS).
+        val secondCard = restarted.state.value.review!!
+        restarted.rateReview(FsrsRating.GOOD, PracticeAnswer("记住了", true, true))
+        assertEquals(BookScreen.REVIEWS, restarted.state.value.screen)
+        assertTrue(store.review(book.id, secondCard.lesson, QuestionMode.SHORT_ANSWER).completed)
+    }
+
     @Test fun aNewJvmRestoresExactReviewAndKeepsOriginalAndAllAttempts() = runBlocking {
         val clock = ReviewTestClock()
         val (store, imported) = library(clock)
         val c = TextbookController(store)
-        c.load(); c.learn(); c.enableLearning()
+        c.load(); c.chooseLearningPath(LearningPath.QUESTION_FIRST); c.enableLearning()
         val book = c.state.value.book!!
-        val questions = book.lessons.take(3).map { com.coach.desktop.books.testPracticeFixture(book, it, QuestionMode.CHOICE)!! }
-        c.answer(PracticeAnswer(questions[0].options.first { it != questions[0].answer }, true))
+        val questions = book.lessons.take(3).map { testPracticeFixture(book, it, QuestionMode.CHOICE)!! }
+        c.recordSectionQuizAnswer(book.lessons[0], 0, questions[0], PracticeAnswer(questions[0].options.first { it != questions[0].answer }, true))
         c.lesson(1)
-        c.answer(PracticeAnswer(questions[1].answer, true, guessed = true))
+        c.recordSectionQuizAnswer(book.lessons[1], 0, questions[1], PracticeAnswer(questions[1].answer, true, guessed = true))
         c.lesson(2)
-        c.answer(PracticeAnswer(questions[2].answer, true))
+        c.recordSectionQuizAnswer(book.lessons[2], 0, questions[2], PracticeAnswer(questions[2].answer, true))
         val guessed = c.state.value.reviews.single { it.lesson == book.lessons[1].id }
         c.openReview(guessed)
         c.saveReviewDraft(guessed.book, guessed.lesson, guessed.mode, PracticeAnswer("Unfinished retry"))
+        val reopenDay = store.review(book.id, book.lessons[2].id, QuestionMode.CHOICE).dueDay
         val cp = (generateSequence(javaClass.classLoader) { it.parent }.filterIsInstance<URLClassLoader>()
             .flatMap { it.urLs.asSequence() }.map { File(it.toURI()).path }.toList() +
             System.getProperty("java.class.path").split(File.pathSeparator)).distinct().joinToString(File.pathSeparator)
         val java = Path.of(System.getProperty("java.home"), "bin", if (System.getProperty("os.name").startsWith("Windows")) "java.exe" else "java")
         val log = store.directory.resolve("new-process.log")
         val child = ProcessBuilder(java.toString(), "-Djava.awt.headless=true", "-cp", cp,
-            UnifiedReviewChild::class.java.name, store.directory.toString(), (clock.day + 1).toString(), book.id, guessed.lesson)
+            UnifiedReviewChild::class.java.name, store.directory.toString(), reopenDay.toString(), book.id, guessed.lesson)
             .redirectErrorStream(true).redirectOutput(log.toFile()).start()
         try {
             assertTrue(child.waitFor(40, TimeUnit.SECONDS), "New JVM must finish its local restore")
@@ -179,9 +228,10 @@ class UnifiedBookReviewTest {
             if (child.isAlive) { child.destroyForcibly(); child.waitFor() }
         }
         assertNotEquals(ProcessHandle.current().pid(), child.pid())
-        val reopened = TextbookController(TextbookLibrary(store.directory, ReviewTestClock(clock.day + 1)))
+        val reopened = TextbookController(TextbookLibrary(store.directory, ReviewTestClock(reopenDay)))
         reopened.load()
         assertEquals(BookScreen.REVIEWING, reopened.state.value.screen)
+        assertTrue(reopened.state.value.todayQueue.cards.isNotEmpty())
         assertEquals(PracticeAnswer(questions[1].answer, true), reopened.state.value.answer)
         assertEquals(3, reopened.state.value.review!!.history.size)
         assertEquals(questions[1].answer, reopened.state.value.review!!.originalAnswer)
@@ -198,6 +248,7 @@ internal object UnifiedReviewChild {
         val c = TextbookController(TextbookLibrary(Path.of(args[0]), clock))
         c.load()
         check(c.state.value.screen == BookScreen.REVIEWING)
+        check(c.state.value.todayQueue.cards.size == 3)
         val row = checkNotNull(c.state.value.review)
         check(row.book == args[2] && row.lesson == args[3])
         check(row.answer.text == "Unfinished retry")

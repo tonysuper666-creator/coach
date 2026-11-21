@@ -1,6 +1,5 @@
 package com.coach.desktop.books
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -9,7 +8,6 @@ import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -18,25 +16,27 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
-import com.coach.ui.theme.CoachTheme
 import com.coach.ui.adaptive.Hinge
-import com.coach.ui.v7.PrimaryButton
+import com.coach.ui.theme.CoachTheme
+import com.coach.ui.v7.CoachCardMeta
+import com.coach.ui.v7.CoachEmptyState
 import com.coach.ui.v7.LocalV7Fonts
+import com.coach.ui.v7.PaperButton
+import com.coach.ui.v7.PaperCard
+import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.V7TextButton
 import com.coach.ui.v7.paperShadow
 import com.coach.ui.v7.v7FocusRing
@@ -51,8 +51,11 @@ internal fun BookImportProgressBar(
     val colors = CoachTheme.colors
     val pine = colors.actionPrimary
     Column(modifier, verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 6.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
             Text(
                 formatImportProgressLabel(progress),
                 Modifier.weight(1f),
@@ -105,107 +108,582 @@ internal fun BookImportToast(notice: BookImportNotice?, onDismiss: (Long) -> Uni
     }
 }
 
+/**
+ * LearningCoach 2.0 居中单栏首页（最大宽度 <= 720dp，保留折叠屏铰链分栏）：
+ * - 空态：零重复文案、全屏共 6 个零死路可点控件（顶栏 ＋ / 设置 + 唯一主钮「导入文件」+ 3 张可点引导卡）。
+ * - 日常首页：全屏仅顶部焦点卡保留唯一实底 PrimaryButton（继续），下方依次为条件今日复习卡、课程、阅读（书单/单书）。
+ */
 @Composable
-internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String) -> Unit, onRead: () -> Unit, onLearn: () -> Unit,
-    onPath: (LearningPath) -> Unit, onCancelImport: () -> Unit = {}, hinge: Hinge? = LocalBookHinge.current,
-    onExportNotes: ((Textbook, Int) -> Unit)? = null) {
-    val book = ui.book
+internal fun LibraryHome(
+    ui: LibraryUi,
+    onImport: () -> Unit,
+    onSelect: (String) -> Unit,
+    onRead: () -> Unit,
+    @Suppress("UNUSED_PARAMETER") onLearn: () -> Unit = {},
+    @Suppress("UNUSED_PARAMETER") onPath: (LearningPath) -> Unit = {},
+    onCancelImport: () -> Unit = {},
+    hinge: Hinge? = LocalBookHinge.current,
+    @Suppress("UNUSED_PARAMETER") onExportNotes: ((Textbook, Int) -> Unit)? = null,
+    onOpenBook: (String) -> Unit = onSelect,
+    onOpenReviews: () -> Unit = {},
+    onNewCourse: () -> Unit = {},
+    onNewBooklist: () -> Unit = {},
+    onOpenCollection: (CollectionSummary) -> Unit = {},
+    onMultiDropAction: (MultiDropAction) -> Unit = {},
+    onDismissMultiDrop: () -> Unit = {},
+) {
     val colors = CoachTheme.colors
     val scroll = rememberScrollState()
     val rightScroll = rememberScrollState()
     val density = LocalDensity.current
     var sheetOriginLeftDp by remember { mutableStateOf<Float?>(null) }
-    val line = colors.borderSubtle
-    BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = if (hinge != null) CoachV7.Space.s3 else CoachV7.Space.s6, vertical = CoachV7.Space.s3), contentAlignment = Alignment.TopCenter) {
-        val sectionSpacing = if (maxHeight < 560.dp) CoachV7.Space.s2 else CoachV7.Space.s5
-        Box(Modifier.widthIn(max = 1000.dp).fillMaxWidth().fillMaxHeight().paperShadow("sheet", colors.dark)
-            .clip(RoundedCornerShape(CoachV7.Radius.sheet)).background(colors.surface1).testTag("shelf-sheet")) {
-            val catalogHeader: @Composable () -> Unit = {
-                Text("书架", style = MaterialTheme.typography.titleLarge, modifier = Modifier.testTag("library-title"))
-                Text("带来一本教材，从想读的地方开始。", color = colors.fgSecondary)
-                if (book == null) {
-                    PrimaryButton(onImport, enabled = !ui.busy, modifier = Modifier.testTag("upload-textbook")) { Text("上传教材") }
-                } else {
-                    V7TextButton(onImport, enabled = !ui.busy, modifier = Modifier.testTag("upload-textbook")) { Text("上传教材") }
-                }
-                Text("${BookFormats.description} · 教材和进度保存在此设备", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
-            }
-            val catalogList: @Composable () -> Unit = {
-                if (book == null) {
-                    Text("书架还是空的", style = MaterialTheme.typography.titleLarge)
-                    Text("上传后，可以直接开始学，也可以先当一本书读。", color = colors.fgSecondary)
-                } else {
-                    Text("全部教材", style = MaterialTheme.typography.titleMedium)
-                    Column {
-                        ShelfDivider(line)
-                        for (item in ui.catalog) {
-                            ShelfBookRow(
-                                item = item,
-                                current = item.id == book.id,
-                                enabled = !ui.busy,
-                                activeImport = ui.importing?.takeIf { it.recognizing && it.bookId == item.id },
-                                onCancelImport = onCancelImport,
+    val activeCollections = remember(ui.collections) { ui.collections.filterNot { it.record.archived } }
+    val courses = remember(activeCollections) { activeCollections.filter { it.record.kind == CollectionKind.COURSE } }
+    val booklists = remember(activeCollections) { activeCollections.filter { it.record.kind == CollectionKind.BOOKLIST } }
+    val standaloneBooks = remember(ui.catalog) { ui.catalog.filter { it.showStandalone } }
+    val isEmpty = ui.catalog.isEmpty() && activeCollections.isEmpty()
+
+    BoxWithConstraints(
+        Modifier.fillMaxSize().padding(
+            horizontal = if (hinge != null) CoachV7.Space.s3 else CoachV7.Space.s5,
+            vertical = CoachV7.Space.s3,
+        ),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        val wideEmptyGuides = maxWidth >= 560.dp
+        val sectionSpacing = if (maxHeight < 560.dp) CoachV7.Space.s3 else CoachV7.Space.s5
+        Box(
+            Modifier.widthIn(max = if (hinge != null) 1000.dp else 720.dp)
+                .fillMaxWidth()
+                .fillMaxHeight()
+                .testTag("shelf-sheet"),
+        ) {
+            if (isEmpty) {
+                // 空态首页：居中单栏，唯一主钮「导入文件」+ 3 张可点引导卡（加顶栏 ＋ / 设置，共 6 个零死路入口）。
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(
+                        Modifier.fillMaxWidth().verticalScroll(scroll)
+                            .padding(horizontal = CoachV7.Space.s4, vertical = CoachV7.Space.s5)
+                            .testTag("home-empty-hub"),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s5),
+                    ) {
+                        CoachEmptyState(
+                            title = "把要读的书或课程材料放进来。",
+                            hint = "直接把文件拖进窗口，或选择下面一种方式开始。",
+                            modifier = Modifier.padding(bottom = 0.dp),
+                        )
+                        PrimaryButton(
+                            onClick = onImport,
+                            enabled = !ui.busy,
+                            modifier = Modifier.testTag("upload-textbook"),
+                        ) { Text("导入文件") }
+                        if (wideEmptyGuides) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(CoachV7.Space.s3),
                             ) {
-                                if (item.id == book.id) onRead() else onSelect(item.id)
+                                EmptyRouteCard(
+                                    title = "为一门课备考",
+                                    meta = "放入课本与讲义，按周备考",
+                                    tag = "empty-route-course",
+                                    enabled = !ui.busy,
+                                    onClick = onNewCourse,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                EmptyRouteCard(
+                                    title = "单读一本书",
+                                    meta = "选书直接开读，随时提问",
+                                    tag = "empty-route-single",
+                                    enabled = !ui.busy,
+                                    onClick = onImport,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                EmptyRouteCard(
+                                    title = "读一组书",
+                                    meta = "选入多本，串起共同主题",
+                                    tag = "empty-route-booklist",
+                                    enabled = !ui.busy,
+                                    onClick = onNewBooklist,
+                                    modifier = Modifier.weight(1f),
+                                )
                             }
-                            ShelfDivider(line)
+                        } else {
+                            Column(
+                                Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s3),
+                            ) {
+                                EmptyRouteCard(
+                                    title = "为一门课备考",
+                                    meta = "放入课本、讲义和习题，按周复习备考",
+                                    tag = "empty-route-course",
+                                    enabled = !ui.busy,
+                                    onClick = onNewCourse,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                                EmptyRouteCard(
+                                    title = "单读一本书",
+                                    meta = "选一本书直接打开读，随时看要点与提问",
+                                    tag = "empty-route-single",
+                                    enabled = !ui.busy,
+                                    onClick = onImport,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                                EmptyRouteCard(
+                                    title = "读一组书",
+                                    meta = "一次选入两本以上，自动串起共同主题",
+                                    tag = "empty-route-booklist",
+                                    enabled = !ui.busy,
+                                    onClick = onNewBooklist,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
                         }
+                    }
+                }
+            } else {
+                val focusBook = ui.book
+                val focusSummary = focusBook?.let { b -> ui.catalog.firstOrNull { it.id == b.id } } ?: ui.catalog.firstOrNull()
+                val focusCollection = if (focusBook == null) activeCollections.firstOrNull() else null
+
+                val focusAndReviewBlock: @Composable () -> Unit = {
+                    // 1. 顶部焦点卡：全屏唯一 PrimaryButton（「继续」）。
+                    if (focusBook != null) {
+                        val pageTotal = focusBook.pages.size.coerceAtLeast(1)
+                        val chapterTitle = focusBook.lessons.firstOrNull {
+                            focusBook.readingPage in it.firstPage..it.lastPage
+                        }?.title
+                        PaperCard(
+                            Modifier.fillMaxWidth().testTag("home-focus-card"),
+                            color = colors.surface1,
+                            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp),
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        focusBook.title,
+                                        style = MaterialTheme.typography.titleLarge,
+                                        fontFamily = LocalV7Fonts.current.display,
+                                        color = colors.fgPrimary,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.testTag("home-focus-title"),
+                                    )
+                                    val metaText = buildString {
+                                        if (!chapterTitle.isNullOrBlank() && chapterTitle != focusBook.title) {
+                                            append(chapterTitle)
+                                            append(" · ")
+                                        }
+                                        append("上次停在第 ${focusBook.readingPage} / $pageTotal 页")
+                                    }
+                                    CoachCardMeta(metaText, Modifier.testTag("home-focus-meta"))
+                                }
+                                PrimaryButton(
+                                    onClick = onRead,
+                                    enabled = !ui.busy,
+                                    modifier = Modifier.testTag("home-read"),
+                                ) { Text("继续") }
+                            }
+                        }
+                    } else if (focusSummary != null) {
+                        PaperCard(
+                            Modifier.fillMaxWidth().testTag("home-focus-card"),
+                            color = colors.surface1,
+                            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp),
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        focusSummary.title,
+                                        style = MaterialTheme.typography.titleLarge,
+                                        fontFamily = LocalV7Fonts.current.display,
+                                        color = colors.fgPrimary,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.testTag("home-focus-title"),
+                                    )
+                                    CoachCardMeta(
+                                        "上次停在第 ${focusSummary.readingPage} / ${focusSummary.pageCount.coerceAtLeast(1)} 页",
+                                        Modifier.testTag("home-focus-meta"),
+                                    )
+                                }
+                                PrimaryButton(
+                                    onClick = { onOpenBook(focusSummary.id) },
+                                    enabled = !ui.busy,
+                                    modifier = Modifier.testTag("home-read"),
+                                ) { Text("继续") }
+                            }
+                        }
+                    } else if (focusCollection != null) {
+                        PaperCard(
+                            Modifier.fillMaxWidth().testTag("home-focus-card"),
+                            color = colors.surface1,
+                            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp),
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        focusCollection.record.title,
+                                        style = MaterialTheme.typography.titleLarge,
+                                        fontFamily = LocalV7Fonts.current.display,
+                                        color = colors.fgPrimary,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.testTag("home-focus-title"),
+                                    )
+                                    CoachCardMeta(
+                                        collectionMeta(focusCollection),
+                                        Modifier.testTag("home-focus-meta"),
+                                    )
+                                }
+                                PrimaryButton(
+                                    onClick = { onOpenCollection(focusCollection) },
+                                    enabled = !ui.busy,
+                                    modifier = Modifier.testTag("home-read"),
+                                ) { Text("继续") }
+                            }
+                        }
+                    }
+
+                    // 2. 条件今日复习卡：有到期题显示 PaperButton("开始复习")，0 题退化为一行 CoachCardMeta。
+                    val dueCount = if (ui.todayQueue.cards.isNotEmpty()) ui.todayQueue.cards.size else ui.reviews.size
+                    val deferred = ui.todayQueue.deferred
+                    if (dueCount > 0) {
+                        PaperCard(
+                            Modifier.fillMaxWidth().testTag("home-review-card"),
+                            color = colors.surface1,
+                            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text("今日复习", style = MaterialTheme.typography.titleMedium, color = colors.fgPrimary)
+                                    val reviewMeta = if (deferred > 0) {
+                                        "$dueCount 题待复习 · 另有 $deferred 题顺延"
+                                    } else {
+                                        "$dueCount 题待复习 · 随时可停"
+                                    }
+                                    CoachCardMeta(reviewMeta, Modifier.testTag("home-review-meta"))
+                                }
+                                PaperButton(
+                                    onClick = onOpenReviews,
+                                    enabled = !ui.busy,
+                                    modifier = Modifier.testTag("home-review-start"),
+                                ) { Text("开始复习") }
+                            }
+                        }
+                    } else {
+                        CoachCardMeta(
+                            "今日复习已完成。",
+                            Modifier.padding(horizontal = 4.dp).testTag("home-review-done"),
+                        )
+                    }
+                }
+
+                val collectionsAndReadingBlock: @Composable () -> Unit = {
+                    // 3. 课程卡片组
+                    if (courses.isNotEmpty()) {
+                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s2)) {
+                            Text(
+                                "课程",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = colors.fgSecondary,
+                                modifier = Modifier.padding(horizontal = 4.dp).testTag("home-section-courses"),
+                            )
+                            for (course in courses) {
+                                HomeCollectionCard(
+                                    summary = course,
+                                    badge = null,
+                                    enabled = !ui.busy,
+                                    onClick = { onOpenCollection(course) },
+                                )
+                            }
+                        }
+                    }
+
+                    // 4. 阅读卡片组（书单 + 单书，课程内附带材料不散落占满首页）
+                    val visibleBooks = if (standaloneBooks.isNotEmpty()) standaloneBooks else if (courses.isEmpty()) ui.catalog else emptyList()
+                    if (booklists.isNotEmpty() || visibleBooks.isNotEmpty()) {
+                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s2)) {
+                            Text(
+                                "阅读",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = colors.fgSecondary,
+                                modifier = Modifier.padding(horizontal = 4.dp).testTag("home-section-reading"),
+                            )
+                            for (list in booklists) {
+                                HomeCollectionCard(
+                                    summary = list,
+                                    badge = "书单",
+                                    enabled = !ui.busy,
+                                    onClick = { onOpenCollection(list) },
+                                )
+                            }
+                            for (item in visibleBooks) {
+                                HomeBookCard(
+                                    item = item,
+                                    current = item.id == focusBook?.id,
+                                    enabled = !ui.busy,
+                                    activeImport = ui.importing?.takeIf { it.recognizing && it.bookId == item.id },
+                                    onCancelImport = onCancelImport,
+                                    onClick = { onOpenBook(item.id) },
+                                )
+                            }
+                        }
+                    }
+                }
+
+                BoxWithConstraints(
+                    Modifier.fillMaxSize()
+                        .padding(
+                            horizontal = if (hinge != null) CoachV7.Space.s3 else CoachV7.Space.s2,
+                            vertical = CoachV7.Space.s2,
+                        )
+                        .onGloballyPositioned { coords -> sheetOriginLeftDp = coords.positionInRoot().x / density.density },
+                ) {
+                    val verticalSplit = if (focusBook != null) {
+                        bookVerticalSplit(maxWidth.value, maxHeight.value, sheetOriginLeftDp ?: 0f, hinge)
+                    } else null
+                    if (verticalSplit != null) {
+                        Row(Modifier.fillMaxSize()) {
+                            Column(
+                                Modifier.width(verticalSplit.leftDp.dp).fillMaxHeight().verticalScroll(scroll)
+                                    .testTag("shelf-half-fold-left"),
+                                verticalArrangement = Arrangement.spacedBy(sectionSpacing),
+                            ) {
+                                focusAndReviewBlock()
+                            }
+                            Spacer(Modifier.width(verticalSplit.gapDp.dp).fillMaxHeight().testTag("shelf-half-fold-hinge"))
+                            Column(
+                                Modifier.weight(1f).fillMaxHeight().verticalScroll(rightScroll)
+                                    .testTag("shelf-half-fold-right"),
+                                verticalArrangement = Arrangement.spacedBy(sectionSpacing),
+                            ) {
+                                collectionsAndReadingBlock()
+                            }
+                        }
+                    } else {
+                        Column(
+                            Modifier.fillMaxWidth().verticalScroll(scroll)
+                                .padding(bottom = if (ui.pendingMultiDrop != null) 76.dp else 16.dp)
+                                .testTag("home-daily-hub"),
+                            verticalArrangement = Arrangement.spacedBy(sectionSpacing),
+                        ) {
+                            focusAndReviewBlock()
+                            collectionsAndReadingBlock()
+                        }
+                        BookScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = CoachV7.Space.s4))
                     }
                 }
             }
-            val selectedActions: @Composable () -> Unit = {
-                if (book != null) {
-                    Text(book.title, style = MaterialTheme.typography.headlineLarge, fontFamily = LocalV7Fonts.current.display)
-                    PrimaryButton(onRead, enabled = !ui.busy, modifier = Modifier.testTag("home-read")) {
-                        Text(if (book.readingPage > 1) "继续阅读 · 第 ${book.readingPage} 页" else "开始阅读")
-                    }
-                    if (onExportNotes != null) {
-                        Column {
-                            ShelfDivider(line)
-                            EntryRow("导出笔记与复习提纲", "生成本教材的 Markdown 笔记与可打印 PDF。", "book-export-notes", !ui.busy) {
-                                onExportNotes(book, book.readingPage)
-                            }
-                            ShelfDivider(line)
-                        }
-                    }
-                }
-            }
-            BoxWithConstraints(Modifier.fillMaxSize()
-                .padding(start = if (hinge != null) CoachV7.Space.s4 else CoachV7.Space.s7,
-                    top = if (hinge != null) CoachV7.Space.s4 else CoachV7.Space.s7,
-                    end = if (hinge != null) CoachV7.Space.s4 else CoachV7.Space.s8,
-                    bottom = if (hinge != null) CoachV7.Space.s4 else CoachV7.Space.s8)
-                .onGloballyPositioned { coords -> sheetOriginLeftDp = coords.positionInRoot().x / density.density }) {
-                val verticalSplit = if (book != null) bookVerticalSplit(maxWidth.value, maxHeight.value, sheetOriginLeftDp ?: 0f, hinge) else null
-                if (verticalSplit != null) {
-                    Row(Modifier.fillMaxSize()) {
-                        Column(Modifier.width(verticalSplit.leftDp.dp).fillMaxHeight().verticalScroll(scroll)
-                            .testTag("shelf-half-fold-left"), verticalArrangement = Arrangement.spacedBy(sectionSpacing)) {
-                            catalogHeader()
-                            catalogList()
-                        }
-                        Spacer(Modifier.width(verticalSplit.gapDp.dp).fillMaxHeight().testTag("shelf-half-fold-hinge"))
-                        Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rightScroll)
-                            .testTag("shelf-half-fold-right"), verticalArrangement = Arrangement.spacedBy(sectionSpacing)) {
-                            selectedActions()
-                        }
-                    }
-                } else {
-                    Column(Modifier.fillMaxWidth().verticalScroll(scroll), verticalArrangement = Arrangement.spacedBy(sectionSpacing)) {
-                        catalogHeader()
-                        selectedActions()
-                        catalogList()
-                    }
-                    BookScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = CoachV7.Space.s4))
-                }
+
+            // 一次拖入多份文件时，底部浮出单行询问条（建课程 / 建书单 / 分开单放）。
+            ui.pendingMultiDrop?.let { drop ->
+                MultiDropInquiryBar(
+                    count = drop.paths.size,
+                    enabled = !ui.busy,
+                    onCourse = { onMultiDropAction(MultiDropAction.COURSE) },
+                    onBooklist = { onMultiDropAction(MultiDropAction.BOOKLIST) },
+                    onSeparate = { onMultiDropAction(MultiDropAction.SEPARATE) },
+                    onDismiss = onDismissMultiDrop,
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+                )
             }
         }
     }
 }
 
+private fun collectionMeta(summary: CollectionSummary): String {
+    val count = summary.materialIds.size
+    return when (summary.record.kind) {
+        CollectionKind.COURSE -> buildString {
+            summary.record.examDate?.takeIf(String::isNotBlank)?.let { append("考试 $it · ") }
+            append(if (count == 0) "待添加材料" else "$count 份材料")
+        }
+        CollectionKind.BOOKLIST -> "$count 本书"
+        else -> "$count 份材料"
+    }
+}
+
 @Composable
-private fun ShelfDivider(color: androidx.compose.ui.graphics.Color) {
-    Spacer(Modifier.fillMaxWidth().height(1.dp).background(color))
+private fun EmptyRouteCard(
+    title: String,
+    meta: String,
+    tag: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = CoachTheme.colors
+    val shape = RoundedCornerShape(CoachV7.Radius.m)
+    PaperTile(
+        enabled = enabled,
+        modifier = modifier.border(1.dp, colors.borderSubtle, shape).testTag(tag),
+        onClick = onClick,
+        padding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+        spacing = 6.dp,
+    ) {
+        Text(title, style = MaterialTheme.typography.titleMedium, color = colors.fgPrimary)
+        CoachCardMeta(meta)
+    }
+}
+
+@Composable
+private fun HomeCollectionCard(
+    summary: CollectionSummary,
+    badge: String?,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val colors = CoachTheme.colors
+    val shape = RoundedCornerShape(CoachV7.Radius.m)
+    PaperTile(
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth().border(1.dp, colors.borderSubtle, shape)
+            .testTag("collection-${summary.record.id}"),
+        onClick = onClick,
+        padding = PaddingValues(horizontal = 18.dp, vertical = 14.dp),
+        spacing = 6.dp,
+    ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                summary.record.title,
+                style = MaterialTheme.typography.titleMedium,
+                color = colors.fgPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (badge != null) {
+                Text(
+                    badge,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.fgTertiary,
+                    modifier = Modifier.padding(start = 12.dp),
+                )
+            }
+        }
+        CoachCardMeta(collectionMeta(summary))
+    }
+}
+
+@Composable
+private fun HomeBookCard(
+    item: BookSummary,
+    current: Boolean,
+    enabled: Boolean,
+    activeImport: BookImportProgress? = null,
+    onCancelImport: () -> Unit = {},
+    onClick: () -> Unit,
+) {
+    val colors = CoachTheme.colors
+    val shape = RoundedCornerShape(CoachV7.Radius.m)
+    val statusSuffix = when {
+        activeImport != null -> " · 识别中 ${activeImport.page} / ${activeImport.total} 页"
+        item.pendingOcrPages > 0 -> " · 待识别 ${item.pendingOcrPages} 页"
+        item.learning -> " · 在学"
+        else -> ""
+    }
+    Column(
+        Modifier.fillMaxWidth()
+            .paperShadow("card", colors.dark)
+            .clip(shape)
+            .background(if (current) colors.surface1 else colors.surface2)
+            .border(1.dp, if (current) colors.actionPrimary.copy(alpha = 0.35f) else colors.borderSubtle, shape),
+    ) {
+        Column(
+            Modifier.fillMaxWidth()
+                .testTag("book-${item.id}")
+                .shelfClick(enabled, onClick)
+                .padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                item.title,
+                style = MaterialTheme.typography.titleMedium,
+                color = colors.fgPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            CoachCardMeta("${item.pageCount} 页 · 读到第 ${item.readingPage} 页$statusSuffix")
+        }
+        if (activeImport != null) {
+            BookImportProgressBar(
+                progress = activeImport,
+                onCancel = onCancelImport,
+                compact = true,
+                modifier = Modifier.fillMaxWidth()
+                    .padding(start = 18.dp, end = 18.dp, bottom = 12.dp)
+                    .testTag("book-import-progress"),
+            )
+        }
+    }
+}
+
+@Composable
+internal fun MultiDropInquiryBar(
+    count: Int,
+    enabled: Boolean,
+    onCourse: () -> Unit,
+    onBooklist: () -> Unit,
+    onSeparate: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = CoachTheme.colors
+    val shape = RoundedCornerShape(CoachV7.Radius.m)
+    Row(
+        modifier
+            .fillMaxWidth()
+            .paperShadow("sheet", colors.dark)
+            .clip(shape)
+            .background(colors.surface2)
+            .border(1.dp, colors.borderSubtle, shape)
+            .padding(horizontal = 16.dp, vertical = 10.dp)
+            .testTag("multi-drop-bar"),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "要把这 $count 份文件建成课程，还是建成书单。",
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.fgPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        PrimaryButton(onClick = onCourse, enabled = enabled, modifier = Modifier.testTag("multi-drop-course")) {
+            Text("建课程")
+        }
+        PaperButton(onClick = onBooklist, enabled = enabled, modifier = Modifier.testTag("multi-drop-booklist")) {
+            Text("建书单")
+        }
+        PaperButton(onClick = onSeparate, enabled = enabled, modifier = Modifier.testTag("multi-drop-separate")) {
+            Text("分开单放")
+        }
+        V7TextButton(onClick = onDismiss, enabled = enabled, modifier = Modifier.testTag("multi-drop-cancel"), ringInside = true) {
+            Text("取消")
+        }
+    }
 }
 
 /** Matches the shared V7 button hover, press, pointer and keyboard focus behavior on the sheet. */
@@ -222,71 +700,28 @@ private fun Modifier.shelfClick(enabled: Boolean, onClick: () -> Unit): Modifier
     }
     val shape = RoundedCornerShape(CoachV7.Radius.s)
     return v7FocusRing(shape).clip(shape)
-        .background(if (enabled && (hovered || pressed)) wash.compositeOver(colors.surface1) else androidx.compose.ui.graphics.Color.Transparent)
+        .background(if (enabled && (hovered || pressed)) wash.compositeOver(colors.surface1) else Color.Transparent)
         .pointerHoverIcon(if (enabled) PointerIcon.Hand else PointerIcon.Default)
         .clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
         .alpha(if (enabled) 1f else .5f)
 }
 
+/** A card-coloured block on the sheet that reads as one button: V7's card, focus ring and press. */
 @Composable
-private fun EntryRow(title: String, description: String, tag: String, enabled: Boolean, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().testTag(tag).shelfClick(enabled, onClick)
-        .padding(horizontal = CoachV7.Space.s3, vertical = CoachV7.Space.s3),
-        horizontalArrangement = Arrangement.spacedBy(CoachV7.Space.s4), verticalAlignment = Alignment.CenterVertically) {
-        Text(title, modifier = Modifier.width(112.dp), style = MaterialTheme.typography.titleMedium, fontFamily = LocalV7Fonts.current.display)
-        Text(description, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = CoachTheme.colors.fgSecondary)
-    }
-}
-
-@Composable
-private fun ShelfBookRow(
-    item: BookSummary,
-    current: Boolean,
+internal fun PaperTile(
     enabled: Boolean,
-    activeImport: BookImportProgress? = null,
-    onCancelImport: () -> Unit = {},
+    modifier: Modifier,
     onClick: () -> Unit,
+    padding: PaddingValues,
+    spacing: Dp,
+    content: @Composable ColumnScope.() -> Unit,
 ) {
     val colors = CoachTheme.colors
-    val wash = colors.actionPrimary.copy(alpha = 0.12f)
-    Column(Modifier.fillMaxWidth().background(if (current) wash else androidx.compose.ui.graphics.Color.Transparent)) {
-        Row(Modifier.fillMaxWidth().testTag("book-${item.id}")
-            .shelfClick(enabled, onClick).padding(horizontal = CoachV7.Space.s3, vertical = CoachV7.Space.s3),
-            horizontalArrangement = Arrangement.spacedBy(CoachV7.Space.s3), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.width(CoachV7.Space.s1).height(CoachV7.Space.s7)
-                .background(if (current) colors.actionPrimary else androidx.compose.ui.graphics.Color.Transparent))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s1)) {
-                Text(item.title, style = MaterialTheme.typography.titleMedium)
-                val statusSuffix = when {
-                    activeImport != null -> " · 识别中 ${activeImport.page} / ${activeImport.total} 页"
-                    item.pendingOcrPages > 0 -> " · 待识别 ${item.pendingOcrPages} 页"
-                    item.learning -> " · 在学"
-                    else -> ""
-                }
-                Text("${item.pageCount} 页 · 读到第 ${item.readingPage} 页$statusSuffix",
-                    style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, fontFamily = LocalV7Fonts.current.numbers)
-            }
-        }
-        if (activeImport != null) {
-            BookImportProgressBar(
-                progress = activeImport,
-                onCancel = onCancelImport,
-                compact = true,
-                modifier = Modifier.fillMaxWidth()
-                    .padding(start = CoachV7.Space.s3 + CoachV7.Space.s1 + CoachV7.Space.s3, end = CoachV7.Space.s3, bottom = CoachV7.Space.s3)
-                    .testTag("book-import-progress"),
-            )
-        }
-    }
-}
-
-/** A borderless card-coloured block on the sheet that reads as one button: V7's card, focus ring and press. */
-@Composable
-internal fun PaperTile(enabled: Boolean, modifier: Modifier, onClick: () -> Unit, padding: PaddingValues, spacing: Dp,
-    content: @Composable ColumnScope.() -> Unit) {
-    val colors = CoachTheme.colors
-    val shape = RoundedCornerShape(10.dp)
-    Column(modifier.v7FocusRing(shape).paperShadow("card", colors.dark).clip(shape).background(colors.surface2)
-        .clickable(enabled = enabled, role = Role.Button, onClick = onClick).alpha(if (enabled) 1f else .5f).padding(padding),
-        verticalArrangement = Arrangement.spacedBy(spacing), content = content)
+    val shape = RoundedCornerShape(CoachV7.Radius.m)
+    Column(
+        modifier.v7FocusRing(shape).paperShadow("card", colors.dark).clip(shape).background(colors.surface2)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick).alpha(if (enabled) 1f else .5f).padding(padding),
+        verticalArrangement = Arrangement.spacedBy(spacing),
+        content = content,
+    )
 }

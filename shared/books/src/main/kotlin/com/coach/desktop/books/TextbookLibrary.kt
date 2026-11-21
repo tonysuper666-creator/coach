@@ -32,6 +32,11 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipFile
 
+internal data class CollectionSummary(
+    val record: MaterialCollectionRecord,
+    val materialIds: List<String>,
+)
+
 internal data class StartupLoadSnapshot(
     val catalog: List<BookSummary>,
     val activeReview: LocalBookReview?,
@@ -40,6 +45,8 @@ internal data class StartupLoadSnapshot(
     val learningPath: String?,
     val reviews: List<LocalBookReview>,
     val ladder: LadderSession,
+    val todayQueue: LocalReviewQueue = LocalReviewQueue(emptyList(), 0),
+    val collections: List<CollectionSummary> = emptyList(),
 )
 
 /** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
@@ -86,7 +93,8 @@ internal class TextbookLibrary(
         db.createStatement().use { sql ->
             sql.executeQuery(
                 """SELECT b.id, b.title, COALESCE(ps.page_count, 0), COALESCE(ps.last_page, 0),
-                          b.reading_page, b.learning, COALESCE(ps.pending_ocr, 0), b.index_state
+                          b.reading_page, b.learning, COALESCE(ps.pending_ocr, 0), b.index_state,
+                          COALESCE(b.show_standalone, 1)
                    FROM books b
                    LEFT JOIN (
                        SELECT book, COUNT(*) AS page_count, MAX(page) AS last_page,
@@ -105,6 +113,7 @@ internal class TextbookLibrary(
                                 rows.getInt(5), rows.getInt(6) == 1,
                                 rows.getInt(7),
                                 indexState = indexStateCol,
+                                showStandalone = rows.getInt(9) != 0,
                             ),
                         )
                     }
@@ -269,8 +278,10 @@ internal class TextbookLibrary(
         }
         val learningPath = loadedBook?.let { learningPath(db, it.id) }
         val reviews = reviewStore.pending(db)
+        val todayQueue = reviewStore.queue(db)
+        val collections = collectionSummaries(db)
         val ladder = loadedBook?.let { ladder(db, it.id) } ?: LadderSession()
-        StartupLoadSnapshot(catalog, active, session, loadedBook, learningPath, reviews, ladder)
+        StartupLoadSnapshot(catalog, active, session, loadedBook, learningPath, reviews, ladder, todayQueue, collections)
     }
 
     @Synchronized fun pageTextLayout(bookId: String, page: Int): PageTextLayout? = database().use { db ->
@@ -884,6 +895,71 @@ internal class TextbookLibrary(
         val outline: List<BookOutlineItem>,
         val aspects: List<Triple<Int, Pair<Double, Double>, Int>>,
         val tier0Pages: List<BookPage>,
+        val initialReadingPage: Int,
+    )
+
+    internal fun initialBodyPage(pages: List<BookPage>, structure: BookStructure?): Int {
+        if (pages.isEmpty()) return 1
+        val validPages = pages.map { it.number }.toSet()
+        val firstNum = pages.minOf { it.number }
+        val nonBodyRoles = setOf(BookPageRole.TOC, BookPageRole.COPYRIGHT, BookPageRole.FRONT_MATTER, BookPageRole.BLANK)
+        // 1. Prefer the first canonical Chapter (or Section) node whose page is valid and not front matter/TOC/copyright.
+        val tocNodes = structure?.tocNodes.orEmpty()
+        val chapterStart = tocNodes.firstOrNull {
+            it.kind == TocNodeKind.CHAPTER && it.startPage in validPages &&
+                structure?.pageRole(it.startPage) !in nonBodyRoles
+        }?.startPage ?: tocNodes.firstOrNull {
+            it.kind == TocNodeKind.SECTION && it.startPage in validPages &&
+                structure?.pageRole(it.startPage) !in nonBodyRoles
+        }?.startPage
+        if (chapterStart != null) return chapterStart
+
+        // 2. Otherwise pick the first page classified as BODY with non-blank text (skips cover/copyright/TOC).
+        val firstBodyByRole = pages.firstOrNull { page ->
+            val role = structure?.pageRole(page.number)
+            role == BookPageRole.BODY && page.text.isNotBlank() && !looksLikeFrontMatterPage(page.text)
+        }?.number
+        if (firstBodyByRole != null) return firstBodyByRole
+
+        // 3. Heuristic fallback when structure is absent: skip obvious cover / copyright / TOC pages.
+        val scanLimit = minOf(pages.size, 12)
+        for (i in 0 until scanLimit) {
+            val page = pages[i]
+            if (page.text.isNotBlank() && !looksLikeFrontMatterPage(page.text)) return page.number
+        }
+        return firstNum
+    }
+
+    private fun looksLikeFrontMatterPage(text: String): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return true
+        val lines = trimmed.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+        if (lines.isEmpty()) return true
+        if (ExplainClassifier.copyrightMarkerCount(trimmed) >= 2) return true
+        val firstLine = lines.first()
+        if (frontMatterHeadingRegex.matches(firstLine)) return true
+        val lower = trimmed.lowercase()
+        if (("isbn" in lower || "copyright" in lower || "all rights reserved" in lower || "版权所有" in trimmed || "图书在版编目" in trimmed) &&
+            trimmed.length < 1500
+        ) return true
+        if ((firstLine.equals("Contents", ignoreCase = true) || firstLine.equals("Table of Contents", ignoreCase = true) ||
+                firstLine == "目录" || firstLine == "目 录") && lines.size >= 2
+        ) return true
+        // Cover-like page: very short title-only page with no chapter heading or body sentence.
+        if (lines.size <= 4 && trimmed.length < 140 && !chapterStartRegex.containsMatchIn(trimmed) &&
+            !trimmed.contains('。') && trimmed.count { it == '.' } <= 1
+        ) return true
+        return false
+    }
+
+    private val frontMatterHeadingRegex = Regex(
+        """^(?:Cover|Half\s+Title|Title\s+Page|Copyright(?:\s+Page)?|Brief\s+Contents|Detailed\s+Contents|Contents|Table\s+of\s+Contents|Blank\s+Page|List\s+of\s+(?:Figures|Tables|Boxes)|目\s*录|总\s*目\s*录|简\s*目|版权页|封面)$""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    private val chapterStartRegex = Regex(
+        """(?m)^(?:#{1,3}\s+|第[一二三四五六七八九十百0-9]+[章节篇]|Chapter\s+\d+|1\.\d+\s+)""",
+        RegexOption.IGNORE_CASE,
     )
 
     fun stageBookImportTier0(source: Path, control: BookImportControl = BookImportControl()): StagedBookImport {
@@ -913,14 +989,36 @@ internal class TextbookLibrary(
                             val crop = sheet.cropBox
                             Triple(index + 1, crop.width.toDouble() to crop.height.toDouble(), sheet.rotation)
                         }
-                        val tier0End = minOf(3, totalPages)
                         val plainExtractor = ReusablePlainPdfTextExtractor()
-                        val tier0Pages = (1..tier0End).map { pageNum ->
+                        val extractedMap = LinkedHashMap<Int, BookPage>()
+                        fun extractPage(pageNum: Int): BookPage = extractedMap.getOrPut(pageNum) {
                             control.check()
                             BookPage(pageNum, plainExtractor.extractPage(pdf, pageNum))
                         }
+                        val tier0End = minOf(3, totalPages)
+                        for (pageNum in 1..tier0End) extractPage(pageNum)
+                        val outlineStructure = BookTocWaterfall.buildTier0Structure(id, bookTitle, totalPages, outline)
+                        val outlineChapterPage = outlineStructure.tocNodes.firstOrNull {
+                            it.kind == TocNodeKind.CHAPTER && it.startPage in 1..totalPages
+                        }?.startPage
+                        val initialPage = if (outlineChapterPage != null) {
+                            for (p in outlineChapterPage..minOf(outlineChapterPage + 2, totalPages)) extractPage(p)
+                            outlineChapterPage
+                        } else {
+                            // Probe up to 10 early pages to skip cover/copyright/TOC pages and open straight to Ch.1 body.
+                            var found: Int? = null
+                            val probeLimit = minOf(10, totalPages)
+                            for (p in 1..probeLimit) {
+                                val pageObj = extractPage(p)
+                                if (pageObj.text.isNotBlank() && !looksLikeFrontMatterPage(pageObj.text)) {
+                                    found = p
+                                    break
+                                }
+                            }
+                            found ?: 1
+                        }
                         payloadReady = true
-                        Tier0PdfPayload(bookTitle, totalPages, outline, aspects, tier0Pages)
+                        Tier0PdfPayload(bookTitle, totalPages, outline, aspects, extractedMap.values.sortedBy { it.number }, initialPage)
                     },
                     commitAndTarget = { payload ->
                         control.check()
@@ -931,6 +1029,7 @@ internal class TextbookLibrary(
                         val tier0Structure = BookTocWaterfall.buildTier0Structure(id, payload.title, payload.totalPages, payload.outline).also {
                             it.deferResolvedLessons { it.toLessons(id, allTier0Pages) }
                         }
+                        val startPage = payload.initialReadingPage.coerceIn(1, payload.totalPages)
                         val target = original(id, "pdf")
                         var moved = false
                         database().use { db ->
@@ -941,7 +1040,7 @@ internal class TextbookLibrary(
                                 ).use { sql ->
                                     sql.setString(1, id); sql.setString(2, payload.title); sql.setString(3, "pdf")
                                     sql.setString(4, QuestionMode.CHOICE.name); sql.setLong(5, System.currentTimeMillis())
-                                    sql.setInt(6, 1); sql.setString(7, "TIER0"); sql.setString(8, "BOOK")
+                                    sql.setInt(6, startPage); sql.setString(7, "TIER0"); sql.setString(8, "BOOK")
                                     sql.setString(9, source.fileName?.toString()); sql.setLong(10, fileBytes)
                                     sql.executeUpdate()
                                 }
@@ -978,7 +1077,7 @@ internal class TextbookLibrary(
                             title = payload.title,
                             format = "pdf",
                             pages = allTier0Pages,
-                            readingPage = 1,
+                            readingPage = startPage,
                             lessonIndex = 0,
                             learning = false,
                             promptSeen = false,
@@ -1468,11 +1567,12 @@ internal class TextbookLibrary(
                 }
                 require(extracted.pages.isNotEmpty()) { "教材中没有可打开的页面。" }
                 val structure = BookStructurePlanner.plan(id, extracted.title, "pdf", extracted.pages, extracted.outline)
+                val startPage = initialBodyPage(extracted.pages, structure)
                 control.check()
                 db.prepareStatement("INSERT INTO books(id,title,format,mode,touched,reading_page,index_state,material_kind,source_filename,file_bytes) VALUES(?,?,?,?,?,?,?,?,?,?)").use { sql ->
                     sql.setString(1, id); sql.setString(2, extracted.title); sql.setString(3, "pdf")
                     sql.setString(4, QuestionMode.CHOICE.name); sql.setLong(5, System.currentTimeMillis())
-                    sql.setInt(6, extracted.pages.minOf { it.number }); sql.setString(7, "READY")
+                    sql.setInt(6, startPage); sql.setString(7, "READY")
                     sql.setString(8, "BOOK"); sql.setString(9, sourceFilename); sql.setLong(10, fileBytes)
                     sql.executeUpdate()
                 }
@@ -1513,6 +1613,7 @@ internal class TextbookLibrary(
     ): StagedBookImport {
         if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
         val structure = BookStructurePlanner.plan(id, extracted.title, format, extracted.pages, extracted.outline)
+        val startPage = initialBodyPage(extracted.pages, structure)
         val target = original(id, format)
         // The immutable source is in place before the single transaction makes it visible.
         Files.move(stage, target, StandardCopyOption.REPLACE_EXISTING)
@@ -1525,7 +1626,7 @@ internal class TextbookLibrary(
                 db.prepareStatement("INSERT INTO books(id,title,format,mode,touched,reading_page,index_state,material_kind,source_filename,file_bytes) VALUES(?,?,?,?,?,?,?,?,?,?)").use { sql ->
                     sql.setString(1, id); sql.setString(2, extracted.title); sql.setString(3, format)
                     sql.setString(4, QuestionMode.CHOICE.name); sql.setLong(5, System.currentTimeMillis())
-                    sql.setInt(6, extracted.pages.minOf { it.number }); sql.setString(7, "READY")
+                    sql.setInt(6, startPage); sql.setString(7, "READY")
                     sql.setString(8, "BOOK"); sql.setString(9, sourceFilename); sql.setLong(10, fileBytes)
                     sql.executeUpdate()
                 }
@@ -1807,6 +1908,15 @@ internal class TextbookLibrary(
         return searchBookPages(pages, query, limit)
     }
 
+    private fun collectionSummaries(db: Connection): List<CollectionSummary> {
+        if (!BookSchemaMigration.tableExists(db, "collections")) return emptyList()
+        return MaterialCollectionStore.collections(db).map { col ->
+            CollectionSummary(col, MaterialCollectionStore.materials(db, col.id).map { it.materialId })
+        }
+    }
+
+    @Synchronized fun collectionSummaries(): List<CollectionSummary> = database().use(::collectionSummaries)
+
     @Synchronized fun collections(): List<MaterialCollectionRecord> = database().use { db ->
         MaterialCollectionStore.collections(db)
     }
@@ -1819,8 +1929,25 @@ internal class TextbookLibrary(
         MaterialCollectionStore.attachMaterial(db, link)
     }
 
+    @Synchronized fun setBookShowStandalone(bookId: String, showStandalone: Boolean) = database().use { db ->
+        db.prepareStatement("UPDATE books SET show_standalone=? WHERE id=?").use { sql ->
+            sql.setInt(1, if (showStandalone) 1 else 0)
+            sql.setString(2, bookId)
+            sql.executeUpdate()
+        }
+    }
+
     @Synchronized fun collectionMaterials(collectionId: String): List<CollectionMaterialRecord> = database().use { db ->
         MaterialCollectionStore.materials(db, collectionId)
+    }
+
+    fun searchAllBooks(rawQuery: String, limitPerBook: Int = 5): List<Pair<BookSummary, BookSearchResult>> {
+        val query = rawQuery.trim()
+        if (query.isEmpty()) return emptyList()
+        return catalog().mapNotNull { summary ->
+            val result = searchBook(summary.id, query, limitPerBook)
+            if (result.hits.isNotEmpty() || summary.title.contains(query, ignoreCase = true)) summary to result else null
+        }
     }
 
     @Synchronized fun saveBookStructure(bookId: String, structure: BookStructure): Textbook {
@@ -1995,6 +2122,13 @@ internal class TextbookLibrary(
         reviewStore.pending(db)
     }
 
+    /** Today's FSRS-ranked single-card queue: at most 20 shown, the rest stay due and roll to tomorrow. */
+    @Synchronized fun reviewQueue(): LocalReviewQueue = database().use { db -> reviewStore.queue(db) }
+
+    @Synchronized fun fsrsState(book: String, lesson: String, mode: QuestionMode) = database().use { db ->
+        reviewStore.fsrsState(db, book, lesson, mode)
+    }
+
     @Synchronized fun review(book: String, lesson: String, mode: QuestionMode): LocalBookReview = database().use { db ->
         checkNotNull(reviewStore.find(db, book, lesson, mode)) { "这道复习题已不在书架中。" }
     }
@@ -2003,6 +2137,14 @@ internal class TextbookLibrary(
         database().use { db ->
             db.autoCommit = false
             try { reviewStore.saveRetry(db, review, answer); db.commit() }
+            catch (failure: Exception) { db.rollback(); throw failure }
+        }
+    }
+
+    @Synchronized fun saveReviewRating(review: LocalBookReview, rating: com.coach.domain.fsrs.FsrsRating, answer: PracticeAnswer) {
+        database().use { db ->
+            db.autoCommit = false
+            try { reviewStore.saveRating(db, review, rating, answer); db.commit() }
             catch (failure: Exception) { db.rollback(); throw failure }
         }
     }

@@ -195,15 +195,30 @@ internal fun runWindowsTextbooks() {
             )) {
             WindowsReadingMinimum(window)
             WindowsTextbookGate(settings) {
-                WindowsTextbookHost(controller, drafts, exams, chooseBook = {
-                    withContext(Dispatchers.Swing) {
-                        val dialog = FileDialog(window, "上传教材 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)
-                        try {
-                            dialog.isVisible = true
-                            dialog.file?.let { Path.of(dialog.directory, it) }
-                        } finally { dialog.dispose() }
-                    }
-                })
+                WindowsTextbookHost(
+                    controller = controller,
+                    drafts = drafts,
+                    exams = exams,
+                    chooseBooks = {
+                        withContext(Dispatchers.Swing) {
+                            val dialog = FileDialog(window, "导入文件 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)
+                            dialog.isMultipleMode = true
+                            try {
+                                dialog.isVisible = true
+                                dialog.files.map { it.toPath() }
+                            } finally { dialog.dispose() }
+                        }
+                    },
+                    chooseBook = {
+                        withContext(Dispatchers.Swing) {
+                            val dialog = FileDialog(window, "导入文件 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)
+                            try {
+                                dialog.isVisible = true
+                                dialog.file?.let { Path.of(dialog.directory, it) }
+                            } finally { dialog.dispose() }
+                        }
+                    },
+                )
             }
             TextbookCloseWarning(closeGuard)
             WindowsUpdatePrompt(save = {

@@ -11,6 +11,8 @@ import java.sql.DriverManager
 import java.sql.SQLException
 
 internal enum class CollectionKind {
+    /** One book read on its own; the collection only carries order, anchor and lock state. */
+    SINGLE_BOOK,
     COURSE,
     BOOKLIST,
     CUSTOM,
@@ -23,6 +25,12 @@ internal data class MaterialCollectionRecord(
     val metadataJson: String = "{}",
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = createdAt,
+    val sortOrder: Int = 0,
+    val examDate: String? = null,
+    val lastActiveAnchorJson: String? = null,
+    val sourceHash: String? = null,
+    val userLocked: Boolean = false,
+    val archived: Boolean = false,
 )
 
 internal data class CollectionMaterialRecord(
@@ -32,6 +40,10 @@ internal data class CollectionMaterialRecord(
     val ordinal: Int = 0,
     val addedAt: Long = System.currentTimeMillis(),
     val metadataJson: String = "{}",
+    val weekNum: Int? = null,
+    val userLocked: Boolean = false,
+    val authorityRank: Int = 2,
+    val sourceHash: String? = null,
 )
 
 /**
@@ -44,7 +56,12 @@ internal data class CollectionMaterialRecord(
  */
 internal object BookSchemaMigration {
     const val V2_SCHEMA_VERSION = 2
+
+    /** 2.0-W2: single book, course and book list share collections, chapter progress and FSRS cards. */
+    const val V3_SCHEMA_VERSION = 3
+    const val CURRENT_SCHEMA_VERSION = V3_SCHEMA_VERSION
     const val V1_BACKUP_FILENAME = "library.sqlite.v1.bak"
+    const val V2_BACKUP_FILENAME = "library.sqlite.v2.bak"
 
     private val CORE_V1_TABLES = listOf(
         "CREATE TABLE IF NOT EXISTS books(id TEXT PRIMARY KEY,title TEXT NOT NULL,format TEXT NOT NULL,reading_page INTEGER NOT NULL DEFAULT 1,lesson_index INTEGER NOT NULL DEFAULT 0,learning INTEGER NOT NULL DEFAULT 0,prompt_seen INTEGER NOT NULL DEFAULT 0,mode TEXT NOT NULL DEFAULT 'NONE',touched INTEGER NOT NULL)",
@@ -74,26 +91,133 @@ internal object BookSchemaMigration {
         "CREATE TABLE IF NOT EXISTS reading_settings(name TEXT PRIMARY KEY, value TEXT NOT NULL)",
     )
 
-    private val V2_TABLES = listOf(
-        """CREATE TABLE IF NOT EXISTS collections(
+    private val COLLECTIONS_DDL = """CREATE TABLE IF NOT EXISTS collections(
             id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL CHECK(kind IN ('COURSE','BOOKLIST','CUSTOM')),
+            kind TEXT NOT NULL CHECK(kind IN ('SINGLE_BOOK','COURSE','BOOKLIST','CUSTOM')),
             title TEXT NOT NULL,
             metadata_json TEXT NOT NULL DEFAULT '{}',
             created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
-        )""".trimIndent(),
-        """CREATE TABLE IF NOT EXISTS collection_materials(
+            updated_at INTEGER NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            exam_date TEXT,
+            last_active_anchor_json TEXT,
+            source_hash TEXT,
+            user_locked INTEGER NOT NULL DEFAULT 0,
+            archived INTEGER NOT NULL DEFAULT 0
+        )""".trimIndent()
+
+    private val COLLECTION_MATERIALS_DDL = """CREATE TABLE IF NOT EXISTS collection_materials(
             collection_id TEXT NOT NULL,
             material_id TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'PRIMARY',
             ordinal INTEGER NOT NULL DEFAULT 0,
             added_at INTEGER NOT NULL,
             metadata_json TEXT NOT NULL DEFAULT '{}',
+            week_num INTEGER,
+            user_locked INTEGER NOT NULL DEFAULT 0,
+            authority_rank INTEGER NOT NULL DEFAULT 2,
+            source_hash TEXT,
             PRIMARY KEY(collection_id, material_id),
             FOREIGN KEY(collection_id) REFERENCES collections(id) ON DELETE CASCADE,
             FOREIGN KEY(material_id) REFERENCES books(id) ON DELETE CASCADE
+        )""".trimIndent()
+
+    /** FSRS-5 memory state per review card; `book_reviews` keeps the question snapshot and the history. */
+    val BOOK_FSRS_CARDS_DDL = """CREATE TABLE IF NOT EXISTS book_fsrs_cards(
+            book TEXT NOT NULL,
+            lesson TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            stability REAL,
+            difficulty REAL,
+            last_review_day INTEGER,
+            due_day INTEGER NOT NULL,
+            reps INTEGER NOT NULL DEFAULT 0,
+            lapses INTEGER NOT NULL DEFAULT 0,
+            origin TEXT NOT NULL DEFAULT 'NEW',
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(book, lesson, mode)
+        )""".trimIndent()
+
+    private val V3_TABLES = listOf(
+        """CREATE TABLE IF NOT EXISTS book_chapter_progress(
+            book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+            toc_node_id TEXT NOT NULL,
+            pages_total INTEGER NOT NULL,
+            pages_dwelled INTEGER NOT NULL DEFAULT 0,
+            dwelled_pages_json TEXT NOT NULL DEFAULT '[]',
+            read_state TEXT NOT NULL DEFAULT 'UNREAD' CHECK(read_state IN ('UNREAD','PARTIAL','READ')),
+            manual_override INTEGER NOT NULL DEFAULT 0,
+            practice_draft_json TEXT NOT NULL DEFAULT '{}',
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(book_id, toc_node_id)
         )""".trimIndent(),
+        """CREATE TABLE IF NOT EXISTS course_topics(
+            topic_id TEXT PRIMARY KEY,
+            collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+            week_label TEXT NOT NULL,
+            ord INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            exam_status TEXT NOT NULL DEFAULT 'EXAMINABLE' CHECK(exam_status IN ('EXAMINABLE','EXCLUDED','PENDING_MATERIALS')),
+            user_locked INTEGER NOT NULL DEFAULT 0,
+            exam_weight REAL NOT NULL DEFAULT 1.0,
+            pack_payload_json TEXT,
+            pack_sources_hash TEXT,
+            practice_draft_json TEXT NOT NULL DEFAULT '{}',
+            mastery_state TEXT NOT NULL DEFAULT 'UNSEEN',
+            updated_at INTEGER NOT NULL
+        )""".trimIndent(),
+        "CREATE INDEX IF NOT EXISTS idx_course_topics_order ON course_topics(collection_id, ord)",
+        """CREATE TABLE IF NOT EXISTS course_topic_sources(
+            topic_id TEXT NOT NULL REFERENCES course_topics(topic_id) ON DELETE CASCADE,
+            book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+            toc_node_id TEXT,
+            start_page INTEGER NOT NULL,
+            end_page INTEGER NOT NULL,
+            source_role TEXT NOT NULL,
+            user_locked INTEGER NOT NULL DEFAULT 0,
+            scope_note TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(topic_id, book_id, start_page, end_page)
+        )""".trimIndent(),
+        """CREATE TABLE IF NOT EXISTS concept_entities(
+            concept_id TEXT PRIMARY KEY,
+            collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+            canonical_name TEXT NOT NULL,
+            aliases_json TEXT NOT NULL DEFAULT '[]',
+            muted INTEGER NOT NULL DEFAULT 0,
+            muted_at INTEGER,
+            shared_note TEXT NOT NULL DEFAULT ''
+        )""".trimIndent(),
+        """CREATE TABLE IF NOT EXISTS concept_mentions(
+            mention_id TEXT PRIMARY KEY,
+            concept_id TEXT NOT NULL REFERENCES concept_entities(concept_id) ON DELETE CASCADE,
+            book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+            toc_node_id TEXT,
+            chunk_id TEXT,
+            page INTEGER NOT NULL,
+            offset_utf16 INTEGER NOT NULL DEFAULT 0,
+            quote_anchor TEXT NOT NULL,
+            mention_role TEXT NOT NULL CHECK(mention_role IN ('PRIMARY_DEF','FORMAL_MODEL','EMPIRICAL_TEST','WORKED_PROBLEM','COUNTER_VIEW')),
+            claim_summary TEXT NOT NULL
+        )""".trimIndent(),
+        "CREATE INDEX IF NOT EXISTS idx_concept_mentions_book ON concept_mentions(book_id, page)",
+        """CREATE TABLE IF NOT EXISTS concept_links(
+            link_id TEXT PRIMARY KEY,
+            collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+            concept_id TEXT NOT NULL REFERENCES concept_entities(concept_id) ON DELETE CASCADE,
+            from_mention_id TEXT NOT NULL REFERENCES concept_mentions(mention_id) ON DELETE CASCADE,
+            to_mention_id TEXT NOT NULL REFERENCES concept_mentions(mention_id) ON DELETE CASCADE,
+            relation_type TEXT NOT NULL CHECK(relation_type IN ('CONSISTENT_DEEPENING','NOTATION_OR_BOUNDARY_DIFF','EMPIRICAL_CHALLENGE','OPPOSING_VIEW','PREREQUISITE')),
+            diff_summary TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            dismissed INTEGER NOT NULL DEFAULT 0
+        )""".trimIndent(),
+        BOOK_FSRS_CARDS_DDL,
+        "CREATE INDEX IF NOT EXISTS idx_book_fsrs_cards_due ON book_fsrs_cards(due_day)",
+    )
+
+    private val V2_TABLES = listOf(
+        COLLECTIONS_DDL,
+        COLLECTION_MATERIALS_DDL,
         """CREATE TABLE IF NOT EXISTS book_toc_nodes(
             book TEXT NOT NULL,
             id TEXT NOT NULL,
@@ -161,6 +285,11 @@ internal object BookSchemaMigration {
         "book_bookmarks", "book_page_aspects", "book_visual_pages", "pages_fts_meta",
     )
 
+    private val REQUIRED_V3_TABLES = REQUIRED_V2_TABLES + setOf(
+        "book_chapter_progress", "course_topics", "course_topic_sources",
+        "concept_entities", "concept_mentions", "concept_links", "book_fsrs_cards",
+    )
+
     fun upgradeAndMigrate(
         directory: Path,
         openConnection: () -> Connection,
@@ -168,8 +297,9 @@ internal object BookSchemaMigration {
         onPostCommit: (Connection?) -> Unit = {},
     ) {
         val dbFile = directory.resolve("library.sqlite")
-        val backupFile = directory.resolve(V1_BACKUP_FILENAME)
+        var backupFile = directory.resolve(V1_BACKUP_FILENAME)
         var upgradingFromV1 = false
+        var upgradingExisting = false
         var currentVersion = 0
         var schemaComplete = false
 
@@ -185,11 +315,15 @@ internal object BookSchemaMigration {
                 }
                 val hadBooks = "books" in existingTables
                 upgradingFromV1 = hadBooks && currentVersion < V2_SCHEMA_VERSION
-                if (upgradingFromV1) {
+                upgradingExisting = hadBooks && currentVersion < CURRENT_SCHEMA_VERSION
+                if (!upgradingFromV1) backupFile = directory.resolve(V2_BACKUP_FILENAME)
+                if (upgradingExisting) {
                     runCatching { probe.createStatement().use { it.execute("PRAGMA wal_checkpoint(TRUNCATE)") } }
                 }
-                schemaComplete = currentVersion >= V2_SCHEMA_VERSION &&
-                    REQUIRED_V2_TABLES.all { it in existingTables } &&
+                schemaComplete = currentVersion >= CURRENT_SCHEMA_VERSION &&
+                    REQUIRED_V3_TABLES.all { it in existingTables } &&
+                    "show_standalone" in tableColumns(probe, "books") &&
+                    "week_num" in tableColumns(probe, "collection_materials") &&
                     "index_state" in tableColumns(probe, "books") &&
                     "text_pending" in tableColumns(probe, "pages") &&
                     "due_day" in tableColumns(probe, "book_reviews") &&
@@ -199,7 +333,7 @@ internal object BookSchemaMigration {
                     return
                 }
             }
-            if (upgradingFromV1 && !Files.exists(backupFile)) {
+            if (upgradingExisting && !Files.exists(backupFile)) {
                 createVerifiedBackup(dbFile, backupFile)
             }
         }
@@ -213,6 +347,7 @@ internal object BookSchemaMigration {
                     }
                     val addedIndexState = ensureColumn(db, "books", "index_state", "TEXT NOT NULL DEFAULT 'READY'")
                     ensureColumn(db, "books", "material_kind", "TEXT NOT NULL DEFAULT 'BOOK'")
+                    ensureColumn(db, "books", "show_standalone", "INTEGER NOT NULL DEFAULT 1")
                     ensureColumn(db, "books", "source_filename", "TEXT")
                     ensureColumn(db, "books", "file_bytes", "INTEGER NOT NULL DEFAULT 0")
                     ensureColumn(db, "books", "sync_epoch", "INTEGER NOT NULL DEFAULT 0")
@@ -222,6 +357,10 @@ internal object BookSchemaMigration {
 
                     db.createStatement().use { sql ->
                         for (ddl in V2_TABLES) sql.execute(ddl)
+                    }
+                    upgradeCollectionsToV3(db)
+                    db.createStatement().use { sql ->
+                        for (ddl in V3_TABLES) sql.execute(ddl)
                     }
                     BookFtsStore.migrate(db)
                     onInTransaction(db)
@@ -235,7 +374,7 @@ internal object BookSchemaMigration {
                             )
                         }
                     }
-                    db.createStatement().use { it.execute("PRAGMA user_version = $V2_SCHEMA_VERSION") }
+                    db.createStatement().use { it.execute("PRAGMA user_version = $CURRENT_SCHEMA_VERSION") }
                     db.createStatement().use { it.execute("COMMIT") }
                 } catch (failure: Throwable) {
                     runCatching { db.createStatement().use { it.execute("ROLLBACK") } }
@@ -244,13 +383,51 @@ internal object BookSchemaMigration {
                 onPostCommit(db)
             }
         } catch (failure: Throwable) {
-            if (upgradingFromV1 && Files.isRegularFile(backupFile) && !isHealthySqlite(dbFile)) {
+            if (upgradingExisting && Files.isRegularFile(backupFile) && !isHealthySqlite(dbFile)) {
                 runCatching {
                     Files.copy(backupFile, dbFile, StandardCopyOption.REPLACE_EXISTING)
                 }
             }
             throw failure
         }
+    }
+
+    /**
+     * v2 `collections` only allowed COURSE/BOOKLIST/CUSTOM. SQLite cannot widen a CHECK in place, so both
+     * collection tables are rebuilt once: rename aside, recreate, copy every shared column, then drop the old copies.
+     * Child rows are copied before either old table is dropped, so nothing is lost even with foreign keys on.
+     */
+    private fun upgradeCollectionsToV3(db: Connection) {
+        val collectionsSql = db.prepareStatement(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='collections'",
+        ).use { sql -> sql.executeQuery().use { if (it.next()) it.getString(1).orEmpty() else "" } }
+        if ("SINGLE_BOOK" !in collectionsSql) {
+            db.createStatement().use { sql ->
+                sql.execute("DROP TABLE IF EXISTS collection_materials_v2_old")
+                sql.execute("DROP TABLE IF EXISTS collections_v2_old")
+                sql.execute("ALTER TABLE collection_materials RENAME TO collection_materials_v2_old")
+                sql.execute("ALTER TABLE collections RENAME TO collections_v2_old")
+                sql.execute(COLLECTIONS_DDL)
+                sql.execute(COLLECTION_MATERIALS_DDL)
+            }
+            copySharedColumns(db, "collections_v2_old", "collections")
+            copySharedColumns(db, "collection_materials_v2_old", "collection_materials")
+            db.createStatement().use { sql ->
+                sql.execute("DROP TABLE collection_materials_v2_old")
+                sql.execute("DROP TABLE collections_v2_old")
+            }
+        }
+        ensureColumn(db, "collection_materials", "week_num", "INTEGER")
+        ensureColumn(db, "collection_materials", "user_locked", "INTEGER NOT NULL DEFAULT 0")
+        ensureColumn(db, "collection_materials", "authority_rank", "INTEGER NOT NULL DEFAULT 2")
+        ensureColumn(db, "collection_materials", "source_hash", "TEXT")
+    }
+
+    private fun copySharedColumns(db: Connection, from: String, to: String) {
+        val target = tableColumns(db, to)
+        val shared = tableColumns(db, from).filter { it in target }.joinToString(",")
+        if (shared.isEmpty()) return
+        db.createStatement().use { it.executeUpdate("INSERT INTO $to($shared) SELECT $shared FROM $from") }
     }
 
     internal fun createVerifiedBackup(sourceDb: Path, backupTarget: Path) {
@@ -671,10 +848,14 @@ internal object BookVisualPageStore {
 internal object MaterialCollectionStore {
     fun upsertCollection(db: Connection, record: MaterialCollectionRecord) {
         db.prepareStatement(
-            """INSERT INTO collections(id, kind, title, metadata_json, created_at, updated_at)
-               VALUES(?,?,?,?,?,?)
+            """INSERT INTO collections(id, kind, title, metadata_json, created_at, updated_at,
+                 sort_order, exam_date, last_active_anchor_json, source_hash, user_locked, archived)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, title=excluded.title,
-               metadata_json=excluded.metadata_json, updated_at=excluded.updated_at""".trimIndent(),
+               metadata_json=excluded.metadata_json, updated_at=excluded.updated_at,
+               sort_order=excluded.sort_order, exam_date=excluded.exam_date,
+               last_active_anchor_json=excluded.last_active_anchor_json, source_hash=excluded.source_hash,
+               user_locked=excluded.user_locked, archived=excluded.archived""".trimIndent(),
         ).use { sql ->
             sql.setString(1, record.id)
             sql.setString(2, record.kind.name)
@@ -682,16 +863,25 @@ internal object MaterialCollectionStore {
             sql.setString(4, record.metadataJson)
             sql.setLong(5, record.createdAt)
             sql.setLong(6, record.updatedAt)
+            sql.setInt(7, record.sortOrder)
+            sql.setString(8, record.examDate)
+            sql.setString(9, record.lastActiveAnchorJson)
+            sql.setString(10, record.sourceHash)
+            sql.setInt(11, if (record.userLocked) 1 else 0)
+            sql.setInt(12, if (record.archived) 1 else 0)
             sql.executeUpdate()
         }
     }
 
     fun attachMaterial(db: Connection, link: CollectionMaterialRecord) {
         db.prepareStatement(
-            """INSERT INTO collection_materials(collection_id, material_id, role, ordinal, added_at, metadata_json)
-               VALUES(?,?,?,?,?,?)
+            """INSERT INTO collection_materials(collection_id, material_id, role, ordinal, added_at, metadata_json,
+                 week_num, user_locked, authority_rank, source_hash)
+               VALUES(?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(collection_id, material_id) DO UPDATE SET role=excluded.role,
-               ordinal=excluded.ordinal, metadata_json=excluded.metadata_json""".trimIndent(),
+               ordinal=excluded.ordinal, metadata_json=excluded.metadata_json, week_num=excluded.week_num,
+               user_locked=excluded.user_locked, authority_rank=excluded.authority_rank,
+               source_hash=excluded.source_hash""".trimIndent(),
         ).use { sql ->
             sql.setString(1, link.collectionId)
             sql.setString(2, link.materialId)
@@ -699,13 +889,21 @@ internal object MaterialCollectionStore {
             sql.setInt(4, link.ordinal)
             sql.setLong(5, link.addedAt)
             sql.setString(6, link.metadataJson)
+            if (link.weekNum == null) sql.setNull(7, java.sql.Types.INTEGER) else sql.setInt(7, link.weekNum)
+            sql.setInt(8, if (link.userLocked) 1 else 0)
+            sql.setInt(9, link.authorityRank)
+            sql.setString(10, link.sourceHash)
             sql.executeUpdate()
         }
     }
 
     fun collections(db: Connection): List<MaterialCollectionRecord> =
         db.createStatement().use { sql ->
-            sql.executeQuery("SELECT id, kind, title, metadata_json, created_at, updated_at FROM collections ORDER BY updated_at DESC, id").use { rows ->
+            sql.executeQuery(
+                """SELECT id, kind, title, metadata_json, created_at, updated_at, sort_order, exam_date,
+                     last_active_anchor_json, source_hash, user_locked, archived
+                   FROM collections ORDER BY updated_at DESC, id""".trimIndent(),
+            ).use { rows ->
                 buildList {
                     while (rows.next()) {
                         add(
@@ -716,6 +914,12 @@ internal object MaterialCollectionStore {
                                 metadataJson = rows.getString("metadata_json"),
                                 createdAt = rows.getLong("created_at"),
                                 updatedAt = rows.getLong("updated_at"),
+                                sortOrder = rows.getInt("sort_order"),
+                                examDate = rows.getString("exam_date"),
+                                lastActiveAnchorJson = rows.getString("last_active_anchor_json"),
+                                sourceHash = rows.getString("source_hash"),
+                                userLocked = rows.getInt("user_locked") != 0,
+                                archived = rows.getInt("archived") != 0,
                             ),
                         )
                     }
@@ -725,7 +929,9 @@ internal object MaterialCollectionStore {
 
     fun materials(db: Connection, collectionId: String): List<CollectionMaterialRecord> =
         db.prepareStatement(
-            "SELECT collection_id, material_id, role, ordinal, added_at, metadata_json FROM collection_materials WHERE collection_id=? ORDER BY ordinal, added_at",
+            """SELECT collection_id, material_id, role, ordinal, added_at, metadata_json,
+                 week_num, user_locked, authority_rank, source_hash
+               FROM collection_materials WHERE collection_id=? ORDER BY ordinal, added_at""".trimIndent(),
         ).use { sql ->
             sql.setString(1, collectionId)
             sql.executeQuery().use { rows ->
@@ -739,6 +945,10 @@ internal object MaterialCollectionStore {
                                 ordinal = rows.getInt("ordinal"),
                                 addedAt = rows.getLong("added_at"),
                                 metadataJson = rows.getString("metadata_json"),
+                                weekNum = rows.getInt("week_num").takeUnless { rows.wasNull() },
+                                userLocked = rows.getInt("user_locked") != 0,
+                                authorityRank = rows.getInt("authority_rank"),
+                                sourceHash = rows.getString("source_hash"),
                             ),
                         )
                     }

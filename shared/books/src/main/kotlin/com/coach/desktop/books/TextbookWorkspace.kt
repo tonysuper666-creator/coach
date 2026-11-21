@@ -62,7 +62,11 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     sourceResolver: BookSourceResolver = remember(controller.library) { BookSourceResolver(controller.library) },
     hinge: Hinge? = LocalBookHinge.current,
     onExportNotes: ((Textbook, Int) -> Unit)? = null,
-    releasePickedBook: (Path) -> Unit = {}, retryState: ShellRetryState? = null, chooseBook: suspend () -> Path?) {
+    releasePickedBook: (Path) -> Unit = {}, retryState: ShellRetryState? = null,
+    onNewCourse: () -> Unit = {},
+    onNewBooklist: () -> Unit = {},
+    onOpenCollection: (CollectionSummary) -> Unit = {},
+    chooseBook: suspend () -> Path?) {
     val explainer = remember(controller.library) { BookExplainer(library = controller.library) }
     val aiEnabled = LocalReadingAiExplain.current
     val bookStructureProvider = remember(explainer, aiEnabled) {
@@ -251,9 +255,13 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                     val book = ui.book
                     when {
                         !ui.initialized && ui.screen == BookScreen.HOME && book == null && ui.catalog.isEmpty() -> {
-                            Box(Modifier.fillMaxSize().testTag("library-loading"))
+                            // 首次从 SQLite 载入时只给一组安静的呼吸点，绝不闪空态（UX-3）。
+                            Box(Modifier.fillMaxSize().testTag("library-loading"), contentAlignment = androidx.compose.ui.Alignment.Center) {
+                                com.coach.ui.v7.CoachLoadingDots(label = "正在打开书架…")
+                            }
                         }
-                        ui.screen == BookScreen.HOME || book == null -> LibraryHome(ui,
+                        ui.screen == BookScreen.HOME || (book == null && ui.screen != BookScreen.REVIEWS && ui.screen != BookScreen.REVIEWING) -> LibraryHome(
+                            ui = ui,
                             onImport = {
                                 scope.launch {
                                     chooseBook()?.let { picked ->
@@ -261,22 +269,48 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                     }
                                 }
                             },
-                            onSelect = { run { controller.select(it) } }, onRead = { run { controller.read() } },
+                            onSelect = { run { controller.select(it) } },
+                            onRead = { run { controller.read() } },
                             onLearn = { run { controller.read() } },
                             onPath = { path -> run { if (drafts.flush()) controller.learn(path) } },
                             onCancelImport = controller::cancelImport,
                             hinge = hinge,
-                            onExportNotes = onExportNotes)
+                            onExportNotes = onExportNotes,
+                            onOpenBook = { id -> run { controller.openBook(id) } },
+                            onOpenReviews = { run { if (drafts.flush()) controller.showReviews() } },
+                            onNewCourse = onNewCourse,
+                            onNewBooklist = onNewBooklist,
+                            onOpenCollection = onOpenCollection,
+                            onMultiDropAction = { action -> controller.resolveMultiDrop(action) },
+                            onDismissMultiDrop = controller::dismissMultiDrop,
+                        )
                         ui.screen == BookScreen.REVIEWS -> LocalBookReviews(ui,
                             onBack = { run { controller.back() } },
                             onOpen = { entry -> run { if (drafts.flush()) controller.openReview(entry) } })
                         ui.screen == BookScreen.REVIEWING && ui.review != null -> {
                             val storedReview = checkNotNull(ui.review)
                             val review = storedReview.copy(answer = drafts.currentReview(storedReview))
-                            LocalBookReviewQuestion(review, !ui.busy, practiceSourceFocus, returnFocus,
-                                onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
+                            LocalBookReviewQuestion(
+                                review = review,
+                                enabled = !ui.busy,
+                                sourceFocus = practiceSourceFocus,
+                                returnFocus = returnFocus,
+                                onFocusRestored = { returnFocus = null },
+                                onBack = { run { controller.back() } },
                                 onSource = { openPracticeSource(review.practice) },
-                                onAnswer = { drafts.saveReview(review, it) })
+                                onAnswer = { drafts.saveReview(review, it) },
+                                position = ui.todayQueue.cards.indexOfFirst {
+                                    it.book == review.book && it.lesson == review.lesson && it.mode == review.mode
+                                }.takeIf { it >= 0 }?.let { it + 1 to ui.todayQueue.cards.size },
+                                deferred = ui.todayQueue.deferred,
+                                onNext = { run { if (drafts.flush()) controller.nextReview() } },
+                                onRate = { rating, ans ->
+                                    run {
+                                        drafts.flush()
+                                        controller.rateReview(rating, ans)
+                                    }
+                                },
+                            )
                         }
                         ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library, learningSupport,
                             practiceSource = practiceSource, pageFocus = readerFocus, explainProvider = explainer,
@@ -307,9 +341,10 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             }, onBack = { returnFromReader() },
                             onLearn = { run { if (drafts.flush()) controller.learn(LearningPath.QUESTION_FIRST) } })
                         else -> {
-                            val lesson = book.lessons.getOrNull(book.lessonIndex)
+                            val activeBook = checkNotNull(book)
+                            val lesson = activeBook.lessons.getOrNull(activeBook.lessonIndex)
                             val displayed = if (lesson == null) ui else ui.copy(
-                                answer = drafts.current(book.id, lesson.id, book.questionMode, ui.answer))
+                                answer = drafts.current(activeBook.id, lesson.id, activeBook.questionMode, ui.answer))
                             TextbookLearning(displayed, learningSupport, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
                             explanationReply, answerExplain, answerExplainReply, sourceResolver, citationFocus, citationIndex,
                             onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
@@ -326,7 +361,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             },
                             onCitationRefused = {
                                 val current = controller.state.value
-                                if (current.screen == BookScreen.LEARNING && current.book?.id == book.id &&
+                                if (current.screen == BookScreen.LEARNING && current.book?.id == activeBook.id &&
                                     current.book.lessons.getOrNull(current.book.lessonIndex)?.id == lesson?.id) {
                                     runCatching { lessonSourceFocus.requestFocus() }
                                 }

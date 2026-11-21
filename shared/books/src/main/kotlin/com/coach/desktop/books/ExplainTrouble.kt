@@ -92,15 +92,16 @@ internal fun ExplainTroubleLine(reply: BookLearningReply.Unavailable, onRetry: (
 }
 
 /**
- * 逐书同意里写清原文去向。三处同意（原文页讲解、选段提问、答完题讲解）共用这几句，免得说法不一。
- * 李政的 Mac 只是中转；生成走 Anthropic 或 OpenAI 的 API，不发到别处；整本书不离开这台电脑。
+ * 设置里「AI 讲解」关着时，三处入口（原文页讲解、选段提问、答完题讲解）共用这几句写清原文去向。
+ * 不再逐本书问：打开一次就对所有书生效，随时可以在设置里关掉。整本书不离开这台电脑。
  */
 internal object ExplainPrivacy {
     const val TITLE = "这段原文会发到哪里"
-    private const val ROUTE = "会经服务发给 Anthropic 或 OpenAI 的 API，不发到别处。API 默认不拿它训练模型。"
+    private const val ROUTE = "会发送给学习服务用于生成讲解，不作其他用途。"
 
-    fun explain(title: String) = "这段和前后各一段原文${ROUTE}整本书留在这台电脑上，《$title》只问这一次。"
-    fun page(title: String) = "这一页的正文${ROUTE}整本书留在这台电脑上，《$title》只问这一次。"
-    fun ask(title: String) = "你选的这段原文和你的问题${ROUTE}整本书留在这台电脑上，《$title》只问这一次。"
-    fun answer(title: String) = "刚做的这段原文和前后各一段${ROUTE}整本书留在这台电脑上，《$title》只问这一次。"
+    private const val GLOBAL = "整本书留在本地设备。开启后对所有书生效，可随时在设置里关闭。"
+    fun explain(@Suppress("UNUSED_PARAMETER") title: String) = "这段和前后各一段原文${ROUTE}$GLOBAL"
+    fun page(@Suppress("UNUSED_PARAMETER") title: String) = "这一页的正文${ROUTE}$GLOBAL"
+    fun ask(@Suppress("UNUSED_PARAMETER") title: String) = "你选的这段原文和你的问题${ROUTE}$GLOBAL"
+    fun answer(@Suppress("UNUSED_PARAMETER") title: String) = "刚做的这段原文和前后各一段${ROUTE}$GLOBAL"
 }

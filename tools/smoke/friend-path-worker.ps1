@@ -263,7 +263,7 @@ function Click-Label([int]$n, [string[]]$labels, [string]$why, [int]$sec = 15) {
 # 但「找不到」也要分两种：按钮真的没了（页面变了）就停手；按钮还在、只是这十几秒被
 # ui.busy 弄灰、标签被 OCR 读成「始边边下」这种，就不能当场 break——$stuckSec > 0 时
 # 隔一拍重拍，等文字恢复或弹窗自己关掉（11-21 06:2x 三路就是这样只点了 1 次就判死）。
-function Click-Until([int]$n, [scriptblock]$Find, [scriptblock]$Done, [string]$why, [int]$sec = 15, [int]$tries = 4, [int]$pauseMs = 0, [int]$stuckSec = 0) {
+function Click-Until([int]$n, [scriptblock]$Find, [scriptblock]$Done, [string]$why, [int]$sec = 15, [int]$tries = 4, [int]$pauseMs = 0, [int]$stuckSec = 0, [scriptblock]$StallAction = $null) {
     if (& $Done (Shot $n 'entry-check')) { return }
     $m = $null; $deadline = (Get-Date).AddSeconds($sec)
     do {
@@ -279,7 +279,20 @@ function Click-Until([int]$n, [scriptblock]$Find, [scriptblock]$Done, [string]$w
         if (& $Done $lines) { return }
         # 按钮在、点了却没反应，多半是 ui.busy 把工具栏禁用了（第 4 步切回文字视图时后台写库，
         # 四路同写会 SQLITE_BUSY 卡十几秒）。这里等一拍再按新一帧重定位，别把重试额度在几百毫秒里烧光。
-        if ($pauseMs -gt 0) { Start-Sleep -Milliseconds $pauseMs; $lines = Shot $n "entry${try}p" }
+        # 等完这一拍也要判 $Done：弹窗本来就是慢半拍才画出来的，11-21 07:22 L1/L4 的
+        # 5-entry5p/7p 已经开着「这次怎么读」，这里不判又去认「开始学」，下一轮就把弹窗点没了。
+        if ($pauseMs -gt 0) {
+            Start-Sleep -Milliseconds $pauseMs
+            $lines = Shot $n "entry${try}p"
+            if (& $Done $lines) { return }
+        }
+        # 入口点不动有时不是按钮的事，是屏幕当场才换的状态（例如写库失败后才挂出的
+        # 「阅读视图暂未保存」）。$StallAction 在这一帧上处理一次，处理完按新一帧重来。
+        if ($StallAction -and (& $StallAction $lines)) {
+            Start-Sleep -Milliseconds 800
+            $lines = Shot $n "entry${try}s"
+            if (& $Done $lines) { return }
+        }
         $again = & $Find $lines
         if (-not $again -and $stuckSec -gt 0) {
             $stuckStop = (Get-Date).AddSeconds($stuckSec); $k = 0
@@ -1003,19 +1016,35 @@ try {
         # 产品写明的重试路径就是那句提示本身：再切一次视图就会重存（TextbookReader.kt:711 先清错再写）。
         # 所以看到提示就切一次视图；切完确认按钮真的翻面、提示清掉就继续（停在哪个视图都不影响第 5 步入口），
         # 连切两次还挂着就带产品原话报错，不再空点。
-        $vsTries = 0
+        # 写库重试期间画面上还没有这条提示，等它真的失败才挂出来：11-21 07:21 L1/L4 就是在入口前那一帧
+        # 什么都没查到、等点到第 2 下、已经进了 Click-Until 才弹出来。所以同一个重切预算（$vsState）
+        # 也交给入口三下的 -StallAction，点不动时当场查一次。
+        $vsState = @{ Tries = 0 }
         $vsStop = (Get-Date).AddSeconds(45)
         while ($true) {
-            $vsAct = Resolve-ViewSaveErrorAction (Shot 5 "viewsave$vsTries") $vsTries
+            $vsAct = Resolve-ViewSaveErrorAction (Shot 5 "viewsave$($vsState.Tries)") $vsState.Tries
             if ($vsAct.Action -eq 'none') { break }
             if ($vsAct.Action -eq 'fail') { Fail 5 "阅读视图状态没存上（$($vsAct.Reason)），第 5 步入口点不动" }
             if ((Get-Date) -ge $vsStop) { Fail 5 "阅读视图状态一直没存上（$($vsAct.Reason)），第 5 步入口点不动" }
-            $vsTries++
+            $vsState.Tries++
             Note "步骤5 入口前视图状态没存上（$($vsAct.Reason)），按产品提示切一次视图重存"
             $null = Click-At $vsAct.Button.X $vsAct.Button.Y
-            if (-not (Await-Text 5 "viewsave-flip$vsTries" @($vsAct.Flip) 12)) {
+            if (-not (Await-Text 5 "viewsave-flip$($vsState.Tries)" @($vsAct.Flip) 12)) {
                 Fail 5 "点了切视图，但按钮没变成「$($vsAct.Flip)」，没法确认这一下切过去了"
             }
+        }
+        $vsStall = {
+            param($l)
+            $act = Resolve-ViewSaveErrorAction $l $vsState.Tries
+            if ($act.Action -eq 'none') { return $false }
+            if ($act.Action -eq 'fail') { Fail 5 "阅读视图状态没存上（$($act.Reason)），第 5 步入口点不动" }
+            $vsState.Tries++
+            Note "步骤5 入口点不动，这时才挂出视图未保存提示（$($act.Reason)），按产品提示切一次视图重存"
+            $null = Click-At $act.Button.X $act.Button.Y
+            if (-not (Await-Text 5 "viewsave-stall$($vsState.Tries)" @($act.Flip) 12)) {
+                Fail 5 "点了切视图，但按钮没变成「$($act.Flip)」，没法确认这一下切过去了"
+            }
+            return $true
         }
         # 入口三下都要看到状态才走下一句：弹窗开了（「这次怎么读」）、底按钮换成「开始边看边学」、弹窗关掉。
         # 弹窗标题「开始学这本教材」里也有「开始学」，所以认按钮时跳过这一行，别把标题当按钮点。
@@ -1023,9 +1052,9 @@ try {
         # 底栏按钮进提交态后会被 OCR 读成「始边边下」「万始边边」（11-21 06:2x L2/L3/L4 都是），
         # 所以第 2、3 下认它一律走 Find-Step5Confirm（整词 → 截断 → 「始边」残片 → 暗字放大）；
         # 第 3 下弹窗还开着时，认不出按钮也不再当场 break，留 12 秒等文字恢复或弹窗自己关。
-        Click-Until 5 { param($l) foreach ($line in $l) { if ($line.Text -match '这本教材') { continue }; $m = Find-Text @($line) '开始学'; if ($m) { return $m } } } { param($l) [bool](Find-Text $l '这次怎么读') } '点了「开始学」但开始学的弹窗一直没开' -tries 8 -pauseMs 2000
-        Click-Until 5 { param($l) Find-DialogPath $l '边看边学' } { param($l) [bool](Find-Step5Confirm $l $script:LastPng) } '点了「边看边学」但底按钮没换成「开始边看边学」' -tries 8 -pauseMs 2000
-        Click-Until 5 { param($l) Find-Step5Confirm $l $script:LastPng } { param($l) -not (Find-Text $l '这次怎么读') } '点了「开始边看边学」但弹窗没关' -tries 8 -pauseMs 2000 -stuckSec 12
+        Click-Until 5 { param($l) foreach ($line in $l) { if ($line.Text -match '这本教材') { continue }; $m = Find-Text @($line) '开始学'; if ($m) { return $m } } } { param($l) [bool](Find-Text $l '这次怎么读') } '点了「开始学」但开始学的弹窗一直没开' -tries 8 -pauseMs 2000 -StallAction $vsStall
+        Click-Until 5 { param($l) Find-DialogPath $l '边看边学' } { param($l) [bool](Find-Step5Confirm $l $script:LastPng) } '点了「边看边学」但底按钮没换成「开始边看边学」' -tries 8 -pauseMs 2000 -StallAction $vsStall
+        Click-Until 5 { param($l) Find-Step5Confirm $l $script:LastPng } { param($l) -not (Find-Text $l '这次怎么读') } '点了「开始边看边学」但弹窗没关' -tries 8 -pauseMs 2000 -stuckSec 12 -StallAction $vsStall
         # 选中经授权的整节：目录 → 滚到序号 → 点 → 收起；核对「本节原文 · 第 N 页」就是授权页，才允许发请求
         Start-Sleep -Seconds 4
         Click-Label 5 @('目录') '找不到「目录」'; Start-Sleep -Seconds 3
@@ -1470,16 +1499,23 @@ try {
         Note "步骤6 选定选项（$($picked.Mode)）：($($picked.X),$($picked.Y))"
         Click-At $picked.X $picked.Y
         Start-Sleep -Seconds 2
-        $selected = $false; $explained = $false; $cited = $false; $summary = $false; $downScrolls = 0
-        foreach ($view in 0..14) {
+        $selected = $false; $explained = $false; $cited = $false; $summary = $false
+        # 答案区在题目下面，一屏放不下：一路往下滚，滚到画面真的不动了才回头。
+        # 11-21 07:26 L3 是固定 10 次下滚后就反转方向，而它第 10 次才刚滚到
+        # 「你选择…本题答案是…重新作答」，随后 4 帧全在往上走，把讲解和出处又推出视野。
+        $dir = -2; $downScrolls = 0; $prevSig = ''
+        foreach ($view in 0..29) {
             $lines = Shot 6 "answered-$view"
             if (Has $lines @('你选择：', '你选择:')) { $selected = $true }
             if (Has $lines @('答后讲解')) { $explained = $true }
             if (Has $lines @('出处')) { $cited = $true }
             if (Has $lines @('题目和作答只保留在这次练习中', '要回看时再打开', '小结')) { $summary = $true }
             if ($selected -and $explained -and $cited -and $summary) { break }
+            $sig = Get-FrameSignature $lines
+            $dir = Resolve-AnsweredScroll $sig $prevSig $downScrolls $dir
+            if ($dir -lt 0) { $downScrolls++ }
+            $prevSig = $sig
             $sp = Scroll-Point 0.7 0.6
-            if (-not ($explained -and $cited -and $summary) -and $downScrolls -lt 10) { $dir = -2; $downScrolls++ } else { $dir = 2 }
             Scroll-At $sp[0] $sp[1] $dir; Start-Sleep -Seconds 1
         }
         if (-not $selected) { Fail 6 '点击选项后没有看到已选答案' }

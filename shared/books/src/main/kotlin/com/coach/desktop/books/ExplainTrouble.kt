@@ -69,11 +69,19 @@ internal enum class ExplainTrouble(val retry: Boolean) {
 internal fun ExplainTroubleLine(reply: BookLearningReply.Unavailable, onRetry: () -> Unit, onRepair: (() -> Unit)? = null,
     modifier: Modifier = Modifier) {
     val trouble = reply.trouble
+    val onRelogin = LocalBookRelogin.current
     Row(modifier.heightIn(min = 40.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
         when {
-            trouble?.needsPairing == true && onRepair != null ->
-                PaperButton(onRepair, modifier = Modifier.testTag("explain-trouble-repair")) {
-                    Text(if (trouble == ExplainTrouble.Revoked) "去重新配对" else "去配对")
+            trouble?.needsPairing == true && (onRelogin != null || onRepair != null) ->
+                PaperButton(
+                    onClick = { if (onRelogin != null) onRelogin("授权已撤销，请重新登录。") else onRepair?.invoke() },
+                    modifier = Modifier.testTag("explain-trouble-repair"),
+                ) {
+                    Text(when {
+                        onRelogin != null -> "重新登录"
+                        trouble == ExplainTrouble.Revoked -> "去重新配对"
+                        else -> "去配对"
+                    })
                 }
             trouble?.retry == true -> PaperButton(onRetry, modifier = Modifier.testTag("explain-trouble-retry")) { Text("再试一次") }
         }

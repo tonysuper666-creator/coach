@@ -24,7 +24,8 @@ internal class DesktopPairing(
     }
 
     suspend fun pair(address: String, code: String, name: String): DesktopIdentity {
-        val url = desktopServerUrl(address)
+        val raw = address.trim().ifBlank { settings.sableFriendUrl() }
+        val url = desktopServerUrl(raw)
         requireDevelopmentServer(settings, url)
         val client = PairingClient(url)
         try {
@@ -59,7 +60,7 @@ internal class DesktopPairing(
         if (identity.credentials.role == "friend") {
             val client = PairingClient(identity.serverUrl)
             return try {
-                client.friendAuthorized(identity.credentials, startup).also { if (!it) store.clear(identity.serverUrl, identity.credentials) }
+                client.friendAuthorized(identity.credentials, startup).also { if (!it) store.clear(identity.serverUrl, identity.credentials, markRevoked = true) }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { true }
             finally { client.close() }
@@ -67,9 +68,15 @@ internal class DesktopPairing(
         val transport = HttpLedgerTransport(identity.serverUrl, identity.credentials.deviceId, identity.credentials.token)
         return try { transport.hello(null); true }
         catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: DeviceAuthorizationException) { store.clear(identity.serverUrl, identity.credentials); false }
+        catch (_: DeviceAuthorizationException) { store.clear(identity.serverUrl, identity.credentials, markRevoked = true); false }
         catch (_: Exception) { true }
         finally { transport.close() }
+    }
+
+    fun wasRevoked(): Boolean = store.wasRevoked()
+
+    fun revoke(identity: DesktopIdentity) {
+        store.clear(identity.serverUrl, identity.credentials, markRevoked = true)
     }
 
     suspend fun awaitRevocation(identity: DesktopIdentity) {

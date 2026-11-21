@@ -17,22 +17,29 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import com.coach.desktop.WindowsTextbookHost
 import com.coach.desktop.books.AndroidBookConnection
+import com.coach.desktop.books.AndroidBookIdentity
+import com.coach.desktop.books.LocalBookRelogin
 import com.coach.desktop.books.Textbook
 import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
+import com.coach.desktop.books.TextbookLoginScreen
 import com.coach.ui.CoachTheme
 import com.coach.ui.adaptive.Hinge
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
@@ -40,7 +47,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.nio.file.Files
 import java.nio.file.Path
@@ -48,6 +58,113 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 private data class BookCopyProgress(val bytes: Long, val total: Long?)
 internal class PickedBookCancelled : Exception()
+
+/**
+ * Startup login gate for the Android textbook workspace (TON-1782):
+ * - First launch or missing identity shows the full-screen login page (Sable primary, pairing code tucked below).
+ * - Existing identity enters the bookshelf/last reading spot immediately without waiting on network, so offline use is never blocked.
+ * - Explicit 401 revocation clears credentials and returns to the login page with a clear explanation.
+ */
+@Composable
+internal fun AndroidTextbookGate(
+    darkTheme: Boolean = isSystemInDarkTheme(),
+    content: @Composable (AndroidBookIdentity) -> Unit,
+) {
+    var identity by remember { mutableStateOf<AndroidBookIdentity?>(null) }
+    var initialized by remember { mutableStateOf(false) }
+    var revokedReason by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        try {
+            val (saved, wasRevoked) = withContext(Dispatchers.IO) { AndroidBookConnection.load() }
+            identity = saved
+            if (saved == null && wasRevoked) {
+                revokedReason = "授权已撤销，请重新登录。"
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            revokedReason = "无法读取登录信息，请重新登录。"
+        } finally {
+            initialized = true
+        }
+    }
+
+    LaunchedEffect(identity) {
+        val current = identity ?: return@LaunchedEffect
+        var startup = true
+        while (currentCoroutineContext().isActive) {
+            val authorized = try {
+                AndroidBookConnection.stillAuthorized(current, startup)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                true
+            }
+            if (!authorized) {
+                identity = null
+                revokedReason = "授权已撤销，请重新登录。"
+                break
+            }
+            startup = false
+            delay(5_000)
+        }
+    }
+
+    val paired = identity
+    if (paired != null) {
+        val onRelogin: (String?) -> Unit = remember(paired) {
+            { reason ->
+                val active = identity
+                identity = null
+                revokedReason = reason ?: "授权已撤销，请重新登录。"
+                if (active != null) {
+                    scope.launch(Dispatchers.IO) { runCatching { AndroidBookConnection.revoke(active) } }
+                }
+            }
+        }
+        CompositionLocalProvider(LocalBookRelogin provides onRelogin) {
+            key(paired.credentials.deviceId, paired.credentials.token) {
+                content(paired)
+            }
+        }
+    } else {
+        CoachTheme(darkTheme) {
+            if (!initialized) {
+                Box(
+                    Modifier.fillMaxSize().safeDrawingPadding().testTag("android-login-loading"),
+                    contentAlignment = Alignment.Center,
+                ) { CircularProgressIndicator() }
+            } else {
+                TextbookLoginScreen(
+                    sableLogin = true,
+                    defaultAddress = "",
+                    hasBuiltInAddress = AndroidBookConnection.hasBuiltInAddress(),
+                    revokedReason = revokedReason,
+                    onSableLogin = { open ->
+                        val signedIn = AndroidBookConnection.sable(open)
+                        revokedReason = null
+                        identity = signedIn
+                    },
+                    onPair = { address, code ->
+                        try {
+                            val signedIn = AndroidBookConnection.pair(address, code)
+                            revokedReason = null
+                            identity = signedIn
+                            true
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            false
+                        }
+                    },
+                    modifier = Modifier.safeDrawingPadding(),
+                )
+            }
+        }
+    }
+}
 
 @Composable
 internal fun AndroidBookWorkspace(onPersonalCourse: () -> Unit, hinge: Hinge? = null) {
@@ -62,89 +179,82 @@ internal fun AndroidBookWorkspace(onPersonalCourse: () -> Unit, hinge: Hinge? = 
         }
     }
     var openError by remember { mutableStateOf(false) }
-    var revoked by remember { mutableStateOf(false) }
     var copyProgress by remember { mutableStateOf<BookCopyProgress?>(null) }
     var copyCancel by remember { mutableStateOf<AtomicBoolean?>(null) }
     var exportTarget by remember { mutableStateOf<Pair<Textbook, Int>?>(null) }
-    LaunchedEffect(Unit) {
-        revoked = withContext(Dispatchers.IO) {
-            val identity = runCatching { AndroidBookConnection.load().first }.getOrNull()
-            identity?.credentials?.role == "friend" && !AndroidBookConnection.stillAuthorized(identity, startup = true)
-        }
-    }
     val pending = remember { mutableListOf<CompletableDeferred<Uri?>>() }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { result ->
         pending.firstOrNull()?.complete(result)
     }
-    val library = initialized?.getOrNull()
-    if (library == null) {
-        CoachTheme(isSystemInDarkTheme()) {
-            Box(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.Center) {
-                if (initialized == null) CircularProgressIndicator()
-                else Text("书架暂时无法打开，请关闭应用后重试。")
-            }
-        }
-        return
-    }
-    Box(Modifier.fillMaxSize().safeDrawingPadding().semantics { testTagsAsResourceId = true }) {
-        WindowsTextbookHost(library, onPersonalCourse = onPersonalCourse, hinge = hinge, onExportNotes = { selectedBook, currentPage -> exportTarget = selectedBook to currentPage }, releasePickedBook = { selected ->
-            val directory = selected.parent
-            runCatching { Files.deleteIfExists(selected); Files.deleteIfExists(directory) }
-        }, chooseBook = pick@{
-            if (pending.isNotEmpty() || copyProgress != null) return@pick null
-            val result = CompletableDeferred<Uri?>()
-            pending.add(result)
-            try {
-                picker.launch(arrayOf(ClipDescription.MIMETYPE_TEXT_PLAIN, "application/*", "image/*", "text/*"))
-                result.await()?.let { uri ->
-                    val cancelled = AtomicBoolean(false)
-                    copyCancel = cancelled
-                    copyProgress = BookCopyProgress(0, null)
-                    try {
-                        copyPickedBook(context, uri, cancelled) { bytes, total ->
-                            copyProgress = BookCopyProgress(bytes, total)
-                        }
-                    } finally {
-                        copyCancel = null
-                        copyProgress = null
+    Box(Modifier.fillMaxSize().semantics { testTagsAsResourceId = true }) {
+        AndroidTextbookGate {
+            val library = initialized?.getOrNull()
+            if (library == null) {
+                CoachTheme(isSystemInDarkTheme()) {
+                    Box(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.Center) {
+                        if (initialized == null) CircularProgressIndicator()
+                        else Text("书架暂时无法打开，请关闭应用后重试。")
                     }
                 }
-            } catch (cancel: CancellationException) { throw cancel }
-            catch (_: PickedBookCancelled) { null }
-            catch (_: Exception) { openError = true; null }
-            finally { pending.remove(result) }
-        })
-        if (openError) AlertDialog(onDismissRequest = { openError = false },
-            text = { Text("无法读取教材，请确认文件可用且不超过 256 MB。") },
-            confirmButton = { TextButton(onClick = { openError = false }) { Text("知道了") } })
-        if (revoked) AlertDialog(onDismissRequest = { revoked = false },
-            title = { Text("授权已撤销，请重新登录") },
-            text = { Text("打开书中的讲解页即可重新登录。读书和做题照常。") },
-            confirmButton = { TextButton(onClick = { revoked = false }) { Text("知道了") } })
-        copyProgress?.let { progress ->
-            AlertDialog(onDismissRequest = {}, title = { Text("正在准备教材") },
-                text = {
-                    Column {
-                        val total = progress.total
-                        if (total != null && total > 0) {
-                            LinearProgressIndicator(progress = { (progress.bytes.toFloat() / total).coerceIn(0f, 1f) })
-                            Text("已读取 ${progress.bytes / 1024 / 1024} / ${total / 1024 / 1024} MB")
-                        } else {
-                            LinearProgressIndicator()
-                            Text("已读取 ${progress.bytes / 1024 / 1024} MB")
+                return@AndroidTextbookGate
+            }
+            Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+                WindowsTextbookHost(library, onPersonalCourse = onPersonalCourse, hinge = hinge, onExportNotes = { selectedBook, currentPage -> exportTarget = selectedBook to currentPage }, releasePickedBook = { selected ->
+                    val directory = selected.parent
+                    runCatching { Files.deleteIfExists(selected); Files.deleteIfExists(directory) }
+                }, chooseBook = pick@{
+                    if (pending.isNotEmpty() || copyProgress != null) return@pick null
+                    val result = CompletableDeferred<Uri?>()
+                    pending.add(result)
+                    try {
+                        picker.launch(arrayOf(ClipDescription.MIMETYPE_TEXT_PLAIN, "application/*", "image/*", "text/*"))
+                        result.await()?.let { uri ->
+                            val cancelled = AtomicBoolean(false)
+                            copyCancel = cancelled
+                            copyProgress = BookCopyProgress(0, null)
+                            try {
+                                copyPickedBook(context, uri, cancelled) { bytes, total ->
+                                    copyProgress = BookCopyProgress(bytes, total)
+                                }
+                            } finally {
+                                copyCancel = null
+                                copyProgress = null
+                            }
                         }
-                    }
-                }, confirmButton = {
-                    TextButton(onClick = { copyCancel?.set(true) }) { Text("取消导入") }
+                    } catch (cancel: CancellationException) { throw cancel }
+                    catch (_: PickedBookCancelled) { null }
+                    catch (_: Exception) { openError = true; null }
+                    finally { pending.remove(result) }
                 })
-        }
-        exportTarget?.let { (selectedBook, currentPage) ->
-            AndroidBookNotesExportDialog(
-                book = selectedBook,
-                library = library.library,
-                currentPage = currentPage,
-                onDismiss = { exportTarget = null },
-            )
+                if (openError) AlertDialog(onDismissRequest = { openError = false },
+                    text = { Text("无法读取教材，请确认文件可用且不超过 256 MB。") },
+                    confirmButton = { TextButton(onClick = { openError = false }) { Text("知道了") } })
+                copyProgress?.let { progress ->
+                    AlertDialog(onDismissRequest = {}, title = { Text("正在准备教材") },
+                        text = {
+                            Column {
+                                val total = progress.total
+                                if (total != null && total > 0) {
+                                    LinearProgressIndicator(progress = { (progress.bytes.toFloat() / total).coerceIn(0f, 1f) })
+                                    Text("已读取 ${progress.bytes / 1024 / 1024} / ${total / 1024 / 1024} MB")
+                                } else {
+                                    LinearProgressIndicator()
+                                    Text("已读取 ${progress.bytes / 1024 / 1024} MB")
+                                }
+                            }
+                        }, confirmButton = {
+                            TextButton(onClick = { copyCancel?.set(true) }) { Text("取消导入") }
+                        })
+                }
+                exportTarget?.let { (selectedBook, currentPage) ->
+                    AndroidBookNotesExportDialog(
+                        book = selectedBook,
+                        library = library.library,
+                        currentPage = currentPage,
+                        onDismiss = { exportTarget = null },
+                    )
+                }
+            }
         }
     }
 }

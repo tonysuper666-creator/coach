@@ -50,6 +50,7 @@ internal class TextbookLibrary(
                 answer_text TEXT NOT NULL DEFAULT '',revealed INTEGER NOT NULL DEFAULT 0,understood INTEGER,
                 completed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(book,lesson,mode))""")
             sql.execute("CREATE TABLE IF NOT EXISTS book_review_position(slot INTEGER PRIMARY KEY CHECK(slot=1),book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL)")
+            sql.execute("CREATE TABLE IF NOT EXISTS book_open_session(slot INTEGER PRIMARY KEY CHECK(slot=1),book TEXT NOT NULL,screen TEXT NOT NULL CHECK(screen IN ('READER','LEARNING')))")
             sql.execute("CREATE TABLE IF NOT EXISTS book_learning_paths(book TEXT PRIMARY KEY,path TEXT NOT NULL CHECK(path IN ('READ','READ_AND_LEARN','QUESTION_FIRST')))")
             sql.execute("CREATE TABLE IF NOT EXISTS book_ladders(book TEXT PRIMARY KEY,session TEXT NOT NULL)")
             sql.execute("CREATE TABLE IF NOT EXISTS book_reader_views(book TEXT PRIMARY KEY,text_view INTEGER NOT NULL)")
@@ -887,6 +888,7 @@ internal class TextbookLibrary(
                     "pages", "book_illustrations", "book_page_text_boxes", "book_native_sources",
                     "book_learning_paths", "book_ladders", "book_reader_views", "book_pdf_modes",
                     "book_highlights", "book_notes", "answers", "book_reviews", "book_structures", "book_section_cache",
+                    "book_open_session",
                 )) {
                     val exists = db.createStatement().use { s -> s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='$table'").use { it.next() } }
                     if (exists) db.prepareStatement("DELETE FROM $table WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }
@@ -1125,6 +1127,30 @@ internal class TextbookLibrary(
 
     @Synchronized fun closeReview() {
         database().use { db -> db.createStatement().use { it.executeUpdate("DELETE FROM book_review_position") } }
+    }
+
+    /** Last open reading or learning screen so reopening returns directly to the book and spot with zero clicks. */
+    @Synchronized fun openSession(): Pair<String, String>? = database().use { db ->
+        db.createStatement().use { sql ->
+            sql.executeQuery("SELECT book,screen FROM book_open_session WHERE slot=1").use { row ->
+                if (row.next()) row.getString(1) to row.getString(2) else null
+            }
+        }
+    }
+
+    @Synchronized fun saveOpenSession(bookId: String, screen: String) {
+        require(screen in setOf("READER", "LEARNING")) { "未知的打开界面。" }
+        database().use { db ->
+            db.prepareStatement("INSERT OR REPLACE INTO book_open_session(slot,book,screen) VALUES(1,?,?)").use { sql ->
+                sql.setString(1, bookId)
+                sql.setString(2, screen)
+                sql.executeUpdate()
+            }
+        }
+    }
+
+    @Synchronized fun clearOpenSession() {
+        database().use { db -> db.createStatement().use { it.executeUpdate("DELETE FROM book_open_session") } }
     }
 
     // ---- 同一页、同一显示宽度合并并发调用并缓存，每次调用留下分段计时 ----

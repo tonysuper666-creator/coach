@@ -178,17 +178,23 @@ internal fun SectionGuideCard(
         }
         when {
             state is SectionGuideState.Failed -> {
+                val onRelogin = LocalBookRelogin.current
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(state.message, style = MaterialTheme.typography.bodySmall,
                         color = if (state.trouble == ExplainTrouble.Revoked) v7Alert() else colors.fgSecondary,
                         modifier = Modifier.weight(1f).testTag("section-guide-failed"))
-                    if (state.trouble.needsPairing) PaperButton(onOpenPair) { Text("去配对") }
+                    if (state.trouble.needsPairing) PaperButton(
+                        onClick = { if (onRelogin != null) onRelogin("授权已撤销，请重新登录。") else onOpenPair() },
+                    ) { Text(if (onRelogin != null) "重新登录" else "去配对") }
                     else V7TextButton(onRetry, modifier = Modifier.testTag("section-guide-retry")) { Text("重试") }
                 }
             }
-            !paired -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("连接服务后自动生成本节导读。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.weight(1f))
-                V7TextButton(onOpenPair, modifier = Modifier.testTag("section-guide-pair")) { Text("连接服务") }
+            !paired -> {
+                val onRelogin = LocalBookRelogin.current
+                if (onRelogin == null) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("连接服务后自动生成本节导读。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.weight(1f))
+                    V7TextButton(onOpenPair, modifier = Modifier.testTag("section-guide-pair")) { Text("连接服务") }
+                }
             }
             !consented -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("开启导读需要允许发送本书正文给讲解服务。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.weight(1f))
@@ -359,11 +365,14 @@ internal fun InlineSelectionExplainCard(
                     modifier = Modifier.testTag("inline-explain-loading"))
             }
             thread.error?.let { (message, trouble) ->
+                val onRelogin = LocalBookRelogin.current
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(message, style = MaterialTheme.typography.bodySmall,
                         color = if (trouble == ExplainTrouble.Revoked) v7Alert() else colors.fgSecondary,
                         modifier = Modifier.weight(1f).testTag("inline-explain-error"))
-                    if (trouble.needsPairing) PaperButton(onOpenPair) { Text("去配对") }
+                    if (trouble.needsPairing) PaperButton(
+                        onClick = { if (onRelogin != null) onRelogin("授权已撤销，请重新登录。") else onOpenPair() },
+                    ) { Text(if (onRelogin != null) "重新登录" else "去配对") }
                     else V7TextButton(onRetry, modifier = Modifier.testTag("inline-explain-retry")) { Text("重试") }
                 }
             }

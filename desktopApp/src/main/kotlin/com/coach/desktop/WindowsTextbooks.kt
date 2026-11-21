@@ -1,5 +1,6 @@
 package com.coach.desktop
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -12,9 +13,13 @@ import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.coach.desktop.books.exam.*
 import com.coach.desktop.books.AnswerDrafts
+import com.coach.desktop.books.LocalBookRelogin
 import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
+import com.coach.desktop.books.TextbookLoginScreen
 import com.coach.desktop.books.rememberAnswerDrafts
+import com.coach.ui.CoachTheme
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -53,10 +58,122 @@ internal fun windowsThemeOverride(value: String?): Boolean? = when {
     else -> null
 }
 
-/** Windows mainline: a new learner can bring a book without a preconfigured course or Mac pairing. */
+/**
+ * Startup login gate for the Windows textbook app (TON-1782):
+ * - First launch or missing identity shows the full-screen login page (Sable primary, pairing code tucked below).
+ * - Existing identity enters the bookshelf/last reading spot immediately without waiting on network, so offline use is never blocked.
+ * - Explicit 401 revocation clears credentials and returns to the login page with a clear explanation.
+ */
+@Composable
+internal fun WindowsTextbookGate(
+    settings: DesktopConnectionSettings,
+    sableIssuer: String = com.coach.client.SABLE_ORIGIN,
+    darkTheme: Boolean = windowsThemeOverride(System.getProperty("coach.windows.theme")) ?: isSystemInDarkTheme(),
+    content: @Composable (DesktopIdentity) -> Unit,
+) {
+    val pairing = remember(settings) { DesktopPairing(settings) }
+    val sable = remember(settings) { settings.sableLoginShown() }
+    val hasBuiltIn = remember(settings) { settings.hasBuiltInFriendUrl() }
+    var identity by remember(pairing) { mutableStateOf<DesktopIdentity?>(null) }
+    var initialized by remember(pairing) { mutableStateOf(false) }
+    var defaultAddress by remember(pairing) { mutableStateOf("") }
+    var revokedReason by remember(pairing) { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(pairing) {
+        try {
+            val (address, saved, wasRevoked) = withContext(Dispatchers.IO) {
+                val url = if (hasBuiltIn) "" else settings.serverUrl().orEmpty()
+                Triple(url, pairing.load(), runCatching { pairing.wasRevoked() }.getOrDefault(false))
+            }
+            defaultAddress = address
+            identity = saved
+            if (saved == null && wasRevoked) {
+                revokedReason = if (sable) "授权已撤销，请重新登录。" else "这台电脑的连接已停用，请重新配对。"
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            revokedReason = "无法读取登录信息，请重新登录。"
+        } finally {
+            initialized = true
+        }
+    }
+
+    LaunchedEffect(identity) {
+        val current = identity ?: return@LaunchedEffect
+        try {
+            withContext(Dispatchers.IO) { pairing.awaitRevocation(current) }
+            identity = null
+            revokedReason = if (sable) "授权已撤销，请重新登录。" else "这台电脑的连接已停用，请重新配对。"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Offline or transient network/storage failures must not block local reading.
+        }
+    }
+
+    val paired = identity
+    if (paired != null) {
+        val onRelogin: (String?) -> Unit = remember(pairing, paired, sable) {
+            { reason ->
+                val active = identity
+                identity = null
+                revokedReason = reason ?: if (sable) "授权已撤销，请重新登录。" else "这台电脑的连接已停用，请重新配对。"
+                if (active != null) {
+                    scope.launch(Dispatchers.IO) { runCatching { pairing.revoke(active) } }
+                }
+            }
+        }
+        CompositionLocalProvider(LocalBookRelogin provides onRelogin) {
+            key(paired.credentials.deviceId, paired.credentials.token) {
+                content(paired)
+            }
+        }
+    } else {
+        CoachTheme(darkTheme) {
+            if (!initialized) {
+                Surface(Modifier.fillMaxSize().testTag("windows-login-loading"), color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {}
+            } else {
+                TextbookLoginScreen(
+                    sableLogin = sable,
+                    defaultAddress = defaultAddress,
+                    hasBuiltInAddress = hasBuiltIn,
+                    revokedReason = revokedReason,
+                    onSableLogin = { open ->
+                        val signedIn = pairing.sable(open, sableIssuer)
+                        revokedReason = null
+                        identity = signedIn
+                    },
+                    onPair = { address, code ->
+                        try {
+                            val signedIn = withContext(Dispatchers.IO) {
+                                pairing.pair(
+                                    address,
+                                    code,
+                                    if (System.getProperty("os.name").startsWith("Windows")) "Windows 电脑" else "Mac 电脑",
+                                )
+                            }
+                            revokedReason = null
+                            identity = signedIn
+                            true
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            false
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** Windows mainline: first-run login gate, then local textbook shelf with zero-click resume. */
 internal fun runWindowsTextbooks() {
     val directory = windowsLibraryDirectory()
     val initialBounds = windowsInitialWindowBounds()
+    val settings = DesktopConnectionSettings()
     application {
         val controller = remember { TextbookController(TextbookLibrary(directory)) }
         val drafts = rememberAnswerDrafts(controller)
@@ -74,28 +191,17 @@ internal fun runWindowsTextbooks() {
                 position = WindowPosition.Absolute(initialBounds.x.dp, initialBounds.y.dp),
             )) {
             WindowsReadingMinimum(window)
-            var revoked by remember { mutableStateOf(false) }
-            val sableLogin = remember { DesktopConnectionSettings().sableLoginShown() }
-            LaunchedEffect(Unit) {
-                revoked = withContext(Dispatchers.IO) {
-                    val pairing = DesktopPairing(DesktopConnectionSettings())
-                    val identity = runCatching { pairing.load() }.getOrNull()
-                    identity?.credentials?.role == "friend" && !pairing.stillAuthorized(identity, startup = true)
-                }
+            WindowsTextbookGate(settings) {
+                WindowsTextbookHost(controller, drafts, exams, chooseBook = {
+                    withContext(Dispatchers.Swing) {
+                        val dialog = FileDialog(window, "上传教材 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)
+                        try {
+                            dialog.isVisible = true
+                            dialog.file?.let { Path.of(dialog.directory, it) }
+                        } finally { dialog.dispose() }
+                    }
+                })
             }
-            if (revoked) AlertDialog(onDismissRequest = { revoked = false },
-                title = { Text(if (sableLogin) "授权已撤销，请重新登录" else "这台电脑的连接已停用") },
-                text = { Text(if (sableLogin) "打开书中的讲解页即可重新登录。" else "打开书中的讲解页，用新的配对码重新配对。读书和做题照常。") },
-                confirmButton = { TextButton(onClick = { revoked = false }) { Text("知道了") } })
-            WindowsTextbookHost(controller, drafts, exams, chooseBook = {
-                withContext(Dispatchers.Swing) {
-                    val dialog = FileDialog(window, "上传教材 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)
-                    try {
-                        dialog.isVisible = true
-                        dialog.file?.let { Path.of(dialog.directory, it) }
-                    } finally { dialog.dispose() }
-                }
-            })
             TextbookCloseWarning(closeGuard)
             WindowsUpdatePrompt(save = {
                 controller.state.first { !it.busy }

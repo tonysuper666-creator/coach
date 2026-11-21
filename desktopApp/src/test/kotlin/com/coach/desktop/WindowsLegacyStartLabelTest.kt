@@ -94,11 +94,11 @@ class WindowsLegacyStartLabelTest {
 
         seed.importBook(learningPathTextbook(root, "Synthetic guided shelf", chemistry = true))
         val guided = seed.state.value.book!!.id
-        seed.chooseLearningPath(LearningPath.READ_AND_LEARN); seed.enableLearning()
+        seed.chooseLearningPath(LearningPath.READ_AND_LEARN); seed.enableLearning(); seed.back()
 
         seed.importBook(learningPathTextbook(root, "Synthetic question shelf", chemistry = true))
         val question = seed.state.value.book!!.id
-        seed.chooseLearningPath(LearningPath.QUESTION_FIRST); seed.enableLearning()
+        seed.chooseLearningPath(LearningPath.QUESTION_FIRST); seed.enableLearning(); seed.back()
 
         assertEquals("READ", library.learningPath(read))
         assertEquals("READ_AND_LEARN", library.learningPath(guided))

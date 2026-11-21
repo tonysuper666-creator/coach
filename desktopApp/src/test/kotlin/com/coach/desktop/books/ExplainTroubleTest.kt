@@ -272,9 +272,9 @@ class ExplainTroubleTest {
         val lesson = book.lessons.first()
         val practice = assertNotNull(StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE))
         FakeMac().use { mac ->
-            val home = Files.createTempDirectory("explain-repair-home-")
+            val home = Files.createTempDirectory("explain-repair-home-").toRealPath()
             val settings = DesktopConnectionSettings(home, { null }, mac = false,
-                property = { if (it == "jpackage.app-path") "/synthetic/Coach.exe" else null })
+                property = { when (it) { "jpackage.app-path" -> "/synthetic/Coach.exe"; "coach.sableLogin" -> "false"; else -> null } })
             assertTrue(runBlocking { BookExplainer(settings, library).pair(mac.url, "123456") })
             val consent = ExplainConsent(library.directory).also { it.allow(book.id) }
             // 和 Windows 主机一样：答后讲解一个 explainer，原文页每次进来另建一个。
@@ -321,7 +321,7 @@ class ExplainTroubleTest {
         val lesson = book.lessons.first()
         val practice = assertNotNull(StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE))
         FakeMac().use { mac ->
-            val settings = DesktopConnectionSettings(Files.createTempDirectory("explain-sable-401-"), { null }, mac = false,
+            val settings = DesktopConnectionSettings(Files.createTempDirectory("explain-sable-401-").toRealPath(), { null }, mac = false,
                 property = { when (it) { "jpackage.app-path" -> "/synthetic/Coach.exe"; "coach.sableLogin" -> "true"; else -> null } })
             assertTrue(runBlocking { BookExplainer(settings, library).pair(mac.url, "123456") })
             val consent = ExplainConsent(library.directory).also { it.allow(book.id) }
@@ -389,7 +389,12 @@ class ExplainTroubleTest {
     private data class Reply(val status: Int, val body: String, val type: String = "application/json")
 
     private class TestMac(private val url: String) :
-        BookExplainer(DesktopConnectionSettings(home = Files.createTempDirectory("explain-trouble-home-"), environment = { null })) {
+        BookExplainer(DesktopConnectionSettings(
+            home = Files.createTempDirectory("explain-trouble-home-").toRealPath(),
+            environment = { null },
+            mac = false,
+            property = { if (it == "coach.sableLogin") "false" else null },
+        )) {
         override suspend fun load() { identity = DesktopIdentity(url, PairedCredentials("test-device", "test-token", "friend")); loaded = true }
         fun switchTo(value: DesktopIdentity) { identity = value }
     }

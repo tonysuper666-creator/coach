@@ -29,14 +29,15 @@ public class NetworkSecuritySmoke {
     }
     @Test public void testAllowlistedHttpAndWs() throws Exception {
         assertTrue(NetworkSecurityPolicy.getInstance().isCleartextTrafficPermitted(BuildConfig.COACH_TAIL_HOST));
-        Request request = authorized("http://" + BuildConfig.COACH_TAIL_HOST + ":18791/v1/hello").build();
+        assertTrue("Use a non-production build", BuildConfig.COACH_PORT != 18791 && BuildConfig.COACH_PORT != 8790 && BuildConfig.COACH_PORT != 8791);
+        Request request = authorized("http://" + BuildConfig.COACH_TAIL_HOST + ":" + BuildConfig.COACH_PORT + "/v1/hello").build();
         try (Response response = client.newCall(request).execute()) {
             assertEquals(200, response.code());
             assertTrue(response.body().string().contains("\"epoch\""));
         }
         CountDownLatch done = new CountDownLatch(1);
         String[] message = {null};
-        WebSocket ws = client.newWebSocket(authorized("ws://" + BuildConfig.COACH_TAIL_HOST + ":18791/v1/ws").build(), new WebSocketListener() {
+        WebSocket ws = client.newWebSocket(authorized("ws://" + BuildConfig.COACH_TAIL_HOST + ":" + BuildConfig.COACH_PORT + "/v1/ws").build(), new WebSocketListener() {
             @Override public void onMessage(WebSocket socket, String text) { message[0] = text; done.countDown(); }
             @Override public void onFailure(WebSocket socket, Throwable t, Response response) { message[0] = t.toString(); done.countDown(); }
         });
@@ -49,14 +50,14 @@ public class NetworkSecuritySmoke {
     @Test public void testOtherCleartextBlocked() throws Exception {
         assertFalse(NetworkSecurityPolicy.getInstance().isCleartextTrafficPermitted("10.0.2.2"));
         try {
-            client.newCall(new Request.Builder().url("http://10.0.2.2:18791/v1/hello").build()).execute().close();
+            client.newCall(new Request.Builder().url("http://10.0.2.2:" + BuildConfig.COACH_PORT + "/v1/hello").build()).execute().close();
             fail("non-allowlisted HTTP was accepted");
         } catch (java.io.IOException expected) {
             assertTrue(expected.toString(), expected.getMessage().contains("CLEARTEXT"));
         }
         CountDownLatch done = new CountDownLatch(1);
         String[] error = {null};
-        WebSocket ws = client.newWebSocket(new Request.Builder().url("ws://10.0.2.2:18791/v1/hello").build(), new WebSocketListener() {
+        WebSocket ws = client.newWebSocket(new Request.Builder().url("ws://10.0.2.2:" + BuildConfig.COACH_PORT + "/v1/hello").build(), new WebSocketListener() {
             @Override public void onFailure(WebSocket socket, Throwable t, Response response) { error[0] = t.toString(); done.countDown(); }
             @Override public void onOpen(WebSocket socket, Response response) { error[0] = "unexpected open"; done.countDown(); }
         });

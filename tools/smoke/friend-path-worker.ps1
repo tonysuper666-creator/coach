@@ -59,7 +59,7 @@ function Await-Text([int]$n, [string]$tag, [string[]]$needles, [int]$sec) {
 function Page-Of($lines) { foreach ($l in $lines) { $mm = [regex]::Match($l.Text, '(\d+)[/／](\d+)'); if ($mm.Success) { return "$($mm.Groups[1].Value)/$($mm.Groups[2].Value)" } }; return $null }
 # 底栏页号夹在「上一页」「下一页」之间。正文和别的卡片里也有「2/2」这种分数，只认这一行。
 function Page-NearNav($lines) {
-    $prev = Find-Text $lines '上一页'; $next = Find-Text $lines '下一页'
+    $prev = Find-PageNav $lines '上一页'; $next = Find-PageNav $lines '下一页'
     if (-not $prev -or -not $next) { return $null }
     foreach ($l in $lines) {
         $mm = [regex]::Match(($l.Text -replace '\s', ''), '^(\d+)(?:[/／](\d+))?[^\d]{0,3}$')
@@ -72,8 +72,8 @@ function Page-NearNav($lines) {
 # At either edge of the book the disabled navigation label may disappear in OCR.
 # Enlarge the counter beside its visible neighbour; keep the current page and total strictly numeric.
 function Get-OriginalPageNumber($lines, [string]$png) {
-    $prev = Find-Text $lines '上一页'
-    $next = Find-Text $lines '下一页'
+    $prev = Find-PageNav $lines '上一页'
+    $next = Find-PageNav $lines '下一页'
     if (-not $prev -and -not $next) { return }
     $anchor = if ($next) { $next } else { $prev }
     $height = $anchor.Y2 - $anchor.Y1
@@ -160,6 +160,21 @@ function Find-Exact($lines, [string]$needle) {
 }
 # The lowest on-screen occurrence of a label (e.g. the last button on a page).
 function Find-Lowest($lines, [string]$needle) { $best = $null; foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m -and (-not $best -or $m.Y -gt $best.Y)) { $best = $m } }; $best }
+# 光标停在底栏按钮上时 Compose 会浮出「下一页 → PageDown」的 tooltip，它比底栏还高一行；
+# Find-Text 从上往下取首命中就会点到浮层上（11-21 03:12 L3 三次重试都戳在正文区，页码一直 1/62）。
+# 翻页按钮只认底栏那一条：先剔掉带 PageDown/PageUp 的提示行，再取最靠下的一条。
+function Find-PageNav($lines, [string]$needle) {
+    $best = $null; $any = $null
+    foreach ($l in $lines) {
+        $m = Find-Text @($l) $needle
+        if (-not $m) { continue }
+        if (-not $any -or $m.Y -gt $any.Y) { $any = $m }
+        if (($l.Text -replace '\s', '') -match '(?i)page\s*(down|up)|pgdn|pgup') { continue }
+        if (-not $best -or $m.Y -gt $best.Y) { $best = $m }
+    }
+    if ($best) { return $best }
+    return $any
+}
 # 滚动落点按窗口实际大小算：winbox 的控制台会话不一定跑在大屏上（现在只有 800×600），
 # 写死的 900/700 会落到窗口外，滚轮就滚到桌面上，列表一动不动。
 function Scroll-Point([double]$fx, [double]$fy) {
@@ -451,7 +466,7 @@ try {
     # 上传后的「这次怎么读」卡上点「先读」进阅读器；导入收尾时按钮可能还没亮，点不动就再点。
     # 提示卡自己收起或点空了会停在书架卡上（11-21 00:47 那轮就是这样），这时「看书」那一行才是进阅读器的入口，两条路都试。
     $lines = Shot 3 'find'
-    $m = Has $lines @('下一页')
+    $m = Find-PageNav $lines '下一页'
     $deadline = (Get-Date).AddSeconds(90)
     while (-not $m -and (Get-Date) -lt $deadline) {
         $b = Has $lines @('先读')
@@ -471,7 +486,7 @@ try {
             Click-At ([int]$off.X) ([int]$off.Y); Start-Sleep -Seconds 1
         }
         $lines = Shot 3 'reader'
-        $m = Has $lines @('下一页')
+        $m = Find-PageNav $lines '下一页'
     }
     if (-not $m) { Fail 3 '没有进到阅读器' }
     $page0 = $null
@@ -482,6 +497,11 @@ try {
     }
     $page1 = $page0
     foreach ($try in 1..3) {
+        # 点空了先重拍再点：光标停在底栏时浮层/布局都可能变，沿用上一轮的旧坐标只会继续点在原地。
+        if ($try -gt 1) {
+            $again = Find-PageNav (Shot 3 'page-retry') '下一页'
+            if ($again) { $m = $again }
+        }
         Click-At $m.X $m.Y
         $stop = (Get-Date).AddSeconds(8)
         while ((Get-Date) -lt $stop -and (-not $page1 -or $page1 -eq $page0)) {
@@ -490,7 +510,7 @@ try {
         }
         if ($page1 -and $page1 -ne $page0) { break }
     }
-    if (-not $page0 -or -not $page1 -or $page0 -eq $page1) { Fail 3 "点了下一页页码没变（前 $page0，后 $page1）" }
+    if (-not $page0 -or -not $page1 -or $page0 -eq $page1) { Fail 3 "点了下一页页码没变（前 $page0，后 $page1，最后落点 $($m.X),$($m.Y)）" }
     Pass 3 "页码 $page0 → $page1"
 
     # ④ 前提：隔离测试服务必须连得上，连不上就停在这一步并说清楚

@@ -472,6 +472,24 @@ function Find-Step5Confirm($lines, [string]$png) {
     if ($png) { return Find-DimButton $png '开始边看边学' }
     return $null
 }
+# 第 5 步等讲解时，服务端偶尔回「回答缺少可核对的页码依据，暂时无法确认。」并给「再试一次」按钮。
+# 原来的拒绝词只认「没有可核对的出处」，L1 既没报错也没重放，干等满 150 秒才报超时（11-21 06:37）。
+# 认它不能只认整句：那一帧被 OCR 读成「依框，暫时无氵去确认」，所以按稳定残片 + 容错骨架认。
+function Find-LectureRefusal($lines) {
+    $pat = '尚未接通|无法讲解|尚未核实|连不上|超时|没有可用的讲解|讲解暂时读不到|讲解服务暂时不可用|额度.*用完|没有可核对的出处|出处已过期|缺少可核对|可核对的页码|[暂暫]时无.{0,3}确认'
+    return $lines | Where-Object { $_.Text -match $pat } | Select-Object -First 1
+}
+# 拒答一次不算终局：界面还带「再试一次」就点它，把这一轮当重放（仍算在原来的 150 秒预算里）；
+# 已经重放过还拒、或按钮不在，就把服务端原话带进失败信息，别让这条 Lane 干等到超时。
+function Resolve-LectureRefusalAction($lines, [bool]$AlreadyRetried) {
+    $e = Find-LectureRefusal $lines
+    if (-not $e) { return [pscustomobject]@{ Action = 'none'; Reason = $null; Button = $null } }
+    if (-not $AlreadyRetried) {
+        $retry = Find-Text $lines '再试一次'
+        if ($retry) { return [pscustomobject]@{ Action = 'retry'; Reason = $e.Text; Button = $retry } }
+    }
+    return [pscustomobject]@{ Action = 'fail'; Reason = $e.Text; Button = $null }
+}
 
 $env:JAVA_HOME = 'C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot'; $env:GRADLE_USER_HOME = 'D:\agent\gradle-home'; $env:Path = "$env:JAVA_HOME\bin;$env:Path"
 $lib = Join-Path $OutDir 'bookshelf'; $client = Join-Path $OutDir 'client'
@@ -1017,13 +1035,19 @@ try {
         if (-not $labelPage) { Fail 5 '选中节后界面没有「本节原文 · 第 N 页」标签，没有发请求' }
         if ([int]$labelPage -ne $LessonPage) { Fail 5 "选中的第 $LessonNumber 条落在第 $labelPage 页，不是授权页第 $LessonPage 页，没有发请求（见 5-section.png）" }
         $deadline = (Get-Date).AddSeconds(150); $res = $null; $sawBody = $false
-        $prevFrame = ''; $still = 0; $scrolls = 0
+        $prevFrame = ''; $still = 0; $scrolls = 0; $retriedRefusal = $false
         while ((Get-Date) -lt $deadline -and -not $res) {
             Start-Sleep -Seconds 5; $lines = Shot 5 'learn'
             $allow = Has $lines @('允许并讲解')
             if ($allow) { Click-At $allow.X $allow.Y; continue }
-            $e = $lines | Where-Object { $_.Text -match '尚未接通|无法讲解|尚未核实|连不上|超时|没有可用的讲解|讲解暂时读不到|讲解服务暂时不可用|额度.*用完|没有可核对的出处|出处已过期' } | Select-Object -First 1
-            if ($e) { $res = "拒绝：$($e.Text)"; continue }
+            $ra = Resolve-LectureRefusalAction $lines $retriedRefusal
+            if ($ra.Action -eq 'retry') {
+                Note "步骤5 讲解被拒（$($ra.Reason)），按「再试一次」重放一次"
+                $retriedRefusal = $true
+                Click-At $ra.Button.X $ra.Button.Y
+                continue
+            }
+            if ($ra.Action -eq 'fail') { $res = "拒绝：$($ra.Reason)"; continue }
             # 「本节原文」不是讲解的出处。先看正文有没有出来（这一屏的「讲解」小标题常被 OCR 漏掉，
             # 所以按长句行数判），正文出来以后再找它自己的带页码出处。
             $source = $lines | Where-Object { $_.Text -match '出处.*第\s*\d+\s*页' } | Select-Object -First 1
@@ -1194,10 +1218,37 @@ try {
             $retNow = if (-not $backFound) { Find-Text $linesNow '返回学习' } else { $null }
             $retAct = Resolve-SourceReturnAction -ReturnedToLearning $backFound -SawFocusLoss $sawFocusLoss -ReturnButton $retNow
             if ($retAct.Action -eq 'reclick') {
-                Note "步骤6 点返回学习后失焦且仍在原文页，按当前帧坐标重点击 ($($retAct.Button.X),$($retAct.Button.Y))"
-                Click-At $retAct.Button.X $retAct.Button.Y
-                Start-Sleep -Milliseconds 800
-                $backFound = [bool](Await-Text 6 "back-$tag" @('本节原文') 15)
+                # 别拿这一步之前那一帧的坐标直接补点：放锁后的 800 ms 里界面可能已经切回做题学，
+                # 旧坐标正好落在「Coach目录返回书架」上（11-21 06:38 L2 就这么跳回了书架）。
+                # 补点前重拍一帧确认还在原文页，坐标也只取这一帧；两样都不在就等下一帧，不猜。
+                $probeAct = $null
+                $probeStop = (Get-Date).AddSeconds(12)
+                while ((Get-Date) -lt $probeStop) {
+                    $probeAct = Resolve-SourceReturnRecheck (Shot 6 "back-probe-$tag")
+                    if ($probeAct.Action -ne 'wait') { break }
+                    Start-Sleep -Milliseconds 800
+                }
+                if ($probeAct -and $probeAct.Action -eq 'reclick') {
+                    Note "步骤6 点返回学习后失焦，当前帧仍在原文页，按这一帧坐标重点击 ($($probeAct.Button.X),$($probeAct.Button.Y))"
+                    Click-At $probeAct.Button.X $probeAct.Button.Y
+                }
+                if ($probeAct -and $probeAct.Action -eq 'done') {
+                    $backFound = $true
+                } else {
+                    $backFound = [bool](Await-Text 6 "back-$tag" @('本节原文') 15)
+                    if (-not $backFound) {
+                        # 探针那一帧也可能慢一步、补点落到了「Coach目录返回书架」上：认书架，按「做题学」回去，
+                        # 比整条 Lane 判死划算；书架入口在折叠线以下时照旧如实报错。
+                        $shelf = Shot 6 "back-shelf-$tag"
+                        $reenter = Has $shelf @('做题学', '继续做题学')
+                        if ($reenter -and -not (Has $shelf @('本节原文'))) {
+                            Note '步骤6 返回学习点到了书架，按「做题学」重新进入'
+                            Click-At $reenter.X $reenter.Y
+                            Start-Sleep -Milliseconds 800
+                            $backFound = [bool](Await-Text 6 "back-$tag" @('本节原文') 20)
+                        }
+                    }
+                }
             } elseif ($retAct.Action -eq 'wait_learning') {
                 $backFound = [bool](Await-Text 6 "back-$tag" @('本节原文') 15)
             }

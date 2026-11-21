@@ -136,6 +136,24 @@ foreach ($a in @(
     if (-not $a.ok) { $fail++ }; $extra++
 }
 
+# 补点前的页面身份复核：放锁后界面可能已切回做题学，旧坐标落在「Coach目录返回书架」上，不能盲点。
+function Ocr([string]$text, [int]$x, [int]$y) {
+    [pscustomobject]@{ Text = $text; Words = @([pscustomobject]@{ Text = $text; BoundingRect = [pscustomobject]@{ X = $x; Y = $y; Width = 120; Height = 22 } }) }
+}
+$reDone = Resolve-SourceReturnRecheck @((Ocr '本节原文 · 第150页' 940 385), (Ocr '在做题学' 700 40))
+$reSrc = Resolve-SourceReturnRecheck @((Ocr '返回学习' 40 40), (Ocr '学习原文 · 第三章 第二节' 40 120))
+$reBlank = Resolve-SourceReturnRecheck @((Ocr 'Coach目录' 40 40))
+$reBoth = Resolve-SourceReturnRecheck @((Ocr '返回学习' 40 40), (Ocr '本节原文' 940 385))
+foreach ($a in @(
+    @{ n = 'return-recheck-done-on-learning'; ok = ($reDone.Action -eq 'done') },
+    @{ n = 'return-recheck-reclick-on-source'; ok = ($reSrc.Action -eq 'reclick' -and $reSrc.Button.X -eq 100 -and $reSrc.Button.Y -eq 51) },
+    @{ n = 'return-recheck-waits-on-transition'; ok = ($reBlank.Action -eq 'wait') },
+    @{ n = 'return-recheck-prefers-learning-when-both'; ok = ($reBoth.Action -eq 'done') }
+)) {
+    '{0} {1}' -f $(if ($a.ok) { 'PASS' } else { 'FAIL' }), $a.n
+    if (-not $a.ok) { $fail++ }; $extra++
+}
+
 # 第⑥步选择题选项点击：能读出字母时走 letter；深色主题漏读 A-D 字母时兜底点「查看对应原文」右侧缩进正文。
 $optWithLetter = Find-PracticeOptionClick @(
     (Rec '查看对应原文' 121 433),

@@ -945,13 +945,9 @@ try {
             $anchor = Has $lines @('查看对应原文')
             if ((Has $lines @('本次练习')) -and $anchor) { $sawQuestion = $true; $optAnchorX1 = [int]$anchor.X1 }
             if ($sawQuestion) {
-                # 只在题目原文按钮下找独立的选项字母；不以固定屏幕位置或「猜的」芯片当成作答。
-                # 深色 800x600 下首屏可能只露出 A 且单字母对比度低易漏读：若未命中则滚动露出 B/C/D 再扫。
+                # 只在题目原文按钮下找选项：优先认单字母 A–D，深色 800x600 OCR 整列漏读字母时兜底点右侧缩进的选项正文。
                 $minOptY = if ($anchor) { $anchor.Y + 10 } else { 180 }
-                foreach ($line in $lines) { foreach ($word in $line.Words) {
-                    $b = $word.BoundingRect
-                    if ($word.Text -cmatch '^[A-Da-d](?:[\.．、])?$' -and $b.Y -gt $minOptY -and $b.X -le ($optAnchorX1 + 22) -and $b.X -ge ($optAnchorX1 - 20) -and (-not $picked -or $b.Y -lt $picked.Y)) { $picked = $b }
-                } }
+                $picked = Find-PracticeOptionClick $lines $optAnchorX1 $minOptY
                 if ($picked) { $question = $true }
             }
             if (-not $question) {
@@ -966,17 +962,19 @@ try {
             }
         }
         if (-not $question) { Fail 6 '120 秒内没有出现可作答的本次练习选择题' }
-        Click-At ([int]$picked.X + 45) ([int]$picked.Y + 12)
+        Note "步骤6 选定选项（$($picked.Mode)）：($($picked.X),$($picked.Y))"
+        Click-At $picked.X $picked.Y
         Start-Sleep -Seconds 2
-        $selected = $false; $explained = $false; $cited = $false; $summary = $false
-        foreach ($view in 0..10) {
+        $selected = $false; $explained = $false; $cited = $false; $summary = $false; $downScrolls = 0
+        foreach ($view in 0..14) {
             $lines = Shot 6 "answered-$view"
             if (Has $lines @('你选择：', '你选择:')) { $selected = $true }
             if (Has $lines @('答后讲解')) { $explained = $true }
             if (Has $lines @('出处')) { $cited = $true }
             if (Has $lines @('题目和作答只保留在这次练习中', '要回看时再打开', '小结')) { $summary = $true }
             if ($selected -and $explained -and $cited -and $summary) { break }
-            $sp = Scroll-Point 0.7 0.6; $dir = if ($view -lt 5) { -2 } else { 2 }
+            $sp = Scroll-Point 0.7 0.6
+            if (-not ($explained -and $cited -and $summary) -and $downScrolls -lt 10) { $dir = -2; $downScrolls++ } else { $dir = 2 }
             Scroll-At $sp[0] $sp[1] $dir; Start-Sleep -Seconds 1
         }
         if (-not $selected) { Fail 6 '点击选项后没有看到已选答案' }

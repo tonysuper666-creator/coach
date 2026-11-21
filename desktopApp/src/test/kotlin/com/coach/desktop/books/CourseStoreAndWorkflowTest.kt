@@ -132,14 +132,28 @@ class CourseStoreAndWorkflowTest {
     fun enforcesFourQualityGatesAndVision25PageCacheGuard() {
         val dir = Files.createTempDirectory("coach-course-gates-")
         try {
-            // Gate 1: past exam rejection + spoiler note scrubbing
+            // Gate 1: past exam rejection + spoiler note scrubbing (including 2026+ and "期末考过")
             assertTrue(CourseClientGates.isPastExamMaterial("ECNM10119-Past-Exam-Paper-2023.pdf"))
+            assertTrue(CourseClientGates.isPastExamMaterial("2026期末试卷.pdf"))
             assertFalse(CourseClientGates.isPastExamMaterial("ECNM10119-Course-Syllabus-Handbook.pdf"))
+            assertFalse(CourseClientGates.isPastExamMaterial("2026-Course-Handbook.pdf"))
             val scrubbed = CourseClientGates.sanitizeUserNote(
-                "2023 真题 原题问了 insurance deductible.\nNormal intuition note stays intact.",
+                "2023 真题 原题问了 insurance deductible.\n" +
+                    "2026年期末考过逆向选择大题。\n" +
+                    "期末考过类似赔偿计算题。\n" +
+                    "Dec 2026 final exam asked deductible schedule.\n" +
+                    "Exam Date: 2026-12-12 (tentative).\n" +
+                    "期末复习重点：理解 risk premium。\n" +
+                    "Normal intuition note stays intact.",
             )
             assertTrue(scrubbed.hasLeakage)
+            assertEquals(4, scrubbed.redactedCount)
             assertFalse(scrubbed.cleanText.contains("2023 真题"))
+            assertFalse(scrubbed.cleanText.contains("2026年期末考过"))
+            assertFalse(scrubbed.cleanText.contains("期末考过类似"))
+            assertFalse(scrubbed.cleanText.contains("Dec 2026 final exam"))
+            assertTrue(scrubbed.cleanText.contains("Exam Date: 2026-12-12 (tentative)."))
+            assertTrue(scrubbed.cleanText.contains("期末复习重点：理解 risk premium。"))
             assertTrue(scrubbed.cleanText.contains("Normal intuition note stays intact"))
 
             // Gate 2: 10/10 exact UTF-16 anchor verification across materials + [mm:ss] transcript

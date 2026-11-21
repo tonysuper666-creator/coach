@@ -395,4 +395,258 @@ class CoursePipelineAndGatesTest {
             dir.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun reviewRegressionsGate1Year2026Gate3NestedFieldsGate4EmptyAssertions() = runBlocking {
+        val dir = Files.createTempDirectory("coach-review-regressions-")
+        try {
+            // Regression 1: 2026+ notes & "期末考过" phrasing must trigger Gate 1 scrubbing on server without false-blocking benign exam schedule/revision headers
+            assertTrue(CourseQualityGates.isPastExamTitle("2026期末试卷.pdf"))
+            assertFalse(CourseQualityGates.isPastExamTitle("2026-Course-Handbook-Syllabus.pdf"))
+
+            val note2026 = "2026年期末考过逆向选择免赔额大题。\n期末考过类似补贴退出题型。\nDec 2026 final exam asked about deductible design.\nExam Date: 2026-12-12 (tentative).\n期末复习重点：厘清混合均衡与分离均衡。"
+            val (scrubbed2026, redactions2026) = CourseQualityGates.sanitizeUserNote(note2026)
+            assertEquals(3, redactions2026)
+            assertFalse(scrubbed2026.contains("2026年期末考过"))
+            assertFalse(scrubbed2026.contains("期末考过类似"))
+            assertFalse(scrubbed2026.contains("Dec 2026 final exam"))
+            assertTrue(scrubbed2026.contains("Exam Date: 2026-12-12 (tentative)."))
+            assertTrue(scrubbed2026.contains("期末复习重点：厘清混合均衡与分离均衡。"))
+
+            // Alignment must also scrub 2026+ & 期末考过 notes before passing previewText to transport
+            var capturedAlignUserPrompt = ""
+            val alignPipe = CourseAlignmentPipeline(
+                object : CourseAlignTransport {
+                    override suspend fun alignCourse(
+                        systemPrompt: String,
+                        userPrompt: String,
+                        batchKey: String,
+                        maxTokens: Int,
+                    ): CourseAlignReply {
+                        capturedAlignUserPrompt = userPrompt
+                        return CourseAlignReply(
+                            text = """{"materialUpdates":[],"topics":[]}""",
+                            routeChannel = CompanionRouteChannel.HAIKU_REALTIME,
+                            model = "claude-sonnet-5-5",
+                            inputTokens = 100,
+                            outputTokens = 50,
+                            elapsedMs = 10,
+                        )
+                    }
+                },
+            )
+            alignPipe.align(
+                buildJsonObject {
+                    put("courseId", "c-reg")
+                    put("courseTitle", "Reg Course")
+                    put("materials", buildJsonArray {
+                        add(buildJsonObject {
+                            put("bookId", "note-2026")
+                            put("title", "个人复习笔记")
+                            put("format", "md")
+                            put("role", "USER_NOTES")
+                            put("previewText", note2026)
+                        })
+                    })
+                },
+            )
+            assertFalse(capturedAlignUserPrompt.contains("2026年期末考过"))
+            assertFalse(capturedAlignUserPrompt.contains("期末考过类似"))
+            assertFalse(capturedAlignUserPrompt.contains("Dec 2026 final exam"))
+
+            // Regression 2 & 3:
+            // - Gate 3 must audit & scrub verbatim >=8-word English & >=12-char Chinese inside keyPoints & discrepancies
+            // - Gate 4 must NEVER pass with checkedCount = 0 when mathAssertions is empty and no inline math exists
+            val srcEn = "Adverse selection causes healthy buyers to exit pooled health insurance contracts prematurely."
+            val srcZh = "当低风险群体认为混合保费高于自身预期赔付时就会率先退出保障池"
+            val srcTexts = listOf("$srcEn $srcZh")
+
+            val ledger = BookTokenLedger(dir.resolve("ledger"))
+            val cache = CourseTopicPackCache(dir.resolve("cache"))
+            val regTransport = object : BatchAiTransport {
+                override suspend fun generateSection(
+                    systemPrompt: String,
+                    userPrompt: String,
+                    task: String,
+                    batchKey: String,
+                    maxTokens: Int,
+                ): BatchTransportReply {
+                    assertFalse(userPrompt.contains("2026年期末考过"), "Gate 1 must scrub 2026 spoiler before map/reduce prompt")
+                    val text = when (task) {
+                        "course_topic_map" -> buildJsonObject {
+                            put("claims", buildJsonArray {})
+                            put("citations", buildJsonArray {
+                                add(buildJsonObject {
+                                    put("bookId", "s1")
+                                    put("page", 1)
+                                    put("quote", "Adverse selection causes healthy buyers to exit")
+                                })
+                            })
+                        }.toString()
+                        else -> buildJsonObject {
+                            put("summary", "Original summary explaining risk selection.")
+                            put("authorityNotice", "L1 slides first.")
+                            put("examFocus", "Short essay evaluation.")
+                            put("keyPoints", buildJsonArray {
+                                add(buildJsonObject {
+                                    put("title", "Verbatim EN copy: $srcEn")
+                                    put("explanation", "讲义指出：$srcZh，导致保障池萎缩。")
+                                    put("citations", buildJsonArray {
+                                        add(buildJsonObject {
+                                            put("bookId", "s1")
+                                            put("page", 1)
+                                            put("quote", "Adverse selection causes healthy buyers to exit")
+                                        })
+                                    })
+                                })
+                            })
+                            put("discrepancies", buildJsonArray {
+                                add(buildJsonObject {
+                                    put("point", "机制对比")
+                                    put("authoritativeView", "L1 emphasizes: $srcEn")
+                                    put("secondaryView", "L2 describes: $srcZh。")
+                                    put("advice", "请聚焦于机制比较而非复述 $srcEn")
+                                    put("citations", buildJsonArray {})
+                                })
+                            })
+                            put("practicePrompt", buildJsonObject {
+                                put("promptId", "p-reg")
+                                put("kind", "ESSAY")
+                                put("stem", "Analyze in original prose how deductible variation supports screening.")
+                                put("wordTarget", 300)
+                            })
+                            // Deliberately omit/empty mathAssertions
+                            put("mathAssertions", buildJsonArray {})
+                        }.toString()
+                    }
+                    return BatchTransportReply(
+                        text = text,
+                        routeChannel = CompanionRouteChannel.CODEBUDDY_DEEPSEEK_FLASH,
+                        model = "deepseek-v4.1-flash",
+                        inputTokens = 200,
+                        outputTokens = 150,
+                        ttftMs = 15,
+                        elapsedMs = 25,
+                    )
+                }
+            }
+
+            val pipe = CourseTopicSynthesisPipeline(regTransport, ledger, cache)
+            val pack = pipe.generateTopicPack(
+                buildJsonObject {
+                    put("courseId", "c-reg")
+                    put("topicId", "t-reg-empty-math")
+                    put("topicTitle", "Selection")
+                    put("sourcesHash", "h-reg")
+                    put("blocks", buildJsonArray {
+                        add(buildJsonObject {
+                            put("bookId", "s1")
+                            put("bookTitle", "Slides")
+                            put("role", "LECTURE_SLIDES")
+                            put("authorityRank", 1)
+                            put("page", 1)
+                            put("text", "$srcEn $srcZh")
+                        })
+                        add(buildJsonObject {
+                            put("bookId", "n1")
+                            put("bookTitle", "Notes")
+                            put("role", "USER_NOTES")
+                            put("authorityRank", 4)
+                            put("page", 1)
+                            put("text", note2026)
+                        })
+                    })
+                },
+                cacheScope = "owner:reg",
+            )
+
+            // Gate 1 verified on 2026 note
+            val gates = pack["gates"]!!.jsonObject
+            assertEquals(3, gates["gate1SpoilerRedactions"]?.jsonPrimitive?.intOrNull)
+
+            // Gate 3 verified across nested keyPoints & discrepancies
+            val kps = pack["keyPoints"]!!.jsonArray
+            val diffs = pack["discrepancies"]!!.jsonArray
+            val nestedProse = buildList {
+                add(pack["summary"]!!.jsonPrimitive.content)
+                add(pack["practicePrompt"]!!.jsonObject["stem"]!!.jsonPrimitive.content)
+                for (k in kps) {
+                    add(k.jsonObject["title"]!!.jsonPrimitive.content)
+                    add(k.jsonObject["explanation"]!!.jsonPrimitive.content)
+                }
+                for (d in diffs) {
+                    add(d.jsonObject["point"]!!.jsonPrimitive.content)
+                    add(d.jsonObject["authoritativeView"]!!.jsonPrimitive.content)
+                    add(d.jsonObject["secondaryView"]!!.jsonPrimitive.content)
+                    add(d.jsonObject["advice"]!!.jsonPrimitive.content)
+                }
+            }
+            for (p in nestedProse) {
+                assertFalse(p.contains(srcEn), "Verbatim English leak remained in nested field: $p")
+                assertFalse(p.contains(srcZh), "Verbatim Chinese leak remained in nested field: $p")
+            }
+            assertTrue(CourseQualityGates.auditZeroOverlap(nestedProse, srcTexts).passed)
+            assertEquals(true, gates["gate3ZeroOverlapPassed"]?.jsonPrimitive?.booleanOrNull)
+
+            // Gate 4 verified: empty mathAssertions NEVER passes with checkedCount=0
+            val emptyAudit = CourseQualityGates.auditMathAssertions(emptyList())
+            assertFalse(emptyAudit.passed)
+            assertEquals(0, emptyAudit.checkedCount)
+            assertTrue(emptyAudit.failures.isNotEmpty())
+            assertEquals(false, gates["gate4MathPassed"]?.jsonPrimitive?.booleanOrNull)
+            assertEquals(0, gates["gate4CheckedCount"]?.jsonPrimitive?.intOrNull)
+            assertTrue((gates["gate4Failures"]?.jsonArray?.size ?: 0) > 0)
+
+            // Wrong inline arithmetic in prose without mathAssertions must also trigger Gate 4 repair
+            val repairCalls = AtomicInteger(0)
+            val inlineMathPipe = CourseTopicSynthesisPipeline(
+                object : BatchAiTransport {
+                    override suspend fun generateSection(
+                        systemPrompt: String,
+                        userPrompt: String,
+                        task: String,
+                        batchKey: String,
+                        maxTokens: Int,
+                    ): BatchTransportReply {
+                        val txt = when (task) {
+                            "course_topic_map" -> """{"claims":[],"citations":[]}"""
+                            "course_topic_math_repair" -> {
+                                repairCalls.incrementAndGet()
+                                """{"summary":"Corrected net outlay: 250 * (1 - 5%) = 237.50.","mathAssertions":[{"expression":"250 * (1 - 5%)","expected":"237.50"}]}"""
+                            }
+                            else -> """{"summary":"Wrong inline calc: 250 * (1 - 5%) = 210.00.","authorityNotice":"L1 first","keyPoints":[],"discrepancies":[],"practicePrompt":{"promptId":"p-m","kind":"ESSAY","stem":"Analyze deductible trade-off in 300 words.","wordTarget":300},"mathAssertions":[]}"""
+                        }
+                        return BatchTransportReply(txt, CompanionRouteChannel.CODEBUDDY_DEEPSEEK_FLASH, "deepseek-v4.1-flash", 100, 100, 0, 10, 10)
+                    }
+                },
+                ledger,
+                cache,
+            )
+            val repairedInline = inlineMathPipe.generateTopicPack(
+                buildJsonObject {
+                    put("courseId", "c-reg")
+                    put("topicId", "t-reg-inline-math")
+                    put("topicTitle", "Math")
+                    put("sourcesHash", "h-inline-math")
+                    put("blocks", buildJsonArray {
+                        add(buildJsonObject {
+                            put("bookId", "s1")
+                            put("bookTitle", "Slides")
+                            put("role", "LECTURE_SLIDES")
+                            put("authorityRank", 1)
+                            put("page", 1)
+                            put("text", "Insurance copay model")
+                        })
+                    })
+                },
+                cacheScope = "owner:reg",
+            )
+            assertEquals(1, repairCalls.get(), "Wrong inline equation must trigger Gate 4 repair")
+            val inlineGates = repairedInline["gates"]!!.jsonObject
+            assertEquals(true, inlineGates["gate4MathPassed"]?.jsonPrimitive?.booleanOrNull)
+            assertEquals(1, inlineGates["gate4CheckedCount"]?.jsonPrimitive?.intOrNull)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
 }

@@ -70,11 +70,15 @@ data class CourseMathAuditResult(
  */
 object CourseQualityGates {
     private val pastExamRegex = Regex(
-        """(?i)(?:past[\s_\-]*(?:exam|paper)|exam[\s_\-]*paper|mock[\s_\-]*exam[\s_\-]*20\d{2}|midterm[\s_\-]*20\d{2}|final[\s_\-]*20\d{2}|(?:历年|往年)?真题|历年(?:试卷|考题))""",
+        """(?i)(?:past[\s_\-]*(?:exam|paper)|exam[\s_\-]*paper|mock[\s_\-]*exam[\s_\-]*20\d{2}|(?:19|20)\d{2}[\s_\-]*(?:exam|midterm|final|期末|期中|试卷|真题)|midterm[\s_\-]*20\d{2}|final[\s_\-]*20\d{2}|(?:历年|往年)?真题|历年(?:试卷|考题))""",
     )
     private val leakageLineRegex = Regex(
-        """(?i)(?:(?:201\d|202[0-5])\s*(?:年)?\s*(?:真题|原题|考试|期中|期末|exam|paper|midterm|final)|(?:历年|往年|去年|前年|以前)?\s*(?:真题|原题|机经|押题原题|考过原题|必考原题)|past[\s_-]*paper|exam[\s_-]*paper|verbatim[\s_-]*(?:question|extract)|exact[\s_-]*question)""",
+        """(?i)(?:(?:19|20)\d{2}\s*(?:年)?\s*(?:\d{1,2}\s*月)?\s*(?:真题|原题|考试|期中|期末|考过|出过|考题|试卷|exam|paper|midterm|final)|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s_-]*(?:19|20)\d{2}\s*(?:exam|paper|midterm|final|question)|(?:期中|期末|大考|统考|补考|往年|历年|去年|前年|以前|上次|上学期|今年)\s*(?:考过|出过|考了|考到过|真题|原题|试卷|考题)|(?:历年|往年|去年|前年|以前)?\s*(?:真题|原题|机经|押题原题|考过原题|必考原题)|考过(?:这题|这道|一道|原题|真题)|past[\s_-]*(?:exam|paper)|exam[\s_-]*paper|verbatim[\s_-]*(?:question|extract)|exact[\s_-]*question)""",
     )
+    private val inlineEquationRegex = Regex(
+        """([$\s(+-]*[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?[%)\s]*(?:[+\-*/×÷^][$\s(+-]*[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?[%)\s]*)+)\s*=\s*([$]?[+-]?[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?%?)""",
+    )
+    private val isoDateOnlyRegex = Regex("""^\s*\d{4}-\d{1,2}-\d{1,2}\s*$""")
     private val enWordRegex = Regex("""[a-z0-9]+""")
     private val timestampRegex = Regex("""\[((?:\d{1,2}:)?\d{1,2}:\d{2})(?:[.,]\d{1,3})?\]""")
 
@@ -246,8 +250,42 @@ object CourseQualityGates {
     }
 
     fun scrubPromptOverlap(text: String, sourceTexts: List<String>): String {
+        if (text.isBlank() || sourceTexts.isEmpty()) return text
         val combined = sourceTexts.joinToString("\n")
-        return VerbatimOverlapGuard.scrubOverlaps(text, combined)
+        var current = text
+        repeat(12) {
+            if (auditZeroOverlap(listOf(current), sourceTexts).passed) return current
+            val next = VerbatimOverlapGuard.scrubOverlaps(current, combined)
+            if (next == current) {
+                return "[已改写以遵循原创防抄录门禁]"
+            }
+            current = next
+        }
+        return if (auditZeroOverlap(listOf(current), sourceTexts).passed) {
+            current
+        } else {
+            "[已改写以遵循原创防抄录门禁]"
+        }
+    }
+
+    fun extractInlineMathAssertions(texts: List<String>): List<CourseMathAssertion> {
+        val seen = LinkedHashSet<Pair<String, BigDecimal>>()
+        val out = mutableListOf<CourseMathAssertion>()
+        for (rawText in texts) {
+            if (rawText.isBlank()) continue
+            for (m in inlineEquationRegex.findAll(rawText)) {
+                val lhs = m.groupValues[1].trim()
+                val rhsRaw = m.groupValues[2].trim()
+                if (isoDateOnlyRegex.matches(lhs)) continue
+                if (evaluateExpression(lhs) == null) continue
+                val rhsVal = evaluateExpression(rhsRaw) ?: continue
+                val key = lhs to rhsVal.setScale(2, RoundingMode.HALF_UP)
+                if (seen.add(key)) {
+                    out += CourseMathAssertion(expression = lhs, expected = rhsVal)
+                }
+            }
+        }
+        return out
     }
 
     fun evaluateExpression(rawExpr: String): BigDecimal? = runCatching {
@@ -264,7 +302,13 @@ object CourseQualityGates {
     }.getOrNull()
 
     fun auditMathAssertions(assertions: List<CourseMathAssertion>): CourseMathAuditResult {
-        if (assertions.isEmpty()) return CourseMathAuditResult(passed = true, checkedCount = 0)
+        if (assertions.isEmpty()) {
+            return CourseMathAuditResult(
+                passed = false,
+                checkedCount = 0,
+                failures = listOf("未提供可验算的 mathAssertions，Gate 4 不能以 checkedCount=0 通过"),
+            )
+        }
         val failures = mutableListOf<String>()
         for (a in assertions) {
             val actual = evaluateExpression(a.expression)?.setScale(2, RoundingMode.HALF_UP)

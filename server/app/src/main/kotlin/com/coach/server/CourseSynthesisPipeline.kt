@@ -418,16 +418,7 @@ class CourseTopicSynthesisPipeline(
             (el as? JsonObject)?.let { CourseQualityGates.verifyCitation(it, blocksByBookPage, allBlocksByBook) }
         }.ifEmpty { verifiedMapCitations }
 
-        val rawSummary = (reduced["summary"] as? JsonPrimitive)?.contentOrNull.orEmpty()
-        val promptObj = reduced["practicePrompt"] as? JsonObject
-        val rawStem = (promptObj?.get("stem") as? JsonPrimitive)?.contentOrNull.orEmpty()
-
-        // Gate 3: Zero-overlap audit & scrub if any verbatim overlap leaked into prompt stem / summary
-        val overlapAudit = CourseQualityGates.auditZeroOverlap(listOf(rawSummary, rawStem), sourceTexts)
-        val cleanSummary = if (overlapAudit.passed) rawSummary else CourseQualityGates.scrubPromptOverlap(rawSummary, sourceTexts)
-        val cleanStem = if (overlapAudit.passed) rawStem else CourseQualityGates.scrubPromptOverlap(rawStem, sourceTexts)
-
-        // Gate 4: Independent BigDecimal math audit (2 decimal places) with one repair attempt on failure
+        // Gate 4: Independent BigDecimal math audit (2 decimal places) across mathAssertions + inline equations
         fun parseMathAssertions(obj: JsonObject): List<CourseMathAssertion> =
             ((obj["mathAssertions"] as? JsonArray) ?: buildJsonArray {}).mapNotNull { el ->
                 val o = el as? JsonObject ?: return@mapNotNull null
@@ -438,9 +429,39 @@ class CourseTopicSynthesisPipeline(
                 CourseMathAssertion(expr, expDec)
             }
 
+        fun collectProseStrings(obj: JsonObject): List<String> = buildList {
+            (obj["summary"] as? JsonPrimitive)?.contentOrNull?.let(::add)
+            (obj["examFocus"] as? JsonPrimitive)?.contentOrNull?.let(::add)
+            (obj["authorityNotice"] as? JsonPrimitive)?.contentOrNull?.let(::add)
+            for (kEl in ((obj["keyPoints"] as? JsonArray) ?: buildJsonArray {})) {
+                val k = kEl as? JsonObject ?: continue
+                (k["title"] as? JsonPrimitive)?.contentOrNull?.let(::add)
+                (k["explanation"] as? JsonPrimitive)?.contentOrNull?.let(::add)
+            }
+            for (dEl in ((obj["discrepancies"] as? JsonArray) ?: buildJsonArray {})) {
+                val d = dEl as? JsonObject ?: continue
+                (d["point"] as? JsonPrimitive)?.contentOrNull?.let(::add)
+                (d["authoritativeView"] as? JsonPrimitive)?.contentOrNull?.let(::add)
+                (d["secondaryView"] as? JsonPrimitive)?.contentOrNull?.let(::add)
+                (d["advice"] as? JsonPrimitive)?.contentOrNull?.let(::add)
+            }
+            val pObj = obj["practicePrompt"] as? JsonObject
+            (pObj?.get("stem") as? JsonPrimitive)?.contentOrNull?.let(::add)
+            for (ptEl in ((pObj?.get("points") as? JsonArray) ?: buildJsonArray {})) {
+                (ptEl as? JsonPrimitive)?.contentOrNull?.let(::add)
+            }
+        }
+
+        fun collectCombinedMathAssertions(obj: JsonObject): List<CourseMathAssertion> {
+            val explicit = parseMathAssertions(obj)
+            val inline = CourseQualityGates.extractInlineMathAssertions(collectProseStrings(obj))
+            return (explicit + inline).distinctBy { it.expression.trim() to it.expected.setScale(2, java.math.RoundingMode.HALF_UP) }
+        }
+
         var activeReduced = reduced
-        var mathAudit = CourseQualityGates.auditMathAssertions(parseMathAssertions(activeReduced))
-        if (!mathAudit.passed) {
+        var combinedAssertions = collectCombinedMathAssertions(activeReduced)
+        var mathAudit = CourseQualityGates.auditMathAssertions(combinedAssertions)
+        if (combinedAssertions.isNotEmpty() && !mathAudit.passed) {
             val repairReply = transport.generateSection(
                 systemPrompt = "以下数学表达式或数值结论未通过独立 2 位小数校验，请修正 mathAssertions 与对应说明后严格返回 JSON。",
                 userPrompt = buildJsonObject {
@@ -470,26 +491,53 @@ class CourseTopicSynthesisPipeline(
             val repairedObj = extractJsonObject(repairReply.text)
             if (repairedObj.isNotEmpty()) {
                 activeReduced = JsonObject(activeReduced + repairedObj)
-                mathAudit = CourseQualityGates.auditMathAssertions(parseMathAssertions(activeReduced))
+                combinedAssertions = collectCombinedMathAssertions(activeReduced)
+                mathAudit = CourseQualityGates.auditMathAssertions(combinedAssertions)
             }
         }
+
+        // Gate 3: Audit & scrub EVERY generated prose field (summary, examFocus, authorityNotice, keyPoints, discrepancies, practicePrompt)
+        val allFinalGeneratedProse = mutableListOf<String>()
+        fun scrubField(text: String): String {
+            if (text.isBlank()) return text
+            return if (CourseQualityGates.auditZeroOverlap(listOf(text), sourceTexts).passed) {
+                text
+            } else {
+                CourseQualityGates.scrubPromptOverlap(text, sourceTexts)
+            }
+        }
+
         val activePackCitations = ((activeReduced["citations"] as? JsonArray) ?: buildJsonArray {}).mapNotNull { el ->
             (el as? JsonObject)?.let { CourseQualityGates.verifyCitation(it, blocksByBookPage, allBlocksByBook) }
         }.ifEmpty { packCitations }
-        val finalRawSummary = ((activeReduced["summary"] as? JsonPrimitive)?.contentOrNull).orEmpty().ifBlank { rawSummary }
-        val finalPromptObj = (activeReduced["practicePrompt"] as? JsonObject) ?: promptObj
-        val finalRawStem = ((finalPromptObj?.get("stem") as? JsonPrimitive)?.contentOrNull).orEmpty().ifBlank { rawStem }
-        val finalOverlapAudit = CourseQualityGates.auditZeroOverlap(listOf(finalRawSummary, finalRawStem), sourceTexts)
-        val repairedSummary = if (finalOverlapAudit.passed) finalRawSummary else CourseQualityGates.scrubPromptOverlap(finalRawSummary, sourceTexts)
-        val repairedStem = if (finalOverlapAudit.passed) finalRawStem else CourseQualityGates.scrubPromptOverlap(finalRawStem, sourceTexts)
 
+        val cleanSummary = scrubField(((activeReduced["summary"] as? JsonPrimitive)?.contentOrNull).orEmpty())
+            .also { if (it.isNotBlank()) allFinalGeneratedProse += it }
+        val cleanExamFocus = scrubField(((activeReduced["examFocus"] as? JsonPrimitive)?.contentOrNull ?: examFormat))
+            .also { if (it.isNotBlank()) allFinalGeneratedProse += it }
+        val baseAuthorityNotice = scrubField(
+            ((activeReduced["authorityNotice"] as? JsonPrimitive)?.contentOrNull).orEmpty()
+                .ifBlank { "按 L1 大纲/讲义/转写 -> L2 核心教材 -> L3 延伸文献 -> L4 个人笔记顺序整理。" },
+        ).also { if (it.isNotBlank()) allFinalGeneratedProse += it }
+
+        val finalPromptObj = activeReduced["practicePrompt"] as? JsonObject
         val finalPrompt = finalPromptObj?.let { p ->
+            val cleanStem = scrubField(
+                ((p["stem"] as? JsonPrimitive)?.contentOrNull).orEmpty()
+                    .ifBlank { "请用自己的话系统阐述「$topicTitle」的核心概念、前提条件及课堂强调的判别要点（约 300 词）。" },
+            )
+            allFinalGeneratedProse += cleanStem
+            val cleanPoints = ((p["points"] as? JsonArray) ?: buildJsonArray {}).mapNotNull { ptEl ->
+                (ptEl as? JsonPrimitive)?.contentOrNull?.let { pt ->
+                    scrubField(pt).also { allFinalGeneratedProse += it }
+                }
+            }
             buildJsonObject {
                 put("promptId", (p["promptId"] as? JsonPrimitive)?.contentOrNull ?: "$topicId-essay")
                 put("kind", (p["kind"] as? JsonPrimitive)?.contentOrNull ?: "ESSAY")
-                put("stem", repairedStem.ifBlank { "请用自己的话系统阐述「$topicTitle」的核心概念、前提条件及课堂强调的判别要点（约 300 词）。" })
+                put("stem", cleanStem)
                 put("wordTarget", (p["wordTarget"] as? JsonPrimitive)?.intOrNull ?: 300)
-                put("points", (p["points"] as? JsonArray) ?: buildJsonArray {})
+                put("points", buildJsonArray { cleanPoints.forEach { add(JsonPrimitive(it)) } })
                 put("citations", buildJsonArray { activePackCitations.take(3).forEach { add(it.toJson()) } })
             }
         }
@@ -500,11 +548,19 @@ class CourseTopicSynthesisPipeline(
                 val verified = ((d["citations"] as? JsonArray) ?: buildJsonArray {}).mapNotNull { c ->
                     (c as? JsonObject)?.let { CourseQualityGates.verifyCitation(it, blocksByBookPage, allBlocksByBook) }
                 }
+                val cleanPoint = scrubField((d["point"] as? JsonPrimitive)?.contentOrNull.orEmpty())
+                    .also { if (it.isNotBlank()) allFinalGeneratedProse += it }
+                val cleanAuthView = scrubField((d["authoritativeView"] as? JsonPrimitive)?.contentOrNull.orEmpty())
+                    .also { if (it.isNotBlank()) allFinalGeneratedProse += it }
+                val cleanSecView = scrubField((d["secondaryView"] as? JsonPrimitive)?.contentOrNull.orEmpty())
+                    .also { if (it.isNotBlank()) allFinalGeneratedProse += it }
+                val cleanAdvice = scrubField((d["advice"] as? JsonPrimitive)?.contentOrNull.orEmpty())
+                    .also { if (it.isNotBlank()) allFinalGeneratedProse += it }
                 add(buildJsonObject {
-                    put("point", (d["point"] as? JsonPrimitive)?.contentOrNull.orEmpty())
-                    put("authoritativeView", (d["authoritativeView"] as? JsonPrimitive)?.contentOrNull.orEmpty())
-                    put("secondaryView", (d["secondaryView"] as? JsonPrimitive)?.contentOrNull.orEmpty())
-                    put("advice", (d["advice"] as? JsonPrimitive)?.contentOrNull.orEmpty())
+                    put("point", cleanPoint)
+                    put("authoritativeView", cleanAuthView)
+                    put("secondaryView", cleanSecView)
+                    put("advice", cleanAdvice)
                     put("citations", buildJsonArray { verified.forEach { add(it.toJson()) } })
                 })
             }
@@ -516,30 +572,34 @@ class CourseTopicSynthesisPipeline(
                 val verified = ((k["citations"] as? JsonArray) ?: buildJsonArray {}).mapNotNull { c ->
                     (c as? JsonObject)?.let { CourseQualityGates.verifyCitation(it, blocksByBookPage, allBlocksByBook) }
                 }
+                val cleanTitle = scrubField((k["title"] as? JsonPrimitive)?.contentOrNull.orEmpty())
+                    .also { if (it.isNotBlank()) allFinalGeneratedProse += it }
+                val cleanExp = scrubField((k["explanation"] as? JsonPrimitive)?.contentOrNull.orEmpty())
+                    .also { if (it.isNotBlank()) allFinalGeneratedProse += it }
                 add(buildJsonObject {
-                    put("title", (k["title"] as? JsonPrimitive)?.contentOrNull.orEmpty())
-                    put("explanation", (k["explanation"] as? JsonPrimitive)?.contentOrNull.orEmpty())
+                    put("title", cleanTitle)
+                    put("explanation", cleanExp)
                     put("citations", buildJsonArray { verified.forEach { add(it.toJson()) } })
                 })
             }
         }
 
         val authorityNotice = buildString {
-            val baseNotice = (activeReduced["authorityNotice"] as? JsonPrimitive)?.contentOrNull.orEmpty()
-                .ifBlank { "按 L1 大纲/讲义/转写 -> L2 核心教材 -> L3 延伸文献 -> L4 个人笔记顺序整理。" }
-            append(baseNotice)
-            if (!mathAudit.passed) {
+            append(baseAuthorityNotice)
+            if (!mathAudit.passed && mathAudit.checkedCount > 0) {
                 append(" [数值核验提示：部分衍生算式待复核]")
             }
         }
 
+        val finalGate3Audit = CourseQualityGates.auditZeroOverlap(allFinalGeneratedProse, sourceTexts)
+
         val resultPayload = buildJsonObject {
             put("topicId", topicId)
-            put("summary", repairedSummary)
+            put("summary", cleanSummary)
             put("authorityNotice", authorityNotice)
             put("examDateTentative", examDateTentative)
             put("examFormatTentative", examFormatTentative)
-            put("examFocus", (activeReduced["examFocus"] as? JsonPrimitive)?.contentOrNull ?: examFormat)
+            put("examFocus", cleanExamFocus)
             put("keyPoints", finalKeyPoints)
             put("discrepancies", finalDiscrepancies)
             finalPrompt?.let { put("practicePrompt", it) }
@@ -549,7 +609,7 @@ class CourseTopicSynthesisPipeline(
             put("gates", buildJsonObject {
                 put("gate1SpoilerRedactions", redactedCount)
                 put("gate2VerifiedCitations", activePackCitations.size)
-                put("gate3ZeroOverlapPassed", CourseQualityGates.auditZeroOverlap(listOf(repairedSummary, repairedStem), sourceTexts).passed)
+                put("gate3ZeroOverlapPassed", finalGate3Audit.passed)
                 put("gate4MathPassed", mathAudit.passed)
                 put("gate4CheckedCount", mathAudit.checkedCount)
                 put("gate4Failures", buildJsonArray { mathAudit.failures.forEach { add(JsonPrimitive(it)) } })

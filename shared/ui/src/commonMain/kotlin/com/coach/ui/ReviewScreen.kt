@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
+import com.coach.client.QuizGroup
 import com.coach.client.NoVariantCandidates
 import com.coach.client.ReviewBoard
 import com.coach.client.ReviewItem
@@ -27,6 +28,8 @@ import com.coach.client.prepareReviewPractice
 import com.coach.client.reviewPracticeTarget
 import com.coach.domain.*
 import com.coach.domain.reviewqueue.VariantCandidate
+import com.coach.ui.v7.CoachEmptyState
+import com.coach.ui.v7.CoachErrorBanner
 import com.coach.domain.reviewqueue.VariantCandidatePort
 import kotlinx.serialization.json.*
 
@@ -57,11 +60,22 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
     val board = remember(view, day, source) { reviewBoard(c.courseId, view, day, source) }
     var cursor by remember(view, day) { mutableStateOf(reviewCursor(c.sync, c.courseId, c.tutor.agentRunId)) }
     var practiceError by remember { mutableStateOf<String?>(null) }
+    var practiceRetry by remember { mutableStateOf<(() -> Unit)?>(null) }
     val savedTarget = reviewPracticeTarget(c.sync, c.courseId, c.tutor.agentRunId)
     fun openPractice(target: ReviewPracticeTarget) {
         val host = onOpenPractice
-        if (host == null) practiceError = "这道题的练习入口尚未接通，尚未开始。选中的题和原作答已保留，不会换成另一题。"
-        else { practiceError = null; host(target) }
+        if (host == null) {
+            practiceRetry = { openPractice(target) }
+            practiceError = "这道题的练习入口还没接上，暂时开不了。选中的题和原来的作答都留着，不会换成另一题。"
+        } else { practiceError = null; practiceRetry = null; host(target) }
+    }
+    // 原位重试：重新准备同一道题，不换题、不丢原来的作答。
+    fun startItem(item: ReviewItem) {
+        val target = prepareReviewPractice(c.sync, c.courseId, c.tutor.agentRunId, item, board.day)
+        if (target == null) {
+            practiceRetry = { startItem(item) }
+            practiceError = "这项复习还没有可用的新题，暂时开不了。原来的作答还留着。"
+        } else { cursor = item.entryId; openPractice(target) }
     }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 8.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -70,7 +84,9 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
             reminderSettings()
         }
         HorizontalDivider()
-        practiceError?.let { Text(it, Modifier.fillMaxWidth().padding(16.dp).testTag("review-practice-error"), color = MaterialTheme.colorScheme.error) }
+        practiceError?.let { message ->
+            CoachErrorBanner(message, Modifier.padding(horizontal = 16.dp, vertical = 8.dp).testTag("review-practice-error"), onRetry = practiceRetry)
+        }
         if (savedTarget != null && board.items.none { it.variantAttemptId == savedTarget.attemptId }) {
             TextButton(onClick = { openPractice(savedTarget) }, modifier = Modifier.testTag("resume-exact-review")) { Text("继续上次选中的复习题") }
         }
@@ -92,20 +108,14 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
             if (onOpenEssay != null) EssayEntry(c, onOpenEssay)
             if (board.snapshotRequired) {
                 // 账本里有这一版读不了的记录：不能猜、也不能显示成「没有复习」。
-                CenterMessage("今天复习什么还确认不了。")
-                Text(
-                    "这台设备上有当前版本读不了的账本记录，要先取服务端的权威快照才能排。" +
-                        "本机已经做过的练习还在，不会丢；连上服务端同步后这里会重新列出要复习的题。",
-                    Modifier.fillMaxWidth().padding(horizontal = 24.dp),
-                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                CoachEmptyState(
+                    title = "今天的复习暂时排不出来。",
+                    hint = "这台设备上有这一版读不了的旧记录，要先和 Coach 服务对上才能排。" +
+                        "本机做过的练习都还在，不会丢；联网同步后这里会重新列出要复习的题。",
                 )
             } else if (board.items.isEmpty()) {
-                CenterMessage("今天没有到期的复习。")
                 // 低频/无题也要说得清：是还没到期、还有未核题，还是根本还没有可复习的题。
-                Text(emptyReviewHint(board), Modifier.fillMaxWidth().padding(horizontal = 24.dp),
-                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                CoachEmptyState(title = "今天没有到期的复习。", hint = emptyReviewHint(board))
             } else {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(board.headline, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -129,11 +139,7 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
                                         Text(reviewItemMeta(item), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                                         if (resumed) Text("上次练到这里", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                                     }
-                                    Button(onClick = {
-                                        val target = prepareReviewPractice(c.sync, c.courseId, c.tutor.agentRunId, item, board.day)
-                                        if (target == null) practiceError = "这项复习还没有可用的已核变式，尚未开始；原作答已保留。"
-                                        else { cursor = item.entryId; openPractice(target) }
-                                    }, modifier = Modifier.heightIn(min = 56.dp)) { Text(if (resumed) "继续" else "开始") }
+                                    Button(onClick = { startItem(item) }, modifier = Modifier.heightIn(min = 56.dp)) { Text(if (resumed) "继续" else "开始") }
                                 }
                             }
                         }
@@ -212,8 +218,32 @@ private fun OfflinePractice(c: CoachController) {
     var active by remember { mutableStateOf<String?>(null) }
     var chosen by remember { mutableStateOf<Map<String,String>>(emptyMap()) }
     var error by remember { mutableStateOf<String?>(null) }
+    var retryAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var downloading by remember { mutableStateOf(false) }
     val group = groups.firstOrNull { it.groupId == active }
+    // 原位重试：下载失败就再存一次，提交失败就再交一次；已经选好的答案一直留着。
+    fun storeOnDevice() {
+        c.tutor.telemetry?.record("tap", "offline_pack")
+        downloading = true; error = null; retryAction = { storeOnDevice() }
+        scope.launch {
+            try { withContext(Dispatchers.IO) { c.sync.downloadOfflinePack(c.courseId) }; retryAction = null }
+            catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { c.tutor.telemetry?.record("error", "offline_pack"); error = "连不上 Coach 服务，没能存到本机；已经有的题还能接着做。" }
+            finally { downloading = false }
+        }
+    }
+    // 提交失败也留在原地重试：同一组题、同一份选择，不重新下载。
+    fun submitGroup(g: QuizGroup) {
+        c.tutor.telemetry?.record("tap", "answer")
+        retryAction = { submitGroup(g) }
+        try {
+            c.sync.submitOfflineGroup(c.courseId, g.groupId, chosen, c.nowMillis())
+            error = null; retryAction = null
+        } catch (_: IllegalArgumentException) {
+            c.tutor.telemetry?.record("error", "offline_pack")
+            error = "这组题已经交过或者过期了，重新存一组就能接着做；刚才选的答案还留着。"
+        }
+    }
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("离线练习", style = MaterialTheme.typography.titleMedium)
         if (group == null) {
@@ -221,16 +251,8 @@ private fun OfflinePractice(c: CoachController) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { active = groups.firstOrNull { !it.submitted }?.groupId; chosen = emptyMap() },
                     enabled = groups.any { !it.submitted }, modifier = Modifier.heightIn(min = 56.dp)) { Text("复习 ${groups.firstOrNull { !it.submitted }?.cards?.size ?: 3} 题") }
-                OutlinedButton(onClick = {
-                    c.tutor.telemetry?.record("tap", "offline_pack")
-                    downloading = true; error = null
-                    scope.launch {
-                        try { withContext(Dispatchers.IO) { c.sync.downloadOfflinePack(c.courseId) } }
-                        catch (e: kotlinx.coroutines.CancellationException) { throw e }
-                        catch (_: Exception) { c.tutor.telemetry?.record("error", "offline_pack"); error = "Coach 服务未连接，下载未完成；已有题仍可练习。" }
-                        finally { downloading = false }
-                    }
-                },enabled = !downloading,modifier = Modifier.heightIn(min = 56.dp)) { Text(if (downloading) "正在存到本机…" else "存到本机") }
+                OutlinedButton(onClick = { storeOnDevice() },
+                    enabled = !downloading, modifier = Modifier.heightIn(min = 56.dp)) { Text(if (downloading) "正在存到本机…" else "存到本机") }
             }
             groups.lastOrNull { it.submitted }?.let { last ->
                 TextButton(onClick = { active = last.groupId }) { Text("查看上组结果") }
@@ -244,15 +266,15 @@ private fun OfflinePractice(c: CoachController) {
                     }
                 }
                 item {
-                    if (!group.submitted) Button(onClick = {
-                        c.tutor.telemetry?.record("tap", "answer")
-                        try { c.sync.submitOfflineGroup(c.courseId,group.groupId,chosen,c.nowMillis()); error = null }
-                        catch (_: IllegalArgumentException) { c.tutor.telemetry?.record("error", "offline_pack"); error = "题组已提交或已过期，请重新下载。" }
-                    },enabled = group.cards.all { chosen[it.attemptId] != null },modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("提交本组答案") }
+                    if (!group.submitted) Button(onClick = { submitGroup(group) },
+                        enabled = group.cards.all { chosen[it.attemptId] != null },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("提交本组答案") }
                     else TextButton(onClick = { active = null; chosen = emptyMap() }) { Text("返回练习队列") }
                 }
             }
         }
-        error?.let { Text(it,color = MaterialTheme.colorScheme.error) }
+        error?.let { message ->
+            CoachErrorBanner(message, Modifier.padding(top = 8.dp).testTag("offline-practice-error"), onRetry = retryAction)
+        }
     }
 }

@@ -142,4 +142,47 @@ class SableThemeContractTest {
             }
         }
     }
+
+    /**
+     * UX-12/13：界面文案里不能露出内部词或厂商词。
+     * 直接扫 `shared/ui/src/commonMain` 的字符串字面量（注释不算），新加文案一旦带上
+     * 机器名、厂商名、协议词或错误码，这里就先红，不用等到人眼在界面上撞见。
+     */
+    @Test fun userVisibleCopyHasNoInternalOrVendorTerms() {
+        val banned = listOf(
+            "Mac", "winbox", "朋友服务", "Anthropic", "OpenAI", "Gemini", "Claude",
+            "HTTP 4", "HTTP 5", "traceId",
+        )
+        val root = locateCommonMain()
+        val literal = Regex("\"((?:[^\"\\\\]|\\\\.)*)\"")
+        val offenders = mutableListOf<String>()
+        root.walkTopDown().filter { it.isFile && it.extension == "kt" }.forEach { file ->
+            // 注释讲内部实现没关系：先去掉注释，只看真正的字符串字面量。
+            val code = file.readText()
+                .replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL), "")
+                .replace(Regex("//[^\\n]*"), "")
+            literal.findAll(code).forEach { match ->
+                val text = match.groupValues[1]
+                banned.firstOrNull { it in text }?.let { term ->
+                    offenders += "${file.relativeTo(root).invariantSeparatorsPath}: 「$text」含「$term」"
+                }
+            }
+        }
+        assertTrue(
+            offenders.isEmpty(),
+            "用户可见文案里出现了内部词：" + offenders.joinToString(separator = "\n"),
+        )
+    }
+
+    /** 测试可能在仓库根，也可能在 `shared/ui` 里跑：两处都认，找不到就报出起点方便定位。 */
+    private fun locateCommonMain(): java.io.File {
+        val start = java.io.File(System.getProperty("user.dir")).absoluteFile
+        var dir: java.io.File? = start
+        while (dir != null) {
+            java.io.File(dir, "shared/ui/src/commonMain").takeIf { it.isDirectory }?.let { return it }
+            if (dir.name == "ui") java.io.File(dir, "src/commonMain").takeIf { it.isDirectory }?.let { return it }
+            dir = dir.parentFile
+        }
+        error("找不到 shared/ui/src/commonMain（从 $start 起找）")
+    }
 }

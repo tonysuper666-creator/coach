@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -113,6 +114,45 @@ fun CoachEmptyState(
     }
 }
 
+/**
+ * Full-page empty/notice state: one quiet accent dot, a plain sentence that says what happens next,
+ * and at most one primary action. Used where a whole screen has nothing to show yet.
+ */
+@Composable
+fun CoachEmptyScreen(
+    text: String,
+    modifier: Modifier = Modifier,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
+    val c = CoachTheme.colors
+    Box(modifier.fillMaxSize().padding(CoachV7.Space.s7), contentAlignment = Alignment.Center) {
+        Column(
+            Modifier.widthIn(max = 420.dp).testTag("coach-empty-screen"),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s3),
+        ) {
+            Box(Modifier.size(10.dp).clip(CircleShape).background(c.accent))
+            Text(text, style = MaterialTheme.typography.bodyLarge, color = c.fgSecondary, textAlign = TextAlign.Center)
+            if (!actionLabel.isNullOrBlank() && onAction != null) {
+                Spacer(Modifier.height(CoachV7.Space.s2))
+                PrimaryButton(onClick = onAction, modifier = Modifier.testTag("coach-empty-screen-action")) { Text(actionLabel) }
+            }
+        }
+    }
+}
+
+/** Full-page loading state: the same breathing dots, centred, with one plain sentence. */
+@Composable
+fun CoachLoadingScreen(
+    label: String,
+    modifier: Modifier = Modifier,
+) {
+    Box(modifier.fillMaxSize().padding(CoachV7.Space.s6), contentAlignment = Alignment.Center) {
+        CoachLoadingDots(label = label)
+    }
+}
+
 /** Inline error banner preserving the surrounding screen state with a direct retry affordance. */
 @Composable
 fun CoachErrorBanner(
@@ -120,6 +160,7 @@ fun CoachErrorBanner(
     modifier: Modifier = Modifier,
     retryLabel: String = "重试",
     onRetry: (() -> Unit)? = null,
+    retryTag: String = "coach-error-retry",
 ) {
     val c = CoachTheme.colors
     val shape = RoundedCornerShape(CoachV7.Radius.m)
@@ -136,7 +177,7 @@ fun CoachErrorBanner(
     ) {
         Text(message, style = MaterialTheme.typography.bodySmall, color = c.dangerFg, modifier = Modifier.weight(1f))
         if (onRetry != null) {
-            V7TextButton(onClick = onRetry, modifier = Modifier.testTag("coach-error-retry")) {
+            V7TextButton(onClick = onRetry, modifier = Modifier.testTag(retryTag)) {
                 Text(retryLabel, color = c.dangerFg, fontWeight = CoachV7.Weight.uiStrong)
             }
         }

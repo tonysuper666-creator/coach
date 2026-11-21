@@ -24,6 +24,8 @@ import com.coach.domain.logicalDay
 import com.coach.domain.str
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.coach.ui.v7.CoachLoadingScreen
+import com.coach.ui.v7.CoachEmptyScreen
 
 /** 记录页选中的一项：一个掌握变化，或一次没有计入的作答。 */
 private sealed interface RecordSelection {
@@ -38,11 +40,11 @@ private sealed interface RecordSelection {
  */
 @Composable
 fun RecordsScreen(c: CoachController, view: CourseView?, wide: Boolean, onOpenMock: ((mockId: String) -> Unit)? = null, onOpenKp: (kpId: String) -> Unit) {
-    if (view == null) return CenterMessage("正在加载课程…")
+    if (view == null) return CoachLoadingScreen("正在加载课程…")
     val records by produceState<RecordsView?>(null, view) {
         value = withContext(Dispatchers.Default) { RecordsView(view.events).also { it.changes; it.orphans; it.timedEssays } }
     }
-    val data = records ?: return CenterMessage("正在整理记录…")
+    val data = records ?: return CoachLoadingScreen("正在整理记录…")
     var picked by remember { mutableStateOf<RecordSelection?>(null) }
     // 宽屏右栏默认就是最新一条变化，不留一块空白；窄屏停在列表。
     val selected = picked ?: if (wide) data.changes.maxByOrNull { it.seq }?.let { RecordSelection.Change(it) } else null
@@ -70,7 +72,7 @@ private fun RecordsList(c: CoachController, view: CourseView, data: RecordsView,
     val essays = data.timedEssays
     var allEssays by remember { mutableStateOf(false) }
     if (changes.isEmpty() && orphans.isEmpty() && mocks.isEmpty() && essays.isEmpty()) {
-        Box(modifier) { CenterMessage("还没有掌握变化。连续答对 3 道不同的题，知识点就会「已通过」，这里会记下为什么。") }
+        Box(modifier) { CoachEmptyScreen("还没有掌握变化。连续答对 3 道不同的题，知识点就会「已通过」，这里会记下为什么。") }
         return
     }
     LazyColumn(modifier, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -174,7 +176,7 @@ private fun RecordDetail(c: CoachController, view: CourseView, data: RecordsView
             TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 记录") }
         }
         when (selected) {
-            null -> CenterMessage("选一条记录，看原题和判分依据。")
+            null -> CoachEmptyScreen("选一条记录，看原题和判分依据。")
             is RecordSelection.Orphan -> OrphanDetail(c, selected.orphan)
             is RecordSelection.Change -> ChangeDetail(c, view, data, selected.change, onOpenKp)
             is RecordSelection.Essay -> {

@@ -15,7 +15,7 @@ import com.coach.client.db.ClientDatabase
 import kotlin.test.*
 
 /**
- * TON-1241 D4：整屏 [CoachApp] 上的「Mac 未连接」横幅，由模型的连接状态驱动（与 [TutorClient] 每次握手/断开时一样）。
+ * TON-1241 D4：整屏 [CoachApp] 上的离线横幅，由模型的连接状态驱动（与 [TutorClient] 每次握手/断开时一样）。
  * 只用 main 上就有的 API，所以同一份测试在 main 上能编译、能跑出闪烁。
  */
 @OptIn(ExperimentalTestApi::class)
@@ -58,7 +58,7 @@ class OfflineBannerTest {
         setContent { CoachApp(CoachController(courseId = "C", sync = sync, tutor = tutor, formatClock = { "10:00" })) }
     }
 
-    private fun ComposeUiTest.bannerShown() = onAllNodesWithText("Coach 服务未连接", substring = true).fetchSemanticsNodes().isNotEmpty()
+    private fun ComposeUiTest.bannerShown() = onAllNodesWithText("当前离线", substring = true).fetchSemanticsNodes().isNotEmpty()
 
     @AfterTest fun closeClient() = tutor.close()
 
@@ -91,7 +91,7 @@ class OfflineBannerTest {
         assertFalse(bannerShown(), "连接稳定后横幅应收起")
     }
 
-    @Test fun macThatNeverAnswersStillShowsBanner() = runComposeUiTest {
+    @Test fun unreachableServerStillShowsBanner() = runComposeUiTest {
         mount()
         mainClock.advanceTimeBy(3_100)
         assertTrue(bannerShown())

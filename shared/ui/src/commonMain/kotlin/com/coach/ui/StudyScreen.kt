@@ -22,6 +22,7 @@ import com.coach.ui.chat.ChatListState
 import com.coach.ui.input.ComposerField
 import com.coach.ui.input.EnterGate
 import kotlinx.coroutines.launch
+import com.coach.ui.v7.CoachErrorBanner
 
 /** 阅读栏最大宽度：内屏/桌面宽窗口下正文不拉成一整行。 */
 private val READING_WIDTH = coach.design.tokens.CoachV7.Layout.colw
@@ -264,7 +265,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
             if (!imeOpen && weekActions != null && view.weekTarget?.id == kp.id) {
                 com.coach.ui.v7.PaperButton(onClick = { weekActions.next(view, kp.id) }, enabled = ui.connected && !tv.busy && !weekActions.busy,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("下一节 →") }
-                weekActions.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                weekActions.error?.let { message -> CoachErrorBanner(message, onRetry = weekActions.retryAction) }
             }
             // 输入框始终可用（讲解进行中也能打字，键盘不会被收起）；只有「发送」会按状态禁用。
             // 组字回车只上屏、不发送；硬件键盘/桌面回车发送，Shift+回车换行；手机回车换行，点击按钮发送（§7.6）。

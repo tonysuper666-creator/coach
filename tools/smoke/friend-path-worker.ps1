@@ -105,6 +105,59 @@ function Get-OriginalPageNumber($lines, [string]$png) {
         }
     } finally { $src.Dispose() }
 }
+# 「暂不开启」是暗底上最暗的一档字（实测字 46–68、底色 32，放大两倍也认不出来）。
+# 把对话框底栏那一条抠出来，按它自己的底色二值化成白底黑字再放大三倍，才能认出按钮；坐标换算回原图。
+function Find-DimButton([string]$png, [string]$needle) {
+    $src = [Drawing.Bitmap]::new($png)
+    $file = Join-Path (Split-Path -Parent $png) ('dim-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.png')
+    try {
+        $scale = 3
+        $left = [int]($src.Width / 2) - 230; $right = [Math]::Min($src.Width, $left + 460)
+        $top = [Math]::Max(0, $src.Height - 90); $bottom = $src.Height - 6
+        $w = $right - $left; $h = $bottom - $top
+        if ($w -le 0 -or $h -le 0) { return $null }
+        $lum = New-Object 'int[,]' $w, $h
+        $hist = @{}
+        for ($y = 0; $y -lt $h; $y++) {
+            for ($x = 0; $x -lt $w; $x++) {
+                $c = $src.GetPixel($left + $x, $top + $y)
+                $v = [int](($c.R * 299 + $c.G * 587 + $c.B * 114) / 1000)
+                $lum[$x, $y] = $v; $hist[$v] = 1 + [int]$hist[$v]
+            }
+        }
+        # 这一条里出现最多的灰度就是对话框底色；比它亮 8 个灰度以上算字。
+        $bg = [int](($hist.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 1).Name)
+        $bmp = [Drawing.Bitmap]::new($w * $scale, $h * $scale)
+        try {
+            $black = [Drawing.Color]::Black; $white = [Drawing.Color]::White
+            for ($y = 0; $y -lt $h; $y++) {
+                for ($x = 0; $x -lt $w; $x++) {
+                    $col = if ($lum[$x, $y] -ge ($bg + 8)) { $black } else { $white }
+                    for ($dy = 0; $dy -lt $scale; $dy++) {
+                        for ($dx = 0; $dx -lt $scale; $dx++) { $bmp.SetPixel($x * $scale + $dx, $y * $scale + $dy, $col) }
+                    }
+                }
+            }
+            $bmp.Save($file, [Drawing.Imaging.ImageFormat]::Png)
+        } finally { $bmp.Dispose() }
+        $m = Find-Text @(Read-Bitmap $file) $needle
+        if (-not $m) { return $null }
+        return [pscustomobject]@{ X = [int]($left + $m.X / $scale); Y = [int]($top + $m.Y / $scale); X1 = [int]($left + $m.X1 / $scale); X2 = [int]($left + $m.X2 / $scale); Y1 = [int]($top + $m.Y1 / $scale); Y2 = [int]($top + $m.Y2 / $scale) }
+    } finally {
+        $src.Dispose()
+        Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue
+    }
+}
+# 标签行必须整行就是这个词，避免书架说明文字里的「看书」把点击带偏。
+function Find-Exact($lines, [string]$needle) {
+    foreach ($l in $lines) {
+        if (($l.Text -replace '\s', '') -eq $needle) {
+            $b = Get-LineBox $l
+            return [pscustomobject]@{ X = [int](($b.X1 + $b.X2) / 2); Y = [int](($b.Y1 + $b.Y2) / 2); X1 = [int]$b.X1; X2 = [int]$b.X2; Y1 = [int]$b.Y1; Y2 = [int]$b.Y2 }
+        }
+    }
+    return $null
+}
 # The lowest on-screen occurrence of a label (e.g. the last button on a page).
 function Find-Lowest($lines, [string]$needle) { $best = $null; foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m -and (-not $best -or $m.Y -gt $best.Y)) { $best = $m } }; $best }
 # 滚动落点按窗口实际大小算：winbox 的控制台会话不一定跑在大屏上（现在只有 800×600），
@@ -122,6 +175,23 @@ function Click-Folded([int]$n, [string[]]$labels, [string]$why) {
         $null = Shot $n "fold$k"
     }
     Fail $n $why
+}
+# 「继续追问」框里的字太小，OCR 读不出来；粘完要靠框内区域的亮像素数确认「框里确实有字」。
+# 空框只有深色底和一圈深色边框，加了字会多出成百上千个亮像素，和空框那张比一下就有数了。
+function Get-FieldInk([string]$png, $label) {
+    $bmp = [System.Drawing.Bitmap]::FromFile($png)
+    try {
+        $x0 = [int]$label.X1 + 2; $y0 = [int]$label.Y2 + 10
+        $x1 = [Math]::Min($x0 + 420, $bmp.Width - 2); $y1 = [Math]::Min($y0 + 42, $bmp.Height - 2)
+        $ink = 0
+        for ($y = $y0; $y -le $y1; $y++) {
+            for ($x = $x0; $x -le $x1; $x++) {
+                $c = $bmp.GetPixel($x, $y)
+                if ($c.R -gt 140 -and $c.G -gt 140 -and $c.B -gt 140) { $ink++ }
+            }
+        }
+        return $ink
+    } finally { $bmp.Dispose() }
 }
 function Find-All($lines, [string]$needle) { $all = @(); foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m) { $all += $m } }; $all | Sort-Object Y }
 # Locate controls inside the open question-mode dialog, ignoring the background toolbar button and hint copy.
@@ -374,15 +444,28 @@ try {
     Pass 2 '书出现在书架'
 
     # ③ 翻页
-    # 上传后的「这次怎么读」卡上点「先读」只读；导入收尾时按钮可能还没亮，点不动就再点，直到阅读器出来。
+    # 上传后的「这次怎么读」卡上点「先读」进阅读器；导入收尾时按钮可能还没亮，点不动就再点。
+    # 提示卡自己收起或点空了会停在书架卡上（11-21 00:47 那轮就是这样），这时「看书」那一行才是进阅读器的入口，两条路都试。
     $lines = Shot 3 'find'
     $m = Has $lines @('下一页')
     $deadline = (Get-Date).AddSeconds(90)
     while (-not $m -and (Get-Date) -lt $deadline) {
-        $b = Has $lines @('先读', '继续看书')
+        $b = Has $lines @('先读')
         if ($b) { Click-At $b.X $b.Y; Start-Sleep -Seconds 1 }
+        else {
+            $r = Find-Exact $lines '看书'
+            if (-not $r) { $r = Find-Exact $lines '继续看书' }
+            if ($r) { Click-At $r.X $r.Y; Start-Sleep -Seconds 1 }
+        }
         $d = Await-Text 3 'dismiss' @('要开始学吗') 2
-        if ($d) { Send-Keys '{ESC}'; Start-Sleep -Seconds 1 }   # 暂不开启：只读这本书
+        if ($d) {
+            # 只读这本书：点「暂不开启」而不是按 ESC（1.1.1 的 ESC 会退回书架）。按钮是暗底灰字，放大两倍才认得出来；
+            # 阅读器刚打开时它可能还是灰的（ui.busy），点不动就下一轮再点，循环有 90 秒。
+            $off = Find-Text $script:Last '暂不开启'
+            if (-not $off) { $off = Find-DimButton $script:LastPng '暂不开启' }
+            if (-not $off) { Fail 3 '「要开始学吗」上的「暂不开启」认不出来（见 3-dismiss.png）' }
+            Click-At ([int]$off.X) ([int]$off.Y); Start-Sleep -Seconds 1
+        }
         $lines = Shot 3 'reader'
         $m = Has $lines @('下一页')
     }
@@ -509,32 +592,48 @@ try {
         }
         if (-not $field) { throw '选段卡里没有「继续追问」输入框' }
         $question = '用大白话解释一下，这里的专用人力资本是什么意思？'
-        # 框里的字太小，OCR 认不出来（截图上明明有字，识别结果是空的），所以不能用「框里有没有字」判断焦点；
         # 标记直接写进问题里，回答轮的标题是「问：<原问题>」，标记出现在那行才算这一问真的发出去了。
         $askText = if ($Marker) { "$Marker $question" } else { $question }
         $fb = Get-LineBox $field
         $hdr = Has $lines @('收起')
         $scrollY = if ($hdr) { [int](($hdr.Y + $fb.Y1) / 2) } else { [Math]::Max(60, [int]($fb.Y1) - 120) }
-        # 框里的字 OCR 读不出来，但框里有字时「发送」会从灰变亮、OCR 就能认到 —— 拿它当焦点探针：
-        # 标签底往下逐格试落点，敲一个字后「发送」亮了就说明这一格真的点进了输入框。
-        $focusY = $null
-        foreach ($dy in 14, 20, 26, 32, 38, 44, 50, 56) {
+        # 框里的字太小，OCR 认不出来（截图上明明有字、识别结果是空的），所以「焦点」和「框里有字」都不能靠读字：
+        #   · 焦点：点进框里敲两个 ASCII 哨兵字符，「发送」会从灰变亮、OCR 就能认到，这是焦点确实落进框里的证据；
+        #   · 有字：粘完数一遍框内区域的亮像素，和空框那张比多出上百个，才算真粘进去了。
+        # 哨兵与 -Marker 无关：以前没传 -Marker 时会跳过探针直接点标签底 +14，那一格在框上边沿外，
+        # 粘贴全丢，只剩「发送没亮」一条看不出原因的失败（2026-11-21 00:18 那轮 6/7 就是这么挂的）。
+        # 实测 +20 是框内第一行，+14 落在框上边沿，所以按 +20 先试。
+        $sentinel = 'zk'
+        $focus = $null
+        foreach ($dy in 20, 14, 26, 32, 38, 44, 50, 56) {
             $probeY = [int]$fb.Y2 + $dy
-            Click-At ([int]$fb.X1 + 150) $probeY; Start-Sleep -Milliseconds 500
-            if (-not $Marker) { $focusY = $probeY; break }
-            Send-Keys $Marker; Start-Sleep -Milliseconds 600
+            Click-At ([int]$fb.X1 + 150) $probeY; Start-Sleep -Milliseconds 400
+            Send-Keys $sentinel; Start-Sleep -Milliseconds 700
             $probe = Shot 4 "ask-probe$dy"
-            if (Has $probe @('发送')) { $focusY = $probeY; break }
+            if (Has $probe @('发送')) { $focus = @{ Y = $probeY; Dy = $dy }; break }
             Send-Keys '^a'; Send-Keys '{BACKSPACE}'; Start-Sleep -Milliseconds 250
         }
-        if (-not $focusY) { throw '点不进「继续追问」框：标签下八个落点都没能把「发送」点亮' }
-        Note "追问框落点：标签底 +$($focusY - $fb.Y2)"
-        # 探针敲进去的字要清掉，换成真问题
-        Send-Keys '^a'; Send-Keys '{BACKSPACE}'; Start-Sleep -Milliseconds 250
-        Paste-Text " $askText"; Start-Sleep -Milliseconds 900
-        $typed = Shot 4 'ask-typed'
-        $send = Has $typed @('发送')
-        if (-not $send) { throw '「继续追问」框里没粘进问题（发送没有亮）' }
+        if (-not $focus) { throw '点不进「继续追问」框：标签下八个落点敲哨兵都没能把「发送」点亮' }
+        Note "追问框落点：标签底 +$($focus.Dy)（哨兵点亮了「发送」）"
+        # 清掉哨兵，留一张空框基线，粘贴后拿它当对照
+        Send-Keys '^a'; Send-Keys '{BACKSPACE}'; Start-Sleep -Milliseconds 300
+        $null = Shot 4 'ask-empty'
+        $emptyInk = Get-FieldInk $script:LastPng $fb
+        # 粘完要验两件事：框里有字（亮像素明显多于空框）且「发送」亮。粘不进去就回框里再点一次重粘，最多三次。
+        $pasted = $false; $send = $null; $ink = $emptyInk
+        foreach ($attempt in 1..3) {
+            if ($attempt -gt 1) {
+                Send-Keys '^a'; Send-Keys '{BACKSPACE}'; Start-Sleep -Milliseconds 200
+                Click-At ([int]$fb.X1 + 150) $focus.Y; Start-Sleep -Milliseconds 400
+            }
+            Paste-Text " $askText"; Start-Sleep -Milliseconds 900
+            $typed = Shot 4 $(if ($attempt -eq 1) { 'ask-typed' } else { "ask-typed$attempt" })
+            $send = Has $typed @('发送')
+            $ink = Get-FieldInk $script:LastPng $fb
+            Note "粘入第 $attempt 次：框内亮像素 $ink（空框 $emptyInk），发送 $(if ($send) { '亮' } else { '灰' })"
+            if ($send -and $ink -gt ($emptyInk + 40)) { $pasted = $true; break }
+        }
+        if (-not $pasted) { throw "「继续追问」框粘了三次都没成：框内亮像素 $ink（空框 $emptyInk），发送 $(if ($send) { '亮' } else { '灰' })（见 4-ask-typed*.png）" }
         # 回车和「发送」是同一条提交路径（onSubmitQuestion），点按钮的落点由 OCR 直接给出，比回车确定。
         Click-At $send.X $send.Y
         # 卡片正文最高 360dp，讲解本身就把滚动区撑满：新加的「问：…」和它的回答追加在下面，不滚卡片看不到。

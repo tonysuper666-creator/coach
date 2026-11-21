@@ -89,7 +89,7 @@ class AndroidSableLoginTest {
 
             compose.onNodeWithText("用 Sable 账号登录").assertIsDisplayed()
             compose.onNodeWithText("没有 Sable 账号？用配对码").assertIsDisplayed()
-            compose.onNodeWithTag("explain-connect-hint").assertTextContains("朋友服务", substring = true)
+            compose.onNodeWithTag("explain-connect-hint").assertTextContains("登录后可以提问", substring = true)
             compose.onNodeWithTag("explain-code").assertExists()
             compose.onNodeWithTag("explain-pair").assertExists()
 

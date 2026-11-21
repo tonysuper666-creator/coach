@@ -56,6 +56,7 @@ class DesktopConnectionTest {
         Files.writeString(token, "another-device-must-not-be-used")
         val settings = DesktopConnectionSettings(home, { null }, mac = false)
         assertNull(settings.serverUrl())
+        assertEquals("请先在连接配置中设置 Coach 服务地址。", assertFailsWith<com.coach.client.SableLoginError> { settings.sableFriendUrl() }.message)
         assertNull(settings.nativeCredentials("http://127.0.0.1:18791"))
         assertNull(DesktopPairing(settings).load())
         settings.saveAddress("http://selected-mac.example:18791")

@@ -96,7 +96,7 @@ fun PairingGate(
         else Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("连接服务", style = MaterialTheme.typography.headlineMedium)
             com.coach.ui.SableLoginButton(busy, { busy = it }) { open ->
-                if (normalizedFriendUrl.isBlank()) throw SableLoginError("此安装包尚未配置朋友服务地址。")
+                if (normalizedFriendUrl.isBlank()) throw SableLoginError("此安装包尚未配置 Coach 服务地址。")
                 val callbackDispatcher = currentCoroutineContext()[ContinuationInterceptor] ?: Dispatchers.Main.immediate
                 val value = try {
                     withContext(Dispatchers.IO) {

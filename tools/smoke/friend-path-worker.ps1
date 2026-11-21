@@ -148,6 +148,21 @@ function Click-Folded([int]$n, [string[]]$labels, [string]$why) {
     }
     Fail $n $why
 }
+# 书架右栏一屏放不下三条入口，「做题学」在折叠线以下：只拍顶屏一帧就会当成没有入口
+# （11-21 06:57 L2 返回学习补点落到书架，那个只拍一帧的兜底就是这么把唯一能回学习页的行漏掉的）。
+# 所以进门和兜底用同一套下滚找法：每帧先确认还在书架上（「本节原文」在就不是书架，别乱滚页面），
+# 再按标题认（含 OCR 错字「续做韪学」，见 Find-ShelfPracticeEntry）；滚满 8 帧还没有返回 $null。
+function Find-ShelfPractice([int]$n, [string]$tag) {
+    $sp = Scroll-Point 0.7 0.6
+    foreach ($k in 1..8) {
+        $shelf = Shot $n "$tag$k"
+        if (Find-Text $shelf '本节原文') { return $null }
+        $path = Find-ShelfPracticeEntry $shelf
+        if ($path) { return $path }
+        Scroll-At $sp[0] $sp[1] -4; Start-Sleep -Milliseconds 600
+    }
+    return $null
+}
 # 「继续追问」框里的字太小，OCR 读不出来；粘完要靠框内区域的亮像素数确认「框里确实有字」。
 # 空框只有深色底和一圈深色边框，加了字会多出成百上千个亮像素，和空框那张比一下就有数了。
 function Get-FieldInk([string]$png, $label) {
@@ -982,14 +997,25 @@ try {
     $five = $null
     try {
         # 第 4 步从「看原页」切回「看文字」时，客户端会在后台把视图状态写进 library.sqlite。四路同写会
-        # SQLITE_BUSY：弹「阅读视图暂未保存。切换视图后会再试一次。」、顶栏进度条亮着、工具栏全灰
-        # （11-21 04:15 L1/L2 有这条提示，L3/L4 只剩进度条）。这段窗口里点「开始学」不算数，
-        # 先等提示条消失（最多 20 秒）再点；没有提示条时也借这一帧确认工具栏已经画回来。
-        $settleStop = (Get-Date).AddSeconds(20)
-        while ((Get-Date) -lt $settleStop) {
-            $null = Shot 5 'settle'
-            if (-not (Has $script:Last @('阅读视图暂未保存'))) { break }
-            Start-Sleep -Seconds 2
+        # SQLITE_BUSY：工具栏下面挂一条「阅读视图暂未保存。切换视图后会再试一次。」、顶栏进度条亮着、工具栏全灰
+        # （11-21 04:15 L1/L2 有这条提示，L3/L4 只剩进度条）。它不是 toast——不清屏也不自己重试，干等 20 秒
+        # 永远等不到；11-21 06:53 L4 就在提示条下把 8 次「开始学」全点空了（提示条盖着，点了不算数）。
+        # 产品写明的重试路径就是那句提示本身：再切一次视图就会重存（TextbookReader.kt:711 先清错再写）。
+        # 所以看到提示就切一次视图；切完确认按钮真的翻面、提示清掉就继续（停在哪个视图都不影响第 5 步入口），
+        # 连切两次还挂着就带产品原话报错，不再空点。
+        $vsTries = 0
+        $vsStop = (Get-Date).AddSeconds(45)
+        while ($true) {
+            $vsAct = Resolve-ViewSaveErrorAction (Shot 5 "viewsave$vsTries") $vsTries
+            if ($vsAct.Action -eq 'none') { break }
+            if ($vsAct.Action -eq 'fail') { Fail 5 "阅读视图状态没存上（$($vsAct.Reason)），第 5 步入口点不动" }
+            if ((Get-Date) -ge $vsStop) { Fail 5 "阅读视图状态一直没存上（$($vsAct.Reason)），第 5 步入口点不动" }
+            $vsTries++
+            Note "步骤5 入口前视图状态没存上（$($vsAct.Reason)），按产品提示切一次视图重存"
+            $null = Click-At $vsAct.Button.X $vsAct.Button.Y
+            if (-not (Await-Text 5 "viewsave-flip$vsTries" @($vsAct.Flip) 12)) {
+                Fail 5 "点了切视图，但按钮没变成「$($vsAct.Flip)」，没法确认这一下切过去了"
+            }
         }
         # 入口三下都要看到状态才走下一句：弹窗开了（「这次怎么读」）、底按钮换成「开始边看边学」、弹窗关掉。
         # 弹窗标题「开始学这本教材」里也有「开始学」，所以认按钮时跳过这一行，别把标题当按钮点。
@@ -1121,14 +1147,11 @@ try {
         }
         Click-Label 6 @('返回书架') '无法从学习页返回书架'
         # 书架一屏放不下三条入口：做题学在折叠线以下，得先滚出来再点。
-        $path = $null
-        foreach ($k in 1..8) {
-            $shelf = Shot 6 "path$k"
-            $path = Has $shelf @('做题学', '继续做题学')
-            if ($path) { break }
-            $sp = Scroll-Point 0.7 0.6; Scroll-At $sp[0] $sp[1] -4; Start-Sleep -Milliseconds 600
+        $path = Find-ShelfPractice 6 'path'
+        if (-not $path) {
+            if (Find-Text $script:Last '本节原文') { Fail 6 '点了「返回书架」但仍停在学习页，没回到书架' }
+            Fail 6 '书架没有做题学入口'
         }
-        if (-not $path) { Fail 6 '书架没有做题学入口' }
         Click-At $path.X $path.Y; Start-Sleep -Milliseconds 800
         $enter = Await-Text 6 'learn-enter' @('本节原文') 15
         if (-not $enter) { Fail 6 '做题学页面没有显示「本节原文」' }
@@ -1230,7 +1253,34 @@ try {
                 }
                 if ($probeAct -and $probeAct.Action -eq 'reclick') {
                     Note "步骤6 点返回学习后失焦，当前帧仍在原文页，按这一帧坐标重点击 ($($probeAct.Button.X),$($probeAct.Button.Y))"
-                    Click-At $probeAct.Button.X $probeAct.Button.Y
+                    # 探针那一帧到按下之间还有几百毫秒，界面照样可能在中间切走：原文页「返回学习」和做题学
+                    # 左上角「Coach目录返回书架」是同一个坐标，这一下按下去就把整条 Lane 送回书架
+                    # （11-21 06:57 L2 的 6-back-probe-3 到 6-back-3 就是这样）。指针落到位置上、按下之前
+                    # 再拍一帧：已经不是原文页就不按，页面归哪儿交给后面的兜底去认。
+                    $pressed = Click-At $probeAct.Button.X $probeAct.Button.Y -BeforePress {
+                        $guard = Shot 6 "back-guard-$tag"
+                        if (Find-Text $guard '本节原文') { return $false }
+                        if (Find-Text $guard 'Coach目录返回书架') { return $false }
+                        return [bool](Find-Text $guard '返回学习')
+                    }
+                    if (-not $pressed) {
+                        Note '步骤6 按下前这一帧已经不是原文页，放弃这次补点'
+                        # 探针否掉只说明「这一下按下去不安全」，不等于已经回到做题学：还在原文页时这一下
+                        # 就等于没点。所以按刚拍的那一帧再看一次，还在原文页就重新取坐标补一次（只补一次，
+                        # 每次都重拍，绝不沿用已经过期的坐标）。
+                        if (Find-Text $script:Last '返回学习') {
+                            $again = Resolve-SourceReturnRecheck (Shot 6 "back-probe2-$tag")
+                            if ($again.Action -eq 'reclick') {
+                                Note "步骤6 还在原文页，按新一帧再补一次 ($($again.Button.X),$($again.Button.Y))"
+                                $null = Click-At $again.Button.X $again.Button.Y -BeforePress {
+                                    $guard = Shot 6 "back-guard2-$tag"
+                                    if (Find-Text $guard '本节原文') { return $false }
+                                    if (Find-Text $guard 'Coach目录返回书架') { return $false }
+                                    return [bool](Find-Text $guard '返回学习')
+                                }
+                            }
+                        }
+                    }
                 }
                 if ($probeAct -and $probeAct.Action -eq 'done') {
                     $backFound = $true
@@ -1238,10 +1288,9 @@ try {
                     $backFound = [bool](Await-Text 6 "back-$tag" @('本节原文') 15)
                     if (-not $backFound) {
                         # 探针那一帧也可能慢一步、补点落到了「Coach目录返回书架」上：认书架，按「做题学」回去，
-                        # 比整条 Lane 判死划算；书架入口在折叠线以下时照旧如实报错。
-                        $shelf = Shot 6 "back-shelf-$tag"
-                        $reenter = Has $shelf @('做题学', '继续做题学')
-                        if ($reenter -and -not (Has $shelf @('本节原文'))) {
+                        # 比整条 Lane 判死划算。书架入口在折叠线以下，照进门那套下滚找，不拿顶屏一帧判死。
+                        $reenter = Find-ShelfPractice 6 "back-shelf-$tag"
+                        if ($reenter) {
                             Note '步骤6 返回学习点到了书架，按「做题学」重新进入'
                             Click-At $reenter.X $reenter.Y
                             Start-Sleep -Milliseconds 800

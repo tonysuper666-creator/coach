@@ -1111,6 +1111,10 @@ function Assert-OurForeground([IntPtr]$Expected = [IntPtr]::Zero, [scriptblock]$
 # 抬起后也留一小段让这一下走完再交锁。
 # 抬起后只等、不再断言：此时点击已经发生，断言失败会让 Invoke-ForegroundStep 重放整段，
 # 复选框这类按钮会被点成两下。
+# $BeforePress 是「按下之前再看一眼」的探针：指针已经停到落点上、前台也断言过了，这时候再拍一帧判页面，
+# 返回假就不按。坐标是上一帧算出来的，界面可能在这几百毫秒里切走；原文页「返回学习」和做题学左上角
+# 「Coach目录返回书架」正好是同一个坐标，按下就等于把整条 Lane 送回书架（11-21 06:57 L2）。
+# 返回值表示这一下到底按没按（探针否掉时是 $false），调用方据此决定要不要另找路回去。
 function Click-At(
     [int]$x,
     [int]$y,
@@ -1118,15 +1122,22 @@ function Click-At(
     [scriptblock]$ActivateProbe = $null,
     [scriptblock]$ForegroundProbe = $null,
     [scriptblock]$RectProbe = $null,
-    [scriptblock]$MouseProbe = $null
+    [scriptblock]$MouseProbe = $null,
+    [scriptblock]$BeforePress = $null
 ) {
-    if (Has-BackgroundDriver) { Invoke-BackgroundAction "/click?x=$x&y=$y"; return }
+    if (Has-BackgroundDriver) { Invoke-BackgroundAction "/click?x=$x&y=$y"; return $true }
+    $state = @{ Pressed = $false }
     Invoke-ForegroundStep -InjectsInput -TargetOwnerProbe $TargetOwnerProbe -ActivateProbe $ActivateProbe -ForegroundProbe $ForegroundProbe -Action {
         $r = if ($RectProbe) { & $RectProbe } else { Get-Rect }
         if ($MouseProbe) { & $MouseProbe 'move' ($r.L + $x) ($r.T + $y) | Out-Null }
         else { [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null }
         Start-Sleep -Milliseconds 120
         Assert-OurForeground -ForegroundProbe $ForegroundProbe
+        if ($BeforePress) {
+            $go = $false
+            try { $go = [bool](& $BeforePress) } catch { $go = $false }
+            if (-not $go) { return }
+        }
         if ($MouseProbe) { & $MouseProbe 'down' ($r.L + $x) ($r.T + $y) | Out-Null }
         else { [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero) }
         try { Start-Sleep -Milliseconds 60 } finally {
@@ -1134,7 +1145,9 @@ function Click-At(
             else { [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero) }
         }
         Start-Sleep -Milliseconds 100
+        $state.Pressed = $true
     }
+    return $state.Pressed
 }
 # A drag is one action: release the button even if foreground is interrupted.
 # Focus lost before the press is retried like any other action. Focus lost while

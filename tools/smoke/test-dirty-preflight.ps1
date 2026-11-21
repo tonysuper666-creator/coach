@@ -870,6 +870,23 @@ $cgBlock
                 ($clickLog -join '|') -eq '1:move@438,282|2:move@438,282|2:down@438,282|2:up@438,282'
             ) "attempts=$($script:clickState.attempt) log=$($clickLog -join '|')"
 
+            # 8b-2. 按下前探针（-BeforePress）：指针已经落位、前台也断言过了，按下之前再看一眼页面身份。
+            # 否掉时一下都不许按（没有 down/up，返回 $false）；放行时和原来一样按（返回 $true）。
+            # 第 6 步「返回学习」补点靠它挡住「界面已经切到做题学、这一下正好落在『返回书架』坐标上」。
+            $script:clickState = @{ attempt = 0; phase = 'init' }
+            $vetoLog = New-Object System.Collections.ArrayList
+            $mouseVeto = { param($kind, $mx, $my) [void]$vetoLog.Add($kind) }
+            $vetoed = Click-At 338 82 -TargetOwnerProbe $targetOwnerProbe -ActivateProbe $actProbeClick -ForegroundProbe $fgProbeBeforeDown -RectProbe $rectProbe -MouseProbe $mouseVeto -BeforePress { return $false }
+            Check 'click-at-skips-press-when-before-press-vetoes' (
+                $vetoed -eq $false -and ($vetoLog -join '|') -eq 'move'
+            ) "pressed=$vetoed log=$($vetoLog -join '|')"
+            $vetoLog.Clear()
+            $script:clickState = @{ attempt = 0; phase = 'init' }
+            $allowed = Click-At 338 82 -TargetOwnerProbe $targetOwnerProbe -ActivateProbe $actProbeClick -ForegroundProbe $fgProbeBeforeDown -RectProbe $rectProbe -MouseProbe $mouseVeto -BeforePress { return $true }
+            Check 'click-at-presses-when-before-press-allows' (
+                $allowed -eq $true -and ($vetoLog -join '|') -eq 'move|down|up'
+            ) "pressed=$allowed log=$($vetoLog -join '|')"
+
             $script:clickState = @{ attempt = 0; phase = 'init' }
             $alwaysLostLog = New-Object System.Collections.ArrayList
             $mouseProbeAlwaysBeforeDown = {

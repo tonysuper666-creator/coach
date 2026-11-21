@@ -1,4 +1,6 @@
 package com.coach.ui.v7
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.*
@@ -18,7 +20,8 @@ fun PaperButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boo
     val c = CoachTheme.colors
     val interaction = remember { MutableInteractionSource() }
     val base = if (c.dark) CoachV7.Dark.btnBg else CoachV7.Light.btnBg
-    Row(modifier.v7FocusRing().paperShadow("button", c.dark).clip(RoundedCornerShape(8.dp)).v7ButtonSurface(base, interaction, enabled)
+    val shape = RoundedCornerShape(CoachV7.Radius.btn)
+    Row(modifier.v7FocusRing(shape).paperShadow("button", c.dark).clip(shape).v7ButtonSurface(base, interaction, enabled).border(BorderStroke(1.dp, c.borderSubtle), shape)
         .v7ButtonClick(interaction, enabled, onClick).defaultMinSize(minHeight = if (LocalDeskMetrics.current.inner) 36.dp else 44.dp).padding(contentPadding),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
         CompositionLocalProvider(LocalContentColor provides c.fgPrimary.copy(alpha = if (enabled) 1f else .4f)) {
@@ -31,10 +34,13 @@ fun PrimaryButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: B
     contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp), content: @Composable RowScope.() -> Unit) {
     val c = CoachTheme.colors
     val interaction = remember { MutableInteractionSource() }
-    Row(modifier.v7FocusRing().clip(RoundedCornerShape(8.dp)).v7ButtonSurface(c.fgPrimary.copy(alpha = if (enabled) 1f else .4f), interaction, enabled, primary = true)
+    val shape = RoundedCornerShape(CoachV7.Radius.btn)
+    Row(modifier.v7FocusRing(shape).clip(shape).v7ButtonSurface(c.fgPrimary.copy(alpha = if (enabled) 1f else .4f), interaction, enabled, primary = true)
         .v7ButtonClick(interaction, enabled, onClick).defaultMinSize(minHeight = if (LocalDeskMetrics.current.inner) 36.dp else 44.dp).padding(contentPadding),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-        CompositionLocalProvider(LocalContentColor provides c.surface1) { ProvideTextStyle(MaterialTheme.typography.labelLarge) { content() } }
+        CompositionLocalProvider(LocalContentColor provides c.surface1) {
+            ProvideTextStyle(MaterialTheme.typography.labelLarge) { content() }
+        }
     }
 }
 

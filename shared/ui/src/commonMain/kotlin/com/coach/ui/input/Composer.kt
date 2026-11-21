@@ -1,7 +1,8 @@
 package com.coach.ui.input
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.ui.draw.shadow
+import androidx.compose.foundation.border
 import coach.design.tokens.CoachV7
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -14,6 +15,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.unit.dp
@@ -75,13 +78,15 @@ fun ComposerField(
 ) {
     val colors = CoachTheme.colors
     val currentValue by rememberUpdatedState(value)
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(CoachV7.Radius.m)
     fun send(): Boolean {
         val text = currentValue.text
         if (!canSend || text.isBlank() || !onSend(text)) return false
         onValueChange(TextFieldValue())
         return true
     }
-    Row(modifier.fillMaxWidth().shadow(2.dp, RoundedCornerShape(CoachV7.Radius.m)).background(colors.surface2, RoundedCornerShape(CoachV7.Radius.m)).padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Bottom) {
+    Row(modifier.fillMaxWidth().clip(shape).background(colors.surface2, shape).border(BorderStroke(1.dp, if (focused) colors.fgPrimary else colors.borderSubtle), shape).padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Bottom) {
         Box(Modifier.weight(1f).padding(vertical = 12.dp)) {
             if (value.text.isEmpty() && placeholder.isNotEmpty()) Text(placeholder, color = colors.fgSecondary, style = MaterialTheme.typography.bodyLarge)
             BasicTextField(
@@ -93,7 +98,7 @@ fun ComposerField(
                 maxLines = maxLines,
                 keyboardOptions = if (softSend) KeyboardOptions(imeAction = ImeAction.Send) else KeyboardOptions.Default,
                 keyboardActions = KeyboardActions(onSend = { if (gate.shouldSend(true, true, false, currentValue.composition != null)) send() }),
-                modifier = Modifier.fillMaxWidth().testTag("composer").onPreviewKeyEvent { event ->
+                modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused }.testTag("composer").onPreviewKeyEvent { event ->
                     if (event.key != Key.Enter && event.key != Key.NumPadEnter) return@onPreviewKeyEvent false
                     val down = event.type == KeyEventType.KeyDown
                     val composing = currentValue.composition != null

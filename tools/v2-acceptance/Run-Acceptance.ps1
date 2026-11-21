@@ -16,6 +16,7 @@ param(
     [string]$Book = 'D:\agent\materials\Health-Economics-620p.pdf',
     [string]$OutDir = '',
     [ValidateSet('all', 'measure', 'bugs', 'login')][string]$Suite = 'all',
+    [int]$BugsRepeat = 3,
     [switch]$Direct
 )
 $ErrorActionPreference = 'Continue'
@@ -51,6 +52,7 @@ if ($sessionId -eq 0 -and -not $Direct) {
     $childArgs = @(
         '-Direct',
         '-Suite', $Suite,
+        '-BugsRepeat', $BugsRepeat,
         '-OutDir', "'$($OutDir.Replace("'", "''"))'",
         '-Runtime111', "'$($Runtime111.Replace("'", "''"))'",
         '-RuntimeV2', "'$($RuntimeV2.Replace("'", "''"))'",
@@ -61,7 +63,7 @@ if ($sessionId -eq 0 -and -not $Direct) {
         $childArgs += @('-RuntimeMain', "'$($RuntimeMain.Replace("'", "''"))'")
     }
     $logFile = Join-Path $OutDir 'worker.log'
-    & $runInteractive -Script $PSCommandPath -ScriptArgs $childArgs -TimeoutSec 900 -LogFile $logFile
+    & $runInteractive -Script $PSCommandPath -ScriptArgs $childArgs -TimeoutSec 1800 -LogFile $logFile
     $rc = $LASTEXITCODE
     if (Test-Path $logFile) { Get-Content -LiteralPath $logFile -Encoding UTF8 }
     exit $rc
@@ -122,24 +124,68 @@ if ($Suite -in 'all', 'measure') {
     if ($LASTEXITCODE -ne 0) { throw 'measure_reader.py failed' }
 }
 
+function Invoke-BugsWithStability([string]$rt, [string]$flavor, [string]$dirName) {
+    $cp = Compile-Harness $rt (Join-Path $clsRoot $flavor)
+    $baseDir = Join-Path $OutDir $dirName
+    New-Item -ItemType Directory -Force $baseDir | Out-Null
+    $rounds = @()
+    $repeat = [Math]::Max(1, $BugsRepeat)
+    for ($i = 1; $i -le $repeat; $i++) {
+        $rDir = Join-Path $baseDir "round-$i"
+        Invoke-Harness $cp @('bugs', $flavor, $LibSeed, $rDir) "$dirName-r$i"
+        $rJson = Get-Content (Join-Path $rDir 'bugs-report.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        $rounds += $rJson
+    }
+    Copy-Item -Force (Join-Path $baseDir 'round-1\bugs-report.json') (Join-Path $baseDir 'bugs-report.json')
+
+    $checkIds = @($rounds[0].checks | ForEach-Object { $_.id })
+    $aggChecks = @()
+    $consistentPass = 0
+    $flakyCount = 0
+    foreach ($cid in $checkIds) {
+        $pCount = 0
+        $fCount = 0
+        $details = @()
+        foreach ($r in $rounds) {
+            $match = $r.checks | Where-Object { $_.id -eq $cid } | Select-Object -First 1
+            if ($match.passed) { $pCount++ } else { $fCount++ }
+            $details += $match.detail
+        }
+        $status = if ($pCount -eq $repeat) { $consistentPass++; 'PASS' } elseif ($fCount -eq $repeat) { 'FAIL' } else { $flakyCount++; 'FLAKY' }
+        $aggChecks += [PSCustomObject]@{
+            id = $cid
+            status = $status
+            pass_count = $pCount
+            fail_count = $fCount
+            runs = $repeat
+            detail = $details[-1]
+            round_details = $details
+        }
+    }
+    $report = [PSCustomObject]@{
+        flavor = $flavor
+        runs = $repeat
+        stable = ($flakyCount -eq 0)
+        passed = $consistentPass
+        flaky = $flakyCount
+        total = $checkIds.Count
+        round_passed = @($rounds | ForEach-Object { $_.passed })
+        checks = $aggChecks
+    }
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText((Join-Path $baseDir 'stability-report.json'), ($report | ConvertTo-Json -Depth 6), $utf8NoBom)
+    return $report
+}
+
 if ($Suite -in 'all', 'bugs') {
     if (Test-Path (Join-Path $Runtime111 'classpath.txt')) {
-        $cp111 = Compile-Harness $Runtime111 (Join-Path $clsRoot '111')
-        $b111Dir = Join-Path $OutDir 'bugs-111'
-        Invoke-Harness $cp111 @('bugs', '111', $LibSeed, $b111Dir) 'bugs-111'
-        $bugs111Report = Get-Content (Join-Path $b111Dir 'bugs-report.json') -Raw | ConvertFrom-Json
+        $bugs111Report = Invoke-BugsWithStability $Runtime111 '111' 'bugs-111'
     }
     if (-not [string]::IsNullOrWhiteSpace($RuntimeMain) -and (Test-Path (Join-Path $RuntimeMain 'classpath.txt'))) {
-        $cpMainB = Compile-Harness $RuntimeMain (Join-Path $clsRoot 'main')
-        $bMainDir = Join-Path $OutDir 'bugs-main'
-        Invoke-Harness $cpMainB @('bugs', 'main', $LibSeed, $bMainDir) 'bugs-main'
-        $bugsMainReport = Get-Content (Join-Path $bMainDir 'bugs-report.json') -Raw | ConvertFrom-Json
+        $bugsMainReport = Invoke-BugsWithStability $RuntimeMain 'main' 'bugs-main'
     }
     if (Test-Path (Join-Path $RuntimeV2 'classpath.txt')) {
-        $cpV2 = Compile-Harness $RuntimeV2 (Join-Path $clsRoot 'v2')
-        $bV2Dir = Join-Path $OutDir 'bugs-v2'
-        Invoke-Harness $cpV2 @('bugs', 'v2', $LibSeed, $bV2Dir) 'bugs-v2'
-        $bugsV2Report = Get-Content (Join-Path $bV2Dir 'bugs-report.json') -Raw | ConvertFrom-Json
+        $bugsV2Report = Invoke-BugsWithStability $RuntimeV2 'v2' 'bugs-v2'
     }
 }
 
@@ -147,33 +193,35 @@ if ($Suite -in 'all', 'login') {
     $cpMain = Compile-Harness $RuntimeMain (Join-Path $clsRoot 'main')
     $loginDir = Join-Path $OutDir 'login-main'
     Invoke-Harness $cpMain @('login', $Book, $loginDir) 'login-main'
-    $loginReport = Get-Content (Join-Path $loginDir 'login-report.json') -Raw | ConvertFrom-Json
+    $loginReport = Get-Content (Join-Path $loginDir 'login-report.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
 Write-Host "=== ACCEPTANCE SUMMARY ($OutDir) ==="
 if ($ranMeasure) {
-    $rows = Get-Content (Join-Path $OutDir 'measure-report.json') -Raw | ConvertFrom-Json
+    $rows = Get-Content (Join-Path $OutDir 'measure-report.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     foreach ($r in $rows) {
         Write-Host ("MEASURE [{0}] {1} | {2} ({3}) | layers={4} vp={5}% body={6}% ink={7}px occ={8}px" -f `
             $r.flavor, $r.state_name, $r.surface_label, $r.resolution, $r.nesting_layers, $r.viewport_pct, $r.body_bounds_pct, $r.body_nonbg_ink_px, $r.drawer_occluded_body_px)
     }
 }
-if ($null -ne $bugs111Report) {
-    Write-Host ("BUGS-111: {0}/{1} passed (expected 0/5 on unpatched 1.1.1)" -f $bugs111Report.passed, $bugs111Report.total)
-    foreach ($c in $bugs111Report.checks) { Write-Host ("  [{0}] {1}: {2}" -f $(if ($c.passed) {'PASS'} else {'FAIL'}), $c.id, $c.detail) }
-}
-if ($null -ne $bugsMainReport) {
-    Write-Host ("BUGS-MAIN: {0}/{1} passed" -f $bugsMainReport.passed, $bugsMainReport.total)
-    foreach ($c in $bugsMainReport.checks) { Write-Host ("  [{0}] {1}: {2}" -f $(if ($c.passed) {'PASS'} else {'FAIL'}), $c.id, $c.detail) }
-}
-if ($null -ne $bugsV2Report) {
-    Write-Host ("BUGS-V2: {0}/{1} passed" -f $bugsV2Report.passed, $bugsV2Report.total)
-    foreach ($c in $bugsV2Report.checks) { Write-Host ("  [{0}] {1}: {2}" -f $(if ($c.passed) {'PASS'} else {'FAIL'}), $c.id, $c.detail) }
+$anyFlaky = $false
+foreach ($pair in @(@('BUGS-111', $bugs111Report), @('BUGS-MAIN', $bugsMainReport), @('BUGS-V2', $bugsV2Report))) {
+    $tag = $pair[0]
+    $rep = $pair[1]
+    if ($null -eq $rep) { continue }
+    if (-not $rep.stable) { $anyFlaky = $true }
+    $note = if ($tag -eq 'BUGS-111') { ' (expected 0/5 on unpatched 1.1.1)' } else { '' }
+    Write-Host ("{0} ({1}x, rounds=[{2}], stable={3}): {4}/{5} consistent pass, flaky={6}{7}" -f `
+        $tag, $rep.runs, ($rep.round_passed -join ','), $rep.stable, $rep.passed, $rep.total, $rep.flaky, $note)
+    foreach ($c in $rep.checks) {
+        Write-Host ("  [{0}] {1} (P={2}/F={3}): {4}" -f $c.status, $c.id, $c.pass_count, $c.fail_count, $c.detail)
+    }
 }
 if ($null -ne $loginReport) {
     Write-Host ("LOGIN-MAIN: {0}/{1} passed" -f $loginReport.passed, $loginReport.total)
     foreach ($c in $loginReport.checks) { Write-Host ("  [{0}] {1}: {2}" -f $(if ($c.passed) {'PASS'} else {'FAIL'}), $c.id, $c.detail) }
 }
 
+if ($anyFlaky) { Write-Host 'FAILED: flaky bugs check detected'; exit 1 }
 if ($null -ne $loginReport -and $loginReport.passed -lt $loginReport.total) { exit 1 }
 exit 0

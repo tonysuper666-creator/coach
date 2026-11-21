@@ -20,7 +20,7 @@
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\v2-acceptance\Run-Acceptance.ps1 -Suite all -OutDir D:\agent\evidence\2.0-W1-C\latest
 ```
 
-只跑某一项：`-Suite measure`、`-Suite bugs` 或 `-Suite login`。
+只跑某一项：`-Suite measure`、`-Suite bugs` 或 `-Suite login`（`-BugsRepeat` 默认 `3`，每个版本连跑 3 次，任一缺陷出现不一致即标为 `FLAKY` 并判整轮失败）。
 
 本地/Mac 运行测量器单元测试：
 

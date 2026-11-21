@@ -151,7 +151,8 @@ public final class ReaderAcceptanceHarness {
                 String resTag = w + "x" + h;
                 ImageComposeScene scene = newScene(w, h, density, cOrig);
                 try {
-                    long nano = pumpScene(scene, 0L, 22, 120);
+                    long nano = pumpSceneUntilSettled(scene, 0L, 22, 45, 120,
+                        () -> !hasTextContainingScene(scene, "正在加载页面"));
                     dumpScene(scene, nano, outDir, flavor, resTag, "pure_read_original");
 
                     if ("v2".equals(flavor)) {
@@ -160,8 +161,8 @@ public final class ReaderAcceptanceHarness {
                         nano = pumpScene(scene, nano, 25, 30);
                         dumpScene(scene, nano, outDir, flavor, resTag, "companion_initial");
 
-                        if (findNodeByTag(scene.getSemanticsOwners(), "companion-dock-toggle") != null) {
-                            String dockLabel = nodeText(findNodeByTag(scene.getSemanticsOwners(), "companion-dock-toggle"));
+                        if (onEdt(() -> findNodeByTag(scene.getSemanticsOwners(), "companion-dock-toggle")) != null) {
+                            String dockLabel = onEdt(() -> nodeText(findNodeByTag(scene.getSemanticsOwners(), "companion-dock-toggle")));
                             if (dockLabel.contains("并排")) {
                                 clickByTagScene(scene, "companion-dock-toggle");
                                 nano = pumpScene(scene, nano, 25, 30);
@@ -173,17 +174,24 @@ public final class ReaderAcceptanceHarness {
                         nano = pumpScene(scene, nano, 20, 25);
                         nano = revealV2HudScene(scene, nano, w);
                         clickByTagScene(scene, "v7-directory-toggle");
-                        nano = pumpScene(scene, nano, 30, 30);
+                        nano = pumpSceneUntilSettled(scene, nano, 20, 40, 30,
+                            () -> onEdt(() -> findNodeByTag(scene.getSemanticsOwners(), "v7-directory-drawer") != null));
                         dumpScene(scene, nano, outDir, flavor, resTag, "toc_expanded");
                         clickByTagScene(scene, "toc-drawer-close");
                         nano = pumpScene(scene, nano, 15, 20);
                     } else {
+                        nano = pumpSceneUntilSettled(scene, nano, 0, 50, 100, () -> onEdt(() -> {
+                            SemanticsNode btn = findNodeByTag(scene.getSemanticsOwners(), "v7-directory-toggle");
+                            return btn != null && isNodeEnabled(btn);
+                        }));
                         clickByTagScene(scene, "v7-directory-toggle");
-                        nano = pumpScene(scene, nano, 40, 25);
+                        nano = pumpSceneUntilSettled(scene, nano, 25, 45, 30,
+                            () -> onEdt(() -> findNodeByTag(scene.getSemanticsOwners(), "v7-directory-drawer") != null));
+                        nano = pumpScene(scene, nano, 15, 25);
                         dumpScene(scene, nano, outDir, flavor, resTag, "toc_expanded");
                     }
                 } finally {
-                    scene.close();
+                    onEdt(() -> { scene.close(); return null; });
                 }
             }
         } finally {
@@ -200,10 +208,11 @@ public final class ReaderAcceptanceHarness {
                 String resTag = w + "x" + h;
                 ImageComposeScene scene = newScene(w, h, density, cText);
                 try {
-                    long nano = pumpScene(scene, 0L, 30, 120);
+                    long nano = pumpSceneUntilSettled(scene, 0L, 30, 35, 120,
+                        () -> !hasTextContainingScene(scene, "正在加载"));
                     dumpScene(scene, nano, outDir, flavor, resTag, "pure_read_text");
                 } finally {
-                    scene.close();
+                    onEdt(() -> { scene.close(); return null; });
                 }
             }
         } finally {
@@ -224,7 +233,7 @@ public final class ReaderAcceptanceHarness {
                         long nano = pumpScene(scene, 0L, 20, 80);
                         dumpScene(scene, nano, outDir, flavor, resTag, "guided");
                     } finally {
-                        scene.close();
+                        onEdt(() -> { scene.close(); return null; });
                     }
                 }
             } finally {
@@ -243,6 +252,7 @@ public final class ReaderAcceptanceHarness {
             ComposeWindow win = openHostWindow(c, 24, 24, 752, 552);
             try {
                 Thread.sleep(2800);
+                waitFor(6000, () -> !hasTextContaining(win, "正在加载页面"));
                 dumpWin32(win, outDir, flavor, "win32", "pure_read_original");
 
                 if ("v2".equals(flavor)) {
@@ -254,11 +264,14 @@ public final class ReaderAcceptanceHarness {
                     Thread.sleep(400);
                     revealV2HudWin32(win);
                     clickTagWin32(win, "v7-directory-toggle");
-                    Thread.sleep(700);
+                    waitFor(4000, () -> findNodeByTag(win, "v7-directory-drawer") != null);
+                    Thread.sleep(300);
                     dumpWin32(win, outDir, flavor, "win32", "toc_expanded");
                 } else {
+                    waitFor(5000, () -> isNodeEnabled(findNodeByTag(win, "v7-directory-toggle")));
                     clickTagWin32(win, "v7-directory-toggle");
-                    Thread.sleep(700);
+                    waitFor(4000, () -> findNodeByTag(win, "v7-directory-drawer") != null);
+                    Thread.sleep(400);
                     dumpWin32(win, outDir, flavor, "win32", "toc_expanded");
                 }
             } finally {
@@ -274,6 +287,7 @@ public final class ReaderAcceptanceHarness {
             ComposeWindow win = openHostWindow(c, 24, 24, 752, 552);
             try {
                 Thread.sleep(3600);
+                waitFor(4000, () -> !hasTextContaining(win, "正在加载"));
                 dumpWin32(win, outDir, flavor, "win32", "pure_read_text");
             } finally {
                 disposeWindow(win);
@@ -329,30 +343,158 @@ public final class ReaderAcceptanceHarness {
         }
     }
 
-    private static void uiJumpToPage(ComposeWindow win, String flavor, int target) throws Exception {
-        if ("v2".equals(flavor)) {
-            revealV2HudWin32(win);
-            SemanticsNode jump = findNodeByTag(win, "page-jump");
-            if (jump != null) {
-                clickNodeWin32(win, jump);
-                Thread.sleep(250);
-            } else {
-                sendKeysWin32(win, KeyEvent.VK_G, InputEvent.CTRL_DOWN_MASK);
-                Thread.sleep(350);
+    private static boolean hasSemanticsAction(SemanticsNode node, String actionKey) {
+        return node != null && findSemanticsActionFn(node, actionKey) != null;
+    }
+
+    private static boolean isNodeEnabled(SemanticsNode node) {
+        if (node == null) return false;
+        SemanticsNode cur = node;
+        while (cur != null) {
+            for (var e : cur.getConfig()) {
+                if ("Disabled".equals(e.getKey().getName())) return false;
             }
+            cur = cur.getParent();
+        }
+        return true;
+    }
+
+    private static String nodeEditableOrText(SemanticsNode node) {
+        if (node == null) return "";
+        for (var e : node.getConfig()) {
+            if ("EditableText".equals(e.getKey().getName()) && e.getValue() instanceof AnnotatedString as) {
+                return as.getText();
+            }
+        }
+        return ownText(node);
+    }
+
+    private static String readBug1PageNum(ComposeWindow win, String flavor) throws Exception {
+        if ("v2".equals(flavor)) revealV2HudWin32(win);
+        SemanticsNode numNode = findNodeByTag(win, "reader-page-number");
+        return ownTextOrChild(numNode);
+    }
+
+    private static final class JumpMetrics {
+        long tPdfMs = -1;
+        long tSyncMs = -1;
+        long lagMs = -1;
+        boolean synced = false;
+        String pageNum = "";
+        String title = "";
+    }
+
+    private static JumpMetrics measureJumpSync(
+        ComposeWindow win, TextbookController c, String flavor, int target, String prevTitle, long timeoutMs
+    ) throws Exception {
+        JumpMetrics m = new JumpMetrics();
+        String targetStr = String.valueOf(target);
+        String pageTag = "original-pdf-page-" + target;
+        long t0 = System.currentTimeMillis();
+        long deadline = t0 + timeoutMs;
+        int syncStable = 0;
+        String lastKey = "";
+        while (System.currentTimeMillis() < deadline) {
+            long now = System.currentTimeMillis() - t0;
+            if (m.tPdfMs < 0 && findNodeByTag(win, pageTag) != null) {
+                m.tPdfMs = now;
+            }
+            int cp = controllerPage(c);
+            String num = readBug1PageNum(win, flavor);
+            String top = topHeaderText(win);
+            m.pageNum = num;
+            m.title = top;
+            boolean barOk = cp == target && num.contains(targetStr);
+            boolean titleOk = !top.isEmpty() && (prevTitle == null || !top.equals(prevTitle));
+            if (barOk && titleOk) {
+                if (m.tSyncMs < 0) m.tSyncMs = now;
+                String key = cp + "|" + num + "|" + top;
+                if (key.equals(lastKey)) syncStable++;
+                else {
+                    lastKey = key;
+                    syncStable = 1;
+                }
+                if (m.tPdfMs >= 0 && syncStable >= 2) {
+                    m.synced = true;
+                    break;
+                }
+            } else {
+                syncStable = 0;
+            }
+            Thread.sleep(60);
+        }
+        if (m.tPdfMs >= 0 && m.tSyncMs >= 0) {
+            m.lagMs = Math.max(0L, m.tSyncMs - m.tPdfMs);
+        }
+        return m;
+    }
+
+    private static int waitUntilControllerPageSettled(
+        TextbookController c, int preferredTarget, long timeoutMs
+    ) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        int last = -1;
+        int stable = 0;
+        while (System.currentTimeMillis() < deadline) {
+            int cur = controllerPage(c);
+            if (cur == last) {
+                stable++;
+            } else {
+                last = cur;
+                stable = 1;
+            }
+            if (preferredTarget > 0 && cur == preferredTarget && stable >= 3) {
+                return cur;
+            }
+            if (preferredTarget <= 0 && cur > 0 && stable >= 3) {
+                return cur;
+            }
+            Thread.sleep(200);
+        }
+        return controllerPage(c);
+    }
+
+    private static void uiJumpToPage(ComposeWindow win, String flavor, int target) throws Exception {
+        String targetStr = String.valueOf(target);
+        if ("v2".equals(flavor)) {
+            waitFor(3000, () -> {
+                revealV2HudWin32(win);
+                SemanticsNode existing = findNodeByTag(win, "page-jump");
+                if (existing != null && onEdt(() -> hasSemanticsAction(existing, "SetText"))) return true;
+                SemanticsNode pill = findNodeByTag(win, "reader-page-number");
+                if (pill != null) {
+                    clickNodeWin32(win, pill);
+                    return false;
+                }
+                sendKeysWin32(win, KeyEvent.VK_G, InputEvent.CTRL_DOWN_MASK);
+                return false;
+            });
+        } else {
+            waitFor(3000, () -> {
+                SemanticsNode f = findNodeByTag(win, "page-jump");
+                return f != null && onEdt(() -> hasSemanticsAction(f, "SetText"));
+            });
         }
         SemanticsNode jumpField = findNodeByTag(win, "page-jump");
         if (jumpField != null) {
-            boolean setViaSemantics = onEdt(() -> invokeSetText(jumpField, String.valueOf(target)));
-            if (!setViaSemantics) {
-                clickNodeWin32(win, jumpField);
-                Thread.sleep(200);
-                sendCtrlAWin32(win);
-                for (int i = 0; i < 6; i++) sendKeysWin32(win, KeyEvent.VK_BACK_SPACE, 0);
-                sendTextWin32(win, String.valueOf(target));
+            waitFor(1500, () -> {
+                SemanticsNode f = findNodeByTag(win, "page-jump");
+                if (f == null) return false;
+                boolean ok = onEdt(() -> invokeSetText(f, targetStr));
+                if (!ok) {
+                    clickNodeWin32(win, f);
+                    sendCtrlAWin32(win);
+                    for (int i = 0; i < 6; i++) sendKeysWin32(win, KeyEvent.VK_BACK_SPACE, 0);
+                    sendTextWin32(win, targetStr);
+                }
+                SemanticsNode after = findNodeByTag(win, "page-jump");
+                return targetStr.equals(onEdt(() -> nodeEditableOrText(after)));
+            });
+            SemanticsNode latestField = findNodeByTag(win, "page-jump");
+            clickOrEnterJump(win, flavor, latestField != null ? latestField : jumpField);
+            if ("v2".equals(flavor)) {
+                waitFor(2000, () -> findNodeByTag(win, "page-jump") == null);
             }
-            Thread.sleep(200);
-            clickOrEnterJump(win, jumpField);
         }
     }
 
@@ -362,26 +504,24 @@ public final class ReaderAcceptanceHarness {
             TextbookController c = openReaderAt(lib, 1, false);
             ComposeWindow win = openHostWindow(c, 24, 24, 752, 552);
             try {
-                Thread.sleep(2200);
+                waitUntilControllerPageSettled(c, 1, 5000);
+                String initialTitle = topHeaderText(win);
                 uiJumpToPage(win, flavor, 32);
-                Thread.sleep(2000);
-                if ("v2".equals(flavor)) revealV2HudWin32(win);
-                String num32 = ownTextOrChild(findNodeByTag(win, "reader-page-number"));
-                String top32 = topHeaderText(win);
+                JumpMetrics m32 = measureJumpSync(win, c, flavor, 32, initialTitle, 7000);
 
                 uiJumpToPage(win, flavor, 173);
-                Thread.sleep(2000);
+                JumpMetrics m173 = measureJumpSync(win, c, flavor, 173, m32.title, 7000);
                 if ("v2".equals(flavor)) revealV2HudWin32(win);
                 dumpWin32(win, outDir, flavor, "win32", "bug1-jump-173");
 
-                String num173 = ownTextOrChild(findNodeByTag(win, "reader-page-number"));
-                String top173 = topHeaderText(win);
-                boolean page32Ok = num32.contains("32");
-                boolean page173Ok = num173.contains("173");
-                boolean titleUpdated = !top173.isEmpty() && !top173.equals(top32) && !top173.contains("Why health economics");
-                boolean passed = page32Ok && page173Ok && titleUpdated;
+                boolean page32Ok = m32.synced && m32.pageNum.contains("32");
+                boolean page173Ok = m173.synced && m173.pageNum.contains("173");
+                boolean titleUpdated = !m173.title.isEmpty() && !m173.title.equals(m32.title) && !m173.title.contains("Why health economics");
+                boolean lagOk = m32.lagMs >= 0 && m32.lagMs <= 1000 && m173.lagMs >= 0 && m173.lagMs <= 1000;
+                boolean passed = page32Ok && page173Ok && titleUpdated && lagOk;
                 return checkResult("bug1_page_jump_sync", passed,
-                    "after32={pageNum='" + num32 + "', title='" + top32 + "'} after173={pageNum='" + num173 + "', title='" + top173 + "'}");
+                    "after32={pageNum='" + m32.pageNum + "', lagMs=" + m32.lagMs + ", title='" + m32.title
+                    + "'} after173={pageNum='" + m173.pageNum + "', lagMs=" + m173.lagMs + ", title='" + m173.title + "'}");
             } finally {
                 disposeWindow(win);
             }
@@ -390,32 +530,55 @@ public final class ReaderAcceptanceHarness {
         }
     }
 
+    private static boolean waitForModeSettled(ComposeWindow win, boolean expectText) throws Exception {
+        return waitFor(10000, () -> {
+            if (expectText) {
+                return findNodeByTag(win, "book-page-loading") == null && findNodeByTag(win, "reader-text") != null;
+            } else {
+                return findNodeByTag(win, "reader-text") == null
+                    && (findNodeByTag(win, "original-pdf-scroll") != null || findNodeByTag(win, "original-pdf-paged") != null);
+            }
+        });
+    }
+
     private static Map<String, Object> testBug2ViewSwitchNoBounce(String flavor, Path libSeed, Path outDir) throws Exception {
         Path lib = copyTempDir(libSeed, "bug2-");
         try {
             TextbookController c = openReaderAt(lib, 32, false);
             ComposeWindow win = openHostWindow(c, 24, 24, 752, 552);
             try {
-                Thread.sleep(1800);
-                // Jump 32 -> 173 via UI just like a real user, then toggle view 5 times
+                waitUntilControllerPageSettled(c, 32, 8000);
+                // Jump 32 -> 173 via UI, wait for original-pdf-page-173 to appear, then switch 5x waiting for stability per toggle
                 uiJumpToPage(win, flavor, 173);
-                Thread.sleep(1500);
+                waitFor(6000, () -> findNodeByTag(win, "original-pdf-page-173") != null);
+                int prePage = controllerPage(c);
                 List<Integer> observed = new ArrayList<>();
-                boolean allNear173 = true;
+                boolean allNear173 = (prePage >= 171 && prePage <= 175);
                 for (int i = 0; i < 5; i++) {
+                    boolean switchingToText = (i % 2 == 0);
                     if ("v2".equals(flavor)) revealV2HudWin32(win);
                     SemanticsNode toggle = null;
                     if ("v2".equals(flavor)) {
-                        toggle = findNodeByTag(win, (i % 2 == 0) ? "view-mode-text" : "view-mode-original");
+                        String wantTag = switchingToText ? "view-mode-text" : "view-mode-original";
+                        waitFor(2500, () -> {
+                            revealV2HudWin32(win);
+                            return findNodeByTag(win, wantTag) != null;
+                        });
+                        toggle = findNodeByTag(win, wantTag);
+                    } else {
+                        waitFor(6000, () -> {
+                            SemanticsNode n = findNodeByTag(win, "book-original-toggle");
+                            return n != null && onEdt(() -> isNodeEnabled(n));
+                        });
+                        toggle = findNodeByTag(win, "book-original-toggle");
                     }
-                    if (toggle == null) toggle = findNodeByTag(win, "book-original-toggle");
                     if (toggle == null) {
                         allNear173 = false;
                         break;
                     }
                     clickNodeWin32(win, toggle);
-                    Thread.sleep(1400);
-                    int p = controllerPage(c);
+                    waitForModeSettled(win, switchingToText);
+                    int p = waitUntilControllerPageSettled(c, -1, 5000);
                     observed.add(p);
                     if (p < 171 || p > 175) {
                         allNear173 = false;
@@ -423,7 +586,7 @@ public final class ReaderAcceptanceHarness {
                 }
                 dumpWin32(win, outDir, flavor, "win32", "bug2-after-5-switches");
                 return checkResult("bug2_view_switch_no_bounce", allNear173 && observed.size() == 5,
-                    "pages_after_5_toggles=" + observed);
+                    "pre=" + prePage + " pages_after_5_toggles=" + observed);
             } finally {
                 disposeWindow(win);
             }
@@ -755,20 +918,41 @@ public final class ReaderAcceptanceHarness {
         return controller;
     }
 
-    private static ImageComposeScene newScene(int w, int h, float density, TextbookController controller) {
-        return new ImageComposeScene(
-            w, h, DensityKt.Density(density, 1f), LayoutDirection.Ltr, Dispatchers.getUnconfined(),
+    private static ImageComposeScene newScene(int w, int h, float density, TextbookController controller) throws Exception {
+        return onEdt(() -> new ImageComposeScene(
+            w, h, DensityKt.Density(density, 1f), LayoutDirection.Ltr, Dispatchers.getMain(),
             (composer, changed) -> { callHost(controller, composer); return Unit.INSTANCE; }
-        );
+        ));
     }
 
     private static long pumpScene(ImageComposeScene scene, long nano, int frames, int sleepMs) throws Exception {
         for (int i = 0; i < frames; i++) {
-            nano += 20_000_000L;
-            try (Image img = scene.render(nano)) { /* pump */ }
+            final long n = nano + 20_000_000L;
+            nano = n;
+            onEdt(() -> { try (Image img = scene.render(n)) {} return null; });
             if (sleepMs > 0) Thread.sleep(sleepMs);
         }
         return nano;
+    }
+
+    private static long pumpSceneUntilSettled(
+        ImageComposeScene scene, long nano, int minFrames, int maxExtraFrames, int sleepMs, Callable<Boolean> pred
+    ) throws Exception {
+        nano = pumpScene(scene, nano, minFrames, sleepMs);
+        for (int i = 0; i < maxExtraFrames; i++) {
+            if (Boolean.TRUE.equals(pred.call())) break;
+            nano = pumpScene(scene, nano, 1, sleepMs);
+        }
+        return nano;
+    }
+
+    private static boolean hasTextContainingScene(ImageComposeScene scene, String needle) throws Exception {
+        return onEdt(() -> {
+            for (SemanticsOwner o : scene.getSemanticsOwners()) {
+                if (findByText(o.getUnmergedRootSemanticsNode(), needle, true) != null) return true;
+            }
+            return false;
+        });
     }
 
     private static long revealV2HudScene(ImageComposeScene scene, long nano, int w) throws Exception {
@@ -783,15 +967,19 @@ public final class ReaderAcceptanceHarness {
         String base = flavor + "-" + resTag + "-scene-" + stateName;
         Path pngPath = outDir.resolve(base + ".png");
         Path metaPath = outDir.resolve(base + ".meta.json");
-        int w, h;
-        try (Image img = scene.render(nano); Data png = img.encodeToData(EncodedImageFormat.PNG, 100, 0)) {
-            if (png == null) throw new IllegalStateException("Failed to encode scene PNG");
-            Files.write(pngPath, png.getBytes());
-            w = img.getWidth();
-            h = img.getHeight();
-        }
-        writeMeta(metaPath, flavor, stateName, "image_compose_scene_offscreen", w, h, resTag.startsWith("2880") ? 1.5f : 1.0f, scene.getSemanticsOwners());
-        System.out.println("DUMP " + pngPath.getFileName() + " (image_compose_scene_offscreen " + w + "x" + h + ")");
+        int[] dims = new int[2];
+        byte[] pngBytes = onEdt(() -> {
+            try (Image img = scene.render(nano); Data png = img.encodeToData(EncodedImageFormat.PNG, 100, 0)) {
+                if (png == null) throw new IllegalStateException("Failed to encode scene PNG");
+                dims[0] = img.getWidth();
+                dims[1] = img.getHeight();
+                return png.getBytes();
+            }
+        });
+        Files.write(pngPath, pngBytes);
+        Collection<SemanticsOwner> owners = onEdt(scene::getSemanticsOwners);
+        writeMeta(metaPath, flavor, stateName, "image_compose_scene_offscreen", dims[0], dims[1], resTag.startsWith("2880") ? 1.5f : 1.0f, owners);
+        System.out.println("DUMP " + pngPath.getFileName() + " (image_compose_scene_offscreen " + dims[0] + "x" + dims[1] + ")");
     }
 
     private static void dumpWin32(
@@ -900,7 +1088,7 @@ public final class ReaderAcceptanceHarness {
     }
 
     private static void revealV2HudWin32(ComposeWindow win) throws Exception {
-        if (findNodeByTag(win, "immersive-top-hud") != null) return;
+        if (findNodeByTag(win, "immersive-top-hud") != null && findNodeByTag(win, "immersive-bottom-hud") != null) return;
         onEdt(() -> {
             List<Surface> surfaces = activeSurfaces(win);
             if (surfaces.isEmpty()) return null;
@@ -1014,17 +1202,26 @@ public final class ReaderAcceptanceHarness {
         return fn instanceof Function0<?> f0 && Boolean.TRUE.equals(f0.invoke());
     }
 
-    private static void clickOrEnterJump(ComposeWindow win, SemanticsNode jumpField) throws Exception {
-        SemanticsNode goBtn = onEdt(() -> {
+    private static SemanticsNode findEnabledGoButton(ComposeWindow win) throws Exception {
+        return onEdt(() -> {
             for (SemanticsOwner o : win.getSemanticsOwners()) {
                 SemanticsNode found = findByText(o.getUnmergedRootSemanticsNode(), "前往", false);
-                if (found != null) return found;
+                if (found != null && isFullyInWindow(found, 752f, 552f) && isNodeEnabled(found)) return found;
             }
             return null;
         });
-        if (goBtn != null && isFullyInWindow(goBtn, 752f, 552f)) {
-            clickNodeWin32(win, goBtn);
-        } else if (!onEdt(() -> invokeImeAction(jumpField))) {
+    }
+
+    private static void clickOrEnterJump(ComposeWindow win, String flavor, SemanticsNode jumpField) throws Exception {
+        if (!"v2".equals(flavor)) {
+            waitFor(6000, () -> findEnabledGoButton(win) != null);
+            SemanticsNode goBtn = findEnabledGoButton(win);
+            if (goBtn != null) {
+                clickNodeWin32(win, goBtn);
+                return;
+            }
+        }
+        if (!onEdt(() -> invokeImeAction(jumpField))) {
             sendKeysWin32(win, KeyEvent.VK_ENTER, 0);
         }
     }
@@ -1228,21 +1425,21 @@ public final class ReaderAcceptanceHarness {
     }
 
     private static void clickByTagScene(ImageComposeScene scene, String tag) throws Exception {
-        SemanticsNode node = findNodeByTag(scene.getSemanticsOwners(), tag);
+        SemanticsNode node = onEdt(() -> findNodeByTag(scene.getSemanticsOwners(), tag));
         if (node == null) {
             System.out.println("WARN scene tag not found: " + tag);
             return;
         }
-        if (invokeOnClick(node)) {
+        if (Boolean.TRUE.equals(onEdt(() -> invokeOnClick(node)))) {
             return;
         }
         Rect r = node.getBoundsInRoot();
         float cx = (r.getLeft() + r.getRight()) / 2f;
         float cy = (r.getTop() + r.getBottom()) / 2f;
         sendScenePointer(scene, pointerType("Move"), cx, cy);
-        try (Image i1 = scene.render(System.nanoTime())) {}
+        onEdt(() -> { try (Image i1 = scene.render(System.nanoTime())) {} return null; });
         sendScenePointer(scene, pointerType("Press"), cx, cy);
-        try (Image i2 = scene.render(System.nanoTime())) {}
+        onEdt(() -> { try (Image i2 = scene.render(System.nanoTime())) {} return null; });
         sendScenePointer(scene, pointerType("Release"), cx, cy);
     }
 
@@ -1256,7 +1453,7 @@ public final class ReaderAcceptanceHarness {
             a[4] = System.currentTimeMillis(); a[5] = 1;
             a[10] = 0b111111100;
             m.setAccessible(true);
-            m.invoke(null, a);
+            onEdt(() -> { m.invoke(null, a); return null; });
             return;
         }
         throw new IllegalStateException("sendPointerEvent$default not found");

@@ -752,6 +752,7 @@ try {
         if (-not $labelPage) { Fail 5 '选中节后界面没有「本节原文 · 第 N 页」标签，没有发请求' }
         if ([int]$labelPage -ne $LessonPage) { Fail 5 "选中的第 $LessonNumber 条落在第 $labelPage 页，不是授权页第 $LessonPage 页，没有发请求（见 5-section.png）" }
         $deadline = (Get-Date).AddSeconds(150); $res = $null; $sawBody = $false
+        $prevFrame = ''; $still = 0; $scrolls = 0
         while ((Get-Date) -lt $deadline -and -not $res) {
             Start-Sleep -Seconds 5; $lines = Shot 5 'learn'
             $allow = Has $lines @('允许并讲解')
@@ -770,7 +771,18 @@ try {
             if ($sawBody -and $sourceBox) { $res = 'ok' }
             elseif ($sawBody) {
                 # 出处行被正文挤到折叠线以下：往下滚，把它滚进视野再判。
-                $sp = Scroll-Point 0.6 0.6; Scroll-At $sp[0] $sp[1] -3
+                # 但滚完必须核对这一帧真的变了。11-21 02:21 四路并行里同一点同方向的滚轮连发 11 次、
+                # 学习页一次没动（见 5-learn.png），150 秒全烧在这上面，最后只会报超时，看不出是驱动没滚动。
+                # 所以给次数上限：前四次在前半页中心滚，还不动就换低一点的落点，七次仍不动直接判失败。
+                $frame = (@($lines | ForEach-Object { $_.Text }) -join '|')
+                if ($frame -eq $prevFrame) { $still++ } else { $still = 0 }
+                $prevFrame = $frame
+                $scrolls++
+                if ($scrolls -gt 7) {
+                    Fail 5 "讲解正文已出，但滚轮滚了 $scrolls 次、连续 $still 帧画面没变，出处行一直在折叠线以下（见 5-learn.png）"
+                }
+                $sp = if ($still -ge 3) { Scroll-Point 0.45 0.62 } else { Scroll-Point 0.6 0.6 }
+                Scroll-At $sp[0] $sp[1] -3
             }
         }
         if ($res -eq 'ok') {

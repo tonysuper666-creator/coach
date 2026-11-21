@@ -8,6 +8,7 @@ public class WD {
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   public delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc p, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr h, EnumProc p, IntPtr l);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
@@ -1184,6 +1185,21 @@ function Find-AppWindowByTitle([string]$prefix) {
     return [IntPtr]::Zero
 }
 
+# 文件选择框里「文件名」是个真 Edit（有时套在 ComboBox 里）。只有把它的文字读回来，
+# 才知道路径真的落进去了；读不到就按回车，是 11-21 02:17 L4 那种「按了三次回车框还没关」。
+# 空串也照收：调用方要分清「框在、但没拿到路径」和「这个对话框的控件读不出来」。
+function Get-DialogEditTexts([IntPtr]$h) {
+    $script:DialogEdits = New-Object Collections.Generic.List[string]
+    [WD]::EnumChildWindows($h, { param($c, $l)
+        $cb = New-Object Text.StringBuilder 64; [WD]::GetClassName($c, $cb, 64) | Out-Null
+        $cls = $cb.ToString()
+        if (($cls -eq 'Edit' -or $cls -eq 'ComboBox' -or $cls -eq 'ComboBoxEx32') -and [WD]::IsWindowVisible($c)) {
+            $sb = New-Object Text.StringBuilder 1024; [WD]::GetWindowText($c, $sb, 1024) | Out-Null
+            $script:DialogEdits.Add($sb.ToString()) }
+        return $true }, [IntPtr]::Zero) | Out-Null
+    return ,$script:DialogEdits
+}
+
 # Dialog discovery and waiting do not hold the mutex. Filename filling is
 # idempotent on retry; each Enter is followed by an unlocked wait.
 # $script:ChooseFileWhy says why it returned $false.
@@ -1192,16 +1208,34 @@ function Choose-File([string]$dialogTitlePrefix, [string]$path, [int]$timeoutSec
     # The native open dialog rejects 'D:/x/y.pdf' with a modal error box that
     # carries the same title; give it the Windows form of the path.
     $path = [IO.Path]::GetFullPath($path)
+    $leaf = [IO.Path]::GetFileName($path)
+    # 带空格的名字会被框自己加上引号，所以只认「含这本书的文件名」，不要求整串相等。
+    $leafRx = [regex]::Escape($leaf)
     $script:ChooseFileWhy = $null
     $deadline = (Get-Date).AddSeconds($timeoutSec); $h = [IntPtr]::Zero
     while ($h -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500; $h = Find-AppWindowByTitle $dialogTitlePrefix }
     if ($h -eq [IntPtr]::Zero) { $script:ChooseFileWhy = '没有弹出选书对话框'; return $false }
-    Invoke-ForegroundStep -Window $h -InjectsInput -Action {
-        [System.Windows.Forms.SendKeys]::SendWait('%n')
-        Assert-OurForeground
-        [System.Windows.Forms.SendKeys]::SendWait('^a')
-        Assert-OurForeground
-        [System.Windows.Forms.SendKeys]::SendWait((ConvertTo-SendKeysLiteral $path))
+    # 四路并行时四个进程同时弹这个框，谁抢到前台就把键送给谁。所以敲完必须读回「文件名」框，
+    # 拿到这本书的路径才按回车；框读得到、内容却不对就不回车，把框关掉，免得它扣着前台卡死其余三路。
+    # 读不到任何候选框（控件类名不同）时退回修复前的做法：按回车，不能因此判失败。
+    $filled = $false; $readable = $false
+    for ($try = 0; $try -lt 3 -and -not $filled; $try++) {
+        Invoke-ForegroundStep -Window $h -InjectsInput -Action {
+            [System.Windows.Forms.SendKeys]::SendWait('%n')
+            Assert-OurForeground
+            [System.Windows.Forms.SendKeys]::SendWait('^a')
+            Assert-OurForeground
+            [System.Windows.Forms.SendKeys]::SendWait((ConvertTo-SendKeysLiteral $path))
+        }
+        Start-Sleep -Milliseconds 600
+        $edits = Get-DialogEditTexts $h
+        if ($edits.Count) { $readable = $true }
+        foreach ($t in $edits) { if ($t -match $leafRx) { $filled = $true; break } }
+    }
+    if ($readable -and -not $filled) {
+        $script:ChooseFileWhy = "选书对话框的「文件名」框没拿到 $leaf，没有按回车"
+        try { Invoke-ForegroundStep -Window $h -InjectsInput -Action { [System.Windows.Forms.SendKeys]::SendWait('{ESC}') } } catch { }
+        return $false
     }
     for ($i = 0; $i -lt 3; $i++) {
         $all = Find-AppWindowsByTitle $dialogTitlePrefix
@@ -1245,14 +1279,22 @@ function List-AppWindows {
 }
 
 # Mouse-wheel inside the window; negative delta scrolls down.
+# Compose 按自己记住的指针位置决定一格滚轮交给哪个可滚区。指针刚被 SetCursorPos 挪过去、
+# 滚轮同一批消息跟着到，那边还没处理移动，格子就落空（11-21 02:21 四路并行：同一点同方向
+# 连发 11 次，学习页一次没动）。所以先落指针、等它被处理，再一格一格送滚轮。
 function Scroll-At([int]$x, [int]$y, [int]$notches) {
     if (Has-BackgroundDriver) { Invoke-BackgroundAction "/scroll?x=$x&y=$y&notches=$notches"; return }
+    $step = if ($notches -ge 0) { 1 } else { -1 }
     Invoke-ForegroundStep -InjectsInput -Action {
         $r = Get-Rect
         [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null
-        $delta = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int](120 * $notches)), 0)
+        Start-Sleep -Milliseconds 150
         Assert-OurForeground
-        [WD]::mouse_event(0x800, 0, 0, $delta, [IntPtr]::Zero)
+        $delta = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int](120 * $step)), 0)
+        for ($i = 0; $i -lt [Math]::Abs($notches); $i++) {
+            [WD]::mouse_event(0x800, 0, 0, $delta, [IntPtr]::Zero)
+            Start-Sleep -Milliseconds 60
+        }
     }
 }
 # Clipboard write and paste are one action. Keep it stable until consumed.

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Builds the Coach desktop Windows installer and prints its evidence.
@@ -20,9 +20,9 @@
     Gradle task. Default: packageDistributionForCurrentOS (MSI on Windows).
 
 .PARAMETER SableLogin
-    Show the "Sable account" sign-in entry in this build. Off by default: the
-    pairing-code form is the only way to connect until the production sign-in is
-    released (TON-1760). The decision is printed as sable-login=shown|hidden.
+    Kept for compatibility; the "Sable account" sign-in entry is shown by default
+    starting in 1.1.2 (TON-1782). Pass -NoSableLogin to build with it hidden.
+    The decision is printed as sable-login=shown|hidden.
 
 .PARAMETER WixZip
     Optional pre-downloaded wix311.zip for an offline host. Copied to
@@ -65,6 +65,7 @@ param(
     [string]$Task = 'packageDistributionForCurrentOS',
     [string]$WixZip,
     [switch]$SableLogin,
+    [switch]$NoSableLogin,
     [string]$Version,
     [string]$VersionCode,
     [string]$ChannelFile,
@@ -145,9 +146,10 @@ try {
         (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
         # --no-daemon: the build JVM may be told to read another home, and a reused
         # daemon would keep the previous one.
+        $showSable = -not $NoSableLogin
         & (Join-Path $root 'gradlew.bat') --console=plain --no-daemon --priority=low --max-workers=2 @homeArg `
             '-Pcoach.release=true' "-Pcoach.release.version=$Version" "-Pcoach.release.versionCode=$VersionCode" `
-            "-Pcoach.sableLogin=$(if ($SableLogin) { 'true' } else { 'false' })" `
+            "-Pcoach.sableLogin=$(if ($showSable) { 'true' } else { 'false' })" `
             :desktopApp:verifyReleaseVersion ":desktopApp:$Task"
         $code = $LASTEXITCODE
     } finally {
@@ -179,7 +181,7 @@ foreach ($installer in $installers) {
     Write-Host ("size={0}" -f $installer.Length)
     Write-Host ("sha256={0}" -f $hash)
     Write-Host ("signature={0} {1}" -f $sig.Status, $signer)
-    Write-Host ("sable-login={0}" -f $(if ($SableLogin) { 'shown' } else { 'hidden' }))
+    Write-Host ("sable-login={0}" -f $(if (-not $NoSableLogin) { 'shown' } else { 'hidden' }))
     Write-Host ("channel={0} sha256={1}" -f $channel, $channelDigest)
     Write-Host ("channel-source={0}" -f $channelSource)
     Write-Host ("home={0}" -f $(if ($UserHome) { 'private' } else { 'profile' }))

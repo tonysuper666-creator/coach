@@ -54,9 +54,7 @@ class DesktopStartupWithoutCourseTest {
             assertFalse(controller.state.value.book!!.learning)
             assertTrue(controller.library.reviews().isEmpty())
             runOnIdle { controller = TextbookController(TextbookLibrary(directory)) }
-            ready(controller) { it.book?.id == id && it.screen == BookScreen.HOME }
-            onNodeWithTag("home-learn").performScrollTo().performClick()
-            ready(controller) { it.screen == BookScreen.READER && it.page == 2 }
+            ready(controller) { it.book?.id == id && it.screen == BookScreen.READER && it.page == 2 }
             assertEquals(id, controller.state.value.book!!.id)
             assertEquals("READ", controller.library.learningPath(id))
             onNodeWithTag("reader-text").assertTextContains("Gravity is the attraction", substring = true)

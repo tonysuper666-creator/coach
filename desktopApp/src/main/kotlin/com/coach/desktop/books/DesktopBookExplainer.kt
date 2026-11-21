@@ -32,26 +32,31 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         protected set
     /** 配对表单上要不要放「用 Sable 账号登录」：跟着构建时的决定走，默认只给配对码。 */
     val sableLogin: Boolean get() = settings.sableLoginShown()
-    val hasBuiltInAddress: Boolean get() = false
+    val hasBuiltInAddress: Boolean get() = settings.hasBuiltInFriendUrl()
 
     /** 别处（选段提问、答后讲解）先碰到了 401：讲解面板也回到配对，不再显示「已连上」。 */
     fun markRevoked() {
-        identity?.let { stopped += it.key() }
+        identity?.let {
+            stopped += it.key()
+            runCatching { pairing.revoke(it) }
+        }
         identity = null; revoked = true
     }
 
     open suspend fun load() {
-        val result = withContext(Dispatchers.IO) { runCatching { settings.serverUrl() to pairing.load() } }
-        result.getOrNull()?.let { (address, saved) ->
+        val result = withContext(Dispatchers.IO) {
+            runCatching { Triple(settings.serverUrl(), pairing.load(), runCatching { pairing.wasRevoked() }.getOrDefault(false)) }
+        }
+        result.getOrNull()?.let { (address, saved, wasRevoked) ->
             defaultAddress = address.orEmpty()
-            // 配对文件 401 之后仍在磁盘上；同一份凭据在这个进程里停用过，就别再当成「已连上」。
+            // 配对文件 401 之后会被清理并留下撤销标记；同一份凭据停用过，就别再当成「已连上」。
             val stale = saved != null && saved.key() in stopped
             val authorized = saved == null || saved.credentials.role != "friend" || withContext(Dispatchers.IO) {
                 pairing.stillAuthorized(saved)
             }
             if (!authorized) { markRevoked(); loaded = true; return }
             identity = if (stale) null else saved
-            if (stale) revoked = true else if (saved != null) revoked = false
+            revoked = stale || (saved == null && wasRevoked)
         }
         loaded = true
     }

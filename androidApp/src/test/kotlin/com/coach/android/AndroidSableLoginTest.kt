@@ -3,22 +3,32 @@ package com.coach.android
 import androidx.activity.ComponentActivity
 import androidx.compose.material3.Text
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.core.app.ApplicationProvider
 import com.coach.client.PairedCredentials
+import com.coach.desktop.WindowsTextbookHost
 import com.coach.desktop.books.AndroidBookConnection
 import com.coach.desktop.books.AndroidBookIdentity
 import com.coach.desktop.books.BookExplainPanel
 import com.coach.desktop.books.BookExplainer
+import com.coach.desktop.books.BookScreen
 import com.coach.desktop.books.ExplainConsent
 import com.coach.desktop.books.ExplainResult
 import com.coach.desktop.books.ExplainTrouble
+import com.coach.desktop.books.LocalBookRelogin
 import com.coach.desktop.books.Textbook
+import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
 import com.coach.ui.theme.CoachTheme
 import com.sun.net.httpserver.HttpServer
@@ -40,6 +50,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.URI
@@ -56,6 +67,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
 class AndroidSableLoginTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
@@ -371,6 +383,114 @@ class AndroidSableLoginTest {
             runBlocking { explainer.load() }
             assertEquals(gateCreds.deviceId, explainer.identity?.credentials?.deviceId)
             assertEquals(gateCreds.token, explainer.identity?.credentials?.token)
+        }
+    }
+
+    @Test fun androidTextbookGateRequiresLoginFirstThenEntersShelfResumesAndHandlesRevocationAndOffline() {
+        FakeFriendBackend().use { friend ->
+            val (library, book) = sampleLibrary()
+            bindConnection(friend.url, friend.issuerUrl)
+            val http = HttpClient.newHttpClient()
+            var generation by mutableStateOf(0)
+            var activeController by mutableStateOf(TextbookController(library))
+
+            compose.setContent {
+                val handler = object : UriHandler {
+                    override fun openUri(uri: String) {
+                        bgExecutor.submit {
+                            http.send(HttpRequest.newBuilder(URI(uri)).GET().build(), HttpResponse.BodyHandlers.discarding())
+                        }
+                    }
+                }
+                CompositionLocalProvider(LocalUriHandler provides handler) {
+                    key(generation) {
+                        AndroidTextbookGate(darkTheme = false) {
+                            WindowsTextbookHost(activeController) { null }
+                        }
+                    }
+                }
+            }
+
+            // 1. Fresh launch shows full-screen login page with Sable primary and backup code tucked behind link.
+            compose.waitUntil(15_000) { compose.onAllNodesWithTag("textbook-login-screen").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("用 Sable 账号登录").assertIsDisplayed()
+            compose.onNodeWithTag("login-pairing-toggle").assertIsDisplayed()
+            compose.onNodeWithTag("login-pairing-form").assertDoesNotExist()
+            assertTrue(compose.onAllNodesWithText("朋友服务", substring = true, useUnmergedTree = true).fetchSemanticsNodes().isEmpty())
+            assertTrue(compose.onAllNodesWithText(friend.url, substring = true).fetchSemanticsNodes().isEmpty())
+
+            // 2. Login via Sable enters bookshelf.
+            compose.onNodeWithText("用 Sable 账号登录").performClick()
+            compose.waitUntil(25_000) { compose.onAllNodesWithTag("windows-host").fetchSemanticsNodes().isNotEmpty() }
+            compose.waitUntil(15_000) { activeController.state.value.book?.id == book.id && !activeController.state.value.busy }
+
+            // Open reader and record open session, then simulate cold reopen -> zero clicks straight back to reader!
+            runBlocking { activeController.read(); activeController.dismissPrompt() }
+            compose.waitUntil(15_000) { activeController.state.value.screen == BookScreen.READER }
+            compose.runOnIdle {
+                activeController = TextbookController(TextbookLibrary(library.directory))
+                generation++
+            }
+            compose.waitUntil(15_000) {
+                compose.onAllNodesWithTag("textbook-reader").fetchSemanticsNodes().isNotEmpty() &&
+                    activeController.state.value.screen == BookScreen.READER
+            }
+            compose.onNodeWithTag("textbook-login-screen").assertDoesNotExist()
+
+            // 3. Revocation (401) returns to full-screen login screen with clear reason.
+            val storedToken = requireNotNull(stores["paired-friend"]?.load()).token
+            friend.revokedTokens += storedToken
+            compose.runOnIdle { generation++ }
+            compose.waitUntil(15_000) { compose.onAllNodesWithTag("login-revoked-reason").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithTag("login-revoked-reason").assertTextContains("授权已撤销", substring = true)
+            assertNull(stores["paired-friend"]?.load())
+
+            // 4. Offline (503) with a saved credential still opens reader without blocking on login.
+            friend.nextFriendToken = "d".repeat(43)
+            compose.onNodeWithText("用 Sable 账号登录").performClick()
+            compose.waitUntil(25_000) { compose.onAllNodesWithTag("textbook-reader").fetchSemanticsNodes().isNotEmpty() }
+            friend.status503.set(true)
+            compose.runOnIdle {
+                activeController = TextbookController(TextbookLibrary(library.directory))
+                generation++
+            }
+            compose.waitUntil(15_000) { compose.onAllNodesWithTag("textbook-reader").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithTag("textbook-login-screen").assertDoesNotExist()
+        }
+    }
+
+    @Test fun androidGatedExplainPanelHidesOldFormAndOffersOnlyReloginOnRevocation() {
+        FakeFriendBackend().use { friend ->
+            val (library, book) = sampleLibrary()
+            bindConnection(friend.url, friend.issuerUrl)
+            val http = HttpClient.newHttpClient()
+            val explainer = BookExplainer(library)
+            runBlocking {
+                explainer.sable { uri, _ ->
+                    http.send(HttpRequest.newBuilder(URI(uri)).GET().build(), HttpResponse.BodyHandlers.discarding())
+                }
+                explainer.load()
+            }
+            var reloginReason by mutableStateOf<String?>(null)
+
+            compose.setContent {
+                CoachTheme(darkTheme = false) {
+                    CompositionLocalProvider(LocalBookRelogin provides { reason -> reloginReason = reason }) {
+                        BookExplainPanel(book, 1, ExplainConsent(library.directory), explainer)
+                    }
+                }
+            }
+            compose.waitUntil(15_000) { explainer.loaded }
+            compose.onNodeWithTag("explain-pairing").assertDoesNotExist()
+            compose.onNodeWithTag("explain-code").assertDoesNotExist()
+            compose.onNodeWithTag("explain-relogin").assertDoesNotExist()
+
+            compose.runOnIdle { explainer.markRevoked() }
+            compose.waitUntil(15_000) { compose.onAllNodesWithTag("explain-relogin").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithTag("explain-pairing").assertDoesNotExist()
+            compose.onNodeWithTag("explain-code").assertDoesNotExist()
+            compose.onNodeWithTag("explain-relogin").performClick()
+            assertEquals("授权已撤销，请重新登录。", reloginReason)
         }
     }
 

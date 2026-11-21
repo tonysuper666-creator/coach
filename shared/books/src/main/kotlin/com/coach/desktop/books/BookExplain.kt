@@ -393,12 +393,25 @@ internal fun BookExplainPanel(
     }
 
     val colors = CoachTheme.colors
+    val onRelogin = LocalBookRelogin.current
     // 讲解长过一屏时，右侧这道 V7 细滚动条跟着同一个 ScrollState 走：不用滚轮也能看出下面还有内容，
     // 拖动滑块能读到底（desktop-polish A11）。条子宽 12dp，落在正文右侧 16dp 的内边距里，不盖住字。
     Box(modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp).testTag("book-explain"), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             val paired = explainer.identity
-            if (paired == null && explainer.loaded) Column(Modifier.testTag("explain-pairing"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (paired == null && explainer.loaded) {
+                if (onRelogin != null) {
+                    if (explainer.revoked) {
+                        Column(Modifier.testTag("explain-revoked-action"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text("授权已撤销，请重新登录。读书和做题照常。",
+                                style = MaterialTheme.typography.bodySmall, color = v7Alert(), modifier = Modifier.testTag("explain-revoked"))
+                            PrimaryButton(
+                                onClick = { onRelogin("授权已撤销，请重新登录。") },
+                                modifier = Modifier.testTag("explain-relogin"),
+                            ) { Text("重新登录") }
+                        }
+                    }
+                } else Column(Modifier.testTag("explain-pairing"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 val sable = explainer.sableLogin
                 if (explainer.revoked) {
                     Text("这台电脑的连接已停用", style = MaterialTheme.typography.titleMedium)
@@ -431,6 +444,7 @@ internal fun BookExplainPanel(
                     }
                 }, enabled = code.length == 6 && (address.isNotBlank() || explainer.hasBuiltInAddress) && !pairing, modifier = Modifier.testTag("explain-pair")) { Text(if (pairing) "正在配对…" else "配对") }
                 pairError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = v7Alert(), modifier = Modifier.testTag("explain-pair-error")) }
+                }
             }
             if (selection == null) {
                 if (pageRole != BookPageRole.BODY || currentSection == null) {
@@ -473,7 +487,10 @@ internal fun BookExplainPanel(
                                 val ctx = sectionContext() ?: return@SectionGuideCard
                                 startSection(ctx, currentSection.id)
                             },
-                            onOpenPair = { scope.launch { scroll.animateScrollTo(0) } },
+                            onOpenPair = {
+                                if (onRelogin != null) onRelogin("授权已撤销，请重新登录。")
+                                else scope.launch { scroll.animateScrollTo(0) }
+                            },
                             onOpenCitation = { citation, block ->
                                 if (onOpenOriginal != null) onOpenOriginal(BookPassage.from(book, block))
                                 else opened = citation to block
@@ -553,9 +570,18 @@ internal fun BookExplainPanel(
                         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                         if (failed != null) {
                             when (failed.trouble) {
-                                ExplainTrouble.Unpaired, ExplainTrouble.Revoked -> PaperButton(onClick = { scope.launch { scroll.animateScrollTo(0) } },
-                                    modifier = Modifier.testTag("explain-repair")) {
-                                    Text(if (failed.trouble == ExplainTrouble.Revoked) "重新配对" else "配对")
+                                ExplainTrouble.Unpaired, ExplainTrouble.Revoked -> PaperButton(
+                                    onClick = {
+                                        if (onRelogin != null) onRelogin("授权已撤销，请重新登录。")
+                                        else scope.launch { scroll.animateScrollTo(0) }
+                                    },
+                                    modifier = Modifier.testTag("explain-repair"),
+                                ) {
+                                    Text(when {
+                                        onRelogin != null -> "重新登录"
+                                        failed.trouble == ExplainTrouble.Revoked -> "重新配对"
+                                        else -> "配对"
+                                    })
                                 }
                                 else -> QuietButton("再试一次", enabled = paired != null, modifier = Modifier.testTag("explain-retry")) { start(block) }
                             }

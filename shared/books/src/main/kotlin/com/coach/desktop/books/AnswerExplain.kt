@@ -121,10 +121,16 @@ internal fun LessonAnswerExplanation(
     when {
         !ready -> Text("正在检查服务连接…", Modifier.testTag("answer-explain-loading"),
             style = MaterialTheme.typography.bodySmall)
-        !paired -> Column(Modifier.fillMaxWidth().testTag("answer-explain-unpaired"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(if (gate.revoked()) ExplainTrouble.revoked(gate.sableLogin()) else "讲解由配对的服务生成，这台电脑还没连上。读书和做题照常。",
-                style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("answer-explain-unpaired-text"))
-            V7TextButton(onOpenSourcePage, modifier = Modifier.testTag("answer-explain-pair")) { Text("去原文页配对") }
+        !paired -> {
+            val onRelogin = LocalBookRelogin.current
+            Column(Modifier.fillMaxWidth().testTag("answer-explain-unpaired"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(if (gate.revoked()) ExplainTrouble.revoked(gate.sableLogin()) else "讲解由配对的服务生成，这台电脑还没连上。读书和做题照常。",
+                    style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("answer-explain-unpaired-text"))
+                V7TextButton(
+                    onClick = { if (onRelogin != null) onRelogin("授权已撤销，请重新登录。") else onOpenSourcePage() },
+                    modifier = Modifier.testTag("answer-explain-pair"),
+                ) { Text(if (onRelogin != null) "重新登录" else "去原文页配对") }
+            }
         }
         skipped -> Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.testTag("answer-explain-skipped")) {
@@ -294,8 +300,11 @@ internal fun GeneratedLessonPractice(
         // 连不上的时候不能让这一节空着：配对只管「现出题」，原文出的题和作答照常。
         !gate.ready() -> fallback()
         !gate.paired() -> {
+            val onRelogin = LocalBookRelogin.current
             Text(if (gate.revoked()) ExplainTrouble.revoked(gate.sableLogin()) else "现出题和答后讲解要用配对的服务；连上之前，这一节先用原文出的题。")
-            V7TextButton(onRepair) { Text("去原文页配对") }
+            V7TextButton({ if (onRelogin != null) onRelogin("授权已撤销，请重新登录。") else onRepair() }) {
+                Text(if (onRelogin != null) "重新登录" else "去原文页配对")
+            }
             fallback()
         }
         !allowed -> {

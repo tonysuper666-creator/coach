@@ -20,6 +20,7 @@ internal class DesktopCredentials(clientDirectory: Path) {
     private val directory = clientDirectory.resolve("pairing").toAbsolutePath().normalize()
     internal val file: Path = directory.resolve("credentials.properties")
     private val addressFile = directory.resolve("server-url")
+    private val revokedFile = directory.resolve("revoked")
 
     private fun <T> readPrivate(path: Path, read: (InputStream) -> T): T? {
         checkParents(directory)
@@ -64,6 +65,7 @@ internal class DesktopCredentials(clientDirectory: Path) {
                 setProperty("role", credentials.role)
             }.store(output, "Coach pairing; private to this user")
         }
+        Files.deleteIfExists(revokedFile)
     }
 
     private fun writePrivate(path: Path, write: (OutputStream) -> Unit) {
@@ -83,18 +85,28 @@ internal class DesktopCredentials(clientDirectory: Path) {
         } finally { Files.deleteIfExists(temporary) }
     }
 
-    @Synchronized fun clear() {
+    @Synchronized fun wasRevoked(): Boolean {
+        checkParents(directory)
+        return Files.exists(revokedFile, NOFOLLOW_LINKS)
+    }
+
+    @Synchronized fun clear(markRevoked: Boolean = false) {
         checkParents(directory)
         if (Files.exists(file, NOFOLLOW_LINKS)) {
             protect(directory, true)
             protect(file, false)
             Files.delete(file)
         }
+        if (markRevoked) {
+            writePrivate(revokedFile) { it.write("revoked".toByteArray(Charsets.UTF_8)) }
+        } else {
+            Files.deleteIfExists(revokedFile)
+        }
     }
 
-    @Synchronized fun clear(serverUrl: String, expected: PairedCredentials) {
+    @Synchronized fun clear(serverUrl: String, expected: PairedCredentials, markRevoked: Boolean = false) {
         val current = load(serverUrl) ?: return
-        if (current.deviceId == expected.deviceId && current.token == expected.token) clear()
+        if (current.deviceId == expected.deviceId && current.token == expected.token) clear(markRevoked)
     }
 
     private fun checkParents(path: Path) {

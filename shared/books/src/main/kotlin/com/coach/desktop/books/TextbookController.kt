@@ -60,16 +60,32 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         action {
             val catalog = library.catalog()
             val active = library.activeReview()
-            val book = active?.let { library.book(it.book) } ?: catalog.firstOrNull()?.let { library.book(it.id) }
+            val session = if (active == null) library.openSession()?.takeIf { (id, _) -> catalog.any { it.id == id } } else null
+            val book = active?.let { library.book(it.book) }
+                ?: session?.let { library.book(it.first) }
+                ?: catalog.firstOrNull()?.let { library.book(it.id) }
             val savedPath = book?.let { library.learningPath(it.id) }
+            val restoredPath = book?.let { LearningPath.restore(savedPath, it.learning) } ?: LearningPath.READ
+            val restoredScreen = when {
+                active != null -> BookScreen.REVIEWING
+                book != null && session?.second == "READER" -> BookScreen.READER
+                book != null && session?.second == "LEARNING" && book.learning -> BookScreen.LEARNING
+                else -> BookScreen.HOME
+            }
+            val restoredLesson = if (restoredScreen == BookScreen.LEARNING && book != null) book.lessons.getOrNull(book.lessonIndex) else null
+            val restoredAnswer = active?.answer
+                ?: restoredLesson?.let { library.answer(book!!.id, it.id, book.questionMode) }
+                ?: PracticeAnswer()
             mutable.update { current ->
                 LibraryUi(
-                    catalog = catalog, book = book, busy = true, reviews = library.reviews(),
-                    review = active, answer = active?.answer ?: PracticeAnswer(),
-                    learningPath = book?.let { LearningPath.restore(savedPath, it.learning) } ?: LearningPath.READ,
+                    catalog = catalog, book = book, page = book?.readingPage ?: 1, busy = true, reviews = library.reviews(),
+                    review = active, answer = restoredAnswer,
+                    learningPath = restoredPath,
                     learningPathSaved = savedPath != null,
+                    questionsOpen = restoredScreen == BookScreen.LEARNING &&
+                        (restoredPath == LearningPath.QUESTION_FIRST || restoredAnswer.text.isNotBlank() || restoredAnswer.revealed),
                     ladder = book?.let { library.ladder(it.id) } ?: LadderSession(),
-                    screen = if (active == null) BookScreen.HOME else BookScreen.REVIEWING,
+                    screen = restoredScreen,
                     importing = current.importing,
                     importNotice = current.importNotice,
                 )
@@ -335,6 +351,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val book = library.book(id)
         library.save(book)
         library.closeReview()
+        library.clearOpenSession()
         val catalog = library.catalog()
         val reviews = library.reviews()
         val pathSaved = library.learningPath(book.id) != null
@@ -358,6 +375,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
 
     private fun openReading(book: Textbook, promptToLearn: Boolean = false) {
         library.closeReview()
+        library.saveOpenSession(book.id, "READER")
         mutable.update { it.copy(review = null, questionsOpen = false,
             screen = BookScreen.READER, page = book.readingPage, source = null,
             prompt = if (promptToLearn && !book.promptSeen && !book.learning) BookPrompt.AFTER_READING else null) }
@@ -387,6 +405,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     }
 
     private fun openLearning(book: Textbook, path: LearningPath = mutable.value.learningPath) {
+        library.saveOpenSession(book.id, "LEARNING")
         val lesson = book.lessons.getOrNull(book.lessonIndex)
         val answer = lesson?.let { library.answer(book.id, it.id, book.questionMode) } ?: PracticeAnswer()
         mutable.update { it.copy(screen = BookScreen.LEARNING, prompt = null, source = null, answer = answer, review = null,
@@ -466,6 +485,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         } else {
             val fromReview = mutable.value.review != null
             library.closeReview()
+            if (!fromReview) library.clearOpenSession()
             mutable.update { it.copy(screen = if (fromReview) BookScreen.REVIEWS else BookScreen.HOME,
                 review = null, prompt = null, reviews = library.reviews()) }
         }
@@ -480,6 +500,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
 
     suspend fun showReviews() = action {
         library.closeReview()
+        library.clearOpenSession()
         mutable.update { it.copy(screen = BookScreen.REVIEWS, review = null, source = null,
             prompt = null, reviews = library.reviews()) }
     }

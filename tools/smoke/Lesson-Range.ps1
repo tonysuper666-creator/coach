@@ -159,6 +159,16 @@ function Resolve-SourceReturnAction([bool]$ReturnedToLearning, [bool]$SawFocusLo
     }
     return [pscustomobject]@{ Action = 'wait_learning'; Button = $null }
 }
+# 点「返回学习」后放锁的那 800 ms 里，别路可能把前台抢走，脚本据此以为「这一下点空了」要补点；
+# 但界面可能已经切回做题学，原文页「返回学习」的坐标正好落在做题学左上角的「Coach目录返回书架」上，
+# 一补点就跳回书架（11-21 06:38 L2）。所以补点前必须用**当前这一帧**再确认一次页面身份，坐标也只取这一帧：
+#   本节原文在 → 已经回到做题学，不用点；返回学习在 → 按这一帧坐标补点；两样都没有（过渡帧）→ 等下一帧，不猜坐标。
+function Resolve-SourceReturnRecheck($lines) {
+    if (Find-Text $lines '本节原文') { return [pscustomobject]@{ Action = 'done'; Button = $null } }
+    $ret = Find-Text $lines '返回学习'
+    if ($ret) { return [pscustomobject]@{ Action = 'reclick'; Button = $ret } }
+    return [pscustomobject]@{ Action = 'wait'; Button = $null }
+}
 function Find-PracticeOptionClick($lines, [int]$OptAnchorX1, [int]$MinOptY) {
     if (-not $lines -or $OptAnchorX1 -le 0) { return $null }
     foreach ($l in $lines) {

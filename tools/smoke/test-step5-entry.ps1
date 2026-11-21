@@ -13,6 +13,8 @@
 #    再「这次怎么读」下面含「始边」的最低一行（弹窗 chip 在上面，不会误认），最后才用放大两倍的暗字识别；
 #  - 弹窗还在时按钮一时认不出来，就隔一拍重拍等文字恢复或弹窗自己关（-stuckSec），不因一次认不出就 break；
 #    真等到头还认不出才报「认不出来了」，不拿旧坐标再点；
+#  - 服务端拒答「回答缺少可核对的页码依据，暂时无法确认」要认（含 OCR 错字「依框，暫时无氵去确认」），
+#    带「再试一次」就先重放一次，第二次还拒就带着原话失败，不干等满 150 秒；
 #  - 追问找标题时见过「思考」就不再往回滚（那会把刚追加的回答推出视野）。
 # 函数体从 friend-path-worker.ps1 里按原文截取，屏幕与输入都换成本文件的假实现。
 $ErrorActionPreference = 'Stop'
@@ -26,7 +28,7 @@ function Check([string]$name, [bool]$ok, [string]$detail = '') {
     "$tag $name$(if ($detail) { " ($detail)" })"
 }
 
-# 把 Get-LineBox / Find-OnRow / Click-Label / Click-Until / Find-DialogPath / Find-Step5Confirm 原样取出来跑。
+# 把 Get-LineBox / Find-OnRow / Click-Label / Click-Until / Find-DialogPath / Find-Step5Confirm / 第 5 步拒答判定原样取出来跑。
 $src = Get-Content -LiteralPath (Join-Path $repo 'tools/smoke/friend-path-worker.ps1') -Raw -Encoding UTF8
 $start = $src.IndexOf('function Get-LineBox')
 $end = $src.IndexOf('$env:JAVA_HOME', $start)
@@ -374,6 +376,33 @@ $script:onClick = { $script:screen = $step5Closed }
 $err = ''
 try { Click-Until 5 $findBlind $done5 '点了「开始边看边学」但弹窗没关' -sec 1 -tries 8 -pauseMs 1 -stuckSec 3 } catch { $err = "$_" }
 Check 'click-until-done-while-waiting' ($script:clicks.Count -eq 1 -and -not $err) "clicks=$($script:clicks.Count) err=$err"
+
+# 34. 第 5 步服务端拒答「回答缺少可核对的页码依据，暂时无法确认。」并给「再试一次」：
+#     第一次点它重放，第二次还拒就把原话写进失败，不再干等满 150 秒（11-21 06:37 L1）。
+#     OCR 会读成「依框，暫时无氵去确认」，所以认拒答要按残片和容错骨架认。
+$refusalFull = @(
+    (New-Line '回答缺少可核对的页码依据，暂时无法确认。' 480 520 700 30),
+    (New-Line '再试一次' 700 570 120 30)
+)
+$refusalOcr = @(
+    (New-Line '依框，暫时无氵去确认' 480 520 420 30),
+    (New-Line '再试一次' 700 570 120 30)
+)
+$refusalNoRetry = @((New-Line '回答缺少可核对的页码依据，暂时无法确认。' 480 520 700 30))
+$lectureBody = @(
+    (New-Line '这段话的意思是作者用比喻说明时间的流逝。' 480 520 700 30),
+    (New-Line '出处：第 150 页' 480 600 300 30)
+)
+$r0 = Resolve-LectureRefusalAction $refusalFull $false
+$r1 = Resolve-LectureRefusalAction $refusalOcr $false
+$r2 = Resolve-LectureRefusalAction $refusalFull $true
+$r3 = Resolve-LectureRefusalAction $refusalNoRetry $false
+$r4 = Resolve-LectureRefusalAction $lectureBody $false
+Check 'lecture-refusal-retries-once-on-server-refusal' ($r0.Action -eq 'retry' -and [bool]$r0.Button) "action=$($r0.Action)"
+Check 'lecture-refusal-matches-ocr-garble' ($r1.Action -eq 'retry' -and $r1.Reason -match '确认') "action=$($r1.Action) reason=$($r1.Reason)"
+Check 'lecture-refusal-second-time-fails-fast' ($r2.Action -eq 'fail' -and [bool]$r2.Reason) "action=$($r2.Action)"
+Check 'lecture-refusal-fails-when-no-retry-button' ($r3.Action -eq 'fail') "action=$($r3.Action)"
+Check 'lecture-body-not-mistaken-for-refusal' ($r4.Action -eq 'none') "action=$($r4.Action)"
 
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"

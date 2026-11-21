@@ -213,7 +213,6 @@ try {
     # 走真实的 Get-ClientPids -Mine / Find-DirtyDesktopWindow / Test-DesktopPreflight。
     # Windows 路径不分大小写、\ 与 / 等价：同一检出换大小写或斜杠仍算本检出残留；相邻检出、嵌套子检出放行。
     $caseRoot = Join-Path $regTmp 'case-root\coach'
-    $script:caseCmdRoot = $null
     $savedMarker = $script:RepoMarker
     try {
         & {
@@ -232,21 +231,32 @@ public class TdpCaseWindow {
             $enumDef = (Get-Command Find-DirtyDesktopWindow).Definition
             Check 'checkout-case-harness-uses-real-enum' ($enumDef.Contains('[WD]::EnumWindows') -and $enumDef.Contains('Get-ClientPids -Mine'))
             Set-Item Function:Find-DirtyDesktopWindow ([scriptblock]::Create($enumDef.Replace('[WD]', '[TdpCaseWindow]')))
-            function Get-CimInstance { [pscustomobject]@{ ProcessId = 71001; CommandLine = "java.exe -cp `"$script:caseCmdRoot\desktopApp\build\classes\kotlin\main`" com.coach.desktop.MainKt" } }
+            function Get-CimInstance { [pscustomobject]@{ ProcessId = 71001; CommandLine = $script:caseCmdLine } }
             function Get-Process { [pscustomobject]@{ ProcessName = 'java' } }
             $caseSep = [string][char]92
+            $checkoutLine = { param($root) "java.exe -cp `"$root${caseSep}desktopApp${caseSep}build${caseSep}classes${caseSep}kotlin${caseSep}main`" com.coach.desktop.MainKt" }
+            $runtimeLine = { param($rt) "java.exe -cp `"$rt${caseSep}smoke-desktop.jar`" com.coach.desktop.MainKt" }
+            # -Runtime 起的客户端命令行里只有运行目录（没有 <检出>/desktopApp/build），要么登记成归属锚点，要么落在检出里。
+            $rtRoot = Join-Path $regTmp 'case-root\rt\smoke-runtime'
+            $rtOther = Join-Path $regTmp 'case-root\rt2\smoke-runtime'
             $cases = @(
-                @{ Name = 'exact'; Marker = $caseRoot; Cmd = $caseRoot; Same = $true },
-                @{ Name = 'case-only'; Marker = $caseRoot; Cmd = $caseRoot.ToUpperInvariant(); Same = $true },
-                @{ Name = 'marker-case-only'; Marker = $caseRoot.ToLowerInvariant(); Cmd = $caseRoot; Same = $true },
-                @{ Name = 'forward-slashes'; Marker = $caseRoot + $caseSep; Cmd = $caseRoot.Replace($caseSep, '/').Replace(':/', '://'); Same = $true },
-                @{ Name = 'other'; Marker = $caseRoot; Cmd = $caseRoot + '-other'; Same = $false },
-                @{ Name = 'nested-child'; Marker = $caseRoot; Cmd = Join-Path $caseRoot 'child'; Same = $false },
-                @{ Name = 'prefix-sibling'; Marker = 'oach'; Cmd = $caseRoot; Same = $false }
+                @{ Name = 'exact'; Marker = $caseRoot; Owned = ''; CmdLine = (& $checkoutLine $caseRoot); Same = $true },
+                @{ Name = 'case-only'; Marker = $caseRoot; Owned = ''; CmdLine = (& $checkoutLine $caseRoot.ToUpperInvariant()); Same = $true },
+                @{ Name = 'marker-case-only'; Marker = $caseRoot.ToLowerInvariant(); Owned = ''; CmdLine = (& $checkoutLine $caseRoot); Same = $true },
+                @{ Name = 'forward-slashes'; Marker = $caseRoot + $caseSep; Owned = ''; CmdLine = (& $checkoutLine $caseRoot.Replace($caseSep, '/').Replace(':/', '://')); Same = $true },
+                @{ Name = 'other'; Marker = $caseRoot; Owned = ''; CmdLine = (& $checkoutLine ($caseRoot + '-other')); Same = $false },
+                @{ Name = 'nested-child'; Marker = $caseRoot; Owned = ''; CmdLine = (& $checkoutLine (Join-Path $caseRoot 'child')); Same = $false },
+                @{ Name = 'prefix-sibling'; Marker = 'oach'; Owned = ''; CmdLine = (& $checkoutLine $caseRoot); Same = $false },
+                @{ Name = 'runtime-owned'; Marker = $caseRoot; Owned = $rtRoot; CmdLine = (& $runtimeLine $rtRoot); Same = $true },
+                @{ Name = 'runtime-owned-case-only'; Marker = $caseRoot; Owned = $rtRoot.ToUpperInvariant(); CmdLine = (& $runtimeLine $rtRoot); Same = $true },
+                @{ Name = 'runtime-unregistered'; Marker = $caseRoot; Owned = ''; CmdLine = (& $runtimeLine $rtRoot); Same = $false },
+                @{ Name = 'runtime-other-lane'; Marker = $caseRoot; Owned = $rtRoot; CmdLine = (& $runtimeLine $rtOther); Same = $false },
+                @{ Name = 'runtime-in-checkout'; Marker = $caseRoot; Owned = ''; CmdLine = (& $runtimeLine (Join-Path $caseRoot 'desktopApp\build\outputs\smoke-runtime')); Same = $true }
             )
             foreach ($c in $cases) {
                 $script:RepoMarker = $c.Marker
-                $script:caseCmdRoot = $c.Cmd
+                $script:OwnedClientRoot = $c.Owned
+                $script:caseCmdLine = $c.CmdLine
                 $mine = @(Get-ClientPids -Mine)
                 $pf = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -ForegroundProbe $edgeFg
                 $ok = if ($c.Same) {
@@ -259,6 +269,8 @@ public class TdpCaseWindow {
         }
     } finally {
         $script:RepoMarker = $savedMarker
+        $script:OwnedClientRoot = ''
+        $script:caseCmdLine = ''
     }
 
     Check 'preflight-rejects-same-checkout-leftover-coach' (-not $pfSame.Clean -and $pfSame.DirtyWindows.Count -eq 1 -and $pfSame.DirtyWindows[0].Pid -eq 21117 -and @($pfSame.OtherCoachWindows).Count -eq 0) $pfSame.Reason

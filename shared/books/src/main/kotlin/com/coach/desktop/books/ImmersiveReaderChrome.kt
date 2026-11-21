@@ -962,6 +962,9 @@ internal fun CompanionAskPane(
     val colors = CoachTheme.colors
     var pickingParagraph by remember(book.id, pageBlocks) { mutableStateOf(false) }
     val quoteSource = thread?.selection ?: activeSelection
+    DisposableEffect(Unit) {
+        onDispose { onInputFocusChanged(false) }
+    }
 
     Column(
         Modifier.fillMaxSize().padding(if (compact) 10.dp else 14.dp).testTag("companion-ask-pane"),
@@ -1098,7 +1101,7 @@ internal fun CompanionAskPane(
                     enabled = thread?.loading != true,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .onFocusChanged { onInputFocusChanged(it.isFocused) }
+                        .onFocusChanged { onInputFocusChanged(it.hasFocus) }
                         .testTag("inline-followup-input")
                         .onPreviewKeyEvent { event ->
                             if (event.type == KeyEventType.KeyDown && event.key == Key.Enter && !event.isShiftPressed &&

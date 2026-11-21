@@ -279,4 +279,73 @@ class ImmersiveReaderV2Test {
         onNodeWithTag("inline-followup-input").assertIsDisplayed()
         onNodeWithTag("inline-followup-send").assertIsDisplayed()
     }
+
+    @Test
+    fun closingCompanionAfterPickingAskPassageRestoresArrowPagingKeys() = runSkikoComposeUiTest(
+        size = Size(752f, 552f),
+        density = Density(1f),
+    ) {
+        val dir = Files.createTempDirectory("coach-v2-ask-arrow-repro")
+        val pdfFile = dir.resolve("synthetic-4p.pdf")
+        PDDocument().use { doc ->
+            val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+            for (p in 1..4) {
+                val page = PDPage(PDRectangle.LETTER)
+                doc.addPage(page)
+                PDPageContentStream(doc, page).use { cs ->
+                    cs.beginText()
+                    cs.setFont(font, 14f)
+                    cs.newLineAtOffset(60f, 700f)
+                    cs.showText("Chapter $p Synthetic Topic on Page $p")
+                    cs.newLineAtOffset(0f, -24f)
+                    cs.showText("Synthetic physics paragraph on page $p explaining thermal conductivity and boundary layers.")
+                    cs.endText()
+                }
+            }
+            doc.save(pdfFile.toFile())
+        }
+        val library = TextbookLibrary(dir.resolve("lib"))
+        val controller = TextbookController(library)
+        runBlocking {
+            controller.load()
+            controller.importBook(pdfFile)
+        }
+        setContent {
+            Box(Modifier.fillMaxSize()) {
+                WindowsTextbookHost(controller, chooseBook = { null })
+            }
+        }
+        waitForIdle()
+        assertEquals(1, controller.state.value.page)
+
+        // Exact Reviewer-Kimi repro: 伴读 -> 提问 -> 选本页段落 -> 关闭伴读 -> 方向右键 (预期 1 -> 2)
+        onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.L) }
+        waitForIdle()
+        onNodeWithTag("companion-tab-ask").performClick()
+        waitForIdle()
+        onNodeWithTag("companion-pick-paragraph").performClick()
+        waitForIdle()
+        onNodeWithTag("ask-passage-block-0").performClick()
+        waitForIdle()
+
+        // While the input field itself IS focused, Right arrow stays inside the editor and does not flip the page.
+        onNodeWithTag("inline-followup-input").performClick()
+        waitForIdle()
+        onNodeWithTag("inline-followup-input").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.DirectionRight) }
+        waitForIdle()
+        assertEquals(1, controller.state.value.page, "Focused Ask input must keep arrow keys for text editing")
+
+        // Close companion drawer -> reader regains focus automatically and Right arrow on root immediately flips page 1 -> 2.
+        onNodeWithTag("companion-close").performClick()
+        waitForIdle()
+        onNodeWithTag("immersive-companion-drawer").assertDoesNotExist()
+        onRoot().performKeyInput { pressKey(androidx.compose.ui.input.key.Key.DirectionRight) }
+        waitForIdle()
+        assertEquals(2, controller.state.value.page, "Closing companion after picking ask passage must restore Right arrow paging (1 -> 2)")
+
+        // Left arrow flips back 2 -> 1 cleanly.
+        onRoot().performKeyInput { pressKey(androidx.compose.ui.input.key.Key.DirectionLeft) }
+        waitForIdle()
+        assertEquals(1, controller.state.value.page)
+    }
 }

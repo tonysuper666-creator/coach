@@ -370,9 +370,27 @@ internal fun TextbookReader(
         }
     }
     var pageFocused by remember { mutableStateOf(false) }
-    val typing = readerTyping(asking, jumpFocused, notesOpen, session.noting) ||
-        inlineThread?.askingOpen == true || searchOpen || searchFocused
-    LaunchedEffect(book.id, ui.page, typing, pdfScrolling) {
+    var tocOpen by remember(book.id) { mutableStateOf(false) }
+    var companionOpen by remember(book.id, openPairing) { mutableStateOf(openPairing) }
+    var companionTab by remember(book.id) { mutableStateOf(ReaderCompanionTab.EXPLAIN) }
+    var askInputFocused by remember(book.id) { mutableStateOf(false) }
+    LaunchedEffect(companionOpen, companionTab) {
+        if (!companionOpen || companionTab != ReaderCompanionTab.ASK) {
+            askInputFocused = false
+        }
+    }
+    fun closeCompanion() {
+        companionOpen = false
+        explainOpen = false
+        notesOpen = false
+        askInputFocused = false
+        inlineThread = inlineThread?.copy(askingOpen = false)
+        focusManager.clearFocus()
+    }
+    // 仅在输入框真实聚焦或页码/批注/搜索正在输入时屏蔽翻页键，绝不用持久的 inlineThread.askingOpen 锁死键盘。
+    val typing = readerTyping(asking, jumpFocused, false, session.noting) ||
+        askInputFocused || searchOpen || searchFocused
+    LaunchedEffect(book.id, ui.page, typing, pdfScrolling, companionOpen, tocOpen) {
         if (typing) return@LaunchedEffect
         // A successful request already owns focus. Do not leave another frame's
         // request pending: it could steal focus from a newly clicked page field.
@@ -585,10 +603,6 @@ internal fun TextbookReader(
     // 2.0 单层沉浸阅读器状态：默认隐藏全部工具栏（嵌套 = 1 层），按需浮出 HUD 与统一伴读抽屉。
     var hudVisible by remember(book.id) { mutableStateOf(false) }
     var hudPinned by remember(book.id) { mutableStateOf(false) }
-    var tocOpen by remember(book.id) { mutableStateOf(false) }
-    var companionOpen by remember(book.id, openPairing) { mutableStateOf(openPairing) }
-    var companionTab by remember(book.id) { mutableStateOf(ReaderCompanionTab.EXPLAIN) }
-    var askInputFocused by remember(book.id) { mutableStateOf(false) }
     // 宽屏（>=1280dp）默认并排停靠（Split-Pane，正文零像素遮挡），保留一键切浮层。
     var companionDocked by remember(book.id) { mutableStateOf(true) }
     val bookmarkStore = remember(library.directory) { BookBookmarkStore(library.directory) }
@@ -735,9 +749,7 @@ internal fun TextbookReader(
                             hudVisible = false
                             hudPinned = false
                             tocOpen = false
-                            companionOpen = false
-                            explainOpen = false
-                            notesOpen = false
+                            closeCompanion()
                             searchOpen = false
                             searchFocused = false
                         } else {
@@ -755,11 +767,7 @@ internal fun TextbookReader(
                         true
                     }
                     !typingNow && !mod && (event.key == Key.L || event.key == Key.RightBracket) -> {
-                        companionOpen = !companionOpen
-                        if (!companionOpen) {
-                            explainOpen = false
-                            notesOpen = false
-                        }
+                        if (companionOpen) closeCompanion() else companionOpen = true
                         true
                     }
                     !typingNow && !mod && event.key == Key.V && hasOriginal -> {
@@ -771,7 +779,7 @@ internal fun TextbookReader(
                             searchOpen -> { searchOpen = false; searchFocused = false; true }
                             editingJump -> { editingJump = false; focusManager.clearFocus(); true }
                             tocOpen -> { tocOpen = false; true }
-                            companionOpen -> { companionOpen = false; explainOpen = false; notesOpen = false; true }
+                            companionOpen -> { closeCompanion(); true }
                             hudVisible && !hudPinned -> { hudVisible = false; true }
                             else -> false
                         }
@@ -947,7 +955,7 @@ internal fun TextbookReader(
         val handleCitationJump: (BookPassage) -> Unit = { passage ->
             openPassage(passage)
             // 仅窄桌面浮层模式下自动收起抽屉，以免盖住刚跳转到的出处；并排与底部半屏抽屉下保留对照。
-            if (effectiveSideOverlay) companionOpen = false
+            if (effectiveSideOverlay) closeCompanion()
         }
 
         val explainTabContent: @Composable () -> Unit = {
@@ -1140,7 +1148,7 @@ internal fun TextbookReader(
                     activeTab = companionTab,
                     onSelectTab = { companionTab = it },
                     onToggleDock = {},
-                    onClose = { companionOpen = false; explainOpen = false; notesOpen = false },
+                    onClose = { closeCompanion() },
                     explainContent = explainTabContent,
                     askContent = askTabContent,
                     notesContent = notesTabContent,
@@ -1159,7 +1167,7 @@ internal fun TextbookReader(
                     activeTab = companionTab,
                     onSelectTab = { companionTab = it },
                     onToggleDock = { companionDocked = false },
-                    onClose = { companionOpen = false; explainOpen = false; notesOpen = false },
+                    onClose = { closeCompanion() },
                     explainContent = explainTabContent,
                     askContent = askTabContent,
                     notesContent = notesTabContent,
@@ -1279,7 +1287,7 @@ internal fun TextbookReader(
                 activeTab = companionTab,
                 onSelectTab = { companionTab = it },
                 onToggleDock = { companionDocked = true },
-                onClose = { companionOpen = false; explainOpen = false; notesOpen = false },
+                onClose = { closeCompanion() },
                 explainContent = explainTabContent,
                 askContent = askTabContent,
                 notesContent = notesTabContent,
@@ -1313,8 +1321,7 @@ internal fun TextbookReader(
             },
             onToggleBookmark = { toggleBookmark(ui.page) },
             onToggleCompanion = {
-                companionOpen = !companionOpen
-                if (!companionOpen) { explainOpen = false; notesOpen = false }
+                if (companionOpen) closeCompanion() else companionOpen = true
             },
             onTogglePinHud = {
                 hudPinned = !hudPinned

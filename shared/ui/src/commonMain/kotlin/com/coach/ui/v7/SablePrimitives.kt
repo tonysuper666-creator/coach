@@ -1,5 +1,6 @@
 package com.coach.ui.v7
 
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -40,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -48,10 +50,7 @@ import coach.design.tokens.CoachV7
 import com.coach.ui.theme.CoachTheme
 import kotlin.math.PI
 
-/**
- * Destructive confirmation button following Sable's `dangerSolid` AA guardrail:
- * literal white label on `actionDanger` with no hover brightening in dark mode.
- */
+/** Destructive confirmation button rendered with V7's danger surface and AA foreground ink. */
 @Composable
 fun DangerButton(
     onClick: () -> Unit,
@@ -74,7 +73,7 @@ fun DangerButton(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center,
     ) {
-        CompositionLocalProvider(LocalContentColor provides c.onDanger.copy(alpha = if (enabled) 1f else .7f)) {
+        CompositionLocalProvider(LocalContentColor provides c.onAccent.copy(alpha = if (enabled) 1f else .7f)) {
             ProvideTextStyle(MaterialTheme.typography.labelLarge.copy(fontWeight = CoachV7.Weight.uiStrong)) { content() }
         }
     }
@@ -128,8 +127,8 @@ fun CoachErrorBanner(
         modifier = modifier
             .fillMaxWidth()
             .clip(shape)
-            .border(BorderStroke(1.dp, c.dangerFg.copy(alpha = 0.28f)), shape)
-            .background(c.dangerBg)
+            .background(c.dangerBg, shape)
+            .border(BorderStroke(1.dp, c.dangerFg.copy(alpha = 0.35f)), shape)
             .padding(horizontal = CoachV7.Space.s4, vertical = CoachV7.Space.s3)
             .testTag("coach-error-banner"),
         verticalAlignment = Alignment.CenterVertically,
@@ -152,24 +151,25 @@ fun CoachOfflineBanner(
 ) {
     val c = CoachTheme.colors
     val shape = RoundedCornerShape(CoachV7.Radius.m)
+    val dotColor = if (c.dark) Color(0xFFE0B45C) else Color(0xFFB37A1E)
     Row(
         modifier = modifier
             .fillMaxWidth()
             .clip(shape)
+            .background(c.surface2, shape)
             .border(BorderStroke(1.dp, c.borderSubtle), shape)
-            .background(c.surface2)
-            .padding(horizontal = CoachV7.Space.s4, vertical = CoachV7.Space.s2b)
+            .padding(horizontal = CoachV7.Space.s4, vertical = 10.dp)
             .testTag("coach-offline-banner"),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(CoachV7.Space.s2b),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Box(Modifier.size(8.dp).clip(CircleShape).background(c.warningAccent))
+        Box(Modifier.size(8.dp).clip(CircleShape).background(dotColor))
         Text(message, style = MaterialTheme.typography.bodySmall, color = c.fgPrimary)
     }
 }
 
 /**
- * Sable three-dot breathing indicator (1800ms phase cycle, opacity/scale only, zero rotation).
+ * Quiet three-dot breathing indicator (1800ms phase cycle, opacity/scale only, zero rotation).
  * Collapses to steady dots when [LocalV7ReducedMotion] is enabled.
  */
 @Composable
@@ -211,7 +211,7 @@ fun CoachLoadingDots(
                         .scale(dotScale)
                         .alpha(alpha)
                         .clip(CircleShape)
-                        .background(c.accent),
+                        .background(c.fgSecondary),
                 )
             }
         }
@@ -221,7 +221,7 @@ fun CoachLoadingDots(
     }
 }
 
-/** 4dp pill progress bar matching Sable's `.sable-usage-track` / `.sable-usage-fill`. */
+/** 4dp pill progress bar rendered with V7 ink tokens. */
 @Composable
 fun CoachProgressBar(
     progress: Float,
@@ -233,10 +233,10 @@ fun CoachProgressBar(
     val clamped = progress.coerceIn(0f, 1f)
     val animated by animateFloatAsState(
         targetValue = clamped,
-        animationSpec = tween(durationMillis = if (reduced) 0 else CoachV7.Motion.progressMs, easing = CoachV7.Motion.easing),
+        animationSpec = tween(durationMillis = if (reduced) 0 else 350, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)),
         label = "progress",
     )
-    val shape = RoundedCornerShape(CoachV7.Radius.pill)
+    val shape = RoundedCornerShape(999.dp)
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -251,13 +251,13 @@ fun CoachProgressBar(
                     .fillMaxWidth(animated)
                     .fillMaxHeight()
                     .clip(shape)
-                    .background(if (warn) c.actionDanger else c.accent),
+                    .background(if (warn) c.actionDanger else c.actionPrimary),
             )
         }
     }
 }
 
-/** Single-line muted footer metadata with tabular monospace digits for cards and list rows. */
+/** Single-line muted footer metadata with tabular numbers for cards and list rows. */
 @Composable
 fun CoachCardMeta(
     text: String,

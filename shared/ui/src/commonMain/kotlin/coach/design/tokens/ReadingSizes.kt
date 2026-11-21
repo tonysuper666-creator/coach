@@ -6,9 +6,9 @@ import androidx.compose.ui.unit.sp
 object ReadingSizes {
     val body = 16.sp
     val ui = 13.sp
-    val caption = 12.sp
-    val section = 20.sp
-    val week = 24.sp
+    val caption = 11.5.sp
+    val section = 22.sp
+    val week = 26.sp
     val stem = 17.sp
     val option = 16.sp
 }

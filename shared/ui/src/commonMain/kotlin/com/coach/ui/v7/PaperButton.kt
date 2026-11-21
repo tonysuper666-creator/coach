@@ -35,11 +35,11 @@ fun PrimaryButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: B
     val c = CoachTheme.colors
     val interaction = remember { MutableInteractionSource() }
     val shape = RoundedCornerShape(CoachV7.Radius.btn)
-    Row(modifier.v7FocusRing(shape).clip(shape).v7ButtonSurface(c.actionPrimary.copy(alpha = if (enabled) 1f else .4f), interaction, enabled, primary = true)
+    Row(modifier.v7FocusRing(shape).clip(shape).v7ButtonSurface(c.fgPrimary.copy(alpha = if (enabled) 1f else .4f), interaction, enabled, primary = true)
         .v7ButtonClick(interaction, enabled, onClick).defaultMinSize(minHeight = if (LocalDeskMetrics.current.inner) 36.dp else 44.dp).padding(contentPadding),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-        CompositionLocalProvider(LocalContentColor provides c.onAccent.copy(alpha = if (enabled) 1f else .7f)) {
-            ProvideTextStyle(MaterialTheme.typography.labelLarge.copy(fontWeight = CoachV7.Weight.uiStrong)) { content() }
+        CompositionLocalProvider(LocalContentColor provides c.surface1) {
+            ProvideTextStyle(MaterialTheme.typography.labelLarge) { content() }
         }
     }
 }

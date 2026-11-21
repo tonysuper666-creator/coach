@@ -25,7 +25,7 @@ internal fun CoachColors.toMaterial(): ColorScheme {
         surface = surface1, onSurface = fgPrimary, surfaceVariant = surface2, onSurfaceVariant = fgSecondary,
         surfaceTint = Color.Transparent, surfaceDim = bgCanvasDeep, surfaceBright = surface1, inversePrimary = accentDeep, surfaceContainerLowest = bgCanvas, surfaceContainerLow = bgCanvas, surfaceContainer = surface1,
         surfaceContainerHigh = surface2, surfaceContainerHighest = bgCanvasDeep, inverseSurface = fgPrimary, inverseOnSurface = inverse,
-        outline = borderStrong, outlineVariant = borderSubtle, error = dangerFg, onError = if (dark) onAccent else onDanger, errorContainer = dangerBg, onErrorContainer = dangerFg,
+        outline = borderStrong, outlineVariant = borderSubtle, error = actionDanger, onError = onAccent, errorContainer = dangerBg, onErrorContainer = dangerFg,
     )
 }
 

@@ -5,7 +5,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
 import coach.design.tokens.CoachV7
 
-/** Compatibility names for existing components; every value comes from the single Sable-aligned palette. */
+/** Compatibility names for existing components; every value comes from the single V7 palette. */
 @Immutable
 data class CoachColors(
     val dark: Boolean,
@@ -16,25 +16,21 @@ data class CoachColors(
     val actionPrimary: Color, val actionDanger: Color,
     val successFg: Color, val successBg: Color, val warningFg: Color, val warningBg: Color,
     val dangerFg: Color, val dangerBg: Color, val infoFg: Color, val infoBg: Color,
-    val onDanger: Color = Color.White, val warningAccent: Color = warningFg, val accentHi: Color = accent,
 ) {
     fun textPairs(): List<Pair<Color, Color>> = listOf(
-        fgPrimary to bgCanvas, fgPrimary to surface1, fgPrimary to surface2,
-        fgSecondary to bgCanvas, fgSecondary to surface1, fgSecondary to surface2,
-        onAccent to actionPrimary, onDanger to actionDanger, inverse to fgPrimary,
+        fgPrimary to bgCanvas, fgPrimary to surface1, fgPrimary to surface2, fgSecondary to bgCanvas, fgSecondary to surface1,
+        onAccent to actionPrimary, onAccent to actionDanger, inverse to fgPrimary,
         successFg to successBg, warningFg to warningBg, dangerFg to dangerBg, infoFg to infoBg, accentDeep to surface1)
     companion object {
         fun light() = with(CoachV7.Light) { CoachColors(false,
-            desk, desk, sheet, card, sheet, ink, sub, faint, onAccent,
-            border, Color(0x29000000), accent, accent, accentLo, accentSoft.compositeOver(sheet), accent, dangerSolid,
-            ok, pineWash.compositeOver(optBg), ink, Color(0x29B7791F).compositeOver(sheet),
-            danger, dangerWash.compositeOver(optBg), accentLo, accentSoft.compositeOver(sheet),
-            onDanger, warn, accentHi) }
+            desk, desk, sheet, card, sheet, ink, sub, faint, sheet,
+            line, sub, ink, zhu, pine, selBg.compositeOver(sheet), ink, zhu,
+            pine, pineWash.compositeOver(optBg), ink, hl.compositeOver(sheet),
+            zhu, zhuWash.compositeOver(optBg), pine, pineWash.compositeOver(sheet)) }
         fun dark() = with(CoachV7.Dark) { CoachColors(true,
-            desk, desk, sheet, card, sheet, ink, sub, faint, onAccent,
-            border, Color(0x29FFFFFF), accent, accent, accentHi, accentSoft.compositeOver(sheet), accent, dangerSolid,
-            ok, pineWash.compositeOver(optBg), ink, Color(0x2ED99A3D).compositeOver(sheet),
-            danger, dangerWash.compositeOver(optBg), accent, accentSoft.compositeOver(sheet),
-            onDanger, warn, accentHi) }
+            desk, desk, sheet, card, sheet, ink, sub, faint, sheet,
+            line, sub, ink, zhu, pine, selBg.compositeOver(sheet), ink, zhu,
+            pine, pineWash.compositeOver(optBg), ink, hl.compositeOver(sheet),
+            zhu, zhuWash.compositeOver(optBg), pine, pineWash.compositeOver(sheet)) }
     }
 }

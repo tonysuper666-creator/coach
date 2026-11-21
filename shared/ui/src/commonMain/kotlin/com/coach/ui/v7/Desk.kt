@@ -209,7 +209,7 @@ fun Desk(
             }
         }
         if (marginSheet && hasMargin && !inner && !focused) ModalBottomSheet(onDismissRequest = { marginSheet = false }) {
-            Box(Modifier.fillMaxWidth().height(sheetHeight).padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp).testTag("v7-margin-sheet")) { margin() }
+            Box(Modifier.fillMaxWidth().height(sheetHeight).padding(16.dp).testTag("v7-margin-sheet")) { margin() }
         }
     }
     }
@@ -221,7 +221,6 @@ fun Modifier.paperShadow(kind: String, dark: Boolean): Modifier {
     val shape = RoundedCornerShape(
         when (kind) {
             "sheet" -> CoachV7.Radius.sheet
-            "card" -> CoachV7.Radius.lg
             "button" -> CoachV7.Radius.btn
             else -> CoachV7.Radius.m
         },
@@ -268,7 +267,7 @@ fun PaperCard(modifier: Modifier = Modifier, color: Color = CoachTheme.colors.su
     contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
     content: @Composable ColumnScope.() -> Unit) {
     val colors = CoachTheme.colors
-    val shape = RoundedCornerShape(CoachV7.Radius.lg)
+    val shape = RoundedCornerShape(CoachV7.Radius.m)
     Column(modifier.fillMaxWidth().paperShadow("card", colors.dark).clip(shape).background(color).border(BorderStroke(1.dp, colors.borderSubtle), shape).padding(contentPadding),
         verticalArrangement = Arrangement.spacedBy(contentSpacing), content = content)
 }
@@ -282,7 +281,7 @@ fun AnswerOption(letter: String, selected: Boolean, correct: Boolean?, enabled: 
     val borderColor = when {
         correct == true -> colors.successFg.copy(alpha = 0.45f)
         correct == false -> colors.dangerFg.copy(alpha = 0.45f)
-        selected -> colors.accent
+        selected -> colors.fgPrimary
         else -> colors.borderSubtle
     }
     Surface(onClick = onClick, enabled = enabled, color = bg, contentColor = colors.fgPrimary, shape = RoundedCornerShape(CoachV7.Radius.m),
@@ -297,7 +296,7 @@ fun AnswerOption(letter: String, selected: Boolean, correct: Boolean?, enabled: 
                 VerdictIcon(correct, Modifier.size(14.dp), verdictColor)
                 Text(if (correct) "正确" else "你选的", style = MaterialTheme.typography.labelMedium, color = verdictColor)
             }
-            else if (selected) Text("●", style = MaterialTheme.typography.labelMedium, color = colors.accent)
+            else if (selected) Text("●", style = MaterialTheme.typography.labelMedium, color = colors.fgPrimary)
         }
     }
 }

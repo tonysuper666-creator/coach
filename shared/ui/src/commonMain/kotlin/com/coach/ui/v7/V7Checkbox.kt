@@ -30,22 +30,22 @@ private val BoxSize = 16.dp
 @Composable
 fun V7Checkbox(checked: Boolean, modifier: Modifier = Modifier, enabled: Boolean = true) {
     val colors = CoachTheme.colors
-    val fill = colors.accent
-    val tickColor = colors.onAccent
+    val pine = colors.successFg
+    val paper = colors.surface1
     val border = colors.fgTertiary
     Canvas(modifier.size(BoxSize).alpha(if (enabled) 1f else .45f)) {
         val side = size.minDimension
         val stroke = 1.dp.toPx()
-        val corner = CornerRadius(3.dp.toPx())
+        val corner = CornerRadius(2.5.dp.toPx())
         if (checked) {
-            drawRoundRect(fill, size = Size(side, side), cornerRadius = corner)
+            drawRoundRect(pine, size = Size(side, side), cornerRadius = corner)
             // 勾的两笔按 16dp 的方框坐标算，框多大都留同样的边：左下起笔，到底，再挑到右上。
             val tick = Path().apply {
                 moveTo(side * 3.7f / 16f, side * 8.4f / 16f)
                 lineTo(side * 6.7f / 16f, side * 11.3f / 16f)
                 lineTo(side * 12.3f / 16f, side * 5.1f / 16f)
             }
-            drawPath(tick, tickColor, style = Stroke(1.7.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+            drawPath(tick, paper, style = Stroke(1.7.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
         } else {
             // 线框画在方框内 (stroke / 2, stroke / 2)，外沿不越出 16dp，和选中态占同一块地方。
             drawRoundRect(border, topLeft = Offset(stroke / 2, stroke / 2), size = Size(side - stroke, side - stroke),

@@ -14,114 +14,76 @@ import androidx.compose.ui.unit.sp
 
 object CoachV7 {
     object Light {
-        val tocBg = Color(0xFFF7F6F3)
-        val railBg = Color(0xFFF7F6F3)
+        val tocBg = Color(0xFFE8E2D6)
+        val railBg = Color(0xFFE8E2D6)
         val pgPaper = Color(0xFFFFFFFF)
-        val pgTxt = Color(0xFFE6E4DF)
+        val pgTxt = Color(0xFFE3DCCF)
         val menuBg = Color(0xFFFFFFFF)
-        val menuInk = Color(0xFF1A1A18)
-        val menuSep = Color(0x14000000)
+        val menuInk = Color(0xFF24211C)
+        val menuSep = Color(0xFFE3DCCF)
         val optBg = Color(0xFFFFFFFF)
-        val pineWash = Color(0x143E7948)
-        val dangerWash = Color(0x14A83A2B)
-        val zhuWash = Color(0x1A8A6A44)
+        val pineWash = Color(0x1A2F6A4B)
+        val zhuWash = Color(0x14A63E2C)
         val btnBg = Color(0xFFFFFFFF)
-        val btnPriBg = Color(0xFF8A6A44)
-        val btnPriInk = Color(0xFFFFFFFF)
-        val hingeBg = Color(0xFFE4E2DC)
-        val noteInk = Color(0xFF6B6A65)
+        val btnPriBg = Color(0xFF24211C)
+        val btnPriInk = Color(0xFFFCFAF6)
+        val hingeBg = Color(0xFFD6CFC1)
+        val noteInk = Color(0xFF665F55)
         val hlSolid = Color(0xFFEED596)
-        val selBg = Color(0x268A6A44)
-        val desk = Color(0xFFF7F6F3)
-        val sheet = Color(0xFFFFFFFF)
-        val card = Color(0xFFF0EFEC)
-        val ink = Color(0xFF1A1A18)
-        val sub = Color(0xFF6B6A65)
-        val faint = Color(0xFF7D7B75)
-        val line = Color(0x14000000)
-        val border = Color(0x14000000)
-        val accent = Color(0xFF8A6A44)
-        val accentHi = Color(0xFFA5824F)
-        val accentLo = Color(0xFF6A5432)
-        val accentSoft = Color(0x1A8A6A44)
-        val onAccent = Color(0xFFFFFFFF)
-        val danger = Color(0xFFA83A2B)
-        val dangerSolid = Color(0xFFA83A2B)
-        val onDanger = Color(0xFFFFFFFF)
-        val ok = Color(0xFF3E7948)
-        val warn = Color(0xFFB7791F)
-        val zhu = Color(0xFFA83A2B)
-        val pine = Color(0xFF3E7948)
-        val hl = Color(0x66EED596)
-        val scrim = Color(0x8008080A)
+        val selBg = Color(0x17A63E2C)
+        val desk = Color(0xFFE8E2D6)
+        val sheet = Color(0xFFFCFAF6)
+        val card = Color(0xFFFBF8F2)
+        val ink = Color(0xFF24211C)
+        val sub = Color(0xFF665F55)
+        val faint = Color(0xFF857D71)
+        val line = Color(0xFFE3DCCF)
+        val zhu = Color(0xFFA63E2C)
+        val pine = Color(0xFF2F6A4B)
+        val hl = Color(0x8CF0D282)
     }
     object Dark {
-        val tocBg = Color(0xFF0E0E10)
-        val railBg = Color(0xFF0E0E10)
-        val pgPaper = Color(0xFF17171A)
-        val pgTxt = Color(0xFF2B2B30)
-        val menuBg = Color(0xFF1F1F23)
-        val menuInk = Color(0xFFE8E6E3)
-        val menuSep = Color(0x14FFFFFF)
-        val optBg = Color(0xFF1F1F23)
-        val pineWash = Color(0x217FBF8A)
-        val dangerWash = Color(0x21E08A76)
-        val zhuWash = Color(0x1FD8B98E)
-        val btnBg = Color(0xFF1F1F23)
-        val btnPriBg = Color(0xFFD8B98E)
-        val btnPriInk = Color(0xFF141210)
+        val tocBg = Color(0xFF0E0D0B)
+        val railBg = Color(0xFF0E0D0B)
+        val pgPaper = Color(0xFF24211D)
+        val pgTxt = Color(0xFF34302A)
+        val menuBg = Color(0xFF2A2722)
+        val menuInk = Color(0xFFE6E0D5)
+        val menuSep = Color(0xFF34302A)
+        val optBg = Color(0xFF23201C)
+        val pineWash = Color(0x267FB394)
+        val zhuWash = Color(0x21E07A68)
+        val btnBg = Color(0xFF2A2722)
+        val btnPriBg = Color(0xFFE6E0D5)
+        val btnPriInk = Color(0xFF1B1916)
         val hingeBg = Color(0xFF000000)
-        val noteInk = Color(0xFF8A8A90)
-        val hlSolid = Color(0xFF5A4B32)
-        val selBg = Color(0x2ED8B98E)
-        val desk = Color(0xFF0E0E10)
-        val sheet = Color(0xFF17171A)
-        val card = Color(0xFF1F1F23)
-        val ink = Color(0xFFE8E6E3)
-        val sub = Color(0xFF8A8A90)
-        val faint = Color(0xFF838389)
-        val line = Color(0x14FFFFFF)
-        val border = Color(0x14FFFFFF)
-        val accent = Color(0xFFD8B98E)
-        val accentHi = Color(0xFFEBD4B0)
-        val accentLo = Color(0xFF8A6A44)
-        val accentSoft = Color(0x1FD8B98E)
-        val onAccent = Color(0xFF141210)
-        val danger = Color(0xFFE08A76)
-        val dangerSolid = Color(0xFFC2543F)
-        val onDanger = Color(0xFFFFFFFF)
-        val ok = Color(0xFF7FBF8A)
-        val warn = Color(0xFFD99A3D)
-        val zhu = Color(0xFFE08A76)
-        val pine = Color(0xFF7FBF8A)
-        val hl = Color(0x47D8B98E)
-        val scrim = Color(0x8008080A)
+        val noteInk = Color(0xFFA0978A)
+        val hlSolid = Color(0xFF6A5730)
+        val selBg = Color(0x29E07A68)
+        val desk = Color(0xFF0E0D0B)
+        val sheet = Color(0xFF1B1916)
+        val card = Color(0xFF23201C)
+        val ink = Color(0xFFE6E0D5)
+        val sub = Color(0xFFA0978A)
+        val faint = Color(0xFF8F8A80)
+        val line = Color(0xFF34302A)
+        val zhu = Color(0xFFE07A68)
+        val pine = Color(0xFF7FB394)
+        val hl = Color(0x42C8A050)
     }
-    object Size {
-        val micro = 11.sp
+    object Size { // 内屏；外屏与 Duo 见 V7.json → size
         val body = 18.sp
-        val ui = 13.sp
-        val uiBody = 15.sp
-        val input = 16.sp
-        val lg = 17.sp
+        val ui = 13.5.sp
         val cap = 12.sp
         val note = 15.sp
         val handnote = 16.sp
-        val heading = 20.sp
-        val section = 24.sp
         val title = 30.sp
-        val deck = 17.sp
-        val stem = 17.sp
-        val opt = 16.sp
-        val row = 15.sp
+        val deck = 18.sp
+        val stem = 19.sp
+        val opt = 17.sp
+        val row = 17.sp
     }
-    object LineHeight {
-        val tight = 1.28f
-        val ui = 1.55f
-        val doc = 1.75f
-        val body = 1.85f
-        val title = 1.3f
-    }
+    object LineHeight { val body = 1.85f; val title = 1.3f } // 倍数：lineHeight = fontSize × 倍数
     object Weight {
         val body = FontWeight(400)
         val ui = FontWeight(400)
@@ -137,9 +99,7 @@ object CoachV7 {
     object Tracking { val cap = 0.02.em; val title = 0.01.em }
     object Space {
         val s1 = 4.dp
-        val s1b = 6.dp
         val s2 = 8.dp
-        val s2b = 10.dp
         val s3 = 12.dp
         val s4 = 16.dp
         val s5 = 20.dp
@@ -147,15 +107,7 @@ object CoachV7 {
         val s7 = 32.dp
         val s8 = 48.dp
     }
-    object Radius {
-        val s = 6.dp
-        val m = 10.dp
-        val btn = 10.dp
-        val sheet = 14.dp
-        val lg = 14.dp
-        val composer = 28.dp
-        val pill = 999.dp
-    }
+    object Radius { val s = 6.dp; val m = 10.dp; val btn = 8.dp; val sheet = 14.dp }
     object Layout { // 内屏
         val barH = 52.dp
         val footH = 52.dp
@@ -169,17 +121,11 @@ object CoachV7 {
         val optH = 48.dp
         val btnH = 36.dp
     }
-    object Motion {
-        const val fastMs = 120
-        const val baseMs = 160
-        const val slowMs = 220
-        const val progressMs = 350
-        const val arriveMs = 600
-        const val blinkMs = 240
-        const val breatheMs = 4000
-        const val pageMs = 220
-        const val expandMs = 160
-        val easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+    object Motion { // 像 Things：打开一项时它“变成一张纸”
+        const val pageMs = 300 // 300ms 纸张上滑 8px + 淡入，轻微回弹
+        const val expandMs = 260 // 260ms 卡片展开
+        val easing = CubicBezierEasing(0.34f, 1.2f, 0.64f, 1f)
+        // 系统“移除动画”打开时（Settings.Global.ANIMATOR_DURATION_SCALE == 0）全部改 0ms
     }
     object Grain { const val light = 0f; const val dark = 0f } // 纸纹不透明度，0 = 不用
 }

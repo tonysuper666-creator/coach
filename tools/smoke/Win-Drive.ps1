@@ -1104,6 +1104,13 @@ function Assert-OurForeground([IntPtr]$Expected = [IntPtr]::Zero, [scriptblock]$
         throw (New-FocusLossException -Message 'WIN_DRIVE_FOCUS_LOST: our client is no longer foreground' -Owner $fgOwner)
     }
 }
+# 与 #552 的滚轮同因：光标刚被 SetCursorPos 挪过去、移动还没被处理，按下就跟着到，
+# Compose 按它记住的旧落点分派这一下（或者干脆丢掉）；抬起紧跟交锁，另一路在同一毫秒
+# SetForegroundWindow 抢前台，这一下也会被整个吞掉（11-21 03:26 四路并行：第 5 步入口三下
+# 里 L1/L2/L3 各丢一下，L4 独跑同样三下一次过）。所以挪指针后等一帧再断言、再按下，
+# 抬起后也留一小段让这一下走完再交锁。
+# 抬起后只等、不再断言：此时点击已经发生，断言失败会让 Invoke-ForegroundStep 重放整段，
+# 复选框这类按钮会被点成两下。
 function Click-At(
     [int]$x,
     [int]$y,
@@ -1118,6 +1125,7 @@ function Click-At(
         $r = if ($RectProbe) { & $RectProbe } else { Get-Rect }
         if ($MouseProbe) { & $MouseProbe 'move' ($r.L + $x) ($r.T + $y) | Out-Null }
         else { [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null }
+        Start-Sleep -Milliseconds 120
         Assert-OurForeground -ForegroundProbe $ForegroundProbe
         if ($MouseProbe) { & $MouseProbe 'down' ($r.L + $x) ($r.T + $y) | Out-Null }
         else { [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero) }
@@ -1125,6 +1133,7 @@ function Click-At(
             if ($MouseProbe) { & $MouseProbe 'up' ($r.L + $x) ($r.T + $y) | Out-Null }
             else { [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero) }
         }
+        Start-Sleep -Milliseconds 100
     }
 }
 # A drag is one action: release the button even if foreground is interrupted.

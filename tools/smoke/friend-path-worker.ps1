@@ -282,6 +282,63 @@ function Click-Label([int]$n, [string[]]$labels, [string]$why, [int]$sec = 15) {
     if (-not $m) { Fail $n "$why（屏幕上找不到「$($labels -join '」或「')」）" }
     Click-At $m.X $m.Y; Start-Sleep -Milliseconds 800
 }
+# 点一下再等结果：$Done 拿到一帧 OCR 行，返回 $true 才算这一下真的生效。
+# 第 5 步入口那三下（开始学 → 边看边学 → 开始边看边学）在四路并行时各只点一次就会丢：
+# 11-21 03:26 L3 点完「开始学」弹窗没开、L1 点了「边看边学」底按钮仍是「开始做题学」、
+# L2 底按钮已变「开始边看边学」但点完弹窗没提交，而 L4 独跑时三下都一次过。
+# 所以「点过一次」不算数，只认这一帧的状态；状态没变就按新一帧重定位再点，
+# 连位置都找不到了就停手（用旧坐标再点一下只会点在别的控件上）。
+function Click-Until([int]$n, [scriptblock]$Find, [scriptblock]$Done, [string]$why, [int]$sec = 15, [int]$tries = 4) {
+    if (& $Done (Shot $n 'entry-check')) { return }
+    $m = $null; $deadline = (Get-Date).AddSeconds($sec)
+    do {
+        $m = & $Find (Shot $n 'entry-find')
+        if (-not $m) { Start-Sleep -Seconds 2 }
+    } while (-not $m -and (Get-Date) -lt $deadline)
+    if (-not $m) { Fail $n $why }
+    foreach ($try in 1..$tries) {
+        Click-At $m.X $m.Y
+        Start-Sleep -Milliseconds 1000
+        $lines = Shot $n "entry$try"
+        if (& $Done $lines) { return }
+        $again = & $Find $lines
+        if (-not $again) {
+            Start-Sleep -Milliseconds 800
+            $lines = Shot $n "entry${try}b"
+            if (& $Done $lines) { return }
+            $again = & $Find $lines
+        }
+        if (-not $again) { break }
+        $m = $again
+    }
+    $last = (Shot $n 'entry-fail') | ForEach-Object { $_.Text }
+    Fail $n "$why（点了 $try 次状态没变；屏上：$((@($last) -join ' / ')))"
+}
+# 书架右栏本来就有「看书 / 边看边学 / 做题学」三行，弹窗盖上去以后 OCR 两处都读得到，
+# 从上往下取首命中会点回书架上（弹窗底下那层被遮罩吃掉，点了没反应）。
+# 弹窗里这三个是并排的三个 chip（同一行），书架里是上下三行，所以先认和另外两个同排的那一个；
+# 认不出来就退一步认「这次怎么读」正下方、底部按钮之上的那一个。
+function Find-DialogPath($lines, [string]$needle) {
+    foreach ($l in $lines) {
+        $m = Find-Text @($l) $needle
+        if ($m -and (Find-OnRow $lines '看书' $m) -and (Find-OnRow $lines '做题学' $m)) { return $m }
+    }
+    $top = Find-Text $lines '这次怎么读'
+    if (-not $top) { return $null }
+    $bottom = $null
+    foreach ($s in @('开始边看边学', '开始做题学', '开始看书')) {
+        $c = Find-Lowest $lines $s
+        if ($c -and (-not $bottom -or $c.Y -lt $bottom.Y)) { $bottom = $c }
+    }
+    $best = $null
+    foreach ($l in $lines) {
+        $m = Find-Text @($l) $needle
+        if (-not $m -or $m.Y -le $top.Y -or ($m.Y - $top.Y) -gt 160) { continue }
+        if ($bottom -and $m.Y -ge $bottom.Y) { continue }
+        if (-not $best -or $m.Y -lt $best.Y) { $best = $m }
+    }
+    return $best
+}
 
 $env:JAVA_HOME = 'C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot'; $env:GRADLE_USER_HOME = 'D:\agent\gradle-home'; $env:Path = "$env:JAVA_HOME\bin;$env:Path"
 $lib = Join-Path $OutDir 'bookshelf'; $client = Join-Path $OutDir 'client'
@@ -734,9 +791,11 @@ try {
     try { Clear-ExplainConsent $lib } catch { Fail 5 "没能撤掉这本测试书的同意（$_），不进默认节，避免自动发送" }
     $five = $null
     try {
-        Click-Label 5 @('开始学') '找不到「开始学」'; Start-Sleep -Seconds 2
-        Click-Label 5 @('边看边学') '找不到「边看边学」'; Start-Sleep -Seconds 1
-        Click-Label 5 @('开始边看边学') '找不到「开始边看边学」'
+        # 入口三下都要看到状态才走下一句：弹窗开了（「这次怎么读」）、底按钮换成「开始边看边学」、弹窗关掉。
+        # 弹窗标题「开始学这本教材」里也有「开始学」，所以认按钮时跳过这一行，别把标题当按钮点。
+        Click-Until 5 { param($l) foreach ($line in $l) { if ($line.Text -match '这本教材') { continue }; $m = Find-Text @($line) '开始学'; if ($m) { return $m } } } { param($l) [bool](Find-Text $l '这次怎么读') } '点了「开始学」但开始学的弹窗一直没开'
+        Click-Until 5 { param($l) Find-DialogPath $l '边看边学' } { param($l) [bool](Find-Text $l '开始边看边学') } '点了「边看边学」但底按钮没换成「开始边看边学」'
+        Click-Until 5 { param($l) Find-Text $l '开始边看边学' } { param($l) -not (Find-Text $l '这次怎么读') } '点了「开始边看边学」但弹窗没关'
         # 选中经授权的整节：目录 → 滚到序号 → 点 → 收起；核对「本节原文 · 第 N 页」就是授权页，才允许发请求
         Start-Sleep -Seconds 4
         Click-Label 5 @('目录') '找不到「目录」'; Start-Sleep -Seconds 3

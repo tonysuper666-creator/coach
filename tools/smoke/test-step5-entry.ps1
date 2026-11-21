@@ -1,9 +1,9 @@
-﻿# 离线回归：第 5 步入口那三下的重试闭环、弹窗内定位、第 2 步「上传教材」补点、第 7 步三下的状态确认（退出码：0 = 全部通过）。
+﻿# 离线回归：第 5 步入口那三下的重试闭环、弹窗内定位、第 2 步「导入文件」补点、第 7 步三下的状态确认（退出码：0 = 全部通过）。
 #  - 状态没变才算没点成：Done 一成立就停手，不重复点；
 #  - 位置找不到就不再拿旧坐标点第二下（否则会点在弹窗关掉之后的页面上）；
 #  - 「边看边学」只认弹窗里和「看书」「做题学」并排的那个 chip，不认书架右栏那一行；
 #  - 工具栏被 ui.busy 禁用的十几秒里按钮还在，靠多给几次机会 + 每次隔一拍扛过去；
-#  - 「上传教材」只认原生选书框弹出来，没弹就重定位补点，弹过以后不重点；
+#  - 「导入文件」只认原生选书框弹出来，没弹就重定位补点，弹过以后不重点；
 #  - 第 7 步的出处/收起/切回文字点落空时补点，点满就返回假，不 throw（后面几步还要跑）；
 #  - 第 4 步「讲讲」/「允许并讲解」点落空时补点，只认同意框、加载态、回答这三种看得见的状态；
 #  - 同意框的按钮字小，OCR 会把「允许并讲解」认成「允许百甫」「允许并讲鱈」：判断框在不在认标题和「不允许」，
@@ -61,11 +61,9 @@ function Shot([int]$n, [string]$tag) {
     return , $script:screen
 }
 function Click-At($x, $y, [scriptblock]$BeforePress = $null) {
-    if ($BeforePress) {
-        if (-not (& $BeforePress)) { return $false }
-    }
-    [void]$script:clicks.Add("$x,$y")
-    if ($script:onClick) { & $script:onClick }
+    # 和真驱动一样：按下之前先问一句「这颗按钮还在原位吗」，不在就整下作废、不点。
+    if ($BeforePress -and -not (& $BeforePress)) { return $false }
+    [void]$script:clicks.Add("$x,$y"); if ($script:onClick) { & $script:onClick }
     return $true
 }
 function Fail([int]$n, [string]$why) { throw "STEP_FAILED: $why" }
@@ -152,20 +150,20 @@ try { Click-Until 5 $find $done '入口没开' -sec 1 -tries 3 -pauseMs 1 } catc
 Check 'click-until-stops-after-tries' ($script:clicks.Count -eq 3 -and $err -like 'STEP_FAILED*') "clicks=$($script:clicks.Count) err=$err"
 
 # 9. 重拍时选书框已经开着：一下都不点。
-$script:screen = @((New-Line '上传教材' 300 120 120 30)); $script:clicks.Clear(); $script:needClicks = 0
-Click-Until-Dialog 2 '上传教材' { (Find-AppWindowByTitle '上传教材') -ne [IntPtr]::Zero } -findSec 1 -sec 5 -tries 3 -openSec 1
+$script:screen = @((New-Line '导入文件' 300 120 120 30)); $script:clicks.Clear(); $script:needClicks = 0
+Click-Until-Dialog 2 '导入文件' { (Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero } -findSec 1 -sec 5 -tries 3 -openSec 1
 Check 'upload-no-click-when-dialog-open' ($script:clicks.Count -eq 0) "clicks=$($script:clicks.Count)"
 
 # 10. 第一下被别路抢前台吞掉（框没开）：按新一帧重定位补点，第二下开框。
 $script:clicks.Clear(); $script:needClicks = 2
-Click-Until-Dialog 2 '上传教材' { (Find-AppWindowByTitle '上传教材') -ne [IntPtr]::Zero } -findSec 1 -sec 20 -tries 3 -openSec 1
+Click-Until-Dialog 2 '导入文件' { (Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero } -findSec 1 -sec 20 -tries 3 -openSec 1
 Check 'upload-reclicks-until-dialog-opens' ($script:clicks.Count -eq 2) "clicks=$($script:clicks.Count)"
 
 # 11. 上传按钮根本不在：不点，直接说找不到。
 $script:screen = @((New-Line '书架' 620 80 80 30)); $script:clicks.Clear(); $script:needClicks = 99
 $err = ''
-try { Click-Until-Dialog 2 '上传教材' { $false } -findSec 1 -sec 5 -tries 2 -openSec 1 } catch { $err = "$_" }
-Check 'upload-fails-when-button-absent' ($script:clicks.Count -eq 0 -and $err -like '*找不到「上传教材」*') "clicks=$($script:clicks.Count) err=$err"
+try { Click-Until-Dialog 2 '导入文件' { $false } -findSec 1 -sec 5 -tries 2 -openSec 1 } catch { $err = "$_" }
+Check 'upload-fails-when-button-absent' ($script:clicks.Count -eq 0 -and $err -like '*找不到「导入文件」*') "clicks=$($script:clicks.Count) err=$err"
 
 # ---- 第 7 步：出处 → 切回原页 / 收起 → 露出底栏 / 看文字 → 切回文字视图，三下都要认状态 ----
 # 文字视图的右上是「看原页」，原页视图的右上是「看文字」；「出处」链接在卡片里。
@@ -229,16 +227,16 @@ $script:screen = $origView; $script:clicks.Clear(); $script:onClick = { $script:
 $ok = Click-Confirm 7 { param($l) Find-Text $l '看文字' } { param($l) [bool](Find-Text $l '看原页') } -tries 3 -waitSec 1 -pauseMs 1
 Check 'step7-back-to-text-one-click' ($ok -and $script:clicks.Count -eq 1) "ok=$ok clicks=$($script:clicks.Count)"
 
-# 18. 第 4 步「讲讲」只认工具条那一行里、在「举个例子」左边的那个；正文里别的「讲讲」不算。
+# 18. 第 4 步「讲讲」浮条：一行里同时有「讲讲 这一段课文的意思」和工具条上的「讲讲」。
+# 1.1.1 那个「只认工具条那一行」的 Find-ExplainButton 已随浮条改版（4b5ff054）下线，
+# 现在第 4 步用 Find-ZoomText（放大 3 倍认「讲讲」）+ Find-OnRow 定位；Find-OnRow 本身在
+# 上面 dialog-path-* 两条里已经覆盖，这里保留这一帧给下面的启用判定用。
 $explainRow = @(
     (New-Line '讲讲 这一段课文的意思' 300 300 300 26),
     (New-Line '讲讲' 200 560 60 26),
     (New-Line '举个例子' 280 560 90 26),
     (New-Line '换个说法' 390 560 90 26)
 )
-$hit = Find-ExplainButton $explainRow
-Check 'step4-explain-picks-toolbar-row' ($hit -and [Math]::Abs($hit.Y - 560) -le 14) "y=$(if ($hit) { $hit.Y } else { 'null' })"
-Check 'step4-explain-none-without-toolbar' ($null -eq (Find-ExplainButton @((New-Line '讲讲' 200 560 60 26)))) ''
 
 # 19. 「讲讲」生效只认看得见的状态：同意框 / 加载态 / 回答出来了；工具条还挂着就是没点上。
 $consentFrame = @(
@@ -246,15 +244,17 @@ $consentFrame = @(
     (New-Line '允许并讲解' 500 500 140 30),
     (New-Line '先不' 380 500 80 30)
 )
-$loadingFrame = @((New-Line '思考中' 300 600 90 24))
+$loadingFrame = @((New-Line '正在整理…' 300 600 90 24))
 Check 'step4-started-on-consent' (Test-ExplainStarted $consentFrame) ''
 Check 'step4-started-on-loading' (Test-ExplainStarted $loadingFrame) ''
 Check 'step4-not-started-on-toolbar' (-not (Test-ExplainStarted $explainRow)) ''
 
 # 20. 点「讲讲」被吞掉一下：按状态重试，第二下弹出同意框。
+# 落点仍按工具条那一行里最靠左的「讲讲」取（Find-OnRow），不再依赖已下线的 Find-ExplainButton。
 $script:screen = $explainRow; $script:clicks.Clear(); $script:swallow = 1
 $script:onClick = { if ($script:swallow -gt 0) { $script:swallow-- } else { $script:screen = $consentFrame } }
-$ok = Click-Confirm 4 { param($l) Find-ExplainButton $l } { param($l) Test-ExplainStarted $l } -tries 3 -waitSec 1 -pauseMs 1
+$toolbar20 = Find-Text $explainRow '举个例子'   # 同排锚：Find-OnRow 的 $ref 要带 Y 的框，不是 OCR 行本身
+$ok = Click-Confirm 4 { param($l) Find-OnRow $l '讲讲' $toolbar20 } { param($l) Test-ExplainStarted $l } -tries 3 -waitSec 1 -pauseMs 1
 Check 'step4-explain-retries-until-consent' ($ok -and $script:clicks.Count -eq 2) "ok=$ok clicks=$($script:clicks.Count)"
 
 # 21. 「允许并讲解」被吞掉一下：框没关就重定位再点，关上才算成。
@@ -432,47 +432,22 @@ Check 'lecture-refusal-second-time-fails-fast' ($r2.Action -eq 'fail' -and [bool
 Check 'lecture-refusal-fails-when-no-retry-button' ($r3.Action -eq 'fail') "action=$($r3.Action)"
 Check 'lecture-body-not-mistaken-for-refusal' ($r4.Action -eq 'none') "action=$($r4.Action)"
 
-# 37. 第 5 步出处跳转后「看原页」点击偶发被吞（08:27Z 冒烟 5-source.png）：
-#     4 秒后仍停在「看原页」要允许补点（最多 3 次），切到「看文字」后绝不回点。
-$srcOrigPage = @(
-    (New-Line 'Coach目录返回学习' 80 30 220 30),
-    (New-Line '看原页' 980 90 90 30)
-)
-$srcTextPage = @(
-    (New-Line 'Coach目录返回学习' 80 30 220 30),
-    (New-Line '看文字' 980 90 90 30)
-)
-$srcRefusalPage = @(
-    (New-Line 'Coach目录返回学习' 80 30 220 30),
-    (New-Line '无法确认原句' 300 200 200 30)
-)
-$sv0 = Resolve-SourceOriginalViewAction $srcOrigPage 0 0.0
-$sv1 = Resolve-SourceOriginalViewAction $srcOrigPage 1 1.5
-$sv2 = Resolve-SourceOriginalViewAction $srcOrigPage 1 4.2
-$sv3 = Resolve-SourceOriginalViewAction $srcOrigPage 3 5.0
-$sv4 = Resolve-SourceOriginalViewAction $srcTextPage 1 5.0
-$sv5 = Resolve-SourceOriginalViewAction $srcRefusalPage 0 0.0
-Check 'source-view-clicks-original-first-time' ($sv0.Action -eq 'click_original' -and [bool]$sv0.Button) "action=$($sv0.Action)"
-Check 'source-view-waits-before-cooldown' ($sv1.Action -eq 'wait') "action=$($sv1.Action)"
-Check 'source-view-retries-original-after-cooldown' ($sv2.Action -eq 'click_original' -and [bool]$sv2.Button) "action=$($sv2.Action)"
-Check 'source-view-stops-at-max-tries' ($sv3.Action -eq 'wait') "action=$($sv3.Action)"
-Check 'source-view-never-reclicks-once-text-visible' ($sv4.Action -eq 'check_page') "action=$($sv4.Action)"
-Check 'source-view-reports-refusal' ($sv5.Action -eq 'refusal') "action=$($sv5.Action)"
-
-# 38. Click-Confirm 支持 -BeforePress：切回学习页后立刻停手，不误点同坐标的「返回书架」；
-#     点落空时重定位再点直至出现「返回书架」。
-$srcLeaveScreen = @((New-Line '返回学习' 115 42 90 30))
+# 37. Click-Confirm 的 -BeforePress：按下前那一帧状态已经变了就整下作废，且当场认 Done；
+#     点落空（状态没变）时重定位再点，直到出现目标状态。
+#     第 7 步点「出处」用的就是这一套——点完底栏还停在第 33 页时补点，页号一对上就停手。
+$leaveScreen = @((New-Line '返回学习' 115 42 90 30))
 $learnScreen = @((New-Line '返回书架' 115 42 90 30))
-$script:screen = $srcLeaveScreen; $script:Last = $srcLeaveScreen; $script:queue = $null; $script:clicks.Clear(); $script:onClick = $null
+$script:screen = $leaveScreen; $script:Last = $leaveScreen; $script:queue = $null; $script:clicks.Clear(); $script:onClick = $null
 $script:bpCalls = 0
 $okVeto = Click-Confirm 6 { param($l) Find-Text $l '返回学习' } { param($l) [bool](Find-Text $l '返回书架') } -tries 3 -waitSec 1 -pauseMs 1 -BeforePress {
     $script:bpCalls++
+    # 拍这一帧的时候界面已经换了：这一下不能再点，直接按新状态判定。
     $script:screen = $learnScreen; $script:Last = $learnScreen
     return $false
 }
 Check 'click-confirm-beforepress-vetoes-and-accepts-done' ($okVeto -and $script:clicks.Count -eq 0 -and $script:bpCalls -eq 1) "ok=$okVeto clicks=$($script:clicks.Count) bp=$($script:bpCalls)"
 
-$script:screen = $srcLeaveScreen; $script:Last = $srcLeaveScreen; $script:queue = $null; $script:clicks.Clear()
+$script:screen = $leaveScreen; $script:Last = $leaveScreen; $script:queue = $null; $script:clicks.Clear()
 $script:onClick = { if ($script:clicks.Count -ge 2) { $script:screen = $learnScreen } }
 $okRetry = Click-Confirm 6 { param($l) Find-Text $l '返回学习' } { param($l) [bool](Find-Text $l '返回书架') } -tries 3 -waitSec 1 -pauseMs 1 -BeforePress {
     [bool](Find-Text $script:screen '返回学习') -and -not (Find-Text $script:screen '返回书架')

@@ -148,21 +148,6 @@ function Click-Folded([int]$n, [string[]]$labels, [string]$why) {
     }
     Fail $n $why
 }
-# 书架右栏一屏放不下三条入口，「做题学」在折叠线以下：只拍顶屏一帧就会当成没有入口
-# （11-21 06:57 L2 返回学习补点落到书架，那个只拍一帧的兜底就是这么把唯一能回学习页的行漏掉的）。
-# 所以进门和兜底用同一套下滚找法：每帧先确认还在书架上（「本节原文」在就不是书架，别乱滚页面），
-# 再按标题认（含 OCR 错字「续做韪学」，见 Find-ShelfPracticeEntry）；滚满 8 帧还没有返回 $null。
-function Find-ShelfPractice([int]$n, [string]$tag) {
-    $sp = Scroll-Point 0.7 0.6
-    foreach ($k in 1..8) {
-        $shelf = Shot $n "$tag$k"
-        if (Find-Text $shelf '本节原文') { return $null }
-        $path = Find-ShelfPracticeEntry $shelf
-        if ($path) { return $path }
-        Scroll-At $sp[0] $sp[1] -4; Start-Sleep -Milliseconds 600
-    }
-    return $null
-}
 # 「继续追问」框里的字太小，OCR 读不出来；粘完要靠框内区域的亮像素数确认「框里确实有字」。
 # 空框只有深色底和一圈深色边框，加了字会多出成百上千个亮像素，和空框那张比一下就有数了。
 function Get-FieldInk([string]$png, $label) {
@@ -181,6 +166,75 @@ function Get-FieldInk([string]$png, $label) {
     } finally { $bmp.Dispose() }
 }
 function Find-All($lines, [string]$needle) { $all = @(); foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m) { $all += $m } }; $all | Sort-Object Y }
+# 2.0（#570）的阅读器是单层满铺画布：没有常驻底栏，指针贴到窗口下缘 48dp 内才浮出来；
+# 窄窗（读者窗口 752dp < 760dp）下两个翻页键只剩「‹」「›」，认字认不到，页号写成「3 / 620 · 0%」。
+# 所以进没进阅读器、翻没翻页，都只看窗口最底下那一条能不能读出页号。
+function Get-HudCounter([string]$png) {
+    if (-not $png -or -not (Test-Path -LiteralPath $png)) { return $null }
+    $src = [Drawing.Bitmap]::new($png)
+    $file = Join-Path (Split-Path -Parent $png) ('hud-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.png')
+    try {
+        $top = [int][Math]::Max(0, $src.Height - 64)
+        $h = $src.Height - $top
+        if ($h -lt 8) { return $null }
+        $rect = [Drawing.Rectangle]::new(0, $top, $src.Width, $h)
+        # 这个字号 4 倍会把「第154页/620」的「54」吞掉，认成「第1页/620」（11-21 10:43 那轮就是这么把 154 读成 1 的），
+        # 所以先试 6 倍，认不出再退回 4 倍。
+        foreach ($scale in 6, 4) {
+            $zoom = [Drawing.Bitmap]::new($src.Width * $scale, $h * $scale)
+            try {
+                $g = [Drawing.Graphics]::FromImage($zoom)
+                try {
+                    $g.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                    $g.DrawImage($src, [Drawing.Rectangle]::new(0, 0, $zoom.Width, $zoom.Height), $rect, [Drawing.GraphicsUnit]::Pixel)
+                } finally { $g.Dispose() }
+                $zoom.Save($file, [Drawing.Imaging.ImageFormat]::Png)
+                foreach ($line in Read-Screen $file) {
+                    # 2.0 底栏页号是「第 7 页 / 180 · 3%」（ImmersiveReaderChrome 的 label + percent），
+                    # 去掉空格后长这样：第7页/180·3%。先转换成半角数字，再取「/」两边那对数字。
+                    $x = Convert-OcrDigits ($line.Text -replace '\s', '')
+                    $mm = [regex]::Match($x, '(\d{1,4})[^\d/]{0,3}/(\d{1,4})')
+                    if (-not $mm.Success) { continue }
+                    $cur = [int]$mm.Groups[1].Value; $total = [int]$mm.Groups[2].Value
+                    # 总页数常常被 OCR 认花（620 认成「52包」），它只用来拼提示语，不参与判断；
+                    # 当前页那一位是左边这串，认到就够。
+                    if ($cur -ge 1) { return [pscustomobject]@{ Cur = $cur; Total = $total; Text = "$cur/$total" } }
+                }
+            } finally { $zoom.Dispose() }
+        }
+        return $null
+    } finally {
+        $src.Dispose()
+        Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue
+    }
+}
+# 只挪指针不按键：底栏是「指针进到下缘」才浮出来的，点下去可能正落在滑杆上把页拖走。
+# 阅读器只认 PointerEventType.Move 才浮 HUD（TextbookReader 的 awaitPointerEvent 那段）；
+# 指针本来就停在目标点上时，SetCursorPos 到同一点不再产生 Move——导入结束书架换成阅读器那一刻
+# 指针恰好压在下缘，就会出现「怎么等都不出底栏」的假死（11-21 12:18 那轮就这样）。
+# 先挪开十六像素再落回，保证这一下真是一次移动。
+function Hover([int]$x, [int]$y) {
+    $r = Get-Rect
+    [WD]::SetCursorPos($r.L + $x, $r.T + [Math]::Max(4, $y - 16)) | Out-Null
+    Start-Sleep -Milliseconds 80
+    [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null
+}
+# 阅读器的顶栏（← 书架 / 目录 / … / 伴读）默认是隐的：指针移到顶边、点一下空白或按 Tab 才浮出来，
+# 指针静置几秒又自己收回去（14:48 那轮第 6 步拍到的就是一帧只剩书页的窗口，导航全靠顶栏那几颗字）。
+# 要顶栏上的按钮，先沿着顶边挪两下把它叫回来，认到「书架」或「目录」再把这一帧交出去。
+function Show-ReaderTop([int]$n, [string]$tag, [int]$Tries = 6) {
+    $r = Get-Rect
+    $w = [int]($r.R - $r.L)
+    $x = [int]($w / 2)
+    for ($k = 0; $k -lt $Tries; $k++) {
+        Hover $x (8 + 7 * $k)
+        Start-Sleep -Milliseconds 500
+        $lines = Shot $n "$tag-top$k"
+        if (Find-Text $lines '书架') { return $lines }
+        if (Find-Text $lines '目录') { return $lines }
+    }
+    $null
+}
 # Locate controls inside the open question-mode dialog, ignoring the background toolbar button and hint copy.
 function Get-QuestionSettingsControls($lines) {
     $title = Find-Text $lines '出题方式'
@@ -356,6 +410,7 @@ function Click-Confirm([int]$n, [scriptblock]$Find, [scriptblock]$Done, [int]$tr
     foreach ($try in 1..$tries) {
         $m = & $Find (Shot $n "confirm$try")
         if (-not $m) { return $false }
+        # 按下前先确认这颗按钮还在原位（-BeforePress 里临时拍一帧），免得点在已经被换掉的画面上。
         $pressed = if ($BeforePress) { Click-At $m.X $m.Y -BeforePress $BeforePress } else { $null = Click-At $m.X $m.Y; $true }
         if (-not $pressed) {
             if (& $Done $script:Last) { return $true }
@@ -372,43 +427,54 @@ function Click-Confirm([int]$n, [scriptblock]$Find, [scriptblock]$Done, [int]$tr
     }
     return $false
 }
-# 第 5 步出处跳转后切「看原页」：ui.busy 或后台准备导读时单次点击可能被吞，
-# 等满 retryWaitSec 仍停在「看原页」且未见到「看文字」才重点击（最多 maxTries 次）；见到「看文字」后绝不回点。
-function Resolve-SourceOriginalViewAction(
-    $lines,
-    [int]$switchTries = 0,
-    [double]$elapsedSinceClickSec = 0.0,
-    [int]$maxTries = 3,
-    [double]$retryWaitSec = 4.0
-) {
-    if (-not (Find-Text $lines '返回学习')) {
-        return [pscustomobject]@{ Action = 'wait'; Button = $null }
+# 顶部（或底部）一条裁出来放大再认：2.0 的选中浮条字太小（浮条高 32dp、标签 12sp），
+# 原生分辨率下 Windows OCR 把「讲讲」读成「½²」（11-21 10:47 那一轮 x=238 的格子就是），
+# 放大 3 倍才认得出「讲讲」「举个例子」「笔记」，落点也才准。返回的坐标已经按缩放比换回屏幕坐标，
+# 可以直接交给 Find-Text / Click-At。
+function Read-ZoomStrip([string]$png, [int]$top, [int]$bottom, [int]$scale = 3) {
+    if (-not $png -or -not (Test-Path -LiteralPath $png)) { return @() }
+    $src = [Drawing.Bitmap]::new($png)
+    $file = Join-Path (Split-Path -Parent $png) ('zoom-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.png')
+    try {
+        $bottom = [Math]::Min($bottom, $src.Height)
+        $top = [Math]::Max(0, $top)
+        $h = $bottom - $top
+        if ($h -lt 8) { return @() }
+        $rect = [Drawing.Rectangle]::new(0, $top, $src.Width, $h)
+        $zoom = [Drawing.Bitmap]::new($src.Width * $scale, $h * $scale)
+        try {
+            $g = [Drawing.Graphics]::FromImage($zoom)
+            try {
+                $g.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                $g.DrawImage($src, [Drawing.Rectangle]::new(0, 0, $zoom.Width, $zoom.Height), $rect, [Drawing.GraphicsUnit]::Pixel)
+            } finally { $g.Dispose() }
+            $zoom.Save($file, [Drawing.Imaging.ImageFormat]::Png)
+        } finally { $zoom.Dispose() }
+        $out = @()
+        foreach ($line in Read-Screen $file) {
+            $ws = @(foreach ($w in $line.Words) {
+                $b = $w.BoundingRect
+                [pscustomobject]@{ Text = $w.Text; BoundingRect = [pscustomobject]@{
+                        X = $b.X / $scale; Y = ($b.Y / $scale) + $top
+                        Width = $b.Width / $scale; Height = $b.Height / $scale } }
+            })
+            $out += [pscustomobject]@{ Text = (($ws | ForEach-Object { $_.Text }) -join ''); Words = $ws }
+        }
+        return $out
+    } finally {
+        $src.Dispose()
+        Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue
     }
-    if ((Find-Text $lines '无法确认原句') -or (Find-Text $lines '出处已过期') -or (Find-Text $lines '无法定位')) {
-        return [pscustomobject]@{ Action = 'refusal'; Button = $null }
-    }
-    if (Find-Text $lines '看文字') {
-        return [pscustomobject]@{ Action = 'check_page'; Button = $null }
-    }
-    $original = Find-Text $lines '看原页'
-    if ($original -and $switchTries -lt $maxTries -and ($switchTries -eq 0 -or $elapsedSinceClickSec -ge $retryWaitSec)) {
-        return [pscustomobject]@{ Action = 'click_original'; Button = $original }
-    }
-    return [pscustomobject]@{ Action = 'wait'; Button = $null }
 }
-# 第 4 步「讲讲」在第几：工具条一行是「讲讲」「举个例子」「换个说法」「问…」，
-# 只认和「举个例子」同一行、在它左边的那个，免得点到正文里别的「讲讲」。
-function Find-ExplainButton($lines) {
-    $row = Find-Text $lines '举个例子'
-    if (-not $row) { $row = Find-Text $lines '换个说法' }
-    if (-not $row) { return $null }
-    return (Find-OnRow $lines '讲讲' $row)
+function Find-ZoomText([string]$png, [int]$top, [int]$bottom, [string]$label, [int]$scale = 3) {
+    return (Find-Text (Read-ZoomStrip $png $top $bottom $scale) $label)
 }
-# 点完「讲讲」算不算生效：同意框弹出、或者已经进了加载态（「思考」）、或者回答已经出来（「出处」）。
+# 点完「讲讲」算不算生效：2.0 不再另开一张卡——伴读抽屉（窄窗是半屏底部抽屉）打开并切到「提问」页，
+# 顶上顶着「引文 · …」，先「正在整理…」，然后出正文和「出处」。第一次问还要先过同意框。
 # 只认这几种看得见的状态——「点过一次」不算，四路交锁时那一下常常被别的窗口吃掉。
 function Test-ExplainStarted($lines) {
     if (Test-ConsentUp $lines) { return $true }
-    foreach ($s in '思考', '出处') {
+    foreach ($s in '正在整理', '引文', '出处', '批注') {
         if (Find-Text $lines $s) { return $true }
     }
     return $false
@@ -715,82 +781,121 @@ try {
     while (-not (Find-CoachWindow) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
     if ($script:Win -eq [IntPtr]::Zero) { Fail 1 "客户端窗口 $StartTimeoutSec 秒内没有出现（见 client.err.log）" }
     Set-SmokeMemoryClient $memoryLease $script:AppPid
-    $m = Await-Text 1 'start' @('上传教材', '书架') 30
-    if (-not $m) { Fail 1 '窗口出来了但没有看到书架' }
+    # 2.0（#573 起）首页是单栏：空库时一句「把要读的书或课程材料放进来。」+ 一个主钮「导入文件」
+    # + 三张路线卡（为一门课备考 / 单读一本书 / 读一组书）；库里有书时首屏是焦点卡
+    # （封面、书名、「上次停在第 N / M 页」、「继续」）。1.1.1 的书架行和侧栏都没有了，
+    # 这两种首页都算窗口起来了，认任何一句结构性文字即可。
+    $m = Await-Text 1 'start' @('导入文件', '单读一本书', '为一门课备考', '上次停在', '读到第') 30
+    if (-not $m) { Fail 1 '窗口出来了，但 30 秒内没读出 2.0 首页（导入文件 / 单读一本书 / 为一门课备考）' }
     if ($launchSw) { Note ("起窗完成：编译结束后 {0:N2} 秒" -f $launchSw.Elapsed.TotalSeconds) }
-    Pass 1 '客户端窗口出现，书架可见'
+    Pass 1 '客户端窗口出现，2.0 首页可见'
 
-    # ② 上传一本书
+    # ② 导入一本书
+    # 2.0 首页的入口是主钮「导入文件」（testTag upload-textbook）；原生选书框标题是
+    # 「导入文件 · <可读格式>」，所以按钮和框都认「导入文件」这个前缀。
     # 只认原生选书框弹出来：四路同时开框时这一下可能在交锁后 3 ms 被别路抢前台吞掉（11-21 04:26 L4），
     # 框根本没开，Choose-File 干等 20 秒才判失败。没弹框就重定位再点，弹过框以后的失败交给 Choose-File 报。
-    Click-Until-Dialog 2 '上传教材' { (Find-AppWindowByTitle '上传教材') -ne [IntPtr]::Zero }
-    if (-not (Choose-File '上传教材' $Book)) { Fail 2 $script:ChooseFileWhy }
-    $m = Await-Text 2 'shelf' @('教材已加入书架', '先读') 120
-    if (-not $m) { Fail 2 '选了书但 120 秒内书架里没出现这本书' }
-    Pass 2 '书出现在书架'
+    Click-Until-Dialog 2 '导入文件' { (Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero }
+    if (-not (Choose-File '导入文件' $Book)) { Fail 2 $script:ChooseFileWhy }
+    # 2.0 导入收尾直接把阅读器打开（TextbookController.launchImport 每条收尾都置 screen = READER），
+    # 首页也不再弹「教材已加入书架 / 先读」卡。所以第 2 步分两半认：
+    #   · 书真进来了：阅读器底栏读出页号（导入后就停在这本书的第 1 页）；
+    #   · 书真进了首页：点阅读器左上「← 书架」退回 2.0 首页——焦点卡副标题是「上次停在第 N / M 页」，
+    #     「阅读」组里那张书卡的副标题是「N 页 · 读到第 M 页」；两句都是库里的页码拼出来的结构性文字，
+    #     书名来自 PDF 不用猜，认其中一句就够。
+    # 620 页那本走渐进 OCR（#571），导入期间首页上有进度条，书卡已经落库、点得开。
+    $r = Get-Rect; $winW = [int]($r.R - $r.L); $winH = [int]($r.B - $r.T)
+    $hoverY = $winH - 10
+    # 画布的上缘从客户区算，客户区上面还压着窗口标题栏；指针得真落进画布顶上那条 48dp 带子里
+    # 才会发出 Move、把顶栏浮出来，落在标题栏上是白等。
+    $topY = 60
+    $midX = [int]($winW / 2); $midY = [int]($winH / 2)
+    $readerPage = $null
+    $shelfHit = $null
+    $deadline = (Get-Date).AddSeconds(150)
+    $tries = 0
+    while (-not $readerPage -and -not $shelfHit -and (Get-Date) -lt $deadline) {
+        $tries++
+        Hover $midX $hoverY; Start-Sleep -Milliseconds 600
+        $lines = Shot 2 $(if ($tries -eq 1) { 'imported' } else { "imported$tries" })
+        $c = Get-HudCounter $script:LastPng
+        if ($c) { $readerPage = $c.Text } else { $shelfHit = Has $lines @('读到第', '上次停在') }
+        if (-not $readerPage -and -not $shelfHit) { Start-Sleep -Seconds 2 }
+    }
+    if (-not $readerPage -and -not $shelfHit) { Fail 2 '选了书但 150 秒内既没进阅读器，书架里也没出现这本书' }
+    # 退回书架认这本书的行：指针贴上缘把顶栏叫出来，返回键在最左边。
+    $row = $null
+    if ($readerPage) {
+        foreach ($try in 1..3) {
+            Hover $midX $topY; Start-Sleep -Milliseconds 700
+            $null = Shot 2 "back$try"
+            $back = Find-Text $script:Last '书架'
+            if (-not $back) { Note "第 $try 次没读到顶栏的「书架」返回键"; continue }
+            Click-At ([int]$back.X) ([int]$back.Y); Start-Sleep -Milliseconds 1200
+            $lines = Shot 2 "shelf$try"
+            foreach ($l in $lines) { if ($l.Text -match '读到第|上次停在') { $row = $l; break } }
+            if ($row) { break }
+            Note "退回后这一帧没读到书行（见 2-shelf$try.png）"
+        }
+    }
+    if ($row) { Pass 2 "书在首页上（行：$($row.Text)），导入后先打开在阅读器第 $readerPage 页" }
+    elseif ($readerPage) { Pass 2 "书导入后直接打开在阅读器（底栏读到第 $readerPage 页）；退回首页那一下没读出书卡，见 2-shelf*.png" }
+    else { Pass 2 '书出现在首页（焦点卡或书卡上读到了「读到第」/「上次停在」）' }
 
     # ③ 翻页
-    # 上传后的「这次怎么读」卡上点「先读」进阅读器；导入收尾时按钮可能还没亮，点不动就再点。
-    # 提示卡自己收起或点空了会停在书架卡上（11-21 00:47 那轮就是这样），这时「看书」那一行才是进阅读器的入口，两条路都试。
-    $lines = Shot 3 'find'
-    $m = Find-PageNav $lines '下一页'
-    $dismissStuck = 0
-    $deadline = (Get-Date).AddSeconds(90)
-    while (-not $m -and (Get-Date) -lt $deadline) {
-        $b = Has $lines @('先读')
-        if ($b) { Click-At $b.X $b.Y; Start-Sleep -Seconds 1 }
-        else {
-            $r = Find-Exact $lines '看书'
-            if (-not $r) { $r = Find-Exact $lines '继续看书' }
-            if ($r) { Click-At $r.X $r.Y; Start-Sleep -Seconds 1 }
-        }
-        $d = Await-Text 3 'dismiss' @('要开始学吗') 2
-        if ($d) {
-            # 只读这本书：点「暂不开启」而不是按 ESC（1.1.1 的 ESC 会退回书架）。按钮是暗底灰字，放大两倍才认得出来；
-            # 阅读器刚打开时它可能还是灰的（ui.busy），点不动就下一轮再点，循环有 90 秒。
-            # Await-Text 命中的那一帧可能正卡在弹窗淡出的过渡上：标题留着残影、按钮已经不在这一帧
-            # （11-21 05:58 L3 就是这样，单帧找不到就 Fail 3，把整个 90 秒循环打断了）。所以多拍几帧再判。
-            $findOff = { param($l) $btn = Find-Text $l '暂不开启'; if (-not $btn) { $btn = Find-DimButton $script:LastPng '暂不开启' }; $btn }
-            $goneOff = { param($l) -not (Find-Text $l '要开始学吗') }
-            $off = Find-AcrossFrames 3 'dismiss' $findOff $goneOff
-            if ($off) { Click-At ([int]$off.X) ([int]$off.Y); Start-Sleep -Seconds 1 }
-            elseif (Find-Text $script:Last '要开始学吗') {
-                # 弹窗还在、三帧都没认出按钮：不在这里打断，下一轮点了入口还会再等一次弹窗。
-                $dismissStuck++
-                Note '「要开始学吗」还在，但「暂不开启」三帧都没认出来（多半是淡出过渡），下一轮再试'
-            }
-        }
-        $lines = Shot 3 'reader'
-        $m = Find-PageNav $lines '下一页'
-    }
-    if (-not $m) {
-        Fail 3 $(if ($dismissStuck -gt 0) { "「要开始学吗」见过 $dismissStuck 次，每次都没认出「暂不开启」（见 3-dismiss*.png），没进到阅读器" } else { '没有进到阅读器' })
-    }
-    # 页号只从底栏「上一页」「下一页」之间那一条读：整帧 OCR 会把「2 / 620」拆成「2」+「/62@」
-    # （11-21 03:49 的 2b 四路全栽在这，页其实已经翻过去了）。读不出就一直重拍到 10 秒。
+    # 2.0（#573）首页一条单栏：有书时首屏是焦点卡（封面 + 书名 +「上次停在第 N / M 页」），
+    # 卡里唯一的实底钮是「继续」（testTag home-read → TextbookController.read）；
+    # 再往下「阅读」组里每本书一张 HomeBookCard（整卡可点 → onOpenBook，副标题「N 页 · 读到第 M 页」）。
+    # 1.1.1 的书架行和卡片按钮「开始阅读 / 继续阅读」都没了。
+    # 阅读器是单层满铺画布：底栏平时收起，指针贴到下缘才浮出「‹ 页号 ›」。
     $page0 = $null
-    foreach ($try in 1..5) {
-        $before = Shot 3 'page-before'
-        $c0 = Get-PageCounter $before $script:LastPng
-        if ($c0) { $page0 = $c0.Text; break }; Start-Sleep -Seconds 2
+    $deadline = (Get-Date).AddSeconds(150)
+    $tries = 0
+    # 进没进阅读器不靠按钮字（箭头认不出来），只认底栏那条页号：读出来就是在阅读器里了。
+    while (-not $page0 -and (Get-Date) -lt $deadline) {
+        $tries++
+        $lines = Shot 3 $(if ($tries -eq 1) { 'find' } else { "find$tries" })
+        $c = Get-HudCounter $script:LastPng
+        if (-not $c) { $c = Get-PageCounter $lines $script:LastPng }
+        if ($c) { $page0 = $c.Text; break }
+        # 只在首页上才点：阅读器正文里也可能出现「继续」两个字，点正文会把选段带跑。
+        $onHome = Has $lines @('单读一本书', '为一门课备考', '上次停在', '读到第')
+        $go = if ($onHome) { Find-Text $lines '继续' } else { $null }
+        $row = $null
+        foreach ($l in $lines) { if ($l.Text -match '读到第') { $row = $l; break } }
+        if ($go) {
+            $pressed = Click-At ([int]$go.X) ([int]$go.Y); Start-Sleep -Milliseconds 1500
+            Note "第 $tries 次点了首页焦点卡「继续」，按下=$pressed"
+        } elseif ($row) {
+            $rb3 = Get-LineBox $row
+            $pressed = Click-At ([int](($rb3.X1 + $rb3.X2) / 2)) ([int]$rb3.Y); Start-Sleep -Milliseconds 1500
+            Note "第 $tries 次点了书卡（$($row.Text)），按下=$pressed"
+        } else {
+            Note "第 $tries 次既没读到首页「继续」也没看到书卡，先当阅读器在起（见 3-find$tries.png）"
+        }
+        Hover $midX $hoverY; Start-Sleep -Milliseconds 700
+        $lines = Shot 3 $(if ($tries -eq 1) { 'reader' } else { "reader$tries" })
+        $c0 = Get-HudCounter $script:LastPng
+        if (-not $c0) { $c0 = Get-PageCounter $lines $script:LastPng }
+        if ($c0) { $page0 = $c0.Text; break }
+        # 还在首页说明这一下没生效，把认到的字记进日志，下一轮重定位再来。
+        if ($tries -le 3) { Note ('这一帧读到：' + (($lines | ForEach-Object { $_.Text }) -join ' / ')) }
     }
+    if (-not $page0) { Fail 3 '首页点「继续」也没进到阅读器，或底栏读不到页号（见 3-find*.png / 3-reader*.png）' }
+    # 2.0 的翻页键只在阅读区真拿到焦点时才生效，先点正文中间把焦点交给页面，再按 →。
+    Click-At $midX $midY; Start-Sleep -Milliseconds 400
     $page1 = $page0
-    foreach ($try in 1..3) {
-        # 点空了先重拍再点：光标停在底栏时浮层/布局都可能变，沿用上一轮的旧坐标只会继续点在原地。
-        if ($try -gt 1) {
-            $again = Find-PageNav (Shot 3 'page-retry') '下一页'
-            if ($again) { $m = $again }
-        }
-        Click-At $m.X $m.Y
-        $stop = (Get-Date).AddSeconds(8)
-        while ((Get-Date) -lt $stop -and (-not $page1 -or $page1 -eq $page0)) {
-            Start-Sleep -Seconds 2; $after = Shot 3 'page-after'
-            $c1 = Get-PageCounter $after $script:LastPng
-            if ($c1) { $page1 = $c1.Text }
-        }
-        if ($page1 -and $page1 -ne $page0) { break }
+    foreach ($try in 1..4) {
+        Send-Keys '{RIGHT}'; Start-Sleep -Seconds 2
+        Hover $midX $hoverY; Start-Sleep -Milliseconds 700
+        $after = Shot 3 "page-after$try"
+        $c1 = Get-HudCounter $script:LastPng
+        if (-not $c1) { $c1 = Get-PageCounter $after $script:LastPng }
+        if ($c1) { $page1 = $c1.Text }
+        if ($page1 -ne $page0) { break }
+        Click-At $midX $midY; Start-Sleep -Milliseconds 300
     }
-    if (-not $page0 -or -not $page1 -or $page0 -eq $page1) { Fail 3 "点了下一页页码没变（前 $page0，后 $page1，最后落点 $($m.X),$($m.Y)）" }
+    if ($page0 -eq $page1) { Fail 3 "按了 → 页码没变（前 $page0，后 $page1，见 3-page-after*.png）" }
     Pass 3 "页码 $page0 → $page1"
 
     # ④ 前提：隔离测试服务必须连得上，连不上就停在这一步并说清楚
@@ -806,31 +911,37 @@ try {
     # 1.1.1（TON-1766）删掉了每段的「讲解这段」：选中文字后浮出的工具条「讲讲」才是这条路径的入口。
     $sel = Get-Content $Selection -Raw -Encoding UTF8 | ConvertFrom-Json
     $physPage = [int]([regex]::Match($sel.blocks[0].id, ':p(\d+):').Groups[1].Value)
-    if (-not (Await-Text 4 'goto' @('前往') 10)) { Fail 4 '找不到页码跳转的「前往」' }
-    # 底栏页码框夹在「页码」标签和「前往」按钮之间，只有 64dp 宽，OCR 读不出框里刚敲的数字；
-    # 所以以「点完「前往」页码真的变成这一页」为准，哪个落点跳不过去就换下一个落点再试。
-    $go = Find-Lowest $script:Last '前往'
-    $goX = [int]$go.X; $goY = [int]$go.Y; $goX1 = [int]$go.X1
-    $cands = New-Object 'System.Collections.Generic.List[int]'
-    $lbl = Find-Lowest $script:Last '页码'
-    if ($lbl) { $cands.Add([int](([int]$lbl.X2 + $goX1) / 2)) }
-    foreach ($off in 106, 70, 40) { $cands.Add($goX - $off) }
+    # 2.0 的跳页框不是常驻的：按 Ctrl+G 直接展开（TextbookReader 的 onPreviewKeyEvent：mod+G → hudVisible + editingJump），
+    # 输入框带 LaunchedEffect requestFocus，敲完数字回车就是 onSubmitJump；不靠 OCR 找「第 N 页 / M」那一行。
+    $r = Get-Rect; $winW = [int]($r.R - $r.L); $winH = [int]($r.B - $r.T)
+    $midX = [int]($winW / 2); $hoverY = $winH - 10; $topY = 10
+    Send-Keys '^g'; Start-Sleep -Milliseconds 900
+    $opened = [bool](Await-Text 4 'goto' @('前往') 10)
+    if (-not $opened) { Fail 4 'Ctrl+G 没展开跳页框（读不到「前往」，见 4-goto.png）' }
+    Send-Keys '^a'; Send-Keys "$physPage"; Start-Sleep -Milliseconds 500
+    $null = Shot 4 'goto-typed'
+    Send-Keys '{ENTER}'; Start-Sleep -Seconds 1
     $pageNow = $null
-    foreach ($fx in $cands) {
-        Click-At $fx $goY; Start-Sleep -Milliseconds 400
-        Send-Keys '^a'; Send-Keys "$physPage"; Start-Sleep -Milliseconds 500
-        $btn = Find-Lowest (Shot 4 'goto-typed') '前往'
-        if ($btn) { Click-At ([int]$btn.X) ([int]$btn.Y) }
-        foreach ($try in 1..5) {
-            Start-Sleep -Seconds 2; $pageNow = Page-NearNav (Shot 4 'jumped')
-            if ($pageNow -eq "$physPage") { break }
-        }
-        if ($pageNow -eq "$physPage") { Note "页码框点在第 $fx 像素处跳页成功"; break }
-        if ($btn) { Send-Keys '^a'; Send-Keys '{BACKSPACE}'; Start-Sleep -Milliseconds 300 }
+    foreach ($try in 1..6) {
+        Start-Sleep -Seconds 2
+        Hover $midX $hoverY; Start-Sleep -Milliseconds 700
+        $null = Shot 4 'jumped'
+        $c = Get-HudCounter $script:LastPng
+        if ($c) { $pageNow = "$($c.Cur)" }
+        if ($pageNow -eq "$physPage") { break }
     }
-    if ($pageNow -ne "$physPage") { Fail 4 "页码没跳到 $physPage（现在 $pageNow）" }
-    Click-Label 4 @('看文字') '找不到「看文字」'
-    if (-not (Await-Text 4 'text-mode' @('看原页') 15)) { Fail 4 '点击「看文字」后没有切换到文字视图' }
+    if ($pageNow -ne "$physPage") { Fail 4 "页码没跳到 $physPage（现在 $pageNow，见 4-jumped*.png）" }
+    # 2.0 把「原页 / 文字」做成顶栏上的两段胶囊（ViewModeSwitchPill，testTag view-mode-text/original），
+    # 顶栏同样要指针贴上缘才出来。已经选中「文字」时点它不会切走，所以直接点「文字」是安全的。
+    Hover $midX $topY; Start-Sleep -Milliseconds 700
+    $lines = Shot 4 'mode'
+    $txtHit = Has $lines @('文字')
+    if ($txtHit) {
+        Click-At ([int]$txtHit.X) ([int]$txtHit.Y); Start-Sleep -Seconds 1
+        $null = Shot 4 'text-mode'
+    } else {
+        Note '顶栏没读到「文字」胶囊，按文字视图继续（段落找不到就是没切成）'
+    }
     # 文字视图一屏只放得下一页的一部分：这一页开头是页眉，可信选段在这页下半部分，往下滚才看得见。
     $words = (($sel.selection -replace '[^A-Za-z ]', ' ').Trim() -split '\s+' | Select-Object -First 4) -join ''
     $paraLine = $null; $lines = @()
@@ -852,21 +963,41 @@ try {
             2 { Drag-Between ($box.X1 + 4) $box.Y ($box.X2 - 4) ($box.Y + 2 * $lineH) }
             3 { Drag-Between ($box.X1 + 4) ([Math]::Max(1, $box.Y - $lineH)) ($box.X2 - 4) ($box.Y + 2 * $lineH) }
         }
-        $toolbar = Await-Text 4 "selected$drag" @('举个例子', '换个说法') 8
+        # 2.0 的浮条是「讲讲 举个例子 问… 笔记 ×」，没有「换个说法」了：认「举个例子」「笔记」都算浮条出来了。
+        $toolbar = Await-Text 4 "selected$drag" @('举个例子', '笔记') 8
         if ($toolbar) { break }
     }
     if (-not $toolbar) { Fail 4 '拖选这一行后没有浮出选中工具条（见 4-selected3.png）' }
-    # 工具条一行是「讲讲」「举个例子」「换个说法」「问…」：取和「举个例子」同一行、在它左边的「讲讲」
-    $explainBtn = Find-OnRow $script:Last '讲讲' $toolbar
-    if (-not $explainBtn) { Fail 4 '选中工具条里找不到「讲讲」' }
     # 「讲讲」和随后的「允许并讲解」原来各只点一下：四路交锁时前台被别路接走，这两下都会落空。
-    # 11-21 那轮 L1/L4 点了「讲讲」等于没点，同意框既没出来也没进加载态；L3 同意框出来了、
-    # 「允许并讲解」点空，框一直开着——三路都在这里空等 120 秒报「既没有讲解也没有报错」。
-    # 所以两下都认状态：状态没变就按新一帧重定位再点，点了三次还没动就当场说清是哪一下没成。
-    $started = Click-Confirm 4 { param($l) Find-ExplainButton $l } { param($l) Test-ExplainStarted $l } -tries 3 -waitSec 6 -pauseMs 800
+    # 11-21 那轮 L1/L4 点了「讲讲」等于没点；10:47 那一轮点完浮条直接消失、什么都没有——落点偏了半格，
+    # 那一下算点在浮条外面，浮条被点收起来了。所以每一下都认状态，没起来就重新拖选把浮条叫回来再点。
+    $started = $false
+    # 浮条钉在阅读区顶端，但它的 top 跟着顶栏走：顶栏没浮出来时 14dp，浮出来时 54dp（TextbookReader.kt:1231）。
+    # 鼠标一进顶边 48dp 顶栏就浮出来、浮条同时下移 40dp——照 14dp 那一帧算好落点再挪过去，按下时它已经
+    # 挪到下面去了，那一下正好落在浮条底下的正文上，选中被清掉（11:01 那一轮三下都是这个结果）。
+    # 所以先把指针停在顶边把顶栏钉出来，等它稳住，再照这一帧（浮条已在 54dp）定位去点；
+    # 54dp 还在「移回顶边才收顶栏」的迟滞区间里（>96dp 才收，TextbookReader.kt:801），点完不会又翻回去。
+    foreach ($try in 1..3) {
+        if ($try -gt 1) {
+            Drag-Between ($box.X1 + 4) $box.Y ($box.X2 - 4) $box.Y; Start-Sleep -Milliseconds 900
+        }
+        Hover $midX $topY; Start-Sleep -Milliseconds 900
+        $null = Shot 4 "confirm$try"
+        $btn = Find-ZoomText $script:LastPng 0 200 '讲讲' 3
+        if (-not $btn) { $btn = Find-OnRow $script:Last '讲讲' $toolbar }
+        if (-not $btn) { Note "第 4 步第 $try 次没找到「讲讲」，重新拖选后再找"; continue }
+        Click-At $btn.X $btn.Y
+        $stop = (Get-Date).AddSeconds(8)
+        while ((Get-Date) -lt $stop) {
+            Start-Sleep -Milliseconds 900
+            if (Test-ExplainStarted (Shot 4 "confirm${try}done")) { $started = $true; break }
+        }
+        if ($started) { break }
+        Note "第 4 步第 $try 次点「讲讲」后伴读抽屉没打开，重定位再点"
+    }
     # 同意框有时要十几秒才弹（后台先把这段原文送出去），点完状态没变也再宽限一次，别比原来等得还短。
-    if (-not $started) { $started = [bool](Await-Text 4 'explain-late' @('允许并讲解', '这段原文会发到哪里', '不允许', '思考', '出处') 15) }
-    if (-not $started) { Fail 4 '点了三次「讲讲」都没有同意框、加载态或讲解出现（见 4-confirm*.png）' }
+    if (-not $started) { $started = [bool](Await-Text 4 'explain-late' @('允许并讲解', '这段原文会发到哪里', '不允许', '正在整理', '引文') 15) }
+    if (-not $started) { Fail 4 '点了三次「讲讲」伴读抽屉都没打开（见 4-confirm*.png）' }
     # 这一帧是不是同意框：按钮标签会被 OCR 认错字（11-21 05:58 L1 在这一帧读成「允许并讲鱈」，
     # 只认「允许并讲解」就整段跳过、后面空等 120 秒），所以标题和「不允许」也认。
     if (Test-ConsentUp (Shot 4 'consent')) {
@@ -888,79 +1019,144 @@ try {
         if ($e) { $outcome = 'error'; $errText = (($lines | Where-Object { $_.Text -match $failPattern } | Select-Object -First 1).Text) }
         elseif (Has $lines @('出处')) { $outcome = 'ok' }
         else {
-            # 讲解比选段卡的可视高度长时，「出处」在卡片正文下面：在卡片里下滚一次再等下一轮
-            $closeCard = Find-Text $lines '收起'
-            if ($closeCard -and $n -ge 2) { $lim = Get-Rect; Scroll-At 600 ([Math]::Min($closeCard.Y + 150, $lim.B - $lim.T - 30)) -3; Start-Sleep -Milliseconds 600 }
+            # 2.0 的讲解在伴读抽屉里（窄窗是半屏底部抽屉），正文比抽屉高时「出处」压在下面：
+            # 在抽屉的正文区（窗口下半截中间）下滚一次，下一轮再看。
+            if ($n -ge 2) {
+                $lim = Get-Rect
+                Scroll-At ([int](($lim.R - $lim.L) / 2)) ([int](($lim.B - $lim.T) * 0.72)) -3
+                Start-Sleep -Milliseconds 700
+            }
         }
     }
     if ($outcome -eq 'error') { Fail 4 "服务回了拒绝：$errText" }
     if ($outcome -ne 'ok') { Fail 4 '120 秒内既没有讲解也没有报错' }
     $explainOk = $true
-    # 1.1.1 没有「选段提问」按钮了：追问就在同一张选段卡底部的「继续追问」框里；先完成追问，再在⑦里点「出处」并「收起」卡片，
-    # 避免 800×600 窗口里 360dp 的选段卡把底栏「上一页 / 下一页」推到屏幕外。
+    # 2.0 的追问就在伴读抽屉最底下（CompanionAskPane 的 inline-followup-input + 「发送」），有两个坑：
+    # 1) 底栏 HUD 的浮现区是窗口最下面 48px，输入框正好长在那条带上。指针一进去 HUD 就盖住框体下半截；
+    #    如果按下那一刻它还在浮现，那一下会落在 HUD 上、框没拿到焦点，粘进去的字全丢——11:18 那轮四张
+    #    4-ask-typed*.png 框里都是空的，四枪全栽在这上面。所以先把指针停在框体那一行把 HUD 叫出来，
+    #    等它停稳，再照这一帧点框体最上面那几行：按下时布局不动，落点也还在 HUD 上沿之上。
+    # 2) 框里的字被 HUD 挡住看不出来（「第 154 页 / 620」正压在框体上），所以粘完把指针挪回中间带让 HUD
+    #    收掉，再数框体那块亮像素：字真进去了才按回车，没进去就换个落点重来。
+    # 提示语放大 4 倍认得准（3 倍把「推导」读成「推寺」），「发送」也是 4 倍才读得到。
     $askWhy = $null
     try {
-        $field = $null; $lines = @()
-        foreach ($k in 0..5) {
-            $lines = if ($k -eq 0) { Shot 4 'ask-card' } else { Shot 4 "ask-card$k" }
-            # 「继续追问」在这个字号下常被认成「组续追问」，所以只认后半截
-            $field = $lines | Where-Object { ($_.Text -replace '\s', '') -match '(续追问|问一句|问一旬)' } | Select-Object -First 1
+        $lim = Get-Rect; $winW = [int]($lim.R - $lim.L); $winH = [int]($lim.B - $lim.T)
+        $scrollX = [int]($winW / 2); $scrollY = [int]($winH * 0.72)
+        # 阅读区中间带：底抽屉开着时画布只剩上半截，指针落在这里 HUD 一定收回去。
+        $midY = [int]($winH * 0.30)
+        $field = $null
+        foreach ($k in 0..3) {
+            if ($k -gt 0) { Start-Sleep -Milliseconds 700 }
+            Hover $midX $midY; Start-Sleep -Milliseconds 700
+            $null = Shot 4 "ask-field$k"
+            foreach ($hint in '问这句', '输入问题', '公式推导') {
+                $field = Find-ZoomText $script:LastPng ([Math]::Max(0, $winH - 130)) $winH $hint 4
+                if ($field) { break }
+            }
             if ($field) { break }
-            Start-Sleep -Milliseconds 700
         }
-        if (-not $field) { throw '选段卡里没有「继续追问」输入框' }
+        # 输入框是扁的一条（高 40px），提示语是它上方的标签，中间还隔着 6dp 的缝：照标签下沿 +18 去点，
+        # 量歪几个像素就落进缝里——12:49 那轮四次都点空了，窗口像素一个没变。
+        # 「发送」和输入框同处一个 Row、垂直居中，拿它的中心当这一行的中线最稳（框体 40px 高，差几像素不碍事）。
+        $clickX = if ($field) { [int]$field.X1 + 30 } else { [int]($winW * 0.3) }
+        $rowY = if ($field) { [int]$field.Y2 + 18 } else { [int]($winH - 46) }
+        $send = Find-ZoomText $script:LastPng ([Math]::Max(0, $winH - 130)) $winH '发送' 4
+        if ($send) { $rowY = [int]$send.Y }
+        if ($field) { Note "追问输入框：提示语在第 $($field.Y) 行，这一行中线 $rowY，落点 x=$clickX" }
+        else { Note "抽屉底栏没读到输入框提示语，按 ($clickX,$rowY) 试" }
         $question = '用大白话解释一下，这里的专用人力资本是什么意思？'
         # 标记直接写进问题里，回答轮的标题是「问：<原问题>」，标记出现在那行才算这一问真的发出去了。
         $askText = if ($Marker) { "$Marker $question" } else { $question }
-        $fb = Get-LineBox $field
-        $hdr = Has $lines @('收起')
-        $scrollY = if ($hdr) { [int](($hdr.Y + $fb.Y1) / 2) } else { [Math]::Max(60, [int]($fb.Y1) - 120) }
-        # 框里的字太小，OCR 认不出来（截图上明明有字、识别结果是空的），所以「焦点」和「框里有字」都不能靠读字：
-        #   · 焦点：点进框里敲两个 ASCII 哨兵字符，「发送」会从灰变亮、OCR 就能认到，这是焦点确实落进框里的证据；
-        #   · 有字：粘完数一遍框内区域的亮像素，和空框那张比多出上百个，才算真粘进去了。
-        # 哨兵与 -Marker 无关：以前没传 -Marker 时会跳过探针直接点标签底 +14，那一格在框上边沿外，
-        # 粘贴全丢，只剩「发送没亮」一条看不出原因的失败（2026-11-21 00:18 那轮 6/7 就是这么挂的）。
-        # 实测 +20 是框内第一行，+14 落在框上边沿，所以按 +20 先试。
-        $sentinel = 'zk'
-        $focus = $null
-        foreach ($dy in 20, 14, 26, 32, 38, 44, 50, 56) {
-            $probeY = [int]$fb.Y2 + $dy
-            Click-At ([int]$fb.X1 + 150) $probeY; Start-Sleep -Milliseconds 400
-            Send-Keys $sentinel; Start-Sleep -Milliseconds 700
-            $probe = Shot 4 "ask-probe$dy"
-            if (Has $probe @('发送')) { $focus = @{ Y = $probeY; Dy = $dy }; break }
-            Send-Keys '^a'; Send-Keys '{BACKSPACE}'; Start-Sleep -Milliseconds 250
-        }
-        if (-not $focus) { throw '点不进「继续追问」框：标签下八个落点敲哨兵都没能把「发送」点亮' }
-        Note "追问框落点：标签底 +$($focus.Dy)（哨兵点亮了「发送」）"
-        # 清掉哨兵，留一张空框基线，粘贴后拿它当对照
-        Send-Keys '^a'; Send-Keys '{BACKSPACE}'; Start-Sleep -Milliseconds 300
-        $null = Shot 4 'ask-empty'
-        $emptyInk = Get-FieldInk $script:LastPng $fb
-        # 粘完要验两件事：框里有字（亮像素明显多于空框）且「发送」亮。粘不进去就回框里再点一次重粘，最多三次。
-        $pasted = $false; $send = $null; $ink = $emptyInk
-        foreach ($attempt in 1..3) {
-            if ($attempt -gt 1) {
-                Send-Keys '^a'; Send-Keys '{BACKSPACE}'; Start-Sleep -Milliseconds 200
-                Click-At ([int]$fb.X1 + 150) $focus.Y; Start-Sleep -Milliseconds 400
+        # 粘贴走不通时的替补：纯 ASCII，只用击键、不碰剪贴板也不碰输入法，标记照样带上。
+        $keyText = if ($Marker) { "$Marker what does the quoted sentence mean in plain words" } else { 'what does the quoted sentence mean in plain words' }
+        $turn = $null; $cite = $null; $typed = $false
+        # 落点用对象装：PS 5.1 里 `@(a,b), @(c,d)` 这一串会当成两个数组相加，直接报 op_Addition。
+        $spots = @(
+            [pscustomobject]@{ X = $clickX; Y = $rowY },
+            [pscustomobject]@{ X = $clickX + 140; Y = $rowY },
+            [pscustomobject]@{ X = [int]($winW * 0.35); Y = $rowY },
+            [pscustomobject]@{ X = $clickX; Y = $rowY - 8 }
+        )
+        $spot = 0
+        foreach ($sp in $spots) {
+            $spot++
+            $spotX = [int]$sp.X; $spotY = [int]$sp.Y
+            # 纯点一下（不再先 Hover：指针挪过来只是移动，不影响按下那一刻的布局）。
+            Click-At $spotX $spotY; Start-Sleep -Milliseconds 500
+            # 六个字母探焦点：框里真吃到字会多出上百个亮像素，只剩一个闪动的光标也到不了 40。
+            Send-Keys 'zzzzzz'; Start-Sleep -Milliseconds 400
+            Hover $midX $midY; Start-Sleep -Milliseconds 700
+            $null = Shot 4 "ask-click$spot"
+            $probe = if ($field) { Get-FieldInk $script:LastPng $field } else { 0 }
+            Note "第 $spot 次点 ($spotX,$spotY)：探针字后框内亮像素 $probe"
+            if ($probe -lt 40) {
+                Send-Keys '^a'; Send-Keys '{BACKSPACE}'
+                continue
             }
+            # 焦点进来了：先清掉探针字，再整句粘；粘贴不成（剪贴板那条路 12:49 那轮一次没成）就改用击键打 ASCII 那句。
+            Send-Keys '^a'; Send-Keys '{BACKSPACE}'; Start-Sleep -Milliseconds 300
+            $textIn = $false
             Paste-Text " $askText"; Start-Sleep -Milliseconds 900
-            $typed = Shot 4 $(if ($attempt -eq 1) { 'ask-typed' } else { "ask-typed$attempt" })
-            $send = Has $typed @('发送')
-            $ink = Get-FieldInk $script:LastPng $fb
-            Note "粘入第 $attempt 次：框内亮像素 $ink（空框 $emptyInk），发送 $(if ($send) { '亮' } else { '灰' })"
-            if ($send -and $ink -gt ($emptyInk + 40)) { $pasted = $true; break }
+            Hover $midX $midY; Start-Sleep -Milliseconds 700
+            $null = Shot 4 "ask-typed$spot"
+            $ink = if ($field) { Get-FieldInk $script:LastPng $field } else { 0 }
+            Note "第 $spot 次粘字：探针 $probe，粘完 $ink"
+            if ($ink -ge [Math]::Max(400, $probe + 120)) { $textIn = $true }
+            if (-not $textIn) {
+                Send-Keys '^a'; Send-Keys '{BACKSPACE}'
+                Send-Keys $keyText; Start-Sleep -Milliseconds 900
+                Hover $midX $midY; Start-Sleep -Milliseconds 700
+                $null = Shot 4 "ask-keyed$spot"
+                $ink = if ($field) { Get-FieldInk $script:LastPng $field } else { 0 }
+                Note "第 $spot 次击键：框内亮像素 $ink"
+                if ($ink -ge [Math]::Max(400, $probe + 120)) { $textIn = $true; $askText = $keyText }
+            }
+            if (-not $textIn) { continue }
+            $typed = $true
+            # 抽屉里已经有一轮（选段讲解）的「出处」：记下它，兜底路径用它排除「把上一轮的出处当这一问的」。
+            $preCite = $script:Last | Where-Object { $_.Text -match '出处.*第\s*\d+\s*页' } | Select-Object -Last 1
+            # 字在框里了：回车提交（CompanionAskPane 的 onPreviewKeyEvent Enter）。提交后 draft 会被清空，
+            # 所以「亮度掉回基线」同样算这一下发出去了，交给下面那段长等待认回答。
+            $sent = $false
+            foreach ($press in 1..2) {
+                Send-Keys '{ENTER}'; Start-Sleep -Milliseconds 900
+                $wait = (Get-Date).AddSeconds(6)
+                while ((Get-Date) -lt $wait -and -not $sent) {
+                    Start-Sleep -Milliseconds 900
+                    $lines = Shot 4 "ask-sent$spot-$press"
+                    if (Has $lines @('正在整理')) { $sent = $true; $turn = 'sent'; break }
+                    $label = Find-AskTurnLabel $lines $Marker
+                    if ($label) { $sent = $true; $turn = $label; break }
+                }
+                if ($sent) { break }
+                $after = if ($field) { Get-FieldInk $script:LastPng $field } else { $ink }
+                if ($after -lt [Math]::Max(400, [int]($ink * 0.5))) { $sent = $true; break }
+            }
+            if ($sent) { Note "追问落点：抽屉底栏 ($clickX,$spotY)"; break }
+            Send-Keys '^a'; Send-Keys '{BACKSPACE}'
+            Note "第 $spot 次回车后没看到「问：…」标题、框里字也没清，换个落点再粘"
         }
-        if (-not $pasted) { throw "「继续追问」框粘了三次都没成：框内亮像素 $ink（空框 $emptyInk），发送 $(if ($send) { '亮' } else { '灰' })（见 4-ask-typed*.png）" }
-        # 回车和「发送」是同一条提交路径（onSubmitQuestion），点按钮的落点由 OCR 直接给出，比回车确定。
-        Click-At $send.X $send.Y
-        # 卡片正文最高 360dp，讲解本身就把滚动区撑满：新加的「问：…」和它的回答追加在下面，不滚卡片看不到。
-        # 一格一格往下找，找到标题就停；走到第 9 格还没出现说明可能滚过头，再往回找一轮，避免标题被推出视野。
-        # 但见过「思考」以后回答只会在下面追加，往回滚等于把新内容推出视野，所以那时只往下（见 Get-AskScrollDir）。
-        $turn = $null; $cite = $null; $i = 0; $step = 0; $sawLoading = $false
-        $deadline = (Get-Date).AddSeconds(150)
+        if (-not $typed) {
+            # 点不到框就分不清是「输入框不吃点击」还是「整个抽屉收不到点击」，先点一下「批注」页签：
+            # 内容换成批注面板（认「写批注」/「导出笔记」）就说明点击到了抽屉里，再点回「提问」（认「引文」）。
+            $tabNotes = Find-Text $script:Last '批注'
+            if ($tabNotes -and $tabNotes.Y -gt 270 -and $tabNotes.Y -lt 340) {
+                Click-At ([int]$tabNotes.X) ([int]$tabNotes.Y); Start-Sleep -Milliseconds 900
+                $probe = Shot 4 'ask-probe-notes'
+                Note ("抽屉页签探针：点「批注」后 " + $(if (Has $probe @('写批注', '导出笔记')) { '内容换成了批注面板（点击通到抽屉里）' } else { '内容没换（抽屉里的点击也不生效）' }))
+                $tabAsk = Find-Text $probe '提问'
+                if ($tabAsk) { Click-At ([int]$tabAsk.X) ([int]$tabAsk.Y); Start-Sleep -Milliseconds 900; $null = Shot 4 'ask-probe-back' }
+            } else { Note '抽屉页签探针：没读到「批注」页签，跳过' }
+            throw '追问框点了四次都没拿到焦点，粘不进字（见 4-ask-click*.png / 4-ask-typed*.png / 4-ask-probe-*.png）'
+        }
+        # 抽屉正文区比一屏矮：新加的「问：…」和它的回答追加在下面，靠滚动才能看全，
+        # 一格一格往下找，找到标题就停；走到第 9 格还没出现说明可能滚过头，再往回找一轮。
+        # 见过「正在整理…」以后回答只会在下面追加，往回滚等于把新内容推出视野，所以那时只往下。
+        $i = 0; $step = 0; $sawLoading = $false; $labelSeen = $false
+        $deadline = (Get-Date).AddSeconds(180)
         while ((Get-Date) -lt $deadline -and -not $cite) {
-            Start-Sleep -Seconds 4; $i++
+            Start-Sleep -Seconds 3; $i++
             $lines = Shot 4 "ask-wait$i"
             $allow = Has $lines @('允许并讲解')
             if ($allow) { Click-At $allow.X $allow.Y; continue }
@@ -968,622 +1164,386 @@ try {
             if ($serviceError) { throw "服务回了拒绝：$serviceError" }
             $bad = $lines | Where-Object { $_.Text -match '无法回答|不能回答|尚未接通|暂时读不到回答|选中追问格式不对|无法确认|无氵去确认' } | Select-Object -First 1
             if ($bad) { throw "提问被拒：$($bad.Text)" }
-            if (Has $lines @('思考')) { $sawLoading = $true }
+            if (Has $lines @('正在整理')) { $sawLoading = $true }
             $label = Find-AskTurnLabel $lines $Marker
-            if ($label) { $turn = $label }
-            if ($turn) {
-                # 自己这一问的「出处」在它的标题下面；标题滚出视野以后，视野里的出处也只会是它的。
+            if ($label) { $turn = $label; $labelSeen = $true }
+            # 标题和「出处」几乎不可能同框：回答比抽屉高，标题在顶上时出处还在折叠线以下，
+            # 出处滚进视野时标题已经出去了。所以标题只用来确认「这一问真的追加进了对话」，
+            # 见到一次就够，之后一直往下滚——滚过标题以后视野里的出处必然属于这一问。
+            if ($labelSeen) {
                 $tb = if ($label) { Get-LineBox $label } else { $null }
-                $cite = $lines | Where-Object { $_.Text -match '出处.*第\s*\d+\s*页' -and (-not $tb -or (Get-LineBox $_).Y -gt $tb.Y) } | Select-Object -Last 1
-                if (-not $cite) { Scroll-At 600 $scrollY -2; Start-Sleep -Milliseconds 500 }
+                $cite = $lines | Where-Object {
+                    $_.Text -match '出处.*第\s*\d+\s*页' -and (-not $tb -or (Get-LineBox $_).Y -gt $tb.Y) -and
+                    # 标题不在这一帧时：还没滚过一步，视野里挂着的可能是上一轮那份出处，不算。
+                    ($tb -or $step -gt 0)
+                } | Select-Object -Last 1
+                if (-not $cite) { Scroll-At $scrollX $scrollY -2; Start-Sleep -Milliseconds 600; $step++ }
+            } elseif ($turn -eq 'sent') {
+                # 兜底：标题一直认不出来（OCR 把「问：」读没了），但字确实清空了。只认「新出现的那份出处」，
+                # 和发出前那份不一样才算，不然就是上一轮的回答。
+                $hit = $lines | Where-Object { $_.Text -match '出处.*第\s*\d+\s*页' -and (-not $preCite -or $_.Text -ne $preCite.Text) } | Select-Object -Last 1
+                if ($hit) { $cite = $hit } else { Scroll-At $scrollX $scrollY -2; Start-Sleep -Milliseconds 600; $step++ }
             } else {
                 $dir = Get-AskScrollDir $sawLoading $step
-                Scroll-At 600 $scrollY $dir; Start-Sleep -Milliseconds 500; $step++
+                Scroll-At $scrollX $scrollY $dir; Start-Sleep -Milliseconds 500; $step++
             }
         }
-        if (-not $turn) { throw "问题发出去了，但 150 秒内没出现「问：<自己这一问>」（加载态 $sawLoading）" }
-        if (-not $cite) { throw '提问有了回答，但没等到它自己的「出处 · 第 N 页」' }
+        if (-not $cite) { throw "问题发出去了，但 180 秒内没等到它自己的「出处 · 第 N 页」（标题 $labelSeen，加载态 $sawLoading）" }
         Note "提问的回答出处：$($cite.Text)"
     } catch { if ("$_" -like 'DESKTOP_BUSY*' -or "$_" -like 'WIN_DRIVE_FOREGROUND_CONTENTION*') { throw }; $askWhy = "$_" }
 
-    # ⑦ 依赖选段卡：点「出处」切回原页（按钮变回「看文字」），再点「收起」露出底栏核对页码，最后切回文字视图。
-    # 这三下在四路交锁时都可能落空（点了但窗口没处理），所以每下都认状态，没变就重定位再点；
+    # ⑦ 点回答里的「出处」：2.0 在窄窗是半屏底部抽屉，点出处只换页（只有窄浮层模式才顺手收起抽屉），
+    # 所以按出处那一行自己写的页码核对跳页，再点顶栏「收起」把抽屉关掉，确认关掉后还停在同一页。
+    # 这几下在四路交锁时都可能落空（点了但窗口没处理），所以每下都认状态；
     # 失败不在这里 throw——后面几步不依赖它，留到最后统一报，免得少记几步通过。
+    if (-not $scrollX) { $lr = Get-Rect; $scrollX = [int](($lr.R - $lr.L) / 2); $scrollY = [int](($lr.B - $lr.T) * 0.72) }
     $cardOk = $null
-    $o = $null
-    foreach ($k in 0..8) {
-        if ($k -gt 0) {
-            $closeCard = Find-Text $script:Last '收起'
-            $lim = Get-Rect; $y = if ($closeCard) { [Math]::Min($closeCard.Y + 150, $lim.B - $lim.T - 30) } else { [int](($lim.B - $lim.T) * 0.8) }
-            Scroll-At 600 $y $(if ($k -le 4) { -3 } else { 3 }); Start-Sleep -Milliseconds 700
-        }
+    $cite = $null
+    foreach ($k in 0..6) {
+        if ($k -gt 0) { Scroll-At $scrollX $scrollY -3; Start-Sleep -Milliseconds 700 }
         $o = Await-Text 7 'cite' @('出处') 1
-        if ($o) { break }
+        if ($o) { $cite = (@(Find-All $script:Last '出处') | Select-Object -Last 1); break }
     }
-    if (-not $o) { $cardOk = '选段卡里没有「出处」链接（见 4-result*.png）' }
+    if (-not $cite) { $cardOk = '伴读抽屉里找不到「出处」链接（见 4-result*.png）' }
     else {
-        # 切回原页的标志是右侧按钮从「看原页」变成「看文字」。只有还停在「看原页」才重点同一个链接；
-        # 认不出当前视图（两个都没有）就停手，别把点击打到已经变过的界面上。
-        $citeAt = $o
-        $clicked = Click-Confirm 7 { param($l) if (Find-Text $l '看原页') { $citeAt } } { param($l) [bool](Find-Text $l '看文字') }
-        $back = if ($clicked) { Has $script:Last @('看文字') } else { $null }
-        if (-not $back) { $cardOk = '点了出处没有切回原页视图（见 7-card.png）' }
+        $citePage = [regex]::Match($cite.Text, '第\s*(\d+)\s*页').Groups[1].Value
+        # 四路交锁时这一下也会被吞：点完底栏还停在第 33 页（11-21 04:46 L3 就这样）。
+        # #577 对这同一颗「出处」的处理是——认出点的还是那颗出处才重点，最多 3 次；
+        # 页号一对上就不再点（再点会把跳转切回去）。这里沿用，落点每次按新一帧重定位。
+        $c7 = $null
+        foreach ($try in 1..3) {
+            $pressed = Click-At $cite.X $cite.Y -BeforePress {
+                [bool](Find-Text (Shot 7 'cite-guard') '出处')
+            }
+            if (-not $pressed) { Note "第 $try 次按下前那一帧已经没有「出处」了，不再点" }
+            Start-Sleep -Seconds 2
+            Hover $midX $hoverY; Start-Sleep -Milliseconds 800
+            $null = Shot 7 $(if ($try -eq 1) { 'cite' } else { "cite$try" })
+            $c7 = Get-HudCounter $script:LastPng
+            if (-not $pressed -or -not $c7 -or -not $citePage -or "$($c7.Cur)" -eq "$citePage") { break }
+            $again = @(Find-All $script:Last '出处') | Select-Object -Last 1
+            if (-not $again) { break }
+            Note "第 $try 次点「出处」后停在第 $($c7.Cur) 页，出处写的是第 $citePage 页，重定位再点"
+            $cite = $again
+        }
+        if (-not $c7) { $cardOk = '点了出处底栏读不到页号（见 7-cite.png）' }
+        elseif ($citePage -and "$($c7.Cur)" -ne "$citePage") { $cardOk = "点了出处没跳到第 $citePage 页（现在第 $($c7.Cur) 页，见 7-cite.png）" }
         else {
-            # 收起选段卡底栏才露出来：L2 那次鼠标确实落在按钮正中（hover 底色还在）卡片却没动，
-            # 所以以「收起」消失为准，没消失就再点。
-            $closed = Click-Confirm 7 { param($l) Find-Text $l '收起' } { param($l) -not (Find-Text $l '收起') } -tries 4 -waitSec 4
-            $pg = $null
-            for ($try = 0; $try -lt 4 -and $pg -ne "$physPage"; $try++) {
-                if ($try -gt 0) { Start-Sleep -Milliseconds 500 }
-                $pg = Page-NearNav (Shot 7 'card')
+            # 抽屉半屏高、盖着正文：把它关掉再看页码没被带走。三种关法按把握从大到小试，每次点完都认状态：
+            #   a) 顶栏那颗「收起」= immersive-companion-toggle（ImmersiveReaderChrome 252-266 行，companionOpen 时
+            #      窄窗写「收起」、宽窗写「收起伴读」）。OCR 认不出这两个字（21 日六帧全缺），但顶栏那一行
+            #      「原页 文字 查找 Aa 收起 ⋯」的 y 认得出来，按右沿内固定偏移点：752 宽窗口里字心在 x=648。
+            #   b) 抽屉头最右的「×」（testTag companion-close，头行 padding 12dp、按钮 contentPadding 6dp），
+            #      752 宽窗口里字心实测在 x=702、跟页签同一行。
+            #   c) 阅读器的 Key.L 是伴读开关（TextbookReader 的 onPreviewKeyEvent）。按下前先切到「讲解」页签：
+            #      页签一变 LaunchedEffect(companionOpen, companionTab) 就把 askInputFocused 清掉，L 才进得了阅读器，
+            #      否则会敲进问句输入框。Esc 不行——2.0 的 Esc 被外壳接走（TextbookWorkspace 直接 returnFromReader）。
+            $closed = $false
+            foreach ($try in 1..6) {
+                Hover $midX $topY; Start-Sleep -Milliseconds 600
+                $null = Shot 7 "close$try"
+                $lines7 = $script:Last
+                $drawer7 = Has $lines7 @('提问', '批注', '讲解')
+                $bar = Has $lines7 @('原页', '文字', '查找', 'Aa')
+                if (-not $drawer7 -and -not (Find-Text $lines7 '引文')) { $closed = $true; break }
+                if ($try -le 2 -and $bar) {
+                    $tx = [int]($winW - $(if ($try -eq 1) { 104 } else { 112 })); $ty = [int](@($bar)[0].Y)
+                    Note "第 $try 次：顶栏同一行右侧 ($tx,$ty) 点「收起」"
+                    Hover $tx $ty; Start-Sleep -Milliseconds 400
+                    $null = Click-At $tx $ty
+                } elseif ($try -le 4 -and $drawer7) {
+                    $dy = @($drawer7)[0]
+                    $fx = [int]($winW - 48); $fy = [int]$dy.Y
+                    Note "第 $try 次：抽屉头同一行右侧 ($fx,$fy) 点「×」"
+                    Hover $fx $fy; Start-Sleep -Milliseconds 400
+                    $null = Click-At $fx $fy
+                } else {
+                    $tab7 = Find-Text $lines7 '讲解'
+                    if ($tab7) { $null = Click-At $tab7.X $tab7.Y; Start-Sleep -Milliseconds 800 }
+                    # 切页签已经让输入框失焦；再按 L 就是阅读器自己的伴读开关。
+                    Note "第 $try 次：切到「讲解」页签失焦后按 L 收伴读"
+                    Send-Keys 'l'
+                }
+                Start-Sleep -Seconds 1
+                $null = Shot 7 "closed$try"
+                $after = $script:Last
+                if (-not (Has $after @('提问', '批注')) -and -not (Find-Text $after '引文')) { $closed = $true; break }
+                Note "第 $try 次点完抽屉没收起，换落点再点"
             }
-            if ($pg -ne "$physPage") {
-                $cardOk = if ($closed) { "点了出处切回原页但页码不是 $physPage（现在 $pg，见 7-card.png）" } else { '点了「收起」选段卡没收起，底栏页码读不到（见 7-card.png）' }
+            if (-not $closed) { $cardOk = '顶栏「收起」、抽屉头的「×」和键盘 L 都没把伴读抽屉关掉（见 7-close*.png / 7-closed*.png）' }
+            else {
+                $pg = $null
+                for ($try = 0; $try -lt 4 -and -not $pg; $try++) {
+                    Start-Sleep -Milliseconds 500
+                    Hover $midX $hoverY; Start-Sleep -Milliseconds 500
+                    $null = Shot 7 'card'
+                    $p = Get-HudCounter $script:LastPng
+                    if ($p) { $pg = "$($p.Cur)" }
+                }
+                if ($citePage -and $pg -ne "$citePage") { $cardOk = "收起伴读后页码不是出处写的第 $citePage 页（现在 $pg，见 7-card.png）" }
             }
-            # 切回文字视图：按钮这时叫「看文字」，切过去以后变成「看原页」，同样认状态。
-            $backNow = Has $script:Last @('看文字')
-            if (-not $backNow) { $backNow = $back }
-            $okBack = Click-Confirm 7 { param($l) $b = Find-Text $l '看文字'; if ($b) { $b } else { $backNow } } { param($l) [bool](Find-Text $l '看原页') } -tries 3
-            if (-not $okBack) { $cardOk = '从出处回跳后切不回文字视图' }
         }
     }
-    try { $cc = Has $script:Last @('收起'); if ($cc) { Click-At $cc.X $cc.Y; Start-Sleep -Milliseconds 400 } } catch { }
     if ($askWhy) {
         try { Fail 4 "选段讲解可用，但实际提问失败：$askWhy" } catch { if ("$_" -ne 'STEP_FAILED') { throw }; if (-not $KeepGoing) { throw 'STEP_FAILED' } }
     } else { Pass 4 '拖选一段点「讲讲」得到带出处的讲解，也能输入问题得到带出处的回答' }
 
-    # ⑤ 边看边学出讲解
-    # 客户端对「已同意」的书，进入或切换整节就会自动发讲解请求（BookLessonExplanation）。④ 已经替这本书同意过，
-    # 所以先撤掉本轮测试书架里这本书的同意：默认首节和选错的节只显示同意卡，不发请求；核准落点页之后才由驱动点同意，发一次。
-    try { Clear-ExplainConsent $lib } catch { Fail 5 "没能撤掉这本测试书的同意（$_），不进默认节，避免自动发送" }
+    # ⑤ 边看边学出讲解：2.0 没有单独的「学习」页，本节讲解在伴读抽屉的「讲解」页签里——
+    # 顶上一排模块（本章要点 / 读前自测 / 推导看图模板 / 选做练习 / 原书章末习题三级提示），
+    # 默认「本章要点」按节给出核心问题与要点，每条要点后面挂「原文第 N 页」，点了跳回那一页。
+    # #574 之后旧的「讲讲这一节」按钮随 BookExplainPanel 一起下线（explainingSelection 不再被赋值），
+    # 所以第 5 步改认单书伴读这套：本节的要点真从书里整理出来了，且要点能定位回原文页。
+    # ④ 已经在这本书上点过「允许并讲解」，这里不撤同意、也不再走目录选节。
     $five = $null
     try {
-        # 第 4 步从「看原页」切回「看文字」时，客户端会在后台把视图状态写进 library.sqlite。四路同写会
-        # SQLITE_BUSY：工具栏下面挂一条「阅读视图暂未保存。切换视图后会再试一次。」、顶栏进度条亮着、工具栏全灰
-        # （11-21 04:15 L1/L2 有这条提示，L3/L4 只剩进度条）。它不是 toast——不清屏也不自己重试，干等 20 秒
-        # 永远等不到；11-21 06:53 L4 就在提示条下把 8 次「开始学」全点空了（提示条盖着，点了不算数）。
-        # 产品写明的重试路径就是那句提示本身：再切一次视图就会重存（TextbookReader.kt:711 先清错再写）。
-        # 所以看到提示就切一次视图；切完确认按钮真的翻面、提示清掉就继续（停在哪个视图都不影响第 5 步入口），
-        # 连切两次还挂着就带产品原话报错，不再空点。
-        # 写库重试期间画面上还没有这条提示，等它真的失败才挂出来：11-21 07:21 L1/L4 就是在入口前那一帧
-        # 什么都没查到、等点到第 2 下、已经进了 Click-Until 才弹出来。所以同一个重切预算（$vsState）
-        # 也交给入口三下的 -StallAction，点不动时当场查一次。
-        $vsState = @{ Tries = 0 }
-        $vsStop = (Get-Date).AddSeconds(45)
-        while ($true) {
-            $vsAct = Resolve-ViewSaveErrorAction (Shot 5 "viewsave$($vsState.Tries)") $vsState.Tries
-            if ($vsAct.Action -eq 'none') { break }
-            if ($vsAct.Action -eq 'fail') { Fail 5 "阅读视图状态没存上（$($vsAct.Reason)），第 5 步入口点不动" }
-            if ((Get-Date) -ge $vsStop) { Fail 5 "阅读视图状态一直没存上（$($vsAct.Reason)），第 5 步入口点不动" }
-            $vsState.Tries++
-            Note "步骤5 入口前视图状态没存上（$($vsAct.Reason)），按产品提示切一次视图重存"
-            $null = Click-At $vsAct.Button.X $vsAct.Button.Y
-            if (-not (Await-Text 5 "viewsave-flip$($vsState.Tries)" @($vsAct.Flip) 12)) {
-                Fail 5 "点了切视图，但按钮没变成「$($vsAct.Flip)」，没法确认这一下切过去了"
-            }
-        }
-        $vsStall = {
-            param($l)
-            $act = Resolve-ViewSaveErrorAction $l $vsState.Tries
-            if ($act.Action -eq 'none') { return $false }
-            if ($act.Action -eq 'fail') { Fail 5 "阅读视图状态没存上（$($act.Reason)），第 5 步入口点不动" }
-            $vsState.Tries++
-            Note "步骤5 入口点不动，这时才挂出视图未保存提示（$($act.Reason)），按产品提示切一次视图重存"
-            $null = Click-At $act.Button.X $act.Button.Y
-            if (-not (Await-Text 5 "viewsave-stall$($vsState.Tries)" @($act.Flip) 12)) {
-                Fail 5 "点了切视图，但按钮没变成「$($act.Flip)」，没法确认这一下切过去了"
-            }
-            return $true
-        }
-        # 入口三下都要看到状态才走下一句：弹窗开了（「这次怎么读」）、底按钮换成「开始边看边学」、弹窗关掉。
-        # 弹窗标题「开始学这本教材」里也有「开始学」，所以认按钮时跳过这一行，别把标题当按钮点。
-        # 写库没完时按钮是灰的、点了不算数，所以每下给 8 次机会、每次隔 2 秒。
-        # 底栏按钮进提交态后会被 OCR 读成「始边边下」「万始边边」（11-21 06:2x L2/L3/L4 都是），
-        # 所以第 2、3 下认它一律走 Find-Step5Confirm（整词 → 截断 → 「始边」残片 → 暗字放大）；
-        # 第 3 下弹窗还开着时，认不出按钮也不再当场 break，留 12 秒等文字恢复或弹窗自己关。
-        Click-Until 5 { param($l) foreach ($line in $l) { if ($line.Text -match '这本教材') { continue }; $m = Find-Text @($line) '开始学'; if ($m) { return $m } } } { param($l) [bool](Find-Text $l '这次怎么读') } '点了「开始学」但开始学的弹窗一直没开' -tries 8 -pauseMs 2000 -StallAction $vsStall
-        Click-Until 5 { param($l) Find-DialogPath $l '边看边学' } { param($l) [bool](Find-Step5Confirm $l $script:LastPng) } '点了「边看边学」但底按钮没换成「开始边看边学」' -tries 8 -pauseMs 2000 -StallAction $vsStall
-        Click-Until 5 { param($l) Find-Step5Confirm $l $script:LastPng } { param($l) -not (Find-Text $l '这次怎么读') } '点了「开始边看边学」但弹窗没关' -tries 8 -pauseMs 2000 -stuckSec 12 -StallAction $vsStall
-        # 选中经授权的整节：目录 → 滚到序号 → 点 → 收起；核对「本节原文 · 第 N 页」就是授权页，才允许发请求
-        Start-Sleep -Seconds 4
-        Click-Label 5 @('目录') '找不到「目录」'; Start-Sleep -Seconds 3
-        $entry = $null
-        # 一屏只放得下八行左右，滚一格约 1.2 行：固定用 -8 时两帧之间能跨过十行，目标会从中间漏掉。
-        # 离得远时大步赶路，接近后小步走；冲过头就按反方向退回几行。
-        $sp = Scroll-Point 0.25 0.6
-        for ($k = 1; $k -le 120; $k++) {
-            $tocLines = Shot 5 "toc$k"
-            foreach ($tl in $tocLines) { if (($tl.Text -replace '\s', '') -match ("^$LessonNumber" + '[\.．。,，、]')) { $entry = Find-Text @($tl) "$LessonNumber"; break } }
-            if ($entry) { break }
-            $nums = @(foreach ($tl in $tocLines) { if (($tl.Text -replace '\s', '') -match '^(\d{1,4})[\.．。,，、]') { [int]$Matches[1] } })
-            $maxN = if ($nums.Count) { ($nums | Measure-Object -Maximum).Maximum } else { 0 }
-            $minN = if ($nums.Count) { ($nums | Measure-Object -Minimum).Minimum } else { 0 }
-            $notches = if ($minN -gt $LessonNumber) { 3 } elseif ($maxN -lt ($LessonNumber - 24)) { -8 } else { -3 }
-            Scroll-At $sp[0] $sp[1] $notches; Start-Sleep -Milliseconds 500
-        }
-        if (-not $entry) { Fail 5 "目录里滚了 120 次也没找到第 $LessonNumber 条，没有发请求" }
-        Click-At $entry.X $entry.Y; Start-Sleep -Seconds 3
-        # 点条目后那一下「收起目录」会被切节的加载吞掉（11-21 01:51 L1 就是这样：抽屉一直盖在右栏上，
-        # 「本节原文 · 第 N 页」被挡住连 OCR 都读不到）。所以这里一直点到这一帧里真的看见标签或抽屉不在为止。
-        $shut = (Get-Date).AddSeconds(20)
-        while ((Get-Date) -lt $shut) {
-            $sectionLines = Shot 5 'section'
-            $shutBtn = Has $sectionLines @('收起目录')
-            # 抽屉还开着时右栏被盖住，抽屉头里的「本节原文」不算数：先真的收起目录，再读右栏的标签。
-            if (-not $shutBtn -and ($sectionLines | Where-Object { $_.Text -match '本节原文' })) { break }
-            if (-not $shutBtn) { Start-Sleep -Milliseconds 800; continue }
-            Click-At $shutBtn.X $shutBtn.Y; Start-Sleep -Seconds 1
-        }
-        $label = $sectionLines | Where-Object { $_.Text -match '本节原文' } | Select-Object -First 1
-        $labelPage = if ($label) { [regex]::Match($label.Text, '第\s*(\d+)\s*页').Groups[1].Value } else { '' }
-        if (-not $labelPage) { Fail 5 '选中节后界面没有「本节原文 · 第 N 页」标签，没有发请求' }
-        if ([int]$labelPage -ne $LessonPage) { Fail 5 "选中的第 $LessonNumber 条落在第 $labelPage 页，不是授权页第 $LessonPage 页，没有发请求（见 5-section.png）" }
-        $deadline = (Get-Date).AddSeconds(150); $res = $null; $sawBody = $false
-        $prevFrame = ''; $still = 0; $scrolls = 0; $retriedRefusal = $false
-        while ((Get-Date) -lt $deadline -and -not $res) {
-            Start-Sleep -Seconds 5; $lines = Shot 5 'learn'
-            $allow = Has $lines @('允许并讲解')
-            if ($allow) { Click-At $allow.X $allow.Y; continue }
-            $ra = Resolve-LectureRefusalAction $lines $retriedRefusal
-            if ($ra.Action -eq 'retry') {
-                Note "步骤5 讲解被拒（$($ra.Reason)），按「再试一次」重放一次"
-                $retriedRefusal = $true
-                Click-At $ra.Button.X $ra.Button.Y
-                continue
-            }
-            if ($ra.Action -eq 'fail') { $res = "拒绝：$($ra.Reason)"; continue }
-            # 「本节原文」不是讲解的出处。先看正文有没有出来（这一屏的「讲解」小标题常被 OCR 漏掉，
-            # 所以按长句行数判），正文出来以后再找它自己的带页码出处。
-            $source = $lines | Where-Object { $_.Text -match '出处.*第\s*\d+\s*页' } | Select-Object -First 1
-            $sourceBox = if ($source) { Find-Text @($source) $source.Text } else { $null }
-            $body = @($lines | Where-Object {
-                ($_.Text -replace '\s', '').Length -ge 20 -and
-                    $_.Text -notmatch '正在读取|正在结合|允许并讲解|发送原文|本节原文|先理解讲解|LearningCoach|Coach目录'
-            })
-            if ($body.Count -ge 3) { $sawBody = $true }
-            if ($sawBody -and $sourceBox) { $res = 'ok' }
-            elseif ($sawBody) {
-                # 出处行被正文挤到折叠线以下：往下滚，把它滚进视野再判。
-                # 但滚完必须核对这一帧真的变了。11-21 02:21 四路并行里同一点同方向的滚轮连发 11 次、
-                # 学习页一次没动（见 5-learn.png），150 秒全烧在这上面，最后只会报超时，看不出是驱动没滚动。
-                # 所以给次数上限：前四次在前半页中心滚，还不动就换低一点的落点，七次仍不动直接判失败。
-                $frame = (@($lines | ForEach-Object { $_.Text }) -join '|')
-                if ($frame -eq $prevFrame) { $still++ } else { $still = 0 }
-                $prevFrame = $frame
-                $scrolls++
-                if ($scrolls -gt 7) {
-                    Fail 5 "讲解正文已出，但滚轮滚了 $scrolls 次、连续 $still 帧画面没变，出处行一直在折叠线以下（见 5-learn.png）"
-                }
-                $sp = if ($still -ge 3) { Scroll-Point 0.45 0.62 } else { Scroll-Point 0.6 0.6 }
-                Scroll-At $sp[0] $sp[1] -3
-            }
-        }
-        if ($res -eq 'ok') {
-            $sourcePage = [regex]::Match($source.Text, '第\s*(\d+)\s*页').Groups[1].Value
-            if ([int]$sourcePage -ne $LessonPage) { Fail 5 "讲解自己的出处是第 $sourcePage 页，不是本节页第 $LessonPage 页" }
-            Click-At $sourceBox.X $sourceBox.Y
-            $deadline = (Get-Date).AddSeconds(30)
-            $verified = $false
-            $switchTries = 0
-            $lastSwitchAt = [datetime]::MinValue
-            $problem = '出处没有回到标注页的原文（见 5-source.png）'
-            do {
-                $lines = Shot 5 'source'
-                $returned = Find-Text $lines '返回学习'
-                $elapsed = if ($switchTries -gt 0) { ((Get-Date) - $lastSwitchAt).TotalSeconds } else { 0.0 }
-                $svAct = Resolve-SourceOriginalViewAction $lines $switchTries $elapsed
-                if ($svAct.Action -eq 'refusal') {
-                    $problem = '出处页打开了，但原句未能核对（见 5-source.png）'
-                    break
-                } elseif ($svAct.Action -eq 'click_original') {
-                    $pressed = Click-At $svAct.Button.X $svAct.Button.Y -BeforePress {
-                        $guard = Shot 5 'source-switch-guard'
-                        [bool](Find-Text $guard '看原页') -and -not (Find-Text $guard '看文字')
-                    }
-                    if ($pressed) {
-                        $switchTries++
-                        $lastSwitchAt = Get-Date
-                    }
-                } elseif ($svAct.Action -eq 'check_page' -and (Get-OriginalPageNumber $lines (Join-Path $OutDir '5-source.png')) -eq $sourcePage) {
-                    $verified = $true
-                    break
-                }
+        $lr = Get-Rect
+        $winW = [int]($lr.R - $lr.L); $winH = [int]($lr.B - $lr.T)
+        $midX = [int](($lr.L + $lr.R) / 2); $midY = [int](($lr.T + $lr.B) / 2)
+        $hoverY = [int]($winH - 10)
+        $scrollX = $midX; $scrollY = [int]($winH * 0.72)
+        # 抽屉页签：讲解 / 提问 / 批注，排在抽屉头最左边。④ 点「出处」跳到原文页时顶栏会隐去，
+        # 帧里可能一条页签都没有：先沿顶边把顶栏叫出来，再点顶栏右边的「伴读」把抽屉叫回来。
+        $lines = Show-ReaderTop 5 'top'
+        if (-not $lines) { $lines = Shot 5 'explain-tab0' }
+        $tab = Has $lines @('提问', '批注', '讲解')
+        $opened = 0
+        while (-not $tab -and $opened -lt 3) {
+            $open = Find-Text $lines '伴读'
+            if ($open) {
+                Note '步骤5 伴读抽屉是收起的，先点顶栏「伴读」把它打开'
+                Hover $open.X $open.Y; Start-Sleep -Milliseconds 400
+                $null = Click-At $open.X $open.Y
                 Start-Sleep -Seconds 1
-            } while ((Get-Date) -lt $deadline)
-            if ($returned -and ($verified -or $KeepGoing)) {
-                $null = Click-At $returned.X $returned.Y -BeforePress {
-                    $guard = Shot 5 'source-leave-guard'
-                    [bool](Find-Text $guard '返回学习') -and -not (Find-Text $guard '返回书架')
+                $lines = Shot 5 "explain-tab$opened"
+                $tab = Has $lines @('提问', '批注', '讲解')
+            } else { Start-Sleep -Milliseconds 800; $lines = Shot 5 "explain-tab$opened" }
+            $opened++
+        }
+        if (-not $tab) { Fail 5 '点开顶栏「伴读」后抽屉头里仍读不到「讲解 / 提问 / 批注」页签（见 5-explain-tab*.png）' }
+        # 抽屉会记住上次停的页签（第 7 步在「提问」上留过草稿），所以必须显式点回「讲解」。
+        # 「提问」这颗字比「讲解」稳，拿它当锚：三个页签等宽、左边距 12dp，往左退 30px 落在「讲解」中间；
+        # 「讲解」自己读出来了就按它的框点。
+        $tabY = [int]$tab.Y
+        $ex = Find-Text $lines '讲解'
+        if ($ex -and [Math]::Abs($ex.Y - $tabY) -le 24) { $tabX = [int]$ex.X }
+        else { $tabX = [int]$tab.X1 - 30 }
+        Click-At $tabX $tabY; Start-Sleep -Seconds 1
+        $lines = Shot 5 'explain-tab-on'
+        # 提问页的输入框还在，说明这一下没切过去：按同一条页签行再往左挪几像素补一次。
+        if (Has $lines @('问这句的意思')) {
+            Note '步骤5 第一次点「讲解」页签还停在「提问」，往左补点一次'
+            Click-At ([Math]::Max(16, $tabX - 10)) $tabY; Start-Sleep -Seconds 1
+            $lines = Shot 5 'explain-tab-on2'
+        }
+        if (Has $lines @('问这句的意思')) { Fail 5 '点了抽屉里的「讲解」页签，内容还停在「提问」（见 5-explain-tab-on*.png）' }
+        Note '步骤5 已切到伴读抽屉的「讲解」页签'
+        # 讲解页的内容由「本章伴读包」驱动，六种状态并存，边等边认：
+        #   就绪：标题「本章要点 · <本章>」+ 若干「N. 要点」+ 每条后面「原文第 N 页」锚点；
+        #   空：本章暂无提取要点；未归类：当前页暂未归入正文小节；未登录：登录后可使用本章伴读；
+        #   关闭：伴读整理已在设置中关闭；出错：卡上那句说明。2.0 的出错文案有两层：
+        #   服务回了 non-2xx 是「本章伴读暂时连不上」，传输层没通（ExplainTrouble.UNREACHABLE）是
+        #   「讲解服务暂时连不上，读书和做题照常。」，旁边带「重试」。两种都算终态，别再干等满。
+        # 出错时像人一样点一次「重试」（最多两次），服务补上就直接往下走；补不上就把卡上那句话原样带出来。
+        # 620 页的书按节整理要点要时间，最多等 180 秒；认出任何一种终态就往下走，不干等满。
+        $why5re = '本章暂无提取要点|当前页暂未归入正文小节|登录后可使用本章伴读|伴读整理已在设置中关闭|去连接服务|暂时连不上|连不上学习服务|没顾上|这次没讲成'
+        $transient5 = '暂时连不上|连不上学习服务|没顾上|这次没讲成'
+        $deadline = (Get-Date).AddSeconds(180); $kp = $null; $why5 = $null; $waited = 0; $retries5 = 0
+        while ((Get-Date) -lt $deadline -and -not $kp -and -not $why5) {
+            Start-Sleep -Seconds 2; $waited++
+            $lines = Shot 5 "explain-wait$waited"
+            # 先认终态：出错时空卡上面照样顶着「本章要点 · <本章>」这个标题，先看标题会把失败当成成功。
+            $why5 = $lines | Where-Object { ($_.Text -replace '\s', '') -match $why5re } | Select-Object -First 1
+            if ($why5 -and ($why5.Text -replace '\s', '') -match $transient5 -and $retries5 -lt 2) {
+                $retry5 = Has $lines @('重试')
+                if ($retry5) {
+                    $retries5++
+                    Note "步骤5 伴读包没拿到（$($why5.Text)），点卡上的「重试」第 $retries5 次"
+                    Hover $retry5.X $retry5.Y; Start-Sleep -Milliseconds 300
+                    Click-At $retry5.X $retry5.Y; Start-Sleep -Seconds 2
+                    $why5 = $null; continue
                 }
             }
-            if (-not $verified) { Fail 5 $problem }
-            Pass 5 "授权节（目录第 $LessonNumber 条，第 $LessonPage 页）出了讲解正文和自己的第 $sourcePage 页出处，点出处回到对应原文页"
-        } elseif ($res) { Fail 5 "边看边学的讲解没出来，界面说「$($res.Substring(3))」" } else { Fail 5 '150 秒内没有同时看到讲解正文和带页码的出处（见 5-learn.png）' }
+            if ($why5) { break }
+            $kp = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^本章要点' } | Select-Object -First 1
+            if (-not $kp) { $kp = $lines | Where-Object { $_.Text -match '原文第\s*\d+\s*页' } | Select-Object -First 1 }
+            if ($kp) { break }
+            # 伴读包还没回来时页签行会被加载态顶下去：顺手确认没被挤回「提问」页。
+            if (Has $lines @('问这句的意思')) {
+                Note '步骤5 等本章要点时被切回了「提问」页签，重新点「讲解」'
+                Click-At $tabX $tabY; Start-Sleep -Milliseconds 800
+            }
+        }
+        if (-not $kp) {
+            if ($why5) { Fail 5 "伴读「讲解」页签没整理出本节要点：$($why5.Text)（见 5-explain-wait*.png）" }
+            Fail 5 '切到「讲解」页签后 180 秒内没等到本章要点（见 5-explain-wait*.png）'
+        }
+        # 要点标题和锚点不一定同屏：标题认到了还看不到「原文第 N 页」，就往下滚抽屉体把它滚进视野；
+        # 滚了四帧画面不动就停手，别把 40 秒全花在推同一屏上。
+        $chip = $null; $stillB = 0; $prevB = ''
+        $deadline = (Get-Date).AddSeconds(40)
+        while ((Get-Date) -lt $deadline -and -not $chip) {
+            $lines = $script:Last
+            $chip = $lines | Where-Object { $_.Text -match '原文第\s*\d+\s*页' } | Select-Object -First 1
+            if ($chip) { break }
+            $frame = (@($lines | ForEach-Object { $_.Text }) -join '|')
+            if ($frame -eq $prevB) { $stillB++ } else { $stillB = 0 }
+            $prevB = $frame
+            if ($stillB -ge 4) { break }
+            Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.78)) -3
+            Start-Sleep -Milliseconds 700
+            $null = Shot 5 'explain-full'
+        }
+        if (-not $chip) { Fail 5 '本章要点出来了，但要点后面读不到「原文第 N 页」锚点（见 5-explain-wait*.png / 5-explain-full.png）' }
+        $chipPage = [regex]::Match($chip.Text, '第\s*(\d+)\s*页').Groups[1].Value
+        Note "步骤5 本章要点的原文锚点：$($chip.Text)"
+        $bx = Get-LineBox $chip
+        $bxc = [int](($bx.X1 + $bx.X2) / 2); $byc = [int]$bx.Y
+        Hover $bxc $byc; Start-Sleep -Milliseconds 500
+        $null = Click-At $bxc $byc; Start-Sleep -Seconds 2
+        # 窄窗（winbox 752×552）是底部半屏抽屉：点锚点只跳页、不自动收抽屉，堆在底缘的页号条压在抽屉上沿之上，
+        # 所以抽屉开着就能核对页码；宽屏浮层会自动收起抽屉，页号同样在底缘。
+        $pg = $null
+        foreach ($k in 1..10) {
+            Start-Sleep -Milliseconds 700
+            Hover $midX $hoverY; Start-Sleep -Milliseconds 400
+            $null = Shot 5 "explain-cite$k"
+            $p = Get-HudCounter $script:LastPng
+            if (-not $p) { $p = Get-PageCounter $script:Last $script:LastPng }
+            if ($p) { $pg = "$($p.Cur)"; if ($pg -eq "$chipPage") { break } }
+        }
+        if ("$pg" -ne "$chipPage") { Fail 5 "点了要点后面的「原文第 $chipPage 页」锚点，页码没跳过去（现在 $pg，见 5-explain-cite*.png）" }
+        Pass 5 "伴读抽屉「讲解」页签整理出本章要点，要点后面挂着「原文第 $chipPage 页」锚点，点了能跳回原文页"
     } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $five = 'failed' }
     if ($five -and -not $KeepGoing) { throw 'STEP_FAILED' }
     if ($StopAfter -le 5) { throw 'STEP_FAILED' }   # 按要求停在第 ⑤ 步之后；已记录的结果不变
 
-    # ⑥ 朋友自己的书：从正常界面进入授权章节后按节现出题，真实点一个选项，再等答后讲解和单题小结；不依赖整理题库准入。
+    # ⑥ 做题（答完出讲解和小结）：2.0 没有单独的「学习」页——#570 删了书架右栏的「做题学」，
+    # #573 的单栏首页也只留阅读（LibraryHome 的 onLearn / onPath 都是 UNUSED_PARAMETER，
+    # 阅读器里 showLearnAction=false，controller.learn 只剩测试在用）。所以「按节出题 → 答后讲解 → 出处」
+    # 这套改在伴读抽屉的「读前自测」模块里验（同一份章节伴读包的另一面）：
+    # 点一个选项 → 点「提交」→ 卡上出「回答准确。/ 猜对了，已记入今日复习巩固。/ 带着悬念去读原文。」，
+    # 下面是解析，末尾「原文第 N 页」锚点。产品少了从首页进学习页的入口这件事写进回执，不在这里改产品。
     $six = $null
     try {
-        $sp = Scroll-Point 0.7 0.6; Scroll-At $sp[0] $sp[1] 30; Start-Sleep -Seconds 1
-        # 第⑤步收尾点出处后停在原文页，顶栏是「返回学习」而不是「返回书架」：先确认回到学习页（「返回书架」出现），再点「返回书架」。
-        $leaveLines = Shot 6 'leave'
-        if ((Find-Text $leaveLines '返回学习') -and -not (Find-Text $leaveLines '返回书架')) {
-            $leftSource = Click-Confirm 6 { param($l)
-                if (Find-Text $l '返回书架') { $null } else { Find-Text $l '返回学习' }
-            } { param($l)
-                [bool](Has $l @('返回书架', '上传教材', '全部教材', '做题学', '继续做题学')) -and -not (Find-Text $l '返回学习')
-            } -tries 3 -waitSec 6 -pauseMs 600 -BeforePress {
-                $guard = Shot 6 'leave-guard'
-                [bool](Find-Text $guard '返回学习') -and -not (Find-Text $guard '返回书架')
-            }
-            if (-not $leftSource) { Fail 6 '无法从本节原文返回做题学页面（点了「返回学习」仍停在原文页）' }
-        }
-        $onShelf = { param($l) [bool](Has $l @('上传教材', '全部教材', '带来一本教材', '做题学', '继续做题学')) -and -not (Find-Text $l '返回书架') -and -not (Find-Text $l '返回学习') }
-        if (-not (& $onShelf $script:Last)) {
-            if (-not (Await-Text 6 'find' @('返回书架', '上传教材', '全部教材', '带来一本教材', '做题学', '继续做题学') 15)) {
-                Fail 6 '无法从学习页返回书架（屏幕上找不到「返回书架」）'
-            }
-            if (-not (& $onShelf $script:Last)) {
-                $backToShelf = Click-Confirm 6 { param($l) Find-Text $l '返回书架' } $onShelf -tries 3 -waitSec 6 -pauseMs 600 -BeforePress {
-                    $guard = Shot 6 'shelf-guard'
-                    [bool](Find-Text $guard '返回书架')
-                }
-                if (-not $backToShelf) { Fail 6 '无法从学习页返回书架（点了「返回书架」但仍停在学习页）' }
+        $lr6 = Get-Rect
+        $winW = [int]($lr6.R - $lr6.L); $winH = [int]($lr6.B - $lr6.T)
+        $midX = [int](($lr6.L + $lr6.R) / 2); $hoverY = [int]($winH - 10)
+        $tabX6 = 30
+        $lines = Show-ReaderTop 6 'top'
+        if (-not $lines) { $lines = Shot 6 'top0' }
+        # ⑤ 之后抽屉一般还开着；要是收起了（⑤ 失败时），先点顶栏「伴读」把它打开。
+        $tab6 = Has $lines @('提问', '批注', '讲解')
+        if (-not $tab6) {
+            $open6 = Find-Text $lines '伴读'
+            if ($open6) {
+                Hover $open6.X $open6.Y; Start-Sleep -Milliseconds 400
+                $null = Click-At $open6.X $open6.Y; Start-Sleep -Seconds 1
+                $lines = Shot 6 'drawer'
+                $tab6 = Has $lines @('提问', '批注', '讲解')
             }
         }
-        # 书架一屏放不下三条入口：做题学在折叠线以下，得先滚出来再点。
-        $path = Find-ShelfPractice 6 'path'
-        if (-not $path) {
-            if (Find-Text $script:Last '本节原文') { Fail 6 '点了「返回书架」但仍停在学习页，没回到书架' }
-            Fail 6 '书架没有做题学入口'
+        if (-not $tab6) { Fail 6 '伴读抽屉打不开，没法做「读前自测」（见 6-top*.png / 6-drawer.png）' }
+        $tabY6 = [int]$tab6.Y
+        # 抽屉会记住上次停的页签：先确认在「讲解」（模块条只在讲解页上）。
+        if (Has $lines @('问这句的意思')) {
+            $ex6 = Find-Text $lines '讲解'
+            if ($ex6 -and [Math]::Abs($ex6.Y - $tabY6) -le 24) { $tabX6 = [int]$ex6.X }
+            else { $tabX6 = [int]$tab6.X1 - 30 }
+            Click-At $tabX6 $tabY6; Start-Sleep -Seconds 1
+            $lines = Shot 6 'explain-tab'
         }
-        Click-At $path.X $path.Y; Start-Sleep -Milliseconds 800
-        $enter = Await-Text 6 'learn-enter' @('本节原文') 15
-        if (-not $enter) { Fail 6 '做题学页面没有显示「本节原文」' }
-        $readTotalLessons = { param($lines)
-            foreach ($l in $lines) {
-                $t = $l.Text -replace '\s', ''
-                if ($t -match '第\d+[/／](\d+)节') { return [int]$Matches[1] }
-            }
-            return 0
+        # 模块条：要点 / 自测 / 推导 / 练习 / 习题，都是两个字的短标签。
+        # 「自测」认不出就拿「要点」往右退一格（三格间距一致，退一格正好落在「自测」上）。
+        $strip = Find-Text $lines '自测'
+        if (-not $strip) {
+            $kp6 = Find-Text $lines '要点'
+            if ($kp6) { $strip = [pscustomobject]@{ X = [int]($kp6.X + 52); Y = [int]$kp6.Y } }
         }
-        # 落点只认产品自己写出的页段：点「本节原文」，读「对应教材第 F–L 页」，再「返回学习」。
-        # 本节正在出题时「本节原文」「上一节」「继续下一节」都是禁用的（TextbookLearning.kt enabled = !busy），先等出题结束再点。
-        $waitIdle = { param([string]$tag)
-            $idle = (Get-Date).AddSeconds(90)
-            while ((Get-Date) -lt $idle -and (Has (Shot 6 "busy-$tag") @('正在按本节原文出题'))) { Start-Sleep -Seconds 2 }
+        if (-not $strip) { Fail 6 '伴读抽屉的模块条上找不到「自测」（见 6-*.png）' }
+        Hover $strip.X $strip.Y; Start-Sleep -Milliseconds 400
+        $null = Click-At $strip.X $strip.Y; Start-Sleep -Seconds 1
+        $null = Shot 6 'pretest'
+        # 等题目卡：题号行「第 i / N 题」；空卡直接写「本章暂无读前自测题。」。
+        $deadline = (Get-Date).AddSeconds(40); $q = $null
+        while ((Get-Date) -lt $deadline -and -not $q) {
+            $lines = $script:Last
+            $q = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^第\d+[/／]\d+题' } | Select-Object -First 1
+            if ($q) { break }
+            $noQ = $lines | Where-Object { ($_.Text -replace '\s', '') -match '本章暂无读前自测题' } | Select-Object -First 1
+            if ($noQ) { Fail 6 "读前自测是空的：$($noQ.Text)（见 6-pretest*.png）" }
+            Start-Sleep -Seconds 1; $null = Shot 6 'pretest-wait'
         }
-        # 上一次点击可能慢一步才打开原文页（两窗争用时 15 秒内没等到）：已在原文页且读得出页段，就直接用这一帧。
-        $waitRangeFade = { param([string]$tag)
-            $fadeStop = (Get-Date).AddSeconds(10)
-            while ((Get-Date) -lt $fadeStop -and (Find-Text $script:Last '返回学习')) {
-                $found = Get-LessonSourceRange $script:Last
-                if ($found) { return $found }
-                Start-Sleep -Seconds 1
-                $null = Shot 6 "fade-$tag"
+        if (-not $q) { Fail 6 '切到「读前自测」后 40 秒内没有出现题目卡（见 6-pretest*.png）' }
+        # 题目卡比抽屉高：先把「提交」滚进视野——它和「这题是猜的」同一行，在最下面。
+        # 找到「提交」后，它正上方那几行里最低的一行就是最后一个选项：点它 → 点「提交」→ 看反馈。
+        # 没选中时提交是灰的、按了不出反馈，所以按「点选项 → 点提交 → 认反馈」闭环，最多换 6 个落点。
+        $answered = $false; $fb = $null; $tries6 = 0; $prev6 = ''; $still6 = 0
+        $deadline = (Get-Date).AddSeconds(90)
+        while ((Get-Date) -lt $deadline -and -not $answered) {
+            $lines = $script:Last
+            $sub = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^提交$' } | Select-Object -First 1
+            if (-not $sub) {
+                $frame = (@($lines | ForEach-Object { $_.Text }) -join '|')
+                if ($frame -eq $prev6) { $still6++ } else { $still6 = 0 }
+                $prev6 = $frame
+                if ($still6 -ge 5) { Fail 6 '题目卡上一直没看到「提交」按钮（见 6-pretest*.png）' }
+                Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.78)) -3
+                Start-Sleep -Milliseconds 700
+                $null = Shot 6 'pretest-scroll'
+                continue
             }
-            if (Find-Text $script:Last '返回学习') { return (Get-LessonSourceRange $script:Last) }
-            return $null
+            $sb = Get-LineBox $sub
+            $above = @($lines | Where-Object {
+                $t = ($_.Text -replace '\s', '')
+                $bb = Get-LineBox $_
+                $bb.Y -lt ($sb.Y - 6) -and $bb.Y -gt ($sb.Y - 110) -and
+                $t -notmatch '这题是猜的|先猜一猜|^第\d+[/／]\d+题$|提交'
+            } | Sort-Object { (Get-LineBox $_).Y })
+            if ($above.Count -eq 0) {
+                Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.56)) 3
+                Start-Sleep -Milliseconds 700
+                $null = Shot 6 'pretest-up'
+                continue
+            }
+            $opt6 = $above[-1]
+            $ob = Get-LineBox $opt6
+            $tries6++
+            Note "步骤6 第 $tries6 次点选项「$($opt6.Text)」再点「提交」"
+            Hover ([int](($ob.X1 + $ob.X2) / 2)) ([int]$ob.Y); Start-Sleep -Milliseconds 300
+            Click-At ([int](($ob.X1 + $ob.X2) / 2)) ([int]$ob.Y); Start-Sleep -Milliseconds 500
+            Click-At ([int](($sb.X1 + $sb.X2) / 2)) ([int]$sb.Y); Start-Sleep -Seconds 1
+            $null = Shot 6 "pretest-submit$tries6"
+            $fb = $script:Last | Where-Object { ($_.Text -replace '\s', '') -match '^(回答准确|猜对了|带着悬念)' } | Select-Object -First 1
+            if ($fb) { $answered = $true; break }
+            if ($tries6 -ge 6) { break }
+            Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.56)) 3
+            Start-Sleep -Milliseconds 600
+            $null = Shot 6 'pretest-retry'
         }
-        $readRange = { param([string]$tag)
-            $r = $null
-            foreach ($try in 1..2) {
-                & $waitIdle $tag
-                $act = Resolve-SourcePageRangeAction (Get-LessonLearningState $script:Last $script:LastPng)
-                if ($act.Action -eq 'return_range') { $r = $act.Range; break }
-                if ($act.Action -eq 'wait_range_fade') { $r = & $waitRangeFade "$tag-$try"; if ($r) { break } }
-                $btn = if ($act.Action -eq 'click_source') { $act.Button } else { $null }
-                # 换节后的过渡帧可能还没画好或按钮仍处于 ui.busy 灰态，重新取图等按钮可用再点。
-                foreach ($again in 1..6) {
-                    if ($btn) { break }
-                    Start-Sleep -Milliseconds 1500
-                    $lines = Shot 6 "btn-$tag-$try-$again"
-                    $act = Resolve-SourcePageRangeAction (Get-LessonLearningState $lines $script:LastPng)
-                    if ($act.Action -eq 'return_range') { $r = $act.Range; break }
-                    if ($act.Action -eq 'wait_range_fade') { $r = & $waitRangeFade "$tag-$try-$again"; if ($r) { break } }
-                    if ($act.Action -eq 'click_source') { $btn = $act.Button }
-                }
-                if ($r) { break }
-                if (-not $btn) { Fail 6 '做题学页面找不到可用的「本节原文 · 第X页」按钮' }
-                Click-At $btn.X $btn.Y; Start-Sleep -Milliseconds 800
-                if (Await-Text 6 "range-$tag" @('对应教材第') 25) {
-                    $r = Get-LessonSourceRange $script:Last
-                    if ($r) { break }
-                    # 原文页只闪一下就退回做题学、那一帧没读全页段：再开一次，不拿空页段往下走。
-                    continue
-                }
-                $actAfter = Resolve-SourcePageRangeAction (Get-LessonLearningState $script:Last $script:LastPng)
-                if ($actAfter.Action -eq 'return_range') { $r = $actAfter.Range; break }
-                if ($actAfter.Action -eq 'wait_range_fade') { $r = & $waitRangeFade "$tag-after-$try"; if ($r) { break } }
-            }
-            $ret = Find-Text $script:Last '返回学习'
-            if (-not $ret) { $ret = Await-Text 6 'find' @('返回学习') 8 }
-            if (-not $r) {
-                $r = Get-LessonSourceRange $script:Last
-                if (-not $r) { $r = & $waitRangeFade "late-$tag" }
-            }
-            if (-not $ret) {
-                # 原文页读完页段后有时会自己退回做题学（切节后立刻再开一次最容易碰上）：页段已经拿到、
-                # 屏幕上已经是做题学，就算回到了原处，不必再点「返回学习」。
-                if ($r) { return $r }
-                Fail 6 '本节原文页没有「返回学习」，页段也没读到（见 6-find.png）'
-            }
-            Click-At $ret.X $ret.Y
-            # Only the foreground driver can lose focus mid-click. The background driver never owns
-            # the foreground, so a foreign foreground is not evidence there: wait, never re-click.
-            $sawFocusLoss = $false
-            if (-not (Has-BackgroundDriver)) {
-                $fgAfterClick = Get-ForegroundOwner
-                $sawFocusLoss = -not $fgAfterClick.IsOwnCoach
-            }
-            Start-Sleep -Milliseconds 800
-            if (-not (Has-BackgroundDriver)) {
-                $fgSettled = Get-ForegroundOwner
-                if (-not $fgSettled.IsOwnCoach) { $sawFocusLoss = $true }
-            }
-            $linesNow = Shot 6 "back-$tag"
-            $backFound = [bool](Find-Text $linesNow '本节原文')
-            $retNow = if (-not $backFound) { Find-Text $linesNow '返回学习' } else { $null }
-            $retAct = Resolve-SourceReturnAction -ReturnedToLearning $backFound -SawFocusLoss $sawFocusLoss -ReturnButton $retNow
-            if ($retAct.Action -eq 'reclick') {
-                # 别拿这一步之前那一帧的坐标直接补点：放锁后的 800 ms 里界面可能已经切回做题学，
-                # 旧坐标正好落在「Coach目录返回书架」上（11-21 06:38 L2 就这么跳回了书架）。
-                # 补点前重拍一帧确认还在原文页，坐标也只取这一帧；两样都不在就等下一帧，不猜。
-                $probeAct = $null
-                $probeStop = (Get-Date).AddSeconds(12)
-                while ((Get-Date) -lt $probeStop) {
-                    $probeAct = Resolve-SourceReturnRecheck (Shot 6 "back-probe-$tag")
-                    if ($probeAct.Action -ne 'wait') { break }
-                    Start-Sleep -Milliseconds 800
-                }
-                if ($probeAct -and $probeAct.Action -eq 'reclick') {
-                    Note "步骤6 点返回学习后失焦，当前帧仍在原文页，按这一帧坐标重点击 ($($probeAct.Button.X),$($probeAct.Button.Y))"
-                    # 探针那一帧到按下之间还有几百毫秒，界面照样可能在中间切走：原文页「返回学习」和做题学
-                    # 左上角「Coach目录返回书架」是同一个坐标，这一下按下去就把整条 Lane 送回书架
-                    # （11-21 06:57 L2 的 6-back-probe-3 到 6-back-3 就是这样）。指针落到位置上、按下之前
-                    # 再拍一帧：已经不是原文页就不按，页面归哪儿交给后面的兜底去认。
-                    $pressed = Click-At $probeAct.Button.X $probeAct.Button.Y -BeforePress {
-                        $guard = Shot 6 "back-guard-$tag"
-                        if (Find-Text $guard '本节原文') { return $false }
-                        if (Find-Text $guard 'Coach目录返回书架') { return $false }
-                        return [bool](Find-Text $guard '返回学习')
-                    }
-                    if (-not $pressed) {
-                        Note '步骤6 按下前这一帧已经不是原文页，放弃这次补点'
-                        # 探针否掉只说明「这一下按下去不安全」，不等于已经回到做题学：还在原文页时这一下
-                        # 就等于没点。所以按刚拍的那一帧再看一次，还在原文页就重新取坐标补一次（只补一次，
-                        # 每次都重拍，绝不沿用已经过期的坐标）。
-                        if (Find-Text $script:Last '返回学习') {
-                            $again = Resolve-SourceReturnRecheck (Shot 6 "back-probe2-$tag")
-                            if ($again.Action -eq 'reclick') {
-                                Note "步骤6 还在原文页，按新一帧再补一次 ($($again.Button.X),$($again.Button.Y))"
-                                $null = Click-At $again.Button.X $again.Button.Y -BeforePress {
-                                    $guard = Shot 6 "back-guard2-$tag"
-                                    if (Find-Text $guard '本节原文') { return $false }
-                                    if (Find-Text $guard 'Coach目录返回书架') { return $false }
-                                    return [bool](Find-Text $guard '返回学习')
-                                }
-                            }
-                        }
-                    }
-                }
-                if ($probeAct -and $probeAct.Action -eq 'done') {
-                    $backFound = $true
-                } else {
-                    $backFound = [bool](Await-Text 6 "back-$tag" @('本节原文') 15)
-                    if (-not $backFound) {
-                        # 探针那一帧也可能慢一步、补点落到了「Coach目录返回书架」上：认书架，按「做题学」回去，
-                        # 比整条 Lane 判死划算。书架入口在折叠线以下，照进门那套下滚找，不拿顶屏一帧判死。
-                        $reenter = Find-ShelfPractice 6 "back-shelf-$tag"
-                        if ($reenter) {
-                            Note '步骤6 返回学习点到了书架，按「做题学」重新进入'
-                            Click-At $reenter.X $reenter.Y
-                            Start-Sleep -Milliseconds 800
-                            $backFound = [bool](Await-Text 6 "back-$tag" @('本节原文') 20)
-                        }
-                    }
-                }
-            } elseif ($retAct.Action -eq 'wait_learning') {
-                $backFound = [bool](Await-Text 6 "back-$tag" @('本节原文') 15)
-            }
-            if (-not $backFound) { Fail 6 '从本节原文返回后没有回到做题学页面' }
-            return $r
+        if (-not $answered) { Fail 6 '点了选项和「提交」，题目卡没出「回答准确 / 猜对了 / 带着悬念去读原文」这类反馈（见 6-pretest-submit*.png）' }
+        Note "步骤6 提交后的反馈：$($fb.Text)"
+        # 反馈下面是解析和「原文第 N 页」锚点，往下滚把它们找齐：解析是答后讲解，锚点就是出处。
+        $chip6 = $null; $prevE = ''; $stillE = 0
+        $deadline = (Get-Date).AddSeconds(40)
+        while ((Get-Date) -lt $deadline -and -not $chip6) {
+            $lines = $script:Last
+            $chip6 = $lines | Where-Object { $_.Text -match '原文第\s*\d+\s*页' } | Select-Object -First 1
+            if ($chip6) { break }
+            $frame = (@($lines | ForEach-Object { $_.Text }) -join '|')
+            if ($frame -eq $prevE) { $stillE++ } else { $stillE = 0 }
+            $prevE = $frame
+            if ($stillE -ge 4) { break }
+            Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.78)) -3
+            Start-Sleep -Milliseconds 700
+            $null = Shot 6 'pretest-full'
         }
-        $totalLessons = & $readTotalLessons $script:Last
-        $totalPages = if ($page1 -match '[/／](\d+)$') { [int]$Matches[1] } elseif ($page0 -match '[/／](\d+)$') { [int]$Matches[1] } else { 0 }
-        $range = if ($physPage -gt 0) { & $readRange '0' } else { $null }
-        if ($physPage -gt 0 -and -not (Test-RangeHasPage $range $physPage)) {
-            # 目录估算只用来跳到附近；每跳之后用页段收窄上下界。离目标页 4 页以内改用「上一节 / 继续下一节」逐节核对，
-            # 直到某节页段真的含目标页；相邻两节把目标页夹在中间却都不含它，就明确报错。
-            $cap = if ($totalLessons -gt 0) { $totalLessons } else { 9999 }
-            $scale = if ($totalLessons -gt 0 -and $totalPages -gt 0) { $totalLessons / $totalPages } else { 1.25 }
-            $lo = 1; $hi = $cap
-            $targetIdx = [Math]::Max(1, [Math]::Min($cap, [int][Math]::Round($physPage * $scale)))
-            $landed = $false; $stepDir = $null; $chosenNum = 0
-            for ($hop = 1; $hop -le 12 -and -not $landed; $hop++) {
-                $dir = if ($range -and $range.Last -lt $physPage -and $physPage - $range.Last -le 4) { 'next' }
-                       elseif ($range -and $range.First -gt $physPage -and $range.First - $physPage -le 4) { 'prev' } else { $null }
-                if ($dir) {
-                    if ($stepDir -and $stepDir -ne $dir) {
-                        Fail 6 "没有哪一节的页段含第 $physPage 页：相邻两节分别是第 $($prev.First)–$($prev.Last) 页和第 $($range.First)–$($range.Last) 页"
-                    }
-                    & $waitIdle "step-$hop"
-                    $beforeLesson = Get-LessonLearningState $script:Last $script:LastPng
-                    if ($dir -eq 'next') { Click-Folded 6 @('继续下一节') '做题学页面找不到「继续下一节」' } else { Click-Folded 6 @('上一节') '做题学页面找不到「上一节」' }
-                    # 找按钮时把整节正文滚到了底下，切完节再滚回顶部，后面按标题和「本节原文」认新节才看得见。
-                    $sp = Scroll-Point 0.6 0.6; Scroll-At $sp[0] $sp[1] 20; Start-Sleep -Milliseconds 400
-                    $secDeadline = (Get-Date).AddSeconds(30)
-                    $secReady = $false
-                    while ((Get-Date) -lt $secDeadline) {
-                        $secLines = Shot 6 "sec-$hop"
-                        $nowLesson = Get-LessonLearningState $secLines $script:LastPng
-                        if (Test-AdjacentLessonReady $beforeLesson $nowLesson) { $secReady = $true; break }
-                        Start-Sleep -Seconds 2
-                    }
-                    if (-not $secReady) { Fail 6 '切换到相邻一节后页面没有切到新节或「本节原文」按钮仍不可用' }
-                    if ($chosenNum -gt 0) { $chosenNum += $(if ($dir -eq 'next') { 1 } else { -1 }) }
-                    $stepDir = $dir; $prev = $range
-                    $range = & $readRange "$hop"
-                    if (-not $range) { Fail 6 '无法确认相邻一节的页段：本节原文页没有读到「对应教材第 F–L 页」' }
-                    Note "步骤6 第 $hop 跳（$(if ($dir -eq 'next') { '下一节' } else { '上一节' })）：第 $($range.First)–$($range.Last) 页"
-                    if (Test-RangeHasPage $range $physPage) { $landed = $true }
-                    continue
-                }
-                $stepDir = $null
-                Click-Label 6 @('目录') '做题学页面找不到「目录」'
-                Start-Sleep -Milliseconds 500
-                $closeDir = Await-Text 6 "dir-$hop" @('收起目录') 10
-                if (-not $closeDir) { Fail 6 '点击「目录」后学习路线抽屉没有打开' }
-                $lines = $script:Last
-                $chosenNum = 0
-                for ($sc = 0; $sc -lt 10; $sc++) {
-                    $items = @(foreach ($l in $lines) {
-                        if ($l.Text -match '^\s*(\d+)[.．]') {
-                            $num = [int]$Matches[1]
-                            $box = Find-Text @($l) $Matches[0]
-                            if ($box -and [Math]::Abs($box.X1 - $closeDir.X1) -lt 80 -and $box.Y1 -gt $closeDir.Y) {
-                                [pscustomobject]@{ Num = $num; X = $box.X; Y = $box.Y }
-                            }
-                        }
-                    }) | Sort-Object Num
-                    if ($items.Count -gt 0) {
-                        $minNum = $items[0].Num; $maxNum = $items[$items.Count - 1].Num
-                        if ($targetIdx -ge $minNum -and $targetIdx -le $maxNum) {
-                            # 只在已确认的上下界内挑；OCR 漏读个别编号时不会退回已排除的那一节。
-                            $inBounds = @($items | Where-Object { $_.Num -ge $lo -and $_.Num -le $hi })
-                            $pool = if ($inBounds.Count -gt 0) { $inBounds } else { $items }
-                            $pick = $pool | Sort-Object { [Math]::Abs($_.Num - $targetIdx) } | Select-Object -First 1
-                            $chosenNum = $pick.Num
-                            Click-At $pick.X $pick.Y
-                            Start-Sleep -Milliseconds 400
-                            break
-                        }
-                        if ($sc -eq 9) {
-                            $pick = if ($targetIdx -lt $minNum) { $items[0] } else { $items[$items.Count - 1] }
-                            $chosenNum = $pick.Num
-                            Click-At $pick.X $pick.Y
-                            Start-Sleep -Milliseconds 400
-                            break
-                        }
-                        $notches = if ($targetIdx -gt $maxNum) {
-                            -[Math]::Min(60, [Math]::Max(4, [int][Math]::Ceiling(($targetIdx - $maxNum) / 2.2)))
-                        } else {
-                            [Math]::Min(60, [Math]::Max(4, [int][Math]::Ceiling(($minNum - $targetIdx) / 2.2)))
-                        }
-                    } else {
-                        $notches = -20
-                    }
-                    Scroll-At $closeDir.X ($closeDir.Y + 250) $notches
-                    Start-Sleep -Milliseconds 400
-                    $lines = Shot 6 "dir-$hop-$sc"
-                }
-                Click-Label 6 @('收起目录') '选中学习路线条目后无法收起目录'
-                $afterSec = Await-Text 6 "sec-$hop" @('本节原文') 15
-                if (-not $afterSec) { Fail 6 '切换学习路线章节后页面没有显示「本节原文」' }
-                $range = & $readRange "$hop"
-                if (-not $range) { Fail 6 "无法确认第 $chosenNum 节的页段：本节原文页没有读到「对应教材第 F–L 页」" }
-                Note "步骤6 第 $hop 跳（目录第 $chosenNum 条）：第 $($range.First)–$($range.Last) 页"
-                if (Test-RangeHasPage $range $physPage) { $landed = $true; break }
-                if ($chosenNum -le 0) { Fail 6 '学习路线里没有找到可点的章节条目' }
-                if ($range.Last -lt $physPage) { $lo = [Math]::Max($lo, $chosenNum + 1); $delta = [Math]::Max(1, [int][Math]::Round(($physPage - $range.Last) * $scale)) }
-                else { $hi = [Math]::Min($hi, $chosenNum - 1); $delta = [Math]::Min(-1, [int][Math]::Round(($physPage - $range.First) * $scale)) }
-                if ($lo -gt $hi) { Fail 6 "没有哪一节的页段含第 $physPage 页（最后确认的一节是第 $($range.First)–$($range.Last) 页）" }
-                $targetIdx = [Math]::Max($lo, [Math]::Min($hi, $chosenNum + $delta))
-            }
-            $seen = if ($range) { "第 $($range.First)–$($range.Last) 页" } else { '未读到页段' }
-            if (-not $landed) { Fail 6 "未能切到含第 $physPage 页的章节（最后确认：$seen）" }
-        }
-        if ($range) { Note "步骤6 落点：本节对应教材第 $($range.First)–$($range.Last) 页，目标第 $physPage 页" }
-        # 已开启的书直接进入学习页；出题方式仍沿用这本书的设置。
-        # 1.1.1 起学习页标签写作「题型：选择题」（#547/TON-1733），旧版是「出题：选择」；两种都认。
-        Click-Label 6 @('题型：', '题型:', '出题：', '出题:') '找不到题型设置'
-        $settings = Await-Text 6 'settings' @('出题方式') 15
-        if (-not $settings) { Fail 6 '出题方式对话框没有打开' }
-        $ctrl = Get-QuestionSettingsControls $script:Last
-        if (-not $ctrl -or -not $ctrl.Choice) { Fail 6 '出题方式对话框没有选择题选项' }
-        Click-At $ctrl.Choice.X $ctrl.Choice.Y; Start-Sleep -Milliseconds 800
-        # 点完「选择」触发 mode() 落盘期间 ui.busy=true 会暂时置灰「确定」；轮询等对话框内「确定」恢复可认再点。
-        $confirmDeadline = (Get-Date).AddSeconds(15); $ctrlConfirm = $null
-        while ((Get-Date) -lt $confirmDeadline) {
-            $confirmLines = Shot 6 'settings-confirm'
-            $cand = Get-QuestionSettingsControls $confirmLines
-            if (-not $cand -or -not $cand.Title) { $ctrlConfirm = $null; break }
-            if ($cand.Confirm -and $cand.Confirm.Y -gt $ctrl.Choice.Y -and (-not $cand.Choice -or $cand.Confirm.Y -gt $cand.Choice.Y)) {
-                $ctrlConfirm = $cand; break
-            }
-            Start-Sleep -Milliseconds 500
-        }
-        if (-not $ctrlConfirm) { Fail 6 '出题方式对话框找不到「确定」按钮' }
-        $choiceBox = if ($ctrlConfirm.Choice) { $ctrlConfirm.Choice } else { $ctrl.Choice }
-        Note "步骤6 设置确认：标题($($ctrlConfirm.Title.X),$($ctrlConfirm.Title.Y)) 选项「选择」($($choiceBox.X),$($choiceBox.Y)) 按钮「确定」($($ctrlConfirm.Confirm.X),$($ctrlConfirm.Confirm.Y))"
-        Click-At $ctrlConfirm.Confirm.X $ctrlConfirm.Confirm.Y
-        $confirmDeadline = (Get-Date).AddSeconds(10); $confirmed = $false
-        while ((Get-Date) -lt $confirmDeadline -and -not $confirmed) {
-            Start-Sleep -Milliseconds 500
-            $afterLines = Shot 6 'settings-after'
-            if (Test-QuestionSettingsConfirmed $afterLines) { $confirmed = $true }
-        }
-        if (-not $confirmed) { Fail 6 '点击「确定」后未关闭出题方式对话框或未确认为选择题' }
-        $deadline = (Get-Date).AddSeconds(120); $question = $false; $picked = $null; $sawQuestion = $false; $optAnchorX1 = 0; $qScroll = 0
-        while ((Get-Date) -lt $deadline -and -not $question) {
-            $lines = Shot 6 'question'
-            $allow = Has $lines @('允许并出题')
-            if ($allow) { Click-At $allow.X $allow.Y; Start-Sleep -Seconds 2; continue }
-            if (Has $lines @('格式完整', '出题暂时读不到', '没有足够的正文', '需要连上', '尚未核实', '额度', '重新配对', '暂时无法确认')) {
-                Fail 6 '本节出题被拒绝或不可用，见 winbox 私有截图 6-question.png'
-            }
-            $anchor = Has $lines @('查看对应原文')
-            if ((Has $lines @('本次练习')) -and $anchor) { $sawQuestion = $true; $optAnchorX1 = [int]$anchor.X1 }
-            if ($sawQuestion) {
-                # 只在题目原文按钮下找选项：优先认单字母 A–D，深色 800x600 OCR 整列漏读字母时兜底点右侧缩进的选项正文。
-                $minOptY = if ($anchor) { $anchor.Y + 10 } else { 180 }
-                $picked = Find-PracticeOptionClick $lines $optAnchorX1 $minOptY
-                if ($picked) { $question = $true }
-            }
-            if (-not $question) {
-                if ($sawQuestion) {
-                    $sp = Scroll-Point 0.7 0.6
-                    $dir = if (($qScroll % 10) -lt 5) { -2 } else { 2 }
-                    Scroll-At $sp[0] $sp[1] $dir; $qScroll++
-                    Start-Sleep -Seconds 1
-                } else {
-                    Start-Sleep -Seconds 3
-                }
-            }
-        }
-        if (-not $question) { Fail 6 '120 秒内没有出现可作答的本次练习选择题' }
-        Note "步骤6 选定选项（$($picked.Mode)）：($($picked.X),$($picked.Y))"
-        Click-At $picked.X $picked.Y
-        Start-Sleep -Seconds 2
-        $selected = $false; $explained = $false; $cited = $false; $summary = $false
-        # 答案区在题目下面，一屏放不下：一路往下滚，滚到画面真的不动了才回头。
-        # 11-21 07:26 L3 是固定 10 次下滚后就反转方向，而它第 10 次才刚滚到
-        # 「你选择…本题答案是…重新作答」，随后 4 帧全在往上走，把讲解和出处又推出视野。
-        $dir = -2; $downScrolls = 0; $prevSig = ''
-        foreach ($view in 0..29) {
-            $lines = Shot 6 "answered-$view"
-            if (Has $lines @('你选择：', '你选择:')) { $selected = $true }
-            if (Has $lines @('答后讲解')) { $explained = $true }
-            if (Has $lines @('出处')) { $cited = $true }
-            if (Has $lines @('题目和作答只保留在这次练习中', '要回看时再打开', '小结')) { $summary = $true }
-            if ($selected -and $explained -and $cited -and $summary) { break }
-            $sig = Get-FrameSignature $lines
-            $dir = Resolve-AnsweredScroll $sig $prevSig $downScrolls $dir
-            if ($dir -lt 0) { $downScrolls++ }
-            $prevSig = $sig
-            $sp = Scroll-Point 0.7 0.6
-            Scroll-At $sp[0] $sp[1] $dir; Start-Sleep -Seconds 1
-        }
-        if (-not $selected) { Fail 6 '点击选项后没有看到已选答案' }
-        if (-not $explained -or -not $cited) { Fail 6 '已作答，但没有看到带出处的答后讲解' }
-        if (-not $summary) { Fail 6 '已作答并看到讲解，但没有看到单题小结' }
-        Pass 6 '从正常界面进入授权章节，现出选择题作答后出现已选答案、带出处的答后讲解和单题小结（6-question、6-answered 私有截图）'
+        if (-not $chip6) { Fail 6 '提交后看到了反馈，但反馈下面没有读出「原文第 N 页」锚点（见 6-pretest-submit*.png / 6-pretest-full.png）' }
+        Note "步骤6 答后讲解的出处：$($chip6.Text)"
+        Pass 6 "伴读抽屉「读前自测」里选一个选项并提交，卡上回了「$($fb.Text -replace '\s', '')」，解析后面挂着「$($chip6.Text)」锚点（6-pretest-submit、6-pretest-full 截图）"
     } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $six = 'failed' }
     if ($six -and -not $KeepGoing) { throw 'STEP_FAILED' }
 
-    if ($cardOk) { Fail 7 $cardOk } else { Pass 7 "点出处切回第 $physPage 页原页" }
+    if ($cardOk) { Fail 7 $cardOk } else { Pass 7 '点回答里的「出处」跳到它写的页，收起伴读后仍停在该页' }
 } catch {
     if ("$_" -like 'WIN_DRIVE_FOREGROUND_CONTENTION*') {
         $stopStep = [Math]::Min($results.Count + 1, 7)

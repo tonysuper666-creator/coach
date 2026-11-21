@@ -193,6 +193,65 @@ foreach ($oc in @(
     if (-not $oc.ok) { $fail++ }; $extra++
 }
 
+# 书架右栏的「做题学」入口：整词要认，OCR 把「继续做题学」读成「续做韪学」也要认（11-21 06:57 L2），
+# 但不能把同栏的「边看边学」「开始学」「看书」当成它。
+$shelfWhole = Find-ShelfPracticeEntry @(
+    (Rec '看书  翻开第 150 页，可就原文段落提问。' 620 300),
+    (Rec '边看边学  先看讲解，再选择是否做题。' 620 360),
+    (Rec '做题学  先试题，答后看讲解；原文按需打开。' 620 420)
+)
+$shelfOcr = Find-ShelfPracticeEntry @(
+    (Rec '边看边学  先看讲解，再选择是否做题。' 620 360),
+    (Rec '续做韪学  先试题，答后看讲解；原文按需打开。' 620 420)
+)
+$shelfNone = Find-ShelfPracticeEntry @(
+    (Rec '看书  翻开第 150 页，可就原文段落提问。' 620 300),
+    (Rec '边看边学  先看讲解，再选择是否做题。' 620 360),
+    (Rec '开始学' 620 520)
+)
+foreach ($sc in @(
+    @{ n = 'shelf-entry-whole-label'; ok = ([bool]$shelfWhole -and $shelfWhole.Y -gt 400 -and $shelfWhole.Y -lt 440) },
+    @{ n = 'shelf-entry-ocr-variant'; ok = ([bool]$shelfOcr -and $shelfOcr.Y -gt 400 -and $shelfOcr.Y -lt 440) },
+    @{ n = 'shelf-entry-ignores-others'; ok = (-not $shelfNone) }
+)) {
+    '{0} {1}' -f $(if ($sc.ok) { 'PASS' } else { 'FAIL' }), $sc.n
+    if (-not $sc.ok) { $fail++ }; $extra++
+}
+
+# 第 4 步切视图写库失败那条提示（viewSaveError）不是 toast，等不会消失；按提示切一次视图才是重试。
+# 这一帧 OCR 会把「阅读视图暂未保存」读成「克读视图兩耒保存」（11-21 06:53 L4）。
+$vsClean = @(
+    (Rec '看原页' 120 96),
+    (Rec '开始学' 300 96),
+    (Rec '第一节 法与经济学' 620 200)
+)
+$vsText = @(
+    (Rec '看原页' 120 96),
+    (Rec '开始学' 300 96),
+    (Rec '阅读视图暂未保存。切换视图后会再试一次。' 120 150)
+)
+$vsOcr = @(
+    (Rec '看文字' 120 96),
+    (Rec '开始学' 300 96),
+    (Rec '克读视图兩耒保存。切换视图后会再试一次。' 120 150)
+)
+$vsNoToggle = @( (Rec '阅读视图暂未保存。切换视图后会再试一次。' 120 150) )
+$actClean = Resolve-ViewSaveErrorAction $vsClean 0
+$actText = Resolve-ViewSaveErrorAction $vsText 0
+$actOcr = Resolve-ViewSaveErrorAction $vsOcr 0
+$actTwice = Resolve-ViewSaveErrorAction $vsText 2
+$actBlind = Resolve-ViewSaveErrorAction $vsNoToggle 0
+foreach ($vc in @(
+    @{ n = 'viewsave-none-when-clean'; ok = ($actClean.Action -eq 'none') },
+    @{ n = 'viewsave-retry-text-view'; ok = ($actText.Action -eq 'retry' -and $actText.Flip -eq '看文字' -and $actText.Button.X -gt 100 -and $actText.Button.X -lt 200) },
+    @{ n = 'viewsave-retry-ocr-variant'; ok = ($actOcr.Action -eq 'retry' -and $actOcr.Flip -eq '看原页' -and $actOcr.Button.X -gt 100 -and $actOcr.Button.X -lt 200) },
+    @{ n = 'viewsave-fails-after-two'; ok = ($actTwice.Action -eq 'fail' -and $actTwice.Reason -match '视图') },
+    @{ n = 'viewsave-fails-without-toggle'; ok = ($actBlind.Action -eq 'fail' -and $actBlind.Reason -match '视图') }
+)) {
+    '{0} {1}' -f $(if ($vc.ok) { 'PASS' } else { 'FAIL' }), $vc.n
+    if (-not $vc.ok) { $fail++ }; $extra++
+}
+
 if ($BatchDir) {
     $bStep4 = Join-Path $BatchDir '6-busy-step-4.png'
     $bSec4 = Join-Path $BatchDir '6-sec-4.png'

@@ -169,6 +169,36 @@ function Resolve-SourceReturnRecheck($lines) {
     if ($ret) { return [pscustomobject]@{ Action = 'reclick'; Button = $ret } }
     return [pscustomobject]@{ Action = 'wait'; Button = $null }
 }
+# 书架右栏三条入口里「做题学」在折叠线以下，滚出来以后这一行常被 OCR 读成「续做韪学」
+# （11-21 06:57 L2 的 6-back-3.txt），整词匹配落空就把唯一能回学习页的入口当成不存在。
+# 先认整词，再认「做 + 题/韪/匙 + 学」的骨架；「边看边学」「开始学」都含「学」但前面不是「做」，不会误认。
+function Find-ShelfPracticeEntry($lines) {
+    foreach ($s in @('继续做题学', '做题学')) { $m = Find-Text $lines $s; if ($m) { return $m } }
+    $e = $lines | Where-Object { ($_.Text -replace '\s', '') -match '做[题韪匙題]学' } | Select-Object -First 1
+    if ($e) { return (Find-Text @($e) ($e.Text -replace '\s', '')) }
+    return $null
+}
+# 第 4 步切回文字视图时客户端会把视图状态写进 library.sqlite，四路同写会 SQLITE_BUSY，工具栏下面挂一条
+# 「阅读视图暂未保存。切换视图后会再试一次。」（TextbookReader.kt 的 viewSaveError）。它不是 toast：
+# 不清屏、不自己重试，等多久都不会消失（11-21 06:53 L4 就在这条提示下把 8 次「开始学」全点空了）。
+# 这一帧被 OCR 读成「克读视图兩耒保存。切换视图后会再试一次。」，所以整词之外还要认骨架。
+function Find-ViewSaveError($lines) {
+    $pat = '视图.{0,8}保存|視圖.{0,8}保存|切.{0,4}视图'
+    return $lines | Where-Object { ($_.Text -replace '\s', '') -match $pat } | Select-Object -First 1
+}
+# 产品给的重试路径就是那句提示本身：再切一次视图就会重存（TextbookReader.kt:711 先清错再写）。
+# 所以看到提示就点工具栏那一下（当前文字视图是「看原页」，原页视图是「看文字」），并告诉调用方切完该看到哪个词；
+# 已经切过一次还挂着、或按钮都找不到，就别再空点，带产品原话交给调用方报错。
+function Resolve-ViewSaveErrorAction($lines, [int]$Attempts) {
+    $e = Find-ViewSaveError $lines
+    if (-not $e) { return [pscustomobject]@{ Action = 'none'; Reason = $null; Button = $null; Flip = $null } }
+    if ($Attempts -ge 2) { return [pscustomobject]@{ Action = 'fail'; Reason = $e.Text; Button = $null; Flip = $null } }
+    $btn = Find-Text $lines '看原页'
+    if ($btn) { return [pscustomobject]@{ Action = 'retry'; Reason = $e.Text; Button = $btn; Flip = '看文字' } }
+    $btn = Find-Text $lines '看文字'
+    if ($btn) { return [pscustomobject]@{ Action = 'retry'; Reason = $e.Text; Button = $btn; Flip = '看原页' } }
+    return [pscustomobject]@{ Action = 'fail'; Reason = $e.Text; Button = $null; Flip = $null }
+}
 function Find-PracticeOptionClick($lines, [int]$OptAnchorX1, [int]$MinOptY) {
     if (-not $lines -or $OptAnchorX1 -le 0) { return $null }
     foreach ($l in $lines) {

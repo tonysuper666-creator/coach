@@ -324,6 +324,31 @@ function Click-Confirm([int]$n, [scriptblock]$Find, [scriptblock]$Done, [int]$tr
     }
     return $false
 }
+# 第 4 步「讲讲」在第几：工具条一行是「讲讲」「举个例子」「换个说法」「问…」，
+# 只认和「举个例子」同一行、在它左边的那个，免得点到正文里别的「讲讲」。
+function Find-ExplainButton($lines) {
+    $row = Find-Text $lines '举个例子'
+    if (-not $row) { $row = Find-Text $lines '换个说法' }
+    if (-not $row) { return $null }
+    return (Find-OnRow $lines '讲讲' $row)
+}
+# 点完「讲讲」算不算生效：同意框弹出、或者已经进了加载态（「思考」）、或者回答已经出来（「出处」）。
+# 只认这几种看得见的状态——「点过一次」不算，四路交锁时那一下常常被别的窗口吃掉。
+function Test-ExplainStarted($lines) {
+    foreach ($s in '允许并讲解', '这段原文会发到哪里', '思考', '出处') {
+        if (Find-Text $lines $s) { return $true }
+    }
+    return $false
+}
+# 追问时卡片正文往下找标题的方向：回答只会追加在下面，所以见过「思考」就只往下滚——
+# 11-21 那轮 L2/L3 在第 9 格倒滚回页顶，剩下的 150 秒一直停在页顶等。没见加载态时仍按
+# 「下扫 9 格 → 上扫 9 格 → 再下扫」的来回找，避免标题被推出视野后一直找不到。
+function Get-AskScrollDir([bool]$sawLoading, [int]$step) {
+    if ($sawLoading) { return -1 }
+    if ($step -lt 9) { return -1 }
+    if ($step -lt 18) { return 1 }
+    return -1
+}
 # 书架右栏本来就有「看书 / 边看边学 / 做题学」三行，弹窗盖上去以后 OCR 两处都读得到，
 # 从上往下取首命中会点回书架上（弹窗底下那层被遮罩吃掉，点了没反应）。
 # 弹窗里这三个是并排的三个 chip（同一行），书架里是上下三行，所以先认和另外两个同排的那一个；
@@ -651,9 +676,19 @@ try {
     # 工具条一行是「讲讲」「举个例子」「换个说法」「问…」：取和「举个例子」同一行、在它左边的「讲讲」
     $explainBtn = Find-OnRow $script:Last '讲讲' $toolbar
     if (-not $explainBtn) { Fail 4 '选中工具条里找不到「讲讲」' }
-    Click-At $explainBtn.X $explainBtn.Y; Start-Sleep -Milliseconds 800
-    $c = Await-Text 4 'consent' @('允许并讲解') 15
-    if ($c) { Click-At $c.X $c.Y }       # 这本书第一次讲解的同意框（开发验收允许点）
+    # 「讲讲」和随后的「允许并讲解」原来各只点一下：四路交锁时前台被别路接走，这两下都会落空。
+    # 11-21 那轮 L1/L4 点了「讲讲」等于没点，同意框既没出来也没进加载态；L3 同意框出来了、
+    # 「允许并讲解」点空，框一直开着——三路都在这里空等 120 秒报「既没有讲解也没有报错」。
+    # 所以两下都认状态：状态没变就按新一帧重定位再点，点了三次还没动就当场说清是哪一下没成。
+    $started = Click-Confirm 4 { param($l) Find-ExplainButton $l } { param($l) Test-ExplainStarted $l } -tries 3 -waitSec 6 -pauseMs 800
+    # 同意框有时要十几秒才弹（后台先把这段原文送出去），点完状态没变也再宽限一次，别比原来等得还短。
+    if (-not $started) { $started = [bool](Await-Text 4 'explain-late' @('允许并讲解', '这段原文会发到哪里', '思考', '出处') 15) }
+    if (-not $started) { Fail 4 '点了三次「讲讲」都没有同意框、加载态或讲解出现（见 4-confirm*.png）' }
+    if (Find-Text (Shot 4 'consent') '允许并讲解') {
+        # 这本书第一次讲解要先同意；框没关就是没点上，按新一帧重定位再点（开发验收允许点）。
+        $allowed = Click-Confirm 4 { param($l) Find-Text $l '允许并讲解' } { param($l) -not (Find-Text $l '允许并讲解') } -tries 3 -waitSec 6 -pauseMs 800
+        if (-not $allowed) { Fail 4 '同意框里的「允许并讲解」点了三次框都没关（见 4-consent*.png）' }
+    }
     $deadline = (Get-Date).AddSeconds(120); $outcome = $null; $errText = $null; $n = 0
     $failWords = @('无法讲解', '尚未核实', '尚未接通', '连不上', '超时', '没顾上', '没讲成', '没有得到可核对', '出处无法核对', '没有可核对的讲解', '连接已更换', '还没配对', '额度', '选中追问格式不对', '保存页', '这一节太长', '请先导入自己的书')
     $failPattern = '无法讲解|尚未核实|尚未接通|连不上|超时|没顾上|没讲成|没有得到可核对|出处无法核对|没有可核对的讲解|连接已更换|还没配对|额度|选中追问格式不对|保存页|这一节太长|请先导入自己的书'
@@ -733,7 +768,8 @@ try {
         # 回车和「发送」是同一条提交路径（onSubmitQuestion），点按钮的落点由 OCR 直接给出，比回车确定。
         Click-At $send.X $send.Y
         # 卡片正文最高 360dp，讲解本身就把滚动区撑满：新加的「问：…」和它的回答追加在下面，不滚卡片看不到。
-        # 一格一格往下找，找到标题就停；走到第 9 格还没出现说明滚过头，再往回找一轮，避免标题被推出视野。
+        # 一格一格往下找，找到标题就停；走到第 9 格还没出现说明可能滚过头，再往回找一轮，避免标题被推出视野。
+        # 但见过「思考」以后回答只会在下面追加，往回滚等于把新内容推出视野，所以那时只往下（见 Get-AskScrollDir）。
         $turn = $null; $cite = $null; $i = 0; $step = 0; $sawLoading = $false
         $deadline = (Get-Date).AddSeconds(150)
         while ((Get-Date) -lt $deadline -and -not $cite) {
@@ -754,7 +790,7 @@ try {
                 $cite = $lines | Where-Object { $_.Text -match '出处.*第\s*\d+\s*页' -and (-not $tb -or (Get-LineBox $_).Y -gt $tb.Y) } | Select-Object -Last 1
                 if (-not $cite) { Scroll-At 600 $scrollY -2; Start-Sleep -Milliseconds 500 }
             } else {
-                $dir = if ($step -lt 9) { -1 } else { 1 }
+                $dir = Get-AskScrollDir $sawLoading $step
                 Scroll-At 600 $scrollY $dir; Start-Sleep -Milliseconds 500; $step++
             }
         }

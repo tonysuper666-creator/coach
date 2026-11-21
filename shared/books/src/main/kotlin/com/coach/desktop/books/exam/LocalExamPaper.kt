@@ -141,13 +141,14 @@ internal fun textbookReferencePaper(book: Textbook): LocalPaperAvailability {
             lesson.blocks.any { it.page == page.number } && p.reference in page.text
         } }
         if (practice == null || page == null) {
-            gaps += "${lesson.title}：缺少可用选择题或单页原句。"
+            // 只记章节名：怎么补、去哪儿补由课程页说，人不需要看懂生成规则。
+            gaps += lesson.title
             null
         } else json("id" to lesson.id, "type" to "mcq", "stem" to practice.prompt, "marks" to 1,
             "options" to JsonArray(practice.options.map(::JsonPrimitive)), "answer" to practice.options.indexOf(practice.answer),
             "source" to json("docId" to book.id, "lessonId" to lesson.id, "pdfPage" to page.number, "quote" to practice.reference))
     }
-    if (items.isEmpty()) return LocalPaperAvailability(null, gaps.ifEmpty { listOf("教材没有可用于练习的文字和题目。") })
+    if (items.isEmpty()) return LocalPaperAvailability(null, gaps.ifEmpty { listOf("整本教材") })
     val content = json("bookId" to book.id, "title" to "${book.title} · 教材参考练习",
         "kind" to "drill", "origin" to "TEXTBOOK_REFERENCE", "key_state" to "UNREVIEWED",
         "sections" to JsonArray(listOf(json("title" to "原文选择", "items" to JsonArray(items)))))

@@ -195,26 +195,38 @@ $script:ForegroundMutexName = 'Global\Coach.WinDrive.Foreground'
 # Other agents may run their own Coach windows on this desktop. Only the process this script started is ever touched.
 $script:Known = @()
 $script:RepoMarker = ''   # 本次检出的目录；设置后只认命令行里带这个目录的客户端进程（别人的 Coach 窗口永远不是我的）
-# 命令行里的构建输出是否落在这个检出目录下。Windows 路径不分大小写，\ 与 / 等价，
-# 重复分隔符视同一个。两端都守目录边界：前面不能紧接文件名字符（coach 不认 mycoach），
-# 后面必须正好是 /desktopApp/build/（不认相邻的 coach-other，也不认嵌套在子目录里的另一个检出）。
-function Test-CheckoutCommandLine([string]$CommandLine, [string]$Repo) {
-    if (-not $CommandLine -or -not $Repo) { return $false }
-    $norm = { param([string]$t) [regex]::Replace($t.Replace('\', '/'), '/{2,}', '/') }
-    $cmd = & $norm $CommandLine
-    $root = (& $norm $Repo).TrimEnd('/')
+# -Runtime 起的客户端不在 <检出>/desktopApp/build 下，命令行里只有运行目录：起窗前把它也登记成归属锚点。
+$script:OwnedClientRoot = ''
+# Windows 路径不分大小写，\ 与 / 等价，重复分隔符视同一个。目录边界两端都要守：
+# 前面必须是路径分隔符、引号、空白或参数分隔符（coach 不认 mycoach，L1 不认 L1x），后面接的是这个目录里的文件。
+function ConvertTo-MarkerPath([string]$Text) { [regex]::Replace($Text.Replace('\', '/'), '/{2,}', '/') }
+function Test-CommandLineUnder([string]$CommandLine, [string]$Root) {
+    if (-not $CommandLine -or -not $Root) { return $false }
+    $cmd = ConvertTo-MarkerPath $CommandLine
+    $root = (ConvertTo-MarkerPath $Root).TrimEnd('/')
     if (-not $root) { return $false }
-    $needle = $root + '/desktopApp/build/'
+    $needle = $root + '/'
     $at = 0
     while (($i = $cmd.IndexOf($needle, $at, [StringComparison]::OrdinalIgnoreCase)) -ge 0) {
-        if ($i -eq 0 -or -not ([char]::IsLetterOrDigit($cmd[$i - 1]) -or '_-.$~'.IndexOf($cmd[$i - 1]) -ge 0)) { return $true }
+        if ($i -eq 0 -or '/"''=;,'.IndexOf($cmd[$i - 1]) -ge 0 -or [char]::IsWhiteSpace($cmd[$i - 1])) { return $true }
         $at = $i + 1
     }
     return $false
 }
+# 命令行里的构建输出是否落在这个检出目录下：必须正好是 /desktopApp/build/
+# （不认相邻的 coach-other，也不认嵌套在子目录里的另一个检出）。
+function Test-CheckoutCommandLine([string]$CommandLine, [string]$Repo) {
+    if (-not $CommandLine -or -not $Repo) { return $false }
+    $root = (ConvertTo-MarkerPath $Repo).TrimEnd('/')
+    if (-not $root) { return $false }
+    return (Test-CommandLineUnder $CommandLine ($root + '/desktopApp/build'))
+}
 function Get-ClientPids([switch]$Mine) {
     @(Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" | Where-Object {
-        ($_.CommandLine -like '*com.coach.desktop.MainKt*' -or $_.CommandLine -like '*com.coach.desktop.smoke.SmokeMain*') -and (-not $Mine -or -not $script:RepoMarker -or (Test-CheckoutCommandLine $_.CommandLine $script:RepoMarker)) } | ForEach-Object { [int]$_.ProcessId })
+        ($_.CommandLine -like '*com.coach.desktop.MainKt*' -or $_.CommandLine -like '*com.coach.desktop.smoke.SmokeMain*') -and
+            (-not $Mine -or -not $script:RepoMarker -or
+                (Test-CheckoutCommandLine $_.CommandLine $script:RepoMarker) -or
+                (Test-CommandLineUnder $_.CommandLine $script:OwnedClientRoot)) } | ForEach-Object { [int]$_.ProcessId })
 }
 function Mark-ExistingClients { $script:Known = Get-ClientPids }
 function Find-CoachWindow {
@@ -949,12 +961,12 @@ function Invoke-ForegroundStep(
                 # Release first so the other driver can finish its action.
                 Write-Verbose "Foreground action retry $attempt/20"
             } finally {
+                # 先记释放时刻再交锁：交出去以后别的驱动可能立刻拿到锁并写下自己的
+                # acquiredUtc，比这里晚记的 releasedUtc 还早，并行时就会假报 1 毫秒重叠。
+                if ($trace) { $trace.releasedUtc = [DateTime]::UtcNow.ToString('o') }
                 [WD]::SetOwnedForegroundPids([uint32[]]@())
                 if ($held) { $mutex.ReleaseMutex() }
-                if ($trace) {
-                    $trace.releasedUtc = [DateTime]::UtcNow.ToString('o')
-                    ($trace | ConvertTo-Json -Compress) | Add-Content -LiteralPath $script:ForegroundTracePath -Encoding UTF8
-                }
+                if ($trace) { ($trace | ConvertTo-Json -Compress) | Add-Content -LiteralPath $script:ForegroundTracePath -Encoding UTF8 }
             }
             if ($attempt -lt 20 -and $declined) {
                 # Give the current owner time to finish. Wake early on a real

@@ -408,6 +408,10 @@ if (-not $buildResult -or $buildResult.ExitCode -eq 0) {
         $revision = (& git -C $Repo rev-parse HEAD).Trim()
         if ($LASTEXITCODE -ne 0 -or (Get-Content (Join-Path $Runtime 'revision.txt') -Raw).Trim() -ne $revision) { throw 'Runtime source revision differs from checkout' }
         if ((Get-Content (Join-Path $Runtime 'dirty.txt') -Raw).Trim()) { throw 'Runtime was built from uncommitted source' }
+        # 运行目录可以放在 <检出>/desktopApp/build 之外（并行几条泳道时各拷一份 smoke-runtime）：
+        # 起窗前把它登记成本轮的归属锚点，Win-Drive 才认得出这个客户端是自己的。
+        # 一份运行目录只能给一条泳道用——两条泳道的命令行一样，就分不清是谁的窗了。
+        $script:OwnedClientRoot = $Runtime
         $classpath = ((Get-Content (Join-Path $Runtime 'classpath.txt')) | ForEach-Object { Join-Path $Runtime $_ }) -join ';'
         # Preparation is a separate Mac heavy call. The foreground path still runs
         # the production MainKt entry; only -Background selects development controls.
@@ -732,8 +736,17 @@ try {
         }
         if (-not $entry) { Fail 5 "目录里滚了 120 次也没找到第 $LessonNumber 条，没有发请求" }
         Click-At $entry.X $entry.Y; Start-Sleep -Seconds 3
-        Click-Label 5 @('收起目录') '找不到「收起目录」'; Start-Sleep -Seconds 2
-        $sectionLines = Shot 5 'section'
+        # 点条目后那一下「收起目录」会被切节的加载吞掉（11-21 01:51 L1 就是这样：抽屉一直盖在右栏上，
+        # 「本节原文 · 第 N 页」被挡住连 OCR 都读不到）。所以这里一直点到这一帧里真的看见标签或抽屉不在为止。
+        $shut = (Get-Date).AddSeconds(20)
+        while ((Get-Date) -lt $shut) {
+            $sectionLines = Shot 5 'section'
+            $shutBtn = Has $sectionLines @('收起目录')
+            # 抽屉还开着时右栏被盖住，抽屉头里的「本节原文」不算数：先真的收起目录，再读右栏的标签。
+            if (-not $shutBtn -and ($sectionLines | Where-Object { $_.Text -match '本节原文' })) { break }
+            if (-not $shutBtn) { Start-Sleep -Milliseconds 800; continue }
+            Click-At $shutBtn.X $shutBtn.Y; Start-Sleep -Seconds 1
+        }
         $label = $sectionLines | Where-Object { $_.Text -match '本节原文' } | Select-Object -First 1
         $labelPage = if ($label) { [regex]::Match($label.Text, '第\s*(\d+)\s*页').Groups[1].Value } else { '' }
         if (-not $labelPage) { Fail 5 '选中节后界面没有「本节原文 · 第 N 页」标签，没有发请求' }
@@ -801,6 +814,10 @@ try {
     $six = $null
     try {
         $sp = Scroll-Point 0.7 0.6; Scroll-At $sp[0] $sp[1] 30; Start-Sleep -Seconds 1
+        # 第⑤步收尾点出处后停在原文页，顶栏是「返回学习」而不是「返回书架」：先退回做题学再回书架。
+        if (Has (Shot 6 'leave') @('返回学习')) {
+            Click-Label 6 @('返回学习') '无法从本节原文返回做题学页面'
+        }
         Click-Label 6 @('返回书架') '无法从学习页返回书架'
         # 书架一屏放不下三条入口：做题学在折叠线以下，得先滚出来再点。
         $path = $null
@@ -860,16 +877,27 @@ try {
                 if ($r) { break }
                 if (-not $btn) { Fail 6 '做题学页面找不到可用的「本节原文 · 第X页」按钮' }
                 Click-At $btn.X $btn.Y; Start-Sleep -Milliseconds 800
-                if (Await-Text 6 "range-$tag" @('对应教材第') 25) { $r = Get-LessonSourceRange $script:Last; break }
+                if (Await-Text 6 "range-$tag" @('对应教材第') 25) {
+                    $r = Get-LessonSourceRange $script:Last
+                    if ($r) { break }
+                    # 原文页只闪一下就退回做题学、那一帧没读全页段：再开一次，不拿空页段往下走。
+                    continue
+                }
                 $actAfter = Resolve-SourcePageRangeAction (Get-LessonLearningState $script:Last $script:LastPng)
                 if ($actAfter.Action -eq 'return_range') { $r = $actAfter.Range; break }
                 if ($actAfter.Action -eq 'wait_range_fade') { $r = & $waitRangeFade "$tag-after-$try"; if ($r) { break } }
             }
-            $ret = Await-Text 6 'find' @('返回学习') 15
-            if (-not $ret) { Fail 6 '本节原文页没有「返回学习」（屏幕上找不到「返回学习」）' }
+            $ret = Find-Text $script:Last '返回学习'
+            if (-not $ret) { $ret = Await-Text 6 'find' @('返回学习') 8 }
             if (-not $r) {
                 $r = Get-LessonSourceRange $script:Last
                 if (-not $r) { $r = & $waitRangeFade "late-$tag" }
+            }
+            if (-not $ret) {
+                # 原文页读完页段后有时会自己退回做题学（切节后立刻再开一次最容易碰上）：页段已经拿到、
+                # 屏幕上已经是做题学，就算回到了原处，不必再点「返回学习」。
+                if ($r) { return $r }
+                Fail 6 '本节原文页没有「返回学习」，页段也没读到（见 6-find.png）'
             }
             Click-At $ret.X $ret.Y
             # Only the foreground driver can lose focus mid-click. The background driver never owns

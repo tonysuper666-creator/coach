@@ -131,7 +131,10 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
     suspend fun ask(chosen: SourceBlock, question: String, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult =
         send(ExplainWire.question(requestId, chosen, question), listOf(chosen), requestId)
 
-    open suspend fun fetchChapterCompanion(requestJson: JsonObject): ChapterCompanionFetchResult {
+    open suspend fun fetchChapterCompanion(
+        requestJson: JsonObject,
+        blocks: List<SourceBlock> = emptyList(),
+    ): ChapterCompanionFetchResult {
         val paired = identity ?: return if (revoked) {
             ChapterCompanionFetchResult.Failed(ExplainTrouble.revoked(sableLogin), ExplainTrouble.Revoked)
         } else {
@@ -139,7 +142,15 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         }
         val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library")
         return try {
-            val reply = http.companionChapter(requestJson)
+            val snapshot = if (blocks.isNotEmpty()) {
+                withContext(Dispatchers.IO) { runCatching { imports?.snapshot(blocks) }.getOrNull() }
+                    ?: return ChapterCompanionFetchResult.Failed("请先打开个人导入的书并允许讲解。")
+            } else null
+            val wire = if (snapshot != null) JsonObject(requestJson + ("localSource" to snapshot)) else requestJson
+            val reply = http.companionChapter(wire)
+            if (snapshot != null && withContext(Dispatchers.IO) { runCatching { imports?.snapshot(blocks) }.getOrNull() } != snapshot) {
+                return ChapterCompanionFetchResult.Failed("保存的原文已变化，请重新打开这本书后重试。")
+            }
             val body = reply.body
             val isRevoked = reply.statusCode == 401 ||
                 (reply.statusCode == 403 && http.libraryAuthStatus() == 401)

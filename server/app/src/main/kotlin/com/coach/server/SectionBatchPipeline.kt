@@ -750,7 +750,7 @@ class RoutedBatchAiTransport(
     }
 }
 
-/** Runs CodeBuddy CLI `deepseek-v4.1-flash` with zero tools in an isolated subprocess. */
+/** Runs CodeBuddy CLI `deepseek-v4.1-flash` with zero tools and live `stream-json` streaming for true TTFT measurement. */
 class CodeBuddyDeepSeekTransport(
     private val executable: String = defaultExecutable(),
     private val timeoutSeconds: Long = 120L,
@@ -768,6 +768,10 @@ class CodeBuddyDeepSeekTransport(
             "-p",
             "--tools",
             "",
+            "--no-session-persistence",
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
             "--system-prompt",
             systemPrompt,
             "--model",
@@ -778,16 +782,19 @@ class CodeBuddyDeepSeekTransport(
         proc.outputStream.bufferedWriter(Charsets.UTF_8).use { writer ->
             writer.write(userPrompt)
         }
-        val stdout = StringBuilder()
-        var firstChunkMs = 0L
+        val streamed = StringBuilder()
+        var fallbackResult: String? = null
+        var firstTokenMs = 0L
         BufferedReader(InputStreamReader(proc.inputStream, Charsets.UTF_8)).use { reader ->
-            val buf = CharArray(512)
             while (true) {
-                val n = reader.read(buf)
-                if (n < 0) break
-                if (n > 0) {
-                    if (firstChunkMs == 0L) firstChunkMs = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L)
-                    stdout.append(buf, 0, n)
+                val line = reader.readLine() ?: break
+                val parsed = parseStreamJsonLine(line) ?: continue
+                if (parsed.isDelta) {
+                    if (firstTokenMs == 0L) firstTokenMs = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L)
+                    streamed.append(parsed.text)
+                } else if (parsed.text.isNotBlank()) {
+                    if (firstTokenMs == 0L) firstTokenMs = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L)
+                    fallbackResult = parsed.text
                 }
             }
         }
@@ -801,7 +808,8 @@ class CodeBuddyDeepSeekTransport(
             val err = proc.errorStream.bufferedReader(Charsets.UTF_8).readText().take(300)
             throw IllegalStateException("codebuddy_exit_${proc.exitValue()}: $err")
         }
-        val raw = unwrapDsml(stdout.toString().trim())
+        val assembled = streamed.toString().ifBlank { fallbackResult.orEmpty() }
+        val raw = unwrapDsml(assembled.trim())
         if (raw.isBlank()) throw IllegalStateException("codebuddy_empty_output")
         BatchTransportReply(
             text = raw,
@@ -810,10 +818,12 @@ class CodeBuddyDeepSeekTransport(
             inputTokens = TokenLedgerPricing.estimateTokens(systemPrompt) + TokenLedgerPricing.estimateTokens(userPrompt),
             outputTokens = TokenLedgerPricing.estimateTokens(raw),
             cachedTokens = 0,
-            ttftMs = if (firstChunkMs > 0L) firstChunkMs else elapsedMs,
+            ttftMs = if (firstTokenMs > 0L) firstTokenMs else elapsedMs,
             elapsedMs = elapsedMs,
         )
     }
+
+    internal data class StreamChunk(val text: String, val isDelta: Boolean)
 
     companion object {
         private val DSML_CONTENT_RE = Regex(
@@ -822,6 +832,28 @@ class CodeBuddyDeepSeekTransport(
 
         internal fun unwrapDsml(text: String): String =
             DSML_CONTENT_RE.find(text)?.groupValues?.get(1)?.trim() ?: text
+
+        internal fun parseStreamJsonLine(line: String): StreamChunk? {
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) return null
+            if (!trimmed.startsWith("{")) return StreamChunk(trimmed, isDelta = true)
+            val obj = runCatching { LedgerJson.parseToJsonElement(trimmed).jsonObject }.getOrNull() ?: return null
+            return when (obj["type"]?.jsonPrimitive?.contentOrNull) {
+                "stream_event" -> {
+                    val event = obj["event"] as? JsonObject ?: return null
+                    if (event["type"]?.jsonPrimitive?.contentOrNull != "content_block_delta") return null
+                    val delta = event["delta"] as? JsonObject ?: return null
+                    if (delta["type"]?.jsonPrimitive?.contentOrNull != "text_delta") return null
+                    val text = delta["text"]?.jsonPrimitive?.contentOrNull ?: return null
+                    if (text.isEmpty()) null else StreamChunk(text, isDelta = true)
+                }
+                "result" -> {
+                    val text = obj["result"]?.jsonPrimitive?.contentOrNull ?: return null
+                    if (text.isBlank()) null else StreamChunk(text, isDelta = false)
+                }
+                else -> null
+            }
+        }
 
         fun defaultExecutable(): String {
             System.getenv("COACH_CODEBUDDY_BIN")?.takeIf { it.isNotBlank() }?.let { return it }
@@ -934,6 +966,9 @@ class ChapterCompanionCache(directory: Path) {
     }
 }
 
+/** Thrown when a personal import receipt or device authorization is revoked before or during companion generation. */
+class CompanionRevokedException : RuntimeException("companion_revoked")
+
 /**
  * Orchestrates concurrent per-section generation (`<= 3,500` tokens/call), UTF-16 anchor verification,
  * exercise isolation, overlap checking, caching, and Token Ledger accounting.
@@ -963,12 +998,19 @@ class SectionConcurrentCompanionPipeline(
         val routeChannel: CompanionRouteChannel,
     )
 
-    suspend fun generateChapter(request: ChapterCompanionRequest, bypassCache: Boolean = false): ChapterCompanionPack {
+    suspend fun generateChapter(
+        request: ChapterCompanionRequest,
+        bypassCache: Boolean = false,
+        cacheScope: String = "local",
+        currentCheck: suspend () -> Boolean = { true },
+    ): ChapterCompanionPack {
         val chunks = SectionChunkSplitter.split(request.sections)
         require(chunks.isNotEmpty()) { "这一章缺少可整理的文本块。" }
-        val inputHash = computeInputHash(request, chunks)
+        if (!currentCheck()) throw CompanionRevokedException()
+        val inputHash = computeInputHash(request, chunks, cacheScope)
         if (!bypassCache && cache != null) {
             cache.get(request.bookId, request.chapterId, inputHash)?.let { cached ->
+                if (!currentCheck()) throw CompanionRevokedException()
                 return cached.copy(stats = cached.stats.copy(fromCache = true))
             }
         }
@@ -978,11 +1020,13 @@ class SectionConcurrentCompanionPipeline(
             chunks.map { chunk ->
                 async {
                     semaphore.withPermit {
+                        if (!currentCheck()) throw CompanionRevokedException()
                         runChunk(request, chunk)
                     }
                 }
             }.awaitAll()
         }
+        if (!currentCheck()) throw CompanionRevokedException()
 
         val allSourceText = buildString {
             for (sec in request.sections) {
@@ -1299,13 +1343,14 @@ class SectionConcurrentCompanionPipeline(
         }
     }
 
-    private fun computeInputHash(request: ChapterCompanionRequest, chunks: List<BoundedSectionChunk>): String {
+    private fun computeInputHash(request: ChapterCompanionRequest, chunks: List<BoundedSectionChunk>, cacheScope: String): String {
         val raw = buildString {
-            append("v1|").append(request.bookId).append('|').append(request.chapterId).append('|')
+            append("v2|").append(cacheScope).append('|').append(request.bookId).append('|').append(request.chapterId).append('|')
             for (c in chunks) {
                 append(c.sectionId).append('#').append(c.chunkIndex).append(':').append(c.isExerciseSection).append('|')
                 for (b in c.blocks) {
-                    append(b.id).append('@').append(b.pdfPage).append(':').append(b.text.length).append(';')
+                    append(b.id).append('@').append(b.pdfPage).append(':').append(b.startUtf16).append(':')
+                        .append(sha256(b.text.toByteArray(Charsets.UTF_8))).append(';')
                 }
             }
         }

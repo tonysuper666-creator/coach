@@ -1,8 +1,10 @@
 package com.coach.server
 
 import io.ktor.server.application.install
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -292,79 +294,271 @@ class SectionBatchPipelineTest {
     }
 
     @Test
-    fun companionChapterAndLedgerRoutesWorkOverHttpAndSupportSplitKind() = runBlocking {
+    fun codeBuddyStreamJsonParserExtractsIncrementalTextDeltasAndFallbackResult() {
+        val deltaLine = """{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"{\"coreQuestion\":"}}}"""
+        val parsedDelta = CodeBuddyDeepSeekTransport.parseStreamJsonLine(deltaLine)
+        assertNotNull(parsedDelta)
+        assertTrue(parsedDelta.isDelta)
+        assertEquals("""{"coreQuestion":""", parsedDelta.text)
+
+        val resultLine = """{"type":"result","result":"{\"coreQuestion\":\"ok\"}"}"""
+        val parsedResult = CodeBuddyDeepSeekTransport.parseStreamJsonLine(resultLine)
+        assertNotNull(parsedResult)
+        assertFalse(parsedResult.isDelta)
+        assertEquals("""{"coreQuestion":"ok"}""", parsedResult.text)
+
+        assertNull(CodeBuddyDeepSeekTransport.parseStreamJsonLine("""{"type":"system","subtype":"init"}"""))
+    }
+
+    private fun companionBody(
+        bookId: String,
+        text: String = "In empirical work, arc elasticity measures price sensitivity across finite intervals.",
+        pageSha: String = "a".repeat(64),
+        pageLen: Int = text.length,
+        consented: Boolean = true,
+        includeLocalSource: Boolean = true,
+        customLocalSource: JsonObject? = null,
+    ): JsonObject = buildJsonObject {
+        put("requestId", "comp0001")
+        put("bookId", bookId)
+        put("bookPages", 10)
+        put("chapterId", "ch-2")
+        put("chapterTitle", "2 Demand for health care")
+        put("sections", buildJsonArray {
+            add(buildJsonObject {
+                put("sectionId", "sec-2-3")
+                put("title", "2.3 Elasticities")
+                put("isExerciseSection", false)
+                put("blocks", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "$bookId:p1:0")
+                        put("pdfPage", 1)
+                        put("startUtf16", 0)
+                        put("text", text)
+                    })
+                })
+            })
+        })
+        if (customLocalSource != null) {
+            put("localSource", customLocalSource)
+        } else if (includeLocalSource) {
+            put("localSource", buildJsonObject {
+                put("schema", 1)
+                put("book", bookId)
+                put("format", "pdf")
+                put("title", "Synthetic Economics")
+                put("consented", consented)
+                put("pages", buildJsonArray {
+                    add(buildJsonObject {
+                        put("number", 1)
+                        put("length", pageLen)
+                        put("ocr", false)
+                        put("sha256", pageSha)
+                    })
+                })
+            })
+        }
+    }
+
+    @Test
+    fun companionChapterAndLedgerRoutesWorkOverHttpAndEnforceReceiptSecurity() = runBlocking {
         val dir = Files.createTempDirectory("coach-companion-http-")
         val store = com.coach.store.LedgerStore(dir)
-        store.enroll("owner-dev", "secret-token-for-companion-route-test-0001")
+        val ownerToken = "secret-token-for-companion-route-test-0001"
+        store.enroll("owner-dev", ownerToken)
+        val friendCred = requireNotNull(store.pair(store.createPairingCode(friend = "alice").code, "alice-laptop"))
+        val friendToken = friendCred.token
+        val friendDev = friendCred.deviceId
         val ledger = BookTokenLedger(dir.resolve("companion"))
         val cache = ChapterCompanionCache(dir.resolve("companion"))
+        val imports = ImportedBookSources(dir.resolve("owner-imports"))
+        val friends = FriendAccess(dir.resolve("friends"), state = dir.resolve("state"), config = dir.resolve("friends.json"))
+        val transportCalls = AtomicInteger(0)
+        val delayMs = java.util.concurrent.atomic.AtomicLong(0L)
         val stubTransport = object : BatchAiTransport {
             override suspend fun generateSection(
                 systemPrompt: String, userPrompt: String, task: String, batchKey: String, maxTokens: Int,
-            ): BatchTransportReply = BatchTransportReply(
-                text = """{"coreQuestion":"需求弹性如何衡量价格敏感度？","keyPoints":[{"summary":"弧弹性用于区间中点衡量价格变化对就医量的影响。","pdfPage":1,"quoteAnchor":"arc elasticity measures price"}],"jargonGlosses":[],"pretest":[],"derivations":[],"optionalPractice":[]}""",
-                routeChannel = CompanionRouteChannel.CODEBUDDY_DEEPSEEK_FLASH,
-                model = "deepseek-v4.1-flash",
-                inputTokens = 640,
-                outputTokens = 210,
-                ttftMs = 28,
-                elapsedMs = 40,
-            )
+            ): BatchTransportReply {
+                transportCalls.incrementAndGet()
+                val wait = delayMs.get()
+                if (wait > 0L) delay(wait)
+                return BatchTransportReply(
+                    text = """{"coreQuestion":"需求弹性如何衡量价格敏感度？","keyPoints":[{"summary":"弧弹性用于区间中点衡量价格变化对就医量的影响。","pdfPage":1,"quoteAnchor":"arc elasticity measures price"}],"jargonGlosses":[],"pretest":[],"derivations":[],"optionalPractice":[]}""",
+                    routeChannel = CompanionRouteChannel.CODEBUDDY_DEEPSEEK_FLASH,
+                    model = "deepseek-v4.1-flash",
+                    inputTokens = 640,
+                    outputTokens = 210,
+                    ttftMs = 28,
+                    elapsedMs = 40,
+                )
+            }
         }
         val pipeline = SectionConcurrentCompanionPipeline(stubTransport, ledger, cache)
         val actor = com.coach.core.LedgerActor(this, store)
         val server = io.ktor.server.engine.embeddedServer(io.ktor.server.netty.Netty, host = "127.0.0.1", port = 0) {
             install(io.ktor.server.application.createApplicationPlugin("TestAuth") {
-                onCall { call -> call.attributes.put(observedDevice, "owner-dev") }
+                onCall { call ->
+                    val bearer = call.request.headers["Authorization"]?.removePrefix("Bearer ").orEmpty()
+                    if (bearer == friendToken) {
+                        call.attributes.put(observedDevice, friendDev)
+                        call.attributes.put(observedFriend, "alice")
+                    } else {
+                        call.attributes.put(observedDevice, "owner-dev")
+                    }
+                }
             })
-            libraryExplainRoutes(actor, reader = null, companionPipeline = pipeline, tokenLedger = ledger)
+            libraryExplainRoutes(
+                actor = actor,
+                reader = null,
+                library = null,
+                imports = imports,
+                friends = friends,
+                companionPipeline = pipeline,
+                tokenLedger = ledger,
+            )
         }.start(wait = false)
         try {
             val port = server.engine.resolvedConnectors().single().port
             val http = java.net.http.HttpClient.newHttpClient()
-            val bookId = "d".repeat(64)
-            val body = buildJsonObject {
-                put("bookId", bookId)
-                put("chapterId", "ch-2")
-                put("chapterTitle", "2 Demand for health care")
-                put("sections", buildJsonArray {
-                    add(buildJsonObject {
-                        put("sectionId", "sec-2-3")
-                        put("title", "2.3 Elasticities")
-                        put("isExerciseSection", false)
-                        put("blocks", buildJsonArray {
-                            add(buildJsonObject {
-                                put("id", "$bookId:p1:0")
-                                put("pdfPage", 1)
-                                put("startUtf16", 0)
-                                put("text", "In empirical work, arc elasticity measures price sensitivity across finite intervals.")
-                            })
-                        })
-                    })
-                })
-            }
-            val postResp = http.send(
+            fun post(payload: JsonObject, token: String = ownerToken): java.net.http.HttpResponse<String> = http.send(
                 java.net.http.HttpRequest.newBuilder(java.net.URI("http://127.0.0.1:$port/v1/library/companion/chapter"))
                     .header("Content-Type", "application/json")
-                    .POST(java.net.http.HttpRequest.BodyPublishers.ofString(body.toString()))
+                    .header("Authorization", "Bearer $token")
+                    .POST(java.net.http.HttpRequest.BodyPublishers.ofString(payload.toString()))
                     .build(),
                 java.net.http.HttpResponse.BodyHandlers.ofString(),
             )
+
+            val bookId = "d".repeat(64)
+
+            // 1. Security gate: missing localSource, dummy {}, unconsented, forged offset, non-64-hex bookId ALL fail closed BEFORE transport/ledger!
+            assertEquals(403, post(companionBody(bookId, includeLocalSource = false), friendToken).statusCode())
+            assertEquals(409, post(companionBody(bookId, includeLocalSource = false), ownerToken).statusCode())
+            assertEquals(400, post(companionBody(bookId, customLocalSource = buildJsonObject { }), friendToken).statusCode())
+            assertEquals(400, post(companionBody(bookId, consented = false), friendToken).statusCode())
+            assertEquals(400, post(companionBody(bookId, pageLen = 5), friendToken).statusCode())
+            assertEquals(400, post(companionBody("short-unregistered-book"), friendToken).statusCode())
+            assertEquals(0, transportCalls.get(), "Unauthorized/invalid companion requests must never call AI transport")
+            assertEquals(0, ledger.bookSummary(bookId).calls, "Unauthorized/invalid companion requests must never write Token Ledger")
+
+            // 2. Friend cannot read global ledger endpoint
+            val friendLedgerResp = http.send(
+                java.net.http.HttpRequest.newBuilder(java.net.URI("http://127.0.0.1:$port/v1/library/companion/ledger?bookId=$bookId"))
+                    .header("Authorization", "Bearer $friendToken")
+                    .GET()
+                    .build(),
+                java.net.http.HttpResponse.BodyHandlers.ofString(),
+            )
+            assertEquals(403, friendLedgerResp.statusCode())
+
+            // 3. Valid consented personal book succeeds for owner and registers receipt
+            val postResp = post(companionBody(bookId), ownerToken)
             assertEquals(200, postResp.statusCode())
             val pack = ChapterCompanionCodec.decode(postResp.body())
             assertEquals(1, pack.keyPoints.size)
             assertNotNull(pack.keyPoints.single().anchor)
             assertEquals(1, pack.stats.verifiedAnchors)
+            assertEquals(1, transportCalls.get())
 
+            // 4. Tampering with page sha256 or block text on registered book fails closed (409 Conflict) before transport
+            assertEquals(409, post(companionBody(bookId, pageSha = "b".repeat(64)), ownerToken).statusCode())
+            assertEquals(409, post(companionBody(bookId, text = "Tampered client text that does not match registered page."), ownerToken).statusCode())
+            assertEquals(1, transportCalls.get(), "Snapshot conflict must not invoke AI transport")
+
+            // 5. Friend with valid consented receipt succeeds on isolated friend store & cache (does NOT leak owner's cache)
+            val friendOk = post(companionBody(bookId), friendToken)
+            assertEquals(200, friendOk.statusCode())
+            val friendPack = ChapterCompanionCodec.decode(friendOk.body())
+            assertFalse(friendPack.stats.fromCache, "Friend must not hit owner's cache scope")
+            assertEquals(2, transportCalls.get())
+
+            // 6. Friend tampering with registered page fails closed (409 Conflict)
+            assertEquals(409, post(companionBody(bookId, pageSha = "c".repeat(64)), friendToken).statusCode())
+            assertEquals(2, transportCalls.get())
+
+            // 7. Revoking friend's receipt mid-flight (isCurrent == false) withholds response (409 Conflict) and does NOT cache
+            delayMs.set(350L)
+            val friendBook2 = "e".repeat(64)
+            val inFlight = async(kotlinx.coroutines.Dispatchers.IO) {
+                post(companionBody(friendBook2), friendToken)
+            }
+            while (transportCalls.get() < 3) delay(10)
+            val friendImportsDb = dir.resolve("friends").resolve(com.coach.store.sha256("alice".toByteArray())).resolve("imports/sources.sqlite")
+            java.sql.DriverManager.getConnection("jdbc:sqlite:$friendImportsDb").use { db ->
+                db.createStatement().use { it.executeUpdate("DELETE FROM blocks") }
+            }
+            val revokedResp = inFlight.await()
+            assertEquals(409, revokedResp.statusCode(), "Deleted receipt during generation must withhold companion response")
+            delayMs.set(0L)
+
+            // 8. Owner ledger reflects verified calls
             val ledgerResp = http.send(
                 java.net.http.HttpRequest.newBuilder(java.net.URI("http://127.0.0.1:$port/v1/library/companion/ledger?bookId=$bookId"))
+                    .header("Authorization", "Bearer $ownerToken")
                     .GET()
                     .build(),
                 java.net.http.HttpResponse.BodyHandlers.ofString(),
             )
             assertEquals(200, ledgerResp.statusCode())
             assertTrue(ledgerResp.body().contains("\"withinBudget\":true"))
-            assertTrue(ledgerResp.body().contains("\"calls\":1"))
+            assertTrue(ledgerResp.body().contains("\"calls\":2"))
+        } finally {
+            server.stop(100, 500)
+            actor.close()
+        }
+    }
+
+    @Test
+    fun companionChapterFailsClosedWhenImportStoreOrFriendAccessIsUnconfiguredOrCatalogReserved() = runBlocking {
+        val dir = Files.createTempDirectory("coach-companion-failclosed-")
+        val store = com.coach.store.LedgerStore(dir)
+        val friendCred = requireNotNull(store.pair(store.createPairingCode(friend = "bob").code, "bob-laptop"))
+        val friendToken = friendCred.token
+        val friendDev = friendCred.deviceId
+        val ledger = BookTokenLedger(dir.resolve("companion"))
+        val transportCalls = AtomicInteger(0)
+        val stubTransport = object : BatchAiTransport {
+            override suspend fun generateSection(
+                systemPrompt: String, userPrompt: String, task: String, batchKey: String, maxTokens: Int,
+            ): BatchTransportReply {
+                transportCalls.incrementAndGet()
+                error("Transport must never be called when import/friend store is missing")
+            }
+        }
+        val pipeline = SectionConcurrentCompanionPipeline(stubTransport, ledger)
+        val actor = com.coach.core.LedgerActor(this, store)
+        val server = io.ktor.server.engine.embeddedServer(io.ktor.server.netty.Netty, host = "127.0.0.1", port = 0) {
+            install(io.ktor.server.application.createApplicationPlugin("TestAuth") {
+                onCall { call ->
+                    val bearer = call.request.headers["Authorization"]?.removePrefix("Bearer ").orEmpty()
+                    if (bearer == friendToken) {
+                        call.attributes.put(observedDevice, friendDev)
+                        call.attributes.put(observedFriend, "bob")
+                    } else {
+                        call.attributes.put(observedDevice, "owner-dev")
+                    }
+                }
+            })
+            // Deliberately omit imports & friends (exact Reviewer-Kimi probe scenario)
+            libraryExplainRoutes(actor, reader = null, companionPipeline = pipeline, tokenLedger = ledger)
+        }.start(wait = false)
+        try {
+            val port = server.engine.resolvedConnectors().single().port
+            val http = java.net.http.HttpClient.newHttpClient()
+            val bookId = "f".repeat(64)
+            for (token in listOf(friendToken, "owner-token")) {
+                val resp = http.send(
+                    java.net.http.HttpRequest.newBuilder(java.net.URI("http://127.0.0.1:$port/v1/library/companion/chapter"))
+                        .header("Content-Type", "application/json")
+                        .header("Authorization", "Bearer $token")
+                        .POST(java.net.http.HttpRequest.BodyPublishers.ofString(companionBody(bookId).toString()))
+                        .build(),
+                    java.net.http.HttpResponse.BodyHandlers.ofString(),
+                )
+                assertEquals(503, resp.statusCode(), "Missing importStore/FriendAccess must fail closed with 503")
+            }
+            assertEquals(0, transportCalls.get())
+            assertEquals(0, ledger.bookSummary(bookId).calls)
         } finally {
             server.stop(100, 500)
             actor.close()

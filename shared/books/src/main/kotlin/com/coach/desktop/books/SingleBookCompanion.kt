@@ -545,13 +545,22 @@ internal object ChapterCompanionGrouping {
 
     fun isExerciseSection(title: String): Boolean = EXERCISE_RE.containsMatchIn(title.trim())
 
+    fun wireBlocks(group: ChapterSectionGroup): List<SourceBlock> {
+        val seen = HashSet<String>()
+        return group.sections.flatMap { sec ->
+            (sec.blocks.filterNot { it.heading }.ifEmpty { sec.blocks }).filter { seen.add(it.id) }
+        }
+    }
+
     fun buildWireRequest(book: Textbook, group: ChapterSectionGroup): JsonObject = buildJsonObject {
+        val seen = HashSet<String>()
         put("bookId", book.id)
+        put("bookPages", book.pages.size.coerceAtLeast(1))
         put("chapterId", group.chapterId)
         put("chapterTitle", group.chapterTitle)
         put("sections", buildJsonArray {
             for (sec in group.sections) {
-                val bodyBlocks = sec.blocks.filterNot { it.heading }.ifEmpty { sec.blocks }
+                val bodyBlocks = (sec.blocks.filterNot { it.heading }.ifEmpty { sec.blocks }).filter { seen.add(it.id) }
                 if (bodyBlocks.isEmpty()) continue
                 add(buildJsonObject {
                     put("sectionId", sec.id)

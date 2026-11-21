@@ -227,6 +227,10 @@ fun Application.libraryExplainRoutes(
         }
         post("/v1/library/companion/chapter") { call.withReaderConnection {
             val friend = call.attributes.getOrNull(observedFriend)
+            val device = call.attributes[observedDevice]
+            val bearer = call.request.header("Authorization")?.removePrefix("Bearer ").orEmpty()
+            val diagnostics = friend?.let { FriendReaderDiagnostics() }
+            var requestId = ""
             val pipeline = companionPipeline
                 ?: return@withReaderConnection call.respondText(
                     json("error" to "章节伴读管线暂未开启，请稍后重试。").toString(),
@@ -244,16 +248,92 @@ fun Application.libraryExplainRoutes(
                 }
                 if (size > 524_288) throw MockError(HttpStatusCode.PayloadTooLarge, "章节请求体过大，请按节拆开后重试。")
                 val input = LedgerJson.parseToJsonElement(bytes.decodeToString(0, size)).jsonObject
-                val req = parseCompanionChapterRequest(input)
+                requestId = (input["requestId"] as? JsonPrimitive)?.takeIf { it.isString }?.content.orEmpty()
+                val (parsedReq, bookPages) = parseCompanionChapterRequest(input)
+
+                // Fail closed identically to /v1/library/explain: require personal localSource receipt,
+                // verify book ownership / non-catalog status, register verified blocks, and check isCurrent.
                 if (friend != null && input["localSource"] == null) {
                     throw MockError(HttpStatusCode.Forbidden, "请先导入自己的书，再生成章节伴读。")
                 }
-                val bypassCache = (input["bypassCache"] as? JsonPrimitive)?.booleanOrNull == true
-                val pack = pipeline.generateChapter(req, bypassCache = bypassCache)
-                call.respondText(
-                    ChapterCompanionCodec.encode(pack).toString(),
-                    ContentType.Application.Json,
+                if (friend == null && input["localSource"] == null) {
+                    throw MockError(HttpStatusCode.Conflict, "整章伴读只支持个人导入的书，请携带有效导入回执。")
+                }
+                val importStore = if (friend == null) imports else (friends ?: throw FriendServiceError()).imports(friend)
+                if (friend == null) {
+                    val allowedPersonal = withContext(Dispatchers.IO) {
+                        runCatching { library?.reservesVersion(parsedReq.bookId) != true }.getOrDefault(false)
+                    }
+                    if (!allowedPersonal) {
+                        throw MockError(HttpStatusCode.Conflict, "这本书的来源或可见范围尚未核实，暂时无法生成伴读。")
+                    }
+                } else {
+                    val quota = withContext(Dispatchers.IO) { friends!!.status(friend, device) }
+                    val callsRem = quota["callsRemaining"]?.jsonPrimitive?.longOrNull
+                    val tokensRem = quota["tokensRemaining"]?.jsonPrimitive?.longOrNull
+                    if ((callsRem != null && callsRem <= 0L) || (tokensRem != null && tokensRem <= 0L)) {
+                        throw FriendServiceError("daily_quota")
+                    }
+                }
+                val resolvedImports = importStore
+                    ?: throw MockError(HttpStatusCode.ServiceUnavailable, "服务还未接通新书伴读，请更新服务后重试。")
+                val receipt = withContext(Dispatchers.IO) {
+                    resolvedImports.registerCompanion(device, input, parsedReq, bookPages)
+                }
+
+                // Rebind sections strictly to receipt-verified blocks (never untrusted rawPages).
+                val receiptBlocksByKey = receipt.blocks.associateBy { Triple(it.page, it.start, it.text) }
+                val verifiedReq = parsedReq.copy(
+                    sections = parsedReq.sections.map { sec ->
+                        sec.copy(
+                            blocks = sec.blocks.map { blk ->
+                                val verified = receiptBlocksByKey[Triple(blk.pdfPage, blk.startUtf16, blk.text)]
+                                    ?: throw MockError(HttpStatusCode.Conflict, "这本书的保存页已变化，请重新导入并核对原文。")
+                                SectionBlockInput(
+                                    id = "${parsedReq.bookId}:p${verified.page}:${verified.start}",
+                                    pdfPage = verified.page,
+                                    startUtf16 = verified.start,
+                                    text = verified.text,
+                                )
+                            },
+                        )
+                    },
+                    rawPages = emptyMap(),
                 )
+                val current: suspend () -> Boolean = {
+                    withContext(Dispatchers.IO) {
+                        resolvedImports.isCurrent(receipt) && (if (friend != null) actor.execute {
+                            authorize(device, bearer) && friendName(device) == friend
+                        } else runCatching { library?.reservesVersion(parsedReq.bookId) != true }.getOrDefault(false))
+                    }
+                }
+                if (!current()) {
+                    throw MockError(HttpStatusCode.Conflict, "这本书的保存页或设备授权已失效，无法生成伴读。")
+                }
+                val cacheScope = friend?.let { "friend:${friendId(it)}" } ?: "owner:$device"
+                val bypassCache = (input["bypassCache"] as? JsonPrimitive)?.booleanOrNull == true
+                val pack = pipeline.generateChapter(
+                    verifiedReq,
+                    bypassCache = bypassCache,
+                    cacheScope = cacheScope,
+                    currentCheck = current,
+                )
+                val body = ChapterCompanionCodec.encode(pack)
+                if (friend != null) withContext(Dispatchers.IO) {
+                    try { friends!!.record(friend, device, requestId, "complete", body, diagnostics) }
+                    catch (_: Exception) { throw FriendServiceError() }
+                }
+                call.respondText(body.toString(), ContentType.Application.Json)
+            } catch (e: CompanionRevokedException) {
+                if (friend != null) withContext(Dispatchers.IO) {
+                    runCatching { friends?.record(friend, device, requestId, "revoked", diagnostics = diagnostics) }
+                }
+                call.respondText(json("error" to "这本书的保存页或设备授权已失效，已撤回本次生成。").toString(), ContentType.Application.Json, HttpStatusCode.Conflict)
+            } catch (e: FriendServiceError) {
+                if (friend != null) withContext(Dispatchers.IO) {
+                    runCatching { friends?.record(friend, device, requestId, e.code, diagnostics = diagnostics) }
+                }
+                call.respondText(e.body.toString(), ContentType.Application.Json, e.status)
             } catch (e: MockError) {
                 call.respondText(json("error" to e.message).toString(), ContentType.Application.Json, e.status)
             } catch (e: IllegalArgumentException) {
@@ -279,14 +359,18 @@ fun Application.libraryExplainRoutes(
     }
 }
 
-private fun parseCompanionChapterRequest(input: JsonObject): ChapterCompanionRequest {
+private fun parseCompanionChapterRequest(input: JsonObject): Pair<ChapterCompanionRequest, Int?> {
     val bookId = input.str("bookId").trim()
     val chapterId = input.str("chapterId").trim()
     val chapterTitle = input.str("chapterTitle").trim()
-    require(Regex("[0-9a-f]{64}|[A-Za-z0-9._-]{1,80}").matches(bookId) && tutorSourceAllowed(bookId)) { "书籍编号格式无效。" }
+    require(Regex("[0-9a-f]{64}").matches(bookId) && tutorSourceAllowed(bookId)) { "书籍编号格式无效。" }
     require(chapterId.length in 1..120 && chapterTitle.length in 1..300) { "章节信息不完整。" }
+    val bookPages = (input["bookPages"] as? JsonPrimitive)?.intOrNull?.also {
+        require(it in 1..100_000) { "书籍总页数无效。" }
+    }
     val rawSections = input["sections"] as? JsonArray ?: throw IllegalArgumentException("缺少章节小节内容。")
     require(rawSections.size in 1..48) { "章节小节数量超出上限。" }
+    val seenBlockIds = HashSet<String>()
     val sections = rawSections.map { el ->
         val obj = el as? JsonObject ?: throw IllegalArgumentException("小节格式不对。")
         val sid = obj.str("sectionId").trim()
@@ -294,17 +378,20 @@ private fun parseCompanionChapterRequest(input: JsonObject): ChapterCompanionReq
         val isEx = (obj["isExerciseSection"] as? JsonPrimitive)?.booleanOrNull ?: false
         require(sid.length in 1..120 && title.length in 1..300) { "小节标题格式不对。" }
         val blocksArr = obj["blocks"] as? JsonArray ?: throw IllegalArgumentException("小节缺少文本块。")
+        require(blocksArr.isNotEmpty()) { "小节缺少文本块。" }
         val blocks = blocksArr.map { bEl ->
             val bObj = bEl as? JsonObject ?: throw IllegalArgumentException("文本块格式不对。")
             val id = bObj.str("id")
-            val page = (bObj["pdfPage"] as? JsonPrimitive)?.intOrNull
-                ?: id.substringAfter(":p", "").substringBefore(':').toIntOrNull()
-                ?: throw IllegalArgumentException("文本块缺少页码。")
-            val start = (bObj["startUtf16"] as? JsonPrimitive)?.intOrNull
-                ?: id.substringAfterLast(':').toIntOrNull()
-                ?: 0
+            val match = lessonBlockId.matchEntire(id) ?: throw IllegalArgumentException("文本块编号格式不对。")
+            require(id.substringBefore(":p") == bookId) { "文本块与书籍编号不一致。" }
+            require(seenBlockIds.add(id)) { "文本块编号重复。" }
+            val idPage = match.groupValues[1].toInt()
+            val idStart = id.substringAfterLast(':').toIntOrNull() ?: throw IllegalArgumentException("文本块偏移量无效。")
+            val page = (bObj["pdfPage"] as? JsonPrimitive)?.intOrNull ?: idPage
+            val start = (bObj["startUtf16"] as? JsonPrimitive)?.intOrNull ?: idStart
+            require(page == idPage && start == idStart) { "文本块页码或偏移量与编号不一致。" }
             val text = bObj.str("text")
-            require(page in 1..100_000 && start >= 0 && text.isNotBlank() && text.length <= 24_000) { "文本块内容无效。" }
+            require(page in 1..100_000 && (bookPages == null || page <= bookPages) && start >= 0 && text.isNotBlank() && text.length <= 24_000) { "文本块内容无效。" }
             SectionBlockInput(id = id, pdfPage = page, startUtf16 = start, text = text)
         }
         SectionBatchInput(sectionId = sid, title = title, isExerciseSection = isEx, blocks = blocks)
@@ -314,5 +401,5 @@ private fun parseCompanionChapterRequest(input: JsonObject): ChapterCompanionReq
         chapterId = chapterId,
         chapterTitle = chapterTitle,
         sections = sections,
-    )
+    ) to bookPages
 }

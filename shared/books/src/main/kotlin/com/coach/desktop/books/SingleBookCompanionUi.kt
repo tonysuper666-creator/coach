@@ -101,7 +101,8 @@ internal fun SingleBookCompanionPanel(
         packState = CompanionPackState.Loading
         try {
             val wire = ChapterCompanionGrouping.buildWireRequest(book, group)
-            when (val res = explainer.fetchChapterCompanion(wire)) {
+            val blocks = ChapterCompanionGrouping.wireBlocks(group)
+            when (val res = explainer.fetchChapterCompanion(wire, blocks)) {
                 is ChapterCompanionFetchResult.Ready -> {
                     withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, res.pack) }
                     packState = CompanionPackState.Ready(res.pack)

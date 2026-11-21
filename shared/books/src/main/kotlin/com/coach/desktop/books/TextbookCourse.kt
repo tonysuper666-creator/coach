@@ -1,8 +1,5 @@
 package com.coach.desktop.books
 
-import java.text.Normalizer
-import kotlin.random.Random
-
 internal enum class QuestionMode(val label: String) { NONE("不出"), CHOICE("选择"), SHORT_ANSWER("简答") }
 internal enum class LearningPath(val label: String) {
     READ("看书"), READ_AND_LEARN("边看边学"), QUESTION_FIRST("做题学");
@@ -45,12 +42,17 @@ internal data class Textbook(
     val readingPage: Int = 1, val lessonIndex: Int = 0, val learning: Boolean = false,
     val promptSeen: Boolean = false, val questionMode: QuestionMode = QuestionMode.CHOICE,
     val structure: BookStructure? = null,
+    val indexState: String = "READY",
 ) {
+    val tocNodes: List<BookTocNode> get() = structure?.tocNodes.orEmpty()
     val lessons: List<BookLesson> by lazy {
         structure?.toLessons()?.takeIf { it.isNotEmpty() } ?: StudyCoachCourse.plan(id, title, pages)
     }
     val hasPendingOcr: Boolean get() = pages.any { it.ocrPending }
-    fun sourceBlocks(): List<SourceBlock> = StudyCoachCourse.blocks(id, pages, snapSentences = structure != null)
+    private val cachedSourceBlocks: List<SourceBlock> by lazy {
+        StudyCoachCourse.blocks(id, pages, snapSentences = structure != null)
+    }
+    fun sourceBlocks(): List<SourceBlock> = cachedSourceBlocks
     val finished get() = learning && lessonIndex >= lessons.size
     fun page(pdfPage: Int): BookPage? = pages.firstOrNull { it.number == pdfPage }
     fun pageLabel(number: Int): String {
@@ -63,6 +65,7 @@ internal data class Textbook(
 internal data class BookSummary(
     val id: String, val title: String, val pageCount: Int, val lastPage: Int,
     val readingPage: Int, val learning: Boolean, val pendingOcrPages: Int = 0,
+    val indexState: String = "READY",
 )
 internal data class Practice(val prompt: String, val reference: String, val answer: String, val options: List<String>)
 internal data class PracticeAnswer(val text: String = "", val revealed: Boolean = false, val understood: Boolean? = null,
@@ -94,49 +97,108 @@ internal object StudyCoachCourse {
         }
         .firstOrNull { it.isNotEmpty() }
 
+    private val sentenceSplitRegex = Regex("(?<=[。！？.!?])\\s*|\\n")
+
+    private fun isAsciiRegexSpace(c: Char): Boolean =
+        c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\u000B' || c == '\u000C'
+
+    private fun mightMatchCourseHeading(text: String, tStart: Int, lineEnd: Int): Boolean {
+        val ch = text[tStart]
+        return when {
+            ch == '#' -> true
+            ch == '第' -> true
+            ch == 'C' || ch == 'c' -> lineEnd - tStart >= 9 && text.regionMatches(tStart, "chapter", 0, 7, ignoreCase = true)
+            ch == 'S' || ch == 's' -> lineEnd - tStart >= 9 && text.regionMatches(tStart, "section", 0, 7, ignoreCase = true)
+            ch in '0'..'9' -> {
+                var k = tStart + 1
+                while (k < lineEnd && text[k] in '0'..'9') k++
+                k + 1 < lineEnd && text[k] == '.' && text[k + 1] in '0'..'9'
+            }
+            else -> false
+        }
+    }
+
     fun blocks(bookId: String, pages: List<BookPage>, snapSentences: Boolean = false): List<SourceBlock> = buildList {
+        val pending = StringBuilder(512)
         for (page in pages) {
             // Keep offsets in the original extracted page. Normalize only fingerprints:
             // NFKC changes string length and must never move a reader source anchor.
-            val paragraph = Regex("[^\\r\\n]+(?:\\r?\\n(?!\\s*\\r?\\n|#{1,6}\\s)[^\\r\\n]+)*")
-            for (match in paragraph.findAll(page.text)) {
-                val raw = match.value
-                // Separate Markdown/short chapter headings from their following paragraph.
-                val lines = raw.lines()
-                var offset = match.range.first
-                var pending = ""
-                var pendingStart = offset
+            val pagePrefix = "$bookId:p${page.number}:"
+            val text = page.text
+            val len = text.length
+            var i = 0
+            while (i < len) {
+                while (i < len && (text[i] == '\r' || text[i] == '\n')) i++
+                if (i >= len) break
+                pending.setLength(0)
+                var pendingStart = i
                 fun flush() {
                     if (pending.isNotBlank()) {
-                        var start = pendingStart
-                        var left = pending
-                        // Legacy books (snapSentences=false) keep exact 2400-char boundaries so saved lesson/review IDs never drift.
-                        // New structured books (snapSentences=true) snap cuts to sentence boundaries.
-                        while (left.isNotEmpty()) {
-                            var count = minOf(left.length, 2400)
-                            if (snapSentences && count < left.length) {
-                                val cut = sentenceBoundaryBefore(left, count, minIndex = 1000)
-                                if (cut != null) count = cut
+                        val full = pending.toString()
+                        if (full.length <= 2400) {
+                            add(SourceBlock("$pagePrefix$pendingStart", page.number, pendingStart, pendingStart + full.length, false, full))
+                        } else {
+                            var start = pendingStart
+                            var left = full
+                            // Legacy books (snapSentences=false) keep exact 2400-char boundaries so saved lesson/review IDs never drift.
+                            // New structured books (snapSentences=true) snap cuts to sentence boundaries.
+                            while (left.isNotEmpty()) {
+                                var count = minOf(left.length, 2400)
+                                if (snapSentences && count < left.length) {
+                                    val cut = sentenceBoundaryBefore(left, count, minIndex = 1000)
+                                    if (cut != null) count = cut
+                                }
+                                if (count < left.length && Character.isHighSurrogate(left[count - 1])) count--
+                                val chunkText = left.take(count)
+                                add(SourceBlock("$pagePrefix$start", page.number, start, start + count, false, chunkText))
+                                start += count; left = left.drop(count)
                             }
-                            if (count < left.length && Character.isHighSurrogate(left[count - 1])) count--
-                            val text = left.take(count)
-                            add(SourceBlock("$bookId:p${page.number}:$start", page.number, start, start + count, false, text))
-                            start += count; left = left.drop(count)
                         }
                     }
-                    pending = ""
+                    pending.setLength(0)
                 }
-                for (line in lines) {
-                    if (line.length <= 150 && heading.matches(line.trim())) {
+                while (i < len) {
+                    val lineStart = i
+                    while (i < len && text[i] != '\r' && text[i] != '\n') i++
+                    val lineEnd = i
+                    val lineLen = lineEnd - lineStart
+                    var tStart = lineStart
+                    while (tStart < lineEnd && text[tStart] <= ' ') tStart++
+                    val isHeadingLine = lineLen <= 150 && tStart < lineEnd &&
+                        mightMatchCourseHeading(text, tStart, lineEnd) &&
+                        heading.matches(text.substring(lineStart, lineEnd).trim())
+                    if (isHeadingLine) {
                         flush()
-                        add(SourceBlock("$bookId:p${page.number}:$offset", page.number, offset, offset + line.length, true, line))
+                        add(
+                            SourceBlock(
+                                "$pagePrefix$lineStart",
+                                page.number, lineStart, lineEnd, true,
+                                text.substring(lineStart, lineEnd),
+                            ),
+                        )
                     } else {
-                        if (pending.isEmpty()) pendingStart = offset
-                        pending += (if (pending.isEmpty()) "" else "\n") + line
+                        if (pending.isEmpty()) pendingStart = lineStart
+                        else pending.append('\n')
+                        pending.append(text, lineStart, lineEnd)
                     }
-                    offset += line.length + if (page.text.getOrNull(offset + line.length) == '\r') 2 else 1
+                    val nextStart = when {
+                        i < len && text[i] == '\n' -> i + 1
+                        i + 1 < len && text[i] == '\r' && text[i + 1] == '\n' -> i + 2
+                        else -> -1
+                    }
+                    if (nextStart < 0 || nextStart >= len || text[nextStart] == '\r' || text[nextStart] == '\n') break
+                    var k = nextStart
+                    while (k < len && (text[k] == ' ' || text[k] == '\t' || text[k] == '\u000B' || text[k] == '\u000C')) k++
+                    if (k < len && (text[k] == '\n' || (text[k] == '\r' && k + 1 < len && text[k + 1] == '\n'))) break
+                    var h = nextStart
+                    while (h < len && h - nextStart < 6 && text[h] == '#') h++
+                    if (h > nextStart && h < len && isAsciiRegexSpace(text[h])) break
+                    i = nextStart
                 }
                 flush()
+                if (i < len && (text[i] == '\r' || text[i] == '\n')) {
+                    i += if (text[i] == '\r' && i + 1 < len && text[i + 1] == '\n') 2 else 1
+                }
             }
         }
     }
@@ -165,7 +227,7 @@ internal object StudyCoachCourse {
 
     /** 离线或尚未生成导读时的节末三行小结兜底。 */
     fun localSectionSummary(lesson: BookLesson): List<String> {
-        val sentences = lesson.text.split(Regex("(?<=[。！？.!?])\\s*|\\n"))
+        val sentences = lesson.text.split(sentenceSplitRegex)
             .map { it.trim() }
             .filter { it.length >= 10 }
             .distinct()

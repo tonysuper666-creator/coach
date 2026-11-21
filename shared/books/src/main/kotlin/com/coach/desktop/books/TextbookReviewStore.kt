@@ -10,8 +10,8 @@ import java.sql.Types
  * Wrong/guessed answers stay in today's same queue. No server identity or exam policy is inferred.
  */
 internal class TextbookReviewStore(private val today: () -> Long) {
-    fun migrate(db: Connection) {
-        db.autoCommit = false
+    fun migrate(db: Connection, manageTransaction: Boolean = true) {
+        if (manageTransaction) db.autoCommit = false
         try {
             fun add(table: String, name: String, declaration: String): Boolean {
                 val exists = db.createStatement().use { s -> s.executeQuery("PRAGMA table_info($table)").use { r ->
@@ -47,9 +47,13 @@ internal class TextbookReviewStore(private val today: () -> Long) {
                     SELECT book,lesson,mode,'MIGRATED_REVIEW',answer_text,revealed,understood,guessed FROM book_reviews
                     WHERE revealed=1 AND (mode='CHOICE' OR understood IS NOT NULL) ORDER BY rowid""")
             }
-            db.commit()
-        } catch (failure: Exception) { db.rollback(); throw failure }
-        finally { db.autoCommit = true }
+            if (manageTransaction) db.commit()
+        } catch (failure: Exception) {
+            if (manageTransaction) db.rollback()
+            throw failure
+        } finally {
+            if (manageTransaction) db.autoCommit = true
+        }
     }
 
     private fun interval(streak: Int) = when (streak) { 0, 1 -> 1L; 2 -> 3L; else -> 7L }

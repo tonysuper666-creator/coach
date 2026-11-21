@@ -75,18 +75,30 @@ internal data class BookStructure(
     val sections: List<BookSection>,
     val source: String,
     val modelAttempted: Boolean = false,
+    val tocNodes: List<BookTocNode> = emptyList(),
+    val studyChunks: List<BookStudyChunk> = emptyList(),
+    val confidence: Double = 1.0,
 ) {
-    /** 无结构长书尚未尝试过模型分节时为 true；一旦尝试或回退后按书缓存不再重复调用。 */
+    /** 无结构或低置信度长书尚未尝试过模型分节时为 true；一旦尝试或回退后按书缓存不再重复调用。 */
     val needsModelSectioning: Boolean
         get() = !modelAttempted &&
-            source == HeadingSource.FALLBACK_LENGTH.name &&
+            (source == HeadingSource.FALLBACK_LENGTH.name || confidence < 0.85) &&
             resolvedLessons.sumOf { ExplainClassifier.nonWhitespaceLength(it.text) } > BookStructurePlanner.TARGET_MIN_CHARS
     /** 将缓存的节结构映射为当前书页的 [BookLesson] 列表，供阅读模式和「继续学」共用。 */
-    fun toLessons(bookId: String, pages: List<BookPage>): List<BookLesson> {
-        val byId = StudyCoachCourse.blocks(bookId, pages, snapSentences = true).associateBy { it.id }
+    fun toLessons(
+        bookId: String,
+        pages: List<BookPage>,
+        precomputedBlocks: List<SourceBlock>? = null,
+    ): List<BookLesson> {
+        val blocks = precomputedBlocks ?: StudyCoachCourse.blocks(bookId, pages, snapSentences = true)
+        val byId = HashMap<String, SourceBlock>(blocks.size * 2)
+        for (block in blocks) byId[block.id] = block
         return sections.mapNotNull { section ->
-            val resolved = section.blockIds.mapNotNull(byId::get).map { block ->
-                if (!block.heading && BookStructurePlanner.matchHeadingRule(block.text.trim(), false) != null) {
+            val resolved = section.blockIds.mapNotNull { bid ->
+                val block = byId[bid] ?: return@mapNotNull null
+                if (!block.heading && block.text.length <= 150 && '\n' !in block.text && '\r' !in block.text &&
+                    BookStructurePlanner.matchHeadingRule(block.text.trim(), false) != null
+                ) {
                     block.copy(heading = true)
                 } else block
             }
@@ -96,8 +108,33 @@ internal data class BookStructure(
         }
     }
 
+    @Volatile private var lessonsResolver: (() -> List<BookLesson>)? = null
+    @Volatile private var cachedLessons: List<BookLesson> = emptyList()
+
     /** 根据当前书页解析所有节；供 [Textbook.lessons] 使用。 */
-    internal var resolvedLessons: List<BookLesson> = emptyList()
+    internal var resolvedLessons: List<BookLesson>
+        get() {
+            val resolver = lessonsResolver ?: return cachedLessons
+            return synchronized(this) {
+                val active = lessonsResolver ?: return@synchronized cachedLessons
+                active().also {
+                    cachedLessons = it
+                    lessonsResolver = null
+                }
+            }
+        }
+        set(value) {
+            synchronized(this) {
+                lessonsResolver = null
+                cachedLessons = value
+            }
+        }
+
+    internal fun deferResolvedLessons(resolver: () -> List<BookLesson>) {
+        synchronized(this) {
+            lessonsResolver = resolver
+        }
+    }
 
     fun toLessons(): List<BookLesson> = resolvedLessons
 
@@ -154,10 +191,18 @@ internal object BookStructurePlanner {
 
     internal data class HeadingMatch(val level: Int, val title: String, val source: HeadingSource)
 
+    private fun isPotentialHeadingStart(c: Char): Boolean =
+        c == '#' || c == '第' || c == '（' || c == '(' || c == '§' || c in '0'..'9' ||
+            c == 'P' || c == 'p' || c == 'C' || c == 'c' || c == 'U' || c == 'u' ||
+            c == 'S' || c == 's' || c == 'L' || c == 'l' ||
+            c in "一二三四五六七八九十百"
+
     /** 判断单行文本是否命中扩充标题规则并返回层级和清洗后的标题。 */
     fun matchHeadingRule(line: String, alreadyHeading: Boolean = false): HeadingMatch? {
         val trimmed = line.trim()
         if (trimmed.isEmpty() || '\n' in trimmed || '\r' in trimmed) return null
+        if (!alreadyHeading && !isPotentialHeadingStart(trimmed[0])) return null
+        if (!alreadyHeading && BookTocWaterfall.isRejectedHeadingCandidate(trimmed)) return null
         if (ExplainClassifier.isPageNumber(trimmed) || ExplainClassifier.isTocLine(trimmed) || ExplainClassifier.isCopyrightBlock(trimmed)) return null
 
         MD_HEADING.matchEntire(trimmed)?.let { m ->
@@ -215,48 +260,9 @@ internal object BookStructurePlanner {
         }
     }
 
-    /** 识别整本书每一页的角色（正文 / 目录 / 版权 / 前言 / 索引 / 参考文献 / 空白）。 */
-    fun classifyPages(allBlocks: List<SourceBlock>, pages: List<BookPage>): Map<Int, BookPageRole> {
-        val result = LinkedHashMap<Int, BookPageRole>(pages.size)
-        val totalPages = pages.size
-        val byPage = allBlocks.groupBy { it.page }
-        var inBackSection: BookPageRole? = null
-
-        for ((idx, page) in pages.withIndex()) {
-            val pageBlocks = byPage[page.number].orEmpty()
-            val analysis = ExplainClassifier.analyzePage(allBlocks, page.number)
-            val nonPage = pageBlocks.filter { analysis.blockKinds[it.id] != ExplainBlockKind.PAGE_NUMBER }
-            val hasRomanNumber = pageBlocks.any {
-                analysis.blockKinds[it.id] == ExplainBlockKind.PAGE_NUMBER && ROMAN_ONLY_PAGE.matches(it.text.trim())
-            }
-            val firstHeading = nonPage.firstOrNull()?.text?.trim().orEmpty()
-            val hasIndexHeading = nonPage.any { INDEX_HEADING.matches(it.text.trim().trimStart('#').trim()) }
-            val hasRefHeading = nonPage.any { REFERENCES_HEADING.matches(it.text.trim().trimStart('#').trim()) }
-            val hasFrontHeading = nonPage.any { FRONT_MATTER_HEADING.matches(it.text.trim().trimStart('#').trim()) }
-
-            val role = when {
-                nonPage.isEmpty() -> BookPageRole.BLANK
-                analysis.kind == ExplainPageKind.TOC -> BookPageRole.TOC
-                analysis.kind == ExplainPageKind.COPYRIGHT -> BookPageRole.COPYRIGHT
-                hasIndexHeading || isIndexPage(nonPage) -> { inBackSection = BookPageRole.INDEX; BookPageRole.INDEX }
-                hasRefHeading || isReferencesPage(nonPage) -> { inBackSection = BookPageRole.REFERENCES; BookPageRole.REFERENCES }
-                inBackSection != null && idx >= totalPages / 2 && !startsNewMainChapter(firstHeading) -> inBackSection
-                hasFrontHeading && (hasRomanNumber || idx < minOf(6, totalPages / 3 + 1)) && analysis.bodyBlocks.size <= 3 -> {
-                    BookPageRole.FRONT_MATTER
-                }
-                analysis.kind == ExplainPageKind.HEADINGS_ONLY && (hasRomanNumber || (idx == 0 && totalPages >= 3)) -> {
-                    BookPageRole.FRONT_MATTER
-                }
-                analysis.kind == ExplainPageKind.BLANK -> BookPageRole.BLANK
-                else -> {
-                    inBackSection = null
-                    BookPageRole.BODY
-                }
-            }
-            result[page.number] = role
-        }
-        return result
-    }
+    /** 识别整本书每一页的角色（O(N)：正文 / 目录 / 版权 / 前言 / 索引 / 参考文献 / 空白）。 */
+    fun classifyPages(allBlocks: List<SourceBlock>, pages: List<BookPage>): Map<Int, BookPageRole> =
+        BookTocWaterfall.classifyPagesFast(allBlocks, pages, ExplainClassifier.precomputeRepeatingEdges(allBlocks))
 
     private fun isIndexPage(blocks: List<SourceBlock>): Boolean {
         val lines = blocks.flatMap { it.text.lineSequence().map(String::trim).filter(String::isNotEmpty).toList() }
@@ -313,7 +319,7 @@ internal object BookStructurePlanner {
     }
 
     /**
-     * 执行完整分节：返回可持久化的 [BookStructure]（已填充 [BookStructure.resolvedLessons]）。
+     * 执行完整分节：返回可持久化的 [BookStructure]（已填充 [BookStructure.tocNodes]、[BookStructure.studyChunks] 与 [BookStructure.resolvedLessons]）。
      */
     fun plan(
         bookId: String,
@@ -321,192 +327,19 @@ internal object BookStructurePlanner {
         format: String,
         pages: List<BookPage>,
         externalOutline: List<BookOutlineItem> = emptyList(),
+        typographyLines: Map<Int, List<PageLineTypography>> = emptyMap(),
     ): BookStructure {
-        val allBlocks = StudyCoachCourse.blocks(bookId, pages, snapSentences = true)
-        val pageRoles = classifyPages(allBlocks, pages)
-        val bodyPageNumbers = pageRoles.filterValues { it == BookPageRole.BODY }.keys
-        // 如果整本书没有任何页被判定为 BODY（例如极短自造样例或仅有标题），退回保留非空白页以免书无法学习。
-        val activePages = if (bodyPageNumbers.isNotEmpty()) bodyPageNumbers
-            else pageRoles.filterValues { it != BookPageRole.BLANK && it != BookPageRole.TOC && it != BookPageRole.COPYRIGHT }.keys
-                .ifEmpty { pages.map { it.number }.toSet() }
-
-        val byPage = allBlocks.groupBy { it.page }
-        val tocEntries = pageRoles.filterValues { it == BookPageRole.TOC }.keys.sorted()
-            .flatMap { p -> parseTocEntries(byPage[p].orEmpty()) }
-        val tocOutline = resolveTocEntriesToPages(tocEntries, activePages, byPage)
-        val typographyHeadings = extractTypographyHeadings(pages)
-
-        val chosenOutline = when {
-            externalOutline.size >= 2 -> externalOutline
-            tocOutline.size >= 2 -> tocOutline
-            externalOutline.isNotEmpty() -> externalOutline
-            tocOutline.isNotEmpty() -> tocOutline
-            else -> emptyList()
-        }
-        val primarySource = chosenOutline.firstOrNull()?.source?.name
-            ?: if (format == "docx") HeadingSource.WORD_STYLE.name
-            else if (typographyHeadings.isNotEmpty()) HeadingSource.TYPOGRAPHY.name
-            else HeadingSource.HEADING_RULE.name
-
-        // 1) 在正文页块流中标记出所有标题及其层级
-        val outlineByPage = chosenOutline.groupBy { it.page }
-        val activeBlocks = allBlocks.filter { it.page in activePages }
-
-        data class RawSection(
-            val title: String,
-            val level: Int,
-            val parentTitle: String?,
-            val breadcrumb: String,
-            val blocks: MutableList<SourceBlock>,
-        )
-
-        val stack = ArrayDeque<Pair<Int, String>>() // (level, title)
-        val rawSections = mutableListOf<RawSection>()
-        var current: RawSection? = null
-        val consumedOutline = HashSet<Pair<Int, String>>()
-        var matchedHeadingCount = 0
-
-        fun pushHeading(level: Int, headingTitle: String): RawSection {
-            while (stack.isNotEmpty() && stack.last().first >= level) stack.removeLast()
-            val parentTitle = stack.lastOrNull()?.second
-            val path = buildList {
-                add(title)
-                stack.forEach { add(it.second) }
-                add(headingTitle)
-            }.distinct().joinToString(" › ")
-            stack.addLast(level to headingTitle)
-            val created = RawSection(headingTitle, level, parentTitle, path, mutableListOf())
-            rawSections += created
-            current = created
-            return created
-        }
-
-        fun ensureSection(): RawSection = current ?: RawSection(title, 1, null, title, mutableListOf()).also {
-            rawSections += it
-            current = it
-        }
-
-        var lastPage = -1
-        for (block in activeBlocks) {
-            val trimmed = block.text.trim()
-            if (trimmed.isEmpty() || PRINTED_PAGE_MARK.matches(trimmed)) continue
-            val blockKind = ExplainClassifier.classifyBlock(block)
-            if (blockKind == ExplainBlockKind.PAGE_NUMBER || blockKind == ExplainBlockKind.HEADER_FOOTER) continue
-
-            // 如果翻到了有书签/目录指向的新页，且页首没有显式同名标题块，则按书签起节
-            if (block.page != lastPage) {
-                lastPage = block.page
-                val pageItems = outlineByPage[block.page].orEmpty()
-                for (item in pageItems) {
-                    val key = item.page to normalizeTitle(item.title)
-                    if (key in consumedOutline) continue
-                    val appearsInPage = byPage[block.page].orEmpty().any { titlesMatch(it.text.trim(), item.title) }
-                    if (!appearsInPage) {
-                        consumedOutline += key
-                        matchedHeadingCount++
-                        pushHeading(item.level, item.title)
-                    }
-                }
-            }
-
-            // 匹配当前块是否为标题：优先匹配外部大纲/目录页条目，再匹配扩充标题规则，再匹配 PDF 字号辅助标题
-            val matchedOutline = outlineByPage[block.page].orEmpty().firstOrNull { item ->
-                val key = item.page to normalizeTitle(item.title)
-                key !in consumedOutline && titlesMatch(trimmed, item.title)
-            }
-            val matchedRule = if (matchedOutline == null) matchHeadingRule(trimmed, block.heading) else null
-            val matchedTypo = if (matchedOutline == null && matchedRule == null &&
-                trimmed in typographyHeadings[block.page].orEmpty() &&
-                ExplainClassifier.nonWhitespaceLength(trimmed) <= 40) {
-                HeadingMatch(2, trimmed, HeadingSource.TYPOGRAPHY)
-            } else null
-
-            when {
-                matchedOutline != null -> {
-                    consumedOutline += matchedOutline.page to normalizeTitle(matchedOutline.title)
-                    matchedHeadingCount++
-                    val sec = pushHeading(matchedOutline.level, matchedOutline.title)
-                    sec.blocks += if (block.heading) block else block.copy(heading = true)
-                }
-                matchedRule != null -> {
-                    matchedHeadingCount++
-                    val sec = pushHeading(matchedRule.level, matchedRule.title)
-                    sec.blocks += if (block.heading) block else block.copy(heading = true)
-                }
-                matchedTypo != null -> {
-                    matchedHeadingCount++
-                    val sec = pushHeading(matchedTypo.level, matchedTypo.title)
-                    sec.blocks += if (block.heading) block else block.copy(heading = true)
-                }
-                else -> {
-                    ensureSection().blocks += block
-                }
-            }
-        }
-
-        // 丢弃完全没有正文的纯章壳（保留它对子节的 breadcrumb 影响，已经记录在子节的 parentTitle/breadcrumb 里）
-        val nonEmpty = rawSections.filter { sec -> sec.blocks.any { !it.heading && it.text.isNotBlank() } }
-        val base = nonEmpty.ifEmpty {
-            val fallbackBlocks = activeBlocks.filter { it.isBodyParagraph && it.text.isNotBlank() }
-            if (fallbackBlocks.isEmpty()) emptyList()
-            else listOf(RawSection(title, 1, null, title, fallbackBlocks.toMutableList()))
-        }
-
-        // 2) 合并：同章下不到 400 字的相邻小节合并（顶层章不跨章合并）
-        val merged = mutableListOf<RawSection>()
-        for (sec in base) {
-            val bodyLen = bodyChars(sec.blocks)
-            val prev = merged.lastOrNull()
-            val canMergeIntoPrev = prev != null &&
-                prev.parentTitle != null &&
-                prev.parentTitle == sec.parentTitle &&
-                (bodyChars(prev.blocks) < MIN_SUBSECTION_CHARS || bodyLen < MIN_SUBSECTION_CHARS) &&
-                bodyChars(prev.blocks) + bodyLen <= MAX_SECTION_CHARS
-            if (canMergeIntoPrev && prev != null) {
-                prev.blocks.addAll(sec.blocks)
-                val combinedTitle = if (sec.title in prev.title) prev.title else "${prev.title} · ${sec.title}"
-                val combinedBreadcrumb = prev.breadcrumb.substringBeforeLast(" › ", "")
-                    .let { prefix -> if (prefix.isEmpty()) combinedTitle else "$prefix › $combinedTitle" }
-                merged[merged.lastIndex] = prev.copy(title = combinedTitle, breadcrumb = combinedBreadcrumb)
-            } else {
-                merged += sec
-            }
-        }
-
-        // 3) 切分：超过 4000 字的节按段落边界切开，绝不切在句子中间
-        val finalSections = mutableListOf<BookSection>()
-        val finalLessons = mutableListOf<BookLesson>()
-        for (sec in merged) {
-            val chunks = splitOversized(sec.blocks)
-            chunks.forEachIndexed { idx, chunkBlocks ->
-                val chunkTitle = if (chunks.size == 1) sec.title else "${sec.title}（${idx + 1}/${chunks.size}）"
-                val chunkBreadcrumb = if (chunks.size == 1) sec.breadcrumb else "${sec.breadcrumb}（${idx + 1}/${chunks.size}）"
-                val id = chunkBlocks.first().id
-                finalSections += BookSection(
-                    id = id,
-                    title = chunkTitle,
-                    breadcrumb = chunkBreadcrumb,
-                    level = sec.level,
-                    startPage = chunkBlocks.first().page,
-                    endPage = chunkBlocks.last().page,
-                    blockIds = chunkBlocks.map { it.id },
-                )
-                finalLessons += BookLesson(id, chunkTitle, chunkBlocks, chunkBreadcrumb)
-            }
-        }
-
-        val resolvedSource = if (chosenOutline.isEmpty() && matchedHeadingCount == 0) {
-            HeadingSource.FALLBACK_LENGTH.name
-        } else {
-            primarySource
-        }
-
+        val outcome = BookTocWaterfall.plan(bookId, title, format, pages, externalOutline, typographyLines)
         return BookStructure(
             version = BookStructure.CURRENT_VERSION,
-            pageRoles = pageRoles,
-            sections = finalSections,
-            source = resolvedSource,
-        ).also { it.resolvedLessons = finalLessons }
+            pageRoles = outcome.pageRoles,
+            sections = outcome.sections,
+            source = outcome.source,
+            modelAttempted = false,
+            tocNodes = outcome.tocNodes,
+            studyChunks = outcome.studyChunks,
+            confidence = outcome.confidence,
+        ).also { it.resolvedLessons = outcome.lessons }
     }
 
     /** 仅提取每页前几行与候选标题（保持原块 id 与 exact prefix 偏移，供无结构书单次分节使用）。 */
@@ -650,23 +483,56 @@ internal object BookStructurePlanner {
         if (ranges.isEmpty()) {
             return baseFallback.copy(modelAttempted = true).also { it.resolvedLessons = baseFallback.resolvedLessons }
         }
+        val tocNodes = mutableListOf<BookTocNode>()
+        val studyChunks = mutableListOf<BookStudyChunk>()
         val finalSections = mutableListOf<BookSection>()
         val finalLessons = mutableListOf<BookLesson>()
-        for ((start, end, secTitle) in ranges) {
+        var chunkOrdinal = 0
+        ranges.forEachIndexed { nodeOrdinal, (start, end, secTitle) ->
             val slice = activeBlocks.subList(start, end)
+            val nodeId = "model-${slice.first().id}"
+            tocNodes += BookTocNode(
+                id = nodeId,
+                parentId = null,
+                ordinal = nodeOrdinal,
+                level = 1,
+                kind = TocNodeKind.CHAPTER,
+                numberLabel = null,
+                title = secTitle,
+                startPage = slice.first().page,
+                endPage = slice.last().page,
+                printedPage = null,
+                source = HeadingSource.MODEL_HAIKU,
+                confidence = 0.90,
+            )
             val chunks = splitOversized(slice)
             chunks.forEachIndexed { idx, chunkBlocks ->
                 val chunkTitle = if (chunks.size == 1) secTitle else "$secTitle（${idx + 1}/${chunks.size}）"
                 val breadcrumb = if (chunkTitle == title) title else "$title › $chunkTitle"
                 val id = chunkBlocks.first().id
+                val cStart = chunkBlocks.first().page
+                val cEnd = chunkBlocks.last().page
+                val bIds = chunkBlocks.map { it.id }
+                studyChunks += BookStudyChunk(
+                    id = id,
+                    tocNodeId = nodeId,
+                    ordinal = chunkOrdinal++,
+                    title = chunkTitle,
+                    breadcrumb = breadcrumb,
+                    level = 1,
+                    startPage = cStart,
+                    endPage = cEnd,
+                    charCount = bodyChars(chunkBlocks),
+                    blockIds = bIds,
+                )
                 finalSections += BookSection(
                     id = id,
                     title = chunkTitle,
                     breadcrumb = breadcrumb,
                     level = 1,
-                    startPage = chunkBlocks.first().page,
-                    endPage = chunkBlocks.last().page,
-                    blockIds = chunkBlocks.map { it.id },
+                    startPage = cStart,
+                    endPage = cEnd,
+                    blockIds = bIds,
                 )
                 finalLessons += BookLesson(id, chunkTitle, chunkBlocks, breadcrumb)
             }
@@ -675,10 +541,17 @@ internal object BookStructurePlanner {
             version = BookStructure.CURRENT_VERSION,
             pageRoles = pageRoles,
             sections = finalSections,
+            tocNodes = tocNodes,
+            studyChunks = studyChunks,
             source = HeadingSource.MODEL_HAIKU.name,
+            confidence = 0.90,
             modelAttempted = true,
         ).also { it.resolvedLessons = finalLessons }
     }
+
+    internal fun bodyCharsPublic(blocks: List<SourceBlock>): Int = bodyChars(blocks)
+
+    internal fun splitOversizedPublic(blocks: List<SourceBlock>): List<List<SourceBlock>> = splitOversized(blocks)
 
     private fun bodyChars(blocks: List<SourceBlock>): Int =
         blocks.filterNot { it.heading }.sumOf { ExplainClassifier.nonWhitespaceLength(it.text) }
@@ -918,20 +791,36 @@ internal object BookStructureStore {
     }
 
     fun saveStructure(db: Connection, bookId: String, structure: BookStructure) {
+        val sectionsFromChunks = structure.studyChunks.isNotEmpty() &&
+            BookSchemaMigration.tableExists(db, "book_study_chunks") &&
+            structure.sections.size == structure.studyChunks.size &&
+            structure.sections.indices.all { i ->
+                val s = structure.sections[i]
+                val c = structure.studyChunks[i]
+                s.id == c.id && s.title == c.title && s.breadcrumb == c.breadcrumb &&
+                    s.level == c.level && s.startPage == c.startPage && s.endPage == c.endPage &&
+                    s.blockIds == c.blockIds
+            }
         val json = buildJsonObject {
             put("version", structure.version)
             put("source", structure.source)
+            put("confidence", structure.confidence)
             put("modelAttempted", structure.modelAttempted)
             put("pageRoles", buildJsonObject {
                 structure.pageRoles.forEach { (p, role) -> put(p.toString(), role.name) }
             })
-            put("sections", buildJsonArray {
-                for (s in structure.sections) add(buildJsonObject {
-                    put("id", s.id); put("title", s.title); put("breadcrumb", s.breadcrumb)
-                    put("level", s.level); put("startPage", s.startPage); put("endPage", s.endPage)
-                    put("blockIds", buildJsonArray { s.blockIds.forEach { add(it) } })
+            if (sectionsFromChunks) {
+                put("sectionsFromChunks", true)
+                put("sections", buildJsonArray {})
+            } else {
+                put("sections", buildJsonArray {
+                    for (s in structure.sections) add(buildJsonObject {
+                        put("id", s.id); put("title", s.title); put("breadcrumb", s.breadcrumb)
+                        put("level", s.level); put("startPage", s.startPage); put("endPage", s.endPage)
+                        put("blockIds", buildJsonArray { s.blockIds.forEach { add(it) } })
+                    })
                 })
-            })
+            }
         }
         db.prepareStatement("INSERT OR REPLACE INTO book_structures(book, version, payload) VALUES(?,?,?)").use { sql ->
             sql.setString(1, bookId)
@@ -939,9 +828,15 @@ internal object BookStructureStore {
             sql.setString(3, json.toString())
             sql.executeUpdate()
         }
+        BookTocStore.saveInTransaction(db, bookId, structure.tocNodes, structure.studyChunks)
     }
 
-    fun loadStructure(db: Connection, bookId: String, pages: List<BookPage>): BookStructure? =
+    fun loadStructure(
+        db: Connection,
+        bookId: String,
+        pages: List<BookPage>,
+        sharedBlocks: (() -> List<SourceBlock>)? = null,
+    ): BookStructure? =
         db.prepareStatement("SELECT payload FROM book_structures WHERE book=?").use { sql ->
             sql.setString(1, bookId)
             sql.executeQuery().use { row ->
@@ -950,26 +845,57 @@ internal object BookStructureStore {
                     val obj = LedgerJson.parseToJsonElement(row.getString(1)).jsonObject
                     val version = obj["version"]?.jsonPrimitive?.intOrNull ?: BookStructure.CURRENT_VERSION
                     val source = obj["source"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val confidence = obj["confidence"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull() ?: 1.0
                     val modelAttempted = obj["modelAttempted"]?.jsonPrimitive?.booleanOrNull ?: false
-                    val roles = obj["pageRoles"]?.jsonObject.orEmpty().mapNotNull { (k, v) ->
-                        val p = k.toIntOrNull() ?: return@mapNotNull null
-                        val r = BookPageRole.entries.firstOrNull { it.name == v.jsonPrimitive.contentOrNull } ?: return@mapNotNull null
-                        p to r
-                    }.toMap()
-                    val sections = obj["sections"]?.jsonArray.orEmpty().map { el ->
-                        val s = el.jsonObject
-                        BookSection(
-                            id = s.getValue("id").jsonPrimitive.content,
-                            title = s.getValue("title").jsonPrimitive.content,
-                            breadcrumb = s.getValue("breadcrumb").jsonPrimitive.content,
-                            level = s.getValue("level").jsonPrimitive.int,
-                            startPage = s.getValue("startPage").jsonPrimitive.int,
-                            endPage = s.getValue("endPage").jsonPrimitive.int,
-                            blockIds = s.getValue("blockIds").jsonArray.map { it.jsonPrimitive.content },
-                        )
+                    val roleByName = BookPageRole.entries.associateBy { it.name }
+                    val rawRoles = obj["pageRoles"]?.jsonObject.orEmpty()
+                    val roles = LinkedHashMap<Int, BookPageRole>(rawRoles.size * 2)
+                    for ((k, v) in rawRoles) {
+                        val p = k.toIntOrNull() ?: continue
+                        val r = roleByName[v.jsonPrimitive.contentOrNull] ?: continue
+                        roles[p] = r
                     }
-                    BookStructure(version, roles, sections, source, modelAttempted).also {
-                        it.resolvedLessons = it.toLessons(bookId, pages)
+                    val tocNodes = BookTocStore.loadTocNodes(db, bookId)
+                    val studyChunks = BookTocStore.loadStudyChunks(db, bookId)
+                    val sectionsFromChunks = obj["sectionsFromChunks"]?.jsonPrimitive?.booleanOrNull == true
+                    val rawSections = obj["sections"]?.jsonArray
+                    val sections = if ((sectionsFromChunks || rawSections.isNullOrEmpty()) && studyChunks.isNotEmpty()) {
+                        studyChunks.map { c ->
+                            BookSection(c.id, c.title, c.breadcrumb, c.level, c.startPage, c.endPage, c.blockIds)
+                        }
+                    } else {
+                        val sectionEls = rawSections.orEmpty()
+                        ArrayList<BookSection>(sectionEls.size).apply {
+                            for (el in sectionEls) {
+                                val s = el.jsonObject
+                                val idsArr = s.getValue("blockIds").jsonArray
+                                val blockIds = ArrayList<String>(idsArr.size)
+                                for (idEl in idsArr) blockIds += idEl.jsonPrimitive.content
+                                add(
+                                    BookSection(
+                                        id = s.getValue("id").jsonPrimitive.content,
+                                        title = s.getValue("title").jsonPrimitive.content,
+                                        breadcrumb = s.getValue("breadcrumb").jsonPrimitive.content,
+                                        level = s.getValue("level").jsonPrimitive.int,
+                                        startPage = s.getValue("startPage").jsonPrimitive.int,
+                                        endPage = s.getValue("endPage").jsonPrimitive.int,
+                                        blockIds = blockIds,
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                    BookStructure(
+                        version = version,
+                        pageRoles = roles,
+                        sections = sections,
+                        source = source,
+                        modelAttempted = modelAttempted,
+                        tocNodes = tocNodes,
+                        studyChunks = studyChunks,
+                        confidence = confidence,
+                    ).also {
+                        it.deferResolvedLessons { it.toLessons(bookId, pages, sharedBlocks?.invoke()) }
                     }
                 }.getOrNull()
             }

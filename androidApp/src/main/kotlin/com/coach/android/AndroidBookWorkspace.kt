@@ -174,7 +174,7 @@ internal fun AndroidBookWorkspace(onPersonalCourse: () -> Unit, hinge: Hinge? = 
             runCatching {
                 PDFBoxResourceLoader.init(context)
                 Class.forName("org.sqlite.JDBC")
-                TextbookController(TextbookLibrary(context.filesDir.toPath().resolve("books"), streamPdfExtras = true))
+                TextbookController(TextbookLibrary(context.filesDir.toPath().resolve("books"), streamPdfExtras = true, lazyPdfExtras = true))
             }
         }
     }

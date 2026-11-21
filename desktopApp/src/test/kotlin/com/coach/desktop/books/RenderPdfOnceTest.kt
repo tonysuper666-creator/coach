@@ -1,11 +1,14 @@
 package com.coach.desktop.books
 
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
 import org.apache.pdfbox.pdmodel.PDPageContentStream
 import org.apache.pdfbox.pdmodel.common.PDRectangle
 import org.apache.pdfbox.pdmodel.font.PDType1Font
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts
+import java.awt.image.BufferedImage
+import java.awt.image.DataBufferInt
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -75,6 +78,49 @@ class RenderPdfOnceTest {
         assertEquals(listOf(720, 480), listOf(narrow.width, narrow.height))
         assertSame(wide, library.renderPdf(book, 1, pixelWidth = 1440))
         assertSame(normal, library.renderPdf(book, 1))
+    }
+
+    @Test fun fastAsBookImageBitmapMatchesComposeConverterAcrossImageTypes() {
+        fun pixelsOf(bmp: androidx.compose.ui.graphics.ImageBitmap): IntArray {
+            val out = IntArray(bmp.width * bmp.height)
+            bmp.readPixels(out, 0, 0, bmp.width, bmp.height, 0, bmp.width)
+            return out
+        }
+
+        val rgbImg = BufferedImage(3, 2, BufferedImage.TYPE_INT_RGB)
+        val rgbData = (rgbImg.raster.dataBuffer as DataBufferInt).data
+        rgbData[0] = 0x00112233
+        rgbData[1] = 0xFFAA5511.toInt()
+        rgbData[2] = 0x12345678
+        rgbData[3] = 0x00FF0000
+        rgbData[4] = 0x0000FF00
+        rgbData[5] = 0x000000FF
+        val fastRgb = rgbImg.asBookImageBitmap()
+        val expRgb = rgbImg.toComposeImageBitmap()
+        assertEquals(expRgb.width, fastRgb.width)
+        assertEquals(expRgb.height, fastRgb.height)
+        assertContentEquals(pixelsOf(expRgb), pixelsOf(fastRgb))
+
+        val argbImg = BufferedImage(3, 2, BufferedImage.TYPE_INT_ARGB)
+        val argbData = (argbImg.raster.dataBuffer as DataBufferInt).data
+        argbData[0] = 0xFF123456.toInt()
+        argbData[1] = 0x80336699.toInt()
+        argbData[2] = 0x00000000
+        argbData[3] = 0xFFABCDEF.toInt()
+        argbData[4] = 0x40112233
+        argbData[5] = 0xFFFFFFFF.toInt()
+        assertContentEquals(pixelsOf(argbImg.toComposeImageBitmap()), pixelsOf(argbImg.asBookImageBitmap()))
+
+        val subImg = rgbImg.getSubimage(1, 0, 2, 2)
+        assertContentEquals(pixelsOf(subImg.toComposeImageBitmap()), pixelsOf(subImg.asBookImageBitmap()))
+
+        val bgrImg = BufferedImage(2, 2, BufferedImage.TYPE_3BYTE_BGR).apply {
+            setRGB(0, 0, 0xFFE63946.toInt())
+            setRGB(1, 0, 0xFF2A9D8F.toInt())
+            setRGB(0, 1, 0xFFE9C46A.toInt())
+            setRGB(1, 1, 0xFF264653.toInt())
+        }
+        assertContentEquals(pixelsOf(bgrImg.toComposeImageBitmap()), pixelsOf(bgrImg.asBookImageBitmap()))
     }
 }
 

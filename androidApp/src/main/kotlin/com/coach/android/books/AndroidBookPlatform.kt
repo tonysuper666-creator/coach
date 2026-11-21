@@ -29,8 +29,10 @@ import com.coach.shared.ui.R
 import com.coach.ui.theme.CoachTheme
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.nio.file.Path
 
 internal const val originalPdfTouchEnabled = true
+internal val bookPdfTier1Parallelism: Int = 1
 
 internal typealias BookBitmap = Bitmap
 internal typealias BookPdfDocument = com.tom_roush.pdfbox.pdmodel.PDDocument
@@ -55,8 +57,22 @@ internal object BookPdfLoader {
     // Text layers, page aspect lookup and bitmap prefetch may run at the same time.
     // Hold one file-backed parser at a time on the Android app heap.
     @Synchronized fun <T> read(file: File, block: (BookPdfDocument) -> T): T = load(file).use(block)
+    fun <T> readCached(file: File, block: (BookPdfDocument) -> T): T = read(file, block)
+    fun <P, R> readAndTransfer(
+        stageFile: File,
+        extract: (BookPdfDocument) -> P,
+        commitAndTarget: (P) -> Pair<File?, R>,
+    ): R {
+        val payload = read(stageFile, extract)
+        return commitAndTarget(payload).second
+    }
+    fun evict(file: File) = Unit
+    fun clearCache() = Unit
     fun load(bytes: ByteArray): BookPdfDocument = BookPdfDocument.load(bytes)
 }
+
+internal fun readCachedPageBitmap(file: Path): BookBitmap? = null
+internal fun writeCachedPageBitmap(file: Path, bitmap: BookBitmap) = Unit
 
 internal fun newBookPdfRenderer(pdf: BookPdfDocument): BookPdfRenderer =
     BookPdfRenderer(pdf).apply { isSubsamplingAllowed = true }
@@ -142,13 +158,15 @@ internal fun extractBookPdfOutline(pdf: BookPdfDocument): List<BookOutlineItem> 
     val root = pdf.documentCatalog?.documentOutline ?: return emptyList()
     val result = mutableListOf<BookOutlineItem>()
     val seen = java.util.IdentityHashMap<Any, Boolean>()
+    val pageIndexByCos = java.util.IdentityHashMap<Any, Int>(pdf.numberOfPages.coerceAtLeast(16))
+    pdf.pages.forEachIndexed { idx, p -> pageIndexByCos[p.cosObject] = idx + 1 }
     fun walk(item: com.tom_roush.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem?, level: Int) {
         var current = item
         while (current != null && result.size < 1000) {
             if (seen.put(current, true) != null) break
             val title = current.title?.trim().orEmpty()
             val page = runCatching { current.findDestinationPage(pdf) }.getOrNull()
-                ?.let { dest -> pdf.pages.indexOf(dest) + 1 }
+                ?.let { dest -> pageIndexByCos[dest.cosObject] ?: (pdf.pages.indexOf(dest) + 1).takeIf { it > 0 } }
                 ?.takeIf { it in 1..pdf.numberOfPages }
             if (title.isNotEmpty() && page != null) {
                 result += BookOutlineItem(title, level.coerceIn(1, 6), page, HeadingSource.PDF_OUTLINE)

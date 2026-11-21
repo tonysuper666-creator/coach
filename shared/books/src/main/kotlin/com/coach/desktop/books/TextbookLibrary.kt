@@ -24,85 +24,103 @@ import java.sql.SQLException
 import java.time.Clock
 import java.time.LocalDate
 import java.util.UUID
+import java.util.concurrent.Callable
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipFile
+
+internal data class StartupLoadSnapshot(
+    val catalog: List<BookSummary>,
+    val activeReview: LocalBookReview?,
+    val openSession: Pair<String, String>?,
+    val book: Textbook?,
+    val learningPath: String?,
+    val reviews: List<LocalBookReview>,
+    val ladder: LadderSession,
+)
 
 /** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
 internal class TextbookLibrary(
     val directory: Path, private val clock: Clock = Clock.systemDefaultZone(), private val ocr: BookOcr = BundledBookOcr,
     private val streamPdfExtras: Boolean = false,
+    internal val lazyPdfExtras: Boolean = false,
     private val extractBook: ((Path, String, String, BookOcr, BookImportControl) -> ExtractedBook)? = null,
 ) {
     private val reviewStore = TextbookReviewStore { LocalDate.now(clock).toEpochDay() }
     private class PendingTextView(val textView: Boolean)
+    private class CachedValue<T>(val value: T)
     private val pendingTextViews = ConcurrentHashMap<String, PendingTextView>()
+    private val savedTextViewCache = ConcurrentHashMap<String, CachedValue<Boolean?>>()
+    private val pdfScrollModeCache = ConcurrentHashMap<String, Boolean>()
+    private val textScrollModeCache = ConcurrentHashMap<String, Boolean>()
+    private val readSpotCache = ConcurrentHashMap<String, CachedValue<Pair<Int, Int>?>>()
+    private val pageHighlightRawCache = ConcurrentHashMap<Pair<String, Int>, List<Triple<Int, Int, String>>>()
     private val textViewWrites = Mutex()
+    private val textLayerLock = Any()
+    private val textLayerCache = LinkedHashMap<Pair<String, Int>, ReaderTextUnit>(16, .75f, true)
     init {
         Files.createDirectories(directory)
         PdfWarmup.start()
-        database().use { db -> db.createStatement().use { sql ->
-            sql.execute("CREATE TABLE IF NOT EXISTS books(id TEXT PRIMARY KEY,title TEXT NOT NULL,format TEXT NOT NULL,reading_page INTEGER NOT NULL DEFAULT 1,lesson_index INTEGER NOT NULL DEFAULT 0,learning INTEGER NOT NULL DEFAULT 0,prompt_seen INTEGER NOT NULL DEFAULT 0,mode TEXT NOT NULL DEFAULT 'NONE',touched INTEGER NOT NULL)")
-            sql.execute("CREATE TABLE IF NOT EXISTS pages(book TEXT NOT NULL,page INTEGER NOT NULL,text TEXT NOT NULL,PRIMARY KEY(book,page))")
-            sql.execute("CREATE TABLE IF NOT EXISTS answers(book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL,text TEXT NOT NULL,revealed INTEGER NOT NULL,understood INTEGER,PRIMARY KEY(book,lesson,mode))")
-            sql.execute("""CREATE TABLE IF NOT EXISTS book_reviews(
-                book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL,book_title TEXT NOT NULL,lesson_title TEXT NOT NULL,
-                prompt TEXT NOT NULL,reference TEXT NOT NULL,solution TEXT NOT NULL,options TEXT NOT NULL,wrong_text TEXT NOT NULL,
-                answer_text TEXT NOT NULL DEFAULT '',revealed INTEGER NOT NULL DEFAULT 0,understood INTEGER,
-                completed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(book,lesson,mode))""")
-            sql.execute("CREATE TABLE IF NOT EXISTS book_review_position(slot INTEGER PRIMARY KEY CHECK(slot=1),book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL)")
-            sql.execute("CREATE TABLE IF NOT EXISTS book_open_session(slot INTEGER PRIMARY KEY CHECK(slot=1),book TEXT NOT NULL,screen TEXT NOT NULL CHECK(screen IN ('READER','LEARNING')))")
-            sql.execute("CREATE TABLE IF NOT EXISTS book_learning_paths(book TEXT PRIMARY KEY,path TEXT NOT NULL CHECK(path IN ('READ','READ_AND_LEARN','QUESTION_FIRST')))")
-            sql.execute("CREATE TABLE IF NOT EXISTS book_ladders(book TEXT PRIMARY KEY,session TEXT NOT NULL)")
-            sql.execute("CREATE TABLE IF NOT EXISTS book_reader_views(book TEXT PRIMARY KEY,text_view INTEGER NOT NULL)")
-            sql.execute("CREATE TABLE IF NOT EXISTS book_pdf_modes(book TEXT PRIMARY KEY,scrolling INTEGER NOT NULL)")
-            sql.execute("CREATE TABLE IF NOT EXISTS book_text_modes(book TEXT PRIMARY KEY,scrolling INTEGER NOT NULL)")
-            sql.execute("CREATE TABLE IF NOT EXISTS book_read_spots(book TEXT PRIMARY KEY,page INTEGER NOT NULL,offset_utf16 INTEGER NOT NULL)")
-            sql.execute("""CREATE TABLE IF NOT EXISTS book_highlights(
-                book TEXT NOT NULL,page INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,quote TEXT NOT NULL,
-                PRIMARY KEY(book,page,start,end))""")
-            sql.execute("""CREATE TABLE IF NOT EXISTS book_notes(
-                book TEXT NOT NULL,id TEXT NOT NULL,version TEXT NOT NULL,page INTEGER NOT NULL,
-                start INTEGER NOT NULL,end INTEGER NOT NULL,quote TEXT NOT NULL,note TEXT NOT NULL,
-                text_sha256 TEXT NOT NULL,revision INTEGER NOT NULL,last_mutation_id TEXT NOT NULL,
-                deleted INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(book,id))""")
-        }
-            val pageColumns = db.createStatement().use { sql -> sql.executeQuery("PRAGMA table_info(pages)").use { rows ->
-                buildSet { while (rows.next()) add(rows.getString("name")) }
-            } }
-            if ("ocr" !in pageColumns) db.createStatement().use { it.execute("ALTER TABLE pages ADD COLUMN ocr INTEGER NOT NULL DEFAULT 0") }
-            if ("ocr_pending" !in pageColumns) db.createStatement().use { it.execute("ALTER TABLE pages ADD COLUMN ocr_pending INTEGER NOT NULL DEFAULT 0") }
-            reviewStore.migrate(db)
-            BookPageModelStore.migrate(db)
-            BookNativeSourceStore.migrate(db)
-            BookStructureStore.migrate(db)
-            backfillReviews(db)
-        }
+        BookSchemaMigration.upgradeAndMigrate(
+            directory = directory,
+            openConnection = ::database,
+            onInTransaction = { db ->
+                reviewStore.migrate(db, manageTransaction = false)
+                BookPageModelStore.migrate(db)
+                BookNativeSourceStore.migrate(db)
+                BookStructureStore.migrate(db)
+            },
+            onPostCommit = { db ->
+                if (db != null) backfillReviews(db) else database().use(::backfillReviews)
+            },
+        )
     }
     private fun database(): Connection = DriverManager.getConnection("jdbc:sqlite:${directory.resolve("library.sqlite")}").apply {
         createStatement().use { it.execute("PRAGMA busy_timeout=5000") }
     }
 
-    @Synchronized fun catalog(): List<BookSummary> = database().use { db ->
-        db.createStatement().use { sql -> sql.executeQuery("""SELECT b.*,
-            (SELECT count(*) FROM pages p WHERE p.book=b.id) AS page_count,
-            (SELECT max(p.page) FROM pages p WHERE p.book=b.id) AS last_page,
-            (SELECT count(*) FROM pages p WHERE p.book=b.id AND p.ocr_pending=1) AS pending_ocr
-            FROM books b ORDER BY touched DESC,id""").use { rows -> buildList {
-            while (rows.next()) add(BookSummary(
-                rows.getString("id"), rows.getString("title"),
-                rows.getInt("page_count"), rows.getInt("last_page"),
-                rows.getInt("reading_page"), rows.getInt("learning") == 1,
-                rows.getInt("pending_ocr"),
-            ))
-        } } }
-    }
+    private fun catalog(db: Connection): List<BookSummary> =
+        db.createStatement().use { sql ->
+            sql.executeQuery(
+                """SELECT b.id, b.title, COALESCE(ps.page_count, 0), COALESCE(ps.last_page, 0),
+                          b.reading_page, b.learning, COALESCE(ps.pending_ocr, 0), b.index_state
+                   FROM books b
+                   LEFT JOIN (
+                       SELECT book, COUNT(*) AS page_count, MAX(page) AS last_page,
+                              SUM(CASE WHEN ocr_pending=1 THEN 1 ELSE 0 END) AS pending_ocr
+                       FROM pages GROUP BY book
+                   ) ps ON ps.book = b.id
+                   ORDER BY b.touched DESC, b.id""".trimIndent(),
+            ).use { rows ->
+                buildList {
+                    while (rows.next()) {
+                        val indexStateCol = rows.getString(8)?.takeIf { it.isNotEmpty() } ?: "READY"
+                        add(
+                            BookSummary(
+                                rows.getString(1), rows.getString(2),
+                                rows.getInt(3), rows.getInt(4),
+                                rows.getInt(5), rows.getInt(6) == 1,
+                                rows.getInt(7),
+                                indexState = indexStateCol,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
 
-    @Synchronized fun learningPath(book: String): String? = database().use { db ->
+    @Synchronized fun catalog(): List<BookSummary> = database().use(::catalog)
+
+    private fun learningPath(db: Connection, book: String): String? =
         db.prepareStatement("SELECT path FROM book_learning_paths WHERE book=?").use { sql ->
             sql.setString(1, book)
             sql.executeQuery().use { row -> if (row.next()) row.getString(1) else null }
         }
-    }
+
+    @Synchronized fun learningPath(book: String): String? = database().use { learningPath(it, book) }
 
     @Synchronized fun saveLearningPath(book: String, path: String) {
         require(path in setOf("READ", "READ_AND_LEARN", "QUESTION_FIRST")) { "未知的学习走法。" }
@@ -114,8 +132,7 @@ internal class TextbookLibrary(
         }
     }
 
-    /** 教材入口和主线共用同一个题梯会话；一行 JSON 按书保存在本机。 */
-    @Synchronized fun ladder(book: String): LadderSession = database().use { db ->
+    private fun ladder(db: Connection, book: String): LadderSession =
         db.prepareStatement("SELECT session FROM book_ladders WHERE book=?").use { sql ->
             sql.setString(1, book)
             sql.executeQuery().use { row ->
@@ -123,7 +140,9 @@ internal class TextbookLibrary(
                 else runCatching { LedgerJson.decodeFromString(LadderSession.serializer(), row.getString(1)) }.getOrNull() ?: LadderSession()
             }
         }
-    }
+
+    /** 教材入口和主线共用同一个题梯会话；一行 JSON 按书保存在本机。 */
+    @Synchronized fun ladder(book: String): LadderSession = database().use { ladder(it, book) }
 
     @Synchronized fun saveLadder(book: String, session: LadderSession) {
         database().use { db -> saveLadderRow(db, book, session) }
@@ -136,12 +155,12 @@ internal class TextbookLibrary(
         }
     }
 
-    @Synchronized fun book(id: String): Textbook = database().use { db ->
-        db.prepareStatement("SELECT * FROM books WHERE id=?").use { sql ->
+    private fun book(db: Connection, id: String): Textbook =
+        db.prepareStatement("SELECT title,format,reading_page,lesson_index,learning,prompt_seen,mode,index_state FROM books WHERE id=?").use { sql ->
             sql.setString(1, id)
             sql.executeQuery().use { row ->
                 check(row.next()) { "这本教材已不在书架中。" }
-                val extras = BookPageModelStore.loadExtrasByPage(db, id, includeTextLayouts = !streamPdfExtras)
+                val extras = BookPageModelStore.loadExtrasByPage(db, id, includeTextLayouts = !streamPdfExtras && !lazyPdfExtras)
                 val pages = db.prepareStatement("SELECT page,text,ocr,ocr_pending FROM pages WHERE book=? ORDER BY page").use { query ->
                     query.setString(1, id)
                     query.executeQuery().use { p -> buildList { while (p.next()) {
@@ -154,13 +173,92 @@ internal class TextbookLibrary(
                         add(BookPage(number, text, p.getInt(3) == 1, illustrations, extra?.textLayout, ocrPending = p.getInt(4) == 1))
                     } } }
                 }
-                val storedPage = row.getInt("reading_page")
-                val structure = BookStructureStore.loadStructure(db, id, pages)
-                Textbook(id, row.getString("title"), row.getString("format"), pages, if (pages.any { it.number == storedPage }) storedPage else pages.first().number,
-                    row.getInt("lesson_index"), row.getInt("learning") == 1, row.getInt("prompt_seen") == 1,
-                    QuestionMode.valueOf(row.getString("mode")), structure)
+                val title = row.getString(1)
+                val format = row.getString(2)
+                val storedPage = row.getInt(3)
+                val lessonIdx = row.getInt(4)
+                val learning = row.getInt(5) == 1
+                val promptSeen = row.getInt(6) == 1
+                val questionMode = QuestionMode.valueOf(row.getString(7))
+                val indexStateCol = row.getString(8)?.takeIf { it.isNotEmpty() } ?: "READY"
+                var createdBook: Textbook? = null
+                val structure = BookStructureStore.loadStructure(db, id, pages, sharedBlocks = {
+                    createdBook?.sourceBlocks() ?: StudyCoachCourse.blocks(id, pages, snapSentences = true)
+                })
+                Textbook(
+                    id, title, format, pages,
+                    if (pages.any { it.number == storedPage }) storedPage else pages.first().number,
+                    lessonIdx, learning, promptSeen, questionMode, structure,
+                    indexState = indexStateCol,
+                ).also { createdBook = it }
             }
         }
+
+    @Synchronized fun book(id: String): Textbook = database().use { book(it, id) }
+
+    @Synchronized fun loadStartupSnapshot(): StartupLoadSnapshot = database().use { db ->
+        val catalog = catalog(db)
+        val active = reviewStore.active(db)
+        val rawSession = openSession(db)
+        val session = if (active == null) rawSession?.takeIf { (id, _) -> catalog.any { it.id == id } } else null
+        var prefetchedPage: Int? = null
+        if (session != null && session.second == "READER") {
+            val earlyPage = db.prepareStatement("SELECT format, reading_page FROM books WHERE id=?").use { sql ->
+                sql.setString(1, session.first)
+                sql.executeQuery().use { row ->
+                    if (row.next() && row.getString(1) == "pdf") row.getInt(2) else null
+                }
+            }
+            if (earlyPage != null) {
+                prefetchedPage = earlyPage
+                startupFirstRenderCompletedAtNs = 0L
+                startupReaderBookId = session.first
+                val partner = if (earlyPage % 2 == 1) earlyPage + 1 else (earlyPage - 1).coerceAtLeast(1)
+                prefetchRenderDiskCacheAsync(session.first, earlyPage, partner)
+            }
+        }
+        val targetId = active?.book ?: session?.first ?: catalog.firstOrNull()?.id
+        val loadedBook = targetId?.let { book(db, it) }
+        if (loadedBook != null) {
+            if (loadedBook.format == "pdf" && !aspectCache.containsKey(loadedBook.id)) {
+                val aspects = BookAspectStore.loadAspects(db, loadedBook.id)
+                if (aspects.isNotEmpty()) {
+                    if (aspectCache.size >= 16) aspectCache.clear()
+                    aspectCache[loadedBook.id] = aspects
+                }
+            }
+            if (loadedBook.format == "pdf" && session?.second == "READER") {
+                startupReaderBookId = loadedBook.id
+                if (prefetchedPage != loadedBook.readingPage) {
+                    startupFirstRenderCompletedAtNs = 0L
+                    val p = loadedBook.readingPage
+                    val partner = if (p % 2 == 1) p + 1 else (p - 1).coerceAtLeast(1)
+                    prefetchRenderDiskCacheAsync(loadedBook.id, p, partner)
+                }
+                startupWarmupExecutor.execute {
+                    runCatching {
+                        loadedBook.sourceBlocks()
+                        loadedBook.lessons
+                    }
+                }
+            } else {
+                startupFirstRenderCompletedAtNs = 0L
+                startupReaderBookId = null
+            }
+            savedTextViewCache[loadedBook.id] = CachedValue(savedTextViewFromDb(db, loadedBook.id))
+            pdfScrollModeCache[loadedBook.id] = pdfScrollModeFromDb(db, loadedBook.id)
+            textScrollModeCache[loadedBook.id] = textScrollModeFromDb(db, loadedBook.id)
+            readSpotCache[loadedBook.id] = CachedValue(savedReadSpotFromDb(db, loadedBook.id))
+            pageHighlightRawCache[loadedBook.id to loadedBook.readingPage] =
+                rawHighlightsFromDb(db, loadedBook.id, loadedBook.readingPage)
+        } else {
+            startupFirstRenderCompletedAtNs = 0L
+            startupReaderBookId = null
+        }
+        val learningPath = loadedBook?.let { learningPath(db, it.id) }
+        val reviews = reviewStore.pending(db)
+        val ladder = loadedBook?.let { ladder(db, it.id) } ?: LadderSession()
+        StartupLoadSnapshot(catalog, active, session, loadedBook, learningPath, reviews, ladder)
     }
 
     @Synchronized fun pageTextLayout(bookId: String, page: Int): PageTextLayout? = database().use { db ->
@@ -169,28 +267,68 @@ internal class TextbookLibrary(
 
     fun pdfTextLayer(book: Textbook, page: BookPage): ReaderTextUnit? {
         if (book.format != "pdf" || page.ocr || page.text.isBlank()) return null
+        val cacheKey = book.id to page.number
+        synchronized(textLayerLock) { textLayerCache[cacheKey] }?.let { return it }
+        if (book.id == startupReaderBookId) {
+            if (firstRenderGates[book.id]?.isDone != true) {
+                awaitFirstRenderOrTimeout(book.id, 400L)
+            }
+            val completedAt = startupFirstRenderCompletedAtNs
+            if (completedAt > 0L) {
+                val remainingMs = 80L - (System.nanoTime() - completedAt) / 1_000_000L
+                if (remainingMs > 0L) runCatching { Thread.sleep(remainingMs) }
+            }
+            startupReaderBookId = null
+        }
+        if (activeRenders.get() > 0) {
+            var remainingNanos = 1_500_000_000L
+            renderIdleLock.lock()
+            try {
+                while (activeRenders.get() > 0 && remainingNanos > 0L) {
+                    remainingNanos = runCatching { renderIdleCondition.awaitNanos(remainingNanos) }.getOrDefault(0L)
+                }
+            } finally {
+                renderIdleLock.unlock()
+            }
+        }
         val saved = page.textLayout ?: pageTextLayout(book.id, page.number)
-        return BookPdfLoader.read(original(book.id, book.format).toFile()) { pdf ->
-            if (!pdf.currentAccessPermission.canExtractContent()) return@read null
+        val unit = BookPdfLoader.readCached(original(book.id, book.format).toFile()) { pdf ->
+            if (!pdf.currentAccessPermission.canExtractContent()) return@readCached null
             if (saved != null) {
                 val restored = try { PdfPageTextExtraction.restore(pdf, page, saved) }
                 catch (_: IllegalArgumentException) { null }
-                if (restored != null) return@read restored
+                if (restored != null) return@readCached restored
             }
             val extracted = PdfPageTextExtraction.extract(pdf, page.number)
             // Older books may have a different text layer. Attach nothing unless all offsets still agree.
-            if (extracted.unit.text != page.text) return@read null
+            if (extracted.unit.text != page.text) return@readCached null
             database().use { db ->
                 BookPageTextBoxStore.saveInTransaction(db, book.id, mapOf(page.number to page.text), listOf(extracted.pageLayout()))
             }
             extracted.unit
         }
+        if (unit != null) {
+            synchronized(textLayerLock) {
+                textLayerCache[cacheKey] = unit
+                while (textLayerCache.size > 16) {
+                    val eldest = textLayerCache.keys.iterator().next()
+                    textLayerCache.remove(eldest)
+                }
+            }
+        }
+        return unit
     }
 
-    fun savedTextView(bookId: String): Boolean? = database().use { db ->
+    private fun savedTextViewFromDb(db: Connection, bookId: String): Boolean? =
         db.prepareStatement("SELECT text_view FROM book_reader_views WHERE book=?").use { sql ->
             sql.setString(1, bookId)
             sql.executeQuery().use { if (it.next()) it.getBoolean(1) else null }
+        }
+
+    fun savedTextView(bookId: String): Boolean? {
+        savedTextViewCache[bookId]?.let { return it.value }
+        return database().use { db -> savedTextViewFromDb(db, bookId) }.also {
+            savedTextViewCache[bookId] = CachedValue(it)
         }
     }
 
@@ -225,12 +363,19 @@ internal class TextbookLibrary(
             sql.setBoolean(2, textView)
             sql.executeUpdate()
         }
+        savedTextViewCache[bookId] = CachedValue(textView)
     }
 
-    fun pdfScrollMode(bookId: String): Boolean = database().use { db ->
+    private fun pdfScrollModeFromDb(db: Connection, bookId: String): Boolean =
         db.prepareStatement("SELECT scrolling FROM book_pdf_modes WHERE book=?").use { sql ->
             sql.setString(1, bookId)
             sql.executeQuery().use { it.next() && it.getBoolean(1) }
+        }
+
+    fun pdfScrollMode(bookId: String): Boolean {
+        pdfScrollModeCache[bookId]?.let { return it }
+        return database().use { db -> pdfScrollModeFromDb(db, bookId) }.also {
+            pdfScrollModeCache[bookId] = it
         }
     }
 
@@ -240,13 +385,20 @@ internal class TextbookLibrary(
             sql.setBoolean(2, scrolling)
             sql.executeUpdate()
         }
+        pdfScrollModeCache[bookId] = scrolling
     }
 
-    /** 文字版阅读方式：默认翻页读，按书记住（TON-1724）。 */
-    fun textScrollMode(bookId: String): Boolean = database().use { db ->
+    private fun textScrollModeFromDb(db: Connection, bookId: String): Boolean =
         db.prepareStatement("SELECT scrolling FROM book_text_modes WHERE book=?").use { sql ->
             sql.setString(1, bookId)
             sql.executeQuery().use { it.next() && it.getBoolean(1) }
+        }
+
+    /** 文字版阅读方式：默认翻页读，按书记住（TON-1724）。 */
+    fun textScrollMode(bookId: String): Boolean {
+        textScrollModeCache[bookId]?.let { return it }
+        return database().use { db -> textScrollModeFromDb(db, bookId) }.also {
+            textScrollModeCache[bookId] = it
         }
     }
 
@@ -256,13 +408,20 @@ internal class TextbookLibrary(
             sql.setBoolean(2, scrolling)
             sql.executeUpdate()
         }
+        textScrollModeCache[bookId] = scrolling
     }
 
-    /** 文字版章内读位：导入页与 UTF-16 偏移，重开回到同一句附近（TON-1724）。 */
-    fun savedReadSpot(bookId: String): Pair<Int, Int>? = database().use { db ->
+    private fun savedReadSpotFromDb(db: Connection, bookId: String): Pair<Int, Int>? =
         db.prepareStatement("SELECT page,offset_utf16 FROM book_read_spots WHERE book=?").use { sql ->
             sql.setString(1, bookId)
             sql.executeQuery().use { if (it.next()) it.getInt(1) to it.getInt(2) else null }
+        }
+
+    /** 文字版章内读位：导入页与 UTF-16 偏移，重开回到同一句附近（TON-1724）。 */
+    fun savedReadSpot(bookId: String): Pair<Int, Int>? {
+        readSpotCache[bookId]?.let { return it.value }
+        return database().use { db -> savedReadSpotFromDb(db, bookId) }.also {
+            readSpotCache[bookId] = CachedValue(it)
         }
     }
 
@@ -273,36 +432,71 @@ internal class TextbookLibrary(
             sql.setInt(3, offsetUtf16)
             sql.executeUpdate()
         }
+        readSpotCache[bookId] = CachedValue(page to offsetUtf16)
     }
 
     private val aspectCache = ConcurrentHashMap<String, Map<Int, Float>>()
 
     fun pdfPageAspects(book: Textbook): Map<Int, Float> {
         aspectCache[book.id]?.let { return it }
-        val computed = BookPdfLoader.read(original(book.id, book.format).toFile()) { pdf ->
-            pdf.pages.withIndex().mapNotNull { (index, page) ->
+        val fromDb = database().use { db -> BookAspectStore.loadAspects(db, book.id) }
+        if (fromDb.isNotEmpty()) {
+            if (aspectCache.size >= 16) aspectCache.clear()
+            aspectCache[book.id] = fromDb
+            return fromDb
+        }
+        val boxes = BookPdfLoader.read(original(book.id, book.format).toFile()) { pdf ->
+            pdf.pages.withIndex().map { (index, page) ->
                 val crop = page.cropBox
-                val aspect = if (page.rotation == 90 || page.rotation == 270) crop.height / crop.width else crop.width / crop.height
-                aspect.takeIf { it.isFinite() && it > 0 }?.let { index + 1 to it }
-            }.toMap()
+                Triple(index + 1, crop.width.toDouble() to crop.height.toDouble(), page.rotation)
+            }
+        }
+        val computed = boxes.mapNotNull { (pageNum, dims, rot) ->
+            val w = dims.first.toFloat()
+            val h = dims.second.toFloat()
+            val aspect = if (rot == 90 || rot == 270) h / w else w / h
+            aspect.takeIf { it.isFinite() && it > 0 }?.let { pageNum to it }
+        }.toMap()
+        runCatching {
+            database().use { db ->
+                db.autoCommit = false
+                try {
+                    BookAspectStore.saveInTransaction(db, book.id, boxes)
+                    db.commit()
+                } catch (e: Exception) {
+                    db.rollback()
+                    throw e
+                }
+            }
         }
         if (aspectCache.size >= 16) aspectCache.clear()
         aspectCache[book.id] = computed
         return computed
     }
 
-    fun highlights(bookId: String, page: BookPage): List<ReaderTextRange> = database().use { db ->
+    private fun rawHighlightsFromDb(db: Connection, bookId: String, page: Int): List<Triple<Int, Int, String>> =
         db.prepareStatement("SELECT start,end,quote FROM book_highlights WHERE book=? AND page=? ORDER BY start,end").use { sql ->
             sql.setString(1, bookId)
-            sql.setInt(2, page.number)
-            sql.executeQuery().use { rows -> buildList {
-                while (rows.next()) {
-                    val start = rows.getInt(1)
-                    val end = rows.getInt(2)
-                    if (start in 0 until end && end <= page.text.length &&
-                        page.text.substring(start, end) == rows.getString(3)) add(ReaderTextRange(start, end))
+            sql.setInt(2, page)
+            sql.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) add(Triple(rows.getInt(1), rows.getInt(2), rows.getString(3)))
                 }
-            } }
+            }
+        }
+
+    fun highlights(bookId: String, page: BookPage): List<ReaderTextRange> {
+        val raw = pageHighlightRawCache[bookId to page.number]
+            ?: database().use { db -> rawHighlightsFromDb(db, bookId, page.number) }.also {
+                if (pageHighlightRawCache.size >= 64) pageHighlightRawCache.clear()
+                pageHighlightRawCache[bookId to page.number] = it
+            }
+        if (raw.isEmpty()) return emptyList()
+        return buildList {
+            for ((start, end, quote) in raw) {
+                if (start in 0 until end && end <= page.text.length &&
+                    page.text.substring(start, end) == quote) add(ReaderTextRange(start, end))
+            }
         }
     }
 
@@ -318,6 +512,7 @@ internal class TextbookLibrary(
             sql.setString(5, passage.text)
             sql.executeUpdate()
         }
+        pageHighlightRawCache.remove(passage.book to passage.page)
     }
 
     @Synchronized fun allHighlights(bookId: String): List<BookHighlightRecord> = database().use { db ->
@@ -607,6 +802,57 @@ internal class TextbookLibrary(
         }
     }
 
+    private fun stageCopyAndHash(source: Path, control: BookImportControl, stage: Path): Triple<String, String, Long> {
+        val digest = MessageDigest.getInstance("SHA-256")
+        var bytesCopied = 0L
+        Files.newInputStream(source).use { input ->
+            Files.newOutputStream(stage).use { output ->
+                val buffer = ByteArray(65536)
+                while (true) {
+                    control.check()
+                    val size = input.read(buffer)
+                    if (size < 0) break
+                    digest.update(buffer, 0, size)
+                    output.write(buffer, 0, size)
+                    bytesCopied += size
+                }
+            }
+        }
+        val format = BookFormats.detect(stage, source.fileName.toString())
+        val id = digest.digest().joinToString("") { "%02x".format(it) }
+        return Triple(id, format, bytesCopied)
+    }
+
+    private fun stagePreparedNonTier0(
+        source: Path, stage: Path, id: String, format: String, fileBytes: Long, control: BookImportControl,
+    ): StagedBookImport {
+        val fallback = source.fileName.toString().substringBeforeLast('.')
+        if (format == "pdf" && streamPdfExtras && extractBook == null) {
+            return stageStreamedPdfBook(stage, id, fallback, control, source.fileName?.toString(), fileBytes)
+        }
+        val extracted = if (extractBook == null) {
+            TextbookExtraction.extractForStaging(stage, format, fallback, control)
+        } else {
+            extractBook.invoke(stage, format, fallback, ocr, control)
+        }.let { book ->
+            when (format) {
+                "html" -> StructuredBookExtraction.htmlImages(
+                    BookText.decode(Files.readAllBytes(stage)), book, source.toAbsolutePath().parent,
+                )
+                "md" -> MarkdownBookImages.attach(
+                    BookText.decode(Files.readAllBytes(stage)), book, source.toAbsolutePath().parent, control,
+                )
+                else -> book
+            }
+        }
+        require(extracted.pages.isNotEmpty()) { "教材中没有可打开的页面。" }
+        control.check()
+        // Optional second traversal, using the existing canonical-text equality gate. Failure
+        // omits the index rather than breaking an otherwise readable EPUB/Word import.
+        val nativeSources = BookNativeSourceStore.capture(stage, format, id, extracted.pages, control)
+        return saveStagedBook(stage, id, format, extracted, nativeSources, control, source.fileName?.toString(), fileBytes)
+    }
+
     fun stageBookImport(source: Path, control: BookImportControl = BookImportControl()): StagedBookImport {
         control.report(0, 0)
         require(Files.isRegularFile(source)) { "请选择一份教材文件，文件夹不能直接导入。" }
@@ -614,52 +860,583 @@ internal class TextbookLibrary(
         require(Files.size(source) <= 256L * 1024 * 1024) { "请选择不超过 256 MB 的教材。" }
         val stage = directory.resolve(".import-${UUID.randomUUID()}")
         try {
-            val digest = MessageDigest.getInstance("SHA-256")
-            Files.newInputStream(source).use { input ->
-                Files.newOutputStream(stage).use { output ->
-                    val buffer = ByteArray(65536)
-                    while (true) {
-                        control.check()
-                        val size = input.read(buffer)
-                        if (size < 0) break
-                        digest.update(buffer, 0, size)
-                        output.write(buffer, 0, size)
-                    }
-                }
-            }
-            val format = BookFormats.detect(stage, source.fileName.toString())
-            val id = digest.digest().joinToString("") { "%02x".format(it) }
+            val (id, format, fileBytes) = stageCopyAndHash(source, control, stage)
             if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
-            val fallback = source.fileName.toString().substringBeforeLast('.')
-            if (format == "pdf" && streamPdfExtras && extractBook == null) {
-                return stageStreamedPdfBook(stage, id, fallback, control)
-            }
-            val extracted = if (extractBook == null) {
-                TextbookExtraction.extractForStaging(stage, format, fallback, control)
-            } else {
-                extractBook.invoke(stage, format, fallback, ocr, control)
-            }.let { book ->
-                when (format) {
-                    "html" -> StructuredBookExtraction.htmlImages(
-                        BookText.decode(Files.readAllBytes(stage)), book, source.toAbsolutePath().parent,
-                    )
-                    "md" -> MarkdownBookImages.attach(
-                        BookText.decode(Files.readAllBytes(stage)), book, source.toAbsolutePath().parent, control,
-                    )
-                    else -> book
-                }
-            }
-            require(extracted.pages.isNotEmpty()) { "教材中没有可打开的页面。" }
-            control.check()
-            // Optional second traversal, using the existing canonical-text equality gate. Failure
-            // omits the index rather than breaking an otherwise readable EPUB/Word import.
-            val nativeSources = BookNativeSourceStore.capture(stage, format, id, extracted.pages, control)
-            return saveStagedBook(stage, id, format, extracted, nativeSources, control)
+            return stagePreparedNonTier0(source, stage, id, format, fileBytes, control)
         } finally { Files.deleteIfExists(stage) }
     }
 
+    private data class Tier0PdfPayload(
+        val title: String,
+        val totalPages: Int,
+        val outline: List<BookOutlineItem>,
+        val aspects: List<Triple<Int, Pair<Double, Double>, Int>>,
+        val tier0Pages: List<BookPage>,
+    )
+
+    fun stageBookImportTier0(source: Path, control: BookImportControl = BookImportControl()): StagedBookImport {
+        control.report(0, 0)
+        require(Files.isRegularFile(source)) { "请选择一份教材文件，文件夹不能直接导入。" }
+        require(Files.size(source) > 0) { "这份教材是空文件，请重新保存或下载后再导入。" }
+        require(Files.size(source) <= 256L * 1024 * 1024) { "请选择不超过 256 MB 的教材。" }
+        val stage = directory.resolve(".import-${UUID.randomUUID()}")
+        try {
+            val (id, format, fileBytes) = stageCopyAndHash(source, control, stage)
+            if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
+            if (format != "pdf" || extractBook != null) {
+                return stagePreparedNonTier0(source, stage, id, format, fileBytes, control)
+            }
+            val fallback = source.fileName.toString().substringBeforeLast('.')
+            var payloadReady = false
+            return try {
+                BookPdfLoader.readAndTransfer(
+                    stageFile = stage.toFile(),
+                    extract = { pdf ->
+                        val totalPages = pdf.numberOfPages
+                        require(totalPages in 1..5000) { "这本 PDF 的页数暂不支持。" }
+                        require(pdf.currentAccessPermission.canExtractContent()) { "这本 PDF 限制了文字提取，请使用有阅读和提取权限的教材。" }
+                        val bookTitle = pdf.documentInformation.title?.trim()?.takeIf(String::isNotEmpty) ?: fallback
+                        val outline = extractBookPdfOutline(pdf)
+                        val aspects = pdf.pages.withIndex().map { (index, sheet) ->
+                            val crop = sheet.cropBox
+                            Triple(index + 1, crop.width.toDouble() to crop.height.toDouble(), sheet.rotation)
+                        }
+                        val tier0End = minOf(3, totalPages)
+                        val plainExtractor = ReusablePlainPdfTextExtractor()
+                        val tier0Pages = (1..tier0End).map { pageNum ->
+                            control.check()
+                            BookPage(pageNum, plainExtractor.extractPage(pdf, pageNum))
+                        }
+                        payloadReady = true
+                        Tier0PdfPayload(bookTitle, totalPages, outline, aspects, tier0Pages)
+                    },
+                    commitAndTarget = { payload ->
+                        control.check()
+                        val tier0ByPage = payload.tier0Pages.associateBy { it.number }
+                        val allTier0Pages = (1..payload.totalPages).map { pageNum ->
+                            tier0ByPage[pageNum] ?: BookPage(pageNum, "")
+                        }
+                        val tier0Structure = BookTocWaterfall.buildTier0Structure(id, payload.title, payload.totalPages, payload.outline).also {
+                            it.deferResolvedLessons { it.toLessons(id, allTier0Pages) }
+                        }
+                        val target = original(id, "pdf")
+                        var moved = false
+                        database().use { db ->
+                            db.autoCommit = false
+                            try {
+                                db.prepareStatement(
+                                    "INSERT INTO books(id,title,format,mode,touched,reading_page,index_state,material_kind,source_filename,file_bytes) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                                ).use { sql ->
+                                    sql.setString(1, id); sql.setString(2, payload.title); sql.setString(3, "pdf")
+                                    sql.setString(4, QuestionMode.CHOICE.name); sql.setLong(5, System.currentTimeMillis())
+                                    sql.setInt(6, 1); sql.setString(7, "TIER0"); sql.setString(8, "BOOK")
+                                    sql.setString(9, source.fileName?.toString()); sql.setLong(10, fileBytes)
+                                    sql.executeUpdate()
+                                }
+                                db.prepareStatement("INSERT INTO pages(book,page,text,ocr,ocr_pending,text_pending) VALUES(?,?,?,?,?,?)").use { sql ->
+                                    for (pageNum in 1..payload.totalPages) {
+                                        val pageObj = tier0ByPage[pageNum]
+                                        sql.setString(1, id)
+                                        sql.setInt(2, pageNum)
+                                        sql.setString(3, pageObj?.text ?: "")
+                                        sql.setInt(4, 0)
+                                        sql.setInt(5, 0)
+                                        sql.setInt(6, if (pageObj == null) 1 else 0)
+                                        sql.addBatch()
+                                    }
+                                    sql.executeBatch()
+                                }
+                                BookAspectStore.saveInTransaction(db, id, payload.aspects)
+                                BookStructureStore.saveStructure(db, id, tier0Structure)
+                                BookFtsStore.rebuildBook(db, id, payload.tier0Pages)
+                                control.check()
+                                Files.move(stage, target, StandardCopyOption.REPLACE_EXISTING)
+                                moved = true
+                                control.check()
+                                db.commit()
+                            } catch (error: Throwable) {
+                                db.rollback()
+                                if (moved) runCatching { Files.deleteIfExists(target) }
+                                throw error
+                            }
+                        }
+                        cacheAspects(id, payload.aspects)
+                        val inMemoryBook = Textbook(
+                            id = id,
+                            title = payload.title,
+                            format = "pdf",
+                            pages = allTier0Pages,
+                            readingPage = 1,
+                            lessonIndex = 0,
+                            learning = false,
+                            promptSeen = false,
+                            questionMode = QuestionMode.CHOICE,
+                            structure = tier0Structure,
+                            indexState = "TIER0",
+                        )
+                        target.toFile() to StagedBookImport(inMemoryBook, alreadyExisted = false)
+                    },
+                )
+            } catch (e: BookPdfPasswordException) {
+                throw IllegalArgumentException("这本 PDF 有密码保护，请取消密码后再导入。", e)
+            } catch (e: java.util.concurrent.CancellationException) {
+                throw e
+            } catch (e: IllegalArgumentException) {
+                throw e
+            } catch (e: Exception) {
+                if (!payloadReady) throw IllegalArgumentException("这份教材不完整或已损坏，请重新保存或下载后再导入。", e)
+                else throw e
+            }
+        } finally { Files.deleteIfExists(stage) }
+    }
+
+    private fun cacheAspects(bookId: String, aspects: List<Triple<Int, Pair<Double, Double>, Int>>) {
+        val aspectMap = aspects.mapNotNull { (pageNum, dims, rot) ->
+            val w = dims.first.toFloat()
+            val h = dims.second.toFloat()
+            val aspect = if (rot == 90 || rot == 270) h / w else w / h
+            aspect.takeIf { it.isFinite() && it > 0 }?.let { pageNum to it }
+        }.toMap()
+        if (aspectMap.isNotEmpty()) {
+            if (aspectCache.size >= 16) aspectCache.clear()
+            aspectCache[bookId] = aspectMap
+        }
+    }
+
+    private fun rebuildFtsIfMissing(db: Connection, bookId: String, pages: List<BookPage>) {
+        if (!BookSchemaMigration.tableExists(db, "pages_fts")) return
+        if (pages.none { it.text.isNotEmpty() }) return
+        val hasRows = runCatching {
+            db.prepareStatement("SELECT 1 FROM pages_fts WHERE book=? LIMIT 1").use { sql ->
+                sql.setString(1, bookId)
+                sql.executeQuery().use { it.next() }
+            }
+        }.getOrDefault(true)
+        if (!hasRows) {
+            BookFtsStore.rebuildBook(db, bookId, pages)
+        }
+    }
+
+    private fun extractTier1Page(
+        pdf: BookPdfDocument,
+        pageNum: Int,
+        existing: BookPage?,
+        preserveExisting: Boolean,
+        plainExtractor: ReusablePlainPdfTextExtractor?,
+    ): Pair<BookPage, List<PageLineTypography>?> {
+        // Legacy v1 upgrades preserve existing pages.text verbatim so highlight/note UTF-16 anchors remain valid.
+        if (existing != null && (existing.ocr || preserveExisting)) {
+            val typoLines = if (!existing.ocr && plainExtractor == null) {
+                PdfPageTextExtraction.extractPlainTextAndTypography(pdf, pageNum).lines.takeIf { it.isNotEmpty() }
+            } else null
+            return existing to typoLines
+        }
+        return if (plainExtractor != null) {
+            val text = plainExtractor.extractPage(pdf, pageNum)
+            BookPage(
+                pageNum, text,
+                ocr = false,
+                illustrations = existing?.illustrations.orEmpty(),
+                textLayout = existing?.textLayout,
+                ocrPending = text.isBlank(),
+            ) to null
+        } else {
+            val fast = PdfPageTextExtraction.extractPlainTextAndTypography(pdf, pageNum)
+            BookPage(
+                pageNum, fast.text,
+                ocr = false,
+                illustrations = existing?.illustrations.orEmpty(),
+                textLayout = existing?.textLayout,
+                ocrPending = fast.text.isBlank(),
+            ) to fast.lines.takeIf { it.isNotEmpty() }
+        }
+    }
+
+    /** Tier 1 background full-text, typography, Stage A/B/C TOC, and FTS5 indexing without holding `@Synchronized`. */
+    fun indexBookTier1(
+        bookId: String,
+        control: BookImportControl = BookImportControl(),
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
+    ): Textbook {
+        val current = book(bookId)
+        if (current.format != "pdf" || current.indexState == "READY") return current
+        val isLegacyTocRebuild = current.indexState == "PENDING_TOC"
+        val sourceFile = original(bookId, "pdf")
+        if (isLegacyTocRebuild && !Files.isRegularFile(sourceFile)) {
+            return completePendingTocFromPersistedPages(bookId, current, control, onProgress)
+        }
+        require(Files.isRegularFile(sourceFile)) { "原文件已丢失或损坏，请重新导入《${current.title}》。" }
+        val existingByPage = current.pages.associateBy { it.number }
+        val needAspects = isLegacyTocRebuild && database().use { BookAspectStore.loadAspects(it, bookId).isEmpty() }
+        val file = sourceFile.toFile()
+        val (initialCount, outline, extractedAspects) = BookPdfLoader.readCached(file) { pdf ->
+            val aspects = if (needAspects) {
+                pdf.pages.withIndex().map { (index, sheet) ->
+                    val crop = sheet.cropBox
+                    Triple(index + 1, crop.width.toDouble() to crop.height.toDouble(), sheet.rotation)
+                }
+            } else emptyList()
+            Triple(pdf.numberOfPages, extractBookPdfOutline(pdf), aspects)
+        }
+        val needTypography = !BookTocWaterfall.willStageASucceed(outline, initialCount, "pdf")
+        val preserveExistingPages = isLegacyTocRebuild && (1..initialCount).all { p -> existingByPage[p] != null }
+        val indexedPages = ArrayList<BookPage>(initialCount)
+        val typographyLines = LinkedHashMap<Int, List<PageLineTypography>>()
+
+        if (preserveExistingPages && !needTypography) {
+            for (pageNum in 1..initialCount) {
+                control.check()
+                indexedPages += existingByPage.getValue(pageNum)
+            }
+            onProgress(initialCount, initialCount)
+        } else {
+            val workers = if (initialCount >= 40) bookPdfTier1Parallelism.coerceAtMost(initialCount) else 1
+            if (workers > 1) {
+                val pdfBytes = if (file.length() in 1L..(16L * 1024 * 1024)) Files.readAllBytes(sourceFile) else null
+                val sliceSize = (initialCount + workers - 1) / workers
+                val slices = (1..initialCount).chunked(sliceSize)
+                val doneCount = AtomicInteger(0)
+                val pool = Executors.newFixedThreadPool(slices.size) { r ->
+                    Thread(r, "coach-tier1-worker").apply { isDaemon = true }
+                }
+                try {
+                    val futures = slices.map { slice ->
+                        pool.submit(Callable<Pair<List<BookPage>, List<Pair<Int, List<PageLineTypography>>>>> {
+                            val localPages = ArrayList<BookPage>(slice.size)
+                            val localTypo = ArrayList<Pair<Int, List<PageLineTypography>>>()
+                            val doc = if (pdfBytes != null) BookPdfLoader.load(pdfBytes) else BookPdfLoader.load(file)
+                            doc.use { pdf ->
+                                val plainExtractor = if (!needTypography) ReusablePlainPdfTextExtractor() else null
+                                for (pageNum in slice) {
+                                    control.check()
+                                    val existing = existingByPage[pageNum]
+                                    val preserve = preserveExistingPages ||
+                                        (isLegacyTocRebuild && existing != null && !existing.ocr && existing.text.isNotBlank())
+                                    val (page, lines) = extractTier1Page(pdf, pageNum, existing, preserve, plainExtractor)
+                                    localPages += page
+                                    if (lines != null) localTypo += pageNum to lines
+                                    val done = doneCount.incrementAndGet()
+                                    if (done % 10 == 0 || done == initialCount) {
+                                        onProgress(done, initialCount)
+                                    }
+                                }
+                            }
+                            localPages to localTypo
+                        })
+                    }
+                    for (f in futures) {
+                        val (pagesChunk, typoChunk) = try {
+                            f.get()
+                        } catch (e: java.util.concurrent.ExecutionException) {
+                            throw (e.cause ?: e)
+                        }
+                        indexedPages.addAll(pagesChunk)
+                        for ((p, lines) in typoChunk) typographyLines[p] = lines
+                    }
+                } finally {
+                    pool.shutdownNow()
+                }
+            } else {
+                val batches = (1..initialCount).chunked(200)
+                for (batch in batches) {
+                    control.check()
+                    BookPdfLoader.read(file) { pdf ->
+                        val plainExtractor = if (!needTypography) ReusablePlainPdfTextExtractor() else null
+                        for (pageNum in batch) {
+                            control.check()
+                            val existing = existingByPage[pageNum]
+                            val preserve = preserveExistingPages ||
+                                (isLegacyTocRebuild && existing != null && !existing.ocr && existing.text.isNotBlank())
+                            val (page, lines) = extractTier1Page(pdf, pageNum, existing, preserve, plainExtractor)
+                            indexedPages += page
+                            if (lines != null) typographyLines[pageNum] = lines
+                            if (pageNum % 10 == 0 || pageNum == initialCount) {
+                                onProgress(pageNum, initialCount)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (!preserveExistingPages) {
+            require(indexedPages.count { it.ocrPending } <= BookScanImages.MAX_OCR_PAGES) {
+                "扫描页超过 ${BookScanImages.MAX_OCR_PAGES} 页，请把 PDF 拆分后再导入。"
+            }
+        }
+        control.check()
+        val structure = BookStructurePlanner.plan(bookId, current.title, "pdf", indexedPages, outline, typographyLines)
+        var readingPage = current.readingPage
+        var lessonIndex = current.lessonIndex
+        var learning = current.learning
+        var promptSeen = current.promptSeen
+        var questionMode = current.questionMode
+        database().use { db ->
+            db.autoCommit = false
+            try {
+                val meta = db.prepareStatement("SELECT reading_page,lesson_index,learning,prompt_seen,mode FROM books WHERE id=?").use { sql ->
+                    sql.setString(1, bookId)
+                    sql.executeQuery().use { row ->
+                        if (!row.next()) null
+                        else arrayOf<Any>(
+                            row.getInt(1),
+                            row.getInt(2),
+                            row.getInt(3) == 1,
+                            row.getInt(4) == 1,
+                            QuestionMode.valueOf(row.getString(5)),
+                        )
+                    }
+                } ?: throw BookImportCancelled()
+                val rawReadingPage = meta[0] as Int
+                readingPage = if (indexedPages.any { it.number == rawReadingPage }) rawReadingPage else indexedPages.first().number
+                lessonIndex = meta[1] as Int
+                learning = meta[2] as Boolean
+                promptSeen = meta[3] as Boolean
+                questionMode = meta[4] as QuestionMode
+                if (!preserveExistingPages) {
+                    db.prepareStatement(
+                        """INSERT INTO pages(book,page,text,ocr,ocr_pending,text_pending) VALUES(?,?,?,?,?,0)
+                           ON CONFLICT(book,page) DO UPDATE SET
+                           text=CASE WHEN pages.ocr=1 THEN pages.text ELSE excluded.text END,
+                           ocr_pending=CASE WHEN pages.ocr=1 THEN 0 ELSE excluded.ocr_pending END,
+                           text_pending=0""".trimIndent(),
+                    ).use { sql ->
+                        for (page in indexedPages) {
+                            sql.setString(1, bookId)
+                            sql.setInt(2, page.number)
+                            sql.setString(3, page.text)
+                            sql.setInt(4, if (page.ocr) 1 else 0)
+                            sql.setInt(5, if (page.ocrPending) 1 else 0)
+                            sql.addBatch()
+                        }
+                        sql.executeBatch()
+                    }
+                }
+                if (extractedAspects.isNotEmpty()) {
+                    BookAspectStore.saveInTransaction(db, bookId, extractedAspects)
+                }
+                BookStructureStore.saveStructure(db, bookId, structure)
+                if (!preserveExistingPages) {
+                    BookFtsStore.rebuildBook(db, bookId, indexedPages)
+                } else {
+                    rebuildFtsIfMissing(db, bookId, indexedPages)
+                }
+                lessonIndex = lessonIndex.coerceIn(0, structure.resolvedLessons.size)
+                if (isLegacyTocRebuild) {
+                    db.prepareStatement("UPDATE books SET index_state='READY', lesson_index=? WHERE id=?").use { sql ->
+                        sql.setInt(1, lessonIndex)
+                        sql.setString(2, bookId)
+                        sql.executeUpdate()
+                    }
+                } else {
+                    db.prepareStatement("UPDATE books SET index_state='READY', touched=?, lesson_index=? WHERE id=?").use { sql ->
+                        sql.setLong(1, System.currentTimeMillis())
+                        sql.setInt(2, lessonIndex)
+                        sql.setString(3, bookId)
+                        sql.executeUpdate()
+                    }
+                }
+                control.check()
+                db.commit()
+            } catch (error: Throwable) {
+                db.rollback()
+                throw error
+            }
+        }
+        if (extractedAspects.isNotEmpty()) {
+            cacheAspects(bookId, extractedAspects)
+        }
+        return Textbook(
+            id = bookId,
+            title = current.title,
+            format = "pdf",
+            pages = indexedPages,
+            readingPage = readingPage,
+            lessonIndex = lessonIndex,
+            learning = learning,
+            promptSeen = promptSeen,
+            questionMode = questionMode,
+            structure = structure,
+            indexState = "READY",
+        )
+    }
+
+    private fun completePendingTocFromPersistedPages(
+        bookId: String,
+        current: Textbook,
+        control: BookImportControl,
+        onProgress: (Int, Int) -> Unit,
+    ): Textbook {
+        if (current.pages.isEmpty()) {
+            database().use { db ->
+                db.prepareStatement("UPDATE books SET index_state='READY' WHERE id=?").use { sql ->
+                    sql.setString(1, bookId)
+                    sql.executeUpdate()
+                }
+            }
+            return current.copy(indexState = "READY")
+        }
+        control.check()
+        val structure = BookStructurePlanner.plan(bookId, current.title, "pdf", current.pages)
+        var readingPage = current.readingPage
+        var lessonIndex = current.lessonIndex
+        var learning = current.learning
+        var promptSeen = current.promptSeen
+        var questionMode = current.questionMode
+        database().use { db ->
+            db.autoCommit = false
+            try {
+                val meta = db.prepareStatement("SELECT reading_page,lesson_index,learning,prompt_seen,mode FROM books WHERE id=?").use { sql ->
+                    sql.setString(1, bookId)
+                    sql.executeQuery().use { row ->
+                        if (!row.next()) null
+                        else arrayOf<Any>(
+                            row.getInt(1),
+                            row.getInt(2),
+                            row.getInt(3) == 1,
+                            row.getInt(4) == 1,
+                            QuestionMode.valueOf(row.getString(5)),
+                        )
+                    }
+                } ?: throw BookImportCancelled()
+                val rawReadingPage = meta[0] as Int
+                readingPage = if (current.pages.any { it.number == rawReadingPage }) rawReadingPage else current.pages.first().number
+                lessonIndex = (meta[1] as Int).coerceIn(0, structure.resolvedLessons.size)
+                learning = meta[2] as Boolean
+                promptSeen = meta[3] as Boolean
+                questionMode = meta[4] as QuestionMode
+                BookStructureStore.saveStructure(db, bookId, structure)
+                rebuildFtsIfMissing(db, bookId, current.pages)
+                db.prepareStatement("UPDATE books SET index_state='READY', lesson_index=? WHERE id=?").use { sql ->
+                    sql.setInt(1, lessonIndex)
+                    sql.setString(2, bookId)
+                    sql.executeUpdate()
+                }
+                control.check()
+                db.commit()
+            } catch (error: Throwable) {
+                db.rollback()
+                throw error
+            }
+        }
+        onProgress(current.pages.size, current.pages.size)
+        return Textbook(
+            id = bookId,
+            title = current.title,
+            format = "pdf",
+            pages = current.pages,
+            readingPage = readingPage,
+            lessonIndex = lessonIndex,
+            learning = learning,
+            promptSeen = promptSeen,
+            questionMode = questionMode,
+            structure = structure,
+            indexState = "READY",
+        )
+    }
+
+    /** Tier 2 lazy per-page visual extraction (idempotent via `book_visual_pages`). Never holds `@Synchronized`. */
+    fun ensurePdfVisualsForPages(
+        bookId: String,
+        pageNumbers: Collection<Int>,
+        control: BookImportControl = BookImportControl(),
+    ): Boolean {
+        val requested = pageNumbers.filter { it >= 1 }.distinct()
+        if (requested.isEmpty()) return false
+        val prep = database().use { db ->
+            val fmt = db.prepareStatement("SELECT format FROM books WHERE id=?").use { sql ->
+                sql.setString(1, bookId)
+                sql.executeQuery().use { if (it.next()) it.getString(1) else null }
+            } ?: return@use null
+            if (fmt != "pdf") return@use null
+            val extractedSet = BookVisualPageStore.extractedPages(db, bookId)
+            val missing = requested.filter { it !in extractedSet }
+            if (missing.isEmpty()) return@use null
+            val readyPages = missing.mapNotNull { pageNum ->
+                db.prepareStatement("SELECT text, ocr, ocr_pending, text_pending FROM pages WHERE book=? AND page=?").use { sql ->
+                    sql.setString(1, bookId)
+                    sql.setInt(2, pageNum)
+                    sql.executeQuery().use { row ->
+                        if (!row.next()) null
+                        else {
+                            val ocrPending = row.getInt("ocr_pending") == 1
+                            val textPending = runCatching { row.getInt("text_pending") == 1 }.getOrDefault(false)
+                            if (ocrPending || textPending) null
+                            else BookPage(pageNum, row.getString("text"), ocr = row.getInt("ocr") == 1)
+                        }
+                    }
+                }
+            }
+            if (readyPages.isEmpty()) return@use null
+            val existingAssets = if (BookSchemaMigration.tableExists(db, "book_illustrations")) {
+                db.prepareStatement("SELECT DISTINCT image_sha256, extension FROM book_illustrations WHERE book=?").use { sql ->
+                    sql.setString(1, bookId)
+                    sql.executeQuery().use { rows ->
+                        buildList { while (rows.next()) add(rows.getString(1) to rows.getString(2)) }
+                    }
+                }
+            } else emptyList()
+            val existingCount = if (BookSchemaMigration.tableExists(db, "book_illustrations")) {
+                db.prepareStatement("SELECT COUNT(*) FROM book_illustrations WHERE book=?").use { sql ->
+                    sql.setString(1, bookId)
+                    sql.executeQuery().use { if (it.next()) it.getInt(1) else 0 }
+                }
+            } else 0
+            val existingBytes = existingAssets.sumOf { (sha, ext) ->
+                runCatching { Files.size(BookIllustrationAssets.imageFile(directory, bookId, sha, ext)) }.getOrDefault(0L)
+            }
+            Triple(readyPages, existingCount, existingBytes)
+        } ?: return false
+
+        val (readyPages, existingCount, existingBytes) = prep
+        val pdfFile = original(bookId, "pdf").toFile()
+        if (!pdfFile.isFile) return false
+        val accepted = BookPdfLoader.read(pdfFile) { pdf ->
+            val raw = importedPdfVisuals(pdf, readyPages, control)
+            var count = existingCount
+            var bytes = existingBytes
+            buildList {
+                for (item in raw) {
+                    if (count >= FormatBookImages.MAX_IMAGES || bytes + item.bytes.size > FormatBookImages.MAX_TOTAL) break
+                    count++
+                    bytes += item.bytes.size
+                    add(item)
+                }
+            }
+        }
+        val newFiles = accepted.map { BookIllustrationAssets.imageFile(directory, bookId, it.contentSha256, it.extension) }
+            .distinct().filterNot(Files::exists)
+        database().use { db ->
+            db.autoCommit = false
+            try {
+                val stillExists = db.prepareStatement("SELECT 1 FROM books WHERE id=?").use { sql ->
+                    sql.setString(1, bookId)
+                    sql.executeQuery().use { it.next() }
+                }
+                if (!stillExists) {
+                    db.rollback()
+                    return false
+                }
+                if (accepted.isNotEmpty()) {
+                    BookIllustrationStore.saveInTransaction(
+                        db, directory, bookId, readyPages.associate { it.number to it.text }, accepted, ensureSchema = false,
+                    )
+                }
+                BookVisualPageStore.markExtracted(db, bookId, readyPages.map { it.number })
+                db.commit()
+            } catch (error: Throwable) {
+                db.rollback()
+                newFiles.forEach { Files.deleteIfExists(it) }
+                throw error
+            }
+        }
+        return true
+    }
+
     @Synchronized
-    private fun stageStreamedPdfBook(stage: Path, id: String, fallback: String, control: BookImportControl): StagedBookImport {
+    private fun stageStreamedPdfBook(
+        stage: Path, id: String, fallback: String, control: BookImportControl,
+        sourceFilename: String? = null, fileBytes: Long = Files.size(stage),
+    ): StagedBookImport {
         if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
         val target = original(id, "pdf")
         val newImages = mutableSetOf<Path>()
@@ -680,12 +1457,14 @@ internal class TextbookLibrary(
                 require(extracted.pages.isNotEmpty()) { "教材中没有可打开的页面。" }
                 val structure = BookStructurePlanner.plan(id, extracted.title, "pdf", extracted.pages, extracted.outline)
                 control.check()
-                db.prepareStatement("INSERT INTO books(id,title,format,mode,touched,reading_page) VALUES(?,?,?,?,?,?)").use { sql ->
+                db.prepareStatement("INSERT INTO books(id,title,format,mode,touched,reading_page,index_state,material_kind,source_filename,file_bytes) VALUES(?,?,?,?,?,?,?,?,?,?)").use { sql ->
                     sql.setString(1, id); sql.setString(2, extracted.title); sql.setString(3, "pdf")
-                    sql.setString(4, QuestionMode.CHOICE.name)
-                    sql.setLong(5, System.currentTimeMillis()); sql.setInt(6, extracted.pages.minOf { it.number }); sql.executeUpdate()
+                    sql.setString(4, QuestionMode.CHOICE.name); sql.setLong(5, System.currentTimeMillis())
+                    sql.setInt(6, extracted.pages.minOf { it.number }); sql.setString(7, "READY")
+                    sql.setString(8, "BOOK"); sql.setString(9, sourceFilename); sql.setLong(10, fileBytes)
+                    sql.executeUpdate()
                 }
-                db.prepareStatement("INSERT INTO pages(book,page,text,ocr,ocr_pending) VALUES(?,?,?,?,?)").use { sql ->
+                db.prepareStatement("INSERT INTO pages(book,page,text,ocr,ocr_pending,text_pending) VALUES(?,?,?,?,?,0)").use { sql ->
                     for (page in extracted.pages) {
                         sql.setString(1, id); sql.setInt(2, page.number); sql.setString(3, page.text)
                         sql.setInt(4, if (page.ocr) 1 else 0); sql.setInt(5, if (page.ocrPending) 1 else 0)
@@ -698,6 +1477,7 @@ internal class TextbookLibrary(
                     extracted.illustrations, extracted.pages.mapNotNull { it.textLayout },
                 )
                 BookStructureStore.saveStructure(db, id, structure)
+                BookFtsStore.rebuildBook(db, id, extracted.pages)
                 control.check()
                 Files.move(stage, target, StandardCopyOption.REPLACE_EXISTING)
                 moved = true
@@ -717,6 +1497,7 @@ internal class TextbookLibrary(
     private fun saveStagedBook(
         stage: Path, id: String, format: String, extracted: ExtractedBook,
         nativeSources: ByteArray?, control: BookImportControl,
+        sourceFilename: String? = null, fileBytes: Long = Files.size(stage),
     ): StagedBookImport {
         if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
         val structure = BookStructurePlanner.plan(id, extracted.title, format, extracted.pages, extracted.outline)
@@ -729,12 +1510,14 @@ internal class TextbookLibrary(
         database().use { db ->
             db.autoCommit = false
             try {
-                db.prepareStatement("INSERT INTO books(id,title,format,mode,touched,reading_page) VALUES(?,?,?,?,?,?)").use { sql ->
+                db.prepareStatement("INSERT INTO books(id,title,format,mode,touched,reading_page,index_state,material_kind,source_filename,file_bytes) VALUES(?,?,?,?,?,?,?,?,?,?)").use { sql ->
                     sql.setString(1, id); sql.setString(2, extracted.title); sql.setString(3, format)
-                    sql.setString(4, QuestionMode.CHOICE.name)
-                    sql.setLong(5, System.currentTimeMillis()); sql.setInt(6, extracted.pages.minOf { it.number }); sql.executeUpdate()
+                    sql.setString(4, QuestionMode.CHOICE.name); sql.setLong(5, System.currentTimeMillis())
+                    sql.setInt(6, extracted.pages.minOf { it.number }); sql.setString(7, "READY")
+                    sql.setString(8, "BOOK"); sql.setString(9, sourceFilename); sql.setLong(10, fileBytes)
+                    sql.executeUpdate()
                 }
-                db.prepareStatement("INSERT INTO pages(book,page,text,ocr,ocr_pending) VALUES(?,?,?,?,?)").use { sql ->
+                db.prepareStatement("INSERT INTO pages(book,page,text,ocr,ocr_pending,text_pending) VALUES(?,?,?,?,?,0)").use { sql ->
                     for (page in extracted.pages) {
                         sql.setString(1, id); sql.setInt(2, page.number); sql.setString(3, page.text)
                         sql.setInt(4, if (page.ocr) 1 else 0); sql.setInt(5, if (page.ocrPending) 1 else 0)
@@ -748,6 +1531,7 @@ internal class TextbookLibrary(
                 )
                 nativeSources?.let { BookNativeSourceStore.saveInTransaction(db, id, it) }
                 BookStructureStore.saveStructure(db, id, structure)
+                BookFtsStore.rebuildBook(db, id, extracted.pages)
                 control.check()
                 db.commit()
             } catch (error: Exception) {
@@ -853,12 +1637,13 @@ internal class TextbookLibrary(
         database().use { db ->
             db.autoCommit = false
             try {
-                db.prepareStatement("UPDATE pages SET text=?,ocr=1,ocr_pending=0 WHERE book=? AND page=?").use { sql ->
+                db.prepareStatement("UPDATE pages SET text=?,ocr=1,ocr_pending=0,text_pending=0 WHERE book=? AND page=?").use { sql ->
                     sql.setString(1, text); sql.setString(2, bookId); sql.setInt(3, pageNumber); sql.executeUpdate()
                 }
                 db.prepareStatement("UPDATE books SET touched=? WHERE id=?").use { sql ->
                     sql.setLong(1, System.currentTimeMillis()); sql.setString(2, bookId); sql.executeUpdate()
                 }
+                BookFtsStore.upsertPage(db, bookId, pageNumber, text)
                 db.commit()
             } catch (error: Exception) { db.rollback(); throw error }
         }
@@ -873,7 +1658,16 @@ internal class TextbookLibrary(
     }
 
     @Synchronized fun deleteBook(bookId: String) {
+        firstRenderGates.remove(bookId)
         aspectCache.remove(bookId)
+        savedTextViewCache.remove(bookId)
+        pdfScrollModeCache.remove(bookId)
+        textScrollModeCache.remove(bookId)
+        readSpotCache.remove(bookId)
+        pageHighlightRawCache.keys.removeIf { it.first == bookId }
+        synchronized(textLayerLock) {
+            textLayerCache.keys.removeIf { it.first == bookId }
+        }
         synchronized(renderLock) {
             renderCache.keys.removeIf { it.id == bookId }
         }
@@ -884,14 +1678,19 @@ internal class TextbookLibrary(
             }
             db.autoCommit = false
             try {
+                BookFtsStore.deleteBook(db, bookId)
                 for (table in listOf(
                     "pages", "book_illustrations", "book_page_text_boxes", "book_native_sources",
                     "book_learning_paths", "book_ladders", "book_reader_views", "book_pdf_modes",
                     "book_highlights", "book_notes", "answers", "book_reviews", "book_structures", "book_section_cache",
-                    "book_open_session",
+                    "book_open_session", "book_toc_nodes", "book_study_chunks", "book_bookmarks",
+                    "book_page_aspects", "book_visual_pages",
                 )) {
                     val exists = db.createStatement().use { s -> s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='$table'").use { it.next() } }
                     if (exists) db.prepareStatement("DELETE FROM $table WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }
+                }
+                if (BookSchemaMigration.tableExists(db, "collection_materials")) {
+                    db.prepareStatement("DELETE FROM collection_materials WHERE material_id=?").use { it.setString(1, bookId); it.executeUpdate() }
                 }
                 val hasVisualReviews = db.createStatement().use { s -> s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='book_pdf_visual_reviews'").use { it.next() } }
                 if (hasVisualReviews) db.prepareStatement("DELETE FROM book_pdf_visual_reviews WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }
@@ -902,7 +1701,17 @@ internal class TextbookLibrary(
             fmt
         }
         if (format != null && format in BookFormats.supported) {
-            runCatching { Files.deleteIfExists(original(bookId, format)) }
+            val filePath = original(bookId, format)
+            if (format == "pdf") BookPdfLoader.evict(filePath.toFile())
+            runCatching { Files.deleteIfExists(filePath) }
+        }
+        runCatching {
+            val cacheDir = directory.resolve(".render-cache")
+            if (Files.isDirectory(cacheDir)) {
+                Files.list(cacheDir).use { stream ->
+                    stream.filter { it.fileName.toString().startsWith("$bookId-") }.forEach { Files.deleteIfExists(it) }
+                }
+            }
         }
         runCatching { directory.resolve(bookId).toFile().deleteRecursively() }
     }
@@ -910,13 +1719,29 @@ internal class TextbookLibrary(
     @Synchronized fun reorganizeSections(bookId: String): Textbook {
         val current = book(bookId)
         val file = runCatching { original(bookId, current.format) }.getOrNull()?.takeIf(Files::isRegularFile)
+        var typographyLines: Map<Int, List<PageLineTypography>> = emptyMap()
         val outline = if (file == null) emptyList() else when (current.format) {
-            "pdf" -> runCatching { BookPdfLoader.read(file.toFile(), ::extractBookPdfOutline) }.getOrDefault(emptyList())
+            "pdf" -> runCatching {
+                BookPdfLoader.read(file.toFile()) { pdf ->
+                    val items = extractBookPdfOutline(pdf)
+                    if (items.size < 3) {
+                        typographyLines = buildMap {
+                            for (p in 1..minOf(pdf.numberOfPages, 5000)) {
+                                if (current.page(p)?.ocr != true) {
+                                    val fast = PdfPageTextExtraction.extractPlainTextAndTypography(pdf, p)
+                                    if (fast.lines.isNotEmpty()) put(p, fast.lines)
+                                }
+                            }
+                        }
+                    }
+                    items
+                }
+            }.getOrDefault(emptyList())
             "epub" -> BookStructurePlanner.extractEpubOutline(file, current.pages)
             "docx" -> BookStructurePlanner.extractWordOutline(file, current.pages)
             else -> emptyList()
         }
-        val structure = BookStructurePlanner.plan(current.id, current.title, current.format, current.pages, outline)
+        val structure = BookStructurePlanner.plan(current.id, current.title, current.format, current.pages, outline, typographyLines)
         val clampedIndex = current.lessonIndex.coerceIn(0, structure.resolvedLessons.size)
         database().use { db ->
             db.autoCommit = false
@@ -931,6 +1756,59 @@ internal class TextbookLibrary(
             } catch (e: Exception) { db.rollback(); throw e }
         }
         return book(bookId)
+    }
+
+    /** Fast full-book search backed by FTS5 (`pages_fts`) and exact UTF-16 offset refinement. */
+    fun searchBook(bookId: String, rawQuery: String, limit: Int = DEFAULT_BOOK_SEARCH_LIMIT): BookSearchResult {
+        val query = rawQuery.trim()
+        if (query.isEmpty() || limit <= 0) return BookSearchResult(query, emptyList(), truncated = false)
+        val pages = database().use { db ->
+            val candidates = BookFtsStore.queryCandidatePages(db, bookId, query)
+            if (candidates == null) {
+                db.prepareStatement("SELECT page,text,ocr,ocr_pending FROM pages WHERE book=? ORDER BY page").use { sql ->
+                    sql.setString(1, bookId)
+                    sql.executeQuery().use { rows ->
+                        buildList { while (rows.next()) add(BookPage(rows.getInt(1), rows.getString(2), ocr = rows.getInt(3) == 1, ocrPending = rows.getInt(4) == 1)) }
+                    }
+                }
+            } else if (candidates.isEmpty()) {
+                emptyList()
+            } else {
+                buildList {
+                    for (chunk in candidates.chunked(500)) {
+                        val placeholders = chunk.joinToString(",") { "?" }
+                        db.prepareStatement(
+                            "SELECT page,text,ocr,ocr_pending FROM pages WHERE book=? AND page IN ($placeholders) ORDER BY page",
+                        ).use { sql ->
+                            sql.setString(1, bookId)
+                            chunk.forEachIndexed { i, p -> sql.setInt(i + 2, p) }
+                            sql.executeQuery().use { rows ->
+                                while (rows.next()) {
+                                    add(BookPage(rows.getInt(1), rows.getString(2), ocr = rows.getInt(3) == 1, ocrPending = rows.getInt(4) == 1))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return searchBookPages(pages, query, limit)
+    }
+
+    @Synchronized fun collections(): List<MaterialCollectionRecord> = database().use { db ->
+        MaterialCollectionStore.collections(db)
+    }
+
+    @Synchronized fun upsertCollection(record: MaterialCollectionRecord) = database().use { db ->
+        MaterialCollectionStore.upsertCollection(db, record)
+    }
+
+    @Synchronized fun attachMaterial(link: CollectionMaterialRecord) = database().use { db ->
+        MaterialCollectionStore.attachMaterial(db, link)
+    }
+
+    @Synchronized fun collectionMaterials(collectionId: String): List<CollectionMaterialRecord> = database().use { db ->
+        MaterialCollectionStore.materials(db, collectionId)
     }
 
     @Synchronized fun saveBookStructure(bookId: String, structure: BookStructure): Textbook {
@@ -1133,14 +2011,15 @@ internal class TextbookLibrary(
         database().use { db -> db.createStatement().use { it.executeUpdate("DELETE FROM book_review_position") } }
     }
 
-    /** Last open reading or learning screen so reopening returns directly to the book and spot with zero clicks. */
-    @Synchronized fun openSession(): Pair<String, String>? = database().use { db ->
+    private fun openSession(db: Connection): Pair<String, String>? =
         db.createStatement().use { sql ->
             sql.executeQuery("SELECT book,screen FROM book_open_session WHERE slot=1").use { row ->
                 if (row.next()) row.getString(1) to row.getString(2) else null
             }
         }
-    }
+
+    /** Last open reading or learning screen so reopening returns directly to the book and spot with zero clicks. */
+    @Synchronized fun openSession(): Pair<String, String>? = database().use(::openSession)
 
     @Synchronized fun saveOpenSession(bookId: String, screen: String) {
         require(screen in setOf("READER", "LEARNING")) { "未知的打开界面。" }
@@ -1161,10 +2040,109 @@ internal class TextbookLibrary(
     private data class RenderKey(val id: String, val page: Int, val stamp: Long, val pixelWidth: Int?)
     private val renderLock = Any()
     private val renderCache = LinkedHashMap<RenderKey, BookBitmap>(16, .75f, true)
-    private val renderInflight = HashMap<RenderKey, java.util.concurrent.CompletableFuture<BookBitmap>>()
+    private val renderInflight = HashMap<RenderKey, CompletableFuture<BookBitmap>>()
     private val traces = java.util.concurrent.ConcurrentLinkedQueue<RenderTrace>()
+    private val activeRenders = AtomicInteger(0)
+    private val renderIdleLock = java.util.concurrent.locks.ReentrantLock()
+    private val renderIdleCondition = renderIdleLock.newCondition()
+    private val firstRenderGates = ConcurrentHashMap<String, CompletableFuture<Unit>>()
+    @Volatile private var startupReaderBookId: String? = null
+    @Volatile private var startupFirstRenderCompletedAtNs: Long = 0L
 
-    /** 最近的渲染记录（最多 64 条）：outcome = render（真正渲染）/ joined（并发时等同一次渲染）/ hit（缓存命中）。 */
+    private fun markFirstRenderCompleted(bookId: String) {
+        val gate = firstRenderGates.computeIfAbsent(bookId) { CompletableFuture() }
+        if (gate.complete(Unit) && bookId == startupReaderBookId) {
+            startupFirstRenderCompletedAtNs = System.nanoTime()
+        }
+    }
+    private val diskCacheExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "coach-render-disk-cache").apply { isDaemon = true }
+    }
+    private val startupWarmupExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "coach-startup-warmup").apply { isDaemon = true }
+    }
+
+    fun awaitFirstRenderOrTimeout(bookId: String, timeoutMs: Long) {
+        val gate = firstRenderGates.computeIfAbsent(bookId) { CompletableFuture() }
+        runCatching { gate.get(timeoutMs, TimeUnit.MILLISECONDS) }
+    }
+
+    private fun renderDiskCacheFile(key: RenderKey): Path = directory.resolve(".render-cache")
+        .resolve("${key.id}-p${key.page}-w${key.pixelWidth ?: "auto"}-s${java.lang.Long.toUnsignedString(key.stamp, 36)}.cbm")
+
+    private fun putRenderCacheLocked(key: RenderKey, bitmap: BookBitmap) {
+        renderCache[key] = bitmap
+        val entries = renderCache.values.iterator()
+        var bytes = renderCache.values.sumOf(::bookPdfBitmapBytes)
+        while (renderCache.size > 6 || bytes > bookPdfCacheBytes) {
+            bytes -= bookPdfBitmapBytes(entries.next())
+            entries.remove()
+        }
+    }
+
+    private fun prefetchRenderDiskCacheAsync(bookId: String, vararg pages: Int) {
+        val pageList = pages.distinct().filter { it > 0 }
+        if (pageList.isEmpty()) return
+        diskCacheExecutor.execute {
+            runCatching {
+                val sourceFile = original(bookId, "pdf").toFile()
+                if (!sourceFile.isFile) return@execute
+                val stamp = sourceFile.length() xor sourceFile.lastModified()
+                val cacheDir = directory.resolve(".render-cache")
+                if (!Files.isDirectory(cacheDir)) return@execute
+                val prefixes = pageList.map { it to "$bookId-p$it-w" }
+                val suffix = "-s${java.lang.Long.toUnsignedString(stamp, 36)}.cbm"
+                val candidates = Files.list(cacheDir).use { stream ->
+                    val matches = mutableListOf<Triple<Int, String, Path>>()
+                    val it = stream.iterator()
+                    while (it.hasNext()) {
+                        val path = it.next()
+                        val name = path.fileName.toString()
+                        if (!name.endsWith(suffix)) continue
+                        val match = prefixes.firstOrNull { (_, prefix) -> name.startsWith(prefix) } ?: continue
+                        matches += Triple(match.first, match.second, path)
+                    }
+                    matches
+                }
+                for ((page, prefix, path) in candidates) {
+                    val name = path.fileName.toString()
+                    val widthToken = name.removePrefix(prefix).removeSuffix(suffix)
+                    val pixelWidth = if (widthToken == "auto") null else widthToken.toIntOrNull() ?: continue
+                    val key = RenderKey(bookId, page, stamp, pixelWidth)
+                    val alreadyLoaded = synchronized(renderLock) {
+                        renderCache.containsKey(key) || renderInflight.containsKey(key)
+                    }
+                    if (alreadyLoaded) continue
+                    val bitmap = readCachedPageBitmap(path) ?: continue
+                    synchronized(renderLock) {
+                        if (!renderCache.containsKey(key) && !renderInflight.containsKey(key)) {
+                            putRenderCacheLocked(key, bitmap)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun persistRenderBitmapAsync(key: RenderKey, bitmap: BookBitmap) {
+        diskCacheExecutor.execute {
+            runCatching {
+                val target = renderDiskCacheFile(key)
+                writeCachedPageBitmap(target, bitmap)
+                val cacheDir = target.parent ?: return@execute
+                if (Files.isDirectory(cacheDir)) {
+                    val files = Files.list(cacheDir).use { stream ->
+                        stream.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".cbm") }
+                            .sorted(Comparator.comparingLong<Path> { Files.getLastModifiedTime(it).toMillis() }.reversed())
+                            .toList()
+                    }
+                    files.drop(6).forEach { runCatching { Files.deleteIfExists(it) } }
+                }
+            }
+        }
+    }
+
+    /** 最近的渲染记录（最多 64 条）：outcome = render（真正渲染）/ joined（并发时等同一次渲染）/ hit（缓存命中）/ disk-hit（磁盘位图命中）。 */
     fun renderTraces(): List<RenderTrace> = traces.toList()
 
     private fun record(t: RenderTrace) {
@@ -1192,20 +2170,37 @@ internal class TextbookLibrary(
         val key = RenderKey(book.id, page, file.length() xor file.lastModified(), pixelWidth)
         val started = System.nanoTime()
         var owner = false
-        val future: java.util.concurrent.CompletableFuture<BookBitmap>
+        val future: CompletableFuture<BookBitmap>
         synchronized(renderLock) {
-            renderCache[key]?.let { record(RenderTrace(book.id, page, "hit", 0.0, 0.0, 0.0, (System.nanoTime() - started) / 1_000_000.0, Thread.currentThread().name)); return it }
+            renderCache[key]?.let {
+                record(RenderTrace(book.id, page, "hit", 0.0, 0.0, 0.0, (System.nanoTime() - started) / 1_000_000.0, Thread.currentThread().name))
+                markFirstRenderCompleted(book.id)
+                return it
+            }
             val running = renderInflight[key]
-            if (running != null) future = running else { future = java.util.concurrent.CompletableFuture(); renderInflight[key] = future; owner = true }
+            if (running != null) future = running else { future = CompletableFuture(); renderInflight[key] = future; owner = true }
         }
         if (!owner) {
             val img = try { future.get() } catch (e: java.util.concurrent.ExecutionException) { throw (e.cause ?: e) }
             record(RenderTrace(book.id, page, "joined", 0.0, 0.0, 0.0, (System.nanoTime() - started) / 1_000_000.0, Thread.currentThread().name))
             return img
         }
+        activeRenders.incrementAndGet()
         try {
+            val diskCached = readCachedPageBitmap(renderDiskCacheFile(key))
+            if (diskCached != null) {
+                val tEnd = System.nanoTime()
+                record(RenderTrace(book.id, page, "disk-hit", 0.0, 0.0, (tEnd - started) / 1_000_000.0, (tEnd - started) / 1_000_000.0, Thread.currentThread().name))
+                synchronized(renderLock) {
+                    putRenderCacheLocked(key, diskCached)
+                    renderInflight.remove(key)
+                }
+                markFirstRenderCompleted(book.id)
+                future.complete(diskCached)
+                return diskCached
+            }
             val t0 = System.nanoTime()
-            val image = BookPdfLoader.read(file) { pdf ->
+            val image = BookPdfLoader.readCached(file) { pdf ->
                 val t1 = System.nanoTime()
                 val sheet = pdf.getPage(page - 1)
                 val bounds = sheet.cropBox
@@ -1223,15 +2218,11 @@ internal class TextbookLibrary(
                 img
             }
             synchronized(renderLock) {
-                renderCache[key] = image
-                val entries = renderCache.values.iterator()
-                var bytes = renderCache.values.sumOf(::bookPdfBitmapBytes)
-                while (renderCache.size > 6 || bytes > bookPdfCacheBytes) {
-                    bytes -= bookPdfBitmapBytes(entries.next())
-                    entries.remove()
-                }
+                putRenderCacheLocked(key, image)
                 renderInflight.remove(key)
             }
+            markFirstRenderCompleted(book.id)
+            persistRenderBitmapAsync(key, image)
             future.complete(image)
             return image
         } catch (e: Throwable) {
@@ -1241,6 +2232,15 @@ internal class TextbookLibrary(
             }
             future.completeExceptionally(e)
             throw e
+        } finally {
+            if (activeRenders.decrementAndGet() == 0) {
+                renderIdleLock.lock()
+                try {
+                    renderIdleCondition.signalAll()
+                } finally {
+                    renderIdleLock.unlock()
+                }
+            }
         }
     }
 }

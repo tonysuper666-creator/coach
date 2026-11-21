@@ -16,9 +16,11 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.nio.file.Path
+import java.util.concurrent.ConcurrentHashMap
 
 internal enum class BookScreen { HOME, READER, LEARNING, REVIEWS, REVIEWING }
 internal enum class BookPrompt { IMPORTED, START, AFTER_READING, QUESTIONS }
+internal data class BookIndexProgress(val bookId: String, val page: Int, val total: Int)
 internal data class LibraryUi(
     val catalog: List<BookSummary> = emptyList(), val book: Textbook? = null,
     val screen: BookScreen = BookScreen.HOME, val prompt: BookPrompt? = null,
@@ -34,10 +36,11 @@ internal data class LibraryUi(
     val importNotice: BookImportNotice? = null,
     /** 首次从 SQLite 载入目录和上次会话完成前为 false，避免重开时先闪现「书架还是空的」。 */
     val initialized: Boolean = false,
+    val indexing: BookIndexProgress? = null,
 )
 
 internal class TextbookController(val library: TextbookLibrary, var structureProvider: BookStructureProvider? = null) {
-    private val mutable = MutableStateFlow(LibraryUi())
+    private val mutable = MutableStateFlow(LibraryUi(initialized = false))
     val state = mutable.asStateFlow()
     private val actions = Mutex()
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -45,6 +48,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     @Volatile private var activeImportJob: Job? = null
     @Volatile private var pendingPageSaveJob: Job? = null
     private val pageSaveLock = Mutex()
+    private val indexingControls = ConcurrentHashMap<String, BookImportControl>()
+    private val indexingJobs = ConcurrentHashMap<String, Job>()
     fun cancelImport() { activeImport?.cancel() }
     fun dismissImportNotice(id: Long) {
         mutable.update { if (it.importNotice?.id == id) it.copy(importNotice = null) else it }
@@ -66,47 +71,61 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     }
 
     suspend fun load() {
-        action {
-            val catalog = library.catalog()
-            val active = library.activeReview()
-            val session = if (active == null) library.openSession()?.takeIf { (id, _) -> catalog.any { it.id == id } } else null
-            val book = active?.let { library.book(it.book) }
-                ?: session?.let { library.book(it.first) }
-                ?: catalog.firstOrNull()?.let { library.book(it.id) }
-            val savedPath = book?.let { library.learningPath(it.id) }
-            val restoredPath = book?.let { LearningPath.restore(savedPath, it.learning) } ?: LearningPath.READ
-            val restoredScreen = when {
-                active != null -> BookScreen.REVIEWING
-                book != null && session?.second == "READER" -> BookScreen.READER
-                book != null && session?.second == "LEARNING" && book.learning -> BookScreen.LEARNING
-                else -> BookScreen.HOME
+        var loadedCatalog: List<BookSummary> = emptyList()
+        var loadedScreen = BookScreen.HOME
+        var loadedBookId: String? = null
+        try {
+            action {
+                val snap = library.loadStartupSnapshot()
+                val catalog = snap.catalog
+                loadedCatalog = catalog
+                val active = snap.activeReview
+                val session = snap.openSession
+                val book = snap.book
+                val savedPath = snap.learningPath
+                val restoredPath = book?.let { LearningPath.restore(savedPath, it.learning) } ?: LearningPath.READ
+                val restoredScreen = when {
+                    active != null -> BookScreen.REVIEWING
+                    book != null && session?.second == "READER" -> BookScreen.READER
+                    book != null && session?.second == "LEARNING" && book.learning -> BookScreen.LEARNING
+                    else -> BookScreen.HOME
+                }
+                loadedScreen = restoredScreen
+                loadedBookId = book?.id
+                val restoredLesson = if (restoredScreen == BookScreen.LEARNING && book != null) book.lessons.getOrNull(book.lessonIndex) else null
+                val restoredAnswer = active?.answer
+                    ?: restoredLesson?.let { library.answer(book!!.id, it.id, book.questionMode) }
+                    ?: PracticeAnswer()
+                mutable.update { current ->
+                    LibraryUi(
+                        catalog = catalog, book = book, page = book?.readingPage ?: 1, busy = true, reviews = snap.reviews,
+                        review = active, answer = restoredAnswer,
+                        learningPath = restoredPath,
+                        learningPathSaved = savedPath != null,
+                        questionsOpen = restoredScreen == BookScreen.LEARNING &&
+                            (restoredPath == LearningPath.QUESTION_FIRST || restoredAnswer.text.isNotBlank() || restoredAnswer.revealed),
+                        ladder = snap.ladder,
+                        screen = restoredScreen,
+                        importing = current.importing,
+                        importNotice = current.importNotice,
+                        initialized = true,
+                        indexing = current.indexing,
+                    )
+                }
             }
-            val restoredLesson = if (restoredScreen == BookScreen.LEARNING && book != null) book.lessons.getOrNull(book.lessonIndex) else null
-            val restoredAnswer = active?.answer
-                ?: restoredLesson?.let { library.answer(book!!.id, it.id, book.questionMode) }
-                ?: PracticeAnswer()
-            mutable.update { current ->
-                LibraryUi(
-                    catalog = catalog, book = book, page = book?.readingPage ?: 1, busy = true, reviews = library.reviews(),
-                    review = active, answer = restoredAnswer,
-                    learningPath = restoredPath,
-                    learningPathSaved = savedPath != null,
-                    questionsOpen = restoredScreen == BookScreen.LEARNING &&
-                        (restoredPath == LearningPath.QUESTION_FIRST || restoredAnswer.text.isNotBlank() || restoredAnswer.revealed),
-                    ladder = book?.let { library.ladder(it.id) } ?: LadderSession(),
-                    screen = restoredScreen,
-                    importing = current.importing,
-                    importNotice = current.importNotice,
-                    initialized = true,
-                )
+            val needIndex = loadedCatalog.firstOrNull { it.id == loadedBookId && it.indexState != "READY" }
+                ?: loadedCatalog.firstOrNull { it.indexState != "READY" }
+            if (needIndex != null && !indexingJobs.containsKey(needIndex.id)) {
+                val waitRender = loadedScreen == BookScreen.READER && loadedBookId == needIndex.id
+                launchTier1Indexing(needIndex.id, waitForFirstRender = waitRender)
+            } else {
+                val pending = loadedCatalog.firstOrNull { it.pendingOcrPages > 0 }
+                if (pending != null && activeImport == null) {
+                    resumePendingOcrInBackground(pending.id)
+                }
             }
-        }
-        if (!mutable.value.initialized) {
-            mutable.update { it.copy(initialized = true) }
-        }
-        val pending = withContext(Dispatchers.IO) { library.catalog().firstOrNull { it.pendingOcrPages > 0 } }
-        if (pending != null && activeImport == null) {
-            resumePendingOcrInBackground(pending.id)
+        } finally {
+            mutable.update { if (it.initialized) it else it.copy(initialized = true) }
         }
     }
 
@@ -145,10 +164,46 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             }
             try {
                 mutable.update { it.copy(error = null, importing = BookImportProgress(0, 0)) }
-                val result = library.stageBookImport(path, control)
+                val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
+                val result = if (useTier0) {
+                    library.stageBookImportTier0(path, control)
+                } else {
+                    library.stageBookImport(path, control)
+                }
                 staged = result
                 releaseOnce()
                 val book = result.book
+                if (book.indexState != "READY") {
+                    actions.withLock {
+                        library.closeReview()
+                        library.saveOpenSession(book.id, "READER")
+                        val catalog = library.catalog()
+                        val reviews = library.reviews()
+                        val pathSaved = library.learningPath(book.id)
+                        val ladder = library.ladder(book.id)
+                        mutable.update { current ->
+                            current.copy(
+                                catalog = catalog,
+                                book = book,
+                                screen = BookScreen.READER,
+                                prompt = null,
+                                source = null,
+                                page = book.readingPage,
+                                busy = false,
+                                error = null,
+                                reviews = reviews,
+                                review = null,
+                                learningPath = pathSaved?.let { LearningPath.restore(it, book.learning) } ?: LearningPath.READ,
+                                learningPathSaved = pathSaved != null,
+                                ladder = ladder,
+                                importing = null,
+                                initialized = true,
+                            )
+                        }
+                    }
+                    launchTier1Indexing(book.id)
+                    return@launch
+                }
                 if (!book.hasPendingOcr) {
                     actions.withLock {
                         library.closeReview()
@@ -333,6 +388,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 page = if (removedOpen) (fallbackBook?.readingPage ?: 1) else current.page,
                 busy = false,
                 importing = null,
+                initialized = true,
                 error = "已取消导入，书架没有新增教材。",
             )
         }
@@ -359,6 +415,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 page = if (removedOpen) (fallbackBook?.readingPage ?: 1) else current.page,
                 busy = false,
                 importing = null,
+                initialized = true,
                 error = message,
             )
         }
@@ -368,22 +425,105 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         launchImport(path).join()
     }
 
-    suspend fun select(id: String) = action {
-        val book = library.book(id)
-        library.save(book)
-        library.closeReview()
-        library.clearOpenSession()
-        val catalog = library.catalog()
-        val reviews = library.reviews()
-        val pathSaved = library.learningPath(book.id) != null
-        val ladder = library.ladder(book.id)
+    private fun launchTier1Indexing(
+        bookId: String,
+        waitForFirstRender: Boolean = true,
+        skipOnContinue: Set<String> = emptySet(),
+    ): Job? {
+        val indexControl = BookImportControl()
+        if (indexingControls.putIfAbsent(bookId, indexControl) != null) {
+            return indexingJobs[bookId]
+        }
+        val job = backgroundScope.launch {
+            var shouldContinueQueue = false
+            var cancelled = false
+            try {
+                if (waitForFirstRender) {
+                    library.awaitFirstRenderOrTimeout(bookId, 1200L)
+                }
+                val indexed = library.indexBookTier1(bookId, indexControl) { page, total ->
+                    mutable.update { it.copy(indexing = BookIndexProgress(bookId, page, total)) }
+                }
+                val catalog = library.catalog()
+                mutable.update { current ->
+                    val openBook = current.book
+                    val refreshed = if (openBook?.id == indexed.id) indexed.copy(readingPage = current.page) else openBook
+                    current.copy(
+                        catalog = catalog,
+                        book = refreshed,
+                        indexing = if (current.indexing?.bookId == bookId) null else current.indexing,
+                    )
+                }
+                if (indexed.hasPendingOcr && activeImport == null) {
+                    resumePendingOcrInBackground(indexed.id)
+                } else {
+                    ensureUnstructuredBookSectioned(indexed.id)
+                }
+                shouldContinueQueue = true
+            } catch (_: BookImportCancelled) {
+                // Book cancelled/deleted while indexing.
+                shouldContinueQueue = true
+            } catch (cancel: CancellationException) {
+                cancelled = true
+                throw cancel
+            } catch (_: Exception) {
+                // Keep Tier 0 readable state; next load retries background indexing cleanly.
+                shouldContinueQueue = true
+            } finally {
+                indexingControls.remove(bookId, indexControl)
+                indexingJobs.remove(bookId)
+                mutable.update { if (it.indexing?.bookId == bookId) it.copy(indexing = null) else it }
+                if (shouldContinueQueue && !cancelled) {
+                    val nextSkip = skipOnContinue + bookId
+                    val nextPending = runCatching { library.catalog() }.getOrNull()
+                        ?.firstOrNull { it.indexState != "READY" && it.id !in nextSkip && !indexingJobs.containsKey(it.id) }
+                    if (nextPending != null) {
+                        launchTier1Indexing(nextPending.id, waitForFirstRender = false, skipOnContinue = nextSkip)
+                    }
+                }
+            }
+        }
+        indexingJobs[bookId] = job
+        return job
+    }
+
+    suspend fun ensureVisualsForPages(bookId: String, pageNumbers: Collection<Int>) {
+        val updated = withContext(Dispatchers.IO) {
+            if (library.ensurePdfVisualsForPages(bookId, pageNumbers)) {
+                runCatching { library.book(bookId) }.getOrNull()
+            } else null
+        } ?: return
         mutable.update { current ->
-            LibraryUi(
-                catalog = catalog, book = book, page = book.readingPage, busy = true, reviews = reviews,
-                learningPath = restoredPath(book), learningPathSaved = pathSaved,
-                ladder = ladder, importing = current.importing, importNotice = current.importNotice,
-                initialized = true,
-            )
+            if (current.book?.id == updated.id) {
+                current.copy(book = updated.copy(readingPage = current.page))
+            } else current
+        }
+    }
+
+    suspend fun select(id: String) {
+        var selectedPendingId: String? = null
+        action {
+            val book = library.book(id)
+            if (book.indexState != "READY") selectedPendingId = book.id
+            library.save(book)
+            library.closeReview()
+            library.clearOpenSession()
+            val catalog = library.catalog()
+            val reviews = library.reviews()
+            val pathSaved = library.learningPath(book.id) != null
+            val ladder = library.ladder(book.id)
+            mutable.update { current ->
+                LibraryUi(
+                    catalog = catalog, book = book, page = book.readingPage, busy = true, reviews = reviews,
+                    learningPath = restoredPath(book), learningPathSaved = pathSaved,
+                    ladder = ladder, importing = current.importing, importNotice = current.importNotice,
+                    initialized = true, indexing = current.indexing,
+                )
+            }
+        }
+        val pendingId = selectedPendingId
+        if (pendingId != null && !indexingJobs.containsKey(pendingId)) {
+            launchTier1Indexing(pendingId, waitForFirstRender = false)
         }
     }
 
@@ -677,7 +817,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val catalog = withContext(Dispatchers.IO) { library.catalog() }
         mutable.update { state ->
             state.copy(
-                book = if (state.book?.id == savedBook.id) savedBook else state.book,
+                book = if (state.book?.id == savedBook.id) savedBook.copy(readingPage = state.page) else state.book,
                 catalog = catalog,
             )
         }

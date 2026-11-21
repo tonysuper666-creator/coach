@@ -85,6 +85,14 @@ internal object ExplainClassifier {
         """(?:ISBN\s*[:：]?\s*(?:97[89][-\s]?)?\d|图书在版编目|CIP\s*数据|版权所有|翻印必究|All\s+rights\s+reserved|Copyright\s*©|©\s*\d{4}|出版发行\s*[:：]|责任编辑\s*[:：]|开本\s*[:：]|印张\s*[:：]|版次\s*[:：]|印次\s*[:：]|定价\s*[:：]|书号\s*[:：]|未经.{0,16}(?:书面)?许可.{0,10}不得(?:复制|翻印|转载|传播|摘编))""",
         RegexOption.IGNORE_CASE,
     )
+    private val COPYRIGHT_DISTINCT_PATTERNS = listOf(
+        Regex("""ISBN\s*[:：]?\s*(?:97[89][-\s]?)?\d""", RegexOption.IGNORE_CASE),
+        Regex("""图书在版编目|CIP\s*数据""", RegexOption.IGNORE_CASE),
+        Regex("""版权所有|翻印必究|All\s+rights\s+reserved""", RegexOption.IGNORE_CASE),
+        Regex("""Copyright\s*©|©\s*\d{4}""", RegexOption.IGNORE_CASE),
+        Regex("""(?:出版发行|责任编辑|开本|印张|版次|印次|定价|书号)\s*[:：]""", RegexOption.IGNORE_CASE),
+        Regex("""未经.{0,16}(?:书面)?许可.{0,10}不得(?:复制|翻印|转载|传播|摘编)""", RegexOption.IGNORE_CASE),
+    )
     private val RUNNING_HEADER_PATTERN = Regex(
         """^(?:\d{1,5}\s{2,}\S.{1,40}|.{2,40}\s*[·|｜]\s*\d{1,5}|[-–—]\s*\d{1,5}\s*[-–—]\s+\S.{1,40}|(?:Page|P\.?)\s*\d{1,5}\s*[·|｜\-–—]\s*\S.{1,40})$""",
         RegexOption.IGNORE_CASE,
@@ -130,6 +138,11 @@ internal object ExplainClassifier {
     }
 
     /**
+     * 预先提取全书跨页重复的页眉页脚键，供 [analyzePage] 在 O(N) 内完成整本书分页。
+     */
+    fun precomputeRepeatingEdges(allBlocks: List<SourceBlock>): Set<String> = repeatingEdgeKeys(allBlocks)
+
+    /**
      * 综合整本书的块与当前页，判断这一页的类型以及每一块的分类。
      */
     fun analyzePage(allBlocks: List<SourceBlock>, page: Int): ExplainPageAnalysis {
@@ -137,7 +150,14 @@ internal object ExplainClassifier {
         if (pageBlocks.isEmpty()) {
             return ExplainPageAnalysis(ExplainPageKind.BLANK, emptyList(), emptyMap(), emptyList())
         }
-        val repeatingEdges = repeatingEdgeKeys(allBlocks)
+        return analyzePage(pageBlocks, repeatingEdgeKeys(allBlocks))
+    }
+
+    /** 使用预计算的跨页重复页眉页脚集合分类单页（O(页内块数)）。 */
+    fun analyzePage(pageBlocks: List<SourceBlock>, repeatingEdges: Set<String>): ExplainPageAnalysis {
+        if (pageBlocks.isEmpty()) {
+            return ExplainPageAnalysis(ExplainPageKind.BLANK, emptyList(), emptyMap(), emptyList())
+        }
         val visible = pageBlocks.filterNot { PRINTED_PAGE_MARK.matches(it.text.trim()) }
         val kinds = LinkedHashMap<String, ExplainBlockKind>(pageBlocks.size)
         for (block in pageBlocks) {
@@ -231,7 +251,13 @@ internal object ExplainClassifier {
         return HEADING_PATTERN.containsMatchIn(lines.first())
     }
 
-    internal fun isCopyrightBlock(trimmed: String): Boolean = COPYRIGHT_PATTERN.containsMatchIn(trimmed)
+    internal fun copyrightMarkerCount(trimmed: String): Int =
+        COPYRIGHT_DISTINCT_PATTERNS.count { it.containsMatchIn(trimmed) }
+
+    internal fun isCopyrightBlock(trimmed: String): Boolean {
+        if (!COPYRIGHT_PATTERN.containsMatchIn(trimmed)) return false
+        return nonWhitespaceLength(trimmed) <= 450 || copyrightMarkerCount(trimmed) >= 2
+    }
 
     private fun isRunningHeaderFooter(
         trimmed: String,

@@ -87,6 +87,8 @@ class WindowsLearningPathsTest {
             ready(controller) { it.book?.questionMode == QuestionMode.SHORT_ANSWER }
             onNodeWithTag("close-question-settings").performClick()
             ready(controller) { it.prompt == null }
+            // 学习页只写题型本身，不再露「出题：简答」这种半截词。
+            onNodeWithText("题型：简答题").assertExists()
             onNodeWithTag("short-answer").performScrollTo().performTextInput("My retained guided draft")
             ready(controller) { it.answer.text == "My retained guided draft" }
             onNodeWithTag("open-practice-source").performScrollTo().performClick()
@@ -127,6 +129,7 @@ class WindowsLearningPathsTest {
             ready(controller) { it.screen == BookScreen.LEARNING }
             assertEquals(LearningPath.QUESTION_FIRST, controller.state.value.learningPath)
             onNodeWithTag("book-questions-off").assertExists()
+            onNodeWithText("题型：关闭").assertExists()
             onNodeWithTag("choice-0").assertDoesNotExist()
             val b = controller.state.value.book!!
             onNodeWithText(b.lessons[0].text).assertDoesNotExist()

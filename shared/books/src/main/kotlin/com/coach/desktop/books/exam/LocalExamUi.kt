@@ -43,14 +43,23 @@ import com.coach.ui.v7.LocalV7Fonts
 import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PaperCard
 import com.coach.ui.v7.PrimaryButton
+import com.coach.ui.v7.V7Checkbox
 import com.coach.ui.v7.V7TextButton
 import com.coach.ui.v7.paperShadow
 import com.coach.ui.v7.v7FocusRing
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 import java.math.BigDecimal
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 private fun points(value: Long): String = BigDecimal.valueOf(value, 2).stripTrailingZeros().toPlainString()
+
+private val startedFormat = DateTimeFormatter.ofPattern("M月d日 HH:mm").withZone(ZoneId.systemDefault())
+
+/** 「作答记录」里的开始时间，用本地时区写成人认得的样子。 */
+internal fun localExamStartedLabel(startedAt: Long): String = startedFormat.format(Instant.ofEpochMilli(startedAt))
 internal fun localExamRemaining(deadline: Long, now: Long): String {
     val seconds = ((deadline - now).coerceAtLeast(0) + 999) / 1000
     return "%02d:%02d".format(seconds / 60, seconds % 60)
@@ -118,15 +127,20 @@ internal fun LocalExamsSummary(controller: LocalExamController) {
         }
         val reference = ui.reference
         val current = reference?.paper
+        val gaps = reference?.gaps.orEmpty()
+        // 缺题说清是哪几节、去哪儿补；不写「暂无」这类系统腔，也不摆生成规则的细节。
+        val gapNames = gaps.joinToString("、")
         if (reference != null && current == null) {
             Text("这本教材暂时生成不了练习。")
-            reference.gaps.forEach { Text(it, style = note, color = colors.fgSecondary) }
+            if (gaps.isNotEmpty()) Text("「$gapNames」里还没有能出题的原文。回教材补一段完整的原文，再来这里就能生成。",
+                style = note, color = colors.fgSecondary, modifier = Modifier.testTag("local-exam-gaps"))
         } else if (current != null && ui.papers.none { it.str("id") == current.id }) {
             PrimaryButton({ scope.launch { controller.generateAndStart() } }, enabled = !ui.busy && ui.active == null,
                 modifier = Modifier.testTag("local-generate-start")) { Text("生成并开始练习") }
         }
-        if (current != null && reference.gaps.isNotEmpty()) {
-            Text("部分章节暂无可用题，这份练习只包含已有题。", style = note, color = colors.fgSecondary)
+        if (current != null && gaps.isNotEmpty()) {
+            Text("这份练习只收了有题的部分，「$gapNames」还没出题。回教材补一段完整的原文，再回来重新生成就会带上。",
+                style = note, color = colors.fgSecondary, modifier = Modifier.testTag("local-exam-gaps"))
         }
         // Old reference versions remain in attempts/history; only the current generated version is offered for a new start.
         ui.papers.filter { it.str("origin") == "AUTHORED" || it.str("id") == current?.id }.forEachIndexed { index, paper ->
@@ -141,9 +155,9 @@ internal fun LocalExamsSummary(controller: LocalExamController) {
                     // 整行可点：方框和「计时作答」是同一个开关，键盘空格也能切；焦点只画 V7 墨色环，不叠 Material 灰底。
                     Row(Modifier.v7FocusRing().toggleable(timed, remember { MutableInteractionSource() }, indication = null,
                         enabled = canStart, role = Role.Checkbox) { timed = it }
-                        .testTag("local-timed-$index").padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(timed, onCheckedChange = null, enabled = canStart, modifier = Modifier.minimumInteractiveComponentSize(),
-                            colors = CheckboxDefaults.colors(checkedColor = v7Pine(), uncheckedColor = colors.fgSecondary, checkmarkColor = colors.surface1))
+                        .testTag("local-timed-$index").padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        V7Checkbox(timed, enabled = canStart)
                         Text("计时作答", style = MaterialTheme.typography.labelLarge)
                     }
                     if (timed) {
@@ -219,7 +233,11 @@ private fun LocalExamPage(controller: LocalExamController) {
                 color = if (timeUp) v7Alert() else colors.fgPrimary, modifier = Modifier.testTag("local-countdown"))
             else if (attempt.flag("autoSubmitted")) Text("计时结束，已自动交卷。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
         }
-        Caption("作答记录：${attempt.str("mockId")}", Modifier.testTag("local-attempt-id"), numbers = true)
+        // 内部 id 只在库里；界面写开始时间和第几次，用户对得上自己的记录。
+        val record = ui.history.firstOrNull { it.str("mockId") == attempt.str("mockId") }
+        val attemptNo = record?.let { ui.history.size - ui.history.indexOf(it) } ?: (ui.history.size + 1)
+        Caption("作答记录：${localExamStartedLabel(attempt.num("startedAt"))} · 第 $attemptNo 次",
+            Modifier.testTag("local-attempt-id"))
         if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth(), color = colors.fgPrimary, trackColor = colors.surface2)
         ExamSaveStatus(ui, controller)
         if (result != null) {

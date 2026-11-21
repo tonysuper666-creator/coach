@@ -217,7 +217,8 @@ class WindowsLocalExamUiTest {
             onNodeWithTag("local-resume").performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-exam-attempt").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("local-choice-${first.id}-$correct").performScrollTo().assertIsSelected()
-            onNodeWithTag("local-attempt-id").assertTextEquals("作答记录：$attempt")
+            onNodeWithTag("local-attempt-id").assertTextContains("第 1 次", substring = true)
+            onNodeWithText("local-", substring = true).assertDoesNotExist()
             capture("02-sqlite-reopened-draft")
             onNodeWithTag("local-submit").performScrollTo().performClick()
             onNodeWithTag("local-confirm-submit").performClick()
@@ -225,7 +226,8 @@ class WindowsLocalExamUiTest {
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-exam-result").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithText("参考得分：1 / 3").assertIsDisplayed()
             onNodeWithText("参考答案尚未独立核对，结果仅供对照。").assertExists()
-            onNodeWithTag("local-attempt-id").assertTextEquals("作答记录：$attempt")
+            onNodeWithTag("local-attempt-id").assertTextContains("第 1 次", substring = true)
+            onNodeWithText("local-", substring = true).assertDoesNotExist()
             capture("03-submitted-result")
             onNodeWithTag("local-source-${first.id}").performScrollTo().performClick()
             onNodeWithTag("local-frozen-source").assertExists()
@@ -237,7 +239,8 @@ class WindowsLocalExamUiTest {
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-history-0").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("local-history-0").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-exam-result").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("local-attempt-id").assertTextEquals("作答记录：$attempt")
+            onNodeWithTag("local-attempt-id").assertTextContains("第 1 次", substring = true)
+            onNodeWithText("local-", substring = true).assertDoesNotExist()
             capture("05-history-original-attempt")
         }
         assertEquals(3, reopened.library.book(book.id).readingPage)
@@ -318,6 +321,37 @@ class WindowsLocalExamUiTest {
         }
     }
 
+    @Test fun partialReferencePaperNamesTheChaptersItCouldNotUse() {
+        val root = Files.createTempDirectory("coach-course-partial-gap-")
+        val file = root.resolve("mixed.md")
+        val sections = listOf(
+            "细胞" to "细胞是生物体结构和功能的基本单位。细胞里有细胞核，并能通过分裂和分化维持生命的连续性。",
+            "细胞膜" to "细胞膜是包围细胞的一层薄膜。它控制物质进出，同时保护内部环境并参与细胞之间的交流。",
+            "细胞核" to "细胞核是细胞里储存遗传信息的结构。它里面有染色体，负责调控细胞代谢和生长繁殖。",
+            "补充说明" to "略。",
+        )
+        Files.writeString(file, sections.mapIndexed { index, (title, body) -> "## 第${index + 1}节 $title\n\n$body" }.joinToString("\n\n"))
+        val library = TextbookLibrary(root.resolve("library"))
+        library.importBook(file)
+        val c = TextbookController(library)
+        runSkikoComposeUiTest(size = Size(1440f, 900f), density = Density(1f)) {
+            setContent { WindowsTextbookHost(c) { null } }
+            ready(c)
+            nav("课程").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-generate-start").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("local-generate-start").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-exam-attempt").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("local-exam-back").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-exam-gaps").fetchSemanticsNodes().isNotEmpty() }
+            // 缺题说清是哪一节、去哪儿补；不再出现「暂无」这类系统腔。
+            onNodeWithTag("local-exam-gaps").performScrollTo().assertTextContains("补充说明", substring = true)
+            onNodeWithTag("local-exam-gaps").assertTextContains("回教材", substring = true)
+            onNodeWithText("暂无", substring = true).assertDoesNotExist()
+            onNodeWithText("缺少可用选择题", substring = true).assertDoesNotExist()
+            capture("08-partial-reference-gap")
+        }
+    }
+
     @Test fun failedAcceptedAnswerBlocksCloseAndRetryPersistsIt() {
         val root = Files.createTempDirectory("coach-exam-close-")
         val library = TextbookLibrary(root.resolve("library"))
@@ -379,7 +413,8 @@ class WindowsLocalExamUiTest {
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-resume").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("local-resume").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-exam-attempt").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("local-attempt-id").assertTextEquals("作答记录：$id")
+            onNodeWithTag("local-attempt-id").assertTextContains("第 1 次", substring = true)
+            onNodeWithText("local-", substring = true).assertDoesNotExist()
             onNode(choice).performScrollTo().assertIsSelected()
         }
         println("LOCAL_EXAM_CLOSE_PASS: accepted choice stayed visible after SQLite failure; window held; retry saved before close; reopened exact choice")

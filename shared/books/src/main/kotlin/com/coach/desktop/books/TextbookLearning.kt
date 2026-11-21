@@ -44,6 +44,14 @@ internal suspend fun restoreCitationFocus(
     }
 }
 
+/** 学习页的「题型」按钮用完整说法；设置弹窗里的短名（「选择」「简答」）留给小标签。 */
+private val QuestionMode.pageLabel: String
+    get() = when (this) {
+        QuestionMode.NONE -> "关闭"
+        QuestionMode.CHOICE -> "选择题"
+        QuestionMode.SHORT_ANSWER -> "简答题"
+    }
+
 @Composable
 internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll: ScrollState, lessonSourceFocus: FocusRequester, practiceSourceFocus: FocusRequester,
     returnFocus: SourceFocus?, explanationReply: MutableState<BookLearningReply?>, answerExplain: AnswerExplain?, answerExplainReply: MutableState<BookLearningReply?>,
@@ -88,7 +96,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(if (lesson == null) "这一遍学完了" else ui.learningPath.label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
                     color = com.coach.ui.theme.CoachTheme.colors.fgSecondary)
-                V7TextButton(onSettings, enabled = !ui.busy, modifier = Modifier.testTag("question-settings")) { Text("出题：${book.questionMode.label}") }
+                V7TextButton(onSettings, enabled = !ui.busy, modifier = Modifier.testTag("question-settings")) { Text("题型：${book.questionMode.pageLabel}") }
             }
             if (lesson == null) {
                 Text("已走完「${book.title}」的 ${book.lessons.size} 节内容。", style = MaterialTheme.typography.titleLarge)
@@ -200,7 +208,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                         if (lesson != null) LessonNav(book, ui.busy, onLesson)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             if (lesson != null) V7TextButton(onSource, enabled = !ui.busy) { Text("本节原文") }
-                            V7TextButton(onSettings, enabled = !ui.busy) { Text("出题：${book.questionMode.label}") }
+                            V7TextButton(onSettings, enabled = !ui.busy) { Text("题型：${book.questionMode.pageLabel}") }
                         }
                     }
                 }

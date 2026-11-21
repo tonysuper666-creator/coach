@@ -42,6 +42,20 @@ public class WD {
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessageTimeout(
     IntPtr h, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeoutMs, out UIntPtr result);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(
+    IntPtr h, uint message, IntPtr wParam, StringBuilder lParam, uint flags, uint timeoutMs, out IntPtr result);
+  // 跨进程读控件正文。GetWindowText 对别的进程的窗口只回缓存标题（编辑框恒为空串），
+  // 驱动和 Coach 不是一个进程，所以读「文件名」框永远是空的；WM_GETTEXT 是系统会替
+  // 标准控件编组缓冲区的消息，跨进程才拿得到框里的真实内容。别换成 GetWindowText。
+  public static string ReadControlText(IntPtr h) {
+    StringBuilder sb = new StringBuilder(1024);
+    GetWindowText(h, sb, 1024);
+    if (sb.Length > 0) return sb.ToString();
+    sb = new StringBuilder(1024);
+    IntPtr r;
+    if (SendMessageTimeout(h, 0x000D, (IntPtr)1024, sb, 0x0003, 400, out r) == IntPtr.Zero) return "";
+    return sb.ToString();
+  }
   public static string LastActivationFailure { get; private set; }
   public static bool LastActivationAccepted { get; private set; }
   public static bool LastActivationInjectedInput { get; private set; }
@@ -1187,15 +1201,15 @@ function Find-AppWindowByTitle([string]$prefix) {
 
 # 文件选择框里「文件名」是个真 Edit（有时套在 ComboBox 里）。只有把它的文字读回来，
 # 才知道路径真的落进去了；读不到就按回车，是 11-21 02:17 L4 那种「按了三次回车框还没关」。
-# 空串也照收：调用方要分清「框在、但没拿到路径」和「这个对话框的控件读不出来」。
+# 读要用 [WD]::ReadControlText（跨进程 WM_GETTEXT）：对话框在 Coach 进程里，驱动在
+# powershell 进程里，GetWindowText 跨进程只会回空串，那样四路都会被误判成「没拿到文件名」。
 function Get-DialogEditTexts([IntPtr]$h) {
     $script:DialogEdits = New-Object Collections.Generic.List[string]
     [WD]::EnumChildWindows($h, { param($c, $l)
         $cb = New-Object Text.StringBuilder 64; [WD]::GetClassName($c, $cb, 64) | Out-Null
         $cls = $cb.ToString()
         if (($cls -eq 'Edit' -or $cls -eq 'ComboBox' -or $cls -eq 'ComboBoxEx32') -and [WD]::IsWindowVisible($c)) {
-            $sb = New-Object Text.StringBuilder 1024; [WD]::GetWindowText($c, $sb, 1024) | Out-Null
-            $script:DialogEdits.Add($sb.ToString()) }
+            $script:DialogEdits.Add([WD]::ReadControlText($c)) }
         return $true }, [IntPtr]::Zero) | Out-Null
     return ,$script:DialogEdits
 }
@@ -1217,8 +1231,8 @@ function Choose-File([string]$dialogTitlePrefix, [string]$path, [int]$timeoutSec
     if ($h -eq [IntPtr]::Zero) { $script:ChooseFileWhy = '没有弹出选书对话框'; return $false }
     # 四路并行时四个进程同时弹这个框，谁抢到前台就把键送给谁。所以敲完必须读回「文件名」框，
     # 拿到这本书的路径才按回车；框读得到、内容却不对就不回车，把框关掉，免得它扣着前台卡死其余三路。
-    # 读不到任何候选框（控件类名不同）时退回修复前的做法：按回车，不能因此判失败。
-    $filled = $false; $readable = $false
+    # 一个框都读不出字（布局里没有 Edit/ComboBox）时退回修复前的做法：直接按回车，不能因此判失败。
+    $filled = $false; $readable = $false; $seen = ''
     for ($try = 0; $try -lt 3 -and -not $filled; $try++) {
         Invoke-ForegroundStep -Window $h -InjectsInput -Action {
             [System.Windows.Forms.SendKeys]::SendWait('%n')
@@ -1227,13 +1241,18 @@ function Choose-File([string]$dialogTitlePrefix, [string]$path, [int]$timeoutSec
             Assert-OurForeground
             [System.Windows.Forms.SendKeys]::SendWait((ConvertTo-SendKeysLiteral $path))
         }
-        Start-Sleep -Milliseconds 600
-        $edits = Get-DialogEditTexts $h
-        if ($edits.Count) { $readable = $true }
-        foreach ($t in $edits) { if ($t -match $leafRx) { $filled = $true; break } }
+        # 长路径会带出自动补全列表，框里的字要等它落定再读。
+        Start-Sleep -Milliseconds 900
+        foreach ($t in (Get-DialogEditTexts $h)) {
+            if ($t -eq '') { continue }
+            $readable = $true
+            if ($t -match $leafRx) { $filled = $true; break }
+            if (-not $seen) { $seen = $t }
+        }
     }
     if ($readable -and -not $filled) {
-        $script:ChooseFileWhy = "选书对话框的「文件名」框没拿到 $leaf，没有按回车"
+        if ($seen.Length -gt 60) { $seen = $seen.Substring(0, 60) + '…' }
+        $script:ChooseFileWhy = "选书对话框的「文件名」框没拿到 $leaf（框里读到「$seen」），没有按回车"
         try { Invoke-ForegroundStep -Window $h -InjectsInput -Action { [System.Windows.Forms.SendKeys]::SendWait('{ESC}') } } catch { }
         return $false
     }

@@ -27,7 +27,7 @@ class ImportedBookSources internal constructor(directory: Path) {
         if (!parsed.isLocalBook || source.keys != setOf("schema", "book", "format", "title", "consented", "pages") ||
             source.num("schema") != 1L || source.str("book") != parsed.bookId ||
             (source["consented"] as? JsonPrimitive)?.booleanOrNull != true ||
-            source.str("format") !in setOf("pdf", "epub", "md", "txt", "docx", "pptx", "html", "mobi", "azw3", "rtf", "odt", "png", "jpg") ||
+            source.str("format") !in setOf("pdf", "epub", "md", "txt", "docx", "pptx", "html", "mobi", "azw3", "rtf", "odt", "png", "jpg", "srt", "vtt") ||
             source.str("title").length !in 1..300 || !tutorSourceAllowed(source.str("title"))) bad()
         val pages = source["pages"] as? JsonArray ?: bad()
         if (pages.isEmpty() || pages.size > (if (parsed.isSectionScoped) 128 else 4)) bad()
@@ -106,7 +106,7 @@ class ImportedBookSources internal constructor(directory: Path) {
             source.keys != setOf("schema", "book", "format", "title", "consented", "pages") ||
             source.num("schema") != 1L || source.str("book") != req.bookId ||
             (source["consented"] as? JsonPrimitive)?.booleanOrNull != true ||
-            source.str("format") !in setOf("pdf", "epub", "md", "txt", "docx", "pptx", "html", "mobi", "azw3", "rtf", "odt", "png", "jpg") ||
+            source.str("format") !in setOf("pdf", "epub", "md", "txt", "docx", "pptx", "html", "mobi", "azw3", "rtf", "odt", "png", "jpg", "srt", "vtt") ||
             source.str("title").length !in 1..300 || !tutorSourceAllowed(source.str("title"))) bad()
         val pages = source["pages"] as? JsonArray ?: bad()
         if (pages.isEmpty() || pages.size > 128) bad()

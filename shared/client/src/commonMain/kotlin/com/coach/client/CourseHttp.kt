@@ -184,6 +184,48 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     } catch (_: HttpRequestTimeoutException) { MockReply(null, "章节伴读等待超时，请重试。") }
       catch (e: kotlinx.coroutines.CancellationException) { throw e }
       catch (_: Exception) { MockReply(null, "连不上学习服务，本地阅读与草稿已保留。") }
+
+    suspend fun courseAlign(input: JsonObject): MockReply =
+        postCourseEndpoint("v1/library/course/align", input, timeoutMs = 120_000L, timeoutMsg = "课程自动对齐超时，已先使用本地规则。")
+
+    suspend fun courseTopicPack(input: JsonObject): MockReply =
+        postCourseEndpoint("v1/library/course/topic-pack", input, timeoutMs = 180_000L, timeoutMsg = "专题合卷超时，请稍后重试。")
+
+    suspend fun courseVision(input: JsonObject): MockReply =
+        postCourseEndpoint("v1/library/course/vision", input, timeoutMs = 180_000L, timeoutMsg = "视觉识别等待超时，请稍后重试。")
+
+    private suspend fun postCourseEndpoint(
+        path: String,
+        input: JsonObject,
+        timeoutMs: Long,
+        timeoutMsg: String,
+    ): MockReply = try {
+        val response = http.post("$base/$path") {
+            timeout { requestTimeoutMillis = timeoutMs; socketTimeoutMillis = timeoutMs }
+            setBody(TextContent(input.toString(), ContentType.Application.Json))
+        }
+        if (response.status.value == 401) {
+            MockReply(null, "授权已失效，请重新登录学习服务。", statusCode = 401)
+        } else {
+            val text = response.bodyAsText()
+            val parsed = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull()
+            val status = response.status.value
+            val code = parsed?.s("code")?.ifBlank { null }
+            when {
+                parsed == null && status != 403 -> MockReply(null, "连不上学习服务，可继续本地阅读与练习。")
+                response.status.isSuccess() -> MockReply(parsed, null, statusCode = status)
+                status == 429 || code == "daily_quota" || code == "monthly_quota" ->
+                    MockReply(null, "课程服务暂时繁忙，请稍后再试。", retryable = true, statusCode = status, code = "unavailable")
+                else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "请求暂时无法完成，请稍后重试。", statusCode = status, code = code)
+            }
+        }
+    } catch (_: HttpRequestTimeoutException) {
+        MockReply(null, timeoutMsg)
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        MockReply(null, "连不上学习服务，可继续本地阅读与练习。")
+    }
     suspend fun cancelLibraryExplain(id: String) {
         runCatching { http.post("$base/v1/library/explain/cancel") {
             setBody(TextContent(buildJsonObject { put("requestId", id) }.toString(), ContentType.Application.Json)) } }

@@ -57,6 +57,14 @@ internal data class Textbook(
     fun page(pdfPage: Int): BookPage? = pages.firstOrNull { it.number == pdfPage }
     fun pageLabel(number: Int): String {
         if (format == "pptx") return "第 $number 张幻灯片"
+        if (format == "srt" || format == "vtt") {
+            val range = CourseTranscriptParser.pageTimeRangeLabel(pages.firstOrNull { it.number == number }?.text)
+            return if (range != null) "第 $number 段（$range）" else "第 $number 段"
+        }
+        if (format == "md" || format == "txt") {
+            val range = CourseTranscriptParser.pageTimeRangeLabel(pages.firstOrNull { it.number == number }?.text)
+            if (range != null) return "第 $number 段（$range）"
+        }
         val chapter = if (format in setOf("txt", "mobi", "azw3")) pages.asSequence().takeWhile { it.number <= number }
             .mapNotNull { BookText.chapterTitle(it.text) }.lastOrNull() else null
         return "第 $number 页" + (chapter?.let { "（$it）" } ?: "")

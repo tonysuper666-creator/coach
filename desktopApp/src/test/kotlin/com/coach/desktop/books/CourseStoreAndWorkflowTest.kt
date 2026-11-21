@@ -1,0 +1,234 @@
+package com.coach.desktop.books
+
+import java.math.BigDecimal
+import java.nio.file.Files
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+class CourseStoreAndWorkflowTest {
+
+    @Test
+    fun locksManualWeekAndTombstonesAcrossRealignmentAndPreservesBookOnRemove() {
+        val dir = Files.createTempDirectory("coach-course-store-")
+        try {
+            val library = TextbookLibrary(dir, lazyPdfExtras = false)
+
+            fun stageText(filename: String, content: String): Textbook {
+                val p = dir.resolve(filename)
+                Files.writeString(p, content)
+                return library.stageBookImport(p).book
+            }
+
+            val syllabus = stageText(
+                "Course-Handbook.md",
+                "# Course Handbook\nWeek 4: Choice Under Uncertainty\nWeek 6: Adverse Selection & Insurance\n",
+            )
+            // Misnamed as Week 3 initially so auto-aligner puts it in Week 3 until corrected in-place
+            val slidesWrongWeek = stageText(
+                "Week3-Slides-Mislabelled.md",
+                "# Adverse Selection Slides\nUnraveling occurs when average cost exceeds low-risk willingness to pay.\n",
+            )
+            val week4Key = stageText(
+                "Tutorial-Week4-KEY.md",
+                "# Week 4 Official Solutions\nCertainty equivalent equals $24.01 when risk premium is positive.\n",
+            )
+            val week6Transcript = stageText(
+                "Week6-Recording.md",
+                "[00:04:10] Lecture benchmark emphasizes pooling equilibrium breakdown.\n" +
+                    "[00:11:20] Empirical health plan study: Cutler & Reber (1998).\n" +
+                    "[00:18:05] Subsidy restores participation in pooled contracts.\n",
+            )
+            val textbook = stageText(
+                "Core-Textbook.md",
+                "# Chapter 1 Choice Under Uncertainty\nExpected utility weighs contingent outcomes by probabilities.\n\n" +
+                    "# Chapter 2 Adverse Selection\nLow-risk buyers exit as pooled premiums climb above reservation value.\n\n" +
+                    "# Chapter 9 International Trade Extensions\nTariff schedules lie outside core insurance curriculum.\n",
+            )
+            val reading = stageText(
+                "Journal-Cutler-Reber.md",
+                "# Quarterly Paper\nDeath spiral dynamics observed after fixed-dollar employer contribution switch.\n",
+            )
+            val notes = stageText(
+                "My-Week6-Notes.md",
+                "# Personal Revision Notes\nRemember 2022 past paper exact question asked about deductible schedules.\nFocus on risk pooling intuition.\n",
+            )
+
+            val detail = library.withCourseDatabase { db ->
+                val (cid, rejected) = CourseStore.createCourse(
+                    db = db,
+                    title = "ECNM Applied Theory",
+                    examProfile = CourseExamProfile(examDate = "2026-12-12", examDateTentative = true, examFormat = "MCQ + 300词论述", examFormatTentative = true),
+                    materialBookIds = listOf(syllabus.id, slidesWrongWeek.id, week4Key.id, week6Transcript.id, textbook.id, reading.id, notes.id),
+                )
+                assertTrue(rejected.isEmpty())
+                CourseAutoAligner.alignLocally(db, cid)
+            }
+
+            // Uncovered Chapter 9 folded into EXCLUDED (`本课不考内容`)
+            val excluded = detail.excludedTopics.firstOrNull { it.title.contains("International Trade") }
+            assertNotNull(excluded, "Uncovered textbook chapter must fold into 本课不考内容")
+
+            // Authority roles inferred properly (L1 -> L2 -> L3 -> L4)
+            val matById = detail.materials.associateBy { it.bookId }
+            assertEquals(CourseMaterialRole.SYLLABUS, matById[syllabus.id]?.role)
+            assertEquals(CourseMaterialRole.SOLUTION_KEY, matById[week4Key.id]?.role)
+            assertEquals(CourseMaterialRole.TRANSCRIPT, matById[week6Transcript.id]?.role)
+            assertEquals(CourseMaterialRole.CORE_TEXTBOOK, matById[textbook.id]?.role)
+            assertEquals(CourseMaterialRole.USER_NOTES, matById[notes.id]?.role)
+
+            // User-note spoiler regex sanitization triggered (Gate 1)
+            assertTrue(detail.spoilerSanitizedCount >= 1)
+
+            // Reassign mislabelled slide from Week 3 -> Week 6
+            val week6BeforeHash = detail.examinableTopics.first { it.weekNum == 6 }.packSourcesHash
+            library.withCourseDatabase { db ->
+                CourseStore.updateMaterialAssignment(db, detail.courseId, slidesWrongWeek.id, 6, CourseMaterialRole.LECTURE_SLIDES)
+            }
+            val afterMove = library.courseDetail(detail.courseId)
+            val movedMat = afterMove.materials.first { it.bookId == slidesWrongWeek.id }
+            assertEquals(6, movedMat.weekNum)
+            assertTrue(movedMat.userLocked, "Manual reassignment must set user_locked=1")
+            val week6After = afterMove.examinableTopics.first { it.weekNum == 6 }
+            assertTrue(week6After.sources.any { it.bookId == slidesWrongWeek.id })
+            assertNotEquals(week6BeforeHash, week6After.packSourcesHash, "pack_sources_hash must refresh when topic sources change")
+
+            // Restore excluded Chapter 9 to EXAMINABLE (`恢复为必考`) and re-align
+            library.withCourseDatabase { db ->
+                CourseStore.setTopicExamStatus(db, excluded.topicId, CourseTopicStatus.EXAMINABLE)
+            }
+            // Also unlink reading from week 6 via tombstone (-1)
+            library.withCourseDatabase { db ->
+                CourseStore.unlinkTopicSource(db, detail.courseId, week6After.topicId, slidesWrongWeek.id)
+                CourseStore.unlinkTopicSource(db, detail.courseId, week6After.topicId, textbook.id)
+            }
+
+            // Re-run local auto-aligner: locked Week 6 assignment + restored chapter + -1 tombstone must survive
+            val afterRealign = library.withCourseDatabase { db -> CourseAutoAligner.alignLocally(db, detail.courseId) }
+            val slidePostRealign = afterRealign.materials.first { it.bookId == slidesWrongWeek.id }
+            assertEquals(6, slidePostRealign.weekNum)
+            assertTrue(slidePostRealign.userLocked)
+            assertTrue(afterRealign.examinableTopics.any { it.topicId == excluded.topicId }, "Restored chapter must remain EXAMINABLE")
+            val week6PostRealign = afterRealign.examinableTopics.first { it.weekNum == 6 }
+            assertFalse(week6PostRealign.sources.any { it.bookId == textbook.id }, "Tombstoned -1 source must not be re-linked")
+
+            // Remove material from course non-destructively (must still exist in library books table!)
+            library.withCourseDatabase { db ->
+                CourseStore.removeMaterialFromCourse(db, detail.courseId, reading.id)
+            }
+            val afterRemove = library.courseDetail(detail.courseId)
+            assertFalse(afterRemove.materials.any { it.bookId == reading.id })
+            assertNotNull(library.book(reading.id), "Removing from course must NOT delete the book from library")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun enforcesFourQualityGatesAndVision25PageCacheGuard() {
+        val dir = Files.createTempDirectory("coach-course-gates-")
+        try {
+            // Gate 1: past exam rejection + spoiler note scrubbing (including 2026+ and "期末考过")
+            assertTrue(CourseClientGates.isPastExamMaterial("ECNM10119-Past-Exam-Paper-2023.pdf"))
+            assertTrue(CourseClientGates.isPastExamMaterial("2026期末试卷.pdf"))
+            assertFalse(CourseClientGates.isPastExamMaterial("ECNM10119-Course-Syllabus-Handbook.pdf"))
+            assertFalse(CourseClientGates.isPastExamMaterial("2026-Course-Handbook.pdf"))
+            val scrubbed = CourseClientGates.sanitizeUserNote(
+                "2023 真题 原题问了 insurance deductible.\n" +
+                    "2026年期末考过逆向选择大题。\n" +
+                    "期末考过类似赔偿计算题。\n" +
+                    "Dec 2026 final exam asked deductible schedule.\n" +
+                    "Exam Date: 2026-12-12 (tentative).\n" +
+                    "期末复习重点：理解 risk premium。\n" +
+                    "Normal intuition note stays intact.",
+            )
+            assertTrue(scrubbed.hasLeakage)
+            assertEquals(4, scrubbed.redactedCount)
+            assertFalse(scrubbed.cleanText.contains("2023 真题"))
+            assertFalse(scrubbed.cleanText.contains("2026年期末考过"))
+            assertFalse(scrubbed.cleanText.contains("期末考过类似"))
+            assertFalse(scrubbed.cleanText.contains("Dec 2026 final exam"))
+            assertTrue(scrubbed.cleanText.contains("Exam Date: 2026-12-12 (tentative)."))
+            assertTrue(scrubbed.cleanText.contains("期末复习重点：理解 risk premium。"))
+            assertTrue(scrubbed.cleanText.contains("Normal intuition note stays intact"))
+
+            // Gate 2: 10/10 exact UTF-16 anchor verification across materials + [mm:ss] transcript
+            val pagesByBook = linkedMapOf<String, List<BookPage>>()
+            val candidates = mutableListOf<CourseCitationRef>()
+            for (i in 1..10) {
+                val bid = "book-$i"
+                val line = if (i % 3 == 0) "[05:1$i] Transcript claim number $i for market unraveling analysis." else "Slide concept statement $i about certainty equivalent."
+                val text = "Header $i\n$line\nTrailer"
+                pagesByBook[bid] = listOf(BookPage(i, text))
+                val start = text.indexOf(line)
+                candidates += CourseCitationRef(
+                    bookId = bid,
+                    bookTitle = "Source $i",
+                    role = if (i % 3 == 0) CourseMaterialRole.TRANSCRIPT else CourseMaterialRole.LECTURE_SLIDES,
+                    page = i,
+                    startUtf16 = start,
+                    endUtf16 = start + line.length,
+                    timestampLabel = if (i % 3 == 0) "05:1$i" else null,
+                    quote = line,
+                )
+            }
+            val verified = CourseClientGates.verifyCitations(candidates, pagesByBook)
+            assertEquals(10, verified.size, "10/10 cross-material citations must verify")
+            val invalid = CourseClientGates.verifySingleCitation(
+                CourseCitationRef("book-1", "Source 1", CourseMaterialRole.CORE_TEXTBOOK, 1, 0, 12, null, "Hallucinated sentence never in book"),
+                pagesByBook["book-1"].orEmpty(),
+            )
+            assertNull(invalid)
+
+            // Gate 3: English 8-gram and Chinese 12-gram overlap check
+            val src = listOf(
+                "Adverse selection causes average insurer claims to rise monotonically across risk classes.",
+                "当高低风险投保人面对相同保费时低风险人群会率先退出保障池。",
+            )
+            assertTrue(
+                CourseClientGates.auditOverlap(
+                    "Explain why pooling equilibrium breaks down under asymmetric risk.",
+                    src,
+                ).passed,
+            )
+            assertFalse(
+                CourseClientGates.auditOverlap(
+                    "Why does adverse selection causes average insurer claims to rise monotonically?",
+                    src,
+                ).passed,
+            )
+            assertFalse(
+                CourseClientGates.auditOverlap(
+                    "请解释为什么低风险人群会率先退出保障池导致的后果。",
+                    src,
+                ).passed,
+            )
+
+            // Gate 4: BigDecimal 2-decimal precision verifier (including $24.01, $46.91, $237.50 checks)
+            assertTrue(CourseClientGates.verifyEqualityClaim("0.5 * 16 + 0.5 * 36 - 1.99", BigDecimal("24.01")).passed)
+            assertTrue(CourseClientGates.verifyEqualityClaim("(0.3 * 100) + (0.7 * 24.16)", BigDecimal("46.91")).passed)
+            assertTrue(CourseClientGates.verifyEqualityClaim("250 - (5% * 250)", BigDecimal("237.50")).passed)
+            assertFalse(CourseClientGates.verifyEqualityClaim("250 - (5% * 250)", BigDecimal("230.00")).passed)
+
+            // Vision SQLite SHA-256 cache deduplication
+            val library = TextbookLibrary(dir, lazyPdfExtras = false)
+            val txtFile = dir.resolve("dummy-note.md").also { Files.writeString(it, "Page 1") }
+            val imported = library.stageBookImport(txtFile).book
+            val pngHash = CourseVisionCacheStore.sha256Hex("synthetic-png-bytes".toByteArray())
+            library.withCourseDatabase { db ->
+                CourseVisionCacheStore.saveRecognizedPages(
+                    db,
+                    imported.id,
+                    listOf(VisionPageOutput(1, "Handwritten derivation step: EU = 24.01", pngHash)),
+                )
+                assertEquals("Handwritten derivation step: EU = 24.01", CourseVisionCacheStore.lookupBySha(db, pngHash))
+            }
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+}

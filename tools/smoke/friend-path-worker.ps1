@@ -178,9 +178,10 @@ function Get-HudCounter([string]$png) {
         $h = $src.Height - $top
         if ($h -lt 8) { return $null }
         $rect = [Drawing.Rectangle]::new(0, $top, $src.Width, $h)
-        # 这个字号 4 倍会把「第154页/620」的「54」吞掉，认成「第1页/620」（11-21 10:43 那轮就是这么把 154 读成 1 的），
-        # 所以先试 6 倍，认不出再退回 4 倍。
-        foreach ($scale in 6, 4) {
+        # 这个字号 4 倍会把「第154页/620」的「54」吞掉，认成「第1页/620」（11-21 10:43 那轮就是这么把 154 读成 1 的）；
+        # 6 倍又常把这一行拆成「第154」「页」「/620」三段，逐行匹配一条都对不上。5 倍一般整行读全，
+        # 所以先试 5 倍，再把各行的数字和斜杠拼起来兜底。
+        foreach ($scale in 5, 6, 4) {
             $zoom = [Drawing.Bitmap]::new($src.Width * $scale, $h * $scale)
             try {
                 $g = [Drawing.Graphics]::FromImage($zoom)
@@ -189,15 +190,27 @@ function Get-HudCounter([string]$png) {
                     $g.DrawImage($src, [Drawing.Rectangle]::new(0, 0, $zoom.Width, $zoom.Height), $rect, [Drawing.GraphicsUnit]::Pixel)
                 } finally { $g.Dispose() }
                 $zoom.Save($file, [Drawing.Imaging.ImageFormat]::Png)
+                # 2.0 底栏页号是「第 7 页 / 180 · 3%」（ImmersiveReaderChrome 的 label + percent）。
+                # 先按行认：一帧里常常同时有一行完整的「第32页/620」和一行孤零零的百分比「5」，
+                # 一行一行认就不会把那颗 5 粘到总页数后面（5 倍那轮曾拼成 32/6205）。
+                $digits = @()
                 foreach ($line in Read-Screen $file) {
-                    # 2.0 底栏页号是「第 7 页 / 180 · 3%」（ImmersiveReaderChrome 的 label + percent），
-                    # 去掉空格后长这样：第7页/180·3%。先转换成半角数字，再取「/」两边那对数字。
                     $x = Convert-OcrDigits ($line.Text -replace '\s', '')
-                    $mm = [regex]::Match($x, '(\d{1,4})[^\d/]{0,3}/(\d{1,4})')
-                    if (-not $mm.Success) { continue }
+                    if ($x -notmatch '\d') { continue }
+                    if ($x -match '(\d{1,4})(?!\d)[^\d/]{0,3}/(\d{1,4})(?!\d)') {
+                        $cur = [int]$Matches[1]; $total = [int]$Matches[2]
+                        # 总页数常常被 OCR 认花（620 认成「52包」），它只用来拼提示语，不参与判断；
+                        # 当前页那一位是左边这串，认到就够。
+                        if ($cur -ge 1) { return [pscustomobject]@{ Cur = $cur; Total = $total; Text = "$cur/$total" } }
+                    }
+                    $digits += $x
+                }
+                # 6 倍常把这一行拆成「第154」「页」「/620」三段，逐行一条都对不上：拼回去再认一次。
+                # 拼起来百分比那位数字会粘在总页数后面（620 变 6205），拼之前先把「·3%」这一截切掉。
+                $hud = ($digits -join '') -replace '[·・:：]?\d{1,2}[%％].*$', ''
+                $mm = [regex]::Match($hud, '(\d{1,4})(?!\d)[^\d/]{0,3}/(\d{1,4})(?!\d)')
+                if ($mm.Success) {
                     $cur = [int]$mm.Groups[1].Value; $total = [int]$mm.Groups[2].Value
-                    # 总页数常常被 OCR 认花（620 认成「52包」），它只用来拼提示语，不参与判断；
-                    # 当前页那一位是左边这串，认到就够。
                     if ($cur -ge 1) { return [pscustomobject]@{ Cur = $cur; Total = $total; Text = "$cur/$total" } }
                 }
             } finally { $zoom.Dispose() }
@@ -632,10 +645,24 @@ function Get-CitePageNumber([string]$CiteText) {
     if ($m.Success) { return $m.Groups[1].Value }
     return $null
 }
+# Find-All / Find-Text 只回坐标、不带原文，第 7 步要核对出处那行自己写的页码就得回到同一帧的原始行。
+# 优先取「出处 + 第 N 页」那行（抽屉里可能同时挂着引文行和出处行），没有就取最靠下的一行「出处」，
+# 好把那一眼读到的原话带进失败信息。
+function Find-CiteLine($lines) {
+    $hits = @($lines | Where-Object { ($_.Text -replace '\s', '') -match '出处' })
+    if (-not $hits.Count) { return $null }
+    $withPage = @($hits | Where-Object { ($_.Text -replace '\s', '') -match '第\d+页' })
+    if ($withPage.Count) { return $withPage[-1] }
+    return $hits[-1]
+}
 # 第 7 步：出处那行自己写的页码必须解析得出来，且点完底栏得停在那一页。
 # 解析不出页码时过去会跳过整段跳页断言、最后还能 Pass 7（20:05 评审指出的第二处假绿），现在一律算失败。
-function Resolve-Step7PageVerdict([string]$CitePage, [string]$NowPage) {
-    if (-not $CitePage) { return '「出处」那行没解析出页码，跳页没法核对（见 7-cite.png）' }
+function Resolve-Step7PageVerdict([string]$CitePage, [string]$NowPage, [string]$CiteText = '') {
+    if (-not $CitePage) {
+        $said = ($CiteText -replace '\s', '')
+        if (-not $said) { $said = '这一帧没读到「出处」那行的原文' }
+        return "「出处」那行没解析出页码（读到：「$said」），跳页没法核对（见 7-cite.png）"
+    }
     if (-not $NowPage) { return '点了出处底栏读不到页号（见 7-cite.png）' }
     if ($NowPage -ne $CitePage) { return "点了出处没跳到第 $CitePage 页（现在第 $NowPage 页，见 7-cite.png）" }
     return $null
@@ -1250,7 +1277,8 @@ try {
     }
     if (-not $cite) { $cardOk = '伴读抽屉里找不到「出处」链接（见 4-result*.png）' }
     else {
-        $citePage = Get-CitePageNumber $cite.Text
+        $citeLine = Find-CiteLine $script:Last
+        $citePage = Get-CitePageNumber $(if ($citeLine) { $citeLine.Text } else { '' })
         # 四路交锁时这一下也会被吞：点完底栏还停在第 33 页（11-21 04:46 L3 就这样）。
         # #577 对这同一颗「出处」的处理是——认出点的还是那颗出处才重点，最多 3 次；
         # 页号一对上就不再点（再点会把跳转切回去）。这里沿用，落点每次按新一帧重定位。
@@ -1269,11 +1297,17 @@ try {
                 if (-not $pressed -or -not $c7 -or "$($c7.Cur)" -eq "$citePage") { break }
                 $again = @(Find-All $script:Last '出处') | Select-Object -Last 1
                 if (-not $again) { break }
+                $citeLine = Find-CiteLine $script:Last
                 Note "第 $try 次点「出处」后停在第 $($c7.Cur) 页，出处写的是第 $citePage 页，重定位再点"
                 $cite = $again
             }
         }
-        $cardOk = Resolve-Step7PageVerdict $citePage $(if ($c7) { "$($c7.Cur)" } else { $null })
+        # 抽屉半屏高，常常正好压住底栏：点完读不出页号是常态，不算没跳页，关掉抽屉再认一次。
+        # 只有两种情形当场算失败：出处那行根本没页码；或者读到了页号、但跟出处对不上。
+        $openVerdict = Resolve-Step7PageVerdict $citePage $(if ($c7) { "$($c7.Cur)" } else { $null }) $(if ($citeLine) { $citeLine.Text } else { '' })
+        $cardOk = if ($c7 -or -not $citePage) { $openVerdict } else { $null }
+        if ($cardOk) { Note "第 7 步：出处写第 $citePage 页，点完底栏读 $(if ($c7) { '第 ' + $c7.Cur + ' 页' } else { '不出页号' })——$cardOk" }
+        else { Note "第 7 步：出处写第 $citePage 页，点完底栏读 $(if ($c7) { '第 ' + $c7.Cur + ' 页' } else { '不出页号' })，关掉抽屉再核" }
         if (-not $cardOk) {
             # 抽屉半屏高、盖着正文：把它关掉再看页码没被带走。三种关法按把握从大到小试，每次点完都认状态：
             #   a) 顶栏那颗「收起」= immersive-companion-toggle（ImmersiveReaderChrome 252-266 行，companionOpen 时

@@ -477,6 +477,19 @@ Check 'step7-passes-when-page-matches' (-not (Resolve-Step7PageVerdict '150' '15
 Check 'step7-close-fails-when-page-unread' ([bool](Resolve-Step7AfterCloseVerdict '150' $null)) "why=$(Resolve-Step7AfterCloseVerdict '150' $null)"
 Check 'step7-close-passes-on-same-page' (-not (Resolve-Step7AfterCloseVerdict '150' '150')) "why=$(Resolve-Step7AfterCloseVerdict '150' '150')"
 
+# 40. 第 7 步的页码得从原始行里取：Find-All / Find-Text 只回坐标，旧写法 $cite.Text 一直是空，
+#     页码从来没解析出来过（所以那一步一直是假绿）。抽屉里同时挂着引文行时，要挑带页码的那行。
+$drawer = @(
+    (New-Line '引文．"Generalhumanca••' 480 500 300 26),
+    (New-Line '出处1．第154页．3段．"Generalhumanca•••' 480 600 320 26)
+)
+$plainCite = @((New-Line '出处' 480 600 60 26))
+Check 'cite-line-picks-the-line-with-page' ((Find-CiteLine $drawer).Text -match '第154页') "got=$((Find-CiteLine $drawer).Text)"
+Check 'cite-line-falls-back-to-plain-label' ((Find-CiteLine $plainCite).Text -eq '出处') "got=$((Find-CiteLine $plainCite).Text)"
+Check 'cite-line-none-when-absent' (-not (Find-CiteLine @((New-Line '提问' 480 600 60 26)))) "found=$(Find-CiteLine @((New-Line '提问' 480 600 60 26)))"
+Check 'step7-cite-page-from-real-drawer-line' ((Get-CitePageNumber (Find-CiteLine $drawer).Text) -eq '154') "got=$(Get-CitePageNumber (Find-CiteLine $drawer).Text)"
+Check 'step7-reports-the-ocr-text-when-page-missing' ((Resolve-Step7PageVerdict '' '150' '出处 · 见上文') -match '见上文') "why=$(Resolve-Step7PageVerdict '' '150' '出处 · 见上文')"
+
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"
 exit ([int]($fail -gt 0))

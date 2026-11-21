@@ -1,0 +1,445 @@
+{
+  "reference": "py-fsrs 5.1.3",
+  "scheduler": {
+    "parameters": [
+      0.40255,
+      1.18385,
+      3.173,
+      15.69105,
+      7.1949,
+      0.5345,
+      1.4604,
+      0.0046,
+      1.54575,
+      0.1192,
+      1.01925,
+      1.9395,
+      0.11,
+      0.29605,
+      2.2698,
+      0.2315,
+      2.9898,
+      0.51655,
+      0.6621
+    ],
+    "desiredRetention": 0.9,
+    "maximumIntervalDays": 36500,
+    "fuzzing": false,
+    "learningSteps": [],
+    "relearningSteps": []
+  },
+  "note": "state 1=Learning 2=Review 3=Relearning; ratings 1=Again 2=Hard 3=Good 4=Easy",
+  "sequences": [
+    {
+      "name": "fresh-good-on-schedule",
+      "steps": [
+        {
+          "day": 0,
+          "rating": 3,
+          "state": 2,
+          "stability": 3.173,
+          "difficulty": 5.282434422319005,
+          "intervalDays": 3
+        },
+        {
+          "day": 3,
+          "rating": 3,
+          "state": 2,
+          "stability": 10.73892584613159,
+          "difficulty": 5.272967931287446,
+          "intervalDays": 11
+        },
+        {
+          "day": 14,
+          "rating": 3,
+          "state": 2,
+          "stability": 34.57762350060534,
+          "difficulty": 5.263544986114632,
+          "intervalDays": 35
+        },
+        {
+          "day": 45,
+          "rating": 3,
+          "state": 2,
+          "stability": 93.87679338579711,
+          "difficulty": 5.254165386489613,
+          "intervalDays": 94
+        },
+        {
+          "day": 120,
+          "rating": 3,
+          "state": 2,
+          "stability": 222.73420749432339,
+          "difficulty": 5.244828933022869,
+          "intervalDays": 223
+        },
+        {
+          "day": 300,
+          "rating": 3,
+          "state": 2,
+          "stability": 501.9144253860236,
+          "difficulty": 5.2355354272420715,
+          "intervalDays": 502
+        }
+      ]
+    },
+    {
+      "name": "fresh-again-recovers",
+      "steps": [
+        {
+          "day": 0,
+          "rating": 1,
+          "state": 2,
+          "stability": 0.40255,
+          "difficulty": 7.1949,
+          "intervalDays": 1
+        },
+        {
+          "day": 1,
+          "rating": 3,
+          "state": 2,
+          "stability": 2.2650094350890537,
+          "difficulty": 7.176636167311107,
+          "intervalDays": 2
+        },
+        {
+          "day": 3,
+          "rating": 2,
+          "state": 2,
+          "stability": 3.083042002518178,
+          "difficulty": 7.6144867521158135,
+          "intervalDays": 3
+        },
+        {
+          "day": 8,
+          "rating": 3,
+          "state": 2,
+          "stability": 10.099009423070388,
+          "difficulty": 7.594292820367189,
+          "intervalDays": 10
+        },
+        {
+          "day": 20,
+          "rating": 4,
+          "state": 2,
+          "stability": 55.92398668669566,
+          "difficulty": 7.185621379680593,
+          "intervalDays": 56
+        },
+        {
+          "day": 90,
+          "rating": 3,
+          "state": 2,
+          "stability": 137.07479501117209,
+          "difficulty": 7.16740022864517,
+          "intervalDays": 137
+        }
+      ]
+    },
+    {
+      "name": "same-day-repeats",
+      "steps": [
+        {
+          "day": 0,
+          "rating": 3,
+          "state": 2,
+          "stability": 3.173,
+          "difficulty": 5.282434422319005,
+          "intervalDays": 3
+        },
+        {
+          "day": 0,
+          "rating": 3,
+          "state": 2,
+          "stability": 4.466858064362218,
+          "difficulty": 5.272967931287446,
+          "intervalDays": 4
+        },
+        {
+          "day": 0,
+          "rating": 1,
+          "state": 2,
+          "stability": 2.2380233037692734,
+          "difficulty": 6.790567694566929,
+          "intervalDays": 2
+        },
+        {
+          "day": 1,
+          "rating": 2,
+          "state": 2,
+          "stability": 2.710199832063122,
+          "difficulty": 7.292552066720332,
+          "intervalDays": 3
+        },
+        {
+          "day": 1,
+          "rating": 3,
+          "state": 2,
+          "stability": 3.8153413097649818,
+          "difficulty": 7.273839034524527,
+          "intervalDays": 4
+        },
+        {
+          "day": 7,
+          "rating": 4,
+          "state": 2,
+          "stability": 30.949063413425332,
+          "difficulty": 6.814881908854592,
+          "intervalDays": 31
+        }
+      ]
+    },
+    {
+      "name": "overdue-and-lapses",
+      "steps": [
+        {
+          "day": 0,
+          "rating": 3,
+          "state": 2,
+          "stability": 3.173,
+          "difficulty": 5.282434422319005,
+          "intervalDays": 3
+        },
+        {
+          "day": 10,
+          "rating": 3,
+          "state": 2,
+          "stability": 23.895875500557327,
+          "difficulty": 5.272967931287446,
+          "intervalDays": 24
+        },
+        {
+          "day": 25,
+          "rating": 1,
+          "state": 2,
+          "stability": 2.986277421957744,
+          "difficulty": 6.790567694566929,
+          "intervalDays": 3
+        },
+        {
+          "day": 26,
+          "rating": 2,
+          "state": 2,
+          "stability": 3.448125630692375,
+          "difficulty": 7.292552066720332,
+          "intervalDays": 3
+        },
+        {
+          "day": 40,
+          "rating": 1,
+          "state": 2,
+          "stability": 1.6511848251140078,
+          "difficulty": 8.148454314466198,
+          "intervalDays": 2
+        },
+        {
+          "day": 41,
+          "rating": 3,
+          "state": 2,
+          "stability": 3.0596394369660134,
+          "difficulty": 8.12580413193076,
+          "intervalDays": 3
+        },
+        {
+          "day": 200,
+          "rating": 4,
+          "state": 2,
+          "stability": 121.05653230217159,
+          "difficulty": 7.800537573817436,
+          "intervalDays": 121
+        }
+      ]
+    },
+    {
+      "name": "easy-chain-hits-max-interval",
+      "steps": [
+        {
+          "day": 0,
+          "rating": 4,
+          "state": 2,
+          "stability": 15.69105,
+          "difficulty": 3.2245015893713678,
+          "intervalDays": 16
+        },
+        {
+          "day": 16,
+          "rating": 4,
+          "state": 2,
+          "stability": 150.28356111866552,
+          "difficulty": 2.1301214599670124,
+          "intervalDays": 150
+        },
+        {
+          "day": 60,
+          "rating": 4,
+          "state": 2,
+          "stability": 498.5484979342093,
+          "difficulty": 1.0,
+          "intervalDays": 499
+        },
+        {
+          "day": 200,
+          "rating": 4,
+          "state": 2,
+          "stability": 1582.8910894533499,
+          "difficulty": 1.0,
+          "intervalDays": 1583
+        },
+        {
+          "day": 900,
+          "rating": 4,
+          "state": 2,
+          "stability": 6223.940796080797,
+          "difficulty": 1.0,
+          "intervalDays": 6224
+        },
+        {
+          "day": 5000,
+          "rating": 4,
+          "state": 2,
+          "stability": 28784.781668768355,
+          "difficulty": 1.0,
+          "intervalDays": 28785
+        },
+        {
+          "day": 12000,
+          "rating": 4,
+          "state": 2,
+          "stability": 62358.193820032844,
+          "difficulty": 1.0,
+          "intervalDays": 36500
+        },
+        {
+          "day": 30000,
+          "rating": 4,
+          "state": 2,
+          "stability": 140691.7038839769,
+          "difficulty": 1.0,
+          "intervalDays": 36500
+        }
+      ]
+    },
+    {
+      "name": "all-again-difficulty-ceiling",
+      "steps": [
+        {
+          "day": 0,
+          "rating": 1,
+          "state": 2,
+          "stability": 0.40255,
+          "difficulty": 7.1949,
+          "intervalDays": 1
+        },
+        {
+          "day": 1,
+          "rating": 1,
+          "state": 2,
+          "stability": 0.2619420221524461,
+          "difficulty": 8.082797017759107,
+          "intervalDays": 1
+        },
+        {
+          "day": 2,
+          "rating": 1,
+          "state": 2,
+          "stability": 0.18606860220627644,
+          "difficulty": 8.679783030429052,
+          "intervalDays": 1
+        },
+        {
+          "day": 3,
+          "rating": 1,
+          "state": 2,
+          "stability": 0.13217247252847564,
+          "difficulty": 9.08117225935453,
+          "intervalDays": 1
+        },
+        {
+          "day": 4,
+          "rating": 1,
+          "state": 2,
+          "stability": 0.09388775047024761,
+          "difficulty": 9.351050128648035,
+          "intervalDays": 1
+        },
+        {
+          "day": 5,
+          "rating": 1,
+          "state": 2,
+          "stability": 0.0666924777885529,
+          "difficulty": 9.532505083304839,
+          "intervalDays": 1
+        },
+        {
+          "day": 6,
+          "rating": 1,
+          "state": 2,
+          "stability": 0.04737451447392094,
+          "difficulty": 9.654508049519508,
+          "intervalDays": 1
+        },
+        {
+          "day": 7,
+          "rating": 1,
+          "state": 2,
+          "stability": 0.03365214033215847,
+          "difficulty": 9.73653790532218,
+          "intervalDays": 1
+        }
+      ]
+    },
+    {
+      "name": "hard-only",
+      "steps": [
+        {
+          "day": 0,
+          "rating": 2,
+          "state": 2,
+          "stability": 1.18385,
+          "difficulty": 6.488305268471453,
+          "intervalDays": 1
+        },
+        {
+          "day": 2,
+          "rating": 2,
+          "state": 2,
+          "stability": 2.1482130329951366,
+          "difficulty": 7.040501547390819,
+          "intervalDays": 2
+        },
+        {
+          "day": 6,
+          "rating": 2,
+          "state": 2,
+          "stability": 3.7001508434463264,
+          "difficulty": 7.500966847928992,
+          "intervalDays": 4
+        },
+        {
+          "day": 16,
+          "rating": 2,
+          "state": 2,
+          "stability": 6.688809768536118,
+          "difficulty": 7.884939542230092,
+          "intervalDays": 7
+        },
+        {
+          "day": 40,
+          "rating": 2,
+          "state": 2,
+          "stability": 12.238477597048982,
+          "difficulty": 8.205126600400446,
+          "intervalDays": 12
+        },
+        {
+          "day": 100,
+          "rating": 2,
+          "state": 2,
+          "stability": 22.789361417358386,
+          "difficulty": 8.472124107622648,
+          "intervalDays": 23
+        }
+      ]
+    }
+  ]
+}

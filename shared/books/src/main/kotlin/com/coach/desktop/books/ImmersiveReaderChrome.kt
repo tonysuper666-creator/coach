@@ -17,11 +17,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -117,7 +120,7 @@ internal fun ImmersiveProgressHairline(
             Modifier
                 .fillMaxWidth(fraction)
                 .fillMaxHeight()
-                .background(v7Pine().copy(alpha = 0.72f)),
+                .background(colors.actionPrimary.copy(alpha = 0.72f)),
         )
     }
 }
@@ -155,9 +158,12 @@ internal fun ImmersiveTopHud(
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
+    val accent = colors.actionPrimary
     val barBg = colors.surface1.copy(alpha = 0.96f)
     val compact = availableWidth < 860.dp
     val veryCompact = availableWidth < 560.dp
+    var moreMenuOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(visible) { if (!visible) moreMenuOpen = false }
     AnimatedVisibility(
         visible = visible,
         enter = fadeIn() + slideInVertically { -it },
@@ -197,7 +203,7 @@ internal fun ImmersiveTopHud(
                     Text(
                         "目录",
                         style = MaterialTheme.typography.labelLarge,
-                        color = if (tocOpen) v7Pine() else colors.fgSecondary,
+                        color = if (tocOpen) accent else colors.fgSecondary,
                         fontWeight = if (tocOpen) FontWeight.SemiBold else FontWeight.Normal,
                         maxLines = 1,
                         softWrap = false,
@@ -237,26 +243,10 @@ internal fun ImmersiveTopHud(
                     Text(
                         "查找",
                         style = MaterialTheme.typography.labelLarge,
-                        color = if (searchOpen) v7Pine() else colors.fgSecondary,
+                        color = if (searchOpen) accent else colors.fgSecondary,
                         maxLines = 1,
                         softWrap = false,
                     )
-                }
-                if (!veryCompact) {
-                    V7TextButton(
-                        onClick = onToggleBookmark,
-                        modifier = Modifier.testTag("immersive-bookmark-toggle"),
-                        contentPadding = PaddingValues(horizontal = if (compact) 6.dp else 8.dp, vertical = 4.dp),
-                        ringInside = true,
-                    ) {
-                        Text(
-                            if (bookmarked) (if (compact) "已藏" else "已存书签") else "书签",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = if (bookmarked) v7Pine() else colors.fgSecondary,
-                            maxLines = 1,
-                            softWrap = false,
-                        )
-                    }
                 }
                 Box(Modifier.padding(horizontal = if (compact) 2.dp else 4.dp)) { typeControl() }
                 V7TextButton(
@@ -268,44 +258,69 @@ internal fun ImmersiveTopHud(
                     Text(
                         if (companionOpen) (if (compact) "收起" else "收起伴读") else "伴读",
                         style = MaterialTheme.typography.labelLarge,
-                        color = if (companionOpen) v7Pine() else colors.fgPrimary,
+                        color = if (companionOpen) accent else colors.fgPrimary,
                         fontWeight = if (companionOpen) FontWeight.SemiBold else FontWeight.Medium,
                         maxLines = 1,
                         softWrap = false,
                     )
                 }
-                if (!compact) {
+                // 次要动作收进「⋯」菜单，顶栏保持克制清爽（对齐 Sable +/⋯ 收纳规范）
+                Box {
                     V7TextButton(
-                        onClick = onTogglePinHud,
-                        modifier = Modifier.testTag("immersive-pin-hud"),
+                        onClick = { moreMenuOpen = !moreMenuOpen },
+                        modifier = Modifier.testTag("immersive-more-menu"),
                         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
                         ringInside = true,
                     ) {
                         Text(
-                            if (pinnedHud) "取消固定" else "固定栏",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (pinnedHud) v7Pine() else colors.fgTertiary,
+                            "⋯",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = if (moreMenuOpen || bookmarked || pinnedHud) accent else colors.fgSecondary,
                             maxLines = 1,
                             softWrap = false,
                         )
                     }
-                }
-                if (showLearnAction && !compact) {
-                    V7TextButton(
-                        onClick = onLearn,
-                        enabled = !busy,
-                        modifier = Modifier.testTag("immersive-learn-btn"),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                        ringInside = true,
+                    DropdownMenu(
+                        expanded = moreMenuOpen,
+                        onDismissRequest = { moreMenuOpen = false },
+                        containerColor = colors.surface1,
                     ) {
-                        Text(
-                            learnLabel,
-                            style = MaterialTheme.typography.labelLarge,
-                            color = v7Pine(),
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            softWrap = false,
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    if (bookmarked) "取消书签" else "添加书签（Ctrl+D）",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = if (bookmarked) accent else colors.fgPrimary,
+                                )
+                            },
+                            onClick = { moreMenuOpen = false; onToggleBookmark() },
+                            modifier = Modifier.testTag("immersive-bookmark-toggle"),
                         )
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    if (pinnedHud) "取消固定工具栏" else "固定顶底栏",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = if (pinnedHud) accent else colors.fgPrimary,
+                                )
+                            },
+                            onClick = { moreMenuOpen = false; onTogglePinHud() },
+                            modifier = Modifier.testTag("immersive-pin-hud"),
+                        )
+                        if (showLearnAction) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        learnLabel,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = colors.fgPrimary,
+                                    )
+                                },
+                                enabled = !busy,
+                                onClick = { moreMenuOpen = false; onLearn() },
+                                modifier = Modifier.testTag("immersive-learn-btn"),
+                            )
+                        }
                     }
                 }
             }
@@ -322,9 +337,10 @@ private fun ViewModeSwitchPill(
     onSelect: (Boolean) -> Unit,
 ) {
     val colors = CoachTheme.colors
-    val outerShape = RoundedCornerShape(CoachV7.Radius.btn)
-    val itemShape = RoundedCornerShape(CoachV7.Radius.s)
-    val activeBg = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
+    val accent = colors.actionPrimary
+    val outerShape = CircleShape
+    val itemShape = CircleShape
+    val activeBg = accent.copy(alpha = 0.14f)
     Row(
         Modifier
             .clip(outerShape)
@@ -340,7 +356,7 @@ private fun ViewModeSwitchPill(
             Text(
                 label,
                 style = MaterialTheme.typography.labelMedium,
-                color = if (selected) v7Pine() else colors.fgSecondary,
+                color = if (selected) accent else colors.fgSecondary,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                 maxLines = 1,
                 softWrap = false,
@@ -428,8 +444,8 @@ internal fun ImmersiveBottomScrubber(
                         },
                         valueRange = 1f..lastPage.toFloat(),
                         colors = SliderDefaults.colors(
-                            thumbColor = v7Pine(),
-                            activeTrackColor = v7Pine(),
+                            thumbColor = colors.actionPrimary,
+                            activeTrackColor = colors.actionPrimary,
                             inactiveTrackColor = colors.borderSubtle,
                         ),
                         modifier = Modifier.weight(1f).testTag("immersive-page-slider"),
@@ -483,7 +499,7 @@ internal fun ImmersiveBottomScrubber(
                             .width(64.dp)
                             .clip(fieldShape)
                             .background(colors.surface2)
-                            .border(1.dp, v7Pine(), fieldShape)
+                            .border(1.dp, colors.actionPrimary, fieldShape)
                             .focusRequester(jumpFocus)
                             .onFocusChanged { onJumpFocusChange(it.isFocused) }
                             .onPreviewKeyEvent { event ->
@@ -542,7 +558,7 @@ internal fun ImmersiveTocDrawer(
 ) {
     val colors = CoachTheme.colors
     var activeTab by remember { mutableStateOf(ReaderLeftTab.TOC) }
-    val activeBg = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
+    val activeBg = colors.actionPrimary.copy(alpha = 0.12f)
     val rowShape = RoundedCornerShape(CoachV7.Radius.s)
     val drawerWidth = minOf(308.dp, (availableWidth * 0.85f).coerceAtLeast(240.dp))
     val tocListState = rememberLazyListState()
@@ -578,7 +594,7 @@ internal fun ImmersiveTocDrawer(
                         Text(
                             tab.label + countSuffix,
                             style = MaterialTheme.typography.labelLarge,
-                            color = if (selected) v7Pine() else colors.fgSecondary,
+                            color = if (selected) colors.actionPrimary else colors.fgSecondary,
                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                             maxLines = 1,
                             softWrap = false,
@@ -642,7 +658,7 @@ internal fun ImmersiveTocDrawer(
                                         Text(
                                             lesson.title,
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = if (active) v7Pine() else colors.fgPrimary,
+                                            color = if (active) colors.actionPrimary else colors.fgPrimary,
                                             fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
                                             maxLines = 2,
                                             overflow = TextOverflow.Ellipsis,
@@ -652,7 +668,7 @@ internal fun ImmersiveTocDrawer(
                                             "${lesson.firstPage}",
                                             style = MaterialTheme.typography.labelSmall,
                                             fontFamily = LocalV7Fonts.current.numbers,
-                                            color = if (active) v7Pine() else colors.fgTertiary,
+                                            color = if (active) colors.actionPrimary else colors.fgTertiary,
                                             maxLines = 1,
                                             softWrap = false,
                                         )
@@ -709,7 +725,7 @@ internal fun ImmersiveTocDrawer(
                                                 book.pageLabel(bookmark.page),
                                                 style = MaterialTheme.typography.bodySmall,
                                                 fontFamily = LocalV7Fonts.current.numbers,
-                                                color = if (active) v7Pine() else colors.fgPrimary,
+                                                color = if (active) colors.actionPrimary else colors.fgPrimary,
                                                 fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
                                             )
                                             if (bookmark.note.isNotBlank()) {
@@ -769,7 +785,7 @@ internal fun ImmersiveCompanionDrawer(
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
-    val activeBg = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
+    val activeBg = colors.actionPrimary.copy(alpha = 0.12f)
     val tabShape = RoundedCornerShape(CoachV7.Radius.s)
 
     val headerAndBody: @Composable (Modifier) -> Unit = { innerModifier ->
@@ -787,7 +803,7 @@ internal fun ImmersiveCompanionDrawer(
                     Text(
                         tab.label,
                         style = MaterialTheme.typography.labelLarge,
-                        color = if (selected) v7Pine() else colors.fgSecondary,
+                        color = if (selected) colors.actionPrimary else colors.fgSecondary,
                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                         maxLines = 1,
                         softWrap = false,
@@ -878,7 +894,7 @@ internal fun ImmersiveSelectionPill(
         modifier
             .paperShadow("button", colors.dark)
             .clip(shape)
-            .background(if (colors.dark) CoachV7.Dark.menuBg else CoachV7.Light.menuBg)
+            .background(colors.surface1)
             .border(1.dp, colors.borderSubtle, shape)
             .padding(horizontal = 6.dp, vertical = 4.dp)
             .testTag("selection-explain-toolbar"),
@@ -955,7 +971,7 @@ internal fun CompanionAskPane(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .background(if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash, RoundedCornerShape(CoachV7.Radius.s))
+                    .background(colors.actionPrimary.copy(alpha = 0.12f), RoundedCornerShape(CoachV7.Radius.s))
                     .padding(horizontal = 10.dp, vertical = if (compact) 5.dp else 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -996,7 +1012,7 @@ internal fun CompanionAskPane(
                     Text(
                         if (pickingParagraph) "收起段落" else "选本页段落",
                         style = MaterialTheme.typography.labelSmall,
-                        color = v7Pine(),
+                        color = colors.actionPrimary,
                         maxLines = 1,
                         softWrap = false,
                         modifier = Modifier
@@ -1031,7 +1047,7 @@ internal fun CompanionAskPane(
                             "${idx + 1}",
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = LocalV7Fonts.current.numbers,
-                            color = v7Pine(),
+                            color = colors.actionPrimary,
                         )
                         Text(
                             shortQuote(block.text),
@@ -1048,7 +1064,7 @@ internal fun CompanionAskPane(
             if (thread != null) {
                 for ((index, entry) in thread.turns.withIndex()) {
                     Column(Modifier.fillMaxWidth().testTag("inline-explain-turn-$index"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(entry.label, style = MaterialTheme.typography.labelMedium, color = v7Pine())
+                        Text(entry.label, style = MaterialTheme.typography.labelMedium, color = colors.actionPrimary)
                         ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks) { citation ->
                             entry.sentBlocks.firstOrNull { it.id == citation.blockId }?.let { onOpenCitation(citation, it) }
                         }
@@ -1056,7 +1072,7 @@ internal fun CompanionAskPane(
                     HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.6f))
                 }
                 if (thread.loading) {
-                    Text("思考中…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("inline-explain-loading"))
+                    Text("正在整理…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("inline-explain-loading"))
                 }
                 thread.error?.let { (message, trouble) ->
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1078,7 +1094,7 @@ internal fun CompanionAskPane(
                 V7Field(
                     value = draft,
                     onValueChange = onDraftChange,
-                    label = if (quoteSource != null) "就这段问一句…" else "输入问题…",
+                    label = if (quoteSource != null) "问这句的意思、公式推导或例子…" else "输入问题…",
                     enabled = thread?.loading != true,
                     modifier = Modifier
                         .fillMaxWidth()

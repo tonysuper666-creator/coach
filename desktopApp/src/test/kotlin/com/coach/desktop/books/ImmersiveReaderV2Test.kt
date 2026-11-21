@@ -193,6 +193,15 @@ class ImmersiveReaderV2Test {
         waitForIdle()
         onNodeWithTag("v7-directory-drawer").assertExists()
         onNodeWithTag("toc-item-0").assertExists()
+
+        // Secondary actions (bookmark, pin HUD) are tucked inside the overflow menu, not cluttering the HUD row
+        onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+        waitForIdle()
+        onNodeWithTag("immersive-bookmark-toggle").assertDoesNotExist()
+        onNodeWithTag("immersive-more-menu").performClick()
+        waitForIdle()
+        onNodeWithTag("immersive-bookmark-toggle").assertExists()
+        onNodeWithTag("immersive-pin-hud").assertExists()
     }
 
     @Test

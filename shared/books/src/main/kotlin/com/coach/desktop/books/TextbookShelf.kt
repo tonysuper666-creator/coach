@@ -49,7 +49,7 @@ internal fun BookImportProgressBar(
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
-    val pine = v7Pine()
+    val pine = colors.actionPrimary
     Column(modifier, verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 6.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -115,7 +115,7 @@ internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String)
     val rightScroll = rememberScrollState()
     val density = LocalDensity.current
     var sheetOriginLeftDp by remember { mutableStateOf<Float?>(null) }
-    val line = if (colors.dark) CoachV7.Dark.line else CoachV7.Light.line
+    val line = colors.borderSubtle
     BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = if (hinge != null) CoachV7.Space.s3 else CoachV7.Space.s6, vertical = CoachV7.Space.s3), contentAlignment = Alignment.TopCenter) {
         val sectionSpacing = if (maxHeight < 560.dp) CoachV7.Space.s2 else CoachV7.Space.s5
         Box(Modifier.widthIn(max = 1000.dp).fillMaxWidth().fillMaxHeight().paperShadow("sheet", colors.dark)
@@ -135,7 +135,7 @@ internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String)
                     Text("书架还是空的", style = MaterialTheme.typography.titleLarge)
                     Text("上传后，可以直接开始学，也可以先当一本书读。", color = colors.fgSecondary)
                 } else {
-                    Text("全部教材", style = MaterialTheme.typography.titleMedium, fontFamily = LocalV7Fonts.current.display)
+                    Text("全部教材", style = MaterialTheme.typography.titleMedium)
                     Column {
                         ShelfDivider(line)
                         for (item in ui.catalog) {
@@ -248,15 +248,15 @@ private fun ShelfBookRow(
     onClick: () -> Unit,
 ) {
     val colors = CoachTheme.colors
-    val wash = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
+    val wash = colors.actionPrimary.copy(alpha = 0.12f)
     Column(Modifier.fillMaxWidth().background(if (current) wash else androidx.compose.ui.graphics.Color.Transparent)) {
         Row(Modifier.fillMaxWidth().testTag("book-${item.id}")
             .shelfClick(enabled, onClick).padding(horizontal = CoachV7.Space.s3, vertical = CoachV7.Space.s3),
             horizontalArrangement = Arrangement.spacedBy(CoachV7.Space.s3), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.width(CoachV7.Space.s1).height(CoachV7.Space.s7)
-                .background(if (current) v7Pine() else androidx.compose.ui.graphics.Color.Transparent))
+                .background(if (current) colors.actionPrimary else androidx.compose.ui.graphics.Color.Transparent))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s1)) {
-                Text(item.title, style = MaterialTheme.typography.titleMedium, fontFamily = LocalV7Fonts.current.display)
+                Text(item.title, style = MaterialTheme.typography.titleMedium)
                 val statusSuffix = when {
                     activeImport != null -> " · 识别中 ${activeImport.page} / ${activeImport.total} 页"
                     item.pendingOcrPages > 0 -> " · 待识别 ${item.pendingOcrPages} 页"

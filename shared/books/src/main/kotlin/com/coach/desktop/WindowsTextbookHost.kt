@@ -137,6 +137,7 @@ internal fun WindowsTextbookHost(
     val isEmptyLibrary = ui.catalog.isEmpty() && ui.collections.none { !it.record.archived }
     val deskPage = (book != null && ui.screen != BookScreen.HOME) ||
         ui.screen == BookScreen.COURSE ||
+        ui.screen == BookScreen.BOOKLIST ||
         ui.screen == BookScreen.REVIEWS || ui.screen == BookScreen.REVIEWING
     val systemDark = isSystemInDarkTheme()
     val dark = remember { bookWorkspaceThemeOverride() }
@@ -232,13 +233,14 @@ internal fun WindowsTextbookHost(
                             onNewCourse = { creatingKind = CollectionKind.COURSE },
                             onNewBooklist = { creatingKind = CollectionKind.BOOKLIST },
                             onOpenCollection = { col ->
-                                if (col.record.kind == CollectionKind.COURSE) {
-                                    scope.launch { controller.openCourse(col.record.id) }
-                                } else {
-                                    activeCollection = col
+                                when (col.record.kind) {
+                                    CollectionKind.COURSE -> scope.launch { controller.openCourse(col.record.id) }
+                                    CollectionKind.BOOKLIST -> scope.launch { controller.openBooklist(col.record.id) }
+                                    else -> activeCollection = col
                                 }
                             },
                             onPickCourseFiles = pickMultiple,
+                            onPickBooklistFiles = pickMultiple,
                             chooseBook = chooseBook,
                         )
                     }
@@ -317,10 +319,10 @@ internal fun WindowsTextbookHost(
                     },
                     onOpenCollection = { col ->
                         searchOpen = false
-                        if (col.record.kind == CollectionKind.COURSE) {
-                            scope.launch { controller.openCourse(col.record.id) }
-                        } else {
-                            activeCollection = col
+                        when (col.record.kind) {
+                            CollectionKind.COURSE -> scope.launch { controller.openCourse(col.record.id) }
+                            CollectionKind.BOOKLIST -> scope.launch { controller.openBooklist(col.record.id) }
+                            else -> activeCollection = col
                         }
                     },
                     onClose = { searchOpen = false },

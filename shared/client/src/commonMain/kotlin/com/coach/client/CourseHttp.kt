@@ -184,7 +184,6 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     } catch (_: HttpRequestTimeoutException) { MockReply(null, "章节伴读等待超时，请重试。") }
       catch (e: kotlinx.coroutines.CancellationException) { throw e }
       catch (_: Exception) { MockReply(null, "连不上学习服务，本地阅读与草稿已保留。") }
-
     suspend fun courseAlign(input: JsonObject): MockReply =
         postCourseEndpoint("v1/library/course/align", input, timeoutMs = 120_000L, timeoutMsg = "课程自动对齐超时，已先使用本地规则。")
 
@@ -226,6 +225,22 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     } catch (_: Exception) {
         MockReply(null, "连不上学习服务，可继续本地阅读与练习。")
     }
+
+    /** 2.0-W2-D: 书单跨书概念两阶段语义对齐（阶段 2 远端语义裁决）。 */
+    suspend fun alignBooklistConcepts(input: JsonObject): MockReply = try {
+        val response = http.post("$base/v1/library/booklist/align") {
+            timeout { requestTimeoutMillis = 120_000L; socketTimeoutMillis = 120_000L }
+            setBody(TextContent(input.toString(), ContentType.Application.Json))
+        }
+        val status = response.status.value
+        if (status == 401) MockReply(null, "授权已失效，请重新登录学习服务。", statusCode = 401)
+        else {
+            val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+            if (response.status.isSuccess() && parsed != null) MockReply(parsed, null, statusCode = status)
+            else MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "书单主题对齐暂时不可用。", statusCode = status)
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+      catch (_: Exception) { MockReply(null, "连不上学习服务，已保留本地对齐结果。") }
     suspend fun cancelLibraryExplain(id: String) {
         runCatching { http.post("$base/v1/library/explain/cancel") {
             setBody(TextContent(buildJsonObject { put("requestId", id) }.toString(), ContentType.Application.Json)) } }

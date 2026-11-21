@@ -520,7 +520,7 @@ private fun collectionMeta(summary: CollectionSummary): String {
             summary.record.examDate?.takeIf(String::isNotBlank)?.let { append("考试 $it · ") }
             append(if (count == 0) "待添加材料" else "$count 份材料")
         }
-        CollectionKind.BOOKLIST -> "$count 本书"
+        CollectionKind.BOOKLIST -> if (summary.activeConceptCount > 0) "$count 本书 · 已关联 ${summary.activeConceptCount} 个共同主题" else "$count 本书"
         else -> "$count 份材料"
     }
 }

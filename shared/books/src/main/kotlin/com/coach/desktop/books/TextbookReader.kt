@@ -65,6 +65,7 @@ import com.coach.domain.reader.ReaderTextUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -113,6 +114,10 @@ internal fun TextbookReader(
     onSaveSectionQuiz: ((BookLesson, Int, Practice, PracticeAnswer) -> Unit)? = null,
     onOpenSectionMainline: ((Int) -> Unit)? = null,
     onEnsureUnstructuredSectioned: (() -> Unit)? = null,
+    onRecordPageDwell: ((bookId: String, tocNodeId: String, page: Int, pagesTotal: Int, dwellMs: Long) -> Unit)? = null,
+    onToggleChapterRead: ((bookId: String, tocNodeId: String, pagesTotal: Int, read: Boolean) -> Unit)? = null,
+    onMuteConcept: ((conceptId: String) -> Unit)? = null,
+    onOpenCrossBookPage: ((bookId: String, page: Int, quoteAnchor: String?) -> Unit)? = null,
     hinge: Hinge? = LocalBookHinge.current,
     onExportNotes: ((Textbook, Int) -> Unit)? = null,
     courseContext: CourseReaderContext? = null,
@@ -396,6 +401,51 @@ internal fun TextbookReader(
     var practiceInputFocused by remember(book.id) { mutableStateOf(false) }
     val currentChapterGroup = remember(book.id, book.lessons, currentSectionIndex) {
         ChapterCompanionGrouping.groupForSection(book, currentSectionIndex)
+    }
+    val bookChapterSpans = remember(book.id, book.lessons, book.pages) { BookChapterResolver.chapters(book) }
+    val currentChapterSpan = remember(bookChapterSpans, currentSectionIndex, ui.page) {
+        BookChapterResolver.chapterForLesson(book, currentSectionIndex)
+            ?: BookChapterResolver.chapterForPage(book, ui.page)
+    }
+    val dwellThresholdMs = LocalChapterDwellMs.current
+    var localBooklistRev by remember(book.id) { mutableIntStateOf(0) }
+    var chapterReadStates by remember(book.id) { mutableStateOf<Map<String, ChapterReadState>>(emptyMap()) }
+    var crossBookCards by remember(book.id) { mutableStateOf<List<CrossBookCompanionCard>>(emptyList()) }
+
+    // 真实停留已读计时器：仅在当前页连续停留 >= 8 秒（测试可注入更短阈值）才记入 book_chapter_progress；
+    // 通过目录跳章或快速滑过会自动取消本协程，被跳过的中间章节绝不标为已读。
+    LaunchedEffect(book.id, ui.page, currentChapterSpan?.tocNodeId, ui.source, dwellThresholdMs) {
+        if (ui.source != null) return@LaunchedEffect
+        val span = currentChapterSpan ?: return@LaunchedEffect
+        val waitMs = dwellThresholdMs.coerceAtLeast(1L)
+        delay(waitMs)
+        val recordedDwell = maxOf(waitMs, ChapterReadPolicy.MIN_DWELL_MS)
+        if (onRecordPageDwell != null) {
+            onRecordPageDwell(book.id, span.tocNodeId, ui.page, span.pagesTotal, recordedDwell)
+        } else {
+            withContext(Dispatchers.IO) {
+                runCatching { library.recordPageDwell(book.id, span.tocNodeId, ui.page, span.pagesTotal, recordedDwell) }
+            }
+            localBooklistRev++
+        }
+    }
+
+    LaunchedEffect(book.id, currentChapterSpan?.tocNodeId, currentSection?.firstPage, currentSection?.lastPage, ui.activeBooklistId, ui.booklistRevision, localBooklistRev) {
+        val loaded = withContext(Dispatchers.IO) {
+            val states = library.chapterProgressMap(book.id).mapValues { it.value.readState }
+            val pageRange = currentSection?.let { it.firstPage..it.lastPage }
+                ?: currentChapterSpan?.let { it.firstPage..it.lastPage }
+                ?: (ui.page..ui.page)
+            val cards = library.companionCrossBookCards(
+                currentBookId = book.id,
+                currentChapterId = currentChapterSpan?.tocNodeId,
+                currentPageRange = pageRange,
+                activeBooklistId = ui.activeBooklistId,
+            )
+            states to cards
+        }
+        chapterReadStates = loaded.first
+        crossBookCards = loaded.second
     }
     var practiceDraft by remember(book.id, currentChapterGroup?.chapterId) {
         val nodeId = currentChapterGroup?.chapterId ?: currentSection?.id ?: "p${ui.page}"
@@ -841,7 +891,7 @@ internal fun TextbookReader(
                     else -> false
                 }
             }
-            .pointerInput(Unit) {
+            .pointerInput(book.id) {
                 awaitPointerEventScope {
                     val topEdgePx = with(density) { 48.dp.toPx() }
                     val bottomEdgePx = with(density) { 48.dp.toPx() }
@@ -1098,6 +1148,29 @@ internal fun TextbookReader(
                                 else companionTab = ReaderCompanionTab.EXPLAIN
                             },
                             onInputFocusChanged = { practiceInputFocused = it },
+                            bottomContent = if (crossBookCards.isNotEmpty()) {
+                                {
+                                    CrossBookCompanionSection(
+                                        cards = crossBookCards,
+                                        onJumpToBookPage = { targetBookId, targetPage, quote ->
+                                            if (onOpenCrossBookPage != null) {
+                                                onOpenCrossBookPage(targetBookId, targetPage, quote)
+                                            }
+                                        },
+                                        onMuteConcept = { conceptId ->
+                                            crossBookCards = crossBookCards.filterNot { it.conceptId == conceptId }
+                                            if (onMuteConcept != null) {
+                                                onMuteConcept(conceptId)
+                                            } else {
+                                                scope.launch(Dispatchers.IO) {
+                                                    runCatching { library.setConceptMuted(conceptId, true) }
+                                                    localBooklistRev++
+                                                }
+                                            }
+                                        },
+                                    )
+                                }
+                            } else null,
                         )
                     }
                 }
@@ -1385,6 +1458,24 @@ internal fun TextbookReader(
             onToggleBookmark = { toggleBookmark(it) },
             onReorganizeSections = onReorganizeSections,
             onClose = { tocOpen = false },
+            chapterReadStates = chapterReadStates,
+            lessonChapterId = { lesson, idx ->
+                BookChapterResolver.chapterForLesson(book, idx)?.tocNodeId ?: lesson.id
+            },
+            onToggleChapterRead = { lesson, idx, nextRead ->
+                val span = BookChapterResolver.chapterForLesson(book, idx)
+                val nodeId = span?.tocNodeId ?: lesson.id
+                val pagesTotal = span?.pagesTotal ?: (lesson.lastPage - lesson.firstPage + 1).coerceAtLeast(1)
+                chapterReadStates = chapterReadStates + (nodeId to if (nextRead) ChapterReadState.READ else ChapterReadState.UNREAD)
+                if (onToggleChapterRead != null) {
+                    onToggleChapterRead(book.id, nodeId, pagesTotal, nextRead)
+                } else {
+                    scope.launch(Dispatchers.IO) {
+                        runCatching { library.setChapterManualReadState(book.id, nodeId, pagesTotal, nextRead) }
+                        localBooklistRev++
+                    }
+                }
+            },
             modifier = Modifier.align(Alignment.CenterStart).padding(top = if (showHud) 44.dp else 0.dp),
         )
 

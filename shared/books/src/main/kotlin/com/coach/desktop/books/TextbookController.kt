@@ -18,7 +18,7 @@ import kotlinx.coroutines.withContext
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 
-internal enum class BookScreen { HOME, COURSE, READER, LEARNING, REVIEWS, REVIEWING }
+internal enum class BookScreen { HOME, COURSE, BOOKLIST, READER, LEARNING, REVIEWS, REVIEWING }
 internal enum class BookPrompt { IMPORTED, START, AFTER_READING, QUESTIONS }
 internal enum class MultiDropAction { COURSE, BOOKLIST, SEPARATE }
 internal data class PendingMultiDrop(val paths: List<Path>, val onStaged: () -> Unit = {})
@@ -54,9 +54,16 @@ internal data class LibraryUi(
     val pendingCourseJump: BookPassage? = null,
     val courseNotice: String? = null,
     val courseBusy: Boolean = false,
+    /** 当前打开的书单 ID（从书单进入阅读器时保留上下文，返回时回到该书单页）。 */
+    val activeBooklistId: String? = null,
+    /** 书单后台正在执行两阶段共同主题对齐时为 true。 */
+    val booklistAligning: Boolean = false,
+    /** 章节已读、主题静音或共享笔记变更递增版本号，驱动书单页与伴读抽屉即时刷新。 */
+    val booklistRevision: Int = 0,
 )
 
 internal class TextbookController(val library: TextbookLibrary, var structureProvider: BookStructureProvider? = null) {
+    var conceptSemanticJudge: ConceptSemanticJudge? = null
     private val mutable = MutableStateFlow(LibraryUi(initialized = false))
     val state = mutable.asStateFlow()
     private val actions = Mutex()
@@ -355,9 +362,136 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         } else null,
                     )
                 }
+                if (kind == CollectionKind.BOOKLIST && allIds.size >= 2) {
+                    launchBooklistAlignment(id)
+                }
             }
         } finally {
             onStaged()
+        }
+    }
+
+    suspend fun openBooklist(collectionId: String) = action {
+        val collections = library.collectionSummaries()
+        require(collections.any { it.record.id == collectionId && it.record.kind == CollectionKind.BOOKLIST }) { "这份书单已不在列表中。" }
+        library.closeReview()
+        library.clearOpenSession()
+        mutable.update { current ->
+            current.copy(
+                collections = collections,
+                screen = BookScreen.BOOKLIST,
+                activeBooklistId = collectionId,
+                prompt = null,
+                source = null,
+                review = null,
+                initialized = true,
+            )
+        }
+    }
+
+    fun addBooksToBooklist(
+        collectionId: String,
+        existingBookIds: List<String>,
+        newFiles: List<Path>,
+        onStaged: () -> Unit = {},
+    ): Job = backgroundScope.launch {
+        try {
+            action {
+                val now = System.currentTimeMillis()
+                val importedIds = mutableListOf<String>()
+                for (path in newFiles) {
+                    val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
+                    val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
+                    importedIds += staged.book.id
+                }
+                val currentMembers = library.collectionMaterials(collectionId)
+                val existingSet = currentMembers.map { it.materialId }.toSet()
+                val toAdd = (existingBookIds + importedIds).distinct().filterNot { it in existingSet }
+                var nextOrd = (currentMembers.maxOfOrNull { it.ordinal } ?: -1) + 1
+                for (bookId in toAdd) {
+                    library.attachMaterial(
+                        CollectionMaterialRecord(
+                            collectionId = collectionId,
+                            materialId = bookId,
+                            role = "LIST_BOOK",
+                            ordinal = nextOrd++,
+                            addedAt = now,
+                        ),
+                    )
+                }
+                val catalog = library.catalog()
+                val collections = library.collectionSummaries()
+                mutable.update { current ->
+                    current.copy(
+                        catalog = catalog,
+                        collections = collections,
+                        booklistRevision = current.booklistRevision + 1,
+                        importNotice = if (toAdd.isNotEmpty()) BookImportNotice(System.nanoTime(), "已向书单加入 ${toAdd.size} 本书。") else current.importNotice,
+                    )
+                }
+                val totalAfter = collections.firstOrNull { it.record.id == collectionId }?.materialIds?.size ?: 0
+                if (totalAfter >= 2) {
+                    launchBooklistAlignment(collectionId)
+                }
+            }
+        } finally {
+            onStaged()
+        }
+    }
+
+    fun launchBooklistAlignment(collectionId: String, judgeOverride: ConceptSemanticJudge? = null): Job =
+        backgroundScope.launch {
+            mutable.update { it.copy(booklistAligning = true) }
+            try {
+                val judge = judgeOverride ?: conceptSemanticJudge ?: HeuristicConceptSemanticJudge
+                BooklistAlignmentEngine.alignBooklist(library, collectionId, judge)
+                val collections = library.collectionSummaries()
+                mutable.update { current ->
+                    current.copy(
+                        collections = collections,
+                        booklistRevision = current.booklistRevision + 1,
+                    )
+                }
+            } finally {
+                mutable.update { it.copy(booklistAligning = false) }
+            }
+        }
+
+    fun recordPageDwell(bookId: String, tocNodeId: String, page: Int, pagesTotal: Int, dwellMs: Long = ChapterReadPolicy.MIN_DWELL_MS) {
+        backgroundScope.launch {
+            val updated = runCatching {
+                library.recordPageDwell(bookId, tocNodeId, page, pagesTotal, dwellMs)
+            }.getOrNull()
+            if (updated != null) {
+                mutable.update { it.copy(booklistRevision = it.booklistRevision + 1) }
+            }
+        }
+    }
+
+    fun setChapterManualReadState(bookId: String, tocNodeId: String, pagesTotal: Int, read: Boolean) {
+        backgroundScope.launch {
+            runCatching { library.setChapterManualReadState(bookId, tocNodeId, pagesTotal, read) }
+            mutable.update { it.copy(booklistRevision = it.booklistRevision + 1) }
+        }
+    }
+
+    fun setConceptMuted(conceptId: String, muted: Boolean) {
+        backgroundScope.launch {
+            runCatching { library.setConceptMuted(conceptId, muted) }
+            val collections = runCatching { library.collectionSummaries() }.getOrNull()
+            mutable.update { current ->
+                current.copy(
+                    collections = collections ?: current.collections,
+                    booklistRevision = current.booklistRevision + 1,
+                )
+            }
+        }
+    }
+
+    fun saveConceptSharedNote(conceptId: String, note: String) {
+        backgroundScope.launch {
+            runCatching { library.saveConceptSharedNote(conceptId, note) }
+            mutable.update { it.copy(booklistRevision = it.booklistRevision + 1) }
         }
     }
 
@@ -1011,6 +1145,27 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     pendingCourseJump = null,
                 )
             }
+        } else if (cur.screen == BookScreen.BOOKLIST) {
+            library.clearOpenSession()
+            mutable.update {
+                it.copy(
+                    screen = BookScreen.HOME,
+                    activeBooklistId = null,
+                    collections = library.collectionSummaries(),
+                    review = null,
+                    prompt = null,
+                )
+            }
+        } else if (cur.screen == BookScreen.READER && cur.activeBooklistId != null) {
+            library.clearOpenSession()
+            mutable.update {
+                it.copy(
+                    screen = BookScreen.BOOKLIST,
+                    collections = library.collectionSummaries(),
+                    review = null,
+                    prompt = null,
+                )
+            }
         } else {
             val fromReview = cur.review != null
             library.closeReview()
@@ -1025,6 +1180,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     activeCourseDetail = null,
                     pendingCourseJump = null,
                     courseNotice = null,
+                    activeBooklistId = if (fromReview) it.activeBooklistId else null,
                     reviews = library.reviews(),
                     todayQueue = library.reviewQueue(),
                 )

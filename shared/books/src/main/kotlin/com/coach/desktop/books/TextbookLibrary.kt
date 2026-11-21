@@ -35,6 +35,7 @@ import java.util.zip.ZipFile
 internal data class CollectionSummary(
     val record: MaterialCollectionRecord,
     val materialIds: List<String>,
+    val activeConceptCount: Int = 0,
 )
 
 internal data class StartupLoadSnapshot(
@@ -1913,7 +1914,8 @@ internal class TextbookLibrary(
     private fun collectionSummaries(db: Connection): List<CollectionSummary> {
         if (!BookSchemaMigration.tableExists(db, "collections")) return emptyList()
         return MaterialCollectionStore.collections(db).map { col ->
-            CollectionSummary(col, MaterialCollectionStore.materials(db, col.id).map { it.materialId })
+            val conceptCount = if (col.kind == CollectionKind.BOOKLIST) ConceptStore.countActiveConcepts(db, col.id) else 0
+            CollectionSummary(col, MaterialCollectionStore.materials(db, col.id).map { it.materialId }, conceptCount)
         }
     }
 
@@ -2005,6 +2007,67 @@ internal class TextbookLibrary(
 
     @Synchronized fun saveChapterCompanion(bookId: String, chapterId: String, pack: BookCompanionPack) = database().use { db ->
         ChapterProgressStore.saveCachedPack(db, bookId, chapterId, pack)
+    }
+
+    @Synchronized fun recordPageDwell(
+        bookId: String,
+        tocNodeId: String,
+        page: Int,
+        pagesTotal: Int,
+        dwellMs: Long = ChapterReadPolicy.MIN_DWELL_MS,
+    ): ChapterProgressRecord? = database().use { db ->
+        BooklistProgressStore.recordPageDwell(db, bookId, tocNodeId, page, pagesTotal, dwellMs)
+    }
+
+    @Synchronized fun setChapterManualReadState(
+        bookId: String,
+        tocNodeId: String,
+        pagesTotal: Int,
+        read: Boolean,
+    ): ChapterProgressRecord? = database().use { db ->
+        BooklistProgressStore.setManualReadState(db, bookId, tocNodeId, pagesTotal, read)
+    }
+
+    @Synchronized fun chapterProgressMap(bookId: String): Map<String, ChapterProgressRecord> = database().use { db ->
+        BooklistProgressStore.loadForBook(db, bookId)
+    }
+
+    @Synchronized fun ftsCandidatePages(bookId: String, query: String): List<Int> = database().use { db ->
+        BookFtsStore.queryCandidatePages(db, bookId, query).orEmpty()
+    }
+
+    @Synchronized fun saveAlignedConcepts(
+        collectionId: String,
+        entities: List<ConceptEntityRecord>,
+        mentions: List<ConceptMentionRecord>,
+        links: List<ConceptLinkRecord>,
+    ) = database().use { db ->
+        ConceptStore.saveAlignedConcepts(db, collectionId, entities, mentions, links)
+    }
+
+    @Synchronized fun setConceptMuted(conceptId: String, muted: Boolean): Boolean = database().use { db ->
+        ConceptStore.setConceptMuted(db, conceptId, muted)
+    }
+
+    @Synchronized fun saveConceptSharedNote(conceptId: String, sharedNote: String): Boolean = database().use { db ->
+        ConceptStore.saveSharedNote(db, conceptId, sharedNote)
+    }
+
+    @Synchronized fun booklistConcepts(
+        collectionId: String,
+        bookTitles: Map<String, String>,
+        chapterTitlesByBook: Map<String, Map<String, String>>,
+    ): BooklistConceptsSnapshot = database().use { db ->
+        ConceptStore.loadBooklistConcepts(db, collectionId, bookTitles, chapterTitlesByBook)
+    }
+
+    @Synchronized fun companionCrossBookCards(
+        currentBookId: String,
+        currentChapterId: String?,
+        currentPageRange: IntRange,
+        activeBooklistId: String? = null,
+    ): List<CrossBookCompanionCard> = database().use { db ->
+        ConceptStore.queryCompanionCardsForSection(db, currentBookId, currentChapterId, currentPageRange, activeBooklistId)
     }
 
     /** 节末可选选择题作答：写入本地答案、错题/猜的复习队列与知识小结梯。 */

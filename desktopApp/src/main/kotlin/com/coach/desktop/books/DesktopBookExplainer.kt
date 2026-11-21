@@ -220,6 +220,24 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         }
     }
 
+    open suspend fun alignBooklistConcepts(requestJson: JsonObject): JsonObject? {
+        val paired = identity ?: return null
+        val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library")
+        return try {
+            val reply = http.alignBooklistConcepts(requestJson)
+            if (reply.statusCode == 401) {
+                markRevoked()
+                null
+            } else reply.body
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        } finally {
+            http.close()
+        }
+    }
+
     private suspend fun sendGuide(input: JsonObject, context: List<SourceBlock>, requestId: String): SectionGuideResult {
         val (body, refused) = sendRaw(input, context, requestId)
         if (refused != null) return SectionGuideResult.Refused(refused.message, refused.trouble)

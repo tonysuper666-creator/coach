@@ -9,6 +9,10 @@
 #  - 同意框的按钮字小，OCR 会把「允许并讲解」认成「允许百甫」「允许并讲鱈」：判断框在不在认标题和「不允许」，
 #    落点从整词退化到「允许并」再到标题下面含「允许」的那一行，「关没关」要标题和两个按钮都不在；
 #  - 弹窗淡出的过渡帧里标题还剩残影、按钮已经不在这一帧：判「暂不开启」要连拍几帧，不拿单帧判死；
+#  - 底栏「开始边看边学」进提交态会被 OCR 读成「始边边下」「万始边边」：认它先整词、再「开始边看」截断、
+#    再「这次怎么读」下面含「始边」的最低一行（弹窗 chip 在上面，不会误认），最后才用放大两倍的暗字识别；
+#  - 弹窗还在时按钮一时认不出来，就隔一拍重拍等文字恢复或弹窗自己关（-stuckSec），不因一次认不出就 break；
+#    真等到头还认不出才报「认不出来了」，不拿旧坐标再点；
 #  - 追问找标题时见过「思考」就不再往回滚（那会把刚追加的回答推出视野）。
 # 函数体从 friend-path-worker.ps1 里按原文截取，屏幕与输入都换成本文件的假实现。
 $ErrorActionPreference = 'Stop'
@@ -22,7 +26,7 @@ function Check([string]$name, [bool]$ok, [string]$detail = '') {
     "$tag $name$(if ($detail) { " ($detail)" })"
 }
 
-# 把 Get-LineBox / Find-OnRow / Click-Label / Click-Until / Find-DialogPath 原样取出来跑。
+# 把 Get-LineBox / Find-OnRow / Click-Label / Click-Until / Find-DialogPath / Find-Step5Confirm 原样取出来跑。
 $src = Get-Content -LiteralPath (Join-Path $repo 'tools/smoke/friend-path-worker.ps1') -Raw -Encoding UTF8
 $start = $src.IndexOf('function Get-LineBox')
 $end = $src.IndexOf('$env:JAVA_HOME', $start)
@@ -39,6 +43,7 @@ function New-Line([string]$text, [int]$x, [int]$y, [int]$w, [int]$h) {
 # $script:queue 非空时按帧序换屏（淡出过渡那种「这一帧没有、下一帧才有」的用例要用）。
 $script:screen = @()
 $script:queue = $null
+$script:LastPng = 'frame.png'
 $script:clicks = New-Object System.Collections.ArrayList
 $script:onClick = $null
 function Shot([int]$n, [string]$tag) {
@@ -308,6 +313,67 @@ Check 'step4-dismiss-stops-when-dialog-gone' (($null -eq $off) -and $script:queu
 $script:screen = $ghost; $script:Last = $ghost; $script:queue = @($ghost, $ghost); $script:clicks.Clear()
 $off = Find-AcrossFrames 3 'dismiss' $findOff $goneOff
 Check 'step4-dismiss-null-while-still-up' (($null -eq $off) -and (Find-Text $script:Last '要开始学吗')) "off=$off"
+
+# 30. 第 5 步底栏那个提交按钮在提交态被 OCR 读成「始边边下」「万始边边」（11-21 06:2x L2/L3/L4 都是）。
+#     认它要退到「始边」残片，而且取标题下面最低那一行——不能落到弹窗里的「边看边学」chip 上。
+$step5Verify = @(
+    (New-Line '这次怎么读' 420 660 120 22),
+    (New-Line '看书' 420 700 60 30),
+    (New-Line '边看边学' 496 700 110 30),
+    (New-Line '做题学' 622 700 80 30),
+    (New-Line '开始边看边学' 900 780 130 30)
+)
+$step5Mis1 = @(
+    (New-Line '这次怎么读' 420 660 120 22),
+    (New-Line '边看边学' 496 700 110 30),
+    (New-Line '始边边下' 900 780 110 30)
+)
+$step5Mis2 = @(
+    (New-Line '这次怎么读' 420 660 120 22),
+    (New-Line '边看边学' 496 700 110 30),
+    (New-Line '万始边边' 900 780 110 30)
+)
+$step5ChipOnly = @(
+    (New-Line '这次怎么读' 420 660 120 22),
+    (New-Line '边看边学' 496 700 110 30)
+)
+$c0 = Find-Step5Confirm $step5Verify 'frame.png'
+$c1 = Find-Step5Confirm $step5Mis1 'frame.png'
+$c2 = Find-Step5Confirm $step5Mis2 'frame.png'
+Check 'step5-confirm-exact-on-normal-frame' ($c0 -and $c0.Y -eq 795) "y=$(if ($c0) { $c0.Y } else { 'null' })"
+Check 'step5-confirm-misread-still-finds-bottom-button' ($c1 -and $c1.Y -eq 795) "y=$(if ($c1) { $c1.Y } else { 'null' })"
+Check 'step5-confirm-second-misread' ($c2 -and $c2.Y -eq 795) "y=$(if ($c2) { $c2.Y } else { 'null' })"
+Check 'step5-confirm-ignores-dialog-chip' ($null -eq (Find-Step5Confirm $step5ChipOnly 'frame.png')) ''
+Check 'step5-confirm-done-on-misread-frame' ([bool](Find-Step5Confirm $step5Mis1 'frame.png')) ''
+
+# 31. 点完进了提交态、按钮标签一时认不出来（OCR 错字）：弹窗还开着就别当场 break，
+#     等一拍文字恢复后补点第二下，第二下弹窗关掉才算成（旧实现只点 1 次就判死）。
+$step5Closed = @((New-Line '书架' 620 80 80 30), (New-Line '开始学' 620 520 100 30))
+$script:blind = 0
+$findBlind = { param($l) if ($script:blind -gt 0) { $script:blind--; return $null }; Find-Step5Confirm $l 'frame.png' }
+$done5 = { param($l) -not (Find-Text $l '这次怎么读') }
+$script:screen = @($step5Verify); $script:Last = $step5Verify; $script:queue = $null; $script:clicks.Clear()
+$script:onClick = { if ($script:clicks.Count -eq 1) { $script:blind = 2 }; if ($script:clicks.Count -eq 2) { $script:screen = $step5Closed } }
+$err = ''
+try { Click-Until 5 $findBlind $done5 '点了「开始边看边学」但弹窗没关' -sec 1 -tries 8 -pauseMs 1 -stuckSec 1 } catch { $err = "$_" }
+Check 'click-until-waits-out-unreadable-button' ($script:clicks.Count -eq 2 -and -not $err) "clicks=$($script:clicks.Count) err=$err"
+
+# 32. 按钮真的没了、弹窗也没关：等满 $stuckSec 还是认不出来就停手，消息里说清是「认不出来了」，
+#     别谎报「点了 N 次状态没变」。
+$script:blind = 0
+$script:screen = @($step5Verify); $script:Last = $step5Verify; $script:queue = $null; $script:clicks.Clear()
+$script:onClick = { if ($script:clicks.Count -eq 1) { $script:blind = 99 } }
+$err = ''
+try { Click-Until 5 $findBlind $done5 '点了「开始边看边学」但弹窗没关' -sec 1 -tries 8 -pauseMs 1 -stuckSec 1 } catch { $err = "$_" }
+Check 'click-until-reports-lost-button' ($script:clicks.Count -eq 1 -and $err -like '*认不出来*') "clicks=$($script:clicks.Count) err=$err"
+
+# 33. 等待期间弹窗自己关掉了：不再补点，直接算成。
+$script:blind = 0
+$script:screen = @($step5Verify); $script:Last = $step5Verify; $script:queue = $null; $script:clicks.Clear()
+$script:onClick = { $script:screen = $step5Closed }
+$err = ''
+try { Click-Until 5 $findBlind $done5 '点了「开始边看边学」但弹窗没关' -sec 1 -tries 8 -pauseMs 1 -stuckSec 3 } catch { $err = "$_" }
+Check 'click-until-done-while-waiting' ($script:clicks.Count -eq 1 -and -not $err) "clicks=$($script:clicks.Count) err=$err"
 
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"

@@ -245,7 +245,10 @@ function Click-Label([int]$n, [string[]]$labels, [string]$why, [int]$sec = 15) {
 # L2 底按钮已变「开始边看边学」但点完弹窗没提交，而 L4 独跑时三下都一次过。
 # 所以「点过一次」不算数，只认这一帧的状态；状态没变就按新一帧重定位再点，
 # 连位置都找不到了就停手（用旧坐标再点一下只会点在别的控件上）。
-function Click-Until([int]$n, [scriptblock]$Find, [scriptblock]$Done, [string]$why, [int]$sec = 15, [int]$tries = 4, [int]$pauseMs = 0) {
+# 但「找不到」也要分两种：按钮真的没了（页面变了）就停手；按钮还在、只是这十几秒被
+# ui.busy 弄灰、标签被 OCR 读成「始边边下」这种，就不能当场 break——$stuckSec > 0 时
+# 隔一拍重拍，等文字恢复或弹窗自己关掉（11-21 06:2x 三路就是这样只点了 1 次就判死）。
+function Click-Until([int]$n, [scriptblock]$Find, [scriptblock]$Done, [string]$why, [int]$sec = 15, [int]$tries = 4, [int]$pauseMs = 0, [int]$stuckSec = 0) {
     if (& $Done (Shot $n 'entry-check')) { return }
     $m = $null; $deadline = (Get-Date).AddSeconds($sec)
     do {
@@ -253,6 +256,7 @@ function Click-Until([int]$n, [scriptblock]$Find, [scriptblock]$Done, [string]$w
         if (-not $m) { Start-Sleep -Seconds 2 }
     } while (-not $m -and (Get-Date) -lt $deadline)
     if (-not $m) { Fail $n $why }
+    $lostAt = 0
     foreach ($try in 1..$tries) {
         Click-At $m.X $m.Y
         Start-Sleep -Milliseconds 1000
@@ -262,17 +266,28 @@ function Click-Until([int]$n, [scriptblock]$Find, [scriptblock]$Done, [string]$w
         # 四路同写会 SQLITE_BUSY 卡十几秒）。这里等一拍再按新一帧重定位，别把重试额度在几百毫秒里烧光。
         if ($pauseMs -gt 0) { Start-Sleep -Milliseconds $pauseMs; $lines = Shot $n "entry${try}p" }
         $again = & $Find $lines
+        if (-not $again -and $stuckSec -gt 0) {
+            $stuckStop = (Get-Date).AddSeconds($stuckSec); $k = 0
+            while (-not $again -and (Get-Date) -lt $stuckStop) {
+                $k++
+                Start-Sleep -Milliseconds 800
+                $lines = Shot $n "entry${try}w$k"
+                if (& $Done $lines) { return }
+                $again = & $Find $lines
+            }
+        }
         if (-not $again) {
             Start-Sleep -Milliseconds 800
             $lines = Shot $n "entry${try}b"
             if (& $Done $lines) { return }
             $again = & $Find $lines
         }
-        if (-not $again) { break }
+        if (-not $again) { $lostAt = $try; break }
         $m = $again
     }
     $last = (Shot $n 'entry-fail') | ForEach-Object { $_.Text }
-    Fail $n "$why（点了 $try 次状态没变；屏上：$((@($last) -join ' / ')))"
+    $detail = if ($lostAt -gt 0) { "点完第 $lostAt 次按钮就认不出来了（没敢按旧坐标再点）" } else { "点了 $try 次状态没变" }
+    Fail $n "$why（$detail；屏上：$((@($last) -join ' / ')))"
 }
 # 点一下等一个原生窗口真的出现：$IsOpen 成立才算这一下生效。第 2 步「上传教材」在四路并行时会丢：
 # 11-21 04:26 L4 点完交锁后 3 ms 就被别路抢走前台，选书框根本没开，Choose-File 只会干等 20 秒判失败。
@@ -431,6 +446,31 @@ function Find-DialogPath($lines, [string]$needle) {
         if (-not $best -or $m.Y -lt $best.Y) { $best = $m }
     }
     return $best
+}
+# 第 5 步底栏那个提交按钮在提交态会被 OCR 错读：11-21 06:2x 三路都把它读成「始边边下」「万始边边」
+# （同帧「暂不开启」读成「鱈不启」「鱈不万启」）。所以认它不能只认整词：先认整词，再认「开始边看」
+# （整词被截断）和「始边」残片，取「这次怎么读」下面的最低那一行（弹窗里的 chip 在上、底栏按钮在下）；
+# 都不行再用放大两倍的暗字识别。'边看边' 这种残片不能用来兜底——弹窗里的 chip 就长这样，会点回 chip。
+function Find-Step5Confirm($lines, [string]$png) {
+    foreach ($s in '开始边看边学', '开始边看') {
+        $m = Find-Text $lines $s
+        if ($m) { return $m }
+    }
+    $top = Find-Text $lines '这次怎么读'
+    $best = $null
+    foreach ($l in $lines) {
+        $t = $l.Text -replace '\s', ''
+        if ($t -notmatch '始边') { continue }
+        $b = Get-LineBox $l
+        $y = [int](($b.Y1 + $b.Y2) / 2)
+        if ($top -and $y -le $top.Y) { continue }
+        if (-not $best -or $y -gt $best.Y) {
+            $best = [pscustomobject]@{ X = [int](($b.X1 + $b.X2) / 2); Y = $y; X1 = [int]$b.X1; X2 = [int]$b.X2; Y1 = [int]$b.Y1; Y2 = [int]$b.Y2 }
+        }
+    }
+    if ($best) { return $best }
+    if ($png) { return Find-DimButton $png '开始边看边学' }
+    return $null
 }
 
 $env:JAVA_HOME = 'C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot'; $env:GRADLE_USER_HOME = 'D:\agent\gradle-home'; $env:Path = "$env:JAVA_HOME\bin;$env:Path"
@@ -936,9 +976,12 @@ try {
         # 入口三下都要看到状态才走下一句：弹窗开了（「这次怎么读」）、底按钮换成「开始边看边学」、弹窗关掉。
         # 弹窗标题「开始学这本教材」里也有「开始学」，所以认按钮时跳过这一行，别把标题当按钮点。
         # 写库没完时按钮是灰的、点了不算数，所以每下给 8 次机会、每次隔 2 秒。
+        # 底栏按钮进提交态后会被 OCR 读成「始边边下」「万始边边」（11-21 06:2x L2/L3/L4 都是），
+        # 所以第 2、3 下认它一律走 Find-Step5Confirm（整词 → 截断 → 「始边」残片 → 暗字放大）；
+        # 第 3 下弹窗还开着时，认不出按钮也不再当场 break，留 12 秒等文字恢复或弹窗自己关。
         Click-Until 5 { param($l) foreach ($line in $l) { if ($line.Text -match '这本教材') { continue }; $m = Find-Text @($line) '开始学'; if ($m) { return $m } } } { param($l) [bool](Find-Text $l '这次怎么读') } '点了「开始学」但开始学的弹窗一直没开' -tries 8 -pauseMs 2000
-        Click-Until 5 { param($l) Find-DialogPath $l '边看边学' } { param($l) [bool](Find-Text $l '开始边看边学') } '点了「边看边学」但底按钮没换成「开始边看边学」' -tries 8 -pauseMs 2000
-        Click-Until 5 { param($l) Find-Text $l '开始边看边学' } { param($l) -not (Find-Text $l '这次怎么读') } '点了「开始边看边学」但弹窗没关' -tries 8 -pauseMs 2000
+        Click-Until 5 { param($l) Find-DialogPath $l '边看边学' } { param($l) [bool](Find-Step5Confirm $l $script:LastPng) } '点了「边看边学」但底按钮没换成「开始边看边学」' -tries 8 -pauseMs 2000
+        Click-Until 5 { param($l) Find-Step5Confirm $l $script:LastPng } { param($l) -not (Find-Text $l '这次怎么读') } '点了「开始边看边学」但弹窗没关' -tries 8 -pauseMs 2000 -stuckSec 12
         # 选中经授权的整节：目录 → 滚到序号 → 点 → 收起；核对「本节原文 · 第 N 页」就是授权页，才允许发请求
         Start-Sleep -Seconds 4
         Click-Label 5 @('目录') '找不到「目录」'; Start-Sleep -Seconds 3

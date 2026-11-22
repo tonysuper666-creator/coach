@@ -1577,24 +1577,25 @@ try {
         Hover $strip.X $strip.Y; Start-Sleep -Milliseconds 400
         $null = Click-At $strip.X $strip.Y; Start-Sleep -Seconds 1
         $null = Shot 6 'pretest'
-        # 等题目卡：题号行「第 i / N 题」；空卡直接写「本章暂无读前自测题。」。
-        $deadline = (Get-Date).AddSeconds(40); $q = $null
+        # 等题目卡：题号行「第 i / N 题」（Windows OCR 偶把简写「题」认成繁写「題」）；空卡直接写「本章暂无读前自测题。」。
+        $deadline = (Get-Date).AddSeconds(60); $q = $null
         while ((Get-Date) -lt $deadline -and -not $q) {
             $lines = $script:Last
-            $q = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^第\d+[/／]\d+题' } | Select-Object -First 1
+            $q = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^第\d+[/／]\d+[题題]' } | Select-Object -First 1
             if ($q) { break }
             # 伴读包没拿到时同一句话顶在模块下面（和第 ⑤ 步同一个 ExplainTrouble.UNREACHABLE）：
             # 这不是「界面变了」，是客户端没收到 JSON（门没转发 companion/chapter 时回的是 nginx 404 页）。
             $why6 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '连不上' } | Select-Object -First 1
             if ($why6) { Fail 6 "伴读包没拿到，读前自测出不来：卡上写「$($why6.Text -replace '\s', '')」——先查 $($env:COACH_URL) 这道门有没有转发 POST /v1/library/companion/chapter（见 6-pretest*.png）" }
-            $noQ = $lines | Where-Object { ($_.Text -replace '\s', '') -match '本章暂无读前自测题' } | Select-Object -First 1
+            $noQ = $lines | Where-Object { ($_.Text -replace '\s', '') -match '本章暂无读前自测[题題]' } | Select-Object -First 1
             if ($noQ) { Fail 6 "读前自测是空的：$($noQ.Text)（见 6-pretest*.png）" }
             Start-Sleep -Seconds 1; $null = Shot 6 'pretest-wait'
         }
-        if (-not $q) { Fail 6 '切到「读前自测」后 40 秒内没有出现题目卡（见 6-pretest*.png）' }
+        if (-not $q) { Fail 6 '切到「读前自测」后 60 秒内没有出现题目卡（见 6-pretest*.png）' }
         # 题目卡比抽屉高：先把「提交」滚进视野——它和「这题是猜的」同一行，在最下面。
         # 找到「提交」后，它正上方那几行里最低的一行就是最后一个选项：点它 → 点「提交」→ 看反馈。
         # 没选中时提交是灰的、按了不出反馈，所以按「点选项 → 点提交 → 认反馈」闭环，最多换 6 个落点。
+        Hover $midX ([int]($winH * 0.50)); Start-Sleep -Milliseconds 250
         $answered = $false; $fb = $null; $tries6 = 0; $prev6 = ''; $still6 = 0
         $deadline = (Get-Date).AddSeconds(90)
         while ((Get-Date) -lt $deadline -and -not $answered) {
@@ -1605,17 +1606,26 @@ try {
                 if ($frame -eq $prev6) { $still6++ } else { $still6 = 0 }
                 $prev6 = $frame
                 if ($still6 -ge 5) { Fail 6 '题目卡上一直没看到「提交」按钮（见 6-pretest*.png）' }
-                Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.78)) -3
+                Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.72)) -3
                 Start-Sleep -Milliseconds 700
                 $null = Shot 6 'pretest-scroll'
                 continue
             }
             $sb = Get-LineBox $sub
+            if ($sb.Y -gt [int]($winH * 0.80) -and $still6 -lt 2) {
+                $frame = (@($lines | ForEach-Object { $_.Text }) -join '|')
+                if ($frame -eq $prev6) { $still6++ } else { $still6 = 0 }
+                $prev6 = $frame
+                Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.72)) -2
+                Start-Sleep -Milliseconds 700
+                $null = Shot 6 'pretest-scroll'
+                continue
+            }
             $above = @($lines | Where-Object {
                 $t = ($_.Text -replace '\s', '')
                 $bb = Get-LineBox $_
                 $bb.Y -lt ($sb.Y - 6) -and $bb.Y -gt ($sb.Y - 110) -and
-                $t -notmatch '这题是猜的|先猜一猜|^第\d+[/／]\d+题$|提交'
+                $t -notmatch '这题是猜的|先猜一猜|^第\d+[/／]\d+[题題]$|提交'
             } | Sort-Object { (Get-LineBox $_).Y })
             if ($above.Count -eq 0) {
                 Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.56)) 3

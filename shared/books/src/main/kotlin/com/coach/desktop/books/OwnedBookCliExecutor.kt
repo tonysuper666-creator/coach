@@ -35,7 +35,7 @@ internal class OwnedBookCliExecutor(
     private val policy: OwnedBookOutboundPolicy = DenyOwnedBookOutbound,
 ) : OwnedBookExecutor {
     override suspend fun answer(prompt: OwnedBookPrompt): OwnedBookAnswer {
-        require(policy.allows(prompt)) { "Private book outbound AI is not authorized" }
+        require(policy.allows(prompt)) { "Private book outbound requests are not authorized" }
         require(prompt.excerpts.isNotEmpty())
         require((prompt.action == OwnedBookAction.EXPLAIN && prompt.question == null) ||
             (prompt.action == OwnedBookAction.ASK && !prompt.question.isNullOrBlank()))

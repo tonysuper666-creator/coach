@@ -24,7 +24,10 @@ internal data class LocalReviewQueue(val cards: List<LocalBookReview>, val defer
  * Wrong/guessed answers stay in today's same queue. No server identity or exam policy is inferred.
  * Rows from the retired 1/3/7 scheme are mapped once by [LegacyStreakMigration] and never become due later.
  */
-internal class TextbookReviewStore(private val today: () -> Long) {
+internal class TextbookReviewStore(
+    private val today: () -> Long,
+    private val nowMs: () -> Long = { System.currentTimeMillis() },
+) {
     fun migrate(db: Connection, manageTransaction: Boolean = true) {
         if (manageTransaction) db.autoCommit = false
         try {
@@ -135,19 +138,36 @@ internal class TextbookReviewStore(private val today: () -> Long) {
         return next
     }
 
-    /** Today's due cards ranked by `syllabusWeight x (1 - R)`; the first [FsrsDailyQueue.defaultCap] are shown. */
+    /** Today's due cards ranked by real `NeedScore` (with eligible 72h T2 cohorts silently mixed in). */
     fun queue(db: Connection): LocalReviewQueue {
-        val due = pending(db)
         val day = today()
+        val now = nowMs()
+        MasteryStore.enqueueEligibleT2Reviews(db, day, now)
+        val due = pending(db)
+        if (due.isEmpty()) return LocalReviewQueue(emptyList(), 0)
         val byId = due.associateBy { "${it.book}/${it.lesson}/${it.mode}" }
-        val cards = due.map { row ->
+        val scored = due.map { row ->
+            val cardId = "${row.book}/${row.lesson}/${row.mode}"
             val state = fsrsState(db, row.book, row.lesson, row.mode) ?: Fsrs5.newCard(row.dueDay)
-            // A wrong or guessed answer today keeps the card in today's queue even though FSRS points to tomorrow.
-            FsrsQueueCard("${row.book}/${row.lesson}/${row.mode}", row.book, row.lesson, 0.5,
-                state.copy(dueDay = minOf(state.dueDay, day)))
+            val effectiveState = state.copy(dueDay = minOf(state.dueDay, day))
+            val retrievability = Fsrs5.retrievability(effectiveState, day)
+            val need = MasteryStore.needScoreForReviewCard(db, row.book, row.lesson, retrievability, now)
+            val waitingDays = (day - row.dueDay).coerceAtLeast(0L)
+            Triple(
+                FsrsQueueCard(cardId, row.book, row.lesson, need.coerceAtLeast(0.01), effectiveState),
+                need,
+                waitingDays,
+            )
         }
-        val plan = dailyQueue.plan(cards, day)
-        return LocalReviewQueue(plan.priority.mapNotNull { byId[it.card.cardId] }, plan.deferred.size)
+        val cap = dailyQueue.capFor(day, null)
+        val ordered = scored.sortedWith(
+            compareByDescending<Triple<FsrsQueueCard, Double, Long>> { it.second }
+                .thenByDescending { it.third }
+                .thenBy { it.first.cardId },
+        )
+        val priority = ordered.take(cap).mapNotNull { byId[it.first.cardId] }
+        val deferred = (ordered.size - priority.size).coerceAtLeast(0)
+        return LocalReviewQueue(priority, deferred)
     }
 
     private fun sources(mode: QuestionMode, practice: Practice, answer: PracticeAnswer): Int {
@@ -255,7 +275,10 @@ internal class TextbookReviewStore(private val today: () -> Long) {
             s.setString(9, old.book); s.setString(10, old.lesson); s.setString(11, old.mode.name)
             check(s.executeUpdate() == 1) { "无法保存复习作答。" }
         }
-        if (newAttempt) append(db, old.book, old.lesson, old.mode, answer, "REVIEW", today())
+        if (newAttempt) {
+            append(db, old.book, old.lesson, old.mode, answer, "REVIEW", today())
+            syncReviewMastery(db, old, correct, answer.guessed, fsrsState(db, old.book, old.lesson, old.mode))
+        }
     }
 
     /** Explicit single-card self-rating: 没记住 -> AGAIN, 记住了 -> GOOD (guessed cards never count as independent GOOD). */
@@ -291,6 +314,51 @@ internal class TextbookReviewStore(private val today: () -> Long) {
             check(s.executeUpdate() == 1) { "无法保存复习评分。" }
         }
         append(db, old.book, old.lesson, old.mode, recordedAnswer, "REVIEW", today())
+        syncReviewMastery(db, old, remembered, recordedAnswer.guessed, next)
+    }
+
+    private fun syncReviewMastery(
+        db: Connection,
+        review: LocalBookReview,
+        correct: Boolean,
+        guessed: Boolean,
+        fsrs: FsrsState?,
+    ) {
+        val now = nowMs()
+        val score = if (correct && !guessed) 1.0 else 0.0
+        if (review.lesson.startsWith(MasteryStore.T2_LESSON_PREFIX)) {
+            val cohortId = review.lesson.removePrefix(MasteryStore.T2_LESSON_PREFIX)
+            val cohort = MasteryStore.recordLearningGainT2(db, cohortId, score, guessed, now)
+            if (cohort != null) {
+                MasteryStore.recordEvidence(
+                    db = db,
+                    bookId = review.book,
+                    tocNodeId = cohort.chapterId,
+                    page = 1,
+                    canonicalName = review.lessonTitle.removeSuffix(" · 三天后再测"),
+                    signal = LearnerSignalType.DELAYED_TRANSFER_T2,
+                    scoreRatio = score,
+                    guessed = guessed,
+                    fsrsStability = fsrs?.stability,
+                    conceptKeyOverride = cohort.conceptKey,
+                    nowMs = now,
+                )
+            }
+            return
+        }
+        val baseLesson = review.lesson.substringBefore("#q")
+        MasteryStore.recordEvidence(
+            db = db,
+            bookId = review.book,
+            tocNodeId = baseLesson,
+            page = 1,
+            canonicalName = review.lessonTitle,
+            signal = LearnerSignalType.POST_QUIZ_T1,
+            scoreRatio = score,
+            guessed = guessed,
+            fsrsStability = fsrs?.stability,
+            nowMs = now,
+        )
     }
 
     fun active(db: Connection): LocalBookReview? = db.createStatement().use { s -> s.executeQuery("""SELECT r.*

@@ -68,6 +68,7 @@ internal fun SingleBookCompanionPanel(
     onDraftChange: (ChapterPracticeDraft) -> Unit,
     onOpenAnchor: (BookCompanionAnchor) -> Unit,
     onCommitQuizAnswer: (BookLesson, Int, Practice, PracticeAnswer) -> Unit,
+    onCommitPretestAnswer: ((BookLesson, Int, Practice, PracticeAnswer) -> Unit)? = null,
     onAskAboutText: (String) -> Unit,
     onOpenLogin: () -> Unit,
     onInputFocusChanged: (Boolean) -> Unit = {},
@@ -83,8 +84,19 @@ internal fun SingleBookCompanionPanel(
     val currentSection = book.lessons.getOrNull(currentSectionIndex)
     var packState by remember(book.id, chapterGroup?.chapterId) { mutableStateOf<CompanionPackState>(CompanionPackState.Idle) }
     var fetchNonce by remember(book.id, chapterGroup?.chapterId) { mutableIntStateOf(0) }
+    var sectionMastery by remember(book.id, currentSection?.id, chapterGroup?.chapterId) { mutableStateOf<ConceptMasteryRecord?>(null) }
     val activeModule = CompanionModuleTab.fromWire(draft.activeModule)
     val scroll = rememberScrollState()
+
+    LaunchedEffect(book.id, currentSection?.id, chapterGroup?.chapterId, draft.pretestSubmitted.size, draft.practiceSubmitted.size) {
+        sectionMastery = withContext(Dispatchers.IO) {
+            val all = library.conceptMasteryForBook(book.id)
+            val secId = currentSection?.id
+            val chapId = chapterGroup?.chapterId
+            all.firstOrNull { it.tocNodeId == secId }
+                ?: all.firstOrNull { it.tocNodeId == chapId }
+        }
+    }
 
     LaunchedEffect(explainer) { if (!explainer.loaded) explainer.load() }
 
@@ -240,6 +252,10 @@ internal fun SingleBookCompanionPanel(
                         when (activeModule) {
                             CompanionModuleTab.KEY_POINTS -> KeyPointsModuleView(
                                 pack = pack,
+                                collapseBasicJargon = MasteryEngine.shouldCollapseBasicTerminology(sectionMastery),
+                                weakSectionHint = if (MasteryEngine.shouldHighlightWeakSection(sectionMastery)) {
+                                    sectionMastery?.let { MasteryEngine.buildHomeFocusMeta(it, currentSection?.title, currentPage) }
+                                } else null,
                                 onOpenAnchor = onOpenAnchor,
                                 onAskTerm = onAskAboutText,
                                 onJumpPretest = { updateDraft { it.copy(activeModule = CompanionModuleTab.PRETEST.name) } },
@@ -276,7 +292,8 @@ internal fun SingleBookCompanionPanel(
                                     }
                                     val sec = book.lessons.firstOrNull { it.id == quiz.sectionId } ?: currentSection
                                     if (sec != null && chosen.isNotBlank()) {
-                                        onCommitQuizAnswer(
+                                        val commit = onCommitPretestAnswer ?: onCommitQuizAnswer
+                                        commit(
                                             sec,
                                             idx,
                                             Practice(quiz.stem, quiz.anchor?.quoteAnchor.orEmpty(), quiz.correctOption, quiz.options),
@@ -375,11 +392,19 @@ internal fun SingleBookCompanionPanel(
 @Composable
 private fun KeyPointsModuleView(
     pack: BookCompanionPack,
+    collapseBasicJargon: Boolean = false,
+    weakSectionHint: String? = null,
     onOpenAnchor: (BookCompanionAnchor) -> Unit,
     onAskTerm: (String) -> Unit,
     onJumpPretest: () -> Unit,
 ) {
     val colors = CoachTheme.colors
+    if (!weakSectionHint.isNullOrBlank()) {
+        CoachCardMeta(
+            text = weakSectionHint,
+            modifier = Modifier.fillMaxWidth().testTag("companion-weak-hint"),
+        )
+    }
     if (pack.coreQuestion.isNotBlank()) {
         PaperCard(Modifier.fillMaxWidth().testTag("companion-core-question"), contentPadding = PaddingValues(12.dp), contentSpacing = 6.dp) {
             Text("核心问题", style = MaterialTheme.typography.labelMedium, color = v7Pine())
@@ -401,24 +426,41 @@ private fun KeyPointsModuleView(
         }
     }
     if (pack.jargonGlosses.isNotEmpty()) {
+        var jargonExpanded by remember(pack.chapterId, collapseBasicJargon) { mutableStateOf(!collapseBasicJargon) }
         PaperCard(Modifier.fillMaxWidth().testTag("companion-jargon-card"), contentPadding = PaddingValues(12.dp), contentSpacing = 8.dp) {
-            Text("专业词扫障", style = MaterialTheme.typography.labelMedium, color = v7Pine())
-            for (g in pack.jargonGlosses) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.Top,
-                ) {
-                    Text(
-                        g.term,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = colors.fgPrimary,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.widthIn(min = 72.dp, max = 130.dp),
-                    )
-                    Text(g.plainMeaning, style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.weight(1f))
-                    V7TextButton({ onAskTerm("解释术语 ${g.term} 在本节里的准确含义。") }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) {
-                        Text("问", style = MaterialTheme.typography.labelSmall)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(role = Role.Button) { jargonExpanded = !jargonExpanded }
+                    .pointerHoverIcon(PointerIcon.Hand)
+                    .testTag(if (jargonExpanded) "companion-jargon-header" else "companion-jargon-collapsed"),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = if (jargonExpanded) "专业词扫障" else "专业词扫障（${pack.jargonGlosses.size} 项已掌握，点开查看 ▸）",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (jargonExpanded) v7Pine() else colors.fgSecondary,
+                )
+            }
+            if (jargonExpanded) {
+                for (g in pack.jargonGlosses) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Text(
+                            g.term,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = colors.fgPrimary,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.widthIn(min = 72.dp, max = 130.dp),
+                        )
+                        Text(g.plainMeaning, style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.weight(1f))
+                        V7TextButton({ onAskTerm("解释术语 ${g.term} 在本节里的准确含义。") }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) {
+                            Text("问", style = MaterialTheme.typography.labelSmall)
+                        }
                     }
                 }
             }

@@ -144,45 +144,68 @@ class SableThemeContractTest {
     }
 
     /**
-     * UX-12/13：界面文案里不能露出内部词或厂商词。
-     * 直接扫 `shared/ui/src/commonMain` 的字符串字面量（注释不算），新加文案一旦带上
-     * 机器名、厂商名、协议词或错误码，这里就先红，不用等到人眼在界面上撞见。
+     * UX-12/13 & 2.0-AI-1 全仓零「AI」禁用词静态门禁：
+     * 扫描 `shared/ui`、`shared/books` 与 `desktopApp` 全部用户可见字符串字面量（注释与 `os.name` 系统探测行除外），
+     * 拦截独立词 `AI`、`智能`、`小助手`、闪光图标 `✨` 以及内部词与上游厂商名。
      */
     @Test fun userVisibleCopyHasNoInternalOrVendorTerms() {
-        val banned = listOf(
-            "Mac", "winbox", "朋友服务", "Anthropic", "OpenAI", "Gemini", "Claude",
-            "HTTP 4", "HTTP 5", "traceId",
+        val bannedSubstrings = listOf(
+            "winbox", "朋友服务", "Anthropic", "OpenAI", "Gemini", "Claude",
+            "DeepSeek", "Grok", "ChatGPT", "HTTP 4", "HTTP 5", "traceId",
+            "智能", "小助手", "✨",
         )
-        val root = locateCommonMain()
+        val bannedAiWord = Regex("(?<![A-Za-z0-9_])AI(?![A-Za-z0-9_])")
+        val repoRoot = locateRepoRoot()
+        val scanRoots = listOf(
+            java.io.File(repoRoot, "shared/ui/src/commonMain"),
+            java.io.File(repoRoot, "shared/books/src/main"),
+            java.io.File(repoRoot, "desktopApp/src/main"),
+        )
+        for (dir in scanRoots) {
+            assertTrue(dir.isDirectory, "缺少静态门禁扫描目录: ${dir.path}")
+        }
         val literal = Regex("\"((?:[^\"\\\\]|\\\\.)*)\"")
         val offenders = mutableListOf<String>()
-        root.walkTopDown().filter { it.isFile && it.extension == "kt" }.forEach { file ->
-            // 注释讲内部实现没关系：先去掉注释，只看真正的字符串字面量。
-            val code = file.readText()
-                .replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL), "")
-                .replace(Regex("//[^\\n]*"), "")
-            literal.findAll(code).forEach { match ->
-                val text = match.groupValues[1]
-                banned.firstOrNull { it in text }?.let { term ->
-                    offenders += "${file.relativeTo(root).invariantSeparatorsPath}: 「$text」含「$term」"
+        for (root in scanRoots) {
+            root.walkTopDown().filter { it.isFile && it.extension == "kt" }.forEach { file ->
+                val withoutBlockComments = file.readText()
+                    .replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL), "")
+                withoutBlockComments.lineSequence().forEachIndexed { lineIdx, rawLine ->
+                    val line = rawLine.replace(Regex("//[^\\n]*"), "")
+                    val isOsNameProbe = "System.getProperty(\"os.name\")" in line
+                    literal.findAll(line).forEach { match ->
+                        val text = match.groupValues[1]
+                        val rel = file.relativeTo(repoRoot).invariantSeparatorsPath
+                        bannedSubstrings.firstOrNull { it in text }?.let { term ->
+                            offenders += "$rel:${lineIdx + 1}: 「$text」含禁用词「$term」"
+                        }
+                        if (bannedAiWord.containsMatchIn(text)) {
+                            offenders += "$rel:${lineIdx + 1}: 「$text」含禁用词「AI」"
+                        }
+                        if (!isOsNameProbe && "Mac" in text) {
+                            offenders += "$rel:${lineIdx + 1}: 「$text」含内部词「Mac」"
+                        }
+                    }
                 }
             }
         }
         assertTrue(
             offenders.isEmpty(),
-            "用户可见文案里出现了内部词：" + offenders.joinToString(separator = "\n"),
+            "用户可见文案里出现了禁用词或内部词：\n" + offenders.joinToString(separator = "\n"),
         )
     }
 
     /** 测试可能在仓库根，也可能在 `shared/ui` 里跑：两处都认，找不到就报出起点方便定位。 */
-    private fun locateCommonMain(): java.io.File {
+    private fun locateRepoRoot(): java.io.File {
         val start = java.io.File(System.getProperty("user.dir")).absoluteFile
         var dir: java.io.File? = start
         while (dir != null) {
-            java.io.File(dir, "shared/ui/src/commonMain").takeIf { it.isDirectory }?.let { return it }
-            if (dir.name == "ui") java.io.File(dir, "src/commonMain").takeIf { it.isDirectory }?.let { return it }
+            val uiDir = java.io.File(dir, "shared/ui/src/commonMain")
+            val booksDir = java.io.File(dir, "shared/books/src/main")
+            val desktopDir = java.io.File(dir, "desktopApp/src/main")
+            if (uiDir.isDirectory && booksDir.isDirectory && desktopDir.isDirectory) return dir
             dir = dir.parentFile
         }
-        error("找不到 shared/ui/src/commonMain（从 $start 起找）")
+        error("找不到仓库根目录（从 $start 起找）")
     }
 }

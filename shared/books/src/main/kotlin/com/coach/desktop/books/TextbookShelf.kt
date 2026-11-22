@@ -276,14 +276,25 @@ internal fun LibraryHome(
                                     val savedDraft = ui.activePracticeDraft?.takeIf {
                                         it.bookId == focusBook.id && it.hasMeaningfulDraft()
                                     }
-                                    val metaText = buildString {
-                                        if (!chapterTitle.isNullOrBlank() && chapterTitle != focusBook.title) {
-                                            append(chapterTitle)
-                                            append(" · ")
+                                    val masteryRec = if (savedDraft == null) {
+                                        ui.focusRecommendation?.takeIf { it.bookId == focusBook.id }
+                                    } else null
+                                    val metaText = when {
+                                        savedDraft != null -> buildString {
+                                            if (!chapterTitle.isNullOrBlank() && chapterTitle != focusBook.title) {
+                                                append(chapterTitle)
+                                                append(" · ")
+                                            }
+                                            append("上次停在第 ${savedDraft.page} / $pageTotal 页 · 练习草稿已保存")
                                         }
-                                        val shownPage = savedDraft?.page ?: focusBook.readingPage
-                                        append("上次停在第 $shownPage / $pageTotal 页")
-                                        if (savedDraft != null) append(" · 练习草稿已保存")
+                                        masteryRec != null -> masteryRec.metaLine
+                                        else -> buildString {
+                                            if (!chapterTitle.isNullOrBlank() && chapterTitle != focusBook.title) {
+                                                append(chapterTitle)
+                                                append(" · ")
+                                            }
+                                            append("上次停在第 ${focusBook.readingPage} / $pageTotal 页")
+                                        }
                                     }
                                     CoachCardMeta(metaText, Modifier.testTag("home-focus-meta"))
                                 }

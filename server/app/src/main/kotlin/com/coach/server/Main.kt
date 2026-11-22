@@ -151,13 +151,19 @@ fun main(args: Array<String>): Unit = runBlocking {
         itemTransport = courseMockTransport,
         ledger = tokenLedger,
     )
+    val studyModeService = StudyModePackService(
+        streamTransport = HaikuStudyModeStreamTransport(chat.bridge),
+        batchTransport = HaikuStudyModeBatchTransport(chat.bridge),
+        ledger = tokenLedger,
+        cache = StudyModePackCache(data.resolve("study-mode-cache")),
+    )
     val port = System.getenv("COACH_PORT")?.toInt() ?: 18791
     val publicPort = System.getenv("COACH_PUBLIC_PORT")?.toInt()?.also {
         require(it in 1..65535 && it != 18791 && it != port) { "COACH_PUBLIC_PORT must be a distinct non-production port" }
     }
     val sable = publicPort?.let { SableSessions(actor, data.resolveSibling("${data.fileName}-sable-credentials")) }
     val friends = FriendAccess(data.resolve("friends"), sableSessions = sable)
-    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation,friends); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); libraryExplainRoutes(actor,chat.reader,reader,imports,friends,companionPipeline,tokenLedger,courseAlignPipeline,courseTopicPipeline,courseVisionService); booklistAlignmentRoutes(actor,friends,booklistAligner); practiceGradeRoutes(actor,friends,practiceGradeService); collectionQaRoutes(actor,friends,collectionQaService); courseMockRoutes(actor,friends,courseMockService); readerRoutes(actor,pushes,reader,mainline) }
+    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation,friends); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); libraryExplainRoutes(actor,chat.reader,reader,imports,friends,companionPipeline,tokenLedger,courseAlignPipeline,courseTopicPipeline,courseVisionService); booklistAlignmentRoutes(actor,friends,booklistAligner); practiceGradeRoutes(actor,friends,practiceGradeService); collectionQaRoutes(actor,friends,collectionQaService); courseMockRoutes(actor,friends,courseMockService); studyModeRoutes(actor,reader,friends,studyModeService); readerRoutes(actor,pushes,reader,mainline) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")
@@ -184,6 +190,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         practiceGradeRoutes(actor,friends=friends,service=practiceGradeService)
         collectionQaRoutes(actor,friends=friends,service=collectionQaService)
         courseMockRoutes(actor,friends=friends,service=courseMockService)
+        studyModeRoutes(actor,friends=friends,service=studyModeService)
     }.apply { engineConfig.apply { connectionGroupSize=1; workerGroupSize=1; callGroupSize=2 }; start(false) } }
     local.start(wait = false)
     println("COACH loopback ready http://127.0.0.1:$port/v1/hello")

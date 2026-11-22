@@ -126,6 +126,8 @@ class UsageObservation(private val logs: Path, private val state: Path,
 internal fun usageRoute(path: String): String {
     if (path in setOf("/v1/pair", "/v1/pairing-code", "/v1/devices", "/v1/prewarm", "/v1/usage", "/v1/hello", "/v1/commands", "/v1/ws", "/v1/math", "/offline-pack", "/v1/library/companion/chapter", "/v1/library/companion/ledger")) return path
     if (Regex("/v1/devices/[^/]+").matches(path)) return "/v1/devices/{device}"
+    if (Regex("/api/books/[^/]+/modes/[^/]+").matches(path)) return "/api/books/{id}/modes/{mode}"
+    if (Regex("/api/books/[^/]+/book-map/batch").matches(path)) return "/api/books/{id}/book-map/batch"
     val parts = path.split('/')
     if (parts.size >= 5 && parts[1] == "v1" && parts[2] == "courses") {
         val tail = parts.drop(4)

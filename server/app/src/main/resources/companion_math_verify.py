@@ -228,8 +228,13 @@ def check_eval(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def check_ratio(spec: dict[str, Any]) -> dict[str, Any]:
-    claimed_raw = spec.get("claimed", spec.get("lhs", ""))
-    expected_raw = spec.get("expected", spec.get("rhs", ""))
+    num_raw = str(spec.get("numerator", "") or "").strip()
+    den_raw = str(spec.get("denominator", "") or "").strip()
+    if num_raw and den_raw:
+        claimed_raw = f"({num_raw})/({den_raw})"
+    else:
+        claimed_raw = str(spec.get("claimed") or spec.get("lhs") or spec.get("expression") or "").strip()
+    expected_raw = str(spec.get("expected") or spec.get("rhs") or "").strip()
     tol = float(spec.get("tolerance", 1e-6))
     claimed = safe_parse(claimed_raw)
     expected = safe_parse(expected_raw)
@@ -260,12 +265,33 @@ def substitute_known_variables(expr: sp.Expr, variables: dict[str, Any], exclude
 
 
 def check_solve(spec: dict[str, Any]) -> dict[str, Any]:
+    eq_raw = normalize_math_text(spec.get("equation", ""))
+    # If caller put an inequality inside solve.equation (e.g. "15/2 - P/4 >= 0" with expected "P <= 30"), delegate cleanly
+    if eq_raw and re.search(r"(<=|>=|<|>)", eq_raw):
+        delegated = dict(spec)
+        delegated["inequality"] = eq_raw
+        exp_raw = normalize_math_text(spec.get("expected", ""))
+        m_exp = re.search(r"(<=|>=|<|>)\s*(.+)$", exp_raw)
+        if m_exp and not delegated.get("expectedRelation"):
+            delegated["expectedRelation"] = m_exp.group(1).strip()
+            delegated["expectedThreshold"] = m_exp.group(2).strip()
+        return check_inequality(delegated)
+
     var_name = normalize_math_text(spec.get("variable", "x"))
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", var_name):
         raise ValueError(f"invalid_variable:{var_name}")
-    lhs = safe_parse(spec.get("lhs", spec.get("expression", "")))
-    rhs_raw = spec.get("rhs", "0")
-    rhs = safe_parse(rhs_raw) if str(rhs_raw).strip() else sp.Integer(0)
+    lhs_raw = str(spec.get("lhs") or spec.get("expression") or "").strip()
+    rhs_raw = str(spec.get("rhs", "") or "").strip()
+    if not lhs_raw and eq_raw:
+        if "=" in eq_raw:
+            parts = eq_raw.split("=", 1)
+            lhs_raw = parts[0].strip()
+            rhs_raw = parts[1].strip()
+        else:
+            lhs_raw = eq_raw
+            rhs_raw = "0"
+    lhs = safe_parse(lhs_raw)
+    rhs = safe_parse(rhs_raw) if rhs_raw else sp.Integer(0)
     variables = spec.get("variables") or {}
     diff = substitute_known_variables(lhs - rhs, variables, exclude_var=var_name)
     expected = safe_parse(spec.get("expected", spec.get("expectedThreshold", "")))
@@ -296,6 +322,14 @@ def check_solve(spec: dict[str, Any]) -> dict[str, Any]:
 
 def check_inequality(spec: dict[str, Any]) -> dict[str, Any]:
     ineq_raw = normalize_math_text(spec.get("inequality", ""))
+    if not ineq_raw:
+        left_part = normalize_math_text(spec.get("lhs") or spec.get("expression") or "")
+        op_part = normalize_math_text(spec.get("op") or spec.get("relation") or "")
+        right_part = normalize_math_text(spec.get("rhs") or spec.get("expected") or "")
+        if left_part and op_part and right_part:
+            ineq_raw = f"{left_part} {op_part} {right_part}"
+        elif left_part and re.search(r"(<=|>=|<|>)", op_part):
+            ineq_raw = f"{left_part} {op_part}"
     var_name = normalize_math_text(spec.get("variable", ""))
     expected_rel = normalize_math_text(spec.get("expectedRelation", ""))
     expected_thr_raw = spec.get("expectedThreshold", "")

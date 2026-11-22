@@ -433,4 +433,387 @@ class CompanionMathVerifierTest {
         val mathStep = "写出期望效用 E[U(I)]p = pU(IS) + (1-p)U(IH)。"
         assertEquals(mathStep, VerbatimOverlapGuard.scrubOverlaps(mathStep, mathSrc))
     }
+
+    @Test
+    fun deterministicGateCatchesFormulaOnlyWrongCoefficientWithoutChineseMultiplierWording() = runBlocking {
+        val blocks = listOf(
+            SectionBlockInput(
+                id = "syn:p175:0",
+                pdfPage = 175,
+                startUtf16 = 0,
+                text = "UB = 3\nXj + M\nj= 2\n1\nA buyer values a unit at 50% more than a seller.",
+            ),
+            SectionBlockInput(
+                id = "syn:p184:0",
+                pdfPage = 184,
+                startUtf16 = 0,
+                text = "Suppose instead buyers value a unit 150% more than sellers.",
+            ),
+        )
+        val cues = SourcePageMathExtractor.extract(blocks)
+
+        // ZERO Chinese "系数为/N倍" words — pure formula coefficient 3 instead of 3/2
+        for (badFormula in listOf(
+            "U_B = 3*X_j + M",
+            "U_B = 3X_j + M",
+            "ΔU_B = 3*E[X] - P",
+            "ΔU_B = 3*(P/2) - P",
+            "ΔU_B = 3(P/2) - P",
+            "U_B = 3 · 25 = 75",
+        )) {
+            val fails = DeterministicMathChecks.checkDeterministicConsistency(
+                itemText = badFormula,
+                sourceCues = cues,
+                anchorPage = 175,
+            )
+            assertTrue(
+                fails.any { it.startsWith("formula_coefficient_mismatch(p.175)") },
+                "Must catch formula-only wrong coefficient in '$badFormula', got $fails",
+            )
+        }
+
+        // Wrong coefficient inside declared mathChecks only (even if prose has no formula!)
+        val checkOnlyFails = DeterministicMathChecks.checkDeterministicConsistency(
+            itemText = "检验买家期望估值。",
+            sourceCues = cues,
+            anchorPage = 175,
+            declaredChecks = listOf(
+                MathCheckSpec(kind = "eval", expression = "3*X", variables = mapOf("X" to "25"), expected = "75"),
+            ),
+        )
+        assertTrue(
+            checkOnlyFails.any { it.startsWith("formula_coefficient_mismatch(p.175)") },
+            "Must catch wrong coefficient in declared mathChecks, got $checkOnlyFails",
+        )
+
+        // Wrong coefficient 5 (dropped /2) AND mistranslated 1.5 (3/2) on p.184 where source ONLY says "150% more" (5/2)
+        val bad5Fails = DeterministicMathChecks.checkDeterministicConsistency(
+            itemText = "ΔU_B = 5*(P/2) - P",
+            sourceCues = cues,
+            anchorPage = 184,
+        )
+        assertTrue(
+            bad5Fails.any { it.startsWith("formula_coefficient_mismatch(p.184)") },
+            "Must catch dropped /2 integer 5 on 150% more page, got $bad5Fails",
+        )
+        val bad15Fails = DeterministicMathChecks.checkDeterministicConsistency(
+            itemText = "U_B = 1.5*X_j + M",
+            sourceCues = cues,
+            anchorPage = 184,
+        )
+        assertTrue(
+            bad15Fails.any { it.startsWith("formula_coefficient_mistranslation(p.184)") },
+            "Must catch 1.5*X on 150%-more-only page, got $bad15Fails",
+        )
+
+        // Valid formulas with 3/2, 1.5, or 3*X_j/2 MUST pass cleanly
+        for (goodFormula in listOf(
+            "U_B = (3/2)*X_j + M",
+            "U_B = 3*X_j/2 + M",
+            "ΔU_B = (3/2)*E[X] - P",
+            "ΔU_B = 1.5*(P/2) - P",
+        )) {
+            val ok = DeterministicMathChecks.checkDeterministicConsistency(
+                itemText = goodFormula,
+                sourceCues = cues,
+                anchorPage = 175,
+            )
+            assertTrue(ok.isEmpty(), "Valid 3/2 formula '$goodFormula' must pass, got $ok")
+        }
+
+        // End-to-end: formula-only wrong coefficient MUST be rejected & DROPPED when repair does not fix it
+        val dir = Files.createTempDirectory("coach-formula-drop-")
+        val ledger = BookTokenLedger(dir)
+        val bookId = "e".repeat(64)
+        val transport = object : BatchAiTransport {
+            override suspend fun generateSection(
+                systemPrompt: String,
+                userPrompt: String,
+                task: String,
+                batchKey: String,
+                maxTokens: Int,
+            ): BatchTransportReply {
+                val text = when (task) {
+                    "BOOK_SECTION_BATCH" -> buildJsonObject {
+                        put("coreQuestion", "测试公式系数拦截。")
+                        put("keyPoints", buildJsonArray {})
+                        put("jargonGlosses", buildJsonArray {})
+                        put("pretest", buildJsonArray {})
+                        put("derivations", buildJsonArray {
+                            add(buildJsonObject {
+                                put("title", "买家估值推导")
+                                put("setup", "质量为 X_j，其他消费为 M。")
+                                put("steps", buildJsonArray {
+                                    add(JsonPrimitive("写出买家效用：U_B = 3*X_j + M。"))
+                                    add(JsonPrimitive("令 P = 50, E[X] = 25，则 ΔU_B = 3*E[X] - P = 25。"))
+                                })
+                                put("graphCheck", "核对斜率。")
+                                put("pitfall", "注意期望质量。")
+                                put("pdfPage", 175)
+                                put("quoteAnchor", "values a unit at 50%")
+                            })
+                        })
+                        put("optionalPractice", buildJsonArray {})
+                    }.toString()
+                    // Even if LLM auditor mistakenly returns sourceMatches=true, deterministic formula gate MUST reject!
+                    "BOOK_MATH_VERIFY" -> buildJsonObject {
+                        put("itemAudits", buildJsonArray {
+                            add(buildJsonObject {
+                                put("itemId", "sec-8-2:drv:0:0")
+                                put("sourceMatches", true)
+                                put("sourceMismatchReason", "")
+                                put("sympyChecks", buildJsonArray {})
+                                put("mcqComputedAnswer", "")
+                            })
+                        })
+                    }.toString()
+                    // Repair keeps the broken formula -> MUST be dropped fail-closed!
+                    "BOOK_MATH_REPAIR" -> buildJsonObject {
+                        put("repairedItems", buildJsonArray {
+                            add(buildJsonObject {
+                                put("itemId", "sec-8-2:drv:0:0")
+                                put("title", "买家估值推导")
+                                put("setup", "质量为 X_j。")
+                                put("steps", buildJsonArray { add(JsonPrimitive("仍写 U_B = 3*X_j + M。")) })
+                                put("graphCheck", "核对斜率。")
+                                put("pitfall", "注意。")
+                                put("pdfPage", 175)
+                                put("quoteAnchor", "values a unit at 50%")
+                            })
+                        })
+                    }.toString()
+                    else -> "{}"
+                }
+                return BatchTransportReply(
+                    text = text,
+                    routeChannel = CompanionRouteChannel.HAIKU_BATCH,
+                    model = "claude-haiku-5-5",
+                    inputTokens = 100,
+                    outputTokens = 100,
+                    ttftMs = 10,
+                    elapsedMs = 20,
+                )
+            }
+        }
+        val pack = SectionConcurrentCompanionPipeline(
+            transport = transport,
+            ledger = ledger,
+            mathVerifier = CompanionMathVerifier(enableLlmAudit = true, maxRegenAttempts = 1),
+        ).generateChapter(
+            ChapterCompanionRequest(
+                bookId = bookId,
+                chapterId = "ch-formula",
+                chapterTitle = "Formula Check",
+                sections = listOf(SectionBatchInput(sectionId = "sec-8-2", title = "8.2 Model", blocks = listOf(blocks[0]))),
+            ),
+        )
+        assertTrue(pack.derivations.isEmpty(), "Formula with wrong coefficient 3 vs 3/2 MUST be dropped fail-closed")
+        assertEquals(1, pack.stats.mathAudit.finalDroppedItems)
+    }
+
+    @Test
+    fun auditFailureOrOmittedItemFailsClosedAndDropsUnauditedItems() = runBlocking {
+        val block = SectionBlockInput(
+            id = "f".repeat(64) + ":p20:0",
+            pdfPage = 20,
+            startUtf16 = 0,
+            text = "Expected value E = 0.5*100 + 0.5*200 = 150.",
+        )
+
+        // Case 1: BOOK_MATH_VERIFY throws an exception -> ALL math items MUST be dropped fail-closed!
+        val throwingTransport = object : BatchAiTransport {
+            override suspend fun generateSection(
+                systemPrompt: String,
+                userPrompt: String,
+                task: String,
+                batchKey: String,
+                maxTokens: Int,
+            ): BatchTransportReply {
+                if (task == "BOOK_MATH_VERIFY") error("simulated_audit_timeout")
+                val text = when (task) {
+                    "BOOK_SECTION_BATCH" -> buildJsonObject {
+                        put("coreQuestion", "测试审计失败关门。")
+                        put("keyPoints", buildJsonArray {})
+                        put("jargonGlosses", buildJsonArray {})
+                        put("pretest", buildJsonArray {})
+                        put("derivations", buildJsonArray {
+                            add(buildJsonObject {
+                                put("title", "期望值计算")
+                                put("setup", "两状态等概率。")
+                                put("steps", buildJsonArray { add(JsonPrimitive("E = 0.5*100 + 0.5*200 = 150。")) })
+                                put("graphCheck", "无。")
+                                put("pitfall", "无。")
+                                put("pdfPage", 20)
+                                put("quoteAnchor", "Expected value E")
+                            })
+                        })
+                        put("optionalPractice", buildJsonArray {})
+                    }.toString()
+                    "BOOK_MATH_REPAIR" -> buildJsonObject { put("repairedItems", buildJsonArray {}) }.toString()
+                    else -> "{}"
+                }
+                return BatchTransportReply(
+                    text = text,
+                    routeChannel = CompanionRouteChannel.HAIKU_BATCH,
+                    model = "claude-haiku-5-5",
+                    inputTokens = 100,
+                    outputTokens = 100,
+                    ttftMs = 10,
+                    elapsedMs = 20,
+                )
+            }
+        }
+        val packFail = SectionConcurrentCompanionPipeline(
+            transport = throwingTransport,
+            ledger = BookTokenLedger(Files.createTempDirectory("coach-audit-throw-")),
+            mathVerifier = CompanionMathVerifier(enableLlmAudit = true, maxRegenAttempts = 1),
+        ).generateChapter(
+            ChapterCompanionRequest(
+                bookId = "f".repeat(64),
+                chapterId = "ch-throw",
+                chapterTitle = "Audit Fail Closed",
+                sections = listOf(SectionBatchInput(sectionId = "sec-1", title = "1.1", blocks = listOf(block))),
+            ),
+        )
+        assertTrue(packFail.derivations.isEmpty(), "When BOOK_MATH_VERIFY throws, unaudited derivation MUST be dropped fail-closed")
+        assertEquals(1, packFail.stats.mathAudit.finalDroppedItems)
+        assertTrue(packFail.stats.mathAudit.failureSummaries.any { it.contains("audit_failed:") })
+
+        // Case 2: BOOK_MATH_VERIFY returns itemAudits for drv:0:0 ONLY and OMITS drv:0:1 -> drv:0:0 passes, drv:0:1 is dropped!
+        val omitTransport = object : BatchAiTransport {
+            override suspend fun generateSection(
+                systemPrompt: String,
+                userPrompt: String,
+                task: String,
+                batchKey: String,
+                maxTokens: Int,
+            ): BatchTransportReply {
+                val text = when (task) {
+                    "BOOK_SECTION_BATCH" -> buildJsonObject {
+                        put("coreQuestion", "测试审计漏项关门。")
+                        put("keyPoints", buildJsonArray {})
+                        put("jargonGlosses", buildJsonArray {})
+                        put("pretest", buildJsonArray {})
+                        put("derivations", buildJsonArray {
+                            add(buildJsonObject {
+                                put("title", "已审计项")
+                                put("setup", "等概率。")
+                                put("steps", buildJsonArray { add(JsonPrimitive("0.5*100 + 0.5*200 = 150。")) })
+                                put("graphCheck", "无。")
+                                put("pitfall", "无。")
+                                put("pdfPage", 20)
+                                put("quoteAnchor", "Expected value E")
+                            })
+                            add(buildJsonObject {
+                                put("title", "被审计漏掉的项")
+                                put("setup", "等概率。")
+                                put("steps", buildJsonArray { add(JsonPrimitive("0.5*100 + 0.5*200 = 150。")) })
+                                put("graphCheck", "无。")
+                                put("pitfall", "无。")
+                                put("pdfPage", 20)
+                                put("quoteAnchor", "Expected value E")
+                            })
+                        })
+                        put("optionalPractice", buildJsonArray {})
+                    }.toString()
+                    "BOOK_MATH_VERIFY" -> buildJsonObject {
+                        put("itemAudits", buildJsonArray {
+                            // Only audits sec-1:drv:0:0; intentionally omits sec-1:drv:0:1!
+                            if (userPrompt.contains("sec-1:drv:0:0")) {
+                                add(buildJsonObject {
+                                    put("itemId", "sec-1:drv:0:0")
+                                    put("sourceMatches", true)
+                                    put("sourceMismatchReason", "")
+                                    put("sympyChecks", buildJsonArray {
+                                        add(buildJsonObject {
+                                            put("kind", "eval")
+                                            put("expression", "0.5*100 + 0.5*200")
+                                            put("expected", "150")
+                                        })
+                                    })
+                                    put("mcqComputedAnswer", "")
+                                })
+                            }
+                        })
+                    }.toString()
+                    "BOOK_MATH_REPAIR" -> buildJsonObject { put("repairedItems", buildJsonArray {}) }.toString()
+                    else -> "{}"
+                }
+                return BatchTransportReply(
+                    text = text,
+                    routeChannel = CompanionRouteChannel.HAIKU_BATCH,
+                    model = "claude-haiku-5-5",
+                    inputTokens = 100,
+                    outputTokens = 100,
+                    ttftMs = 10,
+                    elapsedMs = 20,
+                )
+            }
+        }
+        val packOmit = SectionConcurrentCompanionPipeline(
+            transport = omitTransport,
+            ledger = BookTokenLedger(Files.createTempDirectory("coach-audit-omit-")),
+            mathVerifier = CompanionMathVerifier(enableLlmAudit = true, maxRegenAttempts = 1),
+        ).generateChapter(
+            ChapterCompanionRequest(
+                bookId = "f".repeat(64),
+                chapterId = "ch-omit",
+                chapterTitle = "Audit Omit Closed",
+                sections = listOf(SectionBatchInput(sectionId = "sec-1", title = "1.1", blocks = listOf(block))),
+            ),
+        )
+        assertEquals(1, packOmit.derivations.size, "Only audited item may enter pack; omitted item MUST be dropped")
+        assertEquals("sec-1:drv:0:0", packOmit.derivations.single().id)
+        assertEquals(1, packOmit.stats.mathAudit.finalDroppedItems)
+        assertTrue(packOmit.stats.mathAudit.failureSummaries.any { it.contains("audit_omitted_item:sec-1:drv:0:1") })
+    }
+
+    @Test
+    fun mathCheckSpecNormalizesSchemaAliasesAndPercentOptionMatching() {
+        val ratioSpec = MathCheckSpec.fromJson(
+            buildJsonObject {
+                put("kind", "ratio")
+                put("numerator", "1650")
+                put("denominator", "2750")
+                put("expected", "3/5")
+            },
+            defaultId = "r1",
+        )!!
+        val ineqSpec1 = MathCheckSpec.fromJson(
+            buildJsonObject {
+                put("kind", "inequality")
+                put("lhs", "0.38")
+                put("op", ">")
+                put("rhs", "0.29")
+            },
+            defaultId = "i1",
+        )!!
+        val ineqSpec2 = MathCheckSpec.fromJson(
+            buildJsonObject {
+                put("kind", "inequality")
+                put("expression", "r - p*q")
+                put("variables", buildJsonObject { put("p", "0.2"); put("r", "12"); put("q", "50") })
+                put("relation", ">")
+                put("rhs", "0")
+            },
+            defaultId = "i2",
+        )!!
+        val solveSpec = MathCheckSpec.fromJson(
+            buildJsonObject {
+                put("kind", "solve")
+                put("equation", "15/2 - P/4 >= 0")
+                put("variable", "P")
+                put("expected", "P <= 30")
+            },
+            defaultId = "s1",
+        )!!
+        val resp = SympySubprocessEngine().runBatch(listOf(ratioSpec, ineqSpec1, ineqSpec2, solveSpec))
+        assertEquals("sympy", resp.engine)
+        assertTrue(resp.results.all { it.passed }, "All normalized aliases must pass SymPy: ${resp.results}")
+
+        // 25% option must match computed 25 (percentage points) AND 0.25 (decimal)
+        assertTrue(DeterministicMathChecks.optionMatchesComputedValue("25%", "25", "25"))
+        assertTrue(DeterministicMathChecks.optionMatchesComputedValue("25%", "1/4", "0.25"))
+        assertFalse(DeterministicMathChecks.optionMatchesComputedValue("25%", "40", "40"))
+    }
 }

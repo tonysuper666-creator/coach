@@ -68,9 +68,11 @@ data class MathCheckSpec(
 
     companion object {
         fun fromJson(obj: JsonObject, defaultId: String = ""): MathCheckSpec? {
-            val kind = obj.str("kind").lowercase().ifBlank {
+            var kind = obj.str("kind").lowercase().ifBlank {
                 when {
-                    obj.str("inequality").isNotBlank() -> "inequality"
+                    obj.str("inequality").isNotBlank() || obj.str("op").isNotBlank() || obj.str("relation").isNotBlank() -> "inequality"
+                    obj.str("numerator").isNotBlank() && obj.str("denominator").isNotBlank() -> "ratio"
+                    obj.str("equation").isNotBlank() -> "solve"
                     obj.str("expression").isNotBlank() && obj.str("expected").isNotBlank() -> "eval"
                     obj.str("lhs").isNotBlank() && obj.str("rhs").isNotBlank() -> "identity"
                     else -> ""
@@ -81,18 +83,78 @@ data class MathCheckSpec(
                 val raw = (v as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
                 if (k.isBlank() || raw.isBlank()) null else k.trim() to raw
             }?.toMap().orEmpty()
+
+            var lhs = obj.str("lhs").ifBlank { obj.str("claimed") }
+            var rhs = obj.str("rhs")
+            val expression = obj.str("expression")
+            var expected = obj.str("expected")
+            var inequality = obj.str("inequality")
+            val variable = obj.str("variable")
+            var expectedRelation = obj.str("expectedRelation")
+            var expectedThreshold = obj.str("expectedThreshold")
+
+            when (kind) {
+                "ratio" -> {
+                    val num = obj.str("numerator")
+                    val den = obj.str("denominator")
+                    if (lhs.isBlank() && num.isNotBlank() && den.isNotBlank()) {
+                        lhs = "($num)/($den)"
+                    } else if (lhs.isBlank() && expression.isNotBlank()) {
+                        lhs = expression
+                    }
+                    if (rhs.isBlank() && expected.isNotBlank()) {
+                        rhs = expected
+                    }
+                }
+                "inequality" -> {
+                    if (inequality.isBlank()) {
+                        val leftPart = lhs.ifBlank { expression }
+                        val opPart = obj.str("op").ifBlank { obj.str("relation") }
+                        val rightPart = rhs.ifBlank { expected }
+                        if (leftPart.isNotBlank() && opPart.isNotBlank() && rightPart.isNotBlank()) {
+                            inequality = "$leftPart $opPart $rightPart"
+                        } else if (leftPart.isNotBlank() && Regex("""<=|>=|<|>""").containsMatchIn(opPart)) {
+                            inequality = "$leftPart $opPart"
+                        }
+                    }
+                }
+                "solve" -> {
+                    val eq = obj.str("equation")
+                    if (eq.isNotBlank()) {
+                        if (Regex("""<=|>=|<|>""").containsMatchIn(eq)) {
+                            kind = "inequality"
+                            inequality = eq
+                            val expMatch = Regex("""(<=|>=|<|>)\s*(.+)$""").find(expected)
+                            if (expMatch != null && expectedRelation.isBlank()) {
+                                expectedRelation = expMatch.groupValues[1].trim()
+                                expectedThreshold = expMatch.groupValues[2].trim()
+                            }
+                        } else if (lhs.isBlank()) {
+                            val idx = eq.indexOf('=')
+                            if (idx >= 0) {
+                                lhs = eq.substring(0, idx).trim()
+                                if (rhs.isBlank()) rhs = eq.substring(idx + 1).trim()
+                            } else {
+                                lhs = eq
+                                if (rhs.isBlank()) rhs = "0"
+                            }
+                        }
+                    }
+                }
+            }
+
             return MathCheckSpec(
                 id = obj.str("id").ifBlank { defaultId },
                 kind = kind,
-                lhs = obj.str("lhs").ifBlank { obj.str("claimed") },
-                rhs = obj.str("rhs"),
-                expression = obj.str("expression"),
+                lhs = lhs,
+                rhs = rhs,
+                expression = expression,
                 variables = vars,
-                expected = obj.str("expected"),
-                inequality = obj.str("inequality"),
-                variable = obj.str("variable"),
-                expectedRelation = obj.str("expectedRelation"),
-                expectedThreshold = obj.str("expectedThreshold"),
+                expected = expected,
+                inequality = inequality,
+                variable = variable,
+                expectedRelation = expectedRelation,
+                expectedThreshold = expectedThreshold,
                 tolerance = obj.str("tolerance").ifBlank { "0.015" },
             )
         }
@@ -583,6 +645,15 @@ object DeterministicMathChecks {
     private val FRAC_5_2_RE = Regex("""(?:\(?\s*5\s*/\s*2\s*\)?|2\.5\s*[·*×]?\s*(?:E\[|X|x))""")
     private val FRAC_3_2_RE = Regex("""(?:\(?\s*3\s*/\s*2\s*\)?|1\.5\s*[·*×]?\s*(?:E\[|X|x))""")
 
+    // Extracts explicit numeric/fractional coefficients multiplying quality/expectation/valuation expressions in formulas
+    private val FORMULA_VAR_COEFF_RE = Regex(
+        """(?<![A-Za-z0-9_/.^])(\(?\s*\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?\s*\)?|\d+(?:\.\d+)?)(?!\s*/\s*\d|\s*\^)\s*(?:[*·×]\s*|\s*)(?:(?:∑|Σ|sum)\s*)?(?:(E\s*\[\s*[A-Za-z][A-Za-z0-9_]*\s*\]|E_[A-Za-z][A-Za-z0-9_]*|[XxQq](?:_[A-Za-z0-9]+)?(?![A-Za-z0-9_]))(\s*/\s*(\d+))?|(\(\s*[Pp](?:\s*[+-]\s*[A-Za-z0-9]+)?\s*/\s*\d+\s*\)))""",
+    )
+    private val UTILITY_LHS_COEFF_RE = Regex(
+        """(?:U_?B|ΔU_?B|V_?B|ΔV_?B|E\s*\[\s*U_?B\s*\]|E\s*\[\s*V_?B\s*\]|(?:^|[\s,;(（])(?:U|P_U))\s*=\s*(?:[+\-]?\s*)(?<![A-Za-z0-9_/.^])(\(?\s*\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?\s*\)?|\d+(?:\.\d+)?)(?!\s*/\s*\d|\s*\^)\s*(?:[*·×]\s*|\s*)(?:(?:∑|Σ|sum)\s*)?(?:([A-Za-z][A-Za-z0-9_]*(?:\[[A-Za-z0-9_]+\])?|\d+(?:\.\d+)?)(\s*/\s*(\d+))?|\(\s*[A-Za-z0-9_+\-\s/*]+\))""",
+    )
+    private val NEGATION_WINDOW_RE = Regex("""(?:不是|并非|非|切勿|不要|勿|误写为?|错写为?|而非|NOT\b|not\b)\s*$""")
+
     fun needsMathVerification(quiz: CompanionQuizItem): Boolean {
         if (quiz.kind.equals("SHORT_CALC", ignoreCase = true)) return true
         val combined = buildString {
@@ -594,13 +665,80 @@ object DeterministicMathChecks {
     }
 
     /**
-     * Checks prose-vs-formula self-consistency and source-page multiplier consistency.
+     * Extracts numeric/rational coefficients directly from mathematical formulas in prose and declared `mathChecks`.
+     * Handles `U_B = 3*X_j + M`, `ΔU_B = 3*E[X] - P`, `3*(P/2) - P`, `3X`, `3*X/2` (= 3/2), `U = 5*M`, etc.
+     */
+    fun extractFormulaCoefficients(
+        formulaText: String,
+        declaredChecks: List<MathCheckSpec> = emptyList(),
+    ): List<Rational> {
+        val out = mutableListOf<Rational>()
+
+        fun parseFactor(rawToken: String, trailingDen: String): Rational? {
+            val cleaned = rawToken.trim().removePrefix("(").removeSuffix(")").trim()
+            val base = runCatching { ExactRationalEvaluator.evaluate(cleaned) }.getOrNull() ?: return null
+            if (trailingDen.isNotBlank()) {
+                val den = trailingDen.trim().toBigIntegerOrNull()
+                if (den != null && den > java.math.BigInteger.ZERO) {
+                    return base / Rational.of(den, java.math.BigInteger.ONE)
+                }
+            }
+            return base
+        }
+
+        fun scanText(raw: String, checkNegation: Boolean) {
+            if (raw.isBlank()) return
+            val norm = Normalizer.normalize(raw, Normalizer.Form.NFKC)
+                .replace('\u2212', '-')
+                .replace('\u2013', '-')
+                .replace('\u2014', '-')
+            for (m in FORMULA_VAR_COEFF_RE.findAll(norm)) {
+                if (checkNegation) {
+                    val prefix = norm.substring((m.range.first - 14).coerceAtLeast(0), m.range.first)
+                    if (NEGATION_WINDOW_RE.containsMatchIn(prefix)) continue
+                }
+                val coeff = parseFactor(m.groupValues[1], m.groupValues[4]) ?: continue
+                if (coeff > Rational.ZERO) out += coeff
+            }
+            for (m in UTILITY_LHS_COEFF_RE.findAll(norm)) {
+                if (checkNegation) {
+                    val prefix = norm.substring((m.range.first - 14).coerceAtLeast(0), m.range.first)
+                    if (NEGATION_WINDOW_RE.containsMatchIn(prefix)) continue
+                }
+                val coeff = parseFactor(m.groupValues[1], m.groupValues[4]) ?: continue
+                if (coeff > Rational.ZERO) out += coeff
+            }
+        }
+
+        scanText(formulaText, checkNegation = true)
+        for (c in declaredChecks) {
+            scanText(c.lhs, checkNegation = false)
+            scanText(c.rhs, checkNegation = false)
+            scanText(c.expression, checkNegation = false)
+            scanText(c.inequality, checkNegation = false)
+            if (c.kind.equals("ratio", ignoreCase = true)) {
+                // Also capture self-consistent wrong ratio checks like {"kind":"ratio","lhs":"3","rhs":"3"}
+                val l = runCatching { ExactRationalEvaluator.evaluate(c.lhs) }.getOrNull()
+                val r = runCatching { ExactRationalEvaluator.evaluate(c.rhs) }.getOrNull()
+                if (l != null && r != null && l == r && l > Rational.ONE) {
+                    out += l
+                }
+            }
+        }
+        return out.distinct()
+    }
+
+    /**
+     * Checks prose-vs-formula self-consistency and source-page multiplier consistency
+     * (covering BOTH Chinese multiplier phrases AND algebraic formula coefficients).
      * Returns a list of deterministic failure reasons (empty if clean).
      */
     fun checkDeterministicConsistency(
         itemText: String,
         sourceCues: SourcePageMathCues,
         anchorPage: Int?,
+        declaredChecks: List<MathCheckSpec> = emptyList(),
+        formulaTextOverride: String? = null,
     ): List<String> {
         val failures = mutableListOf<String>()
         val norm = Normalizer.normalize(itemText, Normalizer.Form.NFKC)
@@ -628,7 +766,7 @@ object DeterministicMathChecks {
             failures += "chinese_multiplier_formula_contradiction: prose claims 3x (三倍/3倍) but formula uses 3/2 (= 1.5x)"
         }
 
-        // 3. Cross-check against source-page prose multiplier cues (e.g. "50% more" => 3/2 vs claimed "系数为 3" / "三倍")
+        // 3. Cross-check against source-page prose multiplier cues (Chinese phrases AND direct formula coefficients!)
         val relevantCues = if (anchorPage != null) {
             sourceCues.multipliers.filter { it.pdfPage == anchorPage }.ifEmpty { sourceCues.multipliers }
         } else {
@@ -639,19 +777,28 @@ object DeterministicMathChecks {
             runCatching { ExactRationalEvaluator.evaluate(raw) }.getOrNull()
         }.toList()
         val allClaimedFactors = (zhTimesValues + coeffClaims).distinct()
+        val formulaCoeffs = extractFormulaCoefficients(formulaTextOverride ?: itemText, declaredChecks)
 
         for (cue in relevantCues) {
-            // Classic stacked-fraction drop error: source says "50% more" (3/2) but item claims numerator-only integer 3!
+            // Classic stacked-fraction drop error: source says "50% more" (3/2) but prose or formula uses numerator-only integer 3!
             if (cue.exactFactor.den != java.math.BigInteger.ONE) {
                 val numeratorOnly = Rational.of(cue.exactFactor.num, java.math.BigInteger.ONE)
                 if (numeratorOnly in allClaimedFactors && cue.exactFactor !in allClaimedFactors) {
                     failures += "source_multiplier_mismatch(p.${cue.pdfPage}): source says \"${cue.phrase}\" (exact factor ${cue.exactFactor} = ${cue.factorDecimal}), but item claims $numeratorOnly (dropped denominator ${cue.exactFactor.den})"
                 }
+                if (numeratorOnly in formulaCoeffs && relevantCues.none { it.exactFactor == numeratorOnly }) {
+                    failures += "formula_coefficient_mismatch(p.${cue.pdfPage}): source says \"${cue.phrase}\" (exact factor ${cue.exactFactor} = ${cue.factorDecimal}), but formula uses integer coefficient $numeratorOnly (dropped denominator ${cue.exactFactor.den})"
+                }
             }
-            // Classic mistranslation error: source says "150% more" (5/2 = 2.5) but item writes "1.5倍" (3/2)!
+            // Classic mistranslation error: source says "150% more" (5/2 = 2.5) but prose writes "1.5倍" OR formula uses 3/2 (1.5)!
             val pctOnly = cue.exactFactor - Rational.ONE
-            if (pctOnly > Rational.ONE && pctOnly in zhTimesValues && cue.exactFactor !in zhTimesValues) {
-                failures += "source_multiplier_mistranslation(p.${cue.pdfPage}): source says \"${cue.phrase}\" (exact factor ${cue.exactFactor} = ${cue.factorDecimal}x), but prose wrote ${pctOnly}x instead of adding baseline 1"
+            if (pctOnly > Rational.ONE && relevantCues.none { it.exactFactor == pctOnly }) {
+                if (pctOnly in zhTimesValues && cue.exactFactor !in zhTimesValues) {
+                    failures += "source_multiplier_mistranslation(p.${cue.pdfPage}): source says \"${cue.phrase}\" (exact factor ${cue.exactFactor} = ${cue.factorDecimal}x), but prose wrote ${pctOnly}x instead of adding baseline 1"
+                }
+                if (pctOnly in formulaCoeffs && cue.exactFactor !in formulaCoeffs) {
+                    failures += "formula_coefficient_mistranslation(p.${cue.pdfPage}): source says \"${cue.phrase}\" (exact factor ${cue.exactFactor} = ${cue.factorDecimal}), but formula uses coefficient $pctOnly instead of adding baseline 1"
+                }
             }
         }
 
@@ -665,11 +812,11 @@ object DeterministicMathChecks {
         val out = mutableListOf<MathCheckSpec>()
         var idx = 0
         for (m in INLINE_NUM_EQ_RE.findAll(norm)) {
-            val lhs = m.groupValues[1].trim()
+            val lhs = balanceOuterParens(m.groupValues[1].trim())
             val rhs = m.groupValues[2].trim()
             if (ISO_DATE_RE.matches(lhs)) continue
-            // Skip plain section numbering like "8-1"
-            if (lhs.length < 3) continue
+            // Skip plain section numbering like "8-1" or unbalanced fragments
+            if (lhs.length < 3 || !hasBalancedParens(lhs)) continue
             out += MathCheckSpec(
                 id = "$itemId:inline:${idx++}",
                 kind = "eval",
@@ -696,6 +843,29 @@ object DeterministicMathChecks {
         return out
     }
 
+    private fun balanceOuterParens(expr: String): String {
+        var s = expr.trim()
+        while (s.startsWith("(") && s.count { it == '(' } > s.count { it == ')' }) {
+            s = s.substring(1).trim()
+        }
+        while (s.endsWith(")") && s.count { it == ')' } > s.count { it == '(' }) {
+            s = s.dropLast(1).trim()
+        }
+        return s
+    }
+
+    private fun hasBalancedParens(expr: String): Boolean {
+        var depth = 0
+        for (ch in expr) {
+            if (ch == '(') depth++
+            else if (ch == ')') {
+                depth--
+                if (depth < 0) return false
+            }
+        }
+        return depth == 0
+    }
+
     /** Checks whether a computed numeric value matches a numeric MCQ `correctOption`. */
     fun optionMatchesComputedValue(correctOption: String, computedExact: String, computedDecimal: String): Boolean {
         val optNorm = Normalizer.normalize(correctOption, Normalizer.Form.NFKC)
@@ -715,15 +885,20 @@ object DeterministicMathChecks {
         // Extract candidate numbers/fractions/percentages from correctOption
         val numRe = Regex("""-?\d+(?:\.\d+)?(?:/\d+)?%?""")
         val found = numRe.findAll(optNorm).mapNotNull { m ->
-            runCatching { ExactRationalEvaluator.evaluate(m.value) }.getOrNull()
+            val hasPct = m.value.endsWith("%")
+            val r = runCatching { ExactRationalEvaluator.evaluate(m.value) }.getOrNull() ?: return@mapNotNull null
+            r to hasPct
         }.toList()
         if (found.isEmpty()) return true // Qualitative option text
         val targetBd = targetVal.toBigDecimal(4, RoundingMode.HALF_UP)
         val targetPctBd = (targetVal * Rational.of(100, 1)).toBigDecimal(4, RoundingMode.HALF_UP)
         val tol = BigDecimal("0.02")
-        return found.any { f ->
+        return found.any { (f, hasPct) ->
             val fBd = f.toBigDecimal(4, RoundingMode.HALF_UP)
-            fBd.subtract(targetBd).abs() <= tol || fBd.subtract(targetPctBd).abs() <= tol
+            val fAsPctPoints = (f * Rational.of(100, 1)).toBigDecimal(4, RoundingMode.HALF_UP)
+            fBd.subtract(targetBd).abs() <= tol ||
+                fBd.subtract(targetPctBd).abs() <= tol ||
+                (hasPct && fAsPctPoints.subtract(targetBd).abs() <= tol)
         }
     }
 }
@@ -754,6 +929,7 @@ class CompanionMathVerifier(
         val kind: String, // "derivation" | "optionalPractice" | "pretest"
         val anchorPage: Int?,
         val combinedText: String,
+        val formulaText: String,
         val declaredChecks: List<MathCheckSpec>,
         val payloadJson: JsonObject,
         val correctOption: String = "",
@@ -765,6 +941,13 @@ class CompanionMathVerifier(
         val mismatchReason: String,
         val sympyChecks: List<MathCheckSpec>,
         val mcqComputedAnswer: String,
+    )
+
+    private data class LlmAuditCallOutcome(
+        val succeeded: Boolean,
+        val audits: Map<String, LlmItemAudit>,
+        val costMicrodollars: Long,
+        val failureReason: String = "",
     )
 
     private data class EvaluatedVerdict(
@@ -817,6 +1000,8 @@ class CompanionMathVerifier(
                     itemText = cand.combinedText,
                     sourceCues = sourceCues,
                     anchorPage = cand.anchorPage,
+                    declaredChecks = cand.declaredChecks,
+                    formulaTextOverride = cand.formulaText,
                 ).toMutableList()
                 if (det.any { it.startsWith("placeholder_leak:") }) placeholderLeaks++
                 detFailuresById[cand.id] = det
@@ -831,9 +1016,9 @@ class CompanionMathVerifier(
                 }
             }
 
-            // Independent LLM source-page formula audit -> SymPy checks
-            val llmAudits = if (enableLlmAudit && candidates.isNotEmpty()) {
-                val (audits, costMicro) = runIndependentLlmAudit(
+            // Independent LLM source-page formula audit -> SymPy checks (STRICT FAIL-CLOSED!)
+            val llmAudits: Map<String, LlmItemAudit> = if (enableLlmAudit && candidates.isNotEmpty()) {
+                val outcome = runIndependentLlmAudit(
                     request = request,
                     chunk = chunk,
                     candidates = candidates,
@@ -842,23 +1027,35 @@ class CompanionMathVerifier(
                     transport = transport,
                     ledger = ledger,
                 )
-                extraCost += costMicro
-                audits
+                extraCost += outcome.costMicrodollars
+                if (!outcome.succeeded) {
+                    val reason = outcome.failureReason.ifBlank { "audit_unavailable" }
+                    for (cand in candidates) {
+                        detFailuresById.getOrPut(cand.id) { mutableListOf() } += "audit_failed:$reason"
+                    }
+                    emptyMap()
+                } else {
+                    for (cand in candidates) {
+                        val audit = outcome.audits[cand.id]
+                        if (audit == null) {
+                            detFailuresById.getOrPut(cand.id) { mutableListOf() } += "audit_omitted_item:${cand.id}"
+                        } else {
+                            if (!audit.sourceMatches) {
+                                val reason = audit.mismatchReason.ifBlank { "source_formula_mismatch" }
+                                detFailuresById.getOrPut(cand.id) { mutableListOf() } += "source_audit:$reason"
+                            }
+                            audit.sympyChecks.forEachIndexed { idx, spec ->
+                                val cid = "${cand.id}:audit:$idx"
+                                val tagged = spec.copy(id = cid)
+                                allSympyChecks += tagged
+                                checkOwner[cid] = cand.id
+                            }
+                        }
+                    }
+                    outcome.audits
+                }
             } else {
                 emptyMap()
-            }
-
-            for ((itemId, audit) in llmAudits) {
-                if (!audit.sourceMatches) {
-                    val reason = audit.mismatchReason.ifBlank { "source_formula_mismatch" }
-                    detFailuresById.getOrPut(itemId) { mutableListOf() } += "source_audit:$reason"
-                }
-                audit.sympyChecks.forEachIndexed { idx, spec ->
-                    val cid = "${itemId}:audit:$idx"
-                    val tagged = spec.copy(id = cid)
-                    allSympyChecks += tagged
-                    checkOwner[cid] = itemId
-                }
             }
 
             // Execute ALL checks in one SymPy batch subprocess
@@ -1055,11 +1252,14 @@ class CompanionMathVerifier(
         declaredChecks: Map<String, List<MathCheckSpec>>,
     ): List<CandidateAuditItem> = buildList {
         for (d in derivations) {
-            val combined = buildString {
+            val formulaText = buildString {
                 append(d.title).append('\n')
                 append(d.setup).append('\n')
                 d.steps.forEach { append(it).append('\n') }
-                append(d.graphCheck).append('\n')
+                append(d.graphCheck)
+            }
+            val combined = buildString {
+                append(formulaText).append('\n')
                 append(d.pitfall)
             }
             add(
@@ -1068,6 +1268,7 @@ class CompanionMathVerifier(
                     kind = "derivation",
                     anchorPage = d.anchor?.pdfPage,
                     combinedText = combined,
+                    formulaText = formulaText,
                     declaredChecks = declaredChecks[d.id].orEmpty(),
                     payloadJson = buildJsonObject {
                         put("itemId", d.id)
@@ -1094,6 +1295,11 @@ class CompanionMathVerifier(
     }
 
     private fun quizCandidate(q: CompanionQuizItem, kind: String, checks: List<MathCheckSpec>): CandidateAuditItem {
+        val formulaText = buildString {
+            append(q.stem).append('\n')
+            append("Correct: ").append(q.correctOption).append('\n')
+            append(q.explanation)
+        }
         val combined = buildString {
             append(q.stem).append('\n')
             append("Options: ").append(q.options.joinToString(" | ")).append('\n')
@@ -1105,6 +1311,7 @@ class CompanionMathVerifier(
             kind = kind,
             anchorPage = q.anchor?.pdfPage,
             combinedText = combined,
+            formulaText = formulaText,
             declaredChecks = checks,
             correctOption = q.correctOption,
             payloadJson = buildJsonObject {
@@ -1128,7 +1335,7 @@ class CompanionMathVerifier(
         roundLabel: String,
         transport: BatchAiTransport,
         ledger: BookTokenLedger,
-    ): Pair<Map<String, LlmItemAudit>, Long> {
+    ): LlmAuditCallOutcome {
         val userPrompt = buildString {
             append("Chapter: ").append(request.chapterTitle).append('\n')
             append("Section: ").append(chunk.title).append('\n')
@@ -1152,9 +1359,14 @@ class CompanionMathVerifier(
                 batchKey = batchKey,
                 maxTokens = 12_000,
             )
-        }.getOrElse {
-            // If audit transport fails, do NOT fabricate a pass: return empty map so deterministic + SymPy still gate
-            return emptyMap<String, LlmItemAudit>() to 0L
+        }.getOrElse { err ->
+            // Fail closed: audit transport failure MUST reject candidates rather than silently passing them!
+            return LlmAuditCallOutcome(
+                succeeded = false,
+                audits = emptyMap(),
+                costMicrodollars = 0L,
+                failureReason = "transport_error:${err.javaClass.simpleName}",
+            )
         }
         val costMicro = TokenLedgerPricing.costMicrodollars(
             reply.routeChannel,
@@ -1179,9 +1391,22 @@ class CompanionMathVerifier(
                 status = "complete",
             ),
         )
-        val obj = extractJsonObject(reply.text) ?: return emptyMap<String, LlmItemAudit>() to costMicro
+        val obj = extractJsonObject(reply.text)
+            ?: return LlmAuditCallOutcome(
+                succeeded = false,
+                audits = emptyMap(),
+                costMicrodollars = costMicro,
+                failureReason = "invalid_audit_json",
+            )
+        val auditsArray = obj["itemAudits"] as? JsonArray
+            ?: return LlmAuditCallOutcome(
+                succeeded = false,
+                audits = emptyMap(),
+                costMicrodollars = costMicro,
+                failureReason = "missing_itemAudits_array",
+            )
         val audits = LinkedHashMap<String, LlmItemAudit>()
-        for (el in (obj["itemAudits"] as? JsonArray).orEmpty()) {
+        for (el in auditsArray) {
             val item = el as? JsonObject ?: continue
             val id = (item["itemId"] ?: item["id"])?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
             if (id.isBlank()) continue
@@ -1199,7 +1424,7 @@ class CompanionMathVerifier(
                 mcqComputedAnswer = mcqAns,
             )
         }
-        return audits to costMicro
+        return LlmAuditCallOutcome(succeeded = true, audits = audits, costMicrodollars = costMicro)
     }
 
     private data class RepairedItem(

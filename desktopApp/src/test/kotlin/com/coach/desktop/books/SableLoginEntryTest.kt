@@ -7,9 +7,12 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.platform.testTag
@@ -51,12 +54,24 @@ class SableLoginEntryTest {
             val (library, book) = sample()
             val settings = settings(Files.createTempDirectory("sable-hidden-first-"), sableLogin = false)
             runSkikoComposeUiTest(size = Size(1100f, 850f), density = Density(1f)) {
-                setContent { CoachTheme(darkTheme = false) { BookExplainPanel(book, book.lessons.first().firstPage, ExplainConsent(library.directory), BookExplainer(settings, library)) } }
-                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isNotEmpty() }
-                assertNoSable()
-                onNodeWithTag("explain-connect-hint").assertTextContains("配对码", substring = true)
-                pair(mac.url, "123456")
-                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
+                setContent {
+                    WindowsTextbookGate(settings, darkTheme = false) {
+                        val explainer = remember { BookExplainer(settings, library) }
+                        CoachTheme(darkTheme = false) { BookExplainPanel(book, book.lessons.first().firstPage, ExplainConsent(library.directory), explainer) }
+                    }
+                }
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("login-pairing-form").fetchSemanticsNodes().isNotEmpty() }
+                assertNoSableText()
+                onNodeWithTag("login-pairing-toggle").assertDoesNotExist()
+                onNodeWithTag("login-address").assertExists().performTextClearance()
+                onNodeWithTag("login-address").performTextInput(mac.url)
+                onNodeWithTag("login-code").assertExists().performTextInput("123456")
+                onNodeWithTag("login-pair").performClick()
+                waitUntil(timeoutMillis = 20_000) {
+                    onAllNodesWithTag("textbook-login-screen").fetchSemanticsNodes().isEmpty() &&
+                        onAllNodesWithTag("explain-section-trigger").fetchSemanticsNodes()
+                            .any { it.config.getOrNull(SemanticsProperties.Disabled) == null }
+                }
                 onNodeWithTag("explain-section-trigger").assertIsEnabled()
                 assertTrue(onAllNodesWithText("已连上", substring = true).fetchSemanticsNodes().isEmpty(), "连接正常时不显示连接提示文案")
             }
@@ -70,14 +85,33 @@ class SableLoginEntryTest {
             val settings = settings(Files.createTempDirectory("sable-hidden-revoked-"), sableLogin = false)
             val explainer = BookExplainer(settings, library)
             assertTrue(kotlinx.coroutines.runBlocking { explainer.pair(mac.url, "123456") })
-            explainer.markRevoked()
+            var showRevoked = true
             runSkikoComposeUiTest(size = Size(1100f, 850f), density = Density(1f)) {
-                setContent { CoachTheme(darkTheme = true) { BookExplainPanel(book, book.lessons.first().firstPage, ExplainConsent(library.directory), explainer) } }
+                setContent {
+                    WindowsTextbookGate(settings, darkTheme = true) {
+                        val activeExplainer = remember {
+                            if (showRevoked) { showRevoked = false; explainer } else BookExplainer(settings, library)
+                        }
+                        CoachTheme(darkTheme = true) { BookExplainPanel(book, book.lessons.first().firstPage, ExplainConsent(library.directory), activeExplainer) }
+                    }
+                }
+                waitUntil(timeoutMillis = 15_000) { explainer.loaded }
+                runOnIdle { explainer.markRevoked() }
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-revoked").fetchSemanticsNodes().isNotEmpty() }
-                assertNoSable()
-                onNodeWithTag("explain-revoked").assertTextContains("新的配对码", substring = true)
-                pair(mac.url, "654321")
-                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
+                assertNoSableText()
+                onNodeWithTag("explain-relogin").performClick()
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("login-pairing-form").fetchSemanticsNodes().isNotEmpty() }
+                assertNoSableText()
+                onNodeWithTag("login-pairing-toggle").assertDoesNotExist()
+                onNodeWithTag("login-address").assertExists().performTextClearance()
+                onNodeWithTag("login-address").performTextInput(mac.url)
+                onNodeWithTag("login-code").assertExists().performTextInput("654321")
+                onNodeWithTag("login-pair").performClick()
+                waitUntil(timeoutMillis = 20_000) {
+                    onAllNodesWithTag("textbook-login-screen").fetchSemanticsNodes().isEmpty() &&
+                        onAllNodesWithTag("explain-section-trigger").fetchSemanticsNodes()
+                            .any { it.config.getOrNull(SemanticsProperties.Disabled) == null }
+                }
                 onNodeWithTag("explain-section-trigger").assertIsEnabled()
                 assertTrue(onAllNodesWithText("已连上", substring = true).fetchSemanticsNodes().isEmpty(), "重新配对后不显示连接提示文案")
             }
@@ -192,25 +226,36 @@ class SableLoginEntryTest {
                     waitUntil(timeoutMillis = 25_000) { onAllNodesWithTag("windows-host").fetchSemanticsNodes().isNotEmpty() }
                     waitUntil(timeoutMillis = 20_000) { !activeController.state.value.busy }
                     onNodeWithTag("upload-textbook").performClick()
-                    waitUntil(timeoutMillis = 20_000) { activeController.state.value.prompt == BookPrompt.IMPORTED }
-                    onNodeWithTag("read-only").performClick()
-                    waitUntil(timeoutMillis = 20_000) { activeController.state.value.screen == BookScreen.READER && activeController.state.value.prompt == BookPrompt.AFTER_READING }
-                    onNodeWithTag("read-only").performClick()
-                    waitUntil(timeoutMillis = 20_000) { activeController.state.value.prompt == null }
-                    onNodeWithTag("next-page").performClick()
-                    waitUntil(timeoutMillis = 20_000) { activeController.state.value.page == 2 && !activeController.state.value.busy }
+                    waitUntil(timeoutMillis = 20_000) {
+                        onAllNodesWithTag("textbook-reader").fetchSemanticsNodes().isNotEmpty() &&
+                            activeController.state.value.screen == BookScreen.READER &&
+                            !activeController.state.value.busy
+                    }
+                    assertNull(activeController.state.value.prompt)
+                    val beforePage = activeController.state.value.page
+                    if (onAllNodesWithTag("next-page").fetchSemanticsNodes().isEmpty()) {
+                        onNodeWithTag("textbook-reader").performKeyInput { pressKey(Key.Tab) }
+                        waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("next-page").fetchSemanticsNodes().isNotEmpty() }
+                    }
+                    onNodeWithTag("next-page").assertIsEnabled().performClick()
+                    waitUntil(timeoutMillis = 20_000) { activeController.state.value.page != beforePage && !activeController.state.value.busy }
+                    val targetPage = activeController.state.value.page
 
-                    // 3. Close and reopen -> zero clicks, lands directly back on reader page 2!
+                    // 3. Close and reopen -> zero clicks, lands directly back on the last page!
                     runOnIdle {
                         activeController = TextbookController(TextbookLibrary(libDir))
                         generation++
                     }
                     waitUntil(timeoutMillis = 20_000) {
                         onAllNodesWithTag("textbook-reader").fetchSemanticsNodes().isNotEmpty() &&
-                            activeController.state.value.page == 2 && !activeController.state.value.busy
+                            activeController.state.value.page == targetPage && !activeController.state.value.busy
                     }
                     onNodeWithTag("textbook-login-screen").assertDoesNotExist()
-                    onNodeWithTag("reader-page-number").assertTextEquals("2 / 3")
+                    if (onAllNodesWithTag("reader-page-number").fetchSemanticsNodes().isEmpty()) {
+                        onNodeWithTag("textbook-reader").performKeyInput { pressKey(Key.Tab) }
+                        waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("reader-page-number").fetchSemanticsNodes().isNotEmpty() }
+                    }
+                    onNodeWithTag("reader-page-number").assertTextContains("第 $targetPage 页 / 3", substring = true)
                 }
             } finally {
                 bg.shutdownNow()
@@ -272,7 +317,11 @@ class SableLoginEntryTest {
                     controller.state.value.page == 2 && !controller.state.value.busy
             }
             onNodeWithTag("textbook-login-screen").assertDoesNotExist()
-            onNodeWithTag("reader-page-number").assertTextEquals("2 / 3")
+            if (onAllNodesWithTag("reader-page-number").fetchSemanticsNodes().isEmpty()) {
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(Key.Tab) }
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("reader-page-number").fetchSemanticsNodes().isNotEmpty() }
+            }
+            onNodeWithTag("reader-page-number").assertTextContains("第 2 页 / 3", substring = true)
         }
     }
 

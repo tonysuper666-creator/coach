@@ -138,6 +138,10 @@ public final class ReaderAcceptanceHarness {
         }
     }
 
+    private static boolean isV2Flavor(String flavor) {
+        return "v2".equals(flavor) || "main".equals(flavor);
+    }
+
     private static void captureMeasureStatesSceneAll(
         String flavor, Path libSeed, Path outDir, int[][] profiles, int targetPage
     ) throws Exception {
@@ -155,7 +159,7 @@ public final class ReaderAcceptanceHarness {
                         () -> !hasTextContainingScene(scene, "正在加载页面"));
                     dumpScene(scene, nano, outDir, flavor, resTag, "pure_read_original");
 
-                    if ("v2".equals(flavor)) {
+                    if (isV2Flavor(flavor)) {
                         nano = revealV2HudScene(scene, nano, w);
                         clickByTagScene(scene, "immersive-companion-toggle");
                         nano = pumpScene(scene, nano, 25, 30);
@@ -208,8 +212,10 @@ public final class ReaderAcceptanceHarness {
                 String resTag = w + "x" + h;
                 ImageComposeScene scene = newScene(w, h, density, cText);
                 try {
-                    long nano = pumpSceneUntilSettled(scene, 0L, 30, 35, 120,
-                        () -> !hasTextContainingScene(scene, "正在加载"));
+                    long nano = pumpSceneUntilSettled(scene, 0L, 30, 50, 120,
+                        () -> !hasTextContainingScene(scene, "正在加载")
+                            && !hasTextContainingScene(scene, "正在排版")
+                            && onEdt(() -> findNodeByTag(scene.getSemanticsOwners(), "book-page-loading") == null));
                     dumpScene(scene, nano, outDir, flavor, resTag, "pure_read_text");
                 } finally {
                     onEdt(() -> { scene.close(); return null; });
@@ -219,8 +225,8 @@ public final class ReaderAcceptanceHarness {
             deleteQuietly(libText);
         }
 
-        // State 3 (1.1.1 / main): guided (边看边学)
-        if ("111".equals(flavor) || "main".equals(flavor)) {
+        // Legacy 1.1.1 guided screen (removed in 2.0)
+        if ("111".equals(flavor)) {
             Path libGuided = copyTempDir(libSeed, "m-guided-");
             try {
                 TextbookController cGuided = openGuided(libGuided);
@@ -255,7 +261,7 @@ public final class ReaderAcceptanceHarness {
                 waitFor(6000, () -> !hasTextContaining(win, "正在加载页面"));
                 dumpWin32(win, outDir, flavor, "win32", "pure_read_original");
 
-                if ("v2".equals(flavor)) {
+                if (isV2Flavor(flavor)) {
                     revealV2HudWin32(win);
                     clickTagWin32(win, "immersive-companion-toggle");
                     Thread.sleep(700);
@@ -287,7 +293,9 @@ public final class ReaderAcceptanceHarness {
             ComposeWindow win = openHostWindow(c, 24, 24, 752, 552);
             try {
                 Thread.sleep(3600);
-                waitFor(4000, () -> !hasTextContaining(win, "正在加载"));
+                waitFor(6000, () -> !hasTextContaining(win, "正在加载")
+                    && !hasTextContaining(win, "正在排版")
+                    && findNodeByTag(win, "book-page-loading") == null);
                 dumpWin32(win, outDir, flavor, "win32", "pure_read_text");
             } finally {
                 disposeWindow(win);
@@ -296,7 +304,7 @@ public final class ReaderAcceptanceHarness {
             deleteQuietly(libText);
         }
 
-        if ("111".equals(flavor) || "main".equals(flavor)) {
+        if ("111".equals(flavor)) {
             Path libGuided = copyTempDir(libSeed, "w-guided-");
             try {
                 TextbookController c = openGuided(libGuided);
@@ -370,7 +378,7 @@ public final class ReaderAcceptanceHarness {
     }
 
     private static String readBug1PageNum(ComposeWindow win, String flavor) throws Exception {
-        if ("v2".equals(flavor)) revealV2HudWin32(win);
+        if (isV2Flavor(flavor)) revealV2HudWin32(win);
         SemanticsNode numNode = findNodeByTag(win, "reader-page-number");
         return ownTextOrChild(numNode);
     }
@@ -456,7 +464,7 @@ public final class ReaderAcceptanceHarness {
 
     private static void uiJumpToPage(ComposeWindow win, String flavor, int target) throws Exception {
         String targetStr = String.valueOf(target);
-        if ("v2".equals(flavor)) {
+        if (isV2Flavor(flavor)) {
             waitFor(3000, () -> {
                 revealV2HudWin32(win);
                 SemanticsNode existing = findNodeByTag(win, "page-jump");
@@ -492,7 +500,7 @@ public final class ReaderAcceptanceHarness {
             });
             SemanticsNode latestField = findNodeByTag(win, "page-jump");
             clickOrEnterJump(win, flavor, latestField != null ? latestField : jumpField);
-            if ("v2".equals(flavor)) {
+            if (isV2Flavor(flavor)) {
                 waitFor(2000, () -> findNodeByTag(win, "page-jump") == null);
             }
         }
@@ -511,7 +519,7 @@ public final class ReaderAcceptanceHarness {
 
                 uiJumpToPage(win, flavor, 173);
                 JumpMetrics m173 = measureJumpSync(win, c, flavor, 173, m32.title, 7000);
-                if ("v2".equals(flavor)) revealV2HudWin32(win);
+                if (isV2Flavor(flavor)) revealV2HudWin32(win);
                 dumpWin32(win, outDir, flavor, "win32", "bug1-jump-173");
 
                 boolean page32Ok = m32.synced && m32.pageNum.contains("32");
@@ -556,9 +564,9 @@ public final class ReaderAcceptanceHarness {
                 boolean allNear173 = (prePage >= 171 && prePage <= 175);
                 for (int i = 0; i < 5; i++) {
                     boolean switchingToText = (i % 2 == 0);
-                    if ("v2".equals(flavor)) revealV2HudWin32(win);
+                    if (isV2Flavor(flavor)) revealV2HudWin32(win);
                     SemanticsNode toggle = null;
-                    if ("v2".equals(flavor)) {
+                    if (isV2Flavor(flavor)) {
                         String wantTag = switchingToText ? "view-mode-text" : "view-mode-original";
                         waitFor(2500, () -> {
                             revealV2HudWin32(win);
@@ -602,7 +610,7 @@ public final class ReaderAcceptanceHarness {
             ComposeWindow win = openHostWindow(c, 24, 24, 752, 552);
             try {
                 Thread.sleep(1800);
-                if ("v2".equals(flavor)) revealV2HudWin32(win);
+                if (isV2Flavor(flavor)) revealV2HudWin32(win);
                 clickTagWin32(win, "v7-directory-toggle");
                 Thread.sleep(800);
                 dumpWin32(win, outDir, flavor, "win32", "bug3-toc-drawer");
@@ -648,7 +656,7 @@ public final class ReaderAcceptanceHarness {
                 boolean sendVisibleNoScroll = false;
                 String detail;
                 float clientW = 736f, clientH = 513f;
-                if ("v2".equals(flavor)) {
+                if (isV2Flavor(flavor)) {
                     revealV2HudWin32(win);
                     if (findNodeByTag(win, "immersive-companion-toggle") != null) {
                         clickTagWin32(win, "immersive-companion-toggle");
@@ -668,7 +676,7 @@ public final class ReaderAcceptanceHarness {
                     detail = "inputInWin=" + inputVisibleNoScroll + " sendInWin=" + sendVisibleNoScroll
                         + " inputBounds=" + boundsStr(input) + " sendBounds=" + boundsStr(send);
                 } else {
-                    // 1.1.1 / main: open 选段提问 picker and pick ask-paragraph-0
+                    // 1.1.1: open 选段提问 picker and pick ask-paragraph-0
                     clickTagWin32(win, "ask-book-passage");
                     waitFor(2000, () -> findNodeByTag(win, "ask-paragraph-0") != null);
                     if (findNodeByTag(win, "ask-paragraph-0") != null) {
@@ -774,11 +782,43 @@ public final class ReaderAcceptanceHarness {
                 }
             );
 
-            // Seed library with book for paths 3 & 4 (keep fresh shelf until after login check)
+            // Path 0: Cold empty-library onboarding -> login screen -> 1 click Sable -> 1 click 导入文件 -> page 1 of reader
+            Path home0 = Files.createDirectories(root.resolve("home0"));
+            Path libDir0 = Files.createDirectories(root.resolve("library0"));
+            System.setProperty("user.home", home0.toString());
+            System.setProperty("jpackage.app-path", home0.resolve("LearningCoach.exe").toString());
+            Object settings0 = newSettings(home0, server.url);
+            TextbookController c0 = createController(createLibrary(libDir0));
+            Function1<Continuation<? super Path>, Object> pickBook0 = cont -> bookPdf;
+            ComposeWindow w0 = openGateWindow(settings0, server.url, uriHandler, c0, pickBook0, 24, 24, 752, 552);
+            try {
+                boolean loginFirst0 = waitFor(6000, () -> findNodeByTag(w0, "textbook-login-screen") != null);
+                int onboardingClicks = 0;
+                clickTextExactWin32(w0, "用 Sable 账号登录");
+                boolean emptyHub = waitFor(10000, () -> findNodeByTag(w0, "home-empty-hub") != null && findNodeByTag(w0, "upload-textbook") != null);
+                if (emptyHub) {
+                    clickTagWin32(w0, "upload-textbook");
+                    onboardingClicks++;
+                }
+                boolean openedFirstReadable = waitFor(12000, () -> findNodeByTag(w0, "textbook-reader") != null && controllerPage(c0) >= 1);
+                Thread.sleep(400);
+                dumpWin32(w0, outDir, "main", "win32", "login0-onboarding-page1");
+                checks.add(checkResult("login_0_onboarding_to_page1", loginFirst0 && emptyHub && openedFirstReadable && onboardingClicks <= 2,
+                    "loginFirst=" + loginFirst0 + " emptyHub=" + emptyHub + " openedFirstReadable=" + openedFirstReadable
+                        + " clicks_excluding_sable_auth=" + onboardingClicks + " page=" + controllerPage(c0)));
+            } finally {
+                disposeWindow(w0);
+                deleteQuietly(home0);
+                deleteQuietly(libDir0);
+            }
+            System.setProperty("user.home", home.toString());
+            System.setProperty("jpackage.app-path", home.resolve("LearningCoach.exe").toString());
+
+            // Seed library with book for paths 1..4 (keep fresh shelf until after login check)
             TextbookLibrary seedLib = createLibrary(libDir);
             seedLib.stageBookImport(bookPdf, new BookImportControl());
 
-            // Path 1 & 2: Fresh install -> first screen is login, <=2 clicks to shelf
+            // Path 1 & 2: Fresh install -> first screen is login, <=2 clicks to 2.0 single-column home
             TextbookController c1 = createController(createLibrary(libDir));
             ComposeWindow w1 = openGateWindow(settings, server.url, uriHandler, c1, 24, 24, 752, 552);
             try {
@@ -793,7 +833,11 @@ public final class ReaderAcceptanceHarness {
                 int clicks = 0;
                 clickTextExactWin32(w1, "用 Sable 账号登录");
                 clicks++;
-                boolean enteredShelf = waitFor(10000, () -> findNodeByTag(w1, "windows-host") != null && findNodeByTag(w1, "upload-textbook") != null);
+                boolean enteredShelf = waitFor(10000, () -> findNodeByTag(w1, "windows-host") != null
+                    && (findNodeByTag(w1, "home-daily-hub") != null
+                        || findNodeByTag(w1, "home-focus-card") != null
+                        || findNodeByTag(w1, "home-empty-hub") != null
+                        || findNodeByTag(w1, "upload-textbook") != null));
                 Thread.sleep(400);
                 dumpWin32(w1, outDir, "main", "win32", "login2-shelf");
                 checks.add(checkResult("login_2_clicks_to_shelf", enteredShelf && clicks <= 2,
@@ -1062,6 +1106,15 @@ public final class ReaderAcceptanceHarness {
     private static ComposeWindow openGateWindow(
         Object settings, String sableUrl, Object uriHandler, TextbookController controller, int x, int y, int w, int h
     ) throws Exception {
+        return openGateWindow(settings, sableUrl, uriHandler, controller,
+            cont -> IntrinsicsKt.getCOROUTINE_SUSPENDED(), x, y, w, h);
+    }
+
+    private static ComposeWindow openGateWindow(
+        Object settings, String sableUrl, Object uriHandler, TextbookController controller,
+        Function1<Continuation<? super Path>, Object> chooseBookFn,
+        int x, int y, int w, int h
+    ) throws Exception {
         ComposeWindow[] box = new ComposeWindow[1];
         SwingUtilities.invokeAndWait(() -> {
             ComposeWindow win = new ComposeWindow();
@@ -1070,7 +1123,7 @@ public final class ReaderAcceptanceHarness {
             win.setAutoRequestFocus(false);
             win.setFocusableWindowState(false);
             win.setContent((scope, composer, changed) -> {
-                callGate(settings, sableUrl, uriHandler, controller, composer);
+                callGate(settings, sableUrl, uriHandler, controller, chooseBookFn, composer);
                 return Unit.INSTANCE;
             });
             win.setVisible(true);
@@ -1213,7 +1266,7 @@ public final class ReaderAcceptanceHarness {
     }
 
     private static void clickOrEnterJump(ComposeWindow win, String flavor, SemanticsNode jumpField) throws Exception {
-        if (!"v2".equals(flavor)) {
+        if (!isV2Flavor(flavor)) {
             waitFor(6000, () -> findEnabledGoButton(win) != null);
             SemanticsNode goBtn = findEnabledGoButton(win);
             if (goBtn != null) {
@@ -1255,6 +1308,11 @@ public final class ReaderAcceptanceHarness {
 
     private static String topHeaderText(ComposeWindow win) throws Exception {
         return onEdt(() -> {
+            SemanticsNode v2Title = findNodeByTag(win.getSemanticsOwners(), "immersive-title");
+            if (v2Title != null) {
+                String t = nodeText(v2Title);
+                if (!t.isEmpty()) return t;
+            }
             List<String> parts = new ArrayList<>();
             for (SemanticsOwner o : win.getSemanticsOwners()) {
                 collectTopTexts(o.getUnmergedRootSemanticsNode(), parts);
@@ -1277,12 +1335,12 @@ public final class ReaderAcceptanceHarness {
 
     private static void collectDrawerItems(SemanticsNode node, float maxH, List<SemanticsNode> out) {
         String tag = nodeTag(node);
-        if ("left-tab-toc".equals(tag) || "left-tab-bookmarks".equals(tag)) return;
+        if ("left-tab-toc".equals(tag) || "left-tab-bookmarks".equals(tag) || tag.startsWith("toc-read-toggle-")) return;
         Rect r = node.getBoundsInRoot();
         String t = nodeText(node);
         if (!t.isEmpty() && r.getBottom() > r.getTop() && r.getTop() >= 110 && r.getBottom() <= maxH - 45
             && !t.contains("收起") && !"×".equals(t) && !"目录".equals(t) && !"书签".equals(t) && !"识别目录".equals(t)
-            && !t.matches("\\d+")) {
+            && !"标为已读".equals(t) && !"已读".equals(t) && !t.matches("\\d+")) {
             out.add(node);
         }
         for (SemanticsNode ch : node.getChildren()) collectDrawerItems(ch, maxH, out);
@@ -1522,18 +1580,40 @@ public final class ReaderAcceptanceHarness {
     }
 
     private static void callHost(TextbookController controller, androidx.compose.runtime.Composer composer) {
+        callHost(controller, cont -> IntrinsicsKt.getCOROUTINE_SUSPENDED(), composer);
+    }
+
+    private static void callHost(
+        TextbookController controller,
+        Function1<Continuation<? super Path>, Object> chooseBookFn,
+        androidx.compose.runtime.Composer composer
+    ) {
         try {
             for (Method m : WindowsTextbookHostKt.class.getDeclaredMethods()) {
                 if (!m.getName().equals("WindowsTextbookHost")) continue;
                 Class<?>[] p = m.getParameterTypes();
+                int composerIdx = -1;
+                for (int i = 0; i < p.length; i++) {
+                    if (p[i].getName().equals("androidx.compose.runtime.Composer")) {
+                        composerIdx = i;
+                        break;
+                    }
+                }
+                if (composerIdx < 2) continue;
+                int chooseIdx = composerIdx - 1;
                 Object[] invokeArgs = new Object[p.length];
                 invokeArgs[0] = controller;
-                int chooseIdx = p.length - 4;
-                invokeArgs[chooseIdx] = (Function1<Continuation<? super Path>, Object>) cont -> IntrinsicsKt.getCOROUTINE_SUSPENDED();
-                invokeArgs[p.length - 3] = composer;
-                invokeArgs[p.length - 2] = 0;
+                invokeArgs[chooseIdx] = chooseBookFn;
+                invokeArgs[composerIdx] = composer;
+                for (int k = composerIdx + 1; k < p.length - 1; k++) {
+                    invokeArgs[k] = 0;
+                }
                 int mask = 0;
-                for (int i = 1; i < chooseIdx; i++) mask |= (1 << i);
+                for (int i = 1; i < chooseIdx; i++) {
+                    mask |= (1 << i);
+                    if (p[i] == boolean.class) invokeArgs[i] = false;
+                    else if (p[i] == int.class) invokeArgs[i] = 0;
+                }
                 invokeArgs[p.length - 1] = mask;
                 m.setAccessible(true);
                 m.invoke(null, invokeArgs);
@@ -1562,7 +1642,9 @@ public final class ReaderAcceptanceHarness {
     }
 
     private static void callGate(
-        Object settings, String sableUrl, Object uriHandler, TextbookController controller, androidx.compose.runtime.Composer composer
+        Object settings, String sableUrl, Object uriHandler, TextbookController controller,
+        Function1<Continuation<? super Path>, Object> chooseBookFn,
+        androidx.compose.runtime.Composer composer
     ) {
         try {
             Class<?> cl = Class.forName("androidx.compose.ui.platform.CompositionLocalsKt");
@@ -1589,7 +1671,7 @@ public final class ReaderAcceptanceHarness {
             if (clpM == null) throw new IllegalStateException("CompositionLocalProvider not found");
 
             Function3<Object, androidx.compose.runtime.Composer, Integer, Unit> inner = (identity, c2, ch2) -> {
-                callHost(controller, c2);
+                callHost(controller, chooseBookFn, c2);
                 return Unit.INSTANCE;
             };
             Function2<androidx.compose.runtime.Composer, Integer, Unit> outer = (c1, ch1) -> {

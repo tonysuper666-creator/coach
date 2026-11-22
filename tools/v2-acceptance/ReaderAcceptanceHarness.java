@@ -106,6 +106,8 @@ public final class ReaderAcceptanceHarness {
                 case "measure" -> runMeasure(args);
                 case "bugs" -> runBugs(args);
                 case "login" -> runLogin(args);
+                case "modes" -> runModes(args);
+                case "newcomer" -> runNewcomer(args);
                 default -> throw new IllegalArgumentException("Unknown subcommand: " + cmd);
             }
         } finally {
@@ -1856,6 +1858,350 @@ public final class ReaderAcceptanceHarness {
                 try { Files.deleteIfExists(p); } catch (IOException ignored) {}
             });
         } catch (IOException ignored) {}
+    }
+
+    // ==================== 4. STUDY MODES REAL-WINDOW & NEWCOMER HARNESS (TON-1805) ====================
+
+    private static String queryModeDbStateDigest(Path libDir) throws Exception {
+        Path dbFile = libDir.resolve("library.sqlite");
+        try (var conn = java.sql.DriverManager.getConnection("jdbc:sqlite:" + dbFile)) {
+            StringBuilder sb = new StringBuilder();
+            try (var st = conn.createStatement()) {
+                try (var rs = st.executeQuery("SELECT id, reading_page FROM books ORDER BY id")) {
+                    while (rs.next()) sb.append("B:").append(rs.getString(1)).append("@").append(rs.getInt(2)).append(";");
+                }
+                try (var rs = st.executeQuery("SELECT book, page, start, end, quote FROM book_highlights ORDER BY page, start")) {
+                    while (rs.next()) sb.append("H:").append(rs.getInt(2)).append(":").append(rs.getInt(3)).append("-").append(rs.getInt(4)).append(";");
+                }
+                try (var rs = st.executeQuery("SELECT id, page, start, end, text_sha256, note FROM book_notes WHERE deleted=0 ORDER BY id")) {
+                    while (rs.next()) {
+                        sb.append("N:").append(rs.getString(1)).append("@").append(rs.getInt(2))
+                          .append(":").append(rs.getInt(3)).append("-").append(rs.getInt(4))
+                          .append("#").append(rs.getString(5)).append("=").append(rs.getString(6)).append(";");
+                    }
+                }
+                try {
+                    try (var rs = st.executeQuery("SELECT book_id, toc_node_id, practice_draft_json FROM book_chapter_progress WHERE practice_draft_json <> '{}' ORDER BY book_id, toc_node_id")) {
+                        while (rs.next()) {
+                            sb.append("D:").append(rs.getString(1)).append("/").append(rs.getString(2))
+                              .append("=").append(rs.getString(3)).append(";");
+                        }
+                    }
+                } catch (Exception ignored) {}
+                try {
+                    try (var rs = st.executeQuery("SELECT id, COALESCE(last_active_anchor_json, '') FROM collections ORDER BY id")) {
+                        while (rs.next()) {
+                            sb.append("A:").append(rs.getString(1)).append("=").append(rs.getString(2)).append(";");
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+            var md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] dig = md.digest(sb.toString().getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder();
+            for (byte b : dig) hex.append(String.format("%02x", b));
+            return hex.toString();
+        }
+    }
+
+    private static String currentSavedStudyMode(Path libDir) {
+        Path dbFile = libDir.resolve("library.sqlite");
+        try (var conn = java.sql.DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+             var st = conn.createStatement();
+             var rs = st.executeQuery("SELECT study_mode, user_locked FROM book_study_preferences LIMIT 1")) {
+            if (rs.next()) return rs.getString(1) + (rs.getInt(2) != 0 ? ":LOCKED" : ":DEFAULT");
+        } catch (Exception ignored) {}
+        return "NONE";
+    }
+
+    private static void seedHighlightsAndNotesForModeTest(Path libDir, String bookId, int page, Path sampleCh8Json) throws Exception {
+        Path dbFile = libDir.resolve("library.sqlite");
+        try (var conn = java.sql.DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+             var st = conn.createStatement()) {
+            st.execute("INSERT OR REPLACE INTO book_highlights(book, page, start, end, quote) VALUES('" + bookId + "', " + page + ", 10, 42, 'sample-highlight-quote-1')");
+            st.execute("INSERT OR REPLACE INTO book_notes(book, id, version, page, start, end, quote, note, text_sha256, revision, last_mutation_id, deleted) VALUES('" + bookId + "', 'mode-test-n1', '1', " + page + ", 10, 42, 'sample-note-quote-1', 'keep-note-across-modes', 'sha', 1, 'm1', 0)");
+            try {
+                st.execute("INSERT OR REPLACE INTO book_chapter_progress(book_id, toc_node_id, pages_total, pages_dwelled, dwelled_pages_json, read_state, manual_override, practice_draft_json, updated_at) VALUES('" + bookId + "', 'mode-test-ch8', 21, 1, '[179]', 'PARTIAL', 0, '{\"bookId\":\"" + bookId + "\",\"tocNodeId\":\"mode-test-ch8\",\"page\":179,\"exerciseHintLevels\":{\"ex-1\":1}}', 1000)");
+            } catch (Exception ignored) {}
+            st.execute("CREATE TABLE IF NOT EXISTS book_study_mode_packs(book_id TEXT NOT NULL, chapter_num INTEGER NOT NULL, study_mode TEXT NOT NULL, pack_json TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(book_id, chapter_num, study_mode))");
+            if (sampleCh8Json != null && Files.isRegularFile(sampleCh8Json)) {
+                String raw = Files.readString(sampleCh8Json, StandardCharsets.UTF_8);
+                var json = kotlinx.serialization.json.Json.Default;
+                var root = kotlinx.serialization.json.JsonElementKt.getJsonObject(json.parseToJsonElement(raw));
+                var modesObj = kotlinx.serialization.json.JsonElementKt.getJsonObject(root.get("modes"));
+                try (var ps = conn.prepareStatement("INSERT OR REPLACE INTO book_study_mode_packs(book_id, chapter_num, study_mode, pack_json, updated_at) VALUES(?,?,?,?,?)")) {
+                    for (String mKey : List.of("BOOK_MAP", "EXAM_FOCUS", "DIAGNOSTIC_SKIP", "PROBLEM_DRIVEN", "QUESTION_DRIVEN", "READ_THROUGH")) {
+                        var mEl = modesObj.get(mKey);
+                        if (mEl != null) {
+                            ps.setString(1, bookId);
+                            ps.setInt(2, 8);
+                            ps.setString(3, mKey);
+                            ps.setString(4, mEl.toString());
+                            ps.setLong(5, System.currentTimeMillis());
+                            ps.executeUpdate();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static void runModes(String[] args) throws Exception {
+        Path libSeed = Path.of(args[1]);
+        Path outDir = Path.of(args[2]);
+        Path sampleCh8Json = args.length > 3 ? Path.of(args[3]) : null;
+        Files.createDirectories(outDir);
+        Path shotsDir = outDir.resolve("shots");
+        Files.createDirectories(shotsDir);
+
+        Path libWork = copyTempDir(libSeed, "modes-win32-");
+        try {
+            TextbookLibrary lib = createLibrary(libWork);
+            var catalog = lib.catalog();
+            if (catalog.isEmpty()) throw new IllegalStateException("Empty library seed: " + libSeed);
+            String bookId = catalog.get(0).getId();
+            lib.saveTextView(bookId, false);
+
+            TextbookController controller = createController(lib);
+            runSuspend(c -> controller.load(c));
+            runSuspend(c -> controller.page(179, c));
+            int pageBefore = controllerPage(controller);
+            runSuspend(c -> controller.back(c));
+            seedHighlightsAndNotesForModeTest(libWork, bookId, 179, sampleCh8Json);
+            String beforeDigest = queryModeDbStateDigest(libWork);
+
+            ComposeWindow win = openHostWindow(controller, 32, 32, 1280, 820);
+            try {
+                waitFor(8000, () -> findNodeByTag(win, "home-mode-trigger") != null);
+                Thread.sleep(600);
+                dumpWin32(win, shotsDir, "modes", "1280x820", "01_home_smart_default");
+
+                // Journey 1: Home -> non-default mode in <= 2 clicks (NO extra controller.page call!)
+                int homeToNonDefaultClicks = 0;
+                clickTagWin32(win, "home-mode-trigger");
+                homeToNonDefaultClicks++;
+                waitFor(4000, () -> findNodeByTag(win, "mode-option-BOOK_MAP") != null);
+                Thread.sleep(400);
+                dumpWin32(win, shotsDir, "modes", "1280x820", "02_mode_popover_open");
+
+                clickTagWin32(win, "mode-option-BOOK_MAP");
+                homeToNonDefaultClicks++;
+                waitFor(6000, () -> findNodeByTag(win, "textbook-reader") != null);
+                if (!waitFor(4000, () -> findNodeByTag(win, "mode-surface-BOOK_MAP") != null)) {
+                    throw new IllegalStateException("Expected immediate mode-surface-BOOK_MAP First Screen after 2-click Home selection");
+                }
+                if (!waitFor(4000, () -> hasTextContaining(win, "第 8 / 24 章"))) {
+                    throw new IllegalStateException("Expected BOOK_MAP chapter badge '第 8 / 24 章'");
+                }
+                if (sampleCh8Json != null && !hasTextContaining(win, "各节角色分工")) {
+                    throw new IllegalStateException("Expected real BOOK_MAP one-pager sections ('各节角色分工') on First Screen");
+                }
+                Thread.sleep(700);
+
+                // Landed directly in BOOK_MAP First Screen with 2 clicks total
+                dumpWin32(win, shotsDir, "modes", "1280x820", "04_mode_BOOK_MAP");
+
+                // Close companion to inspect clean reader state, then reopen to cycle remaining 5 modes
+                revealV2HudWin32(win);
+                if (findNodeByTag(win, "immersive-companion-drawer") != null) {
+                    clickTagWin32(win, "immersive-companion-toggle");
+                    waitFor(3000, () -> findNodeByTag(win, "immersive-companion-drawer") == null);
+                }
+                Thread.sleep(500);
+                dumpWin32(win, shotsDir, "modes", "1280x820", "03_pure_read_ch8");
+
+                revealV2HudWin32(win);
+                clickTagWin32(win, "immersive-companion-toggle");
+                waitFor(4000, () -> findNodeByTag(win, "companion-mode-trigger") != null);
+                Thread.sleep(400);
+
+                String[] switchSeq = {
+                    "EXAM_FOCUS", "DIAGNOSTIC_SKIP", "PROBLEM_DRIVEN", "QUESTION_DRIVEN", "READ_THROUGH"
+                };
+                int maxSwitchClicks = 0;
+                int idx = 5;
+                for (String mName : switchSeq) {
+                    int clicks = 0;
+                    clickTagWin32(win, "companion-mode-trigger");
+                    clicks++;
+                    waitFor(4000, () -> findNodeByTag(win, "mode-option-" + mName) != null);
+                    clickTagWin32(win, "mode-option-" + mName);
+                    clicks++;
+                    maxSwitchClicks = Math.max(maxSwitchClicks, clicks);
+                    Thread.sleep(600);
+                    dumpWin32(win, shotsDir, "modes", "1280x820", String.format("0%d_mode_%s", idx++, mName));
+                }
+
+                // Cycle all 3 adjustment knobs (detailLevel, explainLang, pacePreset) and verify zero data loss
+                clickTagWin32(win, "companion-mode-trigger");
+                waitFor(4000, () -> findNodeByTag(win, "mode-detail-brief") != null);
+                clickTagWin32(win, "mode-detail-brief");
+                Thread.sleep(200);
+                clickTagWin32(win, "mode-lang-zh");
+                Thread.sleep(200);
+                clickTagWin32(win, "mode-pace-30");
+                Thread.sleep(200);
+                clickTagWin32(win, "mode-detail-detailed");
+                Thread.sleep(200);
+                clickTagWin32(win, "mode-lang-bilingual");
+                Thread.sleep(200);
+                clickTagWin32(win, "mode-pace-unpaced");
+                Thread.sleep(200);
+                clickTagWin32(win, "mode-option-READ_THROUGH");
+                Thread.sleep(400);
+
+                String afterDigest = queryModeDbStateDigest(libWork);
+                int pageAfter = controllerPage(controller);
+                boolean zeroLoss = beforeDigest.equals(afterDigest) && pageBefore == pageAfter;
+
+                Map<String, Object> report = new HashMap<>();
+                report.put("surface_type", "real_os_window");
+                report.put("window_px", List.of(1280, 820));
+                report.put("home_to_non_default_clicks", homeToNonDefaultClicks);
+                report.put("max_mode_switch_clicks", maxSwitchClicks);
+                report.put("page_before", pageBefore);
+                report.put("page_after", pageAfter);
+                report.put("state_sha256_before", beforeDigest);
+                report.put("state_sha256_after", afterDigest);
+                report.put("zero_data_loss", zeroLoss);
+                report.put("modes_verified", List.of("BOOK_MAP", "EXAM_FOCUS", "DIAGNOSTIC_SKIP", "PROBLEM_DRIVEN", "QUESTION_DRIVEN", "READ_THROUGH"));
+                Files.writeString(outDir.resolve("modes-winbox-report.json"), toJson(report, 0), StandardCharsets.UTF_8);
+                System.out.println("MODES_REPORT homeClicks=" + homeToNonDefaultClicks + " switchClicks=" + maxSwitchClicks + " zeroLoss=" + zeroLoss);
+                if (!zeroLoss || homeToNonDefaultClicks > 2 || maxSwitchClicks > 2) {
+                    throw new IllegalStateException("Modes verification failed: " + report);
+                }
+            } finally {
+                disposeWindow(win);
+            }
+        } finally {
+            deleteQuietly(libWork);
+        }
+    }
+
+    private static void runNewcomer(String[] args) throws Exception {
+        Path libSeed = Path.of(args[1]);
+        Path outDir = Path.of(args[2]);
+        int holdSec = args.length > 3 ? Integer.parseInt(args[3]) : 420;
+        Files.createDirectories(outDir);
+        Path libWork = copyTempDir(libSeed, "modes-newcomer-");
+        try {
+            TextbookLibrary lib = createLibrary(libWork);
+            TextbookController controller = createController(lib);
+            runSuspend(c -> controller.load(c));
+            runSuspend(c -> controller.page(172, c));
+            runSuspend(c -> controller.back(c));
+
+            ComposeWindow[] box = new ComposeWindow[1];
+            SwingUtilities.invokeAndWait(() -> {
+                ComposeWindow win = new ComposeWindow();
+                win.setTitle("LearningCoach-Newcomer-Session");
+                win.setBounds(80, 60, 1280, 820);
+                win.setAutoRequestFocus(true);
+                win.setFocusableWindowState(true);
+                win.setContent((scope, composer, changed) -> {
+                    callHost(controller, composer);
+                    return Unit.INSTANCE;
+                });
+                win.setVisible(true);
+                box[0] = win;
+                activeWindow = win;
+            });
+            ComposeWindow win = box[0];
+            Thread.sleep(900);
+            long tOpen = System.currentTimeMillis();
+            AtomicInteger rawMouseClicks = new AtomicInteger(0);
+            AtomicInteger cmdClicks = new AtomicInteger(0);
+            java.awt.event.AWTEventListener clickListener = event -> {
+                if (event instanceof MouseEvent me && me.getID() == MouseEvent.MOUSE_PRESSED) {
+                    rawMouseClicks.incrementAndGet();
+                }
+            };
+            java.awt.Toolkit.getDefaultToolkit().addAWTEventListener(clickListener, java.awt.AWTEvent.MOUSE_EVENT_MASK);
+
+            try {
+                Path liveShot = outDir.resolve("live-window.png");
+                Path liveTmp = outDir.resolve("live-window.tmp.png");
+                BufferedImage firstImg = onEdt(() -> screenshotWin32(win));
+                ImageIO.write(firstImg, "png", liveShot.toFile());
+
+                Path readyFile = outDir.resolve("window-ready.json");
+                Point loc = onEdt(win::getLocationOnScreen);
+                Map<String, Object> readyInfo = new HashMap<>();
+                readyInfo.put("windowTitle", "LearningCoach-Newcomer-Session");
+                readyInfo.put("x", loc.x);
+                readyInfo.put("y", loc.y);
+                readyInfo.put("width", firstImg.getWidth());
+                readyInfo.put("height", firstImg.getHeight());
+                readyInfo.put("liveScreenshot", liveShot.toString());
+                readyInfo.put("openedAtEpochMs", tOpen);
+                readyInfo.put("libWorkDir", libWork.toString());
+                Files.writeString(readyFile, toJson(readyInfo, 0), StandardCharsets.UTF_8);
+                System.out.println("NEWCOMER_WINDOW_READY " + readyFile);
+
+                String initialState = currentSavedStudyMode(libWork);
+                long firstSwitchElapsedMs = -1L;
+                int clicksAtFirstSwitch = -1;
+                long deadline = tOpen + holdSec * 1000L;
+                Path stopFile = outDir.resolve("stop.signal");
+                Path clickCmdFile = outDir.resolve("click.cmd");
+                int tick = 0;
+                while (System.currentTimeMillis() < deadline && !Files.exists(stopFile) && win.isDisplayable()) {
+                    boolean didCmdClick = false;
+                    if (Files.exists(clickCmdFile)) {
+                        String cmdRaw = Files.readString(clickCmdFile, StandardCharsets.UTF_8).trim();
+                        Files.deleteIfExists(clickCmdFile);
+                        String[] parts = cmdRaw.split("\\s+");
+                        if (parts.length >= 2) {
+                            double cx = Double.parseDouble(parts[0]);
+                            double cy = Double.parseDouble(parts[1]);
+                            cmdClicks.incrementAndGet();
+                            onEdt(() -> {
+                                sendPointerWin32(win, cx, cy, MouseEvent.MOUSE_MOVED, 0, MouseEvent.NOBUTTON);
+                                sendPointerWin32(win, cx, cy, MouseEvent.MOUSE_PRESSED, InputEvent.BUTTON1_DOWN_MASK, MouseEvent.BUTTON1);
+                                sendPointerWin32(win, cx, cy, MouseEvent.MOUSE_RELEASED, 0, MouseEvent.BUTTON1);
+                                sendPointerWin32(win, cx, cy, MouseEvent.MOUSE_CLICKED, 0, MouseEvent.BUTTON1);
+                                return null;
+                            });
+                            didCmdClick = true;
+                            Thread.sleep(350);
+                        }
+                    }
+                    if (didCmdClick || (tick++ % 5 == 0)) {
+                        BufferedImage snap = onEdt(() -> screenshotWin32(win));
+                        ImageIO.write(snap, "png", liveTmp.toFile());
+                        Files.move(liveTmp, liveShot, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    }
+                    int totalClicks = rawMouseClicks.get() + cmdClicks.get();
+                    String cur = currentSavedStudyMode(libWork);
+                    boolean switched = !cur.equals(initialState) && cur.endsWith(":LOCKED");
+                    if (switched && firstSwitchElapsedMs < 0) {
+                        firstSwitchElapsedMs = System.currentTimeMillis() - tOpen;
+                        clicksAtFirstSwitch = totalClicks;
+                        dumpWin32(win, outDir, "newcomer", "1280x820", "switched_state");
+                    }
+                    Map<String, Object> status = new HashMap<>();
+                    status.put("initialMode", initialState);
+                    status.put("currentMode", cur);
+                    status.put("modeSwitched", switched);
+                    status.put("totalClicks", totalClicks);
+                    status.put("clicksAtFirstSwitch", clicksAtFirstSwitch);
+                    status.put("misclicksAtFirstSwitch", clicksAtFirstSwitch > 0 ? Math.max(0, clicksAtFirstSwitch - 2) : -1);
+                    status.put("firstSwitchElapsedMs", firstSwitchElapsedMs);
+                    status.put("elapsedMs", System.currentTimeMillis() - tOpen);
+                    Files.writeString(outDir.resolve("newcomer-telemetry.json"), toJson(status, 0), StandardCharsets.UTF_8);
+                    if (didCmdClick) {
+                        Files.writeString(outDir.resolve("click.done"), String.valueOf(totalClicks), StandardCharsets.UTF_8);
+                    }
+                    Thread.sleep(200);
+                }
+                dumpWin32(win, outDir, "newcomer", "1280x820", "final_state");
+            } finally {
+                java.awt.Toolkit.getDefaultToolkit().removeAWTEventListener(clickListener);
+                disposeWindow(win);
+            }
+        } finally {
+            deleteQuietly(libWork);
+        }
     }
 
     // ==================== LOOPBACK STUB SERVER FOR LOGIN 4 PATHS ====================

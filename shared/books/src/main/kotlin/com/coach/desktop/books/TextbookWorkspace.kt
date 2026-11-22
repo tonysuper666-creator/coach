@@ -371,6 +371,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             onOpenCollection = onOpenCollection,
                             onMultiDropAction = { action -> controller.resolveMultiDrop(action) },
                             onDismissMultiDrop = controller::dismissMultiDrop,
+                            library = controller.library,
                         )
                         ui.screen == BookScreen.COURSE && ui.activeCourseDetail != null -> {
                             val detail = checkNotNull(ui.activeCourseDetail)

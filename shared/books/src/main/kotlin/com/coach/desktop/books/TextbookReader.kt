@@ -128,6 +128,10 @@ internal fun TextbookReader(
     onSaveCoursePracticeDraft: ((CourseTopicPracticeDraft) -> Unit)? = null,
     onRefreshCoursePack: (() -> Unit)? = null,
     onJumpCourseCitation: ((CourseCitationRef) -> Unit)? = null,
+    collectionQaSessions: Map<String, CollectionQaSessionState> = emptyMap(),
+    onUpdateCollectionQaSession: ((String, CollectionQaSessionState) -> Unit)? = null,
+    onJumpCollectionCitation: ((CollectionQaCitation) -> Unit)? = null,
+    onConsumeKeepAskTabOpen: () -> Unit = {},
 ) {
     val book = checkNotNull(ui.book)
     val page = book.page(ui.page)
@@ -409,8 +413,36 @@ internal fun TextbookReader(
         ReaderCompanionTab.entries.firstOrNull { it.name.equals(resumeDraft?.companionTab, ignoreCase = true) }
             ?: ReaderCompanionTab.EXPLAIN
     }
-    var companionOpen by remember(book.id, courseContext?.topicId, openPairing) { mutableStateOf(initialCompanionOpen) }
-    var companionTab by remember(book.id) { mutableStateOf(initialCompanionTab) }
+    var companionOpen by remember(book.id, courseContext?.topicId, openPairing) { mutableStateOf(initialCompanionOpen || ui.keepAskTabOpen) }
+    var companionTab by remember(book.id) { mutableStateOf(if (ui.keepAskTabOpen) ReaderCompanionTab.ASK else initialCompanionTab) }
+    LaunchedEffect(ui.keepAskTabOpen, book.id) {
+        if (ui.keepAskTabOpen) {
+            companionOpen = true
+            companionTab = ReaderCompanionTab.ASK
+            onConsumeKeepAskTabOpen()
+        }
+    }
+    val activeAskCollection = remember(courseContext?.courseId, ui.activeBooklistId, ui.collections, book.id) {
+        when {
+            courseContext != null -> ActiveAskCollection(courseContext.courseId, CollectionKind.COURSE, courseContext.courseTitle)
+            ui.activeBooklistId != null -> ui.collections.firstOrNull { it.record.id == ui.activeBooklistId }
+                ?.let { ActiveAskCollection(it.record.id, it.record.kind, it.record.title) }
+            else -> {
+                val matching = ui.collections.filter { !it.record.archived && book.id in it.materialIds }
+                val preferred = matching.firstOrNull { it.record.kind == CollectionKind.COURSE }
+                    ?: matching.firstOrNull { it.record.kind == CollectionKind.BOOKLIST }
+                preferred?.let { ActiveAskCollection(it.record.id, it.record.kind, it.record.title) }
+            }
+        }
+    }
+    val localCollectionSessions = remember { mutableStateMapOf<String, CollectionQaSessionState>() }
+    fun sessionForCollection(collectionId: String): CollectionQaSessionState =
+        if (onUpdateCollectionQaSession != null) collectionQaSessions[collectionId] ?: CollectionQaSessionState()
+        else localCollectionSessions[collectionId] ?: CollectionQaSessionState()
+    fun updateCollectionSession(collectionId: String, next: CollectionQaSessionState) {
+        if (onUpdateCollectionQaSession != null) onUpdateCollectionQaSession(collectionId, next)
+        else localCollectionSessions[collectionId] = next
+    }
     var askInputFocused by remember(book.id) { mutableStateOf(false) }
     var practiceInputFocused by remember(book.id) { mutableStateOf(false) }
     val currentChapterGroup = remember(book.id, book.lessons, currentSectionIndex) {
@@ -708,10 +740,10 @@ internal fun TextbookReader(
         pdf.selection = null
         asking = false
         explainOpen = false
-        textView = false
+        if (hasOriginal) textView = false
         passageJump = passage
         passageJumpTick++
-        pdf.jump(passage.page)
+        if (originalPdf) pdf.jump(passage.page)
         paging.anchor = BookPageAnchor(passage.page, passage.start)
         if (paging.publishImportPage(passage.page)) onPage(passage.page)
     }
@@ -1350,7 +1382,78 @@ internal fun TextbookReader(
         val currentPageBodyBlocks = remember(allBookBlocks, paragraphPage.number) {
             allBookBlocks.filter { it.page == paragraphPage.number && it.isBodyParagraph }
         }
+        val activeColSession = activeAskCollection?.let { sessionForCollection(it.id) } ?: CollectionQaSessionState()
+        fun submitCollectionQuestion(rawQuestion: String) {
+            val col = activeAskCollection ?: return
+            val q = rawQuestion.trim()
+            if (q.length !in 2..600) return
+            val prev = sessionForCollection(col.id)
+            if (!aiEnabled) {
+                updateCollectionSession(
+                    col.id,
+                    prev.copy(
+                        loading = false,
+                        error = "已在设置中关闭伴读讲解与提问，可在设置中重新开启。" to ExplainTrouble.Other,
+                        lastQuestion = q,
+                    ),
+                )
+                return
+            }
+            inlineDraft = ""
+            updateCollectionSession(col.id, prev.copy(loading = true, error = null, lastQuestion = q))
+            scope.launch {
+                val askNodeId = currentSection?.id ?: currentChapterSpan?.tocNodeId ?: "p${ui.page}"
+                val askName = currentSection?.title ?: currentChapterSpan?.title ?: "第 ${ui.page} 页"
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        library.recordMasteryEvidence(
+                            bookId = book.id,
+                            tocNodeId = askNodeId,
+                            page = ui.page,
+                            canonicalName = askName,
+                            signal = LearnerSignalType.SELECTION_ASK,
+                        )
+                    }
+                }
+                val res = CollectionQaEngine.ask(
+                    library = library,
+                    collectionId = col.id,
+                    question = q,
+                    currentBookId = book.id,
+                    remoteAsk = { payload ->
+                        if (!explainer.loaded) explainer.load()
+                        explainer.askCollection(payload)
+                    },
+                )
+                val latest = sessionForCollection(col.id)
+                res.fold(
+                    onSuccess = { turn ->
+                        updateCollectionSession(
+                            col.id,
+                            latest.copy(
+                                turns = latest.turns + turn,
+                                loading = false,
+                                error = null,
+                                lastQuestion = null,
+                            ),
+                        )
+                    },
+                    onFailure = { err ->
+                        val qaErr = err as? CollectionQaException
+                        if (inlineDraft.isBlank()) inlineDraft = q
+                        updateCollectionSession(
+                            col.id,
+                            latest.copy(
+                                loading = false,
+                                error = (qaErr?.message ?: err.message ?: "跨材料问答暂时不可用，请重试。") to (qaErr?.trouble ?: ExplainTrouble.Other),
+                            ),
+                        )
+                    },
+                )
+            }
+        }
         val askTabContent: @Composable () -> Unit = {
+            val isCollectionAsk = activeAskCollection != null && activeColSession.scope == CollectionAskScope.COLLECTION
             CompanionAskPane(
                 book = book,
                 allBlocks = allBookBlocks,
@@ -1367,14 +1470,18 @@ internal fun TextbookReader(
                     inlineThread = InlineExplainThread(picked, secCtx, askingOpen = true)
                 },
                 onSubmitQuestion = {
-                    val q = inlineDraft.trim()
-                    val target = inlineThread?.selection ?: learnableSelection
-                        ?: currentPageBodyBlocks.firstOrNull()
-                        ?: currentSection?.blocks?.firstOrNull { !it.heading && it.text.isNotBlank() }
-                        ?: allBookBlocks.firstOrNull { it.page == ui.page && it.text.isNotBlank() }
-                    if (target != null && BookPassageQuestion.accepts(q)) {
-                        inlineDraft = ""
-                        runInlineSelection(target, SelectionExplainAction.ASK, q)
+                    if (isCollectionAsk) {
+                        submitCollectionQuestion(inlineDraft)
+                    } else {
+                        val q = inlineDraft.trim()
+                        val target = inlineThread?.selection ?: learnableSelection
+                            ?: currentPageBodyBlocks.firstOrNull()
+                            ?: currentSection?.blocks?.firstOrNull { !it.heading && it.text.isNotBlank() }
+                            ?: allBookBlocks.firstOrNull { it.page == ui.page && it.text.isNotBlank() }
+                        if (target != null && BookPassageQuestion.accepts(q)) {
+                            inlineDraft = ""
+                            runInlineSelection(target, SelectionExplainAction.ASK, q)
+                        }
                     }
                 },
                 onRetry = {
@@ -1389,6 +1496,33 @@ internal fun TextbookReader(
                 onOpenCitation = { _, block -> handleCitationJump(BookPassage.from(book, block)) },
                 onClearSelection = { inlineThread = null; pdf.selection = null; textSelection = null },
                 onInputFocusChanged = { askInputFocused = it },
+                collectionScopeLabel = activeAskCollection?.scopeToggleLabel,
+                askScope = activeColSession.scope,
+                onSelectAskScope = { nextScope ->
+                    activeAskCollection?.let { col ->
+                        updateCollectionSession(col.id, sessionForCollection(col.id).copy(scope = nextScope, error = null))
+                    }
+                },
+                collectionTurns = activeColSession.turns,
+                collectionLoading = activeColSession.loading,
+                collectionError = activeColSession.error,
+                onRetryCollection = {
+                    val q = activeColSession.lastQuestion ?: inlineDraft
+                    submitCollectionQuestion(q)
+                },
+                onOpenCollectionCitation = { cit ->
+                    if (cit.bookId == book.id) {
+                        val pageObj = book.page(cit.page)
+                        val passage = pageObj?.let {
+                            SentenceCitationGate.locatePassageInPage(book.id, it, cit.quoteAnchor, cit.timestampLabel)
+                        }
+                        if (passage != null) openPassage(passage) else turnTo(cit.page)
+                    } else if (onJumpCollectionCitation != null) {
+                        onJumpCollectionCitation(cit)
+                    } else {
+                        onOpenCrossBookPage?.invoke(cit.bookId, cit.page, cit.quoteAnchor)
+                    }
+                },
             )
         }
 

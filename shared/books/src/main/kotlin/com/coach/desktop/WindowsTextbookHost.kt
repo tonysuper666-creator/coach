@@ -86,6 +86,7 @@ internal fun WindowsTextbookHost(
     onExportNotes: ((com.coach.desktop.books.Textbook, Int) -> Unit)? = null,
     releasePickedBook: (Path) -> Unit = {},
     chooseBooks: (suspend () -> List<Path>)? = null,
+    bookExplainer: BookExplainer? = null,
     chooseBook: suspend () -> Path?,
 ) {
     var settings by rememberSaveable { mutableStateOf(false) }
@@ -95,6 +96,7 @@ internal fun WindowsTextbookHost(
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
     val book = ui.book
+    val hostExplainer = remember(controller.library, bookExplainer) { bookExplainer ?: BookExplainer(library = controller.library) }
 
     val pickMultiple: suspend () -> List<Path> = remember(chooseBooks, chooseBook) {
         {
@@ -154,7 +156,9 @@ internal fun WindowsTextbookHost(
                     if (event.type == KeyEventType.KeyDown &&
                         event.key == Key.K &&
                         (event.isCtrlPressed || event.isMetaPressed) &&
-                        !deskPage && !isEmptyLibrary
+                        ui.screen != BookScreen.LEARNING &&
+                        ui.screen != BookScreen.REVIEWING &&
+                        !isEmptyLibrary
                     ) {
                         searchOpen = true
                         true
@@ -241,6 +245,7 @@ internal fun WindowsTextbookHost(
                             },
                             onPickCourseFiles = pickMultiple,
                             onPickBooklistFiles = pickMultiple,
+                            explainProvider = hostExplainer,
                             chooseBook = chooseBook,
                         )
                     }
@@ -326,6 +331,12 @@ internal fun WindowsTextbookHost(
                         }
                     },
                     onClose = { searchOpen = false },
+                    explainer = hostExplainer,
+                    preferredCollectionId = ui.activeCourseId ?: ui.activeBooklistId,
+                    onJumpCollectionCitation = { cit ->
+                        searchOpen = false
+                        scope.launch { controller.jumpToCollectionCitation(cit) }
+                    },
                 )
             }
             creatingKind?.let { kind ->

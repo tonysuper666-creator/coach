@@ -62,6 +62,8 @@ internal data class LibraryUi(
     val booklistAligning: Boolean = false,
     /** 章节已读、主题静音或共享笔记变更递增版本号，驱动书单页与伴读抽屉即时刷新。 */
     val booklistRevision: Int = 0,
+    /** 2.0-AI-3：跨材料问答点击异书角标跳页后保持伴读「提问」抽屉开启。 */
+    val keepAskTabOpen: Boolean = false,
 )
 
 internal class TextbookController(val library: TextbookLibrary, var structureProvider: BookStructureProvider? = null) {
@@ -1669,6 +1671,74 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
 
     fun consumePendingCourseJump() {
         mutable.update { it.copy(pendingCourseJump = null) }
+    }
+
+    fun consumeKeepAskTabOpen() {
+        mutable.update { it.copy(keepAskTabOpen = false) }
+    }
+
+    /** 2.0-AI-3：从「整门课 / 已读书目」问答或全局搜索点击跨材料页码胶囊，1 击切书跳页并保留「提问」抽屉。 */
+    suspend fun jumpToCollectionCitation(citation: CollectionQaCitation) = action {
+        val loaded = library.book(citation.bookId)
+        val clampedPage = citation.page.coerceIn(1, loaded.pages.size.coerceAtLeast(1))
+        val pageObj = loaded.page(clampedPage)
+        val passage = if (pageObj != null) {
+            SentenceCitationGate.locatePassageInPage(loaded.id, pageObj, citation.quoteAnchor, citation.timestampLabel)
+        } else {
+            citation.timestampLabel?.let { ts ->
+                CourseTranscriptParser.findTimestampAnchor(loaded.pages, ts)?.let { anchor ->
+                    BookPassage(loaded.id, anchor.pageNumber, anchor.startUtf16, anchor.endUtf16, anchor.excerpt)
+                }
+            }
+        }
+        val finalPage = passage?.page ?: clampedPage
+        val updatedBook = loaded.copy(readingPage = finalPage)
+        library.save(updatedBook)
+        library.saveOpenSession(updatedBook.id, "READER")
+        val collections = library.collectionSummaries()
+        val targetCol = collections.firstOrNull { it.record.id == citation.collectionId }
+        val nextCourseId = when {
+            targetCol?.record?.kind == CollectionKind.COURSE -> targetCol.record.id
+            targetCol?.record?.kind == CollectionKind.BOOKLIST -> null
+            else -> mutable.value.activeCourseId
+        }
+        val nextBooklistId = when {
+            targetCol?.record?.kind == CollectionKind.BOOKLIST -> targetCol.record.id
+            targetCol?.record?.kind == CollectionKind.COURSE -> null
+            else -> mutable.value.activeBooklistId
+        }
+        val nextDetail = nextCourseId?.let { cid -> runCatching { library.courseDetail(cid) }.getOrNull() }
+        if (nextCourseId != null) {
+            library.withCourseDatabase { db ->
+                CourseStore.saveActiveAnchor(
+                    db,
+                    CourseActiveAnchor(
+                        courseId = nextCourseId,
+                        topicId = mutable.value.activeCourseTopicId,
+                        bookId = updatedBook.id,
+                        page = finalPage,
+                        companionOpen = true,
+                    ),
+                )
+            }
+        }
+        mutable.update { current ->
+            current.copy(
+                book = updatedBook,
+                page = finalPage,
+                screen = BookScreen.READER,
+                source = null,
+                prompt = null,
+                review = null,
+                pendingCourseJump = passage,
+                keepAskTabOpen = true,
+                activeCourseId = nextCourseId,
+                activeCourseDetail = nextDetail,
+                activeBooklistId = nextBooklistId,
+                collections = collections,
+                catalog = library.catalog(),
+            )
+        }
     }
 
     fun dismissCourseNotice() {

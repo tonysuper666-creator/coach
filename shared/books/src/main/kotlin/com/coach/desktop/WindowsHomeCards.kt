@@ -19,9 +19,15 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
+import com.coach.desktop.books.BookExplainer
 import com.coach.desktop.books.BookSearchResult
 import com.coach.desktop.books.BookSummary
 import com.coach.desktop.books.CollectionKind
+import com.coach.desktop.books.CollectionQaCitation
+import com.coach.desktop.books.CollectionQaEngine
+import com.coach.desktop.books.CollectionQaException
+import com.coach.desktop.books.CollectionQaTurn
+import com.coach.desktop.books.CollectionQaTurnView
 import com.coach.desktop.books.CollectionSummary
 import com.coach.desktop.books.PaperColor
 import com.coach.desktop.books.ReadingFont
@@ -222,7 +228,7 @@ internal fun CreateCollectionDialog(
     )
 }
 
-/** 顶栏「搜索」（Ctrl/Cmd+K）：搜全库教材、课程与书单，底部可切换查看全部已导入文件。 */
+/** 顶栏「搜索」（Ctrl/Cmd+K）：搜全库教材、课程与书单，并支持直接向课程或已读书目跨材料提问，底部可切换查看全部已导入文件。 */
 @Composable
 internal fun HostSearchDialog(
     library: TextbookLibrary,
@@ -231,11 +237,53 @@ internal fun HostSearchDialog(
     onOpenBook: (bookId: String, page: Int?) -> Unit,
     onOpenCollection: (CollectionSummary) -> Unit,
     onClose: () -> Unit,
+    explainer: BookExplainer? = null,
+    preferredCollectionId: String? = null,
+    onJumpCollectionCitation: ((CollectionQaCitation) -> Unit)? = null,
 ) {
     val colors = CoachTheme.colors
+    val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
     var showAllFiles by remember { mutableStateOf(false) }
     var bookMatches by remember { mutableStateOf<List<Pair<BookSummary, BookSearchResult>>>(emptyList()) }
+    val askableCollections = remember(collections) {
+        collections.filter { !it.record.archived && (it.record.kind == CollectionKind.COURSE || it.record.kind == CollectionKind.BOOKLIST) }
+    }
+    var selectedCollectionId by remember(askableCollections, preferredCollectionId) {
+        mutableStateOf(
+            preferredCollectionId?.takeIf { id -> askableCollections.any { it.record.id == id } }
+                ?: askableCollections.firstOrNull()?.record?.id,
+        )
+    }
+    val selectedCollection = askableCollections.firstOrNull { it.record.id == selectedCollectionId }
+    var qaLoading by remember { mutableStateOf(false) }
+    var qaError by remember { mutableStateOf<String?>(null) }
+    var qaTurns by remember { mutableStateOf<List<CollectionQaTurn>>(emptyList()) }
+
+    fun submitCollectionAsk() {
+        val col = selectedCollection ?: return
+        val q = query.trim()
+        if (q.length !in 2..600 || qaLoading) return
+        qaLoading = true
+        qaError = null
+        scope.launch {
+            val activeExplainer = explainer ?: BookExplainer(library = library)
+            val res = CollectionQaEngine.ask(
+                library = library,
+                collectionId = col.record.id,
+                question = q,
+                remoteAsk = { payload ->
+                    if (!activeExplainer.loaded) activeExplainer.load()
+                    activeExplainer.askCollection(payload)
+                },
+            )
+            qaLoading = false
+            res.fold(
+                onSuccess = { turn -> qaTurns = qaTurns + turn },
+                onFailure = { err -> qaError = err.message ?: "跨材料问答暂时不可用，请重试。" },
+            )
+        }
+    }
 
     LaunchedEffect(query, catalog) {
         val q = query.trim()
@@ -254,19 +302,93 @@ internal fun HostSearchDialog(
     AlertDialog(
         modifier = Modifier.testTag("host-search-dialog"),
         onDismissRequest = onClose,
-        title = { Text("搜索全库") },
+        title = { Text("搜索与跨材料提问") },
         text = {
             Column(
-                Modifier.fillMaxWidth().heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
+                Modifier.fillMaxWidth().heightIn(max = 480.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it },
                     singleLine = true,
-                    placeholder = { Text("搜索书名、课程、书单或正文…") },
+                    placeholder = { Text("输入关键词搜全库，或直接提问课程/已读书目…") },
                     modifier = Modifier.fillMaxWidth().testTag("host-search-input"),
                 )
+                if (selectedCollection != null) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (askableCollections.size > 1) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                for (col in askableCollections.take(4)) {
+                                    val active = col.record.id == selectedCollection.record.id
+                                    V7TextButton(
+                                        onClick = { selectedCollectionId = col.record.id },
+                                        modifier = Modifier.testTag("host-search-col-${col.record.id}"),
+                                    ) {
+                                        Text(
+                                            col.record.title,
+                                            color = if (active) colors.actionPrimary else colors.fgSecondary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            PaperButton(
+                                onClick = ::submitCollectionAsk,
+                                enabled = !qaLoading && query.trim().length in 2..600,
+                                modifier = Modifier.testTag("host-search-ask-collection"),
+                            ) {
+                                Text(
+                                    if (selectedCollection.record.kind == CollectionKind.BOOKLIST) {
+                                        "问「${selectedCollection.record.title}」已读书目"
+                                    } else {
+                                        "问「${selectedCollection.record.title}」整门课"
+                                    },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            if (qaLoading) {
+                                Text(
+                                    "正在核对原页…",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.fgSecondary,
+                                    modifier = Modifier.testTag("host-search-qa-loading"),
+                                )
+                            }
+                        }
+                        qaError?.let { msg ->
+                            Text(
+                                msg,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.accentDeep,
+                                modifier = Modifier.testTag("host-search-qa-error"),
+                            )
+                        }
+                        for ((idx, turn) in qaTurns.withIndex()) {
+                            CollectionQaTurnView(
+                                turn = turn,
+                                turnIndex = idx,
+                                tagPrefix = "host-search-qa",
+                                onOpenCitation = { cit ->
+                                    if (onJumpCollectionCitation != null) onJumpCollectionCitation(cit)
+                                    else onOpenBook(cit.bookId, cit.page)
+                                },
+                            )
+                            HorizontalDivider(color = colors.borderSubtle)
+                        }
+                    }
+                }
                 if (query.isNotBlank()) {
                     if (matchingCollections.isEmpty() && bookMatches.isEmpty()) {
                         Text("没找到匹配内容。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)

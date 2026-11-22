@@ -12,6 +12,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -961,6 +962,7 @@ internal fun ImmersiveSelectionPill(
 
 /**
  * 伴读抽屉内的「提问」面板：无嵌套卡片，扁平对话流 + 始终固定在底部的输入框（任何窗高零滚屏即见输入框与发送键）。
+ * 处于课程或书单阅读时，吸底提问框上方支持轻量切换「本节 | 整门课（已读书目）」。
  */
 @Composable
 internal fun CompanionAskPane(
@@ -980,10 +982,21 @@ internal fun CompanionAskPane(
     onOpenCitation: (Citation, SourceBlock) -> Unit,
     onClearSelection: () -> Unit,
     onInputFocusChanged: (Boolean) -> Unit = {},
+    collectionScopeLabel: String? = null,
+    askScope: CollectionAskScope = CollectionAskScope.SECTION,
+    onSelectAskScope: (CollectionAskScope) -> Unit = {},
+    collectionTurns: List<CollectionQaTurn> = emptyList(),
+    collectionLoading: Boolean = false,
+    collectionError: Pair<String, ExplainTrouble>? = null,
+    onRetryCollection: () -> Unit = {},
+    onOpenCollectionCitation: (CollectionQaCitation) -> Unit = {},
 ) {
     val colors = CoachTheme.colors
     var pickingParagraph by remember(book.id, pageBlocks) { mutableStateOf(false) }
     val quoteSource = thread?.selection ?: activeSelection
+    val isCollectionMode = collectionScopeLabel != null && askScope == CollectionAskScope.COLLECTION
+    val isLoadingNow = if (isCollectionMode) collectionLoading else (thread?.loading == true)
+    val canSendNow = if (isCollectionMode) draft.trim().length in 2..600 else BookPassageQuestion.accepts(draft)
     DisposableEffect(Unit) {
         onDispose { onInputFocusChanged(false) }
     }
@@ -992,7 +1005,16 @@ internal fun CompanionAskPane(
         Modifier.fillMaxSize().padding(if (compact) 10.dp else 14.dp).testTag("companion-ask-pane"),
         verticalArrangement = Arrangement.spacedBy(if (compact) 6.dp else 10.dp),
     ) {
-        if (quoteSource != null) {
+        if (isCollectionMode) {
+            Text(
+                if (collectionScopeLabel == "已读书目") "只在已读章节里跨书查依据，不剧透未读内容。"
+                else "在整门课全部材料中查原页依据并核对分歧。",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        } else if (quoteSource != null) {
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -1053,64 +1075,123 @@ internal fun CompanionAskPane(
             Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            if (pickingParagraph && quoteSource == null) {
-                pageBlocks.forEachIndexed { idx, block ->
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(CoachV7.Radius.s))
-                            .clickable {
-                                pickingParagraph = false
-                                onPickPassage(block)
-                            }
-                            .pointerHoverIcon(PointerIcon.Hand)
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
-                            .testTag("ask-passage-block-$idx"),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text(
-                            "${idx + 1}",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = LocalV7Fonts.current.numbers,
-                            color = colors.actionPrimary,
-                        )
-                        Text(
-                            shortQuote(block.text),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.fgPrimary,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                    HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.5f))
-                }
-            }
-            if (thread != null) {
-                for ((index, entry) in thread.turns.withIndex()) {
-                    Column(Modifier.fillMaxWidth().testTag("inline-explain-turn-$index"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(entry.label, style = MaterialTheme.typography.labelMedium, color = colors.actionPrimary)
-                        ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks) { citation ->
-                            entry.sentBlocks.firstOrNull { it.id == citation.blockId }?.let { onOpenCitation(citation, it) }
-                        }
-                    }
+            if (isCollectionMode) {
+                for ((index, turn) in collectionTurns.withIndex()) {
+                    CollectionQaTurnView(
+                        turn = turn,
+                        turnIndex = index,
+                        tagPrefix = "collection-qa",
+                        onOpenCitation = onOpenCollectionCitation,
+                    )
                     HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.6f))
                 }
-                if (thread.loading) {
-                    Text("正在整理…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("inline-explain-loading"))
+                if (collectionLoading) {
+                    Text(
+                        "正在跨材料核对原页…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.fgSecondary,
+                        modifier = Modifier.testTag("collection-qa-loading"),
+                    )
                 }
-                thread.error?.let { (message, trouble) ->
+                collectionError?.let { (message, trouble) ->
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
                             message,
                             style = MaterialTheme.typography.bodySmall,
                             color = if (trouble == ExplainTrouble.Revoked) v7Alert() else colors.fgSecondary,
-                            modifier = Modifier.weight(1f).testTag("inline-explain-error"),
+                            modifier = Modifier.weight(1f).testTag("collection-qa-error"),
                         )
-                        if (trouble.needsPairing) TextButton(onClick = onOpenLogin) { Text("重新登录", maxLines = 1, softWrap = false) }
-                        else TextButton(onClick = onRetry) { Text("重试", maxLines = 1, softWrap = false) }
+                        if (trouble.needsPairing) {
+                            TextButton(onClick = onOpenLogin) { Text("重新登录", maxLines = 1, softWrap = false) }
+                        } else {
+                            TextButton(
+                                onClick = onRetryCollection,
+                                modifier = Modifier.testTag("collection-qa-retry"),
+                            ) { Text("重试", maxLines = 1, softWrap = false) }
+                        }
                     }
                 }
+            } else {
+                if (pickingParagraph && quoteSource == null) {
+                    pageBlocks.forEachIndexed { idx, block ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(CoachV7.Radius.s))
+                                .clickable {
+                                    pickingParagraph = false
+                                    onPickPassage(block)
+                                }
+                                .pointerHoverIcon(PointerIcon.Hand)
+                                .padding(horizontal = 8.dp, vertical = 6.dp)
+                                .testTag("ask-passage-block-$idx"),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                "${idx + 1}",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = LocalV7Fonts.current.numbers,
+                                color = colors.actionPrimary,
+                            )
+                            Text(
+                                shortQuote(block.text),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.fgPrimary,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.5f))
+                    }
+                }
+                if (thread != null) {
+                    for ((index, entry) in thread.turns.withIndex()) {
+                        Column(Modifier.fillMaxWidth().testTag("inline-explain-turn-$index"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(entry.label, style = MaterialTheme.typography.labelMedium, color = colors.actionPrimary)
+                            ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks) { citation ->
+                                entry.sentBlocks.firstOrNull { it.id == citation.blockId }?.let { onOpenCitation(citation, it) }
+                            }
+                        }
+                        HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.6f))
+                    }
+                    if (thread.loading) {
+                        Text("正在整理…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("inline-explain-loading"))
+                    }
+                    thread.error?.let { (message, trouble) ->
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                message,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (trouble == ExplainTrouble.Revoked) v7Alert() else colors.fgSecondary,
+                                modifier = Modifier.weight(1f).testTag("inline-explain-error"),
+                            )
+                            if (trouble.needsPairing) TextButton(onClick = onOpenLogin) { Text("重新登录", maxLines = 1, softWrap = false) }
+                            else TextButton(onClick = onRetry) { Text("重试", maxLines = 1, softWrap = false) }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (collectionScopeLabel != null) {
+            Row(
+                Modifier.fillMaxWidth().testTag("ask-scope-bar"),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ScopePillButton(
+                    label = "本节",
+                    selected = askScope == CollectionAskScope.SECTION,
+                    modifier = Modifier.testTag("ask-scope-section"),
+                    onClick = { onSelectAskScope(CollectionAskScope.SECTION) },
+                )
+                ScopePillButton(
+                    label = collectionScopeLabel,
+                    selected = askScope == CollectionAskScope.COLLECTION,
+                    modifier = Modifier.testTag("ask-scope-collection"),
+                    onClick = { onSelectAskScope(CollectionAskScope.COLLECTION) },
+                )
             }
         }
 
@@ -1119,15 +1200,19 @@ internal fun CompanionAskPane(
                 V7Field(
                     value = draft,
                     onValueChange = onDraftChange,
-                    label = if (quoteSource != null) "问这句的意思、公式推导或例子…" else "输入问题…",
-                    enabled = thread?.loading != true,
+                    label = when {
+                        isCollectionMode -> "向$collectionScopeLabel 提问（核对原页与分歧）…"
+                        quoteSource != null -> "问这句的意思、公式推导或例子…"
+                        else -> "输入问题…"
+                    },
+                    enabled = !isLoadingNow,
                     modifier = Modifier
                         .fillMaxWidth()
                         .onFocusChanged { onInputFocusChanged(it.hasFocus) }
                         .testTag("inline-followup-input")
                         .onPreviewKeyEvent { event ->
                             if (event.type == KeyEventType.KeyDown && event.key == Key.Enter && !event.isShiftPressed &&
-                                BookPassageQuestion.accepts(draft) && thread?.loading != true) {
+                                canSendNow && !isLoadingNow) {
                                 onSubmitQuestion(); true
                             } else false
                         },
@@ -1135,9 +1220,171 @@ internal fun CompanionAskPane(
             }
             PrimaryButton(
                 onClick = onSubmitQuestion,
-                enabled = thread?.loading != true && BookPassageQuestion.accepts(draft),
+                enabled = !isLoadingNow && canSendNow,
                 modifier = Modifier.testTag("inline-followup-send"),
             ) { Text("发送", maxLines = 1, softWrap = false) }
+        }
+    }
+}
+
+@Composable
+private fun ScopePillButton(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = CoachTheme.colors
+    val shape = RoundedCornerShape(CoachV7.Radius.s)
+    Box(
+        modifier
+            .clip(shape)
+            .background(if (selected) colors.actionPrimary.copy(alpha = 0.14f) else colors.surface2)
+            .border(1.dp, if (selected) colors.actionPrimary else colors.borderSubtle, shape)
+            .clickable(role = Role.Button, onClick = onClick)
+            .pointerHoverIcon(PointerIcon.Hand)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = if (selected) colors.actionPrimary else colors.fgSecondary,
+            fontWeight = if (selected) CoachV7.Weight.uiStrong else FontWeight.Normal,
+            maxLines = 1,
+            softWrap = false,
+        )
+    }
+}
+
+@Composable
+internal fun CollectionQaTurnView(
+    turn: CollectionQaTurn,
+    turnIndex: Int,
+    tagPrefix: String,
+    onOpenCitation: (CollectionQaCitation) -> Unit,
+) {
+    val colors = CoachTheme.colors
+    val pine = v7Pine()
+    val pillShape = RoundedCornerShape(CoachV7.Radius.s)
+    Column(
+        Modifier.fillMaxWidth().testTag("$tagPrefix-turn-$turnIndex"),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            "问：${turn.question}",
+            style = MaterialTheme.typography.labelMedium,
+            color = colors.actionPrimary,
+        )
+        if (turn.sentences.isNotEmpty()) {
+            turn.sentences.forEachIndexed { sIdx, sentence ->
+                Column(
+                    Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        sentence.claim,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.fgPrimary,
+                    )
+                    Box(
+                        Modifier
+                            .clip(pillShape)
+                            .background(pine.copy(alpha = 0.10f))
+                            .border(1.dp, pine.copy(alpha = 0.35f), pillShape)
+                            .clickable(role = Role.Button) { onOpenCitation(sentence.citation) }
+                            .pointerHoverIcon(PointerIcon.Hand)
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                            .testTag("$tagPrefix-citation-$turnIndex-$sIdx"),
+                    ) {
+                        Text(
+                            "[${sentence.citation.capsuleText()}]",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = LocalV7Fonts.current.numbers,
+                            color = pine,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                    }
+                }
+            }
+        } else if (!turn.fallbackMessage.isNullOrBlank()) {
+            Text(
+                turn.fallbackMessage,
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgSecondary,
+                modifier = Modifier.testTag("$tagPrefix-fallback-$turnIndex"),
+            )
+        }
+
+        if (turn.hasMaterialConflict && (turn.conflictSummaryZh.isNotBlank() || turn.conflictCards.isNotEmpty())) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(pillShape)
+                    .background(colors.surface1)
+                    .border(1.dp, colors.borderSubtle, pillShape)
+                    .padding(10.dp)
+                    .testTag("$tagPrefix-conflict-card-$turnIndex"),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    "各材料说法不一",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = colors.accentDeep,
+                    fontWeight = CoachV7.Weight.uiStrong,
+                )
+                if (turn.conflictSummaryZh.isNotBlank()) {
+                    Text(
+                        turn.conflictSummaryZh,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.fgPrimary,
+                    )
+                }
+                turn.conflictCards.forEachIndexed { cIdx, card ->
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        if (card.point.isNotBlank()) {
+                            Text(card.point, style = MaterialTheme.typography.labelMedium, color = colors.fgPrimary)
+                        }
+                        if (card.authoritativeView.isNotBlank()) {
+                            Text("主口径：${card.authoritativeView}", style = MaterialTheme.typography.bodySmall, color = colors.fgPrimary)
+                        }
+                        if (card.secondaryView.isNotBlank()) {
+                            Text("另一材料：${card.secondaryView}", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+                        }
+                        if (card.advice.isNotBlank()) {
+                            Text("备考建议：${card.advice}", style = MaterialTheme.typography.bodySmall, color = pine)
+                        }
+                        if (card.citations.isNotEmpty()) {
+                            Row(
+                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                card.citations.forEachIndexed { rIdx, cit ->
+                                    Box(
+                                        Modifier
+                                            .clip(pillShape)
+                                            .background(colors.surface2)
+                                            .border(1.dp, colors.borderSubtle, pillShape)
+                                            .clickable(role = Role.Button) { onOpenCitation(cit) }
+                                            .pointerHoverIcon(PointerIcon.Hand)
+                                            .padding(horizontal = 7.dp, vertical = 3.dp)
+                                            .testTag("$tagPrefix-conflict-jump-$turnIndex-$cIdx-$rIdx"),
+                                    ) {
+                                        Text(
+                                            "[${cit.capsuleText()}]",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = LocalV7Fonts.current.numbers,
+                                            color = pine,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

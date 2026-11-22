@@ -1,5 +1,6 @@
 package com.coach.desktop
 
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.asSkiaBitmap
 import androidx.compose.ui.test.*
@@ -10,6 +11,7 @@ import org.jetbrains.skia.EncodedImageFormat
 import org.jetbrains.skia.Image
 import java.nio.file.Files
 import java.nio.file.Path
+import kotlin.math.abs
 import kotlin.test.*
 
 /**
@@ -249,6 +251,148 @@ class SingleBookCompanionFlowTest {
                 onNodeWithTag("exercise-hint2-0").assertExists()
                 onNodeWithTag("exercise-hint3-0").assertDoesNotExist()
                 maybeSaveShot("04-resumed-exercise-hints-tier2")
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun compactBottomSheetDrawerMergesModeBarAndKeepsBodyScrollable() {
+        val root = Files.createTempDirectory("coach-ton1776-compact-drawer-")
+        try {
+            val md = root.resolve("health-econ-sample.md").also {
+                Files.writeString(
+                    it,
+                    """
+                    # Chapter 1 Asymmetric Information
+
+                    When buyers hold private risk information, pooled insurance premiums exceed low-risk willingness to pay.
+
+                    As low-risk buyers exit the pool, average claims rise and the market unravels toward higher prices.
+
+                    # Chapter 2 Risk Pooling
+
+                    Compulsory participation stabilizes average claim costs across heterogeneous households.
+                    """.trimIndent(),
+                )
+            }
+
+            // 1. Wide bottom-sheet drawer at 752x552 merges mode trigger + module strip on a single row
+            // so companion-module-body stays tall and encloses mouse-wheel point (0.65 * winW, 0.72 * winH).
+            val libCompact = TextbookLibrary(root.resolve("lib-compact"))
+            val bookCompact = libCompact.importBook(md)
+            val groupCompact = assertNotNull(ChapterCompanionGrouping.groupForSection(bookCompact, 0))
+            libCompact.saveChapterCompanion(bookCompact.id, groupCompact.chapterId, samplePack(bookCompact, groupCompact))
+            val controllerCompact = TextbookController(libCompact)
+            runBlocking {
+                controllerCompact.load()
+                controllerCompact.read()
+            }
+
+            runSkikoComposeUiTest(size = Size(752f, 552f), density = Density(1f)) {
+                setContent {
+                    WindowsTextbookHost(controller = controllerCompact, chooseBook = { null })
+                }
+                waitForIdle()
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.L) }
+                waitForIdle()
+
+                onNodeWithTag("companion-mode-bar").assertIsDisplayed()
+                onNodeWithTag("companion-mode-trigger").assertIsDisplayed()
+                onNodeWithTag("companion-module-strip").assertIsDisplayed()
+                onNodeWithTag("companion-module-body").assertIsDisplayed()
+
+                val triggerBounds = onNodeWithTag("companion-mode-trigger").fetchSemanticsNode().boundsInRoot
+                val stripBounds = onNodeWithTag("companion-module-strip").fetchSemanticsNode().boundsInRoot
+                val bodyBounds = onNodeWithTag("companion-module-body").fetchSemanticsNode().boundsInRoot
+
+                assertTrue(
+                    abs(triggerBounds.top - stripBounds.top) <= 12f,
+                    "Expected merged header row on 752x552 bottom sheet, but triggerTop=${triggerBounds.top}, stripTop=${stripBounds.top}",
+                )
+                val scrollTarget = Offset(752f * 0.65f, 552f * 0.72f)
+                assertTrue(
+                    bodyBounds.top < scrollTarget.y,
+                    "Expected companion-module-body.top (${bodyBounds.top}) < smoke scroll Y (${scrollTarget.y})",
+                )
+                assertTrue(
+                    bodyBounds.height >= 150f,
+                    "Expected companion-module-body.height >= 150f on 752x552, actual=${bodyBounds.height}",
+                )
+
+                val kpTopBefore = onNodeWithTag("companion-kp-0").fetchSemanticsNode().boundsInRoot.top
+                onRoot().performMouseInput {
+                    moveTo(scrollTarget)
+                    scroll(6f)
+                }
+                waitForIdle()
+                val kpTopAfter = onNodeWithTag("companion-kp-0").fetchSemanticsNode().boundsInRoot.top
+                assertTrue(
+                    kpTopAfter < kpTopBefore,
+                    "Expected scroll at $scrollTarget to move keypoints down (top $kpTopBefore -> $kpTopAfter)",
+                )
+                // Scroll back to top before switching tabs so pretest options start in view
+                onRoot().performMouseInput {
+                    moveTo(scrollTarget)
+                    scroll(-6f)
+                }
+                waitForIdle()
+
+                // Switch to pretest module, select option 0 while visible, then scroll at the exact smoke coordinate to reveal 提交
+                onNodeWithTag("companion-mod-pretest").performClick()
+                waitForIdle()
+                onNodeWithTag("pretest-opt-0-0").assertIsDisplayed().performClick()
+                waitForIdle()
+                repeat(8) {
+                    val submitBounds = onNodeWithTag("pretest-submit-0").fetchSemanticsNode().boundsInRoot
+                    if (submitBounds.top >= bodyBounds.top && submitBounds.bottom <= 552f) return@repeat
+                    onRoot().performMouseInput {
+                        moveTo(scrollTarget)
+                        scroll(2f)
+                    }
+                    waitForIdle()
+                }
+                val finalSubmitBounds = onNodeWithTag("pretest-submit-0").fetchSemanticsNode().boundsInRoot
+                assertTrue(
+                    finalSubmitBounds.top >= bodyBounds.top && finalSubmitBounds.bottom <= 552f,
+                    "Expected pretest-submit-0 to scroll into visible body [${bodyBounds.top}, 552f], actual=$finalSubmitBounds",
+                )
+                onNodeWithTag("pretest-submit-0").assertIsDisplayed().performClick()
+                waitForIdle()
+                onNodeWithTag("pretest-feedback-0").assertExists()
+
+                // Mode switcher popover still opens cleanly from the merged header trigger
+                onNodeWithTag("companion-mode-trigger").performClick()
+                waitForIdle()
+                onNodeWithTag("mode-option-BOOK_MAP").assertIsDisplayed()
+            }
+
+            // 2. Narrow docked side drawer at 1280x800 (< 520dp drawer width) keeps stacked 2-row header
+            val libSide = TextbookLibrary(root.resolve("lib-side"))
+            val bookSide = libSide.importBook(md)
+            val groupSide = assertNotNull(ChapterCompanionGrouping.groupForSection(bookSide, 0))
+            libSide.saveChapterCompanion(bookSide.id, groupSide.chapterId, samplePack(bookSide, groupSide))
+            val controllerSide = TextbookController(libSide)
+            runBlocking {
+                controllerSide.load()
+                controllerSide.read()
+            }
+
+            runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
+                setContent {
+                    WindowsTextbookHost(controller = controllerSide, chooseBook = { null })
+                }
+                waitForIdle()
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.L) }
+                waitForIdle()
+
+                val triggerBounds = onNodeWithTag("companion-mode-trigger").fetchSemanticsNode().boundsInRoot
+                val stripBounds = onNodeWithTag("companion-module-strip").fetchSemanticsNode().boundsInRoot
+                assertTrue(
+                    stripBounds.top >= triggerBounds.bottom - 1f,
+                    "Expected stacked 2-row header on narrow docked drawer, but stripTop=${stripBounds.top}, triggerBottom=${triggerBounds.bottom}",
+                )
             }
         } finally {
             root.toFile().deleteRecursively()

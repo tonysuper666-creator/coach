@@ -470,6 +470,16 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
     suspend fun generateCourseMock(input: JsonObject): CourseServerCallResult =
         callCourseEndpoint { http -> http.generateCourseMock(input) }
 
+    suspend fun fetchStudyModePack(
+        bookId: String,
+        mode: String,
+        input: JsonObject,
+        onProgress: (chars: Int, firstTokenMs: Long?) -> Unit = { _, _ -> },
+    ): CourseServerCallResult = callCourseEndpoint { http -> http.streamStudyModePack(bookId, mode, input, onProgress) }
+
+    suspend fun fetchBookMapBatch(bookId: String, input: JsonObject): CourseServerCallResult =
+        callCourseEndpoint { http -> http.fetchBookMapBatch(bookId, input) }
+
     private suspend fun callCourseEndpoint(
         block: suspend (CourseHttp) -> MockReply,
     ): CourseServerCallResult {

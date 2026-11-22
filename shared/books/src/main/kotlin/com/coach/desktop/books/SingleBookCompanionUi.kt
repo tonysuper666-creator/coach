@@ -85,12 +85,148 @@ internal fun SingleBookCompanionPanel(
         ChapterCompanionGrouping.groupForSection(book, currentSectionIndex)
     }
     val currentSection = book.lessons.getOrNull(currentSectionIndex)
+    val chapterNum = remember(book.id, chapterGroup?.chapterId, currentPage) {
+        chapterGroup?.let { StudyModeChapterNumbering.resolve(book, currentPage, it.firstPage).chapterNumber } ?: 0
+    }
     var packState by remember(book.id, chapterGroup?.chapterId) { mutableStateOf<CompanionPackState>(CompanionPackState.Idle) }
     var fetchNonce by remember(book.id, chapterGroup?.chapterId) { mutableIntStateOf(0) }
+    var modePackJson by remember(book.id, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
+        mutableStateOf<String?>(null)
+    }
+    var modeStreamingChars by remember(book.id, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
+        mutableIntStateOf(0)
+    }
+    var modeLoading by remember(book.id, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
+        mutableStateOf(false)
+    }
+    var modeError by remember(book.id, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
+        mutableStateOf<String?>(null)
+    }
+    var modeFetchNonce by remember(book.id, chapterGroup?.chapterId, studyPreference.mode) { mutableIntStateOf(0) }
+    var bookMapMeta by remember(book.id) { mutableStateOf<WholeBookMapMeta?>(null) }
+    var bookMapBatchBusy by remember(book.id) { mutableStateOf(false) }
     var sectionMastery by remember(book.id, currentSection?.id, chapterGroup?.chapterId) { mutableStateOf<ConceptMasteryRecord?>(null) }
     var gradeResponsesByQuestion by remember(book.id) { mutableStateOf<Map<String, PracticeGradeDiagnoseResponse>>(emptyMap()) }
     val activeModule = CompanionModuleTab.fromWire(draft.activeModule)
     val scroll = rememberScrollState()
+
+    LaunchedEffect(book.id, modePackJson) {
+        bookMapMeta = withContext(Dispatchers.IO) { StudyModeStore.loadBookMapMeta(library, book.id) }
+    }
+
+    LaunchedEffect(book.id, chapterGroup?.chapterId, chapterNum, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion, explainer.loaded, explainer.identity, aiEnabled, modeFetchNonce) {
+        val group = chapterGroup ?: return@LaunchedEffect
+        val fallbackAny = studyPreference.detailLevel == ExplainDetailLevel.DETAILED &&
+            studyPreference.explainLang == ExplainLanguage.BILINGUAL &&
+            studyPreference.inquiryQuestion.isBlank()
+        val cached = withContext(Dispatchers.IO) {
+            StudyModeStore.loadRawModePackJson(
+                library = library,
+                bookId = book.id,
+                chapterNum = chapterNum,
+                mode = studyPreference.mode,
+                detailLevel = studyPreference.detailLevel,
+                explainLang = studyPreference.explainLang,
+                inquiryQuestion = studyPreference.inquiryQuestion,
+                fallbackAnyVariant = fallbackAny,
+            )
+        }
+        if (cached != null) {
+            modePackJson = cached
+            modeLoading = false
+            modeError = null
+            return@LaunchedEffect
+        }
+        if (studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) {
+            modePackJson = null
+            modeLoading = false
+            modeError = null
+            return@LaunchedEffect
+        }
+        if (studyPreference.mode == BookStudyMode.QUESTION_DRIVEN && studyPreference.inquiryQuestion.trim().length < 3) {
+            modeLoading = false
+            modeError = null
+            return@LaunchedEffect
+        }
+        if (!aiEnabled || !explainer.loaded || explainer.identity == null) {
+            modeLoading = false
+            modeError = null
+            return@LaunchedEffect
+        }
+        modeLoading = true
+        modeStreamingChars = 0
+        modeError = null
+        try {
+            val wire = withContext(Dispatchers.IO) {
+                StudyModeWireBuilder.buildModeRequestJson(library, book, group, chapterNum, studyPreference)
+            }
+            val res = explainer.fetchStudyModePack(book.id, studyPreference.mode.name, wire) { chars, _ ->
+                modeStreamingChars = chars
+            }
+            val body = res.body
+            if (body != null) {
+                val jsonStr = body.toString()
+                withContext(Dispatchers.IO) {
+                    StudyModeStore.saveModePackJson(
+                        library = library,
+                        bookId = book.id,
+                        chapterNum = chapterNum,
+                        mode = studyPreference.mode,
+                        detailLevel = studyPreference.detailLevel,
+                        explainLang = studyPreference.explainLang,
+                        inquiryQuestion = studyPreference.inquiryQuestion,
+                        packJson = jsonStr,
+                    )
+                }
+                modePackJson = jsonStr
+                modeLoading = false
+                modeError = null
+            } else {
+                modeLoading = false
+                modeError = res.error ?: "当前离线，已显示本地章节结构。"
+            }
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: Exception) {
+            modeLoading = false
+            modeError = "当前离线，已显示本地章节结构。"
+        }
+    }
+
+    fun triggerBookMapBatch() {
+        if (bookMapBatchBusy || !aiEnabled || explainer.identity == null) return
+        bookMapBatchBusy = true
+        scope.launch {
+            try {
+                val wire = withContext(Dispatchers.IO) {
+                    StudyModeWireBuilder.buildBookMapBatchRequestJson(library, book, studyPreference)
+                }
+                val res = explainer.fetchBookMapBatch(book.id, wire)
+                val body = res.body
+                if (body != null) {
+                    withContext(Dispatchers.IO) {
+                        StudyModeStore.saveBookMapBatchResult(
+                            library = library,
+                            bookId = book.id,
+                            batchJson = body,
+                            detailLevel = ExplainDetailLevel.BRIEF,
+                            explainLang = studyPreference.explainLang,
+                        )
+                    }
+                    bookMapMeta = withContext(Dispatchers.IO) { StudyModeStore.loadBookMapMeta(library, book.id) }
+                    modeFetchNonce += 1
+                } else {
+                    modeError = res.error ?: "整本全书地图暂无法更新。"
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Exception) {
+                modeError = "连不上学习服务，保留本地章节地图。"
+            } finally {
+                bookMapBatchBusy = false
+            }
+        }
+    }
 
     LaunchedEffect(book.id, currentSection?.id, chapterGroup?.chapterId, draft.pretestSubmitted.size, draft.practiceSubmitted.size) {
         sectionMastery = withContext(Dispatchers.IO) {
@@ -305,8 +441,29 @@ internal fun SingleBookCompanionPanel(
                         },
                         onJumpPage = onJumpPage,
                         onOpenAnchor = onOpenAnchor,
+                        modePackJson = modePackJson,
+                        modeStreamingChars = modeStreamingChars,
+                        modeLoading = modeLoading,
+                        modeError = modeError,
+                        bookMapMeta = bookMapMeta,
+                        bookMapBatchLoading = bookMapBatchBusy,
+                        onRequestBookMapBatch = if (aiEnabled && explainer.identity != null) { { triggerBookMapBatch() } } else null,
+                        onRetryModePack = { modeFetchNonce += 1 },
                     )
-                } else when (val state = packState) {
+                } else {
+                    val readThroughLive = remember(modePackJson) {
+                        modePackJson?.let { StudyModeStore.parseReadThroughModePack(it) }
+                    }
+                    if (modeLoading && readThroughLive == null && packState !is CompanionPackState.Ready) {
+                        CoachLoadingDots(label = if (modeStreamingChars > 0) "正在流式整理精读导图（已接收 $modeStreamingChars 字）…" else "正在按节整理本章伴读…")
+                    }
+                    if (readThroughLive != null && activeModule == CompanionModuleTab.KEY_POINTS) {
+                        LiveReadThroughOverviewCard(
+                            pack = readThroughLive,
+                            onOpenAnchor = onOpenAnchor,
+                        )
+                    }
+                    when (val state = packState) {
                     CompanionPackState.Loading -> {
                         Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
                             CoachLoadingDots(label = "正在按节整理本章伴读…")
@@ -478,6 +635,7 @@ internal fun SingleBookCompanionPanel(
                             )
                         }
                     }
+                }
                 }
                 bottomContent?.invoke()
             }

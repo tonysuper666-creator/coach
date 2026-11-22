@@ -204,6 +204,16 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
     open suspend fun generateCourseMock(input: JsonObject): CourseServerCallResult =
         callCourseEndpoint { http -> http.generateCourseMock(input) }
 
+    open suspend fun fetchStudyModePack(
+        bookId: String,
+        mode: String,
+        input: JsonObject,
+        onProgress: (chars: Int, firstTokenMs: Long?) -> Unit = { _, _ -> },
+    ): CourseServerCallResult = callCourseEndpoint { http -> http.streamStudyModePack(bookId, mode, input, onProgress) }
+
+    open suspend fun fetchBookMapBatch(bookId: String, input: JsonObject): CourseServerCallResult =
+        callCourseEndpoint { http -> http.fetchBookMapBatch(bookId, input) }
+
     private suspend fun callCourseEndpoint(
         block: suspend (CourseHttp) -> MockReply,
     ): CourseServerCallResult {

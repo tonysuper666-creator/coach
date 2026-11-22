@@ -7,12 +7,19 @@ import java.time.LocalDate
 import java.time.temporal.ChronoUnit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 
 /**
  * LearningCoach 2.0-MODES (`TON-1805`): Six orthogonal study modes for a single book,
@@ -303,6 +310,15 @@ internal data class BookMapSectionRole(
     val roleLabelZh: String,
     val oneLineZh: String,
     val pdfPage: Int,
+    val quoteAnchor: String = "",
+    val skipUnlessExam: Boolean = false,
+)
+
+internal data class BookMapCoreClaim(
+    val claim: String,
+    val importance: String,
+    val pdfPage: Int,
+    val quoteAnchor: String,
 )
 
 internal data class BookMapOnePagerPack(
@@ -311,6 +327,9 @@ internal data class BookMapOnePagerPack(
     val sectionArchitecture: List<BookMapSectionRole>,
     val prerequisiteChapter: String,
     val downstreamChapter: String,
+    val estimatedMinutes: Int = 20,
+    val readingDepth: String = "CORE_SKIM",
+    val coreClaims: List<BookMapCoreClaim> = emptyList(),
 )
 
 internal data class ExamFocusMustSection(
@@ -318,12 +337,42 @@ internal data class ExamFocusMustSection(
     val weightTag: String,
     val examAngleZh: String,
     val pdfPage: Int,
+    val quoteAnchor: String = "",
+    val scoringRubric: List<String> = emptyList(),
 )
 
 internal data class ExamFocusSkimSection(
     val sectionId: String,
     val weightTag: String,
     val whySkimZh: String,
+    val pdfPage: Int = 1,
+    val quoteAnchor: String = "",
+)
+
+internal data class ExamFocusTrapItem(
+    val trap: String,
+    val wrongReasoning: String,
+    val correction: String,
+    val pdfPage: Int,
+    val quoteAnchor: String,
+)
+
+internal data class ExamFocusFormulaItem(
+    val name: String,
+    val formulaLatex: String,
+    val coefficientNote: String,
+    val examUsage: String,
+    val pdfPage: Int,
+    val quoteAnchor: String,
+)
+
+internal data class ExamFocusMiniCheckItem(
+    val prompt: String,
+    val options: List<String>,
+    val answerIndex: Int,
+    val rubricOnly: String,
+    val pdfPage: Int,
+    val quoteAnchor: String,
 )
 
 internal data class ExamFocusTriagePack(
@@ -332,6 +381,120 @@ internal data class ExamFocusTriagePack(
     val mustStudySections: List<ExamFocusMustSection>,
     val skimOrSkipSections: List<ExamFocusSkimSection>,
     val examPitfallAlertZh: String,
+    val traps: List<ExamFocusTrapItem> = emptyList(),
+    val formulas: List<ExamFocusFormulaItem> = emptyList(),
+    val miniChecks: List<ExamFocusMiniCheckItem> = emptyList(),
+)
+
+internal data class DiagnosticSkipGateItem(
+    val gateId: String,
+    val sectionTitle: String,
+    val targetConcept: String,
+    val questionType: String,
+    val questionPrompt: String,
+    val options: List<String>,
+    val correctIndex: Int,
+    val passSkipNote: String,
+    val missRemediation: String,
+    val missJumpPdfPage: Int,
+    val quoteAnchor: String,
+)
+
+internal data class DiagnosticSkipPack(
+    val skipPolicy: String,
+    val gates: List<DiagnosticSkipGateItem>,
+)
+
+internal data class ProblemDrivenProblemItem(
+    val problemId: String,
+    val title: String,
+    val exercisePdfPage: Int,
+    val exerciseQuoteAnchor: String,
+    val attemptPrompt: String,
+    val scaffoldingHints: List<String>,
+    val keyDerivationCheck: String,
+    val bodyPdfPage: Int,
+    val quoteAnchor: String,
+    val answerOutline: List<String>,
+)
+
+internal data class ProblemDrivenPack(
+    val strategyNote: String,
+    val problems: List<ProblemDrivenProblemItem>,
+)
+
+internal data class QuestionDrivenEvidenceHit(
+    val hitId: String,
+    val bodyJumpPage: Int,
+    val quoteAnchor: String,
+    val howItAnswersQuestion: String,
+    val limitOrCounterpoint: String,
+)
+
+internal data class QuestionDrivenPack(
+    val questionFocus: String,
+    val directConclusion: String,
+    val evidenceHits: List<QuestionDrivenEvidenceHit>,
+    val argumentationScaffold: List<String>,
+    val antiGhostwriteNotice: String,
+    val followUpQuestions: List<String>,
+)
+
+internal data class ReadThroughModeSectionItem(
+    val sectionId: String,
+    val title: String,
+    val pdfPage: Int,
+    val quoteAnchor: String,
+    val keyConcept: String,
+    val plainExplanation: String,
+    val conceptChain: List<String>,
+    val formulaNote: String,
+    val commonMisreading: String,
+    val microCheckPrompt: String,
+    val microCheckHint: String,
+)
+
+internal data class ReadThroughModePack(
+    val learningArc: String,
+    val sections: List<ReadThroughModeSectionItem>,
+    val takeawayChecklist: List<String>,
+)
+
+internal data class BookMapCluster(
+    val clusterId: String,
+    val title: String,
+    val themeSummary: String,
+    val chapterNums: List<Int>,
+)
+
+internal data class BookMapDependencyEdge(
+    val fromChapter: Int,
+    val toChapter: Int,
+    val relation: String,
+    val reason: String,
+)
+
+internal data class BookMapFastSkimStep(
+    val chapterNum: Int,
+    val minutes: Int,
+    val focus: String,
+)
+
+internal data class BookMapGlossaryEntry(
+    val en: String,
+    val zh: String,
+    val chapterNum: Int,
+)
+
+internal data class WholeBookMapMeta(
+    val bookId: String,
+    val bookTitle: String,
+    val chapterCount: Int,
+    val clusters: List<BookMapCluster>,
+    val edges: List<BookMapDependencyEdge>,
+    val fastSkimOrder40Min: List<BookMapFastSkimStep>,
+    val glossary: List<BookMapGlossaryEntry>,
+    val estimatedCostUsd: Double = 0.0,
 )
 
 internal object StudyModeStore {
@@ -357,9 +520,20 @@ internal object StudyModeStore {
             book_id TEXT NOT NULL,
             chapter_num INTEGER NOT NULL,
             study_mode TEXT NOT NULL,
+            detail_level TEXT NOT NULL DEFAULT 'DETAILED',
+            explain_lang TEXT NOT NULL DEFAULT 'BILINGUAL',
+            inquiry_key TEXT NOT NULL DEFAULT '',
             pack_json TEXT NOT NULL,
             updated_at INTEGER NOT NULL,
-            PRIMARY KEY(book_id, chapter_num, study_mode)
+            PRIMARY KEY(book_id, chapter_num, study_mode, detail_level, explain_lang, inquiry_key)
+        )
+    """
+
+    private const val BOOK_MAP_META_DDL = """
+        CREATE TABLE IF NOT EXISTS book_map_meta(
+            book_id TEXT PRIMARY KEY,
+            graph_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
         )
     """
 
@@ -369,102 +543,253 @@ internal object StudyModeStore {
                 it.execute("PRAGMA busy_timeout=5000")
                 it.execute(DDL.trimIndent())
                 it.execute(PACKS_DDL.trimIndent())
+                it.execute(BOOK_MAP_META_DDL.trimIndent())
             }
+            migrateModePacksIfNeeded(this)
         }
 
-    fun saveModePackJson(library: TextbookLibrary, bookId: String, chapterNum: Int, mode: BookStudyMode, packJson: String) {
+    private fun migrateModePacksIfNeeded(db: Connection) {
+        val cols = mutableSetOf<String>()
+        db.createStatement().use { sql ->
+            sql.executeQuery("PRAGMA table_info(book_study_mode_packs)").use { rs ->
+                while (rs.next()) cols += rs.getString("name").orEmpty()
+            }
+        }
+        if ("detail_level" in cols && "explain_lang" in cols && "inquiry_key" in cols) return
+        val prevAutoCommit = db.autoCommit
+        db.autoCommit = false
+        try {
+            db.createStatement().use { sql ->
+                sql.execute("DROP TABLE IF EXISTS book_study_mode_packs_v7")
+                sql.execute("ALTER TABLE book_study_mode_packs RENAME TO book_study_mode_packs_v7")
+                sql.execute(PACKS_DDL.trimIndent())
+                sql.execute(
+                    """INSERT INTO book_study_mode_packs(book_id, chapter_num, study_mode, pack_json, updated_at)
+                       SELECT book_id, chapter_num, study_mode, pack_json, updated_at FROM book_study_mode_packs_v7""",
+                )
+                sql.execute("DROP TABLE book_study_mode_packs_v7")
+            }
+            db.commit()
+        } catch (e: Exception) {
+            runCatching { db.rollback() }
+            throw e
+        } finally {
+            db.autoCommit = prevAutoCommit
+        }
+    }
+
+    internal fun inquiryKey(inquiryQuestion: String): String =
+        inquiryQuestion.trim().lowercase().take(160)
+
+    fun saveModePackJson(library: TextbookLibrary, bookId: String, chapterNum: Int, mode: BookStudyMode, packJson: String) =
+        saveModePackJson(
+            library = library,
+            bookId = bookId,
+            chapterNum = chapterNum,
+            mode = mode,
+            detailLevel = ExplainDetailLevel.DETAILED,
+            explainLang = ExplainLanguage.BILINGUAL,
+            inquiryQuestion = "",
+            packJson = packJson,
+        )
+
+    fun saveModePackJson(
+        library: TextbookLibrary,
+        bookId: String,
+        chapterNum: Int,
+        mode: BookStudyMode,
+        detailLevel: ExplainDetailLevel = ExplainDetailLevel.DETAILED,
+        explainLang: ExplainLanguage = ExplainLanguage.BILINGUAL,
+        inquiryQuestion: String = "",
+        packJson: String,
+    ) {
         runCatching {
             openDb(library.directory).use { db ->
                 db.prepareStatement(
-                    """INSERT INTO book_study_mode_packs(book_id, chapter_num, study_mode, pack_json, updated_at)
-                       VALUES(?,?,?,?,?)
-                       ON CONFLICT(book_id, chapter_num, study_mode) DO UPDATE SET
+                    """INSERT INTO book_study_mode_packs(book_id, chapter_num, study_mode, detail_level, explain_lang, inquiry_key, pack_json, updated_at)
+                       VALUES(?,?,?,?,?,?,?,?)
+                       ON CONFLICT(book_id, chapter_num, study_mode, detail_level, explain_lang, inquiry_key) DO UPDATE SET
                        pack_json=excluded.pack_json, updated_at=excluded.updated_at""".trimIndent(),
                 ).use { s ->
                     s.setString(1, bookId)
                     s.setInt(2, chapterNum)
                     s.setString(3, mode.name)
-                    s.setString(4, packJson)
-                    s.setLong(5, System.currentTimeMillis())
+                    s.setString(4, detailLevel.name)
+                    s.setString(5, explainLang.name)
+                    s.setString(6, if (mode == BookStudyMode.QUESTION_DRIVEN) inquiryKey(inquiryQuestion) else "")
+                    s.setString(7, packJson)
+                    s.setLong(8, System.currentTimeMillis())
                     s.executeUpdate()
                 }
             }
         }
     }
 
-    private fun loadRawModePackObj(library: TextbookLibrary, bookId: String, chapterNum: Int, mode: BookStudyMode): JsonObject? {
-        return runCatching {
-            openDb(library.directory).use { db ->
-                db.prepareStatement(
-                    "SELECT pack_json FROM book_study_mode_packs WHERE book_id=? AND chapter_num=? AND study_mode=?",
-                ).use { s ->
-                    s.setString(1, bookId)
-                    s.setInt(2, chapterNum)
-                    s.setString(3, mode.name)
-                    s.executeQuery().use { r ->
-                        if (r.next()) {
-                            val raw = r.getString(1).orEmpty()
-                            if (raw.isNotBlank()) jsonParser.parseToJsonElement(raw).jsonObject else null
-                        } else null
-                    }
+    fun loadRawModePackJson(
+        library: TextbookLibrary,
+        bookId: String,
+        chapterNum: Int,
+        mode: BookStudyMode,
+        detailLevel: ExplainDetailLevel = ExplainDetailLevel.DETAILED,
+        explainLang: ExplainLanguage = ExplainLanguage.BILINGUAL,
+        inquiryQuestion: String = "",
+        fallbackAnyVariant: Boolean = false,
+    ): String? = runCatching {
+        val inqKey = if (mode == BookStudyMode.QUESTION_DRIVEN) inquiryKey(inquiryQuestion) else ""
+        openDb(library.directory).use { db ->
+            val exact = db.prepareStatement(
+                """SELECT pack_json FROM book_study_mode_packs
+                   WHERE book_id=? AND chapter_num=? AND study_mode=? AND detail_level=? AND explain_lang=? AND inquiry_key=?""",
+            ).use { s ->
+                s.setString(1, bookId)
+                s.setInt(2, chapterNum)
+                s.setString(3, mode.name)
+                s.setString(4, detailLevel.name)
+                s.setString(5, explainLang.name)
+                s.setString(6, inqKey)
+                s.executeQuery().use { r ->
+                    if (r.next()) r.getString(1)?.takeIf { it.isNotBlank() } else null
                 }
             }
-        }.getOrNull()
+            if (exact != null) return@use exact
+            if (!fallbackAnyVariant) return@use null
+            db.prepareStatement(
+                """SELECT pack_json FROM book_study_mode_packs
+                   WHERE book_id=? AND chapter_num=? AND study_mode=?
+                   ORDER BY updated_at DESC LIMIT 1""",
+            ).use { s ->
+                s.setString(1, bookId)
+                s.setInt(2, chapterNum)
+                s.setString(3, mode.name)
+                s.executeQuery().use { r ->
+                    if (r.next()) r.getString(1)?.takeIf { it.isNotBlank() } else null
+                }
+            }
+        }
+    }.getOrNull()
+
+    private fun loadRawModePackObj(
+        library: TextbookLibrary,
+        bookId: String,
+        chapterNum: Int,
+        mode: BookStudyMode,
+        detailLevel: ExplainDetailLevel = ExplainDetailLevel.DETAILED,
+        explainLang: ExplainLanguage = ExplainLanguage.BILINGUAL,
+        inquiryQuestion: String = "",
+        fallbackAnyVariant: Boolean = true,
+    ): JsonObject? {
+        val raw = loadRawModePackJson(library, bookId, chapterNum, mode, detailLevel, explainLang, inquiryQuestion, fallbackAnyVariant)
+            ?: return null
+        return runCatching { jsonParser.parseToJsonElement(raw).jsonObject }.getOrNull()
     }
 
-    fun loadBookMapPack(library: TextbookLibrary, bookId: String, chapterNum: Int): BookMapOnePagerPack? {
-        val root = loadRawModePackObj(library, bookId, chapterNum, BookStudyMode.BOOK_MAP) ?: return null
+    fun loadBookMapPack(library: TextbookLibrary, bookId: String, chapterNum: Int): BookMapOnePagerPack? =
+        loadRawModePackObj(library, bookId, chapterNum, BookStudyMode.BOOK_MAP, fallbackAnyVariant = true)?.let(::parseBookMapPack)
+
+    fun loadBookMapPack(library: TextbookLibrary, bookId: String, chapterNum: Int, preference: BookStudyPreference): BookMapOnePagerPack? =
+        loadRawModePackObj(library, bookId, chapterNum, BookStudyMode.BOOK_MAP, preference.detailLevel, preference.explainLang, "", fallbackAnyVariant = true)?.let(::parseBookMapPack)
+
+    fun parseBookMapPack(rawJson: String): BookMapOnePagerPack? =
+        runCatching { jsonParser.parseToJsonElement(rawJson).jsonObject }.getOrNull()?.let(::parseBookMapPack)
+
+    fun parseBookMapPack(root: JsonObject): BookMapOnePagerPack? {
         val fs = root["firstScreen"]?.jsonObject ?: root
         val thesis = fs["bigPictureThesisZh"]?.jsonPrimitive?.contentOrNull
             ?: fs["oneSentenceVerdictZh"]?.jsonPrimitive?.contentOrNull
+            ?: fs["oneLiner"]?.jsonPrimitive?.contentOrNull
             ?: return null
-        val headline = fs["headlineZh"]?.jsonPrimitive?.contentOrNull.orEmpty()
-        val archArr = (fs["sectionArchitecture"] as? JsonArray) ?: JsonArray(emptyList())
+        val headline = fs["headlineZh"]?.jsonPrimitive?.contentOrNull
+            ?: fs["chapterTitle"]?.jsonPrimitive?.contentOrNull
+            ?: ""
+        val archArr = (fs["sectionArchitecture"] as? JsonArray) ?: (fs["sections"] as? JsonArray) ?: JsonArray(emptyList())
         val roles = archArr.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
             BookMapSectionRole(
-                sectionId = o["sectionId"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                roleLabelZh = o["roleLabelZh"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                oneLineZh = o["oneLineZh"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                sectionId = o["sectionId"]?.jsonPrimitive?.contentOrNull
+                    ?: o["sectionTitle"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                roleLabelZh = o["roleLabelZh"]?.jsonPrimitive?.contentOrNull
+                    ?: if (o["skipUnlessExam"]?.jsonPrimitive?.booleanOrNull == true) "按需速览" else "核心骨架",
+                oneLineZh = o["oneLineZh"]?.jsonPrimitive?.contentOrNull
+                    ?: o["summary"]?.jsonPrimitive?.contentOrNull.orEmpty(),
                 pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull ?: 1,
+                quoteAnchor = o["quoteAnchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                skipUnlessExam = o["skipUnlessExam"]?.jsonPrimitive?.booleanOrNull == true,
+            )
+        }
+        val claims = (fs["coreClaims"] as? JsonArray).orEmpty().mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val c = o["claim"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            BookMapCoreClaim(
+                claim = c,
+                importance = o["importance"]?.jsonPrimitive?.contentOrNull ?: "CORE",
+                pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull ?: 1,
+                quoteAnchor = o["quoteAnchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
             )
         }
         val links = fs["chapterLinks"] as? JsonObject
+        val prereqStr = links?.get("prerequisiteChapter")?.jsonPrimitive?.contentOrNull
+            ?: (fs["prerequisites"] as? JsonArray).orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull }.joinToString(" · ")
+        val unlockStr = links?.get("downstreamChapter")?.jsonPrimitive?.contentOrNull
+            ?: (fs["unlocks"] as? JsonArray).orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull }.joinToString(" · ")
         return BookMapOnePagerPack(
             headlineZh = headline,
             bigPictureThesisZh = thesis,
             sectionArchitecture = roles,
-            prerequisiteChapter = links?.get("prerequisiteChapter")?.jsonPrimitive?.contentOrNull.orEmpty(),
-            downstreamChapter = links?.get("downstreamChapter")?.jsonPrimitive?.contentOrNull.orEmpty(),
+            prerequisiteChapter = prereqStr,
+            downstreamChapter = unlockStr,
+            estimatedMinutes = fs["estimatedMinutes"]?.jsonPrimitive?.intOrNull ?: 20,
+            readingDepth = fs["readingDepth"]?.jsonPrimitive?.contentOrNull ?: "CORE_SKIM",
+            coreClaims = claims,
         )
     }
 
-    fun loadExamFocusPack(library: TextbookLibrary, bookId: String, chapterNum: Int): ExamFocusTriagePack? {
-        val root = loadRawModePackObj(library, bookId, chapterNum, BookStudyMode.EXAM_FOCUS) ?: return null
+    fun loadExamFocusPack(library: TextbookLibrary, bookId: String, chapterNum: Int): ExamFocusTriagePack? =
+        loadRawModePackObj(library, bookId, chapterNum, BookStudyMode.EXAM_FOCUS, fallbackAnyVariant = true)?.let(::parseExamFocusPack)
+
+    fun loadExamFocusPack(library: TextbookLibrary, bookId: String, chapterNum: Int, preference: BookStudyPreference): ExamFocusTriagePack? =
+        loadRawModePackObj(library, bookId, chapterNum, BookStudyMode.EXAM_FOCUS, preference.detailLevel, preference.explainLang, "", fallbackAnyVariant = true)?.let(::parseExamFocusPack)
+
+    fun parseExamFocusPack(rawJson: String): ExamFocusTriagePack? =
+        runCatching { jsonParser.parseToJsonElement(rawJson).jsonObject }.getOrNull()?.let(::parseExamFocusPack)
+
+    fun parseExamFocusPack(root: JsonObject): ExamFocusTriagePack? {
         val fs = root["firstScreen"]?.jsonObject ?: root
-        val mustArr = (fs["mustStudySections"] as? JsonArray) ?: return null
-        val skimArr = (fs["skimOrSkipSections"] as? JsonArray) ?: JsonArray(emptyList())
+        val mustArr = (fs["mustStudySections"] as? JsonArray) ?: (fs["mustKnows"] as? JsonArray) ?: return null
+        val skimArr = (fs["skimOrSkipSections"] as? JsonArray) ?: (fs["skipableExamples"] as? JsonArray) ?: JsonArray(emptyList())
+        val trapsArr = (fs["highFreqTraps"] as? JsonArray) ?: JsonArray(emptyList())
+        val formulasArr = (fs["formulaSheets"] as? JsonArray) ?: JsonArray(emptyList())
+        val checksArr = (fs["miniChecks"] as? JsonArray) ?: JsonArray(emptyList())
+        val topicsJoined = (fs["courseTopicsMatched"] as? JsonArray).orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull }.joinToString(" · ")
+        val firstTrapAlert = trapsArr.firstOrNull()?.let { it as? JsonObject }?.let {
+            val t = it["trap"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val c = it["correction"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            if (c.isNotBlank()) "$t（纠偏：$c）" else t
+        }.orEmpty()
         return ExamFocusTriagePack(
-            headlineZh = fs["headlineZh"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-            courseWeekBadgeZh = fs["courseWeekBadgeZh"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            headlineZh = fs["headlineZh"]?.jsonPrimitive?.contentOrNull ?: fs["triageSummary"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            courseWeekBadgeZh = fs["courseWeekBadgeZh"]?.jsonPrimitive?.contentOrNull ?: topicsJoined,
             mustStudySections = mustArr.mapNotNull { el ->
                 val o = el as? JsonObject ?: return@mapNotNull null
                 ExamFocusMustSection(
-                    sectionId = o["sectionId"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                    weightTag = o["weightTag"]?.jsonPrimitive?.contentOrNull ?: "★ 必考核心",
-                    examAngleZh = o["examAngleZh"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    sectionId = o["sectionId"]?.jsonPrimitive?.contentOrNull ?: o["topic"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    weightTag = o["weightTag"]?.jsonPrimitive?.contentOrNull ?: o["examWeight"]?.jsonPrimitive?.contentOrNull ?: "★ 必考核心",
+                    examAngleZh = o["examAngleZh"]?.jsonPrimitive?.contentOrNull ?: o["whyTested"]?.jsonPrimitive?.contentOrNull.orEmpty(),
                     pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull ?: 1,
+                    quoteAnchor = o["quoteAnchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    scoringRubric = (o["scoringRubric"] as? JsonArray).orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull },
                 )
             },
             skimOrSkipSections = skimArr.mapNotNull { el ->
                 val o = el as? JsonObject ?: return@mapNotNull null
                 ExamFocusSkimSection(
-                    sectionId = o["sectionId"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                    weightTag = o["weightTag"]?.jsonPrimitive?.contentOrNull ?: "○ 背景速览",
-                    whySkimZh = o["whySkimZh"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    sectionId = o["sectionId"]?.jsonPrimitive?.contentOrNull ?: o["label"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    weightTag = o["weightTag"]?.jsonPrimitive?.contentOrNull ?: "○ 考场可跳过",
+                    whySkimZh = o["whySkimZh"]?.jsonPrimitive?.contentOrNull ?: o["reasonToSkip"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull ?: 1,
+                    quoteAnchor = o["quoteAnchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
                 )
             },
-            examPitfallAlertZh = fs["examPitfallAlertZh"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            examPitfallAlertZh = fs["examPitfallAlertZh"]?.jsonPrimitive?.contentOrNull ?: firstTrapAlert,
         )
     }
 
@@ -658,5 +983,493 @@ internal object StudyModeStore {
             testedSectionRatio = testedRatio,
             readChapterRatio = readRatio,
         )
+    }
+
+    fun parseExamFocusExtras(root: JsonObject): Triple<List<ExamFocusTrapItem>, List<ExamFocusFormulaItem>, List<ExamFocusMiniCheckItem>> {
+        val fs = root["firstScreen"]?.jsonObject ?: root
+        val traps = (fs["highFreqTraps"] as? JsonArray).orEmpty().mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            ExamFocusTrapItem(
+                trap = o["trap"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                wrongReasoning = o["wrongReasoning"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                correction = o["correction"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull ?: 1,
+                quoteAnchor = o["quoteAnchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            )
+        }
+        val formulas = (fs["formulaSheets"] as? JsonArray).orEmpty().mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            ExamFocusFormulaItem(
+                name = o["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                formulaLatex = o["formulaLatex"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                coefficientNote = o["coefficientNote"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                examUsage = o["examUsage"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull ?: 1,
+                quoteAnchor = o["quoteAnchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            )
+        }
+        val checks = (fs["miniChecks"] as? JsonArray).orEmpty().mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val prompt = o["prompt"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            ExamFocusMiniCheckItem(
+                prompt = prompt,
+                options = (o["options"] as? JsonArray).orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull },
+                answerIndex = o["answerIndex"]?.jsonPrimitive?.intOrNull ?: 0,
+                rubricOnly = o["rubricOnly"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull ?: 1,
+                quoteAnchor = o["quoteAnchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            )
+        }
+        return Triple(traps, formulas, checks)
+    }
+
+    fun loadDiagnosticSkipPack(library: TextbookLibrary, bookId: String, chapterNum: Int, preference: BookStudyPreference? = null): DiagnosticSkipPack? {
+        val root = loadRawModePackObj(
+            library,
+            bookId,
+            chapterNum,
+            BookStudyMode.DIAGNOSTIC_SKIP,
+            preference?.detailLevel ?: ExplainDetailLevel.DETAILED,
+            preference?.explainLang ?: ExplainLanguage.BILINGUAL,
+            "",
+            fallbackAnyVariant = true,
+        ) ?: return null
+        return parseDiagnosticSkipPack(root)
+    }
+
+    fun parseDiagnosticSkipPack(rawJson: String): DiagnosticSkipPack? =
+        runCatching { jsonParser.parseToJsonElement(rawJson).jsonObject }.getOrNull()?.let(::parseDiagnosticSkipPack)
+
+    fun parseDiagnosticSkipPack(root: JsonObject): DiagnosticSkipPack? {
+        val fs = root["firstScreen"]?.jsonObject ?: root
+        val arr = (fs["diagnosticGates"] as? JsonArray) ?: return null
+        val gates = arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val prompt = o["questionPrompt"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            DiagnosticSkipGateItem(
+                gateId = o["gateId"]?.jsonPrimitive?.contentOrNull ?: "gate-${prompt.hashCode()}",
+                sectionTitle = o["sectionTitle"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                targetConcept = o["targetConcept"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                questionType = o["questionType"]?.jsonPrimitive?.contentOrNull ?: "CONCEPT_CHECK",
+                questionPrompt = prompt,
+                options = (o["options"] as? JsonArray).orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull },
+                correctIndex = o["correctIndex"]?.jsonPrimitive?.intOrNull ?: 0,
+                passSkipNote = o["passSkipNote"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                missRemediation = o["missRemediation"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                missJumpPdfPage = o["missJumpPdfPage"]?.jsonPrimitive?.intOrNull ?: 1,
+                quoteAnchor = o["quoteAnchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            )
+        }
+        if (gates.isEmpty()) return null
+        return DiagnosticSkipPack(
+            skipPolicy = fs["skipPolicy"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            gates = gates,
+        )
+    }
+
+    fun loadProblemDrivenPack(library: TextbookLibrary, bookId: String, chapterNum: Int, preference: BookStudyPreference? = null): ProblemDrivenPack? {
+        val root = loadRawModePackObj(
+            library,
+            bookId,
+            chapterNum,
+            BookStudyMode.PROBLEM_DRIVEN,
+            preference?.detailLevel ?: ExplainDetailLevel.DETAILED,
+            preference?.explainLang ?: ExplainLanguage.BILINGUAL,
+            "",
+            fallbackAnyVariant = true,
+        ) ?: return null
+        return parseProblemDrivenPack(root)
+    }
+
+    fun parseProblemDrivenPack(rawJson: String): ProblemDrivenPack? =
+        runCatching { jsonParser.parseToJsonElement(rawJson).jsonObject }.getOrNull()?.let(::parseProblemDrivenPack)
+
+    fun parseProblemDrivenPack(root: JsonObject): ProblemDrivenPack? {
+        val fs = root["firstScreen"]?.jsonObject ?: root
+        val arr = (fs["problems"] as? JsonArray) ?: return null
+        val problems = arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val title = o["title"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            ProblemDrivenProblemItem(
+                problemId = o["problemId"]?.jsonPrimitive?.contentOrNull ?: title,
+                title = title,
+                exercisePdfPage = o["exercisePdfPage"]?.jsonPrimitive?.intOrNull ?: 1,
+                exerciseQuoteAnchor = o["exerciseQuoteAnchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                attemptPrompt = o["attemptPrompt"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                scaffoldingHints = (o["scaffoldingHints"] as? JsonArray).orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull },
+                keyDerivationCheck = o["keyDerivationCheck"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                bodyPdfPage = o["bodyPdfPage"]?.jsonPrimitive?.intOrNull ?: 1,
+                quoteAnchor = o["quoteAnchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                answerOutline = (o["answerOutline"] as? JsonArray).orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull },
+            )
+        }
+        if (problems.isEmpty()) return null
+        return ProblemDrivenPack(
+            strategyNote = fs["strategyNote"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            problems = problems,
+        )
+    }
+
+    fun loadQuestionDrivenPack(library: TextbookLibrary, bookId: String, chapterNum: Int, preference: BookStudyPreference): QuestionDrivenPack? {
+        val root = loadRawModePackObj(
+            library,
+            bookId,
+            chapterNum,
+            BookStudyMode.QUESTION_DRIVEN,
+            preference.detailLevel,
+            preference.explainLang,
+            preference.inquiryQuestion,
+            fallbackAnyVariant = false,
+        ) ?: return null
+        return parseQuestionDrivenPack(root)
+    }
+
+    fun parseQuestionDrivenPack(rawJson: String): QuestionDrivenPack? =
+        runCatching { jsonParser.parseToJsonElement(rawJson).jsonObject }.getOrNull()?.let(::parseQuestionDrivenPack)
+
+    fun parseQuestionDrivenPack(root: JsonObject): QuestionDrivenPack? {
+        val fs = root["firstScreen"]?.jsonObject ?: root
+        val hitsArr = (fs["evidenceHits"] as? JsonArray) ?: return null
+        val hits = hitsArr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val quote = o["quoteAnchor"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            QuestionDrivenEvidenceHit(
+                hitId = o["hitId"]?.jsonPrimitive?.contentOrNull ?: quote.take(16),
+                bodyJumpPage = o["bodyJumpPage"]?.jsonPrimitive?.intOrNull ?: 1,
+                quoteAnchor = quote,
+                howItAnswersQuestion = o["howItAnswersQuestion"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                limitOrCounterpoint = o["limitOrCounterpoint"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            )
+        }
+        return QuestionDrivenPack(
+            questionFocus = fs["questionFocus"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            directConclusion = fs["directConclusion"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            evidenceHits = hits,
+            argumentationScaffold = (fs["argumentationScaffold"] as? JsonArray).orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull },
+            antiGhostwriteNotice = fs["antiGhostwriteNotice"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            followUpQuestions = (fs["followUpQuestions"] as? JsonArray).orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull },
+        )
+    }
+
+    fun loadReadThroughModePack(library: TextbookLibrary, bookId: String, chapterNum: Int, preference: BookStudyPreference): ReadThroughModePack? {
+        val root = loadRawModePackObj(
+            library,
+            bookId,
+            chapterNum,
+            BookStudyMode.READ_THROUGH,
+            preference.detailLevel,
+            preference.explainLang,
+            "",
+            fallbackAnyVariant = true,
+        ) ?: return null
+        return parseReadThroughModePack(root)
+    }
+
+    fun parseReadThroughModePack(rawJson: String): ReadThroughModePack? =
+        runCatching { jsonParser.parseToJsonElement(rawJson).jsonObject }.getOrNull()?.let(::parseReadThroughModePack)
+
+    fun parseReadThroughModePack(root: JsonObject): ReadThroughModePack? {
+        val fs = root["firstScreen"]?.jsonObject ?: root
+        val secArr = (fs["sections"] as? JsonArray) ?: return null
+        val sections = secArr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val title = o["title"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val plain = o["plainExplanation"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            ReadThroughModeSectionItem(
+                sectionId = o["sectionId"]?.jsonPrimitive?.contentOrNull ?: title,
+                title = title,
+                pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull ?: 1,
+                quoteAnchor = o["quoteAnchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                keyConcept = o["keyConcept"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                plainExplanation = plain,
+                conceptChain = (o["conceptChain"] as? JsonArray).orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull },
+                formulaNote = o["formulaNote"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                commonMisreading = o["commonMisreading"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                microCheckPrompt = o["microCheckPrompt"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                microCheckHint = o["microCheckHint"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            )
+        }
+        if (sections.isEmpty()) return null
+        return ReadThroughModePack(
+            learningArc = fs["learningArc"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            sections = sections,
+            takeawayChecklist = (fs["takeawayChecklist"] as? JsonArray).orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull },
+        )
+    }
+
+    fun saveBookMapBatchResult(
+        library: TextbookLibrary,
+        bookId: String,
+        batchJson: JsonObject,
+        detailLevel: ExplainDetailLevel = ExplainDetailLevel.BRIEF,
+        explainLang: ExplainLanguage = ExplainLanguage.BILINGUAL,
+    ) {
+        runCatching {
+            openDb(library.directory).use { db ->
+                db.prepareStatement(
+                    """INSERT INTO book_map_meta(book_id, graph_json, updated_at)
+                       VALUES(?,?,?)
+                       ON CONFLICT(book_id) DO UPDATE SET graph_json=excluded.graph_json, updated_at=excluded.updated_at""",
+                ).use { s ->
+                    s.setString(1, bookId)
+                    s.setString(2, batchJson.toString())
+                    s.setLong(3, System.currentTimeMillis())
+                    s.executeUpdate()
+                }
+            }
+            (batchJson["chapters"] as? JsonArray).orEmpty().forEach { el ->
+                val chObj = el as? JsonObject ?: return@forEach
+                val chNum = chObj["chapterNum"]?.jsonPrimitive?.intOrNull ?: return@forEach
+                saveModePackJson(
+                    library = library,
+                    bookId = bookId,
+                    chapterNum = chNum,
+                    mode = BookStudyMode.BOOK_MAP,
+                    detailLevel = detailLevel,
+                    explainLang = explainLang,
+                    inquiryQuestion = "",
+                    packJson = chObj.toString(),
+                )
+            }
+        }
+    }
+
+    fun loadBookMapMeta(library: TextbookLibrary, bookId: String): WholeBookMapMeta? = runCatching {
+        openDb(library.directory).use { db ->
+            db.prepareStatement("SELECT graph_json FROM book_map_meta WHERE book_id=?").use { s ->
+                s.setString(1, bookId)
+                s.executeQuery().use { rs ->
+                    if (!rs.next()) return@use null
+                    val raw = rs.getString(1).orEmpty()
+                    if (raw.isBlank()) return@use null
+                    val obj = jsonParser.parseToJsonElement(raw).jsonObject
+                    WholeBookMapMeta(
+                        bookId = obj["bookId"]?.jsonPrimitive?.contentOrNull ?: bookId,
+                        bookTitle = obj["bookTitle"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                        chapterCount = obj["chapterCount"]?.jsonPrimitive?.intOrNull ?: 0,
+                        clusters = (obj["thematicClusters"] as? JsonArray).orEmpty().mapNotNull { el ->
+                            val o = el as? JsonObject ?: return@mapNotNull null
+                            BookMapCluster(
+                                clusterId = o["clusterId"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                                title = o["title"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                                themeSummary = o["themeSummary"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                                chapterNums = (o["chapterNums"] as? JsonArray).orEmpty().mapNotNull { it.jsonPrimitive.intOrNull },
+                            )
+                        },
+                        edges = (obj["dependencyEdges"] as? JsonArray).orEmpty().mapNotNull { el ->
+                            val o = el as? JsonObject ?: return@mapNotNull null
+                            BookMapDependencyEdge(
+                                fromChapter = o["fromChapter"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null,
+                                toChapter = o["toChapter"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null,
+                                relation = o["relation"]?.jsonPrimitive?.contentOrNull ?: "BUILDS_ON",
+                                reason = o["reason"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                            )
+                        },
+                        fastSkimOrder40Min = (obj["fastSkimOrder40Min"] as? JsonArray).orEmpty().mapNotNull { el ->
+                            val o = el as? JsonObject ?: return@mapNotNull null
+                            BookMapFastSkimStep(
+                                chapterNum = o["chapterNum"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null,
+                                minutes = o["minutes"]?.jsonPrimitive?.intOrNull ?: 5,
+                                focus = o["focus"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                            )
+                        },
+                        glossary = (obj["masterGlossary"] as? JsonArray).orEmpty().mapNotNull { el ->
+                            val o = el as? JsonObject ?: return@mapNotNull null
+                            BookMapGlossaryEntry(
+                                en = o["en"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                                zh = o["zh"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                                chapterNum = o["chapterNum"]?.jsonPrimitive?.intOrNull ?: 0,
+                            )
+                        },
+                        estimatedCostUsd = obj["costStats"]?.jsonObject?.get("estimatedCostUsd")?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    )
+                }
+            }
+        }
+    }.getOrNull()
+}
+
+/** Builds server API payloads for `/api/books/{id}/modes/{mode}` and `/api/books/{id}/book-map/batch` with SQLite `course_topics` injection. */
+internal object StudyModeWireBuilder {
+    fun courseTopicsForBook(library: TextbookLibrary, bookId: String): List<String> = runCatching {
+        DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+            if (!BookSchemaMigration.tableExists(db, "course_topics")) return@runCatching emptyList()
+            val titles = linkedSetOf<String>()
+            if (BookSchemaMigration.tableExists(db, "collection_materials")) {
+                db.prepareStatement(
+                    """SELECT DISTINCT ct.title
+                       FROM course_topics ct
+                       JOIN collection_materials cm ON cm.collection_id = ct.collection_id
+                       WHERE cm.material_id = ? AND ct.exam_status <> 'EXCLUDED'
+                       ORDER BY ct.ord LIMIT 20""",
+                ).use { s ->
+                    s.setString(1, bookId)
+                    s.executeQuery().use { rs ->
+                        while (rs.next()) {
+                            rs.getString(1)?.trim()?.takeIf { it.isNotBlank() }?.let { titles += it }
+                        }
+                    }
+                }
+            }
+            if (titles.isEmpty() && BookSchemaMigration.tableExists(db, "course_topic_sources")) {
+                db.prepareStatement(
+                    """SELECT DISTINCT ct.title
+                       FROM course_topics ct
+                       JOIN course_topic_sources cts ON cts.topic_id = ct.topic_id
+                       WHERE cts.book_id = ? AND ct.exam_status <> 'EXCLUDED'
+                       ORDER BY ct.ord LIMIT 20""",
+                ).use { s ->
+                    s.setString(1, bookId)
+                    s.executeQuery().use { rs ->
+                        while (rs.next()) {
+                            rs.getString(1)?.trim()?.takeIf { it.isNotBlank() }?.let { titles += it }
+                        }
+                    }
+                }
+            }
+            titles.toList()
+        }
+    }.getOrDefault(emptyList())
+
+    fun chapterPagesForRange(library: TextbookLibrary, book: Textbook, startPage: Int, endPage: Int): List<Pair<Int, String>> {
+        val inMemory = book.pages
+            .filter { it.number in startPage..endPage && it.text.isNotBlank() }
+            .sortedBy { it.number }
+            .map { it.number to it.text }
+        if (inMemory.isNotEmpty()) return inMemory
+        return runCatching {
+            DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+                db.prepareStatement("SELECT page, text FROM pages WHERE book=? AND page BETWEEN ? AND ? ORDER BY page")
+                    .use { s ->
+                        s.setString(1, book.id)
+                        s.setInt(2, startPage)
+                        s.setInt(3, endPage)
+                        s.executeQuery().use { rs ->
+                            buildList {
+                                while (rs.next()) {
+                                    val p = rs.getInt(1)
+                                    val t = rs.getString(2).orEmpty()
+                                    if (p > 0 && t.isNotBlank()) add(p to t)
+                                }
+                            }
+                        }
+                    }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun buildModeRequestJson(
+        library: TextbookLibrary,
+        book: Textbook,
+        chapterGroup: ChapterSectionGroup,
+        chapterNum: Int,
+        preference: BookStudyPreference,
+    ): JsonObject {
+        val topics = courseTopicsForBook(library, book.id)
+        val pages = chapterPagesForRange(library, book, chapterGroup.firstPage, chapterGroup.lastPage)
+        return buildJsonObject {
+            put("bookId", book.id)
+            put("bookTitle", book.title)
+            put("chapterNum", chapterNum)
+            put("chapterTitle", chapterGroup.chapterTitle)
+            put("detailLevel", preference.detailLevel.name)
+            put("explainLang", preference.explainLang.name)
+            put("inquiryQuestion", preference.inquiryQuestion)
+            put("stream", true)
+            if (topics.isNotEmpty()) {
+                put("courseTopics", buildJsonArray { topics.forEach { add(JsonPrimitive(it)) } })
+            }
+            put(
+                "sections",
+                buildJsonArray {
+                    chapterGroup.sections.forEach { sec ->
+                        add(
+                            buildJsonObject {
+                                put("sectionId", sec.id)
+                                put("title", sec.title)
+                                put("startPdfPage", sec.firstPage)
+                                put("endPdfPage", sec.lastPage)
+                            },
+                        )
+                    }
+                },
+            )
+            put(
+                "pages",
+                buildJsonArray {
+                    pages.forEach { (pg, txt) ->
+                        add(buildJsonObject { put("pdfPage", pg); put("text", txt) })
+                    }
+                },
+            )
+        }
+    }
+
+    fun buildBookMapBatchRequestJson(
+        library: TextbookLibrary,
+        book: Textbook,
+        preference: BookStudyPreference,
+    ): JsonObject {
+        val topics = courseTopicsForBook(library, book.id)
+        val seenIds = linkedSetOf<String>()
+        val groups = buildList {
+            for (i in book.lessons.indices) {
+                val g = ChapterCompanionGrouping.groupForSection(book, i) ?: continue
+                if (seenIds.add(g.chapterId)) add(g)
+            }
+        }
+        return buildJsonObject {
+            put("bookId", book.id)
+            put("bookTitle", book.title)
+            put("detailLevel", ExplainDetailLevel.BRIEF.name)
+            put("explainLang", preference.explainLang.name)
+            put("useBatchApi", true)
+            if (topics.isNotEmpty()) {
+                put("courseTopics", buildJsonArray { topics.forEach { add(JsonPrimitive(it)) } })
+            }
+            put(
+                "chapters",
+                buildJsonArray {
+                    groups.forEachIndexed { idx, g ->
+                        val chNum = StudyModeChapterNumbering.resolve(book, g.firstPage, g.firstPage).chapterNumber
+                            .takeIf { it > 0 } ?: (idx + 1)
+                        val allPages = chapterPagesForRange(library, book, g.firstPage, g.lastPage)
+                        val sample = listOfNotNull(
+                            allPages.firstOrNull(),
+                            allPages.getOrNull(allPages.size / 2),
+                        ).distinctBy { it.first }
+                        add(
+                            buildJsonObject {
+                                put("chapterNum", chNum)
+                                put("chapterTitle", g.chapterTitle)
+                                put(
+                                    "sections",
+                                    buildJsonArray {
+                                        g.sections.forEach { sec ->
+                                            add(
+                                                buildJsonObject {
+                                                    put("sectionId", sec.id)
+                                                    put("title", sec.title)
+                                                    put("startPdfPage", sec.firstPage)
+                                                    put("endPdfPage", sec.lastPage)
+                                                },
+                                            )
+                                        }
+                                    },
+                                )
+                                put(
+                                    "pages",
+                                    buildJsonArray {
+                                        sample.forEach { (pg, txt) ->
+                                            add(buildJsonObject { put("pdfPage", pg); put("text", txt) })
+                                        }
+                                    },
+                                )
+                            },
+                        )
+                    }
+                },
+            )
+        }
     }
 }

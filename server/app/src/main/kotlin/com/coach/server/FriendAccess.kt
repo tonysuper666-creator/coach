@@ -15,11 +15,19 @@ import java.util.concurrent.ConcurrentHashMap
 
 internal val observedFriend = AttributeKey<String>("coach.friend")
 internal fun friendId(name: String) = sha256(name.toByteArray(Charsets.UTF_8))
-internal fun friendPath(call: ApplicationCall): Boolean = when (call.request.httpMethod to call.request.path()) {
-    HttpMethod.Post to "/v1/public/sable", HttpMethod.Post to "/v1/pair", HttpMethod.Get to "/v1/public/status",
-    HttpMethod.Post to "/v1/library/explain", HttpMethod.Post to "/v1/library/explain/cancel",
-    HttpMethod.Post to "/v1/library/companion/chapter" -> true
-    else -> false
+private val friendStudyModeRegex = Regex("""/api/books/[^/]+/modes/[^/]+""")
+private val friendBookMapBatchRegex = Regex("""/api/books/[^/]+/book-map/batch""")
+
+internal fun friendPath(call: ApplicationCall): Boolean {
+    val method = call.request.httpMethod
+    val path = call.request.path()
+    if (path.contains("..") || path.contains('%')) return false
+    return when (method to path) {
+        HttpMethod.Post to "/v1/public/sable", HttpMethod.Post to "/v1/pair", HttpMethod.Get to "/v1/public/status",
+        HttpMethod.Post to "/v1/library/explain", HttpMethod.Post to "/v1/library/explain/cancel",
+        HttpMethod.Post to "/v1/library/companion/chapter" -> true
+        else -> method == HttpMethod.Post && (friendStudyModeRegex.matches(path) || friendBookMapBatchRegex.matches(path))
+    }
 }
 
 /** Fixed, human-readable errors; upstream bodies and diagnostics never cross this boundary. */

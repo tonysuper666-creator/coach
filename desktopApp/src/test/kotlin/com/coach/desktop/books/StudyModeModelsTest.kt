@@ -319,4 +319,133 @@ class StudyModeModelsTest {
             dir.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun migratesLegacyFiveColumnPackTableAndPreservesFiveColumnHarnessInsert() {
+        val dir = Files.createTempDirectory("study-mode-migrate-")
+        try {
+            val library = TextbookLibrary(dir)
+            library.catalog()
+            val dbPath = dir.resolve("library.sqlite")
+            // Seed legacy 5-column Stage 7 schema manually
+            DriverManager.getConnection("jdbc:sqlite:$dbPath").use { db ->
+                db.createStatement().use { st ->
+                    st.execute("DROP TABLE IF EXISTS book_study_mode_packs")
+                    st.execute(
+                        """CREATE TABLE book_study_mode_packs(
+                            book_id TEXT NOT NULL,
+                            chapter_num INTEGER NOT NULL,
+                            study_mode TEXT NOT NULL,
+                            pack_json TEXT NOT NULL,
+                            updated_at INTEGER NOT NULL,
+                            PRIMARY KEY(book_id, chapter_num, study_mode)
+                        )""",
+                    )
+                    st.execute(
+                        """INSERT INTO book_study_mode_packs VALUES(
+                            'bk-mig', 8, 'BOOK_MAP',
+                            '{"firstScreen":{"headlineZh":"Ch8","bigPictureThesisZh":"Migrated thesis"}}',
+                            12345
+                        )""",
+                    )
+                }
+            }
+
+            // Loading triggers automatic migration to 8-column table preserving legacy row
+            val loaded = StudyModeStore.loadBookMapPack(library, "bk-mig", 8)
+            assertEquals("Migrated thesis", loaded?.bigPictureThesisZh)
+
+            // Verify legacy 5-column ReaderAcceptanceHarness INSERT still succeeds cleanly
+            DriverManager.getConnection("jdbc:sqlite:$dbPath").use { db ->
+                db.prepareStatement(
+                    "INSERT OR REPLACE INTO book_study_mode_packs(book_id, chapter_num, study_mode, pack_json, updated_at) VALUES(?,?,?,?,?)",
+                ).use { ps ->
+                    ps.setString(1, "bk-mig")
+                    ps.setInt(2, 8)
+                    ps.setString(3, "EXAM_FOCUS")
+                    ps.setString(4, """{"firstScreen":{"headlineZh":"Exam 8","mustStudySections":[{"sectionId":"8.1","weightTag":"CORE","examAngleZh":"Elasticity","pdfPage":142}]}}""")
+                    ps.setLong(5, 99999L)
+                    ps.executeUpdate()
+                }
+            }
+            val exam = StudyModeStore.loadExamFocusPack(library, "bk-mig", 8)
+            assertEquals("Exam 8", exam?.headlineZh)
+            assertEquals(1, exam?.mustStudySections?.size)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun parsesAllLiveModesSavesBatchMetaAndInjectsCourseTopicsInWireBuilder() {
+        val dir = Files.createTempDirectory("study-mode-v2-")
+        try {
+            val library = TextbookLibrary(dir)
+            library.catalog()
+            val dbPath = dir.resolve("library.sqlite")
+            DriverManager.getConnection("jdbc:sqlite:$dbPath").use { db ->
+                CourseStore.ensureReady(db)
+                db.createStatement().use { st ->
+                    st.execute("INSERT OR REPLACE INTO books(id, title, format, reading_page, touched) VALUES('bk-he', 'Health Economics', 'pdf', 141, 1000)")
+                    st.execute("INSERT OR REPLACE INTO pages(book, page, text) VALUES('bk-he', 141, 'RAND Health Insurance Experiment coinsurance rate 3/2 elasticity.')")
+                    st.execute("INSERT OR REPLACE INTO collections(id, kind, title, metadata_json, created_at, updated_at) VALUES('c-1', 'COURSE', 'ECNM10119', '{}', 1000, 1000)")
+                    st.execute("INSERT OR REPLACE INTO collection_materials(collection_id, material_id, role, ordinal, added_at) VALUES('c-1', 'bk-he', 'PRIMARY', 1, 1000)")
+                    st.execute("INSERT OR REPLACE INTO course_topics(topic_id, collection_id, week_label, ord, title, exam_status, updated_at) VALUES('t-1', 'c-1', '第 4 周', 1, 'Moral Hazard & RAND HIE', 'EXAMINABLE', 1000)")
+                }
+            }
+
+            // Test diagnostic / problem / question / read_through live parsers + SQLite cache
+            val diagJson = """{"skipPolicy":"Pass to skip","diagnosticGates":[{"gateId":"d1","sectionTitle":"8.1","targetConcept":"RAND","questionType":"CALCULATION","questionPrompt":"What happened?","options":["A","B"],"correctIndex":0,"passSkipNote":"Skip 8.1","missRemediation":"Review p.141","missJumpPdfPage":141,"quoteAnchor":"RAND Health Insurance Experiment coinsurance rate"}]}"""
+            StudyModeStore.saveModePackJson(library, "bk-he", 8, BookStudyMode.DIAGNOSTIC_SKIP, ExplainDetailLevel.DETAILED, ExplainLanguage.BILINGUAL, "", diagJson)
+            val probJson = """{"strategyNote":"Try exercise first","problems":[{"problemId":"p1","title":"HIE","exercisePdfPage":150,"exerciseQuoteAnchor":"Compute arc elasticity across coinsurance plans","attemptPrompt":"Try first","scaffoldingHints":["Step 1"],"keyDerivationCheck":"exact 3/2","bodyPdfPage":141,"quoteAnchor":"RAND Health Insurance Experiment coinsurance rate","answerOutline":["Outline"]}]}"""
+            StudyModeStore.saveModePackJson(library, "bk-he", 8, BookStudyMode.PROBLEM_DRIVEN, ExplainDetailLevel.DETAILED, ExplainLanguage.BILINGUAL, "", probJson)
+            val qJson = """{"questionFocus":"Moral hazard?","directConclusion":"Cost-sharing reduces utilization.","evidenceHits":[{"hitId":"e1","bodyJumpPage":141,"quoteAnchor":"RAND Health Insurance Experiment coinsurance rate","howItAnswersQuestion":"Direct evidence","limitOrCounterpoint":"Income effect"}],"argumentationScaffold":["Point 1"],"antiGhostwriteNotice":"Outline only","followUpQuestions":["Follow up?"]}"""
+            StudyModeStore.saveModePackJson(library, "bk-he", 8, BookStudyMode.QUESTION_DRIVEN, ExplainDetailLevel.DETAILED, ExplainLanguage.BILINGUAL, "moral hazard?", qJson)
+
+            val t0 = System.nanoTime()
+            val d = StudyModeStore.loadDiagnosticSkipPack(library, "bk-he", 8)
+            val p = StudyModeStore.loadProblemDrivenPack(library, "bk-he", 8)
+            val q = StudyModeStore.loadQuestionDrivenPack(
+                library,
+                "bk-he",
+                8,
+                BookStudyPreference(bookId = "bk-he", mode = BookStudyMode.QUESTION_DRIVEN, inquiryQuestion = "moral hazard?"),
+            )
+            val elapsedMs = (System.nanoTime() - t0) / 1_000_000.0
+            assertEquals(1, d?.gates?.size)
+            assertEquals(1, p?.problems?.size)
+            assertEquals("Cost-sharing reduces utilization.", q?.directConclusion)
+            assertTrue(elapsedMs < 500.0, "Cached SQLite switch should be fast, took ${elapsedMs}ms")
+
+            // Test batch meta save/load
+            val batchObj = kotlinx.serialization.json.Json.parseToJsonElement(
+                """{"bookId":"bk-he","bookTitle":"Health Economics","chapterCount":24,"chapters":[{"chapterNum":8,"chapterTitle":"RAND","oneLiner":"Core HIE evidence","coreClaims":[{"claim":"Coinsurance matters","importance":"CORE","pdfPage":141,"quoteAnchor":"RAND Health Insurance Experiment coinsurance rate"}]}],"thematicClusters":[{"clusterId":"c1","title":"Demand","themeSummary":"Demand for care","chapterNums":[6,8]}],"dependencyEdges":[{"fromChapter":6,"toChapter":8,"relation":"PREREQUISITE","reason":"Builds on uncertainty"}],"fastSkimOrder40Min":[{"chapterNum":8,"minutes":8,"focus":"RAND table"}],"masterGlossary":[{"en":"Moral hazard","zh":"道德风险","chapterNum":8}],"costStats":{"estimatedCostUsd":0.024}}""",
+            ) as kotlinx.serialization.json.JsonObject
+            StudyModeStore.saveBookMapBatchResult(library, "bk-he", batchObj)
+            val meta = StudyModeStore.loadBookMapMeta(library, "bk-he")
+            assertEquals(24, meta?.chapterCount)
+            assertEquals("Moral hazard", meta?.glossary?.singleOrNull()?.en)
+            assertEquals(0.024, meta?.estimatedCostUsd)
+
+            // Test WireBuilder injects SQLite course_topics & pages
+            val book = Textbook(
+                id = "bk-he",
+                title = "Health Economics",
+                format = "pdf",
+                pages = listOf(BookPage(141, "RAND Health Insurance Experiment coinsurance rate 3/2 elasticity.")),
+            )
+            val group = ChapterSectionGroup(
+                chapterId = "ch-8",
+                chapterTitle = "Chapter 8 RAND",
+                sections = listOf(BookLesson("8.1", "8.1 Intro", listOf(SourceBlock("b1", 141, 0, 10, false, "RAND")))),
+                firstPage = 141,
+                lastPage = 141,
+            )
+            val wire = StudyModeWireBuilder.buildModeRequestJson(library, book, group, 8, BookStudyPreference(bookId = "bk-he"))
+            assertEquals("Moral Hazard & RAND HIE", wire["courseTopics"]?.let { (it as kotlinx.serialization.json.JsonArray)[0] }?.let { (it as kotlinx.serialization.json.JsonPrimitive).content })
+            assertEquals(1, (wire["pages"] as kotlinx.serialization.json.JsonArray).size)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
 }

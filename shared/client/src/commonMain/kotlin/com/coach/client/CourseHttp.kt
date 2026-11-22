@@ -17,15 +17,20 @@ import io.ktor.client.plugins.timeout
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.preparePost
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsChannel
 import io.ktor.http.ContentType
 import io.ktor.http.content.TextContent
 import io.ktor.client.statement.bodyAsText
 import io.ktor.client.statement.bodyAsBytes
+import io.ktor.http.HttpHeaders
+import io.ktor.http.contentType
 import io.ktor.http.encodeURLParameter
 import io.ktor.http.encodeURLPathPart
 import io.ktor.http.isSuccess
+import io.ktor.utils.io.readUTF8Line
 import com.coach.domain.reviewqueue.QueueAvailability
 import com.coach.domain.reviewqueue.QueueQuestion
 import com.coach.domain.reviewqueue.VariantCandidate
@@ -204,6 +209,87 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     /** 2.0-AI-4: 按公开课程手册规格生成整门课考前限时模拟卷与精确验算核对。 */
     suspend fun generateCourseMock(input: JsonObject): MockReply =
         postCourseEndpoint("v1/library/course/mock/generate", input, timeoutMs = 240_000L, timeoutMsg = "模考出卷等待超时，请重试。")
+
+    /** 2.0-MODES-2: 按学习模式流式拉取单章结构化伴读首屏（SSE 优先，兼容普通 JSON 响应）。 */
+    suspend fun streamStudyModePack(
+        bookId: String,
+        mode: String,
+        input: JsonObject,
+        onProgress: (chars: Int, firstTokenMs: Long?) -> Unit = { _, _ -> },
+    ): MockReply = try {
+        val encodedBook = bookId.encodeURLPathPart()
+        val encodedMode = mode.encodeURLPathPart()
+        val wireBody = buildJsonObject {
+            input.forEach { (k, v) -> put(k, v) }
+            if ("stream" !in input) put("stream", true)
+        }
+        http.preparePost("$base/api/books/$encodedBook/modes/$encodedMode") {
+            timeout { requestTimeoutMillis = 60_000L; socketTimeoutMillis = 60_000L }
+            header(HttpHeaders.Accept, ContentType.Text.EventStream.toString())
+            setBody(TextContent(wireBody.toString(), ContentType.Application.Json))
+        }.execute { response ->
+            val status = response.status.value
+            if (status == 401) {
+                MockReply(null, "授权已失效，请重新登录学习服务。", statusCode = 401)
+            } else if (!response.status.isSuccess()) {
+                val errText = response.bodyAsText()
+                val parsed = runCatching { Json.parseToJsonElement(errText).jsonObject }.getOrNull()
+                val code = parsed?.s("code")?.ifBlank { null }
+                if (status == 429 || code == "daily_quota" || code == "monthly_quota") {
+                    MockReply(null, "课程服务暂时繁忙，请稍后再试。", retryable = true, statusCode = status, code = "unavailable")
+                } else {
+                    MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "学法伴读请求失败，请稍后重试。", statusCode = status, code = code)
+                }
+            } else if (response.contentType()?.match(ContentType.Application.Json) == true) {
+                val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+                if (parsed != null) MockReply(parsed, null, statusCode = status)
+                else MockReply(null, "伴读响应格式异常，请稍后重试。", statusCode = status)
+            } else {
+                val ch = response.bodyAsChannel()
+                var currentEvent = ""
+                var finalPack: JsonObject? = null
+                var streamError: String? = null
+                while (!ch.isClosedForRead) {
+                    val line = ch.readUTF8Line() ?: break
+                    val trimmed = line.trimEnd()
+                    when {
+                        trimmed.startsWith("event:") -> currentEvent = trimmed.removePrefix("event:").trim()
+                        trimmed.startsWith("data:") -> {
+                            val dataRaw = trimmed.removePrefix("data:").trim()
+                            val obj = runCatching { Json.parseToJsonElement(dataRaw).jsonObject }.getOrNull() ?: continue
+                            when (currentEvent) {
+                                "first_screen" -> onProgress(obj["chars"]?.let { (it as? JsonPrimitive)?.intOrNull } ?: 0, (obj["firstTokenMs"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull())
+                                "chunk" -> onProgress((obj["chars"] as? JsonPrimitive)?.intOrNull ?: 0, null)
+                                "pack" -> finalPack = obj
+                                "error" -> streamError = obj.s("error").ifBlank { "生成失败" }
+                            }
+                        }
+                        trimmed.isEmpty() -> currentEvent = ""
+                    }
+                }
+                when {
+                    finalPack != null -> MockReply(finalPack, null, statusCode = status)
+                    streamError != null -> MockReply(null, streamError, statusCode = status)
+                    else -> MockReply(null, "未收到完整学法内容，请重试。", statusCode = status)
+                }
+            }
+        }
+    } catch (_: HttpRequestTimeoutException) {
+        MockReply(null, "学法首屏生成超时，可先查看离线结构。")
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        MockReply(null, "连不上学习服务，可继续本地阅读与练习。")
+    }
+
+    /** 2.0-MODES-2: 整本书 24 章一页纸 Batch 管线（全书地图）。 */
+    suspend fun fetchBookMapBatch(bookId: String, input: JsonObject): MockReply =
+        postCourseEndpoint(
+            "api/books/${bookId.encodeURLPathPart()}/book-map/batch",
+            input,
+            timeoutMs = 300_000L,
+            timeoutMsg = "全书地图生成等待超时，请重试。",
+        )
 
     private suspend fun postCourseEndpoint(
         path: String,

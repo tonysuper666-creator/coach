@@ -24,12 +24,18 @@ import coach.design.tokens.CoachV7
 import com.coach.domain.fsrs.FsrsRating
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.CoachCardMeta
+import com.coach.ui.v7.CoachErrorBanner
+import com.coach.ui.v7.CoachLoadingDots
 import com.coach.ui.v7.Desk
 import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PaperCard
 import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.V7TextButton
 import com.coach.ui.v7.v7FocusRing
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
@@ -95,6 +101,69 @@ internal fun LocalBookReviewQuestion(
         }
     }
     val colors = CoachTheme.colors
+    val scope = rememberCoroutineScope()
+    val gradingHost = LocalPracticeGradingHost.current
+    var reviewGradeLoading by remember(review.book, review.lesson, review.mode) { mutableStateOf(false) }
+    var reviewGradeResponse by remember(review.book, review.lesson, review.mode) { mutableStateOf<PracticeGradeDiagnoseResponse?>(null) }
+    var reviewGradeError by remember(review.book, review.lesson, review.mode) { mutableStateOf<String?>(null) }
+    val baseLessonId = remember(review.lesson) { review.lesson.substringBefore("#q") }
+
+    fun triggerReviewDiagnose(answerText: String, mode: String) {
+        val host = gradingHost ?: return
+        if (reviewGradeLoading) return
+        reviewGradeLoading = true
+        reviewGradeError = null
+        scope.launch {
+            try {
+                val req = withContext(Dispatchers.IO) {
+                    PracticeGradingJson.buildReviewDiagnoseRequest(
+                        review = review,
+                        studentAnswer = answerText,
+                        library = host.library,
+                        mode = mode,
+                    )
+                }
+                when (val res = host.gradeAndDiagnose(req)) {
+                    is PracticeGradeDiagnoseResult.Ready -> {
+                        reviewGradeResponse = res.response
+                        val errCls = res.response.diagnosis?.errorClass?.takeIf { it != MisconceptionErrorClass.NONE }
+                        if (errCls != null && host.library != null) {
+                            withContext(Dispatchers.IO) {
+                                host.library.recordMasteryEvidence(
+                                    bookId = review.book,
+                                    tocNodeId = baseLessonId,
+                                    page = res.response.variant?.pdfPage?.coerceAtLeast(1) ?: 1,
+                                    canonicalName = review.lessonTitle,
+                                    signal = LearnerSignalType.MISCONCEPTION_DIAG,
+                                    errorClass = errCls,
+                                )
+                            }
+                        }
+                    }
+                    is PracticeGradeDiagnoseResult.Failed -> reviewGradeError = res.message
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Exception) {
+                reviewGradeError = "错因诊断暂时不可用，已保留当前复习进度。"
+            } finally {
+                reviewGradeLoading = false
+            }
+        }
+    }
+
+    LaunchedEffect(review.book, review.lesson, review.answer.revealed, review.answer.text, review.answer.understood) {
+        val wrongChoice = review.mode == QuestionMode.CHOICE &&
+            review.answer.revealed &&
+            review.answer.text.isNotBlank() &&
+            review.answer.text != review.practice.answer
+        val missedShort = review.mode == QuestionMode.SHORT_ANSWER &&
+            review.answer.revealed &&
+            review.answer.understood == false
+        if ((wrongChoice || missedShort) && reviewGradeResponse == null && gradingHost != null) {
+            triggerReviewDiagnose(review.answer.text, "DIAGNOSE_ONLY")
+        }
+    }
     Desk(
         crumb = review.bookTitle,
         onBack = onBack,
@@ -235,11 +304,23 @@ internal fun LocalBookReviewQuestion(
                         )
                     }
                     if (!review.answer.revealed) {
-                        PrimaryButton(
-                            onClick = { onAnswer(review.answer.copy(text = draft, revealed = true)) },
-                            enabled = enabled,
-                            modifier = Modifier.testTag("review-show-answer"),
-                        ) { Text("看答案") }
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            PrimaryButton(
+                                onClick = { onAnswer(review.answer.copy(text = draft, revealed = true)) },
+                                enabled = enabled,
+                                modifier = Modifier.testTag("review-show-answer"),
+                            ) { Text("看答案") }
+                            if (gradingHost != null && draft.isNotBlank()) {
+                                PaperButton(
+                                    onClick = {
+                                        onAnswer(review.answer.copy(text = draft, revealed = true))
+                                        triggerReviewDiagnose(draft, "GRADE_AND_DIAGNOSE")
+                                    },
+                                    enabled = enabled && !reviewGradeLoading,
+                                    modifier = Modifier.testTag("review-submit-grade"),
+                                ) { Text(if (reviewGradeLoading) "批改中…" else "提交批改") }
+                            }
+                        }
                     } else {
                         PaperCard(Modifier.testTag("review-reference-card"), contentPadding = PaddingValues(16.dp)) {
                             Text("对照原文", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
@@ -282,6 +363,50 @@ internal fun LocalBookReviewQuestion(
                                 ) { Text("记住了") }
                             }
                         }
+                    }
+                }
+
+                if (reviewGradeLoading) {
+                    CoachLoadingDots(label = "正在分析错因与生成同类变式…")
+                }
+                reviewGradeError?.let { err ->
+                    CoachErrorBanner(
+                        message = err,
+                        retryLabel = "重试",
+                        onRetry = { triggerReviewDiagnose(review.answer.text, if (review.mode == QuestionMode.SHORT_ANSWER && review.answer.text.isNotBlank()) "GRADE_AND_DIAGNOSE" else "DIAGNOSE_ONLY") },
+                        modifier = Modifier.testTag("review-grade-error"),
+                    )
+                }
+                reviewGradeResponse?.let { resp ->
+                    if (resp.rubricItems.isNotEmpty()) {
+                        RubricAnnotationSheet(
+                            studentDraft = review.answer.text,
+                            response = resp,
+                            onJumpPage = { _, _ -> onSource() },
+                        )
+                    }
+                    resp.diagnosis?.takeIf { it.errorClass != MisconceptionErrorClass.NONE }?.let { diag ->
+                        MisconceptionFeedbackCard(
+                            diagnosis = diag,
+                            variant = resp.variant,
+                            onJumpPage = { _, _ -> onSource() },
+                            onVariantMastered = { variant ->
+                                val lib = gradingHost?.library ?: return@MisconceptionFeedbackCard
+                                scope.launch(Dispatchers.IO) {
+                                    lib.recordMasteryEvidence(
+                                        bookId = review.book,
+                                        tocNodeId = baseLessonId,
+                                        page = variant.pdfPage.coerceAtLeast(1),
+                                        canonicalName = review.lessonTitle,
+                                        signal = LearnerSignalType.POST_QUIZ_T1,
+                                        scoreRatio = 1.0,
+                                        guessed = false,
+                                        errorClass = MisconceptionErrorClass.NONE,
+                                        conceptKeyOverride = variant.conceptKey.takeIf(String::isNotBlank),
+                                    )
+                                }
+                            },
+                        )
                     }
                 }
 

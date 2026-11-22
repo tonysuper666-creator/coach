@@ -85,6 +85,7 @@ internal fun SingleBookCompanionPanel(
     var packState by remember(book.id, chapterGroup?.chapterId) { mutableStateOf<CompanionPackState>(CompanionPackState.Idle) }
     var fetchNonce by remember(book.id, chapterGroup?.chapterId) { mutableIntStateOf(0) }
     var sectionMastery by remember(book.id, currentSection?.id, chapterGroup?.chapterId) { mutableStateOf<ConceptMasteryRecord?>(null) }
+    var gradeResponsesByQuestion by remember(book.id) { mutableStateOf<Map<String, PracticeGradeDiagnoseResponse>>(emptyMap()) }
     val activeModule = CompanionModuleTab.fromWire(draft.activeModule)
     val scroll = rememberScrollState()
 
@@ -309,9 +310,14 @@ internal fun SingleBookCompanionPanel(
                                 onAskStep = onAskAboutText,
                             )
                             CompanionModuleTab.PRACTICE -> OptionalPracticeModuleView(
+                                book = book,
                                 pack = pack,
                                 draft = draft,
                                 currentSection = currentSection,
+                                explainer = explainer,
+                                library = library,
+                                gradeResponses = gradeResponsesByQuestion,
+                                onGradeResponse = { qId, resp -> gradeResponsesByQuestion = gradeResponsesByQuestion + (qId to resp) },
                                 onSelectOption = { qId, opt ->
                                     updateDraft {
                                         it.copy(
@@ -362,6 +368,7 @@ internal fun SingleBookCompanionPanel(
                                     }
                                 },
                                 onOpenAnchor = onOpenAnchor,
+                                onOpenLogin = onOpenLogin,
                                 onInputFocusChanged = onInputFocusChanged,
                             )
                             CompanionModuleTab.EXERCISE_HINTS -> ExerciseHintsModuleView(
@@ -613,17 +620,108 @@ private fun DerivationModuleView(
 
 @Composable
 private fun OptionalPracticeModuleView(
+    book: Textbook,
     pack: BookCompanionPack,
     draft: ChapterPracticeDraft,
     currentSection: BookLesson?,
+    explainer: BookExplainer,
+    library: TextbookLibrary,
+    gradeResponses: Map<String, PracticeGradeDiagnoseResponse>,
+    onGradeResponse: (String, PracticeGradeDiagnoseResponse) -> Unit,
     onSelectOption: (String, String) -> Unit,
     onEditText: (String, String, Int) -> Unit,
     onToggleGuessed: (String) -> Unit,
     onSubmit: (Int, BookCompanionQuiz) -> Unit,
     onOpenAnchor: (BookCompanionAnchor) -> Unit,
+    onOpenLogin: () -> Unit,
     onInputFocusChanged: (Boolean) -> Unit = {},
 ) {
     val colors = CoachTheme.colors
+    val scope = rememberCoroutineScope()
+    val gradingHost = LocalPracticeGradingHost.current
+    var gradingInFlight by remember(book.id) { mutableStateOf<Set<String>>(emptySet()) }
+    var gradeErrors by remember(book.id) { mutableStateOf<Map<String, Pair<String, ExplainTrouble>>>(emptyMap()) }
+
+    fun launchGradeOrDiagnose(quiz: BookCompanionQuiz, answerText: String, mode: String, mcqSelected: String = "") {
+        if (quiz.id in gradingInFlight) return
+        val canCallServer = gradingHost != null || explainer.identity != null
+        if (!canCallServer) return
+        gradingInFlight = gradingInFlight + quiz.id
+        gradeErrors = gradeErrors - quiz.id
+        scope.launch {
+            try {
+                val sec = book.lessons.firstOrNull { it.id == quiz.sectionId } ?: currentSection
+                val req = PracticeGradingJson.buildSingleBookRequest(
+                    book = book,
+                    section = sec,
+                    quiz = quiz,
+                    studentAnswer = answerText,
+                    mode = mode,
+                    mcqSelected = mcqSelected,
+                )
+                val result = if (gradingHost != null) {
+                    gradingHost.gradeAndDiagnose(req)
+                } else {
+                    if (!explainer.loaded) explainer.load()
+                    explainer.gradeAndDiagnosePractice(req)
+                }
+                when (result) {
+                    is PracticeGradeDiagnoseResult.Ready -> {
+                        val resp = result.response
+                        onGradeResponse(quiz.id, resp)
+                        withContext(Dispatchers.IO) {
+                            val tocNodeId = sec?.id ?: quiz.sectionId
+                            val canonicalName = sec?.title ?: quiz.sectionId
+                            val targetPage = quiz.anchor?.pdfPage ?: sec?.firstPage ?: 1
+                            val errCls = resp.diagnosis?.errorClass?.takeIf { it != MisconceptionErrorClass.NONE }
+                            if (resp.rubricItems.isNotEmpty()) {
+                                val ratio = if (resp.maxMarks > 0.0) {
+                                    (resp.totalAwarded / resp.maxMarks).coerceIn(0.0, 1.0)
+                                } else {
+                                    resp.rubricItems.map {
+                                        when (it.verdict) {
+                                            "FULL" -> 1.0
+                                            "PARTIAL" -> 0.5
+                                            else -> 0.0
+                                        }
+                                    }.average()
+                                }
+                                library.recordMasteryEvidence(
+                                    bookId = book.id,
+                                    tocNodeId = tocNodeId,
+                                    page = targetPage,
+                                    canonicalName = canonicalName,
+                                    signal = LearnerSignalType.RUBRIC_GRADE,
+                                    scoreRatio = ratio,
+                                    guessed = draft.practiceGuessed[quiz.id] == true,
+                                    errorClass = errCls,
+                                )
+                            } else if (errCls != null) {
+                                library.recordMasteryEvidence(
+                                    bookId = book.id,
+                                    tocNodeId = tocNodeId,
+                                    page = targetPage,
+                                    canonicalName = canonicalName,
+                                    signal = LearnerSignalType.MISCONCEPTION_DIAG,
+                                    errorClass = errCls,
+                                )
+                            }
+                        }
+                    }
+                    is PracticeGradeDiagnoseResult.Failed -> {
+                        gradeErrors = gradeErrors + (quiz.id to (result.message to result.trouble))
+                    }
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Exception) {
+                gradeErrors = gradeErrors + (quiz.id to ("逐点批改暂时不可用，你的草稿已保留。" to ExplainTrouble.Other))
+            } finally {
+                gradingInFlight = gradingInFlight - quiz.id
+            }
+        }
+    }
+
     if (pack.optionalPractice.isEmpty()) {
         CoachEmptyState(title = "本章暂无选做练习。", hint = "可先看「本章要点」或「原书章末习题三级提示」。")
         return
@@ -641,8 +739,11 @@ private fun OptionalPracticeModuleView(
         val isMcq = quiz.options.size >= 2
         val submitted = quiz.id in draft.practiceSubmitted
         val guessed = draft.practiceGuessed[quiz.id] == true
-        val isPrimaryCard = idx == activeIdx && !submitted
+        val isPrimaryCard = idx == activeIdx && (if (isMcq) !submitted else true)
         val chosen = if (isMcq) draft.practiceSelections[quiz.id].orEmpty() else draft.practiceTextDrafts[quiz.id].orEmpty()
+        val isGrading = quiz.id in gradingInFlight
+        val gradeResp = gradeResponses[quiz.id]
+        val gradeErr = gradeErrors[quiz.id]
 
         PaperCard(Modifier.fillMaxWidth().testTag("practice-card-$idx"), contentPadding = PaddingValues(12.dp), contentSpacing = 8.dp) {
             Text("选做 ${idx + 1} / ${pack.optionalPractice.size}", style = MaterialTheme.typography.labelSmall, color = v7Pine())
@@ -682,13 +783,14 @@ private fun OptionalPracticeModuleView(
                     }
                 }
                 val shape = RoundedCornerShape(CoachV7.Radius.btn)
+                // Subjective draft stays editable so the learner can revise & resubmit after inspecting rubric notes.
                 BasicTextField(
                     value = tfv,
                     onValueChange = { next ->
                         tfv = next
                         onEditText(quiz.id, next.text, next.selection.end)
                     },
-                    enabled = !submitted,
+                    enabled = !isGrading,
                     minLines = 3,
                     textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.fgPrimary),
                     cursorBrush = SolidColor(colors.fgPrimary),
@@ -702,7 +804,7 @@ private fun OptionalPracticeModuleView(
                         .testTag("practice-draft-input-$idx"),
                 )
             }
-            if (!submitted) {
+            if (!isMcq || !submitted) {
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -715,22 +817,93 @@ private fun OptionalPracticeModuleView(
                         Text(if (guessed) "✓ 这题是猜的" else "这题是猜的", color = if (guessed) colors.actionPrimary else colors.fgSecondary)
                     }
                     Spacer(Modifier.weight(1f))
+                    val actionLabel = when {
+                        isMcq -> "核对"
+                        isGrading -> "批改中…"
+                        else -> "提交批改"
+                    }
+                    val onActionClick: () -> Unit = {
+                        onSubmit(idx, quiz)
+                        if (!isMcq) {
+                            launchGradeOrDiagnose(quiz, chosen, "GRADE_AND_DIAGNOSE")
+                        } else if (chosen.isNotBlank() && chosen != quiz.correctOption) {
+                            launchGradeOrDiagnose(quiz, chosen, "DIAGNOSE_ONLY", mcqSelected = chosen)
+                        }
+                    }
                     if (isPrimaryCard) {
                         PrimaryButton(
-                            onClick = { onSubmit(idx, quiz) },
-                            enabled = chosen.isNotBlank(),
+                            onClick = onActionClick,
+                            enabled = chosen.isNotBlank() && !isGrading,
                             modifier = Modifier.testTag("practice-submit-$idx"),
-                        ) { Text("核对") }
+                        ) { Text(actionLabel) }
                     } else {
                         PaperButton(
-                            onClick = { onSubmit(idx, quiz) },
-                            enabled = chosen.isNotBlank(),
+                            onClick = onActionClick,
+                            enabled = chosen.isNotBlank() && !isGrading,
                             modifier = Modifier.testTag("practice-submit-$idx"),
-                        ) { Text("核对") }
+                        ) { Text(actionLabel) }
                     }
                 }
-            } else {
-                Text("参考结论：${quiz.correctOption}", style = MaterialTheme.typography.bodySmall, color = v7Pine(), modifier = Modifier.testTag("practice-answer-$idx"))
+            }
+            if (isGrading) {
+                CoachLoadingDots(label = if (isMcq) "正在分析错因与生成变式…" else "正在按课程原页逐点核对…")
+            }
+            if (gradeErr != null) {
+                CoachErrorBanner(
+                    message = gradeErr.first,
+                    retryLabel = if (gradeErr.second.needsPairing) "去登录" else "重试",
+                    onRetry = {
+                        if (gradeErr.second.needsPairing) onOpenLogin()
+                        else launchGradeOrDiagnose(quiz, chosen, if (isMcq) "DIAGNOSE_ONLY" else "GRADE_AND_DIAGNOSE", mcqSelected = if (isMcq) chosen else "")
+                    },
+                    modifier = Modifier.testTag("practice-grade-error-$idx"),
+                )
+            }
+            if (gradeResp != null) {
+                val jumpToPage: (Int, String) -> Unit = { pg, quote ->
+                    val pageObj = book.page(pg)
+                    val startIdx = if (pageObj != null && quote.isNotBlank()) pageObj.text.indexOf(quote, ignoreCase = true) else -1
+                    val resolvedAnchor = if (startIdx >= 0) {
+                        BookCompanionAnchor(pg, "${book.id}:p$pg:$startIdx", startIdx, startIdx + quote.length, pageObj!!.text.substring(startIdx, startIdx + quote.length))
+                    } else {
+                        BookCompanionAnchor(pg, "${book.id}:p$pg:0", 0, 0, quote)
+                    }
+                    onOpenAnchor(resolvedAnchor)
+                }
+                if (gradeResp.rubricItems.isNotEmpty()) {
+                    RubricAnnotationSheet(
+                        studentDraft = chosen,
+                        response = gradeResp,
+                        onJumpPage = jumpToPage,
+                    )
+                }
+                gradeResp.diagnosis?.takeIf { it.errorClass != MisconceptionErrorClass.NONE }?.let { diag ->
+                    MisconceptionFeedbackCard(
+                        diagnosis = diag,
+                        variant = gradeResp.variant,
+                        onJumpPage = jumpToPage,
+                        onVariantMastered = { variant ->
+                            val sec = book.lessons.firstOrNull { it.id == quiz.sectionId } ?: currentSection
+                            scope.launch(Dispatchers.IO) {
+                                library.recordMasteryEvidence(
+                                    bookId = book.id,
+                                    tocNodeId = sec?.id ?: quiz.sectionId,
+                                    page = variant.pdfPage.coerceAtLeast(1),
+                                    canonicalName = sec?.title ?: quiz.sectionId,
+                                    signal = LearnerSignalType.POST_QUIZ_T1,
+                                    scoreRatio = 1.0,
+                                    guessed = false,
+                                    errorClass = MisconceptionErrorClass.NONE,
+                                    conceptKeyOverride = variant.conceptKey.takeIf(String::isNotBlank),
+                                )
+                            }
+                        },
+                    )
+                }
+            } else if (submitted && (isMcq || (!isGrading && gradeErr == null))) {
+                if (isMcq || quiz.correctOption.isNotBlank()) {
+                    Text("参考结论：${quiz.correctOption}", style = MaterialTheme.typography.bodySmall, color = v7Pine(), modifier = Modifier.testTag("practice-answer-$idx"))
+                }
                 if (quiz.explanation.isNotBlank()) {
                     Text(quiz.explanation, style = MaterialTheme.typography.bodySmall, color = colors.fgPrimary)
                 }

@@ -22,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -29,9 +30,16 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.coach.ui.theme.CoachTheme
+import com.coach.ui.v7.CoachErrorBanner
+import com.coach.ui.v7.CoachLoadingDots
 import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PaperCard
+import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.V7TextButton
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Course companion drawer hosted inside [TextbookReader]:
@@ -53,9 +61,14 @@ internal fun CourseCompanionPanel(
 ) {
     val colors = CoachTheme.colors
     val pack = courseContext.pack
+    val scope = rememberCoroutineScope()
+    val gradingHost = LocalPracticeGradingHost.current
     var draftText by remember(courseContext.topicId, courseContext.resumeDraft?.topicId) {
         mutableStateOf(courseContext.resumeDraft?.text.orEmpty())
     }
+    var gradingInFlight by remember(courseContext.topicId) { mutableStateOf(false) }
+    var gradeResponse by remember(courseContext.topicId) { mutableStateOf<PracticeGradeDiagnoseResponse?>(null) }
+    var gradeError by remember(courseContext.topicId) { mutableStateOf<String?>(null) }
     val wordTarget = pack?.practicePrompt?.wordTarget ?: 300
 
     Column(
@@ -275,6 +288,142 @@ internal fun CourseCompanionPanel(
                     maxLines = 10,
                     modifier = Modifier.fillMaxWidth().testTag("course-essay-input"),
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    PrimaryButton(
+                        onClick = {
+                            val host = gradingHost
+                            if (host == null) {
+                                gradeError = "请先连接学习服务后再提交批改，当前草稿已保存。"
+                                return@PrimaryButton
+                            }
+                            gradingInFlight = true
+                            gradeError = null
+                            scope.launch {
+                                try {
+                                    val req = withContext(Dispatchers.IO) {
+                                        PracticeGradingJson.buildCourseEssayRequest(
+                                            courseContext = courseContext,
+                                            activeBookId = activeBookId,
+                                            activePage = activePage,
+                                            draftText = draftText,
+                                            library = host.library,
+                                        )
+                                    }
+                                    when (val res = host.gradeAndDiagnose(req)) {
+                                        is PracticeGradeDiagnoseResult.Ready -> {
+                                            gradeResponse = res.response
+                                            val lib = host.library
+                                            if (lib != null) {
+                                                withContext(Dispatchers.IO) {
+                                                    val ratio = if (res.response.maxMarks > 0.0) {
+                                                        (res.response.totalAwarded / res.response.maxMarks).coerceIn(0.0, 1.0)
+                                                    } else {
+                                                        val items = res.response.rubricItems
+                                                        if (items.isEmpty()) 0.5 else items.map {
+                                                            when (it.verdict) {
+                                                                "FULL" -> 1.0
+                                                                "PARTIAL" -> 0.5
+                                                                else -> 0.0
+                                                            }
+                                                        }.average()
+                                                    }
+                                                    val errCls = res.response.diagnosis?.errorClass?.takeIf { it != MisconceptionErrorClass.NONE }
+                                                    lib.recordMasteryEvidence(
+                                                        bookId = activeBookId,
+                                                        tocNodeId = courseContext.topicId,
+                                                        page = activePage.coerceAtLeast(1),
+                                                        canonicalName = courseContext.topicTitle,
+                                                        signal = LearnerSignalType.RUBRIC_GRADE,
+                                                        scoreRatio = ratio,
+                                                        guessed = false,
+                                                        errorClass = errCls,
+                                                        collectionId = courseContext.courseId,
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        is PracticeGradeDiagnoseResult.Failed -> {
+                                            gradeError = res.message
+                                        }
+                                    }
+                                } catch (c: CancellationException) {
+                                    throw c
+                                } catch (_: Exception) {
+                                    gradeError = "逐点批改暂时不可用，你的论述草稿已保存。"
+                                } finally {
+                                    gradingInFlight = false
+                                }
+                            }
+                        },
+                        enabled = draftText.isNotBlank() && !gradingInFlight,
+                        modifier = Modifier.testTag("course-essay-submit"),
+                    ) {
+                        Text(if (gradingInFlight) "批改中…" else "提交批改")
+                    }
+                }
+                if (gradingInFlight) {
+                    CoachLoadingDots(label = "正在对照课程原页逐点核对…")
+                }
+                gradeError?.let { err ->
+                    CoachErrorBanner(
+                        message = err,
+                        retryLabel = "重试",
+                        onRetry = { gradeError = null },
+                        modifier = Modifier.testTag("course-essay-grade-error"),
+                    )
+                }
+                gradeResponse?.let { resp ->
+                    val jumpToPage: (Int, String) -> Unit = { pg, quote ->
+                        val matchedSource = courseContext.orderedSources.firstOrNull { pg in it.startPage..it.endPage }
+                            ?: courseContext.orderedSources.firstOrNull()
+                        val targetBookId = matchedSource?.bookId ?: activeBookId
+                        val targetTitle = matchedSource?.bookTitle ?: courseContext.topicTitle
+                        onJumpCitation(
+                            CourseCitationRef(
+                                bookId = targetBookId,
+                                bookTitle = targetTitle,
+                                role = matchedSource?.role ?: CourseMaterialRole.CORE_TEXTBOOK,
+                                page = pg,
+                                startUtf16 = 0,
+                                endUtf16 = quote.length,
+                                quote = quote,
+                            ),
+                        )
+                    }
+                    RubricAnnotationSheet(
+                        studentDraft = draftText,
+                        response = resp,
+                        onJumpPage = jumpToPage,
+                    )
+                    resp.diagnosis?.takeIf { it.errorClass != MisconceptionErrorClass.NONE }?.let { diag ->
+                        MisconceptionFeedbackCard(
+                            diagnosis = diag,
+                            variant = resp.variant,
+                            onJumpPage = jumpToPage,
+                            onVariantMastered = { variant ->
+                                val lib = gradingHost?.library ?: return@MisconceptionFeedbackCard
+                                scope.launch(Dispatchers.IO) {
+                                    lib.recordMasteryEvidence(
+                                        bookId = activeBookId,
+                                        tocNodeId = courseContext.topicId,
+                                        page = variant.pdfPage.coerceAtLeast(1),
+                                        canonicalName = courseContext.topicTitle,
+                                        signal = LearnerSignalType.POST_QUIZ_T1,
+                                        scoreRatio = 1.0,
+                                        guessed = false,
+                                        errorClass = MisconceptionErrorClass.NONE,
+                                        conceptKeyOverride = variant.conceptKey.takeIf(String::isNotBlank),
+                                        collectionId = courseContext.courseId,
+                                    )
+                                }
+                            },
+                        )
+                    }
+                }
             }
         }
 

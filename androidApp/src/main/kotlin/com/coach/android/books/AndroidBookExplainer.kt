@@ -453,6 +453,17 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
     suspend fun courseVision(input: JsonObject): CourseServerCallResult =
         callCourseEndpoint { http -> http.courseVision(input) }
 
+    suspend fun gradeAndDiagnosePractice(input: JsonObject): PracticeGradeDiagnoseResult {
+        val res = callCourseEndpoint { http -> http.gradeAndDiagnosePractice(input) }
+        val body = res.body ?: return PracticeGradeDiagnoseResult.Failed(
+            res.error ?: "逐点批改暂时不可用，你的草稿已保留。",
+            res.trouble ?: ExplainTrouble.Other,
+        )
+        val parsed = runCatching { PracticeGradingJson.decodeResponse(body) }.getOrNull()
+        return if (parsed != null) PracticeGradeDiagnoseResult.Ready(parsed)
+        else PracticeGradeDiagnoseResult.Failed("批改结果格式无法解析，请稍后重试。")
+    }
+
     private suspend fun callCourseEndpoint(
         block: suspend (CourseHttp) -> MockReply,
     ): CourseServerCallResult {

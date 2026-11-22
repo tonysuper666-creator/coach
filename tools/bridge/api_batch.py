@@ -21,7 +21,8 @@ from api_route import ApiFailure, cost, route, vendor
 
 TASKS = frozenset({"gen_mcq", "repair_mcq_sources", "blind_review",
                    "gen_constructed", "repair_constructed_sources", "review_constructed",
-                   "BOOK_SECTION_BATCH", "BOOK_EXERCISE_HINTS"})
+                   "BOOK_SECTION_BATCH", "BOOK_EXERCISE_HINTS",
+                   "practice_grade", "practice_diagnose", "practice_variant"})
 ROOTS = {"anthropic": "https://api.anthropic.com/v1", "openai": "https://api.openai.com/v1"}
 
 
@@ -104,7 +105,8 @@ class BatchRouter:
                 # Persist intent before reserving/sending. A crash here fails closed.
                 atomic_json(path, state)
                 try:
-                    limit = max_tokens if max_tokens is not None else 4000
+                    default_limit = 8192 if model == "claude-haiku-5-5" else 4000
+                    limit = max_tokens if max_tokens is not None else default_limit
                     bound = len(system.encode()) + len(prompt.encode()) + 4096
                     if type(limit) is not int or not 1 <= limit <= 16000 or bound > 90000:
                         raise Denied("unsupported_batch_size")

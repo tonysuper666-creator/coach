@@ -1,5 +1,8 @@
 package com.coach.server
 
+import com.coach.ai.BridgeClient
+import com.coach.ai.BridgeConfig
+import com.sun.net.httpserver.HttpServer
 import io.ktor.server.application.install
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -8,7 +11,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import java.net.InetSocketAddress
 import java.nio.file.Files
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -266,6 +271,46 @@ class SectionBatchPipelineTest {
         val summary = ledger.bookSummary(bookId)
         assertEquals(275L, summary.totalCostMicrodollars)
         assertTrue(summary.withinBudget)
+    }
+
+    @Test
+    fun haikuOverflowAnswersSynchronouslySoTheApiOnlyBridgeNeverParksItInBatch() = runBlocking {
+        // TON-1795: a background request on the API-only bridge returns 202 BatchPending, which the
+        // waiting chapter-companion request cannot handle, so the drawer showed "暂时不可用".
+        val seen = CopyOnWriteArrayList<Pair<String?, JsonObject>>()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/v1/chat/completions") { exchange ->
+            val body = kotlinx.serialization.json.Json.parseToJsonElement(exchange.requestBody.readBytes().decodeToString()) as JsonObject
+            seen.add(exchange.requestHeaders.getFirst("X-Coach-Background") to body)
+            val reply = buildJsonObject {
+                put("model", "claude-haiku-5-5")
+                put("choices", buildJsonArray {
+                    add(buildJsonObject {
+                        put("index", 0)
+                        put("message", buildJsonObject { put("role", "assistant"); put("content", "{}") })
+                    })
+                })
+                put("x_coach", buildJsonObject {
+                    put("status", "complete"); put("finish_reason", "stop"); put("served_by", "claude-haiku-5-5")
+                    put("fallback", false); put("physical_calls", 1); put("request_id", "synthetic")
+                    put("queue_ms", 1); put("ttft_ms", 1); put("elapsed_ms", 1)
+                })
+            }.toString().toByteArray()
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, reply.size.toLong())
+            exchange.responseBody.use { it.write(reply) }
+        }
+        server.start()
+        try {
+            val transport = HaikuRealtimeBridgeTransport(BridgeClient(BridgeConfig(baseUrl = "http://127.0.0.1:${server.address.port}")))
+            val reply = transport.generateSection("system", "user", "BOOK_SECTION_BATCH", "d".repeat(64), 1800)
+            assertEquals(CompanionRouteChannel.HAIKU_REALTIME, reply.routeChannel)
+            assertEquals(1, seen.size)
+            assertNull(seen.single().first, "Interactive overflow must not opt into background batch")
+            assertEquals("claude-haiku-5-5", seen.single().second["model"]?.let { (it as kotlinx.serialization.json.JsonPrimitive).content })
+        } finally {
+            server.stop(0)
+        }
     }
 
     @Test

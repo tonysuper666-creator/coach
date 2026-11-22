@@ -275,6 +275,23 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("claude-haiku-5-5", route("cross_review_grade", "claude-sonnet-5-5"))
         self.assertIsNone(route("not-a-task", "claude-sonnet-5-5"))
 
+    def test_every_server_bridge_task_and_model_is_served(self):
+        # TON-1795: 2.0 routes requested an unregistered model and unrouted tasks, so the
+        # API-only bridge answered 404/503 and the chapter companion showed "暂时不可用".
+        import re
+        root = Path(__file__).resolve().parents[3]
+        sources = [p.read_text(encoding="utf-8") for d in ("server/app/src/main/kotlin", "server/ai/src/main/kotlin")
+                   for p in (root / d).rglob("*.kt")]
+        tasks = {t for s in sources for t in re.findall(r'\btask\s*=\s*"([A-Za-z_]+)"', s)}
+        tasks |= {t for s in sources for t in re.findall(r'"(BOOK_[A-Z_]+)"', s)}
+        # Token-ledger labels only; these calls never reach the bridge.
+        tasks -= {"course_align", "course_vision_ocr"}
+        self.assertTrue({"booklist_concept_align", "course_topic_map", "BOOK_SECTION_BATCH"} <= tasks)
+        self.assertEqual(set(), tasks - set(CONFIG["tasks"]))
+        constants = {m for s in sources for m in re.findall(r'const val [A-Z]+ = "((?:claude|gpt)-[a-z0-9.-]+)"', s)}
+        self.assertIn("claude-haiku-5-5", constants)
+        self.assertEqual(set(), constants - set(bridge.MODELS))
+
     def test_prices_and_incomplete_usage(self):
         self.assertEqual(600000, cost("claude-haiku-5-5", {"input_tokens": 1_000_000 // 10, "output_tokens": 1180000}))
         self.assertEqual(505, cost("gpt-6.1-terra", {"input_tokens": 100, "cached_tokens": 100, "output_tokens": 100}))

@@ -698,7 +698,7 @@ object VerbatimOverlapGuard {
     }
 }
 
-/** Transport abstraction so production uses CodeBuddy CLI + Haiku Batch overflow, and unit tests run hermetically. */
+/** Transport abstraction so production uses CodeBuddy CLI + realtime Haiku overflow, and unit tests run hermetically. */
 data class BatchTransportReply(
     val text: String,
     val routeChannel: CompanionRouteChannel,
@@ -722,7 +722,7 @@ interface BatchAiTransport {
 
 /**
  * Primary bulk transport: stateless CodeBuddy CLI (`deepseek-v4.1-flash`, `--tools ""`, zero shell/filesystem access).
- * Falls back cleanly on failure to [overflow] (Haiku 5.5 Batch via Coach Bridge).
+ * Falls back cleanly on failure to [overflow] (realtime Haiku 5.5 via Coach Bridge).
  */
 class RoutedBatchAiTransport(
     private val primary: BatchAiTransport?,
@@ -867,10 +867,16 @@ class CodeBuddyDeepSeekTransport(
     }
 }
 
-/** Overflow bulk transport: routes through Coach Bridge to `claude-haiku-5-5` Batch (`background = true`). */
-class HaikuBatchBridgeTransport(
+/**
+ * Overflow transport: routes through Coach Bridge to realtime `claude-haiku-5-5` (`background = false`).
+ *
+ * Every caller (chapter companion, course topic pack, booklist alignment) holds an open user request,
+ * so this must answer synchronously. A background request would let the API-only bridge park it in the
+ * provider Batch API and answer HTTP 202 (`BatchPending`), which no interactive caller can wait for.
+ * Batch stays reserved for durable supply jobs that own a poll loop (PoolWorker).
+ */
+class HaikuRealtimeBridgeTransport(
     private val bridge: BridgeClient,
-    private val batchEpoch: String = "companion-v2",
 ) : BatchAiTransport {
     override suspend fun generateSection(
         systemPrompt: String,
@@ -880,15 +886,14 @@ class HaikuBatchBridgeTransport(
         maxTokens: Int,
     ): BatchTransportReply = withContext(Dispatchers.IO) {
         val started = System.nanoTime()
-        val scoped = bridge.forBatchJob(batchEpoch, batchKey)
-        val result = scoped.chat(
+        val result = bridge.chat(
             ChatRequest(
                 task = task,
                 model = BridgeClient.HAIKU,
                 system = systemPrompt,
                 user = userPrompt,
                 stream = false,
-                background = true,
+                background = false,
                 maxTokens = maxTokens,
             ),
         )
@@ -896,14 +901,14 @@ class HaikuBatchBridgeTransport(
         when (result) {
             is BridgeResult.Success -> BatchTransportReply(
                 text = result.text,
-                routeChannel = CompanionRouteChannel.HAIKU_BATCH,
+                routeChannel = CompanionRouteChannel.HAIKU_REALTIME,
                 model = result.terminal.servedBy ?: BridgeClient.HAIKU,
                 inputTokens = TokenLedgerPricing.estimateTokens(systemPrompt) + TokenLedgerPricing.estimateTokens(userPrompt),
                 outputTokens = TokenLedgerPricing.estimateTokens(result.text),
                 ttftMs = result.call.ttftMs ?: elapsedMs,
                 elapsedMs = result.call.durMs.coerceAtLeast(1L),
             )
-            is BridgeResult.Failure -> throw IllegalStateException("haiku_batch_failed:${result.reason}")
+            is BridgeResult.Failure -> throw IllegalStateException("haiku_realtime_failed:${result.reason}")
         }
     }
 }

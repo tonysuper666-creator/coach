@@ -114,6 +114,7 @@ class ModelSpec:
 def build_registry() -> dict[str, ModelSpec]:
     reg = {
         "claude-sonnet-5-5": ModelSpec("claude-sonnet-5-5", "claude", True),
+        "claude-haiku-5-5": ModelSpec("claude-haiku-5-5", "claude", True),
         "gpt-6.1-sol": ModelSpec("gpt-6.1-sol", "codex", False),
         "gpt-6-sol": ModelSpec("gpt-6-sol", "codex", False),
     }

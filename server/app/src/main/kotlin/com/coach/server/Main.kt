@@ -120,7 +120,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     val companionCache = ChapterCompanionCache(data.resolve("companion"))
     val companionTransport = RoutedBatchAiTransport(
         primary = CodeBuddyDeepSeekTransport(),
-        overflow = HaikuBatchBridgeTransport(chat.bridge),
+        overflow = HaikuRealtimeBridgeTransport(chat.bridge),
     )
     val companionPipeline = SectionConcurrentCompanionPipeline(companionTransport, tokenLedger, companionCache)
     val courseAlignPipeline = CourseAlignmentPipeline(SonnetBridgeAlignTransport(chat.bridge), tokenLedger)

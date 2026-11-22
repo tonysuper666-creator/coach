@@ -403,10 +403,18 @@ internal fun TextbookReader(
     }
     var pageFocused by remember { mutableStateOf(false) }
     var tocOpen by remember(book.id) { mutableStateOf(false) }
+    var studyPreference by remember(book.id) {
+        mutableStateOf(StudyModeStore.loadOrResolve(library, book.id, book.title, book.pages.size))
+    }
     val initialCompanionOpen = openPairing || (
-        ui.source == null && (
+        ui.source == null &&
+            !(studyPreference.userLocked && studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) && (
             (resumeDraft?.companionOpen == true && resumeDraft.hasMeaningfulDraft()) ||
-                (courseContext != null && courseContext.resumeDraft?.companionOpen != false)
+                (courseContext != null && courseContext.resumeDraft?.companionOpen != false) ||
+                (studyPreference.userLocked &&
+                    studyPreference.mode != BookStudyMode.READ_THROUGH &&
+                    studyPreference.detailLevel != ExplainDetailLevel.ORIGINAL_ONLY &&
+                    (resumeDraft == null || resumeDraft.companionOpen || studyPreference.updatedAt >= resumeDraft.updatedAt))
             )
         )
     val initialCompanionTab = remember(book.id, resumeDraft?.companionTab) {
@@ -469,7 +477,7 @@ internal fun TextbookReader(
     var pendingNavigationIsJump by remember(book.id) { mutableStateOf(false) }
 
     suspend fun evaluateMarginWhisperForPage(targetPage: Int, nodeId: String, rereadCountOnPage: Int) {
-        if (ui.source != null) return
+        if (ui.source != null || studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) return
         val quoteSnippet = book.page(targetPage)?.text?.trim()?.lineSequence()?.firstOrNull { it.length >= 8 }?.take(48).orEmpty()
         val (conflict, mastery) = withContext(Dispatchers.IO) {
             val c = runCatching { library.crossMaterialConflictForPage(book.id, targetPage, nodeId) }.getOrNull()
@@ -515,7 +523,10 @@ internal fun TextbookReader(
             if (activeCheckpoint != null && activeCheckpoint?.page != ui.page) {
                 activeCheckpoint = null
             }
-            if (prevSec != null && readingTracker.shouldOfferSectionCheckpoint(
+            if (prevSec != null &&
+                studyPreference.detailLevel != ExplainDetailLevel.ORIGINAL_ONLY &&
+                studyPreference.mode != BookStudyMode.BOOK_MAP &&
+                readingTracker.shouldOfferSectionCheckpoint(
                     previousSectionId = prevSec.id,
                     previousSectionLastPage = prevSec.lastPage,
                     fromPage = prevPage,
@@ -1319,6 +1330,19 @@ internal fun TextbookReader(
                             explainer = explainer,
                             library = library,
                             draft = practiceDraft,
+                            studyPreference = studyPreference,
+                            onUpdateStudyPreference = { nextPref, modeSwitched ->
+                                studyPreference = StudyModeStore.save(library, nextPref)
+                                if (nextPref.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) {
+                                    activeWhisper = null
+                                    activeCheckpoint = null
+                                    closeCompanion()
+                                } else if (modeSwitched) {
+                                    companionOpen = true
+                                    companionTab = ReaderCompanionTab.EXPLAIN
+                                }
+                            },
+                            onJumpPage = { target -> pendingNavigationIsJump = true; turnTo(target) },
                             onDraftChange = { persistPracticeDraft(it) },
                             onOpenAnchor = { anchor ->
                                 val targetPage = book.page(anchor.pdfPage)
@@ -1883,6 +1907,26 @@ internal fun TextbookReader(
                 val control = LocalDeskTypeControl.current
                 if (control != null) control(typeMenuExtra)
             },
+            modeControl = if (source == null) {
+                {
+                    StudyModeSelectorButton(
+                        preference = studyPreference,
+                        onUpdatePreference = { nextPref, modeSwitched ->
+                            studyPreference = StudyModeStore.save(library, nextPref)
+                            if (nextPref.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) {
+                                activeWhisper = null
+                                activeCheckpoint = null
+                                closeCompanion()
+                            } else if (modeSwitched) {
+                                companionOpen = true
+                                companionTab = ReaderCompanionTab.EXPLAIN
+                            }
+                        },
+                        compact = true,
+                        tag = "immersive-mode-trigger",
+                    )
+                }
+            } else null,
             modifier = Modifier.align(Alignment.TopCenter),
         )
 

@@ -156,6 +156,7 @@ internal fun ImmersiveTopHud(
     onTogglePinHud: () -> Unit,
     onLearn: () -> Unit,
     typeControl: @Composable () -> Unit,
+    modeControl: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
@@ -250,6 +251,9 @@ internal fun ImmersiveTopHud(
                     )
                 }
                 Box(Modifier.padding(horizontal = if (compact) 2.dp else 4.dp)) { typeControl() }
+                if (modeControl != null) {
+                    modeControl()
+                }
                 V7TextButton(
                     onClick = onToggleCompanion,
                     modifier = Modifier.testTag("immersive-companion-toggle"),

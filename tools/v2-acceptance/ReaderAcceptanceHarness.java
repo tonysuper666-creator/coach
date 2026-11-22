@@ -1958,6 +1958,9 @@ public final class ReaderAcceptanceHarness {
                     clickTagWin32(win, "immersive-companion-toggle");
                     waitFor(4000, () -> findNodeByTag(win, "companion-mode-trigger") != null);
                 }
+                if (!waitFor(3000, () -> findNodeByTag(win, "mode-surface-BOOK_MAP") != null)) {
+                    throw new IllegalStateException("Expected mode-surface-BOOK_MAP after Home selection");
+                }
                 Thread.sleep(500);
                 dumpWin32(win, shotsDir, "modes", "1280x820", "04_mode_BOOK_MAP");
 

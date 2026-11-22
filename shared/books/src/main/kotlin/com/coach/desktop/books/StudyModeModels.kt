@@ -244,6 +244,7 @@ internal object StudyModeStore {
     fun loadOrResolve(library: TextbookLibrary, bookId: String, fallbackTitle: String = "", fallbackPageCount: Int = 0): BookStudyPreference {
         return runCatching {
             openDb(library.directory).use { db ->
+                var existing: BookStudyPreference? = null
                 db.prepareStatement(
                     """SELECT study_mode, user_locked, default_reason, detail_level,
                               explain_lang, daily_minutes, target_date, inquiry_question, updated_at
@@ -252,7 +253,7 @@ internal object StudyModeStore {
                     s.setString(1, bookId)
                     s.executeQuery().use { r ->
                         if (r.next()) {
-                            return@use BookStudyPreference(
+                            existing = BookStudyPreference(
                                 bookId = bookId,
                                 mode = BookStudyMode.fromWire(r.getString(1)),
                                 userLocked = r.getInt(2) != 0,
@@ -267,9 +268,9 @@ internal object StudyModeStore {
                         }
                     }
                 }
-                val computed = computeSmartDefault(db, bookId, fallbackTitle, fallbackPageCount)
-                saveInDb(db, computed)
-                computed
+                existing ?: computeSmartDefault(db, bookId, fallbackTitle, fallbackPageCount).also {
+                    saveInDb(db, it)
+                }
             }
         }.getOrElse {
             BookStudyPreference(bookId = bookId)

@@ -482,6 +482,13 @@ function Read-ZoomStrip([string]$png, [int]$top, [int]$bottom, [int]$scale = 3) 
 function Find-ZoomText([string]$png, [int]$top, [int]$bottom, [string]$label, [int]$scale = 3) {
     return (Find-Text (Read-ZoomStrip $png $top $bottom $scale) $label)
 }
+function Find-AnchorChip($lines, [string]$png, [int]$winH) {
+    $m = $lines | Where-Object { ($_.Text -replace '\s', '') -match '原文第\d+页' } | Select-Object -First 1
+    if ($m) { return $m }
+    if (-not $png -or $winH -le 0) { return $null }
+    $zLines = Read-ZoomStrip $png ([int]($winH * 0.48)) ([int]($winH * 0.98)) 3
+    return ($zLines | Where-Object { ($_.Text -replace '\s', '') -match '原文第\d+页' } | Select-Object -First 1)
+}
 # 点完「讲讲」算不算生效：2.0 不再另开一张卡——伴读抽屉（窄窗是半屏底部抽屉）打开并切到「提问」页，
 # 顶上顶着「引文 · …」，先「正在整理…」，然后出正文和「出处」。第一次问还要先过同意框。
 # 只认这几种看得见的状态——「点过一次」不算，四路交锁时那一下常常被别的窗口吃掉。
@@ -1427,13 +1434,13 @@ try {
         # 620 页的书按节整理要点要时间，最多等 180 秒；认出任何一种终态就往下走，不干等满。
         # OCR 把「讲解服务」读成「讠爿解务」、「暂」读成「暫」，只有「连不上」三个字一直干净：
         # 认这句就认「连不上」，别再依赖它前面的主语（20:02 那轮因此把「服务连不上」当成「界面变了」）。
-        $why5re = '本章暂无提取要点|当前页暂未归入正文小节|登录后可使用本章伴读|伴读整理已在设置中关闭|去连接服务|连不上|没顾上|这次没讲成'
-        $transient5 = '连不上|没顾上|这次没讲成'
+        $why5re = '本章暂无提取要点|当前页暂未归入正文小节|登录后可使用本章伴读|伴读整理已在设置中关闭|去连接服务|连不上|没顾上|这次没讲成|不可用'
+        $transient5 = '连不上|没顾上|这次没讲成|不可用'
         $deadline = (Get-Date).AddSeconds(180); $kp = $null; $why5 = $null; $waited = 0; $retries5 = 0
         while ((Get-Date) -lt $deadline -and -not $kp -and -not $why5) {
             Start-Sleep -Seconds 2; $waited++
             $lines = Shot 5 "explain-wait$waited"
-            # 先认终态：出错时空卡上面照样顶着「本章要点 · <本章>」这个标题，先看标题会把失败当成成功。
+            # 先认终态：出错和加载态顶部都照样顶着「本章要点 · <本章>」这个标题，先看标题会把加载或失败当成成功。
             $why5 = $lines | Where-Object { ($_.Text -replace '\s', '') -match $why5re } | Select-Object -First 1
             if ($why5 -and ($why5.Text -replace '\s', '') -match $transient5 -and $retries5 -lt 2) {
                 $retry5 = Has $lines @('重试')
@@ -1446,8 +1453,11 @@ try {
                 }
             }
             if ($why5) { break }
-            $kp = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^本章要点' } | Select-Object -First 1
-            if (-not $kp) { $kp = $lines | Where-Object { $_.Text -match '原文第\s*\d+\s*页' } | Select-Object -First 1 }
+            $loading5 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '正在按节整理' } | Select-Object -First 1
+            if (-not $loading5) {
+                $kp = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^(?:核心[问同]题|\d+[.、．])' } | Select-Object -First 1
+                if (-not $kp) { $kp = Find-AnchorChip $lines $script:LastPng $winH }
+            }
             if ($kp) { break }
             # 伴读包还没回来时页签行会被加载态顶下去：顺手确认没被挤回「提问」页。
             if (Has $lines @('问这句的意思')) {
@@ -1469,18 +1479,27 @@ try {
             Fail 5 '切到「讲解」页签后 180 秒内没等到本章要点（见 5-explain-wait*.png）'
         }
         # 要点标题和锚点不一定同屏：标题认到了还看不到「原文第 N 页」，就往下滚抽屉体把它滚进视野；
-        # 滚了四帧画面不动就停手，别把 40 秒全花在推同一屏上。
-        $chip = $null; $stillB = 0; $prevB = ''
+        # 避开底边 48dp HUD 触发区（y > winH*0.80），避免 Hover/Click 被底部进度条劫持。
+        $chip = $null; $lastChip = $null; $stillB = 0; $prevB = ''
+        Hover $midX ([int]($winH * 0.50)); Start-Sleep -Milliseconds 250
         $deadline = (Get-Date).AddSeconds(40)
-        while ((Get-Date) -lt $deadline -and -not $chip) {
+        while ((Get-Date) -lt $deadline) {
             $lines = $script:Last
-            $chip = $lines | Where-Object { $_.Text -match '原文第\s*\d+\s*页' } | Select-Object -First 1
-            if ($chip) { break }
+            $cand = Find-AnchorChip $lines $script:LastPng $winH
+            if ($cand) {
+                $lastChip = $cand
+                $cy = (Get-LineBox $cand).Y
+                if ($cy -le [int]($winH * 0.80) -or $stillB -ge 3) {
+                    $chip = $cand
+                    break
+                }
+            }
             $frame = (@($lines | ForEach-Object { $_.Text }) -join '|')
             if ($frame -eq $prevB) { $stillB++ } else { $stillB = 0 }
             $prevB = $frame
-            if ($stillB -ge 4) { break }
-            Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.78)) -3
+            if ($stillB -ge 4) { $chip = $lastChip; break }
+            $delta = if ($cand) { -2 } else { -3 }
+            Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.72)) $delta
             Start-Sleep -Milliseconds 700
             $null = Shot 5 'explain-full'
         }
@@ -1489,7 +1508,11 @@ try {
         Note "步骤5 本章要点的原文锚点：$($chip.Text)"
         $bx = Get-LineBox $chip
         $bxc = [int](($bx.X1 + $bx.X2) / 2); $byc = [int]$bx.Y
-        Hover $bxc $byc; Start-Sleep -Milliseconds 500
+        if ($byc -le [int]($winH * 0.82)) {
+            Hover $bxc $byc; Start-Sleep -Milliseconds 300
+        } else {
+            Hover $midX ([int]($winH * 0.45)); Start-Sleep -Milliseconds 250
+        }
         $null = Click-At $bxc $byc; Start-Sleep -Seconds 2
         # 窄窗（winbox 752×552）是底部半屏抽屉：点锚点只跳页、不自动收抽屉，堆在底缘的页号条压在抽屉上沿之上，
         # 所以抽屉开着就能核对页码；宽屏浮层会自动收起抽屉，页号同样在底缘。
@@ -1554,24 +1577,25 @@ try {
         Hover $strip.X $strip.Y; Start-Sleep -Milliseconds 400
         $null = Click-At $strip.X $strip.Y; Start-Sleep -Seconds 1
         $null = Shot 6 'pretest'
-        # 等题目卡：题号行「第 i / N 题」；空卡直接写「本章暂无读前自测题。」。
-        $deadline = (Get-Date).AddSeconds(40); $q = $null
+        # 等题目卡：题号行「第 i / N 题」（Windows OCR 偶把简写「题」认成繁写「題」）；空卡直接写「本章暂无读前自测题。」。
+        $deadline = (Get-Date).AddSeconds(60); $q = $null
         while ((Get-Date) -lt $deadline -and -not $q) {
             $lines = $script:Last
-            $q = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^第\d+[/／]\d+题' } | Select-Object -First 1
+            $q = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^第\d+[/／]\d+[题題]' } | Select-Object -First 1
             if ($q) { break }
             # 伴读包没拿到时同一句话顶在模块下面（和第 ⑤ 步同一个 ExplainTrouble.UNREACHABLE）：
             # 这不是「界面变了」，是客户端没收到 JSON（门没转发 companion/chapter 时回的是 nginx 404 页）。
             $why6 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '连不上' } | Select-Object -First 1
             if ($why6) { Fail 6 "伴读包没拿到，读前自测出不来：卡上写「$($why6.Text -replace '\s', '')」——先查 $($env:COACH_URL) 这道门有没有转发 POST /v1/library/companion/chapter（见 6-pretest*.png）" }
-            $noQ = $lines | Where-Object { ($_.Text -replace '\s', '') -match '本章暂无读前自测题' } | Select-Object -First 1
+            $noQ = $lines | Where-Object { ($_.Text -replace '\s', '') -match '本章暂无读前自测[题題]' } | Select-Object -First 1
             if ($noQ) { Fail 6 "读前自测是空的：$($noQ.Text)（见 6-pretest*.png）" }
             Start-Sleep -Seconds 1; $null = Shot 6 'pretest-wait'
         }
-        if (-not $q) { Fail 6 '切到「读前自测」后 40 秒内没有出现题目卡（见 6-pretest*.png）' }
+        if (-not $q) { Fail 6 '切到「读前自测」后 60 秒内没有出现题目卡（见 6-pretest*.png）' }
         # 题目卡比抽屉高：先把「提交」滚进视野——它和「这题是猜的」同一行，在最下面。
         # 找到「提交」后，它正上方那几行里最低的一行就是最后一个选项：点它 → 点「提交」→ 看反馈。
         # 没选中时提交是灰的、按了不出反馈，所以按「点选项 → 点提交 → 认反馈」闭环，最多换 6 个落点。
+        Hover $midX ([int]($winH * 0.50)); Start-Sleep -Milliseconds 250
         $answered = $false; $fb = $null; $tries6 = 0; $prev6 = ''; $still6 = 0
         $deadline = (Get-Date).AddSeconds(90)
         while ((Get-Date) -lt $deadline -and -not $answered) {
@@ -1582,17 +1606,26 @@ try {
                 if ($frame -eq $prev6) { $still6++ } else { $still6 = 0 }
                 $prev6 = $frame
                 if ($still6 -ge 5) { Fail 6 '题目卡上一直没看到「提交」按钮（见 6-pretest*.png）' }
-                Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.78)) -3
+                Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.72)) -3
                 Start-Sleep -Milliseconds 700
                 $null = Shot 6 'pretest-scroll'
                 continue
             }
             $sb = Get-LineBox $sub
+            if ($sb.Y -gt [int]($winH * 0.80) -and $still6 -lt 2) {
+                $frame = (@($lines | ForEach-Object { $_.Text }) -join '|')
+                if ($frame -eq $prev6) { $still6++ } else { $still6 = 0 }
+                $prev6 = $frame
+                Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.72)) -2
+                Start-Sleep -Milliseconds 700
+                $null = Shot 6 'pretest-scroll'
+                continue
+            }
             $above = @($lines | Where-Object {
                 $t = ($_.Text -replace '\s', '')
                 $bb = Get-LineBox $_
                 $bb.Y -lt ($sb.Y - 6) -and $bb.Y -gt ($sb.Y - 110) -and
-                $t -notmatch '这题是猜的|先猜一猜|^第\d+[/／]\d+题$|提交'
+                $t -notmatch '这题是猜的|先猜一猜|^第\d+[/／]\d+[题題]$|提交'
             } | Sort-Object { (Get-LineBox $_).Y })
             if ($above.Count -eq 0) {
                 Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.56)) 3
@@ -1622,7 +1655,7 @@ try {
         $deadline = (Get-Date).AddSeconds(40)
         while ((Get-Date) -lt $deadline -and -not $chip6) {
             $lines = $script:Last
-            $chip6 = $lines | Where-Object { $_.Text -match '原文第\s*\d+\s*页' } | Select-Object -First 1
+            $chip6 = Find-AnchorChip $lines $script:LastPng $winH
             if ($chip6) { break }
             $frame = (@($lines | ForEach-Object { $_.Text }) -join '|')
             if ($frame -eq $prevE) { $stillE++ } else { $stillE = 0 }

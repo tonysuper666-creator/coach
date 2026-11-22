@@ -608,6 +608,7 @@ object Utf16AnchorVerifier {
 /** Verbatim overlap gate: English 8-gram = 0, Chinese 12-gram = 0. */
 object VerbatimOverlapGuard {
     private val EN_WORD = Regex("[a-z0-9]+(?:'[a-z0-9]+)?")
+    private val EN_WORD_MIXED = Regex("[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?")
 
     fun englishWords(text: String): List<String> =
         EN_WORD.findAll(Normalizer.normalize(text, Normalizer.Form.NFKC).lowercase()).map { it.value }.toList()
@@ -667,13 +668,17 @@ object VerbatimOverlapGuard {
         var enSafety = 0
         while (enSafety < 24) {
             enSafety++
-            val matches = EN_WORD.findAll(current).toList()
+            val matches = EN_WORD_MIXED.findAll(current).toList()
             if (matches.size < SectionBatchLimits.EN_NGRAM_LIMIT) break
             val lowered = matches.map { it.value.lowercase() }
             var firstOffending = -1
             for (i in 0..(lowered.size - SectionBatchLimits.EN_NGRAM_LIMIT)) {
-                val gram = lowered.subList(i, i + SectionBatchLimits.EN_NGRAM_LIMIT).joinToString(" ")
+                val window = lowered.subList(i, i + SectionBatchLimits.EN_NGRAM_LIMIT)
+                val gram = window.joinToString(" ")
                 if (gram in srcEnGrams) {
+                    // Preserve pure symbolic math equations (mostly 1-2 char symbols/digits) rather than corrupting formulas.
+                    val longAlphaWords = window.count { tok -> tok.length >= 3 && tok.all(Char::isLetter) }
+                    if (longAlphaWords < 2) continue
                     firstOffending = i
                     break
                 }

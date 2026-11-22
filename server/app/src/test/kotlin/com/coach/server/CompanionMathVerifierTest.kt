@@ -414,9 +414,9 @@ class CompanionMathVerifierTest {
         assertEquals(188, deduped[0].anchor?.pdfPage, "Must keep earliest page anchor across split pages")
         assertTrue(deduped[0].hint1Direction.contains("分段写出"), "Must keep richer merged hint")
 
-        // Overlap scrubbing must NEVER inject 〔依原文公式〕 or （简述） placeholders!
-        val source = "Now assume that neither buyers nor sellers have information about specific quality levels in this synthetic exercise. 本段测试中文连续十二个以上字完全照抄来源原文的情形验证。"
-        val leakyEn = "关注题目中 'neither buyers nor sellers have information about specific quality levels' 这句话的含义。"
+        // Overlap scrubbing must NEVER inject 〔依原文公式〕 or （简述） placeholders (including capitalized English)!
+        val source = "Now assume that Neither Buyers Nor Sellers Have Information About Specific Quality Levels in this synthetic exercise. 本段测试中文连续十二个以上字完全照抄来源原文的情形验证。"
+        val leakyEn = "关注题目中 'Neither Buyers Nor Sellers Have Information About Specific Quality Levels' 这句话的含义。"
         val scrubbedEn = VerbatimOverlapGuard.scrubOverlaps(leakyEn, source)
         assertTrue(VerbatimOverlapGuard.audit(listOf(scrubbedEn), source).passed, "Must pass en 8-gram == 0")
         assertFalse(PlaceholderLeakGuard.hasLeak(scrubbedEn), "Must never emit placeholder tokens: $scrubbedEn")
@@ -427,5 +427,10 @@ class CompanionMathVerifierTest {
         assertTrue(VerbatimOverlapGuard.audit(listOf(scrubbedZh), source).passed, "Must pass zh 12-gram == 0")
         assertFalse(PlaceholderLeakGuard.hasLeak(scrubbedZh), "Must never emit placeholder tokens: $scrubbedZh")
         assertFalse(scrubbedZh.contains("（简述）"), "Must never emit （简述）: $scrubbedZh")
+
+        // Pure symbolic math formula must NOT be corrupted by overlap scrubbing
+        val mathSrc = "Expected utility is E[U(I)]p = pU(IS) + (1-p)U(IH)."
+        val mathStep = "写出期望效用 E[U(I)]p = pU(IS) + (1-p)U(IH)。"
+        assertEquals(mathStep, VerbatimOverlapGuard.scrubOverlaps(mathStep, mathSrc))
     }
 }

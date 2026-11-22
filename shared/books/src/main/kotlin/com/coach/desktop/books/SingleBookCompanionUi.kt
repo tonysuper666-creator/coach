@@ -148,64 +148,106 @@ internal fun SingleBookCompanionPanel(
     }
 
     Column(modifier.fillMaxSize().testTag("single-book-companion")) {
-        // In-place Study Mode bar at top of companion drawer (Click 1 open -> Click 2 switch, 0 data loss)
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 7.dp)
-                .testTag("companion-mode-bar"),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            StudyModeSelectorButton(
-                preference = studyPreference,
-                onUpdatePreference = onUpdateStudyPreference,
-                compact = true,
-                tag = "companion-mode-trigger",
-            )
-            CoachCardMeta(
-                "${studyPreference.detailLevel.labelZh} · ${studyPreference.explainLang.shortZh}",
-                Modifier.testTag("companion-mode-knobs-summary"),
-            )
-        }
-        HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.5f))
-
-        // 5-module selector strip shown in READ_THROUGH mode (zero PrimaryButton here to obey UX-4)
-        if (studyPreference.mode == BookStudyMode.READ_THROUGH) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp, vertical = 8.dp)
-                .testTag("companion-module-strip"),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        // In-place Study Mode bar + 5-module selector strip.
+        // On wide bottom-sheet drawers (>= 520dp, e.g. 752x552 half-screen window), merge both into a single
+        // compact row so companion-module-body keeps enough height and scroll hit-area instead of stacking two bars.
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val mergeModeAndModules = studyPreference.mode == BookStudyMode.READ_THROUGH && maxWidth >= 520.dp
+            val showKnobsInMerged = maxWidth >= 600.dp
             val pillShape = RoundedCornerShape(CoachV7.Radius.s)
             val activeBg = colors.actionPrimary.copy(alpha = 0.14f)
-            for (mod in CompanionModuleTab.entries) {
-                val selected = activeModule == mod
-                Text(
-                    mod.shortLabel,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (selected) colors.actionPrimary else colors.fgSecondary,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                    maxLines = 1,
-                    softWrap = false,
-                    modifier = Modifier
-                        .clip(pillShape)
-                        .background(if (selected) activeBg else Color.Transparent)
-                        .border(1.dp, if (selected) colors.actionPrimary.copy(alpha = 0.35f) else colors.borderSubtle, pillShape)
-                        .clickable(role = Role.Tab) {
-                            updateDraft { it.copy(activeModule = mod.name) }
-                        }
-                        .pointerHoverIcon(PointerIcon.Hand)
-                        .padding(horizontal = 10.dp, vertical = 5.dp)
-                        .testTag(mod.tag),
-                )
+            val modulePills: @Composable (Modifier) -> Unit = { rowModifier ->
+                Row(
+                    rowModifier
+                        .horizontalScroll(rememberScrollState())
+                        .testTag("companion-module-strip"),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    for (mod in CompanionModuleTab.entries) {
+                        val selected = activeModule == mod
+                        Text(
+                            mod.shortLabel,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (selected) colors.actionPrimary else colors.fgSecondary,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier
+                                .clip(pillShape)
+                                .background(if (selected) activeBg else Color.Transparent)
+                                .border(
+                                    1.dp,
+                                    if (selected) colors.actionPrimary.copy(alpha = 0.35f) else colors.borderSubtle,
+                                    pillShape,
+                                )
+                                .clickable(role = Role.Tab) {
+                                    updateDraft { it.copy(activeModule = mod.name) }
+                                }
+                                .pointerHoverIcon(PointerIcon.Hand)
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                                .testTag(mod.tag),
+                        )
+                    }
+                }
             }
-        }
-        HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.7f))
+
+            if (mergeModeAndModules) {
+                Column(Modifier.fillMaxWidth()) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                            .testTag("companion-mode-bar"),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        StudyModeSelectorButton(
+                            preference = studyPreference,
+                            onUpdatePreference = onUpdateStudyPreference,
+                            compact = true,
+                            tag = "companion-mode-trigger",
+                        )
+                        modulePills(Modifier.weight(1f))
+                        if (showKnobsInMerged) {
+                            CoachCardMeta(
+                                "${studyPreference.detailLevel.labelZh} · ${studyPreference.explainLang.shortZh}",
+                                Modifier.testTag("companion-mode-knobs-summary"),
+                            )
+                        }
+                    }
+                    HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.7f))
+                }
+            } else {
+                Column(Modifier.fillMaxWidth()) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 7.dp)
+                            .testTag("companion-mode-bar"),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        StudyModeSelectorButton(
+                            preference = studyPreference,
+                            onUpdatePreference = onUpdateStudyPreference,
+                            compact = true,
+                            tag = "companion-mode-trigger",
+                        )
+                        CoachCardMeta(
+                            "${studyPreference.detailLevel.labelZh} · ${studyPreference.explainLang.shortZh}",
+                            Modifier.testTag("companion-mode-knobs-summary"),
+                        )
+                    }
+                    HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.5f))
+
+                    // 5-module selector strip shown in READ_THROUGH mode (zero PrimaryButton here to obey UX-4)
+                    if (studyPreference.mode == BookStudyMode.READ_THROUGH) {
+                        modulePills(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp))
+                        HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.7f))
+                    }
+                }
+            }
         }
 
         Box(Modifier.weight(1f).fillMaxWidth()) {

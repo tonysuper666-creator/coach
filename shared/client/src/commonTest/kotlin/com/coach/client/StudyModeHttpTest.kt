@@ -25,9 +25,9 @@ class StudyModeHttpTest {
             append("event: meta\n")
             append("data: {\"stage\":\"started\"}\n\n")
             append("event: first_screen\n")
-            append("data: {\"chars\":48,\"firstTokenMs\":510}\n\n")
+            append("data: {\"chars\":48,\"firstTokenMs\":510,\"delta\":\"{\\\"oneLiner\\\":\\\"First\"}\n\n")
             append("event: chunk\n")
-            append("data: {\"chars\":190,\"delta\":\"...\"}\n\n")
+            append("data: {\"chars\":190,\"delta\":\" screen summary\\\"}\"}\n\n")
             append("event: pack\n")
             append("data: {\"studyMode\":\"EXAM_FOCUS\",\"chapterNum\":8,\"mustKnows\":[{\"topic\":\"RAND\",\"pdfPage\":141,\"quoteAnchor\":\"randomly assigned families to plans\"}]}\n\n")
             append("event: done\n")
@@ -57,18 +57,24 @@ class StudyModeHttpTest {
             }
         })
         try {
-            val progressEvents = mutableListOf<Pair<Int, Long?>>()
+            val progressEvents = mutableListOf<Triple<Int, Long?, String>>()
             val reply = client.streamStudyModePack(
                 bookId = "bk-1",
                 mode = "EXAM_FOCUS",
                 input = buildJsonObject { put("chapterNum", 8) },
-            ) { chars, ttft ->
-                progressEvents += chars to ttft
+            ) { chars, ttft, delta ->
+                progressEvents += Triple(chars, ttft, delta)
             }
             assertNull(reply.error)
             assertNotNull(reply.body)
-            assertEquals("EXAM_FOCUS", reply.body?.get("studyMode")?.jsonPrimitive?.content)
-            assertEquals(listOf(48 to 510L, 190 to null), progressEvents)
+            assertEquals("EXAM_FOCUS", reply.body.get("studyMode")?.jsonPrimitive?.content)
+            assertEquals(
+                listOf(
+                    Triple(48, 510L, "{\"oneLiner\":\"First"),
+                    Triple(190, null, " screen summary\"}"),
+                ),
+                progressEvents,
+            )
 
             val batchReply = client.fetchBookMapBatch("bk-1", buildJsonObject { put("bookTitle", "Health") })
             assertEquals(24, batchReply.body?.get("chapterCount")?.jsonPrimitive?.intOrNull)

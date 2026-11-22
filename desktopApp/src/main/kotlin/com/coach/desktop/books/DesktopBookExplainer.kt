@@ -208,7 +208,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         bookId: String,
         mode: String,
         input: JsonObject,
-        onProgress: (chars: Int, firstTokenMs: Long?) -> Unit = { _, _ -> },
+        onProgress: (chars: Int, firstTokenMs: Long?, delta: String) -> Unit = { _, _, _ -> },
     ): CourseServerCallResult = callCourseEndpoint { http -> http.streamStudyModePack(bookId, mode, input, onProgress) }
 
     open suspend fun fetchBookMapBatch(bookId: String, input: JsonObject): CourseServerCallResult =

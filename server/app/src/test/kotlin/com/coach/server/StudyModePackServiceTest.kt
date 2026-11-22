@@ -587,4 +587,82 @@ class StudyModePackServiceTest {
             dir.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun bookMapBatchBackfillsRealSectionPdfPagesAndSeparatesJobKeysByLanguageAndContent() = runBlocking(Dispatchers.IO) {
+        val observedJobKeys = mutableListOf<String>()
+        val noopStream = object : StudyModeStreamTransport {
+            override fun streamGenerate(
+                systemPrompt: String,
+                userPrompt: String,
+                maxTokens: Int,
+                friend: String?,
+                device: String?,
+                onDelta: (String, Long) -> Unit,
+            ): StudyModeTransportReply = error("not used")
+        }
+        val batchTransport = object : StudyModeBatchTransport {
+            override fun complete(
+                task: String,
+                jobKey: String,
+                systemPrompt: String,
+                userPrompt: String,
+                maxTokens: Int,
+                useBatchApi: Boolean,
+                friend: String?,
+                device: String?,
+            ): StudyModeTransportReply {
+                observedJobKeys += jobKey
+                val text = if ("Synthesize a whole-book" in systemPrompt) {
+                    """{"thematicClusters":[],"dependencyEdges":[],"fastSkimOrder40Min":[],"masterGlossary":[]}"""
+                } else {
+                    // Simulate model omitting pdfPage on section 8.1 and emitting bogus pdfPage=1 on section 8.2
+                    """{"chapters":[{"chapterNum":8,"chapterTitle":"RAND","chapterRole":"CORE","oneLiner":"Ch8","estimatedMinutes":15,"readingDepth":"CORE_SKIM","coreClaims":[{"claim":"Core","importance":"CORE","pdfPage":141,"quoteAnchor":"The RAND Health Insurance Experiment randomly assigned families to plans"}],"sections":[{"sectionTitle":"8.1 Design","summary":"Design","skipUnlessExam":false},{"sectionTitle":"8.2 Results","summary":"Results","skipUnlessExam":false,"pdfPage":1}]}]}"""
+                }
+                return StudyModeTransportReply(
+                    text = text,
+                    routeChannel = CompanionRouteChannel.HAIKU_BATCH,
+                    model = BridgeClient.HAIKU,
+                    inputTokens = 100,
+                    outputTokens = 80,
+                    firstTokenMs = 10L,
+                    elapsedMs = 20L,
+                )
+            }
+        }
+        val service = StudyModePackService(noopStream, batchTransport)
+        val ch8Sections = listOf(
+            StudySectionInput("8.1", "8.1 Design", 141, 145),
+            StudySectionInput("8.2", "8.2 Results", 146, 155),
+        )
+        val baseReq = BookMapBatchRequest(
+            bookId = "he-1",
+            bookTitle = "Health Economics",
+            detailLevel = ServerDetailLevel.BRIEF,
+            explainLang = ServerExplainLang.BILINGUAL,
+            chapters = listOf(BookMapChapterInput(8, "RAND", samplePages, ch8Sections)),
+            bypassCache = true,
+        )
+        val bilingualRes = service.generateBookMapBatch(baseReq)
+        val chObj = bilingualRes["chapters"]!!.jsonArray.single().jsonObject
+        val secs = chObj["sections"]!!.jsonArray
+        assertEquals(2, secs.size)
+        assertEquals(141, secs[0].jsonObject["pdfPage"]!!.jsonPrimitive.intOrNull)
+        assertEquals(146, secs[1].jsonObject["pdfPage"]!!.jsonPrimitive.intOrNull)
+        val keysBilingual = observedJobKeys.toList()
+        assertEquals(2, keysBilingual.size)
+
+        observedJobKeys.clear()
+        service.generateBookMapBatch(baseReq.copy(explainLang = ServerExplainLang.EN))
+        val keysEn = observedJobKeys.toList()
+        assertFalse(keysBilingual[0] == keysEn[0], "Batch chunk jobKey must vary by explainLang")
+        assertFalse(keysBilingual[1] == keysEn[1], "Batch graph jobKey must vary by explainLang")
+
+        observedJobKeys.clear()
+        val alteredPages = listOf(samplePages.first().copy(text = "Altered chapter text on page 141 for cache digest check.")) + samplePages.drop(1)
+        service.generateBookMapBatch(baseReq.copy(chapters = listOf(BookMapChapterInput(8, "RAND", alteredPages, ch8Sections))))
+        val keysAltered = observedJobKeys.toList()
+        assertFalse(keysBilingual[0] == keysAltered[0], "Batch chunk jobKey must vary by chapter text digest")
+        assertFalse(keysBilingual[1] == keysAltered[1], "Batch graph jobKey must vary by chapter text digest")
+    }
 }

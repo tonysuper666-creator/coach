@@ -1293,16 +1293,18 @@ class StudyModePackService(
             pendingPreview.append(delta)
             if (!firstScreenEmitted && pendingPreview.length >= 24) {
                 firstScreenEmitted = true
+                val firstSlice = pendingPreview.substring(lastChunkSentChars)
+                lastChunkSentChars = pendingPreview.length
                 sink?.emit(
                     "first_screen",
                     buildJsonObject {
                         put("studyMode", req.mode.name)
                         put("firstTokenMs", atMs)
                         put("chars", pendingPreview.length)
+                        put("delta", firstSlice)
                     },
                 )
-            }
-            if (sink != null && pendingPreview.length - lastChunkSentChars >= 160) {
+            } else if (sink != null && pendingPreview.length - lastChunkSentChars >= 80) {
                 val slice = pendingPreview.substring(lastChunkSentChars)
                 lastChunkSentChars = pendingPreview.length
                 sink.emit("chunk", buildJsonObject { put("delta", slice); put("chars", pendingPreview.length) })
@@ -1496,10 +1498,18 @@ class StudyModePackService(
         }
 
         val chaptersHash = StudyModeJsonHelpers.sha256Hex(
-            req.chapters.joinToString("|") { "${it.chapterNum}:${it.chapterTitle}:${it.pages.firstOrNull()?.pdfPage}:${it.pages.size}" },
+            req.chapters.sortedBy { it.chapterNum }.joinToString("|") { ch ->
+                val secSig = ch.sections.joinToString(",") { s -> "${s.title}@${s.startPdfPage}-${s.endPdfPage}" }
+                val pageSig = ch.pages.joinToString(",") { p ->
+                    "${p.pdfPage}:${p.text.length}:${StudyModeJsonHelpers.sha256Hex(p.text.take(900)).take(8)}"
+                }
+                "${ch.chapterNum}:${ch.chapterTitle}:[$secSig]:[$pageSig]"
+            },
         ).take(16)
+        val topicsHash = StudyModeJsonHelpers.sha256Hex(req.courseTopics.joinToString("|")).take(12)
+        val batchVariantSig = "${req.detailLevel.name}|${req.explainLang.name}|$topicsHash|$chaptersHash"
         val batchCacheKey = StudyModeJsonHelpers.sha256Hex(
-            "$cacheScope|BOOK_MAP_BATCH|${req.bookId}|${req.detailLevel.name}|${req.explainLang.name}|${req.chapters.size}|$chaptersHash",
+            "$cacheScope|BOOK_MAP_BATCH|${req.bookId}|${req.chapters.size}|$batchVariantSig",
         )
         if (!req.bypassCache && cache != null) {
             cache.get(batchCacheKey)?.let { cached ->
@@ -1514,8 +1524,8 @@ class StudyModePackService(
 
         val mapSys = """Build ultra-concise BOOK_MAP chapter one-pagers (4 chapters per JSON response; total output <= 2500 tokens).
 CRITICAL RULES:
-1. Return ONLY JSON: {"chapters":[{"chapterNum":1,"chapterTitle":"...","chapterRole":"CORE|FOUNDATION|EXTENSION","oneLiner":"中文一句话<=18字","estimatedMinutes":15,"readingDepth":"CORE_SKIM|DEEP|REFERENCE","prerequisites":["Ch.X"],"unlocks":["Ch.Y"],"keyTerms":[{"term":"EN term","gloss":"中文释义<=8字"}],"coreClaims":[{"claim":"中文核心论断<=14字","importance":"CORE","pdfPage":12,"quoteAnchor":"VERBATIM 5-9 words copied directly from [p.12]"}],"sections":[{"sectionTitle":"中文小节名","summary":"<=12字","skipUnlessExam":false}]}]}
-2. Emit MAX 1 coreClaim, 1 keyTerm, and 1-2 short sections per chapter; every value concise Chinese except quoteAnchor (strictly verbatim from [p.XXX]).
+1. Return ONLY JSON: {"chapters":[{"chapterNum":1,"chapterTitle":"...","chapterRole":"CORE|FOUNDATION|EXTENSION","oneLiner":"中文一句话<=18字","estimatedMinutes":15,"readingDepth":"CORE_SKIM|DEEP|REFERENCE","prerequisites":["Ch.X"],"unlocks":["Ch.Y"],"keyTerms":[{"term":"EN term","gloss":"中文释义<=8字"}],"coreClaims":[{"claim":"中文核心论断<=14字","importance":"CORE","pdfPage":12,"quoteAnchor":"VERBATIM 5-9 words copied directly from [p.12]"}],"sections":[{"sectionTitle":"中文小节名","summary":"<=12字","skipUnlessExam":false,"pdfPage":12}]}]}
+2. Emit MAX 1 coreClaim, 1 keyTerm, and 1-2 short sections per chapter; every section MUST include integer pdfPage copied from Sections (p.XXX) or [p.XXX]; coreClaims[*].quoteAnchor strictly verbatim from [p.XXX].
 3. ${StudyModePromptBuilder.langInstruction(req.explainLang)}"""
 
         val chunkFutures = chunks.mapIndexed { chunkIdx, group ->
@@ -1539,7 +1549,7 @@ CRITICAL RULES:
                 }
                 val reply = batchTransport.complete(
                     task = "BOOK_SECTION_BATCH",
-                    jobKey = StudyModeJsonHelpers.sha256Hex("bm-v2-${req.bookId}-${chunkIdx}-${chaptersHash}"),
+                    jobKey = StudyModeJsonHelpers.sha256Hex("bm-v4-${req.bookId}-${chunkIdx}-${batchVariantSig}"),
                     systemPrompt = mapSys,
                     userPrompt = prompt,
                     maxTokens = 8192,
@@ -1578,9 +1588,12 @@ CRITICAL RULES:
             val num = chObj["chapterNum"]?.jsonPrimitive?.intOrNull ?: 0
             val inputCh = chapterByNum[num]
             val cleanPlaceholders = StudyModeMathGate.sanitizePlaceholders(chObj) as JsonObject
-            if (inputCh != null && inputCh.pages.isNotEmpty()) {
+            val rawSections = cleanPlaceholders["sections"] as? JsonArray
+            val sectionsLackQuotes = rawSections != null && rawSections.none { (it as? JsonObject)?.containsKey("quoteAnchor") == true }
+            val payloadForAnchorGate = if (sectionsLackQuotes) JsonObject(cleanPlaceholders - "sections") else cleanPlaceholders
+            val verifiedChapter = if (inputCh != null && inputCh.pages.isNotEmpty()) {
                 val (verifiedObj, st, repairReply) = StudyModeAnchorGate.verifyAndRepair(
-                    payload = cleanPlaceholders,
+                    payload = payloadForAnchorGate,
                     pages = inputCh.pages,
                     repairTransport = batchTransport,
                     bookId = req.bookId,
@@ -1596,17 +1609,22 @@ CRITICAL RULES:
                 totalAnchors += st.total
                 verifiedAnchors += st.verified
                 relocatedAnchors += st.relocated
-                verifiedObj
+                if (sectionsLackQuotes) {
+                    JsonObject(verifiedObj.toMutableMap().apply { put("sections", rawSections) })
+                } else {
+                    verifiedObj
+                }
             } else {
                 cleanPlaceholders
             }
+            if (inputCh != null) normalizeBatchChapterSectionPages(verifiedChapter, inputCh) else verifiedChapter
         }
 
         // Cross-chapter synthesis call: clusters, dependency edges, 40-min fast skim route, bilingual master glossary
         val graphSys = """Synthesize a whole-book navigation map (concise, total output <= 1600 tokens) from chapter one-pagers.
 Return ONLY JSON:
 {"thematicClusters":[{"clusterId":"c1","title":"中文主题","themeSummary":"<=14字","chapterNums":[1,2]}],"dependencyEdges":[{"fromChapter":1,"toChapter":2,"relation":"PREREQUISITE|BUILDS_ON|CONTRASTS","reason":"<=12字"}],"fastSkimOrder40Min":[{"chapterNum":1,"minutes":5,"focus":"<=12字"}],"masterGlossary":[{"en":"term","zh":"中文","chapterNum":1}]}
-Limits: max 4 thematicClusters, max 8 dependencyEdges, max 8 chapters in fastSkimOrder40Min (summing ~40 min), max 12 masterGlossary terms. Concise Chinese prose only."""
+Limits: max 4 thematicClusters, max 8 dependencyEdges, max 8 chapters in fastSkimOrder40Min (summing ~40 min), max 12 masterGlossary terms. ${StudyModePromptBuilder.langInstruction(req.explainLang)}"""
         val graphUser = buildString {
             append("Book: ").append(req.bookTitle).append('\n')
             if (req.courseTopics.isNotEmpty()) {
@@ -1620,7 +1638,7 @@ Limits: max 4 thematicClusters, max 8 dependencyEdges, max 8 chapters in fastSki
         }
         val graphReply = batchTransport.complete(
             task = "BOOK_SECTION_BATCH",
-            jobKey = StudyModeJsonHelpers.sha256Hex("bm-v3-graph-${req.bookId}-${chaptersHash}"),
+            jobKey = StudyModeJsonHelpers.sha256Hex("bm-v4-graph-${req.bookId}-${batchVariantSig}"),
             systemPrompt = graphSys,
             userPrompt = graphUser,
             maxTokens = 8192,
@@ -1687,6 +1705,58 @@ Limits: max 4 thematicClusters, max 8 dependencyEdges, max 8 chapters in fastSki
         }
         cache?.put(batchCacheKey, cacheScope, req.bookId, 0, "BOOK_MAP_BATCH", result)
         return@coroutineScope result
+    }
+
+    private val batchSecNumRegex = Regex("""\b(\d+\.\d+(?:\.\d+)?)\b""")
+
+    internal fun normalizeBatchChapterSectionPages(
+        chObj: JsonObject,
+        inputCh: BookMapChapterInput,
+    ): JsonObject {
+        val arr = chObj["sections"] as? JsonArray ?: return chObj
+        if (arr.isEmpty()) return chObj
+        val sectionStarts = inputCh.sections.map { it.startPdfPage }.filter { it > 0 }
+        val pageNums = inputCh.pages.map { it.pdfPage }.filter { it > 0 }
+        val minPage = (sectionStarts + pageNums).minOrNull() ?: return chObj
+        val maxEnd = (inputCh.sections.map { maxOf(it.startPdfPage, it.endPdfPage) }.filter { it > 0 } + pageNums).maxOrNull() ?: minPage
+        val fallbackPage = sectionStarts.firstOrNull() ?: pageNums.firstOrNull() ?: minPage
+
+        val normalizedSections = buildJsonArray {
+            arr.forEachIndexed { idx, el ->
+                val secObj = el as? JsonObject ?: return@forEachIndexed
+                val secTitle = secObj["sectionTitle"]?.jsonPrimitive?.contentOrNull
+                    ?: secObj["sectionId"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                val secNum = batchSecNumRegex.find(secTitle)?.groupValues?.get(1)
+                val explicitMatch = inputCh.sections.firstOrNull { inSec ->
+                    val inNum = batchSecNumRegex.find(inSec.title)?.groupValues?.get(1)
+                        ?: batchSecNumRegex.find(inSec.sectionId)?.groupValues?.get(1)
+                    (secNum != null && inNum == secNum) ||
+                        (secTitle.isNotBlank() && (
+                            inSec.title.contains(secTitle, ignoreCase = true) ||
+                                secTitle.contains(inSec.title, ignoreCase = true)
+                            ))
+                }
+                val matchedInputSec = explicitMatch ?: inputCh.sections.getOrNull(idx)
+                val rawPage = secObj["pdfPage"]?.jsonPrimitive?.intOrNull
+                val resolvedPage = when {
+                    matchedInputSec != null && matchedInputSec.startPdfPage > 0 -> {
+                        val secEnd = maxOf(matchedInputSec.startPdfPage, matchedInputSec.endPdfPage)
+                        if (rawPage != null && rawPage in matchedInputSec.startPdfPage..secEnd) rawPage
+                        else matchedInputSec.startPdfPage
+                    }
+                    rawPage != null && rawPage in minPage..maxEnd -> rawPage
+                    else -> fallbackPage
+                }
+                add(
+                    JsonObject(
+                        secObj.toMutableMap().apply {
+                            put("pdfPage", JsonPrimitive(resolvedPage))
+                        },
+                    ),
+                )
+            }
+        }
+        return JsonObject(chObj.toMutableMap().apply { put("sections", normalizedSections) })
     }
 
     private fun buildOriginalOnlyPack(req: StudyModeRequest, elapsedMs: Long): JsonObject = buildJsonObject {

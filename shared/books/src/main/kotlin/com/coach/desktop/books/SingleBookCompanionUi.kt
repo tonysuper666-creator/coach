@@ -96,6 +96,9 @@ internal fun SingleBookCompanionPanel(
     var modeStreamingChars by remember(book.id, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
         mutableIntStateOf(0)
     }
+    var modeStreamingText by remember(book.id, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
+        mutableStateOf("")
+    }
     var modeLoading by remember(book.id, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
         mutableStateOf(false)
     }
@@ -133,17 +136,20 @@ internal fun SingleBookCompanionPanel(
         }
         if (cached != null) {
             modePackJson = cached
+            modeStreamingText = ""
             modeLoading = false
             modeError = null
             return@LaunchedEffect
         }
         if (studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) {
             modePackJson = null
+            modeStreamingText = ""
             modeLoading = false
             modeError = null
             return@LaunchedEffect
         }
         if (studyPreference.mode == BookStudyMode.QUESTION_DRIVEN && studyPreference.inquiryQuestion.trim().length < 3) {
+            modeStreamingText = ""
             modeLoading = false
             modeError = null
             return@LaunchedEffect
@@ -155,13 +161,17 @@ internal fun SingleBookCompanionPanel(
         }
         modeLoading = true
         modeStreamingChars = 0
+        modeStreamingText = ""
         modeError = null
         try {
             val wire = withContext(Dispatchers.IO) {
                 StudyModeWireBuilder.buildModeRequestJson(library, book, group, chapterNum, studyPreference)
             }
-            val res = explainer.fetchStudyModePack(book.id, studyPreference.mode.name, wire) { chars, _ ->
-                modeStreamingChars = chars
+            val res = explainer.fetchStudyModePack(book.id, studyPreference.mode.name, wire) { chars, _, delta ->
+                modeStreamingChars = maxOf(modeStreamingChars, chars)
+                if (delta.isNotEmpty()) {
+                    modeStreamingText = (modeStreamingText + delta).takeLast(4000)
+                }
             }
             val body = res.body
             if (body != null) {
@@ -179,6 +189,7 @@ internal fun SingleBookCompanionPanel(
                     )
                 }
                 modePackJson = jsonStr
+                modeStreamingText = ""
                 modeLoading = false
                 modeError = null
             } else {
@@ -209,7 +220,7 @@ internal fun SingleBookCompanionPanel(
                             library = library,
                             bookId = book.id,
                             batchJson = body,
-                            detailLevel = ExplainDetailLevel.BRIEF,
+                            detailLevel = if (studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) ExplainDetailLevel.BRIEF else studyPreference.detailLevel,
                             explainLang = studyPreference.explainLang,
                         )
                     }
@@ -437,12 +448,18 @@ internal fun SingleBookCompanionPanel(
                         draft = draft,
                         onUpdateDraft = { updateDraft(it) },
                         onUpdateInquiry = { q ->
-                            onUpdateStudyPreference(studyPreference.copy(inquiryQuestion = q, userLocked = true), false)
+                            val normalized = q.trim()
+                            if (normalized != studyPreference.inquiryQuestion.trim()) {
+                                onUpdateStudyPreference(studyPreference.copy(inquiryQuestion = normalized, userLocked = true), false)
+                            } else if (normalized.length >= 3 && modePackJson == null && !modeLoading) {
+                                modeFetchNonce += 1
+                            }
                         },
                         onJumpPage = onJumpPage,
                         onOpenAnchor = onOpenAnchor,
                         modePackJson = modePackJson,
                         modeStreamingChars = modeStreamingChars,
+                        modeStreamingText = modeStreamingText,
                         modeLoading = modeLoading,
                         modeError = modeError,
                         bookMapMeta = bookMapMeta,
@@ -455,7 +472,21 @@ internal fun SingleBookCompanionPanel(
                         modePackJson?.let { StudyModeStore.parseReadThroughModePack(it) }
                     }
                     if (modeLoading && readThroughLive == null && packState !is CompanionPackState.Ready) {
-                        CoachLoadingDots(label = if (modeStreamingChars > 0) "正在流式整理精读导图（已接收 $modeStreamingChars 字）…" else "正在按节整理本章伴读…")
+                        val streamStatusLabel = if (modeStreamingChars > 0) "正在流式整理精读导图（已接收 $modeStreamingChars 字）…" else "正在按节整理本章伴读…"
+                        val streamPreview = remember(modeStreamingText) { extractReadableStreamPreview(modeStreamingText) }
+                        PaperCard(Modifier.fillMaxWidth().testTag("mode-streaming-status"), color = colors.surface2, contentPadding = PaddingValues(10.dp)) {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                CoachLoadingDots(label = streamStatusLabel)
+                                if (streamPreview.isNotBlank()) {
+                                    Text(
+                                        streamPreview,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.fgSecondary,
+                                        modifier = Modifier.testTag("mode-streaming-preview"),
+                                    )
+                                }
+                            }
+                        }
                     }
                     if (readThroughLive != null && activeModule == CompanionModuleTab.KEY_POINTS) {
                         LiveReadThroughOverviewCard(

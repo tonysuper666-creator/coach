@@ -686,8 +686,12 @@ internal object StudyModeStore {
     fun loadBookMapPack(library: TextbookLibrary, bookId: String, chapterNum: Int): BookMapOnePagerPack? =
         loadRawModePackObj(library, bookId, chapterNum, BookStudyMode.BOOK_MAP, fallbackAnyVariant = true)?.let(::parseBookMapPack)
 
-    fun loadBookMapPack(library: TextbookLibrary, bookId: String, chapterNum: Int, preference: BookStudyPreference): BookMapOnePagerPack? =
-        loadRawModePackObj(library, bookId, chapterNum, BookStudyMode.BOOK_MAP, preference.detailLevel, preference.explainLang, "", fallbackAnyVariant = true)?.let(::parseBookMapPack)
+    fun loadBookMapPack(library: TextbookLibrary, bookId: String, chapterNum: Int, preference: BookStudyPreference): BookMapOnePagerPack? {
+        val fallbackAny = preference.detailLevel == ExplainDetailLevel.DETAILED &&
+            preference.explainLang == ExplainLanguage.BILINGUAL &&
+            preference.inquiryQuestion.isBlank()
+        return loadRawModePackObj(library, bookId, chapterNum, BookStudyMode.BOOK_MAP, preference.detailLevel, preference.explainLang, "", fallbackAnyVariant = fallbackAny)?.let(::parseBookMapPack)
+    }
 
     fun parseBookMapPack(rawJson: String): BookMapOnePagerPack? =
         runCatching { jsonParser.parseToJsonElement(rawJson).jsonObject }.getOrNull()?.let(::parseBookMapPack)
@@ -711,7 +715,7 @@ internal object StudyModeStore {
                     ?: if (o["skipUnlessExam"]?.jsonPrimitive?.booleanOrNull == true) "按需速览" else "核心骨架",
                 oneLineZh = o["oneLineZh"]?.jsonPrimitive?.contentOrNull
                     ?: o["summary"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull ?: 1,
+                pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull?.takeIf { it > 0 } ?: 0,
                 quoteAnchor = o["quoteAnchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
                 skipUnlessExam = o["skipUnlessExam"]?.jsonPrimitive?.booleanOrNull == true,
             )
@@ -722,7 +726,7 @@ internal object StudyModeStore {
             BookMapCoreClaim(
                 claim = c,
                 importance = o["importance"]?.jsonPrimitive?.contentOrNull ?: "CORE",
-                pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull ?: 1,
+                pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull?.takeIf { it > 0 } ?: 0,
                 quoteAnchor = o["quoteAnchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
             )
         }
@@ -1411,6 +1415,7 @@ internal object StudyModeWireBuilder {
         preference: BookStudyPreference,
     ): JsonObject {
         val topics = courseTopicsForBook(library, book.id)
+        val batchDetail = if (preference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) ExplainDetailLevel.BRIEF else preference.detailLevel
         val seenIds = linkedSetOf<String>()
         val groups = buildList {
             for (i in book.lessons.indices) {
@@ -1421,7 +1426,7 @@ internal object StudyModeWireBuilder {
         return buildJsonObject {
             put("bookId", book.id)
             put("bookTitle", book.title)
-            put("detailLevel", ExplainDetailLevel.BRIEF.name)
+            put("detailLevel", batchDetail.name)
             put("explainLang", preference.explainLang.name)
             put("useBatchApi", true)
             if (topics.isNotEmpty()) {

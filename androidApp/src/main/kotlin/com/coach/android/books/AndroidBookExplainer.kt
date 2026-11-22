@@ -474,7 +474,7 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
         bookId: String,
         mode: String,
         input: JsonObject,
-        onProgress: (chars: Int, firstTokenMs: Long?) -> Unit = { _, _ -> },
+        onProgress: (chars: Int, firstTokenMs: Long?, delta: String) -> Unit = { _, _, _ -> },
     ): CourseServerCallResult = callCourseEndpoint { http -> http.streamStudyModePack(bookId, mode, input, onProgress) }
 
     suspend fun fetchBookMapBatch(bookId: String, input: JsonObject): CourseServerCallResult =

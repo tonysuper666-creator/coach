@@ -215,7 +215,7 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         bookId: String,
         mode: String,
         input: JsonObject,
-        onProgress: (chars: Int, firstTokenMs: Long?) -> Unit = { _, _ -> },
+        onProgress: (chars: Int, firstTokenMs: Long?, delta: String) -> Unit = { _, _, _ -> },
     ): MockReply = try {
         val encodedBook = bookId.encodeURLPathPart()
         val encodedMode = mode.encodeURLPathPart()
@@ -258,8 +258,17 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
                             val dataRaw = trimmed.removePrefix("data:").trim()
                             val obj = runCatching { Json.parseToJsonElement(dataRaw).jsonObject }.getOrNull() ?: continue
                             when (currentEvent) {
-                                "first_screen" -> onProgress(obj["chars"]?.let { (it as? JsonPrimitive)?.intOrNull } ?: 0, (obj["firstTokenMs"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull())
-                                "chunk" -> onProgress((obj["chars"] as? JsonPrimitive)?.intOrNull ?: 0, null)
+                                "first_screen" -> {
+                                    val chars = obj["chars"]?.let { (it as? JsonPrimitive)?.intOrNull } ?: 0
+                                    val ttft = (obj["firstTokenMs"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull()
+                                    val delta = (obj["delta"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                                    onProgress(chars, ttft, delta)
+                                }
+                                "chunk" -> {
+                                    val chars = (obj["chars"] as? JsonPrimitive)?.intOrNull ?: 0
+                                    val delta = (obj["delta"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                                    onProgress(chars, null, delta)
+                                }
                                 "pack" -> finalPack = obj
                                 "error" -> streamError = obj.s("error").ifBlank { "生成失败" }
                             }

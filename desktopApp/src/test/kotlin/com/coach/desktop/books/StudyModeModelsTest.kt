@@ -448,4 +448,32 @@ class StudyModeModelsTest {
             dir.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun bookMapSectionPageResolutionAndStreamPreviewExtraction() {
+        val legacyJson = """{"chapterNum":8,"oneLiner":"Ch8 summary","coreClaims":[{"claim":"Claim","importance":"CORE","pdfPage":193,"quoteAnchor":"quote"}],"sections":[{"sectionTitle":"8.1 Design","summary":"Design"},{"sectionTitle":"8.2 Results","summary":"Results","pdfPage":1}]}"""
+        val parsed = StudyModeStore.parseBookMapPack(legacyJson)!!
+        assertEquals(listOf(0, 1), parsed.sectionArchitecture.map { it.pdfPage })
+
+        val chGroup = ChapterSectionGroup(
+            chapterId = "ch-8",
+            chapterTitle = "Chapter 8",
+            sections = listOf(
+                BookLesson("8.1", "8.1 Design", listOf(SourceBlock("b1", 190, 0, 10, false, "Design"))),
+                BookLesson("8.2", "8.2 Results", listOf(SourceBlock("b2", 196, 0, 10, false, "Results"))),
+            ),
+            firstPage = 190,
+            lastPage = 205,
+        )
+        assertEquals(190, resolveBookMapSectionPage(parsed.sectionArchitecture[0], 0, chGroup, parsed))
+        assertEquals(196, resolveBookMapSectionPage(parsed.sectionArchitecture[1], 1, chGroup, parsed))
+
+        val partialJson = """{"studyMode":"READ_THROUGH","learningArc":"本章主线：从逆向选择到市场失灵","sections":[{"sectionId":"s1","title":"柠檬市场","plainExplanation":"好车退出市场导致"""
+        val preview = extractReadableStreamPreview(partialJson)
+        assertTrue("本章主线：从逆向选择到市场失灵" in preview)
+        assertTrue("柠檬市场" in preview)
+        assertTrue("好车退出市场导致" in preview)
+        assertFalse("READ_THROUGH" in preview)
+        assertFalse("\"learningArc\"" in preview)
+    }
 }

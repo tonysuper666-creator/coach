@@ -49,6 +49,7 @@ internal data class StartupLoadSnapshot(
     val todayQueue: LocalReviewQueue = LocalReviewQueue(emptyList(), 0),
     val collections: List<CollectionSummary> = emptyList(),
     val activePracticeDraft: ChapterPracticeDraft? = null,
+    val focusRecommendation: HomeFocusRecommendation? = null,
 )
 
 /** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
@@ -58,7 +59,10 @@ internal class TextbookLibrary(
     internal val lazyPdfExtras: Boolean = false,
     private val extractBook: ((Path, String, String, BookOcr, BookImportControl) -> ExtractedBook)? = null,
 ) {
-    private val reviewStore = TextbookReviewStore { LocalDate.now(clock).toEpochDay() }
+    private val reviewStore = TextbookReviewStore(
+        today = { LocalDate.now(clock).toEpochDay() },
+        nowMs = { clock.millis() },
+    )
     private class PendingTextView(val textView: Boolean)
     private class CachedValue<T>(val value: T)
     private val pendingTextViews = ConcurrentHashMap<String, PendingTextView>()
@@ -279,12 +283,13 @@ internal class TextbookLibrary(
             startupNearWidthUntilNs = 0L
         }
         val learningPath = loadedBook?.let { learningPath(db, it.id) }
-        val reviews = reviewStore.pending(db)
         val todayQueue = reviewStore.queue(db)
+        val reviews = reviewStore.pending(db)
         val collections = collectionSummaries(db)
         val ladder = loadedBook?.let { ladder(db, it.id) } ?: LadderSession()
         val activeDraft = loadedBook?.let { ChapterProgressStore.latestPracticeDraft(db, it.id) }
-        StartupLoadSnapshot(catalog, active, session, loadedBook, learningPath, reviews, ladder, todayQueue, collections, activeDraft)
+        val focusRec = MasteryStore.topHomeRecommendation(db, loadedBook?.id, clock.millis())
+        StartupLoadSnapshot(catalog, active, session, loadedBook, learningPath, reviews, ladder, todayQueue, collections, activeDraft, focusRec)
     }
 
     @Synchronized fun pageTextLayout(bookId: String, page: Int): PageTextLayout? = database().use { db ->
@@ -537,6 +542,18 @@ internal class TextbookLibrary(
             sql.setInt(4, passage.end)
             sql.setString(5, passage.text)
             sql.executeUpdate()
+        }
+        if (highlighted) {
+            val nodeId = "p${passage.page}"
+            MasteryStore.recordEvidence(
+                db = db,
+                bookId = passage.book,
+                tocNodeId = nodeId,
+                page = passage.page,
+                canonicalName = "第 ${passage.page} 页划线",
+                signal = LearnerSignalType.HIGHLIGHT_NOTE,
+                nowMs = clock.millis(),
+            )
         }
         pageHighlightRawCache.remove(passage.book to passage.page)
     }
@@ -1808,6 +1825,7 @@ internal class TextbookLibrary(
                 if (BookSchemaMigration.tableExists(db, "collection_materials")) {
                     db.prepareStatement("DELETE FROM collection_materials WHERE material_id=?").use { it.setString(1, bookId); it.executeUpdate() }
                 }
+                MasteryStore.deleteForBook(db, bookId)
                 val hasVisualReviews = db.createStatement().use { s -> s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='book_pdf_visual_reviews'").use { it.next() } }
                 if (hasVisualReviews) db.prepareStatement("DELETE FROM book_pdf_visual_reviews WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }
                 db.prepareStatement("DELETE FROM book_review_position WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }
@@ -2016,7 +2034,140 @@ internal class TextbookLibrary(
         pagesTotal: Int,
         dwellMs: Long = ChapterReadPolicy.MIN_DWELL_MS,
     ): ChapterProgressRecord? = database().use { db ->
-        BooklistProgressStore.recordPageDwell(db, bookId, tocNodeId, page, pagesTotal, dwellMs)
+        val now = clock.millis()
+        val progress = BooklistProgressStore.recordPageDwell(db, bookId, tocNodeId, page, pagesTotal, dwellMs, now)
+        if (dwellMs >= ChapterReadPolicy.MIN_DWELL_MS) {
+            val conceptKey = MasteryEngine.conceptKeyFor(bookId, tocNodeId)
+            MasteryStore.recordEvidence(
+                db = db,
+                bookId = bookId,
+                tocNodeId = tocNodeId,
+                page = page,
+                canonicalName = tocNodeId,
+                signal = LearnerSignalType.PAGE_DWELL,
+                durationMs = dwellMs,
+                conceptKeyOverride = conceptKey,
+                nowMs = now,
+            )
+            MasteryStore.recordLearningGainRead(
+                db = db,
+                bookId = bookId,
+                chapterId = tocNodeId,
+                conceptKey = conceptKey,
+                addedDwellSec = (dwellMs / 1000L).toInt().coerceAtLeast(1),
+                nowMs = now,
+            )
+        }
+        progress
+    }
+
+    @Synchronized fun recordMasteryEvidence(
+        bookId: String,
+        tocNodeId: String,
+        page: Int,
+        canonicalName: String,
+        signal: LearnerSignalType,
+        scoreRatio: Double? = null,
+        guessed: Boolean = false,
+        errorClass: MisconceptionErrorClass? = null,
+        durationMs: Long = 0L,
+        detailJson: String = "{}",
+        conceptKeyOverride: String? = null,
+        collectionId: String? = null,
+        syllabusWeight: Double? = null,
+    ): ConceptMasteryRecord? = database().use { db ->
+        MasteryStore.recordEvidence(
+            db = db,
+            bookId = bookId,
+            tocNodeId = tocNodeId,
+            page = page,
+            canonicalName = canonicalName,
+            signal = signal,
+            scoreRatio = scoreRatio,
+            guessed = guessed,
+            errorClass = errorClass,
+            durationMs = durationMs,
+            detailJson = detailJson,
+            conceptKeyOverride = conceptKeyOverride,
+            collectionId = collectionId,
+            syllabusWeight = syllabusWeight,
+            nowMs = clock.millis(),
+        )
+    }
+
+    @Synchronized fun recordLearningGainT0(
+        bookId: String,
+        chapterId: String,
+        conceptKey: String,
+        rawScore: Double,
+        guessed: Boolean,
+        collectionId: String? = null,
+        variantId: String? = null,
+    ): LearningGainCohort? = database().use { db ->
+        MasteryStore.recordLearningGainT0(db, bookId, chapterId, conceptKey, rawScore, guessed, collectionId, variantId, clock.millis())
+    }
+
+    @Synchronized fun recordLearningGainRead(
+        bookId: String,
+        chapterId: String,
+        conceptKey: String,
+        addedDwellSec: Int,
+    ): LearningGainCohort? = database().use { db ->
+        MasteryStore.recordLearningGainRead(db, bookId, chapterId, conceptKey, addedDwellSec, clock.millis())
+    }
+
+    @Synchronized fun recordLearningGainT1(
+        bookId: String,
+        chapterId: String,
+        conceptKey: String,
+        rawScore: Double,
+        guessed: Boolean,
+    ): LearningGainCohort? = database().use { db ->
+        MasteryStore.recordLearningGainT1(db, bookId, chapterId, conceptKey, rawScore, guessed, clock.millis())
+    }
+
+    @Synchronized fun recordLearningGainT2(
+        cohortId: String,
+        rawScore: Double,
+        guessed: Boolean,
+    ): LearningGainCohort? = database().use { db ->
+        MasteryStore.recordLearningGainT2(db, cohortId, rawScore, guessed, clock.millis())
+    }
+
+    @Synchronized fun learningGainCohorts(bookId: String? = null): List<LearningGainCohort> = database().use { db ->
+        MasteryStore.listCohorts(db, bookId)
+    }
+
+    @Synchronized fun conceptMasteryForBook(bookId: String): List<ConceptMasteryRecord> = database().use { db ->
+        MasteryStore.loadConceptsForBook(db, bookId)
+    }
+
+    @Synchronized fun conceptMastery(conceptKey: String): ConceptMasteryRecord? = database().use { db ->
+        MasteryStore.loadConcept(db, conceptKey)
+    }
+
+    @Synchronized fun learnerEvidenceEvents(conceptKey: String? = null, bookId: String? = null): List<LearnerEvidenceEvent> = database().use { db ->
+        MasteryStore.listEvidenceEvents(db, conceptKey, bookId)
+    }
+
+    @Synchronized fun topHomeRecommendation(preferredBookId: String? = null): HomeFocusRecommendation? = database().use { db ->
+        MasteryStore.topHomeRecommendation(db, preferredBookId, clock.millis())
+    }
+
+    @Synchronized fun saveMarginWhisperAudit(candidate: MarginWhisperCandidate) = database().use { db ->
+        MasteryStore.saveMarginWhisperAudit(db, candidate)
+    }
+
+    @Synchronized fun dismissMarginWhisperAudit(whisperId: String) = database().use { db ->
+        MasteryStore.markMarginWhisperDismissed(db, whisperId)
+    }
+
+    @Synchronized fun marginWhisperAudits(bookId: String? = null): List<MarginWhisperCandidate> = database().use { db ->
+        MasteryStore.listMarginWhisperAudits(db, bookId)
+    }
+
+    @Synchronized fun crossMaterialConflictForPage(bookId: String, page: Int, tocNodeId: String? = null): Pair<String, String>? = database().use { db ->
+        MasteryStore.queryCrossMaterialConflictForPage(db, bookId, page, tocNodeId)
     }
 
     @Synchronized fun setChapterManualReadState(
@@ -2085,6 +2236,7 @@ internal class TextbookLibrary(
         questionIndex: Int,
         practice: Practice,
         answer: PracticeAnswer,
+        isPretest: Boolean = false,
     ) {
         val source = book(bookId)
         val lessonKey = if (questionIndex == 0) lesson.id else "${lesson.id}#q${questionIndex + 1}"
@@ -2103,6 +2255,45 @@ internal class TextbookLibrary(
                 }
                 if (previous != answer && answer.committed(QuestionMode.CHOICE)) {
                     reviewStore.recordLesson(db, source, storedLesson, QuestionMode.CHOICE, practice, answer)
+                    val now = clock.millis()
+                    val correct = practice.independentlyCorrect(QuestionMode.CHOICE, answer)
+                    val score = if (correct && !answer.guessed) 1.0 else 0.0
+                    val conceptKey = MasteryEngine.conceptKeyFor(bookId, lesson.id)
+                    val fsrs = reviewStore.fsrsState(db, bookId, lessonKey, QuestionMode.CHOICE)
+                    MasteryStore.recordEvidence(
+                        db = db,
+                        bookId = bookId,
+                        tocNodeId = lesson.id,
+                        page = lesson.firstPage,
+                        canonicalName = lesson.title,
+                        signal = if (isPretest) LearnerSignalType.PRETEST_T0 else LearnerSignalType.POST_QUIZ_T1,
+                        scoreRatio = score,
+                        guessed = answer.guessed,
+                        fsrsStability = fsrs?.stability,
+                        conceptKeyOverride = conceptKey,
+                        nowMs = now,
+                    )
+                    if (isPretest) {
+                        MasteryStore.recordLearningGainT0(
+                            db = db,
+                            bookId = bookId,
+                            chapterId = lesson.id,
+                            conceptKey = conceptKey,
+                            rawScore = score,
+                            guessed = answer.guessed,
+                            nowMs = now,
+                        )
+                    } else {
+                        MasteryStore.recordLearningGainT1(
+                            db = db,
+                            bookId = bookId,
+                            chapterId = lesson.id,
+                            conceptKey = conceptKey,
+                            rawScore = score,
+                            guessed = answer.guessed,
+                            nowMs = now,
+                        )
+                    }
                 }
                 if (ladder != null) saveLadderRow(db, bookId, ladder)
                 db.commit()
@@ -2162,6 +2353,22 @@ internal class TextbookLibrary(
                 }
                 if (practice != null && previous != answer) {
                     reviewStore.recordLesson(db, checkNotNull(source), checkNotNull(section), mode, practice, answer)
+                    val now = clock.millis()
+                    val correct = practice.independentlyCorrect(mode, answer)
+                    val score = if (correct && !answer.guessed) 1.0 else 0.0
+                    val fsrs = reviewStore.fsrsState(db, book, lesson, mode)
+                    MasteryStore.recordEvidence(
+                        db = db,
+                        bookId = book,
+                        tocNodeId = section.id,
+                        page = section.firstPage,
+                        canonicalName = section.title,
+                        signal = LearnerSignalType.POST_QUIZ_T1,
+                        scoreRatio = score,
+                        guessed = answer.guessed,
+                        fsrsStability = fsrs?.stability,
+                        nowMs = now,
+                    )
                 }
                 if (ladder != null) saveLadderRow(db, book, ladder)
                 db.commit()

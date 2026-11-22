@@ -59,9 +59,13 @@ internal object BookSchemaMigration {
 
     /** 2.0-W2: single book, course and book list share collections, chapter progress and FSRS cards. */
     const val V3_SCHEMA_VERSION = 3
-    const val CURRENT_SCHEMA_VERSION = V3_SCHEMA_VERSION
+
+    /** 2.0-AI-1 (Stage 4): concept mastery ledger, learner evidence stream, 4-point learning gain cohorts & whisper audit. */
+    const val V4_SCHEMA_VERSION = 4
+    const val CURRENT_SCHEMA_VERSION = V4_SCHEMA_VERSION
     const val V1_BACKUP_FILENAME = "library.sqlite.v1.bak"
     const val V2_BACKUP_FILENAME = "library.sqlite.v2.bak"
+    const val V3_BACKUP_FILENAME = "library.sqlite.v3.bak"
 
     private val CORE_V1_TABLES = listOf(
         "CREATE TABLE IF NOT EXISTS books(id TEXT PRIMARY KEY,title TEXT NOT NULL,format TEXT NOT NULL,reading_page INTEGER NOT NULL DEFAULT 1,lesson_index INTEGER NOT NULL DEFAULT 0,learning INTEGER NOT NULL DEFAULT 0,prompt_seen INTEGER NOT NULL DEFAULT 0,mode TEXT NOT NULL DEFAULT 'NONE',touched INTEGER NOT NULL)",
@@ -215,6 +219,79 @@ internal object BookSchemaMigration {
         "CREATE INDEX IF NOT EXISTS idx_book_fsrs_cards_due ON book_fsrs_cards(due_day)",
     )
 
+    private val V4_TABLES = listOf(
+        """CREATE TABLE IF NOT EXISTS concept_mastery_ledger(
+            concept_key TEXT PRIMARY KEY,
+            collection_id TEXT REFERENCES collections(id) ON DELETE SET NULL,
+            book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+            toc_node_id TEXT NOT NULL,
+            canonical_name TEXT NOT NULL,
+            syllabus_weight REAL NOT NULL DEFAULT 1.0,
+            p_mastery REAL NOT NULL DEFAULT 0.15,
+            has_active_test INTEGER NOT NULL DEFAULT 0,
+            fsrs_stability REAL NOT NULL DEFAULT 1.0,
+            dominant_error_tag TEXT,
+            reread_count INTEGER NOT NULL DEFAULT 0,
+            dwell_ms_total INTEGER NOT NULL DEFAULT 0,
+            ask_count INTEGER NOT NULL DEFAULT 0,
+            highlight_count INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL
+        )""".trimIndent(),
+        "CREATE INDEX IF NOT EXISTS idx_concept_mastery_book ON concept_mastery_ledger(book_id, toc_node_id)",
+        """CREATE TABLE IF NOT EXISTS learner_evidence_events(
+            event_id TEXT PRIMARY KEY,
+            concept_key TEXT NOT NULL REFERENCES concept_mastery_ledger(concept_key) ON DELETE CASCADE,
+            book_id TEXT NOT NULL,
+            page INTEGER NOT NULL,
+            signal_type TEXT NOT NULL CHECK(signal_type IN (
+                'PRETEST_T0', 'POST_QUIZ_T1', 'DELAYED_TRANSFER_T2', 'RUBRIC_GRADE',
+                'MISCONCEPTION_DIAG', 'PAGE_DWELL', 'REREAD_BACKTRACK', 'SELECTION_ASK', 'HIGHLIGHT_NOTE'
+            )),
+            score_ratio REAL,
+            guessed INTEGER NOT NULL DEFAULT 0,
+            error_class TEXT,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            created_at INTEGER NOT NULL
+        )""".trimIndent(),
+        "CREATE INDEX IF NOT EXISTS idx_learner_evidence_concept ON learner_evidence_events(concept_key, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_learner_evidence_book_page ON learner_evidence_events(book_id, page, created_at)",
+        """CREATE TABLE IF NOT EXISTS learning_gain_cohorts(
+            cohort_id TEXT PRIMARY KEY,
+            collection_id TEXT,
+            book_id TEXT NOT NULL,
+            chapter_id TEXT NOT NULL,
+            concept_key TEXT NOT NULL,
+            t0_at INTEGER,
+            t0_score REAL,
+            t0_guessed INTEGER NOT NULL DEFAULT 0,
+            read_completed_at INTEGER,
+            read_dwell_sec INTEGER NOT NULL DEFAULT 0,
+            t1_at INTEGER,
+            t1_score REAL,
+            t2_eligible_after INTEGER,
+            t2_at INTEGER,
+            t2_variant_id TEXT,
+            t2_score REAL
+        )""".trimIndent(),
+        "CREATE INDEX IF NOT EXISTS idx_learning_gain_t2_due ON learning_gain_cohorts(t2_eligible_after, t2_at)",
+        """CREATE TABLE IF NOT EXISTS margin_whisper_audit(
+            whisper_id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+            toc_node_id TEXT NOT NULL,
+            page INTEGER NOT NULL,
+            rule TEXT NOT NULL,
+            collapsed_text TEXT NOT NULL,
+            expanded_text TEXT NOT NULL,
+            pdf_page_anchor INTEGER NOT NULL,
+            quote_anchor TEXT NOT NULL DEFAULT '',
+            trigger_evidence_json TEXT NOT NULL,
+            dismissed INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL
+        )""".trimIndent(),
+        "CREATE INDEX IF NOT EXISTS idx_margin_whisper_book_sec ON margin_whisper_audit(book_id, toc_node_id, created_at)",
+    )
+
     private val V2_TABLES = listOf(
         COLLECTIONS_DDL,
         COLLECTION_MATERIALS_DDL,
@@ -290,6 +367,10 @@ internal object BookSchemaMigration {
         "concept_entities", "concept_mentions", "concept_links", "book_fsrs_cards",
     )
 
+    private val REQUIRED_V4_TABLES = REQUIRED_V3_TABLES + setOf(
+        "concept_mastery_ledger", "learner_evidence_events", "learning_gain_cohorts", "margin_whisper_audit",
+    )
+
     fun upgradeAndMigrate(
         directory: Path,
         openConnection: () -> Connection,
@@ -316,12 +397,16 @@ internal object BookSchemaMigration {
                 val hadBooks = "books" in existingTables
                 upgradingFromV1 = hadBooks && currentVersion < V2_SCHEMA_VERSION
                 upgradingExisting = hadBooks && currentVersion < CURRENT_SCHEMA_VERSION
-                if (!upgradingFromV1) backupFile = directory.resolve(V2_BACKUP_FILENAME)
+                backupFile = when {
+                    upgradingFromV1 -> directory.resolve(V1_BACKUP_FILENAME)
+                    currentVersion < V3_SCHEMA_VERSION -> directory.resolve(V2_BACKUP_FILENAME)
+                    else -> directory.resolve(V3_BACKUP_FILENAME)
+                }
                 if (upgradingExisting) {
                     runCatching { probe.createStatement().use { it.execute("PRAGMA wal_checkpoint(TRUNCATE)") } }
                 }
                 schemaComplete = currentVersion >= CURRENT_SCHEMA_VERSION &&
-                    REQUIRED_V3_TABLES.all { it in existingTables } &&
+                    REQUIRED_V4_TABLES.all { it in existingTables } &&
                     "show_standalone" in tableColumns(probe, "books") &&
                     "week_num" in tableColumns(probe, "collection_materials") &&
                     "index_state" in tableColumns(probe, "books") &&
@@ -361,6 +446,9 @@ internal object BookSchemaMigration {
                     upgradeCollectionsToV3(db)
                     db.createStatement().use { sql ->
                         for (ddl in V3_TABLES) sql.execute(ddl)
+                    }
+                    db.createStatement().use { sql ->
+                        for (ddl in V4_TABLES) sql.execute(ddl)
                     }
                     BookFtsStore.migrate(db)
                     onInTransaction(db)

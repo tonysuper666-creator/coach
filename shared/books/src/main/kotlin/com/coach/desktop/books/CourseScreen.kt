@@ -121,7 +121,7 @@ internal fun CourseScreen(
                             },
                         )
                         DropdownMenuItem(
-                            text = { Text("重新智能对齐") },
+                            text = { Text("重新对齐课程") },
                             modifier = Modifier.testTag("course-realign-action"),
                             onClick = {
                                 courseMenuOpen = false

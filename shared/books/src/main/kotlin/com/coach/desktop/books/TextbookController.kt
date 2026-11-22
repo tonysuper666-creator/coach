@@ -48,6 +48,8 @@ internal data class LibraryUi(
     val lastImportDurationMs: Long? = null,
     /** 当前书最近落盘的伴读练习草稿（`book_chapter_progress.practice_draft_json`），供首页「继续」精确续接。 */
     val activePracticeDraft: ChapterPracticeDraft? = null,
+    /** 2.0-AI-1：无未完草稿时按最高 NeedScore 推荐的薄弱概念（供首页「继续」单行依据与直达）。 */
+    val focusRecommendation: HomeFocusRecommendation? = null,
     val activeCourseId: String? = null,
     val activeCourseTopicId: String? = null,
     val activeCourseDetail: CourseDetailSnapshot? = null,
@@ -146,6 +148,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         pendingMultiDrop = current.pendingMultiDrop,
                         lastImportDurationMs = current.lastImportDurationMs,
                         activePracticeDraft = snap.activePracticeDraft,
+                        focusRecommendation = snap.focusRecommendation,
                         activeCourseId = restoredCourseId,
                         activeCourseTopicId = restoredCourseTopicId,
                         activeCourseDetail = restoredCourseDetail,
@@ -475,8 +478,42 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 library.recordPageDwell(bookId, tocNodeId, page, pagesTotal, dwellMs)
             }.getOrNull()
             if (updated != null) {
-                mutable.update { it.copy(booklistRevision = it.booklistRevision + 1) }
+                val rec = runCatching { library.topHomeRecommendation(bookId) }.getOrNull()
+                mutable.update { it.copy(booklistRevision = it.booklistRevision + 1, focusRecommendation = rec ?: it.focusRecommendation) }
             }
+        }
+    }
+
+    fun recordRereadBacktrack(bookId: String, tocNodeId: String, page: Int, canonicalName: String, dwellMs: Long) {
+        backgroundScope.launch {
+            runCatching {
+                library.recordMasteryEvidence(
+                    bookId = bookId,
+                    tocNodeId = tocNodeId,
+                    page = page,
+                    canonicalName = canonicalName,
+                    signal = LearnerSignalType.REREAD_BACKTRACK,
+                    durationMs = dwellMs,
+                )
+            }
+            val rec = runCatching { library.topHomeRecommendation(bookId) }.getOrNull()
+            if (rec != null) mutable.update { it.copy(focusRecommendation = rec) }
+        }
+    }
+
+    fun recordSelectionAsk(bookId: String, tocNodeId: String, page: Int, canonicalName: String) {
+        backgroundScope.launch {
+            runCatching {
+                library.recordMasteryEvidence(
+                    bookId = bookId,
+                    tocNodeId = tocNodeId,
+                    page = page,
+                    canonicalName = canonicalName,
+                    signal = LearnerSignalType.SELECTION_ASK,
+                )
+            }
+            val rec = runCatching { library.topHomeRecommendation(bookId) }.getOrNull()
+            if (rec != null) mutable.update { it.copy(focusRecommendation = rec) }
         }
     }
 
@@ -903,6 +940,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             val pathSaved = library.learningPath(book.id) != null
             val ladder = library.ladder(book.id)
             val draft = library.latestChapterPracticeDraft(book.id)
+            val focusRec = library.topHomeRecommendation(book.id)
             mutable.update { current ->
                 LibraryUi(
                     catalog = catalog, book = book, collections = collections, page = book.readingPage, busy = true,
@@ -913,6 +951,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     pendingMultiDrop = current.pendingMultiDrop,
                     lastImportDurationMs = current.lastImportDurationMs,
                     activePracticeDraft = draft,
+                    focusRecommendation = focusRec,
                 )
             }
         }
@@ -982,16 +1021,20 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     private fun openReading(book: Textbook) {
         library.closeReview()
         val draft = library.latestChapterPracticeDraft(book.id)
-        val resumePage = if (draft != null && draft.hasMeaningfulDraft() && book.page(draft.page) != null) {
-            draft.page
-        } else book.readingPage
+        val focusRec = library.topHomeRecommendation(book.id)
+        val resumePage = when {
+            draft != null && draft.hasMeaningfulDraft() && book.page(draft.page) != null -> draft.page
+            focusRec != null && focusRec.bookId == book.id && book.page(focusRec.targetPage) != null -> focusRec.targetPage
+            else -> book.readingPage
+        }
         val activeBook = if (resumePage != book.readingPage) {
             book.copy(readingPage = resumePage).also { library.save(it) }
         } else book
         library.saveOpenSession(activeBook.id, "READER")
         mutable.update { it.copy(book = activeBook, review = null, questionsOpen = false,
             screen = BookScreen.READER, page = activeBook.readingPage, source = null,
-            prompt = null, initialized = true, activePracticeDraft = draft) }
+            prompt = null, initialized = true, activePracticeDraft = draft,
+            focusRecommendation = focusRec) }
     }
 
     /** 实时持久化单书伴读与练习草稿到 `book_chapter_progress.practice_draft_json`，退出后点「继续」精确恢复。 */
@@ -1195,6 +1238,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     activeBooklistId = if (fromReview) it.activeBooklistId else null,
                     reviews = library.reviews(),
                     todayQueue = library.reviewQueue(),
+                    focusRecommendation = library.topHomeRecommendation(it.book?.id),
                 )
             }
         }
@@ -1236,8 +1280,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     suspend fun refreshReviews() = action(showBusy = false) {
         val current = mutable.value.review
         val updated = current?.let { library.review(it.book, it.lesson, it.mode) }
+        val nextQueue = if (current == null) library.reviewQueue() else mutable.value.todayQueue
         mutable.update { it.copy(reviews = library.reviews(), review = updated,
-            answer = updated?.answer ?: it.answer, todayQueue = if (current == null) library.reviewQueue() else it.todayQueue) }
+            answer = updated?.answer ?: it.answer, todayQueue = nextQueue) }
     }
 
     suspend fun openReview(entry: LocalBookReview) = action {
@@ -1391,10 +1436,19 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         questionIndex: Int,
         practice: Practice,
         answer: PracticeAnswer,
+        isPretest: Boolean = false,
     ) = action(showBusy = false) {
         val book = mutable.value.book ?: return@action
-        library.saveSectionCheckAnswer(book.id, lesson, questionIndex, practice, answer)
-        mutable.update { it.copy(reviews = library.reviews(), todayQueue = library.reviewQueue(), ladder = library.ladder(book.id)) }
+        library.saveSectionCheckAnswer(book.id, lesson, questionIndex, practice, answer, isPretest = isPretest)
+        val nextQueue = library.reviewQueue()
+        mutable.update {
+            it.copy(
+                reviews = library.reviews(),
+                todayQueue = nextQueue,
+                ladder = library.ladder(book.id),
+                focusRecommendation = library.topHomeRecommendation(book.id),
+            )
+        }
     }
 
     suspend fun openSectionPractice(sectionIndex: Int) = action {
@@ -1755,7 +1809,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         mutable.update {
                             it.copy(
                                 activeCourseDetail = updated,
-                                courseNotice = "已完成智能对齐，所有手动锁定条目已保留。",
+                                courseNotice = "已完成课程对齐，所有手动锁定条目已保留。",
                             )
                         }
                         return@action

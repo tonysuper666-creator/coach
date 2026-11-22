@@ -112,6 +112,7 @@ internal fun TextbookReader(
     onCancelImport: () -> Unit = {},
     onReorganizeSections: (() -> Unit)? = null,
     onSaveSectionQuiz: ((BookLesson, Int, Practice, PracticeAnswer) -> Unit)? = null,
+    onSaveSectionPretest: ((BookLesson, Int, Practice, PracticeAnswer) -> Unit)? = null,
     onOpenSectionMainline: ((Int) -> Unit)? = null,
     onEnsureUnstructuredSectioned: (() -> Unit)? = null,
     onRecordPageDwell: ((bookId: String, tocNodeId: String, page: Int, pagesTotal: Int, dwellMs: Long) -> Unit)? = null,
@@ -268,6 +269,19 @@ internal fun TextbookReader(
             return
         }
         lastInlineAction = action to questionText
+        val askNodeId = book.lessons.getOrNull(secIdx)?.id ?: currentSection?.id ?: "p${target.page}"
+        val askName = book.lessons.getOrNull(secIdx)?.title ?: currentSection?.title ?: "第 ${target.page} 页"
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                library.recordMasteryEvidence(
+                    bookId = book.id,
+                    tocNodeId = askNodeId,
+                    page = target.page,
+                    canonicalName = askName,
+                    signal = LearnerSignalType.SELECTION_ASK,
+                )
+            }
+        }
         val existing = inlineThread?.takeIf { it.selection.id == target.id } ?: InlineExplainThread(target, secCtx)
         val history = existing.turns.map { FollowUpTurn(it.label, ReadableText.withoutCitationMarks(it.explanation.text)) }
         inlineThread = existing.copy(loading = true, error = null, askingOpen = true)
@@ -411,22 +425,156 @@ internal fun TextbookReader(
     var localBooklistRev by remember(book.id) { mutableIntStateOf(0) }
     var chapterReadStates by remember(book.id) { mutableStateOf<Map<String, ChapterReadState>>(emptyMap()) }
     var crossBookCards by remember(book.id) { mutableStateOf<List<CrossBookCompanionCard>>(emptyList()) }
+    val readingTracker = remember(book.id, dwellThresholdMs) {
+        val floor = if (dwellThresholdMs < ChapterReadPolicy.MIN_DWELL_MS) maxOf(dwellThresholdMs, 40L) else 15_000L
+        PageReadingTracker(defaultMedianFloorMs = floor)
+    }
+    val proactivityPolicy = remember(book.id) { QuietProactivityPolicy() }
+    var activeWhisper by remember(book.id) { mutableStateOf<MarginWhisperCandidate?>(null) }
+    var activeCheckpoint by remember(book.id) { mutableStateOf<EndOfSectionCheckpointData?>(null) }
+    var lastTrackedPage by remember(book.id) { mutableStateOf<Int?>(null) }
+    var lastTrackedSection by remember(book.id) { mutableStateOf<BookLesson?>(null) }
+    var pendingNavigationIsJump by remember(book.id) { mutableStateOf(false) }
+
+    suspend fun evaluateMarginWhisperForPage(targetPage: Int, nodeId: String, rereadCountOnPage: Int) {
+        if (ui.source != null) return
+        val quoteSnippet = book.page(targetPage)?.text?.trim()?.lineSequence()?.firstOrNull { it.length >= 8 }?.take(48).orEmpty()
+        val (conflict, mastery) = withContext(Dispatchers.IO) {
+            val c = runCatching { library.crossMaterialConflictForPage(book.id, targetPage, nodeId) }.getOrNull()
+            val m = runCatching {
+                val all = library.conceptMasteryForBook(book.id)
+                all.firstOrNull { it.tocNodeId == nodeId }
+                    ?: all.firstOrNull { it.tocNodeId == currentSection?.id }
+            }.getOrNull()
+            c to m
+        }
+        val effectiveReread = maxOf(rereadCountOnPage, mastery?.rereadCount ?: 0)
+        val candidate = proactivityPolicy.evaluate(
+            bookId = book.id,
+            tocNodeId = nodeId,
+            page = targetPage,
+            conflictInfo = conflict,
+            mastery = mastery,
+            rereadCountOnPage = effectiveReread,
+            cumulativeDwellMs = readingTracker.cumulativeDwellMs(targetPage),
+            personalMedianDwellMs = readingTracker.personalMedianDwellMs(excludePage = targetPage),
+            quoteAnchor = quoteSnippet,
+        )
+        if (candidate != null) {
+            activeWhisper = candidate
+            withContext(Dispatchers.IO) {
+                runCatching { library.saveMarginWhisperAudit(candidate) }
+            }
+        }
+    }
+
+    // Track page entries, dismiss cooldowns, backtrack rereads, section-end checkpoints & margin whispers.
+    LaunchedEffect(book.id, ui.page, ui.source) {
+        if (ui.source != null) return@LaunchedEffect
+        val prevPage = lastTrackedPage
+        val prevSec = lastTrackedSection
+        val isJump = pendingNavigationIsJump || (prevPage != null && kotlin.math.abs(ui.page - prevPage) > 2)
+        pendingNavigationIsJump = false
+
+        if (prevPage != null && prevPage != ui.page) {
+            proactivityPolicy.onPageTurn()
+            activeWhisper = null
+            // Advancing past a section checkpoint slides right past without blocking.
+            if (activeCheckpoint != null && activeCheckpoint?.page != ui.page) {
+                activeCheckpoint = null
+            }
+            if (prevSec != null && readingTracker.shouldOfferSectionCheckpoint(
+                    previousSectionId = prevSec.id,
+                    previousSectionLastPage = prevSec.lastPage,
+                    fromPage = prevPage,
+                    toPage = ui.page,
+                    isJump = isJump,
+                )
+            ) {
+                val checkpointQuestions = withContext(Dispatchers.IO) {
+                    val prevIdx = book.lessons.indexOfFirst { it.id == prevSec.id }.coerceAtLeast(0)
+                    val prevGroup = ChapterCompanionGrouping.groupForSection(book, prevIdx)
+                    val cached = prevGroup?.let { runCatching { library.cachedChapterCompanion(book.id, it.chapterId) }.getOrNull() }
+                    val fromPack = cached?.optionalPractice?.filter { it.sectionId == prevSec.id && it.options.size >= 2 }.orEmpty()
+                        .ifEmpty { cached?.pretest?.filter { it.sectionId == prevSec.id && it.options.size >= 2 }.orEmpty() }
+                        .ifEmpty { cached?.optionalPractice?.filter { it.options.size >= 2 }.orEmpty() }
+                        .take(2)
+                    fromPack.ifEmpty {
+                        val snippet = prevSec.blocks.firstOrNull { !it.heading && it.text.isNotBlank() }?.text?.take(48).orEmpty()
+                        listOf(
+                            BookCompanionQuiz(
+                                id = "cp-${prevSec.id}-1",
+                                sectionId = prevSec.id,
+                                stem = "刚读完「${prevSec.title}」，你现在能不看原文复述本节的核心结论吗？",
+                                options = listOf("能清楚讲出核心机制", "还有一处推导不够稳"),
+                                correctOption = "能清楚讲出核心机制",
+                                explanation = if (snippet.isNotBlank()) "可随时切回第 ${prevSec.firstPage} 页核对原文。" else "读完后隔天复习最稳。",
+                                kind = "MCQ",
+                            ),
+                        )
+                    }
+                }
+                activeCheckpoint = EndOfSectionCheckpointData(
+                    bookId = book.id,
+                    sectionId = prevSec.id,
+                    sectionTitle = prevSec.title,
+                    page = ui.page,
+                    questions = checkpointQuestions,
+                )
+            }
+        }
+
+        val secId = currentSection?.id ?: currentChapterSpan?.tocNodeId ?: "p${ui.page}"
+        readingTracker.onPageEntered(ui.page, isJump = isJump, sectionId = secId)
+        lastTrackedPage = ui.page
+        lastTrackedSection = currentSection
+
+        evaluateMarginWhisperForPage(ui.page, secId, readingTracker.backtrackCount(ui.page))
+    }
 
     // 真实停留已读计时器：仅在当前页连续停留 >= 8 秒（测试可注入更短阈值）才记入 book_chapter_progress；
     // 通过目录跳章或快速滑过会自动取消本协程，被跳过的中间章节绝不标为已读。
-    LaunchedEffect(book.id, ui.page, currentChapterSpan?.tocNodeId, ui.source, dwellThresholdMs) {
+    // 同时持续累计页停留并检测 p+1 -> p 往返重读（累计停留 > 个人页速中位数 2.2 倍记 REREAD_BACKTRACK）。
+    LaunchedEffect(book.id, ui.page, currentChapterSpan?.tocNodeId, currentSection?.id, ui.source, dwellThresholdMs) {
         if (ui.source != null) return@LaunchedEffect
         val span = currentChapterSpan ?: return@LaunchedEffect
+        val secId = currentSection?.id ?: span.tocNodeId
+        val secTitle = currentSection?.title ?: span.title
         val waitMs = dwellThresholdMs.coerceAtLeast(1L)
-        delay(waitMs)
-        val recordedDwell = maxOf(waitMs, ChapterReadPolicy.MIN_DWELL_MS)
-        if (onRecordPageDwell != null) {
-            onRecordPageDwell(book.id, span.tocNodeId, ui.page, span.pagesTotal, recordedDwell)
-        } else {
-            withContext(Dispatchers.IO) {
-                runCatching { library.recordPageDwell(book.id, span.tocNodeId, ui.page, span.pagesTotal, recordedDwell) }
+        var firstTick = true
+        while (true) {
+            delay(waitMs)
+            val recordedDwell = if (dwellThresholdMs >= ChapterReadPolicy.MIN_DWELL_MS) waitMs else maxOf(waitMs, ChapterReadPolicy.MIN_DWELL_MS)
+            val trackerDwell = waitMs
+            if (firstTick) {
+                firstTick = false
+                if (onRecordPageDwell != null) {
+                    onRecordPageDwell(book.id, span.tocNodeId, ui.page, span.pagesTotal, recordedDwell)
+                } else {
+                    withContext(Dispatchers.IO) {
+                        runCatching { library.recordPageDwell(book.id, span.tocNodeId, ui.page, span.pagesTotal, recordedDwell) }
+                    }
+                    localBooklistRev++
+                }
             }
-            localBooklistRev++
+            val triggeredBacktrack = readingTracker.recordDwell(ui.page, trackerDwell, secId)
+            if (triggeredBacktrack) {
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        library.recordMasteryEvidence(
+                            bookId = book.id,
+                            tocNodeId = secId,
+                            page = ui.page,
+                            canonicalName = secTitle,
+                            signal = LearnerSignalType.REREAD_BACKTRACK,
+                            durationMs = trackerDwell,
+                        )
+                    }
+                }
+                if (activeWhisper == null) {
+                    evaluateMarginWhisperForPage(ui.page, secId, readingTracker.backtrackCount(ui.page))
+                }
+            }
         }
     }
 
@@ -1064,6 +1212,25 @@ internal fun TextbookReader(
 
         val explainTabContent: @Composable () -> Unit = {
             Column(Modifier.fillMaxSize()) {
+                if (companionOpen) {
+                    activeCheckpoint?.let { cp ->
+                        EndOfSectionCheckpointCard(
+                            data = cp,
+                            onAnswer = { quiz, chosen, isGuessed ->
+                                val sec = book.lessons.firstOrNull { it.id == cp.sectionId } ?: currentSection
+                                if (sec != null) {
+                                    onSaveSectionQuiz?.invoke(
+                                        sec,
+                                        150 + cp.questions.indexOfFirst { it.id == quiz.id }.coerceAtLeast(0),
+                                        Practice(quiz.stem, quiz.anchor?.quoteAnchor.orEmpty(), quiz.correctOption, quiz.options),
+                                        PracticeAnswer(text = chosen, revealed = true, understood = chosen == quiz.correctOption, guessed = isGuessed),
+                                    )
+                                }
+                            },
+                            onDismiss = { activeCheckpoint = null },
+                        )
+                    }
+                }
                 val chosenHp = activeHardPoint
                 val sec = currentSection
                 if (chosenHp != null && sec != null) {
@@ -1138,6 +1305,9 @@ internal fun TextbookReader(
                             },
                             onCommitQuizAnswer = { sec, qIdx, prac, ans ->
                                 onSaveSectionQuiz?.invoke(sec, qIdx, prac, ans)
+                            },
+                            onCommitPretestAnswer = { sec, qIdx, prac, ans ->
+                                (onSaveSectionPretest ?: onSaveSectionQuiz)?.invoke(sec, qIdx, prac, ans)
                             },
                             onAskAboutText = { promptText ->
                                 companionTab = ReaderCompanionTab.ASK
@@ -1266,6 +1436,51 @@ internal fun TextbookReader(
             }
         }
 
+        val readerViewport: @Composable (Modifier) -> Unit = { viewportMod ->
+            Column(viewportMod) {
+                activeWhisper?.let { whisper ->
+                    MarginWhisperStrip(
+                        whisper = whisper,
+                        onExpandCompanion = {
+                            companionOpen = true
+                            companionTab = ReaderCompanionTab.EXPLAIN
+                        },
+                        onJumpAnchorPage = { target -> turnTo(target) },
+                        onDismiss = {
+                            proactivityPolicy.onUserDismiss()
+                            val dismissedId = whisper.whisperId
+                            activeWhisper = null
+                            scope.launch(Dispatchers.IO) {
+                                runCatching { library.dismissMarginWhisperAudit(dismissedId) }
+                            }
+                        },
+                    )
+                }
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    pageSurface(Modifier.fillMaxSize())
+                }
+                if (!companionOpen) {
+                    activeCheckpoint?.let { cp ->
+                        EndOfSectionCheckpointCard(
+                            data = cp,
+                            onAnswer = { quiz, chosen, isGuessed ->
+                                val sec = book.lessons.firstOrNull { it.id == cp.sectionId } ?: currentSection
+                                if (sec != null) {
+                                    onSaveSectionQuiz?.invoke(
+                                        sec,
+                                        150 + cp.questions.indexOfFirst { it.id == quiz.id }.coerceAtLeast(0),
+                                        Practice(quiz.stem, quiz.anchor?.quoteAnchor.orEmpty(), quiz.correctOption, quiz.options),
+                                        PracticeAnswer(text = chosen, revealed = true, understood = chosen == quiz.correctOption, guessed = isGuessed),
+                                    )
+                                }
+                            },
+                            onDismiss = { activeCheckpoint = null },
+                        )
+                    }
+                }
+            }
+        }
+
         // 1. 主体布局：
         // - Fold8 / Duo 半折：左书右伴读或上书下伴读（铰链零吃字）；
         // - 小窗与手机（<1000dp，含 winbox 752×552）：上书下伴读半屏抽屉，正文绝不归零；
@@ -1274,7 +1489,7 @@ internal fun TextbookReader(
         if (verticalSplit != null) {
             Row(Modifier.fillMaxSize()) {
                 Box(Modifier.width(verticalSplit.leftDp.dp).fillMaxHeight().testTag("book-half-fold-left")) {
-                    pageSurface(Modifier.fillMaxSize())
+                    readerViewport(Modifier.fillMaxSize())
                 }
                 Spacer(Modifier.width(verticalSplit.gapDp.dp).fillMaxHeight().testTag("book-half-fold-hinge"))
                 Box(Modifier.weight(1f).fillMaxHeight().background(colors.surface1).testTag("book-half-fold-right")) {
@@ -1297,7 +1512,7 @@ internal fun TextbookReader(
         } else if (tabletopSplit != null) {
             Column(Modifier.fillMaxSize()) {
                 Box(Modifier.height(tabletopSplit.topDp.dp).fillMaxWidth().testTag("book-tabletop-content")) {
-                    pageSurface(Modifier.fillMaxSize())
+                    readerViewport(Modifier.fillMaxSize())
                 }
                 Spacer(Modifier.height(tabletopSplit.gapDp.dp).fillMaxWidth().testTag("book-tabletop-hinge"))
                 Box(Modifier.weight(1f).fillMaxWidth().background(colors.surface1).testTag("book-tabletop-controls")) {
@@ -1321,7 +1536,7 @@ internal fun TextbookReader(
         } else if (effectiveBottomSheet) {
             Column(Modifier.fillMaxSize()) {
                 Box(Modifier.weight(1f).fillMaxWidth()) {
-                    pageSurface(Modifier.fillMaxSize())
+                    readerViewport(Modifier.fillMaxSize())
                 }
                 ImmersiveCompanionDrawer(
                     visible = true,
@@ -1341,7 +1556,7 @@ internal fun TextbookReader(
         } else if (effectiveSideDocked) {
             Row(Modifier.fillMaxSize()) {
                 Box(Modifier.weight(1f).fillMaxHeight()) {
-                    pageSurface(Modifier.fillMaxSize())
+                    readerViewport(Modifier.fillMaxSize())
                 }
                 ImmersiveCompanionDrawer(
                     visible = true,
@@ -1358,7 +1573,7 @@ internal fun TextbookReader(
                 )
             }
         } else {
-            pageSurface(Modifier.fillMaxSize())
+            readerViewport(Modifier.fillMaxSize())
         }
 
         // 2. 底边 2dp 静默进度细线（HUD 隐藏且非底抽屉时可见，占面积 <0.2%）。
@@ -1454,7 +1669,7 @@ internal fun TextbookReader(
             currentSectionIndex = currentSectionIndex,
             bookmarks = bookmarks,
             busy = ui.busy,
-            onJumpPage = { target -> turnTo(target); tocOpen = false },
+            onJumpPage = { target -> pendingNavigationIsJump = true; turnTo(target); tocOpen = false },
             onToggleBookmark = { toggleBookmark(it) },
             onReorganizeSections = onReorganizeSections,
             onClose = { tocOpen = false },

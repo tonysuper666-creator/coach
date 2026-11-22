@@ -461,6 +461,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 onSaveSectionQuiz = { lesson, qIdx, practice, answer ->
                                     run { controller.recordSectionQuizAnswer(lesson, qIdx, practice, answer) }
                                 },
+                                onSaveSectionPretest = { lesson, qIdx, practice, answer ->
+                                    run { controller.recordSectionQuizAnswer(lesson, qIdx, practice, answer, isPretest = true) }
+                                },
                                 onOpenSectionMainline = { secIdx ->
                                     run { if (drafts.flush()) controller.openSectionPractice(secIdx) }
                                 },

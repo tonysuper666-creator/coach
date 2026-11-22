@@ -11,10 +11,12 @@ import kotlin.test.assertTrue
  */
 class BooksCopyGuardTest {
     private val banned = listOf(
-        "Anthropic", "OpenAI", "Gemini", "Claude",
+        "Anthropic", "OpenAI", "Gemini", "Claude", "DeepSeek", "Grok", "ChatGPT",
         "Mac", "winbox", "朋友服务",
         "HTTP 4", "HTTP 5", "traceId",
+        "智能", "小助手", "✨",
     )
+    private val bannedAiWord = Regex("(?<![A-Za-z0-9_])AI(?![A-Za-z0-9_])")
 
     @Test fun sharedBooksUserVisibleCopyHasNoBannedTerms() {
         val root = locateSharedBooksMain()
@@ -24,6 +26,9 @@ class BooksCopyGuardTest {
             for (text in extractKotlinStringLiterals(file.readText())) {
                 banned.firstOrNull { it in text }?.let { term ->
                     offenders += "${file.relativeTo(root).invariantSeparatorsPath}: 「$text」含禁用词「$term」"
+                }
+                if (bannedAiWord.containsMatchIn(text)) {
+                    offenders += "${file.relativeTo(root).invariantSeparatorsPath}: 「$text」含禁用词「AI」"
                 }
             }
         }

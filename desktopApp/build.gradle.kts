@@ -145,6 +145,8 @@ tasks.test {
     if (providers.gradleProperty("coach.explainLiveWindow").orNull == "true") systemProperty("coach.explainLiveWindow", "true")
     if (providers.gradleProperty("coach.startupLoginLiveWindow").orNull == "true") systemProperty("coach.startupLoginLiveWindow", "true")
     providers.gradleProperty("coach.liveBookConnection").orNull?.let { systemProperty("coach.liveBookConnection", it) }
+    providers.gradleProperty("coach.ai1.soakSeconds").orNull?.let { systemProperty("coach.ai1.soakSeconds", it) }
+    providers.gradleProperty("coach.ai1.reportOut").orNull?.let { systemProperty("coach.ai1.reportOut", it) }
 }
 
 // Ship the very same stdlib-only extraction core used by tools.notes, including in DMGs.

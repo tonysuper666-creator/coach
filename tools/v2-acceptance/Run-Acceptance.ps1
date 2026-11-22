@@ -17,6 +17,7 @@ param(
     [string]$OutDir = '',
     [ValidateSet('all', 'measure', 'bugs', 'login')][string]$Suite = 'all',
     [int]$BugsRepeat = 3,
+    [switch]$SkipLegacy,
     [switch]$Direct
 )
 $ErrorActionPreference = 'Continue'
@@ -62,6 +63,9 @@ if ($sessionId -eq 0 -and -not $Direct) {
     if (-not [string]::IsNullOrWhiteSpace($RuntimeMain)) {
         $childArgs += @('-RuntimeMain', "'$($RuntimeMain.Replace("'", "''"))'")
     }
+    if ($SkipLegacy) {
+        $childArgs += '-SkipLegacy'
+    }
     $logFile = Join-Path $OutDir 'worker.log'
     & $runInteractive -Script $PSCommandPath -ScriptArgs $childArgs -TimeoutSec 1800 -LogFile $logFile
     $rc = $LASTEXITCODE
@@ -104,7 +108,7 @@ $loginReport = $null
 
 if ($Suite -in 'all', 'measure') {
     $ranMeasure = $true
-    if (Test-Path (Join-Path $Runtime111 'classpath.txt')) {
+    if (-not $SkipLegacy -and (Test-Path (Join-Path $Runtime111 'classpath.txt'))) {
         $cp111 = Compile-Harness $Runtime111 (Join-Path $clsRoot '111')
         Invoke-Harness $cp111 @('measure', '111', $LibSeed, $shotsDir, 'scene', '32') 'measure-111-scene'
         Invoke-Harness $cp111 @('measure', '111', $LibSeed, $shotsDir, 'win32', '32') 'measure-111-win32'
@@ -114,7 +118,7 @@ if ($Suite -in 'all', 'measure') {
         Invoke-Harness $cpMainM @('measure', 'main', $LibSeed, $shotsDir, 'scene', '32') 'measure-main-scene'
         Invoke-Harness $cpMainM @('measure', 'main', $LibSeed, $shotsDir, 'win32', '32') 'measure-main-win32'
     }
-    if (Test-Path (Join-Path $RuntimeV2 'classpath.txt')) {
+    if (-not $SkipLegacy -and (Test-Path (Join-Path $RuntimeV2 'classpath.txt'))) {
         $cpV2 = Compile-Harness $RuntimeV2 (Join-Path $clsRoot 'v2')
         Invoke-Harness $cpV2 @('measure', 'v2', $LibSeed, $shotsDir, 'scene', '34') 'measure-v2-scene'
         Invoke-Harness $cpV2 @('measure', 'v2', $LibSeed, $shotsDir, 'win32', '34') 'measure-v2-win32'
@@ -178,13 +182,13 @@ function Invoke-BugsWithStability([string]$rt, [string]$flavor, [string]$dirName
 }
 
 if ($Suite -in 'all', 'bugs') {
-    if (Test-Path (Join-Path $Runtime111 'classpath.txt')) {
+    if (-not $SkipLegacy -and (Test-Path (Join-Path $Runtime111 'classpath.txt'))) {
         $bugs111Report = Invoke-BugsWithStability $Runtime111 '111' 'bugs-111'
     }
     if (-not [string]::IsNullOrWhiteSpace($RuntimeMain) -and (Test-Path (Join-Path $RuntimeMain 'classpath.txt'))) {
         $bugsMainReport = Invoke-BugsWithStability $RuntimeMain 'main' 'bugs-main'
     }
-    if (Test-Path (Join-Path $RuntimeV2 'classpath.txt')) {
+    if (-not $SkipLegacy -and (Test-Path (Join-Path $RuntimeV2 'classpath.txt'))) {
         $bugsV2Report = Invoke-BugsWithStability $RuntimeV2 'v2' 'bugs-v2'
     }
 }
@@ -223,5 +227,6 @@ if ($null -ne $loginReport) {
 }
 
 if ($anyFlaky) { Write-Host 'FAILED: flaky bugs check detected'; exit 1 }
+if ($null -ne $bugsMainReport -and $bugsMainReport.passed -lt $bugsMainReport.total) { exit 1 }
 if ($null -ne $loginReport -and $loginReport.passed -lt $loginReport.total) { exit 1 }
 exit 0

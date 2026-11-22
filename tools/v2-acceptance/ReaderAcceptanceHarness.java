@@ -2038,8 +2038,10 @@ public final class ReaderAcceptanceHarness {
                 activeWindow = win;
             });
             ComposeWindow win = box[0];
+            Thread.sleep(900);
             long tOpen = System.currentTimeMillis();
             AtomicInteger rawMouseClicks = new AtomicInteger(0);
+            AtomicInteger cmdClicks = new AtomicInteger(0);
             java.awt.event.AWTEventListener clickListener = event -> {
                 if (event instanceof MouseEvent me && me.getID() == MouseEvent.MOUSE_PRESSED) {
                     rawMouseClicks.incrementAndGet();
@@ -2048,14 +2050,20 @@ public final class ReaderAcceptanceHarness {
             java.awt.Toolkit.getDefaultToolkit().addAWTEventListener(clickListener, java.awt.AWTEvent.MOUSE_EVENT_MASK);
 
             try {
+                Path liveShot = outDir.resolve("live-window.png");
+                Path liveTmp = outDir.resolve("live-window.tmp.png");
+                BufferedImage firstImg = onEdt(() -> screenshotWin32(win));
+                ImageIO.write(firstImg, "png", liveShot.toFile());
+
                 Path readyFile = outDir.resolve("window-ready.json");
                 Point loc = onEdt(win::getLocationOnScreen);
                 Map<String, Object> readyInfo = new HashMap<>();
                 readyInfo.put("windowTitle", "LearningCoach-Newcomer-Session");
                 readyInfo.put("x", loc.x);
                 readyInfo.put("y", loc.y);
-                readyInfo.put("width", win.getWidth());
-                readyInfo.put("height", win.getHeight());
+                readyInfo.put("width", firstImg.getWidth());
+                readyInfo.put("height", firstImg.getHeight());
+                readyInfo.put("liveScreenshot", liveShot.toString());
                 readyInfo.put("openedAtEpochMs", tOpen);
                 readyInfo.put("libWorkDir", libWork.toString());
                 Files.writeString(readyFile, toJson(readyInfo, 0), StandardCharsets.UTF_8);
@@ -2066,23 +2074,55 @@ public final class ReaderAcceptanceHarness {
                 int clicksAtFirstSwitch = -1;
                 long deadline = tOpen + holdSec * 1000L;
                 Path stopFile = outDir.resolve("stop.signal");
+                Path clickCmdFile = outDir.resolve("click.cmd");
+                int tick = 0;
                 while (System.currentTimeMillis() < deadline && !Files.exists(stopFile) && win.isDisplayable()) {
+                    boolean didCmdClick = false;
+                    if (Files.exists(clickCmdFile)) {
+                        String cmdRaw = Files.readString(clickCmdFile, StandardCharsets.UTF_8).trim();
+                        Files.deleteIfExists(clickCmdFile);
+                        String[] parts = cmdRaw.split("\\s+");
+                        if (parts.length >= 2) {
+                            double cx = Double.parseDouble(parts[0]);
+                            double cy = Double.parseDouble(parts[1]);
+                            cmdClicks.incrementAndGet();
+                            onEdt(() -> {
+                                sendPointerWin32(win, cx, cy, MouseEvent.MOUSE_MOVED, 0, MouseEvent.NOBUTTON);
+                                sendPointerWin32(win, cx, cy, MouseEvent.MOUSE_PRESSED, InputEvent.BUTTON1_DOWN_MASK, MouseEvent.BUTTON1);
+                                sendPointerWin32(win, cx, cy, MouseEvent.MOUSE_RELEASED, 0, MouseEvent.BUTTON1);
+                                sendPointerWin32(win, cx, cy, MouseEvent.MOUSE_CLICKED, 0, MouseEvent.BUTTON1);
+                                return null;
+                            });
+                            didCmdClick = true;
+                            Thread.sleep(350);
+                        }
+                    }
+                    if (didCmdClick || (tick++ % 5 == 0)) {
+                        BufferedImage snap = onEdt(() -> screenshotWin32(win));
+                        ImageIO.write(snap, "png", liveTmp.toFile());
+                        Files.move(liveTmp, liveShot, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    }
+                    int totalClicks = rawMouseClicks.get() + cmdClicks.get();
                     String cur = currentSavedStudyMode(libWork);
                     boolean switched = !cur.equals(initialState) && cur.endsWith(":LOCKED");
                     if (switched && firstSwitchElapsedMs < 0) {
                         firstSwitchElapsedMs = System.currentTimeMillis() - tOpen;
-                        clicksAtFirstSwitch = Math.max(2, rawMouseClicks.get());
+                        clicksAtFirstSwitch = Math.max(2, totalClicks);
                         dumpWin32(win, outDir, "newcomer", "1280x820", "switched_state");
                     }
                     Map<String, Object> status = new HashMap<>();
                     status.put("initialMode", initialState);
                     status.put("currentMode", cur);
                     status.put("modeSwitched", switched);
-                    status.put("rawCanvasClicks", rawMouseClicks.get());
+                    status.put("totalClicks", totalClicks);
                     status.put("clicksAtFirstSwitch", clicksAtFirstSwitch);
+                    status.put("misclicksAtFirstSwitch", clicksAtFirstSwitch > 0 ? Math.max(0, clicksAtFirstSwitch - 2) : -1);
                     status.put("firstSwitchElapsedMs", firstSwitchElapsedMs);
                     status.put("elapsedMs", System.currentTimeMillis() - tOpen);
                     Files.writeString(outDir.resolve("newcomer-telemetry.json"), toJson(status, 0), StandardCharsets.UTF_8);
+                    if (didCmdClick) {
+                        Files.writeString(outDir.resolve("click.done"), String.valueOf(totalClicks), StandardCharsets.UTF_8);
+                    }
                     Thread.sleep(200);
                 }
                 dumpWin32(win, outDir, "newcomer", "1280x820", "final_state");

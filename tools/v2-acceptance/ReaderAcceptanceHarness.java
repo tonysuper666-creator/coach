@@ -1895,18 +1895,39 @@ public final class ReaderAcceptanceHarness {
         return "NONE";
     }
 
-    private static void seedHighlightsAndNotesForModeTest(Path libDir, String bookId, int page) throws Exception {
+    private static void seedHighlightsAndNotesForModeTest(Path libDir, String bookId, int page, Path sampleCh8Json) throws Exception {
         Path dbFile = libDir.resolve("library.sqlite");
         try (var conn = java.sql.DriverManager.getConnection("jdbc:sqlite:" + dbFile);
              var st = conn.createStatement()) {
             st.execute("INSERT OR REPLACE INTO book_highlights(book, page, start, end, quote) VALUES('" + bookId + "', " + page + ", 10, 42, 'sample-highlight-quote-1')");
             st.execute("INSERT OR REPLACE INTO book_notes(book, id, version, page, start, end, quote, note, text_sha256, revision, last_mutation_id, deleted) VALUES('" + bookId + "', 'mode-test-n1', '1', " + page + ", 10, 42, 'sample-note-quote-1', 'keep-note-across-modes', 'sha', 1, 'm1', 0)");
+            st.execute("CREATE TABLE IF NOT EXISTS book_study_mode_packs(book_id TEXT NOT NULL, chapter_num INTEGER NOT NULL, study_mode TEXT NOT NULL, pack_json TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(book_id, chapter_num, study_mode))");
+            if (sampleCh8Json != null && Files.isRegularFile(sampleCh8Json)) {
+                String raw = Files.readString(sampleCh8Json, StandardCharsets.UTF_8);
+                var json = kotlinx.serialization.json.Json.Default;
+                var root = kotlinx.serialization.json.JsonElementKt.getJsonObject(json.parseToJsonElement(raw));
+                var modesObj = kotlinx.serialization.json.JsonElementKt.getJsonObject(root.get("modes"));
+                try (var ps = conn.prepareStatement("INSERT OR REPLACE INTO book_study_mode_packs(book_id, chapter_num, study_mode, pack_json, updated_at) VALUES(?,?,?,?,?)")) {
+                    for (String mKey : List.of("BOOK_MAP", "EXAM_FOCUS", "DIAGNOSTIC_SKIP", "PROBLEM_DRIVEN", "QUESTION_DRIVEN", "READ_THROUGH")) {
+                        var mEl = modesObj.get(mKey);
+                        if (mEl != null) {
+                            ps.setString(1, bookId);
+                            ps.setInt(2, 8);
+                            ps.setString(3, mKey);
+                            ps.setString(4, mEl.toString());
+                            ps.setLong(5, System.currentTimeMillis());
+                            ps.executeUpdate();
+                        }
+                    }
+                }
+            }
         }
     }
 
     private static void runModes(String[] args) throws Exception {
         Path libSeed = Path.of(args[1]);
         Path outDir = Path.of(args[2]);
+        Path sampleCh8Json = args.length > 3 ? Path.of(args[3]) : null;
         Files.createDirectories(outDir);
         Path shotsDir = outDir.resolve("shots");
         Files.createDirectories(shotsDir);
@@ -1922,8 +1943,10 @@ public final class ReaderAcceptanceHarness {
             TextbookController controller = createController(lib);
             runSuspend(c -> controller.load(c));
             runSuspend(c -> controller.page(179, c));
+            int pageBefore = controllerPage(controller);
             runSuspend(c -> controller.back(c));
-            seedHighlightsAndNotesForModeTest(libWork, bookId, 179);
+            seedHighlightsAndNotesForModeTest(libWork, bookId, 179, sampleCh8Json);
+            String beforeDigest = queryModeDbStateDigest(libWork);
 
             ComposeWindow win = openHostWindow(controller, 32, 32, 1280, 820);
             try {
@@ -1931,7 +1954,7 @@ public final class ReaderAcceptanceHarness {
                 Thread.sleep(600);
                 dumpWin32(win, shotsDir, "modes", "1280x820", "01_home_smart_default");
 
-                // Journey 1: Home -> non-default mode in <= 2 clicks
+                // Journey 1: Home -> non-default mode in <= 2 clicks (NO extra controller.page call!)
                 int homeToNonDefaultClicks = 0;
                 clickTagWin32(win, "home-mode-trigger");
                 homeToNonDefaultClicks++;
@@ -1945,15 +1968,18 @@ public final class ReaderAcceptanceHarness {
                 if (!waitFor(4000, () -> findNodeByTag(win, "mode-surface-BOOK_MAP") != null)) {
                     throw new IllegalStateException("Expected immediate mode-surface-BOOK_MAP First Screen after 2-click Home selection");
                 }
-                runSuspend(c -> controller.page(179, c));
+                if (!waitFor(4000, () -> hasTextContaining(win, "第 8 / 24 章"))) {
+                    throw new IllegalStateException("Expected BOOK_MAP chapter badge '第 8 / 24 章'");
+                }
+                if (sampleCh8Json != null && !hasTextContaining(win, "各节角色分工")) {
+                    throw new IllegalStateException("Expected real BOOK_MAP one-pager sections ('各节角色分工') on First Screen");
+                }
                 Thread.sleep(700);
-                String beforeDigest = queryModeDbStateDigest(libWork);
-                int pageBefore = controllerPage(controller);
 
                 // Landed directly in BOOK_MAP First Screen with 2 clicks total
                 dumpWin32(win, shotsDir, "modes", "1280x820", "04_mode_BOOK_MAP");
 
-                // Verify closing companion returns to 100% clean pure read, then reopen to cycle remaining 5 modes
+                // Close companion to inspect clean reader state, then reopen to cycle remaining 5 modes
                 revealV2HudWin32(win);
                 if (findNodeByTag(win, "immersive-companion-drawer") != null) {
                     clickTagWin32(win, "immersive-companion-toggle");
@@ -2110,7 +2136,7 @@ public final class ReaderAcceptanceHarness {
                     boolean switched = !cur.equals(initialState) && cur.endsWith(":LOCKED");
                     if (switched && firstSwitchElapsedMs < 0) {
                         firstSwitchElapsedMs = System.currentTimeMillis() - tOpen;
-                        clicksAtFirstSwitch = Math.max(2, totalClicks);
+                        clicksAtFirstSwitch = totalClicks;
                         dumpWin32(win, outDir, "newcomer", "1280x820", "switched_state");
                     }
                     Map<String, Object> status = new HashMap<>();

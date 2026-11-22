@@ -172,8 +172,51 @@ class StudyModeModelsTest {
                     }
                 }
             }
+
+            // Verify structured BookMapOnePagerPack & ExamFocusTriagePack round-trip
+            StudyModeStore.saveModePackJson(
+                library,
+                "bk1",
+                8,
+                BookStudyMode.BOOK_MAP,
+                """{"firstScreen":{"headlineZh":"第 8 章一页纸","bigPictureThesisZh":"核心论断测试","sectionArchitecture":[{"sectionId":"8.1","roleLabelZh":"起点","oneLineZh":"说明","pdfPage":173}],"chapterLinks":{"prerequisiteChapter":"承第7章","downstreamChapter":"启第9章"}}}""",
+            )
+            val bm = StudyModeStore.loadBookMapPack(library, "bk1", 8)
+            assertEquals("核心论断测试", bm?.bigPictureThesisZh)
+            assertEquals(1, bm?.sectionArchitecture?.size)
+            assertEquals("承第7章", bm?.prerequisiteChapter)
         } finally {
             dir.toFile().deleteRecursively()
         }
+    }
+
+    @Test
+    fun numberedChaptersIgnoresFrontMatterAndCounts24Chapters() {
+        fun lessonAt(id: String, title: String, p1: Int, p2: Int) = BookLesson(
+            id = id,
+            title = title,
+            blocks = listOf(
+                SourceBlock("$id-a", p1, 0, 10, true, title),
+                SourceBlock("$id-b", p2, 11, 40, false, "body"),
+            ),
+        )
+        val lessons = buildList {
+            add(lessonAt("p2", "Front Title", 2, 9))
+            add(lessonAt("p10", "Brief Contents", 10, 17))
+            add(lessonAt("p19", "Preface（1/2）", 19, 31))
+            for (ch in 1..24) {
+                val p = 30 + ch * 20
+                add(lessonAt("ch-$ch", "$ch Chapter Title $ch", p, p + 5))
+                add(lessonAt("ch-$ch-1", "$ch.1 Section One", p + 2, p + 9))
+                if (ch == 14) {
+                    add(lessonAt("stray", "21.063 years 3.92 days", p + 3, p + 3))
+                }
+            }
+        }
+        val numbered = StudyModeChapterNumbering.numberedChaptersFromLessons(lessons, maxBookPage = 620)
+        assertEquals(24, numbered.size)
+        val ch8 = numbered.first { it.number == 8 }
+        assertEquals(190, ch8.firstPage)
+        assertEquals(209, ch8.lastPage)
     }
 }

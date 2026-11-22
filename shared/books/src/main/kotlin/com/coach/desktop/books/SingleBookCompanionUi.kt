@@ -250,6 +250,8 @@ internal fun SingleBookCompanionPanel(
                     val readyPack = (packState as? CompanionPackState.Ready)?.pack
                     ModeDistinctCompanionSurface(
                         book = book,
+                        library = library,
+                        currentPage = currentPage,
                         preference = studyPreference,
                         chapterGroup = chapterGroup,
                         currentSectionIndex = currentSectionIndex,

@@ -267,6 +267,8 @@ private fun <T> AdjustmentPillRow(
 @Composable
 internal fun ModeDistinctCompanionSurface(
     book: Textbook,
+    library: TextbookLibrary,
+    currentPage: Int,
     preference: BookStudyPreference,
     chapterGroup: ChapterSectionGroup,
     currentSectionIndex: Int,
@@ -278,10 +280,19 @@ internal fun ModeDistinctCompanionSurface(
     onOpenAnchor: (BookCompanionAnchor) -> Unit,
 ) {
     val colors = CoachTheme.colors
-    val allChapters = remember(book.id, book.lessons, book.pages) { BookChapterResolver.chapters(book) }
-    val currentChapterOrder = allChapters.indexOfFirst {
-        chapterGroup.firstPage in it.firstPage..it.lastPage
-    }.coerceAtLeast(0)
+    val chapterPos = remember(book.id, book.lessons, book.pages, currentPage, chapterGroup.firstPage) {
+        StudyModeChapterNumbering.resolve(book, currentPage, chapterGroup.firstPage)
+    }
+    val bookMapPack = remember(book.id, chapterPos.chapterNumber, preference.mode) {
+        if (preference.mode == BookStudyMode.BOOK_MAP) {
+            StudyModeStore.loadBookMapPack(library, book.id, chapterPos.chapterNumber)
+        } else null
+    }
+    val examFocusPack = remember(book.id, chapterPos.chapterNumber, preference.mode) {
+        if (preference.mode == BookStudyMode.EXAM_FOCUS) {
+            StudyModeStore.loadExamFocusPack(library, book.id, chapterPos.chapterNumber)
+        } else null
+    }
 
     when (preference.mode) {
         BookStudyMode.BOOK_MAP -> {
@@ -293,54 +304,93 @@ internal fun ModeDistinctCompanionSurface(
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
-                            "先摸全貌 · 本章一页纸（第 ${currentChapterOrder + 1} / ${allChapters.size.coerceAtLeast(1)} 章）",
+                            "先摸全貌 · 本章一页纸（第 ${chapterPos.chapterNumber} / ${chapterPos.totalChapters} 章）",
                             style = MaterialTheme.typography.titleSmall,
                             color = colors.fgPrimary,
+                            modifier = Modifier.testTag("book-map-chapter-badge"),
                         )
                         Text(
-                            pack?.coreQuestion?.ifBlank { null }
-                                ?: "围绕「${chapterGroup.chapterTitle}」建立全章骨架：共 ${chapterGroup.sections.size} 节（第 ${chapterGroup.firstPage}–${chapterGroup.lastPage} 页）。",
+                            bookMapPack?.bigPictureThesisZh?.ifBlank { null }
+                                ?: pack?.coreQuestion?.ifBlank { null }
+                                ?: "请先生成本章一页纸摘要以查看全章核心论断与跨章关系。",
                             style = MaterialTheme.typography.bodyMedium,
                             color = colors.fgPrimary,
+                            modifier = Modifier.testTag("book-map-thesis"),
                         )
-                        CoachCardMeta("不设小测打断 · 约 2 分钟过完本章核心脉络。")
+                        CoachCardMeta("不设小测打断 · 约 3 分钟摸清全章骨架。")
                     }
                 }
-                Text("本章小节脉络图", style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary)
-                chapterGroup.sections.filterNot { ChapterCompanionGrouping.isExerciseSection(it.title) }
-                    .forEachIndexed { idx, sec ->
-                        val kp = pack?.keyPoints?.firstOrNull { it.sectionId == sec.id }
+                if (bookMapPack != null && bookMapPack.sectionArchitecture.isNotEmpty()) {
+                    Text("各节角色分工", style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary)
+                    bookMapPack.sectionArchitecture.forEach { role ->
                         Row(
                             Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(CoachV7.Radius.s))
                                 .background(colors.surface2)
                                 .border(1.dp, colors.borderSubtle, RoundedCornerShape(CoachV7.Radius.s))
-                                .clickable { onJumpPage(sec.firstPage) }
+                                .clickable { onJumpPage(role.pdfPage) }
                                 .padding(10.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.Top,
                         ) {
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text("${idx + 1}. ${sec.title}", style = MaterialTheme.typography.labelMedium, color = colors.fgPrimary)
                                 Text(
-                                    kp?.summary ?: "定位该节核心论点与定义（第 ${sec.firstPage} 页）。",
+                                    "${role.sectionId} · ${role.roleLabelZh}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = colors.actionPrimary,
+                                )
+                                Text(
+                                    role.oneLineZh,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = colors.fgSecondary,
+                                    color = colors.fgPrimary,
                                     maxLines = if (preference.detailLevel == ExplainDetailLevel.BRIEF) 1 else 3,
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                            CoachCardMeta("p.${sec.firstPage}")
+                            CoachCardMeta("p.${role.pdfPage}")
                         }
                     }
-                if (!pack?.jargonGlosses.isNullOrEmpty()) {
-                    Text("本章核心术语表", style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary)
-                    pack.jargonGlosses.take(4).forEach { g ->
-                        CoachCardMeta("${g.term}：${g.plainMeaning}")
+                    if (bookMapPack.prerequisiteChapter.isNotBlank() || bookMapPack.downstreamChapter.isNotBlank()) {
+                        PaperCard(Modifier.fillMaxWidth(), color = colors.surface2, contentPadding = PaddingValues(10.dp)) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("前后章脉络关系", style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary)
+                                if (bookMapPack.prerequisiteChapter.isNotBlank()) {
+                                    CoachCardMeta("承上：${bookMapPack.prerequisiteChapter}")
+                                }
+                                if (bookMapPack.downstreamChapter.isNotBlank()) {
+                                    CoachCardMeta("启下：${bookMapPack.downstreamChapter}")
+                                }
+                            }
+                        }
                     }
+                } else {
+                    Text("本章小节脉络", style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary)
+                    chapterGroup.sections.filterNot { ChapterCompanionGrouping.isExerciseSection(it.title) }
+                        .forEachIndexed { idx, sec ->
+                            val kp = pack?.keyPoints?.firstOrNull { it.sectionId == sec.id }
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(CoachV7.Radius.s))
+                                    .background(colors.surface2)
+                                    .border(1.dp, colors.borderSubtle, RoundedCornerShape(CoachV7.Radius.s))
+                                    .clickable { onJumpPage(sec.firstPage) }
+                                    .padding(10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.Top,
+                            ) {
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    Text("${idx + 1}. ${sec.title}", style = MaterialTheme.typography.labelMedium, color = colors.fgPrimary)
+                                    if (kp != null) {
+                                        Text(kp.summary, style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, maxLines = 2)
+                                    }
+                                }
+                                CoachCardMeta("p.${sec.firstPage}")
+                            }
+                        }
                 }
-                val nextChapter = allChapters.getOrNull(currentChapterOrder + 1)
+                val nextChapter = chapterPos.next
                 if (nextChapter != null) {
                     PaperButton(
                         onClick = { onJumpPage(nextChapter.firstPage) },
@@ -353,44 +403,67 @@ internal fun ModeDistinctCompanionSurface(
         }
 
         BookStudyMode.EXAM_FOCUS -> {
-            val bodySecs = chapterGroup.sections.filterNot {
-                ChapterCompanionGrouping.isExerciseSection(it.title) || it.title.contains("Conclusion", ignoreCase = true)
-            }
             Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.testTag("mode-surface-EXAM_FOCUS")) {
-                PaperCard(Modifier.fillMaxWidth(), color = colors.surface2, contentPadding = PaddingValues(12.dp)) {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("考点优先 · 考纲权重分流", style = MaterialTheme.typography.titleSmall, color = colors.fgPrimary)
-                        CoachCardMeta("优先啃模型推导与定量判据小节，背景叙事节标为速览。")
-                    }
-                }
-                bodySecs.forEachIndexed { idx, sec ->
-                    val isHighYield = idx > 0 || bodySecs.size == 1
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(CoachV7.Radius.s))
-                            .background(colors.surface2)
-                            .border(1.dp, if (isHighYield) colors.actionPrimary.copy(alpha = 0.35f) else colors.borderSubtle, RoundedCornerShape(CoachV7.Radius.s))
-                            .clickable { onJumpPage(sec.firstPage) }
-                            .padding(10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                if (examFocusPack != null) {
+                    PaperCard(Modifier.fillMaxWidth(), color = colors.surface2, contentPadding = PaddingValues(12.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(
-                                (if (isHighYield) "★ 必考核心 · " else "○ 背景速览 · ") + sec.title,
-                                style = MaterialTheme.typography.labelMedium,
-                                color = if (isHighYield) colors.actionPrimary else colors.fgSecondary,
+                                examFocusPack.headlineZh.ifBlank { "第 ${chapterPos.chapterNumber} 章考纲权重分流" },
+                                style = MaterialTheme.typography.titleSmall,
+                                color = colors.fgPrimary,
                             )
-                            val deriv = pack?.derivations?.firstOrNull { it.sectionId == sec.id }
-                            Text(
-                                deriv?.pitfall?.takeIf { it.isNotBlank() }
-                                    ?: if (isHighYield) "重点核对定义边界、公式系数与图形移动方向。" else "记住核心趋势即可，节省时间给推导节。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.fgSecondary,
-                            )
+                            if (examFocusPack.courseWeekBadgeZh.isNotBlank()) {
+                                CoachCardMeta(examFocusPack.courseWeekBadgeZh)
+                            }
                         }
-                        CoachCardMeta("p.${sec.firstPage}")
+                    }
+                    examFocusPack.mustStudySections.forEach { sec ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(CoachV7.Radius.s))
+                                .background(colors.surface2)
+                                .border(1.dp, colors.actionPrimary.copy(alpha = 0.35f), RoundedCornerShape(CoachV7.Radius.s))
+                                .clickable { onJumpPage(sec.pdfPage) }
+                                .padding(10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.Top,
+                        ) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text(
+                                    "${sec.weightTag} · 第 ${sec.sectionId} 节",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = colors.actionPrimary,
+                                )
+                                Text(sec.examAngleZh, style = MaterialTheme.typography.bodySmall, color = colors.fgPrimary, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                            }
+                            CoachCardMeta("p.${sec.pdfPage}")
+                        }
+                    }
+                    examFocusPack.skimOrSkipSections.forEach { skim ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(CoachV7.Radius.s))
+                                .background(colors.surface2)
+                                .border(1.dp, colors.borderSubtle, RoundedCornerShape(CoachV7.Radius.s))
+                                .padding(10.dp),
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("${skim.weightTag} · 第 ${skim.sectionId} 节", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
+                                Text(skim.whySkimZh, style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+                            }
+                        }
+                    }
+                    if (examFocusPack.examPitfallAlertZh.isNotBlank()) {
+                        CoachCardMeta("易错警示：${examFocusPack.examPitfallAlertZh}")
+                    }
+                } else {
+                    PaperCard(Modifier.fillMaxWidth(), color = colors.surface2, contentPadding = PaddingValues(12.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("考点优先 · 待关联考纲或生成权重分流", style = MaterialTheme.typography.titleSmall, color = colors.fgPrimary)
+                            CoachCardMeta("根据课程大纲与章节内容划分必考节与速览节（不按小节序号硬猜权重）。")
+                        }
                     }
                 }
             }

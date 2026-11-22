@@ -5,6 +5,14 @@ import java.sql.Connection
 import java.sql.DriverManager
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * LearningCoach 2.0-MODES (`TON-1805`): Six orthogonal study modes for a single book,
@@ -217,7 +225,118 @@ internal object SmartDefaultModeResolver {
     }
 }
 
+internal data class NumberedBookChapter(
+    val number: Int,
+    val title: String,
+    val firstPage: Int,
+    val lastPage: Int,
+)
+
+internal data class NumberedChapterPosition(
+    val chapterNumber: Int,
+    val totalChapters: Int,
+    val current: NumberedBookChapter?,
+    val next: NumberedBookChapter?,
+)
+
+/**
+ * Resolves true numbered chapters (`1..24` on Health Economics) rather than raw TOC node counts
+ * (which include Preface, Brief Contents, Acknowledgments, Index, etc.).
+ */
+internal object StudyModeChapterNumbering {
+    private val TOP_CHAPTER_RE = Regex("""^\s*(\d{1,2})\s+[A-Z\u4e00-\u9fff].*""")
+
+    fun numberedChapters(book: Textbook): List<NumberedBookChapter> =
+        numberedChaptersFromLessons(book.lessons, book.pages.lastOrNull()?.number ?: 1)
+
+    fun numberedChaptersFromLessons(lessons: List<BookLesson>, maxBookPage: Int): List<NumberedBookChapter> {
+        val raw = mutableListOf<Triple<Int, String, Int>>()
+        val seenNums = HashSet<Int>()
+        var lastStartPage = 0
+        for (lesson in lessons) {
+            val cleanTitle = lesson.title.trim().replace(Regex("""（\d+/\d+）$"""), "").trim()
+            val m = TOP_CHAPTER_RE.matchEntire(cleanTitle) ?: continue
+            val num = m.groupValues[1].toIntOrNull() ?: continue
+            if (num <= 0 || num in seenNums) continue
+            if (lesson.firstPage < lastStartPage) continue
+            if (raw.isNotEmpty() && num != raw.last().first + 1 && num > raw.last().first + 3) continue
+            seenNums.add(num)
+            lastStartPage = lesson.firstPage
+            raw.add(Triple(num, cleanTitle, lesson.firstPage))
+        }
+        if (raw.size < 2) return emptyList()
+        return raw.mapIndexed { idx, (num, title, startP) ->
+            val endP = if (idx + 1 < raw.size) (raw[idx + 1].third - 1).coerceAtLeast(startP) else maxBookPage.coerceAtLeast(startP)
+            NumberedBookChapter(number = num, title = title, firstPage = startP, lastPage = endP)
+        }
+    }
+
+    fun resolve(book: Textbook, currentPage: Int, chapterGroupFirstPage: Int): NumberedChapterPosition {
+        val numbered = numberedChapters(book)
+        if (numbered.isNotEmpty()) {
+            val probePage = if (currentPage > 0) currentPage else chapterGroupFirstPage
+            val idx = numbered.indexOfFirst { probePage in it.firstPage..it.lastPage }
+                .takeIf { it >= 0 }
+                ?: numbered.indexOfLast { it.firstPage <= probePage }.coerceAtLeast(0)
+            val cur = numbered[idx]
+            return NumberedChapterPosition(
+                chapterNumber = cur.number,
+                totalChapters = numbered.size,
+                current = cur,
+                next = numbered.getOrNull(idx + 1),
+            )
+        }
+        val fallback = BookChapterResolver.chapters(book)
+        val idx = fallback.indexOfFirst { chapterGroupFirstPage in it.firstPage..it.lastPage }.coerceAtLeast(0)
+        val nextSpan = fallback.getOrNull(idx + 1)
+        return NumberedChapterPosition(
+            chapterNumber = idx + 1,
+            totalChapters = fallback.size.coerceAtLeast(1),
+            current = fallback.getOrNull(idx)?.let { NumberedBookChapter(idx + 1, it.title, it.firstPage, it.lastPage) },
+            next = nextSpan?.let { NumberedBookChapter(idx + 2, it.title, it.firstPage, it.lastPage) },
+        )
+    }
+}
+
+internal data class BookMapSectionRole(
+    val sectionId: String,
+    val roleLabelZh: String,
+    val oneLineZh: String,
+    val pdfPage: Int,
+)
+
+internal data class BookMapOnePagerPack(
+    val headlineZh: String,
+    val bigPictureThesisZh: String,
+    val sectionArchitecture: List<BookMapSectionRole>,
+    val prerequisiteChapter: String,
+    val downstreamChapter: String,
+)
+
+internal data class ExamFocusMustSection(
+    val sectionId: String,
+    val weightTag: String,
+    val examAngleZh: String,
+    val pdfPage: Int,
+)
+
+internal data class ExamFocusSkimSection(
+    val sectionId: String,
+    val weightTag: String,
+    val whySkimZh: String,
+)
+
+internal data class ExamFocusTriagePack(
+    val headlineZh: String,
+    val courseWeekBadgeZh: String,
+    val mustStudySections: List<ExamFocusMustSection>,
+    val skimOrSkipSections: List<ExamFocusSkimSection>,
+    val examPitfallAlertZh: String,
+)
+
 internal object StudyModeStore {
+    private val jsonParser = Json { ignoreUnknownKeys = true; isLenient = true }
+
     private const val DDL = """
         CREATE TABLE IF NOT EXISTS book_study_preferences(
             book_id TEXT PRIMARY KEY,
@@ -233,13 +352,121 @@ internal object StudyModeStore {
         )
     """
 
+    private const val PACKS_DDL = """
+        CREATE TABLE IF NOT EXISTS book_study_mode_packs(
+            book_id TEXT NOT NULL,
+            chapter_num INTEGER NOT NULL,
+            study_mode TEXT NOT NULL,
+            pack_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(book_id, chapter_num, study_mode)
+        )
+    """
+
     private fun openDb(libraryDir: Path): Connection =
         DriverManager.getConnection("jdbc:sqlite:${libraryDir.resolve("library.sqlite")}").apply {
             createStatement().use {
                 it.execute("PRAGMA busy_timeout=5000")
                 it.execute(DDL.trimIndent())
+                it.execute(PACKS_DDL.trimIndent())
             }
         }
+
+    fun saveModePackJson(library: TextbookLibrary, bookId: String, chapterNum: Int, mode: BookStudyMode, packJson: String) {
+        runCatching {
+            openDb(library.directory).use { db ->
+                db.prepareStatement(
+                    """INSERT INTO book_study_mode_packs(book_id, chapter_num, study_mode, pack_json, updated_at)
+                       VALUES(?,?,?,?,?)
+                       ON CONFLICT(book_id, chapter_num, study_mode) DO UPDATE SET
+                       pack_json=excluded.pack_json, updated_at=excluded.updated_at""".trimIndent(),
+                ).use { s ->
+                    s.setString(1, bookId)
+                    s.setInt(2, chapterNum)
+                    s.setString(3, mode.name)
+                    s.setString(4, packJson)
+                    s.setLong(5, System.currentTimeMillis())
+                    s.executeUpdate()
+                }
+            }
+        }
+    }
+
+    private fun loadRawModePackObj(library: TextbookLibrary, bookId: String, chapterNum: Int, mode: BookStudyMode): JsonObject? {
+        return runCatching {
+            openDb(library.directory).use { db ->
+                db.prepareStatement(
+                    "SELECT pack_json FROM book_study_mode_packs WHERE book_id=? AND chapter_num=? AND study_mode=?",
+                ).use { s ->
+                    s.setString(1, bookId)
+                    s.setInt(2, chapterNum)
+                    s.setString(3, mode.name)
+                    s.executeQuery().use { r ->
+                        if (r.next()) {
+                            val raw = r.getString(1).orEmpty()
+                            if (raw.isNotBlank()) jsonParser.parseToJsonElement(raw).jsonObject else null
+                        } else null
+                    }
+                }
+            }
+        }.getOrNull()
+    }
+
+    fun loadBookMapPack(library: TextbookLibrary, bookId: String, chapterNum: Int): BookMapOnePagerPack? {
+        val root = loadRawModePackObj(library, bookId, chapterNum, BookStudyMode.BOOK_MAP) ?: return null
+        val fs = root["firstScreen"]?.jsonObject ?: root
+        val thesis = fs["bigPictureThesisZh"]?.jsonPrimitive?.contentOrNull
+            ?: fs["oneSentenceVerdictZh"]?.jsonPrimitive?.contentOrNull
+            ?: return null
+        val headline = fs["headlineZh"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val archArr = (fs["sectionArchitecture"] as? JsonArray) ?: JsonArray(emptyList())
+        val roles = archArr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            BookMapSectionRole(
+                sectionId = o["sectionId"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                roleLabelZh = o["roleLabelZh"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                oneLineZh = o["oneLineZh"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull ?: 1,
+            )
+        }
+        val links = fs["chapterLinks"] as? JsonObject
+        return BookMapOnePagerPack(
+            headlineZh = headline,
+            bigPictureThesisZh = thesis,
+            sectionArchitecture = roles,
+            prerequisiteChapter = links?.get("prerequisiteChapter")?.jsonPrimitive?.contentOrNull.orEmpty(),
+            downstreamChapter = links?.get("downstreamChapter")?.jsonPrimitive?.contentOrNull.orEmpty(),
+        )
+    }
+
+    fun loadExamFocusPack(library: TextbookLibrary, bookId: String, chapterNum: Int): ExamFocusTriagePack? {
+        val root = loadRawModePackObj(library, bookId, chapterNum, BookStudyMode.EXAM_FOCUS) ?: return null
+        val fs = root["firstScreen"]?.jsonObject ?: root
+        val mustArr = (fs["mustStudySections"] as? JsonArray) ?: return null
+        val skimArr = (fs["skimOrSkipSections"] as? JsonArray) ?: JsonArray(emptyList())
+        return ExamFocusTriagePack(
+            headlineZh = fs["headlineZh"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            courseWeekBadgeZh = fs["courseWeekBadgeZh"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            mustStudySections = mustArr.mapNotNull { el ->
+                val o = el as? JsonObject ?: return@mapNotNull null
+                ExamFocusMustSection(
+                    sectionId = o["sectionId"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    weightTag = o["weightTag"]?.jsonPrimitive?.contentOrNull ?: "★ 必考核心",
+                    examAngleZh = o["examAngleZh"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull ?: 1,
+                )
+            },
+            skimOrSkipSections = skimArr.mapNotNull { el ->
+                val o = el as? JsonObject ?: return@mapNotNull null
+                ExamFocusSkimSection(
+                    sectionId = o["sectionId"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    weightTag = o["weightTag"]?.jsonPrimitive?.contentOrNull ?: "○ 背景速览",
+                    whySkimZh = o["whySkimZh"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                )
+            },
+            examPitfallAlertZh = fs["examPitfallAlertZh"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        )
+    }
 
     fun loadOrResolve(library: TextbookLibrary, bookId: String, fallbackTitle: String = "", fallbackPageCount: Int = 0): BookStudyPreference {
         return runCatching {

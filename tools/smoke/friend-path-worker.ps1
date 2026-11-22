@@ -482,6 +482,13 @@ function Read-ZoomStrip([string]$png, [int]$top, [int]$bottom, [int]$scale = 3) 
 function Find-ZoomText([string]$png, [int]$top, [int]$bottom, [string]$label, [int]$scale = 3) {
     return (Find-Text (Read-ZoomStrip $png $top $bottom $scale) $label)
 }
+function Find-AnchorChip($lines, [string]$png, [int]$winH) {
+    $m = $lines | Where-Object { ($_.Text -replace '\s', '') -match '原文第\d+页' } | Select-Object -First 1
+    if ($m) { return $m }
+    if (-not $png -or $winH -le 0) { return $null }
+    $zLines = Read-ZoomStrip $png ([int]($winH * 0.48)) ([int]($winH * 0.98)) 3
+    return ($zLines | Where-Object { ($_.Text -replace '\s', '') -match '原文第\d+页' } | Select-Object -First 1)
+}
 # 点完「讲讲」算不算生效：2.0 不再另开一张卡——伴读抽屉（窄窗是半屏底部抽屉）打开并切到「提问」页，
 # 顶上顶着「引文 · …」，先「正在整理…」，然后出正文和「出处」。第一次问还要先过同意框。
 # 只认这几种看得见的状态——「点过一次」不算，四路交锁时那一下常常被别的窗口吃掉。
@@ -1448,7 +1455,8 @@ try {
             if ($why5) { break }
             $loading5 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '正在按节整理' } | Select-Object -First 1
             if (-not $loading5) {
-                $kp = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^(?:核心问题|\d+[.、])' -or $_.Text -match '原文第\s*\d+\s*页' } | Select-Object -First 1
+                $kp = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^(?:核心[问同]题|\d+[.、．])' } | Select-Object -First 1
+                if (-not $kp) { $kp = Find-AnchorChip $lines $script:LastPng $winH }
             }
             if ($kp) { break }
             # 伴读包还没回来时页签行会被加载态顶下去：顺手确认没被挤回「提问」页。
@@ -1476,7 +1484,7 @@ try {
         $deadline = (Get-Date).AddSeconds(40)
         while ((Get-Date) -lt $deadline -and -not $chip) {
             $lines = $script:Last
-            $chip = $lines | Where-Object { $_.Text -match '原文第\s*\d+\s*页' } | Select-Object -First 1
+            $chip = Find-AnchorChip $lines $script:LastPng $winH
             if ($chip) { break }
             $frame = (@($lines | ForEach-Object { $_.Text }) -join '|')
             if ($frame -eq $prevB) { $stillB++ } else { $stillB = 0 }
@@ -1624,7 +1632,7 @@ try {
         $deadline = (Get-Date).AddSeconds(40)
         while ((Get-Date) -lt $deadline -and -not $chip6) {
             $lines = $script:Last
-            $chip6 = $lines | Where-Object { $_.Text -match '原文第\s*\d+\s*页' } | Select-Object -First 1
+            $chip6 = Find-AnchorChip $lines $script:LastPng $winH
             if ($chip6) { break }
             $frame = (@($lines | ForEach-Object { $_.Text }) -join '|')
             if ($frame -eq $prevE) { $stillE++ } else { $stillE = 0 }

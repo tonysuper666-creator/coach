@@ -277,6 +277,17 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         )
                     }
                     val book = ui.book
+                    val existingGradingHost = LocalPracticeGradingHost.current
+                    val activeGradingHost = remember(existingGradingHost, explainer, controller.library) {
+                        existingGradingHost ?: PracticeGradingHost(
+                            library = controller.library,
+                            gradeAndDiagnose = { req ->
+                                if (!explainer.loaded) explainer.load()
+                                explainer.gradeAndDiagnosePractice(req)
+                            },
+                        )
+                    }
+                    CompositionLocalProvider(LocalPracticeGradingHost provides activeGradingHost) {
                     when {
                         !ui.initialized && ui.screen == BookScreen.HOME && book == null && ui.catalog.isEmpty() -> {
                             // 首次从 SQLite 载入时只给一组安静的呼吸点，绝不闪空态（UX-3）。
@@ -535,6 +546,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             onRecapContinue = { run { controller.recapContinue() } },
                             hinge = hinge)
                         }
+                    }
                     }
                 }
                 // Saving a reading bookmark must not resize the page being paginated.

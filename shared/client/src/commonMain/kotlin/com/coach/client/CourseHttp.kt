@@ -193,6 +193,10 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     suspend fun courseVision(input: JsonObject): MockReply =
         postCourseEndpoint("v1/library/course/vision", input, timeoutMs = 180_000L, timeoutMsg = "视觉识别等待超时，请稍后重试。")
 
+    /** 2.0-AI-2: 课程框架逐点批改（零代写）+ 四类错因诊断与同构变式闭环。 */
+    suspend fun gradeAndDiagnosePractice(input: JsonObject): MockReply =
+        postCourseEndpoint("v1/library/practice/grade-and-diagnose", input, timeoutMs = 180_000L, timeoutMsg = "逐点批改等待超时，你的草稿已保留。")
+
     private suspend fun postCourseEndpoint(
         path: String,
         input: JsonObject,

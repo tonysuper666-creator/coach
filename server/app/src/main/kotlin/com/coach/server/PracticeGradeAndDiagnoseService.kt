@@ -606,7 +606,13 @@ class PracticeGradeAndDiagnoseService(
             3. HARD STUDENT-QUOTE RULE: Whenever `verdict` is "FULL" or "PARTIAL" (or `awardedMarks > 0`), `studentQuote` MUST be copied CHARACTER-FOR-CHARACTER as a contiguous verbatim substring from `Student Written Answer` (NO brackets, NO ellipses `...`, NO paraphrasing). Unverified quotes are forcibly zeroed by the server gate.
             4. ANTI-GHOSTWRITING RED LINE: NEVER output a `rewrite` field or model answer paragraph. `feedbackNoteZh` MUST be <= 42 Chinese characters (and <= 18 consecutive English words) stating ONLY what was earned or missed and which page to review.
             5. Provide integer `pdfPage` and a 3-to-6 word verbatim `quoteAnchor` copied from the provided course page excerpt.
-            Output ONE JSON object only: {"items": [{"cid":"...","verdict":"FULL","awardedMarks":0.0,"studentQuote":"exact contiguous substring","feedbackNoteZh":"...","pdfPage":1,"quoteAnchor":"exact verbatim words from source page"}]}
+            Output ONE strictly valid RFC-8259 JSON object only (escape any internal quotes as \" and use Unicode symbols like Ω, τ, ε instead of raw LaTeX backslashes): {"items": [{"cid":"...","verdict":"FULL","awardedMarks":0.0,"studentQuote":"exact contiguous substring","feedbackNoteZh":"...","pdfPage":1,"quoteAnchor":"exact verbatim words from source page"}]}
+        """.trimIndent()
+
+        val JSON_REPAIR_SYSTEM: String = """
+            Your previous grading output was not valid RFC-8259 JSON.
+            Re-emit ONLY ONE strictly valid JSON object with the exact schema {"items":[{"cid":"...","verdict":"FULL|PARTIAL|ZERO","awardedMarks":0.0,"studentQuote":"...","feedbackNoteZh":"...","pdfPage":1,"quoteAnchor":"..."}]}.
+            Escape any internal quotes as \" and replace raw LaTeX backslashes with Unicode symbols. Do NOT add markdown fences or prose.
         """.trimIndent()
 
         val QUOTE_REPAIR_SYSTEM: String = """
@@ -665,7 +671,31 @@ class PracticeGradeAndDiagnoseService(
             lastChannel = gradeReply.routeChannel.wireName
             recordLedger(request, PracticeGradeLimits.TASK_GRADE, gradeKey, gradeReply)
 
-            val parsedItems = parseGradedItems(gradeReply.text)
+            var parsedItems = parseGradedItems(gradeReply.text)
+            if (parsedItems.isEmpty()) {
+                val jsonRepairPrompt = buildString {
+                    append("Malformed grader output to convert into strictly valid JSON:\n")
+                    append(gradeReply.text.take(8_000))
+                    append("\n\nExpected criterion IDs: ")
+                    append(request.rubricCriteria.joinToString(", ") { it.cid })
+                }
+                val jsonRepairKey = "pjr-${sha256("${request.bookId}|${request.questionId}|$jsonRepairPrompt".toByteArray(Charsets.UTF_8)).take(16)}"
+                val jsonRepairReply = runCatching {
+                    transport.generateSection(
+                        systemPrompt = JSON_REPAIR_SYSTEM,
+                        userPrompt = jsonRepairPrompt,
+                        task = PracticeGradeLimits.TASK_GRADE,
+                        batchKey = jsonRepairKey,
+                        maxTokens = PracticeGradeLimits.BATCH_MAX_TOKENS,
+                    )
+                }.getOrNull()
+                if (jsonRepairReply != null) {
+                    lastModel = jsonRepairReply.model
+                    lastChannel = jsonRepairReply.routeChannel.wireName
+                    recordLedger(request, "practice_grade_json_repair", jsonRepairKey, jsonRepairReply)
+                    parsedItems = parseGradedItems(jsonRepairReply.text)
+                }
+            }
             val byCid = parsedItems.associateBy { it.cid }
             val evaluated = mutableListOf<GradedRubricItemResult>()
 
@@ -1164,17 +1194,124 @@ class PracticeGradeAndDiagnoseService(
         return RawVariant(stem, options, correct, explanation, pdfPage, quoteAnchor)
     }
 
-    private fun extractJsonObject(raw: String): JsonObject? {
-        val trimmed = raw.trim()
-            .removePrefix("```json")
-            .removePrefix("```")
-            .removeSuffix("```")
-            .trim()
-        runCatching { return json.parseToJsonElement(trimmed).jsonObject }
-        val start = trimmed.indexOf('{')
-        val end = trimmed.lastIndexOf('}')
-        if (start < 0 || end <= start) return null
-        return runCatching { json.parseToJsonElement(trimmed.substring(start, end + 1)).jsonObject }.getOrNull()
+    internal fun extractJsonObject(raw: String): JsonObject? {
+        val candidates = buildList {
+            val trimmed = raw.trim()
+            val fenceRegex = Regex("""(?s)```(?:json)?\s*(\{.*?\})\s*```""")
+            for (m in fenceRegex.findAll(trimmed)) {
+                add(m.groupValues[1].trim())
+            }
+            val unfenced = trimmed
+                .removePrefix("```json")
+                .removePrefix("```")
+                .removeSuffix("```")
+                .trim()
+            add(unfenced)
+            extractBalancedBraces(unfenced)?.let { add(it) }
+            val start = unfenced.indexOf('{')
+            val end = unfenced.lastIndexOf('}')
+            if (start >= 0 && end > start) {
+                add(unfenced.substring(start, end + 1))
+            }
+        }.distinct()
+
+        for (candidate in candidates) {
+            runCatching { return json.parseToJsonElement(candidate).jsonObject }
+            val repaired = repairCommonLlmJson(candidate)
+            if (repaired != candidate) {
+                runCatching { return json.parseToJsonElement(repaired).jsonObject }
+            }
+        }
+        return null
+    }
+
+    private fun extractBalancedBraces(text: String): String? {
+        val start = text.indexOf('{')
+        if (start < 0) return null
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (i in start until text.length) {
+            val ch = text[i]
+            if (inString) {
+                if (escaped) {
+                    escaped = false
+                } else if (ch == '\\') {
+                    escaped = true
+                } else if (ch == '"') {
+                    inString = false
+                }
+            } else {
+                when (ch) {
+                    '"' -> inString = true
+                    '{' -> depth++
+                    '}' -> {
+                        depth--
+                        if (depth == 0) return text.substring(start, i + 1)
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    internal fun repairCommonLlmJson(raw: String): String {
+        val sb = StringBuilder(raw.length + 32)
+        var inString = false
+        var i = 0
+        while (i < raw.length) {
+            val ch = raw[i]
+            if (!inString) {
+                if (ch == '"') {
+                    inString = true
+                    sb.append(ch)
+                } else {
+                    sb.append(ch)
+                }
+                i++
+                continue
+            }
+            when (ch) {
+                '\\' -> {
+                    val next = raw.getOrNull(i + 1)
+                    val isValidEscape = when (next) {
+                        '"', '\\', '/', 'b', 'f', 'n', 'r', 't' -> true
+                        'u' -> i + 5 < raw.length && raw.substring(i + 2, i + 6).all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
+                        else -> false
+                    }
+                    if (isValidEscape && next != null) {
+                        sb.append('\\').append(next)
+                        i += 2
+                    } else {
+                        // Escape stray backslashes such as LaTeX `\Omega`, `\tau`, `\_`
+                        sb.append("\\\\")
+                        i++
+                    }
+                }
+                '"' -> {
+                    inString = false
+                    sb.append(ch)
+                    i++
+                }
+                '\n' -> {
+                    sb.append("\\n")
+                    i++
+                }
+                '\r' -> {
+                    sb.append("\\r")
+                    i++
+                }
+                '\t' -> {
+                    sb.append("\\t")
+                    i++
+                }
+                else -> {
+                    sb.append(ch)
+                    i++
+                }
+            }
+        }
+        return sb.toString().replace(Regex(""",(\s*[}\]])"""), "$1")
     }
 
     private fun recordLedger(

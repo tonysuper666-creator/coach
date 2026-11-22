@@ -368,4 +368,49 @@ class PracticeGradeAndDiagnoseTest {
             dir.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun jsonParserRecoversLatexEscapesAndRetriesMalformedGraderReply() = runBlocking {
+        var jsonRepairInvoked = false
+        val transport = object : BatchAiTransport {
+            override suspend fun generateSection(systemPrompt: String, userPrompt: String, task: String, batchKey: String, maxTokens: Int): BatchTransportReply =
+                when (systemPrompt) {
+                    PracticeGradeAndDiagnoseService.GRADER_SYSTEM -> stubReply("Here is my grading: { malformed json without closing")
+                    PracticeGradeAndDiagnoseService.JSON_REPAIR_SYSTEM -> {
+                        jsonRepairInvoked = true
+                        // Deliberately includes raw LaTeX `\Omega` and trailing comma to test local recovery too!
+                        stubReply(
+                            """
+                            ```json
+                            {"items":[{"cid":"Q5-C1","verdict":"FULL","awardedMarks":1.0,"studentQuote":"zero-profit line ZP_H","feedbackNoteZh":"包含\Omega_1与零利润线斜率，见第197页。","pdfPage":197,"quoteAnchor":"zero-profit line",},]}
+                            ```
+                            """.trimIndent(),
+                        )
+                    }
+                    else -> stubReply("""{"isEquivalentValid":true,"predicted":"NONE","studentErrorSpan":"","diagnosisZh":"正确。"}""")
+                }
+        }
+        val svc = PracticeGradeAndDiagnoseService(transport)
+        val resp = svc.process(
+            PracticeGradeAndDiagnoseRequest(
+                mode = "GRADE_ONLY",
+                bookId = "book-q5",
+                questionStem = "Explain separating equilibrium.",
+                studentAnswer = "The zero-profit line ZP_H is flatter for high-risk individuals.",
+                rubricCriteria = listOf(
+                    PracticeRubricCriterionInput("Q5-C1", "ZP line", 1.0, 197, "zero-profit line"),
+                ),
+                sourcePages = listOf(
+                    PracticeSourcePageInput(197, "The zero-profit line for high-risk individuals is flatter than for low-risk individuals."),
+                ),
+                generateVariant = false,
+            ),
+        )
+        assertTrue(jsonRepairInvoked)
+        val item = resp.rubricItems.single()
+        assertEquals(PracticeRubricVerdict.FULL, item.verdict)
+        assertEquals(1.0, item.awardedMarks, 1e-6)
+        assertTrue(item.studentQuoteVerified)
+        assertTrue(item.anchorVerified)
+    }
 }

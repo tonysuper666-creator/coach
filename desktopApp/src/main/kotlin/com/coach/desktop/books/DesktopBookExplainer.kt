@@ -201,6 +201,9 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
     open suspend fun askCollection(input: JsonObject): CourseServerCallResult =
         callCourseEndpoint { http -> http.askCollection(input) }
 
+    open suspend fun generateCourseMock(input: JsonObject): CourseServerCallResult =
+        callCourseEndpoint { http -> http.generateCourseMock(input) }
+
     private suspend fun callCourseEndpoint(
         block: suspend (CourseHttp) -> MockReply,
     ): CourseServerCallResult {

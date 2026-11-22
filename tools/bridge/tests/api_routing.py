@@ -285,7 +285,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         tasks = {t for s in sources for t in re.findall(r'\btask\s*=\s*"([A-Za-z_]+)"', s)}
         tasks |= {t for s in sources for t in re.findall(r'"(BOOK_[A-Z_]+)"', s)}
         # Token-ledger labels only; these calls never reach the bridge.
-        tasks -= {"course_align", "course_vision_ocr"}
+        tasks -= {"course_align", "course_vision_ocr", "COLLECTION_QA"}
         self.assertTrue({"booklist_concept_align", "course_topic_map", "BOOK_SECTION_BATCH"} <= tasks)
         self.assertEqual(set(), tasks - set(CONFIG["tasks"]))
         constants = {m for s in sources for m in re.findall(r'const val [A-Z]+ = "((?:claude|gpt)-[a-z0-9.-]+)"', s)}

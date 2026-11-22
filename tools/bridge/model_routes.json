@@ -14,9 +14,10 @@
     "grade_constructed": "draft", "grade_essay": "draft", "repair_grade": "draft", "repair_essay": "draft", "JOURNAL_SUMMARY": "draft",
     "course_topic_map": "draft", "course_topic_reduce": "draft", "course_topic_math_repair": "draft", "booklist_concept_align": "draft",
     "practice_grade": "draft", "practice_diagnose": "draft", "practice_variant": "draft",
+    "course_mock_item": "draft",
     "blind_review": "review", "blind_review_existing": "review", "blind_review_planted": "review",
     "review_constructed_key": "review", "review_constructed": "review", "cross_review_grade": "review", "cross_review_essay": "review",
-    "COURSE_PLAN": "planning", "INITIAL_OUTLINE": "planning", "REVISE_OUTLINE": "planning"
+    "COURSE_PLAN": "planning", "INITIAL_OUTLINE": "planning", "REVISE_OUTLINE": "planning", "course_mock_plan": "planning"
   },
   "prices_usd_per_million": {
     "claude-haiku-5-5": {"input": 0.10, "output": 0.50, "cached": 0.01},

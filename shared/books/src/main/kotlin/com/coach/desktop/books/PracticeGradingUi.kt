@@ -175,6 +175,64 @@ internal object PracticeGradingJson {
         )
     }
 
+    fun encodeResponse(response: PracticeGradeDiagnoseResponse): JsonObject = buildJsonObject {
+        put("mode", response.mode)
+        put("totalAwarded", response.totalAwarded)
+        put("maxMarks", response.maxMarks)
+        put("summaryMetaLine", response.summaryMetaLine)
+        put("rewrittenParagraphsEmitted", response.rewrittenParagraphsEmitted)
+        put(
+            "rubricItems",
+            buildJsonArray {
+                for (item in response.rubricItems) {
+                    add(
+                        buildJsonObject {
+                            put("cid", item.cid)
+                            put("verdict", item.verdict)
+                            put("awardedMarks", item.awardedMarks)
+                            put("maxMarks", item.maxMarks)
+                            put("studentQuote", item.studentQuote)
+                            put("studentQuoteVerified", item.studentQuoteVerified)
+                            put("quoteGateZeroed", item.quoteGateZeroed)
+                            put("feedbackNoteZh", item.feedbackNoteZh)
+                            put("pdfPage", item.pdfPage)
+                            put("quoteAnchor", item.quoteAnchor)
+                            put("anchorVerified", item.anchorVerified)
+                        },
+                    )
+                }
+            },
+        )
+        response.diagnosis?.let { d ->
+            put(
+                "diagnosis",
+                buildJsonObject {
+                    put("isEquivalentValid", d.isEquivalentValid)
+                    put("errorClass", d.errorClass.name)
+                    put("studentErrorSpan", d.studentErrorSpan)
+                    put("diagnosisZh", d.diagnosisZh)
+                },
+            )
+        }
+        response.variant?.let { v ->
+            put(
+                "variant",
+                buildJsonObject {
+                    put("variantId", v.variantId)
+                    put("stem", v.stem)
+                    put("options", buildJsonArray { v.options.forEach { add(JsonPrimitive(it)) } })
+                    put("correctOption", v.correctOption)
+                    put("targetedTrapExplanation", v.targetedTrapExplanation)
+                    put("pdfPage", v.pdfPage)
+                    put("quoteAnchor", v.quoteAnchor)
+                    put("conceptKey", v.conceptKey)
+                    put("targetErrorClass", v.targetErrorClass.name)
+                    put("anchorVerified", v.anchorVerified)
+                },
+            )
+        }
+    }
+
     fun buildSingleBookRequest(
         book: Textbook,
         section: BookLesson?,

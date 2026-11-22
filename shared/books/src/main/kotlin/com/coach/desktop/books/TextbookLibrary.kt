@@ -54,7 +54,7 @@ internal data class StartupLoadSnapshot(
 
 /** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
 internal class TextbookLibrary(
-    val directory: Path, private val clock: Clock = Clock.systemDefaultZone(), private val ocr: BookOcr = BundledBookOcr,
+    val directory: Path, internal val clock: Clock = Clock.systemDefaultZone(), private val ocr: BookOcr = BundledBookOcr,
     private val streamPdfExtras: Boolean = false,
     internal val lazyPdfExtras: Boolean = false,
     private val extractBook: ((Path, String, String, BookOcr, BookImportControl) -> ExtractedBook)? = null,
@@ -1969,7 +1969,7 @@ internal class TextbookLibrary(
         runCatching { original(bookId, format) }.getOrNull()?.takeIf(Files::isRegularFile)
 
     @Synchronized fun courseDetail(courseId: String): CourseDetailSnapshot = database().use { db ->
-        CourseStore.loadCourseDetail(db, courseId)
+        CourseStore.loadCourseDetail(db, courseId, clock)
     }
 
     fun searchAllBooks(rawQuery: String, limitPerBook: Int = 5): List<Pair<BookSummary, BookSearchResult>> {

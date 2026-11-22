@@ -37,6 +37,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.coach.ui.theme.CoachTheme
+import com.coach.ui.v7.CoachCardMeta
 import com.coach.ui.v7.CoachEmptyState
 import com.coach.ui.v7.CoachLoadingDots
 import com.coach.ui.v7.PageHeader
@@ -63,6 +64,8 @@ internal fun CourseScreen(
     onSetTopicStatus: (topicId: String, status: CourseTopicStatus) -> Unit,
     onUpdateExamProfile: (CourseExamProfile) -> Unit,
     onDismissNotice: () -> Unit = {},
+    hasActiveMockExam: Boolean = false,
+    onOpenMockExam: () -> Unit = {},
 ) {
     val colors = CoachTheme.colors
     var courseMenuOpen by remember { mutableStateOf(false) }
@@ -74,9 +77,24 @@ internal fun CourseScreen(
         mutableStateOf(detail.excludedTopics.size in 1..6)
     }
 
-    val resumeTarget = remember(detail) {
-        detail.activeAnchor?.topicId?.let { tid -> detail.examinableTopics.firstOrNull { it.topicId == tid } }
-            ?: detail.examinableTopics.firstOrNull()
+    val plan = detail.countdownPlan
+    val topicGapById = remember(plan) {
+        plan?.rankedTopics?.associateBy { it.topicId }.orEmpty()
+    }
+    val orderedExaminableTopics = remember(detail.examinableTopics, plan) {
+        val rankedIds = plan?.rankedTopics?.map { it.topicId }.orEmpty()
+        if (rankedIds.isEmpty()) {
+            detail.examinableTopics
+        } else {
+            val rankIndex = rankedIds.withIndex().associate { (idx, tid) -> tid to idx }
+            detail.examinableTopics.sortedBy { rankIndex[it.topicId] ?: Int.MAX_VALUE }
+        }
+    }
+    val resumeTarget = remember(detail, plan, orderedExaminableTopics) {
+        val focusId = plan?.todayFocusTopicId
+        focusId?.let { fid -> orderedExaminableTopics.firstOrNull { it.topicId == fid && it.sources.isNotEmpty() } }
+            ?: detail.activeAnchor?.topicId?.let { tid -> orderedExaminableTopics.firstOrNull { it.topicId == tid } }
+            ?: orderedExaminableTopics.firstOrNull()
     }
 
     Box(Modifier.fillMaxSize().testTag("course-screen"), contentAlignment = Alignment.TopCenter) {
@@ -104,6 +122,14 @@ internal fun CourseScreen(
                         Text("⋯")
                     }
                     DropdownMenu(expanded = courseMenuOpen, onDismissRequest = { courseMenuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("进入考前限时综合练习") },
+                            modifier = Modifier.testTag("course-mock-exam-action"),
+                            onClick = {
+                                courseMenuOpen = false
+                                onOpenMockExam()
+                            },
+                        )
                         DropdownMenuItem(
                             text = { Text("查看本课材料清单") },
                             modifier = Modifier.testTag("course-materials-action"),
@@ -147,6 +173,27 @@ internal fun CourseScreen(
                 meta = "已纳入 ${detail.materials.size} 份材料 · 必考专题 ${detail.examinableTopics.size} 项",
             )
 
+            if (hasActiveMockExam) {
+                PaperCard(Modifier.fillMaxWidth().testTag("course-active-mock-banner")) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f).padding(end = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("还有一套未交卷模考", style = MaterialTheme.typography.titleSmall, color = colors.fgPrimary)
+                            CoachCardMeta("作答草稿与计时仍在保存。")
+                        }
+                        PaperButton(
+                            onClick = onOpenMockExam,
+                            modifier = Modifier.testTag("course-resume-mock-btn"),
+                        ) {
+                            Text("继续未交卷模考")
+                        }
+                    }
+                }
+            }
+
             if (busy) {
                 CoachLoadingDots(label = "正在对齐或整理课程材料…")
             }
@@ -171,21 +218,23 @@ internal fun CourseScreen(
                 Text(
                     when {
                         resumeTarget == null -> "导入大纲、讲义或转写开始备考"
+                        plan?.todayFocusTopicId == resumeTarget.topicId -> "继续今日冲刺 · ${resumeTarget.weekLabel}"
                         detail.activeAnchor?.topicId == resumeTarget.topicId -> "继续上次专题 · ${resumeTarget.weekLabel}"
                         else -> "开始本周备考 · ${resumeTarget.weekLabel}"
                     },
                 )
             }
 
-            if (detail.examinableTopics.isEmpty() && detail.pendingTopics.isEmpty()) {
+            if (orderedExaminableTopics.isEmpty() && detail.pendingTopics.isEmpty()) {
                 CoachEmptyState(
                     title = "还没有整理出必考专题",
                     hint = "可从右上角 ⋯ 导入大纲、讲义、习题答案或课堂录音转写，也可以拖入多个课程文件。",
                 )
             } else {
-                detail.examinableTopics.forEach { topic ->
+                orderedExaminableTopics.forEach { topic ->
                     CourseTopicCard(
                         topic = topic,
+                        planMetaLine = topicGapById[topic.topicId]?.cardMetaLine.orEmpty(),
                         onOpen = { onOpenTopic(topic) },
                         onRenameClick = { renamingTopic = topic },
                         onUnlinkClick = { unlinkingTopic = topic },
@@ -389,6 +438,7 @@ internal fun CourseScreen(
 @Composable
 private fun CourseTopicCard(
     topic: CourseTopicEntry,
+    planMetaLine: String = "",
     onOpen: () -> Unit,
     onRenameClick: () -> Unit,
     onUnlinkClick: () -> Unit,
@@ -465,6 +515,13 @@ private fun CourseTopicCard(
                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
                 color = colors.fgPrimary,
             )
+
+            if (planMetaLine.isNotBlank()) {
+                CoachCardMeta(
+                    text = planMetaLine,
+                    modifier = Modifier.testTag("topic-plan-meta-${topic.topicId}"),
+                )
+            }
 
             if (topic.sources.isNotEmpty()) {
                 FlowRow(
@@ -700,7 +757,7 @@ private fun CourseExamProfileDialog(
         confirmButton = {
             PaperButton(onClick = {
                 onSave(
-                    CourseExamProfile(
+                    profile.copy(
                         examDate = examDate.trim(),
                         examDateTentative = dateTentative,
                         examFormat = examFormat.trim(),
@@ -757,6 +814,7 @@ private fun CourseTagChip(text: String, warm: Boolean) {
 
 private fun buildExamSummaryLine(detail: CourseDetailSnapshot): String {
     val p = detail.examProfile
+    val planLine = detail.countdownPlan?.takeIf { detail.examinableTopics.isNotEmpty() }?.headerSummaryLine
     val datePart = if (p.examDate.isNotBlank()) {
         "考试日期：${p.examDate}${if (p.examDateTentative) "（暂定）" else ""}"
     } else {
@@ -767,5 +825,5 @@ private fun buildExamSummaryLine(detail: CourseDetailSnapshot): String {
     } else {
         "题型暂定"
     }
-    return "$datePart · $fmtPart"
+    return if (!planLine.isNullOrBlank()) "$planLine · $datePart · $fmtPart" else "$datePart · $fmtPart"
 }

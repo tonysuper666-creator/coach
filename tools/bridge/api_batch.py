@@ -22,7 +22,7 @@ from api_route import ApiFailure, cost, route, vendor
 TASKS = frozenset({"gen_mcq", "repair_mcq_sources", "blind_review",
                    "gen_constructed", "repair_constructed_sources", "review_constructed",
                    "BOOK_SECTION_BATCH", "BOOK_EXERCISE_HINTS",
-                   "practice_grade", "practice_diagnose", "practice_variant"})
+                   "practice_grade", "practice_diagnose", "practice_variant", "course_mock_item"})
 ROOTS = {"anthropic": "https://api.anthropic.com/v1", "openai": "https://api.openai.com/v1"}
 
 

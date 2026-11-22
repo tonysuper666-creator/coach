@@ -14,6 +14,7 @@ import kotlinx.serialization.json.Json
 import java.sql.Connection
 import java.sql.ResultSet
 import java.sql.Types
+import java.time.LocalDate
 
 /** Today's review in one order, capped like the product promises; deferred cards stay due for tomorrow. */
 internal data class LocalReviewQueue(val cards: List<LocalBookReview>, val deferred: Int) {
@@ -77,7 +78,11 @@ internal class TextbookReviewStore(
     }
 
     private val fsrsConfig = FsrsConfig()
-    private val dailyQueue = FsrsDailyQueue()
+    private val dailyQueue = FsrsDailyQueue(
+        defaultCap = ExamCountdownPlanner.NORMAL_FSRS_CAP,
+        preExamCap = ExamCountdownPlanner.PRE_EXAM_FSRS_CAP,
+        preExamWindowDays = ExamCountdownPlanner.PRE_EXAM_WINDOW_DAYS,
+    )
 
     private fun rating(correct: Boolean) = if (correct) FsrsRating.GOOD else FsrsRating.AGAIN
 
@@ -159,7 +164,9 @@ internal class TextbookReviewStore(
                 waitingDays,
             )
         }
-        val cap = dailyQueue.capFor(day, null)
+        val todayDate = LocalDate.ofEpochDay(day)
+        val nearestExamDay = ExamCountdownPlanner.nearestUpcomingExamEpochDay(db, todayDate)
+        val cap = dailyQueue.capFor(day, nearestExamDay)
         val ordered = scored.sortedWith(
             compareByDescending<Triple<FsrsQueueCard, Double, Long>> { it.second }
                 .thenByDescending { it.third }

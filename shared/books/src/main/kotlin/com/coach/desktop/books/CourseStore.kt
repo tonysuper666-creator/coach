@@ -3,6 +3,8 @@ package com.coach.desktop.books
 import java.security.MessageDigest
 import java.sql.Connection
 import java.sql.Types
+import java.time.Clock
+import java.time.LocalDate
 import java.util.UUID
 
 internal data class CourseMaterialLinkSpec(
@@ -793,7 +795,11 @@ internal object CourseStore {
         }
     }
 
-    fun loadCourseDetail(db: Connection, courseId: String): CourseDetailSnapshot {
+    fun loadCourseDetail(
+        db: Connection,
+        courseId: String,
+        clock: Clock = Clock.systemDefaultZone(),
+    ): CourseDetailSnapshot {
         ensureReady(db)
         val col = db.prepareStatement(
             "SELECT title, metadata_json, exam_date, last_active_anchor_json, updated_at FROM collections WHERE id=?",
@@ -928,7 +934,7 @@ internal object CourseStore {
             sanitizedNotes += countSanitizedNotes(db, m.bookId)
         }
 
-        return CourseDetailSnapshot(
+        val snapshot = CourseDetailSnapshot(
             courseId = courseId,
             title = col.first,
             examProfile = col.second,
@@ -940,6 +946,13 @@ internal object CourseStore {
             spoilerSanitizedCount = sanitizedNotes,
             alignedAt = col.fourth,
         )
+        val plan = ExamCountdownPlanner.planForCourse(
+            db = db,
+            detail = snapshot,
+            today = LocalDate.now(clock),
+            nowMs = clock.millis(),
+        )
+        return snapshot.copy(countdownPlan = plan)
     }
 
     fun loadPagesForBook(db: Connection, bookId: String, maxPages: Int = 500): List<BookPage> =

@@ -201,6 +201,10 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     suspend fun askCollection(input: JsonObject): MockReply =
         postCourseEndpoint("v1/library/collection/ask", input, timeoutMs = 120_000L, timeoutMsg = "跨材料问答等待超时，请重试。")
 
+    /** 2.0-AI-4: 按公开课程手册规格生成整门课考前限时模拟卷与精确验算核对。 */
+    suspend fun generateCourseMock(input: JsonObject): MockReply =
+        postCourseEndpoint("v1/library/course/mock/generate", input, timeoutMs = 240_000L, timeoutMsg = "模考出卷等待超时，请重试。")
+
     private suspend fun postCourseEndpoint(
         path: String,
         input: JsonObject,

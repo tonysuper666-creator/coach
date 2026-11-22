@@ -67,6 +67,9 @@ internal fun SingleBookCompanionPanel(
     draft: ChapterPracticeDraft,
     onDraftChange: (ChapterPracticeDraft) -> Unit,
     onOpenAnchor: (BookCompanionAnchor) -> Unit,
+    studyPreference: BookStudyPreference = BookStudyPreference(bookId = book.id),
+    onUpdateStudyPreference: (BookStudyPreference, Boolean) -> Unit = { _, _ -> },
+    onJumpPage: (Int) -> Unit = { p -> onOpenAnchor(BookCompanionAnchor(p, "", 0, 0, "")) },
     onCommitQuizAnswer: (BookLesson, Int, Practice, PracticeAnswer) -> Unit,
     onCommitPretestAnswer: ((BookLesson, Int, Practice, PracticeAnswer) -> Unit)? = null,
     onAskAboutText: (String) -> Unit,
@@ -145,7 +148,30 @@ internal fun SingleBookCompanionPanel(
     }
 
     Column(modifier.fillMaxSize().testTag("single-book-companion")) {
-        // 5-module selector strip (scrollable, zero PrimaryButton here to obey UX-4)
+        // In-place Study Mode bar at top of companion drawer (Click 1 open -> Click 2 switch, 0 data loss)
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 7.dp)
+                .testTag("companion-mode-bar"),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            StudyModeSelectorButton(
+                preference = studyPreference,
+                onUpdatePreference = onUpdateStudyPreference,
+                compact = true,
+                tag = "companion-mode-trigger",
+            )
+            CoachCardMeta(
+                "${studyPreference.detailLevel.labelZh} · ${studyPreference.explainLang.shortZh}",
+                Modifier.testTag("companion-mode-knobs-summary"),
+            )
+        }
+        HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.5f))
+
+        // 5-module selector strip shown in READ_THROUGH mode (zero PrimaryButton here to obey UX-4)
+        if (studyPreference.mode == BookStudyMode.READ_THROUGH) {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -180,6 +206,7 @@ internal fun SingleBookCompanionPanel(
             }
         }
         HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.7f))
+        }
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
             Column(
@@ -200,8 +227,13 @@ internal fun SingleBookCompanionPanel(
 
                 // Header meta line
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    val headerPrefix = if (studyPreference.mode == BookStudyMode.READ_THROUGH) {
+                        activeModule.fullTitle
+                    } else {
+                        studyPreference.mode.titleZh
+                    }
                     Text(
-                        "${activeModule.fullTitle} · ${chapterGroup.chapterTitle}",
+                        "$headerPrefix · ${chapterGroup.chapterTitle}",
                         style = MaterialTheme.typography.titleSmall,
                         color = colors.fgPrimary,
                         maxLines = 2,
@@ -212,6 +244,25 @@ internal fun SingleBookCompanionPanel(
                         "第 ${chapterGroup.firstPage}–${chapterGroup.lastPage} 页 · 随时可停，进度与草稿自动保存",
                         Modifier.testTag("companion-module-meta"),
                     )
+                }
+
+                if (studyPreference.mode != BookStudyMode.READ_THROUGH) {
+                    val readyPack = (packState as? CompanionPackState.Ready)?.pack
+                    ModeDistinctCompanionSurface(
+                        book = book,
+                        preference = studyPreference,
+                        chapterGroup = chapterGroup,
+                        currentSectionIndex = currentSectionIndex,
+                        pack = readyPack,
+                        draft = draft,
+                        onUpdateDraft = { updateDraft(it) },
+                        onUpdateInquiry = { q ->
+                            onUpdateStudyPreference(studyPreference.copy(inquiryQuestion = q, userLocked = true), false)
+                        },
+                        onJumpPage = onJumpPage,
+                        onOpenAnchor = onOpenAnchor,
+                    )
+                    return@Column
                 }
 
                 when (val state = packState) {

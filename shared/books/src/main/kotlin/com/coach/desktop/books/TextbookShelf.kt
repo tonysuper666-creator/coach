@@ -131,6 +131,7 @@ internal fun LibraryHome(
     onOpenCollection: (CollectionSummary) -> Unit = {},
     onMultiDropAction: (MultiDropAction) -> Unit = {},
     onDismissMultiDrop: () -> Unit = {},
+    library: TextbookLibrary? = null,
 ) {
     val colors = CoachTheme.colors
     val scroll = rememberScrollState()
@@ -247,8 +248,14 @@ internal fun LibraryHome(
                 val focusCollection = if (focusBook == null) activeCollections.firstOrNull() else null
 
                 val focusAndReviewBlock: @Composable () -> Unit = {
-                    // 1. 顶部焦点卡：全屏唯一 PrimaryButton（「继续」）。
+                    // 1. 顶部焦点卡：全屏唯一 PrimaryButton（「继续」）+ 就地学法切换器（≤2 击开非默认学法）。
                     if (focusBook != null) {
+                        var focusPref by remember(focusBook.id, library) {
+                            mutableStateOf(
+                                if (library != null) StudyModeStore.loadOrResolve(library, focusBook.id, focusBook.title, focusBook.pages.size)
+                                else BookStudyPreference(bookId = focusBook.id),
+                            )
+                        }
                         val pageTotal = focusBook.pages.size.coerceAtLeast(1)
                         val chapterTitle = focusBook.lessons.firstOrNull {
                             focusBook.readingPage in it.firstPage..it.lastPage
@@ -260,7 +267,7 @@ internal fun LibraryHome(
                         ) {
                             Row(
                                 Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -293,11 +300,20 @@ internal fun LibraryHome(
                                                 append(chapterTitle)
                                                 append(" · ")
                                             }
-                                            append("上次停在第 ${focusBook.readingPage} / $pageTotal 页")
+                                            append("第 ${focusBook.readingPage} / $pageTotal 页 · ${focusPref.defaultReason}")
                                         }
                                     }
                                     CoachCardMeta(metaText, Modifier.testTag("home-focus-meta"))
                                 }
+                                StudyModeSelectorButton(
+                                    preference = focusPref,
+                                    onUpdatePreference = { next, modeChanged ->
+                                        focusPref = if (library != null) StudyModeStore.save(library, next) else next
+                                        if (modeChanged && !ui.busy) onRead()
+                                    },
+                                    compact = true,
+                                    tag = "home-mode-trigger",
+                                )
                                 PrimaryButton(
                                     onClick = onRead,
                                     enabled = !ui.busy,
@@ -306,6 +322,12 @@ internal fun LibraryHome(
                             }
                         }
                     } else if (focusSummary != null) {
+                        var summaryPref by remember(focusSummary.id, library) {
+                            mutableStateOf(
+                                if (library != null) StudyModeStore.loadOrResolve(library, focusSummary.id, focusSummary.title, focusSummary.pageCount)
+                                else BookStudyPreference(bookId = focusSummary.id),
+                            )
+                        }
                         PaperCard(
                             Modifier.fillMaxWidth().testTag("home-focus-card"),
                             color = colors.surface1,
@@ -313,7 +335,7 @@ internal fun LibraryHome(
                         ) {
                             Row(
                                 Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -327,10 +349,19 @@ internal fun LibraryHome(
                                         modifier = Modifier.testTag("home-focus-title"),
                                     )
                                     CoachCardMeta(
-                                        "上次停在第 ${focusSummary.readingPage} / ${focusSummary.pageCount.coerceAtLeast(1)} 页",
+                                        "第 ${focusSummary.readingPage} / ${focusSummary.pageCount.coerceAtLeast(1)} 页 · ${summaryPref.defaultReason}",
                                         Modifier.testTag("home-focus-meta"),
                                     )
                                 }
+                                StudyModeSelectorButton(
+                                    preference = summaryPref,
+                                    onUpdatePreference = { next, modeChanged ->
+                                        summaryPref = if (library != null) StudyModeStore.save(library, next) else next
+                                        if (modeChanged && !ui.busy) onOpenBook(focusSummary.id)
+                                    },
+                                    compact = true,
+                                    tag = "home-mode-trigger",
+                                )
                                 PrimaryButton(
                                     onClick = { onOpenBook(focusSummary.id) },
                                     enabled = !ui.busy,

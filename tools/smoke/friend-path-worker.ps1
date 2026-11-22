@@ -1479,18 +1479,27 @@ try {
             Fail 5 '切到「讲解」页签后 180 秒内没等到本章要点（见 5-explain-wait*.png）'
         }
         # 要点标题和锚点不一定同屏：标题认到了还看不到「原文第 N 页」，就往下滚抽屉体把它滚进视野；
-        # 滚了四帧画面不动就停手，别把 40 秒全花在推同一屏上。
-        $chip = $null; $stillB = 0; $prevB = ''
+        # 避开底边 48dp HUD 触发区（y > winH*0.80），避免 Hover/Click 被底部进度条劫持。
+        $chip = $null; $lastChip = $null; $stillB = 0; $prevB = ''
+        Hover $midX ([int]($winH * 0.50)); Start-Sleep -Milliseconds 250
         $deadline = (Get-Date).AddSeconds(40)
-        while ((Get-Date) -lt $deadline -and -not $chip) {
+        while ((Get-Date) -lt $deadline) {
             $lines = $script:Last
-            $chip = Find-AnchorChip $lines $script:LastPng $winH
-            if ($chip) { break }
+            $cand = Find-AnchorChip $lines $script:LastPng $winH
+            if ($cand) {
+                $lastChip = $cand
+                $cy = (Get-LineBox $cand).Y
+                if ($cy -le [int]($winH * 0.80) -or $stillB -ge 3) {
+                    $chip = $cand
+                    break
+                }
+            }
             $frame = (@($lines | ForEach-Object { $_.Text }) -join '|')
             if ($frame -eq $prevB) { $stillB++ } else { $stillB = 0 }
             $prevB = $frame
-            if ($stillB -ge 4) { break }
-            Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.78)) -3
+            if ($stillB -ge 4) { $chip = $lastChip; break }
+            $delta = if ($cand) { -2 } else { -3 }
+            Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.72)) $delta
             Start-Sleep -Milliseconds 700
             $null = Shot 5 'explain-full'
         }
@@ -1499,7 +1508,11 @@ try {
         Note "步骤5 本章要点的原文锚点：$($chip.Text)"
         $bx = Get-LineBox $chip
         $bxc = [int](($bx.X1 + $bx.X2) / 2); $byc = [int]$bx.Y
-        Hover $bxc $byc; Start-Sleep -Milliseconds 500
+        if ($byc -le [int]($winH * 0.82)) {
+            Hover $bxc $byc; Start-Sleep -Milliseconds 300
+        } else {
+            Hover $midX ([int]($winH * 0.45)); Start-Sleep -Milliseconds 250
+        }
         $null = Click-At $bxc $byc; Start-Sleep -Seconds 2
         # 窄窗（winbox 752×552）是底部半屏抽屉：点锚点只跳页、不自动收抽屉，堆在底缘的页号条压在抽屉上沿之上，
         # 所以抽屉开着就能核对页码；宽屏浮层会自动收起抽屉，页号同样在底缘。

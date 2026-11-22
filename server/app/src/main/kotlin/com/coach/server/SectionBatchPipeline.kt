@@ -55,6 +55,16 @@ object SectionBatchLimits {
     const val PROMPT_OVERHEAD_TOKENS: Int = 520
     const val MAX_CONTENT_TOKENS_PER_CHUNK: Int = MAX_REQUEST_TOKENS - PROMPT_OVERHEAD_TOKENS
     const val DEFAULT_CONCURRENCY: Int = 4
+
+    /**
+     * Output budget per chunk reply. `claude-haiku-5-5` runs adaptive thinking whenever a request leaves
+     * `thinking` unset (the bridge does), and thinking counts toward `max_tokens`. The old 1,800 default was
+     * spent on thinking before the JSON pack finished, so the bridge got `stop_reason = max_tokens` and
+     * answered `api_incomplete`. Both values stay under the bridge's 16,000 output cap; the CodeBuddy
+     * primary ignores the value.
+     */
+    const val BODY_CHUNK_MAX_OUTPUT_TOKENS: Int = 12_000
+    const val EXERCISE_CHUNK_MAX_OUTPUT_TOKENS: Int = 8_000
     const val EN_NGRAM_LIMIT: Int = 8
     const val ZH_NGRAM_LIMIT: Int = 12
 }
@@ -1147,7 +1157,12 @@ class SectionConcurrentCompanionPipeline(
         val userPrompt = buildChunkPrompt(request.chapterTitle, chunk)
         val batchKey = sha256("${request.bookId}:${request.chapterId}:${chunk.sectionId}:${chunk.chunkIndex}".toByteArray())
         val task = if (chunk.isExerciseSection) "BOOK_EXERCISE_HINTS" else "BOOK_SECTION_BATCH"
-        val reply = transport.generateSection(systemPrompt, userPrompt, task, batchKey)
+        val maxTokens = if (chunk.isExerciseSection) {
+            SectionBatchLimits.EXERCISE_CHUNK_MAX_OUTPUT_TOKENS
+        } else {
+            SectionBatchLimits.BODY_CHUNK_MAX_OUTPUT_TOKENS
+        }
+        val reply = transport.generateSection(systemPrompt, userPrompt, task, batchKey, maxTokens)
         val costMicro = TokenLedgerPricing.costMicrodollars(
             reply.routeChannel,
             reply.inputTokens,

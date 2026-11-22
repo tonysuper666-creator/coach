@@ -66,6 +66,7 @@ class SectionBatchPipelineTest {
 
         val concurrentActive = AtomicInteger(0)
         val maxObservedConcurrency = AtomicInteger(0)
+        val maxTokensByTask = java.util.concurrent.ConcurrentHashMap<String, MutableSet<Int>>()
 
         val stubTransport = object : BatchAiTransport {
             override suspend fun generateSection(
@@ -75,6 +76,7 @@ class SectionBatchPipelineTest {
                 batchKey: String,
                 maxTokens: Int,
             ): BatchTransportReply {
+                maxTokensByTask.computeIfAbsent(task) { java.util.concurrent.ConcurrentHashMap.newKeySet() }.add(maxTokens)
                 val now = concurrentActive.incrementAndGet()
                 maxObservedConcurrency.accumulateAndGet(now, ::maxOf)
                 delay(40)
@@ -204,6 +206,13 @@ class SectionBatchPipelineTest {
         assertEquals(1, pack.exerciseHints.size, "Exercises must populate 3-tier exerciseHints")
         assertEquals("习题 1", pack.exerciseHints.single().problemLabel)
 
+        // TON-1795: Haiku 5.5 thinking counts toward max_tokens, so chunks must not fall back to the 1,800 default.
+        assertEquals<Set<Int>?>(setOf(SectionBatchLimits.BODY_CHUNK_MAX_OUTPUT_TOKENS), maxTokensByTask["BOOK_SECTION_BATCH"])
+        assertEquals<Set<Int>?>(setOf(SectionBatchLimits.EXERCISE_CHUNK_MAX_OUTPUT_TOKENS), maxTokensByTask["BOOK_EXERCISE_HINTS"])
+        for (budget in listOf(SectionBatchLimits.BODY_CHUNK_MAX_OUTPUT_TOKENS, SectionBatchLimits.EXERCISE_CHUNK_MAX_OUTPUT_TOKENS)) {
+            assertTrue(budget in 4_000..16_000, "Chunk output budget must leave room for thinking and stay under the bridge cap: $budget")
+        }
+
         // Verify UTF-16 anchor verification & rejection of fabricated anchors
         val verifiedKp = pack.keyPoints.first()
         val kpAnchor = verifiedKp.anchor
@@ -303,11 +312,18 @@ class SectionBatchPipelineTest {
         server.start()
         try {
             val transport = HaikuRealtimeBridgeTransport(BridgeClient(BridgeConfig(baseUrl = "http://127.0.0.1:${server.address.port}")))
-            val reply = transport.generateSection("system", "user", "BOOK_SECTION_BATCH", "d".repeat(64), 1800)
+            val reply = transport.generateSection(
+                "system", "user", "BOOK_SECTION_BATCH", "d".repeat(64), SectionBatchLimits.BODY_CHUNK_MAX_OUTPUT_TOKENS,
+            )
             assertEquals(CompanionRouteChannel.HAIKU_REALTIME, reply.routeChannel)
             assertEquals(1, seen.size)
             assertNull(seen.single().first, "Interactive overflow must not opt into background batch")
             assertEquals("claude-haiku-5-5", seen.single().second["model"]?.let { (it as kotlinx.serialization.json.JsonPrimitive).content })
+            assertEquals(
+                SectionBatchLimits.BODY_CHUNK_MAX_OUTPUT_TOKENS.toString(),
+                seen.single().second["max_tokens"]?.let { (it as kotlinx.serialization.json.JsonPrimitive).content },
+                "The chunk output budget must reach the bridge as max_tokens",
+            )
         } finally {
             server.stop(0)
         }

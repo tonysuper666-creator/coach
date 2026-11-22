@@ -1427,13 +1427,13 @@ try {
         # 620 页的书按节整理要点要时间，最多等 180 秒；认出任何一种终态就往下走，不干等满。
         # OCR 把「讲解服务」读成「讠爿解务」、「暂」读成「暫」，只有「连不上」三个字一直干净：
         # 认这句就认「连不上」，别再依赖它前面的主语（20:02 那轮因此把「服务连不上」当成「界面变了」）。
-        $why5re = '本章暂无提取要点|当前页暂未归入正文小节|登录后可使用本章伴读|伴读整理已在设置中关闭|去连接服务|连不上|没顾上|这次没讲成'
-        $transient5 = '连不上|没顾上|这次没讲成'
+        $why5re = '本章暂无提取要点|当前页暂未归入正文小节|登录后可使用本章伴读|伴读整理已在设置中关闭|去连接服务|连不上|没顾上|这次没讲成|不可用'
+        $transient5 = '连不上|没顾上|这次没讲成|不可用'
         $deadline = (Get-Date).AddSeconds(180); $kp = $null; $why5 = $null; $waited = 0; $retries5 = 0
         while ((Get-Date) -lt $deadline -and -not $kp -and -not $why5) {
             Start-Sleep -Seconds 2; $waited++
             $lines = Shot 5 "explain-wait$waited"
-            # 先认终态：出错时空卡上面照样顶着「本章要点 · <本章>」这个标题，先看标题会把失败当成成功。
+            # 先认终态：出错和加载态顶部都照样顶着「本章要点 · <本章>」这个标题，先看标题会把加载或失败当成成功。
             $why5 = $lines | Where-Object { ($_.Text -replace '\s', '') -match $why5re } | Select-Object -First 1
             if ($why5 -and ($why5.Text -replace '\s', '') -match $transient5 -and $retries5 -lt 2) {
                 $retry5 = Has $lines @('重试')
@@ -1446,8 +1446,10 @@ try {
                 }
             }
             if ($why5) { break }
-            $kp = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^本章要点' } | Select-Object -First 1
-            if (-not $kp) { $kp = $lines | Where-Object { $_.Text -match '原文第\s*\d+\s*页' } | Select-Object -First 1 }
+            $loading5 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '正在按节整理' } | Select-Object -First 1
+            if (-not $loading5) {
+                $kp = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^(?:核心问题|\d+[.、])' -or $_.Text -match '原文第\s*\d+\s*页' } | Select-Object -First 1
+            }
             if ($kp) { break }
             # 伴读包还没回来时页签行会被加载态顶下去：顺手确认没被挤回「提问」页。
             if (Has $lines @('问这句的意思')) {

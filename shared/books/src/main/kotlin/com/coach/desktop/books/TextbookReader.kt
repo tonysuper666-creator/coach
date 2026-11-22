@@ -403,10 +403,17 @@ internal fun TextbookReader(
     }
     var pageFocused by remember { mutableStateOf(false) }
     var tocOpen by remember(book.id) { mutableStateOf(false) }
+    var studyPreference by remember(book.id) {
+        mutableStateOf(StudyModeStore.loadOrResolve(library, book.id, book.title, book.pages.size))
+    }
     val initialCompanionOpen = openPairing || (
         ui.source == null && (
             (resumeDraft?.companionOpen == true && resumeDraft.hasMeaningfulDraft()) ||
-                (courseContext != null && courseContext.resumeDraft?.companionOpen != false)
+                (courseContext != null && courseContext.resumeDraft?.companionOpen != false) ||
+                (studyPreference.userLocked &&
+                    studyPreference.mode != BookStudyMode.READ_THROUGH &&
+                    studyPreference.detailLevel != ExplainDetailLevel.ORIGINAL_ONLY &&
+                    resumeDraft?.companionOpen != false)
             )
         )
     val initialCompanionTab = remember(book.id, resumeDraft?.companionTab) {
@@ -464,9 +471,6 @@ internal fun TextbookReader(
     val proactivityPolicy = remember(book.id) { QuietProactivityPolicy() }
     var activeWhisper by remember(book.id) { mutableStateOf<MarginWhisperCandidate?>(null) }
     var activeCheckpoint by remember(book.id) { mutableStateOf<EndOfSectionCheckpointData?>(null) }
-    var studyPreference by remember(book.id) {
-        mutableStateOf(StudyModeStore.loadOrResolve(library, book.id, book.title, book.pages.size))
-    }
     var lastTrackedPage by remember(book.id) { mutableStateOf<Int?>(null) }
     var lastTrackedSection by remember(book.id) { mutableStateOf<BookLesson?>(null) }
     var pendingNavigationIsJump by remember(book.id) { mutableStateOf(false) }

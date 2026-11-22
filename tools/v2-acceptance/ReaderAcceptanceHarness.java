@@ -1942,27 +1942,30 @@ public final class ReaderAcceptanceHarness {
                 clickTagWin32(win, "mode-option-BOOK_MAP");
                 homeToNonDefaultClicks++;
                 waitFor(6000, () -> findNodeByTag(win, "textbook-reader") != null);
-                Thread.sleep(1000);
-
-                // Ensure at Ch.8 p.179 and capture Pure Read first
+                if (!waitFor(4000, () -> findNodeByTag(win, "mode-surface-BOOK_MAP") != null)) {
+                    throw new IllegalStateException("Expected immediate mode-surface-BOOK_MAP First Screen after 2-click Home selection");
+                }
                 runSuspend(c -> controller.page(179, c));
-                Thread.sleep(800);
+                Thread.sleep(700);
                 String beforeDigest = queryModeDbStateDigest(libWork);
                 int pageBefore = controllerPage(controller);
 
-                dumpWin32(win, shotsDir, "modes", "1280x820", "03_pure_read_ch8");
+                // Landed directly in BOOK_MAP First Screen with 2 clicks total
+                dumpWin32(win, shotsDir, "modes", "1280x820", "04_mode_BOOK_MAP");
 
-                // Open companion drawer to verify & capture all 6 modes in real OS window (<= 2 clicks per switch)
+                // Verify closing companion returns to 100% clean pure read, then reopen to cycle remaining 5 modes
                 revealV2HudWin32(win);
-                if (findNodeByTag(win, "immersive-companion-drawer") == null) {
+                if (findNodeByTag(win, "immersive-companion-drawer") != null) {
                     clickTagWin32(win, "immersive-companion-toggle");
-                    waitFor(4000, () -> findNodeByTag(win, "companion-mode-trigger") != null);
-                }
-                if (!waitFor(3000, () -> findNodeByTag(win, "mode-surface-BOOK_MAP") != null)) {
-                    throw new IllegalStateException("Expected mode-surface-BOOK_MAP after Home selection");
+                    waitFor(3000, () -> findNodeByTag(win, "immersive-companion-drawer") == null);
                 }
                 Thread.sleep(500);
-                dumpWin32(win, shotsDir, "modes", "1280x820", "04_mode_BOOK_MAP");
+                dumpWin32(win, shotsDir, "modes", "1280x820", "03_pure_read_ch8");
+
+                revealV2HudWin32(win);
+                clickTagWin32(win, "immersive-companion-toggle");
+                waitFor(4000, () -> findNodeByTag(win, "companion-mode-trigger") != null);
+                Thread.sleep(400);
 
                 String[] switchSeq = {
                     "EXAM_FOCUS", "DIAGNOSTIC_SKIP", "PROBLEM_DRIVEN", "QUESTION_DRIVEN", "READ_THROUGH"

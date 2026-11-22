@@ -64,7 +64,7 @@ object SectionBatchLimits {
      * primary ignores the value.
      */
     const val BODY_CHUNK_MAX_OUTPUT_TOKENS: Int = 12_000
-    const val EXERCISE_CHUNK_MAX_OUTPUT_TOKENS: Int = 8_000
+    const val EXERCISE_CHUNK_MAX_OUTPUT_TOKENS: Int = 12_000
     const val EN_NGRAM_LIMIT: Int = 8
     const val ZH_NGRAM_LIMIT: Int = 12
 }
@@ -166,6 +166,7 @@ data class CompanionPipelineStats(
     val totalCostMicrodollars: Long,
     val routeChannelsUsed: List<String>,
     val fromCache: Boolean = false,
+    val mathAudit: MathVerificationStats = MathVerificationStats(),
 )
 
 data class ChapterCompanionPack(
@@ -291,6 +292,7 @@ object ChapterCompanionCodec {
             put("totalCostMicrodollars", pack.stats.totalCostMicrodollars)
             put("routeChannelsUsed", buildJsonArray { pack.stats.routeChannelsUsed.forEach { add(JsonPrimitive(it)) } })
             put("fromCache", pack.stats.fromCache)
+            put("mathAudit", pack.stats.mathAudit.toJson())
         })
     }
 
@@ -367,6 +369,7 @@ object ChapterCompanionCodec {
                 totalCostMicrodollars = st?.get("totalCostMicrodollars")?.jsonPrimitive?.longOrNull ?: 0L,
                 routeChannelsUsed = (st?.get("routeChannelsUsed") as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull },
                 fromCache = st?.get("fromCache")?.jsonPrimitive?.booleanOrNull ?: false,
+                mathAudit = MathVerificationStats.fromJson(st?.get("mathAudit") as? JsonObject),
             ),
         )
     }
@@ -605,6 +608,7 @@ object Utf16AnchorVerifier {
 /** Verbatim overlap gate: English 8-gram = 0, Chinese 12-gram = 0. */
 object VerbatimOverlapGuard {
     private val EN_WORD = Regex("[a-z0-9]+(?:'[a-z0-9]+)?")
+    private val EN_WORD_MIXED = Regex("[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?")
 
     fun englishWords(text: String): List<String> =
         EN_WORD.findAll(Normalizer.normalize(text, Normalizer.Form.NFKC).lowercase()).map { it.value }.toList()
@@ -659,30 +663,40 @@ object VerbatimOverlapGuard {
         for (i in 0..(srcZh.length - SectionBatchLimits.ZH_NGRAM_LIMIT)) {
             srcZhGrams += srcZh.substring(i, i + SectionBatchLimits.ZH_NGRAM_LIMIT)
         }
-        var current = prose
-        // Iteratively break offending >=8-word English spans by compacting long inline symbol/quote chains.
-        val matches = EN_WORD.findAll(Normalizer.normalize(current, Normalizer.Form.NFKC)).toList()
-        if (matches.size >= SectionBatchLimits.EN_NGRAM_LIMIT) {
+        var current = Normalizer.normalize(prose, Normalizer.Form.NFKC)
+        // Iteratively shorten offending >=8-word English verbatim runs cleanly without injecting bracketed placeholders.
+        var enSafety = 0
+        while (enSafety < 24) {
+            enSafety++
+            val matches = EN_WORD_MIXED.findAll(current).toList()
+            if (matches.size < SectionBatchLimits.EN_NGRAM_LIMIT) break
             val lowered = matches.map { it.value.lowercase() }
-            val offendingStarts = mutableListOf<Int>()
+            var firstOffending = -1
             for (i in 0..(lowered.size - SectionBatchLimits.EN_NGRAM_LIMIT)) {
-                val gram = lowered.subList(i, i + SectionBatchLimits.EN_NGRAM_LIMIT).joinToString(" ")
-                if (gram in srcEnGrams) offendingStarts += i
-            }
-            if (offendingStarts.isNotEmpty()) {
-                val sb = StringBuilder(Normalizer.normalize(current, Normalizer.Form.NFKC))
-                // Insert a Chinese delimiter inside offending 8-gram windows from right to left.
-                val breakTokenIndices = offendingStarts.map { it + 4 }.distinct().sortedDescending()
-                for (tokIdx in breakTokenIndices) {
-                    val m = matches[tokIdx]
-                    sb.replace(m.range.first, m.range.last + 1, "〔依原文公式〕")
+                val window = lowered.subList(i, i + SectionBatchLimits.EN_NGRAM_LIMIT)
+                val gram = window.joinToString(" ")
+                if (gram in srcEnGrams) {
+                    // Preserve pure symbolic math equations (mostly 1-2 char symbols/digits) rather than corrupting formulas.
+                    val longAlphaWords = window.count { tok -> tok.length >= 3 && tok.all(Char::isLetter) }
+                    if (longAlphaWords < 2) continue
+                    firstOffending = i
+                    break
                 }
-                current = sb.toString()
             }
+            if (firstOffending < 0) break
+            // Extend across contiguous offending 8-gram windows and trim the trailing verbatim echo with clean ellipsis.
+            var lastOffending = firstOffending
+            while (lastOffending + 1 <= lowered.size - SectionBatchLimits.EN_NGRAM_LIMIT) {
+                val nextGram = lowered.subList(lastOffending + 1, lastOffending + 1 + SectionBatchLimits.EN_NGRAM_LIMIT).joinToString(" ")
+                if (nextGram in srcEnGrams) lastOffending++ else break
+            }
+            val cutStart = matches[firstOffending + 3].range.first
+            val cutEnd = matches[lastOffending + SectionBatchLimits.EN_NGRAM_LIMIT - 1].range.last + 1
+            current = (current.substring(0, cutStart).trimEnd() + "…" + current.substring(cutEnd)).trim()
         }
-        // If any >=12-char Chinese run matches verbatim, break it cleanly at midpoint.
+        // If any >=12-char Chinese run matches verbatim, break it cleanly with ellipsis without injecting placeholder tags.
         var zhSafety = 0
-        while (audit(listOf(current), sourceText).zh12GramHits > 0 && zhSafety < 16) {
+        while (audit(listOf(current), sourceText).zh12GramHits > 0 && zhSafety < 24) {
             zhSafety++
             val zhPositions = mutableListOf<Int>()
             val zhChars = StringBuilder()
@@ -696,15 +710,16 @@ object VerbatimOverlapGuard {
             var broke = false
             for (i in 0..(zhStr.length - SectionBatchLimits.ZH_NGRAM_LIMIT)) {
                 if (zhStr.substring(i, i + SectionBatchLimits.ZH_NGRAM_LIMIT) in srcZhGrams) {
-                    val cutPos = zhPositions[i + 5]
-                    current = current.substring(0, cutPos) + "（简述）" + current.substring(cutPos + 1)
+                    val cutStart = zhPositions[i + 5]
+                    val cutEnd = zhPositions[(i + 7).coerceAtMost(zhPositions.lastIndex)] + 1
+                    current = current.substring(0, cutStart) + "…" + current.substring(cutEnd)
                     broke = true
                     break
                 }
             }
             if (!broke) break
         }
-        return current
+        return PlaceholderLeakGuard.stripLeaks(current)
     }
 }
 
@@ -993,6 +1008,7 @@ class SectionConcurrentCompanionPipeline(
     private val ledger: BookTokenLedger,
     private val cache: ChapterCompanionCache? = null,
     private val maxConcurrency: Int = SectionBatchLimits.DEFAULT_CONCURRENCY,
+    private val mathVerifier: CompanionMathVerifier = CompanionMathVerifier(),
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -1011,6 +1027,8 @@ class SectionConcurrentCompanionPipeline(
         val ttftMs: Long,
         val costMicrodollars: Long,
         val routeChannel: CompanionRouteChannel,
+        val declaredMathChecks: Map<String, List<MathCheckSpec>> = emptyMap(),
+        val mathAudit: MathVerificationStats = MathVerificationStats(),
     )
 
     suspend fun generateChapter(
@@ -1051,7 +1069,13 @@ class SectionConcurrentCompanionPipeline(
             }
         }
 
-        fun clean(s: String): String = VerbatimOverlapGuard.scrubOverlaps(s, allSourceText)
+        var extraPlaceholderBlocked = 0
+        fun clean(s: String): String {
+            val hadLeak = PlaceholderLeakGuard.hasLeak(s)
+            val scrubbed = VerbatimOverlapGuard.scrubOverlaps(s, allSourceText)
+            if (hadLeak) extraPlaceholderBlocked++
+            return scrubbed
+        }
 
         val coreQuestion = clean(
             outcomes.firstNotNullOfOrNull { it.coreQuestion?.takeIf(String::isNotBlank) }
@@ -1064,36 +1088,39 @@ class SectionConcurrentCompanionPipeline(
             .take(10)
             .map { it.copy(plainMeaning = clean(it.plainMeaning)) }
         // Strict isolation: pretest & optionalPractice ONLY come from non-exercise body chunks!
-        val pretest = outcomes.filterNot { it.chunk.isExerciseSection }.flatMap { it.pretest }.take(4)
-            .map { q ->
-                val cleanedCorrect = clean(q.correctOption)
-                q.copy(
-                    stem = clean(q.stem),
-                    options = q.options.map(::clean),
-                    correctOption = cleanedCorrect,
-                    explanation = clean(q.explanation),
-                )
-            }
-        val derivations = outcomes.filterNot { it.chunk.isExerciseSection }.flatMap { it.derivations }
-            .map { d ->
-                d.copy(
-                    setup = clean(d.setup),
-                    steps = d.steps.map(::clean),
-                    graphCheck = clean(d.graphCheck),
-                    pitfall = clean(d.pitfall),
-                )
-            }
-        val optionalPractice = outcomes.filterNot { it.chunk.isExerciseSection }.flatMap { it.optionalPractice }
-            .map { q ->
-                val cleanedCorrect = clean(q.correctOption)
-                q.copy(
-                    stem = clean(q.stem),
-                    options = q.options.map(::clean),
-                    correctOption = cleanedCorrect,
-                    explanation = clean(q.explanation),
-                )
-            }
-        val exerciseHints = outcomes.filter { it.chunk.isExerciseSection }.flatMap { it.exerciseHints }
+        val pretest = CompanionItemDeduplicator.deduplicateQuizzes(
+            outcomes.filterNot { it.chunk.isExerciseSection }.flatMap { it.pretest },
+        ).take(4).map { q ->
+            val cleanedCorrect = clean(q.correctOption)
+            q.copy(
+                stem = clean(q.stem),
+                options = q.options.map(::clean),
+                correctOption = cleanedCorrect,
+                explanation = clean(q.explanation),
+            )
+        }
+        val derivations = CompanionItemDeduplicator.deduplicateDerivations(
+            outcomes.filterNot { it.chunk.isExerciseSection }.flatMap { it.derivations },
+        ).map { d ->
+            d.copy(
+                setup = clean(d.setup),
+                steps = d.steps.map(::clean),
+                graphCheck = clean(d.graphCheck),
+                pitfall = clean(d.pitfall),
+            )
+        }
+        val optionalPractice = CompanionItemDeduplicator.deduplicateQuizzes(
+            outcomes.filterNot { it.chunk.isExerciseSection }.flatMap { it.optionalPractice },
+        ).map { q ->
+            val cleanedCorrect = clean(q.correctOption)
+            q.copy(
+                stem = clean(q.stem),
+                options = q.options.map(::clean),
+                correctOption = cleanedCorrect,
+                explanation = clean(q.explanation),
+            )
+        }
+        val rawExerciseHints = outcomes.filter { it.chunk.isExerciseSection }.flatMap { it.exerciseHints }
             .map { h ->
                 h.copy(
                     questionSummary = clean(h.questionSummary),
@@ -1102,6 +1129,7 @@ class SectionConcurrentCompanionPipeline(
                     hint3Check = clean(h.hint3Check),
                 )
             }
+        val (exerciseHints, deduplicatedExercises) = CompanionItemDeduplicator.deduplicateExerciseHints(rawExerciseHints)
 
         val generatedProse = buildList {
             add(coreQuestion)
@@ -1113,6 +1141,20 @@ class SectionConcurrentCompanionPipeline(
             exerciseHints.forEach { h -> add(h.questionSummary); add(h.hint1Direction); add(h.hint2Method); add(h.hint3Check) }
         }
         val overlap = VerbatimOverlapGuard.audit(generatedProse, allSourceText)
+
+        val aggregatedMathAudit = MathVerificationStats(
+            checkedItems = outcomes.sumOf { it.mathAudit.checkedItems },
+            initialFailedItems = outcomes.sumOf { it.mathAudit.initialFailedItems },
+            rejectedItems = outcomes.sumOf { it.mathAudit.rejectedItems },
+            regeneratedPassedItems = outcomes.sumOf { it.mathAudit.regeneratedPassedItems },
+            finalDroppedItems = outcomes.sumOf { it.mathAudit.finalDroppedItems },
+            sympyChecksRun = outcomes.sumOf { it.mathAudit.sympyChecksRun },
+            sympyChecksPassed = outcomes.sumOf { it.mathAudit.sympyChecksPassed },
+            engine = outcomes.firstOrNull { it.mathAudit.sympyChecksRun > 0 }?.mathAudit?.engine ?: "sympy",
+            deduplicatedExercises = deduplicatedExercises,
+            placeholderLeaksBlocked = outcomes.sumOf { it.mathAudit.placeholderLeaksBlocked } + extraPlaceholderBlocked,
+            failureSummaries = outcomes.flatMap { it.mathAudit.failureSummaries },
+        )
 
         val elapsedSorted = outcomes.map { it.elapsedMs }.sorted()
         val ttftSorted = outcomes.map { it.ttftMs }.sorted()
@@ -1130,6 +1172,7 @@ class SectionConcurrentCompanionPipeline(
             totalCostMicrodollars = outcomes.sumOf { it.costMicrodollars },
             routeChannelsUsed = outcomes.map { it.routeChannel.wireName }.distinct(),
             fromCache = false,
+            mathAudit = aggregatedMathAudit,
         )
 
         val pack = ChapterCompanionPack(
@@ -1186,7 +1229,26 @@ class SectionConcurrentCompanionPipeline(
                 status = "complete",
             ),
         )
-        return parseChunkReply(reply, chunk, request.rawPages, costMicro)
+        val parsed = parseChunkReply(reply, chunk, request.rawPages, costMicro)
+        if (chunk.isExerciseSection) return parsed
+        val verified = mathVerifier.verifyAndRepairChunk(
+            request = request,
+            chunk = chunk,
+            pretest = parsed.pretest,
+            derivations = parsed.derivations,
+            optionalPractice = parsed.optionalPractice,
+            declaredChecksByItemId = parsed.declaredMathChecks,
+            transport = transport,
+            ledger = ledger,
+            rawPages = request.rawPages,
+        )
+        return parsed.copy(
+            pretest = verified.pretest,
+            derivations = verified.derivations,
+            optionalPractice = verified.optionalPractice,
+            costMicrodollars = parsed.costMicrodollars + verified.extraCostMicrodollars,
+            mathAudit = verified.stats,
+        )
     }
 
     private fun parseChunkReply(
@@ -1215,6 +1277,14 @@ class SectionConcurrentCompanionPipeline(
 
         var verifiedCount = 0
         var rejectedCount = 0
+        val declaredChecks = LinkedHashMap<String, List<MathCheckSpec>>()
+
+        fun parseItemMathChecks(item: JsonObject, itemId: String) {
+            val parsed = (item["mathChecks"] as? JsonArray).orEmpty().mapIndexedNotNull { cIdx, cEl ->
+                (cEl as? JsonObject)?.let { MathCheckSpec.fromJson(it, defaultId = "$itemId:decl:$cIdx") }
+            }
+            if (parsed.isNotEmpty()) declaredChecks[itemId] = parsed
+        }
 
         fun verifyAnchor(item: JsonObject): VerifiedSourceAnchor? {
             val page = item["pdfPage"]?.jsonPrimitive?.intOrNull
@@ -1300,8 +1370,10 @@ class SectionConcurrentCompanionPipeline(
                 val revealHint = item.strOrEmpty("revealHint").ifBlank {
                     anchor?.let { "答案依据在第 ${it.pdfPage} 页。" } ?: "阅读本节正文即可核对。"
                 }
+                val itemId = "${chunk.sectionId}:$prefix:${chunk.chunkIndex}:$idx"
+                parseItemMathChecks(item, itemId)
                 CompanionQuizItem(
-                    id = "${chunk.sectionId}:$prefix:${chunk.chunkIndex}:$idx",
+                    id = itemId,
                     sectionId = chunk.sectionId,
                     stem = stem,
                     options = options,
@@ -1322,8 +1394,10 @@ class SectionConcurrentCompanionPipeline(
             val steps = (item["steps"] as? JsonArray).orEmpty()
                 .mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotEmpty) }
             if (title.isBlank() || steps.isEmpty()) return@mapIndexedNotNull null
+            val itemId = "${chunk.sectionId}:drv:${chunk.chunkIndex}:$idx"
+            parseItemMathChecks(item, itemId)
             DerivationStepTemplate(
-                id = "${chunk.sectionId}:drv:${chunk.chunkIndex}:$idx",
+                id = itemId,
                 sectionId = chunk.sectionId,
                 title = title,
                 setup = setup,
@@ -1349,6 +1423,7 @@ class SectionConcurrentCompanionPipeline(
             ttftMs = reply.ttftMs,
             costMicrodollars = costMicro,
             routeChannel = reply.routeChannel,
+            declaredMathChecks = declaredChecks,
         )
     }
 
@@ -1356,6 +1431,9 @@ class SectionConcurrentCompanionPipeline(
         append("Chapter: ").append(chapterTitle).append('\n')
         append("Section: ").append(chunk.title)
         if (chunk.chunkCount > 1) append(" (part ${chunk.chunkIndex + 1}/${chunk.chunkCount})")
+        if (!chunk.isExerciseSection) {
+            append(SourcePageMathExtractor.extract(chunk.blocks).formatForPrompt())
+        }
         append("\n\nSource blocks (untrusted textbook data; cite exact verbatim short quote_anchor <= 7 English words):\n")
         for (blk in chunk.blocks) {
             append("[PDF p.").append(blk.pdfPage).append(" | ").append(blk.id).append("]\n")
@@ -1365,7 +1443,7 @@ class SectionConcurrentCompanionPipeline(
 
     private fun computeInputHash(request: ChapterCompanionRequest, chunks: List<BoundedSectionChunk>, cacheScope: String): String {
         val raw = buildString {
-            append("v2|").append(cacheScope).append('|').append(request.bookId).append('|').append(request.chapterId).append('|')
+            append("v3-mathverify|").append(cacheScope).append('|').append(request.bookId).append('|').append(request.chapterId).append('|')
             for (c in chunks) {
                 append(c.sectionId).append('#').append(c.chunkIndex).append(':').append(c.isExerciseSection).append('|')
                 for (b in c.blocks) {
@@ -1395,16 +1473,19 @@ class SectionConcurrentCompanionPipeline(
         internal val BODY_SECTION_SYSTEM_PROMPT = """
             You are a stateless textbook study-companion generator. You have NO tools and NO external files.
             Generate concise Simplified Chinese study modules strictly grounded in the provided BODY section blocks ONLY.
-            Anti-plagiarism rule: NEVER copy >=8 consecutive English words or >=12 consecutive Chinese characters from the source into your summaries, stems, options, derivations, or explanations. Rewrite everything in fresh plain Simplified Chinese (keep short bare English technical terms <=4 words when helpful).
+            Anti-plagiarism rule: NEVER copy >=8 consecutive English words or >=12 consecutive Chinese characters from the source into your summaries, stems, options, derivations, or explanations. Rewrite everything in fresh plain Simplified Chinese (keep short bare English technical terms <=4 words when helpful; put verbatim quotes ONLY in quoteAnchor). NEVER emit placeholders such as "[依原文公式]" or "〔依原文公式〕".
+            Mathematical accuracy rule (ZERO tolerance for errors):
+            - PDF text extraction often splits stacked fractions across lines (e.g., "3" and "2" across lines around a summation for 3/2, or "5" and "2" for 5/2). ALWAYS cross-check every coefficient against surrounding prose (e.g., "50% more" => 3/2 = 1.5倍; "150% more" => 5/2 = 2.5倍, NOT 1.5倍!).
+            - For EVERY derivation and EVERY numeric/formulaic question, include a "mathChecks" array of SymPy-ready checks (`identity`, `eval`, `inequality`, `solve`, `ratio`) so the server can symbolically re-compute and verify your answer.
             For every citation, provide "pdfPage" (integer) and "quoteAnchor" (a short verbatim anchor of 3 to 6 words copied exactly from that page so the app can locate the UTF-16 offset).
             Output ONE valid JSON object only (no Markdown fences, no extra prose):
             {
               "coreQuestion": "1 plain Chinese sentence stating the central question of this section.",
               "keyPoints": [{"summary":"concise Chinese takeaway ending with 。","pdfPage":1,"quoteAnchor":"exact 3-6 words"}],
               "jargonGlosses": [{"term":"English term","plainMeaning":"short Chinese plain meaning","pdfPage":1,"quoteAnchor":"exact 3-6 words"}],
-              "pretest": [{"stem":"1 competitive multiple-choice question testing core mechanism before reading","options":["opt A","opt B","opt C","opt D"],"correctOption":"exact string matching one option","explanation":"concise Chinese explanation","revealHint":"答案依据在第 X 页。","kind":"MCQ","pdfPage":1,"quoteAnchor":"exact 3-6 words"}],
-              "derivations": [{"title":"model or graph name","setup":"variables/axes setup","steps":["step 1","step 2","step 3"],"graphCheck":"what to check on axes/curves","pitfall":"common exam mistake","pdfPage":1,"quoteAnchor":"exact 3-6 words"}],
-              "optionalPractice": [{"stem":"practice question (MCQ or step-by-step calculation)","options":["opt1","opt2","opt3","opt4"],"correctOption":"exact answer or target value","explanation":"concise worked explanation","kind":"MCQ","pdfPage":1,"quoteAnchor":"exact 3-6 words"}]
+              "pretest": [{"stem":"1 competitive multiple-choice question testing core mechanism before reading","options":["opt A","opt B","opt C","opt D"],"correctOption":"exact string matching one option","explanation":"concise Chinese explanation","revealHint":"答案依据在第 X 页。","kind":"MCQ","pdfPage":1,"quoteAnchor":"exact 3-6 words","mathChecks":[]}],
+              "derivations": [{"title":"model or graph name","setup":"variables/axes setup","steps":["step 1","step 2","step 3"],"graphCheck":"what to check on axes/curves","pitfall":"common exam mistake","pdfPage":1,"quoteAnchor":"exact 3-6 words","mathChecks":[{"kind":"identity","lhs":"(5/2)*(P/2) - P","rhs":"P/4"}]}],
+              "optionalPractice": [{"stem":"practice question (MCQ or step-by-step calculation)","options":["opt1","opt2","opt3","opt4"],"correctOption":"exact answer or target value","explanation":"concise worked explanation","kind":"MCQ","pdfPage":1,"quoteAnchor":"exact 3-6 words","mathChecks":[{"kind":"eval","expression":"(3/2)*X","variables":{"X":"2"},"expected":"3"}]}]
             }
             If a section has no formal math/graph, return "derivations":[]. Never fabricate facts or page numbers.
         """.trimIndent()
@@ -1412,7 +1493,9 @@ class SectionConcurrentCompanionPipeline(
         internal val EXERCISE_SYSTEM_PROMPT = """
             You are a stateless textbook exercise-hint generator. You have NO tools and NO external files.
             Input contains ONLY chapter-end Exercises/Problems. Do NOT generate pretest questions.
-            For each exercise problem, produce progressive 3-tier hints in plain Simplified Chinese (paraphrased, NEVER copying >=8 consecutive English words from the textbook).
+            For each exercise problem that begins or is substantively defined in these blocks, produce progressive 3-tier hints in plain Simplified Chinese.
+            NEVER copy >=6 consecutive English words from the exercise into questionSummary or hints (paraphrase completely in Simplified Chinese; keep verbatim English ONLY in quoteAnchor). NEVER emit placeholders such as "[依原文公式]" or "〔依原文公式〕".
+            If a block begins with trailing continuation text from an earlier problem whose number appeared on a previous chunk, use the exact original problem number (e.g. "习题 10") so the server can merge cross-page continuations cleanly without duplication.
             Provide "pdfPage" and "quoteAnchor" (3 to 6 exact words from that exercise on that page).
             Output ONE valid JSON object only (no Markdown fences):
             {

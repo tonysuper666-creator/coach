@@ -119,7 +119,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     val imports = ImportedBookSources(data.resolve("personal-imports"))
     val companionCache = ChapterCompanionCache(data.resolve("companion"))
     val companionTransport = RoutedBatchAiTransport(
-        primary = CodeBuddyDeepSeekTransport(),
+        primary = if (System.getenv("COACH_API_ONLY") == "1") null else CodeBuddyDeepSeekTransport(),
         overflow = HaikuRealtimeBridgeTransport(chat.bridge),
     )
     val companionPipeline = SectionConcurrentCompanionPipeline(companionTransport, tokenLedger, companionCache)

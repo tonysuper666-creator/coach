@@ -175,7 +175,15 @@ class SectionBatchPipelineTest {
             }
         }
 
-        val pipeline = SectionConcurrentCompanionPipeline(stubTransport, ledger, cache, maxConcurrency = 4)
+        val pipeline = SectionConcurrentCompanionPipeline(
+            transport = stubTransport,
+            ledger = ledger,
+            cache = cache,
+            maxConcurrency = 4,
+            // Disable LLM math-audit subcalls here to isolate 1:1 section call counting;
+            // full LLM + SymPy math verification & regeneration is tested in CompanionMathVerifierTest.
+            mathVerifier = CompanionMathVerifier(enableLlmAudit = false),
+        )
         val req = ChapterCompanionRequest(
             bookId = bookId,
             chapterId = "ch-2",

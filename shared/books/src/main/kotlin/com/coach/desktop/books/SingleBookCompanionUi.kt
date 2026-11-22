@@ -264,10 +264,7 @@ internal fun SingleBookCompanionPanel(
                         onJumpPage = onJumpPage,
                         onOpenAnchor = onOpenAnchor,
                     )
-                    return@Column
-                }
-
-                when (val state = packState) {
+                } else when (val state = packState) {
                     CompanionPackState.Loading -> {
                         Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
                             CoachLoadingDots(label = "正在按节整理本章伴读…")

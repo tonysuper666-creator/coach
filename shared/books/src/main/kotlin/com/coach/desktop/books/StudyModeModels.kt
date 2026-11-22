@@ -195,11 +195,11 @@ internal object SmartDefaultModeResolver {
                 explainLang = defaultLang,
             )
         }
-        // 5. General reading (short / epub narrative without textbook signals) -> 只看原文
-        val looksLikeTextbook = materialKind.equals("TEXTBOOK", ignoreCase = true) ||
-            pageCount >= 120 ||
-            format.equals("pdf", ignoreCase = true)
-        if (!looksLikeTextbook) {
+        // 5. General reading (short EPUB narrative without textbook signals) -> 只看原文
+        val isShortNarrativeEpub = format.equals("epub", ignoreCase = true) &&
+            !materialKind.equals("TEXTBOOK", ignoreCase = true) &&
+            pageCount < 120
+        if (isShortNarrativeEpub) {
             return BookStudyPreference(
                 bookId = bookId,
                 mode = BookStudyMode.READ_THROUGH,
@@ -603,6 +603,20 @@ internal object StudyModeStore {
                 }
             }
         }
+        var totalSections = 0
+        if (BookSchemaMigration.tableExists(db, "book_toc_nodes")) {
+            db.prepareStatement("SELECT COUNT(*) FROM book_toc_nodes WHERE book=?").use { s ->
+                s.setString(1, bookId)
+                s.executeQuery().use { r -> if (r.next()) totalSections = r.getInt(1) }
+            }
+        }
+        if (totalSections <= 0 && BookSchemaMigration.tableExists(db, "book_study_chunks")) {
+            db.prepareStatement("SELECT COUNT(*) FROM book_study_chunks WHERE book=?").use { s ->
+                s.setString(1, bookId)
+                s.executeQuery().use { r -> if (r.next()) totalSections = r.getInt(1) }
+            }
+        }
+        val estimatedSections = maxOf(totalSections, (pageCount / 3).coerceAtLeast(1))
         var testedRatio = 0.0
         if (BookSchemaMigration.tableExists(db, "concept_mastery_ledger")) {
             db.prepareStatement(
@@ -611,7 +625,8 @@ internal object StudyModeStore {
                 s.setString(1, bookId)
                 s.executeQuery().use { r ->
                     if (r.next() && r.getInt(1) > 0) {
-                        testedRatio = r.getInt(2).toDouble() / r.getInt(1).coerceAtLeast(1)
+                        val denom = maxOf(r.getInt(1), estimatedSections, 1)
+                        testedRatio = r.getInt(2).toDouble() / denom
                     }
                 }
             }
@@ -624,7 +639,8 @@ internal object StudyModeStore {
                 s.setString(1, bookId)
                 s.executeQuery().use { r ->
                     if (r.next() && r.getInt(1) > 0) {
-                        readRatio = r.getInt(2).toDouble() / r.getInt(1).coerceAtLeast(1)
+                        val denom = maxOf(r.getInt(1), estimatedSections, 1)
+                        readRatio = r.getInt(2).toDouble() / denom
                     }
                 }
             }

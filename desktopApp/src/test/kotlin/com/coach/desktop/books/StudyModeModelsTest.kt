@@ -296,4 +296,27 @@ class StudyModeModelsTest {
         assertEquals(24, pos.totalChapters)
         assertEquals(9, pos.next?.number)
     }
+
+    @Test
+    fun singleTestedConceptInMultiPageBookDoesNotFalselyTriggerDiagnosticSkip() {
+        val dir = Files.createTempDirectory("study-mode-denom-")
+        try {
+            val library = TextbookLibrary(dir)
+            library.catalog()
+            DriverManager.getConnection("jdbc:sqlite:${dir.resolve("library.sqlite")}").use { db ->
+                db.createStatement().use { st ->
+                    st.execute("INSERT OR REPLACE INTO books(id, title, format, reading_page, touched) VALUES('bk-md', 'Econ Notes', 'md', 1, 1000)")
+                    for (p in 1..18) {
+                        st.execute("INSERT OR REPLACE INTO pages(book, page, text) VALUES('bk-md', $p, 'Chapter $p economic equilibrium dynamics and utility analysis')")
+                    }
+                    st.execute("INSERT OR REPLACE INTO concept_mastery_ledger(concept_key, book_id, toc_node_id, canonical_name, p_mastery, has_active_test, updated_at) VALUES('c1', 'bk-md', 'sec-1', 'Stock vs Flow', 0.9, 1, 1000)")
+                }
+            }
+            val resolved = StudyModeStore.loadOrResolve(library, "bk-md", "Econ Notes", 18)
+            assertEquals(BookStudyMode.READ_THROUGH, resolved.mode)
+            assertEquals(ExplainDetailLevel.DETAILED, resolved.detailLevel)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
 }

@@ -408,12 +408,13 @@ internal fun TextbookReader(
     }
     val initialCompanionOpen = openPairing || (
         ui.source == null &&
-            studyPreference.detailLevel != ExplainDetailLevel.ORIGINAL_ONLY && (
+            !(studyPreference.userLocked && studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) && (
             (resumeDraft?.companionOpen == true && resumeDraft.hasMeaningfulDraft()) ||
                 (courseContext != null && courseContext.resumeDraft?.companionOpen != false) ||
                 (studyPreference.userLocked &&
                     studyPreference.mode != BookStudyMode.READ_THROUGH &&
-                    resumeDraft?.companionOpen != false)
+                    studyPreference.detailLevel != ExplainDetailLevel.ORIGINAL_ONLY &&
+                    (resumeDraft == null || resumeDraft.companionOpen || studyPreference.updatedAt >= resumeDraft.updatedAt))
             )
         )
     val initialCompanionTab = remember(book.id, resumeDraft?.companionTab) {

@@ -198,6 +198,9 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         else PracticeGradeDiagnoseResult.Failed("批改结果格式无法解析，请稍后重试。")
     }
 
+    open suspend fun askCollection(input: JsonObject): CourseServerCallResult =
+        callCourseEndpoint { http -> http.askCollection(input) }
+
     private suspend fun callCourseEndpoint(
         block: suspend (CourseHttp) -> MockReply,
     ): CourseServerCallResult {

@@ -68,8 +68,10 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     onOpenCollection: (CollectionSummary) -> Unit = {},
     onPickCourseFiles: (suspend () -> List<Path>)? = null,
     onPickBooklistFiles: (suspend () -> List<Path>)? = null,
+    explainProvider: BookExplainer? = null,
     chooseBook: suspend () -> Path?) {
-    val explainer = remember(controller.library) { BookExplainer(library = controller.library) }
+    val explainer = remember(controller.library, explainProvider) { explainProvider ?: BookExplainer(library = controller.library) }
+    val collectionQaSessions = remember { mutableStateMapOf<String, CollectionQaSessionState>() }
     val aiEnabled = LocalReadingAiExplain.current
     val currentAiEnabled by rememberUpdatedState(aiEnabled)
     val booklistJudge = remember(explainer) {
@@ -493,6 +495,12 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 onOpenCrossBookPage = { targetBookId, targetPage, _ ->
                                     run { controller.openBook(targetBookId, targetPage) }
                                 },
+                                collectionQaSessions = collectionQaSessions,
+                                onUpdateCollectionQaSession = { colId, next -> collectionQaSessions[colId] = next },
+                                onJumpCollectionCitation = { citation ->
+                                    run { controller.jumpToCollectionCitation(citation) }
+                                },
+                                onConsumeKeepAskTabOpen = controller::consumeKeepAskTabOpen,
                                 hinge = hinge,
                                 onExportNotes = onExportNotes,
                                 onNoteSession = { noteReader = it },

@@ -125,6 +125,9 @@ internal data class CourseExamProfile(
     val examFormat: String = "",
     val examFormatTentative: Boolean = true,
     val weightingNote: String = "",
+    val durationMinutes: Int = 120,
+    val closedBook: Boolean = true,
+    val calculatorAllowed: String = "",
 )
 
 internal data class CourseMaterialEntry(
@@ -252,6 +255,7 @@ internal data class CourseDetailSnapshot(
     val activeAnchor: CourseActiveAnchor? = null,
     val spoilerSanitizedCount: Int = 0,
     val alignedAt: Long = 0L,
+    val countdownPlan: ExamCountdownPlan? = null,
 ) {
     val allTopics: List<CourseTopicEntry>
         get() = examinableTopics + pendingTopics + excludedTopics
@@ -302,6 +306,9 @@ internal object CourseJson {
         put("examFormat", profile.examFormat)
         put("examFormatTentative", profile.examFormatTentative)
         put("weightingNote", profile.weightingNote)
+        put("durationMinutes", profile.durationMinutes.coerceIn(15, 360))
+        put("closedBook", profile.closedBook)
+        if (profile.calculatorAllowed.isNotBlank()) put("calculatorAllowed", profile.calculatorAllowed)
     }.toString()
 
     fun decodeExamProfile(raw: String?, fallbackDate: String? = null): CourseExamProfile {
@@ -312,6 +319,9 @@ internal object CourseJson {
             examFormat = obj.str("examFormat"),
             examFormatTentative = obj.bool("examFormatTentative", true),
             weightingNote = obj.str("weightingNote"),
+            durationMinutes = obj.int("durationMinutes", 120).coerceIn(15, 360),
+            closedBook = obj.bool("closedBook", true),
+            calculatorAllowed = obj.str("calculatorAllowed"),
         )
     }
 

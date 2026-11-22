@@ -18,7 +18,7 @@ import kotlinx.coroutines.withContext
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 
-internal enum class BookScreen { HOME, COURSE, BOOKLIST, READER, LEARNING, REVIEWS, REVIEWING }
+internal enum class BookScreen { HOME, COURSE, COURSE_MOCK, BOOKLIST, READER, LEARNING, REVIEWS, REVIEWING }
 internal enum class BookPrompt { IMPORTED, START, AFTER_READING, QUESTIONS }
 internal enum class MultiDropAction { COURSE, BOOKLIST, SEPARATE }
 internal data class PendingMultiDrop(val paths: List<Path>, val onStaged: () -> Unit = {})
@@ -1191,7 +1191,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             }
         } else if (cur.activeCourseId != null && cur.screen != BookScreen.COURSE && cur.screen != BookScreen.HOME) {
             val refreshed = library.withCourseDatabase { db ->
-                CourseStore.loadCourseDetail(db, cur.activeCourseId)
+                CourseStore.loadCourseDetail(db, cur.activeCourseId, library.clock)
             }
             library.clearOpenSession()
             mutable.update {
@@ -1482,7 +1482,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
 
     suspend fun openCourse(courseId: String) = action {
         val detail = library.withCourseDatabase { db ->
-            val current = CourseStore.loadCourseDetail(db, courseId)
+            val current = CourseStore.loadCourseDetail(db, courseId, library.clock)
             if (current.examinableTopics.isEmpty() && current.pendingTopics.isEmpty() && current.materials.isNotEmpty()) {
                 CourseAutoAligner.alignLocally(db, courseId)
             } else {
@@ -1504,7 +1504,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     }
 
     suspend fun openCourseTopic(courseId: String, topicId: String, explainer: BookExplainer? = null) = action {
-        var detail = library.withCourseDatabase { db -> CourseStore.loadCourseDetail(db, courseId) }
+        var detail = library.withCourseDatabase { db -> CourseStore.loadCourseDetail(db, courseId, library.clock) }
         val topic = detail.allTopics.firstOrNull { it.topicId == topicId }
             ?: throw IllegalArgumentException("找不到该课程专题。")
         val resumeDraft = topic.practiceDraft
@@ -1535,7 +1535,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     ),
                 )
             }
-            detail = library.withCourseDatabase { db -> CourseStore.loadCourseDetail(db, courseId) }
+            detail = library.withCourseDatabase { db -> CourseStore.loadCourseDetail(db, courseId, library.clock) }
         } else {
             library.withCourseDatabase { db ->
                 CourseStore.saveActiveAnchor(
@@ -1598,7 +1598,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 ),
             )
             if (topicId != null) {
-                val curDraft = CourseStore.loadCourseDetail(db, courseId).allTopics
+                val curDraft = CourseStore.loadCourseDetail(db, courseId, library.clock).allTopics
                     .firstOrNull { it.topicId == topicId }?.practiceDraft
                     ?: CourseTopicPracticeDraft(topicId = topicId)
                 CourseStore.savePracticeDraft(
@@ -1745,6 +1745,81 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         mutable.update { it.copy(courseNotice = null) }
     }
 
+    suspend fun openCourseMock(courseId: String) = action {
+        val detail = library.withCourseDatabase { db ->
+            CourseStore.loadCourseDetail(db, courseId, library.clock)
+        }
+        library.clearOpenSession()
+        mutable.update {
+            it.copy(
+                screen = BookScreen.COURSE_MOCK,
+                activeCourseId = courseId,
+                activeCourseTopicId = null,
+                activeCourseDetail = detail,
+                pendingCourseJump = null,
+                courseNotice = null,
+            )
+        }
+    }
+
+    suspend fun refreshActiveCourse(courseId: String) = action {
+        val detail = library.withCourseDatabase { db ->
+            CourseStore.loadCourseDetail(db, courseId, library.clock)
+        }
+        val collections = library.collectionSummaries()
+        mutable.update { cur ->
+            if (cur.activeCourseId == courseId) {
+                cur.copy(activeCourseDetail = detail, collections = collections)
+            } else {
+                cur.copy(collections = collections)
+            }
+        }
+    }
+
+    suspend fun jumpToMockSourcePage(courseId: String, bookId: String, page: Int, quote: String) = action {
+        val loaded = library.book(bookId)
+        val clampedPage = page.coerceIn(1, loaded.pages.size.coerceAtLeast(1))
+        val pageObj = loaded.page(clampedPage)
+        val passage = if (pageObj != null) {
+            SentenceCitationGate.locatePassageInPage(loaded.id, pageObj, quote, null)
+        } else null
+        val finalPage = passage?.page ?: clampedPage
+        val updatedBook = loaded.copy(readingPage = finalPage)
+        library.save(updatedBook)
+        library.saveOpenSession(updatedBook.id, "READER")
+        val collections = library.collectionSummaries()
+        val detail = library.withCourseDatabase { db ->
+            CourseStore.saveActiveAnchor(
+                db,
+                CourseActiveAnchor(
+                    courseId = courseId,
+                    topicId = null,
+                    bookId = updatedBook.id,
+                    page = finalPage,
+                    companionOpen = false,
+                ),
+            )
+            CourseStore.loadCourseDetail(db, courseId, library.clock)
+        }
+        mutable.update { cur ->
+            cur.copy(
+                book = updatedBook,
+                page = finalPage,
+                screen = BookScreen.READER,
+                source = null,
+                prompt = null,
+                review = null,
+                pendingCourseJump = passage,
+                keepAskTabOpen = false,
+                activeCourseId = courseId,
+                activeCourseTopicId = null,
+                activeCourseDetail = detail,
+                collections = collections,
+                catalog = library.catalog(),
+            )
+        }
+    }
+
     fun addMaterialsToCourse(courseId: String, files: List<Path>, onStaged: () -> Unit = {}): Job = backgroundScope.launch {
         try {
             action {
@@ -1793,7 +1868,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     ) = action {
         val detail = library.withCourseDatabase { db ->
             CourseStore.updateMaterialAssignment(db, courseId, bookId, weekNum, role)
-            CourseStore.loadCourseDetail(db, courseId)
+            CourseStore.loadCourseDetail(db, courseId, library.clock)
         }
         mutable.update {
             it.copy(
@@ -1807,7 +1882,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     suspend fun removeCourseMaterial(courseId: String, bookId: String) = action {
         val detail = library.withCourseDatabase { db ->
             CourseStore.removeMaterialFromCourse(db, courseId, bookId)
-            CourseStore.loadCourseDetail(db, courseId)
+            CourseStore.loadCourseDetail(db, courseId, library.clock)
         }
         mutable.update {
             it.copy(
@@ -1821,7 +1896,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     suspend fun unlinkCourseTopicSource(courseId: String, topicId: String, bookId: String) = action {
         val detail = library.withCourseDatabase { db ->
             CourseStore.unlinkTopicSource(db, courseId, topicId, bookId)
-            CourseStore.loadCourseDetail(db, courseId)
+            CourseStore.loadCourseDetail(db, courseId, library.clock)
         }
         mutable.update {
             it.copy(
@@ -1834,7 +1909,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     suspend fun renameCourseTopic(courseId: String, topicId: String, newTitle: String) = action {
         val detail = library.withCourseDatabase { db ->
             CourseStore.renameTopic(db, topicId, newTitle)
-            CourseStore.loadCourseDetail(db, courseId)
+            CourseStore.loadCourseDetail(db, courseId, library.clock)
         }
         mutable.update { it.copy(activeCourseDetail = detail) }
     }
@@ -1842,7 +1917,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     suspend fun setCourseTopicStatus(courseId: String, topicId: String, status: CourseTopicStatus) = action {
         val detail = library.withCourseDatabase { db ->
             CourseStore.setTopicExamStatus(db, topicId, status)
-            CourseStore.loadCourseDetail(db, courseId)
+            CourseStore.loadCourseDetail(db, courseId, library.clock)
         }
         val msg = if (status == CourseTopicStatus.EXAMINABLE) "已恢复为必考专题并锁定。" else "已移入本课不考内容并锁定。"
         mutable.update { it.copy(activeCourseDetail = detail, courseNotice = msg) }
@@ -1851,7 +1926,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     suspend fun updateCourseExamProfile(courseId: String, profile: CourseExamProfile) = action {
         val detail = library.withCourseDatabase { db ->
             CourseStore.updateExamProfile(db, courseId, profile)
-            CourseStore.loadCourseDetail(db, courseId)
+            CourseStore.loadCourseDetail(db, courseId, library.clock)
         }
         mutable.update {
             it.copy(
@@ -1874,7 +1949,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     if (remotePlan.topics.isNotEmpty()) {
                         val updated = library.withCourseDatabase { db ->
                             CourseStore.applyAlignmentRespectingLocks(db, courseId, remotePlan)
-                            CourseStore.loadCourseDetail(db, courseId)
+                            CourseStore.loadCourseDetail(db, courseId, library.clock)
                         }
                         mutable.update {
                             it.copy(

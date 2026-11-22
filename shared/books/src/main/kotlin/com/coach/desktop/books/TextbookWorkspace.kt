@@ -45,6 +45,11 @@ import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
 import com.coach.ui.CoachTheme
 import com.coach.ui.adaptive.Hinge
+import com.coach.desktop.books.exam.CourseMockHost
+import com.coach.desktop.books.exam.CourseMockHubPane
+import com.coach.desktop.books.exam.LocalCourseMockHost
+import com.coach.desktop.books.exam.LocalExamController
+import com.coach.desktop.books.exam.rememberLocalExamController
 import com.coach.desktop.reader.ReaderSession
 import com.coach.desktop.reader.toReaderInput
 import com.coach.ui.v7.LocalDeskMetrics
@@ -56,7 +61,7 @@ import kotlinx.coroutines.launch
 import java.nio.file.Path
 
 @Composable
-internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller), loadOnMount: Boolean = true,
+internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller), exams: LocalExamController = rememberLocalExamController(controller.library), loadOnMount: Boolean = true,
     support: BookLearningSupport? = null,
     answerExplain: AnswerExplain? = null,
     sourceResolver: BookSourceResolver = remember(controller.library) { BookSourceResolver(controller.library) },
@@ -289,7 +294,21 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             },
                         )
                     }
-                    CompositionLocalProvider(LocalPracticeGradingHost provides activeGradingHost) {
+                    val existingCourseMockHost = LocalCourseMockHost.current
+                    val activeCourseMockHost = remember(existingCourseMockHost, explainer, activeGradingHost) {
+                        existingCourseMockHost ?: CourseMockHost(
+                            generateCourseMock = { req ->
+                                if (!explainer.loaded) explainer.load()
+                                explainer.generateCourseMock(req)
+                            },
+                            gradeAndDiagnose = activeGradingHost.gradeAndDiagnose,
+                        )
+                    }
+                    val examUi by exams.state.collectAsState()
+                    CompositionLocalProvider(
+                        LocalPracticeGradingHost provides activeGradingHost,
+                        LocalCourseMockHost provides activeCourseMockHost,
+                    ) {
                     when {
                         !ui.initialized && ui.screen == BookScreen.HOME && book == null && ui.catalog.isEmpty() -> {
                             // 首次从 SQLite 载入时只给一组安静的呼吸点，绝不闪空态（UX-3）。
@@ -329,7 +348,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 )
                             }
                         }
-                        ui.screen == BookScreen.HOME || (book == null && ui.screen != BookScreen.REVIEWS && ui.screen != BookScreen.REVIEWING && ui.screen != BookScreen.COURSE && ui.screen != BookScreen.BOOKLIST) -> LibraryHome(
+                        ui.screen == BookScreen.HOME || (book == null && ui.screen != BookScreen.REVIEWS && ui.screen != BookScreen.REVIEWING && ui.screen != BookScreen.COURSE && ui.screen != BookScreen.COURSE_MOCK && ui.screen != BookScreen.BOOKLIST) -> LibraryHome(
                             ui = ui,
                             onImport = {
                                 scope.launch {
@@ -398,6 +417,23 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                     run { controller.updateCourseExamProfile(detail.courseId, profile) }
                                 },
                                 onDismissNotice = controller::dismissCourseNotice,
+                                hasActiveMockExam = remember(detail.courseId, examUi.active, examUi.attempt) {
+                                    exams.hasActiveCourseMock(detail.courseId)
+                                },
+                                onOpenMockExam = { run { controller.openCourseMock(detail.courseId) } },
+                            )
+                        }
+                        ui.screen == BookScreen.COURSE_MOCK && ui.activeCourseDetail != null -> {
+                            val detail = checkNotNull(ui.activeCourseDetail)
+                            CourseMockHubPane(
+                                detail = detail,
+                                controller = exams,
+                                library = controller.library,
+                                onBackToCourse = { run { controller.back() } },
+                                onJumpToBookPage = { bookId, pg, quote ->
+                                    run { controller.jumpToMockSourcePage(detail.courseId, bookId, pg, quote) }
+                                },
+                                onMasteryUpdated = { cid -> controller.refreshActiveCourse(cid) },
                             )
                         }
                         ui.screen == BookScreen.REVIEWS -> LocalBookReviews(ui,

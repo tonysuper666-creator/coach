@@ -154,6 +154,7 @@ internal class LocalExamStore(
     }
 
     fun get(book: String, attempt: String): JsonObject = transaction { view(expire(it, session(it, book, attempt))) }
+    fun hasActive(book: String): Boolean = active(book) != null
     fun active(book: String): JsonObject? = transaction { db ->
         findActive(db, book)?.let { expire(db, it) }?.takeIf { it.submittedAt == null }?.let(::view)
     }
@@ -186,6 +187,23 @@ internal class LocalExamStore(
             val late = current.deadline != null && now > current.deadline + GRACE_MILLIS
             close(db, current, if (late) current.deadline!! else now, auto || late)
         } else current)
+    }
+
+    /** Persists post-submit rubric grading results without modifying the frozen paper snapshot/hash or drafts. */
+    fun saveGradedResult(book: String, attempt: String, result: JsonObject): JsonObject = transaction { db ->
+        val current = session(db, book, attempt)
+        check(current.submittedAt != null) { "必须先交卷再写入批改结果。" }
+        db.prepareStatement(
+            """UPDATE local_exam_attempts SET result_json=?
+               WHERE id=? AND owner=? AND book=? AND submitted_at IS NOT NULL""",
+        ).use { sql ->
+            sql.setString(1, canonicalJson(result))
+            sql.setString(2, attempt)
+            sql.setString(3, owner)
+            sql.setString(4, book)
+            check(sql.executeUpdate() == 1)
+        }
+        view(session(db, book, attempt))
     }
 
     private fun expire(db: Connection, current: Session): Session =

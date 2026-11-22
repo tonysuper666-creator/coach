@@ -139,6 +139,7 @@ internal fun WindowsTextbookHost(
     val isEmptyLibrary = ui.catalog.isEmpty() && ui.collections.none { !it.record.archived }
     val deskPage = (book != null && ui.screen != BookScreen.HOME) ||
         ui.screen == BookScreen.COURSE ||
+        ui.screen == BookScreen.COURSE_MOCK ||
         ui.screen == BookScreen.BOOKLIST ||
         ui.screen == BookScreen.REVIEWS || ui.screen == BookScreen.REVIEWING
     val systemDark = isSystemInDarkTheme()
@@ -227,6 +228,7 @@ internal fun WindowsTextbookHost(
                         TextbookWorkspace(
                             controller = controller,
                             drafts = drafts,
+                            exams = exams,
                             loadOnMount = false,
                             answerExplain = answerExplain,
                             support = learningSupport,

@@ -21,6 +21,7 @@ enum class CompanionRouteChannel(val wireName: String, val defaultModel: String)
     CODEBUDDY_DEEPSEEK_FLASH("codebuddy_deepseek_flash", "deepseek-v4.1-flash"),
     HAIKU_BATCH("haiku_batch", "claude-haiku-5-5"),
     HAIKU_REALTIME("haiku_realtime", "claude-haiku-5-5"),
+    SONNET_PLAN("sonnet_plan", "claude-sonnet-5-5"),
 }
 
 data class TokenLedgerEntry(
@@ -118,6 +119,11 @@ object TokenLedgerPricing {
             BigDecimal("0.10"),
             BigDecimal("0.50"),
             BigDecimal("0.01"),
+        ),
+        CompanionRouteChannel.SONNET_PLAN to RatesPerMillion(
+            BigDecimal("2.00"),
+            BigDecimal("10.00"),
+            BigDecimal("0.20"),
         ),
     )
 

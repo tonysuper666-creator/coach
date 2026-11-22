@@ -48,6 +48,8 @@ class CompanionMathVerifierTest {
                 MathCheckSpec(id = "ratio-ok", kind = "ratio", lhs = "1.5", rhs = "3/2"),
                 MathCheckSpec(id = "pct-paren-ok", kind = "eval", expression = "(100 - 60)%", expected = "2/5"),
                 MathCheckSpec(id = "expectation-ok", kind = "identity", lhs = "(5/2)*E[X] - P", rhs = "2.5*E_X - P"),
+                MathCheckSpec(id = "num-ineq-ok", kind = "inequality", inequality = "0.6**2 + 0.4**2 > 0.25", variable = "HHI", expectedRelation = ">", expectedThreshold = "0.25"),
+                MathCheckSpec(id = "sub-ineq-ok", kind = "inequality", inequality = "r - p*q > 0", variable = "r", variables = mapOf("p" to "0.1", "q" to "100"), expectedRelation = ">", expectedThreshold = "10"),
                 MathCheckSpec(id = "security-reject", kind = "eval", expression = "__import__('os').system('id')", expected = "0"),
             ),
         )
@@ -63,6 +65,8 @@ class CompanionMathVerifierTest {
         assertTrue(byId.getValue("ratio-ok").passed)
         assertTrue(byId.getValue("pct-paren-ok").passed)
         assertTrue(byId.getValue("expectation-ok").passed)
+        assertTrue(byId.getValue("num-ineq-ok").passed)
+        assertTrue(byId.getValue("sub-ineq-ok").passed)
         assertFalse(byId.getValue("security-reject").passed)
     }
 

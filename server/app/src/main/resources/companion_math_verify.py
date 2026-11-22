@@ -242,6 +242,23 @@ def check_ratio(spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def substitute_known_variables(expr: sp.Expr, variables: dict[str, Any], exclude_var: str = "") -> sp.Expr:
+    if not variables:
+        return expr
+    subs_map: dict[sp.Symbol, sp.Expr] = {}
+    for k, v in variables.items():
+        sym_name = normalize_math_text(str(k))
+        if exclude_var and sym_name == exclude_var:
+            continue
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", sym_name):
+            continue
+        val_expr = safe_parse(str(v))
+        for sym in expr.free_symbols:
+            if sym.name == sym_name:
+                subs_map[sym] = val_expr
+    return sp.simplify(expr.subs(subs_map)) if subs_map else expr
+
+
 def check_solve(spec: dict[str, Any]) -> dict[str, Any]:
     var_name = normalize_math_text(spec.get("variable", "x"))
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", var_name):
@@ -249,15 +266,17 @@ def check_solve(spec: dict[str, Any]) -> dict[str, Any]:
     lhs = safe_parse(spec.get("lhs", spec.get("expression", "")))
     rhs_raw = spec.get("rhs", "0")
     rhs = safe_parse(rhs_raw) if str(rhs_raw).strip() else sp.Integer(0)
+    variables = spec.get("variables") or {}
+    diff = substitute_known_variables(lhs - rhs, variables, exclude_var=var_name)
     expected = safe_parse(spec.get("expected", spec.get("expectedThreshold", "")))
     tol = float(spec.get("tolerance", 0.015))
     var = sp.Symbol(var_name, real=True)
     # Match symbol instance
-    for s in (lhs - rhs).free_symbols:
+    for s in diff.free_symbols:
         if s.name == var_name:
             var = s
             break
-    sols = sp.solve(sp.Eq(lhs, rhs), var)
+    sols = sp.solve(sp.Eq(diff, 0), var)
     for sol in sols:
         ok, _ = expressions_equal(sol, expected, tol)
         if ok:
@@ -280,6 +299,7 @@ def check_inequality(spec: dict[str, Any]) -> dict[str, Any]:
     var_name = normalize_math_text(spec.get("variable", ""))
     expected_rel = normalize_math_text(spec.get("expectedRelation", ""))
     expected_thr_raw = spec.get("expectedThreshold", "")
+    variables = spec.get("variables") or {}
     tol = float(spec.get("tolerance", 0.015))
 
     op_match = re.search(r"(<=|>=|<|>)", ineq_raw)
@@ -290,7 +310,20 @@ def check_inequality(spec: dict[str, Any]) -> dict[str, Any]:
     rhs_str = ineq_raw[op_match.end() :].strip()
     lhs = safe_parse(lhs_str)
     rhs = safe_parse(rhs_str)
-    diff = sp.simplify(lhs - rhs)
+    diff = substitute_known_variables(sp.simplify(lhs - rhs), variables, exclude_var=var_name)
+
+    # Pure numeric inequality (e.g. "0.6**2 + 0.4**2 > 0.25" or "(3/2)*20 - 40 < 0")
+    if not diff.free_symbols:
+        val = float(sp.N(diff, 15))
+        holds = (
+            (val < 0 if op == "<" else val <= 1e-12 if op == "<=" else val > 0 if op == ">" else val >= -1e-12)
+        )
+        return {
+            "passed": holds,
+            "exactValue": format_exact(diff),
+            "decimalValue": format_decimal(diff),
+            "reason": "numeric_inequality_holds" if holds else f"numeric_inequality_false(diff={format_decimal(diff)},op={op})",
+        }
 
     var = None
     for s in diff.free_symbols:

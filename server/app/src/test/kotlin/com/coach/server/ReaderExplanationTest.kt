@@ -233,6 +233,20 @@ class ReaderExplanationTest {
         }
     }
 
+    @Test fun sonnetFormatFailureGetsExactlyOneMoreAttempt() = runBlocking {
+        Harness().use { h ->
+            h.stub.stream(1, payload("不接受虚构引用。", "S9"), StubTutor.terminal("complete"), StubTutor.DONE)
+            h.stub.stream(1, payload("重试后有依据的解释。"), StubTutor.terminal("complete"), StubTutor.DONE)
+            val answer = h.reader.explain("d", "c", json("requestId" to "a1", "kind" to "explain"), "Synthetic pears", pack.pages, com.coach.domain.scope.VisibleScope.learner())
+            assertTrue(answer.str("text").contains("重试后"))
+            assertEquals(2, h.stub.requests)
+            repeat(2) { h.stub.stream(1, payload("不接受虚构引用。", "S9"), StubTutor.terminal("complete"), StubTutor.DONE) }
+            val failed = h.reader.explain("d", "c", json("requestId" to "a2", "kind" to "explain"), "Synthetic pears", pack.pages, com.coach.domain.scope.VisibleScope.learner())
+            assertTrue(failed.str("text").contains("无法确认"))
+            assertEquals(4, h.stub.requests)
+        }
+    }
+
     @Test fun checkedGuideAndStructureValidateBlockIdsAndStrictMonotonicOrder() {
         val three = SourcePack(listOf(
             SourcePage("a".repeat(64) + ":p1:0", 1, "First paragraph on page one."),

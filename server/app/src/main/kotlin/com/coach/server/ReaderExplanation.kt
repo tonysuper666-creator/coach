@@ -313,7 +313,14 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                         "COACH reader.format request={} reason={} attempt={} traffic={}",
                         id, e.reason.name, formatAttempt + 1, if (BridgeConfig().testTraffic) "test" else "user")
                     // A lesson is one provider call and one quota unit, including format failures.
-                    if (lesson || request.cancelled.get() || e.servedBy?.startsWith("claude-haiku-") != true || formatAttempt >= 2) throw e
+                    // Haiku gets two more attempts (the last one escalates); any other reader model gets one, so an
+                    // occasional malformed stream from the primary model is retried instead of shown as a failure.
+                    val formatRetries = when {
+                        e.servedBy == null -> 0
+                        e.servedBy.startsWith("claude-haiku-") -> 2
+                        else -> 1
+                    }
+                    if (lesson || request.cancelled.get() || formatAttempt >= formatRetries) throw e
                     formatAttempt++
                     // A fresh attempt gets its own body deadline; the original total deadline still applies.
                     timing = ReaderTiming(timeouts, started, bodyProgressFactory)

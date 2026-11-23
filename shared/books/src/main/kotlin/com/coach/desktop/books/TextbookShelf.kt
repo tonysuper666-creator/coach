@@ -256,7 +256,6 @@ internal fun LibraryHome(
                                 else BookStudyPreference(bookId = focusBook.id),
                             )
                         }
-                        val pageTotal = focusBook.pages.size.coerceAtLeast(1)
                         val chapterTitle = focusBook.lessons.firstOrNull {
                             focusBook.readingPage in it.firstPage..it.lastPage
                         }?.title
@@ -286,25 +285,14 @@ internal fun LibraryHome(
                                     val masteryRec = if (savedDraft == null) {
                                         ui.focusRecommendation?.takeIf { it.bookId == focusBook.id }
                                     } else null
-                                    val metaText = when {
-                                        savedDraft != null -> buildString {
-                                            if (!chapterTitle.isNullOrBlank() && chapterTitle != focusBook.title) {
-                                                append(chapterTitle)
-                                                append(" · ")
-                                            }
-                                            append("上次停在第 ${savedDraft.page} / $pageTotal 页 · 练习草稿已保存")
-                                        }
-                                        masteryRec != null -> masteryRec.metaLine
-                                        else -> buildString {
-                                            if (!chapterTitle.isNullOrBlank() && chapterTitle != focusBook.title) {
-                                                append(chapterTitle)
-                                                append(" · ")
-                                            }
-                                            append(focusBook.title)
-                                            chapterTitle?.takeIf(String::isNotBlank)?.let { append(" · ").append(it) }
-                                            append(" · 第 ${focusBook.readingPage} 页")
-                                        }
-                                    }
+                                    val metaText = MasteryEngine.formatContinueCardMeta(
+                                        bookTitle = focusBook.title,
+                                        chapterTitle = chapterTitle,
+                                        readingPage = focusBook.readingPage,
+                                        lastQuestion = ui.lastBookQuestion,
+                                        savedDraft = savedDraft,
+                                        masteryRec = masteryRec,
+                                    )
                                     CoachCardMeta(metaText, Modifier.testTag("home-focus-meta"))
                                 }
                                 StudyModeSelectorButton(
@@ -351,7 +339,12 @@ internal fun LibraryHome(
                                         modifier = Modifier.testTag("home-focus-title"),
                                     )
                                     CoachCardMeta(
-                                        "${focusSummary.title} · 第 ${focusSummary.readingPage} 页",
+                                        MasteryEngine.formatContinueCardMeta(
+                                            bookTitle = focusSummary.title,
+                                            chapterTitle = null,
+                                            readingPage = focusSummary.readingPage,
+                                            lastQuestion = ui.lastBookQuestion,
+                                        ),
                                         Modifier.testTag("home-focus-meta"),
                                     )
                                 }
@@ -406,9 +399,8 @@ internal fun LibraryHome(
                         }
                     }
 
-                    // 2. 条件今日复习卡：有到期题显示 PaperButton("开始复习")，0 题退化为一行 CoachCardMeta。
+                    // 2. 条件今日复习卡：有到期项写「今天 N 道，约 M 分钟」，点击卡片或按钮进清单；无到期项如实提示，不推送。
                     val dueCount = if (ui.todayQueue.cards.isNotEmpty()) ui.todayQueue.cards.size else ui.reviews.size
-                    val deferred = ui.todayQueue.deferred
                     if (dueCount > 0) {
                         PaperCard(
                             Modifier.fillMaxWidth().testTag("home-review-card"),
@@ -420,10 +412,21 @@ internal fun LibraryHome(
                                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Text("今日复习", style = MaterialTheme.typography.titleMedium, color = colors.fgPrimary)
-                                    val reviewMeta = "今天 $dueCount 道，约 ${dueCount * 2} 分钟"
-                                    CoachCardMeta(reviewMeta, Modifier.testTag("home-review-meta"))
+                                Column(
+                                    Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Text(
+                                        "今日复习",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = colors.fgPrimary,
+                                        modifier = Modifier.shelfClick(!ui.busy, onOpenReviews),
+                                    )
+                                    val reviewMeta = MasteryEngine.formatHomeReviewMeta(dueCount)
+                                    CoachCardMeta(
+                                        reviewMeta,
+                                        Modifier.testTag("home-review-meta").shelfClick(!ui.busy, onOpenReviews),
+                                    )
                                 }
                                 PaperButton(
                                     onClick = onOpenReviews,
@@ -434,7 +437,7 @@ internal fun LibraryHome(
                         }
                     } else {
                         CoachCardMeta(
-                            "还没有要复习的。做错的题会在明天出现。",
+                            MasteryEngine.HOME_REVIEW_EMPTY_MESSAGE,
                             Modifier.padding(horizontal = 4.dp).testTag("home-review-done"),
                         )
                     }

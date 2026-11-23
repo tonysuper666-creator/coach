@@ -885,6 +885,9 @@ internal object CollectionQaEngine {
         if (cleanQ.length < 2) {
             return Result.failure(IllegalArgumentException("请输入至少 2 个字的问题。"))
         }
+        if (!currentBookId.isNullOrBlank()) {
+            withContext(Dispatchers.IO) { runCatching { library.saveLastQuestion(currentBookId, cleanQ) } }
+        }
         val bundle = withContext(Dispatchers.IO) {
             CollectionQaRetriever.retrieve(library, collectionId, cleanQ, currentBookId)
         }

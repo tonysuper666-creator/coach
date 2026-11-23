@@ -136,19 +136,26 @@ internal object MasteryStore {
             ?: MasteryEngine.conceptKeyFor(bookId, cleanNode)
         val resolvedWeight = syllabusWeight ?: lookupSyllabusWeight(db, bookId, cleanNode) ?: 1.0
         val resolvedCollection = collectionId ?: lookupPrimaryCollectionId(db, bookId)
+        val humanName = MasteryEngine.sanitizeHumanLabel(canonicalName)
+            ?: MasteryEngine.sanitizeHumanLabel(lookupTocTitle(db, bookId, cleanNode))
         val existing = loadConcept(db, key) ?: ConceptMasteryRecord(
             conceptKey = key,
             collectionId = resolvedCollection,
             bookId = bookId,
             tocNodeId = cleanNode,
-            canonicalName = canonicalName.trim().ifBlank { cleanNode },
+            canonicalName = humanName ?: "第 ${page.coerceAtLeast(1)} 页",
             syllabusWeight = resolvedWeight,
             updatedAt = nowMs,
         )
-        val weighted = if (syllabusWeight != null && syllabusWeight != existing.syllabusWeight) {
-            existing.copy(syllabusWeight = syllabusWeight)
+        val healedName = if (MasteryEngine.isInternalIdentifier(existing.canonicalName) && humanName != null) {
+            existing.copy(canonicalName = humanName)
         } else {
             existing
+        }
+        val weighted = if (syllabusWeight != null && syllabusWeight != healedName.syllabusWeight) {
+            healedName.copy(syllabusWeight = syllabusWeight)
+        } else {
+            healedName
         }
         val updated = MasteryEngine.applySignal(
             current = weighted,
@@ -400,7 +407,10 @@ internal object MasteryStore {
                 s.executeQuery().use { if (it.next()) it.getString(1) else null }
             } ?: continue
             val concept = loadConcept(db, cohort.conceptKey)
-            val conceptTitle = concept?.canonicalName?.takeIf(String::isNotBlank) ?: cohort.chapterId
+            val conceptTitle = MasteryEngine.sanitizeHumanLabel(concept?.canonicalName)
+                ?: MasteryEngine.sanitizeHumanLabel(lookupTocTitle(db, cohort.bookId, cohort.chapterId))
+                ?: MasteryEngine.sanitizeHumanLabel(cohort.chapterId)
+                ?: "本章要点"
             val prompt = "三天后再测：不看原文，用自己的话说明「$conceptTitle」的核心关系，并举一个贴切例子。"
 
             db.prepareStatement(
@@ -503,8 +513,16 @@ internal object MasteryStore {
         if (!actionable) return null
 
         val targetPage = lookupTargetPageForConcept(db, top.bookId, top.tocNodeId)
+        val bookTitle = lookupBookTitle(db, top.bookId)
         val sectionTitle = lookupTocTitle(db, top.bookId, top.tocNodeId)
-        val metaLine = MasteryEngine.buildHomeFocusMeta(top, sectionTitle, targetPage)
+        val lastQuestion = lookupLastBookQuestion(db, top.bookId)
+        val metaLine = MasteryEngine.buildHomeFocusMeta(
+            record = top,
+            sectionLabel = sectionTitle,
+            targetPage = targetPage,
+            bookTitle = bookTitle,
+            lastQuestion = lastQuestion,
+        )
         return HomeFocusRecommendation(
             bookId = top.bookId,
             tocNodeId = top.tocNodeId,
@@ -682,6 +700,75 @@ internal object MasteryStore {
                     s.executeUpdate()
                 }
             }
+        }
+        deleteLastBookQuestion(db, bookId)
+    }
+
+    private const val LAST_QUESTION_SETTING_PREFIX = "last_question:"
+
+    fun saveLastBookQuestion(db: Connection, bookId: String, question: String) {
+        val cleanBook = bookId.trim()
+        val cleanQuestion = MasteryEngine.sanitizeHumanLabel(question)?.take(200) ?: return
+        if (cleanBook.isEmpty()) return
+        if (!BookSchemaMigration.tableExists(db, "reading_settings")) {
+            db.createStatement().use {
+                it.execute("CREATE TABLE IF NOT EXISTS reading_settings(name TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            }
+        }
+        db.prepareStatement("INSERT OR REPLACE INTO reading_settings(name, value) VALUES(?, ?)").use { s ->
+            s.setString(1, "$LAST_QUESTION_SETTING_PREFIX$cleanBook")
+            s.setString(2, cleanQuestion)
+            s.executeUpdate()
+        }
+    }
+
+    fun deleteLastBookQuestion(db: Connection, bookId: String) {
+        val cleanBook = bookId.trim()
+        if (cleanBook.isEmpty() || !BookSchemaMigration.tableExists(db, "reading_settings")) return
+        db.prepareStatement("DELETE FROM reading_settings WHERE name=?").use { s ->
+            s.setString(1, "$LAST_QUESTION_SETTING_PREFIX$cleanBook")
+            s.executeUpdate()
+        }
+    }
+
+    fun lookupLastBookQuestion(db: Connection, bookId: String): String? {
+        val cleanBook = bookId.trim()
+        if (cleanBook.isEmpty()) return null
+        if (BookSchemaMigration.tableExists(db, "reading_settings")) {
+            val fromSetting = db.prepareStatement("SELECT value FROM reading_settings WHERE name=? LIMIT 1").use { s ->
+                s.setString(1, "$LAST_QUESTION_SETTING_PREFIX$cleanBook")
+                s.executeQuery().use { if (it.next()) it.getString(1) else null }
+            }
+            MasteryEngine.sanitizeHumanLabel(fromSetting)?.let { return it }
+        }
+        if (BookSchemaMigration.tableExists(db, "learner_evidence_events")) {
+            val fromEvent = db.prepareStatement(
+                """SELECT detail_json FROM learner_evidence_events
+                   WHERE book_id=? AND signal_type='SELECTION_ASK'
+                   ORDER BY created_at DESC, rowid DESC LIMIT 5""".trimIndent(),
+            ).use { s ->
+                s.setString(1, cleanBook)
+                s.executeQuery().use { r ->
+                    var found: String? = null
+                    while (r.next() && found == null) {
+                        val raw = r.getString(1).orEmpty()
+                        val obj = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull()
+                        val q = (obj?.get("question") as? JsonPrimitive)?.contentOrNull
+                        found = MasteryEngine.sanitizeHumanLabel(q)
+                    }
+                    found
+                }
+            }
+            if (fromEvent != null) return fromEvent
+        }
+        return null
+    }
+
+    private fun lookupBookTitle(db: Connection, bookId: String): String? {
+        if (!BookSchemaMigration.tableExists(db, "books")) return null
+        return db.prepareStatement("SELECT title FROM books WHERE id=? LIMIT 1").use { s ->
+            s.setString(1, bookId)
+            s.executeQuery().use { if (it.next()) it.getString(1) else null }
         }
     }
 

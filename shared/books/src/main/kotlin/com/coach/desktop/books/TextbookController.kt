@@ -50,6 +50,8 @@ internal data class LibraryUi(
     val activePracticeDraft: ChapterPracticeDraft? = null,
     /** 2.0-AI-1：无未完草稿时按最高 NeedScore 推荐的薄弱概念（供首页「继续」单行依据与直达）。 */
     val focusRecommendation: HomeFocusRecommendation? = null,
+    /** 2.0-FIX-E (#4A)：当前焦点书最近一次提问正文，供书架「继续」卡展示「上次问：…」。 */
+    val lastBookQuestion: String? = null,
     val activeCourseId: String? = null,
     val activeCourseTopicId: String? = null,
     val activeCourseDetail: CourseDetailSnapshot? = null,
@@ -151,6 +153,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         lastImportDurationMs = current.lastImportDurationMs,
                         activePracticeDraft = snap.activePracticeDraft,
                         focusRecommendation = snap.focusRecommendation,
+                        lastBookQuestion = snap.lastBookQuestion,
                         activeCourseId = restoredCourseId,
                         activeCourseTopicId = restoredCourseTopicId,
                         activeCourseDetail = restoredCourseDetail,
@@ -503,8 +506,11 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
-    fun recordSelectionAsk(bookId: String, tocNodeId: String, page: Int, canonicalName: String) {
+    fun recordSelectionAsk(bookId: String, tocNodeId: String, page: Int, canonicalName: String, questionText: String? = null) {
         backgroundScope.launch {
+            if (!questionText.isNullOrBlank()) {
+                runCatching { library.saveLastQuestion(bookId, questionText) }
+            }
             runCatching {
                 library.recordMasteryEvidence(
                     bookId = bookId,
@@ -515,7 +521,13 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 )
             }
             val rec = runCatching { library.topHomeRecommendation(bookId) }.getOrNull()
-            if (rec != null) mutable.update { it.copy(focusRecommendation = rec) }
+            val lastQ = runCatching { library.lastQuestion(bookId) }.getOrNull()
+            mutable.update { current ->
+                current.copy(
+                    focusRecommendation = rec ?: current.focusRecommendation,
+                    lastBookQuestion = if (current.book?.id == bookId) (lastQ ?: current.lastBookQuestion) else current.lastBookQuestion,
+                )
+            }
         }
     }
 
@@ -943,6 +955,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             val ladder = library.ladder(book.id)
             val draft = library.latestChapterPracticeDraft(book.id)
             val focusRec = library.topHomeRecommendation(book.id)
+            val lastQ = library.lastQuestion(book.id)
             mutable.update { current ->
                 LibraryUi(
                     catalog = catalog, book = book, collections = collections, page = book.readingPage, busy = true,
@@ -954,6 +967,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     lastImportDurationMs = current.lastImportDurationMs,
                     activePracticeDraft = draft,
                     focusRecommendation = focusRec,
+                    lastBookQuestion = lastQ,
                 )
             }
         }
@@ -985,6 +999,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 draft.page
             } else book.readingPage
             val activeBook = if (resumePage != book.readingPage) book.copy(readingPage = resumePage) else book
+            val lastQ = library.lastQuestion(activeBook.id)
             mutable.update { current ->
                 current.copy(
                     catalog = catalog,
@@ -1003,6 +1018,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     ladder = ladder,
                     initialized = true,
                     activePracticeDraft = draft,
+                    lastBookQuestion = lastQ,
                 )
             }
         }
@@ -1036,7 +1052,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         mutable.update { it.copy(book = activeBook, review = null, questionsOpen = false,
             screen = BookScreen.READER, page = activeBook.readingPage, source = null,
             prompt = null, initialized = true, activePracticeDraft = draft,
-            focusRecommendation = focusRec) }
+            focusRecommendation = focusRec,
+            lastBookQuestion = library.lastQuestion(activeBook.id)) }
     }
 
     /** 实时持久化单书伴读与练习草稿到 `book_chapter_progress.practice_draft_json`，退出后点「继续」精确恢复。 */
@@ -1204,6 +1221,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             }
         } else if (cur.screen == BookScreen.BOOKLIST) {
             library.clearOpenSession()
+            val focusBookId = cur.book?.id ?: cur.catalog.firstOrNull()?.id
             mutable.update {
                 it.copy(
                     screen = BookScreen.HOME,
@@ -1211,6 +1229,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     collections = library.collectionSummaries(),
                     review = null,
                     prompt = null,
+                    focusRecommendation = library.topHomeRecommendation(focusBookId),
+                    lastBookQuestion = focusBookId?.let(library::lastQuestion),
                 )
             }
         } else if (cur.screen == BookScreen.READER && cur.activeBooklistId != null) {
@@ -1241,6 +1261,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     reviews = library.reviews(),
                     todayQueue = library.reviewQueue(),
                     focusRecommendation = library.topHomeRecommendation(it.book?.id),
+                    lastBookQuestion = (it.book?.id ?: it.catalog.firstOrNull()?.id)?.let(library::lastQuestion),
                 )
             }
         }

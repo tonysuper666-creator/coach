@@ -1000,7 +1000,9 @@ internal fun CompanionAskPane(
     val quoteSource = thread?.selection ?: activeSelection
     val isCollectionMode = collectionScopeLabel != null && askScope == CollectionAskScope.COLLECTION
     val isLoadingNow = if (isCollectionMode) collectionLoading else (thread?.loading == true)
-    val canSendNow = if (isCollectionMode) draft.trim().length in 2..600 else BookPassageQuestion.accepts(draft)
+    val canSendNow = draft.isNotBlank()
+    val askFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { withFrameNanos { }; askFocus.requestFocus() }
     DisposableEffect(Unit) {
         onDispose { onInputFocusChanged(false) }
     }
@@ -1199,6 +1201,13 @@ internal fun CompanionAskPane(
             }
         }
 
+        if (draft.isBlank()) {
+            Text("先输入问题", style = MaterialTheme.typography.labelSmall, color = colors.fgSecondary)
+        } else if (isCollectionMode && draft.trim().length > 600) {
+            Text("问题太长，请缩短后发送", style = MaterialTheme.typography.labelSmall, color = colors.fgSecondary)
+        } else if (!isCollectionMode && draft.trim().length > BookPassageQuestion.MAX_QUESTION_LENGTH) {
+            Text("问题太长，请缩短后发送", style = MaterialTheme.typography.labelSmall, color = colors.fgSecondary)
+        }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(Modifier.weight(1f)) {
                 V7Field(
@@ -1209,9 +1218,9 @@ internal fun CompanionAskPane(
                         quoteSource != null -> "问这句的意思、公式推导或例子…"
                         else -> "输入问题…"
                     },
-                    enabled = !isLoadingNow,
                     modifier = Modifier
                         .fillMaxWidth()
+                        .focusRequester(askFocus)
                         .onFocusChanged { onInputFocusChanged(it.hasFocus) }
                         .testTag("inline-followup-input")
                         .onPreviewKeyEvent { event ->
@@ -1223,8 +1232,8 @@ internal fun CompanionAskPane(
                 )
             }
             PrimaryButton(
-                onClick = onSubmitQuestion,
-                enabled = !isLoadingNow && canSendNow,
+                onClick = { if (!isLoadingNow) onSubmitQuestion() },
+                enabled = canSendNow,
                 modifier = Modifier.testTag("inline-followup-send"),
             ) { Text("发送", maxLines = 1, softWrap = false) }
         }

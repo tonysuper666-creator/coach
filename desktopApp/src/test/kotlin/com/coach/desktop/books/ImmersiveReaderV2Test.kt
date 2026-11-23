@@ -23,6 +23,25 @@ import kotlin.test.*
 @OptIn(ExperimentalTestApi::class)
 class ImmersiveReaderV2Test {
 
+    @Test
+    fun askOpensFocusedAndSendTracksNonBlankText() = runSkikoComposeUiTest(
+        size = Size(820f, 620f), density = Density(1f),
+    ) {
+        val (library, _) = createTempBookLibrary()
+        val controller = TextbookController(library)
+        runBlocking { controller.load(); controller.read() }
+        setContent { Box(Modifier.fillMaxSize()) { WindowsTextbookHost(controller, chooseBook = { null }) } }
+        waitForIdle()
+        onNodeWithTag("immersive-companion-toggle").performClick()
+        onNodeWithTag("companion-tab-ask").performClick()
+        waitForIdle()
+        onNodeWithTag("inline-followup-input").assertIsFocused()
+        onNodeWithTag("inline-followup-send").assertIsNotEnabled()
+        onNodeWithText("先输入问题").assertExists()
+        onNodeWithTag("inline-followup-input").performTextInput("问")
+        onNodeWithTag("inline-followup-send").assertIsEnabled()
+    }
+
     private fun createTempBookLibrary(): Pair<TextbookLibrary, Textbook> {
         val dir = Files.createTempDirectory("coach-v2-reader-test")
         val library = TextbookLibrary(dir)

@@ -677,8 +677,8 @@ internal fun TextbookReader(
     // 仅在输入框真实聚焦或页码/批注/搜索正在输入时屏蔽翻页键，绝不用持久的 inlineThread.askingOpen 锁死键盘。
     val typing = readerTyping(asking, jumpFocused, false, session.noting) ||
         askInputFocused || practiceInputFocused || searchOpen || searchFocused
-    LaunchedEffect(book.id, ui.page, typing, pdfScrolling, companionOpen, tocOpen) {
-        if (typing) return@LaunchedEffect
+    LaunchedEffect(book.id, ui.page, typing, pdfScrolling, companionOpen, companionTab, tocOpen) {
+        if (typing || (companionOpen && companionTab == ReaderCompanionTab.ASK)) return@LaunchedEffect
         // A successful request already owns focus. Do not leave another frame's
         // request pending: it could steal focus from a newly clicked page field.
         repeat(5) {
@@ -895,10 +895,11 @@ internal fun TextbookReader(
         }
     }
 
-    // 2.0 单层沉浸阅读器状态：默认隐藏全部工具栏（嵌套 = 1 层），按需浮出 HUD 与统一伴读抽屉。
-    var hudVisible by remember(book.id) { mutableStateOf(false) }
+    // 打开时先显示工具栏，读者主动收起后才允许鼠标离开边缘时自动隐藏。
+    var hudVisible by remember(book.id) { mutableStateOf(true) }
+    var hudDismissed by remember(book.id) { mutableStateOf(false) }
     var hudPinned by remember(book.id) { mutableStateOf(false) }
-    // 宽屏（>=1280dp）默认并排停靠（Split-Pane，正文零像素遮挡），保留一键切浮层。
+    // 伴读在桌面并排，窄窗使用底部抽屉。
     var companionDocked by remember(book.id) { mutableStateOf(true) }
     val bookmarkStore = remember(library.directory) { BookBookmarkStore(library.directory) }
     val pdfBitmapCache = remember(library, book.id) { OriginalPdfBitmapCache() }
@@ -1042,6 +1043,7 @@ internal fun TextbookReader(
                     event.key == Key.F11 || (!typingNow && !mod && event.key == Key.F) -> {
                         if (hudVisible || tocOpen || companionOpen || searchOpen) {
                             hudVisible = false
+                            hudDismissed = true
                             hudPinned = false
                             tocOpen = false
                             closeCompanion()
@@ -1054,7 +1056,7 @@ internal fun TextbookReader(
                     }
                     !typingNow && !mod && event.key == Key.Tab -> {
                         hudVisible = !hudVisible
-                        if (!hudVisible) hudPinned = false
+                        if (!hudVisible) { hudPinned = false; hudDismissed = true }
                         true
                     }
                     !typingNow && !mod && (event.key == Key.T || event.key == Key.LeftBracket) -> {
@@ -1075,7 +1077,7 @@ internal fun TextbookReader(
                             editingJump -> { editingJump = false; focusManager.clearFocus(); true }
                             tocOpen -> { tocOpen = false; true }
                             companionOpen -> { closeCompanion(); true }
-                            hudVisible && !hudPinned -> { hudVisible = false; true }
+                            hudVisible && !hudPinned -> { hudVisible = false; hudDismissed = true; true }
                             else -> false
                         }
                     }
@@ -1093,7 +1095,7 @@ internal fun TextbookReader(
                             val h = size.height.toFloat()
                             if (y <= topEdgePx || y >= h - bottomEdgePx) {
                                 hudVisible = true
-                            } else if (!hudPinned && !editingJump && !searchOpen && y > topEdgePx + 48f && y < h - bottomEdgePx - 48f) {
+                            } else if (hudDismissed && !hudPinned && !editingJump && !searchOpen && y > topEdgePx + 48f && y < h - bottomEdgePx - 48f) {
                                 hudVisible = false
                             }
                         }
@@ -1108,11 +1110,11 @@ internal fun TextbookReader(
         val rootWidth = maxWidth
         val rootHeight = maxHeight
         val presentation = companionPresentationForWidth(rootWidth.value)
-        val canDockCompanion = presentation == CompanionPresentation.WIDE_SPLIT && hinge == null
+        val canDockCompanion = presentation != CompanionPresentation.BOTTOM_SHEET && hinge == null
         val isBottomSheetCompanion = presentation == CompanionPresentation.BOTTOM_SHEET && hinge == null
         val verticalSplit = bookVerticalSplit(rootWidth.value, rootHeight.value, readerOriginDp?.first ?: 0f, hinge)
         val tabletopSplit = if (verticalSplit == null) bookTabletopSplit(rootWidth.value, rootHeight.value, readerOriginDp?.second ?: 0f, hinge) else null
-        val effectiveSideDocked = companionOpen && companionDocked && canDockCompanion && verticalSplit == null && tabletopSplit == null
+        val effectiveSideDocked = companionOpen && canDockCompanion && verticalSplit == null && tabletopSplit == null
         val effectiveBottomSheet = companionOpen && isBottomSheetCompanion && verticalSplit == null && tabletopSplit == null
         val effectiveSideOverlay = companionOpen && !effectiveSideDocked && !effectiveBottomSheet && verticalSplit == null && tabletopSplit == null
         val showHud = hudVisible || hudPinned || editingJump || searchOpen
@@ -1123,6 +1125,30 @@ internal fun TextbookReader(
             Box(
                 boxModifier
                     .fillMaxSize()
+                    .pointerInput(book.id) {
+                        awaitPointerEventScope {
+                            var start: androidx.compose.ui.geometry.Offset? = null
+                            var downTime = 0L
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Final)
+                                val change = event.changes.firstOrNull() ?: continue
+                                if (change.pressed && !change.previousPressed) {
+                                    start = change.position
+                                    downTime = change.uptimeMillis
+                                } else if (!change.pressed && change.previousPressed) {
+                                    val p = start
+                                    start = null
+                                    if (p != null && !change.isConsumed && change.uptimeMillis - downTime < 500 &&
+                                        (change.position - p).getDistance() < 12f &&
+                                        p.x in size.width * .3f..size.width * .7f &&
+                                        p.y in size.height * .25f..size.height * .75f) {
+                                        hudVisible = !hudVisible
+                                        if (!hudVisible) { hudDismissed = true; hudPinned = false }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     .background(paperCanvas)
                     .testTag("reader-page")
                     .focusRequester(pageFocus)
@@ -1198,6 +1224,7 @@ internal fun TextbookReader(
                     }
                     BookPageView(
                         book, paging, ranges, turnLayout, libraryDirectory = library.directory,
+                        modifier = Modifier.align(Alignment.Center).widthIn(max = 720.dp),
                         turnStyle = turnStyle, readMode = readMode, onOpenTableRow = openPassage,
                         onSelectText = { textSelection = it },
                         hardPoints = sectionHardPoints,
@@ -1410,7 +1437,7 @@ internal fun TextbookReader(
         fun submitCollectionQuestion(rawQuestion: String) {
             val col = activeAskCollection ?: return
             val q = rawQuestion.trim()
-            if (q.length !in 2..600) return
+            if (q.isEmpty() || q.length > 600) return
             val prev = sessionForCollection(col.id)
             if (!aiEnabled) {
                 updateCollectionSession(
@@ -1595,7 +1622,11 @@ internal fun TextbookReader(
         }
 
         val readerViewport: @Composable (Modifier) -> Unit = { viewportMod ->
-            Column(viewportMod) {
+            Column(viewportMod.padding(
+                start = if (tocOpen) minOf(308.dp, (rootWidth * .85f).coerceAtLeast(240.dp)) else 0.dp,
+                top = if (showHud) 44.dp else 0.dp,
+                bottom = if (showHud && !effectiveBottomSheet) 44.dp else 0.dp,
+            )) {
                 activeWhisper?.let { whisper ->
                     MarginWhisperStrip(
                         whisper = whisper,
@@ -1719,7 +1750,7 @@ internal fun TextbookReader(
                 ImmersiveCompanionDrawer(
                     visible = true,
                     docked = true,
-                    canDock = canDockCompanion,
+                    canDock = false,
                     drawerWidth = sideDrawerWidth,
                     activeTab = companionTab,
                     onSelectTab = { companionTab = it },
@@ -1728,6 +1759,7 @@ internal fun TextbookReader(
                     explainContent = explainTabContent,
                     askContent = askTabContent,
                     notesContent = notesTabContent,
+                    modifier = Modifier.padding(top = if (showHud) 44.dp else 0.dp),
                 )
             }
         } else {
@@ -1937,7 +1969,7 @@ internal fun TextbookReader(
         val canNext = if (textView && !pageUnrecognizedOriginal) paging.canNext || book.pages.any { it.number > visibleImportRange.last }
             else !ui.busy && nextPage != null
         ImmersiveBottomScrubber(
-            visible = showHud,
+            visible = showHud && !effectiveBottomSheet,
             availableWidth = maxWidth,
             currentPage = ui.page,
             lastPage = lastPage,
@@ -1961,7 +1993,7 @@ internal fun TextbookReader(
             onPrev = { turnLayout(ReaderTurn.Previous) },
             onNext = { turnLayout(ReaderTurn.Next) },
             onScrubToPage = { target -> turnTo(target) },
-            modifier = Modifier.align(Alignment.BottomCenter),
+            modifier = Modifier.align(Alignment.BottomStart).then(if (effectiveSideDocked) Modifier.width(rootWidth - sideDrawerWidth) else Modifier.fillMaxWidth()),
         )
 
         // 9. 轻提示（后台导入进度 / 出处警告），仅异常或进行中时浮在顶栏下方。

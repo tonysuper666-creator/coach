@@ -98,7 +98,7 @@ internal data class UnifiedBookScope(
     }
 
     companion object {
-        private val SCOPE_KEY_PATTERN = Regex("(?:sable|device)-[0-9a-f]{64}")
+        internal val SCOPE_KEY_PATTERN = Regex("(?:sable|device)-[0-9a-f]{64}")
 
         fun fromCall(deviceId: String, friendName: String?): UnifiedBookScope {
             require(deviceId.isNotBlank()) { "Missing device id" }
@@ -174,6 +174,11 @@ class UnifiedBookPipeline internal constructor(
     internal val config: UnifiedBookConfig = UnifiedBookConfig(),
 ) {
     val enabled: Boolean get() = config.enabled
+
+    internal val rootDir: Path get() = root
+    internal val blobsDirPath: Path get() = blobsDir
+    internal val accountsDirPath: Path get() = accountsDir
+    internal val registryFilePath: Path get() = registryFile
 
     private val sharedDir get() = root.resolve("shared")
     private val blobsDir get() = sharedDir.resolve("blobs")
@@ -294,6 +299,37 @@ class UnifiedBookPipeline internal constructor(
                         toc_override_json TEXT,
                         progress_json TEXT,
                         updated_at INTEGER NOT NULL
+                    )""".trimIndent(),
+                )
+                sql.execute(
+                    """CREATE TABLE IF NOT EXISTS legacy_book_mappings(
+                        legacy_record_id TEXT PRIMARY KEY,
+                        source_kind TEXT NOT NULL,
+                        legacy_doc_id TEXT NOT NULL,
+                        course_id TEXT NOT NULL,
+                        explain_source_id TEXT,
+                        pages INTEGER NOT NULL,
+                        printed_page_offset INTEGER,
+                        pages_sha256 TEXT,
+                        sha256 TEXT NOT NULL,
+                        shelf_book_id TEXT NOT NULL,
+                        migrated_at INTEGER NOT NULL
+                    )""".trimIndent(),
+                )
+                sql.execute(
+                    """CREATE TABLE IF NOT EXISTS legacy_receipt_alignments(
+                        legacy_receipt_id TEXT NOT NULL,
+                        source_kind TEXT NOT NULL,
+                        shelf_book_id TEXT NOT NULL,
+                        book_sha256 TEXT NOT NULL,
+                        page INTEGER NOT NULL,
+                        start_utf16 INTEGER NOT NULL,
+                        end_utf16 INTEGER NOT NULL,
+                        snapshot_sha256 TEXT NOT NULL,
+                        snapshot_length INTEGER NOT NULL,
+                        snapshot_ocr INTEGER NOT NULL,
+                        aligned_at INTEGER NOT NULL,
+                        PRIMARY KEY(legacy_receipt_id, page, start_utf16, end_utf16)
                     )""".trimIndent(),
                 )
             }
@@ -759,6 +795,342 @@ class UnifiedBookPipeline internal constructor(
 
     internal fun sharedRefCount(sha256: String): Int = registryDb().use { db -> countRefs(db, sha256) }
 
+    internal fun accountShelfFile(scope: UnifiedBookScope): Path = accountsDir.resolve(scope.scopeKey).resolve("shelf.sqlite")
+
+    internal fun blobPathForVerify(sha256: String): Path = blobPath(sha256)
+
+    /**
+     * Strictly read-only lookup for PR B inventory/migration: never creates directories or SQLite files.
+     * Returns the verified `shelf_book_id` only when the account shelf row, shared registry active ref,
+     * and on-disk shared blob file all exist.
+     */
+    internal fun existingShelfBookIdByShaReadOnly(scope: UnifiedBookScope, sha256: String): String? {
+        if (!sha256.matches(SHA256_PATTERN)) return null
+        val shelfFile = accountShelfFile(scope)
+        if (!Files.isRegularFile(shelfFile) || !Files.isRegularFile(registryFile) || !Files.isRegularFile(blobPath(sha256))) {
+            return null
+        }
+        val shelfBookId = openReadOnly(shelfFile).use { accountDb ->
+            accountDb.prepareStatement("SELECT shelf_book_id FROM shelf_books WHERE sha256=?").use { sql ->
+                sql.setString(1, sha256)
+                sql.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else null }
+            }
+        } ?: return null
+        val activeRef = openReadOnly(registryFile).use { db ->
+            db.prepareStatement(
+                """SELECT 1 FROM shared_blobs b
+                   JOIN shared_blob_refs r ON r.sha256 = b.sha256
+                   WHERE b.sha256=? AND b.state='ACTIVE' AND r.scope_key=? AND r.shelf_book_id=?""".trimIndent(),
+            ).use { sql ->
+                sql.setString(1, sha256)
+                sql.setString(2, scope.scopeKey)
+                sql.setString(3, shelfBookId)
+                sql.executeQuery().use { it.next() }
+            }
+        }
+        return if (activeRef) shelfBookId else null
+    }
+
+    internal data class LegacyBookMappingSnapshot(
+        val sourceKind: String,
+        val legacyDocId: String,
+        val courseId: String,
+        val explainSourceId: String?,
+        val pages: Int,
+        val printedPageOffset: Int?,
+        val pagesSha256: String?,
+        val sha256: String,
+        val shelfBookId: String,
+    )
+
+    private fun readLegacyBookMapping(db: Connection, legacyRecordId: String): LegacyBookMappingSnapshot? =
+        db.prepareStatement(
+            """SELECT source_kind, legacy_doc_id, course_id, explain_source_id,
+                      pages, printed_page_offset, pages_sha256, sha256, shelf_book_id
+               FROM legacy_book_mappings WHERE legacy_record_id=?""".trimIndent(),
+        ).use { sql ->
+            sql.setString(1, legacyRecordId)
+            sql.executeQuery().use { rs ->
+                if (!rs.next()) {
+                    null
+                } else {
+                    val rawOffset = rs.getObject(6)
+                    LegacyBookMappingSnapshot(
+                        sourceKind = rs.getString(1),
+                        legacyDocId = rs.getString(2),
+                        courseId = rs.getString(3),
+                        explainSourceId = rs.getString(4),
+                        pages = rs.getInt(5),
+                        printedPageOffset = (rawOffset as? Number)?.toInt(),
+                        pagesSha256 = rs.getString(7),
+                        sha256 = rs.getString(8),
+                        shelfBookId = rs.getString(9),
+                    )
+                }
+            }
+        }
+
+    internal fun hasLegacyBookMappingReadOnly(
+        scope: UnifiedBookScope,
+        legacyRecordId: String,
+        expectedSourceKind: String,
+        expectedLegacyDocId: String,
+        expectedCourseId: String,
+        expectedExplainSourceId: String?,
+        expectedPages: Int,
+        expectedPrintedPageOffset: Int?,
+        expectedPagesSha256: String?,
+        expectedSha256: String,
+    ): Boolean {
+        val shelfFile = accountShelfFile(scope)
+        if (!Files.isRegularFile(shelfFile)) return false
+        return openReadOnly(shelfFile).use { db ->
+            val hasTable = db.createStatement().use { s ->
+                s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_book_mappings'").use { it.next() }
+            }
+            if (!hasTable) return@use false
+            val existing = readLegacyBookMapping(db, legacyRecordId) ?: return@use false
+            val matchesMetadata = existing.sourceKind == expectedSourceKind &&
+                existing.legacyDocId == expectedLegacyDocId &&
+                existing.courseId == expectedCourseId &&
+                existing.explainSourceId == expectedExplainSourceId &&
+                existing.pages == expectedPages &&
+                existing.printedPageOffset == expectedPrintedPageOffset &&
+                existing.pagesSha256 == expectedPagesSha256 &&
+                existing.sha256 == expectedSha256
+            if (!matchesMetadata) return@use false
+            val shelfMatches = db.prepareStatement("SELECT 1 FROM shelf_books WHERE shelf_book_id=? AND sha256=?").use { sql ->
+                sql.setString(1, existing.shelfBookId)
+                sql.setString(2, expectedSha256)
+                sql.executeQuery().use { it.next() }
+            }
+            shelfMatches && Files.isRegularFile(blobPath(expectedSha256))
+        }
+    }
+
+    internal fun alignedReceiptBlockKeysReadOnly(
+        scope: UnifiedBookScope,
+        legacyReceiptId: String,
+        shelfBookId: String,
+    ): Set<Triple<Int, Int, Int>> {
+        val shelfFile = accountShelfFile(scope)
+        if (!Files.isRegularFile(shelfFile)) return emptySet()
+        return openReadOnly(shelfFile).use { db ->
+            val hasTable = db.createStatement().use { s ->
+                s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_receipt_alignments'").use { it.next() }
+            }
+            if (!hasTable) return@use emptySet()
+            db.prepareStatement(
+                "SELECT page, start_utf16, end_utf16 FROM legacy_receipt_alignments WHERE legacy_receipt_id=? AND shelf_book_id=?",
+            ).use { sql ->
+                sql.setString(1, legacyReceiptId)
+                sql.setString(2, shelfBookId)
+                sql.executeQuery().use { rs ->
+                    buildSet { while (rs.next()) add(Triple(rs.getInt(1), rs.getInt(2), rs.getInt(3))) }
+                }
+            }
+        }
+    }
+
+    /**
+     * Imports a verified server-local original file into [scope] for PR B migration.
+     * Always streams and re-hashes the actual file bytes before establishing or reusing any mapping;
+     * returns `(shelfBook, alreadyExistedOnScope)` so repeated runs deduplicate cleanly.
+     */
+    internal suspend fun importVerifiedLocalFile(
+        scope: UnifiedBookScope,
+        file: Path,
+        formatRaw: String,
+        titleRaw: String,
+        expectedSha256: String,
+    ): Pair<UnifiedShelfBook, Boolean> = withContext(Dispatchers.IO) {
+        val format = formatRaw.trim().lowercase()
+        if (format !in SUPPORTED_FORMATS) {
+            throw UnifiedBookError(HttpStatusCode.BadRequest, "unsupported_format", "暂不支持这种教材格式。")
+        }
+        val title = titleRaw.trim()
+        if (title.length !in 1..300 || title.any(Char::isISOControl) || !tutorSourceAllowed(title)) {
+            throw UnifiedBookError(HttpStatusCode.BadRequest, "invalid_metadata", "书名无效，请检查后重试。")
+        }
+        val expectedSha = expectedSha256.trim().lowercase()
+        if (!expectedSha.matches(SHA256_PATTERN)) {
+            throw UnifiedBookError(HttpStatusCode.BadRequest, "invalid_metadata", "文件校验值格式不对。")
+        }
+        if (!Files.isRegularFile(file)) {
+            throw UnifiedBookError(HttpStatusCode.NotFound, "missing_file", "原文件不存在。")
+        }
+        val fileSize = Files.size(file)
+        if (fileSize <= 0L) {
+            throw UnifiedBookError(HttpStatusCode.BadRequest, "invalid_metadata", "这份教材是空文件，无法迁移。")
+        }
+        if (fileSize > config.maxFileBytes) {
+            throw UnifiedBookError(HttpStatusCode.PayloadTooLarge, "file_too_large", "文件太大")
+        }
+
+        // Verify actual file bytes match expectedSha before taking locks or modifying state.
+        val actualSha = sha256File(file)
+        if (actualSha != expectedSha) {
+            throw UnifiedBookError(HttpStatusCode.BadRequest, "sha256_mismatch", "文件内容校验不一致。")
+        }
+
+        shaLock(actualSha).withLock {
+            val existingId = existingShelfBookIdByShaReadOnly(scope, actualSha)
+            if (existingId != null) {
+                val existing = shelfBookStatus(scope, existingId)
+                if (existing != null) {
+                    return@withLock existing to true
+                }
+            }
+            ensureInitialized()
+            val tempFile = privateFiles.file(tmpDir.resolve(".migrate-${UUID.randomUUID()}.part"))
+            var reserved = 0L
+            try {
+                reserved = reserveSpace(scope, fileSize, 0L)
+                val copyDigest = MessageDigest.getInstance("SHA-256")
+                var copied = 0L
+                Files.newInputStream(file).use { input ->
+                    Files.newOutputStream(tempFile).use { out ->
+                        val buffer = ByteArray(65_536)
+                        while (true) {
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            copied += n
+                            if (copied > config.maxFileBytes) {
+                                throw UnifiedBookError(HttpStatusCode.PayloadTooLarge, "file_too_large", "文件太大")
+                            }
+                            copyDigest.update(buffer, 0, n)
+                            out.write(buffer, 0, n)
+                        }
+                    }
+                }
+                val copiedSha = copyDigest.digest().joinToString("") { "%02x".format(it) }
+                if (copied != fileSize || copiedSha != expectedSha) {
+                    throw UnifiedBookError(HttpStatusCode.BadRequest, "sha256_mismatch", "文件内容校验不一致。")
+                }
+                val committed = commitUploadedFile(scope, actualSha, format, title, copied, tempFile)
+                committed to false
+            } finally {
+                runCatching { Files.deleteIfExists(tempFile) }
+                releaseSpace(scope, reserved)
+            }
+        }
+    }
+
+    internal fun upsertLegacyBookMapping(
+        scope: UnifiedBookScope,
+        legacyRecordId: String,
+        sourceKind: String,
+        legacyDocId: String,
+        courseId: String,
+        explainSourceId: String?,
+        pages: Int,
+        printedPageOffset: Int?,
+        pagesSha256: String?,
+        sha256: String,
+        shelfBookId: String,
+    ): Boolean {
+        val now = config.clock()
+        val desired = LegacyBookMappingSnapshot(
+            sourceKind = sourceKind,
+            legacyDocId = legacyDocId,
+            courseId = courseId,
+            explainSourceId = explainSourceId,
+            pages = pages,
+            printedPageOffset = printedPageOffset,
+            pagesSha256 = pagesSha256,
+            sha256 = sha256,
+            shelfBookId = shelfBookId,
+        )
+        return accountShelfDb(scope).use { db ->
+            val existing = readLegacyBookMapping(db, legacyRecordId)
+            if (existing == desired) return@use false
+            db.prepareStatement(
+                """INSERT INTO legacy_book_mappings(
+                       legacy_record_id, source_kind, legacy_doc_id, course_id, explain_source_id,
+                       pages, printed_page_offset, pages_sha256, sha256, shelf_book_id, migrated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(legacy_record_id) DO UPDATE SET
+                       source_kind=excluded.source_kind,
+                       legacy_doc_id=excluded.legacy_doc_id,
+                       course_id=excluded.course_id,
+                       explain_source_id=excluded.explain_source_id,
+                       pages=excluded.pages,
+                       printed_page_offset=excluded.printed_page_offset,
+                       pages_sha256=excluded.pages_sha256,
+                       sha256=excluded.sha256,
+                       shelf_book_id=excluded.shelf_book_id,
+                       migrated_at=excluded.migrated_at""".trimIndent(),
+            ).use { sql ->
+                sql.setString(1, legacyRecordId)
+                sql.setString(2, sourceKind)
+                sql.setString(3, legacyDocId)
+                sql.setString(4, courseId)
+                if (explainSourceId == null) sql.setNull(5, java.sql.Types.VARCHAR) else sql.setString(5, explainSourceId)
+                sql.setInt(6, pages)
+                if (printedPageOffset == null) sql.setNull(7, java.sql.Types.INTEGER) else sql.setInt(7, printedPageOffset)
+                if (pagesSha256 == null) sql.setNull(8, java.sql.Types.VARCHAR) else sql.setString(8, pagesSha256)
+                sql.setString(9, sha256)
+                sql.setString(10, shelfBookId)
+                sql.setLong(11, now)
+                sql.executeUpdate()
+            }
+            true
+        }
+    }
+
+    internal data class LegacyReceiptAlignmentRow(
+        val page: Int,
+        val startUtf16: Int,
+        val endUtf16: Int,
+        val snapshotSha256: String,
+        val snapshotLength: Int,
+        val snapshotOcr: Boolean,
+    )
+
+    internal fun upsertLegacyReceiptAlignments(
+        scope: UnifiedBookScope,
+        legacyReceiptId: String,
+        sourceKind: String,
+        shelfBookId: String,
+        bookSha256: String,
+        rows: List<LegacyReceiptAlignmentRow>,
+    ): Int {
+        if (rows.isEmpty()) return 0
+        val now = config.clock()
+        return accountShelfDb(scope).use { db ->
+            db.autoCommit = false
+            try {
+                var inserted = 0
+                db.prepareStatement(
+                    """INSERT OR IGNORE INTO legacy_receipt_alignments(
+                           legacy_receipt_id, source_kind, shelf_book_id, book_sha256,
+                           page, start_utf16, end_utf16, snapshot_sha256, snapshot_length, snapshot_ocr, aligned_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""".trimIndent(),
+                ).use { sql ->
+                    for (row in rows) {
+                        sql.setString(1, legacyReceiptId)
+                        sql.setString(2, sourceKind)
+                        sql.setString(3, shelfBookId)
+                        sql.setString(4, bookSha256)
+                        sql.setInt(5, row.page)
+                        sql.setInt(6, row.startUtf16)
+                        sql.setInt(7, row.endUtf16)
+                        sql.setString(8, row.snapshotSha256)
+                        sql.setInt(9, row.snapshotLength)
+                        sql.setInt(10, if (row.snapshotOcr) 1 else 0)
+                        sql.setLong(11, now)
+                        inserted += sql.executeUpdate()
+                    }
+                }
+                db.commit()
+                inserted
+            } catch (e: Exception) {
+                db.rollback()
+                throw e
+            }
+        }
+    }
+
     private fun countRefs(db: Connection, sha256: String): Int =
         db.prepareStatement("SELECT COUNT(*) FROM shared_blob_refs WHERE sha256=?").use { sql ->
             sql.setString(1, sha256)
@@ -810,11 +1182,31 @@ class UnifiedBookPipeline internal constructor(
     )
 
     companion object {
-        private val SHA256_PATTERN = Regex("[0-9a-f]{64}")
+        internal val SHA256_PATTERN = Regex("[0-9a-f]{64}")
         internal val SHELF_BOOK_ID_PATTERN = Regex("sb_[0-9a-f]{24}")
-        private val SUPPORTED_FORMATS = setOf(
+        internal val SUPPORTED_FORMATS = setOf(
             "pdf", "epub", "md", "txt", "docx", "pptx", "html", "mobi", "azw3", "rtf", "odt", "png", "jpg", "srt", "vtt",
         )
+
+        internal fun openReadOnly(file: Path): Connection {
+            val props = java.util.Properties().apply {
+                setProperty("open_mode", "1") // SQLITE_OPEN_READONLY
+            }
+            return DriverManager.getConnection("jdbc:sqlite:$file", props)
+        }
+
+        internal fun sha256File(file: Path): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            Files.newInputStream(file).use { input ->
+                val buf = ByteArray(65_536)
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    digest.update(buf, 0, n)
+                }
+            }
+            return digest.digest().joinToString("") { "%02x".format(it) }
+        }
     }
 }
 

@@ -24,7 +24,7 @@ import java.util.Base64
 fun main(args: Array<String>): Unit = runBlocking {
     val managed = System.getenv("COACH_MANAGE_SERVICES") == "1"
     val data = Path.of(System.getenv("COACH_DATA_DIR") ?: File(System.getProperty("user.home"),"Coach/data").path)
-    if (args.firstOrNull() in setOf("pair-code", "devices", "revoke", "revoke-friend", "sable-users", "disable-sable")) {
+    if (args.firstOrNull() in setOf("pair-code", "devices", "revoke", "revoke-friend", "sable-users", "disable-sable", "books-inventory", "books-migrate", "books-verify")) {
         pairingCommand(args, data)
         return@runBlocking
     }
@@ -164,7 +164,10 @@ fun main(args: Array<String>): Unit = runBlocking {
     val sable = publicPort?.let { SableSessions(actor, data.resolveSibling("${data.fileName}-sable-credentials")) }
     val friends = FriendAccess(data.resolve("friends"), sableSessions = sable)
     val unifiedBooks = UnifiedBookPipeline(data.resolve("unified-books"), UnifiedBookConfig.fromEnv())
-    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation,friends,unifiedBooks=unifiedBooks); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); libraryExplainRoutes(actor,chat.reader,reader,imports,friends,companionPipeline,tokenLedger,courseAlignPipeline,courseTopicPipeline,courseVisionService,unifiedBooks); unifiedBookRoutes(actor,unifiedBooks,friends); booklistAlignmentRoutes(actor,friends,booklistAligner); practiceGradeRoutes(actor,friends,practiceGradeService); collectionQaRoutes(actor,friends,collectionQaService); courseMockRoutes(actor,friends,courseMockService); studyModeRoutes(actor,reader,friends,studyModeService,unifiedBooks); readerRoutes(actor,pushes,reader,mainline) }
+    val unifiedBookMigration = UnifiedBookMigration(data, reader.rootPath, unifiedBooks, adminDevice = device) {
+        actor.execute { pairedDevices() }
+    }
+    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation,friends,unifiedBooks=unifiedBooks); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); libraryExplainRoutes(actor,chat.reader,reader,imports,friends,companionPipeline,tokenLedger,courseAlignPipeline,courseTopicPipeline,courseVisionService,unifiedBooks); unifiedBookRoutes(actor,unifiedBooks,friends); unifiedBookMigrationRoutes(unifiedBookMigration,unifiedBooks,adminDevice=device); booklistAlignmentRoutes(actor,friends,booklistAligner); practiceGradeRoutes(actor,friends,practiceGradeService); collectionQaRoutes(actor,friends,collectionQaService); courseMockRoutes(actor,friends,courseMockService); studyModeRoutes(actor,reader,friends,studyModeService,unifiedBooks); readerRoutes(actor,pushes,reader,mainline) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")

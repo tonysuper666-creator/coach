@@ -135,7 +135,7 @@ class StubTutor : AutoCloseable {
             },
         )
 
-        fun terminal(status: String, reason: String? = null): String = sse(
+        fun terminal(status: String, reason: String? = null, retryAfterSec: Int? = null): String = sse(
             kotlinx.serialization.json.buildJsonObject {
                 put("choices", kotlinx.serialization.json.buildJsonArray { })
                 put("model", kotlinx.serialization.json.JsonPrimitive("claude-sonnet-5-5"))
@@ -156,6 +156,9 @@ class StubTutor : AutoCloseable {
                         put("queue_ms", kotlinx.serialization.json.JsonPrimitive(2))
                         put("ttft_ms", kotlinx.serialization.json.JsonPrimitive(900))
                         put("elapsed_ms", kotlinx.serialization.json.JsonPrimitive(1500))
+                        if (retryAfterSec != null) {
+                            put("retry_after_sec", kotlinx.serialization.json.JsonPrimitive(retryAfterSec))
+                        }
                     },
                 )
             },

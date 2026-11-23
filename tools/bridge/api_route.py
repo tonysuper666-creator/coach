@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from decimal import Decimal, ROUND_CEILING
+from email.utils import parsedate_to_datetime
 import json
 import math
 import os
@@ -18,6 +19,7 @@ CONFIG = json.loads(Path(__file__).with_name("model_routes.json").read_text())
 ENDPOINTS = {"anthropic": "https://api.anthropic.com/v1/messages", "openai": "https://api.openai.com/v1/responses"}
 INTERACTIVE_TASKS = frozenset({"TEACH", "READER_SELECTION", "SOURCE_LOOKUP", "PREPARE_TEACH"})
 DEFAULT_429_DELAYS = (0.5, 1.5)
+DEFAULT_429_BUDGET_SEC = 45.0
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -25,6 +27,16 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
         return max(minimum, int(os.environ.get(name, str(default))))
     except ValueError:
         return max(minimum, default)
+
+
+def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
+    try:
+        v = float(os.environ.get(name, str(default)))
+    except ValueError:
+        return max(minimum, default)
+    if not math.isfinite(v) or v < minimum:
+        return max(minimum, default)
+    return v
 
 
 def _env_delays(name: str, default: tuple[float, ...]) -> tuple[float, ...]:
@@ -46,16 +58,25 @@ def _env_delays(name: str, default: tuple[float, ...]) -> tuple[float, ...]:
     return tuple(out)
 
 
-def _parse_retry_after(raw: str | None, base_delay: float, max_delay: float) -> float:
+def _parse_retry_after_seconds(raw: str | None, wall_clock=time.time) -> float | None:
     if raw is None:
-        return min(base_delay, max_delay)
+        return None
+    text = raw.strip()
+    if not text:
+        return None
     try:
-        parsed = float(raw.strip())
-    except (ValueError, AttributeError):
-        return min(base_delay, max_delay)
+        parsed = float(text)
+    except ValueError:
+        try:
+            dt = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+        if dt.tzinfo is None:
+            return None
+        return max(0.0, dt.timestamp() - wall_clock())
     if not math.isfinite(parsed) or parsed < 0:
-        return min(base_delay, max_delay)
-    return min(max(parsed, base_delay), max_delay)
+        return None
+    return parsed
 
 
 class ApiGate:
@@ -150,7 +171,9 @@ def route(task: str, requested: str, format_attempt: int = 0) -> str | None:
 
 
 class ApiFailure(Exception):
-    pass
+    def __init__(self, reason: str, *, retry_after_sec: int | None = None):
+        super().__init__(reason)
+        self.retry_after_sec = retry_after_sec
 
 
 def cost(model: str, usage: dict, batch: bool = False) -> int:
@@ -183,8 +206,10 @@ class ApiRouter:
         concurrency: int | None = None,
         bulk_concurrency: int | None = None,
         retry_429_delays: tuple[float, ...] | None = None,
+        retry_429_budget: float | None = None,
         sleep=None,
         clock=time.monotonic,
+        wall_clock=time.time,
     ):
         self.ledger = ledger or CreditLedger(Path(os.environ.get("COACH_API_STATE_DIR", str(Path.home() / "Coach/state"))).expanduser())
         self.client_factory = client_factory or (lambda: httpx.AsyncClient(timeout=httpx.Timeout(20, connect=5), trust_env=False, follow_redirects=False))
@@ -194,12 +219,18 @@ class ApiRouter:
         limit = concurrency if concurrency is not None else _env_int("BRIDGE_API_CONCURRENCY", 4, minimum=2)
         bulk_limit = bulk_concurrency if bulk_concurrency is not None else _env_int("BRIDGE_API_BULK_CONCURRENCY", 2, minimum=1)
         self._clock = clock
+        self._wall_clock = wall_clock
         self._gates = {
             "anthropic": ApiGate(limit, bulk_limit, clock=clock),
             "openai": ApiGate(limit, bulk_limit, clock=clock),
         }
         self.retry_429_delays = (
             tuple(retry_429_delays) if retry_429_delays is not None else _env_delays("BRIDGE_API_429_DELAYS", DEFAULT_429_DELAYS)
+        )
+        self.retry_429_budget = (
+            max(0.0, float(retry_429_budget))
+            if retry_429_budget is not None
+            else _env_float("BRIDGE_API_429_BUDGET_SEC", DEFAULT_429_BUDGET_SEC, minimum=0.0)
         )
         self._sleep = sleep or asyncio.sleep
 
@@ -243,7 +274,7 @@ class ApiRouter:
                 payload = {"model": model, "instructions": system, "input": prompt, "max_output_tokens": output_limit,
                            "stream": True, "store": False, "service_tier": "default"}
             text, usage, served, finish, ended = [], {}, None, None, False
-            max_delay = 8.0 if bulk else 4.0
+            started = self._clock()
             try:
                 async with asyncio.timeout(175):
                     for attempt in range(len(self.retry_429_delays) + 1):
@@ -252,13 +283,27 @@ class ApiRouter:
                             async with client.stream("POST", ENDPOINTS[provider], headers=headers, json=payload) as response:
                                 if response.status_code == 429:
                                     # Never read an error message containing a key, source text or prompt.
-                                    base_delay = self.retry_429_delays[attempt] if attempt < len(self.retry_429_delays) else 1.0
-                                    delay = _parse_retry_after(response.headers.get("retry-after"), base_delay, max_delay)
-                                    gate.note_rate_limit(delay)
-                                    if attempt < len(self.retry_429_delays):
-                                        retry_delay = delay
+                                    parsed_ra = _parse_retry_after_seconds(response.headers.get("retry-after"), self._wall_clock)
+                                    elapsed = max(0.0, self._clock() - started)
+                                    remaining_budget = max(0.0, self.retry_429_budget - elapsed)
+                                    if parsed_ra is not None:
+                                        retry_sec = max(1, math.ceil(parsed_ra))
+                                        if attempt < len(self.retry_429_delays) and parsed_ra <= remaining_budget:
+                                            gate.note_rate_limit(parsed_ra)
+                                            retry_delay = parsed_ra
+                                        else:
+                                            gate.note_rate_limit(min(parsed_ra, self.retry_429_budget))
+                                            raise ApiFailure("api_http_429", retry_after_sec=retry_sec)
                                     else:
-                                        raise ApiFailure("api_http_429")
+                                        if attempt < len(self.retry_429_delays):
+                                            base_delay = self.retry_429_delays[attempt]
+                                            if base_delay <= remaining_budget:
+                                                gate.note_rate_limit(base_delay)
+                                                retry_delay = base_delay
+                                            else:
+                                                raise ApiFailure("api_http_429")
+                                        else:
+                                            raise ApiFailure("api_http_429")
                                 elif response.status_code != 200:
                                     # Never read an error message containing a key, source text or prompt.
                                     raise ApiFailure(f"api_http_{response.status_code}")

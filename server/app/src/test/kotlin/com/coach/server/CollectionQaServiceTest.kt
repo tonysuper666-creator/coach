@@ -440,16 +440,28 @@ class CollectionQaServiceTest {
             assertEquals(beforeQuotaStubCalls, stub.requests)
             Files.deleteIfExists(friendConfig)
 
+            // 4b. Sable hitting over-budget upstream 429 gets HTTP 429 + Retry-After header + plain-Chinese wait time
+            stub.stream(1, StubTutor.terminal("failed", "unavailable", retryAfterSec = 60), StubTutor.DONE)
+            val sableRateLimited = post(publicPort, "/v1/library/collection/ask", payload, sableDevice, sableAuth)
+            assertEquals(429, sableRateLimited.statusCode())
+            assertEquals("60", sableRateLimited.headers().firstValue("Retry-After").orElse(""))
+            val sableRateJson = LedgerJson.parseToJsonElement(sableRateLimited.body()).jsonObject
+            assertEquals(60, sableRateJson["retryAfterSec"]!!.jsonPrimitive.int)
+            assertTrue(sableRateJson.str("error").contains("60 秒"), "Expected retryable seconds in error: ${sableRateJson.str("error")}")
+
             // 5. Revoked Sable account is rejected with 401
             assertEquals(204, post(privatePort, "/v1/sable/disable", """{"username":"qa-reader"}""", "desktop", ownerToken).statusCode())
             assertEquals(401, post(publicPort, "/v1/library/collection/ask", payload, sableDevice, sableAuth).statusCode())
 
-            // 6. Owner hitting upstream bridge 429 gets HTTP 429 with clear plain-Chinese retry guidance (not 503)
-            stub.stream(1, StubTutor.terminal("failed", "api_http_429"), StubTutor.DONE)
+            // 6. Owner hitting over-budget upstream bridge 429 gets HTTP 429 + Retry-After + clear plain-Chinese wait time (not 503)
+            stub.stream(1, StubTutor.terminal("failed", "api_http_429", retryAfterSec = 60), StubTutor.DONE)
             val rateLimited = post(privatePort, "/v1/library/collection/ask", payload, "desktop", ownerToken)
             assertEquals(429, rateLimited.statusCode())
-            val rateBody = LedgerJson.parseToJsonElement(rateLimited.body()).jsonObject.str("error")
-            assertTrue(rateBody.contains("重试"), "Expected plain-Chinese retry guidance, got: $rateBody")
+            assertEquals("60", rateLimited.headers().firstValue("Retry-After").orElse(""))
+            val rateJson = LedgerJson.parseToJsonElement(rateLimited.body()).jsonObject
+            assertEquals(60, rateJson["retryAfterSec"]!!.jsonPrimitive.int)
+            val rateBody = rateJson.str("error")
+            assertTrue(rateBody.contains("60 秒") && rateBody.contains("重试"), "Expected retryable wait guidance, got: $rateBody")
         } finally {
             privateEngine.stopSuspend(0, 500)
             publicEngine.stopSuspend(0, 500)

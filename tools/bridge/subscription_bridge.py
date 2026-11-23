@@ -567,14 +567,18 @@ class Outcome:
     usage: dict = field(default_factory=lambda: {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
     started: bool = False
     detail: str = ""
+    retry_after_sec: int | None = None
 
     def x_coach(self, req: ReqCtx) -> dict:
-        return {"status": self.status, "reason": self.reason, "finish_reason": self.finish_reason,
+        data = {"status": self.status, "reason": self.reason, "finish_reason": self.finish_reason,
                 "served_by": self.served_by, "fallback": req.fallback,
                 "physical_calls": req.physical_calls, "request_id": req.request_id,
                 "requested_model": req.model, "traffic": req.traffic, "source": "production" if req.production_source else "unknown", "queue_ms": req.queue_ms(),
                 "ttft_ms": req.ttft_ms, "elapsed_ms": req.total_ms(),
                 "transport": req.transport, "api_fallback": req.api_fallback}
+        if self.retry_after_sec is not None:
+            data["retry_after_sec"] = self.retry_after_sec
+        return data
 
 
 # ---------- 子进程 ----------
@@ -1439,15 +1443,16 @@ async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
             # These exceptions contain fixed codes only; upstream messages and keys
             # never enter the diagnostics. Retain ambiguous credit reservations.
             reason = str(error) if isinstance(error, (ApiFailure, Denied)) else "api_ledger_io"
+            retry_after_sec = error.retry_after_sec if isinstance(error, ApiFailure) else None
             if req.friend_id:
                 code = "monthly_quota" if reason in ("credit_limit_95_percent", "monthly_quota") else "daily_quota" if reason == "daily_quota" else "unavailable"
                 req.transport = "api"
-                yield {"kind": "end", "outcome": Outcome("failed", code, "error", req.served_by or model, started=sent)}
+                yield {"kind": "end", "outcome": Outcome("failed", code, "error", req.served_by or model, started=sent, retry_after_sec=retry_after_sec)}
                 return
             if API_ONLY:
                 req.transport = "api"
                 yield {"kind": "end", "outcome": Outcome("truncated" if sent else "failed", reason, "error",
-                      req.served_by or model, started=sent)}
+                      req.served_by or model, started=sent, retry_after_sec=retry_after_sec)}
                 return
             req.api_fallback = reason
             write_log(request_id=req.request_id, task=req.task, event="api_fallback", reason=reason,

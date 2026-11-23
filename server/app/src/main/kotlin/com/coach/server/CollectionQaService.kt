@@ -239,6 +239,11 @@ interface CollectionQaTransport {
     ): CollectionQaTransportReply
 }
 
+internal class CollectionQaRateLimitError(
+    val retryAfterSec: Int?,
+    override val message: String,
+) : RuntimeException(message)
+
 /**
  * Streaming Haiku 5.5 transport via Coach Bridge (`task = "READER_SELECTION"`, `model = "claude-haiku-5-5"`).
  * Respects the bridge 95% API grant guard (`CreditLedger`) for both owner and friend traffic.
@@ -291,9 +296,14 @@ class HaikuStreamingCollectionQaTransport(
         if (result !is BridgeResult.Success) {
             val failure = result as? BridgeResult.Failure
             val reason = failure?.terminal?.reason
+            val retryAfterSec = failure?.terminal?.retryAfterSec?.takeIf { it > 0 }
             if (friend != null) {
-                val code = reason?.takeIf { it in setOf("daily_quota", "monthly_quota") } ?: "unavailable"
-                throw FriendServiceError(code)
+                val quotaCode = reason?.takeIf { it in setOf("daily_quota", "monthly_quota") }
+                if (quotaCode != null) throw FriendServiceError(quotaCode)
+                if (retryAfterSec != null) {
+                    throw CollectionQaRateLimitError(retryAfterSec, "当前提问较集中，请约 ${retryAfterSec} 秒后重试。")
+                }
+                throw FriendServiceError("unavailable")
             }
             val isQuota = reason in setOf("daily_quota", "monthly_quota", "credit_limit_95_percent")
             val isRateLimited = reason in setOf("api_http_429", "rate_limited") ||
@@ -301,7 +311,10 @@ class HaikuStreamingCollectionQaTransport(
                 failure?.reason?.contains("api_http_429") == true
             when {
                 isQuota -> throw MockError(HttpStatusCode.TooManyRequests, "当前问答额度已用尽，请稍后再试。")
-                isRateLimited -> throw MockError(HttpStatusCode.TooManyRequests, "当前提问较集中，请几秒后重试。")
+                isRateLimited -> throw CollectionQaRateLimitError(
+                    retryAfterSec,
+                    retryAfterSec?.let { "当前提问较集中，请约 ${it} 秒后重试。" } ?: "当前提问较集中，请几秒后重试。",
+                )
                 else -> throw MockError(HttpStatusCode.ServiceUnavailable, "学习服务暂时繁忙，请稍后再试。")
             }
         }
@@ -701,6 +714,22 @@ fun Application.collectionQaRoutes(
                     call.respondText(reply.toString(), ContentType.Application.Json)
                 } catch (e: CancellationException) {
                     throw e
+                } catch (e: CollectionQaRateLimitError) {
+                    if (friend != null && friends != null) {
+                        withContext(Dispatchers.IO) {
+                            runCatching { friends.record(friend, device, requestId, "rate_limited") }
+                        }
+                    }
+                    e.retryAfterSec?.let { call.response.header(HttpHeaders.RetryAfter, it.toString()) }
+                    call.respondText(
+                        buildJsonObject {
+                            put("code", "rate_limited")
+                            put("error", e.message)
+                            e.retryAfterSec?.let { put("retryAfterSec", it) }
+                        }.toString(),
+                        ContentType.Application.Json,
+                        HttpStatusCode.TooManyRequests,
+                    )
                 } catch (e: FriendServiceError) {
                     if (friend != null && friends != null) {
                         withContext(Dispatchers.IO) {

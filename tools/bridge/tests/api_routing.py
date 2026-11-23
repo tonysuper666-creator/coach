@@ -276,6 +276,59 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, month["reserved_microusd"])
         self.assertEqual(1, month["calls"])
 
+    async def test_http_429_waits_full_10s_retry_after_within_budget_and_recovers_with_same_reservation(self):
+        now = 0.0
+        request_times = []
+        slept = []
+        def fake_clock():
+            return now
+        async def fake_sleep(seconds):
+            nonlocal now
+            slept.append(seconds)
+            now += seconds
+        def handler(request):
+            request_times.append(now)
+            if now < 10.0:
+                return httpx.Response(429, headers={"Retry-After": str(int(10.0 - now))}, content=b"rate limited")
+            return httpx.Response(200, content=frames("anthropic"))
+        r = self.router(handler=handler, retry_429_delays=(0.5, 1.5), retry_429_budget=45.0, sleep=fake_sleep, clock=fake_clock)
+        events = await self.collect(r, "READER_SELECTION", "claude-haiku-5-5")
+        self.assertEqual("complete", events[-1]["kind"])
+        self.assertEqual([0.0, 10.0], request_times)
+        self.assertEqual([10.0], slept)
+        month = self.ledger.read()["months"]["2026-11"]["anthropic"]
+        self.assertEqual(0, month["reserved_microusd"])
+        self.assertEqual(1, month["calls"])
+
+    async def test_http_429_over_budget_fails_fast_and_reports_retry_after_sec(self):
+        now = 0.0
+        slept = []
+        async def fake_sleep(seconds):
+            nonlocal now
+            slept.append(seconds)
+            now += seconds
+        def handler(request):
+            return httpx.Response(429, headers={"Retry-After": "60"}, content=b"rate limited sensitive body")
+        r = self.router(handler=handler, retry_429_delays=(0.5, 1.5), retry_429_budget=45.0, sleep=fake_sleep, clock=lambda: now)
+        with self.assertRaises(ApiFailure) as ctx:
+            await self.collect(r, "READER_SELECTION", "claude-haiku-5-5")
+        self.assertEqual("api_http_429", str(ctx.exception))
+        self.assertEqual(60, ctx.exception.retry_after_sec)
+        self.assertEqual(1, len(self.requests))
+        self.assertEqual([], slept)
+        self.assertGreater(self.ledger.read()["months"]["2026-11"]["anthropic"]["reserved_microusd"], 0)
+        # Bridge API_ONLY propagates retry_after_sec in x_coach without leaking any upstream body.
+        req = bridge.build_req(
+            {"model": "claude-haiku-5-5", "max_tokens": 100, "messages": [{"role": "user", "content": "synthetic"}]},
+            {"x-coach-task": "READER_SELECTION"},
+        )
+        with patch.object(bridge, "API_ONLY", True), patch.object(bridge, "API_ROUTER", r), patch.object(bridge, "write_log"):
+            outcome = await bridge.dispatch(req, req.model, None)
+        self.assertEqual("failed", outcome.status)
+        self.assertEqual("api_http_429", outcome.reason)
+        self.assertEqual(60, outcome.retry_after_sec)
+        self.assertEqual(60, outcome.x_coach(req)["retry_after_sec"])
+
     async def test_bulk_concurrency_capped_and_foreground_qa_runs_in_reserved_slot(self):
         bulk_in_flight = 0
         bulk_peak = 0

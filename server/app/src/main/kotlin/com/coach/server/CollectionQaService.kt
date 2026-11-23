@@ -355,7 +355,6 @@ class CollectionQaService(
         input: JsonObject,
         friend: String? = null,
         device: String? = null,
-        courseContext: suspend (List<CollectionQaBlockInput>) -> String = { "" },
     ): JsonObject {
         val collectionId = input.str("collectionId").trim().also {
             require(it.length in 1..120) { "合集编号无效。" }
@@ -423,7 +422,7 @@ class CollectionQaService(
             CollectionQaDiscrepancyInput(id, point, authView, secView, advice, directMatch, cites)
         }
 
-        val userPrompt = buildUserPrompt(collectionTitle, collectionKind, question, blocks, discrepancies) + courseContext(blocks)
+        val userPrompt = buildUserPrompt(collectionTitle, collectionKind, question, blocks, discrepancies)
         val reply = transport.ask(
             systemPrompt = COLLECTION_QA_SYSTEM,
             userPrompt = userPrompt,
@@ -645,7 +644,6 @@ fun Application.collectionQaRoutes(
     actor: LedgerActor,
     friends: FriendAccess? = null,
     service: CollectionQaService? = null,
-    library: ReaderLibrary? = null,
 ) {
     routing {
         post("/v1/library/collection/ask") {
@@ -683,11 +681,7 @@ fun Application.collectionQaRoutes(
                         throw MockError(HttpStatusCode.PayloadTooLarge, "跨材料问答请求体积超出上限，请精简后重试。")
                     }
                     val input = LedgerJson.parseToJsonElement(bytes.decodeToString(0, size)).jsonObject
-                    val reply = activeService.ask(input, friend = friend, device = device) { blocks ->
-                        blocks.groupBy { it.bookId }.entries.firstNotNullOfOrNull { (book, group) ->
-                            library?.courseContext(actor, friend, book, group.map { it.page })?.takeIf { it.isNotEmpty() }
-                        }.orEmpty()
-                    }
+                    val reply = activeService.ask(input, friend = friend, device = device)
                     if (friend != null && friends != null) {
                         val requestId = (input["requestId"] as? JsonPrimitive)?.contentOrNull.orEmpty()
                         withContext(Dispatchers.IO) {

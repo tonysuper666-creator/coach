@@ -1,9 +1,6 @@
 package com.coach.server
 
 import com.coach.domain.*
-import com.coach.core.LedgerActor
-import com.coach.domain.scope.VisibleScope
-import com.coach.store.isSableFriend
 import com.coach.store.tutorSourceAllowed
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -25,7 +22,7 @@ internal data class ReaderDocument(
     val explainSourceId: String? = null,
     val savedPage: String? = null,
     val pageSnapshotVersion: String? = null,
-    val courseOwner: String? = null,
+    val allowPersonalImport: Boolean = false,
 ) {
     fun view() = json("id" to id, "title" to title, "version" to version, "pages" to pages,
         "printedPageOffset" to offset, "kind" to kind, "week" to week)
@@ -65,7 +62,6 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
         require(Files.size(manifest) <= 1_048_576) { "Reader catalog too large" }
         val raw = LedgerJson.parseToJsonElement(Files.readString(manifest)).jsonObject
         require(raw.num("schema") == 1L) { "Unsupported reader catalog" }
-        val owners = raw["courseOwners"]?.jsonObject.orEmpty()
         val docs = raw.getValue("documents").jsonArray.map { it.jsonObject }.map { d ->
             val id = d.str("id")
             val relative = Path.of(d.str("file"))
@@ -87,10 +83,7 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
             }
             ReaderDocument(id, d.str("course"), d.str("title"), file, version, pages, offset, kind, week,
                 parseOutline(d["outline"], pages), explainSource,
-                courseOwner = owners[d.str("course")]?.jsonPrimitive?.let {
-                    require(it.isString && isSableFriend(it.content) && it.content.takeLast(64).all { c -> c in "0123456789abcdef" })
-                    it.content
-                })
+                allowPersonalImport = d["allowPersonalImport"] == JsonPrimitive(true))
         }
         require(docs.size <= 500 && docs.map { it.course to it.id }.distinct().size == docs.size) { "Duplicate reader document" }
         return docs
@@ -98,11 +91,10 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
 
     internal fun list(course: String) = documents.filter { it.course == course }
 
-    /** Legacy bindings reserve the hash. Account-owned courses permit independent personal imports. */
+    /** A personal import cannot relabel an existing course book or revive a revoked catalog grant. */
     internal fun reservesVersion(version: String): Boolean {
         if (root == null) return false
-        val matching = load().filter { it.version == version }
-        if (matching.isNotEmpty() && matching.singleOrNull()?.courseOwner == null) return true
+        if (load().any { it.version == version && !it.allowPersonalImport }) return true
         val local = root.resolve("local-books.json")
         if (!Files.exists(local)) return false
         require(Files.size(local) <= 1_048_576)
@@ -117,14 +109,13 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
      * Reload the server-owned opt-in and hash the actual file on every authorization
      * check, including after generation; cached page metadata cannot keep a revoked grant alive.
      */
-    internal suspend fun explanationSource(version: String, page: Int, owner: String? = null): ReaderDocument? = withContext(Dispatchers.IO) {
+    internal suspend fun explanationSource(version: String, page: Int): ReaderDocument? = withContext(Dispatchers.IO) {
         try {
-            val matching = load().filter { it.version == version }
-            if (owner != null && matching.singleOrNull()?.courseOwner != owner) return@withContext null
-            val candidates = matching.filter { it.explainSourceId != null } + localBookBindings(root, version, page)
+            val candidates = load().filter { it.version == version && it.explainSourceId != null } +
+                localBookBindings(root, version, page)
             val d = candidates.singleOrNull()
                 ?: return@withContext null
-            if (d.courseOwner != owner || page !in 1..d.pages || !tutorSourceAllowed(d.id, d.title, d.kind, d.explainSourceId!!)) return@withContext null
+            if (page !in 1..d.pages || !tutorSourceAllowed(d.id, d.title, d.kind, d.explainSourceId!!)) return@withContext null
             val hash = MessageDigest.getInstance("SHA-256")
             Files.newInputStream(d.file).use { input ->
                 val chunk = ByteArray(65536)
@@ -133,24 +124,6 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
             d.takeIf { hash.digest().joinToString("") { "%02x".format(it) } == version }
         } catch (e: kotlinx.coroutines.CancellationException) { throw e
         } catch (_: Exception) { null } // Missing, malformed, moved or changed registrations fail closed.
-    }
-
-    /** Supplement the user's own citable blocks with bounded, visible course material.
-     * The authenticated friend name comes from the ledger. Upload metadata cannot select a course. */
-    internal suspend fun courseContext(actor: LedgerActor, friend: String?, version: String, pages: List<Int>): String {
-        if (friend == null || !isSableFriend(friend) || pages.isEmpty()) return ""
-        val binding = explanationSource(version, pages.first(), friend) ?: return ""
-        val source = binding.explainSourceId ?: return ""
-        val excerpts = actor.execute {
-            val scope = learnedThrough(binding.course, VisibleScope.learner(), todayProgress(binding.course).currentKpId)
-            pages.asSequence().distinct().take(128).filter { it in 1..binding.pages && scope.permits(source, it, true) }
-                .mapNotNull { page ->
-                    learnerSourcePage(source, page)?.takeIf { it.course == binding.course }
-                        ?.page?.text?.takeIf { it.isNotBlank() }?.let { "p.$page " + it.take(240) }
-                }.take(2).toList()
-        }
-        if (excerpts.isEmpty()) return ""
-        return "\nCourse reading notes (background only; cite the uploaded blocks):\n" + excerpts.joinToString("\n") + "\n"
     }
 
     /** Only exact supported citations. Ambiguous and unregistered sources never guess a page. */

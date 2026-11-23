@@ -89,7 +89,6 @@ data class ChapterCompanionRequest(
     val chapterTitle: String,
     val sections: List<SectionBatchInput>,
     val rawPages: Map<Int, String> = emptyMap(),
-    val courseContext: String = "",
 )
 
 data class VerifiedSourceAnchor(
@@ -1038,8 +1037,7 @@ class SectionConcurrentCompanionPipeline(
         cacheScope: String = "local",
         currentCheck: suspend () -> Boolean = { true },
     ): ChapterCompanionPack {
-        val chunks = SectionChunkSplitter.split(request.sections,
-            promptOverheadTokens = SectionBatchLimits.PROMPT_OVERHEAD_TOKENS + TokenLedgerPricing.estimateTokens(request.courseContext))
+        val chunks = SectionChunkSplitter.split(request.sections)
         require(chunks.isNotEmpty()) { "这一章缺少可整理的文本块。" }
         if (!currentCheck()) throw CompanionRevokedException()
         val inputHash = computeInputHash(request, chunks, cacheScope)
@@ -1056,7 +1054,7 @@ class SectionConcurrentCompanionPipeline(
                 async {
                     semaphore.withPermit {
                         if (!currentCheck()) throw CompanionRevokedException()
-                        runChunk(request, chunk, inputHash)
+                        runChunk(request, chunk)
                     }
                 }
             }.awaitAll()
@@ -1194,13 +1192,13 @@ class SectionConcurrentCompanionPipeline(
         return pack
     }
 
-    private suspend fun runChunk(request: ChapterCompanionRequest, chunk: BoundedSectionChunk, inputHash: String): ChunkOutcome {
+    private suspend fun runChunk(request: ChapterCompanionRequest, chunk: BoundedSectionChunk): ChunkOutcome {
         require(chunk.estimatedRequestTokens <= SectionBatchLimits.MAX_REQUEST_TOKENS) {
             "Chunk token budget exceeded: ${chunk.estimatedRequestTokens}"
         }
         val systemPrompt = if (chunk.isExerciseSection) EXERCISE_SYSTEM_PROMPT else BODY_SECTION_SYSTEM_PROMPT
-        val userPrompt = buildChunkPrompt(request.chapterTitle, chunk) + request.courseContext
-        val batchKey = sha256("$inputHash:${chunk.sectionId}:${chunk.chunkIndex}".toByteArray())
+        val userPrompt = buildChunkPrompt(request.chapterTitle, chunk)
+        val batchKey = sha256("${request.bookId}:${request.chapterId}:${chunk.sectionId}:${chunk.chunkIndex}".toByteArray())
         val task = if (chunk.isExerciseSection) "BOOK_EXERCISE_HINTS" else "BOOK_SECTION_BATCH"
         val maxTokens = if (chunk.isExerciseSection) {
             SectionBatchLimits.EXERCISE_CHUNK_MAX_OUTPUT_TOKENS
@@ -1445,7 +1443,6 @@ class SectionConcurrentCompanionPipeline(
 
     private fun computeInputHash(request: ChapterCompanionRequest, chunks: List<BoundedSectionChunk>, cacheScope: String): String {
         val raw = buildString {
-            if (request.courseContext.isNotEmpty()) append(sha256(request.courseContext.toByteArray())).append('|')
             append("v3-mathverify|").append(cacheScope).append('|').append(request.bookId).append('|').append(request.chapterId).append('|')
             for (c in chunks) {
                 append(c.sectionId).append('#').append(c.chunkIndex).append(':').append(c.isExerciseSection).append('|')

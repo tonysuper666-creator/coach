@@ -168,7 +168,6 @@ fun Application.libraryExplainRoutes(
                 if (friend != null && (!parsed.isLocalBook || input["localSource"] == null))
                     throw MockError(HttpStatusCode.Forbidden, "请先导入自己的书，再选择原文讲解。")
                 val importStore = if (friend == null) imports else (friends ?: throw FriendServiceError()).imports(friend)
-                val binding = if (friend == null && parsed.isLocalBook && !parsed.isSectionScoped) library?.explanationSource(parsed.bookId, parsed.pages.single().pdfPage) else null
                 val personal = input["localSource"] != null && parsed.isLocalBook && (friend != null || withContext(Dispatchers.IO) {
                     // Unreadable catalogs fail closed, including while generating.
                     runCatching { library?.reservesVersion(parsed.bookId) != true }.getOrDefault(false)
@@ -178,6 +177,8 @@ fun Application.libraryExplainRoutes(
                     (importStore ?: throw MockError(HttpStatusCode.ServiceUnavailable, "服务还未接通新书讲解，请更新服务后重试。"))
                         .register(call.attributes[observedDevice], input, parsed)
                 } else null
+                val binding = if (receipt == null && friend == null && parsed.isLocalBook && !parsed.isSectionScoped)
+                    library?.explanationSource(parsed.bookId, parsed.pages.single().pdfPage) else null
                 val request = if (receipt == null) actor.execute { parsed.authorize(this, binding) } else null
                 val scope = request?.scope ?: VisibleScope.learner().narrowToDocs(*parsed.pages.map { it.docId }.toTypedArray())
                     .limitPages(parsed.pages.associate { it.docId to it.pdfPage..it.pdfPage })
@@ -286,10 +287,7 @@ fun Application.libraryExplainRoutes(
 
                 // Rebind sections strictly to receipt-verified blocks (never untrusted rawPages).
                 val receiptBlocksByKey = receipt.blocks.associateBy { Triple(it.page, it.start, it.text) }
-                val citedPages = receipt.blocks.map { it.page }.distinct()
-                val courseContext = library?.courseContext(actor, friend, parsedReq.bookId, citedPages).orEmpty()
                 val verifiedReq = parsedReq.copy(
-                    courseContext = courseContext,
                     sections = parsedReq.sections.map { sec ->
                         sec.copy(
                             blocks = sec.blocks.map { blk ->
@@ -308,13 +306,9 @@ fun Application.libraryExplainRoutes(
                 )
                 val current: suspend () -> Boolean = {
                     withContext(Dispatchers.IO) {
-                        if (!resolvedImports.isCurrent(receipt)) return@withContext false
-                        if (friend == null) {
-                            runCatching { library?.reservesVersion(parsedReq.bookId) != true }.getOrDefault(false)
-                        } else {
-                            actor.execute { authorize(device, bearer) && friendName(device) == friend } &&
-                                (courseContext.isEmpty() || library?.courseContext(actor, friend, parsedReq.bookId, citedPages) == courseContext)
-                        }
+                        resolvedImports.isCurrent(receipt) && (if (friend != null) actor.execute {
+                            authorize(device, bearer) && friendName(device) == friend
+                        } else runCatching { library?.reservesVersion(parsedReq.bookId) != true }.getOrDefault(false))
                     }
                 }
                 if (!current()) {

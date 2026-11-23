@@ -124,7 +124,6 @@ data class StudyModeRequest(
     val requestId: String = "",
     val friend: String? = null,
     val device: String = "owner",
-    val courseContext: String = "",
 )
 
 data class BookMapChapterInput(
@@ -146,7 +145,6 @@ data class BookMapBatchRequest(
     val requestId: String = "",
     val friend: String? = null,
     val device: String = "owner",
-    val courseContext: String = "",
 )
 
 data class StudyModeTransportReply(
@@ -1163,7 +1161,6 @@ Schema:
                 append("INQUIRY_QUESTION: ").append(req.inquiryQuestion.ifBlank { "What is the central theoretical mechanism and its boundary conditions in this chapter?" }).append('\n')
             }
             append(buildContextExcerpt(req))
-            append(req.courseContext)
         }
         return system to user
     }
@@ -1262,7 +1259,7 @@ class StudyModePackService(
         val pageDigest = StudyModeJsonHelpers.sha256Hex(
             req.pages.joinToString("\n") { "${it.pdfPage}:${it.text.take(400)}:${it.text.length}" },
         ).take(16)
-        val topicsKey = req.courseTopics.joinToString("|").take(120) + req.courseContext
+        val topicsKey = req.courseTopics.joinToString("|").take(120)
         val cacheKey = StudyModeJsonHelpers.sha256Hex(
             "$cacheScope|${req.bookId}|${req.chapterNum}|${req.mode.name}|${req.detailLevel.name}|${req.explainLang.name}|${req.inquiryQuestion.trim()}|$topicsKey|$pageDigest",
         )
@@ -1509,8 +1506,8 @@ class StudyModePackService(
                 "${ch.chapterNum}:${ch.chapterTitle}:[$secSig]:[$pageSig]"
             },
         ).take(16)
-        val topicsHash = StudyModeJsonHelpers.sha256Hex(req.courseTopics.joinToString("|") + req.courseContext).take(12)
-        val batchVariantSig = "$cacheScope|${req.detailLevel.name}|${req.explainLang.name}|$topicsHash|$chaptersHash"
+        val topicsHash = StudyModeJsonHelpers.sha256Hex(req.courseTopics.joinToString("|")).take(12)
+        val batchVariantSig = "${req.detailLevel.name}|${req.explainLang.name}|$topicsHash|$chaptersHash"
         val batchCacheKey = StudyModeJsonHelpers.sha256Hex(
             "$cacheScope|BOOK_MAP_BATCH|${req.bookId}|${req.chapters.size}|$batchVariantSig",
         )
@@ -1535,7 +1532,6 @@ CRITICAL RULES:
             async(Dispatchers.IO) {
                 val prompt = buildString {
                     append("Book: ").append(req.bookTitle).append('\n')
-                    append(req.courseContext)
                     group.forEach { ch ->
                         append("=== CHAPTER ").append(ch.chapterNum).append(": ").append(ch.chapterTitle).append(" ===\n")
                         if (ch.sections.isNotEmpty()) {
@@ -1940,7 +1936,7 @@ fun Application.studyModeRoutes(
                         ContentType.Application.Json,
                         HttpStatusCode.BadRequest,
                     )
-                if (call.attributes.getOrNull(observedFriend) == null && library?.reservesVersion(bookId) == true) {
+                if (library?.reservesVersion(bookId) == true) {
                     return@withReaderConnection call.respondText(
                         buildJsonObject { put("error", "该书受课程版权保留约束，不支持该入口。") }.toString(),
                         ContentType.Application.Json,
@@ -1974,8 +1970,7 @@ fun Application.studyModeRoutes(
                     }
                     val input = LedgerJson.parseToJsonElement(bodyBytes.decodeToString()).jsonObject
                     requestId = input["requestId"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                    val parsed = StudyModeRequestParser.parseModeRequest(bookId, mode, input, friend, device)
-                    val req = parsed.copy(courseContext = library?.courseContext(actor, friend, bookId, parsed.pages.map { it.pdfPage }).orEmpty())
+                    val req = StudyModeRequestParser.parseModeRequest(bookId, mode, input, friend, device)
                     val cacheScope = friend?.let { "friend:${friendId(it)}" } ?: "owner:$device"
                     val wantsStream = (call.request.accept()?.contains("text/event-stream") == true) ||
                         (input["stream"]?.jsonPrimitive?.booleanOrNull == true)
@@ -2042,7 +2037,7 @@ fun Application.studyModeRoutes(
                     HttpStatusCode.ServiceUnavailable,
                 )
                 val bookId = call.parameters["id"].orEmpty().trim()
-                if (call.attributes.getOrNull(observedFriend) == null && library?.reservesVersion(bookId) == true) {
+                if (library?.reservesVersion(bookId) == true) {
                     return@withReaderConnection call.respondText(
                         buildJsonObject { put("error", "该书受课程版权保留约束。") }.toString(),
                         ContentType.Application.Json,
@@ -2075,9 +2070,7 @@ fun Application.studyModeRoutes(
                     }
                     val input = LedgerJson.parseToJsonElement(bodyBytes.decodeToString()).jsonObject
                     requestId = input["requestId"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                    val parsed = StudyModeRequestParser.parseBatchRequest(bookId, input, friend, device)
-                    val req = parsed.copy(courseContext = library?.courseContext(actor, friend, bookId,
-                        parsed.chapters.flatMap { chapter -> chapter.pages.map { it.pdfPage } }).orEmpty())
+                    val req = StudyModeRequestParser.parseBatchRequest(bookId, input, friend, device)
                     val cacheScope = friend?.let { "friend:${friendId(it)}" } ?: "owner:$device"
                     val result = activeService.generateBookMapBatch(req, cacheScope = cacheScope)
                     if (friend != null && friends != null) {

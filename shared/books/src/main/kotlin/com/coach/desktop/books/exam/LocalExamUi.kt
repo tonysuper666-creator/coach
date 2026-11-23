@@ -147,6 +147,8 @@ internal fun CourseMockHubPane(
     onBackToCourse: () -> Unit,
     onJumpToBookPage: (bookId: String, page: Int, quote: String) -> Unit,
     onMasteryUpdated: suspend (String) -> Unit = {},
+    onAddMaterials: () -> Unit = {},
+    onUpdateExamProfile: (CourseExamProfile) -> Unit = {},
 ) {
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
@@ -180,6 +182,15 @@ internal fun CourseMockHubPane(
             V7TextButton(onBackToCourse, enabled = !ui.busy, modifier = Modifier.testTag("course-mock-hub-back")) {
                 Text("← 返回课程")
             }
+
+            // TON-1820: ask once whether there is a syllabus or past paper; never blocks generating below.
+            CourseScopeAskBar(
+                profile = detail.examProfile,
+                materials = detail.materials,
+                onAddMaterials = onAddMaterials,
+                onUpdateExamProfile = onUpdateExamProfile,
+                tagPrefix = "course-mock-scope-ask",
+            )
 
             val closedStr = if (detail.examProfile.closedBook) "闭卷" else "开卷"
             val calcStr = detail.examProfile.calculatorAllowed.takeIf { it.isNotBlank() }?.let { " · 计算器：$it" }.orEmpty()

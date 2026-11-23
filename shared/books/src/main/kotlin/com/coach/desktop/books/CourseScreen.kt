@@ -77,6 +77,9 @@ internal fun CourseScreen(
         mutableStateOf(detail.excludedTopics.size in 1..6)
     }
 
+    val profile = detail.examProfile
+    val isExam = profile.isExam
+    var weekPlanOpen by remember(detail.courseId) { mutableStateOf(false) }
     val plan = detail.countdownPlan
     val topicGapById = remember(plan) {
         plan?.rankedTopics?.associateBy { it.topicId }.orEmpty()
@@ -122,14 +125,16 @@ internal fun CourseScreen(
                         Text("⋯")
                     }
                     DropdownMenu(expanded = courseMenuOpen, onDismissRequest = { courseMenuOpen = false }) {
-                        DropdownMenuItem(
-                            text = { Text("进入考前限时综合练习") },
-                            modifier = Modifier.testTag("course-mock-exam-action"),
-                            onClick = {
-                                courseMenuOpen = false
-                                onOpenMockExam()
-                            },
-                        )
+                        if (isExam) {
+                            DropdownMenuItem(
+                                text = { Text("进入考前限时综合练习") },
+                                modifier = Modifier.testTag("course-mock-exam-action"),
+                                onClick = {
+                                    courseMenuOpen = false
+                                    onOpenMockExam()
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("查看本课材料清单") },
                             modifier = Modifier.testTag("course-materials-action"),
@@ -139,13 +144,23 @@ internal fun CourseScreen(
                             },
                         )
                         DropdownMenuItem(
-                            text = { Text("编辑考试时间与题型") },
+                            text = { Text(if (isExam) "编辑考试时间与题型" else "设置考试日") },
                             modifier = Modifier.testTag("course-exam-profile-action"),
                             onClick = {
                                 courseMenuOpen = false
                                 examDialogOpen = true
                             },
                         )
+                        if (isExam) {
+                            DropdownMenuItem(
+                                text = { Text("改为不考") },
+                                modifier = Modifier.testTag("course-exam-off-action"),
+                                onClick = {
+                                    courseMenuOpen = false
+                                    onUpdateExamProfile(profile.copy(examIntent = false, examDate = ""))
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("重新对齐课程") },
                             modifier = Modifier.testTag("course-realign-action"),
@@ -166,12 +181,39 @@ internal fun CourseScreen(
                 }
             }
 
-            PageHeader(
-                kicker = "课程备考 · L1 大纲/讲义优先",
-                title = detail.title,
-                deck = buildExamSummaryLine(detail),
-                meta = "已纳入 ${detail.materials.size} 份材料 · 必考专题 ${detail.examinableTopics.size} 项",
-            )
+            if (isExam) {
+                PageHeader(
+                    kicker = "课程备考 · 要考",
+                    title = detail.title,
+                    deck = buildExamSummaryLine(detail),
+                    meta = buildExamMeta(detail),
+                )
+                CourseScopeLine(
+                    detail = detail,
+                    onAddMaterials = onAddMaterials,
+                    onUpdateExamProfile = onUpdateExamProfile,
+                )
+            } else {
+                PageHeader(
+                    kicker = "自学",
+                    title = detail.title,
+                    deck = CourseExamMode.arrangementLine(detail),
+                    meta = CourseExamMode.selfStudyMeta(detail),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CoachCardMeta("这门课有考试？")
+                    V7TextButton(
+                        onClick = { onUpdateExamProfile(profile.copy(examIntent = true)) },
+                        modifier = Modifier.testTag("course-exam-intent-on"),
+                    ) {
+                        Text("要考")
+                    }
+                }
+            }
 
             if (hasActiveMockExam) {
                 PaperCard(Modifier.fillMaxWidth().testTag("course-active-mock-banner")) {
@@ -209,32 +251,69 @@ internal fun CourseScreen(
             }
 
             // Strictly <= 1 PrimaryButton on the entire screen (UX-4)
-            PrimaryButton(
-                onClick = {
-                    if (resumeTarget != null) onOpenTopic(resumeTarget) else onAddMaterials()
-                },
-                modifier = Modifier.testTag("course-primary-cta"),
-            ) {
-                Text(
-                    when {
-                        resumeTarget == null -> "导入大纲、讲义或转写开始备考"
-                        plan?.todayFocusTopicId == resumeTarget.topicId -> "继续今日冲刺 · ${resumeTarget.weekLabel}"
-                        detail.activeAnchor?.topicId == resumeTarget.topicId -> "继续上次专题 · ${resumeTarget.weekLabel}"
-                        else -> "开始本周备考 · ${resumeTarget.weekLabel}"
+            if (isExam) {
+                PrimaryButton(
+                    onClick = {
+                        if (resumeTarget != null) onOpenTopic(resumeTarget) else onAddMaterials()
                     },
-                )
+                    modifier = Modifier.testTag("course-primary-cta"),
+                ) {
+                    Text(
+                        when {
+                            resumeTarget == null -> "导入大纲、讲义或转写开始备考"
+                            plan?.todayFocusTopicId == resumeTarget.topicId -> "继续今日冲刺 · ${resumeTarget.weekLabel}"
+                            detail.activeAnchor?.topicId == resumeTarget.topicId -> "继续上次专题 · ${resumeTarget.weekLabel}"
+                            else -> "开始本周备考 · ${resumeTarget.weekLabel}"
+                        },
+                    )
+                }
+                if (orderedExaminableTopics.isNotEmpty()) {
+                    PaperButton(
+                        onClick = { weekPlanOpen = !weekPlanOpen },
+                        modifier = Modifier.testTag("course-plan-entry"),
+                    ) {
+                        Text(CourseExamMode.planEntryLabel(plan))
+                    }
+                }
+                if (weekPlanOpen) {
+                    CourseWeekPlanCard(
+                        detail = detail,
+                        onAddMaterials = onAddMaterials,
+                        onUpdateExamProfile = onUpdateExamProfile,
+                        onClose = { weekPlanOpen = false },
+                    )
+                }
+            } else {
+                val firstStep = remember(detail) { CourseExamMode.firstStepTopic(detail) }
+                PrimaryButton(
+                    onClick = {
+                        if (firstStep != null) onOpenTopic(firstStep) else onAddMaterials()
+                    },
+                    modifier = Modifier.testTag("course-primary-cta"),
+                ) {
+                    Text(CourseExamMode.firstStepLabel(detail) ?: "添加课本开始读")
+                }
             }
 
-            if (orderedExaminableTopics.isEmpty() && detail.pendingTopics.isEmpty()) {
-                CoachEmptyState(
-                    title = "还没有整理出必考专题",
-                    hint = "可从右上角 ⋯ 导入大纲、讲义、习题答案或课堂录音转写，也可以拖入多个课程文件。",
-                )
+            val listedTopics = if (isExam) orderedExaminableTopics else CourseExamMode.selfStudyTopics(detail)
+            if (listedTopics.isEmpty() && detail.pendingTopics.isEmpty()) {
+                if (isExam) {
+                    CoachEmptyState(
+                        title = "还没有整理出必考专题",
+                        hint = "可从右上角 ⋯ 导入大纲、讲义、习题答案或课堂录音转写，也可以拖入多个课程文件。",
+                    )
+                } else {
+                    CoachEmptyState(
+                        title = "还没有可读的章节",
+                        hint = "从右上角 ⋯ 添加课本或讲义，也可以直接把文件拖进窗口。",
+                    )
+                }
             } else {
-                orderedExaminableTopics.forEach { topic ->
+                listedTopics.forEach { topic ->
                     CourseTopicCard(
                         topic = topic,
-                        planMetaLine = topicGapById[topic.topicId]?.cardMetaLine.orEmpty(),
+                        examMode = isExam,
+                        planMetaLine = if (isExam) topicGapById[topic.topicId]?.cardMetaLine.orEmpty() else "",
                         onOpen = { onOpenTopic(topic) },
                         onRenameClick = { renamingTopic = topic },
                         onUnlinkClick = { unlinkingTopic = topic },
@@ -278,7 +357,7 @@ internal fun CourseScreen(
                 }
             }
 
-            if (detail.excludedTopics.isNotEmpty()) {
+            if (isExam && detail.excludedTopics.isNotEmpty()) {
                 Surface(
                     modifier = Modifier.fillMaxWidth().testTag("course-excluded-section"),
                     shape = RoundedCornerShape(10.dp),
@@ -438,6 +517,7 @@ internal fun CourseScreen(
 @Composable
 private fun CourseTopicCard(
     topic: CourseTopicEntry,
+    examMode: Boolean = true,
     planMetaLine: String = "",
     onOpen: () -> Unit,
     onRenameClick: () -> Unit,
@@ -465,7 +545,7 @@ private fun CourseTopicCard(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     CourseTagChip(text = topic.weekLabel, warm = false)
-                    if (topic.userLocked) {
+                    if (examMode && topic.userLocked) {
                         CourseTagChip(text = "已锁定", warm = true)
                     }
                     if (!topic.practiceDraft?.text.isNullOrBlank()) {
@@ -498,14 +578,16 @@ private fun CourseTopicCard(
                                 },
                             )
                         }
-                        DropdownMenuItem(
-                            text = { Text("移入本课不考") },
-                            modifier = Modifier.testTag("topic-exclude-action-${topic.topicId}"),
-                            onClick = {
-                                menuOpen = false
-                                onExcludeClick()
-                            },
-                        )
+                        if (examMode) {
+                            DropdownMenuItem(
+                                text = { Text("移入本课不考") },
+                                modifier = Modifier.testTag("topic-exclude-action-${topic.topicId}"),
+                                onClick = {
+                                    menuOpen = false
+                                    onExcludeClick()
+                                },
+                            )
+                        }
                     }
                 }
             }

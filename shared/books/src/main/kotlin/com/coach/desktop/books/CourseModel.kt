@@ -128,7 +128,22 @@ internal data class CourseExamProfile(
     val durationMinutes: Int = 120,
     val closedBook: Boolean = true,
     val calculatorAllowed: String = "",
-)
+    /** 用户在课程页点过「要考」。没有考试日也没点过 → 这门课按「不考」显示（TON-1820）。 */
+    val examIntent: Boolean = false,
+    /** 「有考纲或往年题吗」的回答：空 = 还没问过，[SCOPE_ASK_SKIPPED] / [SCOPE_ASK_PROVIDED]。 */
+    val scopeAsk: String = "",
+) {
+    /** 只有两种状态：要考 / 不考，默认不考。填了考试日或点过「要考」才算要考。 */
+    val isExam: Boolean get() = examIntent || examDate.isNotBlank()
+
+    /** 去掉只影响界面的字段，给缓存摘要算 hash 用，切换要考/不考不会让已生成的讲解失效。 */
+    fun forContentHash(): CourseExamProfile = copy(examIntent = false, scopeAsk = "")
+
+    companion object {
+        const val SCOPE_ASK_SKIPPED = "SKIPPED"
+        const val SCOPE_ASK_PROVIDED = "PROVIDED"
+    }
+}
 
 internal data class CourseMaterialEntry(
     val bookId: String,
@@ -309,6 +324,8 @@ internal object CourseJson {
         put("durationMinutes", profile.durationMinutes.coerceIn(15, 360))
         put("closedBook", profile.closedBook)
         if (profile.calculatorAllowed.isNotBlank()) put("calculatorAllowed", profile.calculatorAllowed)
+        if (profile.examIntent) put("examIntent", true)
+        if (profile.scopeAsk.isNotBlank()) put("scopeAsk", profile.scopeAsk)
     }.toString()
 
     fun decodeExamProfile(raw: String?, fallbackDate: String? = null): CourseExamProfile {
@@ -322,6 +339,8 @@ internal object CourseJson {
             durationMinutes = obj.int("durationMinutes", 120).coerceIn(15, 360),
             closedBook = obj.bool("closedBook", true),
             calculatorAllowed = obj.str("calculatorAllowed"),
+            examIntent = obj.bool("examIntent", false),
+            scopeAsk = obj.str("scopeAsk"),
         )
     }
 

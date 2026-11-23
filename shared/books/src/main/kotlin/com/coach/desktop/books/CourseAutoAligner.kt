@@ -184,17 +184,19 @@ internal object CourseAutoAligner {
             )
         }
 
-        // Uncovered CORE_TEXTBOOK chapters fold cleanly into `本课不考内容` (EXCLUDED)
+        // TON-1820: with a syllabus, uncovered CORE_TEXTBOOK chapters fold into `本课不考内容` (EXCLUDED).
+        // Without one there is nothing to narrow the scope by, so every chapter stays in, in book order.
+        val hasSyllabus = current.materials.any { (specByBook[it.bookId]?.role ?: it.role) == CourseMaterialRole.SYLLABUS }
         var excludedOrd = 1000
         for (ch in textbookChapters) {
             if (ch.title in coveredChapterTitles) continue
             topics += CourseTopicPlan(
-                weekLabel = "本课不考",
+                weekLabel = if (hasSyllabus) "本课不考" else CourseExamMode.WHOLE_BOOK_LABEL,
                 weekNum = null,
                 ord = excludedOrd++,
                 title = ch.title,
-                examStatus = CourseTopicStatus.EXCLUDED,
-                examWeight = 0.0,
+                examStatus = if (hasSyllabus) CourseTopicStatus.EXCLUDED else CourseTopicStatus.EXAMINABLE,
+                examWeight = if (hasSyllabus) 0.0 else 1.0,
                 sources = listOf(
                     CourseTopicLinkPlan(
                         bookId = ch.bookId,
@@ -202,7 +204,7 @@ internal object CourseAutoAligner {
                         startPage = ch.startPage,
                         endPage = ch.endPage,
                         role = CourseMaterialRole.CORE_TEXTBOOK,
-                        scopeNote = "未覆盖教材章节 · 可随时恢复为必考",
+                        scopeNote = if (hasSyllabus) "未覆盖教材章节 · 可随时恢复为必考" else ch.title,
                     ),
                 ),
             )
@@ -450,7 +452,7 @@ internal object CourseAutoAligner {
         val existingByBook = existing.materials.associateBy { it.bookId }
         val profileObj = body["examProfile"] as? JsonObject
         val profile = profileObj?.let { p ->
-            CourseExamProfile(
+            existing.examProfile.copy(
                 examDate = (p["examDate"] as? JsonPrimitive)?.contentOrNull.orEmpty().ifBlank { existing.examProfile.examDate },
                 examDateTentative = (p["examDateTentative"] as? JsonPrimitive)?.booleanOrNull ?: existing.examProfile.examDateTentative,
                 examFormat = (p["examFormat"] as? JsonPrimitive)?.contentOrNull.orEmpty().ifBlank { existing.examProfile.examFormat },

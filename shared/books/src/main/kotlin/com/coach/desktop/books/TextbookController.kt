@@ -1990,6 +1990,14 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     }
 
     suspend fun updateCourseExamProfile(courseId: String, profile: CourseExamProfile) = action {
+        val before = mutable.value.activeCourseDetail?.takeIf { it.courseId == courseId }?.examProfile
+        val notice = when {
+            before == null -> "已更新考试信息。"
+            !before.isExam && profile.isExam -> "已改为要考。"
+            before.isExam && !profile.isExam -> "已改为不考，按原书章节顺序读。"
+            before.copy(scopeAsk = profile.scopeAsk) == profile -> null
+            else -> "已更新考试信息。"
+        }
         val detail = library.withCourseDatabase { db ->
             CourseStore.updateExamProfile(db, courseId, profile)
             CourseStore.loadCourseDetail(db, courseId, library.clock)
@@ -1998,7 +2006,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             it.copy(
                 activeCourseDetail = detail,
                 collections = library.collectionSummaries(),
-                courseNotice = "已更新考试信息与暂定标识。",
+                courseNotice = notice ?: it.courseNotice,
             )
         }
     }

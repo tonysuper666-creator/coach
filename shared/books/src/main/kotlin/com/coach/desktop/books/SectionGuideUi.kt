@@ -520,7 +520,7 @@ internal fun SectionEndSummaryCard(
                 }
                 if (onOpenMainline != null) {
                     V7TextButton(onOpenMainline, modifier = Modifier.testTag("section-end-open-mainline")) {
-                        Text("进入做题主线")
+                        Text("进入自测")
                     }
                 }
             }

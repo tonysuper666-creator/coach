@@ -51,7 +51,7 @@ internal enum class BookStudyMode(
         tag = "mode-option-DIAGNOSTIC_SKIP",
     ),
     PROBLEM_DRIVEN(
-        titleZh = "做题带读",
+        titleZh = "自测带读",
         shortSummaryZh = "从原书章末习题出发，卡住再跳回正文查公式。",
         tag = "mode-option-PROBLEM_DRIVEN",
     ),
@@ -120,7 +120,20 @@ internal data class BookStudyPreference(
     val targetDate: String? = null,
     val inquiryQuestion: String = "",
     val updatedAt: Long = System.currentTimeMillis(),
+    /**
+     * TON-1820: whether this book sits in a course that has an exam. Not stored; filled in on load.
+     * null means unknown (old callers), and then every mode is offered as before.
+     */
+    val examAvailable: Boolean? = null,
 ) {
+    /** 「考点优先」 only makes sense for a course that has an exam; keep it visible if the user already picked it. */
+    fun visibleModes(): List<BookStudyMode> =
+        if (examAvailable == false && mode != BookStudyMode.EXAM_FOCUS) {
+            BookStudyMode.entries.filter { it != BookStudyMode.EXAM_FOCUS }
+        } else {
+            BookStudyMode.entries
+        }
+
     val pacePreset: StudyPacePreset
         get() = StudyPacePreset.fromMinutes(dailyMinutes, targetDate)
 
@@ -149,6 +162,8 @@ internal object SmartDefaultModeResolver {
         testedSectionRatio: Double,
         readChapterRatio: Double,
         today: LocalDate = LocalDate.now(),
+        // TON-1820: a course only counts as an exam once it has a date or the user said 「要考」.
+        courseIsExam: Boolean = !courseExamDate.isNullOrBlank(),
     ): BookStudyPreference {
         val isEnglishHeavy = LATIN_WORD_RE.findAll(sampleText.ifBlank { title }).count() >= 5
         val defaultLang = if (isEnglishHeavy) ExplainLanguage.BILINGUAL else ExplainLanguage.ZH
@@ -157,7 +172,7 @@ internal object SmartDefaultModeResolver {
         }
 
         // 1. Course with imminent exam (<= 21 days) & partial prior study -> 先测后读
-        if (inCourse && daysToExam != null && daysToExam in 0..21 && (testedSectionRatio >= 0.20 || readChapterRatio >= 0.25)) {
+        if (inCourse && courseIsExam && daysToExam != null && daysToExam in 0..21 && (testedSectionRatio >= 0.20 || readChapterRatio >= 0.25)) {
             return BookStudyPreference(
                 bookId = bookId,
                 mode = BookStudyMode.DIAGNOSTIC_SKIP,
@@ -168,13 +183,13 @@ internal object SmartDefaultModeResolver {
                 targetDate = courseExamDate,
             )
         }
-        // 2. Linked to a course -> 考点优先
-        if (inCourse) {
+        // 2. Linked to a course that has an exam -> 考点优先 (a course without one reads like any other book)
+        if (inCourse && courseIsExam) {
             return BookStudyPreference(
                 bookId = bookId,
                 mode = BookStudyMode.EXAM_FOCUS,
                 userLocked = false,
-                defaultReason = "已关联课程备考，默认按考纲权重挑重点学，随时可换。",
+                defaultReason = "这门课要考，默认挑要考的重点先学，随时可换。",
                 detailLevel = ExplainDetailLevel.DETAILED,
                 explainLang = defaultLang,
                 targetDate = courseExamDate,
@@ -824,9 +839,17 @@ internal object StudyModeStore {
                         }
                     }
                 }
-                existing ?: computeSmartDefault(db, bookId, fallbackTitle, fallbackPageCount).also {
-                    saveInDb(db, it)
+                val courseIsExam = bookCourseIsExam(db, bookId)
+                val stale = existing?.let { e ->
+                    // Defaults written before TON-1820 put every course book on 考点优先; re-pick those when the course has no exam.
+                    !e.userLocked && e.mode == BookStudyMode.EXAM_FOCUS && !courseIsExam
+                } ?: false
+                val resolved = if (existing != null && !stale) {
+                    existing!!
+                } else {
+                    computeSmartDefault(db, bookId, fallbackTitle, fallbackPageCount).also { saveInDb(db, it) }
                 }
+                resolved.copy(examAvailable = courseIsExam)
             }
         }.getOrElse {
             BookStudyPreference(bookId = bookId)
@@ -872,6 +895,27 @@ internal object StudyModeStore {
         }
     }
 
+    /** True when the book is in at least one live course that has an exam date or was marked 「要考」. */
+    private fun bookCourseIsExam(db: Connection, bookId: String): Boolean = runCatching {
+        if (!BookSchemaMigration.tableExists(db, "collections") || !BookSchemaMigration.tableExists(db, "collection_materials")) {
+            return@runCatching false
+        }
+        db.prepareStatement(
+            """SELECT c.metadata_json, c.exam_date FROM collections c
+               JOIN collection_materials cm ON cm.collection_id = c.id
+               WHERE cm.material_id=? AND c.archived=0 AND c.kind='COURSE'""".trimIndent(),
+        ).use { s ->
+            s.setString(1, bookId)
+            s.executeQuery().use { r ->
+                var exam = false
+                while (r.next()) {
+                    if (CourseJson.decodeExamProfile(r.getString(1), r.getString(2)).isExam) exam = true
+                }
+                exam
+            }
+        }
+    }.getOrDefault(false)
+
     private fun computeSmartDefault(db: Connection, bookId: String, fallbackTitle: String, fallbackPageCount: Int): BookStudyPreference {
         var title = fallbackTitle
         var format = "pdf"
@@ -910,11 +954,12 @@ internal object StudyModeStore {
             }
         }
         var inCourse = false
+        var courseIsExam = false
         var examDate: String? = null
         var inBooklist = false
         if (BookSchemaMigration.tableExists(db, "collections") && BookSchemaMigration.tableExists(db, "collection_materials")) {
             db.prepareStatement(
-                """SELECT c.kind, c.exam_date FROM collections c
+                """SELECT c.kind, c.exam_date, c.metadata_json FROM collections c
                    JOIN collection_materials cm ON cm.collection_id = c.id
                    WHERE cm.material_id=? AND c.archived=0""".trimIndent(),
             ).use { s ->
@@ -925,6 +970,8 @@ internal object StudyModeStore {
                         if (k == "COURSE") {
                             inCourse = true
                             examDate = r.getString(2) ?: examDate
+                            val profile = runCatching { CourseJson.decodeExamProfile(r.getString(3), r.getString(2)) }.getOrNull()
+                            if (profile?.isExam == true) courseIsExam = true
                         } else if (k == "BOOKLIST") {
                             inBooklist = true
                         }
@@ -983,6 +1030,7 @@ internal object StudyModeStore {
             materialKind = materialKind,
             inCourse = inCourse,
             courseExamDate = examDate,
+            courseIsExam = courseIsExam,
             inBooklist = inBooklist,
             testedSectionRatio = testedRatio,
             readChapterRatio = readRatio,

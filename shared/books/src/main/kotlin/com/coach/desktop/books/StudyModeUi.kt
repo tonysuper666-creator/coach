@@ -105,7 +105,7 @@ internal fun StudyModeSelectorButton(
                 }
                 HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle)
 
-                for (mode in BookStudyMode.entries) {
+                for (mode in preference.visibleModes()) {
                     val selected = preference.mode == mode
                     val rowBg = if (selected) colors.actionPrimary.copy(alpha = 0.12f) else Color.Transparent
                     Row(
@@ -772,7 +772,7 @@ internal fun ModeDistinctCompanionSurface(
             Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.testTag("mode-surface-PROBLEM_DRIVEN")) {
                 PaperCard(Modifier.fillMaxWidth(), color = colors.surface2, contentPadding = PaddingValues(12.dp)) {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("做题带读 · 章末习题实战台", style = MaterialTheme.typography.titleSmall, color = colors.fgPrimary)
+                        Text("自测带读 · 章末习题", style = MaterialTheme.typography.titleSmall, color = colors.fgPrimary)
                         CoachCardMeta("直接从原书章末习题动手，卡住哪步再按提示跳回正文公式。")
                     }
                 }
@@ -1225,7 +1225,7 @@ private fun LiveModeStatusAndExtraDeck(
             if (probPack != null && probPack.problems.isNotEmpty()) {
                 PaperCard(Modifier.fillMaxWidth().testTag("problem-driven-live-cards"), color = colors.surface2, contentPadding = PaddingValues(12.dp)) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("做题倒逼工作台", style = MaterialTheme.typography.titleSmall, color = colors.fgPrimary)
+                        Text("自测带读工作台", style = MaterialTheme.typography.titleSmall, color = colors.fgPrimary)
                         if (probPack.strategyNote.isNotBlank()) CoachCardMeta(probPack.strategyNote)
                         for (p in probPack.problems.take(4)) {
                             val probKey = "prob-live-$chapterNumber-${p.problemId}"

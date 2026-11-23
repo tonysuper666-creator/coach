@@ -927,7 +927,8 @@ internal object CourseStore {
                     }
                 }
             }
-        }.sortedWith(compareBy<CourseTopicEntry>({ it.weekNum ?: 999 }, { it.ord }, { it.title }))
+        }.let { CourseExamMode.normalizeTopics(it, materials) }
+            .sortedWith(compareBy<CourseTopicEntry>({ it.weekNum ?: 999 }, { it.ord }, { it.title }))
 
         var sanitizedNotes = 0
         for (m in materials.filter { it.role == CourseMaterialRole.USER_NOTES }) {
@@ -1004,7 +1005,7 @@ internal object CourseStore {
                 }
             }
         }
-        val raw = parts.joinToString("|") + "||" + CourseJson.encodeExamProfile(profile)
+        val raw = parts.joinToString("|") + "||" + CourseJson.encodeExamProfile(profile.forContentHash())
         return sha256(raw)
     }
 

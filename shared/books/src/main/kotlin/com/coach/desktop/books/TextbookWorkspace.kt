@@ -177,6 +177,20 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
         activeRetry.recordAction(action)
         scope.launch { action() }
     }
+    fun addCourseMaterials(courseId: String) {
+        scope.launch {
+            val picked = if (onPickCourseFiles != null) {
+                onPickCourseFiles()
+            } else {
+                listOfNotNull(chooseBook())
+            }
+            if (picked.isNotEmpty()) {
+                controller.addMaterialsToCourse(courseId, picked) {
+                    picked.forEach(releasePickedBook)
+                }
+            }
+        }
+    }
     fun returnFromReader() {
         openPairing = false
         if (ui.source != null) {
@@ -381,20 +395,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 notice = ui.courseNotice,
                                 onBack = { run { controller.back() } },
                                 onOpenTopic = { topic -> run { controller.openCourseTopic(detail.courseId, topic.topicId, explainer) } },
-                                onAddMaterials = {
-                                    scope.launch {
-                                        val picked = if (onPickCourseFiles != null) {
-                                            onPickCourseFiles()
-                                        } else {
-                                            listOfNotNull(chooseBook())
-                                        }
-                                        if (picked.isNotEmpty()) {
-                                            controller.addMaterialsToCourse(detail.courseId, picked) {
-                                                picked.forEach(releasePickedBook)
-                                            }
-                                        }
-                                    }
-                                },
+                                onAddMaterials = { addCourseMaterials(detail.courseId) },
                                 onRealign = { run { controller.realignCourse(detail.courseId, explainer) } },
                                 onUpdateMaterialAssignment = { bookId, weekNum, role ->
                                     run { controller.updateCourseMaterialAssignment(detail.courseId, bookId, weekNum, role) }
@@ -435,6 +436,10 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                     run { controller.jumpToMockSourcePage(detail.courseId, bookId, pg, quote) }
                                 },
                                 onMasteryUpdated = { cid -> controller.refreshActiveCourse(cid) },
+                                onAddMaterials = { addCourseMaterials(detail.courseId) },
+                                onUpdateExamProfile = { profile ->
+                                    run { controller.updateCourseExamProfile(detail.courseId, profile) }
+                                },
                             )
                         }
                         ui.screen == BookScreen.REVIEWS -> LocalBookReviews(ui,

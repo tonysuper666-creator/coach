@@ -113,6 +113,21 @@ class BridgeBoundaryTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("response_format", json.loads(part["body"]))
         self.assertEqual(output, [])
 
+    async def test_friend_api_allows_haiku_for_collection_qa_and_study_modes(self):
+        received, output = await self.friend_request(body_change={"model": "claude-haiku-5-5"})
+        self.assertEqual(len(received), 1)
+        scope, part = received[0]
+        headers = dict(scope["headers"])
+        forwarded_body = json.loads(part["body"])
+        self.assertEqual(forwarded_body["model"], "claude-haiku-5-5")
+        self.assertNotIn("response_format", forwarded_body)
+        self.assertEqual(headers[b"x-coach-friend"], b"a" * 64)
+        self.assertEqual(headers[b"x-coach-friend-device"], b"friend-pc")
+        self.assertEqual(headers[b"x-coach-fallback"], b"off")
+        self.assertEqual(headers[b"x-coach-background"], b"off")
+        self.assertEqual(headers[b"x-coach-batch-key"], b"")
+        self.assertEqual(output, [])
+
     async def test_friend_api_rejects_owner_missing_identity_other_models_tools_and_formats(self):
         cases = [({b"x-coach-friend": b""}, {}), ({b"x-coach-friend-device": b""}, {}),
             ({b"x-coach-task": b"OTHER"}, {}), ({b"x-coach-traffic": b"user"}, {}),

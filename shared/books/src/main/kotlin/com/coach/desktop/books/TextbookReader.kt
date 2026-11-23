@@ -232,15 +232,13 @@ internal fun TextbookReader(
             ExplainPageKind.BODY -> BookPageRole.BODY
         }
     }
-    val guideController = remember(book.id, book.lessons, library, explainConsent, explainer) {
-        SectionGuideController(book, library, explainConsent, explainer, scope)
+    val navigationBook = remember(book.id, book.pages, book.structure) { book }
+    val guideController = remember(navigationBook, library, explainConsent, explainer) {
+        SectionGuideController(navigationBook, library, explainConsent, explainer, scope)
     }
-    val currentSectionIndex = remember(book.id, book.lessons, ui.page, paging.anchor, textView, pageUnrecognizedOriginal) {
-        if (textView && !pageUnrecognizedOriginal) {
-            guideController.sectionIndexForAnchor(paging.anchor.importPage, paging.anchor.offsetUtf16)
-        } else {
-            guideController.sectionIndexForPage(ui.page)
-        }
+    val readingAnchor = if (textView && !pageUnrecognizedOriginal) paging.anchor else BookPageAnchor(ui.page)
+    val currentSectionIndex = remember(guideController, readingAnchor) {
+        guideController.sectionIndexForAnchor(readingAnchor.importPage, readingAnchor.offsetUtf16)
     }
     val currentSection = book.lessons.getOrNull(currentSectionIndex)
     var guideExpanded by remember(book.id, currentSection?.id) { mutableStateOf(false) }
@@ -272,7 +270,7 @@ internal fun TextbookReader(
     }
     fun runInlineSelection(target: SourceBlock, action: SelectionExplainAction, questionText: String? = null) {
         val request = ++inlineRequest
-        val secIdx = guideController.sectionIndexForPage(target.page).takeIf { it >= 0 } ?: currentSectionIndex
+        val secIdx = guideController.sectionIndexForAnchor(target.page, target.start).takeIf { it >= 0 } ?: currentSectionIndex
         val secCtx = guideController.contextForSection(secIdx)
         if (action == SelectionExplainAction.ASK && questionText == null) {
             inlineThread = (inlineThread?.takeIf { it.selection.id == target.id }
@@ -381,7 +379,7 @@ internal fun TextbookReader(
     // A laid-out sheet can start on the previous imported page. Its bookmark
     // follows that first source, but paragraph actions must keep the source
     // explicitly selected by a page jump or citation.
-    val paragraphPage = if (textView) book.page(paging.anchor.importPage) ?: page else page
+    val paragraphPage = book.page(readingAnchor.importPage) ?: page
 
     // The page surface fetches its own raster at the current viewport size.
     val readerSource = remember(library) { com.coach.desktop.reader.LocalBooksReaderSource(library, loadPageImages = false) }
@@ -473,9 +471,8 @@ internal fun TextbookReader(
     val currentChapterGroup = remember(book.id, book.lessons, currentSectionIndex) {
         ChapterCompanionGrouping.groupForSection(book, currentSectionIndex)
     }
-    val currentChapterSpan = remember(book, ui.page, paging.anchor, textView) {
-        val offset = paging.anchor.offsetUtf16.takeIf { textView && paging.anchor.importPage == ui.page } ?: 0
-        BookChapterResolver.chapterForPage(book, ui.page, offset)
+    val currentChapterSpan = remember(navigationBook, readingAnchor) {
+        BookChapterResolver.chapterForPage(navigationBook, readingAnchor.importPage, readingAnchor.offsetUtf16)
     }
     var correctedBodyPage by remember(book.id, book.correctedBodyPage) { mutableStateOf(book.correctedBodyPage) }
     val bodyStart = remember(book, correctedBodyPage) { BookBoundaries.bodyStart(book.pages, book.structure, correctedBodyPage) }
@@ -596,7 +593,8 @@ internal fun TextbookReader(
     // 真实停留已读计时器：仅在当前页连续停留 >= 8 秒（测试可注入更短阈值）才记入 book_chapter_progress；
     // 通过目录跳章或快速滑过会自动取消本协程，被跳过的中间章节绝不标为已读。
     // 同时持续累计页停留并检测 p+1 -> p 往返重读（累计停留 > 个人页速中位数 2.2 倍记 REREAD_BACKTRACK）。
-    LaunchedEffect(book.id, ui.page, currentChapterSpan?.tocNodeId, currentSection?.id, ui.source, dwellThresholdMs) {
+    val dwellPage = readingAnchor.importPage
+    LaunchedEffect(book.id, dwellPage, currentChapterSpan?.tocNodeId, currentSection?.id, ui.source, dwellThresholdMs) {
         if (ui.source != null) return@LaunchedEffect
         val span = currentChapterSpan ?: return@LaunchedEffect
         val secId = currentSection?.id ?: span.tocNodeId
@@ -610,22 +608,22 @@ internal fun TextbookReader(
             if (firstTick) {
                 firstTick = false
                 if (onRecordPageDwell != null) {
-                    onRecordPageDwell(book.id, span.tocNodeId, ui.page, span.pagesTotal, recordedDwell)
+                    onRecordPageDwell(book.id, span.tocNodeId, dwellPage, span.pagesTotal, recordedDwell)
                 } else {
                     withContext(Dispatchers.IO) {
-                        runCatching { library.recordPageDwell(book.id, span.tocNodeId, ui.page, span.pagesTotal, recordedDwell) }
+                        runCatching { library.recordPageDwell(book.id, span.tocNodeId, dwellPage, span.pagesTotal, recordedDwell) }
                     }
                     localBooklistRev++
                 }
             }
-            val triggeredBacktrack = readingTracker.recordDwell(ui.page, trackerDwell, secId)
+            val triggeredBacktrack = readingTracker.recordDwell(dwellPage, trackerDwell, secId)
             if (triggeredBacktrack) {
                 withContext(Dispatchers.IO) {
                     runCatching {
                         library.recordMasteryEvidence(
                             bookId = book.id,
                             tocNodeId = secId,
-                            page = ui.page,
+                            page = dwellPage,
                             canonicalName = secTitle,
                             signal = LearnerSignalType.REREAD_BACKTRACK,
                             durationMs = trackerDwell,
@@ -633,7 +631,7 @@ internal fun TextbookReader(
                     }
                 }
                 if (activeWhisper == null) {
-                    evaluateMarginWhisperForPage(ui.page, secId, readingTracker.backtrackCount(ui.page))
+                    evaluateMarginWhisperForPage(dwellPage, secId, readingTracker.backtrackCount(dwellPage))
                 }
             }
         }
@@ -1385,6 +1383,7 @@ internal fun TextbookReader(
                         SingleBookCompanionPanel(
                             book = book,
                             currentPage = paragraphPage.number,
+                            currentPageOffset = readingAnchor.offsetUtf16,
                             currentSectionIndex = currentSectionIndex,
                             explainer = explainer,
                             library = library,
@@ -1550,7 +1549,7 @@ internal fun TextbookReader(
                 compact = effectiveBottomSheet,
                 onDraftChange = { inlineDraft = it },
                 onPickPassage = { picked ->
-                    val secIdx = guideController.sectionIndexForPage(picked.page).takeIf { it >= 0 } ?: currentSectionIndex
+                    val secIdx = guideController.sectionIndexForAnchor(picked.page, picked.start).takeIf { it >= 0 } ?: currentSectionIndex
                     val secCtx = guideController.contextForSection(secIdx)
                     inlineThread = InlineExplainThread(picked, secCtx, askingOpen = true)
                 },
@@ -1890,7 +1889,7 @@ internal fun TextbookReader(
             availableWidth = maxWidth,
             book = book,
             currentPage = ui.page,
-            currentAnchor = if (textView) paging.anchor else BookPageAnchor(ui.page),
+            currentAnchor = readingAnchor,
             currentChapterId = currentChapterSpan?.tocNodeId,
             bodyStart = bodyStart,
             bodyStartCorrected = correctedBodyPage != null,
@@ -2013,16 +2012,19 @@ internal fun TextbookReader(
         ImmersiveBottomScrubber(
             visible = showHud && !effectiveBottomSheet,
             availableWidth = maxWidth,
-            currentPage = ui.page,
+            currentPage = readingAnchor.importPage,
             lastPage = lastPage,
-            pageLabel = if (textView && !pageUnrecognizedOriginal) paging.pages.getOrNull(paging.index)?.sourceLabel ?: "第 ${ui.page} 页" else "第 ${ui.page} 页",
-            sectionTitle = currentSection?.title,
+            pageStatus = { preview ->
+                val chapter = if (preview == readingAnchor.importPage) currentChapterSpan
+                    else BookChapterResolver.chapterForPage(navigationBook, preview)
+                BookBoundaries.pageStatus(preview, lastPage, chapter?.takeUnless { it.tocNodeId == "ch-all" })
+            },
             canPrev = canPrev,
             canNext = canNext,
             editingJump = editingJump,
             jumpText = jump,
             onJumpTextChange = { jump = it },
-            onStartEditJump = { editingJump = true; jump = ui.page.toString() },
+            onStartEditJump = { editingJump = true; jump = readingAnchor.importPage.toString() },
             onCancelEditJump = { editingJump = false; focusManager.clearFocus() },
             onJumpFocusChange = { jumpFocused = it },
             onSubmitJump = { target ->

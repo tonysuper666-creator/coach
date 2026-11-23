@@ -412,8 +412,7 @@ internal fun ImmersiveBottomScrubber(
     availableWidth: Dp,
     currentPage: Int,
     lastPage: Int,
-    pageLabel: String,
-    sectionTitle: String?,
+    pageStatus: (Int) -> String,
     canPrev: Boolean,
     canNext: Boolean,
     editingJump: Boolean,
@@ -435,7 +434,6 @@ internal fun ImmersiveBottomScrubber(
     var dragging by remember { mutableStateOf(false) }
     val effectiveSlider = if (dragging) sliderPos else currentPage.toFloat()
     val shownPage = if (dragging) sliderPos.roundToInt().coerceIn(1, lastPage.coerceAtLeast(1)) else currentPage
-    val percent = if (lastPage > 1) ((shownPage - 1) * 100 / (lastPage - 1)).coerceIn(0, 100) else 100
 
     AnimatedVisibility(
         visible = visible,
@@ -494,9 +492,8 @@ internal fun ImmersiveBottomScrubber(
                 ) { Text(if (compact) "›" else "下一页 ›", style = MaterialTheme.typography.labelLarge, maxLines = 1, softWrap = false) }
 
                 if (!editingJump) {
-                    val label = if (dragging) "第 $shownPage / $lastPage 页" else "$pageLabel / $lastPage"
                     Text(
-                        "$label · $percent%",
+                        pageStatus(shownPage),
                         style = MaterialTheme.typography.labelMedium,
                         fontFamily = LocalV7Fonts.current.numbers,
                         color = colors.fgSecondary,
@@ -553,17 +550,6 @@ internal fun ImmersiveBottomScrubber(
                     LaunchedEffect(Unit) { runCatching { jumpFocus.requestFocus() } }
                 }
 
-                if (!compact && !sectionTitle.isNullOrBlank()) {
-                    Text(
-                        sectionTitle,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.fgTertiary,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.widthIn(max = 220.dp),
-                    )
-                }
             }
         }
     }

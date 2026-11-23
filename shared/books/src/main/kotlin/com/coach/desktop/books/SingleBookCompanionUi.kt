@@ -81,6 +81,7 @@ internal fun SingleBookCompanionPanel(
     onInputFocusChanged: (Boolean) -> Unit = {},
     bottomContent: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
+    currentPageOffset: Int = 0,
 ) {
     val colors = CoachTheme.colors
     val originalOnly = studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY
@@ -438,7 +439,9 @@ internal fun SingleBookCompanionPanel(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (readingExplanation) {
-                    val chapter = remember(book, currentPage) { BookChapterResolver.chapterForPage(book, currentPage) }
+                    val chapter = remember(book, currentPage, currentPageOffset) {
+                        BookChapterResolver.chapterForPage(book, currentPage, currentPageOffset)
+                    }
                     val first = if (pageOnly) currentPage else chapterGroup?.firstPage ?: currentPage
                     val last = if (pageOnly) currentPage else chapterGroup?.lastPage ?: currentPage
                     val title = if (pageOnly) chapter?.title else chapterGroup?.chapterTitle

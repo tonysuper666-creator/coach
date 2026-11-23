@@ -495,14 +495,11 @@ class ReaderShellFixTest {
                     val askSend = onNodeWithTag("inline-followup-send").fetchSemanticsNode().boundsInRoot
                     val bodyLayout = onNodeWithTag("book-page-layout").fetchSemanticsNode().boundsInRoot
                     val bodyText = onNodeWithTag("reader-text").fetchSemanticsNode().boundsInRoot
-                    val footer = onNodeWithTag("book-sheet-footer").fetchSemanticsNode().boundsInRoot
+                    onNodeWithTag("book-sheet-footer").assertDoesNotExist()
 
                     // Top HUD never occludes reader page or first body line
                     assertTrue(topHud.bottom <= readerPage.top + 1f, "$label: top HUD overlaps reader-page (${topHud.bottom} > ${readerPage.top})")
                     assertTrue(topHud.bottom <= bodyText.top + 1f, "$label: top HUD overlaps first line (${topHud.bottom} > ${bodyText.top})")
-
-                    // Body last line never overlaps page footer
-                    assertTrue(bodyText.bottom <= footer.top + 1f, "$label: body text bottom ${bodyText.bottom} overlaps footer top ${footer.top}")
 
                     // Ask input & Send button fully inside window and displayed
                     onNodeWithTag("inline-followup-input").assertIsDisplayed()
@@ -514,7 +511,7 @@ class ReaderShellFixTest {
                         // Narrow window: bottom scrubber yields; bottom sheet sits below body
                         onNodeWithTag("immersive-bottom-hud").assertDoesNotExist()
                         assertTrue(readerPage.bottom <= drawer.top + 1f, "$label: bottom sheet overlaps body (${readerPage.bottom} > ${drawer.top})")
-                        assertTrue(footer.bottom <= drawer.top + 1f, "$label: bottom sheet overlaps footer (${footer.bottom} > ${drawer.top})")
+                        assertTrue(bodyText.bottom <= drawer.top + 1f, "$label: bottom sheet overlaps the last body line")
                         assertTrue(readerPage.height >= 150f, "$label: body height too small (${readerPage.height})")
                     } else {
                         // Wide window: body <= 720dp, side companion docked with zero overlap, bottom scrubber doesn't overlap companion
@@ -523,7 +520,8 @@ class ReaderShellFixTest {
                         val bottomHud = onNodeWithTag("immersive-bottom-hud").fetchSemanticsNode().boundsInRoot
                         assertTrue(bottomHud.right <= drawer.left + 1f, "$label: bottom scrubber overlaps side companion (${bottomHud.right} > ${drawer.left})")
                         assertTrue(readerPage.bottom <= bottomHud.top + 1f, "$label: bottom scrubber overlaps reader body (${readerPage.bottom} > ${bottomHud.top})")
-                        assertTrue(footer.bottom <= bottomHud.top + 1f, "$label: bottom scrubber overlaps footer (${footer.bottom} > ${bottomHud.top})")
+                        val pageNumber = onNodeWithTag("reader-page-number").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+                        assertTrue(bodyText.bottom <= pageNumber.top + 1f, "$label: page number overlaps the last body line")
                     }
 
                     saveShot(this, "window-$label-ask")

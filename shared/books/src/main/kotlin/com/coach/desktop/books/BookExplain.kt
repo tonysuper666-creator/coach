@@ -404,7 +404,8 @@ internal fun BookExplainPanel(
         Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp).testTag("book-explain"), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             val first = selection?.page ?: currentSection?.firstPage ?: page
             val last = selection?.page ?: currentSection?.lastPage ?: page
-            val chapter = remember(book, first) { BookChapterResolver.chapterForPage(book, first) }
+            val offset = selection?.start ?: currentSection?.blocks?.firstOrNull()?.start ?: 0
+            val chapter = remember(book, first, offset) { BookChapterResolver.chapterForPage(book, first, offset) }
             Text(explanationScope(first, last, chapter?.title ?: book.title), style = MaterialTheme.typography.titleSmall)
             val paired = explainer.identity
             if (!aiEnabled) {

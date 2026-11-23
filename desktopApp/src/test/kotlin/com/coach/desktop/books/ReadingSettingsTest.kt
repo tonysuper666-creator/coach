@@ -107,8 +107,9 @@ class ReadingSettingsTest {
             }
             runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
-                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                onNodeWithTag("immersive-top-hud").assertExists()
                 waitForIdle()
+                onNodeWithTag("immersive-more-menu").performClick()
                 for (mode in listOf("paged", "scroll")) {
                     onNodeWithTag("v7-type-menu").performClick()
                     onNodeWithTag("reading-size-LARGE").assertIsNotEnabled()
@@ -116,7 +117,8 @@ class ReadingSettingsTest {
                     assertEquals(mode == "scroll", library.pdfScrollMode(controller.state.value.book!!.id))
                     onNodeWithTag("reading-settings-panel").assertDoesNotExist()
                 }
-                onNodeWithTag("book-original-toggle").performClick()
+                onNodeWithTag("view-mode-text").performClick()
+                onNodeWithTag("immersive-more-menu").performClick()
                 onNodeWithTag("v7-type-menu").performClick()
                 onNodeWithTag("reading-size-LARGE").assertIsEnabled().performClick()
                 onNodeWithTag("original-mode-scroll").assertDoesNotExist()
@@ -193,9 +195,11 @@ class ReadingSettingsTest {
             val dbUrl = "jdbc:sqlite:${library.directory.resolve("library.sqlite")}"
             runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
-                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                onNodeWithTag("immersive-top-hud").assertExists()
                 waitForIdle()
-                onNodeWithTag("book-original-toggle").performClick()
+                onNodeWithTag("immersive-more-menu").performClick()
+                onNodeWithTag("view-mode-text").performClick()
+                onNodeWithTag("immersive-more-menu").performClick()
                 onNodeWithTag("v7-type-menu").performClick()
                 val locked = CountDownLatch(1)
                 var blockerError: Throwable? = null

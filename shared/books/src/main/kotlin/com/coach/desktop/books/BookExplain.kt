@@ -713,10 +713,29 @@ internal fun V7Field(value: String, onValueChange: (String) -> Unit, label: Stri
     val shape = RoundedCornerShape(CoachV7.Radius.btn)
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
-        BasicTextField(value, onValueChange, enabled = enabled, singleLine = singleLine, minLines = minLines,
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            enabled = enabled,
+            singleLine = singleLine,
+            minLines = minLines,
             textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.fgPrimary.copy(alpha = if (enabled) 1f else .5f)),
-            cursorBrush = SolidColor(colors.fgPrimary), visualTransformation = visualTransformation, keyboardOptions = keyboardOptions,
-            modifier = modifier.v7FocusRing(shape).clip(shape).background(paper)
-                .border(1.dp, if (isError) v7Alert() else colors.borderSubtle, shape).padding(horizontal = 12.dp, vertical = 10.dp))
+            cursorBrush = SolidColor(colors.fgPrimary),
+            visualTransformation = visualTransformation,
+            keyboardOptions = keyboardOptions,
+            modifier = modifier
+                .v7FocusRing(shape)
+                .clip(shape)
+                .background(paper)
+                .border(1.dp, if (isError) v7Alert() else colors.borderSubtle, shape),
+            decorationBox = { innerTextField ->
+                Box(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    innerTextField()
+                }
+            },
+        )
     }
 }

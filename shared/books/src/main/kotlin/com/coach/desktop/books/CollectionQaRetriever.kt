@@ -882,8 +882,8 @@ internal object CollectionQaEngine {
         remoteAsk: suspend (JsonObject) -> CourseServerCallResult,
     ): Result<CollectionQaTurn> {
         val cleanQ = question.trim()
-        if (cleanQ.length < 2) {
-            return Result.failure(IllegalArgumentException("请输入至少 2 个字的问题。"))
+        if (cleanQ.isEmpty()) {
+            return Result.failure(IllegalArgumentException("先输入问题。"))
         }
         if (!currentBookId.isNullOrBlank()) {
             withContext(Dispatchers.IO) { runCatching { library.saveLastQuestion(currentBookId, cleanQ) } }

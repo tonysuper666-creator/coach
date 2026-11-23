@@ -221,7 +221,7 @@ internal fun BookPageView(
     val clipboard = LocalClipboard.current
     val pageClipboard = remember(clipboard) { PageClipboard(clipboard) }
     val latestOnSelectText by rememberUpdatedState(onSelectText)
-    val topMargin = if (immersive) 20.dp else 52.dp
+    val topMargin = if (immersive) 32.dp else 52.dp
     val topMarginPx = with(density) { topMargin.toPx() }
     val paperBg = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
     BoxWithConstraints(modifier.fillMaxSize().then(if (immersive) Modifier.background(paperBg) else Modifier).testTag("book-page-layout")) {
@@ -238,7 +238,7 @@ internal fun BookPageView(
         val leftInset = if (immersive) minOf(24.dp, maxWidth * 0.025f) else 64.dp
         val rightInset = if (immersive) minOf(24.dp, maxWidth * 0.025f) else if (spread) 48.dp else 64.dp
         val widthPx = with(density) { (sheetWidth - leftInset - rightInset).roundToPx().coerceAtLeast(1) }
-        val bodyHeight = with(density) { (maxHeight - if (immersive) 40.dp else 116.dp).roundToPx().coerceAtLeast(1) }
+        val bodyHeight = with(density) { (maxHeight - if (immersive) 68.dp else 116.dp).roundToPx().coerceAtLeast(1) }
         val failed = remember(book.id, libraryDirectory) { mutableStateListOf<BookIllustration>() }
         val layoutPages = remember(book.pages, libraryDirectory, failed.toList()) {
             if (libraryDirectory != null && failed.isEmpty()) book.pages else book.pages.map { page ->
@@ -769,7 +769,10 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
             }
         }
     }
-    DisableSelection { Row(Modifier.align(Alignment.BottomCenter).padding(horizontal = 20.dp, vertical = 20.dp).fillMaxWidth(),
+    DisableSelection { Row(Modifier.align(Alignment.BottomCenter)
+        .padding(horizontal = 20.dp, vertical = if (topMargin < 44.dp) 10.dp else 20.dp)
+        .fillMaxWidth()
+        .testTag("book-sheet-footer"),
         horizontalArrangement = Arrangement.SpaceBetween) {
         val rest = if (remaining == 0) "本章完" else "本章还剩 $remaining 页"
         if (spread && side == 1) {

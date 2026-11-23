@@ -95,6 +95,7 @@ internal data class CollectionQaSessionState(
     val loading: Boolean = false,
     val error: Pair<String, ExplainTrouble>? = null,
     val lastQuestion: String? = null,
+    val fallbackPages: List<CollectionQaCitation> = emptyList(),
 )
 
 internal object CollectionQaJson {

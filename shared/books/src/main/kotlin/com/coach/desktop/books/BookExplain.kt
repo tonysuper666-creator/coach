@@ -124,6 +124,14 @@ internal class ExplainConsent(private val directory: Path) {
 
 /** The request and reply contract with the paired server; pure so it is testable without a network. */
 internal object ExplainWire {
+    fun selectionBlocks(chosen: SourceBlock, context: ExplainSectionContext?): List<SourceBlock> {
+        val blocks = context?.sectionBlocks?.filterNot { it.heading }.orEmpty()
+        val containsSelection = blocks.any {
+            it.id == chosen.id || (it.page == chosen.page && chosen.text.trim() in it.text)
+        }
+        return if (containsSelection && BookLessonWire.fits(blocks)) blocks else listOf(chosen)
+    }
+
     fun question(requestId: String, chosen: SourceBlock, question: String): JsonObject {
         require(BookPassageQuestion.accepts(question))
         require(chosen.text.trim().length in 1..4_000)
@@ -279,7 +287,8 @@ internal object ExplainWire {
             Citation(anchor, block.id, block.page)
         }
         // A reply without a verified block reference is a refusal message, never an explanation.
-        if (text.isBlank() || citations.isEmpty()) return ExplainResult.Refused(text.ifBlank { "这次没有得到可核对的讲解。" })
+        if (citations.isEmpty()) return ExplainResult.Refused("这一句书里没有更多可依据的内容。可以问「这段话在说什么？」或「前后两段有什么联系？」")
+        if (text.isBlank()) return ExplainResult.Refused("这次没有得到可核对的讲解。")
         val elapsed = (body["elapsedMs"] as? JsonPrimitive)?.longOrNull ?: 0L
         return ExplainResult.Done(Explanation(text, citations, elapsed))
     }
@@ -393,6 +402,10 @@ internal fun BookExplainPanel(
     // 拖动滑块能读到底（desktop-polish A11）。条子宽 12dp，落在正文右侧 16dp 的内边距里，不盖住字。
     Box(modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp).testTag("book-explain"), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            val first = selection?.page ?: currentSection?.firstPage ?: page
+            val last = selection?.page ?: currentSection?.lastPage ?: page
+            val chapter = remember(book, first) { BookChapterResolver.chapterForPage(book, first) }
+            Text(explanationScope(first, last, chapter?.title ?: book.title), style = MaterialTheme.typography.titleSmall)
             val paired = explainer.identity
             if (!aiEnabled) {
                 Text(
@@ -551,6 +564,12 @@ internal fun BookExplainPanel(
                                 modifier = Modifier.weight(1f).testTag("explain-failed"))
                         }
                     }
+                    if (failed != null) {
+                        RetrievedPageLinks(listOf(block), { "第 ${it.page} 页" }) {
+                            if (onOpenOriginal != null) onOpenOriginal(BookPassage.from(book, it))
+                            else opened = Citation("", it.id, it.page) to it
+                        }
+                    }
                     if (state is BlockState.Done) ExplanationView(book, blocks, state.explanation, state.context) { citation ->
                         state.context.firstOrNull { it.id == citation.blockId }?.let {
                             if (onOpenOriginal != null) onOpenOriginal(BookPassage.from(book, it))
@@ -577,6 +596,7 @@ internal fun BookExplainPanel(
 
 @Composable
 internal fun ExplanationView(book: Textbook, blocks: List<SourceBlock>, explanation: Explanation, context: List<SourceBlock>,
+    showReaderPage: Boolean = false,
     onOpen: (Citation) -> Unit) {
     val citations = explanation.citations
     // 正文里的【S1】换成主色小号上标数字，点它和点下面「出处 1」一样打开原文；读者看不到任何块编号。
@@ -587,8 +607,9 @@ internal fun ExplanationView(book: Textbook, blocks: List<SourceBlock>, explanat
         Column {
             citations.forEachIndexed { index, c ->
                 val quote = context.firstOrNull { it.id == c.blockId }?.let { " · " + shortQuote(it.text) }.orEmpty()
+                val readerPage = if (showReaderPage && !book.printsPageNumbers(c.page)) "阅读器第 ${c.page} 页 · " else ""
                 V7TextButton({ onOpen(c) }, modifier = Modifier.testTag("explain-citation")) {
-                    Text("出处 ${index + 1} · ${bookCitationLabel(book, blocks, c)}$quote", style = MaterialTheme.typography.labelLarge, color = v7Pine(),
+                    Text("出处 ${index + 1} · $readerPage${bookCitationLabel(book, blocks, c)}$quote", style = MaterialTheme.typography.labelLarge, color = v7Pine(),
                         maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                         textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
                 }

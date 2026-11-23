@@ -29,6 +29,8 @@ import com.coach.desktop.books.CollectionQaException
 import com.coach.desktop.books.CollectionQaTurn
 import com.coach.desktop.books.CollectionQaTurnView
 import com.coach.desktop.books.CollectionSummary
+import com.coach.desktop.books.ExplainTrouble
+import com.coach.desktop.books.RetrievedPageLinks
 import com.coach.desktop.books.PaperColor
 import com.coach.desktop.books.ReadingFont
 import com.coach.desktop.books.ReadingSize
@@ -257,8 +259,8 @@ internal fun HostSearchDialog(
     }
     val selectedCollection = askableCollections.firstOrNull { it.record.id == selectedCollectionId }
     var qaLoading by remember { mutableStateOf(false) }
-    var qaError by remember { mutableStateOf<String?>(null) }
-    var qaTurns by remember { mutableStateOf<List<CollectionQaTurn>>(emptyList()) }
+    var qaError by remember(selectedCollectionId) { mutableStateOf<CollectionQaException?>(null) }
+    var qaTurns by remember(selectedCollectionId) { mutableStateOf<List<CollectionQaTurn>>(emptyList()) }
 
     fun submitCollectionAsk() {
         val col = selectedCollection ?: return
@@ -280,7 +282,9 @@ internal fun HostSearchDialog(
             qaLoading = false
             res.fold(
                 onSuccess = { turn -> qaTurns = qaTurns + turn },
-                onFailure = { err -> qaError = err.message ?: "跨材料问答暂时不可用，请重试。" },
+                onFailure = { err -> qaError = err as? CollectionQaException ?: CollectionQaException(
+                    "这次没讲成，请重试。", ExplainTrouble.Other,
+                ) },
             )
         }
     }
@@ -367,13 +371,17 @@ internal fun HostSearchDialog(
                                 )
                             }
                         }
-                        qaError?.let { msg ->
+                        qaError?.let { error ->
                             Text(
-                                msg,
+                                error.message,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = colors.accentDeep,
                                 modifier = Modifier.testTag("host-search-qa-error"),
                             )
+                            RetrievedPageLinks(error.fallbackPages, { "${it.shortLabel} · 第 ${it.page} 页" }) { cit ->
+                                if (onJumpCollectionCitation != null) onJumpCollectionCitation(cit)
+                                else onOpenBook(cit.bookId, cit.page)
+                            }
                         }
                         for ((idx, turn) in qaTurns.withIndex()) {
                             CollectionQaTurnView(

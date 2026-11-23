@@ -29,7 +29,9 @@ class BookExplainTest {
         assertEquals(blocks[1].id, done.citations.single().blockId)
         assertEquals(3, done.citations.single().page)
         val refused = buildJsonObject { put("text", "追问未完成，暂时无法确认。"); put("sources", JsonArray(emptyList())) }
-        assertIs<ExplainResult.Refused>(ExplainWire.parse(refused, sent))
+        val noSources = assertIs<ExplainResult.Refused>(ExplainWire.parse(refused, sent))
+        assertContains(noSources.message, "这一句书里没有更多可依据的内容")
+        assertContains(noSources.message, "这段话在说什么？")
         val foreign = buildJsonObject {
             put("text", "编造。【S1】")
             put("sources", buildJsonArray { add(buildJsonObject { put("anchor", "S1"); put("docId", "$book:p9:9"); put("pdfPage", 9) }) })
@@ -41,6 +43,21 @@ class BookExplainTest {
         assertIs<ExplainResult.Refused>(ExplainWire.parse(wrongPage, sent))
         val mixed = JsonObject(good + ("sources" to JsonArray(good["sources"]!!.jsonArray + foreign["sources"]!!.jsonArray)))
         assertIs<ExplainResult.Refused>(ExplainWire.parse(mixed, sent), "A valid citation cannot hide a foreign one")
+    }
+
+    @Test fun transportDiagnosticsStayOutOfTheCard() {
+        assertEquals(ExplainTrouble.message(ExplainTrouble.Busy, null),
+            ExplainTrouble.message(ExplainTrouble.Busy, "上游返回 HTTP 503"))
+    }
+
+    @Test fun fallbackPagesComeFromTheSameSelectionContextAsTheRequest() {
+        val selection = block(3, 30, "first paragraph")
+        val context = ExplainSectionContext("小节", null, null, blocks)
+        assertEquals(blocks.drop(1), ExplainWire.selectionBlocks(selection, context))
+        val elsewhere = block(9, 30, selection.text)
+        assertEquals(listOf(elsewhere), ExplainWire.selectionBlocks(elsewhere, context))
+        val oversized = context.copy(sectionBlocks = blocks + block(4, 30, "x".repeat(8_001)))
+        assertEquals(listOf(selection), ExplainWire.selectionBlocks(selection, oversized))
     }
 
     /**

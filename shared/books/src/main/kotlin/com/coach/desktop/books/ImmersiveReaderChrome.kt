@@ -992,6 +992,7 @@ internal fun CompanionAskPane(
     collectionTurns: List<CollectionQaTurn> = emptyList(),
     collectionLoading: Boolean = false,
     collectionError: Pair<String, ExplainTrouble>? = null,
+    collectionFallbackPages: List<CollectionQaCitation> = emptyList(),
     onRetryCollection: () -> Unit = {},
     onOpenCollectionCitation: (CollectionQaCitation) -> Unit = {},
 ) {
@@ -1019,6 +1020,10 @@ internal fun CompanionAskPane(
                 overflow = TextOverflow.Ellipsis,
             )
         } else if (quoteSource != null) {
+            val sources = remember(thread, quoteSource) { ExplainWire.selectionBlocks(quoteSource, thread?.context) }
+            val chapter = remember(book, quoteSource.page) { BookChapterResolver.chapterForPage(book, quoteSource.page) }
+            Text(explanationScope(sources.minOf { it.page }, sources.maxOf { it.page }, chapter?.title ?: book.title),
+                style = MaterialTheme.typography.labelMedium, modifier = Modifier.testTag("inline-explain-scope"))
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -1098,6 +1103,7 @@ internal fun CompanionAskPane(
                     )
                 }
                 collectionError?.let { (message, trouble) ->
+                    RetrievedPageLinks(collectionFallbackPages, { "${it.shortLabel} · 第 ${it.page} 页" }, onOpenCollectionCitation)
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
                             message,
@@ -1153,7 +1159,7 @@ internal fun CompanionAskPane(
                     for ((index, entry) in thread.turns.withIndex()) {
                         Column(Modifier.fillMaxWidth().testTag("inline-explain-turn-$index"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(entry.label, style = MaterialTheme.typography.labelMedium, color = colors.actionPrimary)
-                            ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks) { citation ->
+                            ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks, showReaderPage = true) { citation ->
                                 entry.sentBlocks.firstOrNull { it.id == citation.blockId }?.let { onOpenCitation(citation, it) }
                             }
                         }
@@ -1163,6 +1169,11 @@ internal fun CompanionAskPane(
                         Text("正在整理…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("inline-explain-loading"))
                     }
                     thread.error?.let { (message, trouble) ->
+                        RetrievedPageLinks(thread.fallbackBlocks, { block ->
+                            if (block.page == thread.selection.page) "选段在第 ${block.page} 页" else "相关段落在第 ${block.page} 页"
+                        }) { block ->
+                            onOpenCitation(Citation("", block.id, block.page), block)
+                        }
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(
                                 message,

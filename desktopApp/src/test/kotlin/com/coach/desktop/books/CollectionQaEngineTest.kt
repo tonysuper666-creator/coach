@@ -110,6 +110,19 @@ class CollectionQaEngineTest {
             assertEquals(0, concordantBundle.matchedDiscrepancies.count { it.directAspectMatch })
             assertTrue(concordantBundle.blocks.any { "cream-skim" in it.text })
 
+            val offline = CollectionQaEngine.ask(
+                library = lib, collectionId = courseId,
+                question = "在 Rothschild-Stiglitz 模型里，为什么混同均衡永远不可能存在？",
+                remoteAsk = { CourseServerCallResult(body = null, error = "暂时连不上") },
+            ).exceptionOrNull() as CollectionQaException
+            val retrievedPages = concordantBundle.blocks.map { it.bookId to it.page }.distinct()
+            assertEquals(retrievedPages, offline.fallbackPages.map { it.bookId to it.page })
+            offline.fallbackPages.forEach { link ->
+                assertTrue(concordantBundle.blocks.any {
+                    it.bookId == link.bookId && it.page == link.page && link.quoteAnchor in it.text
+                })
+            }
+
             // 3. End-to-end engine strips fabricated citations & maps valid UTF-16 passage offsets
             val targetBlock = conflictBundle.blocks.first { it.bookId == bookText.id }
             val turn = CollectionQaEngine.ask(

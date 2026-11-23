@@ -43,6 +43,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 internal sealed interface CompanionPackState {
     data object Idle : CompanionPackState
@@ -111,13 +115,38 @@ internal fun SingleBookCompanionPanel(
     var sectionMastery by remember(book.id, currentSection?.id, chapterGroup?.chapterId) { mutableStateOf<ConceptMasteryRecord?>(null) }
     var gradeResponsesByQuestion by remember(book.id) { mutableStateOf<Map<String, PracticeGradeDiagnoseResponse>>(emptyMap()) }
     val activeModule = CompanionModuleTab.fromWire(draft.activeModule)
+    var modeSourcePages by remember(book.id, chapterGroup?.chapterId, studyPreference) { mutableStateOf(emptyList<Int>()) }
+    var wholeChapter by remember(book.id, currentPage, studyPreference.mode) { mutableStateOf(false) }
+    val readingExplanation = studyPreference.mode == BookStudyMode.BOOK_MAP ||
+        (studyPreference.mode == BookStudyMode.READ_THROUGH && activeModule == CompanionModuleTab.KEY_POINTS)
+    val samePage = chapterGroup?.firstPage == currentPage && chapterGroup.lastPage == currentPage
+    val sectionOnly = studyPreference.mode == BookStudyMode.READ_THROUGH &&
+        chapterGroup?.sections?.singleOrNull()?.let { currentPage in it.firstPage..it.lastPage } == true
+    val pageOnly = readingExplanation && !wholeChapter && !samePage && !sectionOnly
+    val cachedPagePack = remember(packState, pageOnly, currentPage, currentSection, studyPreference.mode) {
+        val pack = (packState as? CompanionPackState.Ready)?.pack
+        if (!pageOnly || studyPreference.mode != BookStudyMode.READ_THROUGH || pack == null) null
+        else {
+            val points = pack.keyPoints.filter { it.anchor?.pdfPage == currentPage }
+            val pageText = book.page(currentPage)?.text.orEmpty()
+            if (points.isEmpty()) null else pack.copy(
+                coreQuestion = currentSection?.title.orEmpty(),
+                keyPoints = points,
+                jargonGlosses = pack.jargonGlosses.filter { gloss ->
+                    gloss.anchor?.pdfPage == currentPage ||
+                        (gloss.anchor == null && gloss.term.isNotBlank() && pageText.contains(gloss.term, ignoreCase = true))
+                },
+            )
+        }
+    }
     val scroll = rememberScrollState()
 
     LaunchedEffect(book.id, modePackJson) {
         bookMapMeta = withContext(Dispatchers.IO) { StudyModeStore.loadBookMapMeta(library, book.id) }
     }
 
-    LaunchedEffect(book.id, chapterGroup?.chapterId, chapterNum, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion, explainer.loaded, explainer.identity, aiEnabled, modeFetchNonce) {
+    LaunchedEffect(book.id, chapterGroup?.chapterId, chapterNum, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion, explainer.loaded, explainer.identity, aiEnabled, modeFetchNonce, pageOnly) {
+        if (pageOnly) return@LaunchedEffect
         val group = chapterGroup ?: return@LaunchedEffect
         val fallbackAny = studyPreference.detailLevel == ExplainDetailLevel.DETAILED &&
             studyPreference.explainLang == ExplainLanguage.BILINGUAL &&
@@ -167,6 +196,7 @@ internal fun SingleBookCompanionPanel(
             val wire = withContext(Dispatchers.IO) {
                 StudyModeWireBuilder.buildModeRequestJson(library, book, group, chapterNum, studyPreference)
             }
+            modeSourcePages = wire.getValue("pages").jsonArray.map { it.jsonObject.getValue("pdfPage").jsonPrimitive.int }
             val res = explainer.fetchStudyModePack(book.id, studyPreference.mode.name, wire) { chars, _, delta ->
                 modeStreamingChars = maxOf(modeStreamingChars, chars)
                 if (delta.isNotEmpty()) {
@@ -251,13 +281,14 @@ internal fun SingleBookCompanionPanel(
 
     LaunchedEffect(explainer) { if (!explainer.loaded) explainer.load() }
 
-    LaunchedEffect(book.id, chapterGroup?.chapterId, explainer.loaded, explainer.identity, aiEnabled, fetchNonce) {
+    LaunchedEffect(book.id, chapterGroup?.chapterId, explainer.loaded, explainer.identity, aiEnabled, fetchNonce, pageOnly) {
         val group = chapterGroup ?: return@LaunchedEffect
         val cached = withContext(Dispatchers.IO) { library.cachedChapterCompanion(book.id, group.chapterId) }
         if (cached != null) {
             packState = CompanionPackState.Ready(cached)
             return@LaunchedEffect
         }
+        if (pageOnly) return@LaunchedEffect
         if (!aiEnabled || !explainer.loaded || explainer.identity == null) {
             packState = CompanionPackState.Idle
             return@LaunchedEffect
@@ -406,6 +437,36 @@ internal fun SingleBookCompanionPanel(
                     .testTag("companion-module-body"),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                if (readingExplanation) {
+                    val chapter = remember(book, currentPage) { BookChapterResolver.chapterForPage(book, currentPage) }
+                    val first = if (pageOnly) currentPage else chapterGroup?.firstPage ?: currentPage
+                    val last = if (pageOnly) currentPage else chapterGroup?.lastPage ?: currentPage
+                    val title = if (pageOnly) chapter?.title else chapterGroup?.chapterTitle
+                    Text(explanationScope(first, last, title ?: book.title),
+                        style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag("companion-explanation-scope"))
+                    if (!samePage && !sectionOnly && chapterGroup != null) {
+                        V7TextButton({ wholeChapter = !wholeChapter }, modifier = Modifier.testTag("companion-change-scope")) {
+                            Text(if (wholeChapter) "只讲这一页" else "讲整章")
+                        }
+                    }
+                    if (pageOnly) {
+                        if (cachedPagePack != null) {
+                            KeyPointsModuleView(
+                                pack = cachedPagePack, questionLabel = "当前小节",
+                                collapseBasicJargon = MasteryEngine.shouldCollapseBasicTerminology(sectionMastery),
+                                onOpenAnchor = onOpenAnchor, onAskTerm = onAskAboutText,
+                                onJumpPretest = { updateDraft { it.copy(activeModule = CompanionModuleTab.PRETEST.name) } },
+                            )
+                        } else key(book.id, currentPage) {
+                            PageExplanation(book, currentPage, explainer, onOpen = { block ->
+                                onOpenAnchor(BookCompanionAnchor(block.page, block.id, block.start, block.end, block.text))
+                            }, onLogin = onOpenLogin)
+                        }
+                        bottomContent?.invoke()
+                        return@Column
+                    }
+                    if (modeError != null) RetrievedPageLinks(modeSourcePages, { "第 $it 页" }, onJumpPage)
+                }
                 if (chapterGroup == null) {
                     CoachEmptyState(
                         title = "当前页暂未归入正文小节。",
@@ -501,6 +562,8 @@ internal fun SingleBookCompanionPanel(
                         }
                     }
                     is CompanionPackState.Failed -> {
+                        val pages = remember(chapterGroup) { ChapterCompanionGrouping.wireBlocks(chapterGroup).distinctBy { it.page } }
+                        RetrievedPageLinks(pages, { "第 ${it.page} 页" }, { onJumpPage(it.page) })
                         CoachErrorBanner(
                             message = state.message,
                             retryLabel = if (state.trouble.needsPairing) "去登录" else "重试",
@@ -680,6 +743,7 @@ internal fun SingleBookCompanionPanel(
 @Composable
 private fun KeyPointsModuleView(
     pack: BookCompanionPack,
+    questionLabel: String = "核心问题",
     collapseBasicJargon: Boolean = false,
     weakSectionHint: String? = null,
     onOpenAnchor: (BookCompanionAnchor) -> Unit,
@@ -695,7 +759,7 @@ private fun KeyPointsModuleView(
     }
     if (pack.coreQuestion.isNotBlank()) {
         PaperCard(Modifier.fillMaxWidth().testTag("companion-core-question"), contentPadding = PaddingValues(12.dp), contentSpacing = 6.dp) {
-            Text("核心问题", style = MaterialTheme.typography.labelMedium, color = v7Pine())
+            Text(questionLabel, style = MaterialTheme.typography.labelMedium, color = v7Pine())
             Text(pack.coreQuestion, style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
         }
     }

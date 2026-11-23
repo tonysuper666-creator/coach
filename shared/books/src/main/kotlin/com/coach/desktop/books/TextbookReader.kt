@@ -233,6 +233,7 @@ internal fun TextbookReader(
     var activeHardPoint by remember(book.id, currentSection?.id) { mutableStateOf<Pair<SectionHardPoint, SourceBlock>?>(null) }
     var inlineThread by remember(book.id) { mutableStateOf<InlineExplainThread?>(null) }
     var inlineDraft by remember(book.id) { mutableStateOf("") }
+    var inlineRequest by remember(book.id) { mutableIntStateOf(0) }
     var lastInlineAction by remember(book.id) { mutableStateOf<Pair<SelectionExplainAction, String?>?>(null) }
     val currentGuideState = currentSection?.let { guideController.states[it.id] }
     val currentGuide = (currentGuideState as? SectionGuideState.Ready)?.guide
@@ -256,11 +257,12 @@ internal fun TextbookReader(
         }
     }
     fun runInlineSelection(target: SourceBlock, action: SelectionExplainAction, questionText: String? = null) {
+        val request = ++inlineRequest
         val secIdx = guideController.sectionIndexForPage(target.page).takeIf { it >= 0 } ?: currentSectionIndex
         val secCtx = guideController.contextForSection(secIdx)
         if (action == SelectionExplainAction.ASK && questionText == null) {
             inlineThread = (inlineThread?.takeIf { it.selection.id == target.id }
-                ?: InlineExplainThread(target, secCtx)).copy(askingOpen = true, error = null)
+                ?: InlineExplainThread(target, secCtx)).copy(askingOpen = true, loading = false, error = null)
             return
         }
         if (!aiEnabled) {
@@ -268,6 +270,7 @@ internal fun TextbookReader(
             inlineThread = existing.copy(
                 loading = false,
                 error = ("已在设置中关闭伴读讲解与提问，可在设置中重新开启。" to ExplainTrouble.Other),
+                fallbackBlocks = listOf(target),
                 askingOpen = true,
             )
             return
@@ -288,7 +291,8 @@ internal fun TextbookReader(
         }
         val existing = inlineThread?.takeIf { it.selection.id == target.id } ?: InlineExplainThread(target, secCtx)
         val history = existing.turns.map { FollowUpTurn(it.label, ReadableText.withoutCitationMarks(it.explanation.text)) }
-        inlineThread = existing.copy(loading = true, error = null, askingOpen = true)
+        val pending = existing.copy(loading = true, error = null, fallbackBlocks = emptyList(), askingOpen = true)
+        inlineThread = pending
         scope.launch {
             val result = explainer.explainSelection(
                 kind = action.kind,
@@ -297,20 +301,21 @@ internal fun TextbookReader(
                 question = questionText,
                 history = history,
             )
-            val sent = secCtx?.sectionBlocks?.filterNot { it.heading }
-                ?.takeIf { list -> list.isNotEmpty() && list.any { target.text.trim() in it.text || it.id == target.id } }
-                ?: listOf(target)
+            if (inlineRequest != request || inlineThread?.selection?.id != target.id) return@launch
+            val sent = ExplainWire.selectionBlocks(target, secCtx)
+            if (result is ExplainResult.Done && questionText != null && inlineDraft.trim() == questionText) inlineDraft = ""
             val label = if (action == SelectionExplainAction.ASK && !questionText.isNullOrBlank()) "问：${questionText.trim()}" else action.label
             inlineThread = when (result) {
-                is ExplainResult.Done -> existing.copy(
+                is ExplainResult.Done -> pending.copy(
                     turns = existing.turns + InlineExplainEntry(label, result.explanation, sent),
                     loading = false,
                     error = null,
                     askingOpen = true,
                 )
-                is ExplainResult.Refused -> existing.copy(
+                is ExplainResult.Refused -> pending.copy(
                     loading = false,
                     error = result.message to result.trouble,
+                    fallbackBlocks = (listOf(target) + sent).distinctBy { it.page },
                     askingOpen = true,
                 )
             }
@@ -1423,8 +1428,7 @@ internal fun TextbookReader(
                 )
                 return
             }
-            inlineDraft = ""
-            updateCollectionSession(col.id, prev.copy(loading = true, error = null, lastQuestion = q))
+            updateCollectionSession(col.id, prev.copy(loading = true, error = null, fallbackPages = emptyList(), lastQuestion = q))
             scope.launch {
                 val askNodeId = currentSection?.id ?: currentChapterSpan?.tocNodeId ?: "p${ui.page}"
                 val askName = currentSection?.title ?: currentChapterSpan?.title ?: "第 ${ui.page} 页"
@@ -1452,6 +1456,9 @@ internal fun TextbookReader(
                 val latest = sessionForCollection(col.id)
                 res.fold(
                     onSuccess = { turn ->
+                        if (inlineDraft.trim() == q && (turn.sentences.isNotEmpty() || turn.conflictCards.isNotEmpty())) {
+                            inlineDraft = ""
+                        }
                         updateCollectionSession(
                             col.id,
                             latest.copy(
@@ -1464,12 +1471,12 @@ internal fun TextbookReader(
                     },
                     onFailure = { err ->
                         val qaErr = err as? CollectionQaException
-                        if (inlineDraft.isBlank()) inlineDraft = q
                         updateCollectionSession(
                             col.id,
                             latest.copy(
                                 loading = false,
                                 error = (qaErr?.message ?: err.message ?: "跨材料问答暂时不可用，请重试。") to (qaErr?.trouble ?: ExplainTrouble.Other),
+                                fallbackPages = qaErr?.fallbackPages.orEmpty(),
                             ),
                         )
                     },
@@ -1503,7 +1510,6 @@ internal fun TextbookReader(
                             ?: currentSection?.blocks?.firstOrNull { !it.heading && it.text.isNotBlank() }
                             ?: allBookBlocks.firstOrNull { it.page == ui.page && it.text.isNotBlank() }
                         if (target != null && BookPassageQuestion.accepts(q)) {
-                            inlineDraft = ""
                             runInlineSelection(target, SelectionExplainAction.ASK, q)
                         }
                     }
@@ -1530,6 +1536,7 @@ internal fun TextbookReader(
                 collectionTurns = activeColSession.turns,
                 collectionLoading = activeColSession.loading,
                 collectionError = activeColSession.error,
+                collectionFallbackPages = activeColSession.fallbackPages,
                 onRetryCollection = {
                     val q = activeColSession.lastQuestion ?: inlineDraft
                     submitCollectionQuestion(q)

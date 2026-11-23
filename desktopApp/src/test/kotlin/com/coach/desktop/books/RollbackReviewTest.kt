@@ -20,7 +20,6 @@ class RollbackReviewTest {
             return outcome
         }
         override suspend fun fetchStatus(shelfBookId: String) = UnifiedBookStatusOutcome.NotFound
-        override suspend fun deleteBook(shelfBookId: String) = true
     }
 
     private suspend fun withBook(check: suspend (UnifiedBookUploadCoordinator, Remote, String) -> Unit) {

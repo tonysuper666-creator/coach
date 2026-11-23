@@ -305,7 +305,7 @@ internal object BookSchemaMigration {
             format TEXT NOT NULL,
             title TEXT NOT NULL,
             state TEXT NOT NULL CHECK(state IN (
-                'WAITING_NETWORK','WAITING_SERVER','UPLOADING','RECEIVED','QUEUED','PROCESSING','READY','FAILED','PAUSED','PENDING_DELETE'
+                'WAITING_NETWORK','WAITING_SERVER','UPLOADING','RECEIVED','QUEUED','PROCESSING','READY','FAILED','PAUSED'
             )),
             progress_pct INTEGER NOT NULL DEFAULT 0,
             stage_label TEXT NOT NULL DEFAULT '',

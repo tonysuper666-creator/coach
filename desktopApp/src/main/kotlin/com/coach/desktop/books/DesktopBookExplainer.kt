@@ -471,25 +471,6 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
                     http.close()
                 }
             }
-
-            override suspend fun deleteBook(shelfBookId: String): Boolean {
-                ensurePinned()
-                val http = CourseHttp(pinned.serverUrl, pinned.credentials.deviceId, pinned.credentials.token, "library")
-                return try {
-                    val reply = http.deleteUnifiedBook(shelfBookId)
-                    ensurePinned()
-                    when {
-                        reply.statusCode == 401 -> {
-                            markRevoked()
-                            false
-                        }
-                        reply.statusCode == 404 -> true
-                        else -> reply.body != null
-                    }
-                } finally {
-                    http.close()
-                }
-            }
         }
 
         override suspend fun activeAccountKey(): String? = currentIdentity()?.let(::fallbackAccountKey)
@@ -510,8 +491,5 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
 
         override suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome =
             openSession()?.fetchStatus(shelfBookId) ?: UnifiedBookStatusOutcome.Unauthorized
-
-        override suspend fun deleteBook(shelfBookId: String): Boolean =
-            openSession()?.deleteBook(shelfBookId) ?: false
     }
 }

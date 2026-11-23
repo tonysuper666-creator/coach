@@ -857,7 +857,6 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     private suspend fun handleCancelledImport(bookId: String?) = withContext(NonCancellable) {
         if (bookId != null) {
             runCatching { library.deleteBook(bookId, uploadCoordinator.currentAccountKey()) }
-            if (unifiedUploadClient != null) syncBookUploads()
         }
         val catalog = runCatching { library.catalog() }.getOrElse { emptyList() }
         val fallbackBook = catalog.firstOrNull()?.let { runCatching { library.book(it.id) }.getOrNull() }
@@ -885,7 +884,6 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             runCatching { library.book(bookId).pages.none { it.ocr } }.getOrDefault(false)
         if (shouldDelete) {
             runCatching { library.deleteBook(checkNotNull(bookId), uploadCoordinator.currentAccountKey()) }
-            if (unifiedUploadClient != null) syncBookUploads()
         }
         val catalog = runCatching { library.catalog() }.getOrElse { emptyList() }
         val fallbackBook = catalog.firstOrNull()?.let { runCatching { library.book(it.id) }.getOrNull() }

@@ -14,7 +14,6 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.defaultRequest
 import io.ktor.client.plugins.timeout
-import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -293,21 +292,6 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         MockReply(null, "等待联网", retryable = true, code = "offline")
     }
 
-    suspend fun deleteUnifiedBook(shelfBookId: String): MockReply = try {
-        val response = http.delete("$base/v1/books/${shelfBookId.encodeURLPathPart()}")
-        val status = response.status.value
-        val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
-        when {
-            status == 401 -> MockReply(null, "授权已失效", statusCode = 401, code = "unauthorized")
-            status == 404 -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "书架中找不到这本书", statusCode = 404, code = "not_found")
-            response.status.isSuccess() -> MockReply(parsed ?: buildJsonObject { put("deleted", true) }, null, statusCode = status)
-            else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "删除失败", retryable = status >= 500, statusCode = status)
-        }
-    } catch (e: kotlinx.coroutines.CancellationException) {
-        throw e
-    } catch (_: Exception) {
-        MockReply(null, "等待联网", retryable = true, code = "offline")
-    }
     /** 2.0-W2-B: 按节并发批量生成单书章节伴读五模块（要点/读前自测/推导模板/选做练习/章末习题三级提示）。 */
     suspend fun companionChapter(input: JsonObject): MockReply = try {
         val response = http.post("$base/v1/library/companion/chapter") {

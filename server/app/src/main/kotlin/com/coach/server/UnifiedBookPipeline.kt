@@ -13,7 +13,6 @@ import io.ktor.server.application.Application
 import io.ktor.server.request.header
 import io.ktor.server.request.receiveChannel
 import io.ktor.server.response.respondText
-import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
@@ -48,7 +47,6 @@ internal data class UnifiedBookConfig(
     val maxFileBytes: Long = DEFAULT_MAX_FILE_BYTES,
     val accountQuotaBytes: Long = DEFAULT_ACCOUNT_QUOTA_BYTES,
     val minFreeDiskBytes: Long = DEFAULT_MIN_FREE_DISK_BYTES,
-    val trashRetentionMs: Long = DEFAULT_TRASH_RETENTION_MS,
     val leaseDurationMs: Long = DEFAULT_LEASE_DURATION_MS,
     val usableSpaceProvider: (Path) -> Long = { path -> Files.getFileStore(path).usableSpace },
     val clock: () -> Long = System::currentTimeMillis,
@@ -58,7 +56,6 @@ internal data class UnifiedBookConfig(
         require(maxFileBytes > 0L) { "maxFileBytes must be positive" }
         require(accountQuotaBytes >= maxFileBytes) { "accountQuotaBytes must cover maxFileBytes" }
         require(minFreeDiskBytes >= 0L) { "minFreeDiskBytes must be non-negative" }
-        require(trashRetentionMs >= 0L) { "trashRetentionMs must be non-negative" }
         require(leaseDurationMs > 0L) { "leaseDurationMs must be positive" }
     }
 
@@ -67,7 +64,6 @@ internal data class UnifiedBookConfig(
         const val DEFAULT_MAX_FILE_BYTES = 256L * 1024L * 1024L
         const val DEFAULT_ACCOUNT_QUOTA_BYTES = 2L * 1024L * 1024L * 1024L
         const val DEFAULT_MIN_FREE_DISK_BYTES = 512L * 1024L * 1024L
-        const val DEFAULT_TRASH_RETENTION_MS = 7L * 24L * 3600L * 1000L
         const val DEFAULT_LEASE_DURATION_MS = 10L * 60L * 1000L
 
         fun fromEnv(env: (String) -> String? = System::getenv): UnifiedBookConfig {
@@ -77,13 +73,11 @@ internal data class UnifiedBookConfig(
             val quota = env("COACH_UNIFIED_BOOK_ACCOUNT_QUOTA_BYTES")?.trim()?.toLongOrNull()
                 ?: maxOf(DEFAULT_ACCOUNT_QUOTA_BYTES, maxFile)
             val minFree = env("COACH_UNIFIED_BOOK_MIN_FREE_BYTES")?.trim()?.toLongOrNull() ?: DEFAULT_MIN_FREE_DISK_BYTES
-            val retention = env("COACH_UNIFIED_BOOK_TRASH_RETENTION_MS")?.trim()?.toLongOrNull() ?: DEFAULT_TRASH_RETENTION_MS
             return UnifiedBookConfig(
                 enabled = enabled,
                 maxFileBytes = maxFile,
                 accountQuotaBytes = quota,
                 minFreeDiskBytes = minFree,
-                trashRetentionMs = retention,
             )
         }
     }
@@ -171,7 +165,7 @@ internal class UnifiedBookError(
 
 /**
  * Unified server-side book intake, shared content-addressed storage, per-account shelf isolation,
- * reference-counted trash quarantine, and lease-based processing job queue (TON-1823 PR A).
+ * and lease-based processing job queue (TON-1823 PR A; remote unbinding is tracked in TON-1833).
  *
  * PR A intentionally stops at `queued` and never marks books `ready` until TON-1821's shared parser lands.
  */
@@ -186,13 +180,11 @@ class UnifiedBookPipeline internal constructor(
     private val artifactsDir get() = sharedDir.resolve("artifacts")
     private val tmpDir get() = sharedDir.resolve("tmp")
     private val accountsDir get() = root.resolve("accounts")
-    private val trashDir get() = root.resolve("trash")
     private val registryFile get() = sharedDir.resolve("registry.sqlite")
 
     private val initLock = Any()
     @Volatile private var initialized = false
     private val shaLocks = ConcurrentHashMap<String, Mutex>()
-    private val inFlightShas = ConcurrentHashMap<String, Int>()
     private val quotaLock = Any()
     private val inFlightAccountBytes = HashMap<String, Long>()
     private var totalInFlightBytes = 0L
@@ -207,7 +199,6 @@ class UnifiedBookPipeline internal constructor(
             privateFiles.directory(artifactsDir)
             privateFiles.directory(tmpDir)
             privateFiles.directory(accountsDir)
-            privateFiles.directory(trashDir)
             privateFiles.file(registryFile)
             DriverManager.getConnection("jdbc:sqlite:$registryFile").use { db ->
                 db.createStatement().use { sql ->
@@ -217,9 +208,8 @@ class UnifiedBookPipeline internal constructor(
                             sha256 TEXT PRIMARY KEY,
                             format TEXT NOT NULL,
                             size_bytes INTEGER NOT NULL,
-                            state TEXT NOT NULL CHECK(state IN ('ACTIVE','TRASHED')),
+                            state TEXT NOT NULL CHECK(state IN ('ACTIVE')),
                             ref_count INTEGER NOT NULL DEFAULT 0,
-                            trashed_at INTEGER,
                             created_at INTEGER NOT NULL,
                             updated_at INTEGER NOT NULL
                         )""".trimIndent(),
@@ -249,16 +239,6 @@ class UnifiedBookPipeline internal constructor(
                             PRIMARY KEY(sha256, parser_version)
                         )""".trimIndent(),
                     )
-                    sql.execute(
-                        """CREATE TABLE IF NOT EXISTS pending_deletes(
-                            scope_key TEXT NOT NULL,
-                            shelf_book_id TEXT NOT NULL,
-                            sha256 TEXT NOT NULL,
-                            created_at INTEGER NOT NULL,
-                            PRIMARY KEY(scope_key, shelf_book_id)
-                        )""".trimIndent(),
-                    )
-                    sql.execute("CREATE INDEX IF NOT EXISTS idx_shared_blobs_trash ON shared_blobs(state, trashed_at)")
                     sql.execute("CREATE INDEX IF NOT EXISTS idx_processing_jobs_state ON processing_jobs(state, lease_expires_at)")
                 }
             }
@@ -330,11 +310,6 @@ class UnifiedBookPipeline internal constructor(
     private fun artifactDir(sha256: String, parserVersion: String): Path {
         require(sha256.matches(SHA256_PATTERN)) { "Invalid sha256" }
         return artifactsDir.resolve(sha256).resolve(parserVersion)
-    }
-
-    private fun trashEntryDir(sha256: String): Path {
-        require(sha256.matches(SHA256_PATTERN)) { "Invalid sha256" }
-        return trashDir.resolve(sha256)
     }
 
     private fun accountUsedBytes(scope: UnifiedBookScope): Long {
@@ -456,16 +431,8 @@ class UnifiedBookPipeline internal constructor(
                 throw UnifiedBookError(HttpStatusCode.BadRequest, "sha256_mismatch", "文件内容校验不一致，请重试上传。")
             }
 
-            inFlightShas.merge(actualSha, 1, Int::plus)
-            try {
-                shaLock(actualSha).withLock {
-                    commitUploadedFile(scope, actualSha, format, title, bytesWritten, tempFile)
-                }
-            } finally {
-                inFlightShas.compute(actualSha) { _, count ->
-                    val next = (count ?: 1) - 1
-                    if (next <= 0) null else next
-                }
+            shaLock(actualSha).withLock {
+                commitUploadedFile(scope, actualSha, format, title, bytesWritten, tempFile)
             }
         } finally {
             runCatching { Files.deleteIfExists(tempFile) }
@@ -483,23 +450,12 @@ class UnifiedBookPipeline internal constructor(
     ): UnifiedShelfBook {
         val now = config.clock()
         val finalBlob = blobPath(sha256)
-        val trashEntry = trashEntryDir(sha256)
         var deduplicated = false
 
         if (Files.isRegularFile(finalBlob)) {
             deduplicated = true
             runCatching { Files.deleteIfExists(tempFile) }
         } else {
-            // Recover from trash quarantine if within retention window, replacing or restoring blob atomically.
-            if (Files.exists(trashEntry)) {
-                val trashedArtifacts = trashEntry.resolve("artifacts")
-                val targetArtifacts = artifactsDir.resolve(sha256)
-                if (Files.isDirectory(trashedArtifacts) && !Files.exists(targetArtifacts)) {
-                    moveAtomically(trashedArtifacts, targetArtifacts)
-                }
-                trashEntry.toFile().deleteRecursively()
-                deduplicated = true
-            }
             moveAtomically(tempFile, finalBlob)
             privateFiles.file(finalBlob)
         }
@@ -561,11 +517,10 @@ class UnifiedBookPipeline internal constructor(
                 val existingJob = readJob(db, sha256, config.parserVersion)
                 if (existingJob != null) deduplicated = true
                 db.prepareStatement(
-                    """INSERT INTO shared_blobs(sha256, format, size_bytes, state, ref_count, trashed_at, created_at, updated_at)
-                       VALUES(?, ?, ?, 'ACTIVE', 0, NULL, ?, ?)
+                    """INSERT INTO shared_blobs(sha256, format, size_bytes, state, ref_count, created_at, updated_at)
+                       VALUES(?, ?, ?, 'ACTIVE', 0, ?, ?)
                        ON CONFLICT(sha256) DO UPDATE SET
                            state='ACTIVE',
-                           trashed_at=NULL,
                            size_bytes=excluded.size_bytes,
                            updated_at=excluded.updated_at""".trimIndent(),
                 ).use { sql ->
@@ -742,323 +697,6 @@ class UnifiedBookPipeline internal constructor(
     }
 
     /**
-     * Deletes a book from [scope]'s shelf and cleans account-owned records (notes/Q&A/overrides).
-     * Persists a write-ahead unbind intent in `pending_deletes` before touching the account DB so
-     * a crash/restart mid-delete can always be retried or reconciled without leaking shared refs.
-     * File quarantine completes before the DB marks TRASHED and clears the pending delete record.
-     */
-    internal suspend fun deleteShelfBook(scope: UnifiedBookScope, shelfBookId: String): Boolean = withContext(Dispatchers.IO) {
-        if (!shelfBookId.matches(SHELF_BOOK_ID_PATTERN)) return@withContext false
-        val shaFromShelf = if (Files.exists(accountsDir.resolve(scope.scopeKey).resolve("shelf.sqlite"))) {
-            accountShelfDb(scope).use { accountDb ->
-                accountDb.prepareStatement("SELECT sha256 FROM shelf_books WHERE shelf_book_id=?").use { sql ->
-                    sql.setString(1, shelfBookId)
-                    sql.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else null }
-                }
-            }
-        } else null
-        val shaFromPending = if (shaFromShelf == null && Files.exists(registryFile)) {
-            registryDb().use { db ->
-                db.prepareStatement("SELECT sha256 FROM pending_deletes WHERE scope_key=? AND shelf_book_id=?").use { sql ->
-                    sql.setString(1, scope.scopeKey)
-                    sql.setString(2, shelfBookId)
-                    sql.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else null }
-                }
-            }
-        } else null
-        val sha = shaFromShelf ?: shaFromPending ?: return@withContext false
-
-        shaLock(sha).withLock {
-            val now = config.clock()
-            // 1. Write-ahead durable delete intent before mutating account shelf.
-            registryDb().use { db ->
-                db.prepareStatement(
-                    "INSERT OR IGNORE INTO pending_deletes(scope_key, shelf_book_id, sha256, created_at) VALUES(?,?,?,?)",
-                ).use { sql ->
-                    sql.setString(1, scope.scopeKey)
-                    sql.setString(2, shelfBookId)
-                    sql.setString(3, sha)
-                    sql.setLong(4, now)
-                    sql.executeUpdate()
-                }
-            }
-            completePendingDeleteLocked(scope, shelfBookId, sha, now)
-        }
-    }
-
-    /**
-     * Resumes any delete interrupted between account shelf commit and shared-ref / file quarantine.
-     * Safe to run on startup and on the periodic maintenance schedule.
-     */
-    internal suspend fun reconcilePendingDeletes(): Int = withContext(Dispatchers.IO) {
-        if (!Files.exists(registryFile)) return@withContext 0
-        val pending = registryDb().use { db ->
-            db.createStatement().use { sql ->
-                sql.executeQuery("SELECT scope_key, shelf_book_id, sha256 FROM pending_deletes ORDER BY created_at ASC").use { rs ->
-                    buildList { while (rs.next()) add(Triple(rs.getString(1), rs.getString(2), rs.getString(3))) }
-                }
-            }
-        }
-        var reconciled = 0
-        for ((scopeKey, shelfBookId, sha) in pending) {
-            val scope = UnifiedBookScope(scopeKey, isSableAccount = scopeKey.startsWith("sable-"))
-            shaLock(sha).withLock {
-                if (completePendingDeleteLocked(scope, shelfBookId, sha, config.clock())) {
-                    reconciled++
-                }
-            }
-        }
-        // Also ensure any TRASHED blob whose file move was interrupted is quarantined on disk.
-        val trashedShas = registryDb().use { db ->
-            db.createStatement().use { sql ->
-                sql.executeQuery("SELECT sha256 FROM shared_blobs WHERE state='TRASHED' AND ref_count=0").use { rs ->
-                    buildList { while (rs.next()) add(rs.getString(1)) }
-                }
-            }
-        }
-        for (sha in trashedShas) {
-            shaLock(sha).withLock {
-                if ((inFlightShas[sha] ?: 0) == 0 && sharedRefCount(sha) == 0 && Files.isRegularFile(blobPath(sha))) {
-                    quarantineSharedFiles(sha)
-                }
-            }
-        }
-        reconciled
-    }
-
-    private fun completePendingDeleteLocked(
-        scope: UnifiedBookScope,
-        shelfBookId: String,
-        sha: String,
-        now: Long,
-    ): Boolean {
-        val hasShelfFile = Files.exists(accountsDir.resolve(scope.scopeKey).resolve("shelf.sqlite"))
-        var removedFromShelf = false
-        if (hasShelfFile) {
-            removedFromShelf = accountShelfDb(scope).use { accountDb ->
-                accountDb.autoCommit = false
-                try {
-                    for (table in listOf("shelf_book_notes", "shelf_book_qa", "shelf_book_overrides")) {
-                        accountDb.prepareStatement("DELETE FROM $table WHERE shelf_book_id=?").use { sql ->
-                            sql.setString(1, shelfBookId)
-                            sql.executeUpdate()
-                        }
-                    }
-                    val count = accountDb.prepareStatement("DELETE FROM shelf_books WHERE shelf_book_id=?").use { sql ->
-                        sql.setString(1, shelfBookId)
-                        sql.executeUpdate()
-                    }
-                    accountDb.commit()
-                    count > 0
-                } catch (e: Exception) {
-                    accountDb.rollback()
-                    throw e
-                }
-            }
-        }
-
-        val pendingOrRefPresent = registryDb().use { db ->
-            val hasRef = db.prepareStatement("SELECT 1 FROM shared_blob_refs WHERE sha256=? AND scope_key=?").use { sql ->
-                sql.setString(1, sha)
-                sql.setString(2, scope.scopeKey)
-                sql.executeQuery().use { it.next() }
-            }
-            val hasPending = db.prepareStatement("SELECT 1 FROM pending_deletes WHERE scope_key=? AND shelf_book_id=?").use { sql ->
-                sql.setString(1, scope.scopeKey)
-                sql.setString(2, shelfBookId)
-                sql.executeQuery().use { it.next() }
-            }
-            hasRef || hasPending
-        }
-        if (!removedFromShelf && !pendingOrRefPresent) return false
-
-        // Compute whether this deletion drops refs to zero so file quarantine completes BEFORE clearing pending_deletes.
-        val willBecomeZero = registryDb().use { db ->
-            val otherRefs = db.prepareStatement("SELECT COUNT(*) FROM shared_blob_refs WHERE sha256=? AND scope_key<>?").use { sql ->
-                sql.setString(1, sha)
-                sql.setString(2, scope.scopeKey)
-                sql.executeQuery().use { rs -> if (rs.next()) rs.getInt(1) else 0 }
-            }
-            otherRefs == 0 && (inFlightShas[sha] ?: 0) == 0
-        }
-        if (willBecomeZero) {
-            quarantineSharedFiles(sha)
-        }
-
-        registryDb().use { db ->
-            db.autoCommit = false
-            try {
-                db.prepareStatement("DELETE FROM shared_blob_refs WHERE sha256=? AND scope_key=?").use { sql ->
-                    sql.setString(1, sha)
-                    sql.setString(2, scope.scopeKey)
-                    sql.executeUpdate()
-                }
-                val remaining = countRefs(db, sha)
-                val quarantined = remaining == 0 && (inFlightShas[sha] ?: 0) == 0
-                if (quarantined) {
-                    db.prepareStatement(
-                        "UPDATE shared_blobs SET ref_count=0, state='TRASHED', trashed_at=COALESCE(trashed_at, ?), updated_at=? WHERE sha256=?",
-                    ).use { sql ->
-                        sql.setLong(1, now)
-                        sql.setLong(2, now)
-                        sql.setString(3, sha)
-                        sql.executeUpdate()
-                    }
-                } else {
-                    db.prepareStatement(
-                        "UPDATE shared_blobs SET ref_count=?, updated_at=? WHERE sha256=?",
-                    ).use { sql ->
-                        sql.setInt(1, remaining)
-                        sql.setLong(2, now)
-                        sql.setString(3, sha)
-                        sql.executeUpdate()
-                    }
-                }
-                db.prepareStatement("DELETE FROM pending_deletes WHERE scope_key=? AND shelf_book_id=?").use { sql ->
-                    sql.setString(1, scope.scopeKey)
-                    sql.setString(2, shelfBookId)
-                    sql.executeUpdate()
-                }
-                db.commit()
-            } catch (e: Exception) {
-                db.rollback()
-                throw e
-            }
-        }
-        return true
-    }
-
-    private fun quarantineSharedFiles(sha256: String) {
-        val entry = privateFiles.directory(trashEntryDir(sha256))
-        val blob = blobPath(sha256)
-        if (Files.isRegularFile(blob)) {
-            val target = entry.resolve("blob")
-            moveAtomically(blob, target)
-            check(Files.isRegularFile(target) && !Files.exists(blob)) { "Failed to move shared blob to trash quarantine" }
-        }
-        val shaArtifacts = artifactsDir.resolve(sha256)
-        if (Files.isDirectory(shaArtifacts)) {
-            val dest = entry.resolve("artifacts")
-            if (Files.exists(dest)) check(dest.toFile().deleteRecursively()) { "Failed to clear stale trash artifacts" }
-            moveAtomically(shaArtifacts, dest)
-            check(Files.isDirectory(dest) && !Files.exists(shaArtifacts)) { "Failed to move shared artifacts to trash quarantine" }
-        }
-    }
-
-    /**
-     * Purges quarantined blobs whose retention period has elapsed, re-checking under the per-SHA lock
-     * that ref_count == 0, no upload is in flight, no pending delete exists, and no processing lease is active.
-     * Deletes files FIRST and verifies complete removal before dropping DB records so failures remain retriable.
-     */
-    internal suspend fun purgeExpiredTrash(): Int = withContext(Dispatchers.IO) {
-        if (!Files.exists(registryFile)) return@withContext 0
-        val now = config.clock()
-        val cutoff = now - config.trashRetentionMs
-        val candidates = registryDb().use { db ->
-            db.prepareStatement(
-                "SELECT sha256 FROM shared_blobs WHERE state='TRASHED' AND ref_count=0 AND trashed_at IS NOT NULL AND trashed_at <= ?",
-            ).use { sql ->
-                sql.setLong(1, cutoff)
-                sql.executeQuery().use { rs ->
-                    buildList { while (rs.next()) add(rs.getString(1)) }
-                }
-            }
-        }
-        var purged = 0
-        for (sha in candidates) {
-            shaLock(sha).withLock {
-                if ((inFlightShas[sha] ?: 0) > 0) return@withLock
-                val eligibleBeforeDelete = registryDb().use { db ->
-                    val refs = countRefs(db, sha)
-                    val activeLease = hasActiveLease(db, sha, config.clock())
-                    val hasPending = db.prepareStatement("SELECT 1 FROM pending_deletes WHERE sha256=?").use { sql ->
-                        sql.setString(1, sha)
-                        sql.executeQuery().use { it.next() }
-                    }
-                    val stillExpired = db.prepareStatement(
-                        "SELECT 1 FROM shared_blobs WHERE sha256=? AND state='TRASHED' AND trashed_at IS NOT NULL AND trashed_at <= ?",
-                    ).use { sql ->
-                        sql.setString(1, sha)
-                        sql.setLong(2, config.clock() - config.trashRetentionMs)
-                        sql.executeQuery().use { it.next() }
-                    }
-                    refs == 0 && !activeLease && !hasPending && stillExpired
-                }
-                if (!eligibleBeforeDelete) return@withLock
-
-                // Delete files FIRST and verify removal before touching DB rows.
-                val entry = trashEntryDir(sha)
-                val leftoverArtifacts = artifactsDir.resolve(sha)
-                val leftoverBlob = blobPath(sha)
-                val filesDeleted =
-                    (!Files.exists(entry) || entry.toFile().deleteRecursively()) &&
-                        (!Files.exists(leftoverArtifacts) || leftoverArtifacts.toFile().deleteRecursively()) &&
-                        (!Files.exists(leftoverBlob) || Files.deleteIfExists(leftoverBlob)) &&
-                        !Files.exists(entry) && !Files.exists(leftoverArtifacts) && !Files.exists(leftoverBlob)
-                if (!filesDeleted) return@withLock
-
-                val removedDb = registryDb().use { db ->
-                    db.autoCommit = false
-                    try {
-                        val refs = countRefs(db, sha)
-                        val activeLease = hasActiveLease(db, sha, config.clock())
-                        val stillExpired = db.prepareStatement(
-                            "SELECT 1 FROM shared_blobs WHERE sha256=? AND state='TRASHED' AND trashed_at IS NOT NULL AND trashed_at <= ?",
-                        ).use { sql ->
-                            sql.setString(1, sha)
-                            sql.setLong(2, config.clock() - config.trashRetentionMs)
-                            sql.executeQuery().use { it.next() }
-                        }
-                        if (refs == 0 && !activeLease && stillExpired) {
-                            db.prepareStatement("DELETE FROM processing_jobs WHERE sha256=?").use { sql ->
-                                sql.setString(1, sha)
-                                sql.executeUpdate()
-                            }
-                            db.prepareStatement("DELETE FROM shared_blobs WHERE sha256=?").use { sql ->
-                                sql.setString(1, sha)
-                                sql.executeUpdate()
-                            }
-                            db.commit()
-                            true
-                        } else {
-                            db.rollback()
-                            false
-                        }
-                    } catch (e: Exception) {
-                        db.rollback()
-                        throw e
-                    }
-                }
-                if (removedDb) purged++
-            }
-        }
-        purged
-    }
-
-    internal fun recordPendingDeleteForTest(scope: UnifiedBookScope, shelfBookId: String, sha256: String) {
-        registryDb().use { db ->
-            db.prepareStatement(
-                "INSERT OR IGNORE INTO pending_deletes(scope_key, shelf_book_id, sha256, created_at) VALUES(?,?,?,?)",
-            ).use { sql ->
-                sql.setString(1, scope.scopeKey)
-                sql.setString(2, shelfBookId)
-                sql.setString(3, sha256)
-                sql.setLong(4, config.clock())
-                sql.executeUpdate()
-            }
-        }
-    }
-
-    internal fun deleteOnlyShelfRowForTest(scope: UnifiedBookScope, shelfBookId: String) {
-        accountShelfDb(scope).use { db ->
-            db.prepareStatement("DELETE FROM shelf_books WHERE shelf_book_id=?").use { sql ->
-                sql.setString(1, shelfBookId)
-                sql.executeUpdate()
-            }
-        }
-    }
-
-    /**
      * Lease-based job claim for future TON-1821 parser workers: claims either a `queued` job
      * or a `processing` job whose lease has expired.
      */
@@ -1121,46 +759,10 @@ class UnifiedBookPipeline internal constructor(
 
     internal fun sharedRefCount(sha256: String): Int = registryDb().use { db -> countRefs(db, sha256) }
 
-    internal fun isTrashed(sha256: String): Boolean = Files.exists(trashEntryDir(sha256).resolve("blob"))
-
-    internal fun saveAccountNoteForTest(scope: UnifiedBookScope, shelfBookId: String, noteId: String, payloadJson: String) {
-        accountShelfDb(scope).use { db ->
-            db.prepareStatement(
-                "INSERT OR REPLACE INTO shelf_book_notes(shelf_book_id, note_id, payload_json, updated_at) VALUES(?,?,?,?)",
-            ).use { sql ->
-                sql.setString(1, shelfBookId)
-                sql.setString(2, noteId)
-                sql.setString(3, payloadJson)
-                sql.setLong(4, config.clock())
-                sql.executeUpdate()
-            }
-        }
-    }
-
-    internal fun accountNoteCount(scope: UnifiedBookScope, shelfBookId: String): Int {
-        val file = accountsDir.resolve(scope.scopeKey).resolve("shelf.sqlite")
-        if (!Files.exists(file)) return 0
-        return accountShelfDb(scope).use { db ->
-            db.prepareStatement("SELECT COUNT(*) FROM shelf_book_notes WHERE shelf_book_id=?").use { sql ->
-                sql.setString(1, shelfBookId)
-                sql.executeQuery().use { rs -> if (rs.next()) rs.getInt(1) else 0 }
-            }
-        }
-    }
-
     private fun countRefs(db: Connection, sha256: String): Int =
         db.prepareStatement("SELECT COUNT(*) FROM shared_blob_refs WHERE sha256=?").use { sql ->
             sql.setString(1, sha256)
             sql.executeQuery().use { rs -> if (rs.next()) rs.getInt(1) else 0 }
-        }
-
-    private fun hasActiveLease(db: Connection, sha256: String, now: Long): Boolean =
-        db.prepareStatement(
-            "SELECT 1 FROM processing_jobs WHERE sha256=? AND state='processing' AND lease_expires_at IS NOT NULL AND lease_expires_at > ?",
-        ).use { sql ->
-            sql.setString(1, sha256)
-            sql.setLong(2, now)
-            sql.executeQuery().use { it.next() }
         }
 
     private fun readJob(db: Connection, sha256: String, parserVersion: String): UnifiedProcessingJob? =
@@ -1283,31 +885,6 @@ fun Application.unifiedBookRoutes(
                     HttpStatusCode.NotFound,
                 )
             call.respondText(status.toJson().toString(), ContentType.Application.Json)
-        }
-
-        delete("/v1/books/{id}") {
-            val pipeline = unifiedBooks?.takeIf { it.enabled }
-                ?: return@delete call.respondText("", status = HttpStatusCode.NotFound)
-            val device = call.attributes[observedDevice]
-            val friend = call.attributes.getOrNull(observedFriend)
-            val bearer = call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ").orEmpty()
-            if (friend != null && !actor.execute { authorize(device, bearer) && friendName(device) == friend }) {
-                return@delete call.respondText("Unauthorized", status = HttpStatusCode.Unauthorized)
-            }
-            val scope = UnifiedBookScope.fromCall(device, friend)
-            val shelfBookId = call.parameters["id"].orEmpty()
-            val deleted = pipeline.deleteShelfBook(scope, shelfBookId)
-            if (!deleted) {
-                return@delete call.respondText(
-                    json("error" to "书架中找不到这本书。").toString(),
-                    ContentType.Application.Json,
-                    HttpStatusCode.NotFound,
-                )
-            }
-            call.respondText(
-                json("deleted" to true, "shelfBookId" to shelfBookId).toString(),
-                ContentType.Application.Json,
-            )
         }
     }
 }

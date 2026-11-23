@@ -301,62 +301,11 @@ class UnifiedBookPipelineTest {
             assertEquals(200, reupload.statusCode())
             assertEquals(shelfA, parse(reupload).str("shelfBookId"))
             assertEquals(2, h.unified.sharedRefCount(expectedSha))
-        }
-    }
 
-    @Test
-    fun deleteIsIdempotentPreservesOtherAccountQuarantinesLastRefAndRecoversOrPurgesAfterRetention() = runBlocking {
-        var now = 1_000_000L
-        val retentionMs = 60_000L
-        val cfg = UnifiedBookConfig(enabled = true, trashRetentionMs = retentionMs, clock = { now })
-        Harness(cfg).use { h ->
-            val alice = h.exchangeSable(TOK_ALPHA_1)
-            val bob = h.exchangeSable(TOK_BETA_1)
-            val carol = h.exchangeSable(TOK_GAMMA_1)
-            val bytes = "Shared textbook payload for refcount deletion test.".toByteArray()
-            val sha = sha256Hex(bytes)
-
-            val shelfA = parse(h.upload(alice, bytes, title = "Book A")).str("shelfBookId")
-            val shelfB = parse(h.upload(bob, bytes, title = "Book B")).str("shelfBookId")
-            val scopeA = UnifiedBookScope.fromCall(alice.str("deviceId"), h.actor.execute { friendName(alice.str("deviceId")) })
-            val scopeB = UnifiedBookScope.fromCall(bob.str("deviceId"), h.actor.execute { friendName(bob.str("deviceId")) })
-            h.unified.saveAccountNoteForTest(scopeA, shelfA, "n1", """{"note":"alice"}""")
-            h.unified.saveAccountNoteForTest(scopeB, shelfB, "n1", """{"note":"bob"}""")
-
-            // Alice deletes -> Alice's book & notes gone, Bob's book & notes intact, blob still ACTIVE.
-            assertEquals(200, h.request("/v1/books/$shelfA", "DELETE", credential = alice).statusCode())
-            assertEquals(0, h.unified.accountNoteCount(scopeA, shelfA))
-            assertEquals(1, h.unified.accountNoteCount(scopeB, shelfB))
-            assertEquals(1, h.unified.sharedRefCount(sha))
-            assertFalse(h.unified.isTrashed(sha))
-            assertEquals(200, h.request("/v1/books/$shelfB/status", credential = bob).statusCode())
-
-            // Duplicate delete by Alice is idempotent (404) and does not decrement Bob's ref.
-            assertEquals(404, h.request("/v1/books/$shelfA", "DELETE", credential = alice).statusCode())
-            assertEquals(1, h.unified.sharedRefCount(sha))
-
-            // Bob deletes -> last ref removed -> quarantined into trash, NOT immediately purged.
-            assertEquals(200, h.request("/v1/books/$shelfB", "DELETE", credential = bob).statusCode())
-            assertEquals(0, h.unified.accountNoteCount(scopeB, shelfB))
-            assertEquals(0, h.unified.sharedRefCount(sha))
-            assertEquals(0, h.unified.sharedBlobCount())
-            assertTrue(h.unified.isTrashed(sha))
-            assertEquals(0, h.unified.purgeExpiredTrash())
-
-            // Carol uploads within retention window -> recovers from trash.
-            now += retentionMs / 2
-            val shelfC = parse(h.upload(carol, bytes, title = "Book C")).str("shelfBookId")
-            assertFalse(h.unified.isTrashed(sha))
-            assertEquals(1, h.unified.sharedBlobCount())
-            assertEquals(1, h.unified.sharedRefCount(sha))
-
-            // Carol deletes -> trashed again -> after retention expires, purge cleans up permanently.
-            assertEquals(200, h.request("/v1/books/$shelfC", "DELETE", credential = carol).statusCode())
-            assertTrue(h.unified.isTrashed(sha))
-            now += retentionMs + 1
-            assertEquals(1, h.unified.purgeExpiredTrash())
-            assertFalse(h.unified.isTrashed(sha))
-            assertEquals(0, h.unified.sharedJobCount(sha))
+            // Remote delete / unbind endpoint is intentionally absent in PR A (deferred to TON-1833).
+            assertEquals(404, h.request("/v1/books/$shelfA", "DELETE", credential = alice1).statusCode())
+            assertEquals(200, h.request("/v1/books/$shelfA/status", credential = alice1).statusCode())
+            assertEquals(2, h.unified.sharedRefCount(expectedSha))
         }
     }
 
@@ -435,51 +384,10 @@ class UnifiedBookPipelineTest {
             val ok = h.request("/v1/library/explain", "POST", h.ownerCredential, explainBody, private = true)
             assertEquals(200, ok.statusCode(), ok.body())
 
-            // After deleting from unified shelf, explain fails closed with 409 again.
-            assertEquals(200, h.request("/v1/books/$shelfBookId", "DELETE", h.ownerCredential, private = true).statusCode())
-            assertEquals(409, h.request("/v1/library/explain", "POST", h.ownerCredential, explainBody, private = true).statusCode())
-        }
-    }
-
-    @Test
-    fun interruptedDeleteAfterShelfCommitRecoversViaRetryAndStartupReconciliation() = runBlocking {
-        var now = 2_000_000L
-        val cfg = UnifiedBookConfig(enabled = true, trashRetentionMs = 60_000L, clock = { now })
-        Harness(cfg).use { h ->
-            val alice = h.exchangeSable(TOK_ALPHA_1)
-            val bob = h.exchangeSable(TOK_BETA_1)
-            val bytes = "Crash-recovery shared payload for pending_deletes.".toByteArray()
-            val sha = sha256Hex(bytes)
-
-            val shelfA = parse(h.upload(alice, bytes, title = "Crash Book A")).str("shelfBookId")
-            val shelfB = parse(h.upload(bob, bytes, title = "Crash Book B")).str("shelfBookId")
-            val scopeA = UnifiedBookScope.fromCall(alice.str("deviceId"), h.actor.execute { friendName(alice.str("deviceId")) })
-            val scopeB = UnifiedBookScope.fromCall(bob.str("deviceId"), h.actor.execute { friendName(bob.str("deviceId")) })
-
-            // Simulate crash right after writing pending_deletes + committing Alice's shelf delete, before shared_blob_refs unbind.
-            h.unified.recordPendingDeleteForTest(scopeA, shelfA, sha)
-            h.unified.deleteOnlyShelfRowForTest(scopeA, shelfA)
-            assertEquals(2, h.unified.sharedRefCount(sha))
-
-            // Retry DELETE HTTP call succeeds even though shelf_books row is already gone, releasing Alice's ref.
-            assertEquals(200, h.request("/v1/books/$shelfA", "DELETE", credential = alice).statusCode())
-            assertEquals(1, h.unified.sharedRefCount(sha))
-            assertFalse(h.unified.isTrashed(sha))
-
-            // Simulate crash for Bob's final ref as well; startup reconcilePendingDeletes finishes unbind and quarantines blob.
-            h.unified.recordPendingDeleteForTest(scopeB, shelfB, sha)
-            h.unified.deleteOnlyShelfRowForTest(scopeB, shelfB)
-            assertEquals(1, h.unified.sharedRefCount(sha))
-
-            assertEquals(1, h.unified.reconcilePendingDeletes())
-            assertEquals(0, h.unified.sharedRefCount(sha))
-            assertTrue(h.unified.isTrashed(sha))
-
-            // After retention expires, scheduled purge removes files first and then drops DB rows.
-            now += 60_001L
-            assertEquals(1, h.unified.purgeExpiredTrash())
-            assertFalse(h.unified.isTrashed(sha))
-            assertEquals(0, h.unified.sharedJobCount(sha))
+            // Remote delete endpoint is absent in PR A (deferred to TON-1833), so shelf book stays intact.
+            assertEquals(404, h.request("/v1/books/$shelfBookId", "DELETE", h.ownerCredential, private = true).statusCode())
+            h.reply()
+            assertEquals(200, h.request("/v1/library/explain", "POST", h.ownerCredential, explainBody, private = true).statusCode())
         }
     }
 }

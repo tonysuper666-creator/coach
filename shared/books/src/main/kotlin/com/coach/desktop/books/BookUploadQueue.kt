@@ -26,7 +26,6 @@ internal enum class BookUploadState {
     READY,
     FAILED,
     PAUSED,
-    PENDING_DELETE,
 }
 
 /**
@@ -60,7 +59,6 @@ internal data class BookUploadEntry(
             BookUploadState.READY -> null
             BookUploadState.FAILED -> errorMessage?.takeIf { it.isNotBlank() } ?: "上传失败"
             BookUploadState.PAUSED -> null
-            BookUploadState.PENDING_DELETE -> null
         }
     }
 
@@ -120,7 +118,6 @@ internal interface UnifiedBookRemoteSession {
     ): UnifiedBookUploadOutcome
 
     suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome
-    suspend fun deleteBook(shelfBookId: String): Boolean
 }
 
 internal interface UnifiedBookRemoteClient {
@@ -135,7 +132,6 @@ internal interface UnifiedBookRemoteClient {
     ): UnifiedBookUploadOutcome
 
     suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome
-    suspend fun deleteBook(shelfBookId: String): Boolean
 
     /**
      * Captures a pinned session for one sync batch. Production implementations bind an immutable
@@ -157,7 +153,6 @@ internal interface UnifiedBookRemoteClient {
             ): UnifiedBookUploadOutcome = client.uploadBook(file, format, title, sha256, onProgress)
 
             override suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome = client.fetchStatus(shelfBookId)
-            override suspend fun deleteBook(shelfBookId: String): Boolean = client.deleteBook(shelfBookId)
         }
     }
 }
@@ -340,60 +335,23 @@ internal object BookUploadQueueStore {
     }
 
     /**
-     * Scopes local book deletion to [initiatingAccountKey] when provided, preserving other accounts'
-     * queued items on the same machine. Any entry that already has a `server_shelf_book_id` is
-     * transitioned to retriable `PENDING_DELETE` instead of being silently wiped, so the server-side
-     * shelf reference is properly unbound on the next sync.
+     * Local-only cleanup when deleting a local book or cancelling an import (TON-1823 PR A;
+     * remote shelf unbinding is tracked separately in TON-1833).
+     * Only drops an unsynced local queue row for [initiatingAccountKey]; never touches rows
+     * that already have a `server_shelf_book_id` or rows belonging to other accounts, and
+     * performs no queue mutation when [initiatingAccountKey] is unavailable.
      */
-    fun markPendingDeleteOrRemove(
+    fun deleteLocalUnsyncedForAccount(
         db: Connection,
         localBookId: String,
         initiatingAccountKey: String?,
-        now: Long = System.currentTimeMillis(),
     ) {
-        if (!BookSchemaMigration.tableExists(db, "book_upload_queue")) return
-        if (initiatingAccountKey != null) {
-            db.prepareStatement(
-                """UPDATE book_upload_queue
-                   SET state='PENDING_DELETE', progress_pct=0, stage_label='', error_message=NULL, updated_at=?
-                   WHERE local_book_id=? AND account_key=? AND server_shelf_book_id IS NOT NULL""".trimIndent(),
-            ).use { sql ->
-                sql.setLong(1, now)
-                sql.setString(2, localBookId)
-                sql.setString(3, initiatingAccountKey)
-                sql.executeUpdate()
-            }
-            db.prepareStatement(
-                "DELETE FROM book_upload_queue WHERE local_book_id=? AND account_key=? AND server_shelf_book_id IS NULL",
-            ).use { sql ->
-                sql.setString(1, localBookId)
-                sql.setString(2, initiatingAccountKey)
-                sql.executeUpdate()
-            }
-        } else {
-            db.prepareStatement(
-                """UPDATE book_upload_queue
-                   SET state='PENDING_DELETE', progress_pct=0, stage_label='', error_message=NULL, updated_at=?
-                   WHERE local_book_id=? AND server_shelf_book_id IS NOT NULL""".trimIndent(),
-            ).use { sql ->
-                sql.setLong(1, now)
-                sql.setString(2, localBookId)
-                sql.executeUpdate()
-            }
-            db.prepareStatement(
-                "DELETE FROM book_upload_queue WHERE local_book_id=? AND server_shelf_book_id IS NULL AND paused=0",
-            ).use { sql ->
-                sql.setString(1, localBookId)
-                sql.executeUpdate()
-            }
-        }
-    }
-
-    fun removeEntry(db: Connection, accountKey: String, localBookId: String) {
-        if (!BookSchemaMigration.tableExists(db, "book_upload_queue")) return
-        db.prepareStatement("DELETE FROM book_upload_queue WHERE account_key=? AND local_book_id=?").use { sql ->
-            sql.setString(1, accountKey)
-            sql.setString(2, localBookId)
+        if (initiatingAccountKey == null || !BookSchemaMigration.tableExists(db, "book_upload_queue")) return
+        db.prepareStatement(
+            "DELETE FROM book_upload_queue WHERE local_book_id=? AND account_key=? AND server_shelf_book_id IS NULL",
+        ).use { sql ->
+            sql.setString(1, localBookId)
+            sql.setString(2, initiatingAccountKey)
             sql.executeUpdate()
         }
     }
@@ -411,14 +369,14 @@ internal object BookUploadQueueStore {
         }
     }
 
-    /** Visible book-card entries for [accountKey] (excludes paused and PENDING_DELETE unbind tasks). */
+    /** Active book-card entries for [accountKey] (excludes paused entries). */
     fun listForAccount(db: Connection, accountKey: String): Map<String, BookUploadEntry> {
         if (!BookSchemaMigration.tableExists(db, "book_upload_queue")) return emptyMap()
         return db.prepareStatement(
             """SELECT account_key, local_book_id, file_sha256, server_shelf_book_id, format, title,
                       state, progress_pct, stage_label, error_message, paused, updated_at
                FROM book_upload_queue
-               WHERE account_key=? AND paused=0 AND state <> 'PENDING_DELETE'
+               WHERE account_key=? AND paused=0
                ORDER BY updated_at ASC""".trimIndent(),
         ).use { sql ->
             sql.setString(1, accountKey)
@@ -429,23 +387,6 @@ internal object BookUploadQueueStore {
                         put(entry.localBookId, entry)
                     }
                 }
-            }
-        }
-    }
-
-    /** All active entries for [accountKey], including retriable PENDING_DELETE server unbind tasks. */
-    fun listActionableForAccount(db: Connection, accountKey: String): List<BookUploadEntry> {
-        if (!BookSchemaMigration.tableExists(db, "book_upload_queue")) return emptyList()
-        return db.prepareStatement(
-            """SELECT account_key, local_book_id, file_sha256, server_shelf_book_id, format, title,
-                      state, progress_pct, stage_label, error_message, paused, updated_at
-               FROM book_upload_queue
-               WHERE account_key=? AND paused=0
-               ORDER BY CASE WHEN state='PENDING_DELETE' THEN 0 ELSE 1 END, updated_at ASC""".trimIndent(),
-        ).use { sql ->
-            sql.setString(1, accountKey)
-            sql.executeQuery().use { rs ->
-                buildList { while (rs.next()) add(rowToEntry(rs)) }
             }
         }
     }
@@ -493,7 +434,7 @@ internal object BookUploadQueueStore {
  * - Pins each sync batch to a single immutable [UnifiedBookRemoteSession] and cancels old batches on identity switch.
  * - Persists verified session->account bindings so rolling back to an older server preserves the pending book status.
  * - Clears stale server shelf IDs on 404 NotFound so user retries re-upload the local original file.
- * - Processes retriable PENDING_DELETE unbind tasks so deleted local books also release server shelf refs.
+ * - Local delete/cancel never unbinds remote shelf records (remote unbinding is tracked in TON-1833).
  */
 internal class UnifiedBookUploadCoordinator(
     private val library: TextbookLibrary,
@@ -634,7 +575,7 @@ internal class UnifiedBookUploadCoordinator(
             publishForAccount(resolvedAccountKey, batchGen, session.sessionId)
         }
 
-        val entries = withContext(Dispatchers.IO) { library.actionableUploadEntriesForAccount(resolvedAccountKey) }
+        val entries = withContext(Dispatchers.IO) { library.uploadEntriesForAccount(resolvedAccountKey).values.toList() }
         if (entries.isEmpty()) return
 
         when (capability) {
@@ -673,28 +614,11 @@ internal class UnifiedBookUploadCoordinator(
             is UnifiedBookCapability.Supported -> Unit
         }
 
-        // Process pending server unbinds & uploads sequentially using the single pinned session.
+        // Process pending uploads and status polls sequentially using the single pinned session.
         for (entry in entries) {
             currentCoroutineContext().ensureActive()
             if (!isBatchCurrent() || entry.paused) return
             when {
-                entry.state == BookUploadState.PENDING_DELETE -> {
-                    val shelfId = entry.serverShelfBookId
-                    if (shelfId == null) {
-                        withContext(Dispatchers.IO) {
-                            library.removeBookUploadEntry(resolvedAccountKey, entry.localBookId)
-                        }
-                    } else {
-                        val confirmed = session.deleteBook(shelfId)
-                        if (!isBatchCurrent()) return
-                        if (confirmed) {
-                            withContext(Dispatchers.IO) {
-                                library.removeBookUploadEntry(resolvedAccountKey, entry.localBookId)
-                                publishForAccount(resolvedAccountKey, batchGen, session.sessionId)
-                            }
-                        }
-                    }
-                }
                 entry.serverShelfBookId == null && entry.state in setOf(
                     BookUploadState.WAITING_NETWORK, BookUploadState.WAITING_SERVER, BookUploadState.UPLOADING,
                 ) -> {

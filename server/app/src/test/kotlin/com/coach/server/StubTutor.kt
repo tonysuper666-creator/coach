@@ -18,6 +18,7 @@ class StubTutor : AutoCloseable {
     @Volatile var aborted = false
     val abortedRequests = java.util.concurrent.atomic.AtomicInteger()
     val requestEfforts = java.util.Collections.synchronizedList(ArrayList<String?>())
+    val requestFriends = java.util.Collections.synchronizedList(ArrayList<Pair<String?, String?>>())
     private val routed = java.util.Collections.synchronizedList(ArrayList<Pair<String, Triple<String, Long, Int>>>())
     @Volatile var requests = 0
     /** Null = unlimited. Set before the first request: `limitConcurrency(1)` mimics the production bridge. */
@@ -65,6 +66,9 @@ class StubTutor : AutoCloseable {
         val requestBody = exchange.requestBody.readBytes().decodeToString()
         requestBodies.add(requestBody)
         requestEfforts.add(exchange.requestHeaders.getFirst("X-Coach-Effort"))
+        requestFriends.add(
+            exchange.requestHeaders.getFirst("X-Coach-Friend") to exchange.requestHeaders.getFirst("X-Coach-Friend-Device"),
+        )
         val match = synchronized(routed) { routed.firstOrNull { requestBody.contains(it.first) }?.also { routed.remove(it) } }
         val (body, delay, status) = match?.second ?: replies.pollFirst() ?: Triple("""{"error":"no stub reply"}""", -1L, 200)
         // A bridge with N upstream slots serves requests in arrival order; the rest wait here exactly as they wait in the real bridge.

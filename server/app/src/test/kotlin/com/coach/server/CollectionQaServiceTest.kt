@@ -1,7 +1,11 @@
 package com.coach.server
 
+import com.coach.ai.BridgeClient
+import com.coach.ai.BridgeConfig
 import com.coach.core.LedgerActor
 import com.coach.domain.LedgerJson
+import com.coach.domain.json
+import com.coach.domain.str
 import com.coach.store.LedgerStore
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
@@ -321,6 +325,137 @@ class CollectionQaServiceTest {
             engine.stopSuspend(0, 500)
             actor.close()
             scope.cancel()
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun sableAndFriendUseCollectionAskOnPublicPortWithHashedBridgeIdQuotaIsolationAnd429Mapping(): Unit = runBlocking(Dispatchers.IO) {
+        val dir = Files.createTempDirectory("coach-collection-qa-sable-")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val ownerToken = "owner-test-token-32-characters-yy"
+        val store = LedgerStore(dir.resolve("ledger")).also { it.enroll("desktop", ownerToken) }
+        val actor = LedgerActor(scope, store)
+        val ledger = BookTokenLedger(dir.resolve("companion"))
+        val stub = StubTutor()
+        val bridge = BridgeClient(BridgeConfig(stub.baseUrl))
+        val service = CollectionQaService(HaikuStreamingCollectionQaTransport(bridge), ledger)
+        val friendConfig = dir.resolve("friends.json")
+        val friends = FriendAccess(dir.resolve("friends"), dir.resolve("state"), friendConfig)
+        var sableActive = true
+        val sableToken = "synthetic-sable-qa-bearer-token-12345"
+        friends.sable = SableSessions(actor, SableVault(dir.resolve("vault")), { raw ->
+            if (sableActive && raw == sableToken) SableIdentity("sub-qa-1", "qa-reader") else null
+        })
+
+        val privateEngine = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
+            ledgerRoutes(actor, MutableSharedFlow(extraBufferCapacity = 8), friends = friends, publicOnly = false)
+            collectionQaRoutes(actor, friends = friends, service = service)
+        }.apply { start(false) }
+        val publicEngine = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
+            ledgerRoutes(actor, MutableSharedFlow(extraBufferCapacity = 8), friends = friends, publicOnly = true)
+            collectionQaRoutes(actor, friends = friends, service = service)
+        }.apply { start(false) }
+
+        try {
+            val privatePort = privateEngine.engine.resolvedConnectors().single().port
+            val publicPort = publicEngine.engine.resolvedConnectors().single().port
+            val client = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(5))
+                .build()
+
+            fun post(port: Int, path: String, body: String, deviceId: String? = null, token: String? = null): HttpResponse<String> {
+                val b = HttpRequest.newBuilder(URI("http://127.0.0.1:$port$path"))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("Content-Type", "application/json")
+                if (deviceId != null) b.header("X-Coach-Device", deviceId)
+                if (token != null) b.header("Authorization", "Bearer $token")
+                return client.send(b.POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString())
+            }
+
+            val payload = buildJsonObject {
+                put("requestId", "qa-sable-1")
+                put("collectionId", "course-sable-1")
+                put("collectionKind", "COURSE")
+                put("collectionTitle", "Health Economics")
+                put("question", "什么是逆向选择？")
+                put("blocks", buildJsonArray {
+                    add(buildJsonObject {
+                        put("blockId", "B1")
+                        put("bookId", "sable-upload-book-1")
+                        put("docLabel", "课本 (L2)")
+                        put("authorityRank", 2)
+                        put("page", 179)
+                        put("text", "Adverse selection arises when healthier consumers drop out of pooled insurance contracts.")
+                    })
+                })
+            }.toString()
+
+            // 1. Unauthenticated requests on BOTH public and private ports are rejected with 401
+            assertEquals(401, post(publicPort, "/v1/library/collection/ask", payload).statusCode())
+            assertEquals(401, post(privatePort, "/v1/library/collection/ask", payload).statusCode())
+
+            // 2. Owner credential cannot use public port (404)
+            assertEquals(404, post(publicPort, "/v1/library/collection/ask", payload, "desktop", ownerToken).statusCode())
+
+            // 3. Independent Sable identity exchanges token and asks on public port -> 200 + verified citation
+            val exchange = post(publicPort, "/v1/public/sable", "", token = sableToken)
+            assertEquals(200, exchange.statusCode())
+            val sableCred = LedgerJson.parseToJsonElement(exchange.body()).jsonObject
+            assertEquals("friend", sableCred.str("role"))
+            val sableDevice = sableCred.str("deviceId")
+            val sableAuth = sableCred.str("token")
+
+            val modelReply = """{"sentences":[{"claim":"健康人群退出混同保险合同会引发逆向选择。","blockId":"B1","quoteAnchor":"healthier consumers drop out of pooled insurance"}],"hasMaterialConflict":false,"conflictSummaryZh":"","matchedDiscrepancyIds":[]}"""
+            stub.stream(1, modelReply, StubTutor.terminal("complete"), StubTutor.DONE)
+
+            val sableRes = post(publicPort, "/v1/library/collection/ask", payload, sableDevice, sableAuth)
+            assertEquals(200, sableRes.statusCode(), sableRes.body())
+            val sableJson = LedgerJson.parseToJsonElement(sableRes.body()).jsonObject
+            val sents = sableJson["sentences"]!!.jsonArray
+            assertEquals(1, sents.size)
+            assertEquals("sable-upload-book-1", sents[0].jsonObject["bookId"]!!.jsonPrimitive.content)
+            assertEquals(179, sents[0].jsonObject["page"]!!.jsonPrimitive.int)
+
+            // Verify bridge received SHA-256 hashed friendId (64 hex chars), NOT raw friend name
+            val expectedFriendName = actor.execute { friendName(sableDevice) }!!
+            val (sentFriendId, sentFriendDev) = stub.requestFriends.last()
+            assertEquals(friendId(expectedFriendName), sentFriendId)
+            assertTrue(sentFriendId!!.matches(Regex("[a-f0-9]{64}")))
+            assertEquals(sableDevice, sentFriendDev)
+
+            // Verify owner BookTokenLedger has 0 calls from friend traffic; friend private audit has record
+            assertEquals(0, ledger.bookSummary("collection:course-sable-1").calls)
+            val friendDir = dir.resolve("friends").resolve(friendId(expectedFriendName))
+            assertTrue(Files.exists(friendDir.resolve("explanations.sqlite")))
+            assertTrue(Files.readString(friendDir.resolve("requests.log")).contains("complete"))
+
+            // 4. Friend explicit daily_calls=0 quota returns 429 without hitting bridge
+            val beforeQuotaStubCalls = stub.requests
+            Files.writeString(friendConfig, json("defaults" to json("daily_calls" to 0)).toString())
+            val quotaRes = post(publicPort, "/v1/library/collection/ask", payload, sableDevice, sableAuth)
+            assertEquals(429, quotaRes.statusCode())
+            assertEquals("daily_quota", LedgerJson.parseToJsonElement(quotaRes.body()).jsonObject.str("code"))
+            assertEquals(beforeQuotaStubCalls, stub.requests)
+            Files.deleteIfExists(friendConfig)
+
+            // 5. Revoked Sable account is rejected with 401
+            assertEquals(204, post(privatePort, "/v1/sable/disable", """{"username":"qa-reader"}""", "desktop", ownerToken).statusCode())
+            assertEquals(401, post(publicPort, "/v1/library/collection/ask", payload, sableDevice, sableAuth).statusCode())
+
+            // 6. Owner hitting upstream bridge 429 gets HTTP 429 with clear plain-Chinese retry guidance (not 503)
+            stub.stream(1, StubTutor.terminal("failed", "api_http_429"), StubTutor.DONE)
+            val rateLimited = post(privatePort, "/v1/library/collection/ask", payload, "desktop", ownerToken)
+            assertEquals(429, rateLimited.statusCode())
+            val rateBody = LedgerJson.parseToJsonElement(rateLimited.body()).jsonObject.str("error")
+            assertTrue(rateBody.contains("重试"), "Expected plain-Chinese retry guidance, got: $rateBody")
+        } finally {
+            privateEngine.stopSuspend(0, 500)
+            publicEngine.stopSuspend(0, 500)
+            actor.close()
+            scope.cancel()
+            stub.close()
             dir.toFile().deleteRecursively()
         }
     }

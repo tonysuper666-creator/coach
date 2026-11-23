@@ -124,7 +124,13 @@ class UsageObservation(private val logs: Path, private val state: Path,
 
 /** Log only route templates: arbitrary paths/queries can contain private text. */
 internal fun usageRoute(path: String): String {
-    if (path in setOf("/v1/pair", "/v1/pairing-code", "/v1/devices", "/v1/prewarm", "/v1/usage", "/v1/hello", "/v1/commands", "/v1/ws", "/v1/math", "/offline-pack", "/v1/library/companion/chapter", "/v1/library/companion/ledger")) return path
+    if (path in setOf(
+            "/v1/pair", "/v1/pairing-code", "/v1/devices", "/v1/prewarm", "/v1/usage", "/v1/hello", "/v1/commands", "/v1/ws",
+            "/v1/math", "/offline-pack", "/v1/public/sable", "/v1/public/status",
+            "/v1/library/explain", "/v1/library/explain/cancel", "/v1/library/companion/chapter", "/v1/library/companion/ledger",
+            "/v1/library/collection/ask", "/v1/library/course/align", "/v1/library/course/topic-pack", "/v1/library/course/vision",
+        )
+    ) return path
     if (Regex("/v1/devices/[^/]+").matches(path)) return "/v1/devices/{device}"
     if (Regex("/api/books/[^/]+/modes/[^/]+").matches(path)) return "/api/books/{id}/modes/{mode}"
     if (Regex("/api/books/[^/]+/book-map/batch").matches(path)) return "/api/books/{id}/book-map/batch"

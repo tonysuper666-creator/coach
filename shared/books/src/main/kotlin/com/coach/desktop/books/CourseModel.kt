@@ -119,6 +119,21 @@ internal enum class CourseTopicStatus(val wire: String, val labelZh: String) {
     }
 }
 
+internal enum class CourseSyllabusPromptState(val wire: String) {
+    UNASKED("UNASKED"),
+    SKIPPED("SKIPPED"),
+    PROVIDED("PROVIDED"),
+    ;
+
+    companion object {
+        fun fromWire(value: String?): CourseSyllabusPromptState = when (value?.trim()?.uppercase()) {
+            "SKIPPED" -> SKIPPED
+            "PROVIDED" -> PROVIDED
+            else -> UNASKED
+        }
+    }
+}
+
 internal data class CourseExamProfile(
     val examDate: String = "",
     val examDateTentative: Boolean = true,
@@ -128,7 +143,13 @@ internal data class CourseExamProfile(
     val durationMinutes: Int = 120,
     val closedBook: Boolean = true,
     val calculatorAllowed: String = "",
-)
+    val examEnabled: Boolean = false,
+    val syllabusPromptState: CourseSyllabusPromptState = CourseSyllabusPromptState.UNASKED,
+) {
+    /** Only two states exist: exam vs non-exam (default non-exam). Setting an exam date or enabling exam marks it as exam. */
+    val isExam: Boolean
+        get() = examEnabled || examDate.isNotBlank()
+}
 
 internal data class CourseMaterialEntry(
     val bookId: String,
@@ -244,6 +265,14 @@ internal data class CourseTopicEntry(
     val updatedAt: Long = 0L,
 )
 
+/**
+ * Shared predicate deciding whether a course has an explicit syllabus/exam scope that may narrow
+ * out uncovered textbook chapters. Used identically by directory UI, weekly/countdown planning,
+ * and local course alignment so scope copy, chapter list, and excluded section never contradict.
+ */
+internal fun hasSyllabusScope(roles: Iterable<CourseMaterialRole>): Boolean =
+    roles.any { it == CourseMaterialRole.SYLLABUS }
+
 internal data class CourseDetailSnapshot(
     val courseId: String,
     val title: String,
@@ -259,6 +288,24 @@ internal data class CourseDetailSnapshot(
 ) {
     val allTopics: List<CourseTopicEntry>
         get() = examinableTopics + pendingTopics + excludedTopics
+
+    val isExam: Boolean
+        get() = examProfile.isExam
+
+    /** True once a syllabus/handbook material has been added to narrow down exam scope. */
+    val hasSyllabusOrScope: Boolean
+        get() = hasSyllabusScope(materials.map { it.role })
+
+    /**
+     * True only when a syllabus is present AND it actually narrowed the scope (some chapters sit in the excluded
+     * section). A syllabus that could not be mapped to chapters keeps the whole book, and the UI must say so.
+     */
+    val syllabusNarrowsScope: Boolean
+        get() = hasSyllabusOrScope && excludedTopics.isNotEmpty()
+
+    /** First-time inline prompt shown on weekly plan / countdown schedule / mock exam when an exam course has no syllabus yet. */
+    val shouldShowSyllabusPrompt: Boolean
+        get() = isExam && !hasSyllabusOrScope && examProfile.syllabusPromptState == CourseSyllabusPromptState.UNASKED
 }
 
 internal data class CourseReaderContext(
@@ -309,12 +356,15 @@ internal object CourseJson {
         put("durationMinutes", profile.durationMinutes.coerceIn(15, 360))
         put("closedBook", profile.closedBook)
         if (profile.calculatorAllowed.isNotBlank()) put("calculatorAllowed", profile.calculatorAllowed)
+        put("examEnabled", profile.examEnabled)
+        put("syllabusPromptState", profile.syllabusPromptState.wire)
     }.toString()
 
     fun decodeExamProfile(raw: String?, fallbackDate: String? = null): CourseExamProfile {
         val obj = parseObj(raw) ?: return CourseExamProfile(examDate = fallbackDate.orEmpty())
+        val date = obj.str("examDate").ifBlank { fallbackDate.orEmpty() }
         return CourseExamProfile(
-            examDate = obj.str("examDate").ifBlank { fallbackDate.orEmpty() },
+            examDate = date,
             examDateTentative = obj.bool("examDateTentative", true),
             examFormat = obj.str("examFormat"),
             examFormatTentative = obj.bool("examFormatTentative", true),
@@ -322,6 +372,8 @@ internal object CourseJson {
             durationMinutes = obj.int("durationMinutes", 120).coerceIn(15, 360),
             closedBook = obj.bool("closedBook", true),
             calculatorAllowed = obj.str("calculatorAllowed"),
+            examEnabled = obj.bool("examEnabled", false),
+            syllabusPromptState = CourseSyllabusPromptState.fromWire(obj.str("syllabusPromptState")),
         )
     }
 

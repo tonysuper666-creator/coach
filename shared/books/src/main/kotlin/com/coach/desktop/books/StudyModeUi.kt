@@ -58,6 +58,12 @@ internal fun StudyModeSelectorButton(
     val colors = CoachTheme.colors
     var expanded by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(CoachV7.Radius.s)
+    val effectiveMode = if (!preference.examMode && preference.mode == BookStudyMode.EXAM_FOCUS) {
+        BookStudyMode.READ_THROUGH
+    } else {
+        preference.mode
+    }
+    val displayPref = if (effectiveMode != preference.mode) preference.copy(mode = effectiveMode) else preference
 
     Box(modifier) {
         Row(
@@ -73,7 +79,7 @@ internal fun StudyModeSelectorButton(
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Text(
-                if (compact) "学法：${preference.mode.titleZh} ▾" else "${preference.compactBadgeText()} ▾",
+                if (compact) "学法：${effectiveMode.displayTitle(preference.examMode)} ▾" else "${displayPref.compactBadgeText()} ▾",
                 style = MaterialTheme.typography.labelMedium,
                 color = colors.fgPrimary,
                 fontWeight = FontWeight.Medium,
@@ -97,16 +103,21 @@ internal fun StudyModeSelectorButton(
                     style = MaterialTheme.typography.titleSmall,
                     color = colors.fgPrimary,
                 )
-                if (preference.defaultReason.isNotBlank()) {
+                val safeDefaultReason = if (!preference.examMode && preference.defaultReason.contains("考")) {
+                    "按章节顺序读，随时可以切换学法。"
+                } else {
+                    preference.defaultReason
+                }
+                if (safeDefaultReason.isNotBlank()) {
                     CoachCardMeta(
-                        preference.defaultReason,
+                        safeDefaultReason,
                         Modifier.testTag("study-mode-default-reason"),
                     )
                 }
                 HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle)
 
-                for (mode in BookStudyMode.entries) {
-                    val selected = preference.mode == mode
+                for (mode in BookStudyMode.availableModes(preference.examMode)) {
+                    val selected = effectiveMode == mode
                     val rowBg = if (selected) colors.actionPrimary.copy(alpha = 0.12f) else Color.Transparent
                     Row(
                         Modifier
@@ -144,14 +155,14 @@ internal fun StudyModeSelectorButton(
                     ) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(
-                                mode.titleZh + if (selected) " · 当前" else "",
+                                mode.displayTitle(preference.examMode) + if (selected) " · 当前" else "",
                                 style = MaterialTheme.typography.labelLarge,
                                 color = if (selected) colors.actionPrimary else colors.fgPrimary,
                                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                                 maxLines = 1,
                             )
                             Text(
-                                mode.shortSummaryZh,
+                                mode.displaySummary(preference.examMode),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = colors.fgSecondary,
                                 maxLines = 2,
@@ -772,8 +783,18 @@ internal fun ModeDistinctCompanionSurface(
             Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.testTag("mode-surface-PROBLEM_DRIVEN")) {
                 PaperCard(Modifier.fillMaxWidth(), color = colors.surface2, contentPadding = PaddingValues(12.dp)) {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("做题带读 · 章末习题实战台", style = MaterialTheme.typography.titleSmall, color = colors.fgPrimary)
-                        CoachCardMeta("直接从原书章末习题动手，卡住哪步再按提示跳回正文公式。")
+                        Text(
+                            if (preference.examMode) "做题带读 · 章末习题实战台" else "自测带读 · 边测边读",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = colors.fgPrimary,
+                        )
+                        CoachCardMeta(
+                            if (preference.examMode) {
+                                "直接从原书章末习题动手，卡住哪步再按提示跳回正文公式。"
+                            } else {
+                                "先从自测题动手，卡住哪步再按提示跳回正文对应段落。"
+                            },
+                        )
                     }
                 }
                 if (exSec != null) {
@@ -802,7 +823,7 @@ internal fun ModeDistinctCompanionSurface(
                                     }
                                     if (h.anchor != null) {
                                         V7TextButton(onClick = { onOpenAnchor(h.anchor) }) {
-                                            Text("回正文 p.${h.anchor.pdfPage} 查公式")
+                                            Text(if (preference.examMode) "回正文 p.${h.anchor.pdfPage} 查公式" else "回正文 p.${h.anchor.pdfPage} 查原文")
                                         }
                                     }
                                 }
@@ -1225,7 +1246,11 @@ private fun LiveModeStatusAndExtraDeck(
             if (probPack != null && probPack.problems.isNotEmpty()) {
                 PaperCard(Modifier.fillMaxWidth().testTag("problem-driven-live-cards"), color = colors.surface2, contentPadding = PaddingValues(12.dp)) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("做题倒逼工作台", style = MaterialTheme.typography.titleSmall, color = colors.fgPrimary)
+                        Text(
+                            if (preference.examMode) "做题倒逼工作台" else "自测带读工作台",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = colors.fgPrimary,
+                        )
                         if (probPack.strategyNote.isNotBlank()) CoachCardMeta(probPack.strategyNote)
                         for (p in probPack.problems.take(4)) {
                             val probKey = "prob-live-$chapterNumber-${p.problemId}"

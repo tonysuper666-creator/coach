@@ -414,12 +414,17 @@ internal fun SingleBookCompanionPanel(
                     return@Column
                 }
 
+                val effectiveMode = if (!studyPreference.examMode && studyPreference.mode == BookStudyMode.EXAM_FOCUS) {
+                    BookStudyMode.READ_THROUGH
+                } else {
+                    studyPreference.mode
+                }
                 // Header meta line
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    val headerPrefix = if (studyPreference.mode == BookStudyMode.READ_THROUGH) {
+                    val headerPrefix = if (effectiveMode == BookStudyMode.READ_THROUGH) {
                         activeModule.fullTitle
                     } else {
-                        studyPreference.mode.titleZh
+                        effectiveMode.displayTitle(studyPreference.examMode)
                     }
                     Text(
                         "$headerPrefix · ${chapterGroup.chapterTitle}",
@@ -435,7 +440,7 @@ internal fun SingleBookCompanionPanel(
                     )
                 }
 
-                if (studyPreference.mode != BookStudyMode.READ_THROUGH) {
+                if (effectiveMode != BookStudyMode.READ_THROUGH) {
                     val readyPack = (packState as? CompanionPackState.Ready)?.pack
                     ModeDistinctCompanionSurface(
                         book = book,

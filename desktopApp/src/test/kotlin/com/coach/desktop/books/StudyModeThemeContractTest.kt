@@ -127,6 +127,7 @@ class StudyModeThemeContractTest {
                             mode = BookStudyMode.READ_THROUGH,
                             userLocked = false,
                             defaultReason = "英文专业教材，默认逐节精读配中英对照；随时可换。",
+                            examMode = true,
                         ),
                     )
                     var draft by mutableStateOf(ChapterPracticeDraft(bookId = book.id, tocNodeId = "ch-8", page = 179))

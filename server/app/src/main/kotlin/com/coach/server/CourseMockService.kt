@@ -34,7 +34,7 @@ object CourseMockLimits {
     const val TASK_PLAN: String = "course_mock_plan"
     const val TASK_ITEM: String = "course_mock_item"
     const val PINNED_PLANNER_MODEL: String = BridgeClient.CLAUDE
-    const val PINNED_ITEM_MODEL: String = BridgeClient.HAIKU
+    const val PINNED_ITEM_MODEL: String = BridgeClient.GPT_62_SOL
     const val PLAN_MAX_TOKENS: Int = 3_200
     const val ITEM_MAX_TOKENS: Int = 8_192
     const val ITEM_CONCURRENCY: Int = 4

@@ -48,7 +48,8 @@ import java.util.UUID
  *    (never relying on implicit Sonnet rewriting).
  */
 object PracticeGradeLimits {
-    const val PINNED_HAIKU_MODEL: String = BridgeClient.HAIKU // "claude-haiku-5-5"
+    const val PINNED_HAIKU_MODEL: String = BridgeClient.HAIKU // "claude-haiku-5-5" (kept for test/ledger compat)
+    const val PINNED_GRADE_MODEL: String = BridgeClient.GPT_62_ASTRA
     const val BATCH_MAX_TOKENS: Int = 8_192
     const val MAX_FEEDBACK_ZH_CHARS: Int = 42
     const val MAX_FEEDBACK_CONSECUTIVE_EN_WORDS: Int = 18
@@ -516,6 +517,7 @@ class HaikuPinnedBridgeTransport(
     private val bridge: BridgeClient,
     private val defaultMaxTokens: Int = PracticeGradeLimits.BATCH_MAX_TOKENS,
     private val backgroundBatch: Boolean = false,
+    private val model: String = PracticeGradeLimits.PINNED_GRADE_MODEL,
 ) : BatchAiTransport {
     override suspend fun generateSection(
         systemPrompt: String,
@@ -529,7 +531,7 @@ class HaikuPinnedBridgeTransport(
         val client = if (backgroundBatch) bridge.forBatchJob("practice", batchKey) else bridge
         val request = ChatRequest(
             task = task,
-            model = PracticeGradeLimits.PINNED_HAIKU_MODEL,
+            model = model,
             system = systemPrompt,
             user = userPrompt,
             stream = false,
@@ -546,7 +548,7 @@ class HaikuPinnedBridgeTransport(
             is BridgeResult.Success -> BatchTransportReply(
                 text = result.text,
                 routeChannel = if (backgroundBatch) CompanionRouteChannel.HAIKU_BATCH else CompanionRouteChannel.HAIKU_REALTIME,
-                model = result.terminal.servedBy ?: PracticeGradeLimits.PINNED_HAIKU_MODEL,
+                model = result.terminal.servedBy ?: model,
                 inputTokens = TokenLedgerPricing.estimateTokens(systemPrompt) + TokenLedgerPricing.estimateTokens(userPrompt),
                 outputTokens = TokenLedgerPricing.estimateTokens(result.text),
                 ttftMs = result.call.ttftMs ?: elapsedMs,

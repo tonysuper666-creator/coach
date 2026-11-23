@@ -17,7 +17,11 @@ from api_budget import CreditLedger, Denied
 
 CONFIG = json.loads(Path(__file__).with_name("model_routes.json").read_text())
 ENDPOINTS = {"anthropic": "https://api.anthropic.com/v1/messages", "openai": "https://api.openai.com/v1/responses"}
-INTERACTIVE_TASKS = frozenset({"TEACH", "READER_SELECTION", "SOURCE_LOOKUP", "PREPARE_TEACH"})
+INTERACTIVE_TASKS = frozenset({
+    "TEACH", "READER_SELECTION", "SOURCE_LOOKUP", "PREPARE_TEACH",
+    "COLLECTION_QA", "STUDY_MODE_STREAM", "practice_grade", "practice_diagnose",
+})
+REVIEW_GROUPS = frozenset({"review", "review_openai", "review_upgrade"})
 DEFAULT_429_DELAYS = (0.5, 1.5)
 DEFAULT_429_BUDGET_SEC = 45.0
 
@@ -158,16 +162,30 @@ def route(task: str, requested: str, format_attempt: int = 0) -> str | None:
     group = CONFIG["tasks"].get(task)
     if group is None or vendor(requested) == "unknown":
         return None
+    if group in REVIEW_GROUPS:
+        # Independent cross-vendor review: honor whichever vendor the caller chose to inspect the draft.
+        if vendor(requested) == "anthropic":
+            return CONFIG["models"]["review"]
+        return CONFIG["models"]["review_upgrade"] if format_attempt == 2 else CONFIG["models"].get("review_openai", CONFIG["models"]["review"])
     model = CONFIG["models"][group]
-    # Older persisted grades may have an OpenAI draft. Honour their independently
-    # chosen Anthropic reviewer instead of silently reviewing with OpenAI again.
-    if vendor(model) != vendor(requested):
-        model = CONFIG["models"]["draft" if vendor(requested) == "anthropic" else "review"]
-    if format_attempt == 2 and vendor(model) == "anthropic" and group != "planning":
-        model = CONFIG["models"]["planning"]
-    elif format_attempt == 2 and vendor(model) == "openai":
-        model = CONFIG["models"]["review_upgrade"]
+    if format_attempt == 2:
+        if vendor(model) == "anthropic" and model == "claude-haiku-5-5":
+            model = CONFIG["models"]["planning"]
+        elif vendor(model) == "openai" and model == "gpt-6.2-sol":
+            model = CONFIG["models"].get("review_upgrade", "gpt-6.2-astra")
     return model
+
+
+def fallback_model(task: str, primary_model: str) -> str | None:
+    group = CONFIG["tasks"].get(task)
+    if group is None or group in REVIEW_GROUPS or group == "friend":
+        return None
+    fb = CONFIG.get("fallbacks", {}).get(group)
+    if not fb or fb not in CONFIG.get("prices_usd_per_million", {}):
+        return None
+    if vendor(fb) == vendor(primary_model) or vendor(fb) == "unknown":
+        return None
+    return fb
 
 
 class ApiFailure(Exception):
@@ -210,7 +228,9 @@ class ApiRouter:
         sleep=None,
         clock=time.monotonic,
         wall_clock=time.time,
+        cross_vendor_fallback: bool = True,
     ):
+        self.cross_vendor_fallback = cross_vendor_fallback
         self.ledger = ledger or CreditLedger(Path(os.environ.get("COACH_API_STATE_DIR", str(Path.home() / "Coach/state"))).expanduser())
         self.client_factory = client_factory or (lambda: httpx.AsyncClient(timeout=httpx.Timeout(20, connect=5), trust_env=False, follow_redirects=False))
         self.keys = keys if keys is not None else {
@@ -244,9 +264,28 @@ class ApiRouter:
     async def events(self, task: str, requested: str, system: str, prompt: str, max_tokens: int | None, format_attempt=0, friend=None, device=None):
         if friend is not None and (task != "READER_SELECTION" or vendor(requested) != "anthropic"):
             raise Denied("invalid_friend_route")
-        model = CONFIG["models"]["draft"] if friend is not None else route(task, requested, format_attempt)
+        model = CONFIG["models"].get("friend", CONFIG["models"]["teaching"]) if friend is not None else route(task, requested, format_attempt)
         if model is None:
             raise Denied("unrouted_task")
+        fb = None
+        if friend is None and self.cross_vendor_fallback:
+            cand = fallback_model(task, model)
+            if cand and self.keys.get(vendor(cand), ""):
+                fb = cand
+        yielded_text = False
+        try:
+            async for event in self._stream_model(task, model, system, prompt, max_tokens, friend=friend, device=device):
+                if event.get("kind") == "text":
+                    yielded_text = True
+                yield event
+            return
+        except (Denied, ApiFailure):
+            if yielded_text or fb is None:
+                raise
+        async for event in self._stream_model(task, fb, system, prompt, max_tokens, friend=None, device=None):
+            yield event
+
+    async def _stream_model(self, task: str, model: str, system: str, prompt: str, max_tokens: int | None, *, friend=None, device=None):
         provider = vendor(model)
         key = self.keys.get(provider, "")
         output_limit = max_tokens if max_tokens is not None else 4000

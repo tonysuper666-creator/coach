@@ -646,8 +646,12 @@ class BridgeClient(
 
     companion object {
         const val CLAUDE = "claude-sonnet-5-5"
+        const val OPUS = "claude-opus-5-5"
         const val HAIKU = "claude-haiku-5-5"
         const val CODEX = "gpt-6.1-sol"
+        const val GPT_62_ASTRA = "gpt-6.2-astra"
+        const val GPT_62_SOL = "gpt-6.2-sol"
+        const val GPT_61_TERRA = "gpt-6.1-terra"
     }
 }
 

@@ -55,11 +55,11 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         if request.url.path.endswith(("/results", "/content")):
             usage = {"input_tokens": 100, "output_tokens": 20}
             if self.provider == "anthropic":
-                msg = {"model": "claude-haiku-5-5", "content": [{"type": "text", "text": "synthetic answer"}],
+                msg = {"model": "claude-opus-5-5", "content": [{"type": "text", "text": "synthetic answer"}],
                        "stop_reason": "end_turn", "usage": usage}
                 row = {"custom_id": self.key(), "result": {"type": "succeeded", "message": msg}}
             else:
-                msg = {"model": "gpt-6.1-terra", "status": "completed", "usage": usage,
+                msg = {"model": "gpt-6.2-sol", "status": "completed", "usage": usage,
                        "output": [{"type": "message", "content": [{"type": "output_text", "text": "synthetic answer"}]}]}
                 row = {"custom_id": self.key(), "response": {"status_code": 200, "body": msg}, "error": None}
             # An unrelated row comes first: identity, rather than line order, is authoritative.
@@ -69,7 +69,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                                        "output_file_id": "file_output", "results_url": "https://untrusted.invalid/private"})
 
     async def run_batch(self, router=None):
-        task, model = ("gen_mcq", "claude-sonnet-5-5") if self.provider == "anthropic" else ("blind_review", "gpt-6.1-sol")
+        task, model = ("BOOK_MATH_VERIFY", "claude-opus-5-5") if self.provider == "anthropic" else ("gen_mcq", "gpt-6.2-sol")
         return await (router or self.router).run(self.key(), task, model, "synthetic system", "synthetic prompt", 100)
 
     async def submit(self):
@@ -100,12 +100,12 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                 if provider == "anthropic":
                     payload = json.loads(first.content)["requests"][0]
                     self.assertEqual(self.key(), payload["custom_id"])
-                    self.assertEqual("claude-haiku-5-5", payload["params"]["model"])
+                    self.assertEqual("claude-opus-5-5", payload["params"]["model"])
                     self.assertNotIn("stream", payload["params"])
                 else:
                     self.assertIn(b'name="purpose"\r\n\r\nbatch', first.content)
                     self.assertIn(b'"url": "/v1/responses"', first.content)
-                    self.assertIn(b'"model": "gpt-6.1-terra"', first.content)
+                    self.assertIn(b'"model": "gpt-6.2-sol"', first.content)
                     self.assertIn(b'"store": false', first.content)
                     self.assertEqual({"input_file_id": "file_input", "endpoint": "/v1/responses", "completion_window": "24h"},
                                      json.loads(self.calls[1].content))
@@ -118,7 +118,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual("synthetic answer", result["text"])
                 self.assertEqual("api", result["transport"])
                 self.assertEqual(120, result["usage"]["total_tokens"])
-                model = "claude-haiku-5-5" if provider == "anthropic" else "gpt-6.1-terra"
+                model = "claude-opus-5-5" if provider == "anthropic" else "gpt-6.2-sol"
                 self.assertEqual(cost(model, {"input_tokens": 100, "output_tokens": 20}, batch=True), self.summary()["spent_microusd"])
                 self.assertEqual(0, self.summary()["reserved_microusd"])
                 self.assertEqual(1, self.summary()["calls"])
@@ -194,7 +194,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_bad_identity_model_usage_or_item_error_cannot_be_accepted(self):
         mutations = [lambda r: dict(r, custom_id="wrong"),
                      lambda r: dict(r, result={"type": "errored"}),
-                     lambda r: dict(r, result=dict(r["result"], message=dict(r["result"]["message"], model="claude-sonnet-5-5"))),
+                     lambda r: dict(r, result=dict(r["result"], message=dict(r["result"]["message"], model="claude-haiku-5-5"))),
                      lambda r: dict(r, result=dict(r["result"], message=dict(r["result"]["message"], usage={}))) ]
         for mutate in mutations:
             self.router.path(self.key()).unlink(missing_ok=True)
@@ -224,7 +224,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_key_or_cap_uses_cached_same_vendor_subscription_fallback(self):
         async def cli(req, model, effort):
-            self.assertEqual("claude-sonnet-5-5", model)
+            self.assertEqual("claude-opus-5-5", model)
             req.physical_calls += 1
             return bridge.Outcome("complete", None, "stop", model, text="synthetic CLI answer", usage={})
         for capped in (False, True):
@@ -233,9 +233,9 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                 self.ledger.reserve("anthropic", KEY, micros(190))
             router = self.make_router(keys=None if capped else {})
             def req():
-                return bridge.build_req({"model": "claude-sonnet-5-5", "max_tokens": 100,
+                return bridge.build_req({"model": "claude-opus-5-5", "max_tokens": 100,
                     "messages": [{"role": "user", "content": "synthetic"}]},
-                    {"x-coach-task": "gen_mcq", "x-coach-background": "1", "x-coach-batch-key": self.key()})
+                    {"x-coach-task": "BOOK_MATH_VERIFY", "x-coach-background": "1", "x-coach-batch-key": self.key()})
             with patch.object(bridge, "API_BATCH", router), patch.object(bridge, "dispatch_cli", cli) as fallback, patch.object(bridge, "write_log"):
                 first = req()
                 result = await bridge.dispatch_batch(first, first.model, None)
@@ -258,13 +258,13 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         path.unlink()
         await self.submit()
         with self.assertRaisesRegex(Denied, "batch_identity_mismatch"):
-            await self.router.run(self.key(), "repair_mcq_sources", "claude-sonnet-5-5", "s", "p", 100)
+            await self.router.run(self.key(), "BOOK_MATH_REPAIR", "claude-opus-5-5", "s", "p", 100)
         self.assertEqual(1, len(self.calls))
 
     async def test_http_pending_completion_and_traffic_gates(self):
-        headers = {"X-Coach-Task": "gen_mcq", "X-Coach-Background": "1", "X-Coach-Batch-Key": self.key(),
+        headers = {"X-Coach-Task": "BOOK_MATH_VERIFY", "X-Coach-Background": "1", "X-Coach-Batch-Key": self.key(),
                    "X-Coach-Traffic": "test"}
-        body = {"model": "claude-sonnet-5-5", "max_tokens": 100,
+        body = {"model": "claude-opus-5-5", "max_tokens": 100,
                 "messages": [{"role": "user", "content": "synthetic"}]}
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=bridge.app), base_url="http://test") as client:
             with patch.object(bridge, "API_BATCH", self.router), patch.object(bridge, "USER_ONLY", True), patch.object(bridge, "write_log"):
@@ -280,7 +280,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                 response = await client.post("/v1/chat/completions", headers=headers, json=body)
                 self.assertEqual(200, response.status_code)
                 self.assertEqual("api", response.json()["x_coach"]["transport"])
-                self.assertEqual("claude-haiku-5-5", response.json()["model"])
+                self.assertEqual("claude-opus-5-5", response.json()["model"])
                 async def synchronous(req, model, effort):
                     return bridge.Outcome("complete", None, "stop", model, text="synthetic immediate answer")
                 # A header alone cannot make an interactive call wait for Batch.
@@ -297,7 +297,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.router.router.keys.clear()
         with self.assertRaises(ApiFailure):
             await self.run_batch()
-        self.router.cache_fallback(self.key(), {"text": "synthetic", "served_by": "claude-sonnet-5-5",
+        self.router.cache_fallback(self.key(), {"text": "synthetic", "served_by": "claude-opus-5-5",
                                               "transport": "subscription", "usage": {}})
         result = await self.run_batch()
         self.assertEqual("subscription", result["transport"])

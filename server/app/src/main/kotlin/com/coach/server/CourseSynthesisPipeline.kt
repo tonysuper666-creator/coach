@@ -342,7 +342,7 @@ class CourseTopicSynthesisPipeline(
                         userPrompt = mapPrompt,
                         task = "course_topic_map",
                         batchKey = "course-map-$topicId-$chunkIdx",
-                        maxTokens = 6_000,
+                        maxTokens = 8_000,
                     )
                     tokenLedger?.record(
                         TokenLedgerEntry(

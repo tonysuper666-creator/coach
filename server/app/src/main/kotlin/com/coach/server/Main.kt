@@ -135,6 +135,7 @@ fun main(args: Array<String>): Unit = runBlocking {
             bridge = chat.bridge,
             defaultMaxTokens = PracticeGradeLimits.BATCH_MAX_TOKENS,
             backgroundBatch = System.getenv("COACH_PRACTICE_BATCH") == "1",
+            model = PracticeGradeLimits.PINNED_GRADE_MODEL,
         ),
     )
     val practiceGradeService = PracticeGradeAndDiagnoseService(practiceTransport, tokenLedger)
@@ -145,6 +146,7 @@ fun main(args: Array<String>): Unit = runBlocking {
             bridge = chat.bridge,
             defaultMaxTokens = CourseMockLimits.ITEM_MAX_TOKENS,
             backgroundBatch = System.getenv("COACH_MOCK_BATCH") == "1" || System.getenv("COACH_PRACTICE_BATCH") == "1",
+            model = CourseMockLimits.PINNED_ITEM_MODEL,
         ),
     )
     val courseMockService = CourseMockService(

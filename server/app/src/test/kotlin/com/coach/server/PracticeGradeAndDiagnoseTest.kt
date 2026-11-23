@@ -251,7 +251,7 @@ class PracticeGradeAndDiagnoseTest {
             seenMaxTokens = body["max_tokens"]?.jsonPrimitive?.intOrNull
             seenTask = ex.requestHeaders.getFirst("X-Coach-Task")
             val reply = buildJsonObject {
-                put("model", "claude-haiku-5-5")
+                put("model", "gpt-6.2-astra")
                 put("choices", buildJsonArray {
                     add(buildJsonObject {
                         put("message", buildJsonObject { put("content", """{"isEquivalentValid":true,"predicted":"NONE","studentErrorSpan":"","diagnosisZh":"正确。"}""") })
@@ -260,7 +260,7 @@ class PracticeGradeAndDiagnoseTest {
                 put("x_coach", buildJsonObject {
                     put("status", "complete")
                     put("finish_reason", "stop")
-                    put("served_by", "claude-haiku-5-5")
+                    put("served_by", "gpt-6.2-astra")
                     put("fallback", false)
                     put("physical_calls", 1)
                 })
@@ -280,10 +280,10 @@ class PracticeGradeAndDiagnoseTest {
                 batchKey = "k1",
                 maxTokens = 2_048,
             )
-            assertEquals("claude-haiku-5-5", seenModel)
+            assertEquals("gpt-6.2-astra", seenModel)
             assertEquals(8_192, seenMaxTokens)
             assertEquals("practice_diagnose", seenTask)
-            assertEquals("claude-haiku-5-5", reply.model)
+            assertEquals("gpt-6.2-astra", reply.model)
         } finally {
             server.stop(0)
         }

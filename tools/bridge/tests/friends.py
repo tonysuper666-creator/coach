@@ -169,7 +169,7 @@ class FriendApiTests(unittest.IsolatedAsyncioTestCase):
                 with patch.object(bridge, "API_ROUTER", router({"anthropic": KEY})):
                     result = await bridge.dispatch(request, request.model, None)
                 self.assertEqual("complete", result.status)
-                self.assertEqual(CONFIG["models"]["draft"], json.loads(seen[0].content)["model"])
+                self.assertEqual(CONFIG["models"]["friend"], json.loads(seen[0].content)["model"])
                 self.assertEqual(1, request.physical_calls)
                 atomic_json(Path(temp) / "friends.json", {"defaults": {"daily_calls": 1}})
                 request = req()

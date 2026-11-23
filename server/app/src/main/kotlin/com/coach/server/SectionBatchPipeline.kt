@@ -961,6 +961,12 @@ class HaikuRealtimeBridgeTransport(
         device = device,
     )
 
+    private fun modelForTask(task: String, friend: String?): String = when {
+        friend != null -> BridgeClient.CLAUDE
+        task in setOf("BOOK_MATH_VERIFY", "BOOK_MATH_REPAIR", "booklist_concept_align") -> BridgeClient.OPUS
+        else -> BridgeClient.GPT_62_ASTRA
+    }
+
     private suspend fun generateSectionInternal(
         systemPrompt: String,
         userPrompt: String,
@@ -970,10 +976,11 @@ class HaikuRealtimeBridgeTransport(
         device: String?,
     ): BatchTransportReply = withContext(Dispatchers.IO) {
         val started = System.nanoTime()
+        val targetModel = modelForTask(task, friend)
         val result = bridge.chat(
             ChatRequest(
                 task = if (friend != null) "READER_SELECTION" else task,
-                model = BridgeClient.HAIKU,
+                model = targetModel,
                 system = systemPrompt,
                 user = userPrompt,
                 stream = false,
@@ -988,7 +995,7 @@ class HaikuRealtimeBridgeTransport(
             is BridgeResult.Success -> BatchTransportReply(
                 text = result.text,
                 routeChannel = CompanionRouteChannel.HAIKU_REALTIME,
-                model = result.terminal.servedBy ?: BridgeClient.HAIKU,
+                model = result.terminal.servedBy ?: targetModel,
                 inputTokens = TokenLedgerPricing.estimateTokens(systemPrompt) + TokenLedgerPricing.estimateTokens(userPrompt),
                 outputTokens = TokenLedgerPricing.estimateTokens(result.text),
                 ttftMs = result.call.ttftMs ?: elapsedMs,

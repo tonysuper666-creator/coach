@@ -211,7 +211,11 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                                     ${safePack.render()}""".trimIndent()
                             }
                         }
-                        ChatRequest(task = "READER_SELECTION", model = model, stream = true, effort = "medium",
+                        ChatRequest(
+                            task = if (structure && friend == null) "BOOK_STRUCTURE_DETECT" else "READER_SELECTION",
+                            model = if (structure && friend == null) BridgeClient.OPUS else model,
+                            stream = true,
+                            effort = "medium",
                             system = systemPrompt,
                             user = (when {
                                 guide -> "Generate the section guide, summary, hard points, recap, and full explanation from all ${pages.size} supplied source blocks."
@@ -235,7 +239,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                                     sectionId = "p${pages.first().pdfPage}",
                                     task = "REALTIME_${kind.uppercase()}",
                                     routeChannel = CompanionRouteChannel.HAIKU_REALTIME,
-                                    model = result.call.servedBy ?: BridgeClient.HAIKU,
+                                    model = result.call.servedBy ?: if (structure) BridgeClient.OPUS else model,
                                     inputTokens = inTok,
                                     outputTokens = outTok,
                                     ttftMs = result.call.ttftMs ?: 0L,

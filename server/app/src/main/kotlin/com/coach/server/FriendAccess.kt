@@ -25,7 +25,7 @@ internal fun friendPath(call: ApplicationCall): Boolean {
     return when (method to path) {
         HttpMethod.Post to "/v1/public/sable", HttpMethod.Post to "/v1/pair", HttpMethod.Get to "/v1/public/status",
         HttpMethod.Post to "/v1/library/explain", HttpMethod.Post to "/v1/library/explain/cancel",
-        HttpMethod.Post to "/v1/library/companion/chapter" -> true
+        HttpMethod.Post to "/v1/library/companion/chapter", HttpMethod.Post to "/v1/library/collection/ask" -> true
         else -> method == HttpMethod.Post && (friendStudyModeRegex.matches(path) || friendBookMapBatchRegex.matches(path))
     }
 }

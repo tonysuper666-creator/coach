@@ -286,7 +286,10 @@ fun Application.libraryExplainRoutes(
 
                 // Rebind sections strictly to receipt-verified blocks (never untrusted rawPages).
                 val receiptBlocksByKey = receipt.blocks.associateBy { Triple(it.page, it.start, it.text) }
+                val citedPages = receipt.blocks.map { it.page }.distinct()
+                val courseContext = library?.courseContext(actor, friend, parsedReq.bookId, citedPages).orEmpty()
                 val verifiedReq = parsedReq.copy(
+                    courseContext = courseContext,
                     sections = parsedReq.sections.map { sec ->
                         sec.copy(
                             blocks = sec.blocks.map { blk ->
@@ -305,9 +308,13 @@ fun Application.libraryExplainRoutes(
                 )
                 val current: suspend () -> Boolean = {
                     withContext(Dispatchers.IO) {
-                        resolvedImports.isCurrent(receipt) && (if (friend != null) actor.execute {
-                            authorize(device, bearer) && friendName(device) == friend
-                        } else runCatching { library?.reservesVersion(parsedReq.bookId) != true }.getOrDefault(false))
+                        if (!resolvedImports.isCurrent(receipt)) return@withContext false
+                        if (friend == null) {
+                            runCatching { library?.reservesVersion(parsedReq.bookId) != true }.getOrDefault(false)
+                        } else {
+                            actor.execute { authorize(device, bearer) && friendName(device) == friend } &&
+                                (courseContext.isEmpty() || library?.courseContext(actor, friend, parsedReq.bookId, citedPages) == courseContext)
+                        }
                     }
                 }
                 if (!current()) {

@@ -476,6 +476,67 @@ class LibraryExplainTest {
         override fun close() { engine.stop(100, 1000); runBlocking { actor.close() }; jobs.cancel(); stub.close(); dir.toFile().deleteRecursively() }
     }
 
+    @Test fun sameBookUploadsUseCourseMaterialOnlyForTheBoundSableAccount() = runBlocking {
+        Harness(local = true, personal = true).use { h ->
+            val owner = com.coach.store.sableFriendName("test-course-owner")
+            val manifest = h.libraryRoot.resolve("catalog.json")
+            val catalog = LedgerJson.parseToJsonElement(Files.readString(manifest)).jsonObject
+            Files.writeString(manifest, JsonObject(catalog + json("courseOwners" to json("SYNTHETIC" to owner))).toString())
+            val library = requireNotNull(h.library)
+            val friends = FriendAccess(h.dir.resolve("friends"), h.dir.resolve("state"), h.dir.resolve("friends.json"))
+            val sessions = SableSessions(h.actor, SableVault(h.dir.resolve("vault")), { grant ->
+                when (grant) {
+                    "grant-a" -> SableIdentity("test-course-owner", "learner-a")
+                    "grant-b" -> SableIdentity("test-personal-reader", "learner-b")
+                    else -> null
+                }
+            })
+            friends.sable = sessions
+            val prompts = java.util.concurrent.LinkedBlockingQueue<String>()
+            val service = CollectionQaService(object : CollectionQaTransport {
+                override suspend fun ask(systemPrompt: String, userPrompt: String, friend: String?, device: String?, maxTokens: Int): CollectionQaTransportReply {
+                    prompts.add(userPrompt)
+                    return CollectionQaTransportReply("""{"sentences":[{"claim":"Verified sample.","blockId":"B1","quoteAnchor":"the uploaded sample page"}]}""",
+                        "fixture", 10, 10, 1, 1)
+                }
+            })
+            val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
+                ledgerRoutes(h.actor, MutableSharedFlow(extraBufferCapacity = 8), friends = friends, publicOnly = true)
+                collectionQaRoutes(h.actor, friends, service, library)
+            }.start(false)
+            try {
+                val port = server.engine.resolvedConnectors().single().port
+                val body = json("collectionId" to "fixture", "question" to "What does the sample show?",
+                    "blocks" to JsonArray(listOf(json("blockId" to "B1", "docLabel" to "Sample book", "page" to 12,
+                        "bookId" to h.version, "text" to "This is the uploaded sample page."))))
+                for (grant in listOf("grant-a", "grant-b")) {
+                    val device = requireNotNull(sessions.exchange(grant))
+                    val response = withContext(Dispatchers.IO) {
+                        h.client.send(HttpRequest.newBuilder(URI("http://127.0.0.1:$port/v1/library/collection/ask"))
+                            .header("X-Coach-Device", device.deviceId).header("Authorization", "Bearer ${device.token}")
+                            .POST(HttpRequest.BodyPublishers.ofString(body.toString())).build(), HttpResponse.BodyHandlers.ofString())
+                    }
+                    assertEquals(200, response.statusCode())
+                    val answer = LedgerJson.parseToJsonElement(response.body()).jsonObject
+                    assertEquals(12L, answer.getValue("sentences").jsonArray.single().jsonObject.num("page"))
+                    val prompt = assertNotNull(prompts.poll())
+                    assertTrue("the uploaded sample page" in prompt)
+                    assertEquals(grant == "grant-a", "Synthetic price elasticity" in prompt)
+                    assertFalse("SYNTHETIC_UNREAD_SECRET" in prompt)
+                }
+                assertFalse(library.reservesVersion(h.version))
+                assertNull(library.explanationSource(h.version, 12))
+                h.reply()
+                assertEquals(200, h.post(personal(h.version)).first)
+                h.catalog(h.entry())
+                assertTrue(library.courseContext(h.actor, owner, h.version, listOf(12)).isEmpty())
+                assertTrue(library.reservesVersion(h.version))
+            } finally {
+                server.stop(100, 1000)
+            }
+        }
+    }
+
     @Test fun registeredLearnedSelectionReachesModelWithoutClientOrServerNeighbours() = runBlocking {
         Harness().use { h ->
             h.reply()

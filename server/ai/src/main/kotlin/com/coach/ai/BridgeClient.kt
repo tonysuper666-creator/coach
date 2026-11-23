@@ -62,6 +62,7 @@ data class TerminalState(
     val elapsedMs: Long?,
     val traffic: String? = null,
     val source: String? = null,
+    val retryAfterSec: Int? = null,
 ) {
     val complete: Boolean get() = status == "complete"
 
@@ -78,6 +79,7 @@ data class TerminalState(
             ttftMs = obj["ttft_ms"]?.jsonPrimitive?.content?.toLongOrNull(),
             elapsedMs = obj["elapsed_ms"]?.jsonPrimitive?.content?.toLongOrNull(),
             traffic = obj.stringOrNull("traffic"), source = obj.stringOrNull("source"),
+            retryAfterSec = obj["retry_after_sec"]?.jsonPrimitive?.content?.toIntOrNull()?.takeIf { it > 0 },
         )
     }
 }

@@ -18,6 +18,7 @@ class StubTutor : AutoCloseable {
     @Volatile var aborted = false
     val abortedRequests = java.util.concurrent.atomic.AtomicInteger()
     val requestEfforts = java.util.Collections.synchronizedList(ArrayList<String?>())
+    val requestFriends = java.util.Collections.synchronizedList(ArrayList<Pair<String?, String?>>())
     private val routed = java.util.Collections.synchronizedList(ArrayList<Pair<String, Triple<String, Long, Int>>>())
     @Volatile var requests = 0
     /** Null = unlimited. Set before the first request: `limitConcurrency(1)` mimics the production bridge. */
@@ -65,6 +66,9 @@ class StubTutor : AutoCloseable {
         val requestBody = exchange.requestBody.readBytes().decodeToString()
         requestBodies.add(requestBody)
         requestEfforts.add(exchange.requestHeaders.getFirst("X-Coach-Effort"))
+        requestFriends.add(
+            exchange.requestHeaders.getFirst("X-Coach-Friend") to exchange.requestHeaders.getFirst("X-Coach-Friend-Device"),
+        )
         val match = synchronized(routed) { routed.firstOrNull { requestBody.contains(it.first) }?.also { routed.remove(it) } }
         val (body, delay, status) = match?.second ?: replies.pollFirst() ?: Triple("""{"error":"no stub reply"}""", -1L, 200)
         // A bridge with N upstream slots serves requests in arrival order; the rest wait here exactly as they wait in the real bridge.
@@ -131,7 +135,7 @@ class StubTutor : AutoCloseable {
             },
         )
 
-        fun terminal(status: String, reason: String? = null): String = sse(
+        fun terminal(status: String, reason: String? = null, retryAfterSec: Int? = null): String = sse(
             kotlinx.serialization.json.buildJsonObject {
                 put("choices", kotlinx.serialization.json.buildJsonArray { })
                 put("model", kotlinx.serialization.json.JsonPrimitive("claude-sonnet-5-5"))
@@ -152,6 +156,9 @@ class StubTutor : AutoCloseable {
                         put("queue_ms", kotlinx.serialization.json.JsonPrimitive(2))
                         put("ttft_ms", kotlinx.serialization.json.JsonPrimitive(900))
                         put("elapsed_ms", kotlinx.serialization.json.JsonPrimitive(1500))
+                        if (retryAfterSec != null) {
+                            put("retry_after_sec", kotlinx.serialization.json.JsonPrimitive(retryAfterSec))
+                        }
                     },
                 )
             },

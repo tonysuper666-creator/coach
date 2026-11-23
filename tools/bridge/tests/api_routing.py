@@ -181,12 +181,12 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def router(self, content=None, status=200, keys=None, handler=None):
+    def router(self, content=None, status=200, keys=None, handler=None, **kwargs):
         def handle(request):
             self.requests.append(request)
             return handler(request) if handler else httpx.Response(status, content=content or b"error-body-must-never-be-read")
         return ApiRouter(self.ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(handle)),
-                         keys=keys if keys is not None else {"anthropic": KEY, "openai": KEY})
+                         keys=keys if keys is not None else {"anthropic": KEY, "openai": KEY}, **kwargs)
 
     async def collect(self, router, task="READER_SELECTION", model="claude-sonnet-5-5"):
         return [e async for e in router.events(task, model, "synthetic system", "synthetic prompt", 100)]
@@ -255,6 +255,132 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         await events.aclose()
         self.assertGreater(self.ledger.read()["months"]["2026-11"]["anthropic"]["reserved_microusd"], 0)
         self.assertEqual([], self.requests)
+
+    async def test_http_429_retries_within_same_reservation_and_recovers(self):
+        slept = []
+        async def fake_sleep(seconds):
+            slept.append(seconds)
+        attempts = 0
+        def handler(request):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(429, headers={"Retry-After": "1.25"}, content=b"sensitive-upstream-body")
+            return httpx.Response(200, content=frames("anthropic"))
+        r = self.router(handler=handler, retry_429_delays=(0.5, 1.5), sleep=fake_sleep)
+        events = await self.collect(r, "READER_SELECTION", "claude-haiku-5-5")
+        self.assertEqual("complete", events[-1]["kind"])
+        self.assertEqual(2, len(self.requests))
+        self.assertEqual([1.25], slept)
+        month = self.ledger.read()["months"]["2026-11"]["anthropic"]
+        self.assertEqual(0, month["reserved_microusd"])
+        self.assertEqual(1, month["calls"])
+
+    async def test_http_429_waits_full_10s_retry_after_within_budget_and_recovers_with_same_reservation(self):
+        now = 0.0
+        request_times = []
+        slept = []
+        def fake_clock():
+            return now
+        async def fake_sleep(seconds):
+            nonlocal now
+            slept.append(seconds)
+            now += seconds
+        def handler(request):
+            request_times.append(now)
+            if now < 10.0:
+                return httpx.Response(429, headers={"Retry-After": str(int(10.0 - now))}, content=b"rate limited")
+            return httpx.Response(200, content=frames("anthropic"))
+        r = self.router(handler=handler, retry_429_delays=(0.5, 1.5), retry_429_budget=45.0, sleep=fake_sleep, clock=fake_clock)
+        events = await self.collect(r, "READER_SELECTION", "claude-haiku-5-5")
+        self.assertEqual("complete", events[-1]["kind"])
+        self.assertEqual([0.0, 10.0], request_times)
+        self.assertEqual([10.0], slept)
+        month = self.ledger.read()["months"]["2026-11"]["anthropic"]
+        self.assertEqual(0, month["reserved_microusd"])
+        self.assertEqual(1, month["calls"])
+
+    async def test_http_429_over_budget_fails_fast_and_reports_retry_after_sec(self):
+        now = 0.0
+        slept = []
+        async def fake_sleep(seconds):
+            nonlocal now
+            slept.append(seconds)
+            now += seconds
+        def handler(request):
+            return httpx.Response(429, headers={"Retry-After": "60"}, content=b"rate limited sensitive body")
+        r = self.router(handler=handler, retry_429_delays=(0.5, 1.5), retry_429_budget=45.0, sleep=fake_sleep, clock=lambda: now)
+        with self.assertRaises(ApiFailure) as ctx:
+            await self.collect(r, "READER_SELECTION", "claude-haiku-5-5")
+        self.assertEqual("api_http_429", str(ctx.exception))
+        self.assertEqual(60, ctx.exception.retry_after_sec)
+        self.assertEqual(1, len(self.requests))
+        self.assertEqual([], slept)
+        self.assertGreater(self.ledger.read()["months"]["2026-11"]["anthropic"]["reserved_microusd"], 0)
+        # Bridge API_ONLY propagates retry_after_sec in x_coach without leaking any upstream body.
+        req = bridge.build_req(
+            {"model": "claude-haiku-5-5", "max_tokens": 100, "messages": [{"role": "user", "content": "synthetic"}]},
+            {"x-coach-task": "READER_SELECTION"},
+        )
+        with patch.object(bridge, "API_ONLY", True), patch.object(bridge, "API_ROUTER", r), patch.object(bridge, "write_log"):
+            outcome = await bridge.dispatch(req, req.model, None)
+        self.assertEqual("failed", outcome.status)
+        self.assertEqual("api_http_429", outcome.reason)
+        self.assertEqual(60, outcome.retry_after_sec)
+        self.assertEqual(60, outcome.x_coach(req)["retry_after_sec"])
+
+    async def test_bulk_concurrency_capped_and_foreground_qa_runs_in_reserved_slot(self):
+        bulk_in_flight = 0
+        bulk_peak = 0
+        fg_ran_during_bulk = False
+        release_bulk = asyncio.Event()
+        bulk_started = asyncio.Event()
+
+        class SlowTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request):
+                nonlocal bulk_in_flight, bulk_peak, fg_ran_during_bulk
+                body = json.loads(request.content.decode())
+                user_msg = body["messages"][0]["content"]
+                if user_msg.startswith("bulk:"):
+                    bulk_in_flight += 1
+                    bulk_peak = max(bulk_peak, bulk_in_flight)
+                    if bulk_in_flight >= 2:
+                        bulk_started.set()
+                    try:
+                        await release_bulk.wait()
+                    finally:
+                        bulk_in_flight -= 1
+                else:
+                    if bulk_in_flight > 0:
+                        fg_ran_during_bulk = True
+                return httpx.Response(200, content=frames("anthropic"))
+
+        r = ApiRouter(
+            self.ledger,
+            lambda: httpx.AsyncClient(transport=SlowTransport()),
+            keys={"anthropic": KEY},
+            concurrency=4,
+            bulk_concurrency=2,
+            retry_429_delays=(),
+        )
+        bulk_tasks = [
+            asyncio.create_task(self.collect_prompt(r, "course_topic_map", f"bulk:{i}"))
+            for i in range(5)
+        ]
+        await asyncio.wait_for(bulk_started.wait(), timeout=2.0)
+        await asyncio.sleep(0.02)
+        self.assertEqual(2, bulk_peak)
+        # Foreground Q&A runs immediately in a reserved slot even while bulk slots are full.
+        fg_events = await asyncio.wait_for(self.collect_prompt(r, "READER_SELECTION", "fg:qa"), timeout=2.0)
+        self.assertEqual("complete", fg_events[-1]["kind"])
+        self.assertTrue(fg_ran_during_bulk)
+        release_bulk.set()
+        results = await asyncio.wait_for(asyncio.gather(*bulk_tasks), timeout=2.0)
+        self.assertEqual(5, len(results))
+        self.assertEqual(2, bulk_peak)
+
+    async def collect_prompt(self, router, task, prompt):
+        return [e async for e in router.events(task, "claude-haiku-5-5", "synthetic system", prompt, 100)]
 
 
 class RoutingTests(unittest.IsolatedAsyncioTestCase):

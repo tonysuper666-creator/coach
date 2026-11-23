@@ -7,6 +7,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -250,8 +252,10 @@ class CourseTopicSynthesisPipeline(
     private val transport: BatchAiTransport,
     private val tokenLedger: BookTokenLedger? = null,
     private val cache: CourseTopicPackCache? = null,
+    maxMapConcurrency: Int = 2,
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+    private val mapSemaphore = Semaphore(maxMapConcurrency.coerceAtLeast(1))
 
     suspend fun generateTopicPack(
         input: JsonObject,
@@ -304,63 +308,65 @@ class CourseTopicSynthesisPipeline(
         val allBlocksByBook = rawBlocks.groupBy { it.bookId }
         val sourceTexts = rawBlocks.map { it.text }
 
-        // Map stage: process chunked source groups concurrently, verifying UTF-16 citations (Gate 2) immediately
+        // Map stage: bound concurrent map chunks so opening a large course never floods upstream rate limits.
         val chunkSize = 4
         val chunks = rawBlocks.chunked(chunkSize)
         val mapDeferred = chunks.mapIndexed { chunkIdx, group ->
             async {
-                check(currentCheck()) { "设备授权或来源校验已失效。" }
-                val mapPrompt = buildJsonObject {
-                    put("topicId", topicId)
-                    put("topicTitle", topicTitle)
-                    put("blocks", buildJsonArray {
-                        for (b in group) {
-                            add(buildJsonObject {
-                                put("blockId", b.blockId)
-                                put("bookId", b.bookId)
-                                put("bookTitle", b.bookTitle)
-                                put("role", b.role)
-                                put("authorityRank", b.authorityRank)
-                                put("page", b.page)
-                                put("startUtf16", b.startUtf16)
-                                put("text", b.text)
-                            })
-                        }
-                    })
-                }.toString()
-                val reply = transport.generateSection(
-                    systemPrompt = """
-                        请从以下多源课程块提取本专题要点、交叉印证线索及精确逐字引用。
-                        每条 citation 必须给出 bookId、page、startUtf16、endUtf16、quote（必须逐字复制原文连续片段，课堂转写请附带 timestampLabel）。
-                        严格输出 JSON：{"claims":[{"title":"...","detail":"...","role":"...","authorityRank":1}],"citations":[{"bookId":"...","page":1,"startUtf16":0,"endUtf16":10,"timestampLabel":null,"quote":"..."}]}
-                    """.trimIndent(),
-                    userPrompt = mapPrompt,
-                    task = "course_topic_map",
-                    batchKey = "course-map-$topicId-$chunkIdx",
-                    maxTokens = 1400,
-                )
-                tokenLedger?.record(
-                    TokenLedgerEntry(
-                        bookId = courseId.ifBlank { topicId },
-                        chapterId = topicId,
-                        sectionId = "map-$chunkIdx",
+                mapSemaphore.withPermit {
+                    check(currentCheck()) { "设备授权或来源校验已失效。" }
+                    val mapPrompt = buildJsonObject {
+                        put("topicId", topicId)
+                        put("topicTitle", topicTitle)
+                        put("blocks", buildJsonArray {
+                            for (b in group) {
+                                add(buildJsonObject {
+                                    put("blockId", b.blockId)
+                                    put("bookId", b.bookId)
+                                    put("bookTitle", b.bookTitle)
+                                    put("role", b.role)
+                                    put("authorityRank", b.authorityRank)
+                                    put("page", b.page)
+                                    put("startUtf16", b.startUtf16)
+                                    put("text", b.text)
+                                })
+                            }
+                        })
+                    }.toString()
+                    val reply = transport.generateSection(
+                        systemPrompt = """
+                            请从以下多源课程块提取本专题要点、交叉印证线索及精确逐字引用。
+                            每条 citation 必须给出 bookId、page、startUtf16、endUtf16、quote（必须逐字复制原文连续片段，课堂转写请附带 timestampLabel）。
+                            严格输出 JSON：{"claims":[{"title":"...","detail":"...","role":"...","authorityRank":1}],"citations":[{"bookId":"...","page":1,"startUtf16":0,"endUtf16":10,"timestampLabel":null,"quote":"..."}]}
+                        """.trimIndent(),
+                        userPrompt = mapPrompt,
                         task = "course_topic_map",
-                        routeChannel = reply.routeChannel,
-                        model = reply.model,
-                        inputTokens = reply.inputTokens,
-                        outputTokens = reply.outputTokens,
-                        cachedTokens = reply.cachedTokens,
-                        ttftMs = reply.ttftMs,
-                        elapsedMs = reply.elapsedMs,
-                    ),
-                )
-                val parsed = extractJsonObject(reply.text)
-                val verifiedCitations = ((parsed["citations"] as? JsonArray) ?: buildJsonArray {}).mapNotNull { cEl ->
-                    (cEl as? JsonObject)?.let { cObj ->
-                        CourseQualityGates.verifyCitation(cObj, blocksByBookPage, allBlocksByBook)
+                        batchKey = "course-map-$topicId-$chunkIdx",
+                        maxTokens = 6_000,
+                    )
+                    tokenLedger?.record(
+                        TokenLedgerEntry(
+                            bookId = courseId.ifBlank { topicId },
+                            chapterId = topicId,
+                            sectionId = "map-$chunkIdx",
+                            task = "course_topic_map",
+                            routeChannel = reply.routeChannel,
+                            model = reply.model,
+                            inputTokens = reply.inputTokens,
+                            outputTokens = reply.outputTokens,
+                            cachedTokens = reply.cachedTokens,
+                            ttftMs = reply.ttftMs,
+                            elapsedMs = reply.elapsedMs,
+                        ),
+                    )
+                    val parsed = extractJsonObject(reply.text)
+                    val verifiedCitations = ((parsed["citations"] as? JsonArray) ?: buildJsonArray {}).mapNotNull { cEl ->
+                        (cEl as? JsonObject)?.let { cObj ->
+                            CourseQualityGates.verifyCitation(cObj, blocksByBookPage, allBlocksByBook)
+                        }
                     }
+                    parsed to verifiedCitations
                 }
-                parsed to verifiedCitations
             }
         }
         val mapped = mapDeferred.awaitAll()
@@ -394,7 +400,7 @@ class CourseTopicSynthesisPipeline(
             userPrompt = reducePrompt,
             task = "course_topic_reduce",
             batchKey = "course-reduce-$topicId",
-            maxTokens = 2200,
+            maxTokens = 8_000,
         )
         tokenLedger?.record(
             TokenLedgerEntry(
@@ -471,7 +477,7 @@ class CourseTopicSynthesisPipeline(
                 }.toString(),
                 task = "course_topic_math_repair",
                 batchKey = "course-math-repair-$topicId",
-                maxTokens = 1600,
+                maxTokens = 6_000,
             )
             tokenLedger?.record(
                 TokenLedgerEntry(

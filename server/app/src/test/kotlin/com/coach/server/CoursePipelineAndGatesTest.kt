@@ -649,4 +649,59 @@ class CoursePipelineAndGatesTest {
             dir.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun topicSynthesisBoundsMapConcurrencyAndUsesAdaptiveThinkingOutputBudget() = runBlocking {
+        val inFlight = AtomicInteger(0)
+        val peakInFlight = AtomicInteger(0)
+        val seenMaxTokens = java.util.Collections.synchronizedMap(HashMap<String, Int>())
+        val transport = object : BatchAiTransport {
+            override suspend fun generateSection(
+                systemPrompt: String,
+                userPrompt: String,
+                task: String,
+                batchKey: String,
+                maxTokens: Int,
+            ): BatchTransportReply {
+                seenMaxTokens[task] = maxTokens
+                if (task == "course_topic_map") {
+                    val cur = inFlight.incrementAndGet()
+                    peakInFlight.accumulateAndGet(cur, ::maxOf)
+                    kotlinx.coroutines.delay(40)
+                    inFlight.decrementAndGet()
+                }
+                val text = when (task) {
+                    "course_topic_map" -> """{"claims":[],"citations":[]}"""
+                    else -> """{"summary":"Concise synthesis.","authorityNotice":"L1 first.","keyPoints":[],"discrepancies":[],"practicePrompt":{"promptId":"p1","kind":"ESSAY","stem":"Explain screening.","wordTarget":300},"mathAssertions":[]}"""
+                }
+                return BatchTransportReply(text, CompanionRouteChannel.HAIKU_REALTIME, "claude-haiku-5-5", 100, 50, 0, 10, 40)
+            }
+        }
+        val pipe = CourseTopicSynthesisPipeline(transport, maxMapConcurrency = 2)
+        val blocks = buildJsonArray {
+            for (i in 1..24) {
+                add(buildJsonObject {
+                    put("bookId", "bk-1")
+                    put("bookTitle", "Core Textbook")
+                    put("role", "CORE_TEXTBOOK")
+                    put("authorityRank", 2)
+                    put("page", i)
+                    put("text", "Paragraph $i describing health insurance market equilibrium.")
+                })
+            }
+        }
+        pipe.generateTopicPack(
+            buildJsonObject {
+                put("courseId", "c-conc")
+                put("topicId", "t-conc")
+                put("topicTitle", "Equilibrium")
+                put("sourcesHash", "h-conc")
+                put("blocks", blocks)
+            },
+            cacheScope = "owner:test",
+        )
+        assertTrue(peakInFlight.get() in 1..2, "Expected bounded concurrency <= 2, got ${peakInFlight.get()}")
+        assertTrue((seenMaxTokens["course_topic_map"] ?: 0) >= 6_000)
+        assertTrue((seenMaxTokens["course_topic_reduce"] ?: 0) >= 8_000)
+    }
 }

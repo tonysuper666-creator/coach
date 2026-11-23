@@ -70,11 +70,23 @@ internal fun Route.courseRoutes(
                 call.respondText(e.body.toString(), ContentType.Application.Json, e.status)
             } catch (e: MockError) {
                 call.respondText(buildJsonObject { put("error", e.message) }.toString(), ContentType.Application.Json, e.status)
+            } catch (e: IllegalArgumentException) {
+                call.respondText(
+                    buildJsonObject { put("error", e.message ?: "课程自动对齐参数无效。") }.toString(),
+                    ContentType.Application.Json,
+                    HttpStatusCode.BadRequest,
+                )
+            } catch (_: kotlinx.serialization.SerializationException) {
+                call.respondText(
+                    buildJsonObject { put("error", "课程自动对齐请求格式不对。") }.toString(),
+                    ContentType.Application.Json,
+                    HttpStatusCode.BadRequest,
+                )
             } catch (e: Exception) {
                 call.respondText(
                     buildJsonObject { put("error", e.message ?: "课程自动对齐暂时失败，请稍后重试。") }.toString(),
                     ContentType.Application.Json,
-                    HttpStatusCode.BadRequest,
+                    HttpStatusCode.ServiceUnavailable,
                 )
             }
         }
@@ -136,11 +148,23 @@ internal fun Route.courseRoutes(
                 call.respondText(e.body.toString(), ContentType.Application.Json, e.status)
             } catch (e: MockError) {
                 call.respondText(buildJsonObject { put("error", e.message) }.toString(), ContentType.Application.Json, e.status)
-            } catch (e: Exception) {
+            } catch (e: IllegalArgumentException) {
                 call.respondText(
-                    buildJsonObject { put("error", e.message ?: "专题包生成失败，请稍后重试。") }.toString(),
+                    buildJsonObject { put("error", e.message ?: "专题包请求参数无效。") }.toString(),
                     ContentType.Application.Json,
                     HttpStatusCode.BadRequest,
+                )
+            } catch (_: kotlinx.serialization.SerializationException) {
+                call.respondText(
+                    buildJsonObject { put("error", "专题包请求格式不对。") }.toString(),
+                    ContentType.Application.Json,
+                    HttpStatusCode.BadRequest,
+                )
+            } catch (e: Exception) {
+                call.respondText(
+                    buildJsonObject { put("error", e.message ?: "专题包生成暂时不可用，请稍后重试。") }.toString(),
+                    ContentType.Application.Json,
+                    HttpStatusCode.ServiceUnavailable,
                 )
             }
         }

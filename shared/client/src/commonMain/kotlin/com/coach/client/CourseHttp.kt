@@ -320,8 +320,10 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             when {
                 parsed == null && status != 403 -> MockReply(null, "连不上学习服务，可继续本地阅读与练习。")
                 response.status.isSuccess() -> MockReply(parsed, null, statusCode = status)
-                status == 429 || code == "daily_quota" || code == "monthly_quota" ->
+                code == "daily_quota" || code == "monthly_quota" ->
                     MockReply(null, "课程服务暂时繁忙，请稍后再试。", retryable = true, statusCode = status, code = "unavailable")
+                status == 429 ->
+                    MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "当前提问较集中，请几秒后重试。", retryable = true, statusCode = status, code = "unavailable")
                 else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "请求暂时无法完成，请稍后重试。", statusCode = status, code = code)
             }
         }

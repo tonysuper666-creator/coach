@@ -1337,7 +1337,7 @@ class SectionConcurrentCompanionPipeline(
             optionalPractice = parsed.optionalPractice,
             declaredChecksByItemId = parsed.declaredMathChecks,
             transport = transportOverride,
-            ledger = ledger,
+            ledger = if (recordOwnerLedger) ledger else null,
             rawPages = request.rawPages,
         )
         return parsed.copy(

@@ -296,6 +296,13 @@ internal data class CourseDetailSnapshot(
     val hasSyllabusOrScope: Boolean
         get() = hasSyllabusScope(materials.map { it.role })
 
+    /**
+     * True only when a syllabus is present AND it actually narrowed the scope (some chapters sit in the excluded
+     * section). A syllabus that could not be mapped to chapters keeps the whole book, and the UI must say so.
+     */
+    val syllabusNarrowsScope: Boolean
+        get() = hasSyllabusOrScope && excludedTopics.isNotEmpty()
+
     /** First-time inline prompt shown on weekly plan / countdown schedule / mock exam when an exam course has no syllabus yet. */
     val shouldShowSyllabusPrompt: Boolean
         get() = isExam && !hasSyllabusOrScope && examProfile.syllabusPromptState == CourseSyllabusPromptState.UNASKED

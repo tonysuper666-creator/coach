@@ -184,10 +184,14 @@ internal object CourseAutoAligner {
             )
         }
 
-        // Only narrow out uncovered textbook chapters into EXCLUDED when the course is marked as exam
-        // AND has an explicit syllabus defining exam scope (same predicate as CourseDetailSnapshot.hasSyllabusOrScope).
-        // Otherwise (non-exam default, or exam course without syllabus — even with weekly slides/notes), keep the whole book.
-        val hasScopeNarrowing = current.isExam && hasSyllabusScope(resolvedMaterials.map { it.role })
+        // Only narrow out uncovered textbook chapters into EXCLUDED when the course is marked as exam,
+        // has an explicit syllabus (same predicate as CourseDetailSnapshot.hasSyllabusOrScope), AND that syllabus
+        // actually matched at least one textbook chapter. A syllabus we cannot map to chapters (e.g. a chapter list
+        // without week lines) must never exclude the whole book; keep every chapter and let the UI say
+        // "已收到考纲，暂按整本书安排".
+        val hasScopeNarrowing = current.isExam &&
+            hasSyllabusScope(resolvedMaterials.map { it.role }) &&
+            coveredChapterTitles.isNotEmpty()
         if (hasScopeNarrowing) {
             var excludedOrd = 1000
             for (ch in textbookChapters) {

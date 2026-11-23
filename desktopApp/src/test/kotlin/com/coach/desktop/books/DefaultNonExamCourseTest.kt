@@ -570,6 +570,88 @@ class DefaultNonExamCourseTest {
     }
 
     @Test
+    fun examCourseWithUnmappableChapterSyllabusKeepsWholeBookAndSaysSo() {
+        val shotsDir = (System.getProperty("coach.ton1820.shotsDir") ?: System.getenv("COACH_TON1820_SHOTS_DIR"))
+            ?.takeIf { it.isNotBlank() }
+            ?.let { Path.of(it).also { p -> Files.createDirectories(p) } }
+        val dir = Files.createTempDirectory("coach-ton1820-chapter-syllabus-")
+        try {
+            val libDir = dir.resolve("library")
+            val srcDir = dir.resolve("src").also { Files.createDirectories(it) }
+            val bookPath = srcDir.resolve("Core-Textbook.md").also {
+                Files.writeString(
+                    it,
+                    "# Chapter 1 Demand and Supply\nElasticity measures how demand responds to market price changes.\n\n" +
+                        "# Chapter 2 Consumer Choice\nIndifference curves and budget lines determine optimal consumption bundles.\n\n" +
+                        "# Chapter 3 Market Equilibrium\nCompetitive equilibrium equates marginal willingness to pay and marginal cost.\n",
+                )
+            }
+            // Syllabus names chapters 1 and 2 explicitly but has no week lines, so the local aligner cannot map it.
+            val syllabusPath = srcDir.resolve("Course-Syllabus.md").also {
+                Files.writeString(
+                    it,
+                    "# Course Syllabus\n考试范围：第 1、2 章。\nAssessment covers chapters 1 and 2 of the core textbook.\n",
+                )
+            }
+
+            val library = TextbookLibrary(libDir, lazyPdfExtras = false)
+            val controller = TextbookController(library)
+            val textbook = library.stageBookImport(bookPath).book
+            val courseId = library.withCourseDatabase { db ->
+                val (cid, _) = CourseStore.createCourse(
+                    db = db,
+                    title = "经济学导论（章节考纲）",
+                    examProfile = CourseExamProfile(examEnabled = true),
+                    materialBookIds = listOf(textbook.id),
+                )
+                CourseAutoAligner.alignLocally(db, cid)
+                cid
+            }
+            runBlocking {
+                controller.load()
+                controller.openCourse(courseId)
+                // Same path as 「排本周计划 → 放进来」: stage file, add to course, align locally.
+                controller.addMaterialsToCourse(courseId, listOf(syllabusPath)).join()
+            }
+
+            val detail = library.courseDetail(courseId)
+            assertTrue(detail.isExam)
+            assertTrue(detail.hasSyllabusOrScope, "Syllabus file must be recognised")
+            assertFalse(detail.syllabusNarrowsScope, "Unmappable syllabus must not count as narrowing")
+            assertTrue(detail.excludedTopics.isEmpty(), "No chapter may be excluded; got ${detail.excludedTopics.map { it.title }}")
+            assertEquals(3, detail.examinableTopics.size, "All 3 chapters must stay learnable; got ${detail.examinableTopics.map { it.weekLabel + ":" + it.title }}")
+
+            val offlineExplainer = object : BookExplainer(library = library) {
+                override suspend fun load() {
+                    identity = null
+                    loaded = true
+                }
+            }
+            runSkikoComposeUiTest(size = Size(1100f, 820f)) {
+                setContent {
+                    CoachTheme(false) {
+                        CompositionLocalProvider(LocalV7ReducedMotion provides true) {
+                            WindowsTextbookHost(controller = controller, bookExplainer = offlineExplainer) { null }
+                        }
+                    }
+                }
+                waitUntil(timeoutMillis = 15_000) {
+                    onAllNodesWithTag("course-exam-scope-line").fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+                val allText = collectAllVisibleText()
+                assertTrue("已收到考纲，暂按整本书安排" in allText, "Expected received-syllabus whole-book line, got:\n$allText")
+                assertFalse("本课不考内容" in allText, "Must not show excluded section, got:\n$allText")
+                assertFalse("还没有放入课程材料" in allText, "Must not show empty state with materials present, got:\n$allText")
+                assertTrue("Consumer Choice" in allText && "Market Equilibrium" in allText, "All chapters must stay visible, got:\n$allText")
+                shotsDir?.let { savePng(it.resolve("arch-fix-chapter-syllabus-whole-book.png")) }
+            }
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun sharedBookInNonExamAndExamCourseUsesActiveCourseExamStatusInReaderMenu() {
         val shotsDir = (System.getProperty("coach.ton1820.shotsDir") ?: System.getenv("COACH_TON1820_SHOTS_DIR"))
             ?.takeIf { it.isNotBlank() }

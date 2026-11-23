@@ -314,10 +314,10 @@ internal fun CourseScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            if (detail.hasSyllabusOrScope) {
-                                "已按考纲安排范围，可继续补充考纲或往年题"
-                            } else {
-                                "按整本书安排，放进考纲后可以缩小范围"
+                            when {
+                                detail.syllabusNarrowsScope -> "已按考纲安排范围，可继续补充考纲或往年题"
+                                detail.hasSyllabusOrScope -> "已收到考纲，暂按整本书安排"
+                                else -> "按整本书安排，放进考纲后可以缩小范围"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.fgPrimary,
@@ -451,7 +451,7 @@ internal fun CourseScreen(
                             resumeTarget == null -> "导入课本、讲义或考纲开始学习"
                             plan?.todayFocusTopicId == resumeTarget.topicId -> "继续今日冲刺 · ${resumeTarget.weekLabel}"
                             detail.activeAnchor?.topicId == resumeTarget.topicId -> "继续上次专题 · ${resumeTarget.weekLabel}"
-                            !detail.hasSyllabusOrScope && resumeTarget == orderedExaminableTopics.firstOrNull() ->
+                            !detail.syllabusNarrowsScope && resumeTarget == orderedExaminableTopics.firstOrNull() ->
                                 "从第一章开始 · 约 ${estimateTopicMinutes(resumeTarget)} 分钟"
                             else -> "开始本周学习 · ${resumeTarget.weekLabel}"
                         }
@@ -1091,10 +1091,10 @@ private fun CourseScheduleSubScreen(
             PageHeader(
                 kicker = if (isWeekly) "本周学习计划" else "考前排程",
                 title = detail.title,
-                deck = if (detail.hasSyllabusOrScope) {
-                    plan?.headerSummaryLine ?: "按考纲与讲义排定学习顺序。"
-                } else {
-                    "按整本书安排，放进考纲后可以缩小范围。"
+                deck = when {
+                    detail.syllabusNarrowsScope -> plan?.headerSummaryLine ?: "按考纲与讲义排定学习顺序。"
+                    detail.hasSyllabusOrScope -> "已收到考纲，暂按整本书安排。"
+                    else -> "按整本书安排，放进考纲后可以缩小范围。"
                 },
                 meta = buildString {
                     if (plan?.daysRemaining != null) append("距考试 ${plan.daysRemaining} 天 · ")
@@ -1255,7 +1255,7 @@ private fun buildCourseMetaLine(detail: CourseDetailSnapshot, topics: List<Cours
     }
     return when {
         topics.isEmpty() -> "已纳入 ${detail.materials.size} 份材料"
-        detail.hasSyllabusOrScope -> "已纳入 ${detail.materials.size} 份材料 · 专题 ${topics.size} 项"
+        detail.syllabusNarrowsScope -> "已纳入 ${detail.materials.size} 份材料 · 专题 ${topics.size} 项"
         allChapterTopics -> "已纳入 ${detail.materials.size} 份材料 · 全书共 ${topics.size} 章"
         else -> "已纳入 ${detail.materials.size} 份材料 · 全书共 ${topics.size} 项"
     }

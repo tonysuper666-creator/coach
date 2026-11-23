@@ -145,6 +145,7 @@ fun Application.libraryExplainRoutes(
     courseAlignPipeline: CourseAlignmentPipeline? = null,
     courseTopicPipeline: CourseTopicSynthesisPipeline? = null,
     courseVisionService: CourseVisionService? = null,
+    unifiedBooks: UnifiedBookPipeline? = null,
 ) {
     val companionJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     routing {
@@ -168,14 +169,19 @@ fun Application.libraryExplainRoutes(
                 if (friend != null && (!parsed.isLocalBook || input["localSource"] == null))
                     throw MockError(HttpStatusCode.Forbidden, "请先导入自己的书，再选择原文讲解。")
                 val importStore = if (friend == null) imports else (friends ?: throw FriendServiceError()).imports(friend)
-                val personal = input["localSource"] != null && parsed.isLocalBook && (friend != null || withContext(Dispatchers.IO) {
+                val device = call.attributes[observedDevice]
+                val unifiedScope = if (unifiedBooks?.enabled == true) UnifiedBookScope.fromCall(device, friend) else null
+                val unifiedAuthorized = unifiedScope != null && parsed.isLocalBook && withContext(Dispatchers.IO) {
+                    runCatching { unifiedBooks!!.hasVerifiedShelfBook(unifiedScope, parsed.bookId) }.getOrDefault(false)
+                }
+                val personal = input["localSource"] != null && parsed.isLocalBook && (friend != null || unifiedAuthorized || withContext(Dispatchers.IO) {
                     // Unreadable catalogs fail closed, including while generating.
                     runCatching { library?.reservesVersion(parsed.bookId) != true }.getOrDefault(false)
                 }
                 )
                 val receipt = if (personal) withContext(Dispatchers.IO) {
                     (importStore ?: throw MockError(HttpStatusCode.ServiceUnavailable, "服务还未接通新书讲解，请更新服务后重试。"))
-                        .register(call.attributes[observedDevice], input, parsed)
+                        .register(device, input, parsed)
                 } else null
                 val binding = if (receipt == null && friend == null && parsed.isLocalBook && !parsed.isSectionScoped)
                     library?.explanationSource(parsed.bookId, parsed.pages.single().pdfPage) else null
@@ -186,9 +192,11 @@ fun Application.libraryExplainRoutes(
                 val current: suspend () -> Boolean = {
                     if (receipt != null) withContext(Dispatchers.IO) {
                         importStore!!.isCurrent(receipt) && (if (friend != null) actor.execute {
-                            authorize(call.attributes[observedDevice], call.request.header("Authorization")!!.removePrefix("Bearer ")) &&
-                                friendName(call.attributes[observedDevice]) == friend
-                        } else runCatching { library?.reservesVersion(parsed.bookId) != true }.getOrDefault(false))
+                            authorize(device, call.request.header("Authorization")!!.removePrefix("Bearer ")) &&
+                                friendName(device) == friend
+                        } && (!unifiedAuthorized || runCatching { unifiedBooks!!.hasVerifiedShelfBook(unifiedScope, parsed.bookId) }.getOrDefault(false))
+                        else if (unifiedAuthorized) runCatching { unifiedBooks!!.hasVerifiedShelfBook(unifiedScope, parsed.bookId) }.getOrDefault(false)
+                        else runCatching { library?.reservesVersion(parsed.bookId) != true }.getOrDefault(false))
                     } else (binding == null || library?.explanationSource(parsed.bookId, parsed.pages.single().pdfPage) == binding) &&
                         actor.execute { request!!.isCurrent(this) }
                 }
@@ -264,8 +272,12 @@ fun Application.libraryExplainRoutes(
                     throw MockError(HttpStatusCode.Conflict, "整章伴读只支持个人导入的书，请携带有效导入回执。")
                 }
                 val importStore = if (friend == null) imports else (friends ?: throw FriendServiceError()).imports(friend)
+                val unifiedScope = if (unifiedBooks?.enabled == true) UnifiedBookScope.fromCall(device, friend) else null
+                val unifiedAuthorized = unifiedScope != null && withContext(Dispatchers.IO) {
+                    runCatching { unifiedBooks!!.hasVerifiedShelfBook(unifiedScope, parsedReq.bookId) }.getOrDefault(false)
+                }
                 if (friend == null) {
-                    val allowedPersonal = withContext(Dispatchers.IO) {
+                    val allowedPersonal = unifiedAuthorized || withContext(Dispatchers.IO) {
                         runCatching { library?.reservesVersion(parsedReq.bookId) != true }.getOrDefault(false)
                     }
                     if (!allowedPersonal) {
@@ -308,7 +320,9 @@ fun Application.libraryExplainRoutes(
                     withContext(Dispatchers.IO) {
                         resolvedImports.isCurrent(receipt) && (if (friend != null) actor.execute {
                             authorize(device, bearer) && friendName(device) == friend
-                        } else runCatching { library?.reservesVersion(parsedReq.bookId) != true }.getOrDefault(false))
+                        } && (!unifiedAuthorized || runCatching { unifiedBooks!!.hasVerifiedShelfBook(unifiedScope, parsedReq.bookId) }.getOrDefault(false))
+                        else if (unifiedAuthorized) runCatching { unifiedBooks!!.hasVerifiedShelfBook(unifiedScope, parsedReq.bookId) }.getOrDefault(false)
+                        else runCatching { library?.reservesVersion(parsedReq.bookId) != true }.getOrDefault(false))
                     }
                 }
                 if (!current()) {

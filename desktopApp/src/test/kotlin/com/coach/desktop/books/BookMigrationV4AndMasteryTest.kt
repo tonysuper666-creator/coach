@@ -104,7 +104,7 @@ class BookMigrationV4AndMasteryTest {
             // 2. Real upgrade succeeds atomically with 100% lossless rows & SHA-256 parity
             val upgraded = TextbookLibrary(dir, clock)
             connect(dbFile).use { db ->
-                assertEquals(BookSchemaMigration.V4_SCHEMA_VERSION, BookSchemaMigration.readUserVersion(db))
+                assertEquals(BookSchemaMigration.CURRENT_SCHEMA_VERSION, BookSchemaMigration.readUserVersion(db))
                 for (t in v4Tables) assertTrue(BookSchemaMigration.tableExists(db, t), "missing V4 table $t")
             }
             val after = snapshotTables(dbFile, preservedTables)

@@ -62,10 +62,14 @@ internal object BookSchemaMigration {
 
     /** 2.0-AI-1 (Stage 4): concept mastery ledger, learner evidence stream, 4-point learning gain cohorts & whisper audit. */
     const val V4_SCHEMA_VERSION = 4
-    const val CURRENT_SCHEMA_VERSION = V4_SCHEMA_VERSION
+
+    /** TON-1823 PR A: persistent per-account unified book upload queue & local-to-server shelf mapping. */
+    const val V5_SCHEMA_VERSION = 5
+    const val CURRENT_SCHEMA_VERSION = V5_SCHEMA_VERSION
     const val V1_BACKUP_FILENAME = "library.sqlite.v1.bak"
     const val V2_BACKUP_FILENAME = "library.sqlite.v2.bak"
     const val V3_BACKUP_FILENAME = "library.sqlite.v3.bak"
+    const val V4_BACKUP_FILENAME = "library.sqlite.v4.bak"
 
     private val CORE_V1_TABLES = listOf(
         "CREATE TABLE IF NOT EXISTS books(id TEXT PRIMARY KEY,title TEXT NOT NULL,format TEXT NOT NULL,reading_page INTEGER NOT NULL DEFAULT 1,lesson_index INTEGER NOT NULL DEFAULT 0,learning INTEGER NOT NULL DEFAULT 0,prompt_seen INTEGER NOT NULL DEFAULT 0,mode TEXT NOT NULL DEFAULT 'NONE',touched INTEGER NOT NULL)",
@@ -292,6 +296,32 @@ internal object BookSchemaMigration {
         "CREATE INDEX IF NOT EXISTS idx_margin_whisper_book_sec ON margin_whisper_audit(book_id, toc_node_id, created_at)",
     )
 
+    private val V5_TABLES = listOf(
+        """CREATE TABLE IF NOT EXISTS book_upload_queue(
+            account_key TEXT NOT NULL,
+            local_book_id TEXT NOT NULL,
+            file_sha256 TEXT NOT NULL,
+            server_shelf_book_id TEXT,
+            format TEXT NOT NULL,
+            title TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN (
+                'WAITING_NETWORK','WAITING_SERVER','UPLOADING','RECEIVED','QUEUED','PROCESSING','READY','FAILED','PAUSED'
+            )),
+            progress_pct INTEGER NOT NULL DEFAULT 0,
+            stage_label TEXT NOT NULL DEFAULT '',
+            error_message TEXT,
+            paused INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(account_key, local_book_id)
+        )""".trimIndent(),
+        "CREATE INDEX IF NOT EXISTS idx_book_upload_queue_account ON book_upload_queue(account_key, paused, state)",
+        """CREATE TABLE IF NOT EXISTS book_upload_account_bindings(
+            session_key TEXT PRIMARY KEY,
+            account_key TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        )""".trimIndent(),
+    )
+
     private val V2_TABLES = listOf(
         COLLECTIONS_DDL,
         COLLECTION_MATERIALS_DDL,
@@ -371,6 +401,10 @@ internal object BookSchemaMigration {
         "concept_mastery_ledger", "learner_evidence_events", "learning_gain_cohorts", "margin_whisper_audit",
     )
 
+    private val REQUIRED_V5_TABLES = REQUIRED_V4_TABLES + setOf(
+        "book_upload_queue", "book_upload_account_bindings",
+    )
+
     fun upgradeAndMigrate(
         directory: Path,
         openConnection: () -> Connection,
@@ -400,13 +434,14 @@ internal object BookSchemaMigration {
                 backupFile = when {
                     upgradingFromV1 -> directory.resolve(V1_BACKUP_FILENAME)
                     currentVersion < V3_SCHEMA_VERSION -> directory.resolve(V2_BACKUP_FILENAME)
-                    else -> directory.resolve(V3_BACKUP_FILENAME)
+                    currentVersion < V4_SCHEMA_VERSION -> directory.resolve(V3_BACKUP_FILENAME)
+                    else -> directory.resolve(V4_BACKUP_FILENAME)
                 }
                 if (upgradingExisting) {
                     runCatching { probe.createStatement().use { it.execute("PRAGMA wal_checkpoint(TRUNCATE)") } }
                 }
                 schemaComplete = currentVersion >= CURRENT_SCHEMA_VERSION &&
-                    REQUIRED_V4_TABLES.all { it in existingTables } &&
+                    REQUIRED_V5_TABLES.all { it in existingTables } &&
                     "show_standalone" in tableColumns(probe, "books") &&
                     "week_num" in tableColumns(probe, "collection_materials") &&
                     "index_state" in tableColumns(probe, "books") &&
@@ -449,6 +484,9 @@ internal object BookSchemaMigration {
                     }
                     db.createStatement().use { sql ->
                         for (ddl in V4_TABLES) sql.execute(ddl)
+                    }
+                    db.createStatement().use { sql ->
+                        for (ddl in V5_TABLES) sql.execute(ddl)
                     }
                     BookFtsStore.migrate(db)
                     onInTransaction(db)

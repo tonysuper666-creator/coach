@@ -291,6 +291,7 @@ internal class BookExplainer(private val library: TextbookLibrary? = null) {
     /** 安卓的配对页一直放着「用 Sable 账号登录」，讲解面板跟它一致。 */
     val sableLogin: Boolean get() = true
     val hasBuiltInAddress: Boolean get() = AndroidBookConnection.hasBuiltInAddress()
+    fun unifiedUploadClient(): UnifiedBookRemoteClient? = null
 
     fun markRevoked() {
         identity?.let { revokedIdentity ->

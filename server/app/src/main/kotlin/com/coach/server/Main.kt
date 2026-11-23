@@ -163,7 +163,8 @@ fun main(args: Array<String>): Unit = runBlocking {
     }
     val sable = publicPort?.let { SableSessions(actor, data.resolveSibling("${data.fileName}-sable-credentials")) }
     val friends = FriendAccess(data.resolve("friends"), sableSessions = sable)
-    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation,friends); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); libraryExplainRoutes(actor,chat.reader,reader,imports,friends,companionPipeline,tokenLedger,courseAlignPipeline,courseTopicPipeline,courseVisionService); booklistAlignmentRoutes(actor,friends,booklistAligner); practiceGradeRoutes(actor,friends,practiceGradeService); collectionQaRoutes(actor,friends,collectionQaService); courseMockRoutes(actor,friends,courseMockService); studyModeRoutes(actor,reader,friends,studyModeService); readerRoutes(actor,pushes,reader,mainline) }
+    val unifiedBooks = UnifiedBookPipeline(data.resolve("unified-books"), UnifiedBookConfig.fromEnv())
+    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation,friends,unifiedBooks=unifiedBooks); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); libraryExplainRoutes(actor,chat.reader,reader,imports,friends,companionPipeline,tokenLedger,courseAlignPipeline,courseTopicPipeline,courseVisionService,unifiedBooks); unifiedBookRoutes(actor,unifiedBooks,friends); booklistAlignmentRoutes(actor,friends,booklistAligner); practiceGradeRoutes(actor,friends,practiceGradeService); collectionQaRoutes(actor,friends,collectionQaService); courseMockRoutes(actor,friends,courseMockService); studyModeRoutes(actor,reader,friends,studyModeService,unifiedBooks); readerRoutes(actor,pushes,reader,mainline) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")
@@ -184,13 +185,14 @@ fun main(args: Array<String>): Unit = runBlocking {
         }
     }
     val public = publicPort?.let { p -> embeddedServer(Netty, host = "127.0.0.1", port = p) {
-        ledgerRoutes(actor,pushes,adminDevice=device,friends=friends,publicOnly=true)
-        libraryExplainRoutes(actor,chat.reader,friends=friends,companionPipeline=companionPipeline,tokenLedger=tokenLedger,courseAlignPipeline=courseAlignPipeline,courseTopicPipeline=courseTopicPipeline,courseVisionService=courseVisionService)
+        ledgerRoutes(actor,pushes,adminDevice=device,friends=friends,publicOnly=true,unifiedBooks=unifiedBooks)
+        libraryExplainRoutes(actor,chat.reader,friends=friends,companionPipeline=companionPipeline,tokenLedger=tokenLedger,courseAlignPipeline=courseAlignPipeline,courseTopicPipeline=courseTopicPipeline,courseVisionService=courseVisionService,unifiedBooks=unifiedBooks)
+        unifiedBookRoutes(actor,unifiedBooks,friends)
         booklistAlignmentRoutes(actor,friends=friends,aligner=booklistAligner)
         practiceGradeRoutes(actor,friends=friends,service=practiceGradeService)
         collectionQaRoutes(actor,friends=friends,service=collectionQaService)
         courseMockRoutes(actor,friends=friends,service=courseMockService)
-        studyModeRoutes(actor,friends=friends,service=studyModeService)
+        studyModeRoutes(actor,friends=friends,service=studyModeService,unifiedBooks=unifiedBooks)
     }.apply { engineConfig.apply { connectionGroupSize=1; workerGroupSize=1; callGroupSize=2 }; start(false) } }
     local.start(wait = false)
     println("COACH loopback ready http://127.0.0.1:$port/v1/hello")

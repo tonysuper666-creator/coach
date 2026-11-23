@@ -131,6 +131,7 @@ internal fun LibraryHome(
     onOpenCollection: (CollectionSummary) -> Unit = {},
     onMultiDropAction: (MultiDropAction) -> Unit = {},
     onDismissMultiDrop: () -> Unit = {},
+    onRetryUpload: (String) -> Unit = {},
     library: TextbookLibrary? = null,
 ) {
     val colors = CoachTheme.colors
@@ -492,6 +493,8 @@ internal fun LibraryHome(
                                     current = item.id == focusBook?.id,
                                     enabled = !ui.busy,
                                     activeImport = ui.importing?.takeIf { it.recognizing && it.bookId == item.id },
+                                    uploadStatus = ui.uploadStatuses[item.id],
+                                    onRetryUpload = { onRetryUpload(item.id) },
                                     onCancelImport = onCancelImport,
                                     onClick = { onOpenBook(item.id) },
                                 )
@@ -644,6 +647,8 @@ private fun HomeBookCard(
     current: Boolean,
     enabled: Boolean,
     activeImport: BookImportProgress? = null,
+    uploadStatus: BookUploadEntry? = null,
+    onRetryUpload: () -> Unit = {},
     onCancelImport: () -> Unit = {},
     onClick: () -> Unit,
 ) {
@@ -655,6 +660,7 @@ private fun HomeBookCard(
         item.learning -> " · 在学"
         else -> ""
     }
+    val uploadLine = uploadStatus?.cardStatusLine()
     Column(
         Modifier.fillMaxWidth()
             .paperShadow("card", colors.dark)
@@ -677,6 +683,32 @@ private fun HomeBookCard(
                 overflow = TextOverflow.Ellipsis,
             )
             CoachCardMeta("${item.pageCount} 页 · 读到第 ${item.readingPage} 页$statusSuffix")
+        }
+        if (uploadLine != null) {
+            Row(
+                Modifier.fillMaxWidth()
+                    .padding(start = 18.dp, end = 18.dp, bottom = 10.dp)
+                    .testTag("book-upload-status-${item.id}"),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    uploadLine,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (uploadStatus.canRetry) colors.dangerFg else colors.fgTertiary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (uploadStatus.canRetry) {
+                    V7TextButton(
+                        onClick = onRetryUpload,
+                        enabled = enabled,
+                        ringInside = true,
+                        modifier = Modifier.testTag("book-upload-retry-${item.id}"),
+                    ) { Text("重试", style = MaterialTheme.typography.labelSmall) }
+                }
+            }
         }
         if (activeImport != null) {
             BookImportProgressBar(

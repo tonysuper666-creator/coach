@@ -17,6 +17,7 @@ internal val observedFriend = AttributeKey<String>("coach.friend")
 internal fun friendId(name: String) = sha256(name.toByteArray(Charsets.UTF_8))
 private val friendStudyModeRegex = Regex("""/api/books/[^/]+/modes/[^/]+""")
 private val friendBookMapBatchRegex = Regex("""/api/books/[^/]+/book-map/batch""")
+private val unifiedBookStatusRegex = Regex("""/v1/books/sb_[0-9a-f]{24}/status""")
 
 internal fun friendPath(call: ApplicationCall): Boolean {
     val method = call.request.httpMethod
@@ -26,8 +27,11 @@ internal fun friendPath(call: ApplicationCall): Boolean {
         HttpMethod.Post to "/v1/public/sable", HttpMethod.Post to "/v1/pair", HttpMethod.Get to "/v1/public/status",
         HttpMethod.Post to "/v1/library/explain", HttpMethod.Post to "/v1/library/explain/cancel",
         HttpMethod.Post to "/v1/library/companion/chapter",
-        HttpMethod.Post to "/v1/library/collection/ask" -> true
-        else -> method == HttpMethod.Post && (friendStudyModeRegex.matches(path) || friendBookMapBatchRegex.matches(path))
+        HttpMethod.Post to "/v1/library/collection/ask",
+        HttpMethod.Post to "/v1/books/upload",
+        HttpMethod.Get to "/v1/books" -> true
+        else -> (method == HttpMethod.Post && (friendStudyModeRegex.matches(path) || friendBookMapBatchRegex.matches(path))) ||
+            (method == HttpMethod.Get && unifiedBookStatusRegex.matches(path))
     }
 }
 

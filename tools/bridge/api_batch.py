@@ -104,6 +104,7 @@ class BatchRouter:
                          "input_sha256": hashlib.sha256((system + "\0" + prompt).encode()).hexdigest()}
                 # Persist intent before reserving/sending. A crash here fails closed.
                 atomic_json(path, state)
+                submitting_http = False
                 try:
                     default_limit = 8192 if model == "claude-haiku-5-5" else 4000
                     limit = max_tokens if max_tokens is not None else default_limit
@@ -115,11 +116,19 @@ class BatchRouter:
                     state["reservation"] = self.router.ledger.reserve(provider, self.router.keys.get(provider, ""), maximum)
                     atomic_json(path, state)
                     async with self.router.client_factory() as client:
+                        submitting_http = True
                         state["batch_id"] = await self.submit(client, provider, key, model, system, prompt, limit)
+                        submitting_http = False
                     state["phase"] = "pending"
                     state["next_poll"] = self.clock() + 60
                     atomic_json(path, state)
-                except (ApiFailure, Denied, httpx.HTTPError, ValueError, KeyError, TypeError):
+                except httpx.HTTPError:
+                    if submitting_http:
+                        self.failed(path, state, "batch_submit_ambiguous")
+                        raise ApiFailure("batch_submit_ambiguous") from None
+                    self.failed(path, state, "batch_submit_unavailable")
+                    raise ApiFailure("batch_submit_unavailable") from None
+                except (ApiFailure, Denied, ValueError, KeyError, TypeError):
                     self.failed(path, state, "batch_submit_unavailable")
                     raise ApiFailure("batch_submit_unavailable") from None
                 raise BatchPending()

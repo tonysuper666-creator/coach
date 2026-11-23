@@ -413,4 +413,100 @@ class PracticeGradeAndDiagnoseTest {
         assertTrue(item.studentQuoteVerified)
         assertTrue(item.anchorVerified)
     }
+
+    @Test
+    fun friendPracticePropagatesHeadersSkipsOwnerLedgerAndOwnerUsesPrimaryBeforeDeepSeek() = runBlocking {
+        val dir = Files.createTempDirectory("practice-friend-isolation")
+        val capturedHeaders = java.util.concurrent.CopyOnWriteArrayList<Map<String, String>>()
+        val capturedModels = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/v1/chat/completions") { exchange ->
+            val raw = exchange.requestBody.readBytes().decodeToString()
+            val bodyJson = json.parseToJsonElement(raw).jsonObject
+            capturedModels.add(bodyJson["model"]?.jsonPrimitive?.contentOrNull.orEmpty())
+            val hdrs = mapOf(
+                "task" to exchange.requestHeaders.getFirst("X-Coach-Task").orEmpty(),
+                "friend" to exchange.requestHeaders.getFirst("X-Coach-Friend").orEmpty(),
+                "device" to exchange.requestHeaders.getFirst("X-Coach-Friend-Device").orEmpty(),
+            )
+            capturedHeaders.add(hdrs)
+            val reply = buildJsonObject {
+                put("model", bodyJson["model"]?.jsonPrimitive?.contentOrNull ?: BridgeClient.CLAUDE)
+                put("choices", buildJsonArray {
+                    add(buildJsonObject {
+                        put("index", 0)
+                        put("message", buildJsonObject {
+                            put("role", "assistant")
+                            put("content", """{"items":[{"cid":"C1","verdict":"FULL","awardedMarks":2.0,"studentQuote":"Price equals marginal cost","feedbackNoteZh":"完全正确，见第1页。","pdfPage":1,"quoteAnchor":"Price equals marginal cost"}]}""")
+                        })
+                    })
+                })
+                put("x_coach", buildJsonObject {
+                    put("status", "complete")
+                    put("served_by", bodyJson["model"]?.jsonPrimitive?.contentOrNull ?: BridgeClient.CLAUDE)
+                    put("physical_calls", 1)
+                })
+            }
+            val bytes = reply.toString().toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        val ledger = BookTokenLedger(dir)
+        try {
+            val bridge = BridgeClient(BridgeConfig(baseUrl = "http://127.0.0.1:${server.address.port}"))
+            var deepSeekCalled = false
+            val deepSeekOverflow = object : BatchAiTransport {
+                override suspend fun generateSection(systemPrompt: String, userPrompt: String, task: String, batchKey: String, maxTokens: Int): BatchTransportReply {
+                    deepSeekCalled = true
+                    error("deepSeek should not be called when primary succeeds")
+                }
+            }
+            val bridgeTransport = HaikuPinnedBridgeTransport(
+                bridge = bridge,
+                defaultMaxTokens = PracticeGradeLimits.BATCH_MAX_TOKENS,
+                backgroundBatch = false,
+                model = PracticeGradeLimits.PINNED_GRADE_MODEL,
+            )
+            val routed = RoutedBatchAiTransport(
+                primary = bridgeTransport,
+                overflow = deepSeekOverflow,
+                friendTransport = bridgeTransport,
+            )
+            val svc = PracticeGradeAndDiagnoseService(routed, ledger)
+            val req = PracticeGradeAndDiagnoseRequest(
+                mode = "GRADE_ONLY",
+                bookId = "book-friend-practice",
+                questionStem = "State the optimality condition.",
+                studentAnswer = "Price equals marginal cost in equilibrium.",
+                rubricCriteria = listOf(PracticeRubricCriterionInput("C1", "Condition", 2.0, 1, "Price equals marginal cost")),
+                sourcePages = listOf(PracticeSourcePageInput(1, "Price equals marginal cost in competitive equilibrium.")),
+                generateVariant = false,
+            )
+
+            // 1) Friend path uses friend headers, READER_SELECTION + CLAUDE, and never touches owner ledger or DeepSeek.
+            val friendResp = svc.process(req, friend = "alice", device = "phone-1")
+            assertEquals(1, capturedModels.size)
+            assertEquals(BridgeClient.CLAUDE, capturedModels[0])
+            assertEquals("READER_SELECTION", capturedHeaders[0]["task"])
+            assertEquals(friendId("alice"), capturedHeaders[0]["friend"])
+            assertEquals("phone-1", capturedHeaders[0]["device"])
+            assertFalse(deepSeekCalled)
+            assertEquals(0, ledger.bookSummary("book-friend-practice").calls)
+            assertEquals(2.0, friendResp.totalAwarded, 1e-6)
+
+            // 2) Owner path uses primary bridge (GPT_62_ASTRA), not DeepSeek first, and records owner ledger.
+            svc.process(req)
+            assertEquals(2, capturedModels.size)
+            assertEquals(PracticeGradeLimits.PINNED_GRADE_MODEL, capturedModels[1])
+            assertEquals("practice_grade", capturedHeaders[1]["task"])
+            assertEquals("", capturedHeaders[1]["friend"])
+            assertFalse(deepSeekCalled)
+            assertEquals(1, ledger.bookSummary("book-friend-practice").calls)
+        } finally {
+            server.stop(0)
+            dir.toFile().deleteRecursively()
+        }
+    }
 }

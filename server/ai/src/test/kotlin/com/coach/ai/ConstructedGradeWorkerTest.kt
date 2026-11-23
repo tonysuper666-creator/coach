@@ -53,8 +53,8 @@ class ConstructedGradeWorkerTest {
             val record=actor.execute { constructedRecord("c","a")!! }
             val facts=record.getValue("grades").jsonArray
             assertEquals(2,facts.size)
-            assertEquals(BridgeClient.CLAUDE,facts[0].jsonObject.str("graderModel"))
-            assertEquals(BridgeClient.CODEX,facts[1].jsonObject.str("reviewerModel"))
+            assertEquals(BridgeClient.GPT_62_ASTRA,facts[0].jsonObject.str("graderModel"))
+            assertEquals(BridgeClient.OPUS,facts[1].jsonObject.str("reviewerModel"))
             val evidence=facts[0].jsonObject.getValue("evidence").jsonArray.single().jsonObject
             assertEquals(quote,answer.substring(evidence.num("start").toInt(),evidence.num("end").toInt()))
             assertEquals(listOf("a"),actor.execute { snapshot("c").projection.mastery.getValue("kp").window })
@@ -76,7 +76,7 @@ class ConstructedGradeWorkerTest {
                 val revision=if(mode=="forged") draft(5,"Words absent from the learner response.") else draft(5)
                 val response=if(mode=="total_only") """{"verdict":"REVISE","revised_total":5}"""
                     else """{"verdict":"REVISE","revised_grade":$revision}"""
-                bridge.enqueue(200,StubBridge.completion(response,when(mode) { "same_vendor" -> BridgeClient.CLAUDE; "missing_identity" -> ""; else -> "__MODEL__" }))
+                bridge.enqueue(200,StubBridge.completion(response,when(mode) { "same_vendor" -> BridgeClient.GPT_62_ASTRA; "missing_identity" -> ""; else -> "__MODEL__" }))
                 worker.runOne()
                 val es=actor.execute { events("c") }
                 val review=es.filter { it.type=="grade_reviewed" }
@@ -167,9 +167,9 @@ class ConstructedGradeWorkerTest {
             worker.runOne();worker.runOne()
             val es=actor.execute { events("c") }
             val graded=es.single { it.type=="attempt_graded" }.payload
-            assertEquals(BridgeClient.CODEX,graded.str("graderModel"))
+            assertEquals(BridgeClient.OPUS,graded.str("graderModel"))
             assertTrue(graded.str("notice").contains("限流"))
-            assertEquals(BridgeClient.CLAUDE,es.single { it.type=="grade_reviewed" }.payload.str("reviewerModel"))
+            assertEquals(BridgeClient.GPT_62_ASTRA,es.single { it.type=="grade_reviewed" }.payload.str("reviewerModel"))
             assertEquals(3L,actor.execute { supplyCallCount() })
         } } finally { actor.close();dir.toFile().deleteRecursively() }
     }

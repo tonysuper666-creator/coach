@@ -762,6 +762,7 @@ interface BatchAiTransport {
 class RoutedBatchAiTransport(
     private val primary: BatchAiTransport?,
     private val overflow: BatchAiTransport?,
+    private val friendTransport: BatchAiTransport? = overflow,
 ) : BatchAiTransport {
     override suspend fun generateSection(
         systemPrompt: String,
@@ -794,8 +795,8 @@ class RoutedBatchAiTransport(
         device: String?,
     ): BatchTransportReply {
         if (friend != null) {
-            val friendOverflow = overflow ?: throw IllegalStateException("No friend batch AI transport available")
-            return friendOverflow.generateSectionForFriend(systemPrompt, userPrompt, task, batchKey, maxTokens, friend, device)
+            val target = friendTransport ?: throw IllegalStateException("No friend batch AI transport available")
+            return target.generateSectionForFriend(systemPrompt, userPrompt, task, batchKey, maxTokens, friend, device)
         }
         return generateSection(systemPrompt, userPrompt, task, batchKey, maxTokens)
     }
@@ -1006,7 +1007,7 @@ class HaikuRealtimeBridgeTransport(
     }
 }
 
-private class FriendScopedBatchTransport(
+internal class FriendScopedBatchTransport(
     private val delegate: BatchAiTransport,
     private val friend: String,
     private val device: String,

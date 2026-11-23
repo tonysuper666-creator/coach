@@ -443,7 +443,7 @@ class BridgeClient(
             failure != null -> BridgeResult.Failure(failure, resolved, call, failureStage)
             resolved == null -> BridgeResult.Failure("no_x_coach", null, call, BridgeFailureStage.STREAM_PROTOCOL)
             !resolved.complete -> BridgeResult.Failure("status_${resolved.status}", resolved, call, BridgeFailureStage.TERMINAL)
-            else -> independenceProblem(request.model, resolved)?.let { problem ->
+            else -> independenceProblem(request, resolved)?.let { problem ->
                 BridgeResult.Failure(problem, resolved, call, BridgeFailureStage.ROUTING)
             } ?: BridgeResult.Success(text.toString(), resolved, call)
         }
@@ -521,7 +521,7 @@ class BridgeClient(
             ?.stringOrNull("content")
             ?: ""
         if (terminal != null && terminal.complete) {
-            independenceProblem(request.model, terminal)?.let { problem ->
+            independenceProblem(request, terminal)?.let { problem ->
                 return BridgeResult.Failure(problem, terminal, callFor(request, callId, requestId, startedAt, started, terminal, content.length).copy(status="failed",error=problem))
             }
         }
@@ -595,7 +595,7 @@ class BridgeClient(
         )
         val streamError = failure
         if (resolved != null && resolved.complete) {
-            independenceProblem(request.model, resolved)?.let { problem ->
+            independenceProblem(request, resolved)?.let { problem ->
                 return BridgeResult.Failure(problem, resolved, call.copy(status="failed",error=problem))
             }
         }
@@ -614,10 +614,13 @@ class BridgeClient(
      * 异厂独立性（ADR-0002 第 3、4 条）：我们关了兜底，桥就不许兜底；`served_by` 必须和请求的是同一家。
      * 否则「异厂复核」可能是同一家模型，上层却照常写结果。
      */
-    private fun independenceProblem(requested: String, terminal: TerminalState): String? {
-        if (terminal.fallback) return "served_by_mismatch:fallback"
+    private fun independenceProblem(request: ChatRequest, terminal: TerminalState): String? {
         val served = terminal.servedBy?.takeIf { it.isNotBlank() } ?: return "served_by_missing"
-        if (vendorOf(served) != vendorOf(requested)) return "served_by_mismatch:$served"
+        if (terminal.fallback) {
+            if (request.friendId == null && request.task in CROSS_VENDOR_FALLBACK_TASKS) return null
+            return "served_by_mismatch:fallback"
+        }
+        if (vendorOf(served) != vendorOf(request.model)) return "served_by_mismatch:$served"
         return null
     }
 
@@ -652,6 +655,20 @@ class BridgeClient(
         const val GPT_62_ASTRA = "gpt-6.2-astra"
         const val GPT_62_SOL = "gpt-6.2-sol"
         const val GPT_61_TERRA = "gpt-6.1-terra"
+
+        private val CROSS_VENDOR_FALLBACK_TASKS = setOf(
+            "TEACH", "READER_SELECTION", "SOURCE_LOOKUP", "PREPARE_TEACH",
+            "COLLECTION_QA",
+            "BOOK_SECTION_BATCH", "BOOK_EXERCISE_HINTS", "STUDY_MODE_STREAM",
+            "BOOK_MAP_BATCH_CHUNK", "BOOK_MAP_BATCH_GRAPH",
+            "BOOK_STRUCTURE_DETECT", "BOOK_MATH_VERIFY", "BOOK_MATH_REPAIR",
+            "gen_mcq", "repair_mcq_sources", "gen_constructed", "repair_constructed_sources", "course_mock_item",
+            "grade_constructed", "grade_essay", "repair_grade", "repair_essay", "JOURNAL_SUMMARY",
+            "practice_grade", "practice_diagnose", "practice_variant",
+            "course_topic_map", "course_topic_reduce", "course_topic_math_repair",
+            "booklist_concept_align",
+            "COURSE_PLAN", "INITIAL_OUTLINE", "REVISE_OUTLINE", "course_mock_plan",
+        )
     }
 }
 

@@ -68,7 +68,7 @@ fun Application.practiceGradeRoutes(
                     requestId = (input["requestId"] as? JsonPrimitive)?.content.orEmpty()
 
                     val parsed = PracticeGradeRequestParser.parse(input)
-                    val response = activeService.process(parsed)
+                    val response = activeService.process(parsed, friend = friend, device = device)
                     val body = response.toJson()
 
                     if (friend != null && friends != null) {

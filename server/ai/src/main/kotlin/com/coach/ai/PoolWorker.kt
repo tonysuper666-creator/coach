@@ -60,8 +60,9 @@ class PoolWorker(
             val overlap = RestrictedSourceGuard(reference,listOf(input.str("excerpt")))
             val generated = try {
                 withContext(Dispatchers.IO) {
-                    beforeCall(BridgeClient.CLAUDE)
+                    beforeCall(BridgeClient.GPT_62_SOL)
                     pool.generateFor(input.str("kp"),input.str("objective"),input.str("excerpt"),3,
+                        generatorModel=BridgeClient.GPT_62_SOL,
                         avoid=avoid,background=background,retryMalformed=input.flag("retryMalformed"),
                         internalReference=reference.joinToString("\n\n"))
                 }
@@ -86,8 +87,8 @@ class PoolWorker(
             if (questions.any { !QuestionGate.quotedVerbatim(it,input.str("excerpt")) }) {
                 // Repair quotations before review; the response cannot replace questions, options or keys.
                 val repair = try { withContext(Dispatchers.IO) {
-                    beforeCall(BridgeClient.CLAUDE)
-                    jobClient.chat(ChatRequest("repair_mcq_sources",BridgeClient.CLAUDE,Prompts.GEN_SYSTEM,
+                    beforeCall(BridgeClient.GPT_62_SOL)
+                    jobClient.chat(ChatRequest("repair_mcq_sources",BridgeClient.GPT_62_SOL,Prompts.GEN_SYSTEM,
                         "Return ONLY [{\"id\":0,\"source_quote\":\"exact contiguous supporting source text\"}, ...] for every candidate. Copy at least eight words verbatim, including HTML/LaTeX/Markdown; do not render symbols, paraphrase or join fragments. Do not change any question or key.\nSource:\n"+
                         input.str("excerpt")+"\nCandidates:\n"+JsonArray(questions.mapIndexed { i,q -> JsonObject(storedMcq(q)+("id" to JsonPrimitive(i))) }),
                         false,background=background,maxTokens=2500))
@@ -116,11 +117,16 @@ class PoolWorker(
             return Step(job.id,job.kind,if(queued) "completed" else "stale")
         }
         val questions = (input.getValue("questions") as JsonArray).map { readStoredMcq(it.jsonObject) }
+        val generator = input.str("generator")
+        val reviewerModel = if (modelVendor(generator) == "openai") BridgeClient.OPUS else BridgeClient.GPT_62_ASTRA
         val review = try {
             withContext(Dispatchers.IO) {
-                beforeCall(BridgeClient.CODEX)
-                pool.reviewGroup(listOf(QuestionPool.ReviewEntry(input.str("kp"),input.str("excerpt"),questions,0)),
-                    background=background)
+                beforeCall(reviewerModel)
+                pool.reviewGroup(
+                    listOf(QuestionPool.ReviewEntry(input.str("kp"), input.str("excerpt"), questions, 0)),
+                    reviewerModel = reviewerModel,
+                    background = background,
+                )
             }
         } catch (e: CancellationException) {
             throw e
@@ -132,7 +138,6 @@ class PoolWorker(
         }
         val call = requireNotNull(review.call)
         actor.execute { recordAiCall(call.toJson(),type) }
-        val generator=input.str("generator")
         val reviewer=call.servedBy
         val accepted=questions.mapIndexedNotNull { index,q ->
             if (reviewer.isNullOrBlank() || modelVendor(generator) == modelVendor(reviewer) ||
@@ -162,7 +167,7 @@ class PoolWorker(
         val input=job.subject
         val generating=job.kind == "gen_constructed"
         val question=if(generating) null else TaskParsing.constructed(JsonArray(listOf(input.getValue("question"))).toString()).single().copy(kpId=input.str("kp"))
-        val model=if(generating) BridgeClient.CLAUDE else BridgeClient.CODEX
+        val model=if(generating) BridgeClient.GPT_62_SOL else if(modelVendor(input.str("generator")) == "openai") BridgeClient.OPUS else BridgeClient.GPT_62_ASTRA
         val avoid=if(generating) actor.execute { poolStems(input.str("course"),input.str("kp")) } else emptyList()
         var response=withContext(Dispatchers.IO) {
             beforeCall(model)

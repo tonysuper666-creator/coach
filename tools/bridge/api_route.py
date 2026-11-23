@@ -261,6 +261,23 @@ class ApiRouter:
             self._gates[provider] = gate
         return gate
 
+    def fallback_target(self, task: str, primary_model: str) -> str | None:
+        if not self.cross_vendor_fallback:
+            return None
+        cand = fallback_model(task, primary_model)
+        if cand and self.keys.get(vendor(cand), ""):
+            return cand
+        return None
+
+    async def fallback_events(self, task: str, primary_model: str, system: str, prompt: str, max_tokens: int | None):
+        fb = self.fallback_target(task, primary_model)
+        if fb is None:
+            raise Denied("no_cross_vendor_fallback")
+        async for event in self._stream_model(task, fb, system, prompt, max_tokens, friend=None, device=None):
+            if event.get("kind") == "complete":
+                event = dict(event, fallback=True)
+            yield event
+
     async def events(self, task: str, requested: str, system: str, prompt: str, max_tokens: int | None, format_attempt=0, friend=None, device=None):
         if friend is not None and (task != "READER_SELECTION" or vendor(requested) != "anthropic"):
             raise Denied("invalid_friend_route")
@@ -268,14 +285,12 @@ class ApiRouter:
         if model is None:
             raise Denied("unrouted_task")
         fb = None
-        if friend is None and self.cross_vendor_fallback:
-            cand = fallback_model(task, model)
-            if cand and self.keys.get(vendor(cand), ""):
-                fb = cand
+        if friend is None:
+            fb = self.fallback_target(task, model)
         yielded_text = False
         try:
             async for event in self._stream_model(task, model, system, prompt, max_tokens, friend=friend, device=device):
-                if event.get("kind") == "text":
+                if event.get("kind") == "text" and event.get("text"):
                     yielded_text = True
                 yield event
             return
@@ -283,6 +298,8 @@ class ApiRouter:
             if yielded_text or fb is None:
                 raise
         async for event in self._stream_model(task, fb, system, prompt, max_tokens, friend=None, device=None):
+            if event.get("kind") == "complete":
+                event = dict(event, fallback=True)
             yield event
 
     async def _stream_model(self, task: str, model: str, system: str, prompt: str, max_tokens: int | None, *, friend=None, device=None):
@@ -363,8 +380,9 @@ class ApiRouter:
                                                 yield {"kind": "meta", "served_by": served or model}
                                             elif kind == "content_block_delta" and event.get("delta", {}).get("type") == "text_delta":
                                                 delta = event["delta"]["text"]
-                                                text.append(delta)
-                                                yield {"kind": "text", "text": delta}
+                                                if delta:
+                                                    text.append(delta)
+                                                    yield {"kind": "text", "text": delta}
                                             elif kind == "message_delta":
                                                 usage.update(event.get("usage", {}))
                                                 finish = event.get("delta", {}).get("stop_reason")
@@ -378,8 +396,10 @@ class ApiRouter:
                                                 served = event["response"].get("model")
                                                 yield {"kind": "meta", "served_by": served or model}
                                             elif kind == "response.output_text.delta":
-                                                text.append(event["delta"])
-                                                yield {"kind": "text", "text": event["delta"]}
+                                                delta = event["delta"]
+                                                if delta:
+                                                    text.append(delta)
+                                                    yield {"kind": "text", "text": delta}
                                             elif kind in ("response.completed", "response.incomplete"):
                                                 result = event["response"]
                                                 served = result.get("model")

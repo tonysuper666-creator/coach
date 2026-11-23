@@ -2,6 +2,7 @@ package com.coach.server
 
 import com.coach.ai.BridgeClient
 import io.ktor.http.HttpStatusCode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -55,8 +56,10 @@ class AnthropicHaikuVisionTransport(
     private val fallbackModel: String = BridgeClient.GPT_62_ASTRA,
     private val endpoint: String = "https://api.anthropic.com/v1/messages",
     private val openAiEndpoint: String = "https://api.openai.com/v1/chat/completions",
+    private val connectTimeout: Duration = Duration.ofSeconds(10),
+    private val requestTimeout: Duration = Duration.ofSeconds(60),
 ) : CourseVisionTransport {
-    private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()
+    private val http = HttpClient.newBuilder().connectTimeout(connectTimeout).build()
     private val json = Json { ignoreUnknownKeys = true }
 
     override suspend fun recognizePage(
@@ -69,9 +72,17 @@ class AnthropicHaikuVisionTransport(
         if (apiKey.isNotBlank()) {
             try {
                 return@withContext callAnthropic(apiKey, pngBase64, promptText)
-            } catch (primaryErr: MockError) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw e
+            } catch (primaryErr: Exception) {
                 val oaiKey = openAiKeyProvider()
-                if (oaiKey.isBlank()) throw primaryErr
+                if (oaiKey.isBlank()) {
+                    if (primaryErr is MockError) throw primaryErr
+                    throw MockError(HttpStatusCode.BadGateway, "视觉识别服务暂时不可用（${primaryErr.javaClass.simpleName}）。")
+                }
                 return@withContext callOpenAiVision(oaiKey, pngBase64, promptText)
             }
         }
@@ -108,13 +119,20 @@ class AnthropicHaikuVisionTransport(
             })
         }
         val req = HttpRequest.newBuilder(URI.create(endpoint))
-            .timeout(Duration.ofSeconds(60))
+            .timeout(requestTimeout)
             .header("Content-Type", "application/json")
             .header("x-api-key", apiKey)
             .header("anthropic-version", "2023-06-01")
             .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
             .build()
-        val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
+        val resp = try {
+            http.send(req, HttpResponse.BodyHandlers.ofString())
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw e
+        } catch (e: Exception) {
+            throw MockError(HttpStatusCode.BadGateway, "视觉识别主用服务暂时不可用（${e.javaClass.simpleName}）。")
+        }
         val elapsedMs = (System.nanoTime() - started) / 1_000_000L
         if (resp.statusCode() !in 200..299) {
             throw MockError(HttpStatusCode.BadGateway, "视觉识别服务暂时不可用（HTTP ${resp.statusCode()}）。")
@@ -160,12 +178,19 @@ class AnthropicHaikuVisionTransport(
             })
         }
         val req = HttpRequest.newBuilder(URI.create(openAiEndpoint))
-            .timeout(Duration.ofSeconds(60))
+            .timeout(requestTimeout)
             .header("Content-Type", "application/json")
             .header("Authorization", "Bearer $apiKey")
             .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
             .build()
-        val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
+        val resp = try {
+            http.send(req, HttpResponse.BodyHandlers.ofString())
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw e
+        } catch (e: Exception) {
+            throw MockError(HttpStatusCode.BadGateway, "视觉识别兜底服务暂时不可用（${e.javaClass.simpleName}）。")
+        }
         val elapsedMs = (System.nanoTime() - started) / 1_000_000L
         if (resp.statusCode() !in 200..299) {
             throw MockError(HttpStatusCode.BadGateway, "视觉识别兜底服务暂时不可用（HTTP ${resp.statusCode()}）。")

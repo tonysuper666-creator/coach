@@ -119,9 +119,12 @@ fun main(args: Array<String>): Unit = runBlocking {
     val imports = ImportedBookSources(data.resolve("personal-imports"))
     val companionCache = ChapterCompanionCache(data.resolve("companion"))
     val apiOnly = System.getenv("COACH_API_ONLY") == "1" || System.getenv("COACH_FRIEND_API_ONLY") == "1"
+    val deepSeekFallback = if (apiOnly) null else CodeBuddyDeepSeekTransport()
+    val companionBridge = HaikuRealtimeBridgeTransport(chat.bridge)
     val companionTransport = RoutedBatchAiTransport(
-        primary = if (apiOnly) null else CodeBuddyDeepSeekTransport(),
-        overflow = HaikuRealtimeBridgeTransport(chat.bridge),
+        primary = companionBridge,
+        overflow = deepSeekFallback,
+        friendTransport = companionBridge,
     )
     val companionPipeline = SectionConcurrentCompanionPipeline(companionTransport, tokenLedger, companionCache)
     val courseAlignPipeline = CourseAlignmentPipeline(SonnetBridgeAlignTransport(chat.bridge), tokenLedger)
@@ -129,25 +132,29 @@ fun main(args: Array<String>): Unit = runBlocking {
     val courseTopicPipeline = CourseTopicSynthesisPipeline(companionTransport, tokenLedger, courseTopicCache)
     val courseVisionService = CourseVisionService(data.resolve("course-vision"), tokenLedger = tokenLedger)
     val booklistAligner = BooklistSemanticAligner(companionTransport, tokenLedger)
+    val practiceBridge = HaikuPinnedBridgeTransport(
+        bridge = chat.bridge,
+        defaultMaxTokens = PracticeGradeLimits.BATCH_MAX_TOKENS,
+        backgroundBatch = System.getenv("COACH_PRACTICE_BATCH") == "1",
+        model = PracticeGradeLimits.PINNED_GRADE_MODEL,
+    )
     val practiceTransport = RoutedBatchAiTransport(
-        primary = if (apiOnly) null else CodeBuddyDeepSeekTransport(),
-        overflow = HaikuPinnedBridgeTransport(
-            bridge = chat.bridge,
-            defaultMaxTokens = PracticeGradeLimits.BATCH_MAX_TOKENS,
-            backgroundBatch = System.getenv("COACH_PRACTICE_BATCH") == "1",
-            model = PracticeGradeLimits.PINNED_GRADE_MODEL,
-        ),
+        primary = practiceBridge,
+        overflow = deepSeekFallback,
+        friendTransport = practiceBridge,
     )
     val practiceGradeService = PracticeGradeAndDiagnoseService(practiceTransport, tokenLedger)
     val collectionQaService = CollectionQaService(HaikuStreamingCollectionQaTransport(chat.bridge), tokenLedger)
+    val courseMockBridge = HaikuPinnedBridgeTransport(
+        bridge = chat.bridge,
+        defaultMaxTokens = CourseMockLimits.ITEM_MAX_TOKENS,
+        backgroundBatch = System.getenv("COACH_MOCK_BATCH") == "1" || System.getenv("COACH_PRACTICE_BATCH") == "1",
+        model = CourseMockLimits.PINNED_ITEM_MODEL,
+    )
     val courseMockTransport = RoutedBatchAiTransport(
-        primary = if (apiOnly) null else CodeBuddyDeepSeekTransport(),
-        overflow = HaikuPinnedBridgeTransport(
-            bridge = chat.bridge,
-            defaultMaxTokens = CourseMockLimits.ITEM_MAX_TOKENS,
-            backgroundBatch = System.getenv("COACH_MOCK_BATCH") == "1" || System.getenv("COACH_PRACTICE_BATCH") == "1",
-            model = CourseMockLimits.PINNED_ITEM_MODEL,
-        ),
+        primary = courseMockBridge,
+        overflow = deepSeekFallback,
+        friendTransport = courseMockBridge,
     )
     val courseMockService = CourseMockService(
         plannerTransport = SonnetBridgeMockPlannerTransport(chat.bridge),

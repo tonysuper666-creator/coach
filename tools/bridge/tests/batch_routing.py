@@ -305,5 +305,43 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(self.calls))
 
 
+    async def test_api_only_pre_submit_failure_falls_back_cross_vendor_and_ambiguous_does_not(self):
+        from api_routing import frames as stream_frames
+        req_mcq = bridge.build_req(
+            {"model": "gpt-6.2-sol", "max_tokens": 100, "messages": [{"role": "user", "content": "synthetic"}]},
+            {"x-coach-task": "gen_mcq", "x-coach-background": "1", "x-coach-batch-key": self.key("pre-fail")},
+        )
+        seen_models = []
+
+        def handle_backup(request):
+            seen_models.append(json.loads(request.content)["model"])
+            return httpx.Response(200, content=stream_frames("anthropic", model="claude-opus-5-5"))
+
+        api_router = ApiRouter(self.ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(handle_backup)),
+                               keys={"openai": "", "anthropic": KEY}, cross_vendor_fallback=True)
+        batch_router = BatchRouter(api_router, lambda: self.now)
+        with patch.object(bridge, "API_ONLY", True), patch.object(bridge, "API_ROUTER", api_router), \
+                patch.object(bridge, "API_BATCH", batch_router), patch.object(bridge, "write_log"):
+            result = await bridge.dispatch_batch(req_mcq, req_mcq.model, None)
+        self.assertEqual(("complete", "claude-opus-5-5", ["claude-opus-5-5"], True),
+                         (result.status, result.served_by, seen_models, req_mcq.fallback))
+
+        # Ambiguous network failure during submit must NOT replay onto cross-vendor backup.
+        self.provider = "openai"
+        self.failure = lambda request: (_ for _ in ()).throw(httpx.ReadError("ambiguous")) if request.url.path == "/v1/files" else httpx.Response(200, json={})
+        seen_models.clear()
+        req_amb = bridge.build_req(
+            {"model": "gpt-6.2-sol", "max_tokens": 100, "messages": [{"role": "user", "content": "synthetic"}]},
+            {"x-coach-task": "gen_mcq", "x-coach-background": "1", "x-coach-batch-key": self.key("ambig")},
+        )
+        api_amb = ApiRouter(self.ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(self.handle)),
+                            keys={"openai": KEY, "anthropic": KEY}, cross_vendor_fallback=True)
+        batch_amb = BatchRouter(api_amb, lambda: self.now)
+        with patch.object(bridge, "API_ONLY", True), patch.object(bridge, "API_ROUTER", api_amb), \
+                patch.object(bridge, "API_BATCH", batch_amb), patch.object(bridge, "write_log"):
+            failed = await bridge.dispatch_batch(req_amb, req_amb.model, None)
+        self.assertEqual(("failed", "batch_submit_ambiguous"), (failed.status, failed.reason))
+
+
 if __name__ == "__main__":
     unittest.main()

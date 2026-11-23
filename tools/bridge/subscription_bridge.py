@@ -1399,6 +1399,46 @@ async def dispatch_batch(req: ReqCtx, model: str, effort: str | None) -> Outcome
         write_log(request_id=req.request_id, task=req.task, event="api_fallback", reason=reason)
         if API_ONLY:
             req.transport = "api"
+            pre_submit_reasons = (
+                "batch_submit_unavailable",
+                "missing_key",
+                "credit_limit_95_percent",
+                "grant_allocation_unavailable",
+            )
+            primary = api_model(req.task, model, req.format_attempt) or model
+            if not req.friend_id and reason in pre_submit_reasons and API_ROUTER.fallback_target(req.task, primary) is not None:
+                try:
+                    async with aclosing(
+                        API_ROUTER.fallback_events(
+                            req.task, primary, req.spec_data.system, req.spec_data.prompt, req.body.get("max_tokens")
+                        )
+                    ) as events:
+                        async for event in events:
+                            if event["kind"] == "attempt":
+                                req.physical_calls += 1
+                                req.t_acq = req.t_acq or time.monotonic()
+                            elif event["kind"] == "complete":
+                                req.served_by = event["served_by"]
+                                req.fallback = True
+                                try:
+                                    API_BATCH.cache_fallback(
+                                        req.batch_key,
+                                        {
+                                            "text": event["text"],
+                                            "served_by": event["served_by"],
+                                            "usage": event["usage"],
+                                            "transport": "api",
+                                            "physical_calls": req.physical_calls,
+                                            "api_fallback": reason,
+                                        },
+                                    )
+                                except (Denied, OSError):
+                                    write_log(request_id=req.request_id, task=req.task, event="batch_cache_unavailable")
+                                return Outcome(
+                                    "complete", None, "stop", event["served_by"], text=event["text"], usage=event["usage"]
+                                )
+                except (ApiFailure, Denied, OSError):
+                    write_log(request_id=req.request_id, task=req.task, event="api_cross_vendor_fallback_failed")
             return Outcome("failed", reason, "error", model)
         outcome = await dispatch_cli(req, model, effort)
         if outcome.status == "complete":
@@ -1431,6 +1471,8 @@ async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
                         req.transport = "api"
                     elif kind == "complete":
                         req.served_by = event["served_by"]
+                        if event.get("fallback"):
+                            req.fallback = True
                         yield {"kind": "end", "outcome": Outcome("complete", None, "stop", event["served_by"],
                                text=event["text"], usage=event["usage"], started=sent)}
                         return

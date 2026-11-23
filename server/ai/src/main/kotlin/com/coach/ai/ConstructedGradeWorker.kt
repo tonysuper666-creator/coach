@@ -49,9 +49,9 @@ class ConstructedGradeWorker(private val actor: LedgerActor, private val client:
                 if(draft.calls.any { it.error?.contains("429")==true } || draft.defects.any { it.contains("429") }) {
                     val first=draft.calls
                     draft=withContext(Dispatchers.IO) { pipeline.gradeConstructed(process,answer,
-                        graderModel=BridgeClient.CODEX,reviewerModel=BridgeClient.CLAUDE,draftOnly=true) }
+                        graderModel=BridgeClient.OPUS,reviewerModel=BridgeClient.GPT_62_ASTRA,draftOnly=true) }
                     draft=draft.copy(calls=first+draft.calls)
-                    fallbackNotice="Claude 当前限流，改由 ${BridgeClient.CODEX} 批改；异厂复核后才计入。"
+                    fallbackNotice="OpenAI 当前限流，改由 ${BridgeClient.OPUS} 批改；异厂复核后才计入。"
                 }
                 actor.execute { draft.calls.forEach { recordAiCall(it.toJson(),"foreground") } }
                 if(draft.defects.isNotEmpty() || draft.draft==null) {
@@ -68,7 +68,7 @@ class ConstructedGradeWorker(private val actor: LedgerActor, private val client:
                 if(actor.execute { persistGradeDraft(work,stored,grader) }) onChanged(input.str("course"))
             } else {
                 val grader=input.str("grader")
-                val reviewer=if(modelVendor(grader)=="openai") BridgeClient.CLAUDE else BridgeClient.CODEX
+                val reviewer=if(modelVendor(grader)=="openai") BridgeClient.OPUS else BridgeClient.GPT_62_ASTRA
                 val frozen=input.getValue("draft").jsonObject
                 val draft=TaskParsing.grade(frozen.getValue("processGrade").toString())
                 val prepared=GradePipeline.Outcome(false,draft.awarded,emptyList(),emptyList(),null,

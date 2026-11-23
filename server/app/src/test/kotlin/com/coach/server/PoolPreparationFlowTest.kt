@@ -28,12 +28,12 @@ class PoolPreparationFlowTest {
                     "kpId" to "kp","title" to "Synthetic objective","op" to "add"))))) }
                 chat.openTutor("thread","course","kp",setOf("concept"),"Synthetic objective")
                 // First generation is malformed; the durable retry must use a changed prompt.
-                stub.completion("[{broken]")
+                stub.completion("[{broken]", BridgeClient.GPT_62_SOL)
                 stub.completion(JsonArray((0..2).map { i -> json("stem" to "Synthetic question $i asks for the uniquely correct result.",
                     "correct_text" to "Right result $i","distractors" to listOf("Wrong one $i","Wrong two $i","Wrong three $i"),
-                    "explanation" to "Supported by the source.","source_quote" to source) }).toString())
+                    "explanation" to "Supported by the source.","source_quote" to source) }).toString(), BridgeClient.GPT_62_SOL)
                 stub.completion(JsonArray((0..2).map { i -> json("id" to i,"answer_text" to "Right result $i",
-                    "defects" to emptyList<String>(),"note" to "Supported") }).toString(),BridgeClient.CODEX)
+                    "defects" to emptyList<String>(),"note" to "Supported") }).toString(),BridgeClient.OPUS)
                 chat.nextStep("thread","course",testUntaught=true)
                 withTimeout(2_000) { while(frames.none { it.str("t")=="tutor.progress" }) delay(10) }
                 assertTrue(frames.first { it.str("t")=="tutor.progress" }.str("text").startsWith("正在准备题目（约"))

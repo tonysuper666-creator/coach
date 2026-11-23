@@ -64,7 +64,7 @@ fun Application.courseMockRoutes(
                     }
                     val input = LedgerJson.parseToJsonElement(bodyBytes.decodeToString()).jsonObject
                     requestId = (input["requestId"] as? JsonPrimitive)?.content.orEmpty()
-                    val body = activeService.generate(input)
+                    val body = activeService.generate(input, friend = friend, device = device)
 
                     if (friend != null && friends != null) {
                         withContext(Dispatchers.IO) {

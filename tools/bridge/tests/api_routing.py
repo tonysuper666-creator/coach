@@ -438,6 +438,39 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
                 [e async for e in r_review.events("blind_review", "claude-sonnet-5-5", "sys", "usr", 100)]
             self.assertEqual(["api.anthropic.com"], seen_hosts)
 
+    async def test_empty_text_delta_before_drop_still_allows_cross_vendor_fallback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fund(root)
+            ledger = CreditLedger(root, lambda: NOW)
+
+            def empty_delta_then_drop(request):
+                if request.url.host == "api.anthropic.com":
+                    events = [
+                        {"type": "message_start", "message": {"model": "claude-sonnet-5-5", "usage": {"input_tokens": 10}}},
+                        {"type": "content_block_delta", "delta": {"type": "text_delta", "text": ""}},
+                    ]
+                    return httpx.Response(200, content="".join("data: " + json.dumps(e) + "\n\n" for e in events).encode())
+                return httpx.Response(200, content=frames("openai", model="gpt-6.2-sol"))
+
+            r = ApiRouter(ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(empty_delta_then_drop)),
+                          keys={"anthropic": KEY, "openai": KEY}, retry_429_delays=(), cross_vendor_fallback=True)
+            events = [e async for e in r.events("TEACH", "claude-sonnet-5-5", "sys", "usr", 100)]
+            self.assertEqual("complete", events[-1]["kind"])
+            self.assertEqual("gpt-6.2-sol", events[-1]["served_by"])
+
+            def partial_nonempty_then_drop(request):
+                events = [
+                    {"type": "message_start", "message": {"model": "claude-sonnet-5-5", "usage": {"input_tokens": 10}}},
+                    {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "partial"}},
+                ]
+                return httpx.Response(200, content="".join("data: " + json.dumps(e) + "\n\n" for e in events).encode())
+
+            r_partial = ApiRouter(ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(partial_nonempty_then_drop)),
+                                  keys={"anthropic": KEY, "openai": KEY}, retry_429_delays=(), cross_vendor_fallback=True)
+            with self.assertRaisesRegex(ApiFailure, "api_no_terminal"):
+                [e async for e in r_partial.events("TEACH", "claude-sonnet-5-5", "sys", "usr", 100)]
+
     def test_every_server_bridge_task_and_model_is_served(self):
         # TON-1795: 2.0 routes requested an unregistered model and unrouted tasks, so the
         # API-only bridge answered 404/503 and the chapter companion showed "暂时不可用".

@@ -560,7 +560,7 @@ class SectionBatchPipelineTest {
             assertEquals(409, revokedResp.statusCode(), "Deleted receipt during generation must withhold companion response")
             delayMs.set(0L)
 
-            // 8. Owner ledger reflects verified calls
+            // 8. Owner ledger reflects only owner's verified calls (friend calls stay isolated)
             val ledgerResp = http.send(
                 java.net.http.HttpRequest.newBuilder(java.net.URI("http://127.0.0.1:$port/v1/library/companion/ledger?bookId=$bookId"))
                     .header("Authorization", "Bearer $ownerToken")
@@ -570,10 +570,125 @@ class SectionBatchPipelineTest {
             )
             assertEquals(200, ledgerResp.statusCode())
             assertTrue(ledgerResp.body().contains("\"withinBudget\":true"))
-            assertTrue(ledgerResp.body().contains("\"calls\":2"))
+            assertTrue(ledgerResp.body().contains("\"calls\":1"))
         } finally {
             server.stop(100, 500)
             actor.close()
+        }
+    }
+
+    @Test
+    fun friendCompanionBypassesPrimaryAndSendsReaderSelectionWithFriendHeaders() = runBlocking {
+        val dir = Files.createTempDirectory("coach-companion-friend-bridge-")
+        val ledger = BookTokenLedger(dir)
+        val primaryCalls = AtomicInteger(0)
+        val observedRequests = CopyOnWriteArrayList<Triple<Map<String, String>, String, String>>()
+        val bridgeJson = """{"coreQuestion":"朋友伴读如何透传身份？","keyPoints":[{"summary":"弧弹性用于区间中点衡量价格变化。","pdfPage":1,"quoteAnchor":"arc elasticity measures price"}],"jargonGlosses":[],"pretest":[],"derivations":[],"optionalPractice":[]}"""
+        val mockBridge = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
+            createContext("/v1/chat/completions") { ex ->
+                val body = ex.requestBody.readBytes().decodeToString()
+                val headers = ex.requestHeaders.entries.associate { (k, v) -> k.lowercase() to v.joinToString(",") }
+                observedRequests += Triple(headers, body, ex.requestMethod)
+                val reply = buildJsonObject {
+                    put("model", "claude-haiku-5-5")
+                    put("choices", buildJsonArray {
+                        add(buildJsonObject {
+                            put("index", 0)
+                            put("message", buildJsonObject {
+                                put("role", "assistant")
+                                put("content", bridgeJson)
+                            })
+                        })
+                    })
+                    put("x_coach", buildJsonObject {
+                        put("status", "complete")
+                        put("finish_reason", "stop")
+                        put("served_by", "claude-haiku-5-5")
+                        put("fallback", false)
+                        put("physical_calls", 1)
+                        put("request_id", "synthetic-friend")
+                        put("queue_ms", 1)
+                        put("ttft_ms", 12)
+                        put("elapsed_ms", 20)
+                    })
+                }.toString().toByteArray(Charsets.UTF_8)
+                ex.responseHeaders.add("Content-Type", "application/json")
+                ex.sendResponseHeaders(200, reply.size.toLong())
+                ex.responseBody.use { it.write(reply) }
+            }
+            start()
+        }
+        try {
+            val bridgeUrl = "http://127.0.0.1:${mockBridge.address.port}"
+            val bridge = BridgeClient(BridgeConfig(baseUrl = bridgeUrl, testTraffic = true))
+            val primaryStub = object : BatchAiTransport {
+                override suspend fun generateSection(
+                    systemPrompt: String, userPrompt: String, task: String, batchKey: String, maxTokens: Int,
+                ): BatchTransportReply {
+                    primaryCalls.incrementAndGet()
+                    return BatchTransportReply(
+                        text = bridgeJson,
+                        routeChannel = CompanionRouteChannel.CODEBUDDY_DEEPSEEK_FLASH,
+                        model = "deepseek-v4.1-flash",
+                        inputTokens = 100,
+                        outputTokens = 50,
+                        ttftMs = 10,
+                        elapsedMs = 15,
+                    )
+                }
+            }
+            val routed = RoutedBatchAiTransport(
+                primary = primaryStub,
+                overflow = HaikuRealtimeBridgeTransport(bridge),
+            )
+            val pipeline = SectionConcurrentCompanionPipeline(
+                transport = routed,
+                ledger = ledger,
+                mathVerifier = CompanionMathVerifier(enableLlmAudit = false),
+            )
+            val bookId = "a".repeat(64)
+            val req = ChapterCompanionRequest(
+                bookId = bookId,
+                chapterId = "ch-1",
+                chapterTitle = "1 Elasticity",
+                sections = listOf(
+                    SectionBatchInput(
+                        sectionId = "sec-1-1",
+                        title = "1.1 Elasticity",
+                        blocks = listOf(
+                            SectionBlockInput(
+                                "$bookId:p1:0",
+                                1,
+                                0,
+                                "The arc elasticity measures price responsiveness cleanly across midpoint ranges.",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+
+            // Friend request skips primary CLI, sends READER_SELECTION + haiku + friend headers, and keeps owner ledger untouched
+            val friendPack = pipeline.generateChapter(req, friend = "friend-a", device = "dev-1")
+            assertEquals(1, friendPack.keyPoints.size)
+            assertEquals(0, primaryCalls.get(), "Friend companion must bypass CodeBuddy primary CLI")
+            assertEquals(1, observedRequests.size)
+            val (hdrs, reqBody, _) = observedRequests.single()
+            assertEquals("READER_SELECTION", hdrs["x-coach-task"])
+            assertEquals(friendId("friend-a"), hdrs["x-coach-friend"])
+            assertEquals("dev-1", hdrs["x-coach-friend-device"])
+            val parsedBody = com.coach.domain.LedgerJson.parseToJsonElement(reqBody) as JsonObject
+            assertEquals("claude-haiku-5-5", parsedBody["model"]?.toString()?.trim('"'))
+            assertNull(parsedBody["tools"])
+            assertNull(parsedBody["response_format"])
+            assertEquals(0, ledger.bookSummary(bookId).calls, "Friend companion must not pollute owner book_token_ledger")
+
+            // Owner request still uses primary CLI
+            val ownerPack = pipeline.generateChapter(req)
+            assertEquals(1, ownerPack.keyPoints.size)
+            assertEquals(1, primaryCalls.get(), "Owner companion must continue using primary transport")
+            assertEquals(1, ledger.bookSummary(bookId).calls)
+        } finally {
+            mockBridge.stop(0)
         }
     }
 

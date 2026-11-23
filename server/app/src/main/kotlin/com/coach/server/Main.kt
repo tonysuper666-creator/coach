@@ -118,8 +118,9 @@ fun main(args: Array<String>): Unit = runBlocking {
     val reader = ReaderLibrary.configured()
     val imports = ImportedBookSources(data.resolve("personal-imports"))
     val companionCache = ChapterCompanionCache(data.resolve("companion"))
+    val apiOnly = System.getenv("COACH_API_ONLY") == "1" || System.getenv("COACH_FRIEND_API_ONLY") == "1"
     val companionTransport = RoutedBatchAiTransport(
-        primary = if (System.getenv("COACH_API_ONLY") == "1") null else CodeBuddyDeepSeekTransport(),
+        primary = if (apiOnly) null else CodeBuddyDeepSeekTransport(),
         overflow = HaikuRealtimeBridgeTransport(chat.bridge),
     )
     val companionPipeline = SectionConcurrentCompanionPipeline(companionTransport, tokenLedger, companionCache)
@@ -129,7 +130,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     val courseVisionService = CourseVisionService(data.resolve("course-vision"), tokenLedger = tokenLedger)
     val booklistAligner = BooklistSemanticAligner(companionTransport, tokenLedger)
     val practiceTransport = RoutedBatchAiTransport(
-        primary = if (System.getenv("COACH_API_ONLY") == "1") null else CodeBuddyDeepSeekTransport(),
+        primary = if (apiOnly) null else CodeBuddyDeepSeekTransport(),
         overflow = HaikuPinnedBridgeTransport(
             bridge = chat.bridge,
             defaultMaxTokens = PracticeGradeLimits.BATCH_MAX_TOKENS,
@@ -139,7 +140,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     val practiceGradeService = PracticeGradeAndDiagnoseService(practiceTransport, tokenLedger)
     val collectionQaService = CollectionQaService(HaikuStreamingCollectionQaTransport(chat.bridge), tokenLedger)
     val courseMockTransport = RoutedBatchAiTransport(
-        primary = if (System.getenv("COACH_API_ONLY") == "1") null else CodeBuddyDeepSeekTransport(),
+        primary = if (apiOnly) null else CodeBuddyDeepSeekTransport(),
         overflow = HaikuPinnedBridgeTransport(
             bridge = chat.bridge,
             defaultMaxTokens = CourseMockLimits.ITEM_MAX_TOKENS,

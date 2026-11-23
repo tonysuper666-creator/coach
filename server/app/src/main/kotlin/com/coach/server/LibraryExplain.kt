@@ -335,6 +335,8 @@ fun Application.libraryExplainRoutes(
                     bypassCache = bypassCache,
                     cacheScope = cacheScope,
                     currentCheck = current,
+                    friend = friend,
+                    device = device,
                 )
                 val body = ChapterCompanionCodec.encode(pack)
                 if (friend != null) withContext(Dispatchers.IO) {

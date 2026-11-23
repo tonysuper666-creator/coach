@@ -98,7 +98,7 @@ internal data class UnifiedBookScope(
     }
 
     companion object {
-        private val SCOPE_KEY_PATTERN = Regex("(?:sable|device)-[0-9a-f]{64}")
+        internal val SCOPE_KEY_PATTERN = Regex("(?:sable|device)-[0-9a-f]{64}")
 
         fun fromCall(deviceId: String, friendName: String?): UnifiedBookScope {
             require(deviceId.isNotBlank()) { "Missing device id" }
@@ -831,7 +831,57 @@ class UnifiedBookPipeline internal constructor(
         return if (activeRef) shelfBookId else null
     }
 
-    internal fun hasLegacyBookMappingReadOnly(scope: UnifiedBookScope, legacyRecordId: String): Boolean {
+    internal data class LegacyBookMappingSnapshot(
+        val sourceKind: String,
+        val legacyDocId: String,
+        val courseId: String,
+        val explainSourceId: String?,
+        val pages: Int,
+        val printedPageOffset: Int?,
+        val pagesSha256: String?,
+        val sha256: String,
+        val shelfBookId: String,
+    )
+
+    private fun readLegacyBookMapping(db: Connection, legacyRecordId: String): LegacyBookMappingSnapshot? =
+        db.prepareStatement(
+            """SELECT source_kind, legacy_doc_id, course_id, explain_source_id,
+                      pages, printed_page_offset, pages_sha256, sha256, shelf_book_id
+               FROM legacy_book_mappings WHERE legacy_record_id=?""".trimIndent(),
+        ).use { sql ->
+            sql.setString(1, legacyRecordId)
+            sql.executeQuery().use { rs ->
+                if (!rs.next()) {
+                    null
+                } else {
+                    val rawOffset = rs.getObject(6)
+                    LegacyBookMappingSnapshot(
+                        sourceKind = rs.getString(1),
+                        legacyDocId = rs.getString(2),
+                        courseId = rs.getString(3),
+                        explainSourceId = rs.getString(4),
+                        pages = rs.getInt(5),
+                        printedPageOffset = (rawOffset as? Number)?.toInt(),
+                        pagesSha256 = rs.getString(7),
+                        sha256 = rs.getString(8),
+                        shelfBookId = rs.getString(9),
+                    )
+                }
+            }
+        }
+
+    internal fun hasLegacyBookMappingReadOnly(
+        scope: UnifiedBookScope,
+        legacyRecordId: String,
+        expectedSourceKind: String,
+        expectedLegacyDocId: String,
+        expectedCourseId: String,
+        expectedExplainSourceId: String?,
+        expectedPages: Int,
+        expectedPrintedPageOffset: Int?,
+        expectedPagesSha256: String?,
+        expectedSha256: String,
+    ): Boolean {
         val shelfFile = accountShelfFile(scope)
         if (!Files.isRegularFile(shelfFile)) return false
         return openReadOnly(shelfFile).use { db ->
@@ -839,17 +889,22 @@ class UnifiedBookPipeline internal constructor(
                 s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_book_mappings'").use { it.next() }
             }
             if (!hasTable) return@use false
-            db.prepareStatement(
-                """SELECT m.shelf_book_id, m.sha256
-                   FROM legacy_book_mappings m
-                   JOIN shelf_books b ON b.shelf_book_id = m.shelf_book_id AND b.sha256 = m.sha256
-                   WHERE m.legacy_record_id=?""".trimIndent(),
-            ).use { sql ->
-                sql.setString(1, legacyRecordId)
-                sql.executeQuery().use { rs ->
-                    if (!rs.next()) false else Files.isRegularFile(blobPath(rs.getString(2)))
-                }
+            val existing = readLegacyBookMapping(db, legacyRecordId) ?: return@use false
+            val matchesMetadata = existing.sourceKind == expectedSourceKind &&
+                existing.legacyDocId == expectedLegacyDocId &&
+                existing.courseId == expectedCourseId &&
+                existing.explainSourceId == expectedExplainSourceId &&
+                existing.pages == expectedPages &&
+                existing.printedPageOffset == expectedPrintedPageOffset &&
+                existing.pagesSha256 == expectedPagesSha256 &&
+                existing.sha256 == expectedSha256
+            if (!matchesMetadata) return@use false
+            val shelfMatches = db.prepareStatement("SELECT 1 FROM shelf_books WHERE shelf_book_id=? AND sha256=?").use { sql ->
+                sql.setString(1, existing.shelfBookId)
+                sql.setString(2, expectedSha256)
+                sql.executeQuery().use { it.next() }
             }
+            shelfMatches && Files.isRegularFile(blobPath(expectedSha256))
         }
     }
 
@@ -975,18 +1030,29 @@ class UnifiedBookPipeline internal constructor(
         shelfBookId: String,
     ): Boolean {
         val now = config.clock()
+        val desired = LegacyBookMappingSnapshot(
+            sourceKind = sourceKind,
+            legacyDocId = legacyDocId,
+            courseId = courseId,
+            explainSourceId = explainSourceId,
+            pages = pages,
+            printedPageOffset = printedPageOffset,
+            pagesSha256 = pagesSha256,
+            sha256 = sha256,
+            shelfBookId = shelfBookId,
+        )
         return accountShelfDb(scope).use { db ->
-            val existing = db.prepareStatement("SELECT shelf_book_id FROM legacy_book_mappings WHERE legacy_record_id=?").use { sql ->
-                sql.setString(1, legacyRecordId)
-                sql.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else null }
-            }
-            if (existing == shelfBookId) return@use false
+            val existing = readLegacyBookMapping(db, legacyRecordId)
+            if (existing == desired) return@use false
             db.prepareStatement(
                 """INSERT INTO legacy_book_mappings(
                        legacy_record_id, source_kind, legacy_doc_id, course_id, explain_source_id,
                        pages, printed_page_offset, pages_sha256, sha256, shelf_book_id, migrated_at
                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(legacy_record_id) DO UPDATE SET
+                       source_kind=excluded.source_kind,
+                       legacy_doc_id=excluded.legacy_doc_id,
+                       course_id=excluded.course_id,
                        explain_source_id=excluded.explain_source_id,
                        pages=excluded.pages,
                        printed_page_offset=excluded.printed_page_offset,

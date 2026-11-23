@@ -139,15 +139,23 @@ internal data class UnifiedBookVerificationReport(
     val globalSharedRefs: Int,
     val globalRefCountMismatches: Int,
     val globalDanglingRefs: Int,
+    val missingRegistry: Boolean = false,
+    val unexpectedAccountEntries: Int = 0,
     val accounts: List<UnifiedBookAccountVerification>,
 ) {
     val ok: Boolean
-        get() = globalRefCountMismatches == 0 && globalDanglingRefs == 0 && accounts.all { it.ok }
+        get() = !missingRegistry &&
+            globalRefCountMismatches == 0 &&
+            globalDanglingRefs == 0 &&
+            unexpectedAccountEntries == 0 &&
+            accounts.all { it.ok }
 
     fun toJson(): JsonObject = buildJsonObject {
         put("schema", 1)
         put("mode", "verify")
         put("ok", ok)
+        put("missingRegistry", missingRegistry)
+        put("unexpectedAccountEntries", unexpectedAccountEntries)
         put("globalSharedBlobs", globalSharedBlobs)
         put("globalSharedRefs", globalSharedRefs)
         put("globalRefCountMismatches", globalRefCountMismatches)
@@ -334,33 +342,72 @@ class UnifiedBookMigration internal constructor(
     internal suspend fun verify(): UnifiedBookVerificationReport = withContext(Dispatchers.IO) {
         val registryFile = unifiedBooks.registryFilePath
         val accountsRoot = unifiedBooks.accountsDirPath
-        if (!Files.isRegularFile(registryFile)) {
+        val blobsRoot = unifiedBooks.blobsDirPath
+
+        // Enumerate accounts directory strictly read-only, accepting only valid opaque scope keys.
+        // Unexpected folders/files (such as local backups) are tallied anonymously and never echoed in output.
+        val validScopeDirs = mutableListOf<String>()
+        var unexpectedAccountEntries = 0
+        if (Files.isDirectory(accountsRoot, LinkOption.NOFOLLOW_LINKS)) {
+            Files.list(accountsRoot).use { stream ->
+                for (entry in stream.sorted().toList()) {
+                    val name = entry.fileName.toString()
+                    if (Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS) && name.matches(UnifiedBookScope.SCOPE_KEY_PATTERN)) {
+                        validScopeDirs += name
+                    } else {
+                        unexpectedAccountEntries++
+                    }
+                }
+            }
+        }
+        val hasAnyBlobs = Files.isDirectory(blobsRoot, LinkOption.NOFOLLOW_LINKS) &&
+            Files.list(blobsRoot).use { it.findFirst().isPresent }
+        val registryExists = Files.isRegularFile(registryFile, LinkOption.NOFOLLOW_LINKS)
+
+        // Distinguish a clean empty installation from an incomplete restore with shelves/blobs but no registry.
+        if (!registryExists && validScopeDirs.isEmpty() && unexpectedAccountEntries == 0 && !hasAnyBlobs) {
             return@withContext UnifiedBookVerificationReport(
                 globalSharedBlobs = 0,
                 globalSharedRefs = 0,
                 globalRefCountMismatches = 0,
                 globalDanglingRefs = 0,
+                missingRegistry = false,
+                unexpectedAccountEntries = 0,
                 accounts = emptyList(),
             )
         }
 
         val activeBlobs = linkedMapOf<String, Int>()
-        val refsByScope = linkedMapOf<String, MutableMap<String, String>>() // scopeKey -> (sha256 -> shelfBookId)
+        val refsByScope = linkedMapOf<String, MutableMap<String, String>>() // valid scopeKey -> (sha256 -> shelfBookId)
         val actualRefCountBySha = hashMapOf<String, Int>()
-        UnifiedBookPipeline.openReadOnly(registryFile).use { db ->
-            db.createStatement().use { sql ->
-                sql.executeQuery("SELECT sha256, ref_count FROM shared_blobs WHERE state='ACTIVE' ORDER BY sha256").use { rs ->
-                    while (rs.next()) activeBlobs[rs.getString(1)] = rs.getInt(2)
-                }
-                sql.executeQuery("SELECT sha256, scope_key, shelf_book_id FROM shared_blob_refs ORDER BY scope_key, sha256").use { rs ->
-                    while (rs.next()) {
-                        val sha = rs.getString(1)
-                        val scopeKey = rs.getString(2)
-                        val shelfId = rs.getString(3)
-                        actualRefCountBySha[sha] = (actualRefCountBySha[sha] ?: 0) + 1
-                        refsByScope.computeIfAbsent(scopeKey) { linkedMapOf() }[sha] = shelfId
+        var globalDanglingRefs = 0
+        var missingRegistry = !registryExists
+
+        if (registryExists) {
+            val loadedRegistry = runCatching {
+                UnifiedBookPipeline.openReadOnly(registryFile).use { db ->
+                    db.createStatement().use { sql ->
+                        sql.executeQuery("SELECT sha256, ref_count FROM shared_blobs WHERE state='ACTIVE' ORDER BY sha256").use { rs ->
+                            while (rs.next()) activeBlobs[rs.getString(1)] = rs.getInt(2)
+                        }
+                        sql.executeQuery("SELECT sha256, scope_key, shelf_book_id FROM shared_blob_refs ORDER BY scope_key, sha256").use { rs ->
+                            while (rs.next()) {
+                                val sha = rs.getString(1)
+                                val scopeKey = rs.getString(2)
+                                val shelfId = rs.getString(3)
+                                actualRefCountBySha[sha] = (actualRefCountBySha[sha] ?: 0) + 1
+                                if (scopeKey.matches(UnifiedBookScope.SCOPE_KEY_PATTERN)) {
+                                    refsByScope.computeIfAbsent(scopeKey) { linkedMapOf() }[sha] = shelfId
+                                } else {
+                                    globalDanglingRefs++
+                                }
+                            }
+                        }
                     }
                 }
+            }
+            if (loadedRegistry.isFailure) {
+                missingRegistry = true
             }
         }
 
@@ -386,19 +433,8 @@ class UnifiedBookMigration internal constructor(
             }
         }
 
-        val scopeDirs = if (Files.isDirectory(accountsRoot)) {
-            Files.list(accountsRoot).use { stream ->
-                stream
-                    .filter { Files.isDirectory(it, LinkOption.NOFOLLOW_LINKS) }
-                    .map { it.fileName.toString() }
-                    .sorted()
-                    .toList()
-            }
-        } else emptyList()
-
-        val allScopeKeys = (scopeDirs + refsByScope.keys).toSortedSet()
+        val allScopeKeys = (validScopeDirs + refsByScope.keys).toSortedSet()
         val accounts = mutableListOf<UnifiedBookAccountVerification>()
-        var globalDanglingRefs = 0
 
         for (scopeKey in allScopeKeys) {
             val shelfFile = accountsRoot.resolve(scopeKey).resolve("shelf.sqlite")
@@ -529,6 +565,8 @@ class UnifiedBookMigration internal constructor(
             globalSharedRefs = actualRefCountBySha.values.sum(),
             globalRefCountMismatches = globalRefCountMismatches,
             globalDanglingRefs = globalDanglingRefs,
+            missingRegistry = missingRegistry,
+            unexpectedAccountEntries = unexpectedAccountEntries,
             accounts = accounts,
         )
     }
@@ -847,8 +885,18 @@ class UnifiedBookMigration internal constructor(
             ?: return CandidateCheck.Invalid("missing_file")
         if (actualSha != declaredSha) return CandidateCheck.Invalid("sha256_mismatch")
 
-        val alreadyMigrated = unifiedBooks.hasLegacyBookMappingReadOnly(ownerScope, recordId) &&
-            unifiedBooks.existingShelfBookIdByShaReadOnly(ownerScope, declaredSha) != null
+        val alreadyMigrated = unifiedBooks.hasLegacyBookMappingReadOnly(
+            scope = ownerScope,
+            legacyRecordId = recordId,
+            expectedSourceKind = "catalog",
+            expectedLegacyDocId = docId,
+            expectedCourseId = course,
+            expectedExplainSourceId = explainSourceId,
+            expectedPages = pages,
+            expectedPrintedPageOffset = offset,
+            expectedPagesSha256 = null,
+            expectedSha256 = declaredSha,
+        ) && unifiedBooks.existingShelfBookIdByShaReadOnly(ownerScope, declaredSha) != null
         return CandidateCheck.Valid(
             VerifiedCatalogCandidate(
                 recordId = recordId,
@@ -909,8 +957,18 @@ class UnifiedBookMigration internal constructor(
             numbers.max()
         }.getOrNull() ?: return CandidateCheck.Invalid("invalid_snapshot")
 
-        val alreadyMigrated = unifiedBooks.hasLegacyBookMappingReadOnly(ownerScope, recordId) &&
-            unifiedBooks.existingShelfBookIdByShaReadOnly(ownerScope, declaredSha) != null
+        val alreadyMigrated = unifiedBooks.hasLegacyBookMappingReadOnly(
+            scope = ownerScope,
+            legacyRecordId = recordId,
+            expectedSourceKind = "local_binding",
+            expectedLegacyDocId = docId,
+            expectedCourseId = course,
+            expectedExplainSourceId = explainSourceId,
+            expectedPages = maxPage,
+            expectedPrintedPageOffset = null,
+            expectedPagesSha256 = pagesSha,
+            expectedSha256 = declaredSha,
+        ) && unifiedBooks.existingShelfBookIdByShaReadOnly(ownerScope, declaredSha) != null
         return CandidateCheck.Valid(
             VerifiedCatalogCandidate(
                 recordId = recordId,

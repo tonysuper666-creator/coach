@@ -51,6 +51,7 @@ internal class ReaderFailure(val status: io.ktor.http.HttpStatusCode, message: S
 
 /** All PDF work is local Poppler. No bridge, network, AI client or source-pack ingestion. */
 class ReaderLibrary internal constructor(private val root: Path?, private val bin: String = "") {
+    internal val rootPath: Path? get() = root
     private val lock = Mutex()
     private val verified = mutableMapOf<Path, Pair<String, BasicFileAttributes>>()
     private val documents: List<ReaderDocument> = load()

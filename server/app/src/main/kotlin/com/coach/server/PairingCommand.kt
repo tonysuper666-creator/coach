@@ -29,20 +29,28 @@ internal fun pairingCommand(args: Array<String>, data: Path) {
         "sable-users" -> { require(args.size == 1); "/v1/sable/users" }
         "disable-sable" -> { require(args.size == 2); "/v1/sable/disable" }
         "devices" -> { require(args.size == 1); "/v1/devices" }
+        "books-inventory" -> { require(args.size == 1); "/v1/admin/books/migration/inventory" }
+        "books-migrate" -> { require(args.size == 1); "/v1/admin/books/migration/run" }
+        "books-verify" -> { require(args.size == 1); "/v1/admin/books/migration/verify" }
         else -> {
             require(args.size == 2 && args[1].matches(Regex("[A-Za-z0-9_-]{1,128}"))) { "usage: app revoke DEVICE_ID" }
             "/v1/devices/${args[1]}"
         }
     }
-    val method = when (args.first()) { "pair-code", "revoke-friend", "disable-sable" -> "POST"; "devices", "sable-users" -> "GET"; else -> "DELETE" }
+    val method = when (args.first()) {
+        "pair-code", "revoke-friend", "disable-sable", "books-migrate" -> "POST"
+        "devices", "sable-users", "books-inventory", "books-verify" -> "GET"
+        else -> "DELETE"
+    }
     val body = when {
         args.first() == "pair-code" && args.size == 3 -> com.coach.domain.json("friend" to args[2]).toString()
         args.first() == "disable-sable" -> com.coach.domain.json("username" to args[1]).toString()
         args.first() == "revoke-friend" -> com.coach.domain.json("friend" to args[1]).toString()
         else -> ""
     }
+    val timeoutSeconds = if (args.first() in setOf("books-inventory", "books-migrate", "books-verify")) 300L else 10L
     val request = HttpRequest.newBuilder(URI("http://127.0.0.1:$port$endpoint"))
-        .timeout(Duration.ofSeconds(10))
+        .timeout(Duration.ofSeconds(timeoutSeconds))
         .header("Authorization", "Bearer ${Files.readString(path).trim()}")
         .header("X-Coach-Device", System.getenv("COACH_DEVICE_ID") ?: "desktop")
         .method(method, HttpRequest.BodyPublishers.ofString(body)).build()

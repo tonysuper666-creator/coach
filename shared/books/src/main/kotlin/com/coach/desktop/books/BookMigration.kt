@@ -387,7 +387,7 @@ internal object BookSchemaMigration {
         "book_pdf_modes", "book_text_modes", "book_read_spots", "book_highlights",
         "book_notes", "reading_settings",
         "book_review_history", "book_illustrations", "book_page_text_boxes",
-        "book_native_sources", "book_structures", "book_section_cache",
+        "book_native_sources", "book_structures", "book_section_cache", "book_body_start",
         "collections", "collection_materials", "book_toc_nodes", "book_study_chunks",
         "book_bookmarks", "book_page_aspects", "book_visual_pages", "pages_fts_meta",
     )

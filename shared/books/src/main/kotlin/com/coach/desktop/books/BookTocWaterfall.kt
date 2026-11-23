@@ -27,6 +27,7 @@ internal data class BookTocNode(
     val printedPage: String? = null,
     val source: HeadingSource,
     val confidence: Double = 1.0,
+    val startOffset: Int = 0,
 )
 
 /**
@@ -71,6 +72,10 @@ internal object BookTocWaterfall {
         """^(?:Part\s+([IVXLC]+|\d+)(?:[:：\.\s\-–—]+(.*))?|([IVXLC]+)\s*[:：]\s*(.+)|第([一二三四五六七八九十百千0-9]+)[编篇部](?:[\s：:·\-—]+(.*))?)$""",
         RegexOption.IGNORE_CASE,
     )
+    private val BOOK_PREFIX = Regex("""(?i)^Book\s+([IVXLC]+|\d+)[.:]\s+.+$""")
+    private val ROMAN_CHAPTER = Regex("""^([IVXLC]+)\s+([A-Z][A-Z\s’'—-]{5,})$""")
+    private val FRONT_EXTRA = Regex("""(?i)^(?:Illustrations|List of Illustrations|Introductory Note|\d{4}|\p{L}+[ ]*copyright)[.:]?$""")
+    private val LICENSE_TITLE = Regex("""(?i)^(?:The Full )?Project Gutenberg.*License.*$""")
     private val BARE_PART_ROMAN_WITH_TITLE = Regex(
         """^([IVXLC]{1,5})(?:\s{2,}|\s+[-–—:]\s*)(.{3,90})$""",
     )
@@ -166,6 +171,7 @@ internal object BookTocWaterfall {
         val printedPage: String?,
         val source: HeadingSource,
         val explicitKind: TocNodeKind? = null,
+        val startOffset: Int = 0,
     )
 
     private fun expandLigaturesKeepGaps(raw: String): String =
@@ -241,19 +247,21 @@ internal object BookTocWaterfall {
 
     fun classifyOutlineLabel(raw: String, rawLevel: Int = 1): ClassifiedOutline {
         val cleaned = cleanTocTitle(raw)
-        if (cleaned.isEmpty() || FRONT_SCAFFOLD_NOISE.matches(cleaned)) {
+        val comparable = cleaned.trimEnd('.', ':')
+        if (cleaned.isEmpty() || FRONT_SCAFFOLD_NOISE.matches(comparable)) {
             return ClassifiedOutline(TocNodeKind.FRONT_MATTER, null, cleaned, isScaffoldNoise = true)
         }
-        if (FRONT_MATTER_TITLE.matches(cleaned)) {
+        if (FRONT_MATTER_TITLE.matches(comparable) || FRONT_EXTRA.matches(cleaned)) {
             return ClassifiedOutline(TocNodeKind.FRONT_MATTER, null, cleaned)
         }
-        if (BACK_MATTER_TITLE.matches(cleaned)) {
+        if (BACK_MATTER_TITLE.matches(comparable) || LICENSE_TITLE.matches(cleaned)) {
             return ClassifiedOutline(TocNodeKind.BACK_MATTER, null, cleaned)
         }
         APPENDIX_TITLE.matchEntire(cleaned)?.let { m ->
             val label = (m.groupValues[1].ifEmpty { m.groupValues[2] }).ifEmpty { null }
             return ClassifiedOutline(TocNodeKind.APPENDIX, label, cleaned)
         }
+        BOOK_PREFIX.matchEntire(cleaned)?.let { return ClassifiedOutline(TocNodeKind.PART, it.groupValues[1], cleaned) }
         PART_PREFIX.matchEntire(cleaned)?.let { m ->
             val label = listOf(m.groupValues[1], m.groupValues[3], m.groupValues[5]).firstOrNull { it.isNotEmpty() }
             return ClassifiedOutline(TocNodeKind.PART, label, cleaned)
@@ -280,7 +288,7 @@ internal object BookTocWaterfall {
         CN_NUM_L2.matchEntire(cleaned)?.let { m ->
             return ClassifiedOutline(TocNodeKind.SECTION, m.groupValues[1], cleaned)
         }
-        CHAPTER_EXPLICIT.matchEntire(cleaned)?.let { m ->
+        CHAPTER_EXPLICIT.matchEntire(cleaned.replace(Regex("""(?i)^(Chapter\s+[IVXLC]+)\*(?=\b|\W|$)"""), "$1"))?.let { m ->
             val chNum = m.groupValues[1].toIntOrNull()
             return ClassifiedOutline(TocNodeKind.CHAPTER, m.groupValues[1], cleaned, chapterNumberHint = chNum)
         }
@@ -314,10 +322,10 @@ internal object BookTocWaterfall {
         externalOutline: List<BookOutlineItem>,
     ): BookStructure {
         val raw = externalOutline.map {
-            RawCandidate(it.title, it.level, it.page.coerceIn(1, totalPages.coerceAtLeast(1)), null, it.source)
+            RawCandidate(it.title, it.level, it.page.coerceIn(1, totalPages.coerceAtLeast(1)), null, it.source, startOffset = it.startOffset)
         }
         val tocNodes = buildCanonicalNodes(bookId, totalPages.coerceAtLeast(1), raw, confidence = if (raw.isNotEmpty()) 1.0 else 0.0)
-        val firstBodyPage = tocNodes.firstOrNull { it.kind in BODY_NODE_KINDS }?.startPage
+        val firstBodyPage = BookBoundaries.firstChapter(tocNodes)?.startPage
         val pageRoles = buildMap {
             for (p in 1..totalPages.coerceAtLeast(1)) {
                 put(p, if (firstBodyPage != null && p < firstBodyPage) BookPageRole.FRONT_MATTER else BookPageRole.BODY)
@@ -339,17 +347,8 @@ internal object BookTocWaterfall {
     private val BODY_NODE_KINDS = setOf(TocNodeKind.PART, TocNodeKind.CHAPTER, TocNodeKind.SECTION, TocNodeKind.SUBSECTION, TocNodeKind.APPENDIX)
 
     /** Fast check matching Stage A acceptance thresholds in [plan] so Tier 1 can skip per-glyph typography extraction. */
-    fun willStageASucceed(externalOutline: List<BookOutlineItem>, totalPages: Int, format: String = "pdf"): Boolean {
-        if (externalOutline.isEmpty()) return false
-        val clampedPages = totalPages.coerceAtLeast(1)
-        val raw = externalOutline.map {
-            RawCandidate(it.title, it.level, it.page.coerceIn(1, clampedPages), null, it.source)
-        }
-        val nodes = buildCanonicalNodes("stage-a-check", clampedPages, raw, confidence = 1.0)
-        val chapters = nodes.count { it.kind == TocNodeKind.CHAPTER }
-        val bodyNodes = nodes.count { it.kind in BODY_NODE_KINDS }
-        return chapters >= 3 || bodyNodes >= 10 || (nodes.isNotEmpty() && format in setOf("epub", "docx"))
-    }
+    fun willStageASucceed(externalOutline: List<BookOutlineItem>, totalPages: Int): Boolean =
+        externalOutline.any { it.title.isNotBlank() && it.page in 1..totalPages }
 
     fun plan(
         bookId: String,
@@ -358,6 +357,7 @@ internal object BookTocWaterfall {
         pages: List<BookPage>,
         externalOutline: List<BookOutlineItem> = emptyList(),
         typographyLines: Map<Int, List<PageLineTypography>> = emptyMap(),
+        nativeBodyStart: BookPageAnchor? = null,
     ): WaterfallOutcome {
         val totalPages = pages.maxOfOrNull { it.number } ?: pages.size.coerceAtLeast(1)
         val allBlocks = StudyCoachCourse.blocks(bookId, pages, snapSentences = true)
@@ -366,17 +366,14 @@ internal object BookTocWaterfall {
         val byPage = allBlocks.groupBy { it.page }
 
         // Stage A: External outline (PDF Outline / EPUB TOC / Word styles)
-        val stageARaw = externalOutline.map {
-            RawCandidate(it.title, it.level, it.page.coerceIn(1, totalPages), null, it.source)
+        val stageARaw = externalOutline.filter { it.page in 1..totalPages }.map {
+            RawCandidate(it.title, it.level, it.page, null, it.source, startOffset = it.startOffset)
         }
         val stageANodes = buildCanonicalNodes(bookId, totalPages, stageARaw, confidence = 1.0)
-        val stageAChapters = stageANodes.count { it.kind == TocNodeKind.CHAPTER }
-        val stageABodyNodes = stageANodes.count { it.kind in BODY_NODE_KINDS }
-        if (stageAChapters >= 3 || stageABodyNodes >= 10 || (stageANodes.isNotEmpty() && format in setOf("epub", "docx"))) {
-            val refinedRoles = refinePageRolesWithToc(pages, initialRoles, stageANodes, byPage)
+        if (stageARaw.isNotEmpty()) {
+            val refinedRoles = refinePageRolesWithToc(pages, initialRoles, stageANodes, byPage, nativeBodyStart = nativeBodyStart)
             val (chunks, sections, lessons) = buildStudyChunks(bookId, bookTitle, pages, refinedRoles, stageANodes, byPage)
-            val source = externalOutline.firstOrNull()?.source?.name ?: HeadingSource.PDF_OUTLINE.name
-            return WaterfallOutcome(stageANodes, chunks, sections, lessons, refinedRoles, source, 1.0)
+            return WaterfallOutcome(stageANodes, chunks, sections, lessons, refinedRoles, stageARaw.first().source.name, 1.0)
         }
 
         // Stage B: Extended leading printed TOC parser (for PDFs without outline)
@@ -384,18 +381,10 @@ internal object BookTocWaterfall {
         if (stageBResult != null && stageBResult.first.count { it.kind in BODY_NODE_KINDS } >= 3) {
             val (tocNodes, conf) = stageBResult
             if (conf >= 0.85) {
-                val refinedRoles = refinePageRolesWithToc(pages, initialRoles, tocNodes, byPage)
+                val refinedRoles = refinePageRolesWithToc(pages, initialRoles, tocNodes, byPage, nativeBodyStart = nativeBodyStart)
                 val (chunks, sections, lessons) = buildStudyChunks(bookId, bookTitle, pages, refinedRoles, tocNodes, byPage)
                 return WaterfallOutcome(tocNodes, chunks, sections, lessons, refinedRoles, HeadingSource.TOC_PAGE.name, conf)
             }
-        }
-
-        // Fallback if partial Stage A (1-2 nodes) exists alongside no Stage B
-        if (stageABodyNodes >= 1 && stageBResult == null) {
-            val refinedRoles = refinePageRolesWithToc(pages, initialRoles, stageANodes, byPage)
-            val (chunks, sections, lessons) = buildStudyChunks(bookId, bookTitle, pages, refinedRoles, stageANodes, byPage)
-            val source = externalOutline.firstOrNull()?.source?.name ?: HeadingSource.PDF_OUTLINE.name
-            return WaterfallOutcome(stageANodes, chunks, sections, lessons, refinedRoles, source, 0.90)
         }
 
         // Stage C: Typography clustering + strict negative filters (slides, academic papers, scanned OCR)
@@ -404,7 +393,7 @@ internal object BookTocWaterfall {
         val finalNodes = stageC.nodes
         val finalConf = stageC.confidence
         val finalSource = stageC.source
-        val refinedRoles = refinePageRolesWithToc(pages, initialRoles, finalNodes, byPage, authoritativeFrontMatter = false)
+        val refinedRoles = refinePageRolesWithToc(pages, initialRoles, finalNodes, byPage, authoritativeFrontMatter = false, nativeBodyStart = nativeBodyStart)
         val (chunks, sections, lessons) = buildStudyChunks(bookId, bookTitle, pages, refinedRoles, finalNodes, byPage)
         return WaterfallOutcome(finalNodes, chunks, sections, lessons, refinedRoles, finalSource.name, finalConf)
     }
@@ -477,10 +466,12 @@ internal object BookTocWaterfall {
         tocNodes: List<BookTocNode>,
         byPage: Map<Int, List<SourceBlock>>,
         authoritativeFrontMatter: Boolean = true,
+        nativeBodyStart: BookPageAnchor? = null,
     ): Map<Int, BookPageRole> {
-        if (tocNodes.isEmpty()) return initial
-        val firstBodyPage = tocNodes.firstOrNull { it.kind in BODY_NODE_KINDS }?.startPage
-        val firstBackNode = tocNodes.firstOrNull { it.kind == TocNodeKind.BACK_MATTER }
+        if (tocNodes.isEmpty() && nativeBodyStart == null) return initial
+        val firstBodyPage = nativeBodyStart?.importPage ?: BookBoundaries.openingNode(tocNodes)?.startPage
+        val lastChapterPage = tocNodes.lastOrNull { it.kind == TocNodeKind.CHAPTER }?.startPage ?: 0
+        val firstBackNode = tocNodes.firstOrNull { it.kind == TocNodeKind.BACK_MATTER && it.startPage > lastChapterPage }
         val firstBackPage = firstBackNode?.startPage
         val hasExplicitFront = tocNodes.any { it.kind == TocNodeKind.FRONT_MATTER && (firstBodyPage == null || it.startPage < firstBodyPage) }
         val out = LinkedHashMap(initial)
@@ -529,8 +520,29 @@ internal object BookTocWaterfall {
             val cand: RawCandidate,
             val info: ClassifiedOutline,
         )
-        val filtered = candidates.mapNotNull { cand ->
-            val info = classifyOutlineLabel(cand.rawTitle, cand.rawLevel)
+        val epub = candidates.first().source == HeadingSource.EPUB_TOC
+        val firstExplicitChapter = if (epub) candidates.indexOfFirst { cand ->
+            classifyOutlineLabel(cand.rawTitle, cand.rawLevel).let { info ->
+                info.kind == TocNodeKind.CHAPTER && info.numberLabel != null
+            } || (cand.rawLevel <= 3 && ROMAN_CHAPTER.matches(cand.rawTitle))
+        } else -1
+        val lastExplicitChapter = if (firstExplicitChapter >= 0) candidates.indexOfLast {
+            (classifyOutlineLabel(it.rawTitle, it.rawLevel).let { info ->
+                info.kind == TocNodeKind.CHAPTER && info.numberLabel != null
+            }) || (it.rawLevel <= 3 && ROMAN_CHAPTER.matches(it.rawTitle))
+        } else -1
+        val filtered = candidates.mapIndexedNotNull { index, cand ->
+            val classified = classifyOutlineLabel(cand.rawTitle, cand.rawLevel)
+            val info = when {
+                !epub -> classified
+                classified.title == "正文" -> classified.copy(kind = TocNodeKind.SECTION)
+                cand.rawLevel <= 3 && ROMAN_CHAPTER.matches(cand.rawTitle) ->
+                    classified.copy(kind = TocNodeKind.CHAPTER, numberLabel = cand.rawTitle.substringBefore(' '))
+                firstExplicitChapter >= 0 && classified.kind == TocNodeKind.CHAPTER && classified.numberLabel == null ->
+                    classified.copy(kind = if (index < firstExplicitChapter) TocNodeKind.FRONT_MATTER
+                        else if (index > lastExplicitChapter) TocNodeKind.BACK_MATTER else TocNodeKind.SECTION)
+                else -> classified
+            }
             if (info.isScaffoldNoise || info.title.isEmpty()) null
             else if (cand.explicitKind != null) ClassifiedItem(cand, info.copy(kind = cand.explicitKind))
             else ClassifiedItem(cand, info)
@@ -587,6 +599,7 @@ internal object BookTocWaterfall {
                 printedPage = item.cand.printedPage,
                 source = item.cand.source,
                 confidence = confidence,
+                startOffset = item.cand.startOffset,
             )
         }
 
@@ -1193,12 +1206,10 @@ internal object BookTocWaterfall {
             return list.joinToString(" › ")
         }
 
-        fun parentTitleFor(node: BookTocNode): String? = node.parentId?.let(nodeById::get)?.title
-
         data class RawGroup(
             val tocNodeId: String?,
             val title: String,
-            val parentTitle: String?,
+            val parentId: String?,
             val breadcrumb: String,
             val level: Int,
             val blocks: MutableList<SourceBlock>,
@@ -1217,7 +1228,7 @@ internal object BookTocWaterfall {
                 val g = RawGroup(
                     tocNodeId = node.id,
                     title = node.title,
-                    parentTitle = parentTitleFor(node),
+                    parentId = node.parentId,
                     breadcrumb = breadcrumbFor(node),
                     level = node.level,
                     blocks = mutableListOf(),
@@ -1230,7 +1241,7 @@ internal object BookTocWaterfall {
             fun ensureFallbackGroup(): RawGroup = currentGroup ?: RawGroup(
                 tocNodeId = null,
                 title = bookTitle,
-                parentTitle = null,
+                parentId = null,
                 breadcrumb = bookTitle,
                 level = 1,
                 blocks = mutableListOf(),
@@ -1242,7 +1253,7 @@ internal object BookTocWaterfall {
                     // If a TOC node begins on this page without a verbatim matching heading block, still start it cleanly.
                     val pageNodes = nodesByPage[block.page].orEmpty()
                     for (node in pageNodes) {
-                        if (node.id in consumedNodes) continue
+                        if (node.id in consumedNodes || node.source == HeadingSource.EPUB_TOC) continue
                         val appearsOnPage = byPage[block.page].orEmpty().any { b ->
                             titlesMatch(cleanTocTitle(b.text), node.title)
                         }
@@ -1252,8 +1263,17 @@ internal object BookTocWaterfall {
                         }
                     }
                 }
-                val matchedNode = nodesByPage[block.page].orEmpty().firstOrNull { node ->
-                    node.id !in consumedNodes && titlesMatch(cleanTocTitle(block.text), node.title)
+                val pageNodes = nodesByPage[block.page].orEmpty()
+                val anchoredNodes = pageNodes.filter { node ->
+                    node.source == HeadingSource.EPUB_TOC && node.id !in consumedNodes && node.startOffset <= block.start
+                }
+                for (node in anchoredNodes.sortedBy { it.startOffset }) {
+                    currentNodeIdx = bodyNodes.indexOf(node)
+                    activateNode(node)
+                }
+                val matchedNode = pageNodes.firstOrNull { node ->
+                    node.source != HeadingSource.EPUB_TOC && node.id !in consumedNodes &&
+                        titlesMatch(cleanTocTitle(block.text), node.title)
                 }
                 if (matchedNode != null) {
                     currentNodeIdx = bodyNodes.indexOf(matchedNode)
@@ -1287,12 +1307,15 @@ internal object BookTocWaterfall {
 
         // Short sibling merge (< 400 chars under same parent) - ONLY in studyChunks, NEVER in book_toc_nodes!
         val merged = mutableListOf<RawGroup>()
+        val mergeableKinds = setOf(TocNodeKind.SECTION, TocNodeKind.SUBSECTION)
         for (sec in base) {
             val bodyLen = BookStructurePlanner.bodyCharsPublic(sec.blocks)
             val prev = merged.lastOrNull()
             val canMerge = prev != null &&
-                prev.parentTitle != null &&
-                prev.parentTitle == sec.parentTitle &&
+                prev.parentId != null &&
+                prev.parentId == sec.parentId &&
+                prev.tocNodeId?.let(nodeById::get)?.kind in mergeableKinds &&
+                sec.tocNodeId?.let(nodeById::get)?.kind in mergeableKinds &&
                 (BookStructurePlanner.bodyCharsPublic(prev.blocks) < BookStructurePlanner.MIN_SUBSECTION_CHARS ||
                     bodyLen < BookStructurePlanner.MIN_SUBSECTION_CHARS) &&
                 BookStructurePlanner.bodyCharsPublic(prev.blocks) + bodyLen <= BookStructurePlanner.MAX_SECTION_CHARS

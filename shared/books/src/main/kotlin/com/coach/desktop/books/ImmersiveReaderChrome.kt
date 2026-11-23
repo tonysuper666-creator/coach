@@ -52,6 +52,8 @@ import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -410,8 +412,7 @@ internal fun ImmersiveBottomScrubber(
     availableWidth: Dp,
     currentPage: Int,
     lastPage: Int,
-    pageLabel: String,
-    sectionTitle: String?,
+    pageStatus: (Int) -> String,
     canPrev: Boolean,
     canNext: Boolean,
     editingJump: Boolean,
@@ -433,7 +434,6 @@ internal fun ImmersiveBottomScrubber(
     var dragging by remember { mutableStateOf(false) }
     val effectiveSlider = if (dragging) sliderPos else currentPage.toFloat()
     val shownPage = if (dragging) sliderPos.roundToInt().coerceIn(1, lastPage.coerceAtLeast(1)) else currentPage
-    val percent = if (lastPage > 1) ((shownPage - 1) * 100 / (lastPage - 1)).coerceIn(0, 100) else 100
 
     AnimatedVisibility(
         visible = visible,
@@ -492,9 +492,8 @@ internal fun ImmersiveBottomScrubber(
                 ) { Text(if (compact) "›" else "下一页 ›", style = MaterialTheme.typography.labelLarge, maxLines = 1, softWrap = false) }
 
                 if (!editingJump) {
-                    val label = if (dragging) "第 $shownPage / $lastPage 页" else "$pageLabel / $lastPage"
                     Text(
-                        "$label · $percent%",
+                        pageStatus(shownPage),
                         style = MaterialTheme.typography.labelMedium,
                         fontFamily = LocalV7Fonts.current.numbers,
                         color = colors.fgSecondary,
@@ -551,17 +550,6 @@ internal fun ImmersiveBottomScrubber(
                     LaunchedEffect(Unit) { runCatching { jumpFocus.requestFocus() } }
                 }
 
-                if (!compact && !sectionTitle.isNullOrBlank()) {
-                    Text(
-                        sectionTitle,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.fgTertiary,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.widthIn(max = 220.dp),
-                    )
-                }
             }
         }
     }
@@ -576,28 +564,36 @@ internal fun ImmersiveTocDrawer(
     availableWidth: Dp,
     book: Textbook,
     currentPage: Int,
-    currentSectionIndex: Int,
+    currentAnchor: BookPageAnchor,
+    currentChapterId: String?,
+    bodyStart: BookPageAnchor,
+    bodyStartCorrected: Boolean,
     bookmarks: List<BookBookmark>,
     busy: Boolean,
     onJumpPage: (Int) -> Unit,
     onToggleBookmark: (Int) -> Unit,
+    onJumpToc: (BookTocNode) -> Unit,
+    onSaveBodyStart: suspend (Int?) -> Unit,
     onReorganizeSections: (() -> Unit)?,
     onClose: () -> Unit,
-    chapterReadStates: Map<String, ChapterReadState> = emptyMap(),
-    lessonChapterId: ((BookLesson, Int) -> String)? = null,
-    onToggleChapterRead: ((BookLesson, Int, Boolean) -> Unit)? = null,
+    readChapterIds: Set<String> = emptySet(),
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
-    var activeTab by remember { mutableStateOf(ReaderLeftTab.TOC) }
+    var activeTab by remember(book.id) { mutableStateOf(ReaderLeftTab.TOC) }
     val activeBg = colors.actionPrimary.copy(alpha = 0.12f)
     val rowShape = RoundedCornerShape(CoachV7.Radius.s)
     val drawerWidth = minOf(308.dp, (availableWidth * 0.85f).coerceAtLeast(240.dp))
     val tocListState = rememberLazyListState()
 
-    LaunchedEffect(visible, activeTab, currentSectionIndex) {
-        if (visible && activeTab == ReaderLeftTab.TOC && currentSectionIndex in book.lessons.indices) {
-            tocListState.scrollToItem((currentSectionIndex - 2).coerceAtLeast(0))
+    val entries = book.tocNodes
+    val activeIndex = entries.indexOfLast {
+        it.startPage < currentAnchor.importPage ||
+            it.startPage == currentAnchor.importPage && it.startOffset <= currentAnchor.offsetUtf16
+    }
+    LaunchedEffect(visible, activeTab, activeIndex) {
+        if (visible && activeTab == ReaderLeftTab.TOC && activeIndex >= 0) {
+            tocListState.scrollToItem((activeIndex - 2).coerceAtLeast(0))
         }
     }
 
@@ -654,7 +650,8 @@ internal fun ImmersiveTocDrawer(
                 )
                 when (activeTab) {
                     ReaderLeftTab.TOC -> {
-                        if (book.lessons.isEmpty()) {
+                        TocStructureSummary(book, bodyStart, bodyStartCorrected, busy, onSaveBodyStart)
+                        if (entries.isEmpty()) {
                             Column(
                                 Modifier.weight(1f).fillMaxWidth().padding(20.dp).testTag("v7-directory-drawer"),
                                 verticalArrangement = Arrangement.Center,
@@ -671,26 +668,30 @@ internal fun ImmersiveTocDrawer(
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                                 verticalArrangement = Arrangement.spacedBy(2.dp),
                             ) {
-                                itemsIndexed(book.lessons, key = { idx, item -> "${idx}:${item.id}" }) { idx, lesson ->
-                                    val active = idx == currentSectionIndex
-                                    val depth = (lesson.breadcrumb.count { it == '›' }).coerceAtMost(2)
-                                    val indent = (depth * 12).dp
-                                    val chapterId = lessonChapterId?.invoke(lesson, idx) ?: lesson.id
-                                    val isRead = chapterReadStates[chapterId] == ChapterReadState.READ
+                                itemsIndexed(entries, key = { _, item -> item.id }) { idx, node ->
+                                    val active = idx == activeIndex || node.id == currentChapterId
+                                    val indent = ((node.level - 1).coerceIn(0, 3) * 10).dp
                                     Row(
-                                        Modifier
-                                            .fillMaxWidth()
+                                        Modifier.fillMaxWidth()
                                             .clip(rowShape)
                                             .background(if (active) activeBg else Color.Transparent)
-                                            .clickable(enabled = !busy) { onJumpPage(lesson.firstPage) }
+                                            .clickable(enabled = !busy) { onJumpToc(node) }
                                             .pointerHoverIcon(PointerIcon.Hand)
                                             .padding(start = 10.dp + indent, end = 10.dp, top = 8.dp, bottom = 8.dp)
                                             .testTag("toc-item-$idx"),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     ) {
+                                        if (node.kind == TocNodeKind.CHAPTER) {
+                                            val read = node.id in readChapterIds
+                                            val dot = Modifier.size(6.dp)
+                                            Spacer((if (read) dot.background(v7Pine(), CircleShape)
+                                                else dot.border(1.dp, colors.fgTertiary, CircleShape)).semantics {
+                                                stateDescription = if (read) "已读" else "未读"
+                                            }.testTag("toc-read-dot-$idx"))
+                                        }
                                         Text(
-                                            lesson.title,
+                                            node.title,
                                             style = MaterialTheme.typography.bodySmall,
                                             color = if (active) colors.actionPrimary else colors.fgPrimary,
                                             fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
@@ -698,25 +699,8 @@ internal fun ImmersiveTocDrawer(
                                             overflow = TextOverflow.Ellipsis,
                                             modifier = Modifier.weight(1f),
                                         )
-                                        if (onToggleChapterRead != null) {
-                                            Text(
-                                                if (isRead) "已读" else "标为已读",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = if (isRead) v7Pine() else colors.fgTertiary,
-                                                maxLines = 1,
-                                                softWrap = false,
-                                                modifier = Modifier
-                                                    .clip(rowShape)
-                                                    .clickable(enabled = !busy, role = Role.Button) {
-                                                        onToggleChapterRead(lesson, idx, !isRead)
-                                                    }
-                                                    .pointerHoverIcon(PointerIcon.Hand)
-                                                    .padding(horizontal = 4.dp, vertical = 2.dp)
-                                                    .testTag("toc-read-toggle-$idx"),
-                                            )
-                                        }
                                         Text(
-                                            "${lesson.firstPage}",
+                                            node.startPage.toString(),
                                             style = MaterialTheme.typography.labelSmall,
                                             fontFamily = LocalV7Fonts.current.numbers,
                                             color = if (active) colors.actionPrimary else colors.fgTertiary,

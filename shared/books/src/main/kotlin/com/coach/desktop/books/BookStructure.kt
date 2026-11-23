@@ -5,7 +5,6 @@ import kotlinx.serialization.json.*
 import org.w3c.dom.Element
 import java.nio.file.Path
 import java.sql.Connection
-import java.util.zip.ZipFile
 
 /** 结构来源按可信度由高到低排列。 */
 internal enum class HeadingSource {
@@ -51,6 +50,7 @@ internal data class BookOutlineItem(
     val level: Int,
     val page: Int,
     val source: HeadingSource,
+    val startOffset: Int = 0,
 )
 
 internal data class TocParsedEntry(
@@ -78,6 +78,7 @@ internal data class BookStructure(
     val tocNodes: List<BookTocNode> = emptyList(),
     val studyChunks: List<BookStudyChunk> = emptyList(),
     val confidence: Double = 1.0,
+    val nativeBodyStart: BookPageAnchor? = null,
 ) {
     /** 无结构或低置信度长书尚未尝试过模型分节时为 true；一旦尝试或回退后按书缓存不再重复调用。 */
     val needsModelSectioning: Boolean
@@ -144,7 +145,7 @@ internal data class BookStructure(
         resolvedLessons.indexOfFirst { page in it.firstPage..it.lastPage }
 
     companion object {
-        const val CURRENT_VERSION = 1
+        const val CURRENT_VERSION = 2
     }
 }
 
@@ -328,8 +329,9 @@ internal object BookStructurePlanner {
         pages: List<BookPage>,
         externalOutline: List<BookOutlineItem> = emptyList(),
         typographyLines: Map<Int, List<PageLineTypography>> = emptyMap(),
+        nativeBodyStart: BookPageAnchor? = null,
     ): BookStructure {
-        val outcome = BookTocWaterfall.plan(bookId, title, format, pages, externalOutline, typographyLines)
+        val outcome = BookTocWaterfall.plan(bookId, title, format, pages, externalOutline, typographyLines, nativeBodyStart)
         return BookStructure(
             version = BookStructure.CURRENT_VERSION,
             pageRoles = outcome.pageRoles,
@@ -339,6 +341,7 @@ internal object BookStructurePlanner {
             tocNodes = outcome.tocNodes,
             studyChunks = outcome.studyChunks,
             confidence = outcome.confidence,
+            nativeBodyStart = nativeBodyStart,
         ).also { it.resolvedLessons = outcome.lessons }
     }
 
@@ -632,87 +635,8 @@ internal object BookStructurePlanner {
     }
 
     /** 从 EPUB（nav.xhtml 或 toc.ncx）提取真实目录大纲。 */
-    fun extractEpubOutline(path: Path, pages: List<BookPage>): List<BookOutlineItem> = runCatching {
-        ZipFile(path.toFile()).use { zip ->
-            fun read(name: String): ByteArray? = zip.getEntry(name)?.let { e ->
-                zip.getInputStream(e).use { it.readNBytes(2 * 1024 * 1024) }
-            }
-            fun Element.all(name: String): List<Element> =
-                getElementsByTagNameNS("*", name).let { list -> (0 until list.length).map { list.item(it) as Element } }
-
-            val container = read("META-INF/container.xml")?.let(EpubXml::parse) ?: return@use emptyList()
-            val packagePath = container.all("rootfile").firstOrNull()?.getAttribute("full-path") ?: return@use emptyList()
-            val opf = read(packagePath)?.let(EpubXml::parse) ?: return@use emptyList()
-            val items = opf.all("item")
-            val root = java.net.URI("/$packagePath")
-
-            fun findPageForTitle(title: String): Int? =
-                pages.firstOrNull { p -> p.text.lineSequence().any { titlesMatch(it.trim(), title) } }?.number
-
-            // 1) EPUB3 nav.xhtml
-            val navItem = items.firstOrNull { "nav" in it.getAttribute("properties").split(Regex("\\s+")) }
-            if (navItem != null) {
-                val member = root.resolve(navItem.getAttribute("href")).normalize().path.removePrefix("/")
-                val doc = read(member)?.let(EpubXml::parse)
-                if (doc != null) {
-                    val result = mutableListOf<BookOutlineItem>()
-                    fun walkOl(el: Element, level: Int) {
-                        for (i in 0 until el.childNodes.length) {
-                            val child = el.childNodes.item(i) as? Element ?: continue
-                            when (child.localName?.lowercase()) {
-                                "li" -> {
-                                    val anchor = (0 until child.childNodes.length).mapNotNull { child.childNodes.item(it) as? Element }
-                                        .firstOrNull { it.localName?.lowercase() in setOf("a", "span") }
-                                    val label = anchor?.textContent?.trim().orEmpty()
-                                    if (label.isNotEmpty()) {
-                                        val page = findPageForTitle(label)
-                                        if (page != null) result += BookOutlineItem(label, level.coerceIn(1, 6), page, HeadingSource.EPUB_TOC)
-                                    }
-                                    for (j in 0 until child.childNodes.length) {
-                                        val sub = child.childNodes.item(j) as? Element ?: continue
-                                        if (sub.localName?.lowercase() == "ol") walkOl(sub, level + 1)
-                                    }
-                                }
-                                "ol", "nav" -> walkOl(child, level)
-                            }
-                        }
-                    }
-                    doc.all("nav").firstOrNull()?.let { walkOl(it, 1) }
-                    if (result.isNotEmpty()) return@use result
-                }
-            }
-
-            // 2) EPUB2 toc.ncx
-            val ncxItem = items.firstOrNull { it.getAttribute("media-type") == "application/x-dtbncx+xml" || it.getAttribute("href").endsWith(".ncx", true) }
-            if (ncxItem != null) {
-                val member = root.resolve(ncxItem.getAttribute("href")).normalize().path.removePrefix("/")
-                val doc = read(member)?.let(EpubXml::parse)
-                if (doc != null) {
-                    val result = mutableListOf<BookOutlineItem>()
-                    fun walkNavPoint(el: Element, level: Int) {
-                        val label = el.all("text").firstOrNull()?.textContent?.trim().orEmpty()
-                        if (label.isNotEmpty()) {
-                            val page = findPageForTitle(label)
-                            if (page != null) result += BookOutlineItem(label, level.coerceIn(1, 6), page, HeadingSource.EPUB_TOC)
-                        }
-                        for (i in 0 until el.childNodes.length) {
-                            val child = el.childNodes.item(i) as? Element ?: continue
-                            if (child.localName?.lowercase() == "navpoint") walkNavPoint(child, level + 1)
-                        }
-                    }
-                    val navMap = doc.all("navMap").firstOrNull()
-                    if (navMap != null) {
-                        for (i in 0 until navMap.childNodes.length) {
-                            val child = navMap.childNodes.item(i) as? Element ?: continue
-                            if (child.localName?.lowercase() == "navpoint") walkNavPoint(child, 1)
-                        }
-                    }
-                    if (result.isNotEmpty()) return@use result
-                }
-            }
-            emptyList()
-        }
-    }.getOrDefault(emptyList())
+    fun extractEpubOutline(path: Path, pages: List<BookPage>): List<BookOutlineItem> =
+        TextbookExtraction.epubNavigation(path, pages)?.outline.orEmpty()
 
     /** 从 Word（.docx）样式表与正文提取带层级的标题大纲。 */
     fun extractWordOutline(path: Path, pages: List<BookPage>): List<BookOutlineItem> = runCatching {
@@ -783,6 +707,7 @@ internal object BookStructureStore {
     fun migrate(db: Connection) {
         db.createStatement().use { sql ->
             sql.execute("CREATE TABLE IF NOT EXISTS book_structures(book TEXT PRIMARY KEY, version INTEGER NOT NULL, payload TEXT NOT NULL)")
+            sql.execute("CREATE TABLE IF NOT EXISTS book_body_start(book TEXT PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE, page INTEGER NOT NULL)")
             sql.execute("""CREATE TABLE IF NOT EXISTS book_section_cache(
                 book TEXT NOT NULL, section_id TEXT NOT NULL, kind TEXT NOT NULL,
                 payload TEXT NOT NULL, updated_at INTEGER NOT NULL,
@@ -806,6 +731,13 @@ internal object BookStructureStore {
             put("source", structure.source)
             put("confidence", structure.confidence)
             put("modelAttempted", structure.modelAttempted)
+            structure.nativeBodyStart?.let {
+                put("bodyPage", it.importPage)
+                put("bodyOffset", it.offsetUtf16)
+            }
+            put("tocOffsets", buildJsonObject {
+                structure.tocNodes.filter { it.startOffset > 0 }.forEach { put(it.id, it.startOffset) }
+            })
             put("pageRoles", buildJsonObject {
                 structure.pageRoles.forEach { (p, role) -> put(p.toString(), role.name) }
             })
@@ -855,7 +787,11 @@ internal object BookStructureStore {
                         val r = roleByName[v.jsonPrimitive.contentOrNull] ?: continue
                         roles[p] = r
                     }
-                    val tocNodes = BookTocStore.loadTocNodes(db, bookId)
+                    val tocOffsets = obj["tocOffsets"]?.jsonObject.orEmpty()
+                    val tocNodes = BookTocStore.loadTocNodes(db, bookId).map { node ->
+                        val offset = tocOffsets[node.id]?.jsonPrimitive?.intOrNull ?: 0
+                        node.copy(startOffset = offset)
+                    }
                     val studyChunks = BookTocStore.loadStudyChunks(db, bookId)
                     val sectionsFromChunks = obj["sectionsFromChunks"]?.jsonPrimitive?.booleanOrNull == true
                     val rawSections = obj["sections"]?.jsonArray
@@ -894,6 +830,9 @@ internal object BookStructureStore {
                         tocNodes = tocNodes,
                         studyChunks = studyChunks,
                         confidence = confidence,
+                        nativeBodyStart = obj["bodyPage"]?.jsonPrimitive?.intOrNull?.let {
+                            BookPageAnchor(it, obj["bodyOffset"]?.jsonPrimitive?.intOrNull ?: 0)
+                        },
                     ).also {
                         it.deferResolvedLessons { it.toLessons(bookId, pages, sharedBlocks?.invoke()) }
                     }

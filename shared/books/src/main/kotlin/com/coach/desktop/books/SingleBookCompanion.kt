@@ -513,6 +513,11 @@ internal object ChapterCompanionGrouping {
 
     fun groupForSection(book: Textbook, sectionIndex: Int): ChapterSectionGroup? {
         val current = book.lessons.getOrNull(sectionIndex) ?: return null
+        if (book.tocNodes.isNotEmpty()) {
+            val chapter = BookChapterResolver.chapterForLesson(book, sectionIndex) ?: return null
+            val sections = chapter.sectionIndices.mapNotNull(book.lessons::getOrNull).ifEmpty { listOf(current) }
+            return ChapterSectionGroup(chapter.tocNodeId, chapter.title, chapter.firstPage, chapter.lastPage, sections)
+        }
         val chapterPrefix = chapterGroupKey(current)
         val siblings = if (chapterPrefix != null) {
             book.lessons.filter { chapterGroupKey(it) == chapterPrefix }

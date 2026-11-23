@@ -255,7 +255,7 @@ class SableLoginEntryTest {
                         onNodeWithTag("textbook-reader").performKeyInput { pressKey(Key.Tab) }
                         waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("reader-page-number").fetchSemanticsNodes().isNotEmpty() }
                     }
-                    onNodeWithTag("reader-page-number").assertTextContains("第 $targetPage 页 / 3", substring = true)
+                    onNodeWithTag("reader-page-number").assertTextContains("第 $targetPage / 3 页", substring = true)
                 }
             } finally {
                 bg.shutdownNow()
@@ -321,7 +321,7 @@ class SableLoginEntryTest {
                 onNodeWithTag("textbook-reader").performKeyInput { pressKey(Key.Tab) }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("reader-page-number").fetchSemanticsNodes().isNotEmpty() }
             }
-            onNodeWithTag("reader-page-number").assertTextContains("第 2 页 / 3", substring = true)
+            onNodeWithTag("reader-page-number").assertTextContains("第 2 / 3 页", substring = true)
         }
     }
 

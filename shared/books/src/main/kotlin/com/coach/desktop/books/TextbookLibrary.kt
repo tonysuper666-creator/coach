@@ -171,7 +171,39 @@ internal class TextbookLibrary(
         }
     }
 
-    private fun book(db: Connection, id: String): Textbook =
+    private fun book(db: Connection, id: String): Textbook {
+        val loaded = readBook(db, id)
+        val structure = loaded.structure ?: return loaded
+        if (structure.version >= BookStructure.CURRENT_VERSION || loaded.indexState != "READY") return loaded
+        if (loaded.format !in setOf("epub", "pdf")) return loaded
+        val path = original(id, loaded.format)
+        if (!Files.isRegularFile(path)) return loaded
+        val navigation = if (loaded.format == "epub") {
+            TextbookExtraction.epubNavigation(path, loaded.pages) ?: return loaded
+        } else null
+        val outline = navigation?.outline ?: run {
+            if (structure.source == HeadingSource.PDF_OUTLINE.name) return loaded
+            runCatching { BookPdfLoader.read(path.toFile(), ::extractBookPdfOutline) }.getOrDefault(emptyList())
+                .ifEmpty { return loaded }
+        }
+        val refreshed = BookStructurePlanner.plan(id, loaded.title, loaded.format, loaded.pages, outline,
+            nativeBodyStart = navigation?.nativeBodyStart)
+        // Keep the reader's saved page, bookmarks and notes when refreshing navigation.
+        val autoCommit = db.autoCommit
+        if (autoCommit) db.autoCommit = false
+        try {
+            BookStructureStore.saveStructure(db, id, refreshed)
+            if (autoCommit) db.commit()
+        } catch (error: Exception) {
+            if (autoCommit) db.rollback()
+            throw error
+        } finally {
+            if (autoCommit) db.autoCommit = true
+        }
+        return loaded.copy(structure = refreshed)
+    }
+
+    private fun readBook(db: Connection, id: String): Textbook =
         db.prepareStatement("SELECT title,format,reading_page,lesson_index,learning,prompt_seen,mode,index_state FROM books WHERE id=?").use { sql ->
             sql.setString(1, id)
             sql.executeQuery().use { row ->
@@ -201,16 +233,45 @@ internal class TextbookLibrary(
                 val structure = BookStructureStore.loadStructure(db, id, pages, sharedBlocks = {
                     createdBook?.sourceBlocks() ?: StudyCoachCourse.blocks(id, pages, snapSentences = true)
                 })
+                val correctedBodyPage = db.prepareStatement("SELECT page FROM book_body_start WHERE book=?").use { sql ->
+                    sql.setString(1, id)
+                    sql.executeQuery().use { if (it.next()) it.getInt(1) else null }
+                }
                 Textbook(
                     id, title, format, pages,
                     if (pages.any { it.number == storedPage }) storedPage else pages.first().number,
                     lessonIdx, learning, promptSeen, questionMode, structure,
-                    indexState = indexStateCol,
+                    indexState = indexStateCol, correctedBodyPage = correctedBodyPage,
                 ).also { createdBook = it }
             }
         }
 
     @Synchronized fun book(id: String): Textbook = database().use { book(it, id) }
+
+    @Synchronized fun saveBodyStart(bookId: String, page: Int?) {
+        database().use { db ->
+            if (page != null) {
+                val valid = db.prepareStatement("SELECT 1 FROM pages WHERE book=? AND page=?").use { sql ->
+                    sql.setString(1, bookId)
+                    sql.setInt(2, page)
+                    sql.executeQuery().use { it.next() }
+                }
+                require(valid) { "请输入书内页码。" }
+            }
+            if (page == null) {
+                db.prepareStatement("DELETE FROM book_body_start WHERE book=?").use { sql ->
+                    sql.setString(1, bookId)
+                    sql.executeUpdate()
+                }
+            } else {
+                db.prepareStatement("INSERT OR REPLACE INTO book_body_start(book,page) VALUES(?,?)").use { sql ->
+                    sql.setString(1, bookId)
+                    sql.setInt(2, page)
+                    sql.executeUpdate()
+                }
+            }
+        }
+    }
 
     @Synchronized fun loadStartupSnapshot(): StartupLoadSnapshot = database().use { db ->
         val catalog = catalog(db)
@@ -922,69 +983,8 @@ internal class TextbookLibrary(
         val initialReadingPage: Int,
     )
 
-    internal fun initialBodyPage(pages: List<BookPage>, structure: BookStructure?): Int {
-        if (pages.isEmpty()) return 1
-        val validPages = pages.map { it.number }.toSet()
-        val firstNum = pages.minOf { it.number }
-        val nonBodyRoles = setOf(BookPageRole.TOC, BookPageRole.COPYRIGHT, BookPageRole.FRONT_MATTER, BookPageRole.BLANK)
-        // 1. Prefer the first canonical Chapter (or Section) node whose page is valid and not front matter/TOC/copyright.
-        val tocNodes = structure?.tocNodes.orEmpty()
-        val chapterStart = tocNodes.firstOrNull {
-            it.kind == TocNodeKind.CHAPTER && it.startPage in validPages &&
-                structure?.pageRole(it.startPage) !in nonBodyRoles
-        }?.startPage ?: tocNodes.firstOrNull {
-            it.kind == TocNodeKind.SECTION && it.startPage in validPages &&
-                structure?.pageRole(it.startPage) !in nonBodyRoles
-        }?.startPage
-        if (chapterStart != null) return chapterStart
-
-        // 2. Otherwise pick the first page classified as BODY with non-blank text (skips cover/copyright/TOC).
-        val firstBodyByRole = pages.firstOrNull { page ->
-            val role = structure?.pageRole(page.number)
-            role == BookPageRole.BODY && page.text.isNotBlank() && !looksLikeFrontMatterPage(page.text)
-        }?.number
-        if (firstBodyByRole != null) return firstBodyByRole
-
-        // 3. Heuristic fallback when structure is absent: skip obvious cover / copyright / TOC pages.
-        val scanLimit = minOf(pages.size, 12)
-        for (i in 0 until scanLimit) {
-            val page = pages[i]
-            if (page.text.isNotBlank() && !looksLikeFrontMatterPage(page.text)) return page.number
-        }
-        return firstNum
-    }
-
-    private fun looksLikeFrontMatterPage(text: String): Boolean {
-        val trimmed = text.trim()
-        if (trimmed.isEmpty()) return true
-        val lines = trimmed.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
-        if (lines.isEmpty()) return true
-        if (ExplainClassifier.copyrightMarkerCount(trimmed) >= 2) return true
-        val firstLine = lines.first()
-        if (frontMatterHeadingRegex.matches(firstLine)) return true
-        val lower = trimmed.lowercase()
-        if (("isbn" in lower || "copyright" in lower || "all rights reserved" in lower || "版权所有" in trimmed || "图书在版编目" in trimmed) &&
-            trimmed.length < 1500
-        ) return true
-        if ((firstLine.equals("Contents", ignoreCase = true) || firstLine.equals("Table of Contents", ignoreCase = true) ||
-                firstLine == "目录" || firstLine == "目 录") && lines.size >= 2
-        ) return true
-        // Cover-like page: very short title-only page with no chapter heading or body sentence.
-        if (lines.size <= 4 && trimmed.length < 140 && !chapterStartRegex.containsMatchIn(trimmed) &&
-            !trimmed.contains('。') && trimmed.count { it == '.' } <= 1
-        ) return true
-        return false
-    }
-
-    private val frontMatterHeadingRegex = Regex(
-        """^(?:Cover|Half\s+Title|Title\s+Page|Copyright(?:\s+Page)?|Brief\s+Contents|Detailed\s+Contents|Contents|Table\s+of\s+Contents|Blank\s+Page|List\s+of\s+(?:Figures|Tables|Boxes)|目\s*录|总\s*目\s*录|简\s*目|版权页|封面)$""",
-        RegexOption.IGNORE_CASE,
-    )
-
-    private val chapterStartRegex = Regex(
-        """(?m)^(?:#{1,3}\s+|第[一二三四五六七八九十百0-9]+[章节篇]|Chapter\s+\d+|1\.\d+\s+)""",
-        RegexOption.IGNORE_CASE,
-    )
+    internal fun initialBodyPage(pages: List<BookPage>, structure: BookStructure?): Int =
+        BookBoundaries.bodyStart(pages, structure).importPage
 
     fun stageBookImportTier0(source: Path, control: BookImportControl = BookImportControl()): StagedBookImport {
         control.report(0, 0)
@@ -1022,25 +1022,16 @@ internal class TextbookLibrary(
                         val tier0End = minOf(3, totalPages)
                         for (pageNum in 1..tier0End) extractPage(pageNum)
                         val outlineStructure = BookTocWaterfall.buildTier0Structure(id, bookTitle, totalPages, outline)
-                        val outlineChapterPage = outlineStructure.tocNodes.firstOrNull {
-                            it.kind == TocNodeKind.CHAPTER && it.startPage in 1..totalPages
+                        val outlineChapterPage = BookBoundaries.firstChapter(outlineStructure.tocNodes)?.startPage
+                        val probeStart = outlineChapterPage ?: 1
+                        val nextChapterPage = outlineStructure.tocNodes.firstOrNull {
+                            it.kind == TocNodeKind.CHAPTER && it.startPage > probeStart
                         }?.startPage
-                        val initialPage = if (outlineChapterPage != null) {
-                            for (p in outlineChapterPage..minOf(outlineChapterPage + 2, totalPages)) extractPage(p)
-                            outlineChapterPage
-                        } else {
-                            // Probe up to 10 early pages to skip cover/copyright/TOC pages and open straight to Ch.1 body.
-                            var found: Int? = null
-                            val probeLimit = minOf(10, totalPages)
-                            for (p in 1..probeLimit) {
-                                val pageObj = extractPage(p)
-                                if (pageObj.text.isNotBlank() && !looksLikeFrontMatterPage(pageObj.text)) {
-                                    found = p
-                                    break
-                                }
-                            }
-                            found ?: 1
-                        }
+                        val probeEnd = minOf(probeStart + 31, totalPages, (nextChapterPage ?: totalPages + 1) - 1)
+                        val initialPage = (probeStart..probeEnd).firstOrNull { p ->
+                            !BookBoundaries.looksLikeFrontMatter(extractPage(p).text)
+                        } ?: probeStart
+                        for (p in initialPage..minOf(initialPage + 2, totalPages)) extractPage(p)
                         payloadReady = true
                         Tier0PdfPayload(bookTitle, totalPages, outline, aspects, extractedMap.values.sortedBy { it.number }, initialPage)
                     },
@@ -1050,7 +1041,8 @@ internal class TextbookLibrary(
                         val allTier0Pages = (1..payload.totalPages).map { pageNum ->
                             tier0ByPage[pageNum] ?: BookPage(pageNum, "")
                         }
-                        val tier0Structure = BookTocWaterfall.buildTier0Structure(id, payload.title, payload.totalPages, payload.outline).also {
+                        val tier0Structure = BookTocWaterfall.buildTier0Structure(id, payload.title, payload.totalPages, payload.outline)
+                            .copy(nativeBodyStart = BookPageAnchor(payload.initialReadingPage)).also {
                             it.deferResolvedLessons { it.toLessons(id, allTier0Pages) }
                         }
                         val startPage = payload.initialReadingPage.coerceIn(1, payload.totalPages)
@@ -1213,7 +1205,7 @@ internal class TextbookLibrary(
             } else emptyList()
             Triple(pdf.numberOfPages, extractBookPdfOutline(pdf), aspects)
         }
-        val needTypography = !BookTocWaterfall.willStageASucceed(outline, initialCount, "pdf")
+        val needTypography = !BookTocWaterfall.willStageASucceed(outline, initialCount)
         val preserveExistingPages = isLegacyTocRebuild && (1..initialCount).all { p -> existingByPage[p] != null }
         val indexedPages = ArrayList<BookPage>(initialCount)
         val typographyLines = LinkedHashMap<Int, List<PageLineTypography>>()
@@ -1299,7 +1291,9 @@ internal class TextbookLibrary(
             }
         }
         control.check()
-        val structure = BookStructurePlanner.plan(bookId, current.title, "pdf", indexedPages, outline, typographyLines)
+        val bodyStart = current.structure?.nativeBodyStart?.takeIf { outline.isNotEmpty() }
+        val structure = BookStructurePlanner.plan(bookId, current.title, "pdf", indexedPages, outline, typographyLines,
+            nativeBodyStart = bodyStart)
         var readingPage = current.readingPage
         var lessonIndex = current.lessonIndex
         var learning = current.learning
@@ -1392,6 +1386,7 @@ internal class TextbookLibrary(
             questionMode = questionMode,
             structure = structure,
             indexState = "READY",
+            correctedBodyPage = current.correctedBodyPage,
         )
     }
 
@@ -1636,7 +1631,8 @@ internal class TextbookLibrary(
         sourceFilename: String? = null, fileBytes: Long = Files.size(stage),
     ): StagedBookImport {
         if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
-        val structure = BookStructurePlanner.plan(id, extracted.title, format, extracted.pages, extracted.outline)
+        val structure = BookStructurePlanner.plan(id, extracted.title, format, extracted.pages, extracted.outline,
+            nativeBodyStart = extracted.nativeBodyStart)
         val startPage = initialBodyPage(extracted.pages, structure)
         val target = original(id, format)
         // The immutable source is in place before the single transaction makes it visible.
@@ -1819,7 +1815,7 @@ internal class TextbookLibrary(
                 for (table in listOf(
                     "pages", "book_illustrations", "book_page_text_boxes", "book_native_sources",
                     "book_learning_paths", "book_ladders", "book_reader_views", "book_pdf_modes",
-                    "book_highlights", "book_notes", "answers", "book_reviews", "book_structures", "book_section_cache",
+                    "book_highlights", "book_notes", "answers", "book_reviews", "book_structures", "book_section_cache", "book_body_start",
                     "book_open_session", "book_toc_nodes", "book_study_chunks", "book_bookmarks",
                     "book_page_aspects", "book_visual_pages",
                 )) {
@@ -1859,11 +1855,12 @@ internal class TextbookLibrary(
         val current = book(bookId)
         val file = runCatching { original(bookId, current.format) }.getOrNull()?.takeIf(Files::isRegularFile)
         var typographyLines: Map<Int, List<PageLineTypography>> = emptyMap()
+        val epubNavigation = if (file != null && current.format == "epub") TextbookExtraction.epubNavigation(file, current.pages) else null
         val outline = if (file == null) emptyList() else when (current.format) {
             "pdf" -> runCatching {
                 BookPdfLoader.read(file.toFile()) { pdf ->
                     val items = extractBookPdfOutline(pdf)
-                    if (items.size < 3) {
+                    if (items.isEmpty()) {
                         typographyLines = buildMap {
                             for (p in 1..minOf(pdf.numberOfPages, 5000)) {
                                 if (current.page(p)?.ocr != true) {
@@ -1876,11 +1873,11 @@ internal class TextbookLibrary(
                     items
                 }
             }.getOrDefault(emptyList())
-            "epub" -> BookStructurePlanner.extractEpubOutline(file, current.pages)
+            "epub" -> epubNavigation?.outline.orEmpty()
             "docx" -> BookStructurePlanner.extractWordOutline(file, current.pages)
             else -> emptyList()
         }
-        val structure = BookStructurePlanner.plan(current.id, current.title, current.format, current.pages, outline, typographyLines)
+        val structure = BookStructurePlanner.plan(current.id, current.title, current.format, current.pages, outline, typographyLines, epubNavigation?.nativeBodyStart)
         val clampedIndex = current.lessonIndex.coerceIn(0, structure.resolvedLessons.size)
         database().use { db ->
             db.autoCommit = false
@@ -2898,6 +2895,7 @@ internal data class ExtractedBook(
     val pages: List<BookPage>,
     val illustrations: List<ExtractedIllustration> = emptyList(),
     val outline: List<BookOutlineItem> = emptyList(),
+    val nativeBodyStart: BookPageAnchor? = null,
 )
 
 internal object TextbookExtraction {
@@ -3005,9 +3003,7 @@ internal object TextbookExtraction {
                 finally { releaseBookBitmap(image) }
             }
         }
-        "epub" -> epub(path, title, control = control).let { extracted ->
-            extracted.copy(outline = BookStructurePlanner.extractEpubOutline(path, extracted.pages))
-        }
+        "epub" -> epub(path, title, control = control, withNavigation = true)
         "mobi", "azw3" -> com.coach.desktop.books.mobi.KindleText.read(Files.readAllBytes(path)).let { book ->
             val name = book.title().ifBlank { title }
             StructuredBookExtraction.kindle(book, name)
@@ -3072,8 +3068,14 @@ internal object TextbookExtraction {
         else EpubSourceMapping(EpubSourceMapping.Status.STALE_TEXT, emptyList())
     }
 
+    fun epubNavigation(path: Path, canonicalPages: List<BookPage>): ExtractedBook? = runCatching {
+        epub(path, "", withNavigation = true, navigationOnly = true)
+            .takeIf { parsed -> parsed.pages.map { it.text } == canonicalPages.map { it.text } }
+    }.getOrNull()
+
     private fun epub(path: Path, fallback: String, elements: MutableList<EpubElementSource>? = null,
-        control: BookImportControl = BookImportControl()): ExtractedBook = ZipFile(path.toFile()).use { zip ->
+        control: BookImportControl = BookImportControl(), withNavigation: Boolean = false,
+        navigationOnly: Boolean = false): ExtractedBook = ZipFile(path.toFile()).use { zip ->
         fun read(name: String): ByteArray {
             require(!name.startsWith('/') && name.split('/').none { it == ".." } && '\\' !in name) { "EPUB 内含无效的文件位置。" }
             val entry = requireNotNull(zip.getEntry(name)) { "EPUB 缺少阅读顺序中的正文。" }
@@ -3098,15 +3100,18 @@ internal object TextbookExtraction {
         val manifest = opf.all("item").associate { it.getAttribute("id") to it.getAttribute("href") }
         val spine = opf.all("itemref").withIndex().filter { it.value.getAttribute("linear") != "no" }
         require(spine.size in 1..5000) { "EPUB 没有可读正文，或章节太多。" }
-        val root = java.net.URI("/$packagePath")
+        val root = java.net.URI(null, null, "/$packagePath", null)
         var totalBytes = 0L
         var pageBase = 0
-        val imageExtractor = if (elements == null) EpubBookImages(zip, control) else null
+        val imageExtractor = if (elements == null && !navigationOnly) EpubBookImages(zip, control) else null
+        val navigation = if (withNavigation) EpubNavigation(packagePath, opf) { member ->
+            if (zip.getEntry(member) != null) read(member) else null
+        } else null
         val illustrations = mutableListOf<ExtractedIllustration>()
         val pages = spine.flatMap { (spineIndex, item) ->
             control.check()
             val href = requireNotNull(manifest[item.getAttribute("idref")]) { "EPUB 阅读顺序不完整。" }
-            val resolved = root.resolve(href).normalize()
+            val resolved = root.resolve(href.replace(" ", "%20")).normalize()
             require(resolved.scheme == null && resolved.host == null && resolved.fragment == null) { "EPUB 的正文必须包含在书内。" }
             val member = resolved.path.removePrefix("/")
             val bytes = read(member)
@@ -3114,6 +3119,10 @@ internal object TextbookExtraction {
             require(totalBytes <= 64L * 1024 * 1024) { "EPUB 的正文过大。" }
             val doc = xml(bytes)
             val output = StringBuilder()
+            val requestedFragments = navigation?.fragments(member).orEmpty()
+            val targetOffsets = mutableMapOf<String?, Int>()
+            var boilerplateEnd: Int? = null
+            if (null in requestedFragments) targetOffsets[null] = 0
             val trace = if (elements != null) EpubTextTrace() else null
             fun visit(node: Node, elementPath: List<Int>) {
                 if (node.nodeType == Node.TEXT_NODE) { output.append(node.nodeValue); return }
@@ -3122,7 +3131,20 @@ internal object TextbookExtraction {
                 val block = name in setOf("p", "div", "li", "h1", "h2", "h3", "h4", "section", "br", "tr")
                 if (block) output.append("\n\n")
                 val start = output.length
-                if (node is Element) imageExtractor?.record(node, start)
+                if (node is Element) {
+                    imageExtractor?.record(node, start)
+                    if (requestedFragments.isNotEmpty()) {
+                        for (attribute in listOf("id", "xml:id", "name")) {
+                            val fragment = node.getAttribute(attribute)
+                            if (fragment.isNotEmpty() && fragment in requestedFragments) {
+                                targetOffsets.putIfAbsent(fragment, start)
+                                if (name == "p" || name.length == 2 && name[0] == 'h' && name[1] in '1'..'6') {
+                                    navigation?.recordTargetText(member, fragment, name, node.textContent)
+                                }
+                            }
+                        }
+                    }
+                }
                 if (name.matches(Regex("h[1-6]"))) output.append("# ")
                 var childIndex = 0
                 for (i in 0 until node.childNodes.length) {
@@ -3131,17 +3153,26 @@ internal object TextbookExtraction {
                     if (child is Element) childIndex++
                     visit(child, childPath)
                 }
-                if (node is Element) trace?.record(elementPath, node.namespaceURI.orEmpty(), node.localName ?: node.tagName, start, output.length)
+                if (node is Element) {
+                    trace?.record(elementPath, node.namespaceURI.orEmpty(), node.localName ?: node.tagName, start, output.length)
+                    if (name == "header" && node.getAttribute("id") == "pg-header") boilerplateEnd = output.length
+                }
                 if (block) output.append("\n\n")
             }
             visit(doc, emptyList())
-            val localPages = paginate(clean(output.toString()).trim())
+            val raw = output.toString()
+            val cleaned = clean(raw)
+            val localPages = paginate(cleaned.trim())
+            if (navigation != null && targetOffsets.isNotEmpty()) {
+                navigation.recordMember(member, raw, cleaned, localPages, pageBase, targetOffsets, boilerplateEnd)
+            }
             imageExtractor?.let { illustrations += it.finish(output.toString(), localPages, member, pageBase) }
             trace?.let { elements?.addAll(it.project(output.toString(), localPages, spineIndex, member, bytes, pageBase)) }
             pageBase += localPages.size
             localPages
         }.mapIndexed { index, page -> page.copy(number = index + 1) }
         require(pages.any { it.text.isNotBlank() }) { "EPUB 中没有可读取的文字正文。" }
-        ExtractedBook(opf.all("title").firstOrNull()?.textContent?.trim()?.takeIf(String::isNotEmpty) ?: fallback, pages, illustrations)
+        ExtractedBook(opf.all("title").firstOrNull()?.textContent?.trim()?.takeIf(String::isNotEmpty) ?: fallback,
+            pages, illustrations, navigation?.outline().orEmpty(), navigation?.bodyStart())
     }
 }

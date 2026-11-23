@@ -65,14 +65,16 @@ internal class SectionGuideController(
     val states = mutableStateMapOf<String, SectionGuideState>()
     private val inFlight = mutableSetOf<String>()
 
-    fun sectionIndexForPage(page: Int): Int =
-        book.lessons.indexOfFirst { page in it.firstPage..it.lastPage }
+    fun sectionIndexForPage(page: Int): Int = sectionIndexForAnchor(page, 0)
 
     fun sectionIndexForAnchor(page: Int, offsetUtf16: Int): Int {
-        val exact = book.lessons.indexOfFirst { lesson ->
-            lesson.blocks.any { b -> b.page == page && offsetUtf16 in b.start..b.end }
+        val indices = if (book.tocNodes.any { it.kind == TocNodeKind.CHAPTER }) {
+            BookChapterResolver.chapterForPage(book, page, offsetUtf16)?.sectionIndices.orEmpty()
+        } else book.lessons.indices
+        val exact = indices.firstOrNull { index ->
+            book.lessons[index].blocks.any { it.page == page && offsetUtf16 in it.start until it.end }
         }
-        return if (exact >= 0) exact else sectionIndexForPage(page)
+        return exact ?: indices.firstOrNull { page in book.lessons[it].firstPage..book.lessons[it].lastPage } ?: -1
     }
 
     fun sectionForPage(page: Int): BookLesson? =

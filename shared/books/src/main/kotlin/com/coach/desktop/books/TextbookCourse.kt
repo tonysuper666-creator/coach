@@ -43,8 +43,11 @@ internal data class Textbook(
     val promptSeen: Boolean = false, val questionMode: QuestionMode = QuestionMode.CHOICE,
     val structure: BookStructure? = null,
     val indexState: String = "READY",
+    val correctedBodyPage: Int? = null,
 ) {
     val tocNodes: List<BookTocNode> get() = structure?.tocNodes.orEmpty()
+    val bodyStart: BookPageAnchor by lazy { BookBoundaries.bodyStart(pages, structure, correctedBodyPage) }
+    val chapterSpans: List<BookChapterSpan> by lazy { BookChapterResolver.resolve(this) }
     val lessons: List<BookLesson> by lazy {
         structure?.toLessons()?.takeIf { it.isNotEmpty() } ?: StudyCoachCourse.plan(id, title, pages)
     }

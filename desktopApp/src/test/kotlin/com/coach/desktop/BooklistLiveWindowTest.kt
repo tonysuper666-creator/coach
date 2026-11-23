@@ -200,15 +200,18 @@ class BooklistLiveWindowTest {
                     node(window1, "crossbook-companion-section"),
                 )
 
-                // Step C: Mark Book A Chapter 1 as READ via TOC manual toggle -> Book B shows <= 2 cards & 0px inline underlines!
+                // Step C: Real dwell evidence lights the TOC dot and unlocks Book B's cross-book cards.
                 runBlocking { controller1.openBook(bookA.id, 1) }
                 waitFor("Book A rendered", window1) {
                     controller1.state.value.book?.id == bookA.id &&
                         nodeText(window1, "reader-text").contains("Adverse selection arises")
                 }
                 openTocDrawer(window1)
-                waitFor("TOC read toggle visible", window1) { node(window1, "toc-read-toggle-0") != null }
-                click(window1, "toc-read-toggle-0")
+                waitFor("TOC read dot visible", window1) { node(window1, "toc-read-dot-0") != null }
+                assertNull(node(window1, "toc-read-toggle-0"))
+                for (p in chA1.firstPage..chA1.lastPage) {
+                    library1.recordPageDwell(bookA.id, chA1.tocNodeId, p, chA1.pagesTotal, ChapterReadPolicy.MIN_DWELL_MS)
+                }
                 waitFor("Book A Ch 1 persisted READ", window1) {
                     library1.chapterProgressMap(bookA.id)[chA1.tocNodeId]?.readState == ChapterReadState.READ
                 }

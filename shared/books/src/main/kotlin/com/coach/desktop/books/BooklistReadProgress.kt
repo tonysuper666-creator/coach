@@ -51,6 +51,7 @@ internal data class BookChapterSpan(
     val firstPage: Int,
     val lastPage: Int,
     val sectionIndices: List<Int>,
+    val firstOffset: Int = 0,
 ) {
     val pagesTotal: Int get() = (lastPage - firstPage + 1).coerceAtLeast(1)
 }
@@ -75,7 +76,37 @@ internal data class ChapterProgressRecord(
 internal object BookChapterResolver {
     private val SUBSECTION_NUM_RE = Regex("""^(\d+)\.\d+""")
 
-    fun chapters(book: Textbook): List<BookChapterSpan> {
+    fun chapters(book: Textbook): List<BookChapterSpan> = book.chapterSpans
+
+    internal fun resolve(book: Textbook): List<BookChapterSpan> {
+        val toc = book.tocNodes
+        val chapterNodes = toc.filter { it.kind == TocNodeKind.CHAPTER }
+            .ifEmpty { toc.filter { it.kind == TocNodeKind.SECTION && it.parentId == null } }
+        if (chapterNodes.isNotEmpty()) {
+            val ordered = chapterNodes.sortedWith(compareBy(BookTocNode::startPage, BookTocNode::startOffset, BookTocNode::ordinal))
+            return ordered.mapIndexed { index, node ->
+                val next = ordered.getOrNull(index + 1)
+                val back = toc.firstOrNull { it.kind == TocNodeKind.BACK_MATTER && it.startPage > ordered.last().startPage }
+                val stopPage = listOfNotNull(
+                    next?.let { it.startPage - if (it.startOffset > 0) 0 else 1 },
+                    back?.let { it.startPage - if (it.startOffset > 0) 0 else 1 },
+                ).minOrNull() ?: (book.pages.lastOrNull()?.number ?: node.endPage)
+                val end = stopPage.coerceAtLeast(node.startPage)
+                val sections = book.lessons.indices.filter { sectionIndex ->
+                    val start = book.lessons[sectionIndex].blocks.first()
+                    val afterStart = start.page > node.startPage || start.page == node.startPage && start.start >= node.startOffset
+                    val beforeNext = next == null || start.page < next.startPage ||
+                        start.page == next.startPage && start.start < next.startOffset
+                    afterStart && beforeNext && start.page <= end
+                }
+                BookChapterSpan(node.id, node.title, node.startPage, end, sections, node.startOffset)
+            }
+        }
+        if (book.structure != null && toc.isEmpty()) {
+            val first = BookBoundaries.bodyStart(book.pages, book.structure).importPage
+            val last = book.pages.lastOrNull()?.number ?: first
+            return listOf(BookChapterSpan("ch-all", book.title, first, last, book.lessons.indices.toList()))
+        }
         if (book.lessons.isEmpty()) {
             val first = book.pages.firstOrNull()?.number ?: 1
             val last = book.pages.lastOrNull()?.number ?: first
@@ -112,17 +143,13 @@ internal object BookChapterResolver {
     fun chapterForLesson(book: Textbook, sectionIndex: Int): BookChapterSpan? {
         val all = chapters(book)
         return all.firstOrNull { sectionIndex in it.sectionIndices }
-            ?: book.lessons.getOrNull(sectionIndex)?.let { lesson ->
-                all.firstOrNull { lesson.firstPage in it.firstPage..it.lastPage }
-            }
+            ?: book.lessons.getOrNull(sectionIndex)?.blocks?.firstOrNull()?.let { chapterForPage(book, it.page, it.start) }
     }
 
-    fun chapterForPage(book: Textbook, page: Int): BookChapterSpan? {
-        val all = chapters(book)
-        return all.firstOrNull { page in it.firstPage..it.lastPage }
-            ?: all.lastOrNull { it.firstPage <= page }
-            ?: all.firstOrNull()
-    }
+    fun chapterForPage(book: Textbook, page: Int, offset: Int = 0): BookChapterSpan? =
+        chapters(book).lastOrNull {
+            page in it.firstPage..it.lastPage && (page > it.firstPage || offset >= it.firstOffset)
+        }
 }
 
 /**

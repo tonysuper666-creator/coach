@@ -402,7 +402,8 @@ internal fun BookPageView(
                             Box(Modifier.width(sheetWidth).height(viewHeight).background(paper).clipToBounds()
                                 .readingSpot(scrollSpot, onDown = recordDown).testTag("book-sheet-0")) {
                                 val page = pages[index]
-                                val remaining = pages.count { it.chapter == page.chapter } - pages.take(index + 1).count { it.chapter == page.chapter }
+                                val remaining = if (immersive) null else pages.count { it.chapter == page.chapter } -
+                                    pages.take(index + 1).count { it.chapter == page.chapter }
                                 BookSheet(book, page, typography, measurer, widthPx, leftInset, remaining, false, 0,
                                     libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
                                     topMargin = topMargin) { failed.add(it) }
@@ -454,7 +455,8 @@ internal fun BookPageView(
                                     .clipToBounds().readingSpot(sheetSpot)
                                     .testTag("book-sheet-$side")) {
                                     if (page != null) {
-                                        val remaining = pages.count { it.chapter == page.chapter } - pages.take(first + side + 1).count { it.chapter == page.chapter }
+                                        val remaining = if (immersive) null else pages.count { it.chapter == page.chapter } -
+                                            pages.take(first + side + 1).count { it.chapter == page.chapter }
                                         BookSheet(book, page, typography, measurer, widthPx,
                                             if (spread && side == 1) rightInset else leftInset,
                                             remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
@@ -503,7 +505,8 @@ internal fun BookPageView(
                             Box(Modifier.width(sheetWidth).fillMaxHeight().background(paper).clipToBounds()
                                 .readingSpot(sheetSpot, ignoreTurnGesture)
                                 .testTag("book-sheet-$side")) {
-                                val remaining = pages.count { it.chapter == page.chapter } - pages.take(index + 1).count { it.chapter == page.chapter }
+                                val remaining = if (immersive) null else pages.count { it.chapter == page.chapter } -
+                                    pages.take(index + 1).count { it.chapter == page.chapter }
                                 BookSheet(book, page, typography, measurer, widthPx,
                                     if (spread && side == 1) rightInset else leftInset,
                                     remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
@@ -608,7 +611,7 @@ private fun spotAnchor(pages: List<BookLaidPage>, index: Int, twoPages: Boolean,
 
 @Composable
 private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: BookPageTypography,
-    measurer: TextMeasurer, widthPx: Int, inset: Dp, remaining: Int, spread: Boolean, side: Int,
+    measurer: TextMeasurer, widthPx: Int, inset: Dp, remaining: Int?, spread: Boolean, side: Int,
     libraryDirectory: Path?, onOpenTableRow: ((BookPassage) -> Unit)?,
     onExpand: (BookFigurePreview) -> Unit,
     hardPoints: List<Pair<SectionHardPoint, SourceBlock>> = emptyList(),
@@ -769,7 +772,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
             }
         }
     }
-    DisableSelection { Row(Modifier.align(Alignment.BottomCenter)
+    if (remaining != null) DisableSelection { Row(Modifier.align(Alignment.BottomCenter)
         .padding(horizontal = 20.dp, vertical = if (topMargin < 44.dp) 10.dp else 20.dp)
         .fillMaxWidth()
         .testTag("book-sheet-footer"),

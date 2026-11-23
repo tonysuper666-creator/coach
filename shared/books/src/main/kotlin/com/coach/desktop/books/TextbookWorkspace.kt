@@ -116,6 +116,18 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
             if (controller.structureProvider === bookStructureProvider) controller.structureProvider = null
         }
     }
+    val uploadClient = remember(explainer) { explainer.unifiedUploadClient() }
+    DisposableEffect(controller, uploadClient) {
+        controller.unifiedUploadClient = uploadClient
+        onDispose {
+            if (controller.unifiedUploadClient === uploadClient) controller.unifiedUploadClient = null
+        }
+    }
+    LaunchedEffect(controller, uploadClient, explainer.identity) {
+        if (uploadClient != null) {
+            controller.syncBookUploads()
+        }
+    }
     val learningSupport = support ?: remember(controller.library, explainer) {
         PairedBookLearningSupport(controller.library,
             sendLesson = { blocks, pages -> explainer.run { load(); explainLesson(blocks, pages) } },
@@ -371,6 +383,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             onOpenCollection = onOpenCollection,
                             onMultiDropAction = { action -> controller.resolveMultiDrop(action) },
                             onDismissMultiDrop = controller::dismissMultiDrop,
+                            onRetryUpload = { bookId -> controller.retryBookUpload(bookId) },
                             library = controller.library,
                         )
                         ui.screen == BookScreen.COURSE && ui.activeCourseDetail != null -> {

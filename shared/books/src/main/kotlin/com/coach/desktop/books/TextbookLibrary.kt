@@ -1826,6 +1826,7 @@ internal class TextbookLibrary(
                     db.prepareStatement("DELETE FROM collection_materials WHERE material_id=?").use { it.setString(1, bookId); it.executeUpdate() }
                 }
                 MasteryStore.deleteForBook(db, bookId)
+                BookUploadQueueStore.deleteForBook(db, bookId)
                 val hasVisualReviews = db.createStatement().use { s -> s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='book_pdf_visual_reviews'").use { it.next() } }
                 if (hasVisualReviews) db.prepareStatement("DELETE FROM book_pdf_visual_reviews WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }
                 db.prepareStatement("DELETE FROM book_review_position WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }
@@ -2305,6 +2306,89 @@ internal class TextbookLibrary(
         require(id.matches(Regex("[a-f0-9]{64}")) && format in BookFormats.supported)
         return directory.resolve("$id.$format")
     }
+
+    internal fun originalFileIfPresent(id: String, format: String): Path? {
+        if (!id.matches(Regex("[a-f0-9]{64}")) || format !in BookFormats.supported) return null
+        val path = original(id, format)
+        return path.takeIf { Files.isRegularFile(it) }
+    }
+
+    @Synchronized internal fun enqueueBookUpload(
+        accountKey: String,
+        localBookId: String,
+        fileSha256: String,
+        format: String,
+        title: String,
+    ) = database().use { db ->
+        BookUploadQueueStore.enqueue(db, accountKey, localBookId, fileSha256, format, title, clock.millis())
+    }
+
+    @Synchronized internal fun switchUploadAccount(activeAccountKey: String) = database().use { db ->
+        BookUploadQueueStore.switchAccount(db, activeAccountKey, clock.millis())
+    }
+
+    @Synchronized internal fun rekeyUploadAccount(fromAccountKey: String, toAccountKey: String) {
+        if (fromAccountKey == toAccountKey) return
+        database().use { db ->
+            if (!BookSchemaMigration.tableExists(db, "book_upload_queue")) return
+            db.autoCommit = false
+            try {
+                val fromRows = BookUploadQueueStore.listForAccount(db, fromAccountKey)
+                for (row in fromRows.values) {
+                    val targetExists = BookUploadQueueStore.read(db, toAccountKey, row.localBookId) != null
+                    if (targetExists) {
+                        db.prepareStatement("DELETE FROM book_upload_queue WHERE account_key=? AND local_book_id=?").use { sql ->
+                            sql.setString(1, fromAccountKey)
+                            sql.setString(2, row.localBookId)
+                            sql.executeUpdate()
+                        }
+                    } else {
+                        db.prepareStatement(
+                            "UPDATE book_upload_queue SET account_key=?, updated_at=? WHERE account_key=? AND local_book_id=?",
+                        ).use { sql ->
+                            sql.setString(1, toAccountKey)
+                            sql.setLong(2, clock.millis())
+                            sql.setString(3, fromAccountKey)
+                            sql.setString(4, row.localBookId)
+                            sql.executeUpdate()
+                        }
+                    }
+                }
+                db.commit()
+            } catch (e: Exception) {
+                db.rollback()
+                throw e
+            }
+        }
+    }
+
+    @Synchronized internal fun recoverInterruptedBookUploads() = database().use { db ->
+        BookUploadQueueStore.recoverInterruptedUploads(db, clock.millis())
+    }
+
+    @Synchronized internal fun updateBookUploadState(
+        accountKey: String,
+        localBookId: String,
+        state: BookUploadState,
+        progressPct: Int = 0,
+        stageLabel: String = "",
+        errorMessage: String? = null,
+        serverShelfBookId: String? = null,
+    ) = database().use { db ->
+        BookUploadQueueStore.updateState(
+            db, accountKey, localBookId, state, progressPct, stageLabel, errorMessage, serverShelfBookId, clock.millis(),
+        )
+    }
+
+    @Synchronized internal fun retryBookUpload(accountKey: String, localBookId: String) = database().use { db ->
+        BookUploadQueueStore.retry(db, accountKey, localBookId, clock.millis())
+    }
+
+    @Synchronized internal fun uploadEntriesForAccount(accountKey: String): Map<String, BookUploadEntry> =
+        database().use { db -> BookUploadQueueStore.listForAccount(db, accountKey) }
+
+    @Synchronized internal fun allUploadEntries(): List<BookUploadEntry> =
+        database().use { db -> BookUploadQueueStore.listAll(db) }
 
     @Synchronized fun save(book: Textbook) {
         require(book.page(book.readingPage) != null && book.lessonIndex in 0..book.lessons.size)

@@ -14,6 +14,7 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.defaultRequest
 import io.ktor.client.plugins.timeout
+import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -22,6 +23,7 @@ import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.http.ContentType
+import io.ktor.http.content.OutgoingContent
 import io.ktor.http.content.TextContent
 import io.ktor.client.statement.bodyAsText
 import io.ktor.client.statement.bodyAsBytes
@@ -30,7 +32,9 @@ import io.ktor.http.contentType
 import io.ktor.http.encodeURLParameter
 import io.ktor.http.encodeURLPathPart
 import io.ktor.http.isSuccess
+import io.ktor.utils.io.ByteWriteChannel
 import io.ktor.utils.io.readUTF8Line
+import io.ktor.utils.io.writeFully
 import com.coach.domain.reviewqueue.QueueAvailability
 import com.coach.domain.reviewqueue.QueueQuestion
 import com.coach.domain.reviewqueue.VariantCandidate
@@ -53,6 +57,12 @@ data class SourcePage(val docId: String, val pdfPage: Int, val bookPage: Int?, v
 /** 模拟考接口的一次回答：成功时 [body] 是服务端原样的 JSON；失败时 [error] 是服务端写的原因，连不上 Mac 时两者都是 null。 */
 /** [code] 是服务端给程序看的类别，只用来决定怎么提示，从不显示给人。 */
 class MockReply(val body: JsonObject?, val error: String?, val retryable: Boolean = false, val statusCode: Int? = null, val code: String? = null)
+sealed interface UnifiedServerCapability {
+    data class Supported(val accountScope: String?) : UnifiedServerCapability
+    data class Unsupported(val accountScope: String?) : UnifiedServerCapability
+    data object Unauthorized : UnifiedServerCapability
+    data object Offline : UnifiedServerCapability
+}
 class MainlineEssayReply(val document: MainlineEssayDocument?, val error: String?, val retryable: Boolean = false)
 /** 题库里一道可以限时练的论述题。[fromMockPaper] 的题出自整套模拟卷，先练了那套卷就不再是生题。 */
 data class EssayPrompt(val id: String, val week: Int, val marks: Double, val wordTarget: Int, val stem: String, val pack: String, val fromMockPaper: Boolean)
@@ -166,6 +176,137 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         http.get("$base/v1/public/status").status.value
     } catch (e: kotlinx.coroutines.CancellationException) { throw e }
       catch (_: Exception) { null }
+
+    /** Probe server capability for unified book upload (TON-1823). Never falls back to legacy fragments. */
+    suspend fun unifiedBooksCapability(role: String): UnifiedServerCapability = try {
+        val path = if (role == "friend") "$base/v1/public/status" else "$base/v1/hello"
+        val response = http.get(path)
+        when (response.status.value) {
+            401 -> UnifiedServerCapability.Unauthorized
+            in 200..299 -> {
+                val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+                val supported = if (role == "friend") {
+                    (parsed?.get("unifiedBooks") as? JsonPrimitive)?.booleanOrNull == true
+                } else {
+                    (parsed?.get("unifiedBooksSupported") as? JsonPrimitive)?.booleanOrNull == true
+                }
+                val accountScope = parsed?.s("accountScope")?.ifBlank { null }
+                if (supported) UnifiedServerCapability.Supported(accountScope)
+                else UnifiedServerCapability.Unsupported(accountScope)
+            }
+            else -> UnifiedServerCapability.Offline
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        UnifiedServerCapability.Offline
+    }
+
+    /** Stream original book bytes to unified server intake; full bytes are verified server-side. */
+    suspend fun uploadUnifiedBook(
+        contentLength: Long,
+        format: String,
+        title: String,
+        sha256: String,
+        streamChunks: suspend (writeChunk: suspend (ByteArray, Int, Int) -> Unit) -> Unit,
+    ): MockReply = try {
+        val response = http.post("$base/v1/books/upload") {
+            timeout { requestTimeoutMillis = 600_000L; socketTimeoutMillis = 120_000L }
+            header("X-Coach-Book-Format", format)
+            header("X-Coach-Book-Title", title.encodeURLParameter())
+            header("X-Coach-Book-Sha256", sha256)
+            setBody(
+                object : OutgoingContent.WriteChannelContent() {
+                    override val contentType: ContentType = ContentType.Application.OctetStream
+                    override val contentLength: Long = contentLength
+                    override suspend fun writeTo(channel: ByteWriteChannel) {
+                        streamChunks { buf, offset, len ->
+                            channel.writeFully(buf, offset, offset + len)
+                        }
+                    }
+                },
+            )
+        }
+        val status = response.status.value
+        if (status == 401) {
+            MockReply(null, "授权已失效，请重新登录学习服务。", statusCode = 401, code = "unauthorized")
+        } else if (status == 404) {
+            MockReply(null, "等待服务支持", retryable = true, statusCode = 404, code = "unsupported")
+        } else {
+            val text = response.bodyAsText()
+            val parsed = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull()
+            val code = parsed?.s("code")?.ifBlank { null }
+            when {
+                response.status.isSuccess() && parsed != null -> MockReply(parsed, null, statusCode = status)
+                status == 413 || status == 507 -> MockReply(
+                    null,
+                    parsed?.s("error")?.ifBlank { null } ?: if (status == 507) "存储空间不足，请稍后再试" else "文件太大",
+                    retryable = status == 507,
+                    statusCode = status,
+                    code = code,
+                )
+                else -> MockReply(
+                    null,
+                    parsed?.s("error")?.ifBlank { null } ?: "上传失败，请稍后重试。",
+                    retryable = status >= 500 || status == 408 || status == 429,
+                    statusCode = status,
+                    code = code,
+                )
+            }
+        }
+    } catch (_: HttpRequestTimeoutException) {
+        MockReply(null, "等待联网", retryable = true, code = "offline")
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        MockReply(null, "等待联网", retryable = true, code = "offline")
+    }
+
+    suspend fun unifiedBookStatus(shelfBookId: String): MockReply = try {
+        val response = http.get("$base/v1/books/${shelfBookId.encodeURLPathPart()}/status")
+        val status = response.status.value
+        val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+        when {
+            status == 401 -> MockReply(null, "授权已失效", statusCode = 401, code = "unauthorized")
+            status == 404 -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "等待服务支持", statusCode = 404, code = "not_found")
+            response.status.isSuccess() && parsed != null -> MockReply(parsed, null, statusCode = status)
+            else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "状态查询失败", retryable = status >= 500, statusCode = status)
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        MockReply(null, "等待联网", retryable = true, code = "offline")
+    }
+
+    suspend fun listUnifiedBooks(): MockReply = try {
+        val response = http.get("$base/v1/books")
+        val status = response.status.value
+        val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+        when {
+            status == 401 -> MockReply(null, "授权已失效", statusCode = 401, code = "unauthorized")
+            response.status.isSuccess() && parsed != null -> MockReply(parsed, null, statusCode = status)
+            else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "无法获取书架列表", retryable = status >= 500, statusCode = status)
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        MockReply(null, "等待联网", retryable = true, code = "offline")
+    }
+
+    suspend fun deleteUnifiedBook(shelfBookId: String): MockReply = try {
+        val response = http.delete("$base/v1/books/${shelfBookId.encodeURLPathPart()}")
+        val status = response.status.value
+        val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+        when {
+            status == 401 -> MockReply(null, "授权已失效", statusCode = 401, code = "unauthorized")
+            response.status.isSuccess() -> MockReply(parsed ?: buildJsonObject { put("deleted", true) }, null, statusCode = status)
+            else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "删除失败", statusCode = status)
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        MockReply(null, "等待联网", retryable = true, code = "offline")
+    }
     /** 2.0-W2-B: 按节并发批量生成单书章节伴读五模块（要点/读前自测/推导模板/选做练习/章末习题三级提示）。 */
     suspend fun companionChapter(input: JsonObject): MockReply = try {
         val response = http.post("$base/v1/library/companion/chapter") {

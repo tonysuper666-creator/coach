@@ -12,7 +12,7 @@ const val PROTOCOL_VERSION = 1
     val backedUpThroughSeq: Long)
 @Serializable data class Hello(val epoch: String, val lastSeq: Long, val backedUpThroughSeq: Long,
     val lastSeqBefore: Long, val protocol: Int = PROTOCOL_VERSION, val serverTime: Long = 0,
-    val agentRunsSupported: Boolean = false)
+    val agentRunsSupported: Boolean = false, val unifiedBooksSupported: Boolean = false)
 @Serializable data class Snapshot(val hello: Hello, val courseId: String, val events: List<Event>, val projection: Projection)
 @Serializable data class EventsPage(val epoch: String, val events: List<Event>, val throughSeq: Long, val hasMore: Boolean = false)
 @Serializable data class LedgerFrame(val t: String = "ledger", val course: String, val epoch: String, val events: List<Event>)

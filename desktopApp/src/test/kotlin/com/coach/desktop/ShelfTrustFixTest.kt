@@ -187,4 +187,132 @@ class ShelfTrustFixTest {
             root.toFile().deleteRecursively()
         }
     }
+
+    @Test fun emptyLibraryHomeShowsHonestZeroReviewNotice() {
+        val root = Files.createTempDirectory("coach-ton1822-empty-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val c = TextbookController(library)
+            runSkikoComposeUiTest(size = Size(1280f, 820f), density = Density(1f)) {
+                setContent { WindowsTextbookHost(c) { null } }
+                ready(c) { it.initialized && it.screen == BookScreen.HOME }
+
+                onNodeWithTag("upload-textbook").assertIsDisplayed().assertTextContains("导入文件")
+                onNodeWithTag("home-review-done").assertIsDisplayed().assertTextEquals("还没有要复习的。做错的题会在明天出现。")
+                onAllNodesWithText("今日复习已完成", substring = true).assertCountEquals(0)
+                capture("00-empty-home-honest-review")
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun switchingFocusBookViaSeparateMultiDropDoesNotLeakPreviousBooksQuestion() {
+        val root = Files.createTempDirectory("coach-ton1822-switch-")
+        try {
+            val bookAFile = root.resolve("book-alpha.md").also {
+                Files.writeString(it, "# 第一章 导论\n\n这是甲书的正文段落，用于提问测试。\n")
+            }
+            val bookBFile = root.resolve("book-beta.md").also {
+                Files.writeString(it, "# 第一章 市场\n\n这是乙书的正文段落。\n")
+            }
+            val bookCFile = root.resolve("book-gamma.md").also {
+                Files.writeString(it, "# 第一章 均衡\n\n这是丙书的正文段落。\n")
+            }
+            val library = TextbookLibrary(root.resolve("library"))
+            val bookA = library.importBook(bookAFile)
+            val blockA = bookA.sourceBlocks().first { it.isBodyParagraph }
+            val explainer = BookExplainer(
+                settings = DesktopConnectionSettings(home = root.resolve("home"), environment = { null }),
+                library = library,
+            )
+            runBlocking {
+                explainer.explainSelection(kind = "ask", chosen = blockA, question = "这个例子说明什么？")
+            }
+
+            val c = TextbookController(library)
+            runSkikoComposeUiTest(size = Size(1280f, 820f), density = Density(1f)) {
+                setContent { WindowsTextbookHost(c) { null } }
+                ready(c) { it.initialized && it.screen == BookScreen.HOME }
+
+                // Initially focus is bookA with its asked question.
+                assertTrue(nodeText("home-focus-meta").contains("上次问：这个例子说明什么？"))
+
+                // Multi-drop two new books and choose "分开单放".
+                c.launchDroppedBooks(listOf(bookBFile, bookCFile))
+                waitForIdle()
+                onNodeWithTag("multi-drop-separate").performClick()
+                ready(c) { it.catalog.size == 3 && it.book?.id != bookA.id }
+
+                val newBookMeta = nodeText("home-focus-meta")
+                assertFalse("上次问" in newBookMeta, "New focus book must not inherit old book's question: $newBookMeta")
+                assertFalse("这个例子说明什么" in newBookMeta, "Old question leaked onto new book card: $newBookMeta")
+                assertTrue("第 1 页" in newBookMeta, "Expected clean location meta on new book: $newBookMeta")
+
+                // Switching back to bookA still displays bookA's own question.
+                runBlocking { c.select(bookA.id) }
+                ready(c) { it.book?.id == bookA.id }
+                assertTrue(nodeText("home-focus-meta").contains("上次问：这个例子说明什么？"))
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun sameBookWithPracticeDraftAndQuestionShowsBothAndPreservesDraftResume() {
+        val root = Files.createTempDirectory("coach-ton1822-draft-ask-")
+        try {
+            val md = root.resolve("sample-draft.md").also {
+                Files.writeString(
+                    it,
+                    "# 合成章节\n\n第一页讨论边际效用与消费者选择。\n\n# 第二节\n\n第二页讨论无差异曲线与预算约束。\n",
+                )
+            }
+            val library = TextbookLibrary(root.resolve("library"))
+            val book = library.importBook(md)
+            val firstLesson = book.lessons.first()
+            val draft = ChapterPracticeDraft(
+                bookId = book.id,
+                tocNodeId = firstLesson.id,
+                page = firstLesson.firstPage,
+                companionOpen = true,
+                companionTab = "EXPLAIN",
+                activeModule = CompanionModuleTab.PRACTICE.name,
+                activeQuestionId = "q-1",
+                practiceTextDrafts = mapOf("q-1" to "Step 1: MRS = Px / Py"),
+                updatedAt = System.currentTimeMillis(),
+            )
+            library.saveChapterPracticeDraft(book.id, firstLesson.id, book.pages.size, draft)
+
+            val block = book.sourceBlocks().first { it.isBodyParagraph }
+            val explainer = BookExplainer(
+                settings = DesktopConnectionSettings(home = root.resolve("home"), environment = { null }),
+                library = library,
+            )
+            runBlocking {
+                explainer.explainSelection(kind = "ask", chosen = block, question = "为什么边际替代率递减会导致凸性？")
+            }
+
+            // Reopen fresh controller from SQLite (cold restart).
+            val reopened = TextbookController(TextbookLibrary(library.directory))
+            runSkikoComposeUiTest(size = Size(1280f, 820f), density = Density(1f)) {
+                setContent { WindowsTextbookHost(reopened) { null } }
+                ready(reopened) { it.initialized && it.screen == BookScreen.HOME }
+
+                val meta = nodeText("home-focus-meta")
+                assertTrue(meta.contains("上次问：为什么边际替代率递减会导…"), "Expected question excerpt alongside draft: $meta")
+                assertTrue(meta.contains("练习草稿已保存"), "Expected saved practice draft indicator: $meta")
+                assertTrue(reopened.state.value.activePracticeDraft?.hasMeaningfulDraft() == true)
+                capture("04-home-draft-and-question")
+
+                // Clicking "继续" still opens reader with draft preserved.
+                onNodeWithTag("home-read").performClick()
+                ready(reopened) { it.screen == BookScreen.READER }
+                assertEquals(firstLesson.firstPage, reopened.state.value.page)
+                assertEquals("Step 1: MRS = Px / Py", reopened.state.value.activePracticeDraft?.practiceTextDrafts?.get("q-1"))
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
 }

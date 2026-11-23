@@ -121,6 +121,11 @@ internal data class HomeFocusRecommendation(
     val metaLine: String,
 )
 
+internal data class BookLastQuestion(
+    val bookId: String,
+    val text: String,
+)
+
 internal enum class MarginWhisperRule {
     CROSS_MATERIAL_CONFLICT,
     PRIOR_MISCONCEPTION_GUARD,
@@ -227,10 +232,13 @@ internal object MasteryEngine {
         savedDraft: ChapterPracticeDraft? = null,
         masteryRec: HomeFocusRecommendation? = null,
     ): String {
+        val questionExcerpt = formatQuestionExcerpt(lastQuestion)
+        if (savedDraft != null && questionExcerpt != null) {
+            return "$questionExcerpt · 第 ${savedDraft.page.coerceAtLeast(1)} 页 · 练习草稿已保存"
+        }
         if (savedDraft != null) {
             return "${formatBookLocation(bookTitle, chapterTitle, savedDraft.page)} · 练习草稿已保存"
         }
-        val questionExcerpt = formatQuestionExcerpt(lastQuestion)
         if (questionExcerpt != null) {
             return "$questionExcerpt · 第 ${readingPage.coerceAtLeast(1)} 页"
         }

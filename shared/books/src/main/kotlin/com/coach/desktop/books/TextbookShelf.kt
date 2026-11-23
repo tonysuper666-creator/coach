@@ -240,6 +240,10 @@ internal fun LibraryHome(
                                 )
                             }
                         }
+                        CoachCardMeta(
+                            MasteryEngine.HOME_REVIEW_EMPTY_MESSAGE,
+                            Modifier.testTag("home-review-done"),
+                        )
                     }
                 }
             } else {
@@ -289,7 +293,7 @@ internal fun LibraryHome(
                                         bookTitle = focusBook.title,
                                         chapterTitle = chapterTitle,
                                         readingPage = focusBook.readingPage,
-                                        lastQuestion = ui.lastBookQuestion,
+                                        lastQuestion = ui.lastBookQuestion?.takeIf { it.bookId == focusBook.id }?.text,
                                         savedDraft = savedDraft,
                                         masteryRec = masteryRec,
                                     )
@@ -343,7 +347,7 @@ internal fun LibraryHome(
                                             bookTitle = focusSummary.title,
                                             chapterTitle = null,
                                             readingPage = focusSummary.readingPage,
-                                            lastQuestion = ui.lastBookQuestion,
+                                            lastQuestion = ui.lastBookQuestion?.takeIf { it.bookId == focusSummary.id }?.text,
                                         ),
                                         Modifier.testTag("home-focus-meta"),
                                     )

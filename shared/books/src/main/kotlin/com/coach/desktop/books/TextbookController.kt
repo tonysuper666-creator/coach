@@ -50,8 +50,8 @@ internal data class LibraryUi(
     val activePracticeDraft: ChapterPracticeDraft? = null,
     /** 2.0-AI-1：无未完草稿时按最高 NeedScore 推荐的薄弱概念（供首页「继续」单行依据与直达）。 */
     val focusRecommendation: HomeFocusRecommendation? = null,
-    /** 2.0-FIX-E (#4A)：当前焦点书最近一次提问正文，供书架「继续」卡展示「上次问：…」。 */
-    val lastBookQuestion: String? = null,
+    /** 2.0-FIX-E (#4A)：当前焦点书最近一次提问正文（绑定 bookId 防止切书串台），供书架「继续」卡展示「上次问：…」。 */
+    val lastBookQuestion: BookLastQuestion? = null,
     val activeCourseId: String? = null,
     val activeCourseTopicId: String? = null,
     val activeCourseDetail: CourseDetailSnapshot? = null,
@@ -176,6 +176,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
+    private fun loadLastQuestion(bookId: String?): BookLastQuestion? =
+        bookId?.let { id -> library.lastQuestion(id)?.let { BookLastQuestion(id, it) } }
+
     private fun ensureQueueIncludes(queue: LocalReviewQueue, active: LocalBookReview?): LocalReviewQueue {
         if (active == null) return queue
         val present = queue.cards.any { it.book == active.book && it.lesson == active.lesson && it.mode == active.mode }
@@ -247,6 +250,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 val reviews = library.reviews()
                 val todayQueue = library.reviewQueue()
                 val opened = lastBook ?: catalog.firstOrNull()?.let { library.book(it.id) }
+                val draft = opened?.let { library.latestChapterPracticeDraft(it.id) }
+                val focusRec = library.topHomeRecommendation(opened?.id)
+                val lastQ = loadLastQuestion(opened?.id)
                 mutable.update { current ->
                     current.copy(
                         catalog = catalog,
@@ -258,6 +264,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         reviews = reviews,
                         todayQueue = todayQueue,
                         initialized = true,
+                        activePracticeDraft = draft,
+                        focusRecommendation = focusRec,
+                        lastBookQuestion = lastQ,
                         importNotice = BookImportNotice(System.nanoTime(), "已分开导入 ${paths.size} 份文件。"),
                     )
                 }
@@ -347,6 +356,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     ?: allIds.firstOrNull()?.let { runCatching { library.book(it) }.getOrNull() }
                     ?: mutable.value.book
                     ?: catalog.firstOrNull()?.let { library.book(it.id) }
+                val draft = focusBook?.let { library.latestChapterPracticeDraft(it.id) }
+                val focusRec = library.topHomeRecommendation(focusBook?.id)
+                val lastQ = loadLastQuestion(focusBook?.id)
                 val noticeLabel = buildString {
                     append(if (kind == CollectionKind.COURSE) "已创建课程《$cleanTitle》" else "已创建书单《$cleanTitle》")
                     if (rejectedPastExams.isNotEmpty()) {
@@ -364,6 +376,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         reviews = reviews,
                         todayQueue = todayQueue,
                         initialized = true,
+                        activePracticeDraft = draft,
+                        focusRecommendation = focusRec,
+                        lastBookQuestion = lastQ,
                         importNotice = BookImportNotice(System.nanoTime(), noticeLabel),
                         activeCourseId = if (kind == CollectionKind.COURSE) id else current.activeCourseId,
                         activeCourseTopicId = null,
@@ -521,7 +536,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 )
             }
             val rec = runCatching { library.topHomeRecommendation(bookId) }.getOrNull()
-            val lastQ = runCatching { library.lastQuestion(bookId) }.getOrNull()
+            val lastQ = runCatching { loadLastQuestion(bookId) }.getOrNull()
             mutable.update { current ->
                 current.copy(
                     focusRecommendation = rec ?: current.focusRecommendation,
@@ -604,6 +619,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         val todayQueue = library.reviewQueue()
                         val pathSaved = library.learningPath(book.id)
                         val ladder = library.ladder(book.id)
+                        val draft = library.latestChapterPracticeDraft(book.id)
+                        val focusRec = library.topHomeRecommendation(book.id)
+                        val lastQ = loadLastQuestion(book.id)
                         val elapsedMs = ((System.nanoTime() - startedAtNs) / 1_000_000L).coerceAtLeast(0L)
                         mutable.update { current ->
                             current.copy(
@@ -624,6 +642,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                                 ladder = ladder,
                                 importing = null,
                                 initialized = true,
+                                activePracticeDraft = draft,
+                                focusRecommendation = focusRec,
+                                lastBookQuestion = lastQ,
                                 lastImportDurationMs = elapsedMs,
                             )
                         }
@@ -641,6 +662,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         val todayQueue = library.reviewQueue()
                         val pathSaved = library.learningPath(book.id)
                         val ladder = library.ladder(book.id)
+                        val draft = library.latestChapterPracticeDraft(book.id)
+                        val focusRec = library.topHomeRecommendation(book.id)
+                        val lastQ = loadLastQuestion(book.id)
                         val elapsedMs = ((System.nanoTime() - startedAtNs) / 1_000_000L).coerceAtLeast(0L)
                         mutable.update { current ->
                             current.copy(
@@ -661,6 +685,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                                 ladder = ladder,
                                 importing = null,
                                 initialized = true,
+                                activePracticeDraft = draft,
+                                focusRecommendation = focusRec,
+                                lastBookQuestion = lastQ,
                                 lastImportDurationMs = elapsedMs,
                             )
                         }
@@ -690,6 +717,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     val ladder = library.ladder(book.id)
                     val stayElsewhere = mutable.value.let { it.screen != BookScreen.HOME && it.book != null && it.book.id != book.id }
                     if (!stayElsewhere) library.saveOpenSession(book.id, "READER")
+                    val draft = if (stayElsewhere) null else library.latestChapterPracticeDraft(book.id)
+                    val focusRec = if (stayElsewhere) null else library.topHomeRecommendation(book.id)
+                    val lastQ = if (stayElsewhere) null else loadLastQuestion(book.id)
                     val elapsedMs = ((System.nanoTime() - startedAtNs) / 1_000_000L).coerceAtLeast(0L)
                     mutable.update { current ->
                         current.copy(
@@ -710,6 +740,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                             ladder = if (stayElsewhere) current.ladder else ladder,
                             importing = initialProgress,
                             initialized = true,
+                            activePracticeDraft = if (stayElsewhere) current.activePracticeDraft else draft,
+                            focusRecommendation = if (stayElsewhere) current.focusRecommendation else focusRec,
+                            lastBookQuestion = if (stayElsewhere) current.lastBookQuestion else lastQ,
                             lastImportDurationMs = elapsedMs,
                         )
                     }
@@ -816,6 +849,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         if (bookId != null) runCatching { library.deleteBook(bookId) }
         val catalog = runCatching { library.catalog() }.getOrElse { emptyList() }
         val fallbackBook = catalog.firstOrNull()?.let { runCatching { library.book(it.id) }.getOrNull() }
+        val fallbackDraft = fallbackBook?.let { runCatching { library.latestChapterPracticeDraft(it.id) }.getOrNull() }
+        val fallbackRec = runCatching { library.topHomeRecommendation(fallbackBook?.id) }.getOrNull()
+        val fallbackLastQ = runCatching { loadLastQuestion(fallbackBook?.id) }.getOrNull()
         mutable.update { current ->
             val removedOpen = bookId != null && current.book?.id == bookId
             current.copy(
@@ -828,6 +864,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 busy = false,
                 importing = null,
                 initialized = true,
+                activePracticeDraft = if (removedOpen) fallbackDraft else current.activePracticeDraft,
+                focusRecommendation = if (removedOpen) fallbackRec else current.focusRecommendation,
+                lastBookQuestion = if (removedOpen) fallbackLastQ else current.lastBookQuestion,
                 error = "已取消导入，书架没有新增教材。",
             )
         }
@@ -843,6 +882,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
         val catalog = runCatching { library.catalog() }.getOrElse { emptyList() }
         val fallbackBook = catalog.firstOrNull()?.let { runCatching { library.book(it.id) }.getOrNull() }
+        val fallbackDraft = fallbackBook?.let { runCatching { library.latestChapterPracticeDraft(it.id) }.getOrNull() }
+        val fallbackRec = runCatching { library.topHomeRecommendation(fallbackBook?.id) }.getOrNull()
+        val fallbackLastQ = runCatching { loadLastQuestion(fallbackBook?.id) }.getOrNull()
         mutable.update { current ->
             val removedOpen = shouldDelete && current.book?.id == bookId
             current.copy(
@@ -855,6 +897,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 busy = false,
                 importing = null,
                 initialized = true,
+                activePracticeDraft = if (removedOpen) fallbackDraft else current.activePracticeDraft,
+                focusRecommendation = if (removedOpen) fallbackRec else current.focusRecommendation,
+                lastBookQuestion = if (removedOpen) fallbackLastQ else current.lastBookQuestion,
                 error = message,
             )
         }
@@ -955,7 +1000,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             val ladder = library.ladder(book.id)
             val draft = library.latestChapterPracticeDraft(book.id)
             val focusRec = library.topHomeRecommendation(book.id)
-            val lastQ = library.lastQuestion(book.id)
+            val lastQ = loadLastQuestion(book.id)
             mutable.update { current ->
                 LibraryUi(
                     catalog = catalog, book = book, collections = collections, page = book.readingPage, busy = true,
@@ -999,7 +1044,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 draft.page
             } else book.readingPage
             val activeBook = if (resumePage != book.readingPage) book.copy(readingPage = resumePage) else book
-            val lastQ = library.lastQuestion(activeBook.id)
+            val lastQ = loadLastQuestion(activeBook.id)
             mutable.update { current ->
                 current.copy(
                     catalog = catalog,
@@ -1053,7 +1098,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             screen = BookScreen.READER, page = activeBook.readingPage, source = null,
             prompt = null, initialized = true, activePracticeDraft = draft,
             focusRecommendation = focusRec,
-            lastBookQuestion = library.lastQuestion(activeBook.id)) }
+            lastBookQuestion = loadLastQuestion(activeBook.id)) }
     }
 
     /** 实时持久化单书伴读与练习草稿到 `book_chapter_progress.practice_draft_json`，退出后点「继续」精确恢复。 */
@@ -1230,7 +1275,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     review = null,
                     prompt = null,
                     focusRecommendation = library.topHomeRecommendation(focusBookId),
-                    lastBookQuestion = focusBookId?.let(library::lastQuestion),
+                    lastBookQuestion = loadLastQuestion(focusBookId),
                 )
             }
         } else if (cur.screen == BookScreen.READER && cur.activeBooklistId != null) {
@@ -1261,7 +1306,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     reviews = library.reviews(),
                     todayQueue = library.reviewQueue(),
                     focusRecommendation = library.topHomeRecommendation(it.book?.id),
-                    lastBookQuestion = (it.book?.id ?: it.catalog.firstOrNull()?.id)?.let(library::lastQuestion),
+                    lastBookQuestion = loadLastQuestion(it.book?.id ?: it.catalog.firstOrNull()?.id),
                 )
             }
         }

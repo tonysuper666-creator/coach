@@ -50,7 +50,7 @@ internal data class StartupLoadSnapshot(
     val collections: List<CollectionSummary> = emptyList(),
     val activePracticeDraft: ChapterPracticeDraft? = null,
     val focusRecommendation: HomeFocusRecommendation? = null,
-    val lastBookQuestion: String? = null,
+    val lastBookQuestion: BookLastQuestion? = null,
 )
 
 /** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
@@ -290,7 +290,9 @@ internal class TextbookLibrary(
         val ladder = loadedBook?.let { ladder(db, it.id) } ?: LadderSession()
         val activeDraft = loadedBook?.let { ChapterProgressStore.latestPracticeDraft(db, it.id) }
         val focusRec = MasteryStore.topHomeRecommendation(db, loadedBook?.id, clock.millis())
-        val lastQuestion = (loadedBook?.id ?: catalog.firstOrNull()?.id)?.let { MasteryStore.lookupLastBookQuestion(db, it) }
+        val lastQuestion = (loadedBook?.id ?: catalog.firstOrNull()?.id)?.let { bookId ->
+            MasteryStore.lookupLastBookQuestion(db, bookId)?.let { BookLastQuestion(bookId, it) }
+        }
         StartupLoadSnapshot(catalog, active, session, loadedBook, learningPath, reviews, ladder, todayQueue, collections, activeDraft, focusRec, lastQuestion)
     }
 

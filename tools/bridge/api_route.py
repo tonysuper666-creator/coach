@@ -176,6 +176,22 @@ def route(task: str, requested: str, format_attempt: int = 0) -> str | None:
     return model
 
 
+def friend_model(requested: str) -> str:
+    batch_model = CONFIG["models"].get("friend_batch", "claude-haiku-5-5")
+    if requested == batch_model:
+        return batch_model
+    return CONFIG["models"].get("friend", CONFIG["models"]["teaching"])
+
+
+def friend_fallback_model(primary_model: str) -> str | None:
+    fb = CONFIG.get("fallbacks", {}).get("friend")
+    if not fb or fb == primary_model or fb not in CONFIG.get("prices_usd_per_million", {}):
+        return None
+    if vendor(fb) != "anthropic":
+        return None
+    return fb
+
+
 def fallback_model(task: str, primary_model: str) -> str | None:
     group = CONFIG["tasks"].get(task)
     if group is None or group in REVIEW_GROUPS or group == "friend":
@@ -281,12 +297,16 @@ class ApiRouter:
     async def events(self, task: str, requested: str, system: str, prompt: str, max_tokens: int | None, format_attempt=0, friend=None, device=None):
         if friend is not None and (task != "READER_SELECTION" or vendor(requested) != "anthropic"):
             raise Denied("invalid_friend_route")
-        model = CONFIG["models"].get("friend", CONFIG["models"]["teaching"]) if friend is not None else route(task, requested, format_attempt)
+        model = friend_model(requested) if friend is not None else route(task, requested, format_attempt)
         if model is None:
             raise Denied("unrouted_task")
         fb = None
         if friend is None:
             fb = self.fallback_target(task, model)
+        else:
+            cand = friend_fallback_model(model)
+            if cand and self.keys.get("anthropic", ""):
+                fb = cand
         yielded_text = False
         try:
             async for event in self._stream_model(task, model, system, prompt, max_tokens, friend=friend, device=device):
@@ -294,10 +314,13 @@ class ApiRouter:
                     yielded_text = True
                 yield event
             return
-        except (Denied, ApiFailure):
+        except Denied:
+            if friend is not None or yielded_text or fb is None:
+                raise
+        except ApiFailure:
             if yielded_text or fb is None:
                 raise
-        async for event in self._stream_model(task, fb, system, prompt, max_tokens, friend=None, device=None):
+        async for event in self._stream_model(task, fb, system, prompt, max_tokens, friend=friend, device=device):
             if event.get("kind") == "complete":
                 event = dict(event, fallback=True)
             yield event

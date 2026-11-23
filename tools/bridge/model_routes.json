@@ -14,6 +14,7 @@
     "math_verify": "claude-opus-5-5",
     "draft": "claude-haiku-5-5",
     "friend": "claude-sonnet-5-5",
+    "friend_batch": "claude-haiku-5-5",
     "review": "claude-opus-5-5",
     "review_openai": "gpt-6.2-astra",
     "review_upgrade": "gpt-6.2-astra"

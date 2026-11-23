@@ -182,7 +182,7 @@ class BridgeClientTest {
             assertIs<BridgeResult.Failure>(reviewFallback)
             assertEquals("served_by_mismatch:fallback", reviewFallback.reason)
 
-            // 3) Friend request rejects cross-vendor
+            // 3) Friend request rejects cross-vendor, accepts same-vendor Sonnet -> Haiku fallback
             bridge.enqueue(200, StubBridge.completion("friend", served = BridgeClient.GPT_62_SOL))
             val friendRes = client(bridge).chat(
                 ChatRequest(
@@ -197,6 +197,36 @@ class BridgeClientTest {
             )
             assertIs<BridgeResult.Failure>(friendRes)
             assertEquals("served_by_mismatch:gpt-6.2-sol", friendRes.reason)
+
+            bridge.enqueue(200, StubBridge.fallbackCompletion("friend haiku backup").replace("__MODEL__", BridgeClient.HAIKU))
+            val friendHaikuFallback = client(bridge).chat(
+                ChatRequest(
+                    "READER_SELECTION",
+                    BridgeClient.CLAUDE,
+                    "sys",
+                    "usr",
+                    stream = false,
+                    friendId = "a".repeat(64),
+                    friendDevice = "phone",
+                ),
+            )
+            assertIs<BridgeResult.Success>(friendHaikuFallback)
+            assertEquals(BridgeClient.HAIKU, friendHaikuFallback.call.servedBy)
+
+            bridge.enqueue(200, StubBridge.fallbackCompletion("friend cross-vendor").replace("__MODEL__", BridgeClient.GPT_62_SOL))
+            val friendCrossVendorFallback = client(bridge).chat(
+                ChatRequest(
+                    "READER_SELECTION",
+                    BridgeClient.CLAUDE,
+                    "sys",
+                    "usr",
+                    stream = false,
+                    friendId = "a".repeat(64),
+                    friendDevice = "phone",
+                ),
+            )
+            assertIs<BridgeResult.Failure>(friendCrossVendorFallback)
+            assertEquals("served_by_mismatch:fallback", friendCrossVendorFallback.reason)
         }
     }
 }

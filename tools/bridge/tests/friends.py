@@ -179,12 +179,68 @@ class FriendApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(1, len(seen))
                 cli.assert_not_called()
 
+    async def test_friend_batch_uses_haiku_while_interactive_uses_sonnet_with_haiku_fallback(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_FRIEND_CONFIG": temp + "/friends.json"}):
+            fund(Path(temp))
+            ledger = CreditLedger(Path(temp), lambda: NOW)
+            seen = []
+            fail_sonnet = False
+
+            def response(request):
+                body = json.loads(request.content)
+                seen.append(body["model"])
+                if fail_sonnet and body["model"] == CONFIG["models"]["friend"]:
+                    return httpx.Response(500)
+                return httpx.Response(200, content=frames("anthropic", model=body["model"]))
+
+            router = ApiRouter(ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(response)), keys={"anthropic": KEY})
+            cli = AsyncMock(side_effect=AssertionError("Friend must never enter subscription CLI"))
+            with patch.object(bridge, "API_ROUTER", router), patch.object(bridge, "dispatch_cli", cli), patch.object(bridge, "write_log"):
+                # 1) Friend chapter batch requests Haiku and must actually serve Haiku (not overridden to Sonnet).
+                batch_req = bridge.build_req(
+                    {"model": "claude-haiku-5-5", "max_tokens": 200, "messages": [{"role": "user", "content": "batch chunk"}]},
+                    {"x-coach-task": "READER_SELECTION", "x-coach-friend": B, "x-coach-friend-device": "pc"},
+                )
+                batch_res = await bridge.dispatch(batch_req, batch_req.model, None)
+                self.assertEqual("complete", batch_res.status)
+                self.assertEqual("claude-haiku-5-5", batch_res.served_by)
+                self.assertFalse(batch_req.fallback)
+                self.assertEqual(["claude-haiku-5-5"], seen)
+
+                # 2) Friend interactive requests Sonnet primary; when Sonnet fails with HTTP 500 before text, fall back to Haiku on friend ledger.
+                fail_sonnet = True
+                interactive_req = bridge.build_req(
+                    {"model": "claude-sonnet-5-5", "max_tokens": 200, "messages": [{"role": "user", "content": "interactive explain"}]},
+                    {"x-coach-task": "READER_SELECTION", "x-coach-friend": B, "x-coach-friend-device": "pc"},
+                )
+                fallback_res = await bridge.dispatch(interactive_req, interactive_req.model, None)
+                self.assertEqual("complete", fallback_res.status)
+                self.assertEqual("claude-haiku-5-5", fallback_res.served_by)
+                self.assertTrue(interactive_req.fallback)
+                self.assertEqual(["claude-haiku-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"], seen)
+
+                # Verify both calls were billed to friend B (never leaked as owner-only).
+                day = next(iter(ledger.read()["friends"][B].values()))
+                self.assertEqual(2, day["calls"])
+                self.assertEqual(2, day["devices"]["pc"]["calls"])
+
+                # 3) Friend quota denial must NOT fall back to Haiku.
+                atomic_json(Path(temp) / "friends.json", {"defaults": {"daily_calls": 2}})
+                denied_req = bridge.build_req(
+                    {"model": "claude-sonnet-5-5", "max_tokens": 200, "messages": [{"role": "user", "content": "over quota"}]},
+                    {"x-coach-task": "READER_SELECTION", "x-coach-friend": B, "x-coach-friend-device": "pc"},
+                )
+                denied_res = await bridge.dispatch(denied_req, denied_req.model, None)
+                self.assertEqual("daily_quota", denied_res.reason)
+                self.assertEqual(3, len(seen))
+                cli.assert_not_called()
+
     async def test_http_failure_and_cancellation_keep_both_reservations(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_FRIEND_CONFIG": temp + "/missing"}):
             fund(Path(temp))
             ledger = CreditLedger(Path(temp), lambda: NOW)
             router = ApiRouter(ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(500))), keys={"anthropic": KEY})
-            request = bridge.build_req({"model": "claude-sonnet-5-5", "messages": [{"role": "user", "content": "synthetic"}]},
+            request = bridge.build_req({"model": "claude-haiku-5-5", "messages": [{"role": "user", "content": "synthetic"}]},
                 {"x-coach-task": "READER_SELECTION", "x-coach-friend": A, "x-coach-friend-device": "pc"})
             with patch.object(bridge, "API_ROUTER", router), patch.object(bridge, "dispatch_cli", AsyncMock(side_effect=AssertionError("CLI"))):
                 result = await bridge.dispatch(request, request.model, None)

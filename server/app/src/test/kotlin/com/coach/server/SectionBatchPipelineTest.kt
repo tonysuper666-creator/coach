@@ -590,7 +590,7 @@ class SectionBatchPipelineTest {
                 val headers = ex.requestHeaders.entries.associate { (k, v) -> k.lowercase() to v.joinToString(",") }
                 observedRequests += Triple(headers, body, ex.requestMethod)
                 val reply = buildJsonObject {
-                    put("model", "claude-sonnet-5-5")
+                    put("model", "claude-haiku-5-5")
                     put("choices", buildJsonArray {
                         add(buildJsonObject {
                             put("index", 0)
@@ -603,7 +603,7 @@ class SectionBatchPipelineTest {
                     put("x_coach", buildJsonObject {
                         put("status", "complete")
                         put("finish_reason", "stop")
-                        put("served_by", "claude-sonnet-5-5")
+                        put("served_by", "claude-haiku-5-5")
                         put("fallback", false)
                         put("physical_calls", 1)
                         put("request_id", "synthetic-friend")
@@ -677,7 +677,7 @@ class SectionBatchPipelineTest {
             assertEquals(friendId("friend-a"), hdrs["x-coach-friend"])
             assertEquals("dev-1", hdrs["x-coach-friend-device"])
             val parsedBody = com.coach.domain.LedgerJson.parseToJsonElement(reqBody) as JsonObject
-            assertEquals("claude-sonnet-5-5", parsedBody["model"]?.toString()?.trim('"'))
+            assertEquals("claude-haiku-5-5", parsedBody["model"]?.toString()?.trim('"'))
             assertNull(parsedBody["tools"])
             assertNull(parsedBody["response_format"])
             assertEquals(0, ledger.bookSummary(bookId).calls, "Friend companion must not pollute owner book_token_ledger")
@@ -687,6 +687,73 @@ class SectionBatchPipelineTest {
             assertEquals(1, ownerPack.keyPoints.size)
             assertEquals(1, primaryCalls.get(), "Owner companion must continue using primary transport")
             assertEquals(1, ledger.bookSummary(bookId).calls)
+        } finally {
+            mockBridge.stop(0)
+        }
+    }
+
+    @Test
+    fun friendChapterBatchAndMathVerifyAlwaysUseHaikuWhileOwnerKeepsOpusAndAstra() = runBlocking {
+        val observed = CopyOnWriteArrayList<Triple<String, String, String?>>()
+        val mockBridge = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
+            createContext("/v1/chat/completions") { ex ->
+                val body = ex.requestBody.readBytes().decodeToString()
+                val parsed = com.coach.domain.LedgerJson.parseToJsonElement(body) as JsonObject
+                val model = parsed["model"]?.toString()?.trim('"').orEmpty()
+                val task = ex.requestHeaders.getFirst("X-Coach-Task").orEmpty()
+                val friendHdr = ex.requestHeaders.getFirst("X-Coach-Friend")
+                observed += Triple(task, model, friendHdr)
+                val reply = buildJsonObject {
+                    put("model", model)
+                    put("choices", buildJsonArray {
+                        add(buildJsonObject {
+                            put("index", 0)
+                            put("message", buildJsonObject {
+                                put("role", "assistant")
+                                put("content", "{}")
+                            })
+                        })
+                    })
+                    put("x_coach", buildJsonObject {
+                        put("status", "complete")
+                        put("finish_reason", "stop")
+                        put("served_by", model)
+                        put("fallback", false)
+                        put("physical_calls", 1)
+                        put("request_id", "batch-model-assert")
+                        put("queue_ms", 1)
+                        put("ttft_ms", 5)
+                        put("elapsed_ms", 10)
+                    })
+                }.toString().toByteArray(Charsets.UTF_8)
+                ex.responseHeaders.add("Content-Type", "application/json")
+                ex.sendResponseHeaders(200, reply.size.toLong())
+                ex.responseBody.use { it.write(reply) }
+            }
+            start()
+        }
+        try {
+            val bridge = BridgeClient(BridgeConfig(baseUrl = "http://127.0.0.1:${mockBridge.address.port}", testTraffic = true))
+            val transport = HaikuRealtimeBridgeTransport(bridge)
+            val friendScoped = FriendScopedBatchTransport(transport, friend = "friend-batch", device = "dev-batch")
+
+            for (task in listOf("BOOK_SECTION_BATCH", "BOOK_EXERCISE_HINTS", "BOOK_MATH_VERIFY", "BOOK_MATH_REPAIR")) {
+                val reply = friendScoped.generateSection("sys", "usr", task, "k-$task", 1024)
+                assertEquals(BridgeClient.HAIKU, reply.model, "Friend bulk task $task must serve Haiku")
+            }
+            assertEquals(4, observed.size)
+            for ((task, model, friendHdr) in observed) {
+                assertEquals("READER_SELECTION", task)
+                assertEquals(BridgeClient.HAIKU, model)
+                assertEquals(friendId("friend-batch"), friendHdr)
+            }
+
+            observed.clear()
+            assertEquals(BridgeClient.GPT_62_ASTRA, transport.generateSection("sys", "usr", "BOOK_SECTION_BATCH", "k-own-1", 1024).model)
+            assertEquals(BridgeClient.OPUS, transport.generateSection("sys", "usr", "BOOK_MATH_VERIFY", "k-own-2", 1024).model)
+            assertEquals(BridgeClient.OPUS, transport.generateSection("sys", "usr", "BOOK_MATH_REPAIR", "k-own-3", 1024).model)
+            assertEquals(listOf("BOOK_SECTION_BATCH" to BridgeClient.GPT_62_ASTRA, "BOOK_MATH_VERIFY" to BridgeClient.OPUS, "BOOK_MATH_REPAIR" to BridgeClient.OPUS),
+                observed.map { it.first to it.second })
         } finally {
             mockBridge.stop(0)
         }

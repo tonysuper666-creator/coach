@@ -5,7 +5,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
@@ -38,6 +40,9 @@ class ImmersiveReaderV2Test {
         onNodeWithTag("inline-followup-input").assertIsFocused()
         onNodeWithTag("inline-followup-send").assertIsNotEnabled()
         onNodeWithText("先输入问题").assertExists()
+        onNodeWithTag("reader-page").performSemanticsAction(SemanticsActions.RequestFocus)
+        onNodeWithTag("inline-followup-input").performMouseInput { click(Offset(3f, 3f)) }
+        onNodeWithTag("inline-followup-input").assertIsFocused()
         onNodeWithTag("inline-followup-input").performTextInput("问")
         onNodeWithTag("inline-followup-send").assertIsEnabled()
     }
@@ -181,6 +186,11 @@ class ImmersiveReaderV2Test {
             }
         }
         waitForIdle()
+        // New books first show the controls. Enter the original pure-read state
+        // explicitly before checking its existing viewport and hairline guarantees.
+        onNodeWithTag("immersive-top-hud").assertExists()
+        onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+        waitForIdle()
         // Pure-read: left rail hidden, Desk v7-paper absent, viewport >= 95%
         onNodeWithTag("host-navigation").assertDoesNotExist()
         onNodeWithTag("v7-paper").assertDoesNotExist()
@@ -207,6 +217,9 @@ class ImmersiveReaderV2Test {
         onNodeWithTag("inline-followup-input").assertIsDisplayed()
         onNodeWithTag("inline-followup-send").assertIsDisplayed()
 
+        // Ask now takes keyboard focus. Return focus to the page before using its T shortcut.
+        onNodeWithTag("reader-page").performSemanticsAction(SemanticsActions.RequestFocus)
+        waitForIdle()
         // Press T to open TOC drawer: non-empty & clickable
         onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.T) }
         waitForIdle()

@@ -125,7 +125,9 @@ class BookInBookSearchTest {
                     onNodeWithTag("book-search-count").assertTextEquals("1 / 1")
 
                     // 校验读法被完整保留
+                    onNodeWithTag("immersive-more-menu").performClick()
                     onNodeWithTag("book-original-toggle").assertExists()
+                    onNodeWithTag("book-original-toggle").performKeyInput { pressKey(Key.Escape) }
                     if (mode.textView) {
                         assertEquals(mode.scrolling, library.textScrollMode(book.id))
                         onAllNodesWithText("Copper Bridge resonance verified on page five.", substring = true)
@@ -140,6 +142,7 @@ class BookInBookSearchTest {
                     }
 
                     // Esc 关闭书内查找
+                    onNodeWithTag("book-search-input").performClick()
                     onNodeWithTag("book-search-input").performKeyInput { pressKey(Key.Escape) }
                     onNodeWithTag("book-search-panel").assertDoesNotExist()
                 }
@@ -177,8 +180,9 @@ class BookInBookSearchTest {
             runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
                 waitUntil(timeoutMillis = 10_000) { controller.state.value.screen == BookScreen.READER }
-                onNodeWithTag("textbook-reader").performKeyInput { pressKey(Key.Tab) }
+                onNodeWithTag("immersive-top-hud").assertExists()
                 waitForIdle()
+                onNodeWithTag("immersive-more-menu").performClick()
                 onNodeWithTag("book-search-toggle").performClick()
                 onNodeWithTag("book-search-input").performTextInput("主缆")
                 onNodeWithTag("book-search-count").assertTextEquals("共 3 处")

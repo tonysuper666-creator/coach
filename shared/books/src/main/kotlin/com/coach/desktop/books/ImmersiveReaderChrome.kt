@@ -228,29 +228,6 @@ internal fun ImmersiveTopHud(
                     textAlign = TextAlign.Center,
                     modifier = Modifier.weight(1f).padding(horizontal = if (compact) 4.dp else 8.dp).testTag("immersive-title"),
                 )
-                if (hasOriginal) {
-                    ViewModeSwitchPill(
-                        textView = textView,
-                        compact = veryCompact,
-                        onSelect = onSelectView,
-                    )
-                }
-                V7TextButton(
-                    onClick = onToggleSearch,
-                    enabled = !busy,
-                    modifier = Modifier.testTag("book-search-toggle"),
-                    contentPadding = PaddingValues(horizontal = if (compact) 6.dp else 8.dp, vertical = 4.dp),
-                    ringInside = true,
-                ) {
-                    Text(
-                        "查找",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = if (searchOpen) accent else colors.fgSecondary,
-                        maxLines = 1,
-                        softWrap = false,
-                    )
-                }
-                Box(Modifier.padding(horizontal = if (compact) 2.dp else 4.dp)) { typeControl() }
                 if (modeControl != null) {
                     modeControl()
                 }
@@ -290,6 +267,21 @@ internal fun ImmersiveTopHud(
                         onDismissRequest = { moreMenuOpen = false },
                         containerColor = colors.surface1,
                     ) {
+                        if (hasOriginal) {
+                            Box(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
+                                ViewModeSwitchPill(textView = textView, compact = veryCompact, onSelect = {
+                                    moreMenuOpen = false
+                                    onSelectView(it)
+                                })
+                            }
+                        }
+                        DropdownMenuItem(
+                            text = { Text("查找", style = MaterialTheme.typography.labelLarge) },
+                            enabled = !busy,
+                            onClick = { moreMenuOpen = false; onToggleSearch() },
+                            modifier = Modifier.testTag("book-search-toggle"),
+                        )
+                        Box(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) { typeControl() }
                         DropdownMenuItem(
                             text = {
                                 Text(
@@ -1209,7 +1201,7 @@ internal fun CompanionAskPane(
             Text("问题太长，请缩短后发送", style = MaterialTheme.typography.labelSmall, color = colors.fgSecondary)
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.weight(1f)) {
+            Box(Modifier.weight(1f).clickable { askFocus.requestFocus() }) {
                 V7Field(
                     value = draft,
                     onValueChange = onDraftChange,

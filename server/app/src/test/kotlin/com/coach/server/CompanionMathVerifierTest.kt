@@ -131,6 +131,235 @@ class CompanionMathVerifierTest {
         )
     }
 
+    private fun buildMathAuditRepairStubTransport(
+        tasksSeen: MutableList<String>,
+        friendCallsSeen: MutableList<Triple<String, String?, String?>>? = null,
+    ): BatchAiTransport = object : BatchAiTransport {
+        override suspend fun generateSectionForFriend(
+            systemPrompt: String,
+            userPrompt: String,
+            task: String,
+            batchKey: String,
+            maxTokens: Int,
+            friend: String?,
+            device: String?,
+        ): BatchTransportReply {
+            friendCallsSeen?.add(Triple(task, friend, device))
+            return generateSection(systemPrompt, userPrompt, task, batchKey, maxTokens)
+        }
+
+        override suspend fun generateSection(
+            systemPrompt: String,
+            userPrompt: String,
+            task: String,
+            batchKey: String,
+            maxTokens: Int,
+        ): BatchTransportReply {
+            tasksSeen += task
+            val text = when (task) {
+                "BOOK_SECTION_BATCH" -> buildJsonObject {
+                    put("coreQuestion", "信息不对称如何导致市场萎缩？")
+                    put("keyPoints", buildJsonArray {
+                        add(buildJsonObject {
+                            put("summary", "买家估值比卖家高出百分之五十。")
+                            put("pdfPage", 10)
+                            put("quoteAnchor", "values a unit at 50%")
+                        })
+                    })
+                    put("jargonGlosses", buildJsonArray {})
+                    put("pretest", buildJsonArray {})
+                    put("derivations", buildJsonArray {
+                        // Derivation 0: WRONG coefficient 3 instead of 3/2 -> will be rejected & repaired
+                        add(buildJsonObject {
+                            put("title", "买卖双方效用函数")
+                            put("setup", "质量为 Q，其他商品为 M。")
+                            put("steps", buildJsonArray {
+                                add(JsonPrimitive("买家效用加权系数为 3，估值是卖家三倍。"))
+                            })
+                            put("graphCheck", "核对系数。")
+                            put("pitfall", "勿忽略系数 3。")
+                            put("pdfPage", 10)
+                            put("quoteAnchor", "values a unit at 50%")
+                        })
+                        // Derivation 1: Unfixable bad math -> repair will still fail -> MUST BE DROPPED
+                        add(buildJsonObject {
+                            put("title", "错误临界值推导")
+                            put("setup", "测试不可修复项。")
+                            put("steps", buildJsonArray {
+                                add(JsonPrimitive("令 2 + 2 = 5，导出临界值 99。"))
+                            })
+                            put("graphCheck", "无。")
+                            put("pitfall", "无。")
+                            put("pdfPage", 10)
+                            put("quoteAnchor", "values a unit at 50%")
+                        })
+                    })
+                    put("optionalPractice", buildJsonArray {
+                        // Practice 0: WRONG calculation 3*2=6 -> will be rejected & repaired to 3/2 * 2 = 3
+                        add(buildJsonObject {
+                            put("stem", "若质量 Q = 2，按买家效用系数计算其效用贡献是多少？")
+                            put("options", buildJsonArray {
+                                add(JsonPrimitive("2"))
+                                add(JsonPrimitive("3"))
+                                add(JsonPrimitive("5"))
+                                add(JsonPrimitive("6"))
+                            })
+                            put("correctOption", "6")
+                            put("explanation", "买家系数为 3，因此 3 * 2 = 6。")
+                            put("kind", "MCQ")
+                            put("pdfPage", 10)
+                            put("quoteAnchor", "values a unit at 50%")
+                        })
+                    })
+                }.toString()
+
+                "BOOK_MATH_VERIFY" -> {
+                    // Independent auditor checks whether the prompt contains the repaired 3/2 text or broken 3 text
+                    val isRepaired = userPrompt.contains("3/2") && !userPrompt.contains("系数为 3，")
+                    buildJsonObject {
+                        put("itemAudits", buildJsonArray {
+                            if (userPrompt.contains("sec-1:drv:0:0")) {
+                                add(buildJsonObject {
+                                    put("itemId", "sec-1:drv:0:0")
+                                    put("sourceMatches", isRepaired)
+                                    put("sourceMismatchReason", if (isRepaired) "" else "Source says 50% more -> coefficient is 3/2, not 3")
+                                    put("sympyChecks", buildJsonArray {
+                                        add(buildJsonObject {
+                                            put("kind", "ratio")
+                                            put("lhs", if (isRepaired) "3/2" else "3")
+                                            put("rhs", "3/2")
+                                        })
+                                    })
+                                    put("mcqComputedAnswer", "")
+                                })
+                            }
+                            if (userPrompt.contains("sec-1:drv:0:1")) {
+                                add(buildJsonObject {
+                                    put("itemId", "sec-1:drv:0:1")
+                                    put("sourceMatches", false)
+                                    put("sourceMismatchReason", "Arithmetic 2+2=5 is invalid")
+                                    put("sympyChecks", buildJsonArray {
+                                        add(buildJsonObject {
+                                            put("kind", "eval")
+                                            put("expression", "2 + 2")
+                                            put("expected", "5")
+                                        })
+                                    })
+                                    put("mcqComputedAnswer", "")
+                                })
+                            }
+                            if (userPrompt.contains("sec-1:prac:0:0")) {
+                                add(buildJsonObject {
+                                    put("itemId", "sec-1:prac:0:0")
+                                    put("sourceMatches", isRepaired)
+                                    put("sourceMismatchReason", if (isRepaired) "" else "Coefficient must be 3/2, so (3/2)*2 = 3")
+                                    put("sympyChecks", buildJsonArray {
+                                        add(buildJsonObject {
+                                            put("kind", "eval")
+                                            put("expression", "(3/2)*Q")
+                                            put("variables", buildJsonObject { put("Q", "2") })
+                                            put("expected", "3")
+                                        })
+                                    })
+                                    put("mcqComputedAnswer", "3")
+                                })
+                            }
+                        })
+                    }.toString()
+                }
+
+                "BOOK_MATH_REPAIR" -> buildJsonObject {
+                    put("repairedItems", buildJsonArray {
+                        // Fix Derivation 0 properly with 3/2
+                        add(buildJsonObject {
+                            put("itemId", "sec-1:drv:0:0")
+                            put("title", "买卖双方效用函数")
+                            put("setup", "质量为 Q，其他商品为 M。")
+                            put("steps", buildJsonArray {
+                                add(JsonPrimitive("买家效用加权系数为 3/2（即 1.5倍），对同质量商品估值高出 50%。"))
+                            })
+                            put("graphCheck", "确认买家系数 3/2。")
+                            put("pitfall", "勿漏掉分母 2。")
+                            put("pdfPage", 10)
+                            put("quoteAnchor", "values a unit at 50%")
+                            put("mathChecks", buildJsonArray {
+                                add(buildJsonObject { put("kind", "ratio"); put("lhs", "3/2"); put("rhs", "1.5") })
+                            })
+                        })
+                        // Derivation 1 still returns broken math -> must be DROPPED after maxRegenAttempts
+                        add(buildJsonObject {
+                            put("itemId", "sec-1:drv:0:1")
+                            put("title", "错误临界值推导")
+                            put("setup", "测试不可修复项。")
+                            put("steps", buildJsonArray {
+                                add(JsonPrimitive("仍有错误：2 + 2 = 5。"))
+                            })
+                            put("graphCheck", "无。")
+                            put("pitfall", "无。")
+                            put("pdfPage", 10)
+                            put("quoteAnchor", "values a unit at 50%")
+                        })
+                        // Fix Practice 0 properly to (3/2) * 2 = 3
+                        add(buildJsonObject {
+                            put("itemId", "sec-1:prac:0:0")
+                            put("stem", "若质量 Q = 2，按买家效用系数 3/2 计算其效用贡献是多少？")
+                            put("options", buildJsonArray {
+                                add(JsonPrimitive("2"))
+                                add(JsonPrimitive("3"))
+                                add(JsonPrimitive("5"))
+                                add(JsonPrimitive("6"))
+                            })
+                            put("correctOption", "3")
+                            put("explanation", "买家效用系数为 3/2，因此 (3/2) * 2 = 3。")
+                            put("quizKind", "MCQ")
+                            put("pdfPage", 10)
+                            put("quoteAnchor", "values a unit at 50%")
+                            put("mathChecks", buildJsonArray {
+                                add(buildJsonObject {
+                                    put("kind", "eval")
+                                    put("expression", "(3/2)*Q")
+                                    put("variables", buildJsonObject { put("Q", "2") })
+                                    put("expected", "3")
+                                })
+                            })
+                        })
+                    })
+                }.toString()
+
+                else -> "{}"
+            }
+            return BatchTransportReply(
+                text = text,
+                routeChannel = CompanionRouteChannel.HAIKU_BATCH,
+                model = "claude-haiku-5-5",
+                inputTokens = 500,
+                outputTokens = 300,
+                ttftMs = 40,
+                elapsedMs = 80,
+            )
+        }
+    }
+
+    private fun syntheticMathChapterRequest(bookId: String): ChapterCompanionRequest = ChapterCompanionRequest(
+        bookId = bookId,
+        chapterId = "ch-syn",
+        chapterTitle = "Synthetic Market",
+        sections = listOf(
+            SectionBatchInput(
+                sectionId = "sec-1",
+                title = "1.1 Utility setup",
+                blocks = listOf(
+                    SectionBlockInput(
+                        id = "$bookId:p10:0",
+                        pdfPage = 10,
+                        startUtf16 = 0,
+                        text = "VB = 3\nQj + M\nj= 2\n1\nA buyer values a unit at 50% more than a seller.",
+                    ),
+                ),
+            ),
+        ),
+    )
+
     @Test
     fun pipelineRejectsWrongCoefficientRegeneratesAndDropsUnfixableItems() = runBlocking {
         val dir = Files.createTempDirectory("coach-math-verify-")
@@ -138,225 +367,12 @@ class CompanionMathVerifierTest {
         val bookId = "d".repeat(64)
         val tasksSeen = CopyOnWriteArrayList<String>()
 
-        val stubTransport = object : BatchAiTransport {
-            override suspend fun generateSection(
-                systemPrompt: String,
-                userPrompt: String,
-                task: String,
-                batchKey: String,
-                maxTokens: Int,
-            ): BatchTransportReply {
-                tasksSeen += task
-                val text = when (task) {
-                    "BOOK_SECTION_BATCH" -> buildJsonObject {
-                        put("coreQuestion", "信息不对称如何导致市场萎缩？")
-                        put("keyPoints", buildJsonArray {
-                            add(buildJsonObject {
-                                put("summary", "买家估值比卖家高出百分之五十。")
-                                put("pdfPage", 10)
-                                put("quoteAnchor", "values a unit at 50%")
-                            })
-                        })
-                        put("jargonGlosses", buildJsonArray {})
-                        put("pretest", buildJsonArray {})
-                        put("derivations", buildJsonArray {
-                            // Derivation 0: WRONG coefficient 3 instead of 3/2 -> will be rejected & repaired
-                            add(buildJsonObject {
-                                put("title", "买卖双方效用函数")
-                                put("setup", "质量为 Q，其他商品为 M。")
-                                put("steps", buildJsonArray {
-                                    add(JsonPrimitive("买家效用加权系数为 3，估值是卖家三倍。"))
-                                })
-                                put("graphCheck", "核对系数。")
-                                put("pitfall", "勿忽略系数 3。")
-                                put("pdfPage", 10)
-                                put("quoteAnchor", "values a unit at 50%")
-                            })
-                            // Derivation 1: Unfixable bad math -> repair will still fail -> MUST BE DROPPED
-                            add(buildJsonObject {
-                                put("title", "错误临界值推导")
-                                put("setup", "测试不可修复项。")
-                                put("steps", buildJsonArray {
-                                    add(JsonPrimitive("令 2 + 2 = 5，导出临界值 99。"))
-                                })
-                                put("graphCheck", "无。")
-                                put("pitfall", "无。")
-                                put("pdfPage", 10)
-                                put("quoteAnchor", "values a unit at 50%")
-                            })
-                        })
-                        put("optionalPractice", buildJsonArray {
-                            // Practice 0: WRONG calculation 3*2=6 -> will be rejected & repaired to 3/2 * 2 = 3
-                            add(buildJsonObject {
-                                put("stem", "若质量 Q = 2，按买家效用系数计算其效用贡献是多少？")
-                                put("options", buildJsonArray {
-                                    add(JsonPrimitive("2"))
-                                    add(JsonPrimitive("3"))
-                                    add(JsonPrimitive("5"))
-                                    add(JsonPrimitive("6"))
-                                })
-                                put("correctOption", "6")
-                                put("explanation", "买家系数为 3，因此 3 * 2 = 6。")
-                                put("kind", "MCQ")
-                                put("pdfPage", 10)
-                                put("quoteAnchor", "values a unit at 50%")
-                            })
-                        })
-                    }.toString()
-
-                    "BOOK_MATH_VERIFY" -> {
-                        // Independent auditor checks whether the prompt contains the repaired 3/2 text or broken 3 text
-                        val isRepaired = userPrompt.contains("3/2") && !userPrompt.contains("系数为 3，")
-                        buildJsonObject {
-                            put("itemAudits", buildJsonArray {
-                                if (userPrompt.contains("sec-1:drv:0:0")) {
-                                    add(buildJsonObject {
-                                        put("itemId", "sec-1:drv:0:0")
-                                        put("sourceMatches", isRepaired)
-                                        put("sourceMismatchReason", if (isRepaired) "" else "Source says 50% more -> coefficient is 3/2, not 3")
-                                        put("sympyChecks", buildJsonArray {
-                                            add(buildJsonObject {
-                                                put("kind", "ratio")
-                                                put("lhs", if (isRepaired) "3/2" else "3")
-                                                put("rhs", "3/2")
-                                            })
-                                        })
-                                        put("mcqComputedAnswer", "")
-                                    })
-                                }
-                                if (userPrompt.contains("sec-1:drv:0:1")) {
-                                    add(buildJsonObject {
-                                        put("itemId", "sec-1:drv:0:1")
-                                        put("sourceMatches", false)
-                                        put("sourceMismatchReason", "Arithmetic 2+2=5 is invalid")
-                                        put("sympyChecks", buildJsonArray {
-                                            add(buildJsonObject {
-                                                put("kind", "eval")
-                                                put("expression", "2 + 2")
-                                                put("expected", "5")
-                                            })
-                                        })
-                                        put("mcqComputedAnswer", "")
-                                    })
-                                }
-                                if (userPrompt.contains("sec-1:prac:0:0")) {
-                                    add(buildJsonObject {
-                                        put("itemId", "sec-1:prac:0:0")
-                                        put("sourceMatches", isRepaired)
-                                        put("sourceMismatchReason", if (isRepaired) "" else "Coefficient must be 3/2, so (3/2)*2 = 3")
-                                        put("sympyChecks", buildJsonArray {
-                                            add(buildJsonObject {
-                                                put("kind", "eval")
-                                                put("expression", "(3/2)*Q")
-                                                put("variables", buildJsonObject { put("Q", "2") })
-                                                put("expected", "3")
-                                            })
-                                        })
-                                        put("mcqComputedAnswer", "3")
-                                    })
-                                }
-                            })
-                        }.toString()
-                    }
-
-                    "BOOK_MATH_REPAIR" -> buildJsonObject {
-                        put("repairedItems", buildJsonArray {
-                            // Fix Derivation 0 properly with 3/2
-                            add(buildJsonObject {
-                                put("itemId", "sec-1:drv:0:0")
-                                put("title", "买卖双方效用函数")
-                                put("setup", "质量为 Q，其他商品为 M。")
-                                put("steps", buildJsonArray {
-                                    add(JsonPrimitive("买家效用加权系数为 3/2（即 1.5倍），对同质量商品估值高出 50%。"))
-                                })
-                                put("graphCheck", "确认买家系数 3/2。")
-                                put("pitfall", "勿漏掉分母 2。")
-                                put("pdfPage", 10)
-                                put("quoteAnchor", "values a unit at 50%")
-                                put("mathChecks", buildJsonArray {
-                                    add(buildJsonObject { put("kind", "ratio"); put("lhs", "3/2"); put("rhs", "1.5") })
-                                })
-                            })
-                            // Derivation 1 still returns broken math -> must be DROPPED after maxRegenAttempts
-                            add(buildJsonObject {
-                                put("itemId", "sec-1:drv:0:1")
-                                put("title", "错误临界值推导")
-                                put("setup", "测试不可修复项。")
-                                put("steps", buildJsonArray {
-                                    add(JsonPrimitive("仍有错误：2 + 2 = 5。"))
-                                })
-                                put("graphCheck", "无。")
-                                put("pitfall", "无。")
-                                put("pdfPage", 10)
-                                put("quoteAnchor", "values a unit at 50%")
-                            })
-                            // Fix Practice 0 properly to (3/2) * 2 = 3
-                            add(buildJsonObject {
-                                put("itemId", "sec-1:prac:0:0")
-                                put("stem", "若质量 Q = 2，按买家效用系数 3/2 计算其效用贡献是多少？")
-                                put("options", buildJsonArray {
-                                    add(JsonPrimitive("2"))
-                                    add(JsonPrimitive("3"))
-                                    add(JsonPrimitive("5"))
-                                    add(JsonPrimitive("6"))
-                                })
-                                put("correctOption", "3")
-                                put("explanation", "买家效用系数为 3/2，因此 (3/2) * 2 = 3。")
-                                put("quizKind", "MCQ")
-                                put("pdfPage", 10)
-                                put("quoteAnchor", "values a unit at 50%")
-                                put("mathChecks", buildJsonArray {
-                                    add(buildJsonObject {
-                                        put("kind", "eval")
-                                        put("expression", "(3/2)*Q")
-                                        put("variables", buildJsonObject { put("Q", "2") })
-                                        put("expected", "3")
-                                    })
-                                })
-                            })
-                        })
-                    }.toString()
-
-                    else -> "{}"
-                }
-                return BatchTransportReply(
-                    text = text,
-                    routeChannel = CompanionRouteChannel.HAIKU_BATCH,
-                    model = "claude-haiku-5-5",
-                    inputTokens = 500,
-                    outputTokens = 300,
-                    ttftMs = 40,
-                    elapsedMs = 80,
-                )
-            }
-        }
-
         val pipeline = SectionConcurrentCompanionPipeline(
-            transport = stubTransport,
+            transport = buildMathAuditRepairStubTransport(tasksSeen),
             ledger = ledger,
             mathVerifier = CompanionMathVerifier(enableLlmAudit = true, maxRegenAttempts = 2),
         )
-        val pack = pipeline.generateChapter(
-            ChapterCompanionRequest(
-                bookId = bookId,
-                chapterId = "ch-syn",
-                chapterTitle = "Synthetic Market",
-                sections = listOf(
-                    SectionBatchInput(
-                        sectionId = "sec-1",
-                        title = "1.1 Utility setup",
-                        blocks = listOf(
-                            SectionBlockInput(
-                                id = "$bookId:p10:0",
-                                pdfPage = 10,
-                                startUtf16 = 0,
-                                text = "VB = 3\nQj + M\nj= 2\n1\nA buyer values a unit at 50% more than a seller.",
-                            ),
-                        ),
-                    ),
-                ),
-            ),
-        )
+        val pack = pipeline.generateChapter(syntheticMathChapterRequest(bookId))
 
         assertTrue("BOOK_MATH_VERIFY" in tasksSeen)
         assertTrue("BOOK_MATH_REPAIR" in tasksSeen)
@@ -373,6 +389,53 @@ class CompanionMathVerifierTest {
         assertEquals(2, pack.stats.mathAudit.regeneratedPassedItems)
         assertEquals(1, pack.stats.mathAudit.finalDroppedItems)
         assertEquals("sympy", pack.stats.mathAudit.engine)
+    }
+
+    @Test
+    fun friendMathVerifyAndRepairSkipOwnerLedgerWhileOwnerRecordsAll() = runBlocking {
+        val bookId = "c".repeat(64)
+        val request = syntheticMathChapterRequest(bookId)
+
+        // Friend run with LLM math audit + repair enabled: 0 entries written to owner's book_token_ledger,
+        // and all transport calls (batch, math verify, math repair) preserve friend/device scope.
+        val friendLedger = BookTokenLedger(Files.createTempDirectory("coach-friend-math-ledger-"))
+        val friendTasks = CopyOnWriteArrayList<String>()
+        val friendScopedCalls = CopyOnWriteArrayList<Triple<String, String?, String?>>()
+        val friendPack = SectionConcurrentCompanionPipeline(
+            transport = buildMathAuditRepairStubTransport(friendTasks, friendScopedCalls),
+            ledger = friendLedger,
+            mathVerifier = CompanionMathVerifier(enableLlmAudit = true, maxRegenAttempts = 2),
+        ).generateChapter(request, friend = "alice", device = "alice-dev")
+
+        assertEquals(1, friendPack.derivations.size)
+        assertTrue("BOOK_SECTION_BATCH" in friendTasks)
+        assertTrue("BOOK_MATH_VERIFY" in friendTasks)
+        assertTrue("BOOK_MATH_REPAIR" in friendTasks)
+        assertTrue(friendScopedCalls.isNotEmpty())
+        assertTrue(friendScopedCalls.all { (_, f, d) -> f == "alice" && d == "alice-dev" })
+        assertTrue(
+            friendLedger.entriesForBook(bookId).isEmpty(),
+            "Friend math verify/repair must write 0 rows to owner book_token_ledger",
+        )
+        assertEquals(0, friendLedger.bookSummary(bookId).calls)
+
+        // Owner run: batch + BOOK_MATH_VERIFY + BOOK_MATH_REPAIR are all recorded normally in owner's ledger.
+        val ownerLedger = BookTokenLedger(Files.createTempDirectory("coach-owner-math-ledger-"))
+        val ownerTasks = CopyOnWriteArrayList<String>()
+        val ownerPack = SectionConcurrentCompanionPipeline(
+            transport = buildMathAuditRepairStubTransport(ownerTasks),
+            ledger = ownerLedger,
+            mathVerifier = CompanionMathVerifier(enableLlmAudit = true, maxRegenAttempts = 2),
+        ).generateChapter(request)
+
+        assertEquals(1, ownerPack.derivations.size)
+        val ownerEntries = ownerLedger.entriesForBook(bookId)
+        val recordedTasks = ownerEntries.map { it.task }.toSet()
+        assertTrue("BOOK_SECTION_BATCH" in recordedTasks)
+        assertTrue("BOOK_MATH_VERIFY" in recordedTasks)
+        assertTrue("BOOK_MATH_REPAIR" in recordedTasks)
+        assertEquals(ownerEntries.size, ownerLedger.bookSummary(bookId).calls)
+        assertTrue(ownerEntries.size >= 4)
     }
 
     @Test

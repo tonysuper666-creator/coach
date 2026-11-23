@@ -966,7 +966,7 @@ class CompanionMathVerifier(
         optionalPractice: List<CompanionQuizItem>,
         declaredChecksByItemId: Map<String, List<MathCheckSpec>>,
         transport: BatchAiTransport,
-        ledger: BookTokenLedger,
+        ledger: BookTokenLedger?,
         rawPages: Map<Int, String>,
     ): ChunkMathVerificationResult {
         if (chunk.isExerciseSection) {
@@ -1334,7 +1334,7 @@ class CompanionMathVerifier(
         sourceCues: SourcePageMathCues,
         roundLabel: String,
         transport: BatchAiTransport,
-        ledger: BookTokenLedger,
+        ledger: BookTokenLedger?,
     ): LlmAuditCallOutcome {
         val userPrompt = buildString {
             append("Chapter: ").append(request.chapterTitle).append('\n')
@@ -1374,7 +1374,7 @@ class CompanionMathVerifier(
             reply.outputTokens,
             reply.cachedTokens,
         )
-        ledger.record(
+        ledger?.record(
             TokenLedgerEntry(
                 bookId = request.bookId,
                 chapterId = request.chapterId,
@@ -1441,7 +1441,7 @@ class CompanionMathVerifier(
         sourceCues: SourcePageMathCues,
         attempt: Int,
         transport: BatchAiTransport,
-        ledger: BookTokenLedger,
+        ledger: BookTokenLedger?,
         rawPages: Map<Int, String>,
     ): Pair<Map<String, RepairedItem>, Long> {
         val userPrompt = buildString {
@@ -1487,7 +1487,7 @@ class CompanionMathVerifier(
             reply.outputTokens,
             reply.cachedTokens,
         )
-        ledger.record(
+        ledger?.record(
             TokenLedgerEntry(
                 bookId = request.bookId,
                 chapterId = request.chapterId,

@@ -743,6 +743,16 @@ interface BatchAiTransport {
         batchKey: String,
         maxTokens: Int = 1800,
     ): BatchTransportReply
+
+    suspend fun generateSectionForFriend(
+        systemPrompt: String,
+        userPrompt: String,
+        task: String,
+        batchKey: String,
+        maxTokens: Int = 1800,
+        friend: String? = null,
+        device: String? = null,
+    ): BatchTransportReply = generateSection(systemPrompt, userPrompt, task, batchKey, maxTokens)
 }
 
 /**
@@ -772,6 +782,22 @@ class RoutedBatchAiTransport(
             return overflow.generateSection(systemPrompt, userPrompt, task, batchKey, maxTokens)
         }
         throw IllegalStateException("No batch AI transport available", primaryError)
+    }
+
+    override suspend fun generateSectionForFriend(
+        systemPrompt: String,
+        userPrompt: String,
+        task: String,
+        batchKey: String,
+        maxTokens: Int,
+        friend: String?,
+        device: String?,
+    ): BatchTransportReply {
+        if (friend != null) {
+            val friendOverflow = overflow ?: throw IllegalStateException("No friend batch AI transport available")
+            return friendOverflow.generateSectionForFriend(systemPrompt, userPrompt, task, batchKey, maxTokens, friend, device)
+        }
+        return generateSection(systemPrompt, userPrompt, task, batchKey, maxTokens)
     }
 }
 
@@ -909,17 +935,52 @@ class HaikuRealtimeBridgeTransport(
         task: String,
         batchKey: String,
         maxTokens: Int,
+    ): BatchTransportReply = generateSectionInternal(
+        systemPrompt = systemPrompt,
+        userPrompt = userPrompt,
+        task = task,
+        maxTokens = maxTokens,
+        friend = null,
+        device = null,
+    )
+
+    override suspend fun generateSectionForFriend(
+        systemPrompt: String,
+        userPrompt: String,
+        task: String,
+        batchKey: String,
+        maxTokens: Int,
+        friend: String?,
+        device: String?,
+    ): BatchTransportReply = generateSectionInternal(
+        systemPrompt = systemPrompt,
+        userPrompt = userPrompt,
+        task = task,
+        maxTokens = maxTokens,
+        friend = friend,
+        device = device,
+    )
+
+    private suspend fun generateSectionInternal(
+        systemPrompt: String,
+        userPrompt: String,
+        task: String,
+        maxTokens: Int,
+        friend: String?,
+        device: String?,
     ): BatchTransportReply = withContext(Dispatchers.IO) {
         val started = System.nanoTime()
         val result = bridge.chat(
             ChatRequest(
-                task = task,
+                task = if (friend != null) "READER_SELECTION" else task,
                 model = BridgeClient.HAIKU,
                 system = systemPrompt,
                 user = userPrompt,
                 stream = false,
                 background = false,
                 maxTokens = maxTokens,
+                friendId = friend?.let(::friendId),
+                friendDevice = if (friend != null) device else null,
             ),
         )
         val elapsedMs = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L)
@@ -936,6 +997,28 @@ class HaikuRealtimeBridgeTransport(
             is BridgeResult.Failure -> throw IllegalStateException("haiku_realtime_failed:${result.reason}")
         }
     }
+}
+
+private class FriendScopedBatchTransport(
+    private val delegate: BatchAiTransport,
+    private val friend: String,
+    private val device: String,
+) : BatchAiTransport {
+    override suspend fun generateSection(
+        systemPrompt: String,
+        userPrompt: String,
+        task: String,
+        batchKey: String,
+        maxTokens: Int,
+    ): BatchTransportReply = delegate.generateSectionForFriend(
+        systemPrompt = systemPrompt,
+        userPrompt = userPrompt,
+        task = task,
+        batchKey = batchKey,
+        maxTokens = maxTokens,
+        friend = friend,
+        device = device,
+    )
 }
 
 /** Persistent server-side cache for generated chapter companion packs keyed by `(bookId, chapterId, inputHash)`. */
@@ -1036,6 +1119,8 @@ class SectionConcurrentCompanionPipeline(
         bypassCache: Boolean = false,
         cacheScope: String = "local",
         currentCheck: suspend () -> Boolean = { true },
+        friend: String? = null,
+        device: String? = null,
     ): ChapterCompanionPack {
         val chunks = SectionChunkSplitter.split(request.sections)
         require(chunks.isNotEmpty()) { "这一章缺少可整理的文本块。" }
@@ -1048,13 +1133,19 @@ class SectionConcurrentCompanionPipeline(
             }
         }
 
+        val effectiveTransport = if (friend != null && !device.isNullOrBlank()) {
+            FriendScopedBatchTransport(transport, friend, device)
+        } else {
+            transport
+        }
+        val recordOwnerLedger = friend == null
         val semaphore = Semaphore(maxConcurrency.coerceAtLeast(1))
         val outcomes = coroutineScope {
             chunks.map { chunk ->
                 async {
                     semaphore.withPermit {
                         if (!currentCheck()) throw CompanionRevokedException()
-                        runChunk(request, chunk)
+                        runChunk(request, chunk, effectiveTransport, recordOwnerLedger)
                     }
                 }
             }.awaitAll()
@@ -1192,7 +1283,12 @@ class SectionConcurrentCompanionPipeline(
         return pack
     }
 
-    private suspend fun runChunk(request: ChapterCompanionRequest, chunk: BoundedSectionChunk): ChunkOutcome {
+    private suspend fun runChunk(
+        request: ChapterCompanionRequest,
+        chunk: BoundedSectionChunk,
+        transportOverride: BatchAiTransport = transport,
+        recordOwnerLedger: Boolean = true,
+    ): ChunkOutcome {
         require(chunk.estimatedRequestTokens <= SectionBatchLimits.MAX_REQUEST_TOKENS) {
             "Chunk token budget exceeded: ${chunk.estimatedRequestTokens}"
         }
@@ -1205,30 +1301,32 @@ class SectionConcurrentCompanionPipeline(
         } else {
             SectionBatchLimits.BODY_CHUNK_MAX_OUTPUT_TOKENS
         }
-        val reply = transport.generateSection(systemPrompt, userPrompt, task, batchKey, maxTokens)
+        val reply = transportOverride.generateSection(systemPrompt, userPrompt, task, batchKey, maxTokens)
         val costMicro = TokenLedgerPricing.costMicrodollars(
             reply.routeChannel,
             reply.inputTokens,
             reply.outputTokens,
             reply.cachedTokens,
         )
-        ledger.record(
-            TokenLedgerEntry(
-                bookId = request.bookId,
-                chapterId = request.chapterId,
-                sectionId = "${chunk.sectionId}#${chunk.chunkIndex}",
-                task = task,
-                routeChannel = reply.routeChannel,
-                model = reply.model,
-                inputTokens = reply.inputTokens,
-                outputTokens = reply.outputTokens,
-                cachedTokens = reply.cachedTokens,
-                costMicrodollars = costMicro,
-                ttftMs = reply.ttftMs,
-                elapsedMs = reply.elapsedMs,
-                status = "complete",
-            ),
-        )
+        if (recordOwnerLedger) {
+            ledger.record(
+                TokenLedgerEntry(
+                    bookId = request.bookId,
+                    chapterId = request.chapterId,
+                    sectionId = "${chunk.sectionId}#${chunk.chunkIndex}",
+                    task = task,
+                    routeChannel = reply.routeChannel,
+                    model = reply.model,
+                    inputTokens = reply.inputTokens,
+                    outputTokens = reply.outputTokens,
+                    cachedTokens = reply.cachedTokens,
+                    costMicrodollars = costMicro,
+                    ttftMs = reply.ttftMs,
+                    elapsedMs = reply.elapsedMs,
+                    status = "complete",
+                ),
+            )
+        }
         val parsed = parseChunkReply(reply, chunk, request.rawPages, costMicro)
         if (chunk.isExerciseSection) return parsed
         val verified = mathVerifier.verifyAndRepairChunk(
@@ -1238,8 +1336,8 @@ class SectionConcurrentCompanionPipeline(
             derivations = parsed.derivations,
             optionalPractice = parsed.optionalPractice,
             declaredChecksByItemId = parsed.declaredMathChecks,
-            transport = transport,
-            ledger = ledger,
+            transport = transportOverride,
+            ledger = if (recordOwnerLedger) ledger else null,
             rawPages = request.rawPages,
         )
         return parsed.copy(

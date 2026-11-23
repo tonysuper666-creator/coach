@@ -403,8 +403,17 @@ internal fun TextbookReader(
     }
     var pageFocused by remember { mutableStateOf(false) }
     var tocOpen by remember(book.id) { mutableStateOf(false) }
-    var studyPreference by remember(book.id) {
-        mutableStateOf(StudyModeStore.loadOrResolve(library, book.id, book.title, book.pages.size))
+    var studyPreference by remember(book.id, courseContext?.courseId, courseContext?.examProfile?.isExam) {
+        mutableStateOf(
+            StudyModeStore.loadOrResolve(
+                library = library,
+                bookId = book.id,
+                fallbackTitle = book.title,
+                fallbackPageCount = book.pages.size,
+                courseExamOverride = courseContext?.examProfile?.isExam,
+                courseExamDateOverride = courseContext?.examProfile?.examDate?.takeIf { it.isNotBlank() },
+            ),
+        )
     }
     val initialCompanionOpen = openPairing || (
         ui.source == null &&

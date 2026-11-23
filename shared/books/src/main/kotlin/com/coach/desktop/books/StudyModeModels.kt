@@ -820,7 +820,14 @@ internal object StudyModeStore {
         )
     }
 
-    fun loadOrResolve(library: TextbookLibrary, bookId: String, fallbackTitle: String = "", fallbackPageCount: Int = 0): BookStudyPreference {
+    fun loadOrResolve(
+        library: TextbookLibrary,
+        bookId: String,
+        fallbackTitle: String = "",
+        fallbackPageCount: Int = 0,
+        courseExamOverride: Boolean? = null,
+        courseExamDateOverride: String? = null,
+    ): BookStudyPreference {
         return runCatching {
             openDb(library.directory).use { db ->
                 var existing: BookStudyPreference? = null
@@ -848,29 +855,58 @@ internal object StudyModeStore {
                     }
                 }
                 val liveCourse = resolveBookCourseContext(db, bookId)
+                val effectiveExamMode = courseExamOverride ?: liveCourse.isExam
                 val resolved = existing?.let { saved ->
-                    val adjustedMode = if (!liveCourse.isExam && !saved.userLocked && saved.mode == BookStudyMode.EXAM_FOCUS) {
-                        BookStudyMode.READ_THROUGH
+                    if (!saved.userLocked && courseExamOverride != null) {
+                        computeSmartDefault(
+                            db = db,
+                            bookId = bookId,
+                            fallbackTitle = fallbackTitle,
+                            fallbackPageCount = fallbackPageCount,
+                            courseExamOverride = courseExamOverride,
+                            courseExamDateOverride = courseExamDateOverride,
+                        ).copy(
+                            detailLevel = saved.detailLevel,
+                            explainLang = saved.explainLang,
+                            dailyMinutes = saved.dailyMinutes,
+                            inquiryQuestion = saved.inquiryQuestion,
+                            updatedAt = saved.updatedAt,
+                        )
                     } else {
-                        saved.mode
+                        val adjustedMode = if (
+                            !effectiveExamMode &&
+                            saved.mode == BookStudyMode.EXAM_FOCUS &&
+                            (courseExamOverride == false || !saved.userLocked)
+                        ) {
+                            BookStudyMode.READ_THROUGH
+                        } else {
+                            saved.mode
+                        }
+                        val adjustedReason = if (!effectiveExamMode && saved.defaultReason.contains("考")) {
+                            "按章节顺序读，随时可以切换学法。"
+                        } else {
+                            saved.defaultReason
+                        }
+                        saved.copy(
+                            mode = adjustedMode,
+                            defaultReason = adjustedReason,
+                            examMode = effectiveExamMode,
+                        )
                     }
-                    val adjustedReason = if (!liveCourse.isExam && saved.defaultReason.contains("考")) {
-                        "按章节顺序读，随时可以切换学法。"
-                    } else {
-                        saved.defaultReason
-                    }
-                    saved.copy(
-                        mode = adjustedMode,
-                        defaultReason = adjustedReason,
-                        examMode = liveCourse.isExam,
-                    )
-                } ?: computeSmartDefault(db, bookId, fallbackTitle, fallbackPageCount).also {
+                } ?: computeSmartDefault(
+                    db = db,
+                    bookId = bookId,
+                    fallbackTitle = fallbackTitle,
+                    fallbackPageCount = fallbackPageCount,
+                    courseExamOverride = courseExamOverride,
+                    courseExamDateOverride = courseExamDateOverride,
+                ).also {
                     saveInDb(db, it)
                 }
                 resolved
             }
         }.getOrElse {
-            BookStudyPreference(bookId = bookId)
+            BookStudyPreference(bookId = bookId, examMode = courseExamOverride ?: false)
         }
     }
 
@@ -959,7 +995,14 @@ internal object StudyModeStore {
         }
     }
 
-    private fun computeSmartDefault(db: Connection, bookId: String, fallbackTitle: String, fallbackPageCount: Int): BookStudyPreference {
+    private fun computeSmartDefault(
+        db: Connection,
+        bookId: String,
+        fallbackTitle: String,
+        fallbackPageCount: Int,
+        courseExamOverride: Boolean? = null,
+        courseExamDateOverride: String? = null,
+    ): BookStudyPreference {
         var title = fallbackTitle
         var format = "pdf"
         var materialKind: String? = null
@@ -997,8 +1040,13 @@ internal object StudyModeStore {
             }
         }
         val courseCtx = resolveBookCourseContext(db, bookId)
-        val inCourse = courseCtx.inCourse
-        val examDate = courseCtx.examDate
+        val inCourse = if (courseExamOverride != null) true else courseCtx.inCourse
+        val effectiveIsExam = courseExamOverride ?: courseCtx.isExam
+        val examDate = when (courseExamOverride) {
+            false -> null
+            true -> courseExamDateOverride ?: courseCtx.examDate
+            null -> courseCtx.examDate
+        }
         val inBooklist = courseCtx.inBooklist
         var totalSections = 0
         if (BookSchemaMigration.tableExists(db, "book_toc_nodes")) {
@@ -1054,7 +1102,7 @@ internal object StudyModeStore {
             inBooklist = inBooklist,
             testedSectionRatio = testedRatio,
             readChapterRatio = readRatio,
-            courseIsExam = courseCtx.isExam,
+            courseIsExam = effectiveIsExam,
         )
     }
 

@@ -10,6 +10,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.semantics.SemanticsNode
@@ -24,6 +25,7 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.runSkikoComposeUiTest
 import androidx.compose.ui.unit.dp
@@ -461,6 +463,263 @@ class DefaultNonExamCourseTest {
                 onNodeWithTag("course-syllabus-prompt-skip").performClick()
                 waitForIdle()
                 assertTrue(onAllNodesWithTag("course-syllabus-prompt-bar").fetchSemanticsNodes().isEmpty())
+            }
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun examCourseWithWeek1MaterialAndNoSyllabusRetainsAllThreeChaptersWithoutExclusion() {
+        val shotsDir = (System.getProperty("coach.ton1820.shotsDir") ?: System.getenv("COACH_TON1820_SHOTS_DIR"))
+            ?.takeIf { it.isNotBlank() }
+            ?.let { Path.of(it).also { p -> Files.createDirectories(p) } }
+        val dir = Files.createTempDirectory("coach-ton1820-week1-nosyllabus-")
+        try {
+            val libDir = dir.resolve("library")
+            val srcDir = dir.resolve("src").also { Files.createDirectories(it) }
+            val bookPath = srcDir.resolve("Core-Textbook.md").also {
+                Files.writeString(
+                    it,
+                    "# Chapter 1 Demand and Supply\nElasticity measures how demand responds to market price changes.\n\n" +
+                        "# Chapter 2 Consumer Choice\nIndifference curves and budget lines determine optimal consumption bundles.\n\n" +
+                        "# Chapter 3 Market Equilibrium\nCompetitive equilibrium equates marginal willingness to pay and marginal cost.\n",
+                )
+            }
+            val week1Path = srcDir.resolve("Week1-Demand-Slides.md").also {
+                Files.writeString(
+                    it,
+                    "# Week 1 Demand and Supply Lecture\nDemand elasticity and market price shifts covered in week 1.\n",
+                )
+            }
+
+            val library = TextbookLibrary(libDir, lazyPdfExtras = false)
+            val controller = TextbookController(library)
+            val offlineExplainer = object : BookExplainer(library = library) {
+                override suspend fun load() {
+                    identity = null
+                    loaded = true
+                }
+            }
+            val textbook = library.stageBookImport(bookPath).book
+            val week1Slides = library.stageBookImport(week1Path).book
+
+            val courseId = library.withCourseDatabase { db ->
+                val (cid, _) = CourseStore.createCourse(
+                    db = db,
+                    title = "经济学导论（无考纲）",
+                    examProfile = CourseExamProfile(),
+                    materialBookIds = listOf(textbook.id, week1Slides.id),
+                )
+                CourseAutoAligner.alignLocally(db, cid)
+                cid
+            }
+            runBlocking {
+                controller.load()
+                controller.openCourse(courseId)
+            }
+
+            runSkikoComposeUiTest(size = Size(1100f, 820f)) {
+                setContent {
+                    CoachTheme(false) {
+                        CompositionLocalProvider(LocalV7ReducedMotion provides true) {
+                            WindowsTextbookHost(controller = controller, bookExplainer = offlineExplainer) { null }
+                        }
+                    }
+                }
+                waitUntil(timeoutMillis = 15_000) {
+                    onAllNodesWithTag("course-screen").fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+
+                // Click ⋯ -> 「要考」 without adding any syllabus
+                onNodeWithTag("course-overflow").performClick()
+                waitForIdle()
+                onNodeWithTag("course-enable-exam-action").performClick()
+                waitUntil(timeoutMillis = 15_000) {
+                    onAllNodesWithTag("course-exam-scope-line").fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+
+                val detail = library.courseDetail(courseId)
+                assertTrue(detail.isExam, "Course should be in exam mode")
+                assertFalse(detail.hasSyllabusOrScope, "Week-1 slides alone must not count as syllabus")
+                assertTrue(detail.excludedTopics.isEmpty(), "Without syllabus, zero chapters may be excluded; got ${detail.excludedTopics.map { it.title }}")
+                assertEquals(3, detail.examinableTopics.size, "All 3 chapters must remain scheduled; got ${detail.examinableTopics.map { it.weekLabel + ":" + it.title }}")
+
+                val allText = collectAllVisibleText()
+                assertTrue("按整本书安排，放进考纲后可以缩小范围" in allText, "Expected whole-book scope banner, got:\n$allText")
+                assertFalse("全书共 1 章" in allText, "Must never display contradictory '全书共 1 章', got:\n$allText")
+                assertFalse("本课不考内容" in allText, "Must never show excluded section without syllabus, got:\n$allText")
+                assertTrue("Consumer Choice" in allText && "Market Equilibrium" in allText, "Chapters 2 & 3 must stay visible, got:\n$allText")
+                shotsDir?.let { savePng(it.resolve("qa-fix-01-week1-no-syllabus.png")) }
+
+                // Open weekly plan and confirm all 3 items are scheduled and syllabus prompt still shows once
+                onNodeWithTag("course-weekly-plan-btn").performClick()
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("course-weekly-plan-view").fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+                val planText = collectAllVisibleText()
+                assertTrue("按整本书安排，放进考纲后可以缩小范围" in planText)
+                assertTrue("Consumer Choice" in planText && "Market Equilibrium" in planText, "Weekly plan must include all 3 chapters, got:\n$planText")
+            }
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun sharedBookInNonExamAndExamCourseUsesActiveCourseExamStatusInReaderMenu() {
+        val shotsDir = (System.getProperty("coach.ton1820.shotsDir") ?: System.getenv("COACH_TON1820_SHOTS_DIR"))
+            ?.takeIf { it.isNotBlank() }
+            ?.let { Path.of(it).also { p -> Files.createDirectories(p) } }
+        val dir = Files.createTempDirectory("coach-ton1820-shared-book-")
+        try {
+            val libDir = dir.resolve("library")
+            val srcDir = dir.resolve("src").also { Files.createDirectories(it) }
+            val bookPath = writeSyntheticTextbook(srcDir, "Shared-Econ-Textbook.md")
+
+            val library = TextbookLibrary(libDir, lazyPdfExtras = false)
+            val controller = TextbookController(library)
+            val offlineExplainer = object : BookExplainer(library = library) {
+                override suspend fun load() {
+                    identity = null
+                    loaded = true
+                }
+            }
+            val book = library.stageBookImport(bookPath).book
+
+            val (nonExamCourseId, examCourseId) = library.withCourseDatabase { db ->
+                val (cidNonExam, _) = CourseStore.createCourse(
+                    db = db,
+                    title = "普通精读课",
+                    examProfile = CourseExamProfile(),
+                    materialBookIds = listOf(book.id),
+                )
+                CourseAutoAligner.alignLocally(db, cidNonExam)
+                val (cidExam, _) = CourseStore.createCourse(
+                    db = db,
+                    title = "期末备考课",
+                    examProfile = CourseExamProfile(examEnabled = true, examDate = "2027-01-10"),
+                    materialBookIds = listOf(book.id),
+                )
+                CourseAutoAligner.alignLocally(db, cidExam)
+                cidNonExam to cidExam
+            }
+
+            runBlocking {
+                controller.load()
+                controller.openCourse(nonExamCourseId)
+            }
+
+            runSkikoComposeUiTest(size = Size(1180f, 820f)) {
+                setContent {
+                    CoachTheme(false) {
+                        CompositionLocalProvider(LocalV7ReducedMotion provides true) {
+                            WindowsTextbookHost(controller = controller, bookExplainer = offlineExplainer) { null }
+                        }
+                    }
+                }
+                waitUntil(timeoutMillis = 15_000) {
+                    onAllNodesWithTag("course-screen").fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+
+                // 1) Enter from the non-exam course via 「从第一章开始」
+                onNodeWithTag("course-primary-cta").performClick()
+                waitUntil(timeoutMillis = 15_000) {
+                    controller.state.value.screen == BookScreen.READER &&
+                        onAllNodesWithTag("course-screen").fetchSemanticsNodes().isEmpty()
+                }
+                waitForIdle()
+                onAllNodes(isRoot())[0].performMouseInput { moveTo(Offset(200f, 10f)) }
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("immersive-mode-trigger").fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+
+                onNodeWithTag("immersive-mode-trigger").performClick()
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("study-mode-popover").fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+
+                assertTrue(
+                    onAllNodesWithTag("mode-option-EXAM_FOCUS").fetchSemanticsNodes().isEmpty(),
+                    "Opening shared book from non-exam course must NOT show EXAM_FOCUS",
+                )
+                val nonExamMenuText = collectAllVisibleText()
+                assertFalse("考点优先" in nonExamMenuText, "Non-exam course reader menu must not contain 考点优先, got:\n$nonExamMenuText")
+                assertFalse("做题带读" in nonExamMenuText, "Non-exam course reader menu must not contain 做题带读, got:\n$nonExamMenuText")
+                assertTrue("自测带读" in nonExamMenuText, "Non-exam course reader menu should show 自测带读, got:\n$nonExamMenuText")
+                assertTrue("逐节精读 · 当前" in nonExamMenuText, "Expected 逐节精读 selected in non-exam course, got:\n$nonExamMenuText")
+                shotsDir?.let { savePng(it.resolve("qa-fix-02-shared-book-non-exam-menu.png")) }
+
+                // 2) Now open the SAME book from the exam course -> EXAM_FOCUS must be selected & available
+                runBlocking { controller.openCourse(examCourseId) }
+                waitUntil(timeoutMillis = 15_000) {
+                    onAllNodesWithTag("course-screen").fetchSemanticsNodes().isNotEmpty() &&
+                        controller.state.value.activeCourseId == examCourseId
+                }
+                waitForIdle()
+                onNodeWithTag("course-primary-cta").performClick()
+                waitUntil(timeoutMillis = 15_000) {
+                    controller.state.value.screen == BookScreen.READER &&
+                        onAllNodesWithTag("course-screen").fetchSemanticsNodes().isEmpty()
+                }
+                waitForIdle()
+                onAllNodes(isRoot())[0].performMouseInput { moveTo(Offset(200f, 10f)) }
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("immersive-mode-trigger").fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+                onNodeWithTag("immersive-mode-trigger").performClick()
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("study-mode-popover").fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+                assertTrue(
+                    onAllNodesWithTag("mode-option-EXAM_FOCUS").fetchSemanticsNodes().isNotEmpty(),
+                    "Opening shared book from exam course must show EXAM_FOCUS",
+                )
+                val examMenuText = collectAllVisibleText()
+                assertTrue("考点优先" in examMenuText, "Exam course reader menu should contain 考点优先, got:\n$examMenuText")
+
+                // Lock EXAM_FOCUS while inside the exam course, then switch back to the non-exam course
+                onNodeWithTag("mode-option-EXAM_FOCUS").performClick()
+                waitForIdle()
+
+                runBlocking { controller.openCourse(nonExamCourseId) }
+                waitUntil(timeoutMillis = 15_000) {
+                    onAllNodesWithTag("course-screen").fetchSemanticsNodes().isNotEmpty() &&
+                        controller.state.value.activeCourseId == nonExamCourseId
+                }
+                waitForIdle()
+                onNodeWithTag("course-primary-cta").performClick()
+                waitUntil(timeoutMillis = 15_000) {
+                    controller.state.value.screen == BookScreen.READER &&
+                        onAllNodesWithTag("course-screen").fetchSemanticsNodes().isEmpty()
+                }
+                waitForIdle()
+                onAllNodes(isRoot())[0].performMouseInput { moveTo(Offset(200f, 10f)) }
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("immersive-mode-trigger").fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+                onNodeWithTag("immersive-mode-trigger").performClick()
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("study-mode-popover").fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+                assertTrue(
+                    onAllNodesWithTag("mode-option-EXAM_FOCUS").fetchSemanticsNodes().isEmpty(),
+                    "Returning to non-exam course must still hide EXAM_FOCUS even after locking it in exam course",
+                )
+                val nonExamAgainText = collectAllVisibleText()
+                assertFalse("考点优先" in nonExamAgainText)
+                assertFalse("做题带读" in nonExamAgainText)
+                assertTrue("自测带读" in nonExamAgainText)
             }
         } finally {
             dir.toFile().deleteRecursively()

@@ -185,9 +185,9 @@ internal object CourseAutoAligner {
         }
 
         // Only narrow out uncovered textbook chapters into EXCLUDED when the course is marked as exam
-        // AND actually has a syllabus or weekly teaching materials defining scope.
-        // Otherwise (non-exam default, or exam course without syllabus/weekly materials), schedule the whole book!
-        val hasScopeNarrowing = current.isExam && (syllabusTitlesByWeek.isNotEmpty() || allWeeks.isNotEmpty())
+        // AND has an explicit syllabus defining exam scope (same predicate as CourseDetailSnapshot.hasSyllabusOrScope).
+        // Otherwise (non-exam default, or exam course without syllabus — even with weekly slides/notes), keep the whole book.
+        val hasScopeNarrowing = current.isExam && hasSyllabusScope(resolvedMaterials.map { it.role })
         if (hasScopeNarrowing) {
             var excludedOrd = 1000
             for (ch in textbookChapters) {
@@ -212,10 +212,13 @@ internal object CourseAutoAligner {
                 )
             }
         } else {
+            val chapterPosByKey = textbookChapters.withIndex().associate { (i, ch) ->
+                Triple(ch.bookId, ch.startPage, ch.title) to (i + 1)
+            }
             val uncoveredChapters = textbookChapters.filter { it.title !in coveredChapterTitles }
             if (uncoveredChapters.isNotEmpty()) {
                 uncoveredChapters.forEachIndexed { idx, ch ->
-                    val chapterOrder = idx + 1
+                    val chapterOrder = chapterPosByKey[Triple(ch.bookId, ch.startPage, ch.title)] ?: (idx + 1)
                     topics += CourseTopicPlan(
                         weekLabel = "第 $chapterOrder 章",
                         weekNum = null,

@@ -1244,17 +1244,20 @@ private fun buildRegularSummaryLine(detail: CourseDetailSnapshot, topics: List<C
 }
 
 private fun buildCourseMetaLine(detail: CourseDetailSnapshot, topics: List<CourseTopicEntry>): String {
+    val allChapterTopics = topics.isNotEmpty() &&
+        topics.all { it.weekNum == null && it.weekLabel.startsWith("第 ") && it.weekLabel.endsWith(" 章") }
     if (!detail.isExam) {
-        return if (topics.isNotEmpty()) {
-            "已纳入 ${detail.materials.size} 份材料 · 共 ${topics.size} 章"
-        } else {
-            "已纳入 ${detail.materials.size} 份材料"
+        return when {
+            topics.isEmpty() -> "已纳入 ${detail.materials.size} 份材料"
+            allChapterTopics -> "已纳入 ${detail.materials.size} 份材料 · 共 ${topics.size} 章"
+            else -> "已纳入 ${detail.materials.size} 份材料 · 共 ${topics.size} 项"
         }
     }
     return when {
         topics.isEmpty() -> "已纳入 ${detail.materials.size} 份材料"
         detail.hasSyllabusOrScope -> "已纳入 ${detail.materials.size} 份材料 · 专题 ${topics.size} 项"
-        else -> "已纳入 ${detail.materials.size} 份材料 · 全书共 ${topics.size} 章"
+        allChapterTopics -> "已纳入 ${detail.materials.size} 份材料 · 全书共 ${topics.size} 章"
+        else -> "已纳入 ${detail.materials.size} 份材料 · 全书共 ${topics.size} 项"
     }
 }
 

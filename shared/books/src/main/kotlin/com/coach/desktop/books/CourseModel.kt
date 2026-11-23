@@ -265,6 +265,14 @@ internal data class CourseTopicEntry(
     val updatedAt: Long = 0L,
 )
 
+/**
+ * Shared predicate deciding whether a course has an explicit syllabus/exam scope that may narrow
+ * out uncovered textbook chapters. Used identically by directory UI, weekly/countdown planning,
+ * and local course alignment so scope copy, chapter list, and excluded section never contradict.
+ */
+internal fun hasSyllabusScope(roles: Iterable<CourseMaterialRole>): Boolean =
+    roles.any { it == CourseMaterialRole.SYLLABUS }
+
 internal data class CourseDetailSnapshot(
     val courseId: String,
     val title: String,
@@ -286,7 +294,7 @@ internal data class CourseDetailSnapshot(
 
     /** True once a syllabus/handbook material has been added to narrow down exam scope. */
     val hasSyllabusOrScope: Boolean
-        get() = materials.any { it.role == CourseMaterialRole.SYLLABUS }
+        get() = hasSyllabusScope(materials.map { it.role })
 
     /** First-time inline prompt shown on weekly plan / countdown schedule / mock exam when an exam course has no syllabus yet. */
     val shouldShowSyllabusPrompt: Boolean

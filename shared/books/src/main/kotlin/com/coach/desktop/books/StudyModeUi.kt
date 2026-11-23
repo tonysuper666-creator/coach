@@ -58,6 +58,12 @@ internal fun StudyModeSelectorButton(
     val colors = CoachTheme.colors
     var expanded by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(CoachV7.Radius.s)
+    val effectiveMode = if (!preference.examMode && preference.mode == BookStudyMode.EXAM_FOCUS) {
+        BookStudyMode.READ_THROUGH
+    } else {
+        preference.mode
+    }
+    val displayPref = if (effectiveMode != preference.mode) preference.copy(mode = effectiveMode) else preference
 
     Box(modifier) {
         Row(
@@ -73,7 +79,7 @@ internal fun StudyModeSelectorButton(
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Text(
-                if (compact) "学法：${preference.mode.displayTitle(preference.examMode)} ▾" else "${preference.compactBadgeText()} ▾",
+                if (compact) "学法：${effectiveMode.displayTitle(preference.examMode)} ▾" else "${displayPref.compactBadgeText()} ▾",
                 style = MaterialTheme.typography.labelMedium,
                 color = colors.fgPrimary,
                 fontWeight = FontWeight.Medium,
@@ -111,7 +117,7 @@ internal fun StudyModeSelectorButton(
                 HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle)
 
                 for (mode in BookStudyMode.availableModes(preference.examMode)) {
-                    val selected = preference.mode == mode
+                    val selected = effectiveMode == mode
                     val rowBg = if (selected) colors.actionPrimary.copy(alpha = 0.12f) else Color.Transparent
                     Row(
                         Modifier

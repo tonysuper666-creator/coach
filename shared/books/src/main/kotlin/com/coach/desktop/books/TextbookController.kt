@@ -1959,6 +1959,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     }
 
     suspend fun realignCourse(courseId: String, explainer: BookExplainer? = null) = action {
+        mutable.update { it.copy(courseNotice = null) }
         val existing = library.courseDetail(courseId)
         if (explainer != null) {
             runCatching { explainer.load() }

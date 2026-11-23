@@ -98,6 +98,13 @@ class CourseLiveWindowTest {
                 controller1.openCourse(courseId)
             }
 
+            val offlineExplainer1 = object : BookExplainer(library = library1) {
+                override suspend fun load() {
+                    identity = null
+                    loaded = true
+                }
+            }
+
             val window1 = edt {
                 ComposeWindow().apply {
                     title = "Coach W2-C Live Window Session 1"
@@ -108,7 +115,7 @@ class CourseLiveWindowTest {
                         minOf(1280, (screen.width - 40).coerceAtLeast(800)),
                         minOf(880, (screen.height - 80).coerceAtLeast(600)),
                     )
-                    setContent { WindowsTextbookHost(controller1) { null } }
+                    setContent { WindowsTextbookHost(controller1, bookExplainer = offlineExplainer1) { null } }
                     isVisible = true
                 }
             }
@@ -145,7 +152,10 @@ class CourseLiveWindowTest {
                 // Re-align via UI overflow and verify manual Week 6 lock survives!
                 click(window1, "course-overflow")
                 click(window1, "course-realign-action")
-                waitFor("notice after realign", window1) { node(window1, "course-notice-banner") != null }
+                waitFor("notice after realign", window1) {
+                    val st = controller1.state.value
+                    !st.busy && st.courseNotice?.contains("对齐") == true && node(window1, "course-notice-banner") != null
+                }
                 val postRealign = library1.courseDetail(courseId)
                 assertEquals(6, postRealign.materials.first { it.bookId == bSlides.id }.weekNum)
                 assertTrue(postRealign.materials.first { it.bookId == bSlides.id }.userLocked)
@@ -242,6 +252,13 @@ class CourseLiveWindowTest {
             assertEquals(BookScreen.READER, controller2.state.value.screen)
             assertEquals(courseId, controller2.state.value.activeCourseId)
 
+            val offlineExplainer2 = object : BookExplainer(library = library2) {
+                override suspend fun load() {
+                    identity = null
+                    loaded = true
+                }
+            }
+
             val window2 = edt {
                 ComposeWindow().apply {
                     title = "Coach W2-C Live Window Session 2"
@@ -252,7 +269,7 @@ class CourseLiveWindowTest {
                         minOf(1280, (screen.width - 40).coerceAtLeast(800)),
                         minOf(880, (screen.height - 80).coerceAtLeast(600)),
                     )
-                    setContent { WindowsTextbookHost(controller2) { null } }
+                    setContent { WindowsTextbookHost(controller2, bookExplainer = offlineExplainer2) { null } }
                     isVisible = true
                 }
             }

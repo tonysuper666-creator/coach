@@ -35,7 +35,7 @@ import kotlin.test.assertTrue
 @OptIn(ExperimentalTestApi::class)
 class StudyModeInteractionRegressionTest {
 
-    private class FakeStudyExplainer(
+    private open class FakeStudyExplainer(
         home: Path,
         library: TextbookLibrary,
         private val onModeFetch: suspend (
@@ -119,6 +119,66 @@ class StudyModeInteractionRegressionTest {
         val ch8FirstLessonIdx = lessons.indexOfFirst { it.id == "ch-8-1" }
         val ch8Group = ChapterCompanionGrouping.groupForSection(book, ch8FirstLessonIdx)!!
         return Triple(library, book, ch8Group)
+    }
+
+    @Test
+    fun originalOnlySuppressesAutomaticRequestsOnOpenAndAfterChangingDetail() {
+        val root = Files.createTempDirectory("original-only-companion-")
+        try {
+            val (library, book, group) = seed24ChapterLibrary(root)
+            val calls = java.util.concurrent.ConcurrentLinkedQueue<String>()
+            val explainer = object : FakeStudyExplainer(root, library, { _, _, _, _ ->
+                calls.add("mode")
+                CourseServerCallResult(null, "offline")
+            }) {
+                init { loaded = false }
+                override suspend fun load() { calls.add("load"); super.load() }
+                override suspend fun explainLesson(blocks: List<SourceBlock>, bookPages: Int, requestId: String): ExplainResult {
+                    calls.add("page")
+                    return super.explainLesson(blocks, bookPages, requestId)
+                }
+                override suspend fun fetchChapterCompanion(requestJson: JsonObject, blocks: List<SourceBlock>): ChapterCompanionFetchResult {
+                    calls.add("chapter")
+                    return super.fetchChapterCompanion(requestJson, blocks)
+                }
+            }
+            val section = book.lessons.indexOfFirst { it.id == group.sections.first().id }
+            var pref by mutableStateOf(BookStudyPreference(book.id, BookStudyMode.BOOK_MAP, detailLevel = ExplainDetailLevel.ORIGINAL_ONLY))
+            var open by mutableStateOf(true)
+            runSkikoComposeUiTest(size = Size(820f, 1050f)) {
+                setContent {
+                    CoachTheme(false) {
+                        CompositionLocalProvider(LocalReadingAiExplain provides true) {
+                            if (open) SingleBookCompanionPanel(
+                                book = book, currentPage = group.firstPage, currentSectionIndex = section,
+                                explainer = explainer, library = library, studyPreference = pref,
+                                draft = ChapterPracticeDraft(bookId = book.id, tocNodeId = group.chapterId, page = group.firstPage),
+                                onDraftChange = {}, onOpenAnchor = {}, onCommitQuizAnswer = { _, _, _, _ -> },
+                                onAskAboutText = {}, onOpenLogin = {},
+                            )
+                        }
+                    }
+                }
+                waitForIdle()
+                onNodeWithTag("mode-surface-BOOK_MAP").assertExists()
+                assertTrue(calls.isEmpty(), calls.toString())
+                pref = pref.copy(detailLevel = ExplainDetailLevel.BRIEF)
+                waitUntil(timeoutMillis = 5_000) { "mode" in calls && "page" in calls && "load" in calls }
+                onNodeWithTag("page-explanation-error").assertTextContains("段落位置无法核对", substring = true)
+                val before = calls.toList()
+                pref = pref.copy(detailLevel = ExplainDetailLevel.ORIGINAL_ONLY)
+                waitForIdle()
+                open = false
+                waitForIdle()
+                pref = pref.copy(mode = BookStudyMode.READ_THROUGH)
+                open = true
+                waitForIdle()
+                onNodeWithText("只看原文 · 可以在学法中调整讲解详略。").assertExists()
+                assertEquals(before, calls.toList())
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
     }
 
     @Test

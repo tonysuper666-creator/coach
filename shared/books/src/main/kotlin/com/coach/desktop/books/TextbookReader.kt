@@ -207,6 +207,10 @@ internal fun TextbookReader(
     val explainer = remember(library, explainProvider) { explainProvider ?: BookExplainer(library = library) }
     val explainConsent = remember(library) { ExplainConsent(library.directory) }
     val aiEnabled = LocalReadingAiExplain.current
+    var studyPreference by remember(book.id) {
+        mutableStateOf(StudyModeStore.loadOrResolve(library, book.id, book.title, book.pages.size))
+    }
+    val autoExplain = aiEnabled && studyPreference.detailLevel != ExplainDetailLevel.ORIGINAL_ONLY
     val autoGuide = LocalReadingAutoGuide.current
     val allBookBlocks = remember(book.id, book.pages, book.structure) { book.sourceBlocks() }
     val pageRole = remember(book.id, book.structure, allBookBlocks, ui.page) {
@@ -245,14 +249,14 @@ internal fun TextbookReader(
             hp to block
         }
     }
-    LaunchedEffect(explainer) { if (!explainer.loaded) explainer.load() }
-    LaunchedEffect(book.id, book.structure?.needsModelSectioning, book.hasPendingOcr, explainer.identity, aiEnabled) {
-        if (book.structure?.needsModelSectioning == true && !book.hasPendingOcr && explainer.identity != null && aiEnabled) {
+    LaunchedEffect(explainer, autoExplain) { if (autoExplain && !explainer.loaded) explainer.load() }
+    LaunchedEffect(book.id, book.structure?.needsModelSectioning, book.hasPendingOcr, explainer.identity, autoExplain) {
+        if (book.structure?.needsModelSectioning == true && !book.hasPendingOcr && explainer.identity != null && autoExplain) {
             onEnsureUnstructuredSectioned?.invoke()
         }
     }
-    LaunchedEffect(book.id, ui.page, autoGuide, explainer.identity, aiEnabled, currentSectionIndex) {
-        if (pageRole == BookPageRole.BODY && explainer.identity != null && aiEnabled && autoGuide && currentSectionIndex >= 0) {
+    LaunchedEffect(book.id, ui.page, autoGuide, explainer.identity, autoExplain, currentSectionIndex) {
+        if (pageRole == BookPageRole.BODY && explainer.identity != null && autoExplain && autoGuide && currentSectionIndex >= 0) {
             guideController.prefetchForPage(ui.page, autoGuide = true, sectionIndexOverride = currentSectionIndex)
         }
     }
@@ -294,6 +298,7 @@ internal fun TextbookReader(
         val pending = existing.copy(loading = true, error = null, fallbackBlocks = emptyList(), askingOpen = true)
         inlineThread = pending
         scope.launch {
+            if (!explainer.loaded) explainer.load()
             val result = explainer.explainSelection(
                 kind = action.kind,
                 chosen = target,
@@ -408,9 +413,6 @@ internal fun TextbookReader(
     }
     var pageFocused by remember { mutableStateOf(false) }
     var tocOpen by remember(book.id) { mutableStateOf(false) }
-    var studyPreference by remember(book.id) {
-        mutableStateOf(StudyModeStore.loadOrResolve(library, book.id, book.title, book.pages.size))
-    }
     val initialCompanionOpen = openPairing || (
         ui.source == null &&
             !(studyPreference.userLocked && studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) && (

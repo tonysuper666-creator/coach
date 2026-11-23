@@ -36,16 +36,20 @@ internal fun PageExplanation(
     book: Textbook,
     page: Int,
     explainer: BookExplainer,
+    enabled: Boolean,
     onOpen: (SourceBlock) -> Unit,
     onLogin: () -> Unit,
 ) {
     val blocks = remember(book, page) { book.sourceBlocks().filter { it.page == page && it.isBodyParagraph } }
-    val enabled = LocalReadingAiExplain.current
     var attempt by remember(book.id, page) { mutableIntStateOf(0) }
-    val reply by produceState<ExplainResult?>(null, blocks, explainer.identity, enabled, attempt) {
+    val reply by produceState<ExplainResult?>(null, blocks, explainer.loaded, explainer.identity, enabled, attempt) {
         value = null
-        if (enabled && blocks.isNotEmpty() && explainer.identity != null) {
-            value = explainer.explainLesson(blocks, book.pages.maxOf { it.number })
+        if (enabled && blocks.isNotEmpty() && explainer.loaded && explainer.identity != null) {
+            value = try {
+                explainer.explainLesson(blocks, book.pages.maxOf { it.number })
+            } catch (_: IllegalArgumentException) {
+                ExplainResult.Refused("这一页的段落位置无法核对，可以选中一段再问。")
+            }
         }
     }
     when {

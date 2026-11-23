@@ -83,7 +83,8 @@ internal fun SingleBookCompanionPanel(
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
-    val aiEnabled = LocalReadingAiExplain.current
+    val originalOnly = studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY
+    val aiEnabled = LocalReadingAiExplain.current && !originalOnly
     val scope = rememberCoroutineScope()
     val chapterGroup = remember(book.id, book.lessons, currentSectionIndex) {
         ChapterCompanionGrouping.groupForSection(book, currentSectionIndex)
@@ -117,8 +118,8 @@ internal fun SingleBookCompanionPanel(
     val activeModule = CompanionModuleTab.fromWire(draft.activeModule)
     var modeSourcePages by remember(book.id, chapterGroup?.chapterId, studyPreference) { mutableStateOf(emptyList<Int>()) }
     var wholeChapter by remember(book.id, currentPage, studyPreference.mode) { mutableStateOf(false) }
-    val readingExplanation = studyPreference.mode == BookStudyMode.BOOK_MAP ||
-        (studyPreference.mode == BookStudyMode.READ_THROUGH && activeModule == CompanionModuleTab.KEY_POINTS)
+    val readingExplanation = !originalOnly && (studyPreference.mode == BookStudyMode.BOOK_MAP ||
+        (studyPreference.mode == BookStudyMode.READ_THROUGH && activeModule == CompanionModuleTab.KEY_POINTS))
     val samePage = chapterGroup?.firstPage == currentPage && chapterGroup.lastPage == currentPage
     val sectionOnly = studyPreference.mode == BookStudyMode.READ_THROUGH &&
         chapterGroup?.sections?.singleOrNull()?.let { currentPage in it.firstPage..it.lastPage } == true
@@ -145,8 +146,7 @@ internal fun SingleBookCompanionPanel(
         bookMapMeta = withContext(Dispatchers.IO) { StudyModeStore.loadBookMapMeta(library, book.id) }
     }
 
-    LaunchedEffect(book.id, chapterGroup?.chapterId, chapterNum, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion, explainer.loaded, explainer.identity, aiEnabled, modeFetchNonce, pageOnly) {
-        if (pageOnly) return@LaunchedEffect
+    LaunchedEffect(book.id, chapterGroup?.chapterId, chapterNum, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion, explainer.loaded, explainer.identity, aiEnabled, modeFetchNonce) {
         val group = chapterGroup ?: return@LaunchedEffect
         val fallbackAny = studyPreference.detailLevel == ExplainDetailLevel.DETAILED &&
             studyPreference.explainLang == ExplainLanguage.BILINGUAL &&
@@ -250,7 +250,7 @@ internal fun SingleBookCompanionPanel(
                             library = library,
                             bookId = book.id,
                             batchJson = body,
-                            detailLevel = if (studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) ExplainDetailLevel.BRIEF else studyPreference.detailLevel,
+                            detailLevel = studyPreference.detailLevel,
                             explainLang = studyPreference.explainLang,
                         )
                     }
@@ -279,7 +279,7 @@ internal fun SingleBookCompanionPanel(
         }
     }
 
-    LaunchedEffect(explainer) { if (!explainer.loaded) explainer.load() }
+    LaunchedEffect(explainer, aiEnabled) { if (aiEnabled && !explainer.loaded) explainer.load() }
 
     LaunchedEffect(book.id, chapterGroup?.chapterId, explainer.loaded, explainer.identity, aiEnabled, fetchNonce, pageOnly) {
         val group = chapterGroup ?: return@LaunchedEffect
@@ -458,17 +458,15 @@ internal fun SingleBookCompanionPanel(
                                 onJumpPretest = { updateDraft { it.copy(activeModule = CompanionModuleTab.PRETEST.name) } },
                             )
                         } else key(book.id, currentPage) {
-                            PageExplanation(book, currentPage, explainer, onOpen = { block ->
+                            PageExplanation(book, currentPage, explainer, enabled = aiEnabled, onOpen = { block ->
                                 onOpenAnchor(BookCompanionAnchor(block.page, block.id, block.start, block.end, block.text))
                             }, onLogin = onOpenLogin)
                         }
-                        bottomContent?.invoke()
-                        return@Column
                     }
-                    if (modeError != null) RetrievedPageLinks(modeSourcePages, { "第 $it 页" }, onJumpPage)
+                    if (!pageOnly && modeError != null) RetrievedPageLinks(modeSourcePages, { "第 $it 页" }, onJumpPage)
                 }
                 if (chapterGroup == null) {
-                    CoachEmptyState(
+                    if (pageOnly) bottomContent?.invoke() else CoachEmptyState(
                         title = "当前页暂未归入正文小节。",
                         hint = "翻到正文第 1 章后，这里会自动呈现本章伴读与练习。",
                     )
@@ -555,7 +553,7 @@ internal fun SingleBookCompanionPanel(
                             onOpenAnchor = onOpenAnchor,
                         )
                     }
-                    when (val state = packState) {
+                    if (!pageOnly) when (val state = packState) {
                     CompanionPackState.Loading -> {
                         Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
                             CoachLoadingDots(label = "正在按节整理本章伴读…")
@@ -576,6 +574,7 @@ internal fun SingleBookCompanionPanel(
                     }
                     CompanionPackState.Idle -> {
                         when {
+                            originalOnly -> CoachCardMeta("只看原文 · 可以在学法中调整讲解详略。")
                             !aiEnabled -> CoachEmptyState(
                                 title = "伴读整理已在设置中关闭。",
                                 hint = "打开设置里的伴读开关后，即可自动生成本章要点与练习。",

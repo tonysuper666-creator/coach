@@ -483,7 +483,6 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         # Token-ledger / section labels only; these calls never reach the bridge.
         tasks -= {
             "course_align", "course_vision_ocr",
-            "STUDY_MODE_ANCHOR_REPAIR", "STUDY_MODE_MATH_REPAIR",
             "BOOK_MAP_BATCH", "BOOK_MAP_GRAPH",
         }
         self.assertTrue({"booklist_concept_align", "course_topic_map", "BOOK_SECTION_BATCH"} <= tasks)

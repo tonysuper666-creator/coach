@@ -660,6 +660,7 @@ class BridgeClient(
             "TEACH", "READER_SELECTION", "SOURCE_LOOKUP", "PREPARE_TEACH",
             "COLLECTION_QA",
             "BOOK_SECTION_BATCH", "BOOK_EXERCISE_HINTS", "STUDY_MODE_STREAM",
+            "STUDY_MODE_ANCHOR_REPAIR", "STUDY_MODE_MATH_REPAIR",
             "BOOK_MAP_BATCH_CHUNK", "BOOK_MAP_BATCH_GRAPH",
             "BOOK_STRUCTURE_DETECT", "BOOK_MATH_VERIFY", "BOOK_MATH_REPAIR",
             "gen_mcq", "repair_mcq_sources", "gen_constructed", "repair_constructed_sources", "course_mock_item",

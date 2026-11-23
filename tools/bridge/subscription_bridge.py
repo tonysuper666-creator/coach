@@ -43,7 +43,7 @@ from typing import Any, AsyncIterator
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from api_route import ApiRouter, ApiFailure, route as api_model
+from api_route import ApiRouter, ApiFailure, route as api_model, vendor as api_vendor
 from api_budget import Denied
 from api_batch import BatchRouter, BatchPending, TASKS as BATCH_TASKS
 
@@ -1391,6 +1391,10 @@ async def dispatch_batch(req: ReqCtx, model: str, effort: str | None) -> Outcome
         req.transport = result["transport"]
         req.physical_calls = result.get("physical_calls", 1)
         req.api_fallback = result.get("api_fallback")
+        # Cached cross-vendor backups must keep their wire marker; caches written before the flag
+        # existed are recognised by a served_by vendor that differs from the requested primary.
+        primary = api_model(req.task, model, req.format_attempt) or model
+        req.fallback = bool(result.get("fallback")) or api_vendor(result["served_by"]) != api_vendor(primary)
         req.t_acq = time.monotonic()
         return Outcome("complete", None, "stop", result["served_by"], text=result["text"], usage=result["usage"])
     except (ApiFailure, Denied, OSError) as error:
@@ -1430,6 +1434,7 @@ async def dispatch_batch(req: ReqCtx, model: str, effort: str | None) -> Outcome
                                             "transport": "api",
                                             "physical_calls": req.physical_calls,
                                             "api_fallback": reason,
+                                            "fallback": True,
                                         },
                                     )
                                 except (Denied, OSError):

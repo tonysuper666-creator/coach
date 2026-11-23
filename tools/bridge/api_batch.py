@@ -128,9 +128,10 @@ class BatchRouter:
                         raise ApiFailure("batch_submit_ambiguous") from None
                     self.failed(path, state, "batch_submit_unavailable")
                     raise ApiFailure("batch_submit_unavailable") from None
-                except (ApiFailure, Denied, ValueError, KeyError, TypeError):
-                    self.failed(path, state, "batch_submit_unavailable")
-                    raise ApiFailure("batch_submit_unavailable") from None
+                except (ApiFailure, Denied, ValueError, KeyError, TypeError) as error:
+                    reason = "batch_submit_ambiguous" if str(error) == "batch_submit_ambiguous" else "batch_submit_unavailable"
+                    self.failed(path, state, reason)
+                    raise ApiFailure(reason) from None
                 raise BatchPending()
             if self.clock() < state["next_poll"]:
                 raise BatchPending()
@@ -205,7 +206,11 @@ class BatchRouter:
             file_id = self.identifier(upload.json()["id"])
             response = await self.request(client, provider, "POST", "/batches",
                                           json={"input_file_id": file_id, "endpoint": "/v1/responses", "completion_window": "24h"})
-        return self.identifier(response.json()["id"])
+        try:
+            return self.identifier(response.json()["id"])
+        except (ApiFailure, ValueError, KeyError, TypeError):
+            # The create call was accepted (HTTP 200) but returned no usable id: a batch may exist upstream.
+            raise ApiFailure("batch_submit_ambiguous") from None
 
     async def poll(self, client, provider, state):
         batch_id = self.identifier(state["batch_id"])

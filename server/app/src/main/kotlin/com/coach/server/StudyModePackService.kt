@@ -754,7 +754,7 @@ Do NOT paraphrase, truncate mid-word, or invent text."""
             }
         }
         val reply = transport.complete(
-            task = "PREPARE_TEACH",
+            task = "STUDY_MODE_ANCHOR_REPAIR",
             jobKey = StudyModeJsonHelpers.sha256Hex("repair:$bookId:$chapterNum:${failures.size}"),
             systemPrompt = sys,
             userPrompt = user,
@@ -943,7 +943,7 @@ Return STRICT JSON: {"items":[{"id":"...","obj":{...exact same keys corrected...
             }
             repairReply = runCatching {
                 repairTransport.complete(
-                    task = "PREPARE_TEACH",
+                    task = "STUDY_MODE_MATH_REPAIR",
                     jobKey = StudyModeJsonHelpers.sha256Hex("mathfix:$bookId:$chapterNum:${idsToRepair.joinToString(",")}"),
                     systemPrompt = sys,
                     userPrompt = user,

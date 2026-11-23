@@ -1803,23 +1803,31 @@ try {
         # 找到「提交」后，它正上方那几行里最低的一行就是最后一个选项：点它 → 点「提交」→ 看反馈。
         # 没选中时提交是灰的、按了不出反馈，所以按「点选项 → 点提交 → 认反馈」闭环，最多换 6 个落点。
         Hover $midX ([int]($winH * 0.50)); Start-Sleep -Milliseconds 250
-        $answered = $false; $fb = $null; $tries6 = 0; $prev6 = ''; $still6 = 0
+        $answered = $false; $fb = $null; $tries6 = 0; $prev6 = ''; $still6 = 0; $push6 = 0
         $deadline = (Get-Date).AddSeconds(90)
         while ((Get-Date) -lt $deadline -and -not $answered) {
             $lines = $script:Last
             $sub = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^提交$' } | Select-Object -First 1
+            $sb = if ($sub) { Get-LineBox $sub } else { $null }
+            if (-not $sb) {
+                $guessRow = $lines | Where-Object { ($_.Text -replace '\s', '') -match '这题是猜的' } | Select-Object -First 1
+                if ($guessRow) {
+                    $gb = Get-LineBox $guessRow
+                    $sb = [pscustomobject]@{ X1 = [int]($winW - 96); X2 = [int]($winW - 24); Y1 = $gb.Y1; Y2 = $gb.Y2; Y = $gb.Y }
+                }
+            }
             # 11-23 14:22 那轮滚轮落点没让抽屉体动（OCR 帧一模一样 5 次就判了没「提交」）：
             # 改用 Scroll-DrawerBody 按像素确认真滚了、没滚就换落点；连着 3 次滚不动才算卡底。
-            if (-not $sub) {
+            if (-not $sb) {
                 if (Scroll-DrawerBody -4 $winW $winH) { $still6 = 0 } else { $still6++ }
                 if ($still6 -ge 3) { Fail 6 '题目卡滚到底也没看到「提交」按钮（抽屉体换了 4 个落点都滚不动，见 6-pretest*.png）' }
                 Start-Sleep -Milliseconds 400
                 $null = Shot 6 'pretest-scroll'
                 continue
             }
-            $sb = Get-LineBox $sub
-            if ($sb.Y -gt [int]($winH * 0.80) -and $still6 -lt 2) {
-                if (Scroll-DrawerBody -2 $winW $winH) { $still6 = 0 } else { $still6++ }
+            if ($sb.Y -gt [int]($winH * 0.80) -and $push6 -lt 2) {
+                $push6++
+                $null = Scroll-DrawerBody -2 $winW $winH
                 Start-Sleep -Milliseconds 400
                 $null = Shot 6 'pretest-scroll'
                 continue

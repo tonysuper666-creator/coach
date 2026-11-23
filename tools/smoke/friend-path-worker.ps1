@@ -302,7 +302,7 @@ function Show-ReaderTop([int]$n, [string]$tag, [int]$Tries = 6) {
     $w = [int]($r.R - $r.L)
     $x = [int]($w / 2)
     for ($k = 0; $k -lt $Tries; $k++) {
-        Hover $x (8 + 7 * $k)
+        Hover $x (36 + 8 * $k)
         Start-Sleep -Milliseconds 500
         $lines = Shot $n "$tag-top$k"
         if (Find-Text $lines '书架') { return $lines }
@@ -1551,7 +1551,7 @@ try {
     try {
         $lr = Get-Rect
         $winW = [int]($lr.R - $lr.L); $winH = [int]($lr.B - $lr.T)
-        $midX = [int](($lr.L + $lr.R) / 2); $midY = [int](($lr.T + $lr.B) / 2)
+        $midX = [int]($winW / 2); $midY = [int]($winH / 2)
         $hoverY = [int]($winH - 10)
         $scrollX = $midX; $scrollY = [int]($winH * 0.72)
         # 抽屉页签：讲解 / 提问 / 批注，排在抽屉头最左边。④ 点「出处」跳到原文页时顶栏会隐去，
@@ -1711,8 +1711,7 @@ try {
         # 跟第 7 步同一个办法：读不出就先收起抽屉再读（顶栏「收起」，认不到就切「讲解」页签失焦后按 L）。
         # 第 6 步开头会自己从顶栏「伴读」把抽屉打开。
         if (-not $pg) {
-            Hover $midX 40; Start-Sleep -Milliseconds 600
-            $lines = Shot 5 'cite-close'
+            $lines = Show-ReaderTop 5 'cite-close'; if (-not $lines) { $lines = Shot 5 'cite-close' }
             $fold5 = Find-Text $lines '收起'
             if ($fold5 -and $fold5.Y -lt [int]($winH * 0.2)) {
                 Note "步骤5 抽屉压住了底栏页号，点顶栏「收起」($($fold5.X),$($fold5.Y)) 再读"
@@ -1749,7 +1748,7 @@ try {
     try {
         $lr6 = Get-Rect
         $winW = [int]($lr6.R - $lr6.L); $winH = [int]($lr6.B - $lr6.T)
-        $midX = [int](($lr6.L + $lr6.R) / 2); $hoverY = [int]($winH - 10)
+        $midX = [int]($winW / 2); $hoverY = [int]($winH - 10)
         $tabX6 = 30
         $lines = Show-ReaderTop 6 'top'
         if (-not $lines) { $lines = Shot 6 'top0' }

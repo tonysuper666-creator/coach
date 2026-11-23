@@ -50,6 +50,7 @@ internal data class StartupLoadSnapshot(
     val collections: List<CollectionSummary> = emptyList(),
     val activePracticeDraft: ChapterPracticeDraft? = null,
     val focusRecommendation: HomeFocusRecommendation? = null,
+    val lastBookQuestion: BookLastQuestion? = null,
 )
 
 /** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
@@ -289,7 +290,10 @@ internal class TextbookLibrary(
         val ladder = loadedBook?.let { ladder(db, it.id) } ?: LadderSession()
         val activeDraft = loadedBook?.let { ChapterProgressStore.latestPracticeDraft(db, it.id) }
         val focusRec = MasteryStore.topHomeRecommendation(db, loadedBook?.id, clock.millis())
-        StartupLoadSnapshot(catalog, active, session, loadedBook, learningPath, reviews, ladder, todayQueue, collections, activeDraft, focusRec)
+        val lastQuestion = (loadedBook?.id ?: catalog.firstOrNull()?.id)?.let { bookId ->
+            MasteryStore.lookupLastBookQuestion(db, bookId)?.let { BookLastQuestion(bookId, it) }
+        }
+        StartupLoadSnapshot(catalog, active, session, loadedBook, learningPath, reviews, ladder, todayQueue, collections, activeDraft, focusRec, lastQuestion)
     }
 
     @Synchronized fun pageTextLayout(bookId: String, page: Int): PageTextLayout? = database().use { db ->
@@ -2043,7 +2047,7 @@ internal class TextbookLibrary(
                 bookId = bookId,
                 tocNodeId = tocNodeId,
                 page = page,
-                canonicalName = tocNodeId,
+                canonicalName = "",
                 signal = LearnerSignalType.PAGE_DWELL,
                 durationMs = dwellMs,
                 conceptKeyOverride = conceptKey,
@@ -2152,6 +2156,14 @@ internal class TextbookLibrary(
 
     @Synchronized fun topHomeRecommendation(preferredBookId: String? = null): HomeFocusRecommendation? = database().use { db ->
         MasteryStore.topHomeRecommendation(db, preferredBookId, clock.millis())
+    }
+
+    @Synchronized fun saveLastQuestion(bookId: String, question: String) = database().use { db ->
+        MasteryStore.saveLastBookQuestion(db, bookId, question)
+    }
+
+    @Synchronized fun lastQuestion(bookId: String): String? = database().use { db ->
+        MasteryStore.lookupLastBookQuestion(db, bookId)
     }
 
     @Synchronized fun saveMarginWhisperAudit(candidate: MarginWhisperCandidate) = database().use { db ->

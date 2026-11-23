@@ -121,6 +121,11 @@ internal data class HomeFocusRecommendation(
     val metaLine: String,
 )
 
+internal data class BookLastQuestion(
+    val bookId: String,
+    val text: String,
+)
+
 internal enum class MarginWhisperRule {
     CROSS_MATERIAL_CONFLICT,
     PRIOR_MISCONCEPTION_GUARD,
@@ -169,6 +174,100 @@ internal object MasteryEngine {
     const val T2_DELAY_MS: Long = 72L * 3600L * 1000L
     const val REREAD_DWELL_MULTIPLIER: Double = 2.2
     const val WHISPER_DISMISS_COOLDOWN_PAGES: Int = 10
+    const val HOME_REVIEW_EMPTY_MESSAGE: String = "还没有要复习的。做错的题会在明天出现。"
+    const val LAST_QUESTION_MAX_CHARS: Int = 12
+
+    private val WHITESPACE_RE = Regex("\\s+")
+    private val HEX_ID_RE = Regex("^[0-9a-fA-F]{8,}(?:\\.{3}|…)?$")
+    private val UUID_RE = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+    private val PAGE_NODE_ID_RE = Regex("^p\\d+$", RegexOption.IGNORE_CASE)
+    private val PREFIXED_INTERNAL_ID_RE = Regex(
+        "^(?:ev|var|mw|toc|sec|chunk|course|topic|col|book|node|item|lesson)[-_][0-9a-fA-F]{6,}(?::.*)?$",
+        RegexOption.IGNORE_CASE,
+    )
+    private val COLON_INTERNAL_ID_RE = Regex("^(?:[0-9a-fA-F]{8,}|gain|t2):.+$", RegexOption.IGNORE_CASE)
+
+    fun isInternalIdentifier(raw: String): Boolean {
+        val text = raw.trim()
+        if (text.isEmpty()) return true
+        if (text.equals("root", ignoreCase = true)) return true
+        return HEX_ID_RE.matches(text) ||
+            UUID_RE.matches(text) ||
+            PAGE_NODE_ID_RE.matches(text) ||
+            PREFIXED_INTERNAL_ID_RE.matches(text) ||
+            COLON_INTERNAL_ID_RE.matches(text)
+    }
+
+    fun sanitizeHumanLabel(raw: String?): String? {
+        val cleaned = raw?.replace(WHITESPACE_RE, " ")?.trim().orEmpty()
+        if (cleaned.isEmpty() || isInternalIdentifier(cleaned)) return null
+        return cleaned
+    }
+
+    fun formatQuestionExcerpt(rawQuestion: String?, maxChars: Int = LAST_QUESTION_MAX_CHARS): String? {
+        val clean = sanitizeHumanLabel(rawQuestion) ?: return null
+        val limit = maxChars.coerceAtLeast(1)
+        val preview = if (clean.length > limit) clean.take(limit) + "…" else clean
+        return "上次问：$preview"
+    }
+
+    fun formatBookLocation(bookTitle: String?, chapterTitle: String?, page: Int): String {
+        val safePage = page.coerceAtLeast(1)
+        val cleanBook = sanitizeHumanLabel(bookTitle)
+        val cleanChapter = sanitizeHumanLabel(chapterTitle)?.takeIf { it != cleanBook }
+        val compactBook = cleanBook?.let { compactLabel(it, 28) }
+        val compactChapter = cleanChapter?.let { compactLabel(it, 20) }
+        return buildList {
+            if (compactBook != null) add(compactBook)
+            if (compactChapter != null) add(compactChapter)
+            add("第 $safePage 页")
+        }.joinToString(" · ")
+    }
+
+    fun formatContinueCardMeta(
+        bookTitle: String?,
+        chapterTitle: String?,
+        readingPage: Int,
+        lastQuestion: String? = null,
+        savedDraft: ChapterPracticeDraft? = null,
+        masteryRec: HomeFocusRecommendation? = null,
+    ): String {
+        val questionExcerpt = formatQuestionExcerpt(lastQuestion)
+        if (savedDraft != null && questionExcerpt != null) {
+            return "$questionExcerpt · 第 ${savedDraft.page.coerceAtLeast(1)} 页 · 练习草稿已保存"
+        }
+        if (savedDraft != null) {
+            return "${formatBookLocation(bookTitle, chapterTitle, savedDraft.page)} · 练习草稿已保存"
+        }
+        if (questionExcerpt != null) {
+            return "$questionExcerpt · 第 ${readingPage.coerceAtLeast(1)} 页"
+        }
+        val errorLabel = masteryRec?.dominantErrorTag?.let(MisconceptionErrorClass::fromWire)
+            ?.takeIf { it != MisconceptionErrorClass.NONE }
+            ?.labelZh
+        if (masteryRec != null && errorLabel != null) {
+            val cleanMeta = sanitizeHumanLabel(masteryRec.metaLine)
+            if (cleanMeta != null && !containsHexIdentifierToken(cleanMeta)) {
+                return cleanMeta
+            }
+            return "${formatBookLocation(bookTitle, chapterTitle, masteryRec.targetPage)} · 上次卡在$errorLabel"
+        }
+        return formatBookLocation(bookTitle, chapterTitle, readingPage)
+    }
+
+    fun estimateReviewMinutes(dueCount: Int): Int {
+        val count = dueCount.coerceAtLeast(1)
+        return ((count * 4) + 2) / 3
+    }
+
+    fun formatHomeReviewMeta(dueCount: Int): String =
+        "今天 $dueCount 道，约 ${estimateReviewMinutes(dueCount)} 分钟"
+
+    private fun compactLabel(text: String, maxChars: Int): String =
+        if (text.length > maxChars) text.take(maxChars - 1) + "…" else text
+
+    private fun containsHexIdentifierToken(text: String): Boolean =
+        Regex("\\b[0-9a-fA-F]{10,}\\b").containsMatchIn(text)
 
     fun conceptKeyFor(bookId: String, tocNodeId: String, suffix: String? = null): String {
         val cleanNode = tocNodeId.trim().ifBlank { "root" }
@@ -328,18 +427,36 @@ internal object MasteryEngine {
     fun shouldHighlightWeakSection(record: ConceptMasteryRecord?): Boolean =
         record != null && (record.rereadCount >= 2 || !record.dominantErrorTag.isNullOrBlank())
 
-    fun buildHomeFocusMeta(record: ConceptMasteryRecord, sectionLabel: String?, targetPage: Int): String {
-        val prefix = sectionLabel?.trim()?.takeIf(String::isNotEmpty)
-            ?: record.canonicalName.trim().take(18).ifBlank { "第 $targetPage 页" }
+    fun buildHomeFocusMeta(
+        record: ConceptMasteryRecord,
+        sectionLabel: String?,
+        targetPage: Int,
+        bookTitle: String? = null,
+        lastQuestion: String? = null,
+    ): String {
+        val safePage = targetPage.coerceAtLeast(1)
+        val questionExcerpt = formatQuestionExcerpt(lastQuestion)
+        if (questionExcerpt != null) {
+            return "$questionExcerpt · 第 $safePage 页"
+        }
+        val cleanBook = sanitizeHumanLabel(bookTitle)
+        val cleanSection = sanitizeHumanLabel(sectionLabel)
+        val cleanConcept = sanitizeHumanLabel(record.canonicalName)
+        val prefix = cleanSection ?: cleanConcept ?: cleanBook ?: "第 $safePage 页"
         val errorLabel = MisconceptionErrorClass.fromWire(record.dominantErrorTag)
             ?.takeIf { it != MisconceptionErrorClass.NONE }
             ?.labelZh
-        val conceptShort = record.canonicalName.trim().let { if (it.length > 16) it.take(15) + "…" else it }
+        val conceptShort = cleanConcept?.let { if (it.length > 16) it.take(15) + "…" else it }
         return when {
-            errorLabel != null -> "$prefix · 上次卡在$conceptShort（$errorLabel） · 建议巩固。"
-            record.rereadCount >= 2 -> "$prefix · 第 $targetPage 页回看 ${record.rereadCount} 次 · 建议巩固。"
-            record.askCount > 0 -> "$prefix · 曾提问「$conceptShort」 · 第 $targetPage 页。"
-            else -> "$prefix · $conceptShort 待巩固 · 第 $targetPage 页。"
+            errorLabel != null -> {
+                if (conceptShort != null && conceptShort != prefix) {
+                    "$prefix · 上次卡在$conceptShort（$errorLabel） · 建议巩固。"
+                } else {
+                    "$prefix · 上次卡在（$errorLabel） · 建议巩固。"
+                }
+            }
+            record.rereadCount >= 2 -> "${formatBookLocation(cleanBook, cleanSection ?: cleanConcept, safePage)} · 回看 ${record.rereadCount} 次"
+            else -> formatBookLocation(cleanBook, cleanSection ?: cleanConcept, safePage)
         }
     }
 

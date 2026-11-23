@@ -13,6 +13,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -63,7 +64,34 @@ import com.coach.ui.v7.LocalV7Fonts
 import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.V7TextButton
 import com.coach.ui.v7.paperShadow
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.math.roundToInt
+
+/** 按书持久化「用户是否曾主动收起顶底栏」：首次打开某本书时栏常显，主动收起一次后才开始自动隐藏。 */
+internal class BookHudPreferenceStore(private val directory: Path) {
+    private val file: Path get() = directory.resolve("reader-hud-dismissed.txt")
+
+    fun isDismissed(bookId: String): Boolean {
+        if (bookId.isBlank()) return false
+        return runCatching {
+            if (!Files.exists(file)) false
+            else Files.readAllLines(file).any { it.trim() == bookId }
+        }.getOrDefault(false)
+    }
+
+    fun markDismissed(bookId: String) {
+        if (bookId.isBlank()) return
+        runCatching {
+            Files.createDirectories(directory)
+            val existing = if (Files.exists(file)) Files.readAllLines(file).map(String::trim).filter(String::isNotEmpty).toMutableSet()
+            else linkedSetOf()
+            if (existing.add(bookId)) {
+                Files.writeString(file, existing.joinToString("\n", postfix = "\n"))
+            }
+        }
+    }
+}
 
 /** 统一伴读抽屉的三个页签：讲解、提问、批注，合在同一平面容器里，不再一层套一层。 */
 internal enum class ReaderCompanionTab(val label: String, val tag: String) {
@@ -157,6 +185,7 @@ internal fun ImmersiveTopHud(
     onLearn: () -> Unit,
     typeControl: @Composable () -> Unit,
     modeControl: (@Composable () -> Unit)? = null,
+    onMoreMenuDismiss: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
@@ -228,29 +257,6 @@ internal fun ImmersiveTopHud(
                     textAlign = TextAlign.Center,
                     modifier = Modifier.weight(1f).padding(horizontal = if (compact) 4.dp else 8.dp).testTag("immersive-title"),
                 )
-                if (hasOriginal) {
-                    ViewModeSwitchPill(
-                        textView = textView,
-                        compact = veryCompact,
-                        onSelect = onSelectView,
-                    )
-                }
-                V7TextButton(
-                    onClick = onToggleSearch,
-                    enabled = !busy,
-                    modifier = Modifier.testTag("book-search-toggle"),
-                    contentPadding = PaddingValues(horizontal = if (compact) 6.dp else 8.dp, vertical = 4.dp),
-                    ringInside = true,
-                ) {
-                    Text(
-                        "查找",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = if (searchOpen) accent else colors.fgSecondary,
-                        maxLines = 1,
-                        softWrap = false,
-                    )
-                }
-                Box(Modifier.padding(horizontal = if (compact) 2.dp else 4.dp)) { typeControl() }
                 if (modeControl != null) {
                     modeControl()
                 }
@@ -287,9 +293,27 @@ internal fun ImmersiveTopHud(
                     }
                     DropdownMenu(
                         expanded = moreMenuOpen,
-                        onDismissRequest = { moreMenuOpen = false },
+                        onDismissRequest = {
+                            moreMenuOpen = false
+                            onMoreMenuDismiss()
+                        },
                         containerColor = colors.surface1,
                     ) {
+                        if (hasOriginal) {
+                            Box(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
+                                ViewModeSwitchPill(textView = textView, compact = veryCompact, onSelect = {
+                                    moreMenuOpen = false
+                                    onSelectView(it)
+                                })
+                            }
+                        }
+                        DropdownMenuItem(
+                            text = { Text("查找", style = MaterialTheme.typography.labelLarge) },
+                            enabled = !busy,
+                            onClick = { moreMenuOpen = false; onToggleSearch() },
+                            modifier = Modifier.testTag("book-search-toggle"),
+                        )
+                        Box(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) { typeControl() }
                         DropdownMenuItem(
                             text = {
                                 Text(
@@ -1001,7 +1025,12 @@ internal fun CompanionAskPane(
     val quoteSource = thread?.selection ?: activeSelection
     val isCollectionMode = collectionScopeLabel != null && askScope == CollectionAskScope.COLLECTION
     val isLoadingNow = if (isCollectionMode) collectionLoading else (thread?.loading == true)
-    val canSendNow = if (isCollectionMode) draft.trim().length in 2..600 else BookPassageQuestion.accepts(draft)
+    val canSendNow = draft.isNotBlank()
+    val askFocus = remember { FocusRequester() }
+    LaunchedEffect(askScope, quoteSource?.id) {
+        withFrameNanos { }
+        runCatching { askFocus.requestFocus() }
+    }
     DisposableEffect(Unit) {
         onDispose { onInputFocusChanged(false) }
     }
@@ -1210,8 +1239,22 @@ internal fun CompanionAskPane(
             }
         }
 
+        if (draft.isBlank()) {
+            Text("先输入问题", style = MaterialTheme.typography.labelSmall, color = colors.fgSecondary)
+        } else if (isCollectionMode && draft.trim().length > 600) {
+            Text("问题太长，请缩短后发送", style = MaterialTheme.typography.labelSmall, color = colors.fgSecondary)
+        } else if (!isCollectionMode && draft.trim().length > BookPassageQuestion.MAX_QUESTION_LENGTH) {
+            Text("问题太长，请缩短后发送", style = MaterialTheme.typography.labelSmall, color = colors.fgSecondary)
+        }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.weight(1f)) {
+            Box(
+                Modifier
+                    .weight(1f)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { runCatching { askFocus.requestFocus() } },
+            ) {
                 V7Field(
                     value = draft,
                     onValueChange = onDraftChange,
@@ -1220,9 +1263,9 @@ internal fun CompanionAskPane(
                         quoteSource != null -> "问这句的意思、公式推导或例子…"
                         else -> "输入问题…"
                     },
-                    enabled = !isLoadingNow,
                     modifier = Modifier
                         .fillMaxWidth()
+                        .focusRequester(askFocus)
                         .onFocusChanged { onInputFocusChanged(it.hasFocus) }
                         .testTag("inline-followup-input")
                         .onPreviewKeyEvent { event ->
@@ -1234,8 +1277,13 @@ internal fun CompanionAskPane(
                 )
             }
             PrimaryButton(
-                onClick = onSubmitQuestion,
-                enabled = !isLoadingNow && canSendNow,
+                onClick = {
+                    if (!isLoadingNow) {
+                        onSubmitQuestion()
+                        runCatching { askFocus.requestFocus() }
+                    }
+                },
+                enabled = canSendNow,
                 modifier = Modifier.testTag("inline-followup-send"),
             ) { Text("发送", maxLines = 1, softWrap = false) }
         }

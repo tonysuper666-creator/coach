@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerIcon
@@ -256,8 +257,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
         Surface(Modifier.fillMaxSize().testTag("windows-textbooks").onPreviewKeyEvent { event ->
             val editing = noteReader?.takeIf { ui.screen == BookScreen.READER && it.noting }
             val noteKey = event.toReaderInput()
-            if (editing != null && noteKey != null && editing.onKey(noteKey.first, noteKey.second)) true
-            else if (event.key == Key.Escape && event.type == KeyEventType.KeyDown && ui.screen == BookScreen.READER &&
+            editing != null && noteKey != null && editing.onKey(noteKey.first, noteKey.second)
+        }.onKeyEvent { event ->
+            if (event.key == Key.Escape && event.type == KeyEventType.KeyDown && ui.screen == BookScreen.READER &&
                 ui.prompt == null && !ui.busy) {
                 returnFromReader(); true
             } else false

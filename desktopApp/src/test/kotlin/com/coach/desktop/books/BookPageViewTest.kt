@@ -148,7 +148,7 @@ class BookPageViewTest {
                         onNoteSession = {}, onPage = { writes += it }, onBack = {}, onLearn = {})
                 } }
                 waitForIdle()
-                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                onNodeWithTag("immersive-top-hud").assertExists()
                 waitForIdle()
                 fun sources() = onNodeWithTag("reader-text").fetchSemanticsNode().config[BookPageSources]
                 val first = sources()
@@ -230,9 +230,10 @@ class BookPageViewTest {
                 waitUntil(timeoutMillis = 20_000) { controller.state.value.book != null && !controller.state.value.busy }
                 onNodeWithTag("home-read").performClick()
                 waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER }
-                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                onNodeWithTag("immersive-top-hud").assertExists()
                 waitForIdle()
-                onNodeWithTag("book-original-toggle").performClick()
+                onNodeWithTag("immersive-more-menu").performClick()
+                onNodeWithTag("view-mode-text").performClick()
                 waitForIdle()
                 fun displayed() = onNodeWithTag("reader-text").fetchSemanticsNode()
                     .config[SemanticsProperties.Text].single().text
@@ -242,9 +243,11 @@ class BookPageViewTest {
                 val continuation = displayed()
                 assertNotEquals(opening, continuation)
                 assertEquals(1, controller.state.value.page)
-                onNodeWithTag("book-original-toggle").performClick()
+                onNodeWithTag("immersive-more-menu").performClick()
+                onNodeWithTag("view-mode-original").performClick()
                 waitForIdle()
-                onNodeWithTag("book-original-toggle").performClick()
+                onNodeWithTag("immersive-more-menu").performClick()
+                onNodeWithTag("view-mode-text").performClick()
                 waitForIdle()
                 assertEquals(continuation, displayed())
             }

@@ -125,7 +125,16 @@ class BookInBookSearchTest {
                     onNodeWithTag("book-search-count").assertTextEquals("1 / 1")
 
                     // 校验读法被完整保留
+                    onNodeWithTag("immersive-more-menu").performClick()
+                    waitForIdle()
                     onNodeWithTag("book-original-toggle").assertExists()
+                    onNodeWithTag("book-search-toggle").performKeyInput { pressKey(Key.Escape) }
+                    waitForIdle()
+                    if (onAllNodesWithTag("book-original-toggle").fetchSemanticsNodes().isNotEmpty()) {
+                        onNodeWithTag("immersive-more-menu").performClick()
+                        waitForIdle()
+                    }
+                    onNodeWithTag("book-original-toggle").assertDoesNotExist()
                     if (mode.textView) {
                         assertEquals(mode.scrolling, library.textScrollMode(book.id))
                         onAllNodesWithText("Copper Bridge resonance verified on page five.", substring = true)
@@ -139,9 +148,13 @@ class BookInBookSearchTest {
                         ImageIO.write(captureToImage().toAwtImage(), "png", shotDir.resolve("search-${mode.name}.png").toFile())
                     }
 
-                    // Esc 关闭书内查找
+                    // Esc 关闭书内查找，同时留在阅读页
+                    onNodeWithTag("book-search-input").performClick()
+                    waitForIdle()
                     onNodeWithTag("book-search-input").performKeyInput { pressKey(Key.Escape) }
+                    waitForIdle()
                     onNodeWithTag("book-search-panel").assertDoesNotExist()
+                    assertEquals(BookScreen.READER, controller.state.value.screen, "${mode.name}: Esc 应只关闭查找面板，不退出阅读页")
                 }
             } finally {
                 root.toFile().deleteRecursively()
@@ -177,8 +190,9 @@ class BookInBookSearchTest {
             runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
                 waitUntil(timeoutMillis = 10_000) { controller.state.value.screen == BookScreen.READER }
-                onNodeWithTag("textbook-reader").performKeyInput { pressKey(Key.Tab) }
+                onNodeWithTag("immersive-top-hud").assertExists()
                 waitForIdle()
+                onNodeWithTag("immersive-more-menu").performClick()
                 onNodeWithTag("book-search-toggle").performClick()
                 onNodeWithTag("book-search-input").performTextInput("主缆")
                 onNodeWithTag("book-search-count").assertTextEquals("共 3 处")

@@ -277,7 +277,7 @@ internal object AndroidBookConnection {
     }
 }
 
-internal class BookExplainer(library: TextbookLibrary? = null) {
+internal class BookExplainer(private val library: TextbookLibrary? = null) {
     private val imports = library?.let(::ImportedBookWire)
     var identity by mutableStateOf<AndroidBookIdentity?>(null)
         private set
@@ -376,6 +376,12 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
         history: List<FollowUpTurn> = emptyList(),
         requestId: String = UUID.randomUUID().toString().replace("-", ""),
     ): ExplainResult {
+        if (kind == "ask" && !question.isNullOrBlank()) {
+            val bookId = chosen.id.substringBefore(":p").takeIf { it.isNotBlank() && it != chosen.id }
+            if (bookId != null && library != null) {
+                withContext(Dispatchers.IO) { runCatching { library.saveLastQuestion(bookId, question) } }
+            }
+        }
         val blocks = ExplainWire.selectionBlocks(chosen, context)
         val wire = ExplainWire.selectionRequest(requestId, kind, chosen, blocks, context, question, history)
         return send(wire, blocks, requestId)
@@ -393,8 +399,13 @@ internal class BookExplainer(library: TextbookLibrary? = null) {
         return ExplainWire.parseStructure(checkNotNull(body), candidates)
     }
 
-    suspend fun ask(chosen: SourceBlock, question: String, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult =
-        send(ExplainWire.question(requestId, chosen, question), listOf(chosen), requestId)
+    suspend fun ask(chosen: SourceBlock, question: String, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult {
+        val bookId = chosen.id.substringBefore(":p").takeIf { it.isNotBlank() && it != chosen.id }
+        if (bookId != null && library != null && question.isNotBlank()) {
+            withContext(Dispatchers.IO) { runCatching { library.saveLastQuestion(bookId, question) } }
+        }
+        return send(ExplainWire.question(requestId, chosen, question), listOf(chosen), requestId)
+    }
 
     suspend fun fetchChapterCompanion(
         requestJson: JsonObject,

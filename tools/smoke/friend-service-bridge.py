@@ -64,7 +64,7 @@ class FriendApiOnly(SubscriptionOnly):
     json_response_format = False
 
     def configure(self, body, headers):
-        if (body.get("model") != "claude-sonnet-5-5" or
+        if (body.get("model") not in {"claude-sonnet-5-5", "claude-haiku-5-5"} or
                 body.get("response_format") or body.get("tools") or
                 headers.get(b"x-coach-task") != b"READER_SELECTION" or
                 not re.fullmatch(rb"[a-f0-9]{64}", headers.get(b"x-coach-friend", b"")) or

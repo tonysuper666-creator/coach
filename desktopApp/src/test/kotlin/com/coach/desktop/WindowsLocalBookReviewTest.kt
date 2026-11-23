@@ -113,7 +113,7 @@ class WindowsLocalBookReviewTest {
             capture("06-today-review-done")
             runBlocking { reopened.back() }
             ready(reopened) { it.screen == BookScreen.HOME }
-            onNodeWithTag("home-review-done").assertTextContains("今日复习已完成。")
+            onNodeWithTag("home-review-done").assertTextContains("还没有要复习的。做错的题会在明天出现。")
             onNodeWithTag("home-review-start").assertDoesNotExist()
             assertEquals(1, reopenedLibrary.book(book.id).lessonIndex)
             assertEquals(PracticeAnswer(wrong, true), reopenedLibrary.answer(book.id, book.lessons[0].id, QuestionMode.CHOICE))

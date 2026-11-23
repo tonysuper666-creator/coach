@@ -19,7 +19,7 @@ import java.util.UUID
  * Open only so a screenshot test can stand in for the Mac without a network; the app uses this class as is.
  */
 internal open class BookExplainer(private val settings: DesktopConnectionSettings = DesktopConnectionSettings(),
-    library: TextbookLibrary? = null) {
+    private val library: TextbookLibrary? = null) {
     private val imports = library?.let(::ImportedBookWire)
     private val pairing = DesktopPairing(settings)
     var identity by mutableStateOf<DesktopIdentity?>(null)
@@ -110,6 +110,12 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         history: List<FollowUpTurn> = emptyList(),
         requestId: String = UUID.randomUUID().toString().replace("-", ""),
     ): ExplainResult {
+        if (kind == "ask" && !question.isNullOrBlank()) {
+            val bookId = chosen.id.substringBefore(":p").takeIf { it.isNotBlank() && it != chosen.id }
+            if (bookId != null && library != null) {
+                withContext(Dispatchers.IO) { runCatching { library.saveLastQuestion(bookId, question) } }
+            }
+        }
         val blocks = ExplainWire.selectionBlocks(chosen, context)
         val wire = ExplainWire.selectionRequest(requestId, kind, chosen, blocks, context, question, history)
         return send(wire, blocks, requestId)
@@ -127,8 +133,13 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         return ExplainWire.parseStructure(checkNotNull(body), candidates)
     }
 
-    suspend fun ask(chosen: SourceBlock, question: String, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult =
-        send(ExplainWire.question(requestId, chosen, question), listOf(chosen), requestId)
+    suspend fun ask(chosen: SourceBlock, question: String, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult {
+        val bookId = chosen.id.substringBefore(":p").takeIf { it.isNotBlank() && it != chosen.id }
+        if (bookId != null && library != null && question.isNotBlank()) {
+            withContext(Dispatchers.IO) { runCatching { library.saveLastQuestion(bookId, question) } }
+        }
+        return send(ExplainWire.question(requestId, chosen, question), listOf(chosen), requestId)
+    }
 
     open suspend fun fetchChapterCompanion(
         requestJson: JsonObject,

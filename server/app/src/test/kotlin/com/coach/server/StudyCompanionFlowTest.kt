@@ -117,9 +117,9 @@ class StudyCompanionFlowTest {
             assertTrue(f.stub.requestBodies.last().contains(BridgeClient.CODEX))
             listener.cancelAndJoin()
             f.stub.httpError(429)
-            f.stub.completion("""{"summary":"No assessed answers today."}""",BridgeClient.CODEX)
+            f.stub.completion("""{"summary":"No assessed answers today."}""",BridgeClient.OPUS)
             val journal = assertNotNull(f.chat.journals.summarize("course",thread.day))
-            assertTrue(journal.summaryNotice.orEmpty().contains(BridgeClient.CODEX))
+            assertTrue(journal.summaryNotice.orEmpty().contains(BridgeClient.OPUS))
             assertEquals(4,f.stub.requests)
         }
     }
@@ -129,7 +129,7 @@ class StudyCompanionFlowTest {
             val day = f.actor.execute { todayProgress("course").day }
             f.actor.execute { append("course","note_saved",json("content" to "A synthetic note")) }
             val fromSeq = f.actor.execute { snapshot("course").projection.lastSeq }
-            f.stub.completion("""{"summary":"One note was saved."}""")
+            f.stub.completion("""{"summary":"One note was saved."}""", BridgeClient.GPT_62_ASTRA)
             val summary = assertNotNull(f.chat.journals.summarize("course",day))
             assertEquals(fromSeq,summary.summaryFromSeq)
             assertEquals("One note was saved.",summary.summary)
@@ -139,7 +139,7 @@ class StudyCompanionFlowTest {
             assertTrue(fetched.summaryStale)
             assertEquals("A personal reflection",fetched.manual)
             assertEquals(summary.summary,fetched.summary)
-            f.stub.completion("unusable summary")
+            f.stub.completion("unusable summary", BridgeClient.GPT_62_ASTRA)
             assertNull(f.chat.journals.summarize("course",day))
             assertEquals(summary.summary,f.actor.execute { journalDay("course",day).summary })
         }

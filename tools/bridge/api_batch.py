@@ -104,6 +104,7 @@ class BatchRouter:
                          "input_sha256": hashlib.sha256((system + "\0" + prompt).encode()).hexdigest()}
                 # Persist intent before reserving/sending. A crash here fails closed.
                 atomic_json(path, state)
+                submitting_http = False
                 try:
                     default_limit = 8192 if model == "claude-haiku-5-5" else 4000
                     limit = max_tokens if max_tokens is not None else default_limit
@@ -115,13 +116,22 @@ class BatchRouter:
                     state["reservation"] = self.router.ledger.reserve(provider, self.router.keys.get(provider, ""), maximum)
                     atomic_json(path, state)
                     async with self.router.client_factory() as client:
+                        submitting_http = True
                         state["batch_id"] = await self.submit(client, provider, key, model, system, prompt, limit)
+                        submitting_http = False
                     state["phase"] = "pending"
                     state["next_poll"] = self.clock() + 60
                     atomic_json(path, state)
-                except (ApiFailure, Denied, httpx.HTTPError, ValueError, KeyError, TypeError):
+                except httpx.HTTPError:
+                    if submitting_http:
+                        self.failed(path, state, "batch_submit_ambiguous")
+                        raise ApiFailure("batch_submit_ambiguous") from None
                     self.failed(path, state, "batch_submit_unavailable")
                     raise ApiFailure("batch_submit_unavailable") from None
+                except (ApiFailure, Denied, ValueError, KeyError, TypeError) as error:
+                    reason = "batch_submit_ambiguous" if str(error) == "batch_submit_ambiguous" else "batch_submit_unavailable"
+                    self.failed(path, state, reason)
+                    raise ApiFailure(reason) from None
                 raise BatchPending()
             if self.clock() < state["next_poll"]:
                 raise BatchPending()
@@ -196,7 +206,11 @@ class BatchRouter:
             file_id = self.identifier(upload.json()["id"])
             response = await self.request(client, provider, "POST", "/batches",
                                           json={"input_file_id": file_id, "endpoint": "/v1/responses", "completion_window": "24h"})
-        return self.identifier(response.json()["id"])
+        try:
+            return self.identifier(response.json()["id"])
+        except (ApiFailure, ValueError, KeyError, TypeError):
+            # The create call was accepted (HTTP 200) but returned no usable id: a batch may exist upstream.
+            raise ApiFailure("batch_submit_ambiguous") from None
 
     async def poll(self, client, provider, state):
         batch_id = self.identifier(state["batch_id"])

@@ -762,6 +762,7 @@ interface BatchAiTransport {
 class RoutedBatchAiTransport(
     private val primary: BatchAiTransport?,
     private val overflow: BatchAiTransport?,
+    private val friendTransport: BatchAiTransport? = overflow,
 ) : BatchAiTransport {
     override suspend fun generateSection(
         systemPrompt: String,
@@ -794,8 +795,8 @@ class RoutedBatchAiTransport(
         device: String?,
     ): BatchTransportReply {
         if (friend != null) {
-            val friendOverflow = overflow ?: throw IllegalStateException("No friend batch AI transport available")
-            return friendOverflow.generateSectionForFriend(systemPrompt, userPrompt, task, batchKey, maxTokens, friend, device)
+            val target = friendTransport ?: throw IllegalStateException("No friend batch AI transport available")
+            return target.generateSectionForFriend(systemPrompt, userPrompt, task, batchKey, maxTokens, friend, device)
         }
         return generateSection(systemPrompt, userPrompt, task, batchKey, maxTokens)
     }
@@ -961,6 +962,12 @@ class HaikuRealtimeBridgeTransport(
         device = device,
     )
 
+    private fun modelForTask(task: String, friend: String?): String = when {
+        friend != null -> BridgeClient.CLAUDE
+        task in setOf("BOOK_MATH_VERIFY", "BOOK_MATH_REPAIR", "booklist_concept_align") -> BridgeClient.OPUS
+        else -> BridgeClient.GPT_62_ASTRA
+    }
+
     private suspend fun generateSectionInternal(
         systemPrompt: String,
         userPrompt: String,
@@ -970,10 +977,11 @@ class HaikuRealtimeBridgeTransport(
         device: String?,
     ): BatchTransportReply = withContext(Dispatchers.IO) {
         val started = System.nanoTime()
+        val targetModel = modelForTask(task, friend)
         val result = bridge.chat(
             ChatRequest(
                 task = if (friend != null) "READER_SELECTION" else task,
-                model = BridgeClient.HAIKU,
+                model = targetModel,
                 system = systemPrompt,
                 user = userPrompt,
                 stream = false,
@@ -988,7 +996,7 @@ class HaikuRealtimeBridgeTransport(
             is BridgeResult.Success -> BatchTransportReply(
                 text = result.text,
                 routeChannel = CompanionRouteChannel.HAIKU_REALTIME,
-                model = result.terminal.servedBy ?: BridgeClient.HAIKU,
+                model = result.terminal.servedBy ?: targetModel,
                 inputTokens = TokenLedgerPricing.estimateTokens(systemPrompt) + TokenLedgerPricing.estimateTokens(userPrompt),
                 outputTokens = TokenLedgerPricing.estimateTokens(result.text),
                 ttftMs = result.call.ttftMs ?: elapsedMs,
@@ -999,7 +1007,7 @@ class HaikuRealtimeBridgeTransport(
     }
 }
 
-private class FriendScopedBatchTransport(
+internal class FriendScopedBatchTransport(
     private val delegate: BatchAiTransport,
     private val friend: String,
     private val device: String,

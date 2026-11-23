@@ -52,7 +52,7 @@ class QuestionPool(private val client: BridgeClient) {
         objective: String,
         excerpt: String,
         count: Int,
-        generatorModel: String = BridgeClient.CLAUDE,
+        generatorModel: String = BridgeClient.GPT_62_SOL,
         avoid: List<String> = emptyList(),
         background: Boolean = false,
         retryMalformed: Boolean = false,
@@ -92,7 +92,7 @@ class QuestionPool(private val client: BridgeClient) {
 
     fun reviewGroup(
         entries: List<ReviewEntry>,
-        reviewerModel: String = BridgeClient.CODEX,
+        reviewerModel: String = BridgeClient.OPUS,
         background: Boolean = false,
     ): ReviewBatch {
         if (entries.isEmpty()) return ReviewBatch(emptyMap(), null, 0)
@@ -145,8 +145,8 @@ class QuestionPool(private val client: BridgeClient) {
         objective: String,
         excerpt: String,
         count: Int,
-        generatorModel: String = BridgeClient.CLAUDE,
-        reviewerModel: String = BridgeClient.CODEX,
+        generatorModel: String = BridgeClient.GPT_62_SOL,
+        reviewerModel: String = BridgeClient.OPUS,
         avoid: List<String> = emptyList(),
         background: Boolean = false,
     ): PoolResult {
@@ -156,7 +156,10 @@ class QuestionPool(private val client: BridgeClient) {
         if (generated.questions.isEmpty()) {
             return PoolResult(kpId, emptyList(), emptyList(), listOf(generated.call), generated.wallMs, generated.parsed, failureReason = generated.failureReason)
         }
-        val review = reviewGroup(listOf(ReviewEntry(kpId, excerpt, generated.questions, 0)), reviewerModel, background)
+        val actualReviewer = generated.call.servedBy?.takeIf { it.isNotBlank() }?.let {
+            if (modelVendor(it) == "openai") BridgeClient.OPUS else BridgeClient.GPT_62_ASTRA
+        } ?: reviewerModel
+        val review = reviewGroup(listOf(ReviewEntry(kpId, excerpt, generated.questions, 0)), actualReviewer, background)
         val accepted = ArrayList<Mcq>()
         val rejected = ArrayList<Rejected>()
         generated.questions.forEachIndexed { index, mcq ->
@@ -203,8 +206,8 @@ class GradePipeline(private val client: BridgeClient) {
         question: ConstructedQuestion,
         answer: String,
         expectedFingerprint: String = GradeGate.rubricFingerprint(question.rubric),
-        graderModel: String = BridgeClient.CLAUDE,
-        reviewerModel: String = BridgeClient.CODEX,
+        graderModel: String = BridgeClient.GPT_62_ASTRA,
+        reviewerModel: String = BridgeClient.OPUS,
         background: Boolean = false,
         draftOnly: Boolean = false,
     ): Outcome {
@@ -278,12 +281,15 @@ class GradePipeline(private val client: BridgeClient) {
         val located = locate(answer, current)
         val prepared = Outcome(false, current.awarded, emptyList(), calls, null, spans, fingerprint, current, located, withheld)
         if (draftOnly) return prepared
-        return reviewDraft(question, answer, prepared, reviewerModel, background)
+        val actualReviewer = graded.call.servedBy?.takeIf { it.isNotBlank() }?.let {
+            if (modelVendor(it) == "openai") BridgeClient.OPUS else BridgeClient.GPT_62_ASTRA
+        } ?: reviewerModel
+        return reviewDraft(question, answer, prepared, actualReviewer, background)
     }
 
     /** Durable workers restore this input from the ledger; no second grading call is needed. */
     fun reviewDraft(question: ConstructedQuestion, answer: String, prepared: Outcome,
-        reviewerModel: String = BridgeClient.CODEX, background: Boolean = true): Outcome {
+        reviewerModel: String = BridgeClient.OPUS, background: Boolean = true): Outcome {
         val current = requireNotNull(prepared.draft)
         if (prepared.rubricFingerprint != GradeGate.rubricFingerprint(question.rubric))
             return prepared.copy(defects=listOf("rubric_changed"))

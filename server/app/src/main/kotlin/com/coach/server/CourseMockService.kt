@@ -34,7 +34,7 @@ object CourseMockLimits {
     const val TASK_PLAN: String = "course_mock_plan"
     const val TASK_ITEM: String = "course_mock_item"
     const val PINNED_PLANNER_MODEL: String = BridgeClient.CLAUDE
-    const val PINNED_ITEM_MODEL: String = BridgeClient.HAIKU
+    const val PINNED_ITEM_MODEL: String = BridgeClient.GPT_62_SOL
     const val PLAN_MAX_TOKENS: Int = 3_200
     const val ITEM_MAX_TOKENS: Int = 8_192
     const val ITEM_CONCURRENCY: Int = 4
@@ -57,6 +57,15 @@ interface MockBlueprintPlannerTransport {
         batchKey: String,
         maxTokens: Int = CourseMockLimits.PLAN_MAX_TOKENS,
     ): MockPlannerReply
+
+    suspend fun planBlueprintForFriend(
+        systemPrompt: String,
+        userPrompt: String,
+        batchKey: String,
+        maxTokens: Int = CourseMockLimits.PLAN_MAX_TOKENS,
+        friend: String? = null,
+        device: String? = null,
+    ): MockPlannerReply = planBlueprint(systemPrompt, userPrompt, batchKey, maxTokens)
 }
 
 /**
@@ -71,26 +80,66 @@ class SonnetBridgeMockPlannerTransport(
         userPrompt: String,
         batchKey: String,
         maxTokens: Int,
+    ): MockPlannerReply = planBlueprintInternal(
+        systemPrompt = systemPrompt,
+        userPrompt = userPrompt,
+        maxTokens = maxTokens,
+        friend = null,
+        device = null,
+    )
+
+    override suspend fun planBlueprintForFriend(
+        systemPrompt: String,
+        userPrompt: String,
+        batchKey: String,
+        maxTokens: Int,
+        friend: String?,
+        device: String?,
+    ): MockPlannerReply = planBlueprintInternal(
+        systemPrompt = systemPrompt,
+        userPrompt = userPrompt,
+        maxTokens = maxTokens,
+        friend = friend,
+        device = device,
+    )
+
+    private suspend fun planBlueprintInternal(
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int,
+        friend: String?,
+        device: String?,
     ): MockPlannerReply = withContext(Dispatchers.IO) {
         val started = System.nanoTime()
+        val targetTask = if (friend != null) "READER_SELECTION" else CourseMockLimits.TASK_PLAN
+        val targetModel = if (friend != null) BridgeClient.CLAUDE else CourseMockLimits.PINNED_PLANNER_MODEL
         val result = bridge.chat(
             ChatRequest(
-                task = CourseMockLimits.TASK_PLAN,
-                model = CourseMockLimits.PINNED_PLANNER_MODEL,
+                task = targetTask,
+                model = targetModel,
                 system = systemPrompt,
                 user = userPrompt,
                 stream = false,
                 background = false,
                 maxTokens = maxTokens,
+                friendId = friend?.let(::friendId),
+                friendDevice = if (friend != null) device else null,
             ),
         )
         val elapsedMs = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L)
         when (result) {
-            is BridgeResult.Failure -> throw IllegalStateException("course_mock_plan_failed:${result.reason}")
+            is BridgeResult.Failure -> {
+                if (friend != null) {
+                    val reason = result.terminal?.reason
+                    val quotaCode = reason?.takeIf { it in setOf("daily_quota", "monthly_quota") }
+                    throw FriendServiceError(quotaCode ?: "unavailable")
+                }
+                throw IllegalStateException("course_mock_plan_failed:${result.reason}")
+            }
             is BridgeResult.Success -> MockPlannerReply(
                 text = result.text,
                 routeChannel = CompanionRouteChannel.SONNET_PLAN,
-                model = result.terminal.servedBy ?: CourseMockLimits.PINNED_PLANNER_MODEL,
+                model = result.terminal.servedBy ?: targetModel,
                 inputTokens = TokenLedgerPricing.estimateTokens(systemPrompt) + TokenLedgerPricing.estimateTokens(userPrompt),
                 outputTokens = TokenLedgerPricing.estimateTokens(result.text),
                 elapsedMs = result.call.durMs.coerceAtLeast(elapsedMs),
@@ -324,9 +373,14 @@ class CourseMockService(
         """.trimIndent()
     }
 
-    suspend fun generate(input: JsonObject): JsonObject {
+    suspend fun generate(
+        input: JsonObject,
+        friend: String? = null,
+        device: String? = null,
+    ): JsonObject {
         val request = CourseMockRequestParser.parse(input)
         CourseMockLeakageGuard.scanRequest(request)
+        val recordOwnerLedger = friend == null
 
         val excludedLower = request.excludedTopicTitles.map { it.trim().lowercase() }.filter { it.isNotEmpty() }.toSet()
         val examinable = request.topics.filter { topic ->
@@ -339,13 +393,24 @@ class CourseMockService(
         // 1) Call Sonnet 5.5 planner EXACTLY ONCE for the cross-week blueprint.
         val blueprintUserPrompt = buildBlueprintPrompt(request, examinable)
         val planKey = "cmp-${sha256("${request.courseId}|$blueprintUserPrompt".toByteArray(Charsets.UTF_8)).take(16)}"
-        val planReply = plannerTransport.planBlueprint(
-            systemPrompt = BLUEPRINT_SYSTEM,
-            userPrompt = blueprintUserPrompt,
-            batchKey = planKey,
-            maxTokens = CourseMockLimits.PLAN_MAX_TOKENS,
-        )
-        recordPlannerLedger(request.courseId, planKey, planReply)
+        val planReply = if (friend != null) {
+            plannerTransport.planBlueprintForFriend(
+                systemPrompt = BLUEPRINT_SYSTEM,
+                userPrompt = blueprintUserPrompt,
+                batchKey = planKey,
+                maxTokens = CourseMockLimits.PLAN_MAX_TOKENS,
+                friend = friend,
+                device = device,
+            )
+        } else {
+            plannerTransport.planBlueprint(
+                systemPrompt = BLUEPRINT_SYSTEM,
+                userPrompt = blueprintUserPrompt,
+                batchKey = planKey,
+                maxTokens = CourseMockLimits.PLAN_MAX_TOKENS,
+            )
+        }
+        if (recordOwnerLedger) recordPlannerLedger(request.courseId, planKey, planReply)
         val plannerCalls = 1
 
         val sections = parseAndValidateBlueprint(planReply.text, examinable)
@@ -353,6 +418,11 @@ class CourseMockService(
         require(allSlots.isNotEmpty()) { "模考蓝图未生成任何有效试题槽位。" }
 
         // 2) Generate all items concurrently (`Semaphore(4)`) + enforce exact rational & anchor & zero-overlap gates.
+        val effectiveItemTransport = if (friend != null) {
+            FriendScopedBatchTransport(itemTransport, friend, device.orEmpty())
+        } else {
+            itemTransport
+        }
         val topicById = examinable.associateBy { it.topicId }
         val semaphore = Semaphore(CourseMockLimits.ITEM_CONCURRENCY)
         val generatedItems = coroutineScope {
@@ -360,7 +430,7 @@ class CourseMockService(
                 async {
                     semaphore.withPermit {
                         val topic = topicById[slot.topicId] ?: examinable.first()
-                        generateAndVerifyItem(request, section, slot, topic)
+                        generateAndVerifyItem(request, section, slot, topic, effectiveItemTransport, recordOwnerLedger)
                     }
                 }
             }.awaitAll()
@@ -400,7 +470,7 @@ class CourseMockService(
             }
         }
 
-        val ledgerSummary = ledger?.bookSummary(request.courseId)
+        val ledgerSummary = if (recordOwnerLedger) ledger?.bookSummary(request.courseId) else null
         val paperId = "course-mock-${UUID.randomUUID().toString().replace("-", "").take(12)}"
         val basis = buildString {
             append(request.courseTitle)
@@ -458,6 +528,8 @@ class CourseMockService(
         section: MockBlueprintSection,
         slot: MockBlueprintSlot,
         topic: MockTopicCandidateInput,
+        activeItemTransport: BatchAiTransport = itemTransport,
+        recordOwnerLedger: Boolean = true,
     ): VerifiedMockItemOutcome {
         var calls = 0
         var lastError: String? = null
@@ -466,7 +538,7 @@ class CourseMockService(
         repeat(2) { attempt ->
             val userPrompt = buildItemPrompt(request, section, slot, topic, extraParaphraseNote)
             val batchKey = "cmi-${sha256("${request.courseId}|${slot.slotId}|$attempt|$userPrompt".toByteArray(Charsets.UTF_8)).take(16)}"
-            val reply = itemTransport.generateSection(
+            val reply = activeItemTransport.generateSection(
                 systemPrompt = ITEM_SYSTEM,
                 userPrompt = userPrompt,
                 task = CourseMockLimits.TASK_ITEM,
@@ -474,7 +546,7 @@ class CourseMockService(
                 maxTokens = CourseMockLimits.ITEM_MAX_TOKENS,
             )
             calls++
-            recordItemLedger(request.courseId, slot.slotId, batchKey, reply)
+            if (recordOwnerLedger) recordItemLedger(request.courseId, slot.slotId, batchKey, reply)
 
             val parsed = extractJsonObject(reply.text)
             if (parsed == null) {

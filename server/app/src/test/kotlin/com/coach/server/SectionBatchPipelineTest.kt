@@ -300,7 +300,7 @@ class SectionBatchPipelineTest {
             val body = kotlinx.serialization.json.Json.parseToJsonElement(exchange.requestBody.readBytes().decodeToString()) as JsonObject
             seen.add(exchange.requestHeaders.getFirst("X-Coach-Background") to body)
             val reply = buildJsonObject {
-                put("model", "claude-haiku-5-5")
+                put("model", "gpt-6.2-astra")
                 put("choices", buildJsonArray {
                     add(buildJsonObject {
                         put("index", 0)
@@ -308,7 +308,7 @@ class SectionBatchPipelineTest {
                     })
                 })
                 put("x_coach", buildJsonObject {
-                    put("status", "complete"); put("finish_reason", "stop"); put("served_by", "claude-haiku-5-5")
+                    put("status", "complete"); put("finish_reason", "stop"); put("served_by", "gpt-6.2-astra")
                     put("fallback", false); put("physical_calls", 1); put("request_id", "synthetic")
                     put("queue_ms", 1); put("ttft_ms", 1); put("elapsed_ms", 1)
                 })
@@ -326,7 +326,7 @@ class SectionBatchPipelineTest {
             assertEquals(CompanionRouteChannel.HAIKU_REALTIME, reply.routeChannel)
             assertEquals(1, seen.size)
             assertNull(seen.single().first, "Interactive overflow must not opt into background batch")
-            assertEquals("claude-haiku-5-5", seen.single().second["model"]?.let { (it as kotlinx.serialization.json.JsonPrimitive).content })
+            assertEquals("gpt-6.2-astra", seen.single().second["model"]?.let { (it as kotlinx.serialization.json.JsonPrimitive).content })
             assertEquals(
                 SectionBatchLimits.BODY_CHUNK_MAX_OUTPUT_TOKENS.toString(),
                 seen.single().second["max_tokens"]?.let { (it as kotlinx.serialization.json.JsonPrimitive).content },
@@ -590,7 +590,7 @@ class SectionBatchPipelineTest {
                 val headers = ex.requestHeaders.entries.associate { (k, v) -> k.lowercase() to v.joinToString(",") }
                 observedRequests += Triple(headers, body, ex.requestMethod)
                 val reply = buildJsonObject {
-                    put("model", "claude-haiku-5-5")
+                    put("model", "claude-sonnet-5-5")
                     put("choices", buildJsonArray {
                         add(buildJsonObject {
                             put("index", 0)
@@ -603,7 +603,7 @@ class SectionBatchPipelineTest {
                     put("x_coach", buildJsonObject {
                         put("status", "complete")
                         put("finish_reason", "stop")
-                        put("served_by", "claude-haiku-5-5")
+                        put("served_by", "claude-sonnet-5-5")
                         put("fallback", false)
                         put("physical_calls", 1)
                         put("request_id", "synthetic-friend")
@@ -677,7 +677,7 @@ class SectionBatchPipelineTest {
             assertEquals(friendId("friend-a"), hdrs["x-coach-friend"])
             assertEquals("dev-1", hdrs["x-coach-friend-device"])
             val parsedBody = com.coach.domain.LedgerJson.parseToJsonElement(reqBody) as JsonObject
-            assertEquals("claude-haiku-5-5", parsedBody["model"]?.toString()?.trim('"'))
+            assertEquals("claude-sonnet-5-5", parsedBody["model"]?.toString()?.trim('"'))
             assertNull(parsedBody["tools"])
             assertNull(parsedBody["response_format"])
             assertEquals(0, ledger.bookSummary(bookId).calls, "Friend companion must not pollute owner book_token_ledger")

@@ -260,7 +260,9 @@ class HaikuStreamingCollectionQaTransport(
     ): CollectionQaTransportReply = withContext(Dispatchers.IO) {
         val started = System.nanoTime()
         var firstDeltaAtMs: Long? = null
-        var servedModel = BridgeClient.HAIKU
+        val targetModel = if (friend != null) BridgeClient.CLAUDE else BridgeClient.GPT_62_ASTRA
+        val targetTask = if (friend != null) "READER_SELECTION" else "COLLECTION_QA"
+        var servedModel = targetModel
         val buf = StringBuilder()
         val sink = object : BridgeStreamSink {
             override val supportsReset: Boolean = true
@@ -280,8 +282,8 @@ class HaikuStreamingCollectionQaTransport(
         }
         val result = bridge.streamChat(
             ChatRequest(
-                task = "READER_SELECTION",
-                model = BridgeClient.HAIKU,
+                task = targetTask,
+                model = targetModel,
                 system = systemPrompt,
                 user = userPrompt,
                 stream = true,

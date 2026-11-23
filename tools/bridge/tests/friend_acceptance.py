@@ -39,9 +39,9 @@ def bridge_child(port):
     from api_route import ApiRouter
     def provider(request):
         assert request.url.host == "api.anthropic.com"
-        assert json.loads(request.content)["model"] == "claude-haiku-5-5"
+        assert json.loads(request.content)["model"] == "claude-sonnet-5-5"
         text = json.dumps({"paragraphs": [{"text": "这是用于验收的自写样例说明。", "anchors": ["S1"]}]}, ensure_ascii=False)
-        events = [{"type": "message_start", "message": {"model": "claude-haiku-5-5", "usage": {"input_tokens": 100}}},
+        events = [{"type": "message_start", "message": {"model": "claude-sonnet-5-5", "usage": {"input_tokens": 100}}},
             {"type": "content_block_delta", "delta": {"type": "text_delta", "text": text}},
             {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 20}},
             {"type": "message_stop"}]

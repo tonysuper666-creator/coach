@@ -35,7 +35,7 @@ class RequestLogTests(unittest.TestCase):
 
 
 def frames(provider, terminal=True, usage=True, model=None):
-    model = model or ("claude-haiku-5-5" if provider == "anthropic" else "gpt-6.1-terra")
+    model = model or ("claude-sonnet-5-5" if provider == "anthropic" else "gpt-6.2-astra")
     if provider == "anthropic":
         events = [{"type": "message_start", "message": {"model": model, "usage": {"input_tokens": 100} if usage else {}}},
                   {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "synthetic answer"}},
@@ -181,12 +181,13 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def router(self, content=None, status=200, keys=None, handler=None, **kwargs):
+    def router(self, content=None, status=200, keys=None, handler=None, cross_vendor_fallback=False, **kwargs):
         def handle(request):
             self.requests.append(request)
             return handler(request) if handler else httpx.Response(status, content=content or b"error-body-must-never-be-read")
         return ApiRouter(self.ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(handle)),
-                         keys=keys if keys is not None else {"anthropic": KEY, "openai": KEY}, **kwargs)
+                         keys=keys if keys is not None else {"anthropic": KEY, "openai": KEY},
+                         cross_vendor_fallback=cross_vendor_fallback, **kwargs)
 
     async def collect(self, router, task="READER_SELECTION", model="claude-sonnet-5-5"):
         return [e async for e in router.events(task, model, "synthetic system", "synthetic prompt", 100)]
@@ -209,9 +210,12 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], self.requests)
 
     async def test_both_official_streaming_protocols_and_usage(self):
-        for provider, task, requested in (("anthropic", "READER_SELECTION", "claude-sonnet-5-5"), ("openai", "cross_review_grade", "gpt-6.1-sol")):
+        for provider, task, requested, served in (
+            ("anthropic", "READER_SELECTION", "claude-sonnet-5-5", "claude-sonnet-5-5"),
+            ("openai", "cross_review_grade", "gpt-6.2-astra", "gpt-6.2-astra"),
+        ):
             with self.subTest(provider=provider):
-                events = await self.collect(self.router(frames(provider)), task, requested)
+                events = await self.collect(self.router(frames(provider, model=served)), task, requested)
                 self.assertEqual("complete", events[-1]["kind"])
                 self.assertEqual("synthetic answer", events[-1]["text"])
                 self.assertEqual(120, events[-1]["usage"]["total_tokens"])
@@ -220,10 +224,13 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("api.openai.com", self.requests[1].url.host)
 
     async def test_missing_usage_or_terminal_retains_full_reservation(self):
-        for provider, task, requested in (("anthropic", "TEACH", "claude-sonnet-5-5"), ("openai", "blind_review", "gpt-6.1-sol")):
+        for provider, task, requested, served in (
+            ("anthropic", "TEACH", "claude-sonnet-5-5", "claude-sonnet-5-5"),
+            ("openai", "blind_review", "gpt-6.2-astra", "gpt-6.2-astra"),
+        ):
             for terminal, usage in ((False, True), (True, False)):
                 with self.assertRaises(ApiFailure):
-                    await self.collect(self.router(frames(provider, terminal, usage)), task, requested)
+                    await self.collect(self.router(frames(provider, terminal, usage, model=served)), task, requested)
             self.assertGreater(self.ledger.read()["months"]["2026-11"][provider]["reserved_microusd"], 0)
 
     async def test_http_errors_never_expose_body(self):
@@ -241,16 +248,16 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Denied, "missing_key"):
             await self.collect(self.router(keys={}))
         self.assertEqual([], self.requests)
-        events = await self.collect(self.router(frames("anthropic"), keys={"anthropic": KEY}))
+        events = await self.collect(self.router(frames("anthropic", model="claude-sonnet-5-5"), keys={"anthropic": KEY}))
         self.assertEqual("complete", events[-1]["kind"])
         self.assertEqual(1, len(self.requests))
 
     async def test_wrong_served_model_fails_closed(self):
         with self.assertRaisesRegex(ApiFailure, "api_model_mismatch"):
-            await self.collect(self.router(frames("anthropic", model="claude-sonnet-5-5")))
+            await self.collect(self.router(frames("anthropic", model="claude-haiku-5-5")))
 
     async def test_cancellation_keeps_reservation(self):
-        events = self.router(frames("anthropic")).events("TEACH", "claude-sonnet-5-5", "s", "u", 100)
+        events = self.router(frames("anthropic", model="claude-sonnet-5-5")).events("TEACH", "claude-sonnet-5-5", "s", "u", 100)
         self.assertEqual("attempt", (await anext(events))["kind"])
         await events.aclose()
         self.assertGreater(self.ledger.read()["months"]["2026-11"]["anthropic"]["reserved_microusd"], 0)
@@ -266,9 +273,9 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             attempts += 1
             if attempts == 1:
                 return httpx.Response(429, headers={"Retry-After": "1.25"}, content=b"sensitive-upstream-body")
-            return httpx.Response(200, content=frames("anthropic"))
+            return httpx.Response(200, content=frames("anthropic", model="claude-sonnet-5-5"))
         r = self.router(handler=handler, retry_429_delays=(0.5, 1.5), sleep=fake_sleep)
-        events = await self.collect(r, "READER_SELECTION", "claude-haiku-5-5")
+        events = await self.collect(r, "READER_SELECTION", "claude-sonnet-5-5")
         self.assertEqual("complete", events[-1]["kind"])
         self.assertEqual(2, len(self.requests))
         self.assertEqual([1.25], slept)
@@ -290,9 +297,9 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             request_times.append(now)
             if now < 10.0:
                 return httpx.Response(429, headers={"Retry-After": str(int(10.0 - now))}, content=b"rate limited")
-            return httpx.Response(200, content=frames("anthropic"))
+            return httpx.Response(200, content=frames("anthropic", model="claude-sonnet-5-5"))
         r = self.router(handler=handler, retry_429_delays=(0.5, 1.5), retry_429_budget=45.0, sleep=fake_sleep, clock=fake_clock)
-        events = await self.collect(r, "READER_SELECTION", "claude-haiku-5-5")
+        events = await self.collect(r, "READER_SELECTION", "claude-sonnet-5-5")
         self.assertEqual("complete", events[-1]["kind"])
         self.assertEqual([0.0, 10.0], request_times)
         self.assertEqual([10.0], slept)
@@ -311,7 +318,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(429, headers={"Retry-After": "60"}, content=b"rate limited sensitive body")
         r = self.router(handler=handler, retry_429_delays=(0.5, 1.5), retry_429_budget=45.0, sleep=fake_sleep, clock=lambda: now)
         with self.assertRaises(ApiFailure) as ctx:
-            await self.collect(r, "READER_SELECTION", "claude-haiku-5-5")
+            await self.collect(r, "READER_SELECTION", "claude-sonnet-5-5")
         self.assertEqual("api_http_429", str(ctx.exception))
         self.assertEqual(60, ctx.exception.retry_after_sec)
         self.assertEqual(1, len(self.requests))
@@ -319,7 +326,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(self.ledger.read()["months"]["2026-11"]["anthropic"]["reserved_microusd"], 0)
         # Bridge API_ONLY propagates retry_after_sec in x_coach without leaking any upstream body.
         req = bridge.build_req(
-            {"model": "claude-haiku-5-5", "max_tokens": 100, "messages": [{"role": "user", "content": "synthetic"}]},
+            {"model": "claude-sonnet-5-5", "max_tokens": 100, "messages": [{"role": "user", "content": "synthetic"}]},
             {"x-coach-task": "READER_SELECTION"},
         )
         with patch.object(bridge, "API_ONLY", True), patch.object(bridge, "API_ROUTER", r), patch.object(bridge, "write_log"):
@@ -364,7 +371,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             retry_429_delays=(),
         )
         bulk_tasks = [
-            asyncio.create_task(self.collect_prompt(r, "course_topic_map", f"bulk:{i}"))
+            asyncio.create_task(self.collect_prompt(r, "COURSE_PLAN", f"bulk:{i}"))
             for i in range(5)
         ]
         await asyncio.wait_for(bulk_started.wait(), timeout=2.0)
@@ -380,26 +387,89 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, bulk_peak)
 
     async def collect_prompt(self, router, task, prompt):
-        return [e async for e in router.events(task, "claude-haiku-5-5", "synthetic system", prompt, 100)]
+        return [e async for e in router.events(task, "claude-sonnet-5-5", "synthetic system", prompt, 100)]
 
 
 class RoutingTests(unittest.IsolatedAsyncioTestCase):
     def test_rate_limited_grading_swap_keeps_cross_vendor_review(self):
         draft = route("grade_constructed", "gpt-6.1-sol")
         review = route("cross_review_grade", "claude-sonnet-5-5")
-        self.assertEqual("gpt-6.1-terra", draft)
-        self.assertEqual("claude-haiku-5-5", review)
+        self.assertEqual("gpt-6.2-astra", draft)
+        self.assertEqual("claude-opus-5-5", review)
         self.assertNotEqual(vendor(draft), vendor(review))
 
     def test_task_roles_and_format_escalation(self):
         for task, group in CONFIG["tasks"].items():
+            if group in ("review", "review_openai", "review_upgrade"):
+                self.assertEqual(CONFIG["models"]["review"], route(task, "claude-sonnet-5-5"))
+                self.assertEqual(CONFIG["models"]["review_openai"], route(task, "gpt-6.1-sol"))
+                continue
             expected = CONFIG["models"][group]
-            requested = "gpt-6.1-sol" if vendor(expected) == "openai" else "claude-sonnet-5-5"
-            self.assertEqual(expected, route(task, requested))
-        self.assertEqual("claude-haiku-5-5", route("gen_mcq", "claude-sonnet-5-5", 1))
-        self.assertEqual("claude-sonnet-5-5", route("gen_mcq", "claude-sonnet-5-5", 2))
-        self.assertEqual("claude-haiku-5-5", route("cross_review_grade", "claude-sonnet-5-5"))
+            self.assertEqual(expected, route(task, "claude-sonnet-5-5"))
+        self.assertEqual("gpt-6.2-sol", route("gen_mcq", "gpt-6.2-sol", 1))
+        self.assertEqual("gpt-6.2-astra", route("gen_mcq", "gpt-6.2-sol", 2))
+        self.assertEqual("claude-opus-5-5", route("cross_review_grade", "claude-sonnet-5-5"))
+        self.assertEqual("gpt-6.2-astra", route("cross_review_grade", "gpt-6.1-sol"))
         self.assertIsNone(route("not-a-task", "claude-sonnet-5-5"))
+
+    async def test_cross_vendor_fallback_on_429_and_not_on_review_or_partial(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fund(root)
+            ledger = CreditLedger(root, lambda: NOW)
+            seen_hosts = []
+            def handler(request):
+                seen_hosts.append(request.url.host)
+                if request.url.host == "api.anthropic.com":
+                    return httpx.Response(429, headers={"Retry-After": "60"}, content=b"rate-limited")
+                return httpx.Response(200, content=frames("openai", model="gpt-6.2-sol"))
+            r = ApiRouter(ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                          keys={"anthropic": KEY, "openai": KEY}, retry_429_delays=(), cross_vendor_fallback=True)
+            events = [e async for e in r.events("READER_SELECTION", "claude-sonnet-5-5", "sys", "usr", 100)]
+            self.assertEqual("complete", events[-1]["kind"])
+            self.assertEqual("gpt-6.2-sol", events[-1]["served_by"])
+            self.assertEqual(["api.anthropic.com", "api.openai.com"], seen_hosts)
+
+            # Review tasks MUST NOT cross-vendor fall back even on 429
+            seen_hosts.clear()
+            r_review = ApiRouter(ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                                 keys={"anthropic": KEY, "openai": KEY}, retry_429_delays=(), cross_vendor_fallback=True)
+            with self.assertRaises(ApiFailure):
+                [e async for e in r_review.events("blind_review", "claude-sonnet-5-5", "sys", "usr", 100)]
+            self.assertEqual(["api.anthropic.com"], seen_hosts)
+
+    async def test_empty_text_delta_before_drop_still_allows_cross_vendor_fallback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fund(root)
+            ledger = CreditLedger(root, lambda: NOW)
+
+            def empty_delta_then_drop(request):
+                if request.url.host == "api.anthropic.com":
+                    events = [
+                        {"type": "message_start", "message": {"model": "claude-sonnet-5-5", "usage": {"input_tokens": 10}}},
+                        {"type": "content_block_delta", "delta": {"type": "text_delta", "text": ""}},
+                    ]
+                    return httpx.Response(200, content="".join("data: " + json.dumps(e) + "\n\n" for e in events).encode())
+                return httpx.Response(200, content=frames("openai", model="gpt-6.2-sol"))
+
+            r = ApiRouter(ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(empty_delta_then_drop)),
+                          keys={"anthropic": KEY, "openai": KEY}, retry_429_delays=(), cross_vendor_fallback=True)
+            events = [e async for e in r.events("TEACH", "claude-sonnet-5-5", "sys", "usr", 100)]
+            self.assertEqual("complete", events[-1]["kind"])
+            self.assertEqual("gpt-6.2-sol", events[-1]["served_by"])
+
+            def partial_nonempty_then_drop(request):
+                events = [
+                    {"type": "message_start", "message": {"model": "claude-sonnet-5-5", "usage": {"input_tokens": 10}}},
+                    {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "partial"}},
+                ]
+                return httpx.Response(200, content="".join("data: " + json.dumps(e) + "\n\n" for e in events).encode())
+
+            r_partial = ApiRouter(ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(partial_nonempty_then_drop)),
+                                  keys={"anthropic": KEY, "openai": KEY}, retry_429_delays=(), cross_vendor_fallback=True)
+            with self.assertRaisesRegex(ApiFailure, "api_no_terminal"):
+                [e async for e in r_partial.events("TEACH", "claude-sonnet-5-5", "sys", "usr", 100)]
 
     def test_every_server_bridge_task_and_model_is_served(self):
         # TON-1795: 2.0 routes requested an unregistered model and unrouted tasks, so the
@@ -410,11 +480,14 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
                    for p in (root / d).rglob("*.kt")]
         tasks = {t for s in sources for t in re.findall(r'\btask\s*=\s*"([A-Za-z_]+)"', s)}
         tasks |= {t for s in sources for t in re.findall(r'"(BOOK_[A-Z_]+)"', s)}
-        # Token-ledger labels only; these calls never reach the bridge.
-        tasks -= {"course_align", "course_vision_ocr", "COLLECTION_QA"}
+        # Token-ledger / section labels only; these calls never reach the bridge.
+        tasks -= {
+            "course_align", "course_vision_ocr",
+            "BOOK_MAP_BATCH", "BOOK_MAP_GRAPH",
+        }
         self.assertTrue({"booklist_concept_align", "course_topic_map", "BOOK_SECTION_BATCH"} <= tasks)
         self.assertEqual(set(), tasks - set(CONFIG["tasks"]))
-        constants = {m for s in sources for m in re.findall(r'const val [A-Z]+ = "((?:claude|gpt)-[a-z0-9.-]+)"', s)}
+        constants = {m for s in sources for m in re.findall(r'const val [A-Z0-9_]+ = "((?:claude|gpt)-[a-z0-9.-]+)"', s)}
         self.assertIn("claude-haiku-5-5", constants)
         self.assertEqual(set(), constants - set(bridge.MODELS))
 

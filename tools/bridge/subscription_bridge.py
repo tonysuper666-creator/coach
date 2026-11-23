@@ -43,7 +43,7 @@ from typing import Any, AsyncIterator
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from api_route import ApiRouter, ApiFailure, route as api_model
+from api_route import ApiRouter, ApiFailure, route as api_model, vendor as api_vendor
 from api_budget import Denied
 from api_batch import BatchRouter, BatchPending, TASKS as BATCH_TASKS
 
@@ -113,8 +113,12 @@ class ModelSpec:
 
 def build_registry() -> dict[str, ModelSpec]:
     reg = {
+        "claude-opus-5-5": ModelSpec("claude-opus-5-5", "claude", True),
         "claude-sonnet-5-5": ModelSpec("claude-sonnet-5-5", "claude", True),
         "claude-haiku-5-5": ModelSpec("claude-haiku-5-5", "claude", True),
+        "gpt-6.2-astra": ModelSpec("gpt-6.2-astra", "codex", False),
+        "gpt-6.2-sol": ModelSpec("gpt-6.2-sol", "codex", False),
+        "gpt-6.1-terra": ModelSpec("gpt-6.1-terra", "codex", False),
         "gpt-6.1-sol": ModelSpec("gpt-6.1-sol", "codex", False),
         "gpt-6-sol": ModelSpec("gpt-6-sol", "codex", False),
     }
@@ -1387,14 +1391,64 @@ async def dispatch_batch(req: ReqCtx, model: str, effort: str | None) -> Outcome
         req.transport = result["transport"]
         req.physical_calls = result.get("physical_calls", 1)
         req.api_fallback = result.get("api_fallback")
+        # Cached cross-vendor backups must keep their wire marker; caches written before the flag
+        # existed are recognised by a served_by vendor that differs from the requested primary.
+        primary = api_model(req.task, model, req.format_attempt) or model
+        req.fallback = bool(result.get("fallback")) or api_vendor(result["served_by"]) != api_vendor(primary)
         req.t_acq = time.monotonic()
         return Outcome("complete", None, "stop", result["served_by"], text=result["text"], usage=result["usage"])
     except (ApiFailure, Denied, OSError) as error:
         reason = str(error) if isinstance(error, (ApiFailure, Denied)) else "batch_state_io"
         req.api_fallback = reason
         write_log(request_id=req.request_id, task=req.task, event="api_fallback", reason=reason)
+        if reason == "batch_submit_ambiguous":
+            # A batch may already exist upstream: neither the cross-vendor API backup nor the
+            # subscription CLI may generate this job a second time, in any mode.
+            req.transport = "api"
+            return Outcome("failed", reason, "error", model)
         if API_ONLY:
             req.transport = "api"
+            pre_submit_reasons = (
+                "batch_submit_unavailable",
+                "missing_key",
+                "credit_limit_95_percent",
+                "grant_allocation_unavailable",
+            )
+            primary = api_model(req.task, model, req.format_attempt) or model
+            if not req.friend_id and reason in pre_submit_reasons and API_ROUTER.fallback_target(req.task, primary) is not None:
+                try:
+                    async with aclosing(
+                        API_ROUTER.fallback_events(
+                            req.task, primary, req.spec_data.system, req.spec_data.prompt, req.body.get("max_tokens")
+                        )
+                    ) as events:
+                        async for event in events:
+                            if event["kind"] == "attempt":
+                                req.physical_calls += 1
+                                req.t_acq = req.t_acq or time.monotonic()
+                            elif event["kind"] == "complete":
+                                req.served_by = event["served_by"]
+                                req.fallback = True
+                                try:
+                                    API_BATCH.cache_fallback(
+                                        req.batch_key,
+                                        {
+                                            "text": event["text"],
+                                            "served_by": event["served_by"],
+                                            "usage": event["usage"],
+                                            "transport": "api",
+                                            "physical_calls": req.physical_calls,
+                                            "api_fallback": reason,
+                                            "fallback": True,
+                                        },
+                                    )
+                                except (Denied, OSError):
+                                    write_log(request_id=req.request_id, task=req.task, event="batch_cache_unavailable")
+                                return Outcome(
+                                    "complete", None, "stop", event["served_by"], text=event["text"], usage=event["usage"]
+                                )
+                except (ApiFailure, Denied, OSError):
+                    write_log(request_id=req.request_id, task=req.task, event="api_cross_vendor_fallback_failed")
             return Outcome("failed", reason, "error", model)
         outcome = await dispatch_cli(req, model, effort)
         if outcome.status == "complete":
@@ -1427,6 +1481,8 @@ async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
                         req.transport = "api"
                     elif kind == "complete":
                         req.served_by = event["served_by"]
+                        if event.get("fallback"):
+                            req.fallback = True
                         yield {"kind": "end", "outcome": Outcome("complete", None, "stop", event["served_by"],
                                text=event["text"], usage=event["usage"], started=sent)}
                         return

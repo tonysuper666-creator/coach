@@ -229,11 +229,13 @@ class HaikuStudyModeStreamTransport(
         val startedNs = System.nanoTime()
         val firstDeltaMs = AtomicLong(0L)
         val buffer = StringBuilder()
-        var servedByName = BridgeClient.HAIKU
+        val targetTask = if (friend != null) "READER_SELECTION" else "STUDY_MODE_STREAM"
+        val targetModel = if (friend != null) BridgeClient.CLAUDE else BridgeClient.GPT_62_ASTRA
+        var servedByName = targetModel
         val result = bridge.streamChat(
             ChatRequest(
-                task = if (friend != null) "READER_SELECTION" else "PREPARE_TEACH",
-                model = BridgeClient.HAIKU,
+                task = targetTask,
+                model = targetModel,
                 system = systemPrompt,
                 user = userPrompt,
                 stream = true,
@@ -297,10 +299,11 @@ class HaikuStudyModeBatchTransport(
     ): StudyModeTransportReply {
         val startedNs = System.nanoTime()
         val batchEligible = useBatchApi && friend == null
+        val targetModel = if (friend != null) BridgeClient.CLAUDE else BridgeClient.GPT_62_ASTRA
         val client = if (batchEligible) bridge.forBatchJob("studymode", jobKey) else bridge
         val request = ChatRequest(
-            task = if (friend != null) "READER_SELECTION" else if (batchEligible) task else "PREPARE_TEACH",
-            model = BridgeClient.HAIKU,
+            task = if (friend != null) "READER_SELECTION" else task,
+            model = targetModel,
             system = systemPrompt,
             user = userPrompt,
             stream = false,
@@ -320,7 +323,7 @@ class HaikuStudyModeBatchTransport(
                     is BridgeResult.Success -> StudyModeTransportReply(
                         text = result.text,
                         routeChannel = if (batchEligible) CompanionRouteChannel.HAIKU_BATCH else CompanionRouteChannel.HAIKU_REALTIME,
-                        model = result.terminal.servedBy?.ifBlank { BridgeClient.HAIKU } ?: BridgeClient.HAIKU,
+                        model = result.terminal.servedBy?.ifBlank { targetModel } ?: targetModel,
                         inputTokens = TokenLedgerPricing.estimateTokens(systemPrompt) + TokenLedgerPricing.estimateTokens(userPrompt),
                         outputTokens = TokenLedgerPricing.estimateTokens(result.text),
                         firstTokenMs = elapsedMs,
@@ -751,7 +754,7 @@ Do NOT paraphrase, truncate mid-word, or invent text."""
             }
         }
         val reply = transport.complete(
-            task = "PREPARE_TEACH",
+            task = "STUDY_MODE_ANCHOR_REPAIR",
             jobKey = StudyModeJsonHelpers.sha256Hex("repair:$bookId:$chapterNum:${failures.size}"),
             systemPrompt = sys,
             userPrompt = user,
@@ -940,7 +943,7 @@ Return STRICT JSON: {"items":[{"id":"...","obj":{...exact same keys corrected...
             }
             repairReply = runCatching {
                 repairTransport.complete(
-                    task = "PREPARE_TEACH",
+                    task = "STUDY_MODE_MATH_REPAIR",
                     jobKey = StudyModeJsonHelpers.sha256Hex("mathfix:$bookId:$chapterNum:${idsToRepair.joinToString(",")}"),
                     systemPrompt = sys,
                     userPrompt = user,

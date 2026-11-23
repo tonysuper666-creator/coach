@@ -38,7 +38,7 @@ class BatchSupplyTest {
             worker = PoolWorker(actor, BridgeClient(stubConfig(bridge)))
             assertNull(worker.runOne(), "poll deadline must survive reopening the database")
             now += 60_001
-            bridge.enqueue(200, StubBridge.completion(generated(), "claude-haiku-5-5"))
+            bridge.enqueue(200, StubBridge.completion(generated(), BridgeClient.GPT_62_SOL))
             assertEquals("completed", worker.runOne()!!.state)
             assertEquals(bridge.key(0), bridge.key(1), "new fences retain the durable batch identity")
             assertNotNull(bridge.key(0))
@@ -47,7 +47,7 @@ class BatchSupplyTest {
             assertEquals("pending", worker.runOne()!!.state)
             assertNotEquals(bridge.key(0), bridge.key(2), "review is an independently submitted task")
             now += 60_001
-            bridge.enqueue(200, StubBridge.completion(reviewed(), "gpt-6.1-terra"))
+            bridge.enqueue(200, StubBridge.completion(reviewed(), BridgeClient.OPUS))
             assertEquals(3, worker.runOne()!!.inserted)
             assertEquals(bridge.key(2), bridge.key(3))
             assertEquals(3, actor.execute { poolAvailable("c", "kp") })
@@ -97,9 +97,9 @@ class BatchSupplyTest {
         try { StubBridge().use { bridge ->
             val worker = PoolWorker(actor, BridgeClient(stubConfig(bridge)))
             worker.ensure("c", "kp", "Objective", source, 3, background = true)
-            bridge.enqueue(200, StubBridge.completion(generated(), "claude-haiku-5-5"))
+            bridge.enqueue(200, StubBridge.completion(generated(), BridgeClient.GPT_62_SOL))
             assertEquals("completed", worker.runOne()!!.state)
-            bridge.enqueue(200, StubBridge.completion(reviewed(), "claude-haiku-5-5"))
+            bridge.enqueue(200, StubBridge.completion(reviewed(), BridgeClient.GPT_62_ASTRA))
             assertEquals("retrying", worker.runOne()!!.state)
             assertEquals(0, actor.execute { poolAvailable("c", "kp") })
         } } finally { actor.close(); dir.toFile().deleteRecursively() }
@@ -113,19 +113,19 @@ class BatchSupplyTest {
             val worker = PoolWorker(actor, BridgeClient(stubConfig(bridge)))
             worker.ensure("c", "kp", "Objective", source, 3, background = true)
             val draft = generated().replace(source, "A quotation absent from the source.")
-            bridge.enqueue(200, StubBridge.completion(draft, "claude-haiku-5-5"))
+            bridge.enqueue(200, StubBridge.completion(draft, BridgeClient.GPT_62_SOL))
             bridge.enqueue(202, pending)
             assertEquals("pending", worker.runOne()!!.state)
             assertEquals(1L, actor.execute { supplyCallCount() })
             now += 60_001
-            bridge.enqueue(200, StubBridge.completion(draft, "claude-haiku-5-5"))
+            bridge.enqueue(200, StubBridge.completion(draft, BridgeClient.GPT_62_SOL))
             val repairs = JsonArray((0..2).map { json("id" to it, "source_quote" to source) }).toString()
-            bridge.enqueue(200, StubBridge.completion(repairs, "claude-haiku-5-5"))
+            bridge.enqueue(200, StubBridge.completion(repairs, BridgeClient.GPT_62_SOL))
             assertEquals("completed", worker.runOne()!!.state)
             assertEquals(bridge.key(0), bridge.key(2))
             assertEquals(bridge.key(1), bridge.key(3))
             assertNotEquals(bridge.key(0), bridge.key(1))
-            bridge.enqueue(200, StubBridge.completion(reviewed(), "gpt-6.1-terra"))
+            bridge.enqueue(200, StubBridge.completion(reviewed(), BridgeClient.OPUS))
             assertEquals(3, worker.runOne()!!.inserted)
             assertEquals(3L, actor.execute { supplyCallCount() })
         } } finally { actor.close(); dir.toFile().deleteRecursively() }
@@ -146,17 +146,17 @@ class BatchSupplyTest {
                 "reference_answer" to "The selected text is the uniquely correct result.",
                 "rubric" to JsonArray((1..3).map { r -> json("id" to "R$r", "text" to "Explains factor $r",
                     "points" to if (r == 3) 4 else 3, "basis" to source) })) }).toString()
-            bridge.enqueue(200, StubBridge.completion(draft, "claude-haiku-5-5"))
+            bridge.enqueue(200, StubBridge.completion(draft, BridgeClient.GPT_62_SOL))
             assertEquals("completed", worker.runOne()!!.state)
             assertEquals(bridge.key(0), bridge.key(1))
             bridge.enqueue(202, pending)
             assertEquals("pending", worker.runOne()!!.state)
             assertEquals(0, actor.execute { constructedAvailable("c", "kp") })
             val verdict = """{"verdict":"CONFIRM","note":"Supported"}"""
-            bridge.enqueue(200, StubBridge.completion(verdict, "gpt-6.1-terra"))
+            bridge.enqueue(200, StubBridge.completion(verdict, BridgeClient.OPUS))
             assertEquals(1, worker.runOne()!!.inserted)
             now += 60_001
-            bridge.enqueue(200, StubBridge.completion(verdict, "gpt-6.1-terra"))
+            bridge.enqueue(200, StubBridge.completion(verdict, BridgeClient.OPUS))
             assertEquals(1, worker.runOne()!!.inserted)
             assertEquals(bridge.key(2), bridge.key(4))
             assertNotEquals(bridge.key(2), bridge.key(3))

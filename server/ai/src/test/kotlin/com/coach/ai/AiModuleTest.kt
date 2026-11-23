@@ -155,6 +155,50 @@ class BridgeClientTest {
             assertEquals("allowed", ((rate as kotlinx.serialization.json.JsonObject)["status"] as kotlinx.serialization.json.JsonPrimitive).content)
         }
     }
+
+    @Test
+    fun nonReviewOwnerAcceptsCrossVendorBackupWhileReviewAndFriendStayStrict() {
+        StubBridge().use { bridge ->
+            // 1) Owner non-review task accepts cross-vendor fallback
+            bridge.enqueue(200, StubBridge.fallbackCompletion("owner backup answer").replace("__MODEL__", BridgeClient.GPT_62_SOL))
+            val ownerRes = client(bridge).chat(
+                ChatRequest("READER_SELECTION", BridgeClient.CLAUDE, "sys", "usr", stream = false),
+            )
+            assertIs<BridgeResult.Success>(ownerRes)
+            assertEquals(BridgeClient.GPT_62_SOL, ownerRes.call.servedBy)
+
+            // 2) Review task rejects cross-vendor & fallback=true
+            bridge.enqueue(200, StubBridge.completion("review", served = BridgeClient.GPT_62_ASTRA))
+            val reviewCrossVendor = client(bridge).chat(
+                ChatRequest("blind_review", BridgeClient.OPUS, "sys", "usr", stream = false),
+            )
+            assertIs<BridgeResult.Failure>(reviewCrossVendor)
+            assertEquals("served_by_mismatch:gpt-6.2-astra", reviewCrossVendor.reason)
+
+            bridge.enqueue(200, StubBridge.fallbackCompletion("review"))
+            val reviewFallback = client(bridge).chat(
+                ChatRequest("blind_review", BridgeClient.OPUS, "sys", "usr", stream = false),
+            )
+            assertIs<BridgeResult.Failure>(reviewFallback)
+            assertEquals("served_by_mismatch:fallback", reviewFallback.reason)
+
+            // 3) Friend request rejects cross-vendor
+            bridge.enqueue(200, StubBridge.completion("friend", served = BridgeClient.GPT_62_SOL))
+            val friendRes = client(bridge).chat(
+                ChatRequest(
+                    "READER_SELECTION",
+                    BridgeClient.CLAUDE,
+                    "sys",
+                    "usr",
+                    stream = false,
+                    friendId = "a".repeat(64),
+                    friendDevice = "phone",
+                ),
+            )
+            assertIs<BridgeResult.Failure>(friendRes)
+            assertEquals("served_by_mismatch:gpt-6.2-sol", friendRes.reason)
+        }
+    }
 }
 
 class TaskContractTest {

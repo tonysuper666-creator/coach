@@ -48,7 +48,8 @@ import java.util.UUID
  *    (never relying on implicit Sonnet rewriting).
  */
 object PracticeGradeLimits {
-    const val PINNED_HAIKU_MODEL: String = BridgeClient.HAIKU // "claude-haiku-5-5"
+    const val PINNED_HAIKU_MODEL: String = BridgeClient.HAIKU // "claude-haiku-5-5" (kept for test/ledger compat)
+    const val PINNED_GRADE_MODEL: String = BridgeClient.GPT_62_ASTRA
     const val BATCH_MAX_TOKENS: Int = 8_192
     const val MAX_FEEDBACK_ZH_CHARS: Int = 42
     const val MAX_FEEDBACK_CONSECUTIVE_EN_WORDS: Int = 18
@@ -516,6 +517,7 @@ class HaikuPinnedBridgeTransport(
     private val bridge: BridgeClient,
     private val defaultMaxTokens: Int = PracticeGradeLimits.BATCH_MAX_TOKENS,
     private val backgroundBatch: Boolean = false,
+    private val model: String = PracticeGradeLimits.PINNED_GRADE_MODEL,
 ) : BatchAiTransport {
     override suspend fun generateSection(
         systemPrompt: String,
@@ -523,20 +525,61 @@ class HaikuPinnedBridgeTransport(
         task: String,
         batchKey: String,
         maxTokens: Int,
+    ): BatchTransportReply = generateSectionInternal(
+        systemPrompt = systemPrompt,
+        userPrompt = userPrompt,
+        task = task,
+        batchKey = batchKey,
+        maxTokens = maxTokens,
+        friend = null,
+        device = null,
+    )
+
+    override suspend fun generateSectionForFriend(
+        systemPrompt: String,
+        userPrompt: String,
+        task: String,
+        batchKey: String,
+        maxTokens: Int,
+        friend: String?,
+        device: String?,
+    ): BatchTransportReply = generateSectionInternal(
+        systemPrompt = systemPrompt,
+        userPrompt = userPrompt,
+        task = task,
+        batchKey = batchKey,
+        maxTokens = maxTokens,
+        friend = friend,
+        device = device,
+    )
+
+    private suspend fun generateSectionInternal(
+        systemPrompt: String,
+        userPrompt: String,
+        task: String,
+        batchKey: String,
+        maxTokens: Int,
+        friend: String?,
+        device: String?,
     ): BatchTransportReply = withContext(Dispatchers.IO) {
         val started = System.nanoTime()
         val effectiveLimit = maxOf(maxTokens, defaultMaxTokens).coerceAtMost(16_000)
-        val client = if (backgroundBatch) bridge.forBatchJob("practice", batchKey) else bridge
+        val useBatch = backgroundBatch && friend == null
+        val targetTask = if (friend != null) "READER_SELECTION" else task
+        val targetModel = if (friend != null) BridgeClient.CLAUDE else model
+        val client = if (useBatch) bridge.forBatchJob("practice", batchKey) else bridge
         val request = ChatRequest(
-            task = task,
-            model = PracticeGradeLimits.PINNED_HAIKU_MODEL,
+            task = targetTask,
+            model = targetModel,
             system = systemPrompt,
             user = userPrompt,
             stream = false,
-            background = backgroundBatch,
+            background = useBatch,
             maxTokens = effectiveLimit,
+            friendId = friend?.let(::friendId),
+            friendDevice = if (friend != null) device else null,
         )
-        val result = if (backgroundBatch) {
+        val result = if (useBatch) {
             pollUntilComplete(client, request)
         } else {
             client.chat(request)
@@ -545,14 +588,21 @@ class HaikuPinnedBridgeTransport(
         when (result) {
             is BridgeResult.Success -> BatchTransportReply(
                 text = result.text,
-                routeChannel = if (backgroundBatch) CompanionRouteChannel.HAIKU_BATCH else CompanionRouteChannel.HAIKU_REALTIME,
-                model = result.terminal.servedBy ?: PracticeGradeLimits.PINNED_HAIKU_MODEL,
+                routeChannel = if (useBatch) CompanionRouteChannel.HAIKU_BATCH else CompanionRouteChannel.HAIKU_REALTIME,
+                model = result.terminal.servedBy ?: targetModel,
                 inputTokens = TokenLedgerPricing.estimateTokens(systemPrompt) + TokenLedgerPricing.estimateTokens(userPrompt),
                 outputTokens = TokenLedgerPricing.estimateTokens(result.text),
                 ttftMs = result.call.ttftMs ?: elapsedMs,
                 elapsedMs = result.call.durMs.coerceAtLeast(1L),
             )
-            is BridgeResult.Failure -> throw IllegalStateException("haiku_pinned_failed:${result.reason}")
+            is BridgeResult.Failure -> {
+                if (friend != null) {
+                    val reason = result.terminal?.reason
+                    val quotaCode = reason?.takeIf { it in setOf("daily_quota", "monthly_quota") }
+                    throw FriendServiceError(quotaCode ?: "unavailable")
+                }
+                throw IllegalStateException("haiku_pinned_failed:${result.reason}")
+            }
         }
     }
 
@@ -632,9 +682,15 @@ class PracticeGradeAndDiagnoseService(
         """.trimIndent()
     }
 
-    suspend fun process(request: PracticeGradeAndDiagnoseRequest): PracticeGradeAndDiagnoseResponse {
+    suspend fun process(
+        request: PracticeGradeAndDiagnoseRequest,
+        friend: String? = null,
+        device: String? = null,
+    ): PracticeGradeAndDiagnoseResponse {
         val started = System.nanoTime()
         validateNoLeakage(request)
+        val effectiveTransport = if (friend != null) FriendScopedBatchTransport(transport, friend, device.orEmpty()) else transport
+        val recordOwnerLedger = friend == null
 
         val mode = request.mode.trim().uppercase().ifBlank { "GRADE_AND_DIAGNOSE" }
         val sourceBlocks = buildSourceBlocks(request.bookId, request.sourcePages)
@@ -660,7 +716,7 @@ class PracticeGradeAndDiagnoseService(
         if (mode in setOf("GRADE_AND_DIAGNOSE", "GRADE_ONLY") && request.rubricCriteria.isNotEmpty()) {
             val gradeUserPrompt = buildGradingPrompt(request, numericFacts)
             val gradeKey = "pg-${sha256("${request.bookId}|${request.questionId}|$gradeUserPrompt".toByteArray(Charsets.UTF_8)).take(16)}"
-            val gradeReply = transport.generateSection(
+            val gradeReply = effectiveTransport.generateSection(
                 systemPrompt = GRADER_SYSTEM,
                 userPrompt = gradeUserPrompt,
                 task = PracticeGradeLimits.TASK_GRADE,
@@ -669,7 +725,7 @@ class PracticeGradeAndDiagnoseService(
             )
             lastModel = gradeReply.model
             lastChannel = gradeReply.routeChannel.wireName
-            recordLedger(request, PracticeGradeLimits.TASK_GRADE, gradeKey, gradeReply)
+            if (recordOwnerLedger) recordLedger(request, PracticeGradeLimits.TASK_GRADE, gradeKey, gradeReply)
 
             var parsedItems = parseGradedItems(gradeReply.text)
             if (parsedItems.isEmpty()) {
@@ -681,7 +737,7 @@ class PracticeGradeAndDiagnoseService(
                 }
                 val jsonRepairKey = "pjr-${sha256("${request.bookId}|${request.questionId}|$jsonRepairPrompt".toByteArray(Charsets.UTF_8)).take(16)}"
                 val jsonRepairReply = runCatching {
-                    transport.generateSection(
+                    effectiveTransport.generateSection(
                         systemPrompt = JSON_REPAIR_SYSTEM,
                         userPrompt = jsonRepairPrompt,
                         task = PracticeGradeLimits.TASK_GRADE,
@@ -692,7 +748,7 @@ class PracticeGradeAndDiagnoseService(
                 if (jsonRepairReply != null) {
                     lastModel = jsonRepairReply.model
                     lastChannel = jsonRepairReply.routeChannel.wireName
-                    recordLedger(request, "practice_grade_json_repair", jsonRepairKey, jsonRepairReply)
+                    if (recordOwnerLedger) recordLedger(request, "practice_grade_json_repair", jsonRepairKey, jsonRepairReply)
                     parsedItems = parseGradedItems(jsonRepairReply.text)
                 }
             }
@@ -735,7 +791,7 @@ class PracticeGradeAndDiagnoseService(
                     }
                     val repairKey = "pqr-${sha256("${request.bookId}|${crit.cid}|$repairPrompt".toByteArray(Charsets.UTF_8)).take(16)}"
                     val repairReply = runCatching {
-                        transport.generateSection(
+                        effectiveTransport.generateSection(
                             systemPrompt = QUOTE_REPAIR_SYSTEM,
                             userPrompt = repairPrompt,
                             task = PracticeGradeLimits.TASK_GRADE,
@@ -744,7 +800,7 @@ class PracticeGradeAndDiagnoseService(
                         )
                     }.getOrNull()
                     if (repairReply != null) {
-                        recordLedger(request, "practice_quote_repair", repairKey, repairReply)
+                        if (recordOwnerLedger) recordLedger(request, "practice_quote_repair", repairKey, repairReply)
                         val repairedQuote = parseQuotedRepair(repairReply.text)
                         if (StudentQuoteGate.isExactContiguousSubstring(repairedQuote, request.studentAnswer)) {
                             quote = repairedQuote
@@ -815,7 +871,7 @@ class PracticeGradeAndDiagnoseService(
         if (shouldDiagnose) {
             val diagUserPrompt = buildDiagnosisPrompt(request, rubricItems, numericFacts)
             val diagKey = "pd-${sha256("${request.bookId}|${request.questionId}|$diagUserPrompt".toByteArray(Charsets.UTF_8)).take(16)}"
-            val diagReply = transport.generateSection(
+            val diagReply = effectiveTransport.generateSection(
                 systemPrompt = GENERIC_SHIELDED_SYSTEM,
                 userPrompt = diagUserPrompt,
                 task = PracticeGradeLimits.TASK_DIAGNOSE,
@@ -824,7 +880,7 @@ class PracticeGradeAndDiagnoseService(
             )
             lastModel = diagReply.model
             lastChannel = diagReply.routeChannel.wireName
-            recordLedger(request, PracticeGradeLimits.TASK_DIAGNOSE, diagKey, diagReply)
+            if (recordOwnerLedger) recordLedger(request, PracticeGradeLimits.TASK_DIAGNOSE, diagKey, diagReply)
             diagnosis = parseDiagnosis(diagReply.text, request.studentAnswer)
         } else if (mode == "GRADE_AND_DIAGNOSE" && rubricItems.isNotEmpty() && !hasRubricDefect && !hasNumericDefect) {
             diagnosis = MisconceptionDiagnosisResult(
@@ -848,6 +904,8 @@ class PracticeGradeAndDiagnoseService(
                 sourceBlocks = sourceBlocks,
                 rawPagesMap = rawPagesMap,
                 overlapCorpus = overlapCorpus,
+                activeTransport = effectiveTransport,
+                recordOwnerLedger = recordOwnerLedger,
             )?.also { (_, replyModel, replyChannel) ->
                 lastModel = replyModel
                 lastChannel = replyChannel
@@ -889,17 +947,19 @@ class PracticeGradeAndDiagnoseService(
         sourceBlocks: List<SectionBlockInput>,
         rawPagesMap: Map<Int, String>,
         overlapCorpus: String,
+        activeTransport: BatchAiTransport = transport,
+        recordOwnerLedger: Boolean = true,
     ): Triple<IsomorphicVariantResult, String, String>? {
         val userPrompt = buildVariantPrompt(request, errorClass, diagnosisZh)
         val varKey = "pv-${sha256("${request.bookId}|${request.questionId}|${errorClass.name}|$userPrompt".toByteArray(Charsets.UTF_8)).take(16)}"
-        val reply = transport.generateSection(
+        val reply = activeTransport.generateSection(
             systemPrompt = VARIANT_SYSTEM,
             userPrompt = userPrompt,
             task = PracticeGradeLimits.TASK_VARIANT,
             batchKey = varKey,
             maxTokens = PracticeGradeLimits.BATCH_MAX_TOKENS,
         )
-        recordLedger(request, PracticeGradeLimits.TASK_VARIANT, varKey, reply)
+        if (recordOwnerLedger) recordLedger(request, PracticeGradeLimits.TASK_VARIANT, varKey, reply)
 
         val raw = parseVariantRaw(reply.text) ?: return null
 

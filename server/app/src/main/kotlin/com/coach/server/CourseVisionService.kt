@@ -2,6 +2,7 @@ package com.coach.server
 
 import com.coach.ai.BridgeClient
 import io.ktor.http.HttpStatusCode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -28,7 +29,7 @@ import java.time.Duration
 
 data class CourseVisionReply(
     val text: String,
-    val model: String = BridgeClient.HAIKU,
+    val model: String = BridgeClient.OPUS,
     val inputTokens: Int = 1500,
     val outputTokens: Int = 400,
     val elapsedMs: Long = 0L,
@@ -47,10 +48,18 @@ class AnthropicHaikuVisionTransport(
         System.getenv("COACH_ANTHROPIC_API_KEY")?.trim().orEmpty()
             .ifBlank { System.getenv("ANTHROPIC_API_KEY")?.trim().orEmpty() }
     },
-    private val model: String = BridgeClient.HAIKU,
+    private val openAiKeyProvider: () -> String = {
+        System.getenv("COACH_OPENAI_API_KEY")?.trim().orEmpty()
+            .ifBlank { System.getenv("OPENAI_API_KEY")?.trim().orEmpty() }
+    },
+    private val model: String = BridgeClient.OPUS,
+    private val fallbackModel: String = BridgeClient.GPT_62_ASTRA,
     private val endpoint: String = "https://api.anthropic.com/v1/messages",
+    private val openAiEndpoint: String = "https://api.openai.com/v1/chat/completions",
+    private val connectTimeout: Duration = Duration.ofSeconds(10),
+    private val requestTimeout: Duration = Duration.ofSeconds(60),
 ) : CourseVisionTransport {
-    private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()
+    private val http = HttpClient.newBuilder().connectTimeout(connectTimeout).build()
     private val json = Json { ignoreUnknownKeys = true }
 
     override suspend fun recognizePage(
@@ -58,14 +67,37 @@ class AnthropicHaikuVisionTransport(
         pngBase64: String,
         pageSha256: String,
     ): CourseVisionReply = withContext(Dispatchers.IO) {
+        val promptText = "请完整转写这页课堂板书/手写笔记的文字、公式和图表标注，保留清晰段落结构与原文繁简字体（繁体原文保持繁体、简体保持简体），不要补充正文之外的评论。"
         val apiKey = apiKeyProvider()
-        if (apiKey.isBlank()) {
-            throw MockError(HttpStatusCode.ServiceUnavailable, "视觉识别密钥尚未配置，暂时无法识别手写或扫描板书。")
+        if (apiKey.isNotBlank()) {
+            try {
+                return@withContext callAnthropic(apiKey, pngBase64, promptText)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw e
+            } catch (primaryErr: Exception) {
+                val oaiKey = openAiKeyProvider()
+                if (oaiKey.isBlank()) {
+                    if (primaryErr is MockError) throw primaryErr
+                    throw MockError(HttpStatusCode.BadGateway, "视觉识别服务暂时不可用（${primaryErr.javaClass.simpleName}）。")
+                }
+                return@withContext callOpenAiVision(oaiKey, pngBase64, promptText)
+            }
         }
+        val oaiKey = openAiKeyProvider()
+        if (oaiKey.isNotBlank()) {
+            return@withContext callOpenAiVision(oaiKey, pngBase64, promptText)
+        }
+        throw MockError(HttpStatusCode.ServiceUnavailable, "视觉识别密钥尚未配置，暂时无法识别手写或扫描板书。")
+    }
+
+    private fun callAnthropic(apiKey: String, pngBase64: String, promptText: String): CourseVisionReply {
         val started = System.nanoTime()
         val payload = buildJsonObject {
             put("model", model)
-            put("max_tokens", 1600)
+            put("max_tokens", 2048)
             put("messages", buildJsonArray {
                 addJsonObject {
                     put("role", "user")
@@ -80,20 +112,27 @@ class AnthropicHaikuVisionTransport(
                         }
                         addJsonObject {
                             put("type", "text")
-                            put("text", "请完整转写这页课堂板书/手写笔记的文字、公式和图表标注，保留清晰段落结构，不要补充正文之外的评论。")
+                            put("text", promptText)
                         }
                     })
                 }
             })
         }
         val req = HttpRequest.newBuilder(URI.create(endpoint))
-            .timeout(Duration.ofSeconds(60))
+            .timeout(requestTimeout)
             .header("Content-Type", "application/json")
             .header("x-api-key", apiKey)
             .header("anthropic-version", "2023-06-01")
             .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
             .build()
-        val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
+        val resp = try {
+            http.send(req, HttpResponse.BodyHandlers.ofString())
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw e
+        } catch (e: Exception) {
+            throw MockError(HttpStatusCode.BadGateway, "视觉识别主用服务暂时不可用（${e.javaClass.simpleName}）。")
+        }
         val elapsedMs = (System.nanoTime() - started) / 1_000_000L
         if (resp.statusCode() !in 200..299) {
             throw MockError(HttpStatusCode.BadGateway, "视觉识别服务暂时不可用（HTTP ${resp.statusCode()}）。")
@@ -106,9 +145,66 @@ class AnthropicHaikuVisionTransport(
         val usage = parsed["usage"] as? JsonObject
         val inTok = (usage?.get("input_tokens") as? JsonPrimitive)?.intOrNull ?: 1500
         val outTok = (usage?.get("output_tokens") as? JsonPrimitive)?.intOrNull ?: TokenLedgerPricing.estimateTokens(text)
-        CourseVisionReply(
+        return CourseVisionReply(
             text = text,
             model = model,
+            inputTokens = inTok,
+            outputTokens = outTok,
+            elapsedMs = elapsedMs,
+        )
+    }
+
+    private fun callOpenAiVision(apiKey: String, pngBase64: String, promptText: String): CourseVisionReply {
+        val started = System.nanoTime()
+        val payload = buildJsonObject {
+            put("model", fallbackModel)
+            put("max_completion_tokens", 2048)
+            put("messages", buildJsonArray {
+                addJsonObject {
+                    put("role", "user")
+                    put("content", buildJsonArray {
+                        addJsonObject {
+                            put("type", "text")
+                            put("text", promptText)
+                        }
+                        addJsonObject {
+                            put("type", "image_url")
+                            put("image_url", buildJsonObject {
+                                put("url", "data:image/png;base64,$pngBase64")
+                            })
+                        }
+                    })
+                }
+            })
+        }
+        val req = HttpRequest.newBuilder(URI.create(openAiEndpoint))
+            .timeout(requestTimeout)
+            .header("Content-Type", "application/json")
+            .header("Authorization", "Bearer $apiKey")
+            .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
+            .build()
+        val resp = try {
+            http.send(req, HttpResponse.BodyHandlers.ofString())
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw e
+        } catch (e: Exception) {
+            throw MockError(HttpStatusCode.BadGateway, "视觉识别兜底服务暂时不可用（${e.javaClass.simpleName}）。")
+        }
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+        if (resp.statusCode() !in 200..299) {
+            throw MockError(HttpStatusCode.BadGateway, "视觉识别兜底服务暂时不可用（HTTP ${resp.statusCode()}）。")
+        }
+        val parsed = json.parseToJsonElement(resp.body()).jsonObject
+        val firstChoice = (parsed["choices"] as? JsonArray)?.firstOrNull() as? JsonObject
+        val msg = firstChoice?.get("message") as? JsonObject
+        val text = (msg?.get("content") as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+        val usage = parsed["usage"] as? JsonObject
+        val inTok = (usage?.get("prompt_tokens") as? JsonPrimitive)?.intOrNull ?: 1500
+        val outTok = (usage?.get("completion_tokens") as? JsonPrimitive)?.intOrNull ?: TokenLedgerPricing.estimateTokens(text)
+        return CourseVisionReply(
+            text = text,
+            model = fallbackModel,
             inputTokens = inTok,
             outputTokens = outTok,
             elapsedMs = elapsedMs,

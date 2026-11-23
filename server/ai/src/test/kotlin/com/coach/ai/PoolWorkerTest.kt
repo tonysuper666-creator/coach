@@ -57,8 +57,8 @@ class PoolWorkerTest {
             assertEquals("blind_review",actor.execute { supplyJobs().single().kind })
             assertEquals(3,worker.runOne()!!.inserted)
             assertNull(worker.ensure("course","essay-kp","Synthetic objective",source,3))
-            assertEquals(BridgeClient.CLAUDE,JsonText.objectOf(bridge.requests[0]).str("model"))
-            assertEquals(BridgeClient.CODEX,JsonText.objectOf(bridge.requests[1]).str("model"))
+            assertEquals(BridgeClient.GPT_62_SOL,JsonText.objectOf(bridge.requests[0]).str("model"))
+            assertEquals(BridgeClient.OPUS,JsonText.objectOf(bridge.requests[1]).str("model"))
             val group=actor.execute { takePoolGroup("course","essay-kp","group") }
             assertEquals("READY",group.status); assertEquals(3,group.events.size)
             assertTrue(group.events.all { it.type == "question_posed" && "correctOptionId" !in it.payload })
@@ -316,7 +316,7 @@ class PoolWorkerTest {
             val worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
             bridge.enqueue(200,StubBridge.completion(constructed()))
             bridge.enqueue(200,StubBridge.completion("""{"verdict":"REVISE","note":"Unsupported answer"}"""))
-            bridge.enqueue(200,StubBridge.completion("""{"verdict":"CONFIRM","note":"Wrong vendor"}""",served=BridgeClient.CLAUDE))
+            bridge.enqueue(200,StubBridge.completion("""{"verdict":"CONFIRM","note":"Wrong vendor"}""",served=BridgeClient.GPT_62_SOL))
             worker.ensureConstructed("c","kp","Objective",source);worker.runOne()
             repeat(2) { assertEquals("failed",worker.runOne()!!.state) }
             assertEquals(0,actor.execute { constructedAvailable("c","kp") })
@@ -338,6 +338,46 @@ class PoolWorkerTest {
                 assertEquals(if(changePoints) 0 else 2,actor.execute { supplyJobs().count { it.kind=="review_constructed" } })
                 assertEquals(2L,actor.execute { supplyCallCount() })
             } } finally { actor.close();dir.toFile().deleteRecursively() }
+        }
+    }
+
+    @Test fun openaiGeneratedMcqAndConstructedSelectAnthropicReviewerAndPersist() = runBlocking<Unit> {
+        val dir = Files.createTempDirectory("pool-openai-gen")
+        val actor = LedgerActor(this, LedgerStore(dir))
+        try {
+            StubBridge().use { bridge ->
+                val worker = PoolWorker(actor, BridgeClient(stubConfig(bridge)))
+                // 1) OpenAI serves gen_mcq -> blind_review must select Anthropic Opus, NOT CODEX.
+                bridge.enqueue(200, StubBridge.completion(generated(), served = BridgeClient.GPT_62_SOL))
+                bridge.enqueue(200, StubBridge.completion(review(), served = BridgeClient.OPUS))
+                worker.ensure("c", "kp", "Objective", source, 3)
+                assertEquals("completed", worker.runOne()!!.state)
+                assertEquals(3, worker.runOne()!!.inserted)
+                assertEquals(BridgeClient.OPUS, JsonText.objectOf(bridge.requests[1]).str("model"))
+
+                // 2) OpenAI serves gen_constructed -> review_constructed must select Anthropic Opus, NOT CODEX.
+                actor.execute { append("c", "legacy_passed", json("kpId" to "kp")) }
+                bridge.enqueue(200, StubBridge.completion(constructed(), served = BridgeClient.GPT_62_SOL))
+                repeat(2) {
+                    bridge.enqueue(200, StubBridge.completion("""{"verdict":"CONFIRM","note":"Supported by OpenAI-draft cross review"}""", served = BridgeClient.OPUS))
+                }
+                worker.ensureConstructed("c", "kp", "Objective", source)
+                assertEquals("completed", worker.runOne()!!.state)
+                repeat(2) { assertEquals(1, worker.runOne()!!.inserted) }
+                assertEquals(BridgeClient.OPUS, JsonText.objectOf(bridge.requests[3]).str("model"))
+                assertEquals(BridgeClient.OPUS, JsonText.objectOf(bridge.requests[4]).str("model"))
+
+                // 3) Reverse direction: if gen_mcq fell back to Anthropic OPUS, blind_review selects OpenAI GPT_62_ASTRA and persists.
+                bridge.enqueue(200, StubBridge.fallbackCompletion(generated()).replace("__MODEL__", BridgeClient.OPUS))
+                bridge.enqueue(200, StubBridge.completion(review(), served = BridgeClient.GPT_62_ASTRA))
+                worker.ensure("c2", "kp", "Objective", source, 3)
+                assertEquals("completed", worker.runOne()!!.state)
+                assertEquals(3, worker.runOne()!!.inserted)
+                assertEquals(BridgeClient.GPT_62_ASTRA, JsonText.objectOf(bridge.requests[6]).str("model"))
+            }
+        } finally {
+            actor.close()
+            dir.toFile().deleteRecursively()
         }
     }
 

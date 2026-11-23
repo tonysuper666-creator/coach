@@ -49,7 +49,7 @@ internal enum class ExplainTrouble(val retry: Boolean) {
 
         /** 给人看的那一句：连不上和停用用固定的话，其余用服务端的 `error`，它空了才用兜底。 */
         fun message(trouble: ExplainTrouble, serverError: String?): String {
-            val said = serverError?.trim().orEmpty()
+            val said = serverError?.trim()?.takeUnless { HTTP_ERROR_CODE.containsMatchIn(it) }.orEmpty()
             return when (trouble) {
                 Unpaired -> UNPAIRED
                 Unreachable -> UNREACHABLE
@@ -58,6 +58,7 @@ internal enum class ExplainTrouble(val retry: Boolean) {
                 Other -> said.ifEmpty { "这次没讲成，可以再试一次。" }
             }
         }
+        private val HTTP_ERROR_CODE = Regex("""(?<![0-9])[45][0-9]{2}(?![0-9])""")
     }
 }
 

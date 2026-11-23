@@ -924,8 +924,16 @@ internal object CollectionQaEngine {
             shortLabelByBookId = bundle.shortLabelByBookId,
         )
         val serverResult = remoteAsk(payload)
-        val body = serverResult.body
-            ?: return Result.failure(CollectionQaException(serverResult.error ?: "跨材料问答暂时不可用，请重试。", serverResult.trouble ?: ExplainTrouble.Other))
+        fun failure(message: String, trouble: ExplainTrouble): Result<CollectionQaTurn> {
+            val pages = bundle.blocks.distinctBy { it.bookId to it.page }.map { block ->
+                CollectionQaCitation(collectionId, block.bookId, block.docLabel, block.shortLabel,
+                    block.page, quoteAnchor = block.text.trim().take(80))
+            }
+            return Result.failure(CollectionQaException(message, trouble, pages))
+        }
+        val body = serverResult.body ?: return failure(
+            serverResult.error ?: "这次没讲成。", serverResult.trouble ?: ExplainTrouble.Other,
+        )
 
         val verifiedTurn = SentenceCitationGate.verifyResponseLocally(
             collectionId = bundle.collection.id,
@@ -937,6 +945,9 @@ internal object CollectionQaEngine {
             docLabelByBookId = bundle.docLabelByBookId,
             offlineDiscrepancies = bundle.matchedDiscrepancies,
         )
+        if (verifiedTurn.sentences.isEmpty() && verifiedTurn.conflictCards.none { it.citations.isNotEmpty() }) {
+            return failure("材料里没有足够的依据回答这个问题。可以选中一段，再问它在说什么。", ExplainTrouble.Other)
+        }
         return Result.success(verifiedTurn)
     }
 }
@@ -944,4 +955,5 @@ internal object CollectionQaEngine {
 internal class CollectionQaException(
     override val message: String,
     val trouble: ExplainTrouble,
+    val fallbackPages: List<CollectionQaCitation> = emptyList(),
 ) : RuntimeException(message)

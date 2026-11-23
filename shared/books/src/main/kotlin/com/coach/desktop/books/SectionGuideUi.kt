@@ -180,6 +180,9 @@ internal fun SectionGuideCard(
         when {
             state is SectionGuideState.Failed -> {
                 val onRelogin = LocalBookRelogin.current
+                RetrievedPageLinks(section.blocks.filterNot { it.heading }.distinctBy { it.page }, { "第 ${it.page} 页" }) {
+                    onOpenCitation(Citation("", it.id, it.page), it)
+                }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(state.message, style = MaterialTheme.typography.bodySmall,
                         color = if (state.trouble == ExplainTrouble.Revoked) v7Alert() else colors.fgSecondary,
@@ -303,6 +306,7 @@ internal data class InlineExplainThread(
     val loading: Boolean = false,
     val error: Pair<String, ExplainTrouble>? = null,
     val askingOpen: Boolean = false,
+    val fallbackBlocks: List<SourceBlock> = emptyList(),
 )
 
 internal data class InlineExplainEntry(

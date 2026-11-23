@@ -383,9 +383,7 @@ internal class BookExplainer(private val library: TextbookLibrary? = null) {
                 withContext(Dispatchers.IO) { runCatching { library.saveLastQuestion(bookId, question) } }
             }
         }
-        val blocks = context?.sectionBlocks?.filterNot { it.heading }
-            ?.takeIf { list -> list.isNotEmpty() && BookLessonWire.fits(list) && list.any { chosen.text.trim() in it.text || it.id == chosen.id } }
-            ?: listOf(chosen)
+        val blocks = ExplainWire.selectionBlocks(chosen, context)
         val wire = ExplainWire.selectionRequest(requestId, kind, chosen, blocks, context, question, history)
         return send(wire, blocks, requestId)
     }

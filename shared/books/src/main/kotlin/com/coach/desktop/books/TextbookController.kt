@@ -66,11 +66,15 @@ internal data class LibraryUi(
     val booklistRevision: Int = 0,
     /** 2.0-AI-3：跨材料问答点击异书角标跳页后保持伴读「提问」抽屉开启。 */
     val keepAskTabOpen: Boolean = false,
+    /** TON-1823 PR A：单行真实上传与服务端整理状态（按当前账号隔离，绝不阻塞本地阅读）。 */
+    val uploadStatuses: Map<String, BookUploadEntry> = emptyMap(),
 )
 
 internal class TextbookController(val library: TextbookLibrary, var structureProvider: BookStructureProvider? = null) {
     var conceptSemanticJudge: ConceptSemanticJudge? = null
     @Volatile var allowRemoteBooklistAi: () -> Boolean = { true }
+    @Volatile var unifiedUploadClient: UnifiedBookRemoteClient? = null
+    internal val uploadCoordinator = UnifiedBookUploadCoordinator(library) { unifiedUploadClient }
     @Volatile private var activeBooklistAlignJob: Job? = null
     suspend fun awaitBooklistAlignment() { activeBooklistAlignJob?.join() }
     private val mutable = MutableStateFlow(LibraryUi(initialized = false))
@@ -79,10 +83,55 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var activeImport: BookImportControl? = null
     @Volatile private var activeImportJob: Job? = null
+    @Volatile private var activeUploadSyncJob: Job? = null
     @Volatile private var pendingPageSaveJob: Job? = null
     private val pageSaveLock = Mutex()
     private val indexingControls = ConcurrentHashMap<String, BookImportControl>()
     private val indexingJobs = ConcurrentHashMap<String, Job>()
+
+    init {
+        backgroundScope.launch {
+            uploadCoordinator.statuses.collect { statuses ->
+                mutable.update { current ->
+                    if (current.uploadStatuses == statuses) current else current.copy(uploadStatuses = statuses)
+                }
+            }
+        }
+    }
+
+    fun onUploadIdentityChanged(newSessionId: String?): Job? {
+        activeUploadSyncJob?.cancel()
+        activeUploadSyncJob = null
+        uploadCoordinator.onSessionChanged(newSessionId)
+        return if (newSessionId != null && unifiedUploadClient != null) syncBookUploads() else null
+    }
+
+    fun syncBookUploads(): Job {
+        val job = backgroundScope.launch {
+            runCatching { uploadCoordinator.syncOnce() }
+        }
+        activeUploadSyncJob = job
+        return job
+    }
+
+    fun retryBookUpload(localBookId: String): Job = backgroundScope.launch {
+        runCatching { uploadCoordinator.retryBook(localBookId) }
+    }
+
+    private fun enqueueBookForUnifiedUpload(book: Textbook) {
+        if (unifiedUploadClient == null) return
+        backgroundScope.launch {
+            runCatching {
+                uploadCoordinator.enqueueBook(
+                    localBookId = book.id,
+                    fileSha256 = book.id,
+                    format = book.format,
+                    title = book.title,
+                )
+                uploadCoordinator.syncOnce()
+            }
+        }
+    }
     fun cancelImport() { activeImport?.cancel() }
     fun dismissImportNotice(id: Long) {
         mutable.update { if (it.importNotice?.id == id) it.copy(importNotice = null) else it }
@@ -157,6 +206,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         activeCourseId = restoredCourseId,
                         activeCourseTopicId = restoredCourseTopicId,
                         activeCourseDetail = restoredCourseDetail,
+                        uploadStatuses = current.uploadStatuses,
                     )
                 }
             }
@@ -243,6 +293,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 for (path in paths) {
                     val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
                     val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
+                    enqueueBookForUnifiedUpload(staged.book)
                     lastBook = staged.book
                 }
                 val catalog = library.catalog()
@@ -301,6 +352,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     if (kind == CollectionKind.COURSE && !staged.alreadyExisted) {
                         library.setBookShowStandalone(staged.book.id, false)
                     }
+                    enqueueBookForUnifiedUpload(staged.book)
                     importedBooks += staged.book
                 }
                 val allIds = (existingBookIds + importedBooks.map { it.id }).distinct()
@@ -314,7 +366,10 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         val (cid, skipped) = CourseStore.createCourse(
                             db = db,
                             title = cleanTitle,
-                            examProfile = CourseExamProfile(examDate = cleanExamDate.orEmpty()),
+                            examProfile = CourseExamProfile(
+                                examDate = cleanExamDate.orEmpty(),
+                                examEnabled = !cleanExamDate.isNullOrBlank(),
+                            ),
                             materialBookIds = allIds,
                             existingId = id,
                         )
@@ -428,6 +483,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 for (path in newFiles) {
                     val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
                     val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
+                    enqueueBookForUnifiedUpload(staged.book)
                     importedIds += staged.book.id
                 }
                 val currentMembers = library.collectionMaterials(collectionId)
@@ -609,6 +665,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 staged = result
                 releaseOnce()
                 val book = result.book
+                enqueueBookForUnifiedUpload(book)
                 if (book.indexState != "READY") {
                     actions.withLock {
                         library.closeReview()
@@ -846,7 +903,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     }
 
     private suspend fun handleCancelledImport(bookId: String?) = withContext(NonCancellable) {
-        if (bookId != null) runCatching { library.deleteBook(bookId) }
+        if (bookId != null) {
+            runCatching { library.deleteBook(bookId, uploadCoordinator.currentAccountKey()) }
+        }
         val catalog = runCatching { library.catalog() }.getOrElse { emptyList() }
         val fallbackBook = catalog.firstOrNull()?.let { runCatching { library.book(it.id) }.getOrNull() }
         val fallbackDraft = fallbackBook?.let { runCatching { library.latestChapterPracticeDraft(it.id) }.getOrNull() }
@@ -878,7 +937,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val shouldDelete = bookId != null && deleteIfNoOcrYet &&
             runCatching { library.book(bookId).pages.none { it.ocr } }.getOrDefault(false)
         if (shouldDelete) {
-            runCatching { library.deleteBook(checkNotNull(bookId)) }
+            runCatching { library.deleteBook(checkNotNull(bookId), uploadCoordinator.currentAccountKey()) }
         }
         val catalog = runCatching { library.catalog() }.getOrElse { emptyList() }
         val fallbackBook = catalog.firstOrNull()?.let { runCatching { library.book(it.id) }.getOrNull() }
@@ -1900,6 +1959,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     val useTier0 = library.lazyPdfExtras && fileName.endsWith(".pdf", ignoreCase = true)
                     val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
                     if (!staged.alreadyExisted) library.setBookShowStandalone(staged.book.id, false)
+                    enqueueBookForUnifiedUpload(staged.book)
                     importedIds += staged.book.id
                 }
                 val (detail, rejected) = library.withCourseDatabase { db ->
@@ -1908,8 +1968,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     refreshed to (preRejected + addRes.rejectedPastExamTitles)
                 }
                 val notice = when {
-                    rejected.isNotEmpty() -> "已拦截 ${rejected.size} 份历年真题文件；其余 ${detail.materials.size} 份材料已对齐。"
-                    importedIds.isNotEmpty() -> "已补充 ${importedIds.size} 份材料并更新本周对齐。"
+                    rejected.isNotEmpty() -> "已拦截 ${rejected.size} 份历年真题文件；其余 ${detail.materials.size} 份材料已整理。"
+                    importedIds.isNotEmpty() && detail.isExam -> "已补充 ${importedIds.size} 份材料并更新本周对齐。"
+                    importedIds.isNotEmpty() -> "已添加 ${importedIds.size} 份材料。"
                     else -> null
                 }
                 mutable.update {
@@ -1990,20 +2051,38 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     }
 
     suspend fun updateCourseExamProfile(courseId: String, profile: CourseExamProfile) = action {
-        val detail = library.withCourseDatabase { db ->
+        val (prevProfile, detail) = library.withCourseDatabase { db ->
+            val before = CourseStore.loadCourseDetail(db, courseId, library.clock).examProfile
             CourseStore.updateExamProfile(db, courseId, profile)
-            CourseStore.loadCourseDetail(db, courseId, library.clock)
+            val refreshed = if (before.isExam != profile.isExam) {
+                CourseAutoAligner.alignLocally(db, courseId)
+                CourseStore.loadCourseDetail(db, courseId, library.clock)
+            } else {
+                CourseStore.loadCourseDetail(db, courseId, library.clock)
+            }
+            before to refreshed
+        }
+        val onlyPromptChanged = prevProfile.isExam == profile.isExam &&
+            prevProfile.examDate == profile.examDate &&
+            prevProfile.examFormat == profile.examFormat &&
+            prevProfile.syllabusPromptState != profile.syllabusPromptState
+        val notice = when {
+            onlyPromptChanged -> null
+            !profile.isExam -> "已切换为普通学习。"
+            profile.examDate.isNotBlank() -> "已保存考试日期（${profile.examDate}）。"
+            else -> "已设为要考，可随时补考试日或考纲。"
         }
         mutable.update {
             it.copy(
                 activeCourseDetail = detail,
                 collections = library.collectionSummaries(),
-                courseNotice = "已更新考试信息与暂定标识。",
+                courseNotice = notice,
             )
         }
     }
 
     suspend fun realignCourse(courseId: String, explainer: BookExplainer? = null) = action {
+        mutable.update { it.copy(courseNotice = null) }
         val existing = library.courseDetail(courseId)
         if (explainer != null) {
             runCatching { explainer.load() }

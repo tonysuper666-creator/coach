@@ -946,12 +946,16 @@ internal object CourseStore {
             spoilerSanitizedCount = sanitizedNotes,
             alignedAt = col.fourth,
         )
-        val plan = ExamCountdownPlanner.planForCourse(
-            db = db,
-            detail = snapshot,
-            today = LocalDate.now(clock),
-            nowMs = clock.millis(),
-        )
+        val plan = if (snapshot.isExam) {
+            ExamCountdownPlanner.planForCourse(
+                db = db,
+                detail = snapshot,
+                today = LocalDate.now(clock),
+                nowMs = clock.millis(),
+            )
+        } else {
+            null
+        }
         return snapshot.copy(countdownPlan = plan)
     }
 

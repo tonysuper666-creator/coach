@@ -34,15 +34,15 @@ class SuspensionDetector(private var wall: Long = System.currentTimeMillis(), pr
     }
 }
 
-fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null, adminDevice: String = "desktop", observation: UsageObservation? = null, friends: FriendAccess? = null, publicOnly: Boolean = false) =
-    ledgerRoutes(actor, pushes, chat, adminDevice, observation, friends, publicOnly) { }
+fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null, adminDevice: String = "desktop", observation: UsageObservation? = null, friends: FriendAccess? = null, publicOnly: Boolean = false, unifiedBooks: UnifiedBookPipeline? = null) =
+    ledgerRoutes(actor, pushes, chat, adminDevice, observation, friends, publicOnly, unifiedBooks) { }
 
 // Preserve the existing explicit test-hook overload.
 internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService?, adminDevice: String, observation: UsageObservation?, beforeLedgerFrame: suspend (String) -> Unit) =
-    ledgerRoutes(actor, pushes, chat, adminDevice, observation, null, false, beforeLedgerFrame)
+    ledgerRoutes(actor, pushes, chat, adminDevice, observation, null, false, null, beforeLedgerFrame)
 
 // Test seam: pause an individual connection at the point its nonempty frame is sent.
-internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService?, adminDevice: String, observation: UsageObservation?, friends: FriendAccess? = null, publicOnly: Boolean = false, beforeLedgerFrame: suspend (String) -> Unit) {
+internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService?, adminDevice: String, observation: UsageObservation?, friends: FriendAccess? = null, publicOnly: Boolean = false, unifiedBooks: UnifiedBookPipeline? = null, beforeLedgerFrame: suspend (String) -> Unit) {
     if (observation != null) observeUsage(observation)
     install(WebSockets) { pingPeriod = kotlin.time.Duration.parse("5s");timeout=kotlin.time.Duration.parse("15s");maxFrameSize=1_048_576 }
     intercept(ApplicationCallPipeline.Call) {
@@ -246,8 +246,18 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
         }
         get("/v1/public/status") {
             val name = call.attributes.getOrNull(observedFriend) ?: return@get call.respond(HttpStatusCode.Forbidden)
+            val device = call.attributes[observedDevice]
             call.response.headers.append(HttpHeaders.CacheControl, "no-store")
-            try { call.respondText((friends ?: throw FriendServiceError()).status(name, call.attributes[observedDevice]).toString(), ContentType.Application.Json) }
+            try {
+                val base = (friends ?: throw FriendServiceError()).status(name, device)
+                val scope = UnifiedBookScope.fromCall(device, name)
+                val enriched = buildJsonObject {
+                    base.forEach { (k, v) -> put(k, v) }
+                    put("unifiedBooks", unifiedBooks?.enabled == true)
+                    put("accountScope", scope.scopeKey)
+                }
+                call.respondText(enriched.toString(), ContentType.Application.Json)
+            }
             catch (e: FriendServiceError) { call.respondText(e.body.toString(), ContentType.Application.Json, e.status) }
         }
         post("/v1/friends/revoke") {
@@ -275,7 +285,13 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             val pack = actor.execute { downloadOfflinePack(course,call.request.header("X-Coach-Device")!!,size) }
             call.respondText(LedgerJson.encodeToString(pack),ContentType.Application.Json)
         }
-        get("/v1/hello") { call.respondText(LedgerJson.encodeToString(actor.execute { hello() }),ContentType.Application.Json) }
+        get("/v1/hello") {
+            val base = actor.execute { hello() }
+            call.respondText(
+                LedgerJson.encodeToString(base.copy(unifiedBooksSupported = unifiedBooks?.enabled == true)),
+                ContentType.Application.Json,
+            )
+        }
         get("/v1/courses/{course}/events") {
             val course=call.parameters["course"]!!
             val after=call.request.queryParameters["after"]?.toLongOrNull() ?: 0

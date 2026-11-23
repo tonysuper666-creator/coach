@@ -131,7 +131,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                     if (ui.learningPath == LearningPath.READ_AND_LEARN) {
                         BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow, onRepair = onPair)
                         if (!ui.questionsOpen && book.questionMode != QuestionMode.NONE) {
-                            PaperButton(onQuestions, enabled = !ui.busy, modifier = Modifier.testTag("guided-start-questions")) { Text("继续做题") }
+                            PaperButton(onQuestions, enabled = !ui.busy, modifier = Modifier.testTag("guided-start-questions")) { Text("继续自测") }
                         }
                     }
                     if (book.questionMode == QuestionMode.NONE) Text("当前已关闭出题，可在出题设置中重新选择。", Modifier.testTag("book-questions-off"))

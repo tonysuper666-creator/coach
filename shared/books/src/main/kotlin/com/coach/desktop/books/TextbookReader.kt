@@ -207,8 +207,17 @@ internal fun TextbookReader(
     val explainer = remember(library, explainProvider) { explainProvider ?: BookExplainer(library = library) }
     val explainConsent = remember(library) { ExplainConsent(library.directory) }
     val aiEnabled = LocalReadingAiExplain.current
-    var studyPreference by remember(book.id) {
-        mutableStateOf(StudyModeStore.loadOrResolve(library, book.id, book.title, book.pages.size))
+    var studyPreference by remember(book.id, courseContext?.courseId, courseContext?.examProfile?.isExam) {
+        mutableStateOf(
+            StudyModeStore.loadOrResolve(
+                library = library,
+                bookId = book.id,
+                fallbackTitle = book.title,
+                fallbackPageCount = book.pages.size,
+                courseExamOverride = courseContext?.examProfile?.isExam,
+                courseExamDateOverride = courseContext?.examProfile?.examDate?.takeIf { it.isNotBlank() },
+            ),
+        )
     }
     val autoExplain = aiEnabled && studyPreference.detailLevel != ExplainDetailLevel.ORIGINAL_ONLY
     val autoGuide = LocalReadingAutoGuide.current

@@ -147,6 +147,8 @@ internal fun CourseMockHubPane(
     onBackToCourse: () -> Unit,
     onJumpToBookPage: (bookId: String, page: Int, quote: String) -> Unit,
     onMasteryUpdated: suspend (String) -> Unit = {},
+    onAddMaterials: () -> Unit = {},
+    onSkipSyllabusPrompt: () -> Unit = {},
 ) {
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
@@ -179,6 +181,13 @@ internal fun CourseMockHubPane(
         ) {
             V7TextButton(onBackToCourse, enabled = !ui.busy, modifier = Modifier.testTag("course-mock-hub-back")) {
                 Text("← 返回课程")
+            }
+
+            if (detail.shouldShowSyllabusPrompt) {
+                CourseSyllabusPromptBar(
+                    onAddSyllabus = onAddMaterials,
+                    onSkip = onSkipSyllabusPrompt,
+                )
             }
 
             val closedStr = if (detail.examProfile.closedBook) "闭卷" else "开卷"
@@ -231,8 +240,8 @@ internal fun CourseMockHubPane(
                 }
             } else if (detail.examinableTopics.isEmpty()) {
                 CoachEmptyState(
-                    title = "当前还没有可用于组卷的必考专题",
-                    hint = "先在课程里导入大纲或讲义并整理出必考专题，再来生成限时模拟卷。",
+                    title = "当前还没有可用于组卷的课程内容",
+                    hint = "先在课程里导入课本或讲义，再来生成限时模拟卷。",
                 )
             } else {
                 PrimaryButton(

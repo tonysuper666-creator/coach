@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.coach.client.CourseHttp
 import com.coach.client.MockReply
+import com.coach.client.UnifiedServerCapability
 import com.coach.desktop.DesktopConnectionSettings
 import com.coach.desktop.DesktopIdentity
 import com.coach.desktop.DesktopPairing
@@ -12,6 +13,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
+import java.nio.file.Files
+import java.nio.file.Path
+import java.security.MessageDigest
 import java.util.UUID
 
 /**
@@ -324,5 +328,177 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         } catch (_: Exception) {
             null to ExplainResult.Refused("保存的原文或发送许可无法核对，请重新打开这本书后重试。")
         } finally { http.close() }
+    }
+
+    /** Unified server book intake client backed by an immutable per-batch identity snapshot (TON-1823 PR A). */
+    open fun unifiedUploadClient(): UnifiedBookRemoteClient? = object : UnifiedBookRemoteClient {
+        private fun fallbackAccountKey(paired: DesktopIdentity): String {
+            val raw = "${paired.serverUrl}\u0000${paired.credentials.role}\u0000${paired.credentials.deviceId}"
+            val digest = MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8))
+            return "local-" + digest.joinToString("") { "%02x".format(it) }
+        }
+
+        private suspend fun currentIdentity(): DesktopIdentity? {
+            if (!loaded) load()
+            return identity
+        }
+
+        private fun isStillPinned(pinned: DesktopIdentity): Boolean {
+            val current = identity ?: return false
+            return current.serverUrl == pinned.serverUrl &&
+                current.credentials.deviceId == pinned.credentials.deviceId &&
+                current.credentials.token == pinned.credentials.token &&
+                current.credentials.role == pinned.credentials.role
+        }
+
+        private fun pinnedSession(pinned: DesktopIdentity): UnifiedBookRemoteSession = object : UnifiedBookRemoteSession {
+            override val sessionId: String = fallbackAccountKey(pinned)
+            override val fallbackAccountKey: String = sessionId
+
+            private fun ensurePinned() {
+                if (!isStillPinned(pinned)) throw CancellationException("Upload identity changed")
+            }
+
+            override suspend fun checkCapability(): UnifiedBookCapability {
+                ensurePinned()
+                val http = CourseHttp(pinned.serverUrl, pinned.credentials.deviceId, pinned.credentials.token, "library")
+                return try {
+                    val cap = http.unifiedBooksCapability(pinned.credentials.role)
+                    ensurePinned()
+                    when (cap) {
+                        is UnifiedServerCapability.Supported -> UnifiedBookCapability.Supported(
+                            cap.accountScope ?: fallbackAccountKey,
+                        )
+                        is UnifiedServerCapability.Unsupported -> UnifiedBookCapability.Unsupported(
+                            cap.accountScope ?: fallbackAccountKey,
+                        )
+                        UnifiedServerCapability.Unauthorized -> {
+                            markRevoked()
+                            UnifiedBookCapability.Unauthorized
+                        }
+                        UnifiedServerCapability.Offline -> UnifiedBookCapability.Offline
+                    }
+                } finally {
+                    http.close()
+                }
+            }
+
+            override suspend fun uploadBook(
+                file: Path,
+                format: String,
+                title: String,
+                sha256: String,
+                onProgress: (Int) -> Unit,
+            ): UnifiedBookUploadOutcome {
+                ensurePinned()
+                val totalBytes = runCatching { Files.size(file) }.getOrNull()
+                    ?: return UnifiedBookUploadOutcome.Failed("本地原文件无法读取，请重新导入", retryable = false)
+                if (totalBytes <= 0L) {
+                    return UnifiedBookUploadOutcome.Failed("这份教材是空文件，无法上传", retryable = false)
+                }
+                val http = CourseHttp(pinned.serverUrl, pinned.credentials.deviceId, pinned.credentials.token, "library")
+                return try {
+                    val reply = http.uploadUnifiedBook(totalBytes, format, title, sha256) { writeChunk ->
+                        withContext(Dispatchers.IO) {
+                            var sent = 0L
+                            var lastPct = -1
+                            Files.newInputStream(file).use { input ->
+                                val buf = ByteArray(65_536)
+                                while (true) {
+                                    ensurePinned()
+                                    val n = input.read(buf)
+                                    if (n < 0) break
+                                    writeChunk(buf, 0, n)
+                                    sent += n
+                                    val pct = ((sent * 100L) / totalBytes).toInt().coerceIn(0, 100)
+                                    if (pct != lastPct && (pct == 100 || pct - lastPct >= 5)) {
+                                        lastPct = pct
+                                        onProgress(pct)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ensurePinned()
+                    val body = reply.body
+                    when {
+                        reply.statusCode == 401 -> {
+                            markRevoked()
+                            UnifiedBookUploadOutcome.Unauthorized
+                        }
+                        reply.statusCode == 404 || reply.code == "unsupported" -> UnifiedBookUploadOutcome.UnsupportedServer
+                        reply.code == "offline" -> UnifiedBookUploadOutcome.Offline
+                        body != null -> {
+                            val shelfBookId = body["shelfBookId"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                            val serverSha = body["sha256"]?.jsonPrimitive?.contentOrNull ?: sha256
+                            val job = body["job"] as? JsonObject
+                            val jobState = BookUploadQueueStore.parseServerJobState(
+                                job?.get("state")?.jsonPrimitive?.contentOrNull ?: "queued",
+                            )
+                            val pct = job?.get("progressPct")?.jsonPrimitive?.intOrNull ?: 0
+                            val stageLabel = job?.get("stageLabel")?.jsonPrimitive?.contentOrNull.orEmpty()
+                            if (shelfBookId.isBlank()) {
+                                UnifiedBookUploadOutcome.Failed("服务端返回格式异常，请稍后重试")
+                            } else {
+                                UnifiedBookUploadOutcome.Accepted(shelfBookId, serverSha, jobState, pct, stageLabel)
+                            }
+                        }
+                        else -> UnifiedBookUploadOutcome.Failed(reply.error ?: "上传失败，请稍后重试", reply.retryable)
+                    }
+                } finally {
+                    http.close()
+                }
+            }
+
+            override suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome {
+                ensurePinned()
+                val http = CourseHttp(pinned.serverUrl, pinned.credentials.deviceId, pinned.credentials.token, "library")
+                return try {
+                    val reply = http.unifiedBookStatus(shelfBookId)
+                    ensurePinned()
+                    val body = reply.body
+                    when {
+                        reply.statusCode == 401 -> {
+                            markRevoked()
+                            UnifiedBookStatusOutcome.Unauthorized
+                        }
+                        reply.statusCode == 404 -> UnifiedBookStatusOutcome.NotFound
+                        reply.code == "offline" -> UnifiedBookStatusOutcome.Offline
+                        body != null -> {
+                            val job = body["job"] as? JsonObject
+                            val jobState = BookUploadQueueStore.parseServerJobState(
+                                job?.get("state")?.jsonPrimitive?.contentOrNull ?: "queued",
+                            )
+                            val pct = job?.get("progressPct")?.jsonPrimitive?.intOrNull ?: 0
+                            val stageLabel = job?.get("stageLabel")?.jsonPrimitive?.contentOrNull.orEmpty()
+                            val err = job?.get("error")?.jsonPrimitive?.contentOrNull
+                            UnifiedBookStatusOutcome.Ready(jobState, pct, stageLabel, err)
+                        }
+                        else -> UnifiedBookStatusOutcome.Offline
+                    }
+                } finally {
+                    http.close()
+                }
+            }
+        }
+
+        override suspend fun activeAccountKey(): String? = currentIdentity()?.let(::fallbackAccountKey)
+
+        override suspend fun openSession(): UnifiedBookRemoteSession? = currentIdentity()?.let(::pinnedSession)
+
+        override suspend fun checkCapability(): UnifiedBookCapability =
+            openSession()?.checkCapability() ?: UnifiedBookCapability.Unauthorized
+
+        override suspend fun uploadBook(
+            file: Path,
+            format: String,
+            title: String,
+            sha256: String,
+            onProgress: (Int) -> Unit,
+        ): UnifiedBookUploadOutcome =
+            openSession()?.uploadBook(file, format, title, sha256, onProgress) ?: UnifiedBookUploadOutcome.Unauthorized
+
+        override suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome =
+            openSession()?.fetchStatus(shelfBookId) ?: UnifiedBookStatusOutcome.Unauthorized
     }
 }

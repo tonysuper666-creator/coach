@@ -1919,6 +1919,7 @@ fun Application.studyModeRoutes(
     library: ReaderLibrary? = null,
     friends: FriendAccess? = null,
     service: StudyModePackService? = null,
+    unifiedBooks: UnifiedBookPipeline? = null,
 ) {
     routing {
         post("/api/books/{id}/modes/{mode}") {
@@ -1936,7 +1937,12 @@ fun Application.studyModeRoutes(
                         ContentType.Application.Json,
                         HttpStatusCode.BadRequest,
                     )
-                if (library?.reservesVersion(bookId) == true) {
+                val friend = call.attributes.getOrNull(observedFriend)
+                val device = call.attributes[observedDevice]
+                val unifiedAuthorized = unifiedBooks?.enabled == true && withContext(Dispatchers.IO) {
+                    runCatching { unifiedBooks.hasVerifiedShelfBook(UnifiedBookScope.fromCall(device, friend), bookId) }.getOrDefault(false)
+                }
+                if (!unifiedAuthorized && library?.reservesVersion(bookId) == true) {
                     return@withReaderConnection call.respondText(
                         buildJsonObject { put("error", "该书受课程版权保留约束，不支持该入口。") }.toString(),
                         ContentType.Application.Json,
@@ -1944,8 +1950,6 @@ fun Application.studyModeRoutes(
                     )
                 }
 
-                val friend = call.attributes.getOrNull(observedFriend)
-                val device = call.attributes[observedDevice]
                 val bearer = call.request.header("Authorization")?.removePrefix("Bearer ").orEmpty()
                 val diagnostics = friend?.let { FriendReaderDiagnostics() }
                 var requestId = ""
@@ -2037,15 +2041,18 @@ fun Application.studyModeRoutes(
                     HttpStatusCode.ServiceUnavailable,
                 )
                 val bookId = call.parameters["id"].orEmpty().trim()
-                if (library?.reservesVersion(bookId) == true) {
+                val friend = call.attributes.getOrNull(observedFriend)
+                val device = call.attributes[observedDevice]
+                val unifiedAuthorized = unifiedBooks?.enabled == true && withContext(Dispatchers.IO) {
+                    runCatching { unifiedBooks.hasVerifiedShelfBook(UnifiedBookScope.fromCall(device, friend), bookId) }.getOrDefault(false)
+                }
+                if (!unifiedAuthorized && library?.reservesVersion(bookId) == true) {
                     return@withReaderConnection call.respondText(
                         buildJsonObject { put("error", "该书受课程版权保留约束。") }.toString(),
                         ContentType.Application.Json,
                         HttpStatusCode.Conflict,
                     )
                 }
-                val friend = call.attributes.getOrNull(observedFriend)
-                val device = call.attributes[observedDevice]
                 val bearer = call.request.header("Authorization")?.removePrefix("Bearer ").orEmpty()
                 val diagnostics = friend?.let { FriendReaderDiagnostics() }
                 var requestId = ""

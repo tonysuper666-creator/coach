@@ -184,28 +184,90 @@ internal object CourseAutoAligner {
             )
         }
 
-        // Uncovered CORE_TEXTBOOK chapters fold cleanly into `本课不考内容` (EXCLUDED)
-        var excludedOrd = 1000
-        for (ch in textbookChapters) {
-            if (ch.title in coveredChapterTitles) continue
-            topics += CourseTopicPlan(
-                weekLabel = "本课不考",
-                weekNum = null,
-                ord = excludedOrd++,
-                title = ch.title,
-                examStatus = CourseTopicStatus.EXCLUDED,
-                examWeight = 0.0,
-                sources = listOf(
-                    CourseTopicLinkPlan(
-                        bookId = ch.bookId,
-                        tocNodeId = ch.tocNodeId,
-                        startPage = ch.startPage,
-                        endPage = ch.endPage,
-                        role = CourseMaterialRole.CORE_TEXTBOOK,
-                        scopeNote = "未覆盖教材章节 · 可随时恢复为必考",
+        // Only narrow out uncovered textbook chapters into EXCLUDED when the course is marked as exam,
+        // has an explicit syllabus (same predicate as CourseDetailSnapshot.hasSyllabusOrScope), AND that syllabus
+        // actually matched at least one textbook chapter. A syllabus we cannot map to chapters (e.g. a chapter list
+        // without week lines) must never exclude the whole book; keep every chapter and let the UI say
+        // "已收到考纲，暂按整本书安排".
+        val hasScopeNarrowing = current.isExam &&
+            hasSyllabusScope(resolvedMaterials.map { it.role }) &&
+            coveredChapterTitles.isNotEmpty()
+        if (hasScopeNarrowing) {
+            var excludedOrd = 1000
+            for (ch in textbookChapters) {
+                if (ch.title in coveredChapterTitles) continue
+                topics += CourseTopicPlan(
+                    weekLabel = "本课不考",
+                    weekNum = null,
+                    ord = excludedOrd++,
+                    title = ch.title,
+                    examStatus = CourseTopicStatus.EXCLUDED,
+                    examWeight = 0.0,
+                    sources = listOf(
+                        CourseTopicLinkPlan(
+                            bookId = ch.bookId,
+                            tocNodeId = ch.tocNodeId,
+                            startPage = ch.startPage,
+                            endPage = ch.endPage,
+                            role = CourseMaterialRole.CORE_TEXTBOOK,
+                            scopeNote = "未覆盖教材章节 · 可随时恢复为必考",
+                        ),
                     ),
-                ),
-            )
+                )
+            }
+        } else {
+            val chapterPosByKey = textbookChapters.withIndex().associate { (i, ch) ->
+                Triple(ch.bookId, ch.startPage, ch.title) to (i + 1)
+            }
+            val uncoveredChapters = textbookChapters.filter { it.title !in coveredChapterTitles }
+            if (uncoveredChapters.isNotEmpty()) {
+                uncoveredChapters.forEachIndexed { idx, ch ->
+                    val chapterOrder = chapterPosByKey[Triple(ch.bookId, ch.startPage, ch.title)] ?: (idx + 1)
+                    topics += CourseTopicPlan(
+                        weekLabel = "第 $chapterOrder 章",
+                        weekNum = null,
+                        ord = if (allWeeks.isEmpty()) chapterOrder * 10 else 500 + chapterOrder,
+                        title = ch.title,
+                        examStatus = CourseTopicStatus.EXAMINABLE,
+                        examWeight = 1.0,
+                        sources = listOf(
+                            CourseTopicLinkPlan(
+                                bookId = ch.bookId,
+                                tocNodeId = ch.tocNodeId,
+                                startPage = ch.startPage,
+                                endPage = ch.endPage,
+                                role = CourseMaterialRole.CORE_TEXTBOOK,
+                                scopeNote = ch.title,
+                            ),
+                        ),
+                    )
+                }
+            } else if (topics.isEmpty()) {
+                val textbooks = current.materials.filter {
+                    (specByBook[it.bookId]?.role ?: it.role) == CourseMaterialRole.CORE_TEXTBOOK
+                }.ifEmpty { current.materials }
+                textbooks.forEachIndexed { idx, mat ->
+                    val effRole = specByBook[mat.bookId]?.role ?: mat.role
+                    topics += CourseTopicPlan(
+                        weekLabel = "第 ${idx + 1} 章",
+                        weekNum = null,
+                        ord = (idx + 1) * 10,
+                        title = mat.title,
+                        examStatus = CourseTopicStatus.EXAMINABLE,
+                        examWeight = 1.0,
+                        sources = listOf(
+                            CourseTopicLinkPlan(
+                                bookId = mat.bookId,
+                                tocNodeId = null,
+                                startPage = 1,
+                                endPage = mat.pageCount.coerceAtLeast(1),
+                                role = effRole,
+                                scopeNote = mat.title,
+                            ),
+                        ),
+                    )
+                }
+            }
         }
 
         CourseStore.applyAlignmentRespectingLocks(
@@ -268,22 +330,38 @@ internal object CourseAutoAligner {
             listOf(
                 CourseDiscrepancyItem(
                     point = "讲义优先于教材细枝末节",
-                    authoritativeView = "L1 ${l1.role.labelZh}《${l1.bookTitle}》代表本课考核口径与课堂重点。",
-                    secondaryView = "L2 核心教材《${l2.bookTitle}》（第 ${l2.startPage}–${l2.endPage} 页）提供背景推导与扩展案例。",
-                    advice = "作答结论优先对齐讲义和官方答案，教材细节仅作辅助论证。",
+                    authoritativeView = if (detail.isExam) {
+                        "L1 ${l1.role.labelZh}《${l1.bookTitle}》代表本课考核口径与课堂重点。"
+                    } else {
+                        "${l1.role.labelZh}《${l1.bookTitle}》代表课堂主线与核心重点。"
+                    },
+                    secondaryView = "核心教材《${l2.bookTitle}》（第 ${l2.startPage}–${l2.endPage} 页）提供背景推导与扩展案例。",
+                    advice = if (detail.isExam) {
+                        "作答结论优先对齐讲义和官方答案，教材细节仅作辅助论证。"
+                    } else {
+                        "阅读时先对照讲义主线，再结合教材扩展理解。"
+                    },
                     citations = citations.filter { it.bookId == l1.bookId || it.bookId == l2.bookId }.take(2),
                 ),
             )
         } else {
             emptyList()
         }
-        val tentativeNotice = buildString {
-            append("以课堂大纲与 L1 讲义为准")
-            if (detail.examProfile.examDateTentative || detail.examProfile.examFormatTentative) {
-                append(" · 考试日期与题型标注为暂定")
+        val tentativeNotice = if (detail.isExam) {
+            buildString {
+                append("以课堂大纲与 L1 讲义为准")
+                if (detail.examProfile.examDateTentative || detail.examProfile.examFormatTentative) {
+                    append(" · 考试日期与题型标注为暂定")
+                }
             }
+        } else {
+            "按当前材料顺序整理"
         }
-        val promptStem = "结合「${topic.title}」的权威讲义与核心概念，用自己的话阐释其核心机制、适用前提，并对比课堂强调与教材拓展之间的关键边界（建议 300 词左右）。"
+        val promptStem = if (detail.isExam) {
+            "结合「${topic.title}」的权威讲义与核心概念，用自己的话阐释其核心机制、适用前提，并对比课堂强调与教材拓展之间的关键边界（建议 300 词左右）。"
+        } else {
+            "结合「${topic.title}」的核心概念，用自己的话阐释主要思路与适用前提（建议 300 词左右）。"
+        }
         val cleanStem = if (CourseClientGates.auditOverlap(promptStem, sourceTexts).passed) {
             promptStem
         } else {
@@ -292,11 +370,17 @@ internal object CourseAutoAligner {
         val packHash = topic.packSourcesHash.orEmpty()
         return CourseTopicPack(
             topicId = topic.topicId,
-            summary = "本专题共关联 ${orderedSources.size} 份课程材料，已按 L1 大纲/讲义 → L2 教材 → L3 文献 → L4 笔记排好阅读顺序。",
+            summary = if (detail.isExam) {
+                "本专题共关联 ${orderedSources.size} 份课程材料，已按 L1 大纲/讲义 → L2 教材 → L3 文献 → L4 笔记排好阅读顺序。"
+            } else {
+                "本章共关联 ${orderedSources.size} 份材料，已按阅读顺序排好。"
+            },
             authorityNotice = tentativeNotice,
-            examDateTentative = detail.examProfile.examDateTentative,
-            examFormatTentative = detail.examProfile.examFormatTentative,
-            examFocus = if (detail.examProfile.examFormat.isNotBlank()) {
+            examDateTentative = detail.isExam && detail.examProfile.examDateTentative,
+            examFormatTentative = detail.isExam && detail.examProfile.examFormatTentative,
+            examFocus = if (!detail.isExam) {
+                ""
+            } else if (detail.examProfile.examFormat.isNotBlank()) {
                 "${detail.examProfile.examFormat}${if (detail.examProfile.examFormatTentative) "（暂定）" else ""}"
             } else {
                 "论述与概念辨析（暂定）"

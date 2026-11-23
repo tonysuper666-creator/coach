@@ -116,6 +116,20 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
             if (controller.structureProvider === bookStructureProvider) controller.structureProvider = null
         }
     }
+    val uploadClient = remember(explainer) { explainer.unifiedUploadClient() }
+    DisposableEffect(controller, uploadClient) {
+        controller.unifiedUploadClient = uploadClient
+        onDispose {
+            if (controller.unifiedUploadClient === uploadClient) {
+                controller.unifiedUploadClient = null
+                controller.onUploadIdentityChanged(null)
+            }
+        }
+    }
+    LaunchedEffect(controller, uploadClient, explainer.identity) {
+        val idKey = uploadClient?.activeAccountKey()
+        controller.onUploadIdentityChanged(idKey)
+    }
     val learningSupport = support ?: remember(controller.library, explainer) {
         PairedBookLearningSupport(controller.library,
             sendLesson = { blocks, pages -> explainer.run { load(); explainLesson(blocks, pages) } },
@@ -371,6 +385,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             onOpenCollection = onOpenCollection,
                             onMultiDropAction = { action -> controller.resolveMultiDrop(action) },
                             onDismissMultiDrop = controller::dismissMultiDrop,
+                            onRetryUpload = { bookId -> controller.retryBookUpload(bookId) },
                             library = controller.library,
                         )
                         ui.screen == BookScreen.COURSE && ui.activeCourseDetail != null -> {
@@ -435,6 +450,28 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                     run { controller.jumpToMockSourcePage(detail.courseId, bookId, pg, quote) }
                                 },
                                 onMasteryUpdated = { cid -> controller.refreshActiveCourse(cid) },
+                                onAddMaterials = {
+                                    scope.launch {
+                                        val picked = if (onPickCourseFiles != null) {
+                                            onPickCourseFiles()
+                                        } else {
+                                            listOfNotNull(chooseBook())
+                                        }
+                                        if (picked.isNotEmpty()) {
+                                            controller.addMaterialsToCourse(detail.courseId, picked) {
+                                                picked.forEach(releasePickedBook)
+                                            }
+                                        }
+                                    }
+                                },
+                                onSkipSyllabusPrompt = {
+                                    run {
+                                        controller.updateCourseExamProfile(
+                                            detail.courseId,
+                                            detail.examProfile.copy(syllabusPromptState = CourseSyllabusPromptState.SKIPPED),
+                                        )
+                                    }
+                                },
                             )
                         }
                         ui.screen == BookScreen.REVIEWS -> LocalBookReviews(ui,

@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import httpx
@@ -364,13 +364,19 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         api = ApiRouter(self.ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(handle)),
                         keys={"openai": KEY, "anthropic": KEY}, cross_vendor_fallback=True)
         jobs = BatchRouter(api, lambda: self.now)
-        req = self.mcq_request("receipt")
-        with patch.object(bridge, "API_ONLY", True), patch.object(bridge, "API_ROUTER", api),                 patch.object(bridge, "API_BATCH", jobs), patch.object(bridge, "write_log"):
-            first = await bridge.dispatch_batch(req, req.model, None)
-            again = await bridge.dispatch_batch(self.mcq_request("receipt"), req.model, None)
-        self.assertEqual(("failed", "batch_submit_ambiguous"), (first.status, first.reason))
-        self.assertEqual(("failed", "batch_submit_ambiguous"), (again.status, again.reason))
-        self.assertEqual(["/v1/files", "/v1/batches"], paths)
+        cli = AsyncMock(side_effect=AssertionError("subscription CLI after ambiguous submit"))
+        for api_only in (True, False):
+            paths.clear()
+            name = "receipt-api-only" if api_only else "receipt-default"
+            req = self.mcq_request(name)
+            with patch.object(bridge, "API_ONLY", api_only), patch.object(bridge, "API_ROUTER", api),                     patch.object(bridge, "API_BATCH", jobs), patch.object(bridge, "dispatch_cli", cli),                     patch.object(bridge, "write_log"):
+                first = await bridge.dispatch_batch(req, req.model, None)
+                again = await bridge.dispatch_batch(self.mcq_request(name), req.model, None)
+            self.assertEqual(("failed", "batch_submit_ambiguous"), (first.status, first.reason))
+            self.assertEqual(("failed", "batch_submit_ambiguous"), (again.status, again.reason))
+            self.assertEqual(["/v1/files", "/v1/batches"], paths)
+            self.assertEqual("fallback", jobs.read(jobs.path(self.key(name)))["phase"])
+        cli.assert_not_called()
 
     async def test_cached_cross_vendor_fallback_keeps_wire_marker(self):
         from api_routing import frames as stream_frames

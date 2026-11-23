@@ -1401,6 +1401,11 @@ async def dispatch_batch(req: ReqCtx, model: str, effort: str | None) -> Outcome
         reason = str(error) if isinstance(error, (ApiFailure, Denied)) else "batch_state_io"
         req.api_fallback = reason
         write_log(request_id=req.request_id, task=req.task, event="api_fallback", reason=reason)
+        if reason == "batch_submit_ambiguous":
+            # A batch may already exist upstream: neither the cross-vendor API backup nor the
+            # subscription CLI may generate this job a second time, in any mode.
+            req.transport = "api"
+            return Outcome("failed", reason, "error", model)
         if API_ONLY:
             req.transport = "api"
             pre_submit_reasons = (

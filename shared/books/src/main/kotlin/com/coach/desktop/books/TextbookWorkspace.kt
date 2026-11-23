@@ -120,13 +120,15 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     DisposableEffect(controller, uploadClient) {
         controller.unifiedUploadClient = uploadClient
         onDispose {
-            if (controller.unifiedUploadClient === uploadClient) controller.unifiedUploadClient = null
+            if (controller.unifiedUploadClient === uploadClient) {
+                controller.unifiedUploadClient = null
+                controller.onUploadIdentityChanged(null)
+            }
         }
     }
     LaunchedEffect(controller, uploadClient, explainer.identity) {
-        if (uploadClient != null) {
-            controller.syncBookUploads()
-        }
+        val idKey = uploadClient?.activeAccountKey()
+        controller.onUploadIdentityChanged(idKey)
     }
     val learningSupport = support ?: remember(controller.library, explainer) {
         PairedBookLearningSupport(controller.library,

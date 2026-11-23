@@ -184,6 +184,20 @@ fun main(args: Array<String>): Unit = runBlocking {
             }
         }
     }
+    val unifiedBookMaintenance = if (unifiedBooks.enabled) {
+        launch(Dispatchers.IO) {
+            while (isActive) {
+                runCatching {
+                    unifiedBooks.reconcilePendingDeletes()
+                    unifiedBooks.purgeExpiredTrash()
+                }.onFailure {
+                    if (it is CancellationException) throw it
+                    println("COACH unified books maintenance failed=${it.javaClass.simpleName}")
+                }
+                delay(3_600_000L)
+            }
+        }
+    } else null
     val public = publicPort?.let { p -> embeddedServer(Netty, host = "127.0.0.1", port = p) {
         ledgerRoutes(actor,pushes,adminDevice=device,friends=friends,publicOnly=true,unifiedBooks=unifiedBooks)
         libraryExplainRoutes(actor,chat.reader,friends=friends,companionPipeline=companionPipeline,tokenLedger=tokenLedger,courseAlignPipeline=courseAlignPipeline,courseTopicPipeline=courseTopicPipeline,courseVisionService=courseVisionService,unifiedBooks=unifiedBooks)
@@ -240,7 +254,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     val shutdown = Thread {
         runBlocking {
             children?.stop();supervisor.cancelAndJoin();public?.stopSuspend(100,1000);local.stopSuspend(100,1000)
-            verification?.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close()
+            unifiedBookMaintenance?.cancelAndJoin();verification?.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close()
         }
     }
     Runtime.getRuntime().addShutdownHook(shutdown)
@@ -251,6 +265,6 @@ fun main(args: Array<String>): Unit = runBlocking {
         supervisor.cancelAndJoin()
         public?.stop(100, 1000)
         local.stop(100, 1000)
-        verification?.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close();lock.release();fileLock.close()
+        unifiedBookMaintenance?.cancelAndJoin();verification?.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close();lock.release();fileLock.close()
     }
 }

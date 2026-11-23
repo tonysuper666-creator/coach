@@ -1790,7 +1790,7 @@ internal class TextbookLibrary(
         }
     }
 
-    @Synchronized fun deleteBook(bookId: String) {
+    @Synchronized fun deleteBook(bookId: String, initiatingAccountKey: String? = null) {
         firstRenderGates.remove(bookId)
         aspectCache.remove(bookId)
         savedTextViewCache.remove(bookId)
@@ -1826,7 +1826,7 @@ internal class TextbookLibrary(
                     db.prepareStatement("DELETE FROM collection_materials WHERE material_id=?").use { it.setString(1, bookId); it.executeUpdate() }
                 }
                 MasteryStore.deleteForBook(db, bookId)
-                BookUploadQueueStore.deleteForBook(db, bookId)
+                BookUploadQueueStore.markPendingDeleteOrRemove(db, bookId, initiatingAccountKey, clock.millis())
                 val hasVisualReviews = db.createStatement().use { s -> s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='book_pdf_visual_reviews'").use { it.next() } }
                 if (hasVisualReviews) db.prepareStatement("DELETE FROM book_pdf_visual_reviews WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }
                 db.prepareStatement("DELETE FROM book_review_position WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }
@@ -2362,6 +2362,14 @@ internal class TextbookLibrary(
         }
     }
 
+    @Synchronized internal fun saveUploadAccountBinding(sessionKey: String, accountKey: String) = database().use { db ->
+        BookUploadQueueStore.saveAccountBinding(db, sessionKey, accountKey, clock.millis())
+    }
+
+    @Synchronized internal fun boundUploadAccountKey(sessionKey: String): String? = database().use { db ->
+        BookUploadQueueStore.boundAccountKey(db, sessionKey)
+    }
+
     @Synchronized internal fun recoverInterruptedBookUploads() = database().use { db ->
         BookUploadQueueStore.recoverInterruptedUploads(db, clock.millis())
     }
@@ -2374,9 +2382,11 @@ internal class TextbookLibrary(
         stageLabel: String = "",
         errorMessage: String? = null,
         serverShelfBookId: String? = null,
+        clearServerShelfBookId: Boolean = false,
     ) = database().use { db ->
         BookUploadQueueStore.updateState(
-            db, accountKey, localBookId, state, progressPct, stageLabel, errorMessage, serverShelfBookId, clock.millis(),
+            db, accountKey, localBookId, state, progressPct, stageLabel, errorMessage,
+            serverShelfBookId, clearServerShelfBookId, clock.millis(),
         )
     }
 
@@ -2384,8 +2394,15 @@ internal class TextbookLibrary(
         BookUploadQueueStore.retry(db, accountKey, localBookId, clock.millis())
     }
 
+    @Synchronized internal fun removeBookUploadEntry(accountKey: String, localBookId: String) = database().use { db ->
+        BookUploadQueueStore.removeEntry(db, accountKey, localBookId)
+    }
+
     @Synchronized internal fun uploadEntriesForAccount(accountKey: String): Map<String, BookUploadEntry> =
         database().use { db -> BookUploadQueueStore.listForAccount(db, accountKey) }
+
+    @Synchronized internal fun actionableUploadEntriesForAccount(accountKey: String): List<BookUploadEntry> =
+        database().use { db -> BookUploadQueueStore.listActionableForAccount(db, accountKey) }
 
     @Synchronized internal fun allUploadEntries(): List<BookUploadEntry> =
         database().use { db -> BookUploadQueueStore.listAll(db) }

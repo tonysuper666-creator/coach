@@ -81,6 +81,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var activeImport: BookImportControl? = null
     @Volatile private var activeImportJob: Job? = null
+    @Volatile private var activeUploadSyncJob: Job? = null
     @Volatile private var pendingPageSaveJob: Job? = null
     private val pageSaveLock = Mutex()
     private val indexingControls = ConcurrentHashMap<String, BookImportControl>()
@@ -96,8 +97,19 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
-    fun syncBookUploads(): Job = backgroundScope.launch {
-        runCatching { uploadCoordinator.syncOnce() }
+    fun onUploadIdentityChanged(newSessionId: String?): Job? {
+        activeUploadSyncJob?.cancel()
+        activeUploadSyncJob = null
+        uploadCoordinator.onSessionChanged(newSessionId)
+        return if (newSessionId != null && unifiedUploadClient != null) syncBookUploads() else null
+    }
+
+    fun syncBookUploads(): Job {
+        val job = backgroundScope.launch {
+            runCatching { uploadCoordinator.syncOnce() }
+        }
+        activeUploadSyncJob = job
+        return job
     }
 
     fun retryBookUpload(localBookId: String): Job = backgroundScope.launch {
@@ -843,7 +855,10 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     }
 
     private suspend fun handleCancelledImport(bookId: String?) = withContext(NonCancellable) {
-        if (bookId != null) runCatching { library.deleteBook(bookId) }
+        if (bookId != null) {
+            runCatching { library.deleteBook(bookId, uploadCoordinator.currentAccountKey()) }
+            if (unifiedUploadClient != null) syncBookUploads()
+        }
         val catalog = runCatching { library.catalog() }.getOrElse { emptyList() }
         val fallbackBook = catalog.firstOrNull()?.let { runCatching { library.book(it.id) }.getOrNull() }
         mutable.update { current ->
@@ -869,7 +884,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val shouldDelete = bookId != null && deleteIfNoOcrYet &&
             runCatching { library.book(bookId).pages.none { it.ocr } }.getOrDefault(false)
         if (shouldDelete) {
-            runCatching { library.deleteBook(checkNotNull(bookId)) }
+            runCatching { library.deleteBook(checkNotNull(bookId), uploadCoordinator.currentAccountKey()) }
+            if (unifiedUploadClient != null) syncBookUploads()
         }
         val catalog = runCatching { library.catalog() }.getOrElse { emptyList() }
         val fallbackBook = catalog.firstOrNull()?.let { runCatching { library.book(it.id) }.getOrNull() }

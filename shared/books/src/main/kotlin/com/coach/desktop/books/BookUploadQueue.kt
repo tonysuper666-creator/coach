@@ -2,6 +2,9 @@ package com.coach.desktop.books
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -11,6 +14,7 @@ import kotlinx.coroutines.withContext
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
+import java.util.concurrent.atomic.AtomicLong
 
 internal enum class BookUploadState {
     WAITING_NETWORK,
@@ -22,6 +26,7 @@ internal enum class BookUploadState {
     READY,
     FAILED,
     PAUSED,
+    PENDING_DELETE,
 }
 
 /**
@@ -55,6 +60,7 @@ internal data class BookUploadEntry(
             BookUploadState.READY -> null
             BookUploadState.FAILED -> errorMessage?.takeIf { it.isNotBlank() } ?: "上传失败"
             BookUploadState.PAUSED -> null
+            BookUploadState.PENDING_DELETE -> null
         }
     }
 
@@ -97,8 +103,13 @@ internal sealed interface UnifiedBookStatusOutcome {
     data object NotFound : UnifiedBookStatusOutcome
 }
 
-internal interface UnifiedBookRemoteClient {
-    suspend fun activeAccountKey(): String?
+/**
+ * Immutable authenticated session snapshot pinned for an entire sync batch so an identity switch
+ * mid-batch can never send an old account's queued book under the new account's credentials.
+ */
+internal interface UnifiedBookRemoteSession {
+    val sessionId: String
+    val fallbackAccountKey: String
     suspend fun checkCapability(): UnifiedBookCapability
     suspend fun uploadBook(
         file: Path,
@@ -112,7 +123,75 @@ internal interface UnifiedBookRemoteClient {
     suspend fun deleteBook(shelfBookId: String): Boolean
 }
 
+internal interface UnifiedBookRemoteClient {
+    suspend fun activeAccountKey(): String?
+    suspend fun checkCapability(): UnifiedBookCapability
+    suspend fun uploadBook(
+        file: Path,
+        format: String,
+        title: String,
+        sha256: String,
+        onProgress: (Int) -> Unit,
+    ): UnifiedBookUploadOutcome
+
+    suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome
+    suspend fun deleteBook(shelfBookId: String): Boolean
+
+    /**
+     * Captures a pinned session for one sync batch. Production implementations bind an immutable
+     * `(serverUrl, deviceId, token)` credential and abort if the active identity changes mid-batch.
+     */
+    suspend fun openSession(): UnifiedBookRemoteSession? {
+        val key = activeAccountKey() ?: return null
+        val client = this
+        return object : UnifiedBookRemoteSession {
+            override val sessionId: String = key
+            override val fallbackAccountKey: String = key
+            override suspend fun checkCapability(): UnifiedBookCapability = client.checkCapability()
+            override suspend fun uploadBook(
+                file: Path,
+                format: String,
+                title: String,
+                sha256: String,
+                onProgress: (Int) -> Unit,
+            ): UnifiedBookUploadOutcome = client.uploadBook(file, format, title, sha256, onProgress)
+
+            override suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome = client.fetchStatus(shelfBookId)
+            override suspend fun deleteBook(shelfBookId: String): Boolean = client.deleteBook(shelfBookId)
+        }
+    }
+}
+
 internal object BookUploadQueueStore {
+    fun saveAccountBinding(
+        db: Connection,
+        sessionKey: String,
+        accountKey: String,
+        now: Long = System.currentTimeMillis(),
+    ) {
+        if (!BookSchemaMigration.tableExists(db, "book_upload_account_bindings")) return
+        db.prepareStatement(
+            """INSERT INTO book_upload_account_bindings(session_key, account_key, updated_at)
+               VALUES(?, ?, ?)
+               ON CONFLICT(session_key) DO UPDATE SET account_key=excluded.account_key, updated_at=excluded.updated_at""".trimIndent(),
+        ).use { sql ->
+            sql.setString(1, sessionKey)
+            sql.setString(2, accountKey)
+            sql.setLong(3, now)
+            sql.executeUpdate()
+        }
+    }
+
+    fun boundAccountKey(db: Connection, sessionKey: String): String? {
+        if (!BookSchemaMigration.tableExists(db, "book_upload_account_bindings")) return null
+        return db.prepareStatement(
+            "SELECT account_key FROM book_upload_account_bindings WHERE session_key=?",
+        ).use { sql ->
+            sql.setString(1, sessionKey)
+            sql.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else null }
+        }
+    }
+
     fun enqueue(
         db: Connection,
         accountKey: String,
@@ -146,6 +225,7 @@ internal object BookUploadQueueStore {
                ) VALUES(?, ?, ?, NULL, ?, ?, 'WAITING_NETWORK', 0, '', NULL, 0, ?)
                ON CONFLICT(account_key, local_book_id) DO UPDATE SET
                    file_sha256=excluded.file_sha256,
+                   server_shelf_book_id=NULL,
                    format=excluded.format,
                    title=excluded.title,
                    state='WAITING_NETWORK',
@@ -214,24 +294,33 @@ internal object BookUploadQueueStore {
         stageLabel: String = "",
         errorMessage: String? = null,
         serverShelfBookId: String? = null,
+        clearServerShelfBookId: Boolean = false,
         now: Long = System.currentTimeMillis(),
     ) {
         if (!BookSchemaMigration.tableExists(db, "book_upload_queue")) return
+        val shelfClause = if (clearServerShelfBookId) {
+            "server_shelf_book_id=NULL"
+        } else {
+            "server_shelf_book_id=COALESCE(?, server_shelf_book_id)"
+        }
         db.prepareStatement(
             """UPDATE book_upload_queue
                SET state=?, progress_pct=?, stage_label=?, error_message=?,
-                   server_shelf_book_id=COALESCE(?, server_shelf_book_id),
+                   $shelfClause,
                    updated_at=?
                WHERE account_key=? AND local_book_id=?""".trimIndent(),
         ).use { sql ->
-            sql.setString(1, state.name)
-            sql.setInt(2, progressPct.coerceIn(0, 100))
-            sql.setString(3, stageLabel)
-            if (errorMessage == null) sql.setNull(4, java.sql.Types.VARCHAR) else sql.setString(4, errorMessage)
-            if (serverShelfBookId == null) sql.setNull(5, java.sql.Types.VARCHAR) else sql.setString(5, serverShelfBookId)
-            sql.setLong(6, now)
-            sql.setString(7, accountKey)
-            sql.setString(8, localBookId)
+            var idx = 1
+            sql.setString(idx++, state.name)
+            sql.setInt(idx++, progressPct.coerceIn(0, 100))
+            sql.setString(idx++, stageLabel)
+            if (errorMessage == null) sql.setNull(idx++, java.sql.Types.VARCHAR) else sql.setString(idx++, errorMessage)
+            if (!clearServerShelfBookId) {
+                if (serverShelfBookId == null) sql.setNull(idx++, java.sql.Types.VARCHAR) else sql.setString(idx++, serverShelfBookId)
+            }
+            sql.setLong(idx++, now)
+            sql.setString(idx++, accountKey)
+            sql.setString(idx, localBookId)
             sql.executeUpdate()
         }
     }
@@ -250,10 +339,61 @@ internal object BookUploadQueueStore {
         }
     }
 
-    fun deleteForBook(db: Connection, localBookId: String) {
+    /**
+     * Scopes local book deletion to [initiatingAccountKey] when provided, preserving other accounts'
+     * queued items on the same machine. Any entry that already has a `server_shelf_book_id` is
+     * transitioned to retriable `PENDING_DELETE` instead of being silently wiped, so the server-side
+     * shelf reference is properly unbound on the next sync.
+     */
+    fun markPendingDeleteOrRemove(
+        db: Connection,
+        localBookId: String,
+        initiatingAccountKey: String?,
+        now: Long = System.currentTimeMillis(),
+    ) {
         if (!BookSchemaMigration.tableExists(db, "book_upload_queue")) return
-        db.prepareStatement("DELETE FROM book_upload_queue WHERE local_book_id=?").use { sql ->
-            sql.setString(1, localBookId)
+        if (initiatingAccountKey != null) {
+            db.prepareStatement(
+                """UPDATE book_upload_queue
+                   SET state='PENDING_DELETE', progress_pct=0, stage_label='', error_message=NULL, updated_at=?
+                   WHERE local_book_id=? AND account_key=? AND server_shelf_book_id IS NOT NULL""".trimIndent(),
+            ).use { sql ->
+                sql.setLong(1, now)
+                sql.setString(2, localBookId)
+                sql.setString(3, initiatingAccountKey)
+                sql.executeUpdate()
+            }
+            db.prepareStatement(
+                "DELETE FROM book_upload_queue WHERE local_book_id=? AND account_key=? AND server_shelf_book_id IS NULL",
+            ).use { sql ->
+                sql.setString(1, localBookId)
+                sql.setString(2, initiatingAccountKey)
+                sql.executeUpdate()
+            }
+        } else {
+            db.prepareStatement(
+                """UPDATE book_upload_queue
+                   SET state='PENDING_DELETE', progress_pct=0, stage_label='', error_message=NULL, updated_at=?
+                   WHERE local_book_id=? AND server_shelf_book_id IS NOT NULL""".trimIndent(),
+            ).use { sql ->
+                sql.setLong(1, now)
+                sql.setString(2, localBookId)
+                sql.executeUpdate()
+            }
+            db.prepareStatement(
+                "DELETE FROM book_upload_queue WHERE local_book_id=? AND server_shelf_book_id IS NULL AND paused=0",
+            ).use { sql ->
+                sql.setString(1, localBookId)
+                sql.executeUpdate()
+            }
+        }
+    }
+
+    fun removeEntry(db: Connection, accountKey: String, localBookId: String) {
+        if (!BookSchemaMigration.tableExists(db, "book_upload_queue")) return
+        db.prepareStatement("DELETE FROM book_upload_queue WHERE account_key=? AND local_book_id=?").use { sql ->
+            sql.setString(1, accountKey)
+            sql.setString(2, localBookId)
             sql.executeUpdate()
         }
     }
@@ -271,12 +411,15 @@ internal object BookUploadQueueStore {
         }
     }
 
+    /** Visible book-card entries for [accountKey] (excludes paused and PENDING_DELETE unbind tasks). */
     fun listForAccount(db: Connection, accountKey: String): Map<String, BookUploadEntry> {
         if (!BookSchemaMigration.tableExists(db, "book_upload_queue")) return emptyMap()
         return db.prepareStatement(
             """SELECT account_key, local_book_id, file_sha256, server_shelf_book_id, format, title,
                       state, progress_pct, stage_label, error_message, paused, updated_at
-               FROM book_upload_queue WHERE account_key=? AND paused=0 ORDER BY updated_at ASC""".trimIndent(),
+               FROM book_upload_queue
+               WHERE account_key=? AND paused=0 AND state <> 'PENDING_DELETE'
+               ORDER BY updated_at ASC""".trimIndent(),
         ).use { sql ->
             sql.setString(1, accountKey)
             sql.executeQuery().use { rs ->
@@ -286,6 +429,23 @@ internal object BookUploadQueueStore {
                         put(entry.localBookId, entry)
                     }
                 }
+            }
+        }
+    }
+
+    /** All active entries for [accountKey], including retriable PENDING_DELETE server unbind tasks. */
+    fun listActionableForAccount(db: Connection, accountKey: String): List<BookUploadEntry> {
+        if (!BookSchemaMigration.tableExists(db, "book_upload_queue")) return emptyList()
+        return db.prepareStatement(
+            """SELECT account_key, local_book_id, file_sha256, server_shelf_book_id, format, title,
+                      state, progress_pct, stage_label, error_message, paused, updated_at
+               FROM book_upload_queue
+               WHERE account_key=? AND paused=0
+               ORDER BY CASE WHEN state='PENDING_DELETE' THEN 0 ELSE 1 END, updated_at ASC""".trimIndent(),
+        ).use { sql ->
+            sql.setString(1, accountKey)
+            sql.executeQuery().use { rs ->
+                buildList { while (rs.next()) add(rowToEntry(rs)) }
             }
         }
     }
@@ -330,9 +490,10 @@ internal object BookUploadQueueStore {
 
 /**
  * Coordinates the persistent per-account unified upload queue without ever blocking local reading.
- * - Offline → marks pending books WAITING_NETWORK ("等待联网").
- * - Old / rolled-back server lacking capability → marks pending books WAITING_SERVER ("等待服务支持"),
- *   preserving queue and local reading without falling back to legacy fragment uploads.
+ * - Pins each sync batch to a single immutable [UnifiedBookRemoteSession] and cancels old batches on identity switch.
+ * - Persists verified session->account bindings so rolling back to an older server preserves the pending book status.
+ * - Clears stale server shelf IDs on 404 NotFound so user retries re-upload the local original file.
+ * - Processes retriable PENDING_DELETE unbind tasks so deleted local books also release server shelf refs.
  */
 internal class UnifiedBookUploadCoordinator(
     private val library: TextbookLibrary,
@@ -342,51 +503,127 @@ internal class UnifiedBookUploadCoordinator(
     private val mutableStatuses = MutableStateFlow<Map<String, BookUploadEntry>>(emptyMap())
     val statuses: StateFlow<Map<String, BookUploadEntry>> = mutableStatuses.asStateFlow()
 
+    private val sessionGeneration = AtomicLong(0L)
+    @Volatile private var activeSessionId: String? = null
     @Volatile private var lastAccountKey: String? = null
+    @Volatile private var activeBatchJob: Job? = null
+
+    internal fun currentAccountKey(): String? = lastAccountKey
+
+    /**
+     * Cancels any in-flight sync batch belonging to a previous account/session and prevents
+     * late responses from that batch from mutating the new session's UI state.
+     */
+    fun onSessionChanged(newSessionId: String?) {
+        val changed = newSessionId != activeSessionId
+        sessionGeneration.incrementAndGet()
+        activeBatchJob?.cancel()
+        activeBatchJob = null
+        if (changed) {
+            activeSessionId = newSessionId
+            lastAccountKey = null
+            mutableStatuses.value = emptyMap()
+        }
+    }
 
     suspend fun enqueueBook(localBookId: String, fileSha256: String, format: String, title: String) {
         val remote = remoteProvider() ?: return
-        val accountKey = remote.activeAccountKey() ?: return
+        val session = remote.openSession() ?: return
+        val accountKey = withContext(Dispatchers.IO) {
+            library.boundUploadAccountKey(session.fallbackAccountKey) ?: session.fallbackAccountKey
+        }
         withContext(Dispatchers.IO) {
             library.enqueueBookUpload(accountKey, localBookId, fileSha256, format, title)
-            publishForAccount(accountKey)
+            if (activeSessionId == null || activeSessionId == session.sessionId) {
+                activeSessionId = session.sessionId
+                publishForAccount(accountKey, sessionGeneration.get(), session.sessionId)
+            }
         }
     }
 
     suspend fun retryBook(localBookId: String) {
         val remote = remoteProvider() ?: return
-        val accountKey = lastAccountKey ?: remote.activeAccountKey() ?: return
+        val session = remote.openSession() ?: return
+        val accountKey = lastAccountKey
+            ?: withContext(Dispatchers.IO) { library.boundUploadAccountKey(session.fallbackAccountKey) }
+            ?: session.fallbackAccountKey
         withContext(Dispatchers.IO) {
             library.retryBookUpload(accountKey, localBookId)
-            publishForAccount(accountKey)
+            publishForAccount(accountKey, sessionGeneration.get(), session.sessionId)
         }
         syncOnce()
     }
 
-    suspend fun syncOnce() = syncLock.withLock {
-        val remote = remoteProvider() ?: return@withLock
-        val fallbackKey = remote.activeAccountKey()
+    suspend fun syncOnce() {
+        val remote = remoteProvider() ?: return
+        val myGen = sessionGeneration.get()
+        val session = remote.openSession() ?: run {
+            if (sessionGeneration.get() == myGen) {
+                activeSessionId = null
+                lastAccountKey = null
+                mutableStatuses.value = emptyMap()
+            }
+            return
+        }
+        val previousSession = activeSessionId
+        if (previousSession != null && previousSession != session.sessionId) {
+            // Identity switched between syncs; bump generation and cancel any stale in-flight batch first.
+            onSessionChanged(session.sessionId)
+        }
+        val batchGen = sessionGeneration.get()
+        val batchJob = currentCoroutineContext()[Job]
+        syncLock.withLock {
+            if (sessionGeneration.get() != batchGen) return@withLock
+            activeSessionId = session.sessionId
+            activeBatchJob = batchJob
+            try {
+                runPinnedBatch(session, batchGen)
+            } finally {
+                if (activeBatchJob === batchJob) activeBatchJob = null
+            }
+        }
+    }
+
+    private suspend fun runPinnedBatch(session: UnifiedBookRemoteSession, batchGen: Long) {
+        fun isBatchCurrent(): Boolean =
+            sessionGeneration.get() == batchGen && activeSessionId == session.sessionId
+
+        currentCoroutineContext().ensureActive()
         val capability = try {
-            remote.checkCapability()
+            session.checkCapability()
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (_: Exception) {
             UnifiedBookCapability.Offline
         }
+        if (!isBatchCurrent()) return
 
-        val resolvedAccountKey = when (capability) {
-            is UnifiedBookCapability.Supported -> capability.accountKey
-            is UnifiedBookCapability.Unsupported -> capability.accountKey
-            UnifiedBookCapability.Unauthorized, UnifiedBookCapability.Offline -> fallbackKey
-        } ?: run {
-            mutableStatuses.value = emptyMap()
-            return@withLock
+        val resolvedAccountKey = withContext(Dispatchers.IO) {
+            when (capability) {
+                is UnifiedBookCapability.Supported -> {
+                    if (capability.accountKey != session.fallbackAccountKey) {
+                        library.saveUploadAccountBinding(session.fallbackAccountKey, capability.accountKey)
+                    }
+                    capability.accountKey
+                }
+                is UnifiedBookCapability.Unsupported -> {
+                    if (capability.accountKey != session.fallbackAccountKey) {
+                        library.saveUploadAccountBinding(session.fallbackAccountKey, capability.accountKey)
+                        capability.accountKey
+                    } else {
+                        library.boundUploadAccountKey(session.fallbackAccountKey) ?: capability.accountKey
+                    }
+                }
+                UnifiedBookCapability.Unauthorized, UnifiedBookCapability.Offline -> {
+                    library.boundUploadAccountKey(session.fallbackAccountKey) ?: session.fallbackAccountKey
+                }
+            }
         }
+        if (!isBatchCurrent()) return
 
         withContext(Dispatchers.IO) {
-            // Re-key local queue items created while offline (under fallbackKey) onto the server's stable accountKey.
-            if (fallbackKey != null && fallbackKey != resolvedAccountKey) {
-                library.rekeyUploadAccount(fallbackKey, resolvedAccountKey)
+            if (session.fallbackAccountKey != resolvedAccountKey) {
+                library.rekeyUploadAccount(session.fallbackAccountKey, resolvedAccountKey)
             }
             if (lastAccountKey != resolvedAccountKey) {
                 library.switchUploadAccount(resolvedAccountKey)
@@ -394,16 +631,17 @@ internal class UnifiedBookUploadCoordinator(
             } else {
                 library.recoverInterruptedBookUploads()
             }
-            publishForAccount(resolvedAccountKey)
+            publishForAccount(resolvedAccountKey, batchGen, session.sessionId)
         }
 
-        val entries = withContext(Dispatchers.IO) { library.uploadEntriesForAccount(resolvedAccountKey) }
-        if (entries.isEmpty()) return@withLock
+        val entries = withContext(Dispatchers.IO) { library.actionableUploadEntriesForAccount(resolvedAccountKey) }
+        if (entries.isEmpty()) return
 
         when (capability) {
             UnifiedBookCapability.Offline -> {
                 withContext(Dispatchers.IO) {
-                    for (entry in entries.values) {
+                    if (!isBatchCurrent()) return@withContext
+                    for (entry in entries) {
                         if (entry.serverShelfBookId == null && entry.state in setOf(
                                 BookUploadState.WAITING_SERVER, BookUploadState.UPLOADING,
                             )
@@ -411,17 +649,16 @@ internal class UnifiedBookUploadCoordinator(
                             library.updateBookUploadState(resolvedAccountKey, entry.localBookId, BookUploadState.WAITING_NETWORK)
                         }
                     }
-                    publishForAccount(resolvedAccountKey)
+                    publishForAccount(resolvedAccountKey, batchGen, session.sessionId)
                 }
-                return@withLock
+                return
             }
-            UnifiedBookCapability.Unauthorized -> {
-                return@withLock
-            }
+            UnifiedBookCapability.Unauthorized -> return
             is UnifiedBookCapability.Unsupported -> {
                 // Rolled-back or old server without unified upload: never fall back to legacy fragments.
                 withContext(Dispatchers.IO) {
-                    for (entry in entries.values) {
+                    if (!isBatchCurrent()) return@withContext
+                    for (entry in entries) {
                         if (entry.serverShelfBookId == null && entry.state in setOf(
                                 BookUploadState.WAITING_NETWORK, BookUploadState.UPLOADING,
                             )
@@ -429,42 +666,66 @@ internal class UnifiedBookUploadCoordinator(
                             library.updateBookUploadState(resolvedAccountKey, entry.localBookId, BookUploadState.WAITING_SERVER)
                         }
                     }
-                    publishForAccount(resolvedAccountKey)
+                    publishForAccount(resolvedAccountKey, batchGen, session.sessionId)
                 }
-                return@withLock
+                return
             }
             is UnifiedBookCapability.Supported -> Unit
         }
 
-        // Upload pending books sequentially; local reading remains completely unblocked.
-        for (entry in entries.values) {
-            if (entry.paused) continue
+        // Process pending server unbinds & uploads sequentially using the single pinned session.
+        for (entry in entries) {
+            currentCoroutineContext().ensureActive()
+            if (!isBatchCurrent() || entry.paused) return
             when {
+                entry.state == BookUploadState.PENDING_DELETE -> {
+                    val shelfId = entry.serverShelfBookId
+                    if (shelfId == null) {
+                        withContext(Dispatchers.IO) {
+                            library.removeBookUploadEntry(resolvedAccountKey, entry.localBookId)
+                        }
+                    } else {
+                        val confirmed = session.deleteBook(shelfId)
+                        if (!isBatchCurrent()) return
+                        if (confirmed) {
+                            withContext(Dispatchers.IO) {
+                                library.removeBookUploadEntry(resolvedAccountKey, entry.localBookId)
+                                publishForAccount(resolvedAccountKey, batchGen, session.sessionId)
+                            }
+                        }
+                    }
+                }
                 entry.serverShelfBookId == null && entry.state in setOf(
                     BookUploadState.WAITING_NETWORK, BookUploadState.WAITING_SERVER, BookUploadState.UPLOADING,
                 ) -> {
                     val file = library.originalFileIfPresent(entry.localBookId, entry.format)
                     if (file == null || !Files.isRegularFile(file)) {
                         withContext(Dispatchers.IO) {
+                            if (!isBatchCurrent()) return@withContext
                             library.updateBookUploadState(
                                 resolvedAccountKey,
                                 entry.localBookId,
                                 BookUploadState.FAILED,
                                 errorMessage = "本地原文件已丢失，请重新导入",
                             )
-                            publishForAccount(resolvedAccountKey)
+                            publishForAccount(resolvedAccountKey, batchGen, session.sessionId)
                         }
                         continue
                     }
                     withContext(Dispatchers.IO) {
+                        if (!isBatchCurrent()) return@withContext
                         library.updateBookUploadState(resolvedAccountKey, entry.localBookId, BookUploadState.UPLOADING, progressPct = 0)
-                        publishForAccount(resolvedAccountKey)
+                        publishForAccount(resolvedAccountKey, batchGen, session.sessionId)
                     }
-                    val outcome = remote.uploadBook(file, entry.format, entry.title, entry.fileSha256) { pct ->
-                        library.updateBookUploadState(resolvedAccountKey, entry.localBookId, BookUploadState.UPLOADING, progressPct = pct)
-                        publishForAccount(resolvedAccountKey)
+                    val outcome = session.uploadBook(file, entry.format, entry.title, entry.fileSha256) { pct ->
+                        if (isBatchCurrent()) {
+                            library.updateBookUploadState(resolvedAccountKey, entry.localBookId, BookUploadState.UPLOADING, progressPct = pct)
+                            publishForAccount(resolvedAccountKey, batchGen, session.sessionId)
+                        }
                     }
+                    if (!isBatchCurrent()) return
                     withContext(Dispatchers.IO) {
+                        if (!isBatchCurrent()) return@withContext
                         when (outcome) {
                             is UnifiedBookUploadOutcome.Accepted -> {
                                 library.updateBookUploadState(
@@ -495,14 +756,16 @@ internal class UnifiedBookUploadCoordinator(
                                 )
                             }
                         }
-                        publishForAccount(resolvedAccountKey)
+                        publishForAccount(resolvedAccountKey, batchGen, session.sessionId)
                     }
                 }
                 entry.serverShelfBookId != null && entry.state in setOf(
                     BookUploadState.RECEIVED, BookUploadState.QUEUED, BookUploadState.PROCESSING,
                 ) -> {
-                    val status = remote.fetchStatus(entry.serverShelfBookId)
+                    val status = session.fetchStatus(entry.serverShelfBookId)
+                    if (!isBatchCurrent()) return
                     withContext(Dispatchers.IO) {
+                        if (!isBatchCurrent()) return@withContext
                         when (status) {
                             is UnifiedBookStatusOutcome.Ready -> {
                                 library.updateBookUploadState(
@@ -515,26 +778,28 @@ internal class UnifiedBookUploadCoordinator(
                                 )
                             }
                             UnifiedBookStatusOutcome.NotFound -> {
-                                // Book was deleted on server; keep local copy intact and allow re-upload on retry.
+                                // Clear stale serverShelfBookId so retry re-uploads the local original file.
                                 library.updateBookUploadState(
-                                    resolvedAccountKey,
-                                    entry.localBookId,
-                                    BookUploadState.FAILED,
+                                    accountKey = resolvedAccountKey,
+                                    localBookId = entry.localBookId,
+                                    state = BookUploadState.FAILED,
                                     errorMessage = "服务端记录已移除，可点击重试上传",
+                                    clearServerShelfBookId = true,
                                 )
                             }
                             UnifiedBookStatusOutcome.UnsupportedServer,
                             UnifiedBookStatusOutcome.Offline,
                             UnifiedBookStatusOutcome.Unauthorized -> Unit
                         }
-                        publishForAccount(resolvedAccountKey)
+                        publishForAccount(resolvedAccountKey, batchGen, session.sessionId)
                     }
                 }
             }
         }
     }
 
-    private fun publishForAccount(accountKey: String) {
+    private fun publishForAccount(accountKey: String, expectedGen: Long, expectedSessionId: String) {
+        if (sessionGeneration.get() != expectedGen || activeSessionId != expectedSessionId) return
         mutableStatuses.value = library.uploadEntriesForAccount(accountKey)
     }
 }

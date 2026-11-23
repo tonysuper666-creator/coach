@@ -440,4 +440,46 @@ class UnifiedBookPipelineTest {
             assertEquals(409, h.request("/v1/library/explain", "POST", h.ownerCredential, explainBody, private = true).statusCode())
         }
     }
+
+    @Test
+    fun interruptedDeleteAfterShelfCommitRecoversViaRetryAndStartupReconciliation() = runBlocking {
+        var now = 2_000_000L
+        val cfg = UnifiedBookConfig(enabled = true, trashRetentionMs = 60_000L, clock = { now })
+        Harness(cfg).use { h ->
+            val alice = h.exchangeSable(TOK_ALPHA_1)
+            val bob = h.exchangeSable(TOK_BETA_1)
+            val bytes = "Crash-recovery shared payload for pending_deletes.".toByteArray()
+            val sha = sha256Hex(bytes)
+
+            val shelfA = parse(h.upload(alice, bytes, title = "Crash Book A")).str("shelfBookId")
+            val shelfB = parse(h.upload(bob, bytes, title = "Crash Book B")).str("shelfBookId")
+            val scopeA = UnifiedBookScope.fromCall(alice.str("deviceId"), h.actor.execute { friendName(alice.str("deviceId")) })
+            val scopeB = UnifiedBookScope.fromCall(bob.str("deviceId"), h.actor.execute { friendName(bob.str("deviceId")) })
+
+            // Simulate crash right after writing pending_deletes + committing Alice's shelf delete, before shared_blob_refs unbind.
+            h.unified.recordPendingDeleteForTest(scopeA, shelfA, sha)
+            h.unified.deleteOnlyShelfRowForTest(scopeA, shelfA)
+            assertEquals(2, h.unified.sharedRefCount(sha))
+
+            // Retry DELETE HTTP call succeeds even though shelf_books row is already gone, releasing Alice's ref.
+            assertEquals(200, h.request("/v1/books/$shelfA", "DELETE", credential = alice).statusCode())
+            assertEquals(1, h.unified.sharedRefCount(sha))
+            assertFalse(h.unified.isTrashed(sha))
+
+            // Simulate crash for Bob's final ref as well; startup reconcilePendingDeletes finishes unbind and quarantines blob.
+            h.unified.recordPendingDeleteForTest(scopeB, shelfB, sha)
+            h.unified.deleteOnlyShelfRowForTest(scopeB, shelfB)
+            assertEquals(1, h.unified.sharedRefCount(sha))
+
+            assertEquals(1, h.unified.reconcilePendingDeletes())
+            assertEquals(0, h.unified.sharedRefCount(sha))
+            assertTrue(h.unified.isTrashed(sha))
+
+            // After retention expires, scheduled purge removes files first and then drops DB rows.
+            now += 60_001L
+            assertEquals(1, h.unified.purgeExpiredTrash())
+            assertFalse(h.unified.isTrashed(sha))
+            assertEquals(0, h.unified.sharedJobCount(sha))
+        }
+    }
 }

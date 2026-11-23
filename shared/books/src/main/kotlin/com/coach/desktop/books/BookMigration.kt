@@ -305,7 +305,7 @@ internal object BookSchemaMigration {
             format TEXT NOT NULL,
             title TEXT NOT NULL,
             state TEXT NOT NULL CHECK(state IN (
-                'WAITING_NETWORK','WAITING_SERVER','UPLOADING','RECEIVED','QUEUED','PROCESSING','READY','FAILED','PAUSED'
+                'WAITING_NETWORK','WAITING_SERVER','UPLOADING','RECEIVED','QUEUED','PROCESSING','READY','FAILED','PAUSED','PENDING_DELETE'
             )),
             progress_pct INTEGER NOT NULL DEFAULT 0,
             stage_label TEXT NOT NULL DEFAULT '',
@@ -315,6 +315,11 @@ internal object BookSchemaMigration {
             PRIMARY KEY(account_key, local_book_id)
         )""".trimIndent(),
         "CREATE INDEX IF NOT EXISTS idx_book_upload_queue_account ON book_upload_queue(account_key, paused, state)",
+        """CREATE TABLE IF NOT EXISTS book_upload_account_bindings(
+            session_key TEXT PRIMARY KEY,
+            account_key TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        )""".trimIndent(),
     )
 
     private val V2_TABLES = listOf(
@@ -397,7 +402,7 @@ internal object BookSchemaMigration {
     )
 
     private val REQUIRED_V5_TABLES = REQUIRED_V4_TABLES + setOf(
-        "book_upload_queue",
+        "book_upload_queue", "book_upload_account_bindings",
     )
 
     fun upgradeAndMigrate(

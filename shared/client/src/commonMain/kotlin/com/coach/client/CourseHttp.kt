@@ -299,8 +299,9 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
         when {
             status == 401 -> MockReply(null, "授权已失效", statusCode = 401, code = "unauthorized")
+            status == 404 -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "书架中找不到这本书", statusCode = 404, code = "not_found")
             response.status.isSuccess() -> MockReply(parsed ?: buildJsonObject { put("deleted", true) }, null, statusCode = status)
-            else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "删除失败", statusCode = status)
+            else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "删除失败", retryable = status >= 500, statusCode = status)
         }
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e

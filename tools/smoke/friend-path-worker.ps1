@@ -165,6 +165,68 @@ function Get-FieldInk([string]$png, $label) {
         return $ink
     } finally { $bmp.Dispose() }
 }
+# 一条横带的粗略像素指纹（隔 3 个像素取一点、亮度分 8 档）：提问页签回答区只有 30 多 px 高，
+# 同一行字能在视野里停好几步，靠 OCR 文本相同判断「滚到顶了」会误判，这里直接比像素。
+function Get-BandSig([string]$png, [int]$y0, [int]$y1) {
+    if (-not $png -or -not (Test-Path -LiteralPath $png)) { return '' }
+    $bmp = [System.Drawing.Bitmap]::FromFile($png)
+    try {
+        $y0 = [Math]::Max(0, $y0); $y1 = [Math]::Min($bmp.Height - 1, $y1)
+        $sb = New-Object System.Text.StringBuilder
+        for ($y = $y0; $y -le $y1; $y += 3) {
+            for ($x = 20; $x -lt $bmp.Width - 20; $x += 3) {
+                $c = $bmp.GetPixel($x, $y)
+                [void]$sb.Append([char](48 + [int](($c.R + $c.G + $c.B) / 96)))
+            }
+        }
+        return $sb.ToString()
+    } finally { $bmp.Dispose() }
+}
+# 真滚到底：一格滚轮在提问回答区只走几 px，-15 格常常只走一百来 px、离底还远（11-23 13:51 那轮
+# 九遍都从中段开扫，最底下的「正在整理…」/新一问一次没露过面）。所以一直往下滚，直到那条横带
+# 连着两次不再变，才算到底；只截图比像素，不跑 OCR。
+function Scroll-AskBottom([int]$x, [int]$y) {
+    $probe = Join-Path $OutDir '4-ask-bottom-probe.png'
+    $prev = $null; $same = 0
+    for ($k = 0; $k -lt 30 -and $same -lt 2; $k++) {
+        Scroll-At $x $y -15; Start-Sleep -Milliseconds 250
+        Save-Shot $probe
+        $sig = Get-BandSig $probe ($y - 12) ($y + 12)
+        if ($sig -eq $prev) { $same++ } else { $same = 0 }
+        $prev = $sig
+    }
+}
+# 伴读抽屉体（讲解页签下面的模块内容）滚一下，并按像素核对真的动了。11-23 14:22 那轮第 6 步在
+# (0.65w, 0.72h) 连滚 5 次 -3 格，抽屉体一像素没动、只靠 OCR 文本相同判「到底了」，「提交」一直没露面。
+# 所以每滚一次都比抽屉体那条横带；没动就先把指针停稳再滚，再换左半边、右半边落点（都不进底边 HUD 区）。
+function Scroll-DrawerBody([int]$notches, [int]$winW, [int]$winH) {
+    $probe = Join-Path $OutDir 'drawer-scroll-probe.png'
+    $y0 = [int]($winH * 0.68); $y1 = [int]($winH * 0.94)
+    Save-Shot $probe
+    $before = Get-BandSig $probe $y0 $y1
+    $spots = @(
+        @(([int]($winW * 0.65)), ([int]($winH * 0.72)), $false),
+        @(([int]($winW * 0.65)), ([int]($winH * 0.72)), $true),
+        @(([int]($winW * 0.35)), ([int]($winH * 0.78)), $true),
+        @(([int]($winW * 0.90)), ([int]($winH * 0.78)), $true)
+    )
+    for ($i = 0; $i -lt $spots.Count; $i++) {
+        $sx = $spots[$i][0]; $sy = $spots[$i][1]
+        if ($spots[$i][2]) { Hover $sx $sy; Start-Sleep -Milliseconds 400 }
+        Scroll-At $sx $sy $notches; Start-Sleep -Milliseconds 500
+        Save-Shot $probe
+        if ((Get-BandSig $probe $y0 $y1) -ne $before) {
+            if ($i -gt 0) { Note "抽屉体换第 $($i + 1) 个落点 ($sx,$sy) 才滚动" }
+            return $true
+        }
+    }
+    return $false
+}
+# #599 起「讲解」页签默认只讲当前这一页：讲解卡下面一条条「出处 N · 第 X 页 · 第 Y 段 · 开头几个字」，
+# 点了回到那一段。OCR 常把中间的「·」读成「．」或吞掉。
+function Find-PageCite($lines) {
+    return ($lines | Where-Object { ($_.Text -replace '\s', '') -match '^出处\d.*第\d+页' } | Select-Object -First 1)
+}
 function Find-All($lines, [string]$needle) { $all = @(); foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m) { $all += $m } }; $all | Sort-Object Y }
 # 2.0（#570）的阅读器是单层满铺画布：没有常驻底栏，指针贴到窗口下缘 48dp 内才浮出来；
 # 窄窗（读者窗口 752dp < 760dp）下两个翻页键只剩「‹」「›」，认字认不到，页号写成「3 / 620 · 0%」。
@@ -1009,25 +1071,82 @@ try {
         if ($pageNow -eq "$physPage") { break }
     }
     if ($pageNow -ne "$physPage") { Fail 4 "页码没跳到 $physPage（现在 $pageNow，见 4-jumped*.png）" }
-    # 2.0 把「原页 / 文字」做成顶栏上的两段胶囊（ViewModeSwitchPill，testTag view-mode-text/original），
-    # 顶栏同样要指针贴上缘才出来。已经选中「文字」时点它不会切走，所以直接点「文字」是安全的。
+    # 「原页 / 文字」两段胶囊（ViewModeSwitchPill，testTag view-mode-text/original）：
+    # #599（阅读页外壳）起它不在顶栏上了，收进了顶栏最右边的「⋯」菜单（immersive-more-menu）的第一项；
+    # 旧版客户端还在顶栏上。两处都认：顶栏读到「文字」就直接点，读不到就点「⋯」在菜单里找。
+    # 已经选中「文字」时点它不会切走，所以直接点「文字」是安全的。
+    # 两处都没点成时退到快捷键 V（TextbookReader：非输入状态下 V = switchView(!textView)，是切换不是置位），
+    # 下面找段落时按「找不到就再按一次 V」兜回来。
     Hover $midX $topY; Start-Sleep -Milliseconds 700
     $lines = Shot 4 'mode'
     $txtHit = Has $lines @('文字')
+    $viewBy = ''
     if ($txtHit) {
         Click-At ([int]$txtHit.X) ([int]$txtHit.Y); Start-Sleep -Seconds 1
         $null = Shot 4 'text-mode'
+        $viewBy = 'bar'
     } else {
-        Note '顶栏没读到「文字」胶囊，按文字视图继续（段落找不到就是没切成）'
+        # 「⋯」是顶栏最后一颗按钮，紧挨「伴读 / 收起」右边；OCR 不一定认得出这个字形，就按「伴读」右侧落点点。
+        $more = Has $lines @('⋯', '…', '...')
+        $comp = Has $lines @('伴读', '收起')
+        $mx = $null; $my = $null
+        $band = [int]($winH * 0.2)
+        if ($more -and $more.X -gt [int]($winW * 0.7) -and $more.Y -lt $band) { $mx = [int]$more.X; $my = [int]$more.Y }
+        elseif ($comp -and $comp.Y -lt $band) { $mx = [Math]::Min($winW - 14, [int]$comp.X2 + 22); $my = [int]$comp.Y }
+        if ($null -ne $mx) {
+            Click-At $mx $my; Start-Sleep -Milliseconds 900
+            $menu = Shot 4 'more-menu'
+            $txtHit = Has $menu @('文字')
+            if ($txtHit) {
+                Click-At ([int]$txtHit.X) ([int]$txtHit.Y); Start-Sleep -Seconds 1
+                $null = Shot 4 'text-mode'
+                $viewBy = 'menu'
+            } else {
+                Send-Keys '{ESC}'; Start-Sleep -Milliseconds 500
+            }
+        }
+        if (-not $viewBy) {
+            Note '顶栏和「⋯」菜单里都没读到「文字」，按快捷键 V 切文字视图'
+            Hover $midX ([int]($winH * 0.5)); Start-Sleep -Milliseconds 300
+            Send-Keys 'v'; Start-Sleep -Seconds 1
+            $null = Shot 4 'text-mode'
+            $viewBy = 'key'
+        }
     }
-    # 文字视图一屏只放得下一页的一部分：这一页开头是页眉，可信选段在这页下半部分，往下滚才看得见。
+    Note "步骤4 文字视图切换方式：$viewBy"
+    # 文字视图一屏只放得下一页的一部分：这一页开头是页眉，可信选段在这页下半部分，常在下一张纸上。
     $words = (($sel.selection -replace '[^A-Za-z ]', ' ').Trim() -split '\s+' | Select-Object -First 4) -join ''
     $paraLine = $null; $lines = @()
-    foreach ($round in 1..6) {
-        if ($round -eq 1) { $lines = Shot 4 'blocks' } else { $lines = Shot 4 'blocks-down' }
-        foreach ($l in $lines) { if ($l.Text -replace '[^A-Za-z]', '' -like "*$words*") { $paraLine = $l; break } }
-        if ($paraLine) { break }
-        Scroll-At 600 400 -3; Start-Sleep -Milliseconds 800
+    # 文字视图按窗口大小排成一张张「纸」（BookPageView 的 laid page），跳到第 N 页落在的那张纸可能是「第 N-1–N 页」，
+    # 选段在下一张纸上。翻纸只用 →：滚轮在这里时灵时不灵——11-23 上午几轮一格都滚不动，14:41 起一格就越过
+    # 「第 154 页」那张纸直接到「tract nurses…」，把选段整段跳过去；→ 每轮都正好落在下一张纸上。
+    # → 后新纸偶尔还没画出来（14:39 那轮），下一帧跟按前一样：先等一帧再认，别连按两次跳过头。
+    # 连按 4 次 → 还没认到才退回滚轮一格一格找。
+    $nextSheets = 0
+    foreach ($pass in 1..2) {
+        $prevFrame = ''; $lastAct = ''
+        foreach ($round in 1..10) {
+            if ($round -eq 1) { $lines = Shot 4 'blocks' } else { $lines = Shot 4 "blocks-down$pass-$round" }
+            foreach ($l in $lines) { if ($l.Text -replace '[^A-Za-z]', '' -like "*$words*") { $paraLine = $l; break } }
+            if ($paraLine) { break }
+            $frame = (@($lines | Where-Object { $_.Text -match '[A-Za-z]{4}' } | ForEach-Object { $_.Text }) -join '|')
+            if ($lastAct -eq 'next' -and $frame -eq $prevFrame) {
+                Start-Sleep -Milliseconds 1200; $lastAct = 'wait'
+            } elseif ($nextSheets -lt 4) {
+                $nextSheets++
+                Note "步骤4 这张纸上没有选段，按 → 翻到下一张纸找（第 $nextSheets 次）"
+                Hover $midX ([int]($winH * 0.5)); Send-Keys '{RIGHT}'; Start-Sleep -Milliseconds 1200
+                $lastAct = 'next'
+            } else {
+                Scroll-At 600 400 -1; Start-Sleep -Milliseconds 700
+                $lastAct = 'wheel'
+            }
+            $prevFrame = $frame
+        }
+        if ($paraLine -or $viewBy -ne 'key') { break }
+        # V 是切换：要是按之前本来就在文字视图，上面那一下把它切回了原页，再按一次切回来。
+        Note '按 V 后没找到段落，再按一次 V 再找'
+        Send-Keys 'v'; Start-Sleep -Seconds 1
     }
     if (-not $paraLine) { Fail 4 '文字视图里找不到可信选段所在的段落（见 4-blocks.png）' }
     $box = Get-LineBox $paraLine
@@ -1137,6 +1256,15 @@ try {
         # 输入框是扁的一条（高 40px），提示语是它上方的标签，中间还隔着 6dp 的缝：照标签下沿 +18 去点，
         # 量歪几个像素就落进缝里——12:49 那轮四次都点空了，窗口像素一个没变。
         # 「发送」和输入框同处一个 Row、垂直居中，拿它的中心当这一行的中线最稳（框体 40px 高，差几像素不碍事）。
+        # #599 以后提问页签顶上多了「讲的是：…」一行，小窗里回答区只剩 30px 左右，winH*0.72 正落在它上沿，
+        # 滚轮可能落空。拿「引文」那一行和下面「先输入问题」/提示语之间的中点当滚动点，读不到再退回 0.72。
+        $quoteRow = Find-Text $script:Last '引文'
+        $hintRow = Has $script:Last @('先输入', '问这句')
+        if (-not $hintRow -and $field) { $hintRow = $field }
+        if ($quoteRow -and $hintRow -and $hintRow.Y -gt $quoteRow.Y + 20) {
+            $scrollY = [int](($quoteRow.Y + $hintRow.Y) / 2)
+            Note "提问回答区滚动点：引文行 $($quoteRow.Y) 与提示行 $($hintRow.Y) 之间，y=$scrollY"
+        }
         $clickX = if ($field) { [int]$field.X1 + 30 } else { [int]($winW * 0.3) }
         $rowY = if ($field) { [int]$field.Y2 + 18 } else { [int]($winH - 46) }
         $send = Find-ZoomText $script:LastPng ([Math]::Max(0, $winH - 130)) $winH '发送' 4
@@ -1231,10 +1359,18 @@ try {
         # 抽屉正文区比一屏矮：新加的「问：…」和它的回答追加在下面，靠滚动才能看全，
         # 一格一格往下找，找到标题就停；走到第 9 格还没出现说明可能滚过头，再往回找一轮。
         # 见过「正在整理…」以后回答只会在下面追加，往回滚等于把新内容推出视野，所以那时只往下。
-        $i = 0; $step = 0; $sawLoading = $false; $labelSeen = $false
+        # #599 以后小窗（752×552）回答区只剩 30 多 px 高，回答卡末尾「出处」下面还有约 30px 留白：
+        # 滚到底时视野里只有那段留白，出处永远差一点露不出来（11-23 13:29 那轮回答 3 秒就回来了，
+        # 脚本却在底部空等 3 分钟）。所以改成「从底往上扫」：新一问总在对话最底下，
+        # 先滚到底（还在「正在整理…」就停在底部等），然后每次往上两格（一格约 10px，不会跳过一整行），
+        # 往上遇到的第一份出处就是最新一轮的；再往上见到带标记的「问：…」标题，才确认这一轮是这一问。
+        # 扫到顶都没见标题（回答还没追加进来，或者看到的是上一轮），回到底部重来。
+        $i = 0; $sweeps = 0; $upSteps = 0; $sawLoading = $false; $labelSeen = $false
+        $newestCite = $null; $prevSig = $null; $sameFrames = 0
         $deadline = (Get-Date).AddSeconds(180)
+        Scroll-AskBottom $scrollX $scrollY
         while ((Get-Date) -lt $deadline -and -not $cite) {
-            Start-Sleep -Seconds 3; $i++
+            Start-Sleep -Milliseconds $(if ($upSteps -gt 0) { 400 } else { 2000 }); $i++
             $lines = Shot 4 "ask-wait$i"
             $allow = Has $lines @('允许并讲解')
             if ($allow) { Click-At $allow.X $allow.Y; continue }
@@ -1242,31 +1378,49 @@ try {
             if ($serviceError) { throw "服务回了拒绝：$serviceError" }
             $bad = $lines | Where-Object { $_.Text -match '无法回答|不能回答|尚未接通|暂时读不到回答|选中追问格式不对|无法确认|无氵去确认' } | Select-Object -First 1
             if ($bad) { throw "提问被拒：$($bad.Text)" }
-            if (Has $lines @('正在整理')) { $sawLoading = $true }
-            $label = Find-AskTurnLabel $lines $Marker
-            if ($label) { $turn = $label; $labelSeen = $true }
-            # 标题和「出处」几乎不可能同框：回答比抽屉高，标题在顶上时出处还在折叠线以下，
-            # 出处滚进视野时标题已经出去了。所以标题只用来确认「这一问真的追加进了对话」，
-            # 见到一次就够，之后一直往下滚——滚过标题以后视野里的出处必然属于这一问。
-            if ($labelSeen) {
-                $tb = if ($label) { Get-LineBox $label } else { $null }
-                $cite = $lines | Where-Object {
-                    $_.Text -match '出处.*第\s*\d+\s*页' -and (-not $tb -or (Get-LineBox $_).Y -gt $tb.Y) -and
-                    # 标题不在这一帧时：还没滚过一步，视野里挂着的可能是上一轮那份出处，不算。
-                    ($tb -or $step -gt 0)
-                } | Select-Object -Last 1
-                if (-not $cite) { Scroll-At $scrollX $scrollY -2; Start-Sleep -Milliseconds 600; $step++ }
-            } elseif ($turn -eq 'sent') {
-                # 兜底：标题一直认不出来（OCR 把「问：」读没了），但字确实清空了。只认「新出现的那份出处」，
-                # 和发出前那份不一样才算，不然就是上一轮的回答。
-                $hit = $lines | Where-Object { $_.Text -match '出处.*第\s*\d+\s*页' -and (-not $preCite -or $_.Text -ne $preCite.Text) } | Select-Object -Last 1
-                if ($hit) { $cite = $hit } else { Scroll-At $scrollX $scrollY -2; Start-Sleep -Milliseconds 600; $step++ }
-            } else {
-                $dir = Get-AskScrollDir $sawLoading $step
-                Scroll-At $scrollX $scrollY $dir; Start-Sleep -Milliseconds 500; $step++
+            # 回答失败时对话底下是一行说明加「重试」（inline-explain-error），把同一行的说明带出来。
+            $retry = Find-Text $lines '重试'
+            if ($retry -and $retry.Y -gt 330 -and $retry.Y -lt 470) {
+                $why = ($lines | Where-Object { [Math]::Abs((Get-LineBox $_).Y - $retry.Y) -lt 12 -and $_.Text -notmatch '^\s*重试\s*$' } | ForEach-Object Text) -join ' '
+                throw "提问出错（底下出现「重试」）：$why"
             }
+            if (Has $lines @('正在整理')) {
+                # 还在等回答：「正在整理…」就挂在对话最底下，留在底部等它变成回答。
+                $sawLoading = $true; $newestCite = $null; $upSteps = 0
+                Scroll-AskBottom $scrollX $scrollY
+                continue
+            }
+            $label = Find-AskTurnLabel $lines $Marker
+            $cites = @($lines | Where-Object { $_.Text -match '出处.*第\s*\d+\s*页' })
+            if ($label) {
+                $labelSeen = $true; $turn = $label
+                $tb = Get-LineBox $label
+                # 同框时取标题下面最近的那份；不同框时用往上扫路上先碰到的那份（它在标题下面、属于这一轮）。
+                $below = $cites | Where-Object { (Get-LineBox $_).Y -gt $tb.Y } | Select-Object -First 1
+                if ($below) { $cite = $below; break }
+                if ($newestCite) { $cite = $newestCite; break }
+                # 标题见到了但路上没碰到出处（回答里本来就没有出处时也会这样）：回底部再扫一遍。
+                Note "提问：见到本问标题，但它下面还没认到出处，回底部再扫"
+                $upSteps = 0; $sweeps++
+                Scroll-AskBottom $scrollX $scrollY
+                continue
+            }
+            if ($cites.Count -gt 0 -and -not $newestCite) { $newestCite = $cites[-1] }
+            # 回答区那条横带的像素和上一帧一模一样（往上滚了却没动），连着三次就当扫到顶了。
+            # 不能比 OCR 文本：一格只走几 px，同一行字会在视野里停好几步，文本相同不代表没动（11-23 13:44 那轮误判过）。
+            $sig = Get-BandSig $script:LastPng ($scrollY - 12) ($scrollY + 12)
+            if ($upSteps -gt 0 -and $sig -eq $prevSig) { $sameFrames++ } else { $sameFrames = 0 }
+            $prevSig = $sig
+            if ($sameFrames -ge 3 -or $upSteps -ge 80) {
+                $sweeps++
+                Note "提问：第 $sweeps 遍从底往上扫到顶（$upSteps 步）没见到本问标题，回底部重来"
+                $upSteps = 0; $newestCite = $null; $sameFrames = 0; $prevSig = $null
+                Scroll-AskBottom $scrollX $scrollY
+                continue
+            }
+            Scroll-At $scrollX $scrollY 2; $upSteps++
         }
-        if (-not $cite) { throw "问题发出去了，但 180 秒内没等到它自己的「出处 · 第 N 页」（标题 $labelSeen，加载态 $sawLoading）" }
+        if (-not $cite) { throw "问题发出去了，但 180 秒内没等到它自己的「出处 · 第 N 页」（标题 $labelSeen，加载态 $sawLoading，扫了 $sweeps 遍）" }
         Note "提问的回答出处：$($cite.Text)"
     } catch { if ("$_" -like 'DESKTOP_BUSY*' -or "$_" -like 'WIN_DRIVE_FOREGROUND_CONTENTION*') { throw }; $askWhy = "$_" }
 
@@ -1277,8 +1431,12 @@ try {
     if (-not $scrollX) { $lr = Get-Rect; $scrollX = [int](($lr.R - $lr.L) / 2); $scrollY = [int](($lr.B - $lr.T) * 0.72) }
     $cardOk = $null
     $cite = $null
-    foreach ($k in 0..6) {
-        if ($k -gt 0) { Scroll-At $scrollX $scrollY -3; Start-Sleep -Milliseconds 700 }
+    # #599 以后小窗回答区只有 30 多 px 高，往下滚 3 格×7 次只走 150px 左右，到不了最新那轮的「出处」
+    # （11-23 14:10 那轮七帧都停在线程顶上的引文和第一段讲解）。先真滚到底，再一小格一小格往上找：
+    # 最新一轮回答在最底下，往上遇到的第一颗带页码的「出处」就是它。
+    Scroll-AskBottom $scrollX $scrollY
+    foreach ($k in 0..14) {
+        if ($k -gt 0) { Scroll-At $scrollX $scrollY 2; Start-Sleep -Milliseconds 500 }
         $o = Await-Text 7 'cite' @('出处') 1
         if ($o) { $cite = (@(Find-All $script:Last '出处') | Select-Object -Last 1); break }
     }
@@ -1332,8 +1490,16 @@ try {
                 $lines7 = $script:Last
                 $drawer7 = Has $lines7 @('提问', '批注', '讲解')
                 $bar = Has $lines7 @('原页', '文字', '查找', 'Aa')
+                # #599 起顶栏只剩「书架 / 目录 / 书名 / 收起 / ⋯」，原页/文字/查找收进了「⋯」，上面那组认不到；
+                # 「收起」本身读得到就直接点它。
+                $fold7 = Find-Text $lines7 '收起'
+                if ($fold7 -and $fold7.Y -ge [int]($winH * 0.2)) { $fold7 = $null }
                 if (-not $drawer7 -and -not (Find-Text $lines7 '引文')) { $closed = $true; break }
-                if ($try -le 2 -and $bar) {
+                if ($try -le 2 -and $fold7) {
+                    Note "第 $try 次：顶栏「收起」($($fold7.X),$($fold7.Y))"
+                    Hover $fold7.X $fold7.Y; Start-Sleep -Milliseconds 400
+                    $null = Click-At $fold7.X $fold7.Y
+                } elseif ($try -le 2 -and $bar) {
                     $tx = [int]($winW - $(if ($try -eq 1) { 104 } else { 112 })); $ty = [int](@($bar)[0].Y)
                     Note "第 $try 次：顶栏同一行右侧 ($tx,$ty) 点「收起」"
                     Hover $tx $ty; Start-Sleep -Milliseconds 400
@@ -1436,7 +1602,7 @@ try {
         # 认这句就认「连不上」，别再依赖它前面的主语（20:02 那轮因此把「服务连不上」当成「界面变了」）。
         $why5re = '本章暂无提取要点|当前页暂未归入正文小节|登录后可使用本章伴读|伴读整理已在设置中关闭|去连接服务|连不上|没顾上|这次没讲成|不可用'
         $transient5 = '连不上|没顾上|这次没讲成|不可用'
-        $deadline = (Get-Date).AddSeconds(180); $kp = $null; $why5 = $null; $waited = 0; $retries5 = 0
+        $deadline = (Get-Date).AddSeconds(180); $kp = $null; $why5 = $null; $waited = 0; $retries5 = 0; $pageMode5 = $false
         while ((Get-Date) -lt $deadline -and -not $kp -and -not $why5) {
             Start-Sleep -Seconds 2; $waited++
             $lines = Shot 5 "explain-wait$waited"
@@ -1453,6 +1619,23 @@ try {
                 }
             }
             if ($why5) { break }
+            # #599 起「要点」默认只讲当前这一页（SingleBookCompanionUi 的 pageOnly）：标题「讲的是：第 N 页 · …」，
+            # 下面一颗「讲整章」，再下面是这一页的讲解卡和「出处 N · 第 N 页」。朋友打开抽屉先看到的就是它，
+            # 第 5 步认这张卡：讲解出来了、出处能点回原文页。「讲整章」走 /api/books/<id>/modes/<mode>，
+            # 冒烟门只转发 /v1/library/* 那几条，点了只会出「这次没讲成，先看原文」，所以这里不点它。
+            $page5 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^讲的是[:：]?第\d+页' } | Select-Object -First 1
+            if ($page5) {
+                $busy5 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '正在讲解这一页|正在打开讲解' } | Select-Object -First 1
+                $kp = Find-PageCite $lines
+                if (-not $kp -and -not $busy5) {
+                    # 讲解卡出来了（标题下面有成段的字），出处在卡底，交给下面的滚动去找。
+                    $hy = (Get-LineBox $page5).Y
+                    $body5 = $lines | Where-Object { (Get-LineBox $_).Y -gt ($hy + 40) -and ($_.Text -replace '\s', '').Length -ge 16 } | Select-Object -First 1
+                    if ($body5) { $kp = $page5 }
+                }
+                if ($kp) { $pageMode5 = $true; break }
+                continue
+            }
             $loading5 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '正在按节整理' } | Select-Object -First 1
             if (-not $loading5) {
                 $kp = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^(?:核心[问同]题|\d+[.、．])' } | Select-Object -First 1
@@ -1480,32 +1663,31 @@ try {
         }
         # 要点标题和锚点不一定同屏：标题认到了还看不到「原文第 N 页」，就往下滚抽屉体把它滚进视野；
         # 避开底边 48dp HUD 触发区（y > winH*0.80），避免 Hover/Click 被底部进度条劫持。
-        $chip = $null; $lastChip = $null; $stillB = 0; $prevB = ''
+        # 滚动用 Scroll-DrawerBody：按像素确认抽屉体真的动了，没动就换落点；连着两次滚不动就当到底了。
+        $chip = $null; $lastChip = $null; $stillB = 0
+        $what5 = if ($pageMode5) { '这一页讲解的「出处 N · 第 N 页」' } else { '「原文第 N 页」锚点' }
         Hover $midX ([int]($winH * 0.50)); Start-Sleep -Milliseconds 250
-        $deadline = (Get-Date).AddSeconds(40)
+        $deadline = (Get-Date).AddSeconds(60)
         while ((Get-Date) -lt $deadline) {
             $lines = $script:Last
-            $cand = Find-AnchorChip $lines $script:LastPng $winH
+            $cand = if ($pageMode5) { Find-PageCite $lines } else { Find-AnchorChip $lines $script:LastPng $winH }
             if ($cand) {
                 $lastChip = $cand
                 $cy = (Get-LineBox $cand).Y
-                if ($cy -le [int]($winH * 0.80) -or $stillB -ge 3) {
+                if ($cy -le [int]($winH * 0.80) -or $stillB -ge 2) {
                     $chip = $cand
                     break
                 }
             }
-            $frame = (@($lines | ForEach-Object { $_.Text }) -join '|')
-            if ($frame -eq $prevB) { $stillB++ } else { $stillB = 0 }
-            $prevB = $frame
-            if ($stillB -ge 4) { $chip = $lastChip; break }
             $delta = if ($cand) { -2 } else { -3 }
-            Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.72)) $delta
-            Start-Sleep -Milliseconds 700
+            if (Scroll-DrawerBody $delta $winW $winH) { $stillB = 0 } else { $stillB++ }
+            if ($stillB -ge 3) { $chip = $lastChip; break }
+            Start-Sleep -Milliseconds 400
             $null = Shot 5 'explain-full'
         }
-        if (-not $chip) { Fail 5 '本章要点出来了，但要点后面读不到「原文第 N 页」锚点（见 5-explain-wait*.png / 5-explain-full.png）' }
+        if (-not $chip) { Fail 5 "讲解出来了，但滚到底也读不到$what5（见 5-explain-wait*.png / 5-explain-full.png）" }
         $chipPage = [regex]::Match($chip.Text, '第\s*(\d+)\s*页').Groups[1].Value
-        Note "步骤5 本章要点的原文锚点：$($chip.Text)"
+        Note "步骤5 讲解的出处：$($chip.Text)"
         $bx = Get-LineBox $chip
         $bxc = [int](($bx.X1 + $bx.X2) / 2); $byc = [int]$bx.Y
         if ($byc -le [int]($winH * 0.82)) {
@@ -1525,8 +1707,34 @@ try {
             if (-not $p) { $p = Get-PageCounter $script:Last $script:LastPng }
             if ($p) { $pg = "$($p.Cur)"; if ($pg -eq "$chipPage") { break } }
         }
-        if ("$pg" -ne "$chipPage") { Fail 5 "点了要点后面的「原文第 $chipPage 页」锚点，页码没跳过去（现在 $pg，见 5-explain-cite*.png）" }
-        Pass 5 "伴读抽屉「讲解」页签整理出本章要点，要点后面挂着「原文第 $chipPage 页」锚点，点了能跳回原文页"
+        # 11-23 14:36 那轮：出处点了、原文那段已高亮，可半屏抽屉正好压住底栏，十帧都读不出页号。
+        # 跟第 7 步同一个办法：读不出就先收起抽屉再读（顶栏「收起」，认不到就切「讲解」页签失焦后按 L）。
+        # 第 6 步开头会自己从顶栏「伴读」把抽屉打开。
+        if (-not $pg) {
+            Hover $midX 40; Start-Sleep -Milliseconds 600
+            $lines = Shot 5 'cite-close'
+            $fold5 = Find-Text $lines '收起'
+            if ($fold5 -and $fold5.Y -lt [int]($winH * 0.2)) {
+                Note "步骤5 抽屉压住了底栏页号，点顶栏「收起」($($fold5.X),$($fold5.Y)) 再读"
+                Hover $fold5.X $fold5.Y; Start-Sleep -Milliseconds 400
+                $null = Click-At $fold5.X $fold5.Y
+            } else {
+                Note '步骤5 抽屉压住了底栏页号，切「讲解」页签失焦后按 L 收起再读'
+                $null = Click-At $tabX $tabY; Start-Sleep -Milliseconds 800
+                Send-Keys 'l'
+            }
+            Start-Sleep -Seconds 1
+            foreach ($k in 1..4) {
+                Hover $midX $hoverY; Start-Sleep -Milliseconds 500
+                $null = Shot 5 "explain-cite-closed$k"
+                $p = Get-HudCounter $script:LastPng
+                if (-not $p) { $p = Get-PageCounter $script:Last $script:LastPng }
+                if ($p) { $pg = "$($p.Cur)"; break }
+            }
+        }
+        if ("$pg" -ne "$chipPage") { Fail 5 "点了讲解里的出处（第 $chipPage 页），页码没跳过去（现在 $pg，见 5-explain-cite*.png）" }
+        if ($pageMode5) { Pass 5 "伴读抽屉「讲解」讲了当前这一页，讲解末尾的出处指向第 $chipPage 页，点了停在原文这一页" }
+        else { Pass 5 "伴读抽屉「讲解」页签整理出本章要点，要点后面挂着「原文第 $chipPage 页」锚点，点了能跳回原文页" }
     } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $five = 'failed' }
     if ($five -and -not $KeepGoing) { throw 'STEP_FAILED' }
     if ($StopAfter -le 5) { throw 'STEP_FAILED' }   # 按要求停在第 ⑤ 步之后；已记录的结果不变
@@ -1601,34 +1809,32 @@ try {
         while ((Get-Date) -lt $deadline -and -not $answered) {
             $lines = $script:Last
             $sub = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^提交$' } | Select-Object -First 1
+            # 11-23 14:22 那轮滚轮落点没让抽屉体动（OCR 帧一模一样 5 次就判了没「提交」）：
+            # 改用 Scroll-DrawerBody 按像素确认真滚了、没滚就换落点；连着 3 次滚不动才算卡底。
             if (-not $sub) {
-                $frame = (@($lines | ForEach-Object { $_.Text }) -join '|')
-                if ($frame -eq $prev6) { $still6++ } else { $still6 = 0 }
-                $prev6 = $frame
-                if ($still6 -ge 5) { Fail 6 '题目卡上一直没看到「提交」按钮（见 6-pretest*.png）' }
-                Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.72)) -3
-                Start-Sleep -Milliseconds 700
+                if (Scroll-DrawerBody -4 $winW $winH) { $still6 = 0 } else { $still6++ }
+                if ($still6 -ge 3) { Fail 6 '题目卡滚到底也没看到「提交」按钮（抽屉体换了 4 个落点都滚不动，见 6-pretest*.png）' }
+                Start-Sleep -Milliseconds 400
                 $null = Shot 6 'pretest-scroll'
                 continue
             }
             $sb = Get-LineBox $sub
             if ($sb.Y -gt [int]($winH * 0.80) -and $still6 -lt 2) {
-                $frame = (@($lines | ForEach-Object { $_.Text }) -join '|')
-                if ($frame -eq $prev6) { $still6++ } else { $still6 = 0 }
-                $prev6 = $frame
-                Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.72)) -2
-                Start-Sleep -Milliseconds 700
+                if (Scroll-DrawerBody -2 $winW $winH) { $still6 = 0 } else { $still6++ }
+                Start-Sleep -Milliseconds 400
                 $null = Shot 6 'pretest-scroll'
                 continue
             }
             $above = @($lines | Where-Object {
                 $t = ($_.Text -replace '\s', '')
                 $bb = Get-LineBox $_
-                $bb.Y -lt ($sb.Y - 6) -and $bb.Y -gt ($sb.Y - 110) -and
+                $bb.Y -lt ($sb.Y - 6) -and $bb.Y -gt ($sb.Y - 110) -and $bb.Y -gt ($strip.Y + 24) -and
                 $t -notmatch '这题是猜的|先猜一猜|^第\d+[/／]\d+[题題]$|提交'
             } | Sort-Object { (Get-LineBox $_).Y })
+            # 「提交」被滚到模块条底下时，它上面就只剩模块条（14:37 那轮把「习题」当成选项点了，切走了自测）：
+            # 选项只认模块条以下的行，认不到就往回滚。
             if ($above.Count -eq 0) {
-                Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.56)) 3
+                $null = Scroll-DrawerBody 3 $winW $winH
                 Start-Sleep -Milliseconds 700
                 $null = Shot 6 'pretest-up'
                 continue
@@ -1641,10 +1847,11 @@ try {
             Click-At ([int](($ob.X1 + $ob.X2) / 2)) ([int]$ob.Y); Start-Sleep -Milliseconds 500
             Click-At ([int](($sb.X1 + $sb.X2) / 2)) ([int]$sb.Y); Start-Sleep -Seconds 1
             $null = Shot 6 "pretest-submit$tries6"
-            $fb = $script:Last | Where-Object { ($_.Text -replace '\s', '') -match '^(回答准确|猜对了|带着悬念)' } | Select-Object -First 1
+            # OCR 常把「带着悬念」的「着」读成「后 / 看」（11-23 14:47 两次都读成「带后悬念去读原文」），只认「带?悬念去读原文」。
+            $fb = $script:Last | Where-Object { ($_.Text -replace '\s', '') -match '^(回答准确|猜对了|带.?悬念去读原文)' } | Select-Object -First 1
             if ($fb) { $answered = $true; break }
             if ($tries6 -ge 6) { break }
-            Scroll-At ([int]($winW * 0.65)) ([int]($winH * 0.56)) 3
+            $null = Scroll-DrawerBody 3 $winW $winH
             Start-Sleep -Milliseconds 600
             $null = Shot 6 'pretest-retry'
         }

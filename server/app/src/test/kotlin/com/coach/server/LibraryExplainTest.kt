@@ -239,6 +239,29 @@ class LibraryExplainTest {
         }
     }
 
+    @Test fun catalogCanAlsoAllowPersonalUploadsWhilePreservingTheRegisteredSource() = runBlocking {
+        Harness(local = true, personal = true).use { h ->
+            val library = requireNotNull(h.library)
+            val upload = personal(h.version)
+            assertEquals(409, h.post(upload).first)
+            h.catalog(JsonObject(h.entry() + ("allowPersonalImport" to JsonPrimitive(true))))
+
+            h.reply()
+            val (status, personalAnswer) = h.post(upload)
+            assertEquals(200, status)
+            assertEquals("${h.version}:p1:5", personalAnswer.getValue("sources").jsonArray.single().jsonObject.str("docId"))
+            assertFalse(h.stub.requestBodies.single().contains("SYNTHETIC_NEIGHBOUR_SECRET"))
+
+            h.reply()
+            val (courseStatus, courseAnswer) = h.post(request("Synthetic selected", blocks(h.localId to "Synthetic selected")))
+            assertEquals(200, courseStatus)
+            assertEquals(h.localId, courseAnswer.getValue("sources").jsonArray.single().jsonObject.str("docId"))
+            assertEquals(h.sourceId, library.document("SYNTHETIC", "synthetic").explainSourceId)
+            h.catalog(h.entry())
+            assertEquals(409, h.post(upload).first)
+        }
+    }
+
     @Test fun personalReceiptsRejectMissingConsentImpossibleOffsetsAndConflictingSnapshotsBeforeModel() = runBlocking {
         Harness(local = true, personal = true).use { h ->
             h.catalog()

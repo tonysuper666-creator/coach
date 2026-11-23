@@ -22,6 +22,7 @@ internal data class ReaderDocument(
     val explainSourceId: String? = null,
     val savedPage: String? = null,
     val pageSnapshotVersion: String? = null,
+    val allowPersonalImport: Boolean = false,
 ) {
     fun view() = json("id" to id, "title" to title, "version" to version, "pages" to pages,
         "printedPageOffset" to offset, "kind" to kind, "week" to week)
@@ -81,7 +82,8 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
                 it.content
             }
             ReaderDocument(id, d.str("course"), d.str("title"), file, version, pages, offset, kind, week,
-                parseOutline(d["outline"], pages), explainSource)
+                parseOutline(d["outline"], pages), explainSource,
+                allowPersonalImport = d["allowPersonalImport"] == JsonPrimitive(true))
         }
         require(docs.size <= 500 && docs.map { it.course to it.id }.distinct().size == docs.size) { "Duplicate reader document" }
         return docs
@@ -92,7 +94,7 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
     /** A personal import cannot relabel an existing course book or revive a revoked catalog grant. */
     internal fun reservesVersion(version: String): Boolean {
         if (root == null) return false
-        if (load().any { it.version == version }) return true
+        if (load().any { it.version == version && !it.allowPersonalImport }) return true
         val local = root.resolve("local-books.json")
         if (!Files.exists(local)) return false
         require(Files.size(local) <= 1_048_576)

@@ -300,7 +300,9 @@ internal fun LibraryHome(
                                                 append(chapterTitle)
                                                 append(" · ")
                                             }
-                                            append("第 ${focusBook.readingPage} / $pageTotal 页 · ${focusPref.defaultReason}")
+                                            append(focusBook.title)
+                                            chapterTitle?.takeIf(String::isNotBlank)?.let { append(" · ").append(it) }
+                                            append(" · 第 ${focusBook.readingPage} 页")
                                         }
                                     }
                                     CoachCardMeta(metaText, Modifier.testTag("home-focus-meta"))
@@ -349,7 +351,7 @@ internal fun LibraryHome(
                                         modifier = Modifier.testTag("home-focus-title"),
                                     )
                                     CoachCardMeta(
-                                        "第 ${focusSummary.readingPage} / ${focusSummary.pageCount.coerceAtLeast(1)} 页 · ${summaryPref.defaultReason}",
+                                        "${focusSummary.title} · 第 ${focusSummary.readingPage} 页",
                                         Modifier.testTag("home-focus-meta"),
                                     )
                                 }
@@ -420,11 +422,7 @@ internal fun LibraryHome(
                             ) {
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                     Text("今日复习", style = MaterialTheme.typography.titleMedium, color = colors.fgPrimary)
-                                    val reviewMeta = if (deferred > 0) {
-                                        "$dueCount 题待复习 · 另有 $deferred 题顺延"
-                                    } else {
-                                        "$dueCount 题待复习 · 随时可停"
-                                    }
+                                    val reviewMeta = "今天 $dueCount 道，约 ${dueCount * 2} 分钟"
                                     CoachCardMeta(reviewMeta, Modifier.testTag("home-review-meta"))
                                 }
                                 PaperButton(
@@ -436,7 +434,7 @@ internal fun LibraryHome(
                         }
                     } else {
                         CoachCardMeta(
-                            "今日复习已完成。",
+                            "还没有要复习的。做错的题会在明天出现。",
                             Modifier.padding(horizontal = 4.dp).testTag("home-review-done"),
                         )
                     }

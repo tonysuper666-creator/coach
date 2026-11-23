@@ -586,3 +586,62 @@ internal object ChapterCompanionGrouping {
         })
     }
 }
+
+internal object ChapterCompanionProgressive {
+    /** Picks one initial body section so Pretest unlocks as soon as the first section completes. */
+    fun firstSectionGroup(group: ChapterSectionGroup, currentSectionId: String?): ChapterSectionGroup? {
+        if (group.sections.size <= 1) return null
+        val nonExercise = group.sections.filterNot { ChapterCompanionGrouping.isExerciseSection(it.title) }
+        val first = nonExercise.firstOrNull { it.id == currentSectionId }
+            ?: nonExercise.firstOrNull()
+            ?: group.sections.first()
+        return group.copy(
+            firstPage = first.firstPage,
+            lastPage = first.lastPage,
+            sections = listOf(first),
+        )
+    }
+
+    fun remainingSectionGroup(group: ChapterSectionGroup, firstSectionId: String): ChapterSectionGroup? {
+        val rest = group.sections.filterNot { it.id == firstSectionId }
+        if (rest.isEmpty()) return null
+        return group.copy(
+            firstPage = rest.minOf { it.firstPage },
+            lastPage = rest.maxOf { it.lastPage },
+            sections = rest,
+        )
+    }
+
+    fun merge(first: BookCompanionPack, rest: BookCompanionPack): BookCompanionPack = BookCompanionPack(
+        version = maxOf(first.version, rest.version),
+        bookId = first.bookId,
+        chapterId = first.chapterId,
+        chapterTitle = first.chapterTitle.ifBlank { rest.chapterTitle },
+        coreQuestion = first.coreQuestion.ifBlank { rest.coreQuestion },
+        keyPoints = (first.keyPoints + rest.keyPoints).distinctBy { it.id },
+        jargonGlosses = (first.jargonGlosses + rest.jargonGlosses).distinctBy { it.term },
+        pretest = (first.pretest + rest.pretest).distinctBy { it.id },
+        derivations = (first.derivations + rest.derivations).distinctBy { it.id },
+        optionalPractice = (first.optionalPractice + rest.optionalPractice).distinctBy { it.id },
+        exerciseHints = (first.exerciseHints + rest.exerciseHints).distinctBy { it.id },
+        stats = BookCompanionStats(
+            sectionChunks = first.stats.sectionChunks + rest.stats.sectionChunks,
+            maxRequestTokens = maxOf(first.stats.maxRequestTokens, rest.stats.maxRequestTokens),
+            verifiedAnchors = first.stats.verifiedAnchors + rest.stats.verifiedAnchors,
+            rejectedAnchors = first.stats.rejectedAnchors + rest.stats.rejectedAnchors,
+            exercisesIsolated = first.stats.exercisesIsolated + rest.stats.exercisesIsolated,
+            overlapAudit = BookCompanionOverlapAudit(
+                en8GramHits = first.stats.overlapAudit.en8GramHits + rest.stats.overlapAudit.en8GramHits,
+                zh12GramHits = first.stats.overlapAudit.zh12GramHits + rest.stats.overlapAudit.zh12GramHits,
+                passed = first.stats.overlapAudit.passed && rest.stats.overlapAudit.passed,
+            ),
+            p50ElapsedMs = maxOf(first.stats.p50ElapsedMs, rest.stats.p50ElapsedMs),
+            p95ElapsedMs = maxOf(first.stats.p95ElapsedMs, rest.stats.p95ElapsedMs),
+            p50TtftMs = maxOf(first.stats.p50TtftMs, rest.stats.p50TtftMs),
+            p95TtftMs = maxOf(first.stats.p95TtftMs, rest.stats.p95TtftMs),
+            totalCostMicrodollars = first.stats.totalCostMicrodollars + rest.stats.totalCostMicrodollars,
+            routeChannelsUsed = (first.stats.routeChannelsUsed + rest.stats.routeChannelsUsed).distinct(),
+            fromCache = first.stats.fromCache && rest.stats.fromCache,
+        ),
+    )
+}

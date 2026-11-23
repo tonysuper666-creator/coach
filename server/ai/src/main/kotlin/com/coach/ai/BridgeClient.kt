@@ -618,6 +618,7 @@ class BridgeClient(
         val served = terminal.servedBy?.takeIf { it.isNotBlank() } ?: return "served_by_missing"
         if (terminal.fallback) {
             if (request.friendId == null && request.task in CROSS_VENDOR_FALLBACK_TASKS) return null
+            if (request.friendId != null && request.task == "READER_SELECTION" && vendorOf(served) == vendorOf(request.model)) return null
             return "served_by_mismatch:fallback"
         }
         if (vendorOf(served) != vendorOf(request.model)) return "served_by_mismatch:$served"

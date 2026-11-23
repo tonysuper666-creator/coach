@@ -51,7 +51,7 @@ import kotlinx.serialization.json.jsonPrimitive
 internal sealed interface CompanionPackState {
     data object Idle : CompanionPackState
     data object Loading : CompanionPackState
-    data class Ready(val pack: BookCompanionPack) : CompanionPackState
+    data class Ready(val pack: BookCompanionPack, val expanding: Boolean = false) : CompanionPackState
     data class Failed(val message: String, val trouble: ExplainTrouble) : CompanionPackState
 }
 
@@ -296,15 +296,44 @@ internal fun SingleBookCompanionPanel(
         }
         packState = CompanionPackState.Loading
         try {
-            val wire = ChapterCompanionGrouping.buildWireRequest(book, group)
-            val blocks = ChapterCompanionGrouping.wireBlocks(group)
-            when (val res = explainer.fetchChapterCompanion(wire, blocks)) {
-                is ChapterCompanionFetchResult.Ready -> {
-                    withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, res.pack) }
-                    packState = CompanionPackState.Ready(res.pack)
+            val firstGroup = ChapterCompanionProgressive.firstSectionGroup(group, currentSection?.id)
+            val restGroup = firstGroup?.sections?.singleOrNull()?.id?.let {
+                ChapterCompanionProgressive.remainingSectionGroup(group, it)
+            }
+            if (firstGroup != null && restGroup != null) {
+                val firstWire = ChapterCompanionGrouping.buildWireRequest(book, firstGroup)
+                val firstBlocks = ChapterCompanionGrouping.wireBlocks(firstGroup)
+                when (val firstRes = explainer.fetchChapterCompanion(firstWire, firstBlocks)) {
+                    is ChapterCompanionFetchResult.Ready -> {
+                        packState = CompanionPackState.Ready(firstRes.pack, expanding = true)
+                        val restWire = ChapterCompanionGrouping.buildWireRequest(book, restGroup)
+                        val restBlocks = ChapterCompanionGrouping.wireBlocks(restGroup)
+                        when (val restRes = explainer.fetchChapterCompanion(restWire, restBlocks)) {
+                            is ChapterCompanionFetchResult.Ready -> {
+                                val merged = ChapterCompanionProgressive.merge(firstRes.pack, restRes.pack)
+                                withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, merged) }
+                                packState = CompanionPackState.Ready(merged, expanding = false)
+                            }
+                            is ChapterCompanionFetchResult.Failed -> {
+                                packState = CompanionPackState.Ready(firstRes.pack, expanding = false)
+                            }
+                        }
+                    }
+                    is ChapterCompanionFetchResult.Failed -> {
+                        packState = CompanionPackState.Failed(firstRes.message, firstRes.trouble)
+                    }
                 }
-                is ChapterCompanionFetchResult.Failed -> {
-                    packState = CompanionPackState.Failed(res.message, res.trouble)
+            } else {
+                val wire = ChapterCompanionGrouping.buildWireRequest(book, group)
+                val blocks = ChapterCompanionGrouping.wireBlocks(group)
+                when (val res = explainer.fetchChapterCompanion(wire, blocks)) {
+                    is ChapterCompanionFetchResult.Ready -> {
+                        withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, res.pack) }
+                        packState = CompanionPackState.Ready(res.pack, expanding = false)
+                    }
+                    is ChapterCompanionFetchResult.Failed -> {
+                        packState = CompanionPackState.Failed(res.message, res.trouble)
+                    }
                 }
             }
         } catch (c: CancellationException) {
@@ -615,6 +644,7 @@ internal fun SingleBookCompanionPanel(
                                 pack = pack,
                                 draft = draft,
                                 currentSection = currentSection,
+                                expanding = state.expanding,
                                 onSelectOption = { qId, opt ->
                                     updateDraft {
                                         it.copy(
@@ -837,6 +867,7 @@ private fun PretestModuleView(
     pack: BookCompanionPack,
     draft: ChapterPracticeDraft,
     currentSection: BookLesson?,
+    expanding: Boolean = false,
     onSelectOption: (String, String) -> Unit,
     onToggleGuessed: (String) -> Unit,
     onSubmitQuestion: (Int, BookCompanionQuiz) -> Unit,
@@ -844,8 +875,17 @@ private fun PretestModuleView(
 ) {
     val colors = CoachTheme.colors
     if (pack.pretest.isEmpty()) {
+        if (expanding) {
+            Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
+                CoachLoadingDots(label = "正在继续整理本章自测题…")
+            }
+            return
+        }
         CoachEmptyState(title = "本章暂无读前自测题。", hint = "直接阅读原页正文，随时可切到「选做练习」。")
         return
+    }
+    if (expanding) {
+        CoachCardMeta("第一节自测已就绪，其余小节正在后台整理…")
     }
     val activeIdx = pack.pretest.indexOfFirst { it.id == draft.activeQuestionId }.takeIf { it >= 0 }
         ?: pack.pretest.indexOfFirst { it.id !in draft.pretestSubmitted }.takeIf { it >= 0 }

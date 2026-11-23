@@ -963,7 +963,7 @@ class HaikuRealtimeBridgeTransport(
     )
 
     private fun modelForTask(task: String, friend: String?): String = when {
-        friend != null -> BridgeClient.CLAUDE
+        friend != null -> BridgeClient.HAIKU
         task in setOf("BOOK_MATH_VERIFY", "BOOK_MATH_REPAIR", "booklist_concept_align") -> BridgeClient.OPUS
         else -> BridgeClient.GPT_62_ASTRA
     }

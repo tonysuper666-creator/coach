@@ -515,12 +515,12 @@ internal fun SectionEndSummaryCard(
                         onClick = { quizOpen = !quizOpen },
                         modifier = Modifier.testTag("section-end-start-quiz"),
                     ) {
-                        Text(if (quizOpen) "收起小题" else "做 ${practices.size} 道选择题")
+                        Text(if (quizOpen) "收起自测" else "开始 ${practices.size} 道自测")
                     }
                 }
                 if (onOpenMainline != null) {
                     V7TextButton(onOpenMainline, modifier = Modifier.testTag("section-end-open-mainline")) {
-                        Text("进入做题主线")
+                        Text("进入自测")
                     }
                 }
             }

@@ -91,7 +91,13 @@ internal fun CourseCompanionPanel(
                     color = colors.fgPrimary,
                 )
                 Text(
-                    courseContext.authorityNotice.ifBlank { "按 L1 大纲/讲义 -> L2 核心教材 -> L3 文献 -> L4 笔记顺序对照" },
+                    courseContext.authorityNotice.ifBlank {
+                        if (courseContext.examProfile.isExam) {
+                            "按 L1 大纲/讲义 -> L2 核心教材 -> L3 文献 -> L4 笔记顺序对照"
+                        } else {
+                            "按当前材料顺序对照"
+                        }
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.fgSecondary,
                 )
@@ -104,7 +110,9 @@ internal fun CourseCompanionPanel(
             }
         }
 
-        if (courseContext.examProfile.examDateTentative || courseContext.examProfile.examFormatTentative) {
+        if (courseContext.examProfile.isExam &&
+            (courseContext.examProfile.examDateTentative || courseContext.examProfile.examFormatTentative)
+        ) {
             Surface(
                 modifier = Modifier.fillMaxWidth().testTag("course-tentative-notice"),
                 shape = RoundedCornerShape(8.dp),
@@ -177,7 +185,11 @@ internal fun CourseCompanionPanel(
                                 Text(diff.point, style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary)
                                 Text("L1 口径：${diff.authoritativeView}", style = MaterialTheme.typography.bodySmall, color = colors.fgPrimary)
                                 Text("对照教材/文献：${diff.secondaryView}", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
-                                Text("备考建议：${diff.advice}", style = MaterialTheme.typography.bodySmall, color = colors.accentDeep)
+                                Text(
+                                    if (courseContext.examProfile.isExam) "备考建议：${diff.advice}" else "阅读建议：${diff.advice}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.accentDeep,
+                                )
                                 if (diff.citations.isNotEmpty()) {
                                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                         diff.citations.forEachIndexed { idx, c ->
@@ -199,7 +211,7 @@ internal fun CourseCompanionPanel(
             if (pack.keyPoints.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "核心考点与多源出处",
+                        if (courseContext.examProfile.isExam) "核心考点与多源出处" else "核心要点与原文出处",
                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
                         color = colors.fgPrimary,
                     )

@@ -435,6 +435,28 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                     run { controller.jumpToMockSourcePage(detail.courseId, bookId, pg, quote) }
                                 },
                                 onMasteryUpdated = { cid -> controller.refreshActiveCourse(cid) },
+                                onAddMaterials = {
+                                    scope.launch {
+                                        val picked = if (onPickCourseFiles != null) {
+                                            onPickCourseFiles()
+                                        } else {
+                                            listOfNotNull(chooseBook())
+                                        }
+                                        if (picked.isNotEmpty()) {
+                                            controller.addMaterialsToCourse(detail.courseId, picked) {
+                                                picked.forEach(releasePickedBook)
+                                            }
+                                        }
+                                    }
+                                },
+                                onSkipSyllabusPrompt = {
+                                    run {
+                                        controller.updateCourseExamProfile(
+                                            detail.courseId,
+                                            detail.examProfile.copy(syllabusPromptState = CourseSyllabusPromptState.SKIPPED),
+                                        )
+                                    }
+                                },
                             )
                         }
                         ui.screen == BookScreen.REVIEWS -> LocalBookReviews(ui,

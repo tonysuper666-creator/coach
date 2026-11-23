@@ -302,7 +302,10 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         val (cid, skipped) = CourseStore.createCourse(
                             db = db,
                             title = cleanTitle,
-                            examProfile = CourseExamProfile(examDate = cleanExamDate.orEmpty()),
+                            examProfile = CourseExamProfile(
+                                examDate = cleanExamDate.orEmpty(),
+                                examEnabled = !cleanExamDate.isNullOrBlank(),
+                            ),
                             materialBookIds = allIds,
                             existingId = id,
                         )
@@ -1842,8 +1845,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     refreshed to (preRejected + addRes.rejectedPastExamTitles)
                 }
                 val notice = when {
-                    rejected.isNotEmpty() -> "已拦截 ${rejected.size} 份历年真题文件；其余 ${detail.materials.size} 份材料已对齐。"
-                    importedIds.isNotEmpty() -> "已补充 ${importedIds.size} 份材料并更新本周对齐。"
+                    rejected.isNotEmpty() -> "已拦截 ${rejected.size} 份历年真题文件；其余 ${detail.materials.size} 份材料已整理。"
+                    importedIds.isNotEmpty() && detail.isExam -> "已补充 ${importedIds.size} 份材料并更新本周对齐。"
+                    importedIds.isNotEmpty() -> "已添加 ${importedIds.size} 份材料。"
                     else -> null
                 }
                 mutable.update {
@@ -1924,15 +1928,32 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     }
 
     suspend fun updateCourseExamProfile(courseId: String, profile: CourseExamProfile) = action {
-        val detail = library.withCourseDatabase { db ->
+        val (prevProfile, detail) = library.withCourseDatabase { db ->
+            val before = CourseStore.loadCourseDetail(db, courseId, library.clock).examProfile
             CourseStore.updateExamProfile(db, courseId, profile)
-            CourseStore.loadCourseDetail(db, courseId, library.clock)
+            val refreshed = if (before.isExam != profile.isExam) {
+                CourseAutoAligner.alignLocally(db, courseId)
+                CourseStore.loadCourseDetail(db, courseId, library.clock)
+            } else {
+                CourseStore.loadCourseDetail(db, courseId, library.clock)
+            }
+            before to refreshed
+        }
+        val onlyPromptChanged = prevProfile.isExam == profile.isExam &&
+            prevProfile.examDate == profile.examDate &&
+            prevProfile.examFormat == profile.examFormat &&
+            prevProfile.syllabusPromptState != profile.syllabusPromptState
+        val notice = when {
+            onlyPromptChanged -> null
+            !profile.isExam -> "已切换为普通学习。"
+            profile.examDate.isNotBlank() -> "已保存考试日期（${profile.examDate}）。"
+            else -> "已设为要考，可随时补考试日或考纲。"
         }
         mutable.update {
             it.copy(
                 activeCourseDetail = detail,
                 collections = library.collectionSummaries(),
-                courseNotice = "已更新考试信息与暂定标识。",
+                courseNotice = notice,
             )
         }
     }

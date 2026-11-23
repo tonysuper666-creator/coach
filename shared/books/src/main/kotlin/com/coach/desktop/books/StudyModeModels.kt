@@ -62,7 +62,25 @@ internal enum class BookStudyMode(
     ),
     ;
 
+    fun displayTitle(examMode: Boolean): String = when {
+        !examMode && this == PROBLEM_DRIVEN -> "自测带读"
+        !examMode && this == EXAM_FOCUS -> READ_THROUGH.titleZh
+        else -> titleZh
+    }
+
+    fun displaySummary(examMode: Boolean): String = when (this) {
+        READ_THROUGH -> if (examMode) shortSummaryZh else "按章节顺序读，配本节导读与读后自测。"
+        BOOK_MAP -> if (examMode) shortSummaryZh else "每章一页纸、核心概念与跨章关系，快速通览全书。"
+        EXAM_FOCUS -> shortSummaryZh
+        DIAGNOSTIC_SKIP -> if (examMode) shortSummaryZh else "先做几道自测，已掌握的部分自动折起跳过。"
+        PROBLEM_DRIVEN -> if (examMode) shortSummaryZh else "先从自测题入手，卡住再跳回正文查对应段落。"
+        QUESTION_DRIVEN -> if (examMode) shortSummaryZh else "输入想弄懂的问题，只看全书最相关的章节与页。"
+    }
+
     companion object {
+        fun availableModes(examMode: Boolean): List<BookStudyMode> =
+            if (examMode) entries else entries.filter { it != EXAM_FOCUS }
+
         fun fromWire(raw: String?): BookStudyMode =
             entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: READ_THROUGH
     }
@@ -120,13 +138,14 @@ internal data class BookStudyPreference(
     val targetDate: String? = null,
     val inquiryQuestion: String = "",
     val updatedAt: Long = System.currentTimeMillis(),
+    val examMode: Boolean = false,
 ) {
     val pacePreset: StudyPacePreset
         get() = StudyPacePreset.fromMinutes(dailyMinutes, targetDate)
 
     fun compactBadgeText(): String = buildString {
         append("学法：")
-        append(mode.titleZh)
+        append(mode.displayTitle(examMode))
         if (detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) {
             append(" · 只看原文")
         }
@@ -149,15 +168,17 @@ internal object SmartDefaultModeResolver {
         testedSectionRatio: Double,
         readChapterRatio: Double,
         today: LocalDate = LocalDate.now(),
+        courseIsExam: Boolean = !courseExamDate.isNullOrBlank(),
     ): BookStudyPreference {
         val isEnglishHeavy = LATIN_WORD_RE.findAll(sampleText.ifBlank { title }).count() >= 5
         val defaultLang = if (isEnglishHeavy) ExplainLanguage.BILINGUAL else ExplainLanguage.ZH
         val daysToExam = courseExamDate?.takeIf { it.isNotBlank() }?.let { raw ->
             runCatching { ChronoUnit.DAYS.between(today, LocalDate.parse(raw.trim())) }.getOrNull()
         }
+        val activeExam = inCourse && courseIsExam
 
-        // 1. Course with imminent exam (<= 21 days) & partial prior study -> 先测后读
-        if (inCourse && daysToExam != null && daysToExam in 0..21 && (testedSectionRatio >= 0.20 || readChapterRatio >= 0.25)) {
+        // 1. Exam course with imminent exam (<= 21 days) & partial prior study -> 先测后读
+        if (activeExam && daysToExam != null && daysToExam in 0..21 && (testedSectionRatio >= 0.20 || readChapterRatio >= 0.25)) {
             return BookStudyPreference(
                 bookId = bookId,
                 mode = BookStudyMode.DIAGNOSTIC_SKIP,
@@ -166,10 +187,11 @@ internal object SmartDefaultModeResolver {
                 detailLevel = ExplainDetailLevel.DETAILED,
                 explainLang = defaultLang,
                 targetDate = courseExamDate,
+                examMode = true,
             )
         }
-        // 2. Linked to a course -> 考点优先
-        if (inCourse) {
+        // 2. Linked to an exam course (exam date set or explicitly marked 要考) -> 考点优先
+        if (activeExam) {
             return BookStudyPreference(
                 bookId = bookId,
                 mode = BookStudyMode.EXAM_FOCUS,
@@ -178,6 +200,7 @@ internal object SmartDefaultModeResolver {
                 detailLevel = ExplainDetailLevel.DETAILED,
                 explainLang = defaultLang,
                 targetDate = courseExamDate,
+                examMode = true,
             )
         }
         // 3. Standalone book with >= 30% chapters already read/tested -> 先测后读
@@ -824,13 +847,77 @@ internal object StudyModeStore {
                         }
                     }
                 }
-                existing ?: computeSmartDefault(db, bookId, fallbackTitle, fallbackPageCount).also {
+                val liveCourse = resolveBookCourseContext(db, bookId)
+                val resolved = existing?.let { saved ->
+                    val adjustedMode = if (!liveCourse.isExam && !saved.userLocked && saved.mode == BookStudyMode.EXAM_FOCUS) {
+                        BookStudyMode.READ_THROUGH
+                    } else {
+                        saved.mode
+                    }
+                    val adjustedReason = if (!liveCourse.isExam && saved.defaultReason.contains("考")) {
+                        "按章节顺序读，随时可以切换学法。"
+                    } else {
+                        saved.defaultReason
+                    }
+                    saved.copy(
+                        mode = adjustedMode,
+                        defaultReason = adjustedReason,
+                        examMode = liveCourse.isExam,
+                    )
+                } ?: computeSmartDefault(db, bookId, fallbackTitle, fallbackPageCount).also {
                     saveInDb(db, it)
                 }
+                resolved
             }
         }.getOrElse {
             BookStudyPreference(bookId = bookId)
         }
+    }
+
+    private data class BookCourseContext(
+        val inCourse: Boolean = false,
+        val isExam: Boolean = false,
+        val examDate: String? = null,
+        val inBooklist: Boolean = false,
+    )
+
+    private fun resolveBookCourseContext(db: Connection, bookId: String): BookCourseContext {
+        var inCourse = false
+        var isExam = false
+        var examDate: String? = null
+        var inBooklist = false
+        if (BookSchemaMigration.tableExists(db, "collections") && BookSchemaMigration.tableExists(db, "collection_materials")) {
+            val hasMeta = BookSchemaMigration.tableColumns(db, "collections").contains("metadata_json")
+            val query = if (hasMeta) {
+                """SELECT c.kind, c.exam_date, c.metadata_json FROM collections c
+                   JOIN collection_materials cm ON cm.collection_id = c.id
+                   WHERE cm.material_id=? AND c.archived=0"""
+            } else {
+                """SELECT c.kind, c.exam_date, NULL FROM collections c
+                   JOIN collection_materials cm ON cm.collection_id = c.id
+                   WHERE cm.material_id=? AND c.archived=0"""
+            }
+            db.prepareStatement(query.trimIndent()).use { s ->
+                s.setString(1, bookId)
+                s.executeQuery().use { r ->
+                    while (r.next()) {
+                        val k = r.getString(1).orEmpty()
+                        if (k == "COURSE") {
+                            inCourse = true
+                            val colDate = r.getString(2)
+                            val profile = CourseJson.decodeExamProfile(r.getString(3), colDate)
+                            if (profile.isExam) {
+                                isExam = true
+                                if (profile.examDate.isNotBlank()) examDate = profile.examDate
+                            }
+                        } else if (k == "BOOKLIST") {
+                            inBooklist = true
+                        }
+                    }
+                }
+            }
+        }
+        return BookCourseContext(inCourse = inCourse, isExam = isExam, examDate = examDate, inBooklist = inBooklist)
     }
 
     fun save(library: TextbookLibrary, pref: BookStudyPreference): BookStudyPreference {
@@ -909,29 +996,10 @@ internal object StudyModeStore {
                 }
             }
         }
-        var inCourse = false
-        var examDate: String? = null
-        var inBooklist = false
-        if (BookSchemaMigration.tableExists(db, "collections") && BookSchemaMigration.tableExists(db, "collection_materials")) {
-            db.prepareStatement(
-                """SELECT c.kind, c.exam_date FROM collections c
-                   JOIN collection_materials cm ON cm.collection_id = c.id
-                   WHERE cm.material_id=? AND c.archived=0""".trimIndent(),
-            ).use { s ->
-                s.setString(1, bookId)
-                s.executeQuery().use { r ->
-                    while (r.next()) {
-                        val k = r.getString(1).orEmpty()
-                        if (k == "COURSE") {
-                            inCourse = true
-                            examDate = r.getString(2) ?: examDate
-                        } else if (k == "BOOKLIST") {
-                            inBooklist = true
-                        }
-                    }
-                }
-            }
-        }
+        val courseCtx = resolveBookCourseContext(db, bookId)
+        val inCourse = courseCtx.inCourse
+        val examDate = courseCtx.examDate
+        val inBooklist = courseCtx.inBooklist
         var totalSections = 0
         if (BookSchemaMigration.tableExists(db, "book_toc_nodes")) {
             db.prepareStatement("SELECT COUNT(*) FROM book_toc_nodes WHERE book=?").use { s ->
@@ -986,6 +1054,7 @@ internal object StudyModeStore {
             inBooklist = inBooklist,
             testedSectionRatio = testedRatio,
             readChapterRatio = readRatio,
+            courseIsExam = courseCtx.isExam,
         )
     }
 

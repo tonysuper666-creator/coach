@@ -377,4 +377,160 @@ class RoutingRegressionTest {
             dir.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun visionTwoPageBatchClarifiesPartialCompletionAndCachesFirstPageOnRetry() = runBlocking {
+        val samplePngB64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        val dir = Files.createTempDirectory("course-vision-two-page-batch")
+        val bridgeHits = AtomicInteger(0)
+        val providerCalls = AtomicInteger(0)
+
+        val bridgeServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        bridgeServer.createContext("/v1/chat/completions") { exchange ->
+            val hit = bridgeHits.incrementAndGet()
+            val bodyJson = json.parseToJsonElement(exchange.requestBody.readBytes().decodeToString()).jsonObject
+            val model = bodyJson["model"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val reply = if (hit == 1) {
+                providerCalls.incrementAndGet()
+                buildJsonObject {
+                    put("model", BridgeClient.OPUS)
+                    put("choices", buildJsonArray {
+                        add(buildJsonObject {
+                            put("index", 0)
+                            put("message", buildJsonObject {
+                                put("role", "assistant")
+                                put("content", "第 1 页板书")
+                            })
+                        })
+                    })
+                    put("usage", buildJsonObject {
+                        put("prompt_tokens", 100)
+                        put("completion_tokens", 20)
+                        put("total_tokens", 120)
+                    })
+                    put("x_coach", buildJsonObject {
+                        put("status", "complete")
+                        put("served_by", BridgeClient.OPUS)
+                        put("physical_calls", 1)
+                    })
+                }
+            } else {
+                buildJsonObject {
+                    put("model", model)
+                    put("choices", buildJsonArray {
+                        add(buildJsonObject {
+                            put("index", 0)
+                            put("message", buildJsonObject {
+                                put("role", "assistant")
+                                put("content", "")
+                            })
+                        })
+                    })
+                    put("x_coach", buildJsonObject {
+                        put("status", "failed")
+                        put("reason", "credit_limit_95_percent")
+                        put("served_by", model)
+                        put("physical_calls", 0)
+                    })
+                }
+            }
+            val bytes = reply.toString().toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        bridgeServer.start()
+
+        val ledger = BookTokenLedger(dir.resolve("ledger"))
+        try {
+            val bridge = BridgeClient(BridgeConfig(baseUrl = "http://127.0.0.1:${bridgeServer.address.port}"))
+            val transport = BridgeCourseVisionTransport(bridge)
+            val service = CourseVisionService(dir.resolve("vision"), transport = transport, tokenLedger = ledger)
+
+            val sha1 = "1".repeat(64)
+            val sha2 = "2".repeat(64)
+            val twoPageInput = buildJsonObject {
+                put("bookId", "book-two-page")
+                put("totalPages", 2)
+                put("pages", buildJsonArray {
+                    add(buildJsonObject {
+                        put("pageNumber", 1)
+                        put("pageSha256", sha1)
+                        put("pngBase64", samplePngB64)
+                    })
+                    add(buildJsonObject {
+                        put("pageNumber", 2)
+                        put("pageSha256", sha2)
+                        put("pngBase64", samplePngB64)
+                    })
+                })
+            }
+
+            // Sub-case A: first 2-page batch succeeds on page 1, hits 95% guard on page 2.
+            val firstErr = assertFailsWith<MockError> {
+                service.recognizeBatch(twoPageInput)
+            }
+            assertEquals(HttpStatusCode.TooManyRequests, firstErr.status)
+            assertTrue(firstErr.message.orEmpty().contains("第 2 页未发送"))
+            assertTrue(firstErr.message.orEmpty().contains("第 1 页已完成"))
+            assertFalse(firstErr.message.orEmpty().contains("本次请求未发送"))
+            assertEquals(1, providerCalls.get())
+            assertEquals(2, bridgeHits.get())
+            assertTrue(service.lookupCached(sha1) != null)
+            assertNull(service.lookupCached(sha2))
+            assertEquals(1, ledger.bookSummary("book-two-page").calls)
+
+            // Retry with exact same 2-page payload hits cache for page 1, sends 0 new provider calls.
+            val retryErr = assertFailsWith<MockError> {
+                service.recognizeBatch(twoPageInput)
+            }
+            assertEquals(HttpStatusCode.TooManyRequests, retryErr.status)
+            assertTrue(retryErr.message.orEmpty().contains("第 2 页未发送"))
+            assertTrue(retryErr.message.orEmpty().contains("第 1 页已完成"))
+            assertFalse(retryErr.message.orEmpty().contains("本次请求未发送"))
+            assertEquals(1, providerCalls.get())
+            assertEquals(3, bridgeHits.get())
+            assertEquals(1, ledger.bookSummary("book-two-page").calls)
+
+            // Sub-case B: 3-page batch where 2 pages completed and page 3 hits guard.
+            val stubTransport = object : CourseVisionTransport {
+                override suspend fun recognizePage(
+                    pageNumber: Int,
+                    pngBase64: String,
+                    pageSha256: String,
+                ): CourseVisionReply {
+                    if (pageNumber == 3) {
+                        throw MockError(
+                            HttpStatusCode.TooManyRequests,
+                            "视觉识别赠额已达到保护上限，本次请求未发送，请确认额度后再试。",
+                        )
+                    }
+                    return CourseVisionReply(text = "第 $pageNumber 页内容")
+                }
+            }
+            val threePageService = CourseVisionService(dir.resolve("vision-three"), transport = stubTransport)
+            val threePageErr = assertFailsWith<MockError> {
+                threePageService.recognizeBatch(buildJsonObject {
+                    put("bookId", "book-three-page")
+                    put("totalPages", 3)
+                    put("pages", buildJsonArray {
+                        for (p in 1..3) {
+                            add(buildJsonObject {
+                                put("pageNumber", p)
+                                put("pageSha256", p.toString().repeat(64))
+                                put("pngBase64", samplePngB64)
+                            })
+                        }
+                    })
+                })
+            }
+            assertEquals(HttpStatusCode.TooManyRequests, threePageErr.status)
+            assertTrue(threePageErr.message.orEmpty().contains("第 3 页未发送"))
+            assertTrue(threePageErr.message.orEmpty().contains("已有 2 页已完成"))
+            assertFalse(threePageErr.message.orEmpty().contains("本次请求未发送"))
+        } finally {
+            bridgeServer.stop(0)
+            dir.toFile().deleteRecursively()
+        }
+    }
 }

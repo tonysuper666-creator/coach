@@ -221,6 +221,26 @@ class CourseVisionService(
         }
     }
 
+    private fun enrichBatchFailure(
+        failedPage: Int,
+        completedPages: List<Int>,
+        error: MockError,
+    ): MockError {
+        if (completedPages.isEmpty()) return error
+        val completedSummary = if (completedPages.size == 1) {
+            "第 ${completedPages.first()} 页已完成"
+        } else {
+            "已有 ${completedPages.size} 页已完成"
+        }
+        val raw = error.message.orEmpty()
+        val updated = if ("本次请求未发送" in raw) {
+            raw.replace("本次请求未发送", "第 ${failedPage} 页未发送，$completedSummary")
+        } else {
+            "第 ${failedPage} 页识别失败（$completedSummary）：$raw"
+        }
+        return MockError(error.status, updated)
+    }
+
     suspend fun recognizeBatch(
         input: JsonObject,
         friend: String? = null,
@@ -236,6 +256,7 @@ class CourseVisionService(
             )
         }
         val outputs = mutableListOf<JsonObject>()
+        val completedPages = mutableListOf<Int>()
         var cacheHits = 0
         var billedCalls = 0
         for (el in pages) {
@@ -248,6 +269,7 @@ class CourseVisionService(
             val hit = lookupCached(sha)
             if (hit != null) {
                 cacheHits++
+                completedPages += pageNum
                 outputs += buildJsonObject {
                     put("pageNumber", pageNum)
                     put("pageSha256", sha)
@@ -261,8 +283,13 @@ class CourseVisionService(
             if (pngB64.isBlank()) {
                 throw MockError(HttpStatusCode.BadRequest, "第 $pageNum 页未命中缓存且缺少图片数据。")
             }
-            val reply = transport.recognizePage(pageNum, pngB64, sha, friend = friend, device = device)
+            val reply = try {
+                transport.recognizePage(pageNum, pngB64, sha, friend = friend, device = device)
+            } catch (e: MockError) {
+                throw enrichBatchFailure(pageNum, completedPages, e)
+            }
             storeCached(sha, reply.text, reply.model)
+            completedPages += pageNum
             billedCalls++
             if (friend == null) {
                 tokenLedger?.record(

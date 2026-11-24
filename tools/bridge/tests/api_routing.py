@@ -1,24 +1,37 @@
 #!/usr/bin/env python3
 """Offline API contracts. MockTransport cannot contact a provider or subscription CLI."""
 import asyncio
+import base64
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
+import struct
 import sys
 import tempfile
 import time
 import unittest
 from unittest.mock import patch
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from api_budget import CreditLedger, Denied, atomic_json, micros
 from grant_fixture import fund
-from api_route import ApiRouter, ApiFailure, CONFIG, cost, route, vendor
+from api_route import ApiRouter, ApiFailure, CONFIG, cost, image_token_bound, route, vendor
 import httpx
 import subscription_bridge as bridge
 
 KEY = "synthetic-not-a-real-key"
 NOW = 1794787200
+
+
+def make_png_b64(width: int = 1600, height: int = 1200) -> str:
+    """Build a minimal valid PNG header+IDAT+IEND with arbitrary verified dimensions."""
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    raw = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(b"\x00")) + chunk(b"IEND", b"")
+    return base64.b64encode(raw).decode("ascii")
 
 
 class RequestLogTests(unittest.TestCase):
@@ -482,10 +495,10 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         tasks |= {t for s in sources for t in re.findall(r'"(BOOK_[A-Z_]+)"', s)}
         # Token-ledger / section labels only; these calls never reach the bridge.
         tasks -= {
-            "course_align", "course_vision_ocr",
+            "course_align",
             "BOOK_MAP_BATCH", "BOOK_MAP_GRAPH",
         }
-        self.assertTrue({"booklist_concept_align", "course_topic_map", "BOOK_SECTION_BATCH"} <= tasks)
+        self.assertTrue({"booklist_concept_align", "course_topic_map", "BOOK_SECTION_BATCH", "course_vision_ocr"} <= tasks)
         self.assertEqual(set(), tasks - set(CONFIG["tasks"]))
         constants = {m for s in sources for m in re.findall(r'const val [A-Z0-9_]+ = "((?:claude|gpt)-[a-z0-9.-]+)"', s)}
         self.assertIn("claude-haiku-5-5", constants)
@@ -550,6 +563,231 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {"COACH_OPENAI_API_KEY": KEY, "COACH_ANTHROPIC_API_KEY": KEY, "OPENAI_API_KEY": KEY, "ANTHROPIC_API_KEY": KEY}):
             for backend in ("claude", "codex", "agy"):
                 self.assertNotIn(KEY, bridge.child_env(backend).values())
+
+
+class VisionRoutingTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.ledger = CreditLedger(self.root, lambda: NOW)
+        fund(self.root)
+        self.requests = []
+        self.png_b64 = make_png_b64(1600, 1200)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def vision_req(self, png_b64=None, task="course_vision_ocr", model="claude-opus-5-5", max_tokens=2048):
+        img_b64 = self.png_b64 if png_b64 is None else png_b64
+        body = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": "transcribe faithfully"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Transcribe board notes"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                    ],
+                },
+            ],
+        }
+        return bridge.build_req(body, {"x-coach-task": task})
+
+    def router(self, handler, keys=None, cross_vendor_fallback=True):
+        def wrapped(request):
+            self.requests.append(request)
+            return handler(request)
+        return ApiRouter(
+            self.ledger,
+            lambda: httpx.AsyncClient(transport=httpx.MockTransport(wrapped)),
+            keys=keys if keys is not None else {"anthropic": KEY, "openai": KEY},
+            retry_429_delays=(),
+            cross_vendor_fallback=cross_vendor_fallback,
+        )
+
+    async def test_vision_reserves_image_bound_preserves_image_block_and_settles(self):
+        reserved_during_call = []
+
+        def handler(request):
+            reserved_during_call.append(
+                self.ledger.read()["months"]["2026-11"]["anthropic"]["reserved_microusd"]
+            )
+            payload = json.loads(request.content)
+            self.assertEqual("claude-opus-5-5", payload["model"])
+            blocks = payload["messages"][0]["content"]
+            self.assertEqual("image", blocks[0]["type"])
+            self.assertEqual("base64", blocks[0]["source"]["type"])
+            self.assertEqual("image/png", blocks[0]["source"]["media_type"])
+            self.assertEqual(self.png_b64, blocks[0]["source"]["data"])
+            self.assertEqual({"type": "text", "text": "Transcribe board notes"}, blocks[1])
+            self.assertNotIn("[image omitted]", json.dumps(payload))
+            return httpx.Response(200, content=frames("anthropic", model="claude-opus-5-5"))
+
+        req = self.vision_req()
+        with patch.object(bridge, "API_ROUTER", self.router(handler)), patch.object(bridge, "write_log"):
+            outcome = await bridge.dispatch(req, req.model, None)
+
+        self.assertEqual("complete", outcome.status)
+        self.assertEqual("claude-opus-5-5", outcome.served_by)
+        self.assertEqual(1, len(self.requests))
+        self.assertEqual("api.anthropic.com", self.requests[0].url.host)
+        text_only_bound = len(req.spec_data.system.encode()) + len(req.spec_data.prompt.encode()) + 4096
+        expected_bound = text_only_bound + image_token_bound(1600, 1200)
+        expected_reserved = cost("claude-opus-5-5", {"input_tokens": expected_bound, "output_tokens": 2048})
+        text_only_reserved = cost("claude-opus-5-5", {"input_tokens": text_only_bound, "output_tokens": 2048})
+        self.assertEqual([expected_reserved], reserved_during_call)
+        self.assertGreater(expected_reserved, text_only_reserved)
+        month = self.ledger.read()["months"]["2026-11"]["anthropic"]
+        self.assertEqual(0, month["reserved_microusd"])
+        self.assertEqual(1, month["calls"])
+        self.assertEqual(cost("claude-opus-5-5", {"input_tokens": 100, "output_tokens": 20}), month["spent_microusd"])
+
+    async def test_vision_over_share_denies_with_zero_network_requests_and_no_cli_fallback(self):
+        # Fill both Anthropic (95% = $190) and OpenAI (95% = $475) shares.
+        self.ledger.reserve("anthropic", KEY, micros(190))
+        self.ledger.reserve("openai", KEY, micros(475))
+
+        def fail_if_called(request):
+            raise AssertionError(f"Unexpected upstream HTTP call to {request.url}")
+
+        async def fail_cli(*args, **kwargs):
+            raise AssertionError("Vision must never fall back to subscription CLI")
+
+        for keys, expected_reason in (
+            ({"anthropic": KEY}, "credit_limit_95_percent"),
+            ({"anthropic": KEY, "openai": KEY}, "credit_limit_95_percent"),
+            ({"openai": KEY}, "credit_limit_95_percent"),
+            ({}, "missing_key"),
+        ):
+            with self.subTest(keys=sorted(keys.keys())):
+                req = self.vision_req()
+                with patch.object(bridge, "API_ONLY", False), \
+                        patch.object(bridge, "API_ROUTER", self.router(fail_if_called, keys=keys)), \
+                        patch.object(bridge, "dispatch_cli", fail_cli), \
+                        patch.object(bridge, "write_log"):
+                    outcome = await bridge.dispatch(req, req.model, None)
+                self.assertEqual("failed", outcome.status)
+                self.assertEqual(expected_reason, outcome.reason)
+                self.assertEqual("api", req.transport)
+        self.assertEqual([], self.requests)
+
+    async def test_vision_primary_failure_retains_anthropic_reservation_and_falls_back_to_openai_with_guard(self):
+        def handler(request):
+            if request.url.host == "api.anthropic.com":
+                return httpx.Response(500, content=b"upstream failure body")
+            payload = json.loads(request.content)
+            self.assertEqual("gpt-6.2-astra", payload["model"])
+            content = payload["input"][0]["content"]
+            self.assertEqual({"type": "input_text", "text": "Transcribe board notes"}, content[0])
+            self.assertEqual("input_image", content[1]["type"])
+            self.assertEqual(f"data:image/png;base64,{self.png_b64}", content[1]["image_url"])
+            return httpx.Response(200, content=frames("openai", model="gpt-6.2-astra"))
+
+        req = self.vision_req()
+        with patch.object(bridge, "API_ROUTER", self.router(handler)), patch.object(bridge, "write_log"):
+            outcome = await bridge.dispatch(req, req.model, None)
+
+        self.assertEqual("complete", outcome.status)
+        self.assertEqual("gpt-6.2-astra", outcome.served_by)
+        self.assertTrue(req.fallback)
+        self.assertEqual(["api.anthropic.com", "api.openai.com"], [r.url.host for r in self.requests])
+        months = self.ledger.read()["months"]["2026-11"]
+        # Failed Anthropic attempt retains its conservative reservation; OpenAI settled cleanly.
+        self.assertGreater(months["anthropic"]["reserved_microusd"], 0)
+        self.assertEqual(0, months["openai"]["reserved_microusd"])
+        self.assertEqual(1, months["openai"]["calls"])
+        self.assertGreater(months["openai"]["spent_microusd"], 0)
+
+        # If OpenAI allocation is absent, Anthropic failure must NOT touch OpenAI network.
+        (self.root / "grant-allocation-openai.json").unlink()
+        self.requests.clear()
+        req2 = self.vision_req()
+        with patch.object(bridge, "API_ROUTER", self.router(handler)), patch.object(bridge, "write_log"):
+            outcome2 = await bridge.dispatch(req2, req2.model, None)
+        self.assertEqual("failed", outcome2.status)
+        self.assertEqual("grant_allocation_unavailable", outcome2.reason)
+        self.assertEqual(["api.anthropic.com"], [r.url.host for r in self.requests])
+
+    async def test_vision_rejects_remote_url_corrupt_image_oversized_dimensions_and_multiturn_before_ledger(self):
+        bad_bodies = [
+            {
+                "model": "claude-opus-5-5",
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "hi"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/secret.png"}},
+                ]}],
+            },
+            {
+                "model": "claude-opus-5-5",
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "hi"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+                ]}],
+            },
+            {
+                "model": "claude-opus-5-5",
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "hi"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{make_png_b64(8192, 8192)}"}},
+                ]}],
+            },
+            {
+                "model": "claude-opus-5-5",
+                "messages": [
+                    {"role": "user", "content": "first"},
+                    {"role": "assistant", "content": "second"},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": "third"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{self.png_b64}"}},
+                    ]},
+                ],
+            },
+        ]
+        for body in bad_bodies:
+            with self.assertRaises(bridge.BridgeError) as ctx:
+                bridge.build_req(body, {"x-coach-task": "course_vision_ocr"})
+            self.assertEqual(400, ctx.exception.status)
+            self.assertEqual("unsupported_image", ctx.exception.reason)
+        self.assertEqual({}, self.ledger.read()["cycles"])
+        self.assertEqual([], self.requests)
+
+    async def test_vision_http_endpoint_enforces_share_and_returns_x_coach_without_network(self):
+        self.ledger.reserve("anthropic", KEY, micros(190))
+
+        def fail_if_called(request):
+            raise AssertionError(f"Unexpected upstream HTTP call to {request.url}")
+
+        payload = {
+            "model": "claude-opus-5-5",
+            "max_tokens": 2048,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": "transcribe"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Transcribe board"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{self.png_b64}"}},
+                    ],
+                },
+            ],
+        }
+        headers = {"X-Coach-Task": "course_vision_ocr", "X-Coach-Fallback": "off", "X-Coach-Model-Policy": "exact"}
+        transport = httpx.ASGITransport(app=bridge.app)
+        with patch.object(bridge, "USER_ONLY", False), \
+                patch.object(bridge, "API_ONLY", False), \
+                patch.object(bridge, "API_ROUTER", self.router(fail_if_called, keys={"anthropic": KEY})), \
+                patch.object(bridge, "write_log"):
+            async with httpx.AsyncClient(transport=transport, base_url="http://bridge.test") as client:
+                resp = await client.post("/v1/chat/completions", json=payload, headers=headers)
+        self.assertEqual(200, resp.status_code)
+        body = resp.json()
+        self.assertEqual("failed", body["x_coach"]["status"])
+        self.assertEqual("credit_limit_95_percent", body["x_coach"]["reason"])
+        self.assertEqual("api", body["x_coach"]["transport"])
+        self.assertEqual([], self.requests)
 
 
 if __name__ == "__main__":

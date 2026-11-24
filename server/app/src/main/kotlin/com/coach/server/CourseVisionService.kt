@@ -1,31 +1,24 @@
 package com.coach.server
 
 import com.coach.ai.BridgeClient
+import com.coach.ai.BridgeResult
+import com.coach.ai.ChatRequest
+import com.coach.ai.ImageAttachment
 import io.ktor.http.HttpStatusCode
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
-import java.net.URI
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
-import java.time.Duration
 
 data class CourseVisionReply(
     val text: String,
@@ -41,184 +34,106 @@ interface CourseVisionTransport {
         pngBase64: String,
         pageSha256: String,
     ): CourseVisionReply
+
+    suspend fun recognizePage(
+        pageNumber: Int,
+        pngBase64: String,
+        pageSha256: String,
+        friend: String?,
+        device: String?,
+    ): CourseVisionReply = recognizePage(pageNumber, pngBase64, pageSha256)
 }
 
-class AnthropicHaikuVisionTransport(
-    private val apiKeyProvider: () -> String = {
-        System.getenv("COACH_ANTHROPIC_API_KEY")?.trim().orEmpty()
-            .ifBlank { System.getenv("ANTHROPIC_API_KEY")?.trim().orEmpty() }
-    },
-    private val openAiKeyProvider: () -> String = {
-        System.getenv("COACH_OPENAI_API_KEY")?.trim().orEmpty()
-            .ifBlank { System.getenv("OPENAI_API_KEY")?.trim().orEmpty() }
-    },
+/**
+ * Routes all board/handwriting vision OCR calls through Coach Bridge so every provider
+ * attempt (Anthropic primary, OpenAI cross-vendor fallback, and friend Anthropic-only)
+ * is reserved and settled against the shared 95% grant ledger.
+ */
+class BridgeCourseVisionTransport(
+    private val bridge: BridgeClient,
     private val model: String = BridgeClient.OPUS,
-    private val fallbackModel: String = BridgeClient.GPT_62_ASTRA,
-    private val endpoint: String = "https://api.anthropic.com/v1/messages",
-    private val openAiEndpoint: String = "https://api.openai.com/v1/chat/completions",
-    private val connectTimeout: Duration = Duration.ofSeconds(10),
-    private val requestTimeout: Duration = Duration.ofSeconds(60),
+    private val friendModel: String = BridgeClient.CLAUDE,
+    private val maxTokens: Int = 2048,
 ) : CourseVisionTransport {
-    private val http = HttpClient.newBuilder().connectTimeout(connectTimeout).build()
-    private val json = Json { ignoreUnknownKeys = true }
+    override suspend fun recognizePage(
+        pageNumber: Int,
+        pngBase64: String,
+        pageSha256: String,
+    ): CourseVisionReply = recognizePage(pageNumber, pngBase64, pageSha256, friend = null, device = null)
 
     override suspend fun recognizePage(
         pageNumber: Int,
         pngBase64: String,
         pageSha256: String,
+        friend: String?,
+        device: String?,
     ): CourseVisionReply = withContext(Dispatchers.IO) {
+        val started = System.nanoTime()
+        val systemPrompt = "你是严谨的课堂板书与手写笔记转写助手。请严格按原文转写，不要补充正文之外的评论。"
         val promptText = "请完整转写这页课堂板书/手写笔记的文字、公式和图表标注，保留清晰段落结构与原文繁简字体（繁体原文保持繁体、简体保持简体），不要补充正文之外的评论。"
-        val apiKey = apiKeyProvider()
-        if (apiKey.isNotBlank()) {
-            try {
-                return@withContext callAnthropic(apiKey, pngBase64, promptText)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-                throw e
-            } catch (primaryErr: Exception) {
-                val oaiKey = openAiKeyProvider()
-                if (oaiKey.isBlank()) {
-                    if (primaryErr is MockError) throw primaryErr
-                    throw MockError(HttpStatusCode.BadGateway, "视觉识别服务暂时不可用（${primaryErr.javaClass.simpleName}）。")
-                }
-                return@withContext callOpenAiVision(oaiKey, pngBase64, promptText)
+        val targetModel = if (friend != null) friendModel else model
+        val result = bridge.chat(
+            ChatRequest(
+                task = if (friend != null) "READER_SELECTION" else "course_vision_ocr",
+                model = targetModel,
+                system = systemPrompt,
+                user = promptText,
+                stream = false,
+                background = false,
+                maxTokens = maxTokens,
+                friendId = friend?.let(::friendId),
+                friendDevice = if (friend != null) device else null,
+                images = listOf(ImageAttachment("image/png", pngBase64)),
+            ),
+        )
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+        when (result) {
+            is BridgeResult.Success -> {
+                val text = result.text.trim()
+                val served = result.terminal.servedBy?.takeIf { it.isNotBlank() } ?: targetModel
+                val inTok = result.terminal.promptTokens ?: 1500
+                val outTok = result.terminal.completionTokens ?: TokenLedgerPricing.estimateTokens(text)
+                CourseVisionReply(
+                    text = text,
+                    model = served,
+                    inputTokens = inTok,
+                    outputTokens = outTok,
+                    elapsedMs = elapsedMs,
+                )
             }
+            is BridgeResult.Failure -> throw mapFailure(result)
         }
-        val oaiKey = openAiKeyProvider()
-        if (oaiKey.isNotBlank()) {
-            return@withContext callOpenAiVision(oaiKey, pngBase64, promptText)
-        }
-        throw MockError(HttpStatusCode.ServiceUnavailable, "视觉识别密钥尚未配置，暂时无法识别手写或扫描板书。")
     }
 
-    private fun callAnthropic(apiKey: String, pngBase64: String, promptText: String): CourseVisionReply {
-        val started = System.nanoTime()
-        val payload = buildJsonObject {
-            put("model", model)
-            put("max_tokens", 2048)
-            put("messages", buildJsonArray {
-                addJsonObject {
-                    put("role", "user")
-                    put("content", buildJsonArray {
-                        addJsonObject {
-                            put("type", "image")
-                            put("source", buildJsonObject {
-                                put("type", "base64")
-                                put("media_type", "image/png")
-                                put("data", pngBase64)
-                            })
-                        }
-                        addJsonObject {
-                            put("type", "text")
-                            put("text", promptText)
-                        }
-                    })
-                }
-            })
+    private fun mapFailure(failure: BridgeResult.Failure): MockError {
+        val reason = failure.terminal?.reason
+        return when {
+            reason == "missing_key" ->
+                MockError(HttpStatusCode.ServiceUnavailable, "视觉识别密钥尚未配置，暂时无法识别手写或扫描板书。")
+            reason in setOf("credit_limit_95_percent", "monthly_quota") ->
+                MockError(HttpStatusCode.TooManyRequests, "视觉识别赠额已达到保护上限，本次请求未发送，请确认额度后再试。")
+            reason == "daily_quota" ->
+                MockError(HttpStatusCode.TooManyRequests, "今日视觉识别额度已用完，请明天再试。")
+            reason == "grant_allocation_unavailable" ->
+                MockError(HttpStatusCode.ServiceUnavailable, "视觉识别赠额配额尚未就绪，本次请求未发送，请检查配额配置。")
+            reason == "api_http_429" ->
+                MockError(HttpStatusCode.TooManyRequests, "视觉识别服务当前繁忙，请稍后再试。")
+            reason in setOf("unsupported_image", "unsupported_context_price", "unsupported_output_limit") ||
+                failure.reason.startsWith("http_400") ->
+                MockError(HttpStatusCode.BadRequest, "板书图片格式或大小不符合识别要求，请检查后重试。")
+            else ->
+                MockError(HttpStatusCode.BadGateway, "视觉识别服务暂时不可用（${reason ?: "bridge_error"}）。")
         }
-        val req = HttpRequest.newBuilder(URI.create(endpoint))
-            .timeout(requestTimeout)
-            .header("Content-Type", "application/json")
-            .header("x-api-key", apiKey)
-            .header("anthropic-version", "2023-06-01")
-            .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
-            .build()
-        val resp = try {
-            http.send(req, HttpResponse.BodyHandlers.ofString())
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw e
-        } catch (e: Exception) {
-            throw MockError(HttpStatusCode.BadGateway, "视觉识别主用服务暂时不可用（${e.javaClass.simpleName}）。")
-        }
-        val elapsedMs = (System.nanoTime() - started) / 1_000_000L
-        if (resp.statusCode() !in 200..299) {
-            throw MockError(HttpStatusCode.BadGateway, "视觉识别服务暂时不可用（HTTP ${resp.statusCode()}）。")
-        }
-        val parsed = json.parseToJsonElement(resp.body()).jsonObject
-        val text = ((parsed["content"] as? JsonArray) ?: buildJsonArray {})
-            .mapNotNull { el -> (el as? JsonObject)?.get("text")?.let { (it as? JsonPrimitive)?.contentOrNull } }
-            .joinToString("\n")
-            .trim()
-        val usage = parsed["usage"] as? JsonObject
-        val inTok = (usage?.get("input_tokens") as? JsonPrimitive)?.intOrNull ?: 1500
-        val outTok = (usage?.get("output_tokens") as? JsonPrimitive)?.intOrNull ?: TokenLedgerPricing.estimateTokens(text)
-        return CourseVisionReply(
-            text = text,
-            model = model,
-            inputTokens = inTok,
-            outputTokens = outTok,
-            elapsedMs = elapsedMs,
-        )
-    }
-
-    private fun callOpenAiVision(apiKey: String, pngBase64: String, promptText: String): CourseVisionReply {
-        val started = System.nanoTime()
-        val payload = buildJsonObject {
-            put("model", fallbackModel)
-            put("max_completion_tokens", 2048)
-            put("messages", buildJsonArray {
-                addJsonObject {
-                    put("role", "user")
-                    put("content", buildJsonArray {
-                        addJsonObject {
-                            put("type", "text")
-                            put("text", promptText)
-                        }
-                        addJsonObject {
-                            put("type", "image_url")
-                            put("image_url", buildJsonObject {
-                                put("url", "data:image/png;base64,$pngBase64")
-                            })
-                        }
-                    })
-                }
-            })
-        }
-        val req = HttpRequest.newBuilder(URI.create(openAiEndpoint))
-            .timeout(requestTimeout)
-            .header("Content-Type", "application/json")
-            .header("Authorization", "Bearer $apiKey")
-            .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
-            .build()
-        val resp = try {
-            http.send(req, HttpResponse.BodyHandlers.ofString())
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw e
-        } catch (e: Exception) {
-            throw MockError(HttpStatusCode.BadGateway, "视觉识别兜底服务暂时不可用（${e.javaClass.simpleName}）。")
-        }
-        val elapsedMs = (System.nanoTime() - started) / 1_000_000L
-        if (resp.statusCode() !in 200..299) {
-            throw MockError(HttpStatusCode.BadGateway, "视觉识别兜底服务暂时不可用（HTTP ${resp.statusCode()}）。")
-        }
-        val parsed = json.parseToJsonElement(resp.body()).jsonObject
-        val firstChoice = (parsed["choices"] as? JsonArray)?.firstOrNull() as? JsonObject
-        val msg = firstChoice?.get("message") as? JsonObject
-        val text = (msg?.get("content") as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
-        val usage = parsed["usage"] as? JsonObject
-        val inTok = (usage?.get("prompt_tokens") as? JsonPrimitive)?.intOrNull ?: 1500
-        val outTok = (usage?.get("completion_tokens") as? JsonPrimitive)?.intOrNull ?: TokenLedgerPricing.estimateTokens(text)
-        return CourseVisionReply(
-            text = text,
-            model = fallbackModel,
-            inputTokens = inTok,
-            outputTokens = outTok,
-            elapsedMs = elapsedMs,
-        )
     }
 }
 
 /**
- * On-demand Haiku Vision OCR service for <=25-page handwritten/scanned PDFs.
+ * On-demand Vision OCR service for <=25-page handwritten/scanned PDFs.
  * Caches recognized page text by `page_sha256` in SQLite to prevent repeat billing.
  */
 class CourseVisionService(
     directory: Path,
-    private val transport: CourseVisionTransport = AnthropicHaikuVisionTransport(),
+    private val transport: CourseVisionTransport = BridgeCourseVisionTransport(BridgeClient()),
     private val tokenLedger: BookTokenLedger? = null,
 ) {
     companion object {
@@ -273,7 +188,11 @@ class CourseVisionService(
         }
     }
 
-    suspend fun recognizeBatch(input: JsonObject): JsonObject {
+    suspend fun recognizeBatch(
+        input: JsonObject,
+        friend: String? = null,
+        device: String? = null,
+    ): JsonObject {
         val bookId = (input["bookId"] as? JsonPrimitive)?.contentOrNull.orEmpty()
         val totalPages = (input["totalPages"] as? JsonPrimitive)?.intOrNull ?: 0
         val pages = (input["pages"] as? JsonArray) ?: buildJsonArray {}
@@ -309,22 +228,24 @@ class CourseVisionService(
             if (pngB64.isBlank()) {
                 throw MockError(HttpStatusCode.BadRequest, "第 $pageNum 页未命中缓存且缺少图片数据。")
             }
-            val reply = transport.recognizePage(pageNum, pngB64, sha)
+            val reply = transport.recognizePage(pageNum, pngB64, sha, friend = friend, device = device)
             storeCached(sha, reply.text, reply.model)
             billedCalls++
-            tokenLedger?.record(
-                TokenLedgerEntry(
-                    bookId = bookId.ifBlank { "vision" },
-                    chapterId = "vision",
-                    sectionId = "p$pageNum",
-                    task = "course_vision_ocr",
-                    routeChannel = CompanionRouteChannel.HAIKU_REALTIME,
-                    model = reply.model,
-                    inputTokens = reply.inputTokens,
-                    outputTokens = reply.outputTokens,
-                    elapsedMs = reply.elapsedMs,
-                ),
-            )
+            if (friend == null) {
+                tokenLedger?.record(
+                    TokenLedgerEntry(
+                        bookId = bookId.ifBlank { "vision" },
+                        chapterId = "vision",
+                        sectionId = "p$pageNum",
+                        task = "course_vision_ocr",
+                        routeChannel = CompanionRouteChannel.HAIKU_REALTIME,
+                        model = reply.model,
+                        inputTokens = reply.inputTokens,
+                        outputTokens = reply.outputTokens,
+                        elapsedMs = reply.elapsedMs,
+                    ),
+                )
+            }
             outputs += buildJsonObject {
                 put("pageNumber", pageNum)
                 put("pageSha256", sha)

@@ -43,7 +43,11 @@ from typing import Any, AsyncIterator
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from api_route import ApiRouter, ApiFailure, route as api_model, vendor as api_vendor
+from api_route import (
+    ApiRouter, ApiFailure,
+    parse_image_part, validate_images,
+    route as api_model, vendor as api_vendor,
+)
 from api_budget import Denied
 from api_batch import BatchRouter, BatchPending, TASKS as BATCH_TASKS
 
@@ -395,6 +399,43 @@ class Spec:
     prompt: str
     tool_names: set[str]
     json_mode: bool
+    images: list[dict]
+
+
+def _has_image_part(content: Any) -> bool:
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(p, dict) and p.get("type") in ("image_url", "image", "input_image") for p in content)
+
+
+def _extract_user_multimodal(content: list) -> tuple[str, list[dict]]:
+    text_parts: list[str] = []
+    images: list[dict] = []
+    for p in content:
+        if isinstance(p, str):
+            text_parts.append(p)
+        elif isinstance(p, dict):
+            t = p.get("type")
+            if t in ("text", "input_text", "output_text") or (t is None and "text" in p):
+                text_parts.append(str(p.get("text", "")))
+            elif t in ("image_url", "image", "input_image"):
+                try:
+                    images.append(parse_image_part(p))
+                except Denied:
+                    raise BridgeError(400, "图片格式、编码或尺寸不受支持", "invalid_request_error",
+                                      param="messages", reason="unsupported_image") from None
+            else:
+                raise BridgeError(400, "图片消息包含不支持的内容分段类型", "invalid_request_error",
+                                  param="messages", reason="unsupported_image")
+        else:
+            raise BridgeError(400, "图片消息包含不支持的内容格式", "invalid_request_error",
+                              param="messages", reason="unsupported_image")
+    try:
+        validated = validate_images(images)
+    except Denied:
+        raise BridgeError(400, "图片数量或尺寸超出限制", "invalid_request_error",
+                          param="messages", reason="unsupported_image") from None
+    return "\n".join(text_parts).replace("\x00", ""), validated
 
 
 def build_spec(body: dict) -> Spec:
@@ -402,7 +443,11 @@ def build_spec(body: dict) -> Spec:
     if not isinstance(msgs, list) or not msgs:
         raise BridgeError(400, "messages 必须是非空数组", "invalid_request_error", param="messages")
     msgs = [m for m in msgs if isinstance(m, dict)]
-    sys_parts = [text_of(m.get("content")) for m in msgs if m.get("role") in ("system", "developer")]
+    sys_msgs = [m for m in msgs if m.get("role") in ("system", "developer")]
+    if any(_has_image_part(m.get("content")) for m in sys_msgs):
+        raise BridgeError(400, "system 消息不支持图片输入", "invalid_request_error",
+                          param="messages", reason="unsupported_image")
+    sys_parts = [text_of(m.get("content")) for m in sys_msgs]
     rest = [m for m in msgs if m.get("role") not in ("system", "developer")]
     if not rest:
         raise BridgeError(400, "messages 里没有 user 消息", "invalid_request_error", param="messages")
@@ -416,17 +461,25 @@ def build_spec(body: dict) -> Spec:
     if jin:
         system += "\n\n" + jin
 
-    if len(rest) == 1 and rest[0].get("role") == "user":
+    has_images = any(_has_image_part(m.get("content")) for m in rest)
+    images: list[dict] = []
+    if has_images:
+        if len(rest) != 1 or rest[0].get("role") != "user" or not isinstance(rest[0].get("content"), list):
+            raise BridgeError(400, "图片输入仅支持单轮 user 消息", "invalid_request_error",
+                              param="messages", reason="unsupported_image")
+        prompt, images = _extract_user_multimodal(rest[0]["content"])
+    elif len(rest) == 1 and rest[0].get("role") == "user":
         prompt = text_of(rest[0].get("content"))
     else:
         prompt = render_transcript(rest)
-    if not prompt.strip():
+    if not prompt.strip() and not images:
         raise BridgeError(400, "提示词为空", "invalid_request_error", param="messages")
 
     s = Spec()
     s.system, s.prompt = system, prompt
     s.tool_names = {x["name"] for x in specs}
     s.json_mode = bool(jin)
+    s.images = images
     return s
 
 
@@ -1466,13 +1519,15 @@ async def dispatch_batch(req: ReqCtx, model: str, effort: str | None) -> Outcome
 async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIterator[dict]:
     """Keep the vendor fixed. Reset-aware callers replace interrupted content."""
     sent = False
+    images = req.spec_data.images
     if api_model(req.task, model, req.format_attempt) is not None:
         if req.format_attempt == 2 and not req.friend_id:
             write_log(request_id=req.request_id, task=req.task, event="format_escalation", model=api_model(req.task, model, 2))
         try:
             async with aclosing(API_ROUTER.events(req.task, model, req.spec_data.system, req.spec_data.prompt,
                                                  req.body.get("max_tokens"), req.format_attempt,
-                                                 **({"friend": req.friend_id, "device": req.friend_device} if req.friend_id else {}))) as events:
+                                                 **({"friend": req.friend_id, "device": req.friend_device} if req.friend_id else {}),
+                                                 **({"images": images} if images else {}))) as events:
                 async for event in events:
                     kind = event["kind"]
                     if kind == "attempt":
@@ -1505,7 +1560,8 @@ async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
                 req.transport = "api"
                 yield {"kind": "end", "outcome": Outcome("failed", code, "error", req.served_by or model, started=sent, retry_after_sec=retry_after_sec)}
                 return
-            if API_ONLY:
+            if API_ONLY or images:
+                # Subscription CLIs cannot read images and must never drop them silently.
                 req.transport = "api"
                 yield {"kind": "end", "outcome": Outcome("truncated" if sent else "failed", reason, "error",
                       req.served_by or model, started=sent, retry_after_sec=retry_after_sec)}
@@ -1524,6 +1580,10 @@ async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
     if req.friend_id:
         yield {"kind": "end", "outcome": Outcome("failed", "unavailable", "error", model)}
         return
+    if images:
+        req.transport = "api"
+        yield {"kind": "end", "outcome": Outcome("failed", "unrouted_task", "error", model)}
+        return
     if req.stream and MODELS[model].backend == "claude" and not req.spec_data.json_mode:
         async for event in claude_stream(req, model, effort):
             yield event
@@ -1536,6 +1596,8 @@ async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
 
 async def dispatch(req: ReqCtx, model: str, effort: str | None) -> Outcome:
     if not req.friend_id and api_model(req.task, model, req.format_attempt) is None:
+        if req.spec_data.images:
+            raise BridgeError(400, "该任务不支持图片输入", "invalid_request_error", reason="unrouted_task")
         return await dispatch_cli(req, model, effort)
     async for event in routed_events(req, model, effort):
         if event["kind"] == "end":
@@ -1817,7 +1879,7 @@ async def chat(request: Request):
                 oc = end_ev["outcome"]
                 await events.aclose()
                 req.served_by = oc.served_by
-                if oc.status != "complete" and req.fallback_enabled and oc.reason in ("cli_exit", "timeout"):
+                if oc.status != "complete" and not req.spec_data.images and req.fallback_enabled and oc.reason in ("cli_exit", "timeout"):
                     fb = await fallback_call(req, None)
                     content, calls, _ = shape_output(req, fb)
                     req.out_chars = len(fb.text)
@@ -1833,10 +1895,12 @@ async def chat(request: Request):
         # ---- 非流式 / 非真流式后端 ----
         try:
             batch = req.batch_key and req.background and not req.stream and req.task in BATCH_TASKS
+            if batch and req.spec_data.images:
+                raise BridgeError(400, "批处理通道不支持图片输入", "invalid_request_error", reason="unsupported_image")
             operation = dispatch_batch if batch else dispatch
             oc = await wait_disconnect(request, operation(req, target, effort_for(req, MODELS[target].backend)))
         except BridgeError as e:
-            if req.fallback_enabled and e.reason in ("cli_exit", "timeout"):
+            if not req.spec_data.images and req.fallback_enabled and e.reason in ("cli_exit", "timeout"):
                 oc = await fallback_call(req, e)
             elif req.stream and e.status >= 500:
                 oc = Outcome("failed", e.reason, "error", req.served_by or target, detail=e.message)

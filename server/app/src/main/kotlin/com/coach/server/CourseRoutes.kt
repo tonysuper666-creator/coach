@@ -193,7 +193,7 @@ internal fun Route.courseRoutes(
                     val allowed = actor.execute { authorize(device, bearer) && friendName(device) == friend }
                     if (!allowed) throw MockError(HttpStatusCode.Conflict, "设备授权已失效，无法发起视觉识别。")
                 }
-                val body = service.recognizeBatch(input)
+                val body = service.recognizeBatch(input, friend = friend, device = device)
                 if (friend != null) withContext(Dispatchers.IO) {
                     try { friends!!.record(friend, device, requestId, "complete", body, diagnostics) }
                     catch (_: Exception) { throw FriendServiceError() }

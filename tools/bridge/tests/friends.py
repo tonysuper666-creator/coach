@@ -14,7 +14,7 @@ from unittest.mock import patch, AsyncMock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from api_budget import CreditLedger, Denied, atomic_json, micros
 from api_route import ApiRouter, CONFIG
-from api_routing import frames, KEY, NOW
+from api_routing import frames, KEY, NOW, make_png_b64
 from grant_fixture import fund
 from friend_spend_watch import publish
 import httpx
@@ -251,6 +251,52 @@ class FriendApiTests(unittest.IsolatedAsyncioTestCase):
             data = ledger.read()
             self.assertEqual(2, len(data["cycles"]["anthropic:2026-11"]["reserved"]))
             self.assertEqual(2, len(next(iter(data["friends"][A].values()))["reserved"]))
+
+    async def test_friend_vision_stays_anthropic_only_and_obeys_shared_guard(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_FRIEND_CONFIG": temp + "/friends.json"}):
+            fund(Path(temp))
+            ledger = CreditLedger(Path(temp), lambda: NOW)
+            png_b64 = make_png_b64(800, 600)
+            seen = []
+
+            def response(request):
+                seen.append(request.url.host)
+                payload = json.loads(request.content)
+                self.assertEqual("image", payload["messages"][0]["content"][0]["type"])
+                return httpx.Response(200, content=frames("anthropic", model=payload["model"]))
+
+            router = ApiRouter(ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(response)),
+                               keys={"anthropic": KEY, "openai": KEY})
+            cli = AsyncMock(side_effect=AssertionError("Friend vision must never enter subscription CLI"))
+            req_body = {
+                "model": "claude-sonnet-5-5",
+                "max_tokens": 2048,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Transcribe page"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_b64}"}},
+                    ],
+                }],
+            }
+            headers = {"x-coach-task": "READER_SELECTION", "x-coach-friend": B, "x-coach-friend-device": "pc"}
+            with patch.object(bridge, "API_ROUTER", router), patch.object(bridge, "dispatch_cli", cli), patch.object(bridge, "write_log"):
+                ok_req = bridge.build_req(req_body, headers)
+                ok_res = await bridge.dispatch(ok_req, ok_req.model, None)
+                self.assertEqual("complete", ok_res.status)
+                self.assertEqual(["api.anthropic.com"], seen)
+                day = next(iter(ledger.read()["friends"][B].values()))
+                self.assertEqual(1, day["calls"])
+
+                # Exhaust remaining Anthropic share; friend vision must be denied with zero network calls and no OpenAI fallback.
+                spent = ledger.read()["cycles"]["anthropic:2026-11"]["spent"]
+                ledger.reserve("anthropic", KEY, micros(190) - spent)
+                denied_req = bridge.build_req(req_body, headers)
+                denied_res = await bridge.dispatch(denied_req, denied_req.model, None)
+                self.assertEqual("failed", denied_res.status)
+                self.assertEqual("monthly_quota", denied_res.reason)
+                self.assertEqual(["api.anthropic.com"], seen)
+                cli.assert_not_called()
 
     async def test_friend_audit_has_separate_private_file_without_prompt_or_key(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_API_STATE_DIR": temp, "BRIDGE_LOG_STDOUT": "1"}):

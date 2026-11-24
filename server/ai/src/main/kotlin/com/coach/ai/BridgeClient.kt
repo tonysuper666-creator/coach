@@ -33,6 +33,12 @@ data class BridgeConfig(
             Path.of(System.getProperty("user.home"),"Coach/bridge").toString()).resolve("state/production-key").toString()) else null,
 )
 
+/** Inline base64 image attachment for multimodal vision tasks routed through the local bridge. */
+data class ImageAttachment(
+    val mediaType: String,
+    val base64Data: String,
+)
+
 /** Task metadata goes to the local router, never into the model prompt. */
 data class ChatRequest(
     val task: String,
@@ -46,6 +52,7 @@ data class ChatRequest(
     val formatAttempt: Int = 0,
     val friendId: String? = null,
     val friendDevice: String? = null,
+    val images: List<ImageAttachment> = emptyList(),
 )
 
 /** `x_coach` 终态帧（ADR-0002：这是唯一可信的结束信号）。 */
@@ -63,6 +70,8 @@ data class TerminalState(
     val traffic: String? = null,
     val source: String? = null,
     val retryAfterSec: Int? = null,
+    val promptTokens: Int? = null,
+    val completionTokens: Int? = null,
 ) {
     val complete: Boolean get() = status == "complete"
 
@@ -460,7 +469,26 @@ class BridgeClient(
             }
             addJsonObject {
                 put("role", "user")
-                put("content", request.user)
+                if (request.images.isEmpty()) {
+                    put("content", request.user)
+                } else {
+                    putJsonArray("content") {
+                        if (request.user.isNotEmpty()) {
+                            addJsonObject {
+                                put("type", "text")
+                                put("text", request.user)
+                            }
+                        }
+                        for (img in request.images) {
+                            addJsonObject {
+                                put("type", "image_url")
+                                put("image_url", buildJsonObject {
+                                    put("url", "data:${img.mediaType};base64,${img.base64Data}")
+                                })
+                            }
+                        }
+                    }
+                }
             }
         }
         put("stream", stream)
@@ -514,7 +542,12 @@ class BridgeClient(
                 ),
             )
         }
-        val terminal = (root["x_coach"] as? JsonObject)?.let { TerminalState.fromJson(it) }
+        val usage = root["usage"] as? JsonObject
+        val promptTokens = usage?.get("prompt_tokens")?.jsonPrimitive?.content?.toIntOrNull()?.takeIf { it >= 0 }
+        val completionTokens = usage?.get("completion_tokens")?.jsonPrimitive?.content?.toIntOrNull()?.takeIf { it >= 0 }
+        val terminal = (root["x_coach"] as? JsonObject)?.let {
+            TerminalState.fromJson(it).copy(promptTokens = promptTokens, completionTokens = completionTokens)
+        }
         val content = (root["choices"] as? kotlinx.serialization.json.JsonArray)
             ?.firstOrNull()?.jsonObject
             ?.get("message")?.jsonObject
@@ -669,6 +702,7 @@ class BridgeClient(
             "practice_grade", "practice_diagnose", "practice_variant",
             "course_topic_map", "course_topic_reduce", "course_topic_math_repair",
             "booklist_concept_align",
+            "course_vision_ocr",
             "COURSE_PLAN", "INITIAL_OUTLINE", "REVISE_OUTLINE", "course_mock_plan",
         )
     }

@@ -1,7 +1,9 @@
-"""Task routing and first-party text API transports; injectable HTTP for offline tests."""
+"""Task routing and first-party API transports (text + vision); injectable HTTP for offline tests."""
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 from contextlib import asynccontextmanager
 from decimal import Decimal, ROUND_CEILING
 from email.utils import parsedate_to_datetime
@@ -9,6 +11,7 @@ import json
 import math
 import os
 from pathlib import Path
+import struct
 import time
 
 import httpx
@@ -20,10 +23,151 @@ ENDPOINTS = {"anthropic": "https://api.anthropic.com/v1/messages", "openai": "ht
 INTERACTIVE_TASKS = frozenset({
     "TEACH", "READER_SELECTION", "SOURCE_LOOKUP", "PREPARE_TEACH",
     "COLLECTION_QA", "STUDY_MODE_STREAM", "practice_grade", "practice_diagnose",
+    "course_vision_ocr",
 })
 REVIEW_GROUPS = frozenset({"review", "review_openai", "review_upgrade"})
 DEFAULT_429_DELAYS = (0.5, 1.5)
 DEFAULT_429_BUDGET_SEC = 45.0
+ALLOWED_IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"})
+MAX_IMAGES_PER_REQUEST = 4
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_IMAGE_BASE64_CHARS = (MAX_IMAGE_BYTES * 4 // 3) + 16
+MAX_IMAGE_SIDE = 4096
+NON_FALLBACK_DENIALS = frozenset({
+    "unsupported_image", "unsupported_context_price", "unsupported_output_limit", "invalid_reservation",
+})
+OCR_GUARD_DENIALS = frozenset({
+    "credit_limit_95_percent",
+    "grant_allocation_unavailable",
+    "ledger_unreadable",
+    "monthly_quota",
+    "daily_quota",
+    "friend_config_unreadable",
+})
+
+
+def _image_dimensions(media_type: str, raw: bytes) -> tuple[int, int]:
+    """Read pixel dimensions from magic-verified headers without external imaging libraries."""
+    if media_type == "image/png":
+        if len(raw) < 24 or raw[:8] != b"\x89PNG\r\n\x1a\n" or raw[12:16] != b"IHDR":
+            raise Denied("unsupported_image")
+        return struct.unpack(">II", raw[16:24])
+    if media_type == "image/gif":
+        if len(raw) < 10 or raw[:6] not in (b"GIF87a", b"GIF89a"):
+            raise Denied("unsupported_image")
+        return struct.unpack("<HH", raw[6:10])
+    if media_type == "image/jpeg":
+        if len(raw) < 4 or raw[:2] != b"\xff\xd8":
+            raise Denied("unsupported_image")
+        i = 2
+        while i + 1 < len(raw):
+            while i < len(raw) and raw[i] == 0xFF:
+                i += 1
+            if i >= len(raw):
+                break
+            marker = raw[i]
+            i += 1
+            if marker in (0xD8, 0xD9, 0x01) or 0xD0 <= marker <= 0xD7:
+                continue
+            if i + 2 > len(raw):
+                break
+            seg_len = struct.unpack(">H", raw[i:i + 2])[0]
+            if seg_len < 2 or i + seg_len > len(raw):
+                break
+            if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                if seg_len < 7:
+                    break
+                height, width = struct.unpack(">HH", raw[i + 3:i + 7])
+                return width, height
+            i += seg_len
+        raise Denied("unsupported_image")
+    if media_type == "image/webp":
+        if len(raw) < 30 or raw[:4] != b"RIFF" or raw[8:12] != b"WEBP":
+            raise Denied("unsupported_image")
+        chunk = raw[12:16]
+        if chunk == b"VP8 " and raw[23:26] == b"\x9d\x01\x2a":
+            w, h = struct.unpack("<HH", raw[26:30])
+            return w & 0x3FFF, h & 0x3FFF
+        if chunk == b"VP8L" and raw[20] == 0x2F:
+            bits = struct.unpack("<I", raw[21:25])[0]
+            return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+        if chunk == b"VP8X":
+            return int.from_bytes(raw[24:27], "little") + 1, int.from_bytes(raw[27:30], "little") + 1
+        raise Denied("unsupported_image")
+    raise Denied("unsupported_image")
+
+
+def parse_image_part(part: dict) -> dict:
+    """Parse an OpenAI image_url/input_image data URI or Anthropic base64 image block."""
+    if not isinstance(part, dict):
+        raise Denied("unsupported_image")
+    kind = part.get("type")
+    media_type = ""
+    raw_b64 = ""
+    if kind in ("image_url", "input_image"):
+        val = part.get("image_url")
+        url = val.get("url") if isinstance(val, dict) else val
+        if not isinstance(url, str) or not url.startswith("data:") or ";base64," not in url:
+            raise Denied("unsupported_image")
+        head, raw_b64 = url.split(";base64,", 1)
+        media_type = head[5:].strip().lower()
+    elif kind == "image":
+        src = part.get("source")
+        if not isinstance(src, dict) or src.get("type") != "base64":
+            raise Denied("unsupported_image")
+        media_type = str(src.get("media_type") or "").strip().lower()
+        raw_b64 = src.get("data") if isinstance(src.get("data"), str) else ""
+    else:
+        raise Denied("unsupported_image")
+    return validate_image_spec({"media_type": media_type, "data": raw_b64})
+
+
+def validate_image_spec(img: dict) -> dict:
+    if not isinstance(img, dict):
+        raise Denied("unsupported_image")
+    media_type = str(img.get("media_type") or "").strip().lower()
+    raw_b64 = img.get("data")
+    if media_type not in ALLOWED_IMAGE_MEDIA_TYPES or not isinstance(raw_b64, str):
+        raise Denied("unsupported_image")
+    clean_b64 = raw_b64.replace("\r", "").replace("\n", "").strip()
+    if not clean_b64 or len(clean_b64) > MAX_IMAGE_BASE64_CHARS:
+        raise Denied("unsupported_image")
+    try:
+        raw = base64.b64decode(clean_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise Denied("unsupported_image") from None
+    if not raw or len(raw) > MAX_IMAGE_BYTES:
+        raise Denied("unsupported_image")
+    width, height = _image_dimensions(media_type, raw)
+    if not (1 <= width <= MAX_IMAGE_SIDE and 1 <= height <= MAX_IMAGE_SIDE):
+        raise Denied("unsupported_image")
+    return {
+        "media_type": media_type,
+        "data": clean_b64,
+        "width": width,
+        "height": height,
+        "byte_len": len(raw),
+    }
+
+
+def validate_images(images: list | None) -> list[dict]:
+    if not images:
+        return []
+    if not isinstance(images, list) or len(images) > MAX_IMAGES_PER_REQUEST:
+        raise Denied("unsupported_image")
+    return [validate_image_spec(img) for img in images]
+
+
+def image_token_bound(width: int, height: int) -> int:
+    """Conservative input-token upper bound covering Anthropic and OpenAI vision billing."""
+    if type(width) is not int or type(height) is not int or width <= 0 or height <= 0:
+        raise Denied("unsupported_image")
+    anthropic_bound = math.ceil((width * height) / 500) + 256
+    patches = math.ceil(width / 32) * math.ceil(height / 32)
+    openai_patch_bound = patches * 3 + 256
+    tiles = math.ceil(width / 512) * math.ceil(height / 512)
+    openai_tile_bound = 256 + 340 * tiles
+    return max(2048, anthropic_bound, openai_patch_bound, openai_tile_bound)
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -285,16 +429,16 @@ class ApiRouter:
             return cand
         return None
 
-    async def fallback_events(self, task: str, primary_model: str, system: str, prompt: str, max_tokens: int | None):
+    async def fallback_events(self, task: str, primary_model: str, system: str, prompt: str, max_tokens: int | None, *, images=None):
         fb = self.fallback_target(task, primary_model)
         if fb is None:
             raise Denied("no_cross_vendor_fallback")
-        async for event in self._stream_model(task, fb, system, prompt, max_tokens, friend=None, device=None):
+        async for event in self._stream_model(task, fb, system, prompt, max_tokens, friend=None, device=None, images=images):
             if event.get("kind") == "complete":
                 event = dict(event, fallback=True)
             yield event
 
-    async def events(self, task: str, requested: str, system: str, prompt: str, max_tokens: int | None, format_attempt=0, friend=None, device=None):
+    async def events(self, task: str, requested: str, system: str, prompt: str, max_tokens: int | None, format_attempt=0, friend=None, device=None, images=None):
         if friend is not None and (task != "READER_SELECTION" or vendor(requested) != "anthropic"):
             raise Denied("invalid_friend_route")
         model = friend_model(requested) if friend is not None else route(task, requested, format_attempt)
@@ -309,31 +453,39 @@ class ApiRouter:
                 fb = cand
         yielded_text = False
         try:
-            async for event in self._stream_model(task, model, system, prompt, max_tokens, friend=friend, device=device):
+            async for event in self._stream_model(task, model, system, prompt, max_tokens, friend=friend, device=device, images=images):
                 if event.get("kind") == "text" and event.get("text"):
                     yielded_text = True
                 yield event
             return
-        except Denied:
-            if friend is not None or yielded_text or fb is None:
+        except Denied as err:
+            if (
+                friend is not None
+                or yielded_text
+                or fb is None
+                or str(err) in NON_FALLBACK_DENIALS
+                or ((task == "course_vision_ocr" or bool(images)) and str(err) in OCR_GUARD_DENIALS)
+            ):
                 raise
         except ApiFailure:
             if yielded_text or fb is None:
                 raise
-        async for event in self._stream_model(task, fb, system, prompt, max_tokens, friend=friend, device=device):
+        async for event in self._stream_model(task, fb, system, prompt, max_tokens, friend=friend, device=device, images=images):
             if event.get("kind") == "complete":
                 event = dict(event, fallback=True)
             yield event
 
-    async def _stream_model(self, task: str, model: str, system: str, prompt: str, max_tokens: int | None, *, friend=None, device=None):
+    async def _stream_model(self, task: str, model: str, system: str, prompt: str, max_tokens: int | None, *, friend=None, device=None, images=None):
         provider = vendor(model)
         key = self.keys.get(provider, "")
         output_limit = max_tokens if max_tokens is not None else 4000
         if type(output_limit) is not int or not 1 <= output_limit <= 16000:
             raise Denied("unsupported_output_limit")
-        # UTF-8 bytes bound text tokens conservatively; reserve overhead too. Avoid
-        # long-context pricing entirely. Reservation precedes every network attempt.
-        input_bound = len(system.encode()) + len(prompt.encode()) + 4096
+        validated_images = validate_images(images)
+        image_bound = sum(image_token_bound(img["width"], img["height"]) for img in validated_images)
+        # UTF-8 bytes plus verified image dimensions bound input tokens conservatively;
+        # avoid long-context pricing entirely. Reservation precedes every network attempt.
+        input_bound = len(system.encode()) + len(prompt.encode()) + image_bound + 4096
         if input_bound > 90_000:
             raise Denied("unsupported_context_price")
         maximum = cost(model, {"input_tokens": input_bound, "output_tokens": output_limit})
@@ -346,12 +498,41 @@ class ApiRouter:
             yield {"kind": "attempt", "model": model}
             if provider == "anthropic":
                 headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
-                payload = {"model": model, "system": system, "messages": [{"role": "user", "content": prompt}],
+                if validated_images:
+                    user_content = [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": img["media_type"],
+                                "data": img["data"],
+                            },
+                        }
+                        for img in validated_images
+                    ]
+                    if prompt:
+                        user_content.append({"type": "text", "text": prompt})
+                else:
+                    user_content = prompt
+                payload = {"model": model, "system": system, "messages": [{"role": "user", "content": user_content}],
                            "max_tokens": output_limit, "stream": True}
             else:
                 headers = {"Authorization": "Bearer " + key}
-                payload = {"model": model, "instructions": system, "input": prompt, "max_output_tokens": output_limit,
+                if validated_images:
+                    user_content = []
+                    if prompt:
+                        user_content.append({"type": "input_text", "text": prompt})
+                    for img in validated_images:
+                        user_content.append({
+                            "type": "input_image",
+                            "image_url": f"data:{img['media_type']};base64,{img['data']}",
+                        })
+                    oai_input = [{"role": "user", "content": user_content}]
+                else:
+                    oai_input = prompt
+                payload = {"model": model, "instructions": system, "input": oai_input, "max_output_tokens": output_limit,
                            "stream": True, "store": False, "service_tier": "default"}
+            stream_kwargs = {"timeout": httpx.Timeout(60, connect=5)} if validated_images else {}
             text, usage, served, finish, ended = [], {}, None, None, False
             started = self._clock()
             try:
@@ -359,7 +540,7 @@ class ApiRouter:
                     for attempt in range(len(self.retry_429_delays) + 1):
                         retry_delay = None
                         async with self.client_factory() as client:
-                            async with client.stream("POST", ENDPOINTS[provider], headers=headers, json=payload) as response:
+                            async with client.stream("POST", ENDPOINTS[provider], headers=headers, json=payload, **stream_kwargs) as response:
                                 if response.status_code == 429:
                                     # Never read an error message containing a key, source text or prompt.
                                     parsed_ra = _parse_retry_after_seconds(response.headers.get("retry-after"), self._wall_clock)

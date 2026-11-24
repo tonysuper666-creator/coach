@@ -130,7 +130,11 @@ fun main(args: Array<String>): Unit = runBlocking {
     val courseAlignPipeline = CourseAlignmentPipeline(SonnetBridgeAlignTransport(chat.bridge), tokenLedger)
     val courseTopicCache = CourseTopicPackCache(data.resolve("course-packs"))
     val courseTopicPipeline = CourseTopicSynthesisPipeline(companionTransport, tokenLedger, courseTopicCache)
-    val courseVisionService = CourseVisionService(data.resolve("course-vision"), tokenLedger = tokenLedger)
+    val courseVisionService = CourseVisionService(
+        directory = data.resolve("course-vision"),
+        transport = BridgeCourseVisionTransport(chat.bridge),
+        tokenLedger = tokenLedger,
+    )
     val booklistAligner = BooklistSemanticAligner(companionTransport, tokenLedger)
     val practiceBridge = HaikuPinnedBridgeTransport(
         bridge = chat.bridge,

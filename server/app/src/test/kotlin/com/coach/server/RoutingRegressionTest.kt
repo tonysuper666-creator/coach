@@ -209,6 +209,42 @@ class RoutingRegressionTest {
                         put("physical_calls", 0)
                     })
                 }
+                "primary_500_fallback_quota" -> buildJsonObject {
+                    put("model", model)
+                    put("choices", buildJsonArray {
+                        add(buildJsonObject {
+                            put("index", 0)
+                            put("message", buildJsonObject {
+                                put("role", "assistant")
+                                put("content", "")
+                            })
+                        })
+                    })
+                    put("x_coach", buildJsonObject {
+                        put("status", "failed")
+                        put("reason", "credit_limit_95_percent")
+                        put("served_by", model)
+                        put("physical_calls", 1)
+                    })
+                }
+                "no_allocation" -> buildJsonObject {
+                    put("model", model)
+                    put("choices", buildJsonArray {
+                        add(buildJsonObject {
+                            put("index", 0)
+                            put("message", buildJsonObject {
+                                put("role", "assistant")
+                                put("content", "")
+                            })
+                        })
+                    })
+                    put("x_coach", buildJsonObject {
+                        put("status", "failed")
+                        put("reason", "grant_allocation_unavailable")
+                        put("served_by", model)
+                        put("physical_calls", 0)
+                    })
+                }
                 else -> buildJsonObject {
                     put("model", model)
                     put("choices", buildJsonArray {
@@ -260,7 +296,7 @@ class RoutingRegressionTest {
             assertEquals(HttpStatusCode.ServiceUnavailable, missingKeyErr.status)
             assertTrue(missingKeyErr.message.orEmpty().contains("视觉识别密钥尚未配置"))
 
-            // 3) 95% quota denial fails cleanly with 429 and does not cache the page.
+            // 3) 95% quota denial (physical_calls=0) fails cleanly with 429 ("本次请求未发送") and does not cache the page.
             mode = "quota_exceeded"
             val quotaSha = "c".repeat(64)
             val quotaErr = assertFailsWith<MockError> {
@@ -277,7 +313,26 @@ class RoutingRegressionTest {
                 })
             }
             assertEquals(HttpStatusCode.TooManyRequests, quotaErr.status)
+            assertTrue(quotaErr.message.orEmpty().contains("本次请求未发送"))
             assertNull(service.lookupCached(quotaSha))
+
+            // 3b) Missing allocation (physical_calls=0) fails with 503 ("本次请求未发送").
+            mode = "no_allocation"
+            val noAllocErr = assertFailsWith<MockError> {
+                transport.recognizePage(3, samplePngB64, "e".repeat(64))
+            }
+            assertEquals(HttpStatusCode.ServiceUnavailable, noAllocErr.status)
+            assertTrue(noAllocErr.message.orEmpty().contains("本次请求未发送"))
+
+            // 3c) Primary attempted upstream (physical_calls=1, reservation retained) then fallback blocked by 95% guard:
+            // must return 502 and MUST NOT falsely claim "本次请求未发送".
+            mode = "primary_500_fallback_quota"
+            val partialErr = assertFailsWith<MockError> {
+                transport.recognizePage(4, samplePngB64, "f".repeat(64))
+            }
+            assertEquals(HttpStatusCode.BadGateway, partialErr.status)
+            assertFalse(partialErr.message.orEmpty().contains("本次请求未发送"))
+            assertTrue(partialErr.message.orEmpty().contains("可能已产生预留"))
 
             // 4) Friend vision propagates friend headers, uses READER_SELECTION + Claude, and skips owner BookTokenLedger.
             mode = "friend_ok"

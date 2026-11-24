@@ -787,7 +787,124 @@ class VisionRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("failed", body["x_coach"]["status"])
         self.assertEqual("credit_limit_95_percent", body["x_coach"]["reason"])
         self.assertEqual("api", body["x_coach"]["transport"])
+        self.assertEqual(0, body["x_coach"]["physical_calls"])
         self.assertEqual([], self.requests)
+
+    async def test_vision_primary_guard_denials_stop_without_openai_fallback_even_when_openai_has_headroom(self):
+        # Regression for TON-1799 paid cross-review:
+        # 1) Anthropic 95% full while OpenAI has headroom -> must stop with 0 upstream calls.
+        # 2) Anthropic allocation missing while OpenAI has headroom -> must stop with 0 upstream calls.
+        # 3) Anthropic returns 500 (retaining reservation) while OpenAI 95% full -> reports physical_calls=1, 0 OpenAI calls.
+        payload = {
+            "model": "claude-opus-5-5",
+            "max_tokens": 2048,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": "transcribe"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Transcribe board"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{self.png_b64}"}},
+                    ],
+                },
+            ],
+        }
+        headers = {"X-Coach-Task": "course_vision_ocr", "X-Coach-Fallback": "off", "X-Coach-Model-Policy": "exact"}
+        transport = httpx.ASGITransport(app=bridge.app)
+
+        # Case 1: Only Anthropic 95% full; OpenAI has full headroom and key.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fund(root)
+            ledger = CreditLedger(root, lambda: NOW)
+            ledger.reserve("anthropic", KEY, micros(190))
+            seen = []
+
+            def fail_if_called(request):
+                seen.append(request.url.host)
+                return httpx.Response(200, content=frames("openai", model="gpt-6.2-astra"))
+
+            router = ApiRouter(
+                ledger,
+                lambda: httpx.AsyncClient(transport=httpx.MockTransport(fail_if_called)),
+                keys={"anthropic": KEY, "openai": KEY},
+                retry_429_delays=(),
+                cross_vendor_fallback=True,
+            )
+            with patch.object(bridge, "USER_ONLY", False), patch.object(bridge, "API_ONLY", False), \
+                    patch.object(bridge, "API_ROUTER", router), patch.object(bridge, "write_log"):
+                async with httpx.AsyncClient(transport=transport, base_url="http://bridge.test") as client:
+                    resp = await client.post("/v1/chat/completions", json=payload, headers=headers)
+            self.assertEqual(200, resp.status_code)
+            xc = resp.json()["x_coach"]
+            self.assertEqual("failed", xc["status"])
+            self.assertEqual("credit_limit_95_percent", xc["reason"])
+            self.assertEqual(0, xc["physical_calls"])
+            self.assertEqual([], seen)
+
+        # Case 2: Only Anthropic missing grant-allocation-anthropic.json; OpenAI has full headroom and key.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fund(root)
+            (root / "grant-allocation-anthropic.json").unlink()
+            ledger = CreditLedger(root, lambda: NOW)
+            seen = []
+
+            def fail_if_called(request):
+                seen.append(request.url.host)
+                return httpx.Response(200, content=frames("openai", model="gpt-6.2-astra"))
+
+            router = ApiRouter(
+                ledger,
+                lambda: httpx.AsyncClient(transport=httpx.MockTransport(fail_if_called)),
+                keys={"anthropic": KEY, "openai": KEY},
+                retry_429_delays=(),
+                cross_vendor_fallback=True,
+            )
+            with patch.object(bridge, "USER_ONLY", False), patch.object(bridge, "API_ONLY", False), \
+                    patch.object(bridge, "API_ROUTER", router), patch.object(bridge, "write_log"):
+                async with httpx.AsyncClient(transport=transport, base_url="http://bridge.test") as client:
+                    resp = await client.post("/v1/chat/completions", json=payload, headers=headers)
+            self.assertEqual(200, resp.status_code)
+            xc = resp.json()["x_coach"]
+            self.assertEqual("failed", xc["status"])
+            self.assertEqual("grant_allocation_unavailable", xc["reason"])
+            self.assertEqual(0, xc["physical_calls"])
+            self.assertEqual([], seen)
+
+        # Case 3: Anthropic receives 1 request and returns 500 (retaining reservation), while OpenAI is 95% full.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fund(root)
+            ledger = CreditLedger(root, lambda: NOW)
+            ledger.reserve("openai", KEY, micros(475))
+            seen = []
+
+            def primary_500(request):
+                seen.append(request.url.host)
+                if request.url.host == "api.anthropic.com":
+                    return httpx.Response(500, content=b"upstream error")
+                raise AssertionError("OpenAI must not be contacted when over 95% share")
+
+            router = ApiRouter(
+                ledger,
+                lambda: httpx.AsyncClient(transport=httpx.MockTransport(primary_500)),
+                keys={"anthropic": KEY, "openai": KEY},
+                retry_429_delays=(),
+                cross_vendor_fallback=True,
+            )
+            with patch.object(bridge, "USER_ONLY", False), patch.object(bridge, "API_ONLY", False), \
+                    patch.object(bridge, "API_ROUTER", router), patch.object(bridge, "write_log"):
+                async with httpx.AsyncClient(transport=transport, base_url="http://bridge.test") as client:
+                    resp = await client.post("/v1/chat/completions", json=payload, headers=headers)
+            self.assertEqual(200, resp.status_code)
+            xc = resp.json()["x_coach"]
+            self.assertEqual("failed", xc["status"])
+            self.assertEqual("credit_limit_95_percent", xc["reason"])
+            self.assertEqual(1, xc["physical_calls"])
+            self.assertEqual(["api.anthropic.com"], seen)
+            self.assertGreater(ledger.read()["months"]["2026-11"]["anthropic"]["reserved_microusd"], 0)
 
 
 if __name__ == "__main__":

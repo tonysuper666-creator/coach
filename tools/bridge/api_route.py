@@ -36,6 +36,14 @@ MAX_IMAGE_SIDE = 4096
 NON_FALLBACK_DENIALS = frozenset({
     "unsupported_image", "unsupported_context_price", "unsupported_output_limit", "invalid_reservation",
 })
+OCR_GUARD_DENIALS = frozenset({
+    "credit_limit_95_percent",
+    "grant_allocation_unavailable",
+    "ledger_unreadable",
+    "monthly_quota",
+    "daily_quota",
+    "friend_config_unreadable",
+})
 
 
 def _image_dimensions(media_type: str, raw: bytes) -> tuple[int, int]:
@@ -451,7 +459,13 @@ class ApiRouter:
                 yield event
             return
         except Denied as err:
-            if friend is not None or yielded_text or fb is None or str(err) in NON_FALLBACK_DENIALS:
+            if (
+                friend is not None
+                or yielded_text
+                or fb is None
+                or str(err) in NON_FALLBACK_DENIALS
+                or ((task == "course_vision_ocr" or bool(images)) and str(err) in OCR_GUARD_DENIALS)
+            ):
                 raise
         except ApiFailure:
             if yielded_text or fb is None:

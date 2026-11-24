@@ -106,16 +106,49 @@ class BridgeCourseVisionTransport(
     }
 
     private fun mapFailure(failure: BridgeResult.Failure): MockError {
-        val reason = failure.terminal?.reason
+        val terminal = failure.terminal
+        val reason = terminal?.reason
+        // Only claim "not sent" when the bridge explicitly confirmed zero upstream attempts/reservations.
+        val attemptedUpstream = (terminal?.physicalCalls ?: 1) > 0
         return when {
             reason == "missing_key" ->
                 MockError(HttpStatusCode.ServiceUnavailable, "视觉识别密钥尚未配置，暂时无法识别手写或扫描板书。")
             reason in setOf("credit_limit_95_percent", "monthly_quota") ->
-                MockError(HttpStatusCode.TooManyRequests, "视觉识别赠额已达到保护上限，本次请求未发送，请确认额度后再试。")
+                if (attemptedUpstream) {
+                    MockError(
+                        HttpStatusCode.BadGateway,
+                        "视觉识别主用服务失败（可能已产生预留），且备用额度已达到保护上限，未能切换备用服务。",
+                    )
+                } else {
+                    MockError(
+                        HttpStatusCode.TooManyRequests,
+                        "视觉识别赠额已达到保护上限，本次请求未发送，请确认额度后再试。",
+                    )
+                }
             reason == "daily_quota" ->
-                MockError(HttpStatusCode.TooManyRequests, "今日视觉识别额度已用完，请明天再试。")
+                if (attemptedUpstream) {
+                    MockError(
+                        HttpStatusCode.BadGateway,
+                        "视觉识别主用服务失败（可能已产生预留），且今日额度已用完，未能切换备用服务。",
+                    )
+                } else {
+                    MockError(
+                        HttpStatusCode.TooManyRequests,
+                        "今日视觉识别额度已用完，本次请求未发送，请明天再试。",
+                    )
+                }
             reason == "grant_allocation_unavailable" ->
-                MockError(HttpStatusCode.ServiceUnavailable, "视觉识别赠额配额尚未就绪，本次请求未发送，请检查配额配置。")
+                if (attemptedUpstream) {
+                    MockError(
+                        HttpStatusCode.BadGateway,
+                        "视觉识别主用服务失败（可能已产生预留），且备用赠额配额尚未就绪，未能切换备用服务。",
+                    )
+                } else {
+                    MockError(
+                        HttpStatusCode.ServiceUnavailable,
+                        "视觉识别赠额配额尚未就绪，本次请求未发送，请检查配额配置。",
+                    )
+                }
             reason == "api_http_429" ->
                 MockError(HttpStatusCode.TooManyRequests, "视觉识别服务当前繁忙，请稍后再试。")
             reason in setOf("unsupported_image", "unsupported_context_price", "unsupported_output_limit") ||

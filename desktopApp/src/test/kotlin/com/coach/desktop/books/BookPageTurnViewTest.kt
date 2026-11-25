@@ -13,6 +13,7 @@ import com.coach.ui.pageturn.PageTurnStyle
 import java.io.File
 import javax.imageio.ImageIO
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlin.test.*
 
@@ -186,5 +187,165 @@ class BookPageTurnViewTest {
         runOnIdle { mode.value = BookReadMode.Paged }
         mainClock.advanceTimeBy(150); waitForIdle()
         assertEquals(state.index > 0, state.canPrevious, "paged mode goes back to page-index rules")
+    }
+
+    @Test fun immersiveTopLeftMouseDragSelectsTextWithoutFlippingPage() = runSkikoComposeUiTest(
+        size = Size(2160f, 1350f),
+        density = Density(1.5f),
+    ) {
+        val pages = (1..8).map { p ->
+            BookPage(p, "Section $p opening sentence for selection verification. " + "Additional textbook evidence on page $p. ".repeat(40))
+        }
+        val longBook = Textbook("immersive-drag-select", "健康经济学", "pdf", pages)
+        val state = BookPagingState(BookPageAnchor(4))
+        var selected by mutableStateOf<SourceBlock?>(null)
+        setContent {
+            CoachTheme(false) {
+                androidx.compose.material3.Surface(color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
+                    Box(Modifier.fillMaxSize()) {
+                        BookPageView(
+                            book = longBook,
+                            state = state,
+                            highlights = selected?.let { mapOf(it.page to listOf(it.start until it.end)) } ?: emptyMap(),
+                            onTurn = { state.move(it) },
+                            turnStyle = PageTurnStyle.Flip,
+                            onSelectText = { selected = it },
+                            immersive = true,
+                        )
+                    }
+                }
+            }
+        }
+        waitUntil(timeoutMillis = 10_000) { state.pages.isNotEmpty() && state.index >= 2 }
+        waitForIdle()
+
+        val initialIndex = state.index
+        val initialAnchor = state.anchor
+        val turnBounds = onNodeWithTag("book-page-turn").fetchSemanticsNode().boundsInRoot
+        val textBounds = onNodeWithTag("reader-text").fetchSemanticsNode().boundsInRoot
+        // Start on the top-left first line of reader-text inside PageTurnView's inEdge (< 8%/14%) and inCorner (< 18%)
+        val startX = (textBounds.left - turnBounds.left) + 8f
+        val startY = (textBounds.top - turnBounds.top) + 12f
+        assertTrue(startX < turnBounds.width * 0.08f, "startX=$startX must sit inside PageTurnView mouse edge (${turnBounds.width * 0.08f})")
+        assertTrue(startY < turnBounds.height * 0.18f, "startY=$startY must sit inside PageTurnView mouse corner (${turnBounds.height * 0.18f})")
+
+        onNodeWithTag("book-page-turn").performMouseInput {
+            moveTo(Offset(startX, startY))
+            press()
+            moveTo(Offset(startX + 260f, startY))
+            release()
+        }
+        mainClock.advanceTimeBy(800); waitForIdle()
+
+        val chosen = assertNotNull(selected, "top-left mouse drag must select text")
+        assertEquals(initialAnchor.importPage, chosen.page, "selected text must come from current page, not previous page")
+        assertTrue(chosen.text.isNotBlank(), "selected text must not be blank")
+        assertEquals(initialIndex, state.index, "top-left text drag must not flip PageTurnView")
+    }
+
+    @Test fun deskOuterMarginClickStillTurnsPageWhileTextClickDoesNot() = runSkikoComposeUiTest(
+        size = Size(900f, 900f),
+        density = Density(1f),
+    ) {
+        val pages = (1..6).map { p ->
+            BookPage(p, "Page $p sentence for margin click check. " + "Supporting content on page $p. ".repeat(30))
+        }
+        val testBook = Textbook("margin-click-turn", "阅读", "md", pages)
+        val state = BookPagingState(BookPageAnchor(3))
+        var selected by mutableStateOf<SourceBlock?>(null)
+        setContent {
+            CoachTheme(false) {
+                androidx.compose.material3.Surface(color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
+                    Box(Modifier.fillMaxSize()) {
+                        BookPageView(
+                            book = testBook,
+                            state = state,
+                            highlights = emptyMap(),
+                            onTurn = { state.move(it) },
+                            turnStyle = PageTurnStyle.Flip,
+                            onSelectText = { selected = it },
+                            immersive = false,
+                        )
+                    }
+                }
+            }
+        }
+        waitUntil(timeoutMillis = 10_000) { state.pages.isNotEmpty() && state.index > 0 }
+        waitForIdle()
+        val before = state.index
+        val turnBounds = onNodeWithTag("book-page-turn").fetchSemanticsNode().boundsInRoot
+        val textBounds = onNodeWithTag("reader-text").fetchSemanticsNode().boundsInRoot
+        // Click on text inside PageTurnView's left 14% edge: must NOT turn page
+        val textClickX = (textBounds.left - turnBounds.left) + 12f
+        val clickY = (textBounds.top - turnBounds.top) + 24f
+        assertTrue(textClickX < turnBounds.width * 0.14f)
+        onNodeWithTag("book-page-turn").performMouseInput { click(Offset(textClickX, clickY)) }
+        mainClock.advanceTimeBy(800); waitForIdle()
+        assertEquals(before, state.index, "clicking on text inside left edge must not turn page")
+
+        // Click on non-text outer margin (x = 12f < 64.dp leftInset): explicit margin click turns back
+        onNodeWithTag("book-page-turn").performMouseInput { click(Offset(12f, clickY)) }
+        mainClock.advanceTimeBy(800); waitForIdle()
+        assertTrue(state.index < before, "clicking non-text left margin should still turn back: $before -> ${state.index}")
+    }
+
+    @Test fun backgroundLayoutLongBookKeepsCompletedPaginationOnHighlightUpdates() = runSkikoComposeUiTest(
+        size = Size(1280f, 800f),
+        density = Density(1f),
+    ) {
+        val pages = (1..75).map { p ->
+            BookPage(p, "# 第 $p 章\n\nImport page $p discusses demand elasticity and marginal valuation in healthcare markets. " +
+                "Repeated paragraph text to ensure each page lays out cleanly across the book. ".repeat(4))
+        }
+        val longBook = Textbook("long-bg-book", "长书测试", "pdf", pages)
+        val state = BookPagingState(BookPageAnchor(40))
+        var highlights by mutableStateOf<Map<Int, List<IntRange>>>(emptyMap())
+        setContent {
+            CoachTheme(false) {
+                androidx.compose.material3.Surface(color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
+                    Box(Modifier.fillMaxSize()) {
+                        BookPageView(
+                            book = longBook,
+                            state = state,
+                            highlights = highlights,
+                            onTurn = { state.move(it) },
+                            turnStyle = PageTurnStyle.Flip,
+                            immersive = true,
+                        )
+                    }
+                }
+            }
+        }
+        waitUntil(timeoutMillis = 30_000) { state.completedPagination != null && state.pages.size > 64 }
+        waitForIdle()
+
+        val completedBefore = assertNotNull(state.completedPagination)
+        val pageCountBefore = state.pages.size
+        val indexBefore = state.index
+        val visibleSourcesBefore = state.pages[indexBefore].sources
+        val unaffectedPageBefore = state.pages[0]
+
+        // Apply a textSelection-style highlight on import page 40
+        highlights = mapOf(40 to listOf(0 until 32))
+        mainClock.advanceTimeBy(500); waitForIdle()
+
+        onNodeWithTag("book-page-loading").assertDoesNotExist()
+        assertSame(completedBefore, state.completedPagination, "highlight change must not invalidate completedPagination")
+        assertEquals(pageCountBefore, state.pages.size, "highlight change must not fall back to near layout")
+        assertEquals(indexBefore, state.index, "highlight change must not shift visible page index")
+        assertEquals(visibleSourcesBefore, state.pages[state.index].sources, "highlight change must not alter page boundaries")
+        assertSame(unaffectedPageBefore, state.pages[0], "unaffected laid pages should be reused directly")
+        assertTrue(
+            state.pages[state.index].runs.any { run -> run.text.spanStyles.any { it.item.background != androidx.compose.ui.graphics.Color.Unspecified } },
+            "updated highlight must still be applied to the visible page runs",
+        )
+
+        // Clear highlight again and ensure layout stays completely stable
+        highlights = emptyMap()
+        mainClock.advanceTimeBy(500); waitForIdle()
+        assertSame(completedBefore, state.completedPagination)
+        assertEquals(pageCountBefore, state.pages.size)
+        assertEquals(indexBefore, state.index)
+        assertEquals(visibleSourcesBefore, state.pages[state.index].sources)
     }
 }

@@ -339,11 +339,12 @@ internal fun HostSearchDialog(
                 )
                 if (selectedCollection != null) {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(
+                        FlowRow(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            for (col in askableCollections.take(4)) {
+                            for (col in askableCollections) {
                                 val active = col.record.id == selectedCollection.record.id
                                 V7TextButton(
                                     onClick = { selectedCollectionId = col.record.id },

@@ -771,6 +771,89 @@ class ReaderShellFixTest {
     }
 
     @Test
+    fun hostSearchKeepsReadLibraryVisibleWithFourCoursesAndStandaloneBook() {
+        val root = Files.createTempDirectory("coach-mixed-shelf-search-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val standalone = library.importBook(
+                root.resolve("Independent.md").also {
+                    Files.writeString(
+                        it,
+                        """
+                        # Chapter 1
+                        Inductive reasoning draws general principles from concrete examples.
+                        """.trimIndent(),
+                    )
+                },
+            )
+            for (number in 1..4) {
+                library.upsertCollection(MaterialCollectionRecord("course-$number", CollectionKind.COURSE, "Course $number"))
+            }
+            val explainer = object : BookExplainer(library = library) {
+                override suspend fun load() {
+                    loaded = true
+                    identity = DesktopIdentity("http://127.0.0.1:1", PairedCredentials("desk", "tok", "owner"))
+                }
+
+                override suspend fun askCollection(requestJson: JsonObject): CourseServerCallResult {
+                    val blocks = requestJson["blocks"] as? JsonArray ?: JsonArray(emptyList())
+                    val firstBlk = blocks.firstOrNull() as? JsonObject
+                    val blockId = (firstBlk?.get("blockId") as? JsonPrimitive)?.content ?: "B1"
+                    return CourseServerCallResult(
+                        body = buildJsonObject {
+                            put("sentences", buildJsonArray {
+                                add(buildJsonObject {
+                                    put("claim", "文中用归纳推理概括具体事例。")
+                                    put("blockId", blockId)
+                                    put("quoteAnchor", "Inductive reasoning")
+                                })
+                            })
+                            put("hasMaterialConflict", false)
+                            put("conflictSummaryZh", "")
+                        },
+                        error = null,
+                    )
+                }
+            }
+            val controller = TextbookController(library)
+            runBlocking {
+                controller.load()
+                controller.openBook(standalone.id, 1)
+                controller.back()
+            }
+
+            runSkikoComposeUiTest(size = Size(980f, 760f), density = Density(1f)) {
+                setContent {
+                    Box(Modifier.fillMaxSize()) {
+                        WindowsTextbookHost(controller, bookExplainer = explainer, chooseBook = { null })
+                    }
+                }
+                waitUntil(timeoutMillis = 10_000) { controller.state.value.screen == BookScreen.HOME }
+                waitForIdle()
+
+                onNodeWithTag("host-search").performClick()
+                waitForIdle()
+                onNodeWithTag("host-search-dialog").assertExists()
+                for (number in 1..4) {
+                    onNodeWithTag("host-search-col-course-$number").assertExists()
+                }
+                onNodeWithTag("host-search-col-${CollectionQaVirtualCollections.READ_LIBRARY_ID}")
+                    .assertExists()
+                    .performClick()
+                waitForIdle()
+                onNodeWithTag("host-search-input").performTextInput("Inductive reasoning examples?")
+                waitForIdle()
+                onNodeWithTag("host-search-ask-collection").assertIsEnabled().performClick()
+                waitUntil(timeoutMillis = 5_000) {
+                    onAllNodesWithTag("host-search-qa-citation-0-0").fetchSemanticsNodes().isNotEmpty()
+                }
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun realWindowSequentialBooklistProgressAndStandaloneReadLibrary() {
         assumeFalse("Requires non-headless desktop display", GraphicsEnvironment.isHeadless())
         val root = Files.createTempDirectory("coach-ton1847-realwin-")
@@ -1059,13 +1142,23 @@ class ReaderShellFixTest {
             waitFor("Standalone reader 已读书目 reply rendered") { findTag(winB, "collection-qa-turn-0") != null }
             captureWin(winB, "ton1847-standalone-reader-scope")
 
+            // Add 4 courses alongside standalone NaHan so HostSearchDialog must display all courses + "已读书目" without .take(4) truncation
+            runBlocking {
+                for (n in 1..4) {
+                    libraryB.upsertCollection(MaterialCollectionRecord("course-win-$n", CollectionKind.COURSE, "Course $n"))
+                }
+                controllerB.load()
+            }
             clickTag(winB, "immersive-back")
             waitFor("Returned to shelf") { findTag(winB, "host-search") != null }
             clickTag(winB, "host-search")
-            waitFor("HostSearchDialog shows 已读书目 ask button") {
+            waitFor("HostSearchDialog shows all 4 courses and 已读书目 scope") {
                 findTag(winB, "host-search-dialog") != null &&
+                    (1..4).all { n -> findTag(winB, "host-search-col-course-win-$n") != null } &&
+                    findTag(winB, "host-search-col-${CollectionQaVirtualCollections.READ_LIBRARY_ID}") != null &&
                     findTag(winB, "host-search-ask-collection") != null
             }
+            clickTag(winB, "host-search-col-${CollectionQaVirtualCollections.READ_LIBRARY_ID}")
             setFieldText(winB, "host-search-input", "方玄綽為什麼不敢討債?")
             clickTag(winB, "host-search-ask-collection")
             waitFor("HostSearchDialog rendered citation") { findTag(winB, "host-search-qa-citation-0-0") != null }

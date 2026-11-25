@@ -32,11 +32,12 @@ function Read-TutorFrame([string]$name) {
 }
 
 function Scroll-TutorView([int]$notches) {
+    $bounds = Get-Rect
     if ($Winbox) {
-        $bounds = Get-Rect
         Scroll-At ([int](($bounds.R - $bounds.L) * 0.56)) ([int](($bounds.B - $bounds.T) * 0.70)) $notches
     } else {
-        Scroll-At 584 490 $notches
+        # 2.0 companion on this runner is a bottom sheet. Wheel its body, not the page.
+        Scroll-At ([int](($bounds.R - $bounds.L) * 0.50)) ([int](($bounds.B - $bounds.T) * 0.78)) $notches
     }
 }
 
@@ -91,28 +92,84 @@ function Find-WinboxControl([string]$template, [string]$name, [int]$scroll) {
     throw "Missing $label in $name"
 }
 
-# A long line of the page body: below the reader toolbar, above the page bar. 1.1.1 explains
-# whatever the reader has selected, so the probe needs a real line to drag across.
-function Find-TutorBodyLine($lines) {
+# One visual row of body text. Tesseract's sparse mode often glues a wrapped paragraph
+# into a single box, and the centre of that box sits in the gap between the glyphs, so a
+# horizontal drag there selects nothing.
+function Find-TutorBodyRows($lines) {
     $tool = @('举个例子', '讲讲', '笔记', '看原页', '看文字') | ForEach-Object { Find-Text $lines $_ } | Where-Object { $_ } | Select-Object -First 1
     $bar = @('上一页', '下一页') | ForEach-Object { Find-Text $lines $_ } | Where-Object { $_ } | Select-Object -First 1
-    $top = if ($tool) { $tool.Y2 + 8 } else { 0 }
+    $top = if ($tool) { $tool.Y2 + 8 } else { 36 }
     $bottom = if ($bar) { $bar.Y1 - 8 } else { 100000 }
-    $best = $null
-    foreach ($l in $lines) {
-        if (($l.Text -replace '[^\p{L}\p{N}]', '').Length -lt 12) { continue }
-        $words = @($l.Words)
-        if (-not $words) { continue }
-        $x1 = [int](($words | ForEach-Object { $_.BoundingRect.X } | Measure-Object -Minimum).Minimum)
-        $y1 = [int](($words | ForEach-Object { $_.BoundingRect.Y } | Measure-Object -Minimum).Minimum)
-        $x2 = [int](($words | ForEach-Object { $_.BoundingRect.X + $_.BoundingRect.Width } | Measure-Object -Maximum).Maximum)
-        $y2 = [int](($words | ForEach-Object { $_.BoundingRect.Y + $_.BoundingRect.Height } | Measure-Object -Maximum).Maximum)
-        if ($y1 -lt $top -or $y2 -gt $bottom) { continue }
-        if (($x2 - $x1) -lt 80) { continue }
-        $box = [pscustomobject]@{ X1 = $x1; X2 = $x2; Y = [int](($y1 + $y2) / 2); Width = $x2 - $x1 }
-        if (-not $best -or $box.Width -gt $best.Width) { $best = $box }
+    $buckets = New-Object System.Collections.Generic.List[object]
+    foreach ($l in @($lines)) {
+        foreach ($w in @($l.Words)) {
+            $rect = $w.BoundingRect
+            if ($rect.Width -lt 2 -or $rect.Height -lt 2) { continue }
+            $cy = $rect.Y + ($rect.Height / 2)
+            if ($cy -lt $top -or $cy -gt $bottom) { continue }
+            $hit = $null
+            foreach ($bucket in $buckets) {
+                if ([Math]::Abs($bucket.Y - $cy) -le 9) { $hit = $bucket; break }
+            }
+            if (-not $hit) {
+                $hit = [pscustomobject]@{ Y = [double]$cy; Items = (New-Object System.Collections.Generic.List[object]) }
+                $buckets.Add($hit) | Out-Null
+            }
+            $hit.Items.Add($w) | Out-Null
+        }
     }
-    return $best
+    $rows = foreach ($bucket in $buckets) {
+        $items = @($bucket.Items)
+        $text = ($items | ForEach-Object { $_.Text }) -join ''
+        if (($text -replace '[^\p{L}\p{N}]', '').Length -lt 8) { continue }
+        $x1 = [int](($items | ForEach-Object { $_.BoundingRect.X } | Measure-Object -Minimum).Minimum)
+        $x2 = [int](($items | ForEach-Object { $_.BoundingRect.X + $_.BoundingRect.Width } | Measure-Object -Maximum).Maximum)
+        $y = [int](($items | ForEach-Object { $_.BoundingRect.Y + ($_.BoundingRect.Height / 2) } | Measure-Object -Average).Average)
+        if (($x2 - $x1) -lt 120) { continue }
+        [pscustomobject]@{ X1 = $x1; X2 = $x2; Y = $y; Width = ($x2 - $x1) }
+    }
+    return @($rows | Sort-Object Width -Descending)
+}
+
+# SetCursorPos and the button-down have to be a frame apart. Compose otherwise
+# presses wherever the cursor already was, and a same-point press clears the selection.
+function Drag-TutorLine([int]$x1, [int]$y1, [int]$x2) {
+    if ($x2 -lt $x1) { $swap = $x1; $x1 = $x2; $x2 = $swap }
+    $y1 = [Math]::Max(8, $y1)
+    Invoke-ForegroundStep -InjectsInput -Action {
+        $r = Get-Rect
+        $sx = $r.L + $x1
+        $sy = $r.T + $y1
+        $ex = $r.L + $x2
+        [WD]::SetCursorPos($sx, $sy) | Out-Null
+        Start-Sleep -Milliseconds 180
+        Assert-OurForeground
+        [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
+        try {
+            foreach ($i in 1..8) {
+                Start-Sleep -Milliseconds 35
+                [WD]::SetCursorPos([int]($sx + (($ex - $sx) * $i / 8)), $sy) | Out-Null
+            }
+            Start-Sleep -Milliseconds 100
+        } finally {
+            [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
+        }
+    }
+}
+
+function Wait-TutorText([string]$name, [string[]]$labels, [int]$seconds, [int]$scroll = -2) {
+    $deadline = (Get-Date).AddSeconds($seconds)
+    $spins = 0
+    do {
+        $frame = @(Read-TutorFrame $name)
+        foreach ($label in $labels) {
+            $hit = Find-Text $frame $label
+            if ($hit) { return $hit }
+        }
+        if ($scroll -and $spins -lt 8) { Scroll-TutorView $scroll; $spins++ }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    return $null
 }
 
 # The selection toolbar draws its four actions in one row; take the one left of a known neighbour.
@@ -132,21 +189,33 @@ function Focus-ReaderPage {
     Start-Sleep -Milliseconds 300
 }
 
-# 2.0 selection toolbar is 「讲讲 / 拆句 / 举个例子 / 问… / 笔记」. Drag a body line, then click one action.
+# 2.0 selection toolbar is a light pill: 「讲讲 / 拆句 / 举个例子 / 问… / 笔记」.
+# Drag one glyph row. A centre click is not used here: it toggles the reader HUD.
 function Open-SelectionAction([string]$name, [string]$action) {
-    Focus-ReaderPage
     $lines = @(Read-TutorFrame "$name-reader")
-    $box = Find-TutorBodyLine $lines
-    if (-not $box) { throw "No selectable body line in $name" }
+    $rows = @(Find-TutorBodyRows $lines)
+    if (-not $rows) { throw "No selectable body line in $name" }
     $selected = $null
-    foreach ($attempt in 1..3) {
-        Drag-Between ($box.X1 + 4) $box.Y ($box.X2 - 4) $box.Y
-        try { $selected = Find-TutorLabel "$name-selected" @('举个例子', '笔记', '拆句') 0 } catch { $selected = $null }
+    $tries = 0
+    foreach ($row in ($rows | Select-Object -First 3)) {
+        foreach ($dy in @(0, 8)) {
+            $tries++
+            if ($tries -gt 4) { break }
+            Drag-TutorLine ($row.X1 + 6) ($row.Y + $dy) ($row.X2 - 6)
+            Start-Sleep -Milliseconds 400
+            $frame = @(Read-TutorFrame "$name-selected")
+            foreach ($label in @('举个例子', '笔记', '拆句', '讲讲')) {
+                $selected = Find-Text $frame $label
+                if ($selected) { break }
+            }
+            if ($selected) { break }
+        }
         if ($selected) { break }
     }
     if (-not $selected) { throw "Dragging a line did not raise the selection toolbar ($name)" }
     $bar = @(Read-TutorFrame "$name-bar")
     $hit = Find-OnTutorRow $bar $action $selected
+    if (-not $hit) { $hit = Find-Text $bar $action }
     if (-not $hit) { throw "Selection toolbar has no $action" }
     Click-At $hit.X $hit.Y | Out-Null
 }
@@ -160,6 +229,7 @@ function Test-BlockAndCitation {
     Open-SelectionAction '04' '讲讲'
     $reply = $null
     $deadline = (Get-Date).AddSeconds(30)
+    $spins = 0
     do {
         $lines = @(Read-TutorFrame '04-after-explain')
         $reply = Find-Text $lines 'Blockexplanation'
@@ -167,7 +237,8 @@ function Test-BlockAndCitation {
         $consent = Find-Text $lines '允许并讲解'
         if (-not $consent) { $consent = Find-Text $lines '开启讲解' }
         if ($consent) { Click-At $consent.X $consent.Y | Out-Null }
-        Start-Sleep -Milliseconds 800
+        elseif ($spins -lt 6) { Scroll-TutorView -2; $spins++ }
+        Start-Sleep -Milliseconds 700
     } while ((Get-Date) -lt $deadline)
     if (-not $reply) { throw '讲解没有出现（Block explanation）' }
     Select-TutorLabel '07-citation' @('出处') -2
@@ -205,18 +276,14 @@ function Test-WholeLesson {
     $opened = @(Read-TutorFrame '05-companion')
     $wider = Find-Text $opened '讲整章'
     if ($wider) { Click-At $wider.X $wider.Y | Out-Null }
-    $hit = $null
-    $deadline = (Get-Date).AddSeconds(45)
-    do {
-        $frame = @(Read-TutorFrame '05-lesson')
-        $hit = Find-Text $frame 'Lessonoverview'
-        if (-not $hit) { $hit = Find-Text $frame '先阅读原文' }
-        if ($hit) { break }
-        $fail = Find-Text $frame '连不上'
+    # The pack's core question sits under the module header. On a short bottom sheet
+    # it starts just below the fold, so wheel the sheet until the sentence is painted.
+    $hit = Wait-TutorText '05-lesson' @('Lessonoverview', '先阅读原文') 45 -2
+    if (-not $hit) {
+        $fail = Find-Text @(Read-TutorFrame '05-lesson-fail') '连不上'
         if ($fail) { throw '本章伴读连不上（见 05-lesson）' }
-        Start-Sleep -Milliseconds 800
-    } while ((Get-Date) -lt $deadline)
-    if (-not $hit) { throw '本章讲解没有出现' }
+        throw '本章讲解没有出现'
+    }
     $null = Find-TutorLabel '05-lesson-source' @('出处', '原文第') -3
 }
 
@@ -226,27 +293,41 @@ function Test-Practice {
     $lines = @(Read-TutorFrame '06-open')
     $tab = Find-Text $lines '自测'
     if (-not $tab) { $tab = Find-Text $lines '读前自测' }
+    # ARM OCR reads the light card titles and misreads 「自测」 (it came back as 「自疯」).
+    # The module strip is 要点 / 自测 / 推导. 「推导」 is stable; the pill to its left is 自测.
+    if (-not $tab) {
+        $derive = Find-Text $lines '推导'
+        if ($derive) { $tab = [pscustomobject]@{ X = [int]($derive.X - 52); Y = [int]$derive.Y } }
+    }
+    if (-not $tab) {
+        $points = Find-Text $lines '要点'
+        if ($points) { $tab = [pscustomobject]@{ X = [int]($points.X + 52); Y = [int]$points.Y } }
+    }
     if (-not $tab) { throw '伴读里没有读前自测' }
     Click-At $tab.X $tab.Y | Out-Null
-    $stem = $null
-    $frame = @()
-    $deadline = (Get-Date).AddSeconds(30)
-    do {
-        $frame = @(Read-TutorFrame '06-question')
-        $stem = Find-Text $frame 'Whichmethod'
-        if (-not $stem) { $stem = Find-Text $frame 'checksrecall' }
-        if ($stem) { break }
-        $fail = Find-Text $frame '连不上'
+    $stem = Wait-TutorText '06-question' @('Whichmethod', 'checksrecall') 30 -2
+    if (-not $stem) {
+        $fail = Find-Text @(Read-TutorFrame '06-question-fail') '连不上'
         if ($fail) { throw '读前自测连不上（见 06-question）' }
-        Start-Sleep -Milliseconds 700
-    } while ((Get-Date) -lt $deadline)
-    if (-not $stem) { throw '读前自测题没有出现' }
+        throw '读前自测题没有出现'
+    }
+    $frame = @(Read-TutorFrame '06-options')
     $opt = Find-Text $frame 'Recallbefore'
     if (-not $opt) { $opt = Find-Text $frame 'beforechecking' }
+    if (-not $opt) {
+        Scroll-TutorView -2
+        $frame = @(Read-TutorFrame '06-options-down')
+        $opt = Find-Text $frame 'Recallbefore'
+        if (-not $opt) { $opt = Find-Text $frame 'beforechecking' }
+    }
     if (-not $opt) { throw '读前自测没有选项 Recall before checking' }
     Click-At $opt.X $opt.Y | Out-Null
     Start-Sleep -Milliseconds 400
     $submit = Find-Text @(Read-TutorFrame '06-selected') '提交'
+    if (-not $submit) {
+        Scroll-TutorView -2
+        $submit = Find-Text @(Read-TutorFrame '06-selected-down') '提交'
+    }
     if (-not $submit) { throw '读前自测没有提交' }
     Click-At $submit.X $submit.Y | Out-Null
     $fb = $null

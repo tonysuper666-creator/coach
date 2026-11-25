@@ -114,13 +114,31 @@ class Tutor(BaseHTTPRequestHandler):
             {"kind": "practice", "source": source, "blocks": len(found)},
         ])
 
+    def _study_mode(self):
+        # The drawer also asks POST /api/books/{id}/modes/READ_THROUGH. A 404 becomes
+        # the banner 「这次没讲成，先看原文」, which pushes the companion pack below the
+        # bottom sheet. An empty JSON object clears that banner. The lesson and the
+        # pretest still come from /v1/library/companion/chapter.
+        path = self.path.split("?", 1)[0]
+        prefix = "/api/books/"
+        marker = "/modes/"
+        if not (path.startswith(prefix) and marker in path):
+            return False
+        book = path[len(prefix):path.index(marker)]
+        return book == self.server.digest
+
     def do_POST(self):
-        if self.path not in ("/v1/library/explain", "/v1/library/companion/chapter"):
+        mode = self._study_mode()
+        if self.path not in ("/v1/library/explain", "/v1/library/companion/chapter") and not mode:
             self.send_error(404)
             return
         if not self._authorized():
             return
         try:
+            if mode:
+                self._read_json(524288)
+                self._reply({}, [])
+                return
             if self.path == "/v1/library/companion/chapter":
                 self._companion(self._read_json(524288))
                 return

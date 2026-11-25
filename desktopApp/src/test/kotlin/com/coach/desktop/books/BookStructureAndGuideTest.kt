@@ -12,6 +12,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.coach.client.PairedCredentials
@@ -270,7 +272,7 @@ class BookStructureAndGuideTest {
 
             // 3) 真实阅读器文字版拖选文字自动浮出工具条 + 4) 点击「讲讲」就地回答并连续追问（共用整节上下文）
             library.saveTextView(book.id, true)
-            runSkikoComposeUiTest(size = Size(1080f, 820f), density = Density(1f)) {
+            runSkikoComposeUiTest(size = Size(980f, 820f), density = Density(1f)) {
                 var activePage by mutableStateOf(secondSection.firstPage)
                 setContent {
                     val focus = remember { FocusRequester() }
@@ -291,20 +293,20 @@ class BookStructureAndGuideTest {
                         }
                     }
                 }
-                waitUntil(timeoutMillis = 20_000) {
-                    onAllNodesWithTag("reader-text").fetchSemanticsNodes().isNotEmpty() &&
-                        onAllNodesWithTag("section-guide-brief").fetchSemanticsNodes().isNotEmpty()
-                }
-                waitForIdle()
-                // 在真实 BookPageView 上鼠标拖选第 4 页「（二）基本任务」正文，自动浮出选字工具条
-                onNodeWithTag("book-sheet-0").performMouseInput {
-                    val b = onNodeWithTag("reader-text").fetchSemanticsNode().boundsInRoot
-                    val sheet = onNodeWithTag("book-sheet-0").fetchSemanticsNode().boundsInRoot
-                    val startX = (b.left - sheet.left) + 24f
-                    val y = (b.top - sheet.top) + 210f
-                    moveTo(Offset(startX, y))
+                // TON-1784 opens explanations in the drawer. The preceding component test checks the cached guide.
+                val prefix = secondSection.blocks.first { it.isBodyParagraph && it.text.trim().length >= 12 }.text.trim().take(12)
+                val body = hasTestTag("reader-text") and hasText(prefix, substring = true)
+                waitUntil(timeoutMillis = 20_000) { onAllNodes(body).fetchSemanticsNodes().size == 1 }
+                val text = onNode(body)
+                val layouts = mutableListOf<TextLayoutResult>()
+                text.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+                val layout = layouts.single()
+                val start = layout.layoutInput.text.text.indexOf(prefix)
+                val end = start + prefix.length - 1
+                text.performMouseInput {
+                    moveTo(layout.getBoundingBox(start).center)
                     press()
-                    moveTo(Offset(startX + 260f, y))
+                    moveTo(layout.getBoundingBox(end).center)
                     release()
                 }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("selection-explain-toolbar").fetchSemanticsNodes().isNotEmpty() }
@@ -336,9 +338,9 @@ class BookStructureAndGuideTest {
                 savePng(outDir.resolve("ton1766-04-followup.png"))
 
                 // 收起就地回答卡后，卡片和选字浮条均收起
-                onNodeWithTag("inline-explain-close").performClick()
+                onNodeWithTag("companion-close").performClick()
                 waitForIdle()
-                onNodeWithTag("inline-explain-card").assertDoesNotExist()
+                onNodeWithTag("immersive-companion-drawer").assertDoesNotExist()
                 onNodeWithTag("selection-explain-toolbar").assertDoesNotExist()
             }
         } finally {

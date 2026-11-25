@@ -488,6 +488,9 @@ Check 'cite-line-picks-the-line-with-page' ((Find-CiteLine $drawer).Text -match 
 Check 'cite-line-falls-back-to-plain-label' ((Find-CiteLine $plainCite).Text -eq '出处') "got=$((Find-CiteLine $plainCite).Text)"
 Check 'cite-line-none-when-absent' (-not (Find-CiteLine @((New-Line '提问' 480 600 60 26)))) "found=$(Find-CiteLine @((New-Line '提问' 480 600 60 26)))"
 Check 'step7-cite-page-from-real-drawer-line' ((Get-CitePageNumber (Find-CiteLine $drawer).Text) -eq '154') "got=$(Get-CitePageNumber (Find-CiteLine $drawer).Text)"
+$drawerMisread = @((New-Line '出处2·第153贞·第12段“' 480 600 320 26))
+Check 'step7-cite-page-tolerates-hidpi-ocr-misread' ((Get-CitePageNumber (Find-CiteLine $drawerMisread).Text) -eq '153') "got=$(Get-CitePageNumber (Find-CiteLine $drawerMisread).Text)"
+Check 'step7-cite-page-tolerates-chong-ocr-misread' ((Get-CitePageNumber '出处3·第153虫·第4段') -eq '153') "got=$(Get-CitePageNumber '出处3·第153虫·第4段')"
 Check 'step7-reports-the-ocr-text-when-page-missing' ((Resolve-Step7PageVerdict '' '150' '出处 · 见上文') -match '见上文') "why=$(Resolve-Step7PageVerdict '' '150' '出处 · 见上文')"
 
 $fail = @($results | Where-Object { -not $_ }).Count

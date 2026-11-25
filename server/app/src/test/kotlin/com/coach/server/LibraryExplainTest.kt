@@ -76,6 +76,18 @@ class LibraryExplainTest {
             assertTrue(system.contains("上一节介绍了机械功的定义。") && system.contains("第三节 功率"))
             assertFalse(system.contains("If unsupported, return empty paragraphs."))
             assertTrue(messages.single { it.str("role") == "user" }.str("content").contains("这一段最重要的一个概念是什么？"))
+            assertTrue(system.contains("One to three short paragraphs"))
+            assertTrue(system.contains("never type a double quote"))
+
+            // Live check: a third short paragraph for the cross-section note is accepted for questions only.
+            h.stub.stream(1, """{"paragraphs":[{"text":"本节先讲能量守恒。","anchors":["S1"]},{"text":"再讲转化过程。","anchors":["S2"]},{"text":"功率不在本节，在下一节《第三节 功率》。","anchors":["S3"]}]}""",
+                StubTutor.terminal("complete"), StubTutor.DONE)
+            val (threeStatus, threeBody) = h.post(JsonObject(input + ("requestId" to JsonPrimitive("ab14"))))
+            assertEquals(200, threeStatus)
+            assertEquals(listOf(1L, 2L, 3L), threeBody.getValue("sources").jsonArray.map { it.jsonObject.num("pdfPage") })
+            assertEquals(3, readerMaxParagraphs(lesson = false, kind = "ask"))
+            assertEquals(2, readerMaxParagraphs(lesson = false, kind = "explain"))
+            assertEquals(6, readerMaxParagraphs(lesson = true, kind = "lesson"))
         }
     }
 

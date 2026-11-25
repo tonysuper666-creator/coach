@@ -907,7 +907,7 @@ public final class ReaderAcceptanceHarness {
                 runSuspend(cont -> c1.load(cont));
                 runSuspend(cont -> c1.read(cont));
                 runSuspend(cont -> c1.dismissPrompt(cont));
-                runSuspend(cont -> c1.page(32, cont));
+                controllerPageTo(c1, 32);
                 Thread.sleep(800);
             } finally {
                 disposeWindow(w1);
@@ -1002,8 +1002,26 @@ public final class ReaderAcceptanceHarness {
         runSuspend(c -> controller.load(c));
         runSuspend(c -> controller.read(c));
         runSuspend(c -> controller.dismissPrompt(c));
-        runSuspend(c -> controller.page(page, c));
+        controllerPageTo(controller, page);
         return controller;
+    }
+
+    private static void controllerPageTo(TextbookController controller, int page) throws Exception {
+        for (Method m : TextbookController.class.getDeclaredMethods()) {
+            if (!"page".equals(m.getName())) continue;
+            Class<?>[] p = m.getParameterTypes();
+            if (p.length == 2 && p[0] == int.class) {
+                m.setAccessible(true);
+                runSuspend(c -> m.invoke(controller, page, c));
+                return;
+            }
+            if (p.length == 3 && p[0] == int.class && p[1] == boolean.class) {
+                m.setAccessible(true);
+                runSuspend(c -> m.invoke(controller, page, true, c));
+                return;
+            }
+        }
+        throw new IllegalStateException("TextbookController.page(...) not found");
     }
 
     private static TextbookController openGuided(Path libDir) throws Exception {
@@ -2161,7 +2179,7 @@ public final class ReaderAcceptanceHarness {
 
             TextbookController controller = createController(lib);
             runSuspend(c -> controller.load(c));
-            runSuspend(c -> controller.page(179, c));
+            controllerPageTo(controller, 179);
             int pageBefore = controllerPage(controller);
             runSuspend(c -> controller.back(c));
             seedHighlightsAndNotesForModeTest(libWork, bookId, 179, sampleCh8Json);
@@ -2285,7 +2303,7 @@ public final class ReaderAcceptanceHarness {
             TextbookLibrary lib = createLibrary(libWork);
             TextbookController controller = createController(lib);
             runSuspend(c -> controller.load(c));
-            runSuspend(c -> controller.page(172, c));
+            controllerPageTo(controller, 172);
             runSuspend(c -> controller.back(c));
 
             ComposeWindow[] box = new ComposeWindow[1];

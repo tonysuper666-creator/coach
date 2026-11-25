@@ -219,6 +219,8 @@ class IllustratedReaderWindowTest {
                         // #570（TON-1784）的沉浸阅读器把翻页样式定为翻转，窗口里不再有 turn-style 切换；
                         // 滑动样式下的放大 / 关闭仍由上面的 pointerAndKeyboardDismissWithoutMovingTheReadingAnchor 覆盖。
                         for (style in listOf("flip")) {
+                            // 图注的语义先于正文页的来源语义落定（TON-1853 d29 撞上过），先等来源出现再记下，条件不变。
+                            await("page sources in $format") { nodes(window).any { it.config.getOrNull(BookPageSources) != null } }
                             val sources = edt { nodes(window).mapNotNull { it.config.getOrNull(BookPageSources) } }
                             assertTrue(sources.isNotEmpty())
                             val inlineWidth = click(figureTag)

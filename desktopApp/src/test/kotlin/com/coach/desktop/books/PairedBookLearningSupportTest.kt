@@ -41,6 +41,7 @@ class PairedBookLearningSupportTest {
             assertTrue(body.size > 6)
             val request = BookExplanationRequest(book.id, lesson.id, lesson.blocks)
             var calls = 0
+            ReadingSettings(library.directory).chooseAiExplain(false)
             val support = PairedBookLearningSupport(library, sendLesson = { blocks, pages ->
                 calls++
                 assertEquals(body, blocks); assertEquals(book.pages.size, pages)
@@ -108,6 +109,7 @@ class PairedBookLearningSupportTest {
         val block = book.lessons.first().blocks.first { !it.heading }
         val request = BookPassageQuestion(BookPassage.from(book, block), "Why does the plant need light?")
         var calls = 0
+        ReadingSettings(library.directory).chooseAiExplain(false)
         val support = PairedBookLearningSupport(library) { sent, question ->
             calls++
             assertEquals(block, sent)

@@ -17,6 +17,7 @@ class ImportedBookWireTest {
             val text = "Synthetic selected text."
             val start = page.text.indexOf(text)
             val block = SourceBlock("${book.id}:p1:$start", 1, start, start + text.length, false, text)
+            ReadingSettings(library.directory).chooseAiExplain(false)
             val wire = ImportedBookWire(library)
             assertFailsWith<IllegalArgumentException> { wire.snapshot(listOf(block)) }
             ExplainConsent(library.directory).allow(book.id)

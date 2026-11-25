@@ -184,6 +184,9 @@ internal class TextbookReviewStore(
         return bits
     }
 
+    fun legacyChoice(book: Textbook, lesson: BookLesson, answer: PracticeAnswer): Practice? =
+        LegacyReviewChoice.reconstruct(book, lesson)?.takeIf { answer.text in it.options }
+
     fun recordLesson(db: Connection, book: Textbook, lesson: BookLesson, mode: QuestionMode,
         practice: Practice, answer: PracticeAnswer, migrated: Boolean = false) {
         val old = find(db, book.id, lesson.id, mode)
@@ -385,5 +388,36 @@ internal class TextbookReviewStore(
         db.prepareStatement("INSERT OR REPLACE INTO book_review_position(slot,book,lesson,mode) VALUES(1,?,?,?)").use { s ->
             s.setString(1, entry.book); s.setString(2, entry.lesson); s.setString(3, entry.mode.name); s.executeUpdate()
         }
+    }
+}
+
+/** Reconstruct the deterministic pre-2.0 choice key only when migrating a saved answer. */
+private object LegacyReviewChoice {
+    private val words = Regex("[A-Za-z][A-Za-z'-]{3,}|[\\p{IsHan}]{2,6}")
+    private val definition = Regex("^(.{2,40}?)(?:\\s+(?:is|are|means|refers to)\\b|是|指的是|表示|称为)", RegexOption.IGNORE_CASE)
+
+    private fun choiceCandidates(book: Textbook): List<String> {
+        val definitions = book.lessons.asSequence().flatMap { lesson ->
+            lesson.text.splitToSequence(Regex("(?<=[。.!?])\\s*|\\n"))
+                .mapNotNull { definition.find(it.trim())?.groupValues?.get(1)?.trim() }
+        }
+        val vocabulary = book.pages.asSequence().flatMap { page -> words.findAll(page.text).map { it.value } }
+        return (definitions + vocabulary).filter { it.length in 2..40 }.distinctBy(::normalized).take(4).toList()
+    }
+
+    private fun normalized(value: String) = java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFKC).lowercase().trim()
+
+    fun reconstruct(book: Textbook, lesson: BookLesson): Practice? {
+        val sentences = lesson.text.split(Regex("(?<=[。！？.!?])\\s*|\\n")).map(String::trim).filter { it.length >= 12 }
+        val reference = sentences.firstOrNull() ?: lesson.text.trim().takeIf { it.isNotEmpty() } ?: return null
+        val sentence = sentences.firstOrNull { definition.containsMatchIn(it) } ?: reference
+        val defined = definition.find(sentence)?.groupValues?.get(1)?.trim()?.trimEnd(',', '，', '：', ':')
+        val answer = defined?.takeIf { it.length <= 40 && sentence.contains(it) }
+            ?: words.find(sentence)?.value ?: return null
+        val answerKey = normalized(answer)
+        val distractors = choiceCandidates(book).filter { normalized(it) != answerKey }.take(3)
+        if (distractors.isEmpty()) return null
+        val options = (distractors + answer).shuffled(kotlin.random.Random(lesson.id.hashCode()))
+        return Practice("根据本节原文，补全这句话：\n${sentence.replaceFirst(answer, "____")}", sentence, answer, options)
     }
 }

@@ -115,10 +115,13 @@ internal sealed interface SectionGuideResult {
  * 保留类签名以兼容既有调用方与测试夹具，默认允许发送所选片段，可在设置中全局关闭。
  */
 internal class ExplainConsent(private val directory: Path) {
-    private val settings by lazy { runCatching { ReadingSettings(directory) }.getOrNull() }
-    fun allowed(@Suppress("UNUSED_PARAMETER") bookId: String): Boolean = settings?.aiExplain ?: true
-    fun allow(@Suppress("UNUSED_PARAMETER") bookId: String) {
-        runCatching { settings?.chooseAiExplain(true) }
+    private val validId = Regex("[A-Za-z0-9._-]{1,80}")
+    private val settings by lazy { ReadingSettings(directory) }
+    fun allowed(bookId: String): Boolean = validId.matches(bookId) &&
+        runCatching { settings.storedAiExplainEnabled() }.getOrDefault(false)
+
+    fun allow(bookId: String) {
+        if (validId.matches(bookId)) runCatching { settings.chooseAiExplain(true) }
     }
 }
 

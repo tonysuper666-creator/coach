@@ -38,22 +38,24 @@ internal fun learningPathTextbook(root: Path, title: String, chemistry: Boolean 
 }
 
 class BookLearningPathPersistenceTest {
-    @Test fun legacyStartLearningStillPromptsButAnExplicitReadWalkContinuesReading() = runBlocking {
+    @Test fun defaultContinueOpensReadingWithoutSavingAPathAndAnExplicitReadWalkPersists() = runBlocking {
         val root = Files.createTempDirectory("coach-legacy-start-walk-")
         val library = TextbookLibrary(root.resolve("library"))
         val book = library.importBook(learningPathTextbook(root, "Synthetic legacy entry"))
         val c = TextbookController(library)
         c.load(); c.learn()
         assertNull(c.state.value.error)
-        assertEquals(BookPrompt.START, c.state.value.prompt)
-        assertEquals(LearningPath.QUESTION_FIRST, c.state.value.learningPath)
-        assertNull(library.learningPath(book.id), "Do not persist a preview before the user enters")
-        c.dismissPrompt(); c.read(); c.dismissPrompt(); c.page(2); c.back(); c.learn()
+        assertNull(c.state.value.prompt)
+        assertEquals(BookScreen.READER, c.state.value.screen)
+        assertEquals(LearningPath.READ, c.state.value.learningPath)
+        assertNull(library.learningPath(book.id), "A default walk is not an explicit preference")
+        c.page(2); c.back(); c.learn()
         assertNull(c.state.value.error)
-        assertTrue(c.state.value.book!!.promptSeen)
-        assertEquals(BookPrompt.START, c.state.value.prompt, "Ordinary reading must not remove the old start-learning action")
+        assertEquals(BookScreen.READER, c.state.value.screen)
+        assertEquals(2, c.state.value.page)
+        assertNull(c.state.value.prompt)
         assertNull(library.learningPath(book.id), "Reading does not choose a walk")
-        c.chooseLearningPath(LearningPath.READ); c.enableLearning(); c.page(2); c.back()
+        c.learn(LearningPath.READ); c.back()
         c.learn()
         assertEquals(BookScreen.READER, c.state.value.screen)
         assertNull(c.state.value.prompt)

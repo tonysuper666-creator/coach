@@ -363,7 +363,7 @@ internal object BookTocWaterfall {
         val totalPages = pages.maxOfOrNull { it.number } ?: pages.size.coerceAtLeast(1)
         val allBlocks = StudyCoachCourse.blocks(bookId, pages, snapSentences = true)
         val repeatingEdges = ExplainClassifier.precomputeRepeatingEdges(allBlocks)
-        val initialRoles = classifyPagesFast(allBlocks, pages, repeatingEdges)
+        val initialRoles = classifyPagesFast(allBlocks, pages, repeatingEdges, format)
         val byPage = allBlocks.groupBy { it.page }
 
         // Stage A: External outline (PDF Outline / EPUB TOC / Word styles)
@@ -403,6 +403,7 @@ internal object BookTocWaterfall {
         allBlocks: List<SourceBlock>,
         pages: List<BookPage>,
         repeatingEdges: Set<String>,
+        format: String? = null,
     ): Map<Int, BookPageRole> {
         val result = LinkedHashMap<Int, BookPageRole>(pages.size)
         val totalPages = pages.size
@@ -441,6 +442,8 @@ internal object BookTocWaterfall {
             val hasFrontH = nonPage.any { frontHeading.matches(it.text.trim().trimStart('#').trim()) }
             val startsMain = BookStructurePlanner.matchHeadingRule(firstHeading, false)?.level == 1
 
+            // Slide titles, bullet points and speaker notes may all be shorter than a prose paragraph.
+            val hasSlideNotes = format == "pptx" && page.text.substringAfter("\n\n备注\n\n", "").isNotBlank()
             val role = when {
                 nonPage.isEmpty() -> BookPageRole.BLANK
                 analysis.kind == ExplainPageKind.TOC -> BookPageRole.TOC
@@ -449,7 +452,7 @@ internal object BookTocWaterfall {
                 hasRefH || isRefs(nonPage) -> { inBackSection = BookPageRole.REFERENCES; BookPageRole.REFERENCES }
                 inBackSection != null && idx >= totalPages / 2 && !startsMain -> inBackSection
                 hasFrontH && (hasRoman || idx < minOf(6, totalPages / 3 + 1)) && analysis.bodyBlocks.size <= 3 -> BookPageRole.FRONT_MATTER
-                analysis.kind == ExplainPageKind.HEADINGS_ONLY && !startsMain && (hasRoman || (idx == 0 && totalPages >= 3)) -> BookPageRole.FRONT_MATTER
+                analysis.kind == ExplainPageKind.HEADINGS_ONLY && !hasSlideNotes && !startsMain && (hasRoman || (idx == 0 && totalPages >= 3)) -> BookPageRole.FRONT_MATTER
                 analysis.kind == ExplainPageKind.BLANK -> BookPageRole.BLANK
                 else -> {
                     inBackSection = null

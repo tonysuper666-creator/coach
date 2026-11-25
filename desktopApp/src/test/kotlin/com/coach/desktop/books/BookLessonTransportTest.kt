@@ -41,6 +41,7 @@ class BookLessonTransportTest {
             assertTrue(blocks.size > 6)
             val settings = DesktopConnectionSettings(home = root, environment = { null }, mac = false,
                 property = { if (it == "jpackage.app-path") "Coach.exe" else null })
+            ReadingSettings(library.directory).chooseAiExplain(false)
             val explainer = BookExplainer(settings, library)
             assertTrue(explainer.pair("http://127.0.0.1:${server.address.port}", "123456"))
             assertIs<ExplainResult.Refused>(explainer.explainLesson(blocks, book.pages.size))

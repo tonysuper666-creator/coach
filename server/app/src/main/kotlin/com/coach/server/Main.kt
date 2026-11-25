@@ -178,6 +178,18 @@ fun main(args: Array<String>): Unit = runBlocking {
     val sable = publicPort?.let { SableSessions(actor, data.resolveSibling("${data.fileName}-sable-credentials")) }
     val friends = FriendAccess(data.resolve("friends"), sableSessions = sable)
     val unifiedBooks = UnifiedBookPipeline(data.resolve("unified-books"), UnifiedBookConfig.fromEnv())
+    if (unifiedBooks.enabled) {
+        runCatching { unifiedBooks.reconcilePendingDeletes() }
+    }
+    val unifiedBooksMaintenance = if (unifiedBooks.enabled) {
+        launch(Dispatchers.IO) {
+            while (isActive) {
+                runCatching { unifiedBooks.reconcilePendingDeletes() }
+                runCatching { unifiedBooks.purgeExpiredTrash() }
+                delay(3_600_000L)
+            }
+        }
+    } else null
     val unifiedBookMigration = UnifiedBookMigration(data, reader.rootPath, unifiedBooks, adminDevice = device) {
         actor.execute { pairedDevices() }
     }
@@ -257,7 +269,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     val shutdown = Thread {
         runBlocking {
             children?.stop();supervisor.cancelAndJoin();public?.stopSuspend(100,1000);local.stopSuspend(100,1000)
-            verification?.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close()
+            verification?.cancelAndJoin();unifiedBooksMaintenance?.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close()
         }
     }
     Runtime.getRuntime().addShutdownHook(shutdown)
@@ -268,6 +280,6 @@ fun main(args: Array<String>): Unit = runBlocking {
         supervisor.cancelAndJoin()
         public?.stop(100, 1000)
         local.stop(100, 1000)
-        verification?.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close();lock.release();fileLock.close()
+        verification?.cancelAndJoin();unifiedBooksMaintenance?.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close();lock.release();fileLock.close()
     }
 }

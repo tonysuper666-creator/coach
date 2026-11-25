@@ -1805,6 +1805,7 @@ internal class TextbookLibrary(
         synchronized(renderLock) {
             renderCache.keys.removeIf { it.id == bookId }
         }
+        var keepOriginalFile = false
         val format = database().use { db ->
             val fmt = db.prepareStatement("SELECT format FROM books WHERE id=?").use { sql ->
                 sql.setString(1, bookId)
@@ -1827,7 +1828,11 @@ internal class TextbookLibrary(
                     db.prepareStatement("DELETE FROM collection_materials WHERE material_id=?").use { it.setString(1, bookId); it.executeUpdate() }
                 }
                 MasteryStore.deleteForBook(db, bookId)
-                BookUploadQueueStore.deleteLocalUnsyncedForAccount(db, bookId, initiatingAccountKey)
+                val resolvedAccountKey = initiatingAccountKey?.let { key ->
+                    BookUploadQueueStore.boundAccountKey(db, key) ?: key
+                }
+                BookUploadQueueStore.markDeleteOrDropForAccount(db, bookId, resolvedAccountKey, clock.millis())
+                keepOriginalFile = BookUploadQueueStore.hasPendingUploadRequiringOriginal(db, bookId)
                 val hasVisualReviews = db.createStatement().use { s -> s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='book_pdf_visual_reviews'").use { it.next() } }
                 if (hasVisualReviews) db.prepareStatement("DELETE FROM book_pdf_visual_reviews WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }
                 db.prepareStatement("DELETE FROM book_review_position WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }
@@ -1836,7 +1841,7 @@ internal class TextbookLibrary(
             } catch (error: Exception) { db.rollback(); throw error }
             fmt
         }
-        if (format != null && format in BookFormats.supported) {
+        if (format != null && format in BookFormats.supported && !keepOriginalFile) {
             val filePath = original(bookId, format)
             if (format == "pdf") BookPdfLoader.evict(filePath.toFile())
             runCatching { Files.deleteIfExists(filePath) }
@@ -2523,10 +2528,21 @@ internal class TextbookLibrary(
             if (!BookSchemaMigration.tableExists(db, "book_upload_queue")) return
             db.autoCommit = false
             try {
-                val fromRows = BookUploadQueueStore.listForAccount(db, fromAccountKey)
-                for (row in fromRows.values) {
-                    val targetExists = BookUploadQueueStore.read(db, toAccountKey, row.localBookId) != null
-                    if (targetExists) {
+                val fromRows = BookUploadQueueStore.listAllForAccount(db, fromAccountKey)
+                for (row in fromRows) {
+                    val targetRow = BookUploadQueueStore.read(db, toAccountKey, row.localBookId)
+                    if (targetRow != null) {
+                        if (row.state == BookUploadState.PENDING_DELETE && row.serverShelfBookId != null && targetRow.state != BookUploadState.PENDING_DELETE && targetRow.serverShelfBookId == null) {
+                            db.prepareStatement(
+                                "UPDATE book_upload_queue SET server_shelf_book_id=?, state='PENDING_DELETE', updated_at=? WHERE account_key=? AND local_book_id=?",
+                            ).use { sql ->
+                                sql.setString(1, row.serverShelfBookId)
+                                sql.setLong(2, clock.millis())
+                                sql.setString(3, toAccountKey)
+                                sql.setString(4, row.localBookId)
+                                sql.executeUpdate()
+                            }
+                        }
                         db.prepareStatement("DELETE FROM book_upload_queue WHERE account_key=? AND local_book_id=?").use { sql ->
                             sql.setString(1, fromAccountKey)
                             sql.setString(2, row.localBookId)
@@ -2544,11 +2560,78 @@ internal class TextbookLibrary(
                         }
                     }
                 }
+                if (BookSchemaMigration.tableExists(db, "book_pending_deletes")) {
+                    db.prepareStatement(
+                        """INSERT OR IGNORE INTO book_pending_deletes(
+                               account_key, server_shelf_book_id, local_book_id, file_sha256, format, title, created_at
+                           ) SELECT ?, server_shelf_book_id, local_book_id, file_sha256, format, title, created_at
+                           FROM book_pending_deletes WHERE account_key=?""".trimIndent(),
+                    ).use { sql ->
+                        sql.setString(1, toAccountKey)
+                        sql.setString(2, fromAccountKey)
+                        sql.executeUpdate()
+                    }
+                    db.prepareStatement("DELETE FROM book_pending_deletes WHERE account_key=?").use { sql ->
+                        sql.setString(1, fromAccountKey)
+                        sql.executeUpdate()
+                    }
+                }
+                if ("import_account_key" in BookSchemaMigration.tableColumns(db, "books")) {
+                    db.prepareStatement("UPDATE books SET import_account_key=? WHERE import_account_key=?").use { sql ->
+                        sql.setString(1, toAccountKey)
+                        sql.setString(2, fromAccountKey)
+                        sql.executeUpdate()
+                    }
+                }
                 db.commit()
             } catch (e: Exception) {
                 db.rollback()
                 throw e
             }
+        }
+    }
+
+    @Synchronized internal fun readUploadEntry(accountKey: String, localBookId: String): BookUploadEntry? =
+        database().use { db -> BookUploadQueueStore.read(db, accountKey, localBookId) }
+
+    @Synchronized internal fun syncTasksForAccount(accountKey: String): List<BookUploadEntry> =
+        database().use { db -> BookUploadQueueStore.listSyncTasksForAccount(db, accountKey) }
+
+    @Synchronized internal fun recordOrphanedPendingDelete(
+        accountKey: String,
+        localBookId: String,
+        fileSha256: String,
+        serverShelfBookId: String,
+        format: String,
+        title: String,
+    ) = database().use { db ->
+        BookUploadQueueStore.recordOrphanedPendingDelete(
+            db, accountKey, localBookId, fileSha256, serverShelfBookId, format, title, now = clock.millis(),
+        )
+    }
+
+    @Synchronized internal fun completePendingBookDelete(
+        accountKey: String,
+        localBookId: String,
+        expectedShelfBookId: String?,
+    ) = database().use { db ->
+        BookUploadQueueStore.completePendingDelete(db, accountKey, localBookId, expectedShelfBookId)
+    }
+
+    @Synchronized internal fun cleanupOrphanOriginalIfUnused(bookId: String, format: String) {
+        if (!bookId.matches(Regex("[a-f0-9]{64}")) || format !in BookFormats.supported) return
+        val shouldDelete = database().use { db ->
+            val inCatalog = db.prepareStatement("SELECT 1 FROM books WHERE id=? LIMIT 1").use { sql ->
+                sql.setString(1, bookId)
+                sql.executeQuery().use { it.next() }
+            }
+            if (inCatalog) return@use false
+            !BookUploadQueueStore.hasPendingUploadRequiringOriginal(db, bookId)
+        }
+        if (shouldDelete) {
+            val filePath = original(bookId, format)
+            if (format == "pdf") BookPdfLoader.evict(filePath.toFile())
+            runCatching { Files.deleteIfExists(filePath) }
         }
     }
 
@@ -2564,6 +2647,23 @@ internal class TextbookLibrary(
         BookUploadQueueStore.recoverInterruptedUploads(db, clock.millis())
     }
 
+    @Synchronized internal fun saveImportAccountKey(bookId: String, accountKey: String) = database().use { db ->
+        if ("import_account_key" !in BookSchemaMigration.tableColumns(db, "books")) return@use
+        db.prepareStatement("UPDATE books SET import_account_key=? WHERE id=?").use { sql ->
+            sql.setString(1, accountKey)
+            sql.setString(2, bookId)
+            sql.executeUpdate()
+        }
+    }
+
+    @Synchronized internal fun importAccountKey(bookId: String): String? = database().use { db ->
+        if ("import_account_key" !in BookSchemaMigration.tableColumns(db, "books")) return@use null
+        db.prepareStatement("SELECT import_account_key FROM books WHERE id=?").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { rs -> if (rs.next()) rs.getString(1)?.takeIf(String::isNotBlank) else null }
+        }
+    }
+
     @Synchronized internal fun updateBookUploadState(
         accountKey: String,
         localBookId: String,
@@ -2573,10 +2673,14 @@ internal class TextbookLibrary(
         errorMessage: String? = null,
         serverShelfBookId: String? = null,
         clearServerShelfBookId: Boolean = false,
-    ) = database().use { db ->
+        expectedServerShelfBookId: String? = null,
+        requireNullServerShelfBookId: Boolean = false,
+        allowedCurrentStates: Set<BookUploadState>? = null,
+    ): Int = database().use { db ->
         BookUploadQueueStore.updateState(
             db, accountKey, localBookId, state, progressPct, stageLabel, errorMessage,
             serverShelfBookId, clearServerShelfBookId, clock.millis(),
+            expectedServerShelfBookId, requireNullServerShelfBookId, allowedCurrentStates,
         )
     }
 

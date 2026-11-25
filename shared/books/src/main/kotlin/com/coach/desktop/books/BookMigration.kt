@@ -68,12 +68,16 @@ internal object BookSchemaMigration {
 
     /** TON-1848: transactional SQLite persistence for companion Q&A threads (`book_ask_turns`). */
     const val V6_SCHEMA_VERSION = 6
-    const val CURRENT_SCHEMA_VERSION = V6_SCHEMA_VERSION
+
+    /** TON-1833: persistent per-account remote unbind (`PENDING_DELETE`), `book_pending_deletes`, and `books.import_account_key`. */
+    const val V7_SCHEMA_VERSION = 7
+    const val CURRENT_SCHEMA_VERSION = V7_SCHEMA_VERSION
     const val V1_BACKUP_FILENAME = "library.sqlite.v1.bak"
     const val V2_BACKUP_FILENAME = "library.sqlite.v2.bak"
     const val V3_BACKUP_FILENAME = "library.sqlite.v3.bak"
     const val V4_BACKUP_FILENAME = "library.sqlite.v4.bak"
     const val V5_BACKUP_FILENAME = "library.sqlite.v5.bak"
+    const val V6_BACKUP_FILENAME = "library.sqlite.v6.bak"
 
     private val CORE_V1_TABLES = listOf(
         "CREATE TABLE IF NOT EXISTS books(id TEXT PRIMARY KEY,title TEXT NOT NULL,format TEXT NOT NULL,reading_page INTEGER NOT NULL DEFAULT 1,lesson_index INTEGER NOT NULL DEFAULT 0,learning INTEGER NOT NULL DEFAULT 0,prompt_seen INTEGER NOT NULL DEFAULT 0,mode TEXT NOT NULL DEFAULT 'NONE',touched INTEGER NOT NULL)",
@@ -300,8 +304,7 @@ internal object BookSchemaMigration {
         "CREATE INDEX IF NOT EXISTS idx_margin_whisper_book_sec ON margin_whisper_audit(book_id, toc_node_id, created_at)",
     )
 
-    private val V5_TABLES = listOf(
-        """CREATE TABLE IF NOT EXISTS book_upload_queue(
+    private val BOOK_UPLOAD_QUEUE_DDL = """CREATE TABLE IF NOT EXISTS book_upload_queue(
             account_key TEXT NOT NULL,
             local_book_id TEXT NOT NULL,
             file_sha256 TEXT NOT NULL,
@@ -309,7 +312,7 @@ internal object BookSchemaMigration {
             format TEXT NOT NULL,
             title TEXT NOT NULL,
             state TEXT NOT NULL CHECK(state IN (
-                'WAITING_NETWORK','WAITING_SERVER','UPLOADING','RECEIVED','QUEUED','PROCESSING','READY','FAILED','PAUSED'
+                'WAITING_NETWORK','WAITING_SERVER','UPLOADING','RECEIVED','QUEUED','PROCESSING','READY','FAILED','PAUSED','PENDING_DELETE'
             )),
             progress_pct INTEGER NOT NULL DEFAULT 0,
             stage_label TEXT NOT NULL DEFAULT '',
@@ -317,7 +320,10 @@ internal object BookSchemaMigration {
             paused INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL,
             PRIMARY KEY(account_key, local_book_id)
-        )""".trimIndent(),
+        )""".trimIndent()
+
+    private val V5_TABLES = listOf(
+        BOOK_UPLOAD_QUEUE_DDL,
         "CREATE INDEX IF NOT EXISTS idx_book_upload_queue_account ON book_upload_queue(account_key, paused, state)",
         """CREATE TABLE IF NOT EXISTS book_upload_account_bindings(
             session_key TEXT PRIMARY KEY,
@@ -348,6 +354,20 @@ internal object BookSchemaMigration {
         )""".trimIndent(),
         "CREATE INDEX IF NOT EXISTS idx_book_ask_turns_book_thread ON book_ask_turns(book, thread_id, id)",
         "CREATE INDEX IF NOT EXISTS idx_book_ask_turns_book_id ON book_ask_turns(book, id)",
+    )
+
+    private val V7_TABLES = listOf(
+        """CREATE TABLE IF NOT EXISTS book_pending_deletes(
+            account_key TEXT NOT NULL,
+            server_shelf_book_id TEXT NOT NULL,
+            local_book_id TEXT NOT NULL,
+            file_sha256 TEXT NOT NULL,
+            format TEXT NOT NULL,
+            title TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(account_key, server_shelf_book_id)
+        )""".trimIndent(),
+        "CREATE INDEX IF NOT EXISTS idx_book_pending_deletes_account ON book_pending_deletes(account_key, created_at)",
     )
 
     private val V2_TABLES = listOf(
@@ -437,6 +457,10 @@ internal object BookSchemaMigration {
         "book_ask_turns",
     )
 
+    private val REQUIRED_V7_TABLES = REQUIRED_V6_TABLES + setOf(
+        "book_pending_deletes",
+    )
+
     fun upgradeAndMigrate(
         directory: Path,
         openConnection: () -> Connection,
@@ -468,14 +492,16 @@ internal object BookSchemaMigration {
                     currentVersion < V3_SCHEMA_VERSION -> directory.resolve(V2_BACKUP_FILENAME)
                     currentVersion < V4_SCHEMA_VERSION -> directory.resolve(V3_BACKUP_FILENAME)
                     currentVersion < V5_SCHEMA_VERSION -> directory.resolve(V4_BACKUP_FILENAME)
-                    else -> directory.resolve(V5_BACKUP_FILENAME)
+                    currentVersion < V6_SCHEMA_VERSION -> directory.resolve(V5_BACKUP_FILENAME)
+                    else -> directory.resolve(V6_BACKUP_FILENAME)
                 }
                 if (upgradingExisting) {
                     runCatching { probe.createStatement().use { it.execute("PRAGMA wal_checkpoint(TRUNCATE)") } }
                 }
                 schemaComplete = currentVersion >= CURRENT_SCHEMA_VERSION &&
-                    REQUIRED_V6_TABLES.all { it in existingTables } &&
+                    REQUIRED_V7_TABLES.all { it in existingTables } &&
                     "show_standalone" in tableColumns(probe, "books") &&
+                    "import_account_key" in tableColumns(probe, "books") &&
                     "week_num" in tableColumns(probe, "collection_materials") &&
                     "index_state" in tableColumns(probe, "books") &&
                     "text_pending" in tableColumns(probe, "pages") &&
@@ -504,6 +530,7 @@ internal object BookSchemaMigration {
                     ensureColumn(db, "books", "source_filename", "TEXT")
                     ensureColumn(db, "books", "file_bytes", "INTEGER NOT NULL DEFAULT 0")
                     ensureColumn(db, "books", "sync_epoch", "INTEGER NOT NULL DEFAULT 0")
+                    ensureColumn(db, "books", "import_account_key", "TEXT")
                     ensureColumn(db, "pages", "ocr", "INTEGER NOT NULL DEFAULT 0")
                     ensureColumn(db, "pages", "ocr_pending", "INTEGER NOT NULL DEFAULT 0")
                     ensureColumn(db, "pages", "text_pending", "INTEGER NOT NULL DEFAULT 0")
@@ -523,6 +550,17 @@ internal object BookSchemaMigration {
                     }
                     db.createStatement().use { sql ->
                         for (ddl in V6_TABLES) sql.execute(ddl)
+                    }
+                    upgradeUploadQueueToV6(db)
+                    db.createStatement().use { sql ->
+                        for (ddl in V7_TABLES) sql.execute(ddl)
+                        sql.executeUpdate(
+                            """INSERT OR IGNORE INTO book_pending_deletes(
+                                   account_key, server_shelf_book_id, local_book_id, file_sha256, format, title, created_at
+                               ) SELECT account_key, server_shelf_book_id, local_book_id, file_sha256, format, title, updated_at
+                               FROM book_upload_queue
+                               WHERE state='PENDING_DELETE' AND server_shelf_book_id IS NOT NULL""".trimIndent(),
+                        )
                     }
                     BookFtsStore.migrate(db)
                     onInTransaction(db)
@@ -583,6 +621,24 @@ internal object BookSchemaMigration {
         ensureColumn(db, "collection_materials", "user_locked", "INTEGER NOT NULL DEFAULT 0")
         ensureColumn(db, "collection_materials", "authority_rank", "INTEGER NOT NULL DEFAULT 2")
         ensureColumn(db, "collection_materials", "source_hash", "TEXT")
+    }
+
+    private fun upgradeUploadQueueToV6(db: Connection) {
+        val queueSql = db.prepareStatement(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='book_upload_queue'",
+        ).use { sql -> sql.executeQuery().use { if (it.next()) it.getString(1).orEmpty() else "" } }
+        if (queueSql.isNotEmpty() && "PENDING_DELETE" !in queueSql) {
+            db.createStatement().use { sql ->
+                sql.execute("DROP TABLE IF EXISTS book_upload_queue_v5_old")
+                sql.execute("ALTER TABLE book_upload_queue RENAME TO book_upload_queue_v5_old")
+                sql.execute(BOOK_UPLOAD_QUEUE_DDL)
+            }
+            copySharedColumns(db, "book_upload_queue_v5_old", "book_upload_queue")
+            db.createStatement().use { sql ->
+                sql.execute("DROP TABLE book_upload_queue_v5_old")
+                sql.execute("CREATE INDEX IF NOT EXISTS idx_book_upload_queue_account ON book_upload_queue(account_key, paused, state)")
+            }
+        }
     }
 
     private fun copySharedColumns(db: Connection, from: String, to: String) {

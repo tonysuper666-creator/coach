@@ -12,6 +12,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.coach.client.PairedCredentials
@@ -270,48 +272,52 @@ class BookStructureAndGuideTest {
 
             // 3) 真实阅读器文字版拖选文字自动浮出工具条 + 4) 点击「讲讲」就地回答并连续追问（共用整节上下文）
             library.saveTextView(book.id, true)
-            runSkikoComposeUiTest(size = Size(1080f, 820f), density = Density(1f)) {
+            // Standard Windows 150% scaling uses a full-height side drawer.
+            runSkikoComposeUiTest(size = Size(1920f, 1080f), density = Density(1.5f)) {
                 var activePage by mutableStateOf(secondSection.firstPage)
+                var readerWidth by mutableStateOf(1280.dp)
                 setContent {
                     val focus = remember { FocusRequester() }
                     CoachTheme(darkTheme = false) {
                         CompositionLocalProvider(LocalReadingAutoGuide provides true) {
-                            TextbookReader(
-                                ui = LibraryUi(library.catalog(), book, screen = BookScreen.READER, page = activePage),
-                                library = library,
-                                support = UnconnectedBookLearningSupport,
-                                practiceSource = null,
-                                pageFocus = focus,
-                                onNoteSession = {},
-                                onPage = { activePage = it },
-                                onBack = {},
-                                onLearn = {},
-                                explainProvider = explainer,
-                            )
+                            Box(Modifier.width(readerWidth).fillMaxHeight()) {
+                                TextbookReader(
+                                    ui = LibraryUi(library.catalog(), book, screen = BookScreen.READER, page = activePage),
+                                    library = library,
+                                    support = UnconnectedBookLearningSupport,
+                                    practiceSource = null,
+                                    pageFocus = focus,
+                                    onNoteSession = {},
+                                    onPage = { activePage = it },
+                                    onBack = {},
+                                    onLearn = {},
+                                    explainProvider = explainer,
+                                )
+                            }
                         }
                     }
                 }
-                waitUntil(timeoutMillis = 20_000) {
-                    onAllNodesWithTag("reader-text").fetchSemanticsNodes().isNotEmpty() &&
-                        onAllNodesWithTag("section-guide-brief").fetchSemanticsNodes().isNotEmpty()
-                }
-                waitForIdle()
-                // 在真实 BookPageView 上鼠标拖选第 4 页「（二）基本任务」正文，自动浮出选字工具条
-                onNodeWithTag("book-sheet-0").performMouseInput {
-                    val b = onNodeWithTag("reader-text").fetchSemanticsNode().boundsInRoot
-                    val sheet = onNodeWithTag("book-sheet-0").fetchSemanticsNode().boundsInRoot
-                    val startX = (b.left - sheet.left) + 24f
-                    val y = (b.top - sheet.top) + 210f
-                    moveTo(Offset(startX, y))
+                // TON-1784 opens explanations in the drawer. The preceding component test checks the cached guide.
+                val prefix = secondSection.blocks.first { it.isBodyParagraph && it.text.trim().length >= 12 }.text.trim().take(12)
+                val body = hasTestTag("reader-text") and hasText(prefix, substring = true)
+                waitUntil(timeoutMillis = 20_000) { onAllNodes(body).fetchSemanticsNodes().size == 1 }
+                val text = onNode(body)
+                val layouts = mutableListOf<TextLayoutResult>()
+                text.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+                val layout = layouts.single()
+                val start = layout.layoutInput.text.text.indexOf(prefix)
+                val end = start + prefix.length - 1
+                text.performMouseInput {
+                    moveTo(layout.getBoundingBox(start).center)
                     press()
-                    moveTo(Offset(startX + 260f, y))
+                    moveTo(layout.getBoundingBox(end).center)
                     release()
                 }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("selection-explain-toolbar").fetchSemanticsNodes().isNotEmpty() }
                 waitForIdle()
                 onNodeWithTag("selection-action-explain").assertTextEquals("讲讲")
                 onNodeWithTag("selection-action-example").assertTextEquals("举个例子")
-                onNodeWithTag("selection-action-rephrase").assertTextEquals("换个说法")
+                onNodeWithTag("selection-action-split").assertTextEquals("拆句")
                 onNodeWithTag("selection-action-ask").assertTextEquals("问…")
                 savePng(outDir.resolve("ton1766-03-selection-toolbar.png"))
 
@@ -330,15 +336,21 @@ class BookStructureAndGuideTest {
                 assertEquals(1, explainer.selectionCalls.last().third.size, "追问必须携带上一轮问答历史")
                 assertTrue(onNodeWithTag("inline-explain-turn-0").fetchSemanticsNode().boundsInRoot.height > 20f, "第一轮回答必须可见")
                 assertTrue(onNodeWithTag("inline-explain-turn-1").fetchSemanticsNode().boundsInRoot.height > 20f, "追问回答必须可见")
+                // The side drawer scrolls history independently of its composer. The narrow
+                // presentation moves the same input below the page with room for a full line.
+                onNodeWithTag("inline-followup-input").assertIsDisplayed()
+                runOnIdle { readerWidth = 900.dp }
+                waitForIdle()
+                onNodeWithTag("inline-explain-turn-1").assertExists()
                 val inputBounds = onNodeWithTag("inline-followup-input").fetchSemanticsNode().boundsInRoot
                 assertTrue(inputBounds.width > 400f && inputBounds.height < 120f, "追问输入框应为横向单行输入：$inputBounds")
                 waitForIdle()
                 savePng(outDir.resolve("ton1766-04-followup.png"))
 
                 // 收起就地回答卡后，卡片和选字浮条均收起
-                onNodeWithTag("inline-explain-close").performClick()
+                onNodeWithTag("companion-close").performClick()
                 waitForIdle()
-                onNodeWithTag("inline-explain-card").assertDoesNotExist()
+                onNodeWithTag("immersive-companion-drawer").assertDoesNotExist()
                 onNodeWithTag("selection-explain-toolbar").assertDoesNotExist()
             }
         } finally {
@@ -389,9 +401,9 @@ class BookStructureAndGuideTest {
                     release()
                 }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("selection-explain-toolbar").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithTag("selection-action-rephrase").performClick()
+                onNodeWithTag("selection-action-split").performClick()
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("inline-explain-turn-0").fetchSemanticsNodes().isNotEmpty() }
-                assertEquals("rephrase", explainer.selectionCalls.last().first)
+                assertEquals("split", explainer.selectionCalls.last().first)
                 assertEquals(epub.lessons.first().breadcrumb, explainer.selectionCalls.last().second?.location)
             }
 
@@ -414,6 +426,12 @@ class BookStructureAndGuideTest {
             assertTrue(secondLessonId in legacy.lessons.map { it.id }, "超过 2400 字的旧书第二节 ID 必须保持 p1:2400")
 
             val savedAnswer = PracticeAnswer(text = "技术变革", revealed = true, understood = true)
+            // This is an existing review, with its original frozen options and solution.
+            val oldSection = legacy.lessons.single { it.id == secondLessonId }
+            val oldPractice = Practice("迁移验证", oldSection.text, "另一选项", listOf("技术变革", "另一选项"))
+            reopened.withCourseDatabase { db ->
+                TextbookReviewStore({ 0L }).recordLesson(db, legacy, oldSection, QuestionMode.CHOICE, oldPractice, savedAnswer)
+            }
             reopened.saveAnswer(legacy.id, secondLessonId, QuestionMode.CHOICE, savedAnswer)
             val afterReload = TextbookLibrary(library.directory)
             assertEquals(savedAnswer, afterReload.answer(legacy.id, secondLessonId, QuestionMode.CHOICE), "旧书已存作答必须持续可查")

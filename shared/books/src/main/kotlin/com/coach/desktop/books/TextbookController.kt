@@ -56,6 +56,7 @@ internal data class LibraryUi(
     val activeCourseTopicId: String? = null,
     val activeCourseDetail: CourseDetailSnapshot? = null,
     val pendingCourseJump: BookPassage? = null,
+    val canReturnToCitationOrigin: Boolean = false,
     val courseNotice: String? = null,
     val courseBusy: Boolean = false,
     /** 当前打开的书单 ID（从书单进入阅读器时保留上下文，返回时回到该书单页）。 */
@@ -79,6 +80,16 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     suspend fun awaitBooklistAlignment() { activeBooklistAlignJob?.join() }
     private val mutable = MutableStateFlow(LibraryUi(initialized = false))
     val state = mutable.asStateFlow()
+    private data class CitationOrigin(
+        val bookId: String,
+        val anchor: BookPageAnchor,
+        val courseId: String?,
+        val topicId: String?,
+        val booklistId: String?,
+        val source: BookLesson?,
+        val review: LocalBookReview?,
+    )
+    private val citationOrigins = ArrayDeque<CitationOrigin>()
     private val actions = Mutex()
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var activeImport: BookImportControl? = null
@@ -183,14 +194,21 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         pendingPageSaveJob?.join()
     }
 
-    private suspend fun action(showBusy: Boolean = true, block: suspend () -> Unit) = actions.withLock {
+    private suspend fun action(showBusy: Boolean = true, citationNavigation: Boolean = false, block: suspend () -> Unit) = actions.withLock {
+        val before = mutable.value
         mutable.update { it.copy(busy = showBusy, error = null) }
         try { withContext(Dispatchers.IO) { block() } }
         catch (cancel: CancellationException) { throw cancel }
         catch (failure: Exception) {
             mutable.update { it.copy(error = failure.message.takeIf { failure is IllegalArgumentException && ReadableText.readsAsChinese(it) }
                 ?: "暂时无法读取或保存教材，请确认文件完整、未加密，然后重试。") }
-        } finally { mutable.update { it.copy(busy = false) } }
+        } finally {
+            val after = mutable.value
+            if (!citationNavigation && (before.screen != after.screen || before.book?.id != after.book?.id)) {
+                citationOrigins.clear()
+            }
+            mutable.update { it.copy(busy = false, canReturnToCitationOrigin = citationOrigins.isNotEmpty()) }
+        }
     }
 
     suspend fun load() {
@@ -1399,9 +1417,37 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         mutable.update { it.copy(screen = BookScreen.READER, source = lesson, page = page, prompt = null) }
     }
 
-    suspend fun back() = action {
+    private fun citationOrigin(targetBookId: String, visibleAnchor: BookPageAnchor?): CitationOrigin? {
+        val ui = mutable.value
+        val book = ui.book ?: return null
+        if (ui.screen != BookScreen.READER || book.id == targetBookId) return null
+        val offset = library.savedReadSpot(book.id)?.takeIf { it.first == ui.page }?.second ?: 0
+        return CitationOrigin(book.id, visibleAnchor ?: BookPageAnchor(ui.page, offset),
+            ui.activeCourseId, ui.activeCourseTopicId, ui.activeBooklistId, ui.source, ui.review)
+    }
+
+    suspend fun back() = action(citationNavigation = true) {
         val cur = mutable.value
-        if (cur.source != null) {
+        val origin = citationOrigins.lastOrNull()
+        if (cur.screen == BookScreen.READER && origin != null) {
+            val book = library.book(origin.bookId)
+            val page = origin.anchor.importPage
+            val restored = if (origin.source == null) book.copy(readingPage = page) else book
+            if (origin.source == null) {
+                library.save(restored)
+                library.saveReadSpot(book.id, page, origin.anchor.offsetUtf16)
+            }
+            library.saveOpenSession(book.id, "READER")
+            origin.courseId?.let { courseId -> library.withCourseDatabase { db ->
+                CourseStore.saveActiveAnchor(db, CourseActiveAnchor(courseId, origin.topicId, book.id, page, true))
+            } }
+            val detail = origin.courseId?.let { library.courseDetail(it) }
+            val catalog = library.catalog()
+            mutable.update { it.copy(book = restored, page = page, source = origin.source, review = origin.review,
+                activeCourseId = origin.courseId, activeCourseTopicId = origin.topicId, activeCourseDetail = detail,
+                activeBooklistId = origin.booklistId, pendingCourseJump = null, keepAskTabOpen = false, catalog = catalog) }
+            citationOrigins.removeLast()
+        } else if (cur.source != null) {
             mutable.update {
                 it.copy(screen = if (it.review == null) BookScreen.LEARNING else BookScreen.REVIEWING, source = null)
             }
@@ -1844,7 +1890,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
-    suspend fun jumpToCourseCitation(ref: CourseCitationRef) = action {
+    suspend fun jumpToCourseCitation(ref: CourseCitationRef, visibleAnchor: BookPageAnchor? = null) = action(citationNavigation = true) {
+        val origin = citationOrigin(ref.bookId, visibleAnchor)
         val loaded = library.book(ref.bookId)
         val verified = CourseClientGates.verifySingleCitation(ref, loaded.pages)
         val targetPage = verified?.page ?: ref.page.coerceIn(1, loaded.pages.size.coerceAtLeast(1))
@@ -1889,6 +1936,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 activeCourseDetail = it.activeCourseId?.let { cid -> library.courseDetail(cid) },
             )
         }
+        if (origin != null) citationOrigins.addLast(origin)
     }
 
     fun consumePendingCourseJump() {
@@ -1900,7 +1948,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     }
 
     /** 2.0-AI-3：从「整门课 / 已读书目」问答或全局搜索点击跨材料页码胶囊，1 击切书跳页并保留「提问」抽屉。 */
-    suspend fun jumpToCollectionCitation(citation: CollectionQaCitation) = action {
+    suspend fun jumpToCollectionCitation(citation: CollectionQaCitation, visibleAnchor: BookPageAnchor? = null) = action(citationNavigation = true) {
+        val origin = citationOrigin(citation.bookId, visibleAnchor)
         val loaded = library.book(citation.bookId)
         val clampedPage = citation.page.coerceIn(1, loaded.pages.size.coerceAtLeast(1))
         val pageObj = loaded.page(clampedPage)
@@ -1963,6 +2012,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 catalog = library.catalog(),
             )
         }
+        if (origin != null) citationOrigins.addLast(origin)
     }
 
     fun dismissCourseNotice() {

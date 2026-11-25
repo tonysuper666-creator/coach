@@ -32,6 +32,7 @@ class BookLessonExplanationReplyTest {
         assertTrue(blocks.size > 6)
         val last = blocks.last()
         var calls = 0
+        ReadingSettings(library.directory).chooseAiExplain(false)
         val support = PairedBookLearningSupport(library, sendLesson = { sent, pages ->
             calls++
             assertEquals(blocks, sent)

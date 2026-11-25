@@ -326,7 +326,7 @@ class Ton1848CompanionFixesTest {
                         }
                     }
                 }
-                waitUntil(timeoutMillis = 5_000) { explainer.lessonCalls.isNotEmpty() }
+                waitUntil(timeoutMillis = 5_000) { onAllNodesWithTag("explain-text").fetchSemanticsNodes().isNotEmpty() }
                 waitForIdle()
                 assertEquals(listOf(listOf(blockIntro)), explainer.lessonCalls)
                 onNodeWithTag("explain-text").assertTextContains("INTRODUCTION", substring = true)
@@ -385,7 +385,7 @@ class Ton1848CompanionFixesTest {
             val migratedLibrary = TextbookLibrary(library.directory)
             assertTrue(Files.isRegularFile(library.directory.resolve(BookSchemaMigration.V5_BACKUP_FILENAME)))
             DriverManager.getConnection("jdbc:sqlite:$dbFile").use { db ->
-                assertEquals(BookSchemaMigration.V6_SCHEMA_VERSION, BookSchemaMigration.readUserVersion(db))
+                assertEquals(BookSchemaMigration.CURRENT_SCHEMA_VERSION, BookSchemaMigration.readUserVersion(db))
                 assertTrue(BookSchemaMigration.tableExists(db, "book_ask_turns"))
             }
 

@@ -547,8 +547,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                         scope.launch { controller.refreshCourseTopicPack(activeCourse.courseId, activeTopic.topicId, explainer) }
                                     }
                                 },
-                                onJumpCourseCitation = { citation ->
-                                    run { controller.jumpToCourseCitation(citation) }
+                                onJumpCourseCitation = { citation, origin ->
+                                    run { controller.jumpToCourseCitation(citation, origin) }
                                 },
                                 onCancelImport = controller::cancelImport,
                                 onReorganizeSections = { run { controller.reorganizeSections() } },
@@ -578,8 +578,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 },
                                 collectionQaSessions = collectionQaSessions,
                                 onUpdateCollectionQaSession = { colId, next -> collectionQaSessions[colId] = next },
-                                onJumpCollectionCitation = { citation ->
-                                    run { controller.jumpToCollectionCitation(citation) }
+                                onJumpCollectionCitation = { citation, origin ->
+                                    run { controller.jumpToCollectionCitation(citation, origin) }
                                 },
                                 onConsumeKeepAskTabOpen = controller::consumeKeepAskTabOpen,
                                 hinge = hinge,

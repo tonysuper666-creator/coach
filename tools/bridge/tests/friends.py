@@ -308,6 +308,37 @@ class FriendApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(KEY, path.read_text())
             self.assertNotIn("secret-source", path.read_text())
 
+    async def test_friend_minimal_effort_header_disables_thinking_in_upstream_payload(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_FRIEND_CONFIG": temp + "/friends.json"}):
+            fund(Path(temp))
+            ledger = CreditLedger(Path(temp), lambda: NOW)
+            seen_payloads = []
+
+            def response(request):
+                body = json.loads(request.content)
+                seen_payloads.append(body)
+                return httpx.Response(200, content=frames("anthropic", model=body["model"]))
+
+            router = ApiRouter(ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(response)), keys={"anthropic": KEY})
+            cli = AsyncMock(side_effect=AssertionError("Friend must never enter subscription CLI"))
+            with patch.object(bridge, "API_ROUTER", router), patch.object(bridge, "dispatch_cli", cli), patch.object(bridge, "write_log"):
+                min_req = bridge.build_req(
+                    {"model": "claude-haiku-5-5", "max_tokens": 200, "messages": [{"role": "user", "content": "batch chunk"}]},
+                    {"x-coach-task": "READER_SELECTION", "x-coach-friend": B, "x-coach-friend-device": "pc", "x-coach-effort": "minimal"},
+                )
+                min_res = await bridge.dispatch(min_req, min_req.model, None)
+                self.assertEqual("complete", min_res.status)
+                self.assertEqual({"type": "disabled"}, seen_payloads[0].get("thinking"))
+
+                std_req = bridge.build_req(
+                    {"model": "claude-haiku-5-5", "max_tokens": 200, "messages": [{"role": "user", "content": "math audit"}]},
+                    {"x-coach-task": "READER_SELECTION", "x-coach-friend": B, "x-coach-friend-device": "pc"},
+                )
+                std_res = await bridge.dispatch(std_req, std_req.model, None)
+                self.assertEqual("complete", std_res.status)
+                self.assertNotIn("thinking", seen_payloads[1])
+                cli.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

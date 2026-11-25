@@ -760,6 +760,72 @@ class SectionBatchPipelineTest {
     }
 
     @Test
+    fun friendChapterBatchSendsMinimalEffortWhileMathAuditAndOwnerOmitIt() = runBlocking {
+        val observed = CopyOnWriteArrayList<Triple<String, String, String?>>()
+        val mockBridge = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
+            createContext("/v1/chat/completions") { ex ->
+                val body = ex.requestBody.readBytes().decodeToString()
+                val parsed = com.coach.domain.LedgerJson.parseToJsonElement(body) as JsonObject
+                val model = parsed["model"]?.toString()?.trim('"').orEmpty()
+                val task = ex.requestHeaders.getFirst("X-Coach-Task").orEmpty()
+                val effort = ex.requestHeaders.getFirst("X-Coach-Effort")
+                observed += Triple(task, model, effort)
+                val reply = buildJsonObject {
+                    put("model", model)
+                    put("choices", buildJsonArray {
+                        add(buildJsonObject {
+                            put("index", 0)
+                            put("message", buildJsonObject {
+                                put("role", "assistant")
+                                put("content", "{}")
+                            })
+                        })
+                    })
+                    put("x_coach", buildJsonObject {
+                        put("status", "complete")
+                        put("finish_reason", "stop")
+                        put("served_by", model)
+                        put("fallback", false)
+                        put("physical_calls", 1)
+                        put("request_id", "effort-assert")
+                        put("queue_ms", 1)
+                        put("ttft_ms", 5)
+                        put("elapsed_ms", 10)
+                    })
+                }.toString().toByteArray(Charsets.UTF_8)
+                ex.responseHeaders.add("Content-Type", "application/json")
+                ex.sendResponseHeaders(200, reply.size.toLong())
+                ex.responseBody.use { it.write(reply) }
+            }
+            start()
+        }
+        try {
+            val bridge = BridgeClient(BridgeConfig(baseUrl = "http://127.0.0.1:${mockBridge.address.port}", testTraffic = true))
+            val transport = HaikuRealtimeBridgeTransport(bridge)
+            val friendScoped = FriendScopedBatchTransport(transport, friend = "friend-effort", device = "dev-effort")
+
+            friendScoped.generateSection("sys", "usr", "BOOK_SECTION_BATCH", "k-1", 1024)
+            friendScoped.generateSection("sys", "usr", "BOOK_EXERCISE_HINTS", "k-2", 1024)
+            friendScoped.generateSection("sys", "usr", "BOOK_MATH_VERIFY", "k-3", 1024)
+            friendScoped.generateSection("sys", "usr", "BOOK_MATH_REPAIR", "k-4", 1024)
+            transport.generateSection("sys", "usr", "BOOK_SECTION_BATCH", "k-own", 1024)
+
+            assertEquals(
+                listOf(
+                    Triple("READER_SELECTION", BridgeClient.HAIKU, "minimal"),
+                    Triple("READER_SELECTION", BridgeClient.HAIKU, "minimal"),
+                    Triple("READER_SELECTION", BridgeClient.HAIKU, null),
+                    Triple("READER_SELECTION", BridgeClient.HAIKU, null),
+                    Triple("BOOK_SECTION_BATCH", BridgeClient.GPT_62_ASTRA, null),
+                ),
+                observed.toList(),
+            )
+        } finally {
+            mockBridge.stop(0)
+        }
+    }
+
+    @Test
     fun companionChapterFailsClosedWhenImportStoreOrFriendAccessIsUnconfiguredOrCatalogReserved() = runBlocking {
         val dir = Files.createTempDirectory("coach-companion-failclosed-")
         val store = com.coach.store.LedgerStore(dir)

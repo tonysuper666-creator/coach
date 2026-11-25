@@ -906,6 +906,26 @@ class VisionRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(["api.anthropic.com"], seen)
             self.assertGreater(ledger.read()["months"]["2026-11"]["anthropic"]["reserved_microusd"], 0)
 
+    async def test_minimal_effort_disables_anthropic_thinking_only_when_requested(self):
+        seen_payloads = []
+
+        def handle(request):
+            body = json.loads(request.content)
+            seen_payloads.append(body)
+            return httpx.Response(200, content=frames("anthropic", model=body["model"]))
+
+        router = self.router(handler=handle)
+        events_min = await self.collect_with_effort(router, "READER_SELECTION", "claude-haiku-5-5", effort="minimal")
+        self.assertEqual("complete", events_min[-1]["kind"])
+        self.assertEqual({"type": "disabled"}, seen_payloads[0].get("thinking"))
+
+        events_default = await self.collect_with_effort(router, "READER_SELECTION", "claude-haiku-5-5", effort=None)
+        self.assertEqual("complete", events_default[-1]["kind"])
+        self.assertNotIn("thinking", seen_payloads[1])
+
+    async def collect_with_effort(self, router, task="READER_SELECTION", model="claude-haiku-5-5", effort=None):
+        return [e async for e in router.events(task, model, "synthetic system", "synthetic prompt", 100, effort=effort)]
+
 
 if __name__ == "__main__":
     unittest.main()

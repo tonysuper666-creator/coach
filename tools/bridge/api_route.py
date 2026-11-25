@@ -438,7 +438,7 @@ class ApiRouter:
                 event = dict(event, fallback=True)
             yield event
 
-    async def events(self, task: str, requested: str, system: str, prompt: str, max_tokens: int | None, format_attempt=0, friend=None, device=None, images=None):
+    async def events(self, task: str, requested: str, system: str, prompt: str, max_tokens: int | None, format_attempt=0, friend=None, device=None, images=None, effort: str | None = None):
         if friend is not None and (task != "READER_SELECTION" or vendor(requested) != "anthropic"):
             raise Denied("invalid_friend_route")
         model = friend_model(requested) if friend is not None else route(task, requested, format_attempt)
@@ -453,7 +453,7 @@ class ApiRouter:
                 fb = cand
         yielded_text = False
         try:
-            async for event in self._stream_model(task, model, system, prompt, max_tokens, friend=friend, device=device, images=images):
+            async for event in self._stream_model(task, model, system, prompt, max_tokens, friend=friend, device=device, images=images, effort=effort):
                 if event.get("kind") == "text" and event.get("text"):
                     yielded_text = True
                 yield event
@@ -470,12 +470,12 @@ class ApiRouter:
         except ApiFailure:
             if yielded_text or fb is None:
                 raise
-        async for event in self._stream_model(task, fb, system, prompt, max_tokens, friend=friend, device=device, images=images):
+        async for event in self._stream_model(task, fb, system, prompt, max_tokens, friend=friend, device=device, images=images, effort=effort):
             if event.get("kind") == "complete":
                 event = dict(event, fallback=True)
             yield event
 
-    async def _stream_model(self, task: str, model: str, system: str, prompt: str, max_tokens: int | None, *, friend=None, device=None, images=None):
+    async def _stream_model(self, task: str, model: str, system: str, prompt: str, max_tokens: int | None, *, friend=None, device=None, images=None, effort: str | None = None):
         provider = vendor(model)
         key = self.keys.get(provider, "")
         output_limit = max_tokens if max_tokens is not None else 4000
@@ -516,6 +516,8 @@ class ApiRouter:
                     user_content = prompt
                 payload = {"model": model, "system": system, "messages": [{"role": "user", "content": user_content}],
                            "max_tokens": output_limit, "stream": True}
+                if effort == "minimal":
+                    payload["thinking"] = {"type": "disabled"}
             else:
                 headers = {"Authorization": "Bearer " + key}
                 if validated_images:

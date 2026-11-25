@@ -1338,7 +1338,9 @@ try {
         $boxX0 = [Math]::Max(0, $clickX - 24)
         $boxX1 = [Math]::Min($winW - 2, $boxX0 + 380)
         $boxY0 = [Math]::Max(0, $rowY - 24)
-        $boxY1 = [Math]::Min($winH - 2, $rowY + 24)
+        # 宽屏 HiDPI 下提示语「问这句的意思…」在输入框上沿，输入正文落在其下方 ~25..110px 处；
+        # 像素差检测盒向下覆盖到 $rowY + 120，才能比出探针字与粘贴中文的差异。
+        $boxY1 = [Math]::Min($winH - 2, $rowY + 120)
         $emptyPng = $script:LastPng
         $question = '用大白话解释一下，这里的专用人力资本是什么意思？'
         # 标记直接写进问题里，回答轮的标题是「问：<原问题>」，标记出现在那行才算这一问真的发出去了。
@@ -1699,7 +1701,7 @@ try {
             # 下面一颗「讲整章」，再下面是这一页的讲解卡和「出处 N · 第 N 页」。朋友打开抽屉先看到的就是它，
             # 第 5 步认这张卡：讲解出来了、出处能点回原文页。「讲整章」走 /api/books/<id>/modes/<mode>，
             # 冒烟门只转发 /v1/library/* 那几条，点了只会出「这次没讲成，先看原文」，所以这里不点它。
-            $page5 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^讲的是[:：]?第\d+页' } | Select-Object -First 1
+            $page5 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^讲的是[:：]?第\d+[页頁贞貞虫]' } | Select-Object -First 1
             if ($page5) {
                 $busy5 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '正在讲解这一页|正在打开讲解' } | Select-Object -First 1
                 $kp = Find-PageCite $lines
@@ -1762,7 +1764,7 @@ try {
             $null = Shot 5 'explain-full'
         }
         if (-not $chip) { Fail 5 "讲解出来了，但滚到底也读不到$what5（见 5-explain-wait*.png / 5-explain-full.png）" }
-        $chipPage = [regex]::Match($chip.Text, '第\s*(\d+)\s*页').Groups[1].Value
+        $chipPage = [regex]::Match(($chip.Text -replace '\s', ''), '第(\d+)[页頁贞貞虫]').Groups[1].Value
         Note "步骤5 讲解的出处：$($chip.Text)"
         $bx = Get-LineBox $chip
         $bxc = [int](($bx.X1 + $bx.X2) / 2); $byc = [int]$bx.Y

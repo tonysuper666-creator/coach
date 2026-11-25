@@ -12,8 +12,10 @@ import kotlin.test.Test
 import kotlin.test.assertNotEquals
 
 /**
- * TON-1846: the next screen of the same imported page must change the footer page status.
- * Publishing only the import page leaves the footer unchanged, so this fails until that changes.
+ * TON-1846: the next screen of the same imported page must change the footer.
+ * The reader calls the six-argument [BookBoundaries.pageStatus]: import page, last page,
+ * chapter, screen index, screen count, and remaining screens in the chapter.
+ * A three-argument call hides that move, so the two strings stay equal.
  */
 class R1846SamePageFooterTest {
     @Test
@@ -36,32 +38,18 @@ class R1846SamePageFooterTest {
         fun status(): String {
             val screen = screens.indexOfFirst { it.anchor.offsetUtf16 == state.anchor.offsetUtf16 }
                 .let { index -> if (index < 0) 1 else index + 1 }
-            return footerStatus(state.publishedImportPage, 5, chapter, screen, screens.size)
+            return BookBoundaries.pageStatus(
+                page = state.publishedImportPage,
+                lastPage = 5,
+                chapter = chapter,
+                subPage = screen,
+                subPageCount = screens.size,
+                chapterRemainingScreens = 0,
+            )
         }
         val before = status()
         state.move(ReaderTurn.Next)
         val after = status()
-        assertNotEquals(before, after, "footer stayed $after after moving to offset ${state.anchor.offsetUtf16}")
-    }
-
-    /**
-     * Same imported page, next screen. The five-argument status adds the screen fraction.
-     * The three-argument status ignores that move, so the two strings stay equal.
-     */
-    private fun footerStatus(
-        page: Int,
-        lastPage: Int,
-        chapter: BookChapterSpan,
-        subPage: Int,
-        subPageCount: Int,
-    ): String {
-        val ranged = BookBoundaries::class.java.methods.firstOrNull {
-            it.name == "pageStatus" && it.parameterCount == 5
-        }
-        return if (ranged != null) {
-            ranged.invoke(BookBoundaries, page, lastPage, chapter, subPage, subPageCount) as String
-        } else {
-            BookBoundaries.pageStatus(page, lastPage, chapter)
-        }
+        assertNotEquals(before, after, "footer stayed `$after` after moving to offset ${state.anchor.offsetUtf16}")
     }
 }

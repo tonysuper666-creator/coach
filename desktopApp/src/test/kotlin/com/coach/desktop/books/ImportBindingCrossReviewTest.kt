@@ -88,36 +88,60 @@ class ImportBindingCrossReviewTest {
     }
 
     @Test fun cancelDuringFirstReconnectUsesVerifiedBinding() = runBlocking {
-        val dir = Files.createTempDirectory("review-reconnect-")
-        val source = dir.resolve("scan.png")
+        val root = Files.createTempDirectory("review-reconnect-")
+        val dir = root.resolve("library")
+        val source = root.resolve("scan.png")
         ImageIO.write(BufferedImage(32, 32, BufferedImage.TYPE_BYTE_GRAY), "png", source.toFile())
+        val original = TextbookLibrary(dir)
+        val remote = SyntheticRemote().apply { online = false }
+        val first = TextbookController(original).apply { unifiedUploadClient = remote }
+        first.onUploadIdentityChanged(remote.sessionKey)?.join()
+        first.createCollection(CollectionKind.BOOKLIST, "Sample", existingBookIds = emptyList(), newFiles = listOf(source)).join()
+        val bookId = original.catalog().single().id
+        assertEquals(remote.sessionKey, original.importAccountKey(bookId))
         val started = CompletableDeferred<Unit>()
-        val library = TextbookLibrary(dir.resolve("library"), ocr = BookOcr { _, control ->
+        val reopened = TextbookLibrary(dir, ocr = BookOcr { _, control ->
             started.complete(Unit)
             while (!control.isCancelled()) Thread.sleep(5)
             control.check()
             ""
         })
-        val remote = SyntheticRemote().apply { online = false }
-        val controller = TextbookController(library).apply { unifiedUploadClient = remote }
-        controller.onUploadIdentityChanged(remote.sessionKey)?.join()
-        val importing = controller.launchImport(source)
-        val bookId: String
+        val second = TextbookController(reopened).apply { unifiedUploadClient = remote }
+        second.onUploadIdentityChanged(remote.sessionKey)?.join()
+        second.load()
         try {
             withTimeout(15000) { started.await() }
-            bookId = library.catalog().single().id
-            assertEquals(remote.sessionKey, library.importAccountKey(bookId))
+            assertEquals(remote.sessionKey, reopened.importAccountKey(bookId))
             remote.online = true
-            controller.syncBookUploads().join()
-            assertEquals(remote.verifiedAccount, library.importAccountKey(bookId))
-            assertEquals(remote.shelfId, library.readUploadEntry(remote.verifiedAccount, bookId)?.serverShelfBookId)
+            second.syncBookUploads().join()
+            assertEquals(remote.verifiedAccount, reopened.importAccountKey(bookId))
+            assertEquals(remote.shelfId, reopened.readUploadEntry(remote.verifiedAccount, bookId)?.serverShelfBookId)
         } finally {
-            controller.cancelImport()
-            importing.join()
+            second.cancelImport()
         }
-        controller.syncBookUploads().join()
-        assertTrue(library.catalog().isEmpty())
-        val state = library.readUploadEntry(remote.verifiedAccount, bookId)?.state
+        withTimeout(15000) { while (second.state.value.importing != null) kotlinx.coroutines.delay(10) }
+        second.syncBookUploads().join()
+        assertTrue(reopened.catalog().isEmpty())
+        val state = reopened.readUploadEntry(remote.verifiedAccount, bookId)?.state
         assertEquals(1, remote.deletes, "Verified account row after cancellation: " + state)
+    }
+
+    @Test fun completedLocalOnlyScanReimportBindsCurrentAccount() = runBlocking {
+        val root = Files.createTempDirectory("review-local-scan-")
+        val dir = root.resolve("library")
+        val source = root.resolve("scan.png")
+        ImageIO.write(BufferedImage(32, 32, BufferedImage.TYPE_BYTE_GRAY), "png", source.toFile())
+        val pre = TextbookLibrary(dir)
+        val existing = pre.stageBookImport(source).book
+        assertTrue(existing.hasPendingOcr)
+        val library = TextbookLibrary(dir, ocr = BookOcr { _, _ -> "Synthetic OCR text" })
+        val remote = SyntheticRemote()
+        val controller = TextbookController(library).apply { unifiedUploadClient = remote }
+        controller.onUploadIdentityChanged(remote.sessionKey)?.join()
+        controller.importBook(source)
+        controller.syncBookUploads().join()
+        assertEquals(1, remote.uploads)
+        assertEquals(existing.id, library.catalog().single().id)
+        assertEquals(remote.shelfId, library.readUploadEntry(remote.verifiedAccount, existing.id)?.serverShelfBookId)
     }
 }

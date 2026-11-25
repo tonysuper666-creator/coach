@@ -6,7 +6,6 @@ import java.nio.file.Path
 import java.util.concurrent.CopyOnWriteArrayList
 import javax.imageio.ImageIO
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
@@ -31,7 +30,6 @@ class ExistingShelfCancelReviewTest {
         val account = "synthetic-account"
         assertNull(library.readUploadEntry(account, book.id))
         val existingShelf = mapOf(book.id to "sb_123456781234567812345678")
-        val existingId = existingShelf.getValue(book.id)
         val deleteRequests = CopyOnWriteArrayList<String>()
         val remote = object : UnifiedBookRemoteClient {
             override suspend fun activeAccountKey() = account
@@ -50,8 +48,9 @@ class ExistingShelfCancelReviewTest {
         try {
             withTimeout(15000) {
                 enteredOcr.await()
-                while (library.readUploadEntry(account, book.id)?.serverShelfBookId != existingId) delay(5)
             }
+            controller.syncBookUploads().join()
+            assertNull(library.readUploadEntry(account, book.id))
         } finally {
             controller.cancelImport()
             importing.join()

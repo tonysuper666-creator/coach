@@ -497,14 +497,7 @@ class UnifiedBookUploadQueueTest {
     fun cancelImportAfterAccountSwitchUnbindsOnlyInitiatingAccountAndPreservesOtherAccountPendingOriginal() = runBlocking {
         val root = Files.createTempDirectory("coach-upload-initiating-account-")
         try {
-            val lib = TextbookLibrary(
-                root.resolve("library"),
-                ocr = BookOcr { _, control ->
-                    while (!control.isCancelled()) Thread.sleep(10)
-                    control.check()
-                    ""
-                },
-            )
+            val libDir = root.resolve("library")
             val imageFile = root.resolve("scan-book.png")
             val raster = java.awt.image.BufferedImage(32, 32, java.awt.image.BufferedImage.TYPE_BYTE_GRAY)
             ImageIO.write(raster, "png", imageFile.toFile())
@@ -546,27 +539,45 @@ class UnifiedBookUploadQueueTest {
 
                 override suspend fun deleteBook(shelfBookId: String): UnifiedBookDeleteOutcome {
                     val account = activeKey ?: return UnifiedBookDeleteOutcome.Unauthorized
-                    deletedOnServer += account to shelfBookId
+                    deletedOnServer += account to shelfIdOr(shelfBookId)
                     val removed = remoteShelfRecords.remove(account to shelfBookId) != null
                     return if (removed) UnifiedBookDeleteOutcome.Deleted else UnifiedBookDeleteOutcome.NotFound
                 }
+
+                private fun shelfIdOr(shelfBookId: String): String = shelfBookId
             }
 
+            val setupLib = TextbookLibrary(libDir)
+            val firstController = TextbookController(setupLib).apply { unifiedUploadClient = remote }
+            firstController.onUploadIdentityChanged("sable-alpha")?.join()
+            firstController.createCollection(
+                CollectionKind.BOOKLIST,
+                "Sample",
+                existingBookIds = emptyList(),
+                newFiles = listOf(imageFile),
+            ).join()
+            val importedId = setupLib.catalog().single().id
+            kotlinx.coroutines.withTimeout(15000) {
+                while (setupLib.readUploadEntry("sable-alpha", importedId)?.serverShelfBookId == null) {
+                    kotlinx.coroutines.delay(10)
+                }
+            }
+            val alphaShelfId = setupLib.readUploadEntry("sable-alpha", importedId)!!.serverShelfBookId!!
+
+            val ocrStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val lib = TextbookLibrary(
+                libDir,
+                ocr = BookOcr { _, control ->
+                    ocrStarted.complete(Unit)
+                    while (!control.isCancelled()) Thread.sleep(10)
+                    control.check()
+                    ""
+                },
+            )
             val controller = TextbookController(lib).apply { unifiedUploadClient = remote }
             controller.onUploadIdentityChanged("sable-alpha")?.join()
-
-            // Start import as Account A (sable-alpha) and wait until upload has produced a server shelfBookId.
-            val importJob = launch(Dispatchers.Default) {
-                controller.importBook(imageFile)
-            }
-            while (controller.state.value.importing?.recognizing != true) {
-                kotlinx.coroutines.delay(10)
-            }
-            val importedId = controller.state.value.importing!!.bookId!!
-            while (lib.readUploadEntry("sable-alpha", importedId)?.serverShelfBookId == null) {
-                kotlinx.coroutines.delay(10)
-            }
-            val alphaShelfId = lib.readUploadEntry("sable-alpha", importedId)!!.serverShelfBookId!!
+            controller.load()
+            kotlinx.coroutines.withTimeout(15000) { ocrStarted.await() }
 
             // Switch to Account B (sable-beta) while offline so beta's copy is still waiting to upload, then cancel Account A's import!
             lib.enqueueBookUpload("sable-beta", importedId, importedId, "png", "scan-book")
@@ -575,7 +586,9 @@ class UnifiedBookUploadQueueTest {
             controller.onUploadIdentityChanged("sable-beta")?.join()
 
             controller.cancelImport()
-            importJob.join()
+            kotlinx.coroutines.withTimeout(15000) {
+                while (controller.state.value.importing != null) kotlinx.coroutines.delay(10)
+            }
 
             // Only Account A is marked PENDING_DELETE; Account B keeps its pending upload AND local original file!
             val alphaAfterCancel = assertNotNull(lib.readUploadEntry("sable-alpha", importedId))

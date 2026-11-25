@@ -147,6 +147,30 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             }
         }
     }
+
+    private suspend fun enqueueAndSyncCompletedImport(
+        book: Textbook,
+        initiatingAccountKey: String?,
+        isCancelled: () -> Boolean = { false },
+    ) {
+        val effectiveAccountKey = initiatingAccountKey?.let { key ->
+            runCatching { library.boundUploadAccountKey(key) }.getOrNull() ?: key
+        }
+        if (effectiveAccountKey != null && unifiedUploadClient != null) {
+            runCatching {
+                uploadCoordinator.enqueueBookForAccount(
+                    accountKey = effectiveAccountKey,
+                    localBookId = book.id,
+                    fileSha256 = book.id,
+                    format = book.format,
+                    title = book.title,
+                )
+            }
+            if (!isCancelled() && effectiveAccountKey == uploadCoordinator.currentAccountKey()) {
+                syncBookUploads()
+            }
+        }
+    }
     fun cancelImport() { activeImport?.cancel() }
     fun dismissImportNotice(id: Long) {
         mutable.update { if (it.importNotice?.id == id) it.copy(importNotice = null) else it }
@@ -696,23 +720,6 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 val book = result.book
                 persistImportOwnerIfNew(result, initiatingAccountKey)
                 control.check()
-                val effectiveAccountKey = initiatingAccountKey?.let { key ->
-                    runCatching { library.boundUploadAccountKey(key) }.getOrNull() ?: key
-                }
-                if (effectiveAccountKey != null && unifiedUploadClient != null) {
-                    runCatching {
-                        uploadCoordinator.enqueueBookForAccount(
-                            accountKey = effectiveAccountKey,
-                            localBookId = book.id,
-                            fileSha256 = book.id,
-                            format = book.format,
-                            title = book.title,
-                        )
-                    }
-                    if (!control.isCancelled() && effectiveAccountKey == uploadCoordinator.currentAccountKey()) {
-                        syncBookUploads()
-                    }
-                }
                 if (book.indexState != "READY") {
                     actions.withLock {
                         library.closeReview()
@@ -753,6 +760,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                             )
                         }
                     }
+                    enqueueAndSyncCompletedImport(book, initiatingAccountKey) { control.isCancelled() }
                     launchTier1Indexing(book.id)
                     return@launch
                 }
@@ -796,6 +804,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                             )
                         }
                     }
+                    enqueueAndSyncCompletedImport(book, initiatingAccountKey) { control.isCancelled() }
                     ensureUnstructuredBookSectioned(book.id)
                     return@launch
                 }
@@ -851,7 +860,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         )
                     }
                 }
-                runOcrLoop(book.id, control, deleteOnEmptyFailure = !result.alreadyExisted)
+                val finalBook = runOcrLoop(book.id, control, deleteOnEmptyFailure = !result.alreadyExisted)
+                control.check()
+                enqueueAndSyncCompletedImport(finalBook, initiatingAccountKey) { control.isCancelled() }
             } catch (_: BookImportCancelled) {
                 releaseOnce()
                 handleCancelledImport(staged?.book?.id, staged?.alreadyExisted == false, initiatingAccountKey)
@@ -901,7 +912,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                             ),
                         )
                     }
-                    runOcrLoop(bookId, control, deleteOnEmptyFailure = false)
+                    val finalBook = runOcrLoop(bookId, control, deleteOnEmptyFailure = false)
+                    control.check()
+                    enqueueAndSyncCompletedImport(finalBook, initiatingAccountKey) { control.isCancelled() }
                 }
             } catch (_: BookImportCancelled) {
                 if (initiatingAccountKey == null) {
@@ -925,7 +938,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         return job
     }
 
-    private suspend fun runOcrLoop(bookId: String, control: BookImportControl, deleteOnEmptyFailure: Boolean) {
+    private suspend fun runOcrLoop(bookId: String, control: BookImportControl, deleteOnEmptyFailure: Boolean): Textbook {
         var finalBook = library.resumeBookOcr(bookId, control) { updatedBook, progress ->
             val remainingPending = updatedBook.pages.count { it.ocrPending }
             mutable.update { current ->
@@ -951,6 +964,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 importNotice = BookImportNotice(System.nanoTime(), "《${finalBook.title}》识别完了"),
             )
         }
+        return finalBook
     }
 
     private suspend fun handleCancelledImport(

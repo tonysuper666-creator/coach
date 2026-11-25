@@ -68,6 +68,9 @@ import com.coach.ui.v7.LocalV7Fonts
 import com.coach.ui.v7.LocalV7ReducedMotion
 import com.coach.ui.v7.v7FocusRing
 import androidx.compose.ui.graphics.ImageBitmap
+import kotlin.math.roundToInt
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import java.nio.file.Path
@@ -215,8 +218,7 @@ internal fun BookPageView(
     onHardPointClick: ((SectionHardPoint, SourceBlock) -> Unit)? = null,
     immersive: Boolean = false,
     /**
-     * 这本书会出页边「难点」小标（自动导读开、讲解可用）。沉浸模式两边只留 4dp（TON-1854），
-     * 小标没地方放会画到栏外、看不见也点不到；这时每栏外侧留一条小标栏。按开关定、不等导读回来，免得正文中途重排。
+     * 滚动等布局按导读开关预留页边栏。Windows 翻页读按每张纸上的实际标记留边。
      */
     hardPointGutter: Boolean = false,
 ) {
@@ -244,14 +246,25 @@ internal fun BookPageView(
     val clipboard = LocalClipboard.current
     val pageClipboard = remember(clipboard) { PageClipboard(clipboard) }
     val latestOnSelectText by rememberUpdatedState(onSelectText)
-    val topMargin = if (immersive) 8.dp else 52.dp
-    val openerTopMargin = if (immersive) 2.dp else topMargin
+    val windowsPaged = immersive && readMode == BookReadMode.Paged &&
+        System.getProperty("os.name").orEmpty().startsWith("Windows")
+    // Reflowed PDF already has chapter and page navigation in the reader HUD.
+    val topMargin = when {
+        windowsPaged && book.format == "pdf" -> 0.dp
+        immersive -> 8.dp
+        else -> 52.dp
+    }
+    val openerTopMargin = if (immersive) minOf(2.dp, topMargin) else topMargin
     val openerExtraHeightPx = if (immersive) with(density) { (topMargin - openerTopMargin).roundToPx() } else 0
     val topMarginPx = with(density) { topMargin.toPx() }
     val openerTopMarginPx = with(density) { openerTopMargin.toPx() }
+    val linePitchPx = if (windowsPaged) remember(measurer, body) {
+        val sample = measurer.measure("Mg\nMg", body)
+        (sample.lastBaseline - sample.firstBaseline).roundToInt().coerceAtLeast(1)
+    } else null
     val paperBg = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
     var pointerActive by remember(state) { mutableStateOf(false) }
-    BoxWithConstraints(
+    BookPageViewport(
         modifier
             .fillMaxSize()
             .then(if (immersive) Modifier.background(paperBg) else Modifier)
@@ -265,12 +278,13 @@ internal fun BookPageView(
                 }
             }
             .testTag("book-page-layout"),
-    ) {
+        linePitchPx, topMargin,
+    ) { maxWidth, maxHeight, viewportWidth ->
         val column = with(density) { (body.fontSize * (if (immersive) 38 else 33)).toDp() }
         val scrolling = readMode == BookReadMode.Scroll
         val visibleColumns = when {
             scrolling -> 1
-            immersive -> bookImmersiveColumns(maxWidth.value, column.value, mode, state.columns)
+            immersive -> bookImmersiveColumns(viewportWidth.value, column.value, mode, state.columns)
             bookSpread(maxWidth.value, column.value, mode, state.spread) -> 2
             else -> 1
         }
@@ -282,10 +296,16 @@ internal fun BookPageView(
             else -> minOf(maxWidth / 2, column + 112.dp)
         }
         val leftInset = if (immersive) minOf(4.dp, sheetWidth * 0.008f) else 64.dp
-        val rightInset = if (immersive && hardPointGutter) 48.dp
-            else if (immersive) minOf(4.dp, sheetWidth * 0.008f) else if (spread) 48.dp else 64.dp
+        // Facing columns share a gutter. Keep the full outer margin for corner drags.
+        val rightInset = when {
+            immersive && !windowsPaged && hardPointGutter -> 48.dp
+            windowsPaged && spread -> minOf(2.dp, leftInset)
+            immersive -> leftInset
+            spread -> 48.dp
+            else -> 64.dp
+        }
         val widthPx = with(density) { (sheetWidth - leftInset - rightInset).roundToPx().coerceAtLeast(1) }
-        val bodyHeight = with(density) { (maxHeight - if (immersive) 8.dp else 116.dp).roundToPx().coerceAtLeast(1) }
+        val bodyHeight = with(density) { (maxHeight - if (immersive) topMargin else 116.dp).roundToPx().coerceAtLeast(1) }
         val failed = remember(book.id, libraryDirectory) { mutableStateListOf<BookIllustration>() }
         val layoutPages = remember(book.pages, libraryDirectory, failed.toList()) {
             if (libraryDirectory != null && failed.isEmpty()) book.pages else book.pages.map { page ->
@@ -313,7 +333,7 @@ internal fun BookPageView(
                     nearChapterLayoutPages(
                         pages = layoutPages,
                         anchor = state.anchor,
-                        tailPages = NEAR_LAYOUT_PAGES,
+                        tailPages = NEAR_LAYOUT_PAGES * (if (windowsPaged) visibleColumns else 1),
                         maxPages = MAX_NEAR_LAYOUT_PAGES,
                         pdf = pdf,
                         tocNodes = tocForLayout,
@@ -372,7 +392,7 @@ internal fun BookPageView(
         }
         if (basePages == null || pages == null) {
             Text("正在排版…", Modifier.align(Alignment.Center).testTag("book-page-loading"), color = colors.fgSecondary)
-            return@BoxWithConstraints
+            return@BookPageViewport
         }
         SideEffect {
             if (state.layoutPages !== basePages) state.layoutPages = basePages
@@ -382,7 +402,7 @@ internal fun BookPageView(
         }
         if (pages.isEmpty()) {
             Text("这一页没有可提取文字，请切换到原页阅读。", Modifier.align(Alignment.Center))
-            return@BoxWithConstraints
+            return@BookPageViewport
         }
         val first = state.firstFor(basePages, visibleColumns, layoutIdentity = basePages)
         SideEffect { state.groupFirst = first; state.groupPages = basePages }
@@ -487,7 +507,57 @@ internal fun BookPageView(
                     }
                 }
             }
-            return@BoxWithConstraints
+            return@BookPageViewport
+        }
+        // Keep pagination independent of asynchronously arriving guide annotations. Only a
+        // sheet containing an anchored marker is fitted with a margin, retaining its lines.
+        val sheetWidthPx = with(density) { sheetWidth.roundToPx().coerceAtLeast(1) }
+        val markerMarginPx = with(density) { 48.dp.roundToPx() }
+        var lastIdlePoints by remember(book.id) { mutableStateOf(hardPoints) }
+        val displayedPoints = if (pointerActive) lastIdlePoints else hardPoints
+        SideEffect { if (!pointerActive) lastIdlePoints = hardPoints }
+        fun markerMargin(page: BookLaidPage?): Int {
+            if (!windowsPaged || page == null || onHardPointClick == null) return 0
+            val marked = displayedPoints.any { (_, block) ->
+                page.runs.any { it.offsetOfHardPoint(block) != null }
+            }
+            return if (marked) markerMarginPx else 0
+        }
+        fun sheetScale(index: Int) = sheetWidthPx.toFloat() / (sheetWidthPx + markerMargin(pages.getOrNull(index)))
+        val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
+        val drawSheet: @Composable (Int, Int, Modifier, State<(Long) -> Boolean>?) -> Unit = { index, side, sheetModifier, ignoreDown ->
+            val page = pages.getOrNull(index)
+            val extraPx = markerMargin(page)
+            val isLast = spread && side == visibleColumns - 1
+            val inset = if (isLast) rightInset + with(density) { extraPx.toDp() } else leftInset
+            val rendered = remember(page) { mutableMapOf<Int, TextLayoutResult>() }
+            val scale = sheetWidthPx.toFloat() / (sheetWidthPx + extraPx)
+            val sheetSpot = rememberUpdatedState { g: ReadingPointerGesture ->
+                state.anchor = spotAnchor(pages, index, spread, side, g.down, g.up, g.dragged,
+                    sheetWidthPx.toFloat(), measurer, typography, widthPx, ::sheetScale) ?: state.anchor
+                val cb = latestOnSelectText ?: return@rememberUpdatedState
+                when {
+                    g.longPressed || (!g.isTouch && g.dragged) -> {
+                        val local = if (extraPx == 0) g else g.copy(down = g.down / scale, up = g.up / scale)
+                        cb(page?.selectionForGesture(book, local, with(density) { inset.toPx() },
+                            if (page.opener) openerTopMarginPx else topMarginPx, rendered))
+                    }
+                    !g.dragged -> cb(null)
+                }
+            }
+            Box(sheetModifier.background(paper).clipToBounds().readingSpot(sheetSpot, ignoreDown)
+                .testTag("book-sheet-$side")) {
+                if (page != null) {
+                    val remaining = if (immersive) null else pages.count { it.chapter == page.chapter } -
+                        pages.take(index + 1).count { it.chapter == page.chapter }
+                    Box(Modifier.fillMaxSize().fitMarkerMargin(extraPx)) {
+                        BookSheet(book, page, typography, measurer, widthPx, inset, remaining, spread, side,
+                            libraryDirectory, onOpenTableRow, { preview = it }, displayedPoints, onHardPointClick,
+                            topMargin = if (page.opener) openerTopMargin else topMargin,
+                            lastColumn = isLast, rendered = rendered) { failed.add(it) }
+                    }
+                }
+            }
         }
         val fade = remember { Animatable(1f) }
         LaunchedEffect(first, basePages) { fade.snapTo(if (reduced) 1f else 0f); fade.animateTo(1f, tween(if (reduced) 0 else 150)) }
@@ -511,37 +581,11 @@ internal fun BookPageView(
             CompositionLocalProvider(LocalClipboard provides pageClipboard) {
                 SelectionContainer {
                     if (turnStyle == PageTurnStyle.None) {
-                    Row(Modifier.fillMaxHeight().graphicsLayer { alpha = fade.value }) {
+                        Row(Modifier.fillMaxHeight().graphicsLayer { alpha = fade.value }) {
                             repeat(visibleColumns) { side ->
-                                val page = pages.getOrNull(first + side)
-                                val rendered = remember(page) { mutableMapOf<Int, TextLayoutResult>() }
-                                val insetPx = with(density) { (if (spread && side == visibleColumns - 1) rightInset else leftInset).toPx() }
-                                val sheetSpot = rememberUpdatedState { g: ReadingPointerGesture ->
-                                    state.anchor = spotAnchor(pages, first + side, spread, side, g.down, g.up, g.dragged, with(density) { sheetWidth.toPx() }, measurer, typography, widthPx) ?: state.anchor
-                                    val cb = latestOnSelectText ?: return@rememberUpdatedState
-                                    when {
-                                        g.longPressed || (!g.isTouch && g.dragged) ->
-                                            cb(page?.selectionForGesture(book, g, insetPx, if (page.opener) openerTopMarginPx else topMarginPx, rendered))
-                                        !g.dragged -> cb(null)
-                                    }
-                                }
-                                Box(Modifier.width(sheetWidth).fillMaxHeight()
-                                    .background(if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper)
-                                    .clipToBounds().readingSpot(sheetSpot)
-                                    .testTag("book-sheet-$side")) {
-                                    if (page != null) {
-                                        val remaining = if (immersive) null else pages.count { it.chapter == page.chapter } -
-                                            pages.take(first + side + 1).count { it.chapter == page.chapter }
-                                        BookSheet(book, page, typography, measurer, widthPx,
-                                            if (spread && side == visibleColumns - 1) rightInset else leftInset,
-                                            remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
-                                            topMargin = if (page.opener) openerTopMargin else topMargin,
-                                            lastColumn = spread && side == visibleColumns - 1, rendered = rendered) { failed.add(it) }
-                                    }
-                                }
+                                drawSheet(first + side, side, Modifier.width(sheetWidth).fillMaxHeight(), null)
                             }
                         }
-    
                     } else {
                         val turnState = remember(basePages) { PageTurnState(pages.size, first, alignToSpread = false) }
                         // 锚点（目录跳转、键盘、重排）变了：相邻一步翻过去，远的快翻，不动画的直接换
@@ -558,7 +602,6 @@ internal fun BookPageView(
                             val at = turnState.position
                             if (at != first && !turnState.turning) onTurn(if (at > first) ReaderTurn.Next else ReaderTurn.Previous)
                         }
-                        val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
                         val ignoreTurnGesture = rememberUpdatedState { downUptimeMs: Long ->
                             turnState.lastHandledPointerDownUptimeMs == downUptimeMs
                         }
@@ -572,41 +615,68 @@ internal fun BookPageView(
                                     with(density) { leftInset.toPx() },
                                     with(density) { rightInset.toPx() },
                                     widthPx, topMarginPx, openerTopMarginPx, with(density) { 4.dp.toPx() },
-                                    measurer, typography,
+                                    measurer, typography, ::markerMargin,
                                 )
                             },
                             modifier = turnMod.testTag("book-page-turn"),
                             shadow = if (colors.dark) Color.Black else CoachV7.Light.ink) { index ->
                             val side = if (spread) Math.floorMod(index - turnState.shownPosition, visibleColumns) else 0
-                            val page = pages[index]
-                            val rendered = remember(page) { mutableMapOf<Int, TextLayoutResult>() }
-                            val insetPx = with(density) { (if (spread && side == visibleColumns - 1) rightInset else leftInset).toPx() }
-                            val sheetSpot = rememberUpdatedState { g: ReadingPointerGesture ->
-                                state.anchor = spotAnchor(pages, index, spread, side, g.down, g.up, g.dragged, with(density) { sheetWidth.toPx() }, measurer, typography, widthPx) ?: state.anchor
-                                val cb = latestOnSelectText ?: return@rememberUpdatedState
-                                when {
-                                    g.longPressed || (!g.isTouch && g.dragged) ->
-                                        cb(page.selectionForGesture(book, g, insetPx, if (page.opener) openerTopMarginPx else topMarginPx, rendered))
-                                    !g.dragged -> cb(null)
-                                }
-                            }
-                            Box(Modifier.fillMaxSize().background(paper).clipToBounds()
-                                .readingSpot(sheetSpot, ignoreTurnGesture)
-                                .testTag("book-sheet-$side")) {
-                                val remaining = if (immersive) null else pages.count { it.chapter == page.chapter } -
-                                    pages.take(index + 1).count { it.chapter == page.chapter }
-                                BookSheet(book, page, typography, measurer, widthPx,
-                                    if (spread && side == visibleColumns - 1) rightInset else leftInset,
-                                    remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
-                                    topMargin = if (page.opener) openerTopMargin else topMargin,
-                                    lastColumn = spread && side == visibleColumns - 1, rendered = rendered) { failed.add(it) }
-                            }
+                            drawSheet(index, side, Modifier.fillMaxSize(), ignoreTurnGesture)
                         }
                     }
                 }
             }
             if (spread && turnStyle == PageTurnStyle.None) Box(Modifier.width(48.dp).fillMaxHeight().background(Brush.horizontalGradient(listOf(
                 Color.Transparent, (if (colors.dark) Color.Black.copy(alpha = .24f) else CoachV7.Light.ink.copy(alpha = .06f)), Color.Transparent))))
+        }
+    }
+}
+
+private fun Modifier.fitMarkerMargin(extraPx: Int): Modifier = if (extraPx == 0) this else layout { measurable, bounds ->
+    val width = bounds.maxWidth + extraPx
+    val scale = bounds.maxWidth.coerceAtLeast(1).toFloat() / width
+    val sheet = measurable.measure(Constraints.fixed(width, bounds.maxHeight))
+    layout(bounds.maxWidth, bounds.maxHeight) {
+        sheet.placeWithLayer(0, 0) {
+            transformOrigin = TransformOrigin(0f, 0f)
+            scaleX = scale
+            scaleY = scale
+        }
+    }
+}
+
+/** Fit whole baselines under the header and above the progress line. Keep the physical
+ * viewport width for column breakpoints and scale the glyphs and pointer targets together. */
+@Composable
+private fun BookPageViewport(
+    modifier: Modifier,
+    linePitchPx: Int?,
+    topMargin: Dp,
+    content: @Composable BoxScope.(width: Dp, height: Dp, viewportWidth: Dp) -> Unit,
+) {
+    BoxWithConstraints(modifier) {
+        val density = LocalDensity.current
+        val reservedPx = with(density) { topMargin.roundToPx() + 2.dp.roundToPx() }
+        val rows = if (linePitchPx != null) (constraints.maxHeight - reservedPx) / linePitchPx else 0
+        if (linePitchPx == null || rows < 8 || !constraints.hasBoundedHeight || !constraints.hasBoundedWidth) {
+            content(maxWidth, maxHeight, maxWidth)
+            return@BoxWithConstraints
+        }
+        val gridHeight = rows * linePitchPx + reservedPx
+        val zoom = constraints.maxHeight.toFloat() / gridHeight
+        val gridWidth = (constraints.maxWidth / zoom).roundToInt().coerceAtLeast(1)
+        val viewportWidth = maxWidth
+        Box(Modifier.layout { measurable, bounds ->
+            val page = measurable.measure(Constraints.fixed(gridWidth, gridHeight))
+            layout(bounds.maxWidth, bounds.maxHeight) {
+                page.placeWithLayer(0, 0) {
+                    transformOrigin = TransformOrigin(0f, 0f)
+                    scaleX = zoom
+                    scaleY = zoom
+                }
+            }
+        }) {
+            with(density) { content(gridWidth.toDp(), gridHeight.toDp(), viewportWidth) }
         }
     }
 }
@@ -684,8 +754,9 @@ private fun Modifier.readingSpot(
  * 右页往回拖到左页取左页抬起点；同页内取更靠上的那一端。
  */
 internal fun spotAnchor(pages: List<BookLaidPage>, index: Int, multiColumn: Boolean, side: Int, down: Offset, up: Offset,
-    dragged: Boolean, sheetWidthPx: Float, measurer: TextMeasurer, typography: BookPageTypography, widthPx: Int): BookPageAnchor? {
-    fun at(i: Int, y: Float) = pages.getOrNull(i)?.anchorAtY(y.toInt().coerceAtLeast(0), measurer, typography, widthPx)
+    dragged: Boolean, sheetWidthPx: Float, measurer: TextMeasurer, typography: BookPageTypography, widthPx: Int,
+    sheetScale: (Int) -> Float = { 1f }): BookPageAnchor? {
+    fun at(i: Int, y: Float) = pages.getOrNull(i)?.anchorAtY((y / sheetScale(i)).toInt().coerceAtLeast(0), measurer, typography, widthPx)
     if (!dragged) return at(index, down.y)
     if (!multiColumn) return at(index, minOf(down.y, up.y))
     val deltaCols = kotlin.math.floor(up.x / sheetWidthPx).toInt()
@@ -712,7 +783,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
     val column = with(density) { widthPx.toDp() }
     val runningTitle = remember(book, page) { BookBoundaries.runningHeaderTitle(book, page) }
     val compactHeader = topMargin < 44.dp
-    DisableSelection { if (!page.opener && (spread && side == 0 || runningTitle.isNotEmpty())) Text(if (spread && side == 0) book.title else runningTitle,
+    DisableSelection { if (topMargin > 0.dp && !page.opener && (spread && side == 0 || runningTitle.isNotEmpty())) Text(if (spread && side == 0) book.title else runningTitle,
         Modifier.align(Alignment.TopStart).padding(start = inset, top = if (compactHeader) 0.dp else 20.dp).width(column),
         textAlign = androidx.compose.ui.text.style.TextAlign.Center, color = colors.fgTertiary,
         style = MaterialTheme.typography.labelSmall.copy(fontSize = if (compactHeader) 9.5.sp else CoachV7.Size.cap,
@@ -773,17 +844,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
                 measurer.measure(run.text, typography.body, placeholders = run.placeholders, constraints = Constraints(maxWidth = widthPx))
             }
             for ((hp, block) in hardPoints) {
-                var offsetInRun = 0
-                var matchedDisplayOffset: Int? = null
-                for (slice in run.sources) {
-                    val sliceLen = slice.endUtf16 - slice.startUtf16
-                    if (slice.importPage == block.page && block.start in slice.startUtf16 until slice.endUtf16) {
-                        matchedDisplayOffset = offsetInRun + (block.start - slice.startUtf16)
-                        break
-                    }
-                    offsetInRun += sliceLen
-                }
-                if (matchedDisplayOffset == null) continue
+                val matchedDisplayOffset = run.offsetOfHardPoint(block) ?: continue
                 val safeOffset = matchedDisplayOffset.coerceIn(0, (run.text.length - 1).coerceAtLeast(0))
                 val line = runLayout.getLineForOffset(safeOffset)
                 var lineTopPx = run.topPx + runLayout.getLineTop(line)
@@ -924,6 +985,17 @@ private fun TableRowLinks(book: Textbook, item: BookIllustration, band: BookTabl
     }
 }
 
+private fun BookTextRun.offsetOfHardPoint(block: SourceBlock): Int? {
+    var offset = 0
+    for (slice in sources) {
+        if (slice.importPage == block.page && block.start in slice.startUtf16 until slice.endUtf16) {
+            return offset + block.start - slice.startUtf16
+        }
+        offset += slice.endUtf16 - slice.startUtf16
+    }
+    return null
+}
+
 private fun isNonTextTurnTarget(
     pos: Offset,
     pages: List<BookLaidPage>,
@@ -939,13 +1011,16 @@ private fun isNonTextTurnTarget(
     hitSlopPx: Float,
     measurer: TextMeasurer,
     typography: BookPageTypography,
+    markerMargin: (BookLaidPage) -> Int,
 ): Boolean {
     val col = if (visibleColumns <= 1 || sheetWidthPx <= 0f) 0
         else (pos.x / sheetWidthPx).toInt().coerceIn(0, visibleColumns - 1)
     val laidPage = pages.getOrNull(shownPosition + col) ?: return true
     if (laidPage.runs.isEmpty()) return true
-    val insetPx = if (spread && col == visibleColumns - 1) rightInsetPx else leftInsetPx
-    val localX = pos.x - col * sheetWidthPx
+    val extraPx = markerMargin(laidPage)
+    val scale = sheetWidthPx / (sheetWidthPx + extraPx)
+    val insetPx = if (spread && col == visibleColumns - 1) rightInsetPx + extraPx else leftInsetPx
+    val localX = (pos.x - col * sheetWidthPx) / scale
     if (localX !in (insetPx - hitSlopPx)..(insetPx + widthPx + hitSlopPx)) return true
     val pageTopMarginPx = if (laidPage.opener) openerTopMarginPx else topMarginPx
     val firstTop = pageTopMarginPx + laidPage.runs.first().topPx
@@ -956,7 +1031,7 @@ private fun isNonTextTurnTarget(
         constraints = Constraints(maxWidth = widthPx),
     )
     val lastBottom = pageTopMarginPx + lastRun.topPx + lastLayout.size.height
-    return pos.y !in (firstTop - hitSlopPx)..(lastBottom + hitSlopPx)
+    return (pos.y / scale) !in (firstTop - hitSlopPx)..(lastBottom + hitSlopPx)
 }
 
 private fun List<BookLaidPage>.applyBookHighlights(

@@ -33,6 +33,45 @@ import kotlin.test.*
 /** Source anchors survive both component reflow and Desk's opt-in width. */
 @OptIn(ExperimentalTestApi::class)
 class BookPageViewTest {
+    @Test fun guideArrivalFitsOnlyTheSheetContainingTheHardPoint() {
+        org.junit.Assume.assumeTrue(System.getProperty("os.name").startsWith("Windows"))
+        val book = spotBook()
+        val state = BookPagingState(BookPageAnchor(1))
+        var points by mutableStateOf(emptyList<Pair<SectionHardPoint, SourceBlock>>())
+        var opened: SourceBlock? = null
+        runSkikoComposeUiTest(size = Size(1344f, 712f), density = Density(1f)) {
+            setContent { CoachTheme {
+                BookPageView(book, state, emptyMap(), onTurn = { state.move(it) }, immersive = true,
+                    hardPointGutter = true, hardPoints = points, onHardPointClick = { _, block -> opened = block })
+            } }
+            waitForIdle()
+            fun bounds(tag: String) = onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
+            val left = bounds("reader-text")
+            val right = bounds("reader-text-right")
+            assertTrue(left.width > bounds("book-sheet-0").width - 10f)
+            val pagination = state.pages
+            val anchor = state.anchor
+            // Both columns come from the same import page. Only the right column contains this offset.
+            val source = pagination[1].runs.first().sources.first()
+            val block = SourceBlock("right", source.importPage, source.startUtf16, source.endUtf16, false,
+                book.pages.single().text.substring(source.startUtf16, source.endUtf16))
+            val point = SectionHardPoint(block.id, "anchor", block.page, "label", "explanation")
+            runOnIdle { points = listOf(point to block) }
+            waitForIdle()
+            assertSame(pagination, state.pages)
+            assertEquals(anchor, state.anchor)
+            assertEquals(left, bounds("reader-text"))
+            val marked = bounds("reader-text-right")
+            val marker = bounds("hard-point-marker-right")
+            assertTrue(marker.width > 0 && marked.left > right.left && marker.right <= marked.left)
+            onNodeWithTag("hard-point-marker-right").performMouseInput { click() }
+            runOnIdle { assertEquals(block, opened); points = emptyList() }
+            waitForIdle()
+            assertEquals(right, bounds("reader-text-right"))
+            onNodeWithTag("hard-point-marker-right").assertDoesNotExist()
+        }
+    }
+
     @Test fun reviewedTableRepeatsHeaderPixelsAndKeepsEachRowAndItsSourceOnOneSheet() {
         val root = Files.createTempDirectory("coach-table-rows-")
         try {

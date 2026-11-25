@@ -444,7 +444,7 @@ internal fun BookPageView(
                 val target = positionOf(state.anchor)
                 val now = scrollState.position
                 val moved = target.page != now.page || kotlin.math.abs(target.fraction - now.fraction) * itemHeightPx > 80
-                if (moved) { programmatic[0] = target; scrollState.scrollTo(target) }
+                if (moved) { withFrameNanos { }; programmatic[0] = target; scrollState.scrollTo(target) }
             }
             val viewHeight = maxHeight
             val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper

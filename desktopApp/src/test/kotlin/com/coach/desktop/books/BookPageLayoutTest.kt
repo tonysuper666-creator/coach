@@ -333,6 +333,10 @@ class BookPageLayoutTest {
         val aspects = mapOf(31 to 0.7683f, 32 to 0.7683f)
         assertEquals(listOf(listOf(31, 32)), originalPdfSheets(listOf(31, 32), aspects, 738f, 511f, immersive = true))
         assertEquals(listOf(listOf(31), listOf(32)), originalPdfSheets(listOf(31, 32), aspects, 460f, 511f, immersive = true))
+        // Fit-width continuous scroll pairs portrait pages on wide windows and stays 1-up on compact windows or landscape pages
+        assertEquals(listOf(listOf(31, 32)), originalPdfScrollSheets(listOf(31, 32), aspects, twoUp = true))
+        assertEquals(listOf(listOf(31), listOf(32)), originalPdfScrollSheets(listOf(31, 32), aspects, twoUp = false))
+        assertEquals(listOf(listOf(31), listOf(32)), originalPdfScrollSheets(listOf(31, 32), mapOf(31 to 1.3f, 32 to 0.7683f), twoUp = true))
     }
 
     @Test fun singleColumnUpwardDragSpotAnchorUsesTopEndOfSelection() = runSkikoComposeUiTest(density = Density(1f)) {

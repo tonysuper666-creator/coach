@@ -466,7 +466,7 @@ internal class TextbookLibrary(
     private fun pdfScrollModeFromDb(db: Connection, bookId: String): Boolean =
         db.prepareStatement("SELECT scrolling FROM book_pdf_modes WHERE book=?").use { sql ->
             sql.setString(1, bookId)
-            sql.executeQuery().use { it.next() && it.getBoolean(1) }
+            sql.executeQuery().use { if (it.next()) it.getBoolean(1) else true }
         }
 
     fun pdfScrollMode(bookId: String): Boolean {

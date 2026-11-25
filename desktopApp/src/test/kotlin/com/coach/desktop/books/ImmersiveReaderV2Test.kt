@@ -518,4 +518,64 @@ class ImmersiveReaderV2Test {
             dir.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun originalPdfWideLaptopDefaultsToFitWidthScrollAndKeepsFullPageEntry() {
+        val dir = Files.createTempDirectory("coach-v2-orig-scroll")
+        try {
+            val pdfPath = dir.resolve("sample.pdf")
+            PDDocument().use { pdf ->
+                repeat(4) { idx ->
+                    val page = PDPage(PDRectangle.LETTER)
+                    pdf.addPage(page)
+                    PDPageContentStream(pdf, page).use { out ->
+                        out.beginText()
+                        out.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 12f)
+                        out.newLineAtOffset(50f, 700f)
+                        out.showText("Synthetic original PDF page ${idx + 1}")
+                        out.endText()
+                    }
+                }
+                pdf.save(pdfPath.toFile())
+            }
+            val library = TextbookLibrary(dir.resolve("lib"))
+            val book = library.importBook(pdfPath)
+            val controller = TextbookController(library)
+            runBlocking {
+                controller.load()
+                controller.openBook(book.id, 1)
+            }
+            runSkikoComposeUiTest(size = Size(1514f, 808f), density = Density(1.25f)) {
+                setContent { Box(Modifier.fillMaxSize()) { WindowsTextbookHost(controller, chooseBook = { null }) } }
+                waitUntil(timeoutMillis = 10_000) { controller.state.value.screen == BookScreen.READER }
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("original-pdf-scroll").fetchSemanticsNodes().isNotEmpty() &&
+                        onAllNodesWithTag("original-pdf-page-1").fetchSemanticsNodes().isNotEmpty() &&
+                        onAllNodesWithTag("original-pdf-page-2").fetchSemanticsNodes().isNotEmpty()
+                }
+                val p1 = onNodeWithTag("original-pdf-page-1").fetchSemanticsNode().boundsInRoot
+                val p2 = onNodeWithTag("original-pdf-page-2").fetchSemanticsNode().boundsInRoot
+                assertTrue(p2.left >= p1.right - 2f, "Wide laptop fit-width scroll should pair pages 1 and 2 side-by-side")
+                val combinedWidth = p1.width + p2.width
+                assertTrue(combinedWidth >= 1514f * 0.95f, "2-up fit-width PDF pages should fill viewport width, got $combinedWidth / 1514")
+
+                // Ensure full-page spread entry in ⋯ -> Aa menu still switches back to paged mode and persists.
+                if (onAllNodesWithTag("immersive-more-menu").fetchSemanticsNodes().isEmpty()) {
+                    onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                    waitUntil(timeoutMillis = 5_000) { onAllNodesWithTag("immersive-more-menu").fetchSemanticsNodes().isNotEmpty() }
+                }
+                onNodeWithTag("immersive-more-menu").performClick()
+                waitUntil(timeoutMillis = 5_000) { onAllNodesWithTag("v7-type-menu").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("v7-type-menu").performClick()
+                waitForIdle()
+                onNodeWithTag("original-mode-paged").performClick()
+                waitUntil(timeoutMillis = 5_000) {
+                    onAllNodesWithTag("original-pdf-paged").fetchSemanticsNodes().isNotEmpty()
+                }
+                assertFalse(library.pdfScrollMode(book.id), "Switching to full-page spread mode must persist")
+            }
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
 }

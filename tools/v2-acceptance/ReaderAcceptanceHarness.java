@@ -1172,7 +1172,7 @@ public final class ReaderAcceptanceHarness {
         });
         Files.write(pngPath, pngBytes);
         Collection<SemanticsOwner> owners = onEdt(scene::getSemanticsOwners);
-        writeMeta(metaPath, flavor, stateName, "image_compose_scene_offscreen", dims[0], dims[1], resTag.startsWith("2880") ? 1.5f : 1.0f, owners);
+        writeMeta(metaPath, flavor, stateName, "image_compose_scene_offscreen", dims[0], dims[1], resTag.startsWith("2880") ? 1.5f : 1.0f, owners, 0, 0);
         System.out.println("DUMP " + pngPath.getFileName() + " (image_compose_scene_offscreen " + dims[0] + "x" + dims[1] + ")");
     }
 
@@ -1185,17 +1185,34 @@ public final class ReaderAcceptanceHarness {
         BufferedImage img = onEdt(() -> screenshotWin32(win));
         ImageIO.write(img, "png", pngPath.toFile());
         float scale = onEdt(() -> (float) win.getGraphicsConfiguration().getDefaultTransform().getScaleX());
+        int[] canvasOffset = onEdt(() -> mainCanvasPixelOffset(win, scale));
         Collection<SemanticsOwner> owners = onEdt(win::getSemanticsOwners);
-        writeMeta(metaPath, flavor, stateName, "real_os_window", img.getWidth(), img.getHeight(), scale, owners);
+        writeMeta(metaPath, flavor, stateName, "real_os_window", img.getWidth(), img.getHeight(), scale, owners, canvasOffset[0], canvasOffset[1]);
         System.out.println("DUMP " + pngPath.getFileName() + " (real_os_window " + img.getWidth() + "x" + img.getHeight() + ")");
     }
 
+    private static int[] mainCanvasPixelOffset(ComposeWindow window, double scale) {
+        try {
+            Point origin = window.getLocationOnScreen();
+            for (Surface s : activeSurfaces(window)) {
+                if (!s.layer.isShowing()) continue;
+                Point pt = s.layer.getCanvas().getLocationOnScreen();
+                return new int[]{
+                    (int) Math.round((pt.x - origin.x) * scale),
+                    (int) Math.round((pt.y - origin.y) * scale)
+                };
+            }
+        } catch (Exception ignored) {}
+        return new int[]{0, 0};
+    }
+
     private static void writeMeta(
-        Path metaPath, String flavor, String stateName, String surfaceType, int w, int h, float scale, Collection<SemanticsOwner> owners
+        Path metaPath, String flavor, String stateName, String surfaceType, int w, int h, float scale,
+        Collection<SemanticsOwner> owners, int offsetX, int offsetY
     ) throws IOException {
         List<Map<String, Object>> roots = new ArrayList<>();
         for (SemanticsOwner o : owners) {
-            roots.add(serializeNode(o.getUnmergedRootSemanticsNode()));
+            roots.add(serializeNode(o.getUnmergedRootSemanticsNode(), offsetX, offsetY));
         }
         Map<String, Object> meta = new HashMap<>();
         meta.put("flavor", flavor);
@@ -1207,7 +1224,7 @@ public final class ReaderAcceptanceHarness {
         Files.writeString(metaPath, toJson(meta, 0), StandardCharsets.UTF_8);
     }
 
-    private static Map<String, Object> serializeNode(SemanticsNode node) {
+    private static Map<String, Object> serializeNode(SemanticsNode node, int offsetX, int offsetY) {
         Rect r = node.getBoundsInRoot();
         String tag = "";
         List<String> texts = new ArrayList<>();
@@ -1224,12 +1241,17 @@ public final class ReaderAcceptanceHarness {
         }
         List<Map<String, Object>> children = new ArrayList<>();
         for (SemanticsNode ch : node.getChildren()) {
-            children.add(serializeNode(ch));
+            children.add(serializeNode(ch, offsetX, offsetY));
         }
         Map<String, Object> m = new HashMap<>();
         m.put("tag", tag);
         m.put("text", String.join(" ", texts));
-        m.put("bounds", List.of(Math.round(r.getLeft()), Math.round(r.getTop()), Math.round(r.getRight()), Math.round(r.getBottom())));
+        m.put("bounds", List.of(
+            Math.round(r.getLeft()) + offsetX,
+            Math.round(r.getTop()) + offsetY,
+            Math.round(r.getRight()) + offsetX,
+            Math.round(r.getBottom()) + offsetY
+        ));
         m.put("children", children);
         return m;
     }

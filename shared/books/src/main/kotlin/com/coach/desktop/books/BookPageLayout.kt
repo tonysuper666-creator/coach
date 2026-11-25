@@ -250,6 +250,7 @@ internal class BookPageLayouter(
         highlights: Map<Int, List<IntRange>> = emptyMap(), tableRows: Map<BookIllustration, BookTableRows> = emptyMap(),
         tocNodes: List<BookTocNode> = emptyList(),
         forceAuthoritativeTocHeadings: Boolean = false,
+        openerExtraHeightPx: Int = 0,
         checkCancelled: () -> Unit = {},
     ): List<BookLaidPage> {
         require(widthPx > 0 && bodyHeightPx > 0)
@@ -380,7 +381,8 @@ internal class BookPageLayouter(
                 }
                 val opener = firstSheet && chapter.title != null
                 val number = if (opener) bookChapterNumber(chapter.title!!) else null
-                val top = if (opener && !immersive) bodyHeightPx / 4 else 0
+                val sheetHeightPx = if (opener && immersive) bodyHeightPx + openerExtraHeightPx else bodyHeightPx
+                val top = if (opener && !immersive) sheetHeightPx / 4 else 0
                 val titleInset = if (number != null) measurer.measure(bookChapterDisplayNumber(number), typography.number).size.width +
                     with(density) { 20.dp.roundToPx() } else 0
                 val sheetStart = start
@@ -388,8 +390,8 @@ internal class BookPageLayouter(
                 val runs = mutableListOf<BookTextRun>()
                 val visuals = mutableListOf<BookPlacedVisual>()
                 fun place(event: VisualEvent): Boolean {
-                    val box = boxFor(event, if (runs.isEmpty() && visuals.isEmpty()) bodyHeightPx - y else bodyHeightPx)
-                    if (box.totalHeight > bodyHeightPx - y && (runs.isNotEmpty() || visuals.isNotEmpty() || y > 0)) return false
+                    val box = boxFor(event, if (runs.isEmpty() && visuals.isEmpty()) sheetHeightPx - y else sheetHeightPx)
+                    if (box.totalHeight > sheetHeightPx - y && (runs.isNotEmpty() || visuals.isNotEmpty() || y > 0)) return false
                     visuals += box.block.copy(topPx = y + box.margin)
                     y += box.totalHeight
                     return true
@@ -401,8 +403,8 @@ internal class BookPageLayouter(
                         if (event.band?.let { it.startY > it.headerBottom } == true && (runs.isNotEmpty() || visuals.isNotEmpty())) break
                         if (pending.isNotEmpty() || !place(event)) {
                             if (event.inline || (pending.isNotEmpty() &&
-                                    (pending.sumOf { boxFor(it, bodyHeightPx).totalHeight } +
-                                        boxFor(event, bodyHeightPx).totalHeight > bodyHeightPx))) break
+                                    (pending.sumOf { boxFor(it, sheetHeightPx).totalHeight } +
+                                        boxFor(event, sheetHeightPx).totalHeight > sheetHeightPx))) break
                             pending.addLast(event)
                         }
                         next++
@@ -410,10 +412,10 @@ internal class BookPageLayouter(
                         continue
                     }
                     val limit = event?.let { it.at - chapter.start } ?: raw.length
-                    if (start >= limit || y >= bodyHeightPx) break
-                    val fit = fitText(raw, original, model, start, limit, widthPx, bodyHeightPx - y,
+                    if (start >= limit || y >= sheetHeightPx) break
+                    val fit = fitText(raw, original, model, start, limit, widthPx, sheetHeightPx - y,
                         if (start == 0 && opener) titleInset else 0)
-                    if (fit.height > bodyHeightPx - y && (runs.isNotEmpty() || visuals.isNotEmpty())) break
+                    if (fit.height > sheetHeightPx - y && (runs.isNotEmpty() || visuals.isNotEmpty())) break
                     val sources = slices(chapter.start + start, chapter.start + fit.end)
                     runs += BookTextRun(y, fit.laid.text, fit.laid.placeholders, sources, source.substring(previousTextEnd, chapter.start + start))
                     previousTextEnd = chapter.start + fit.end
@@ -535,17 +537,20 @@ internal class BookPageLayouter(
             measured = measure(rest, widthPx)
         }
         var lines = (0 until measured.lineCount).takeWhile { measured.getLineBottom(it) <= available }.size.coerceAtLeast(1)
+        val compactImmersive = immersive && available <= with(density) { 720.dp.roundToPx() }
         if (lines < measured.lineCount) {
             var end = measured.getLineEnd(lines - 1)
-            // At least two lines at either end of a paragraph with four or more lines.
-            for (paragraph in model.paragraphs) {
-                if (paragraph.start < start + end && paragraph.end > start + end) {
-                    val first = measured.getLineForOffset((paragraph.start - start).coerceAtLeast(0))
-                    val last = if (paragraph.end > lookAhead) measured.lineCount + 1 else
-                        measured.getLineForOffset((paragraph.end - start - 1).coerceIn(0, rest.text.lastIndex))
-                    if (last - first + 1 >= 4) {
-                        if (lines - first == 1 && first > 0) lines = first
-                        else if (last - lines + 1 == 1 && lines - first > 2) lines--
+            // At least two lines at either end of a paragraph with four or more lines (skip on compact laptop immersive screens to avoid large bottom gaps).
+            if (!compactImmersive) {
+                for (paragraph in model.paragraphs) {
+                    if (paragraph.start < start + end && paragraph.end > start + end) {
+                        val first = measured.getLineForOffset((paragraph.start - start).coerceAtLeast(0))
+                        val last = if (paragraph.end > lookAhead) measured.lineCount + 1 else
+                            measured.getLineForOffset((paragraph.end - start - 1).coerceIn(0, rest.text.lastIndex))
+                        if (last - first + 1 >= 4) {
+                            if (lines - first == 1 && first > 0) lines = first
+                            else if (last - lines + 1 == 1 && lines - first > 2) lines--
+                        }
                     }
                 }
             }
@@ -577,15 +582,17 @@ internal class BookPageLayouter(
         // final fragment can fit on one line even when the uncut layout's
         // line indices predicted two. Check that actual continuation after
         // fitting this page, using the same no-indent continuation style.
-        val continuing = model.paragraphs.firstOrNull {
-            it.kind == BookParagraph.Kind.BODY && it.start < end && it.end > end
-        }
-        if (continuing != null && continuing.end <= lookAhead && lines > 2 &&
-            measure(pageText(original, model, end, continuing.end, 0), widthPx).lineCount == 1) {
-            lines--
-            end = safeBookBoundary(raw, start + measured.getLineEnd(lines - 1))
-            laid = pageText(original, model, start, end, titleInset)
-            height = measure(laid, widthPx).size.height
+        if (!compactImmersive) {
+            val continuing = model.paragraphs.firstOrNull {
+                it.kind == BookParagraph.Kind.BODY && it.start < end && it.end > end
+            }
+            if (continuing != null && continuing.end <= lookAhead && lines > 2 &&
+                measure(pageText(original, model, end, continuing.end, 0), widthPx).lineCount == 1) {
+                lines--
+                end = safeBookBoundary(raw, start + measured.getLineEnd(lines - 1))
+                laid = pageText(original, model, start, end, titleInset)
+                height = measure(laid, widthPx).size.height
+            }
         }
         return TextFit(end, laid, height)
     }

@@ -10,6 +10,7 @@ import com.coach.desktop.books.*
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.DriverManager
+import kotlinx.coroutines.runBlocking
 import kotlin.test.*
 
 /**
@@ -49,8 +50,16 @@ class ArgonGLifecycleReviewTest {
         waitForIdle()
     }
 
-    private fun ComposeUiTest.nav(label: String) =
-        onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText(label))
+    /**
+     * TON-1784（#570）去掉了首页「开始学 / 继续学」按钮，阅读器「更多」里的学习项也不再显示
+     * （showLearnAction = false）；进做题学只剩控制器 learn()。重开窗口时停在做题学就直接沿用（load 按 openSession 恢复）。
+     */
+    private fun ComposeUiTest.enterLearning(c: TextbookController) {
+        waitUntil(timeoutMillis = 15_000) { !c.state.value.busy && c.state.value.book != null }
+        if (c.state.value.screen != BookScreen.LEARNING) runBlocking { c.learn() }
+        waitUntil(timeoutMillis = 15_000) { !c.state.value.busy && c.state.value.screen == BookScreen.LEARNING }
+        waitForIdle()
+    }
 
     private fun blockedInSaveAnswer(): Boolean = Thread.getAllStackTraces().values.any { stack ->
         stack.any { it.className == TextbookLibrary::class.java.name && it.methodName == "saveAnswer" }
@@ -67,10 +76,11 @@ class ArgonGLifecycleReviewTest {
         runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
             setContent { WindowsTextbookHost(c) { null } }
             ready(c) { it.catalog.size == 2 && it.book != null }
+            // 2.0：点书卡进阅读器（TON-1790 书架首页），再进做题学。
             onNodeWithTag("book-${f.a.id}").performClick()
-            ready(c) { it.book?.id == f.a.id }
-            onNodeWithTag("home-learn").performClick()
-            ready(c) { it.screen == BookScreen.LEARNING && it.answer.text == "alpha earlier draft" }
+            ready(c) { it.book?.id == f.a.id && it.screen == BookScreen.READER }
+            enterLearning(c)
+            ready(c) { it.answer.text == "alpha earlier draft" }
 
             val startedAt = System.currentTimeMillis()
             var timeoutElapsedMs = 0L
@@ -122,10 +132,11 @@ class ArgonGLifecycleReviewTest {
                 }
             }
             ready(c) { it.catalog.size == 2 && it.book != null }
+            // 2.0：点书卡进阅读器（TON-1790 书架首页），再进做题学。
             onNodeWithTag("book-${f.a.id}").performClick()
-            ready(c) { it.book?.id == f.a.id }
-            onNodeWithTag("home-learn").performClick()
-            ready(c) { it.screen == BookScreen.LEARNING && it.answer.text == "alpha earlier draft" }
+            ready(c) { it.book?.id == f.a.id && it.screen == BookScreen.READER }
+            enterLearning(c)
+            ready(c) { it.answer.text == "alpha earlier draft" }
 
             DriverManager.getConnection("jdbc:sqlite:${f.library.directory.resolve("library.sqlite")}").use { blocker ->
                 blocker.createStatement().use { it.execute("BEGIN IMMEDIATE") }
@@ -150,10 +161,13 @@ class ArgonGLifecycleReviewTest {
         runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
             setContent { WindowsTextbookHost(reopened) { null } }
             ready(reopened) { it.catalog.size == 2 && it.book != null }
-            onNodeWithTag("book-${f.a.id}").performClick()
-            ready(reopened) { it.book?.id == f.a.id }
-            onNodeWithTag("home-learn").performClick()
-            ready(reopened) { it.screen == BookScreen.LEARNING }
+            // 关窗前停在 Alpha 的做题学：重开时 load 直接恢复到做题学；万一回到书架，就点书卡再进。
+            if (reopened.state.value.screen != BookScreen.LEARNING) {
+                onNodeWithTag("book-${f.a.id}").performClick()
+                ready(reopened) { it.book?.id == f.a.id && it.screen == BookScreen.READER }
+            }
+            enterLearning(reopened)
+            assertEquals(f.a.id, reopened.state.value.book?.id)
             val stored = f.library.answer(f.a.id, lessonId, QuestionMode.SHORT_ANSWER).text
             val reopenedVisible = reopened.state.value.answer.text
             println(

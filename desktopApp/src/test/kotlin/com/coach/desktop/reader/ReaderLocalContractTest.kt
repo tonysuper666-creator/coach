@@ -241,23 +241,29 @@ class ReaderLocalContractTest {
         val (library, book) = fixture()
         library.save(book.copy(readingPage = 3, learning = true, questionMode = QuestionMode.CHOICE))
         val controller = TextbookController(library)
+        val gate = generatedChoiceGate(library.directory.parent)
         runComposeUiTest {
-            setContent { TextbookWorkspace(controller) { null } }
+            setContent { TextbookWorkspace(controller, answerExplain = gate) { null } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
-            onNodeWithTag("home-learn").performClick()
+            runBlocking { controller.learn() }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING }
+            // TON-1784（#570）：选择题由服务按本节第一段够长的正文生成，作答只留在本窗口（generatedChoiceGate）。
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("choice-0").fetchSemanticsNodes().isNotEmpty() }
+            val current = controller.state.value.book!!
+            val lesson = current.lessons[current.lessonIndex]
             onNodeWithTag("choice-0").performScrollTo().performClick()
-            waitUntil(timeoutMillis = 20_000) { controller.state.value.answer.revealed }
-            val answer = controller.state.value.answer
+            waitUntil(timeoutMillis = 20_000) { gate.answerFor(current, lesson).revealed }
+            val answer = gate.answerFor(current, lesson)
             onNodeWithTag("open-lesson-source").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("remote-highlight").fetchSemanticsNodes().size == 1 }
-            onNodeWithText("返回学习").performClick()
+            onNodeWithTag("immersive-back").assertTextContains("返回学习", substring = true).performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
-            assertEquals(answer, controller.state.value.answer)
+            assertEquals(answer, gate.answerFor(current, lesson))
             assertEquals(3, library.book(book.id).readingPage)
+            // 生成题作答只在本窗口：重开后的控制器不带回、也不写进书里（TON-1784 起选择题不再落本地 answer）。
             val reopened = TextbookController(library)
             runBlocking { reopened.load(); reopened.learn() }
-            assertEquals(answer, reopened.state.value.answer)
+            assertEquals(PracticeAnswer(), reopened.state.value.answer)
         }
         println("real choice click/source/return/reload: same controller answer/result preserved; independent bookmark=3")
     }

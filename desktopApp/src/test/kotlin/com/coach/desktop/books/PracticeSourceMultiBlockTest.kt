@@ -1,6 +1,7 @@
 package com.coach.desktop.books
 
 import androidx.compose.ui.test.*
+import kotlinx.coroutines.runBlocking
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
 import org.apache.pdfbox.pdmodel.PDPageContentStream
@@ -29,7 +30,7 @@ class PracticeSourceMultiBlockTest {
         runComposeUiTest {
             setContent { TextbookWorkspace(controller) { null } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
-            onNodeWithTag("home-learn").performClick()
+            runBlocking { controller.learn() }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
 
             val book = controller.state.value.book!!
@@ -52,7 +53,7 @@ class PracticeSourceMultiBlockTest {
                 onAllNodesWithContentDescription("${book.title} 第 $targetPage 页").fetchSemanticsNodes().isNotEmpty()
             }
 
-            onNodeWithText("返回学习").performClick()
+            onNodeWithTag("immersive-back").assertTextContains("返回学习", substring = true).performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             assertEquals(lesson.id, controller.state.value.book!!.lessons[controller.state.value.book!!.lessonIndex].id, "仍是同一题")
             onNodeWithTag("short-answer").assertTextContains("我的草稿 mid")
@@ -68,15 +69,19 @@ class PracticeSourceMultiBlockTest {
         val imported = library.importBook(multiBlockTextbook(root.resolve("synthetic"), listOf(repeated, repeated)))
         library.save(imported.copy(readingPage = 1, lessonIndex = 0, learning = true, questionMode = QuestionMode.CHOICE))
         val controller = TextbookController(library)
+        val gate = generatedChoiceGate(root)
         runComposeUiTest {
-            setContent { TextbookWorkspace(controller) { null } }
+            setContent { TextbookWorkspace(controller, answerExplain = gate) { null } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
-            onNodeWithTag("home-learn").performClick()
+            runBlocking { controller.learn() }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
 
             val book = controller.state.value.book!!
             val lesson = book.lessons[book.lessonIndex]
             assertEquals(2, lesson.blocks.count { it.text == repeated }, "同一句必须真的出现两次")
+            // TON-1784（#570）：选择题由服务按本节第一段够长的正文生成，作答只留在本窗口（generatedChoiceGate）。
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("generated-practice").fetchSemanticsNodes().isNotEmpty() }
+            assertEquals(repeated, generatedChoiceBlock(lesson).text, "题目依据就是重复的那一句")
             onNodeWithTag("open-practice-source").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && !controller.state.value.busy }
 
@@ -99,7 +104,7 @@ class PracticeSourceMultiBlockTest {
         runComposeUiTest {
             setContent { TextbookWorkspace(controller) { null } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
-            onNodeWithTag("home-learn").performClick()
+            runBlocking { controller.learn() }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
 
             val book = controller.state.value.book!!

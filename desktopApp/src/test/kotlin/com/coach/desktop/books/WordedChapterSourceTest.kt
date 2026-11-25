@@ -58,7 +58,9 @@ class WordedChapterSourceTest {
         val book = library.importBook(wordedChapterPdf(root))
         val lesson = book.lessons.first()
         val before = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)
-        assertEquals("Chlorophyll", before?.answer, "The existing lesson/question must not be re-planned by a reader quote fix")
+        // 原来这里核对的是产品里正则挖空出的答案词；#570（TON-1784）删掉了那个出题器，题目改由服务生成，
+        // 这里只剩测试替身 testPracticeFixture，具体答案词没有产品含义。要守的是最后一行：取原句不会改动已有的题。
+        assertNotNull(before, "The existing lesson must still have a question definition")
         val reply = LocalBooksReaderSource(library).study(book.id, 1)
         assertEquals(200, reply.status)
         val question = reply.body!!["questions"]!!.jsonArray.first().jsonObject
@@ -76,7 +78,7 @@ class WordedChapterSourceTest {
         runComposeUiTest {
             setContent { TextbookWorkspace(controller) { null } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
-            onNodeWithTag("home-learn").performClick()
+            runBlocking { controller.learn() }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING }
             val owner = controller.state.value.book!!.lessons[0].id
             onNodeWithTag("open-lesson-source").performScrollTo().performClick()
@@ -88,7 +90,7 @@ class WordedChapterSourceTest {
                 ImageIO.write(onNodeWithTag("windows-textbooks").captureToImage().toAwtImage(), "png", Path.of(directory, "compose-source.png").toFile())
             }
             highlight.assertContentDescriptionEquals("原句：$WORDED_BODY")
-            onNodeWithText("返回学习").performClick()
+            onNodeWithTag("immersive-back").assertTextContains("返回学习", substring = true).performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING }
             assertEquals(owner, controller.state.value.book!!.lessons[0].id)
             assertEquals(3, TextbookLibrary(library.directory).book(book.id).readingPage)

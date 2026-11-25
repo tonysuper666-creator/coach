@@ -1,6 +1,8 @@
 package com.coach.desktop.books
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.test.*
+import kotlinx.coroutines.runBlocking
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
 import org.apache.pdfbox.pdmodel.PDPageContentStream
@@ -51,20 +53,19 @@ class ReaderFocusAfterPagingTest {
     @Test fun pagingForwardAndBackKeepsTheReaderFocusedOnTheUiContextAndTheDraft() {
         val (controller, library) = longLessonController()
         runComposeUiTest {
-            setContent { TextbookWorkspace(controller) { null } }
+            // 2.0 宽窗原页并排两页、文字一屏多栏，逐页点「上一页 / 下一页」要在一屏一页的竖窄窗里测（SinglePageReaderWindow）。
+            setContent { Box(SinglePageReaderWindow) { TextbookWorkspace(controller) { null } } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
-            onNodeWithTag("home-learn").performClick()
+            runBlocking { controller.learn() }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             val book = controller.state.value.book!!
             onNodeWithTag("short-answer").performScrollTo().performTextInput("Focus draft")
             onNodeWithTag("open-practice-source").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && !controller.state.value.busy }
             repeat(2) {
-                onNodeWithText("下一页").performMouseInput { click() }
-                waitUntil(timeoutMillis = 20_000) { controller.state.value.page == 2 && !controller.state.value.busy }
+                turnUntil(controller, "next-page", click = { performMouseInput { click() } }) { it.page == 2 }
                 waitUntil(timeoutMillis = 20_000) { runCatching { onNodeWithTag("reader-page").assertIsFocused() }.isSuccess }
-                onNodeWithText("上一页").performMouseInput { click() }
-                waitUntil(timeoutMillis = 20_000) { controller.state.value.page == 1 && !controller.state.value.busy }
+                turnUntil(controller, "previous-page", click = { performMouseInput { click() } }) { it.page == 1 }
                 waitUntil(timeoutMillis = 20_000) { runCatching { onNodeWithTag("reader-page").assertIsFocused() }.isSuccess }
             }
             assertEquals(PracticeAnswer("Focus draft"), controller.state.value.answer)

@@ -38,8 +38,28 @@ class ReviewerKPhysicalPagesUiTest {
         waitForIdle()
     }
 
-    private fun ComposeUiTest.nav(label: String) =
-        onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText(label))
+    /**
+     * TON-1790：主窗口去掉了左侧「书架 / 课程」导航栏，只剩顶栏。宿主里真实的来回一趟改为：
+     * 阅读器左上角「← 返回书架」回到主窗口书架，再点这本书的书卡重新打开（书卡直接进阅读器）。
+     */
+    private fun ComposeUiTest.backToShelfAndReopen(controller: TextbookController, bookId: String) {
+        onNodeWithTag("immersive-back").assertTextContains("书架", substring = true).performClick()
+        ready(controller) { it.screen == BookScreen.HOME }
+        onNodeWithTag("host-bar").assertExists()
+        onNodeWithTag("book-$bookId").performClick()
+    }
+
+    /**
+     * 2.0：重开窗口时上次停在阅读器就直接恢复到阅读器（TextbookController.load 按 openSession 恢复）；
+     * 停在书架时点书卡直接打开阅读器（TextbookController.openBook），不再有书首页的「继续」。
+     */
+    private fun ComposeUiTest.openFromShelf(controller: TextbookController, bookId: String) {
+        ready(controller) {
+            (it.screen == BookScreen.READER && it.book?.id == bookId) ||
+                (it.screen == BookScreen.HOME && it.catalog.any { entry -> entry.id == bookId })
+        }
+        if (controller.state.value.screen == BookScreen.HOME) onNodeWithTag("book-$bookId").performClick()
+    }
 
     @Test fun physicalPagesSurviveRealHostNavigationAndReload() {
         val root = Files.createTempDirectory("reviewer-k-physical-host-")
@@ -51,22 +71,20 @@ class ReviewerKPhysicalPagesUiTest {
             setContent { WindowsTextbookHost(controller) { input } }
             ready(controller) { it.catalog.isEmpty() && it.book == null }
             onNodeWithTag("upload-textbook").performClick()
-            ready(controller) { it.prompt == BookPrompt.IMPORTED }
+            // TON-1784（#570）：导入完成直接进阅读器，不再有「导入后 / 读完」两道提示。
+            ready(controller) { it.screen == BookScreen.READER && it.prompt == null && it.page == 5 }
             bookId = controller.state.value.book!!.id
             assertEquals(listOf(5, 6), controller.state.value.book!!.pages.map { it.number })
-            onNodeWithTag("read-only").performClick()
-            ready(controller) { it.screen == BookScreen.READER && it.prompt == BookPrompt.AFTER_READING }
-            onNodeWithTag("read-only").performClick()
-            ready(controller) { it.prompt == null && it.page == 5 }
             onNodeWithTag("reader-text").assertTextContains("第五页独立正文", substring = true)
             onNodeWithTag("reader-text").assertTextContains("第六页独立正文", substring = true)
-            onNodeWithTag("reader-page-number").assertTextEquals("第 5–6 页")
+            // TON-1821（#603）：页码统一为「第 当前 / 末页 页」，一屏两页时显示读位所在的页。
+            onNodeWithTag("reader-page-number").assertTextEquals("第 5 / 6 页")
             val sources = onNodeWithTag("reader-text").fetchSemanticsNode().config[BookPageSources]
             assertEquals(listOf(5, 6), sources.map { it.importPage })
             assertEquals(controller.state.value.book!!.pages.joinToString("") { it.text },
                 onNodeWithTag("reader-text").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().text)
-            onNodeWithText("上一页").assertIsNotEnabled()
-            onNodeWithText("下一页").assertIsNotEnabled()
+            onNodeWithTag("previous-page").assertIsNotEnabled()
+            onNodeWithTag("next-page").assertIsNotEnabled()
             onNodeWithTag("reader-page-number").performClick()
             for (number in listOf("1", "4", "7")) {
                 onNodeWithTag("page-jump").performTextReplacement(number)
@@ -75,34 +93,33 @@ class ReviewerKPhysicalPagesUiTest {
                 onNodeWithTag("page-jump").assertExists()
                 assertEquals(5, controller.state.value.page, "missing physical page rejected")
             }
-            // Import page 6 belongs to the same laid-out page, whose first source is 5.
+            // 2.0 读位规则（BookPageView：读者跳页即移动锚点并写读位）：跳到导入页 6 时锚点落在第 6 页，
+            // 书签记第 6 页；这一屏仍是 5、6 两页同屏，页码显示锚点所在的第 6 页。
             onNodeWithTag("page-jump").performTextReplacement("6")
             onNodeWithTag("page-jump").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Enter) }
-            ready(controller) { it.page == 5 && it.book?.readingPage == 5 }
+            ready(controller) { it.page == 6 && it.book?.readingPage == 6 }
             onNodeWithTag("page-jump").assertDoesNotExist()
-            onNodeWithTag("reader-page-number").assertTextEquals("第 5–6 页")
+            onNodeWithTag("reader-page-number").assertTextEquals("第 6 / 6 页")
+            assertEquals(listOf(5, 6), onNodeWithTag("reader-text").fetchSemanticsNode().config[BookPageSources].map { it.importPage })
 
-            nav("课程").performClick()
-            onNodeWithTag("host-course-book").assertExists()
-            nav("书架").performClick()
-            ready(controller) { it.screen == BookScreen.READER && it.page == 5 }
+            backToShelfAndReopen(controller, bookId)
+            ready(controller) { it.screen == BookScreen.READER && it.page == 6 }
             assertEquals(bookId, controller.state.value.book!!.id)
             onNodeWithTag("reader-text").assertTextContains("第五页独立正文", substring = true)
-            onNodeWithText("下一页").assertIsNotEnabled()
+            onNodeWithTag("next-page").assertIsNotEnabled()
         }
-        assertEquals(5, TextbookLibrary(root.resolve("library")).book(bookId).readingPage)
+        assertEquals(6, TextbookLibrary(root.resolve("library")).book(bookId).readingPage)
 
         val reopened = TextbookController(TextbookLibrary(root.resolve("library")))
         runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
             setContent { WindowsTextbookHost(reopened) { null } }
-            ready(reopened) { it.book?.id == bookId }
-            onNodeWithTag("home-read").performClick()
-            ready(reopened) { it.screen == BookScreen.READER && it.page == 5 && it.prompt == null }
+            openFromShelf(reopened, bookId)
+            ready(reopened) { it.screen == BookScreen.READER && it.page == 6 && it.prompt == null }
             assertEquals(bookId, reopened.state.value.book!!.id)
             onNodeWithTag("reader-text").assertTextContains("第六页独立正文", substring = true)
-            onNodeWithText("下一页").assertIsNotEnabled()
+            onNodeWithTag("next-page").assertIsNotEnabled()
         }
-        println("PASS real host: pages=[5,6], range=5–6, jump=6, rejected=[1,4,7], bookmark=5, sameBook=$bookId")
+        println("PASS real host: pages=[5,6], label=5/6, jump=6, rejected=[1,4,7], bookmark=6, sameBook=$bookId")
     }
 
     @Test fun chapterPageTurnsKeepTheirPhysicalIdentityAcrossHostNavigationAndReload() {
@@ -117,24 +134,19 @@ class ReviewerKPhysicalPagesUiTest {
         val controller = TextbookController(library)
         runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
             setContent { WindowsTextbookHost(controller) { null } }
-            ready(controller) { it.book?.id == imported.id }
-            onNodeWithTag("home-read").performClick()
+            openFromShelf(controller, imported.id)
             ready(controller) { it.screen == BookScreen.READER && it.page == 5 && it.prompt == null }
             onNodeWithTag("reader-text").assertTextContains("第五页独立正文", substring = true)
-            onNodeWithText("上一页").assertIsNotEnabled()
-            onNodeWithText("下一页").performClick()
-            ready(controller) { it.page == 6 && it.book?.readingPage == 6 }
+            onNodeWithTag("previous-page").assertIsNotEnabled()
+            turnUntil(controller, "next-page") { it.page == 6 && it.book?.readingPage == 6 }
             onNodeWithTag("reader-text").assertTextContains("第六页独立正文", substring = true)
-            onNodeWithText("下一页").assertIsNotEnabled()
-            onNodeWithText("上一页").performClick()
-            ready(controller) { it.page == 5 }
+            onNodeWithTag("next-page").assertIsNotEnabled()
+            turnUntil(controller, "previous-page") { it.page == 5 }
             onNodeWithTag("reader-page-number").performClick()
             onNodeWithTag("page-jump").performTextReplacement("6")
             onNodeWithTag("page-jump").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Enter) }
             ready(controller) { it.page == 6 && it.book?.readingPage == 6 }
-            nav("课程").performClick()
-            onNodeWithTag("host-course-book").assertExists()
-            nav("书架").performClick()
+            backToShelfAndReopen(controller, imported.id)
             ready(controller) { it.screen == BookScreen.READER && it.page == 6 }
             assertEquals(imported.id, controller.state.value.book!!.id)
             onNodeWithTag("reader-text").assertTextContains("第六页独立正文", substring = true)
@@ -143,8 +155,7 @@ class ReviewerKPhysicalPagesUiTest {
         val reopened = TextbookController(TextbookLibrary(library.directory))
         runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
             setContent { WindowsTextbookHost(reopened) { null } }
-            ready(reopened) { it.book?.id == imported.id }
-            onNodeWithTag("home-read").performClick()
+            openFromShelf(reopened, imported.id)
             ready(reopened) { it.screen == BookScreen.READER && it.page == 6 && it.prompt == null }
             onNodeWithTag("reader-text").assertTextContains("第六页独立正文", substring = true)
             assertEquals(listOf(6), onNodeWithTag("reader-text").fetchSemanticsNode().config[BookPageSources].map { it.importPage })
@@ -166,7 +177,7 @@ class ReviewerKPhysicalPagesUiTest {
         runComposeUiTest {
             setContent { TextbookWorkspace(controller) { null } }
             ready(controller) { it.book?.id == imported.id }
-            onNodeWithTag("home-learn").performClick()
+            runBlocking { controller.learn() }
             ready(controller) { it.screen == BookScreen.LEARNING }
             onNodeWithTag("short-answer").performScrollTo().performTextInput("保留这段同书学习草稿")
             ready(controller) { it.answer.text == "保留这段同书学习草稿" }
@@ -177,7 +188,7 @@ class ReviewerKPhysicalPagesUiTest {
             assertEquals(6, library.book(imported.id).readingPage)
             onNodeWithTag("reader-text").assertTextContains("Photosynthesis is the process", substring = true)
             onAllNodesWithTag("source-anchor-status").assertCountEquals(0)
-            onNodeWithText("返回学习").performClick()
+            onNodeWithTag("immersive-back").assertTextContains("返回学习", substring = true).performClick()
             ready(controller) { it.screen == BookScreen.LEARNING && it.source == null }
             assertEquals(0, controller.state.value.book!!.lessonIndex)
             assertEquals(6, controller.state.value.book!!.readingPage)

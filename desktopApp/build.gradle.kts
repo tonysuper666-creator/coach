@@ -140,6 +140,22 @@ tasks.withType<JavaExec>().configureEach {
 }
 
 tasks.test {
+    // 测试不借用这台机器上的配对：默认讲解器读 user.home 下的 Coach/client，开发机上有真实配对时，
+    // 合成教材会被送去 Coach 服务分节、改写章节标题（结果随 AI 变、还花真实额度）。
+    // 普通测试一律放进构建目录里的空 home；显式打开的真机 / 真服务验收保持原样。
+    val liveRun = listOf(
+        "coach.liveBookConnection", "coach.explainLiveWindow", "coach.startupLoginLiveWindow", "coach.ai1.soakSeconds",
+        "coach.w1aTocBench", "coach.w1aSample1", "coach.w1aGroundTruth", "coach.w1aSample3Paper", "coach.w1aSample3Slides",
+        "coach.w1aLiveWindow", "coach.w1aBookPath", "coach.w1aOutDir",
+    ).any { System.getProperty(it) != null || providers.gradleProperty(it).isPresent } ||
+        listOf("COACH_AI3_LIVE_EVAL", "COACH_AI4_LIVE_EVAL").any { !System.getenv(it).isNullOrBlank() }
+    if (!liveRun) {
+        val testHome = layout.buildDirectory.dir("test-home").get().asFile
+        doFirst { testHome.deleteRecursively(); testHome.mkdirs() }
+        systemProperty("user.home", testHome.absolutePath)
+        // Skiko 的本机库仍解到原来的位置，不在空 home 里每次重解。
+        systemProperty("skiko.data.path", File(System.getProperty("user.home"), ".skiko").absolutePath)
+    }
     if (providers.gradleProperty("coach.nativeOcr").orNull == "true") systemProperty("coach.nativeOcr", "true")
     if (providers.gradleProperty("coach.nativeFormats").orNull == "true") systemProperty("coach.nativeFormats", "true")
     if (providers.gradleProperty("coach.explainLiveWindow").orNull == "true") systemProperty("coach.explainLiveWindow", "true")

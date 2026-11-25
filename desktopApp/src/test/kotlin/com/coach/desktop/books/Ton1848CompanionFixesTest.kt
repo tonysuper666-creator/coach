@@ -11,6 +11,7 @@ import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -47,7 +48,9 @@ class Ton1848CompanionFixesTest {
         home: Path,
         library: TextbookLibrary,
         private val refuseSelection: Boolean = false,
+        private val respondChapterCompanion: Boolean = false,
     ) : BookExplainer(DesktopConnectionSettings(home = home, environment = { null }), library) {
+        val chapterCalls = mutableListOf<Pair<JsonObject, List<SourceBlock>>>()
         val lessonCalls = mutableListOf<List<SourceBlock>>()
         val modeCalls = mutableListOf<String>()
         val selectionCalls = mutableListOf<Triple<String, SourceBlock, String?>>()
@@ -65,7 +68,38 @@ class Ton1848CompanionFixesTest {
         override suspend fun fetchChapterCompanion(
             requestJson: JsonObject,
             blocks: List<SourceBlock>,
-        ): ChapterCompanionFetchResult = ChapterCompanionFetchResult.Failed("skip chapter", ExplainTrouble.Other)
+        ): ChapterCompanionFetchResult {
+            chapterCalls += requestJson to blocks
+            if (!respondChapterCompanion) {
+                return ChapterCompanionFetchResult.Failed("skip chapter", ExplainTrouble.Other)
+            }
+            val bookId = requestJson["bookId"]?.toString()?.trim('"').orEmpty()
+            val chapterId = requestJson["chapterId"]?.toString()?.trim('"').orEmpty()
+            val chapterTitle = requestJson["chapterTitle"]?.toString()?.trim('"').orEmpty()
+            val keyPoints = blocks.mapIndexed { idx, blk ->
+                BookCompanionKeyPoint(
+                    id = "kp-$idx",
+                    sectionId = chapterId,
+                    summary = "章节要点：${blk.text}",
+                    anchor = BookCompanionAnchor(
+                        pdfPage = blk.page,
+                        blockId = blk.id,
+                        startUtf16 = blk.start,
+                        endUtf16 = blk.end,
+                        quoteAnchor = blk.text.take(40),
+                    ),
+                )
+            }
+            return ChapterCompanionFetchResult.Ready(
+                BookCompanionPack(
+                    bookId = bookId,
+                    chapterId = chapterId,
+                    chapterTitle = chapterTitle,
+                    coreQuestion = "本章核心问题：$chapterTitle",
+                    keyPoints = keyPoints,
+                ),
+            )
+        }
 
         override suspend fun fetchStudyModePack(
             bookId: String,
@@ -546,6 +580,188 @@ class Ton1848CompanionFixesTest {
             println("TON1848_SNAPSHOT_MS=$elapsedMs")
             assertEquals(book.id, snapshot["book"]?.let { (it as kotlinx.serialization.json.JsonPrimitive).content })
             assertTrue(elapsedMs < 2000.0, "Snapshot took unexpectedly long: ${elapsedMs}ms")
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun onePageChapterDefaultExplainSkipsLeadingCaptionAndStartsWithIntro() {
+        val root = Files.createTempDirectory("ton1848-one-page-chapter-")
+        try {
+            val xrayCaption = "X-Ray photograph of a hand, making this a synthetic caption."
+            val introPara1 = "The lighthouse team measures tides before testing the blue signal."
+            val introPara2 = "Independent measurements help the observers verify the pattern."
+            val zhCaption = "插图：手部 X 光示意"
+            val zhProse = "灯塔观测员会先校对潮汐，再记录蓝色信号。"
+            val page1Text = "$xrayCaption\n\nINTRODUCTION\n\n$introPara1\n\n$introPara2"
+            val page2Text = "CHAPTER 1: OBSERVATIONS\n\nObservation 1.1: observers compare notes across stations."
+            val (library, rawBook) = importSyntheticBook(root, "placeholder")
+
+            val capStart = page1Text.indexOf(xrayCaption)
+            val headingStart = page1Text.indexOf("INTRODUCTION")
+            val intro1Start = page1Text.indexOf(introPara1)
+            val intro2Start = page1Text.indexOf(introPara2)
+            assertTrue(headingStart > capStart && intro1Start > headingStart && intro2Start > intro1Start)
+
+            val blockCap = SourceBlock("${rawBook.id}:p1:$capStart", 1, capStart, capStart + xrayCaption.length, false, xrayCaption)
+            val blockHeading = SourceBlock("${rawBook.id}:p1:$headingStart", 1, headingStart, headingStart + "INTRODUCTION".length, true, "INTRODUCTION")
+            val blockIntro1 = SourceBlock("${rawBook.id}:p1:$intro1Start", 1, intro1Start, intro1Start + introPara1.length, false, introPara1)
+            val blockIntro2 = SourceBlock("${rawBook.id}:p1:$intro2Start", 1, intro2Start, intro2Start + introPara2.length, false, introPara2)
+            val blockCh1Head = SourceBlock("${rawBook.id}:p2:0", 2, 0, "CHAPTER 1: OBSERVATIONS".length, true, "CHAPTER 1: OBSERVATIONS")
+            val blockCh1Body = SourceBlock("${rawBook.id}:p2:25", 2, 25, page2Text.length, false, "Observation 1.1: observers compare notes across stations.")
+
+            val lessons = listOf(
+                BookLesson("sec-caption", "Illustrations", listOf(blockCap)),
+                BookLesson("sec-intro", "INTRODUCTION", listOf(blockHeading, blockIntro1, blockIntro2)),
+                BookLesson("sec-ch1", "CHAPTER 1: OBSERVATIONS", listOf(blockCh1Head, blockCh1Body)),
+            )
+            val tocNodes = listOf(
+                BookTocNode("ch-intro", null, 0, 1, TocNodeKind.CHAPTER, "1", "INTRODUCTION", 1, 1, null, HeadingSource.PDF_OUTLINE),
+                BookTocNode("ch-1", null, 0, 2, TocNodeKind.CHAPTER, "2", "CHAPTER 1: OBSERVATIONS", 2, 2, null, HeadingSource.PDF_OUTLINE),
+            )
+            val structure = BookStructure(
+                version = BookStructure.CURRENT_VERSION,
+                pageRoles = mapOf(1 to BookPageRole.BODY, 2 to BookPageRole.BODY),
+                sections = lessons.map { sec ->
+                    BookSection(sec.id, sec.title, sec.breadcrumb, sec.firstPage, sec.lastPage, 1, sec.blocks.map(SourceBlock::id))
+                },
+                source = HeadingSource.PDF_OUTLINE.name,
+                tocNodes = tocNodes,
+            ).also { st -> st.deferResolvedLessons { lessons } }
+
+            // Intentionally leave BookIllustration empty to verify text-regex caption matching as well.
+            val book = rawBook.copy(
+                pages = listOf(
+                    BookPage(1, page1Text),
+                    BookPage(2, page2Text),
+                ),
+                structure = structure,
+            )
+
+            // 1. Anchor at offset 0 on page 1 resolves to INTRODUCTION prose section, not caption section.
+            val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined)
+            val guideController = SectionGuideController(
+                book,
+                library,
+                ExplainConsent(library.directory),
+                FakeCompanionExplainer(root.resolve("home-guide"), library),
+                scope,
+            )
+            assertEquals(1, guideController.sectionIndexForAnchor(1, 0))
+
+            // 2. ChapterCompanionGrouping filters leading caption section in multi-section single-page chapter.
+            val group = ChapterCompanionGrouping.groupForSection(book, 0)!!
+            val filteredGroup = ChapterCompanionGrouping.filterForCompanion(book, group)
+            assertEquals(listOf("sec-intro"), filteredGroup.sections.map { it.id })
+            assertNull(ChapterCompanionProgressive.firstSectionGroup(filteredGroup, "sec-caption"))
+
+            // 3. Single-section single-page chapter with caption block before prose also strips leading caption block.
+            val singleSectionGroup = ChapterSectionGroup(
+                chapterId = "ch-single-sec",
+                chapterTitle = "INTRODUCTION",
+                firstPage = 1,
+                lastPage = 1,
+                sections = listOf(BookLesson("sec-single", "INTRODUCTION", listOf(blockCap, blockHeading, blockIntro1))),
+            )
+            val filteredSingle = ChapterCompanionGrouping.filterForCompanion(book, singleSectionGroup)
+            assertEquals(listOf(blockIntro1), ChapterCompanionGrouping.wireBlocks(filteredSingle))
+
+            // 4. Pure-caption chapter keeps caption fallback instead of dropping all blocks; Chinese caption skips cleanly.
+            val pureCaptionGroup = ChapterSectionGroup(
+                chapterId = "ch-pure-caption",
+                chapterTitle = "Plates",
+                firstPage = 1,
+                lastPage = 1,
+                sections = listOf(BookLesson("sec-cap-only", "Plates", listOf(blockCap))),
+            )
+            assertEquals(listOf(blockCap), ChapterCompanionGrouping.wireBlocks(ChapterCompanionGrouping.filterForCompanion(book, pureCaptionGroup)))
+
+            val zhCapBlock = SourceBlock("${rawBook.id}:p1:0", 1, 0, zhCaption.length, false, zhCaption)
+            val zhProseBlock = SourceBlock("${rawBook.id}:p1:${zhCaption.length + 2}", 1, zhCaption.length + 2, zhCaption.length + 2 + zhProse.length, false, zhProse)
+            val zhLesson = BookLesson("zh-s1", "正文", listOf(zhCapBlock, zhProseBlock))
+            val zhBook = rawBook.copy(
+                pages = listOf(BookPage(1, "$zhCaption\n\n$zhProse")),
+                structure = BookStructure(
+                    version = BookStructure.CURRENT_VERSION,
+                    pageRoles = mapOf(1 to BookPageRole.BODY),
+                    sections = listOf(BookSection("zh-s1", "正文", "正文", 1, 1, 1, listOf(zhCapBlock.id, zhProseBlock.id))),
+                    source = HeadingSource.HEADING_RULE.name,
+                ).also { it.deferResolvedLessons { listOf(zhLesson) } },
+            )
+            assertTrue(isLeadingImageCaptionBlock(zhCapBlock, emptySet()))
+            assertEquals(listOf(zhProseBlock), selectScreenExplainBlocks(zhBook, 1))
+
+            // 5. Render SingleBookCompanionPanel for single-page Intro chapter (even if caller passes sectionIndex=0):
+            // sends a single chapter request with INTRODUCTION prose and zero caption blocks, and displays prose KP first.
+            val explainer = FakeCompanionExplainer(root.resolve("home-ui"), library, respondChapterCompanion = true)
+            val pref = BookStudyPreference(book.id, BookStudyMode.READ_THROUGH, detailLevel = ExplainDetailLevel.DETAILED)
+            runSkikoComposeUiTest(size = Size(820f, 620f)) {
+                setContent {
+                    CoachTheme(false) {
+                        CompositionLocalProvider(LocalReadingAiExplain provides true, LocalV7ReducedMotion provides true) {
+                            SingleBookCompanionPanel(
+                                book = book,
+                                currentPage = 1,
+                                currentPageOffset = 0,
+                                currentSectionIndex = 0,
+                                explainer = explainer,
+                                library = library,
+                                draft = ChapterPracticeDraft(bookId = book.id, tocNodeId = "ch-intro", page = 1),
+                                studyPreference = pref,
+                                onDraftChange = {},
+                                onOpenAnchor = {},
+                                onCommitQuizAnswer = { _, _, _, _ -> },
+                                onAskAboutText = {},
+                                onOpenLogin = {},
+                            )
+                        }
+                    }
+                }
+                waitUntil(timeoutMillis = 5_000) { explainer.chapterCalls.isNotEmpty() }
+                waitUntil(timeoutMillis = 5_000) { onAllNodesWithTag("companion-kp-0").fetchSemanticsNodes().isNotEmpty() }
+                waitForIdle()
+                assertEquals(1, explainer.chapterCalls.size)
+                val sentTexts = explainer.chapterCalls.single().second.map { it.text }
+                assertTrue(sentTexts.any { introPara1 in it }, "First request must include Introduction prose, got: $sentTexts")
+                assertFalse(sentTexts.any { "synthetic caption" in it }, "First request must exclude leading caption, got: $sentTexts")
+                assertTrue(explainer.lessonCalls.isEmpty(), "Single-page chapter stays on chapter companion path")
+                onNodeWithTag("companion-kp-0").assertIsDisplayed()
+                onNodeWithText("The lighthouse team measures tides", substring = true).assertIsDisplayed()
+                assertTrue(onAllNodesWithText("synthetic caption", substring = true).fetchSemanticsNodes().isEmpty())
+            }
+
+            // 6. Reopen hits SQLite chapter cache with 0 additional chapter requests and keeps prose KP first.
+            val reopenExplainer = FakeCompanionExplainer(root.resolve("home-reopen"), library, respondChapterCompanion = true)
+            runSkikoComposeUiTest(size = Size(820f, 620f)) {
+                setContent {
+                    CoachTheme(false) {
+                        CompositionLocalProvider(LocalReadingAiExplain provides true, LocalV7ReducedMotion provides true) {
+                            SingleBookCompanionPanel(
+                                book = book,
+                                currentPage = 1,
+                                currentPageOffset = 0,
+                                currentSectionIndex = 1,
+                                explainer = reopenExplainer,
+                                library = library,
+                                draft = ChapterPracticeDraft(bookId = book.id, tocNodeId = "ch-intro", page = 1),
+                                studyPreference = pref,
+                                onDraftChange = {},
+                                onOpenAnchor = {},
+                                onCommitQuizAnswer = { _, _, _, _ -> },
+                                onAskAboutText = {},
+                                onOpenLogin = {},
+                            )
+                        }
+                    }
+                }
+                waitUntil(timeoutMillis = 5_000) { onAllNodesWithTag("companion-kp-0").fetchSemanticsNodes().isNotEmpty() }
+                waitForIdle()
+                assertTrue(reopenExplainer.chapterCalls.isEmpty())
+                onNodeWithTag("companion-kp-0").assertIsDisplayed()
+                onNodeWithText("The lighthouse team measures tides", substring = true).assertIsDisplayed()
+                assertTrue(onAllNodesWithText("synthetic caption", substring = true).fetchSemanticsNodes().isEmpty())
+            }
         } finally {
             root.toFile().deleteRecursively()
         }

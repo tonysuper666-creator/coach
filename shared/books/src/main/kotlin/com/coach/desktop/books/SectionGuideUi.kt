@@ -75,7 +75,17 @@ internal class SectionGuideController(
         val exact = indices.firstOrNull { index ->
             book.lessons[index].blocks.any { it.page == page && offsetUtf16 in it.start until it.end }
         }
-        if (exact != null) return exact
+        if (exact != null) {
+            if (offsetUtf16 == 0 && isLeadingCaptionOnlySection(book, book.lessons[exact])) {
+                val proseOnPage = indices.firstOrNull { idx ->
+                    idx > exact &&
+                        book.lessons[idx].blocks.any { it.page == page } &&
+                        !isLeadingCaptionOnlySection(book, book.lessons[idx])
+                }
+                if (proseOnPage != null) return proseOnPage
+            }
+            return exact
+        }
         if (offsetUtf16 > 0) {
             val atOrAfter = indices
                 .filter { index -> book.lessons[index].blocks.any { it.page == page && it.end > offsetUtf16 } }
@@ -90,7 +100,10 @@ internal class SectionGuideController(
                 }
             if (beforeOrAt != null) return beforeOrAt
         }
-        return indices.firstOrNull { page in book.lessons[it].firstPage..book.lessons[it].lastPage } ?: -1
+        val pageMatches = indices.filter { page in book.lessons[it].firstPage..book.lessons[it].lastPage }
+        return pageMatches.firstOrNull { !isLeadingCaptionOnlySection(book, book.lessons[it]) }
+            ?: pageMatches.firstOrNull()
+            ?: -1
     }
 
     fun sectionForPage(page: Int): BookLesson? =

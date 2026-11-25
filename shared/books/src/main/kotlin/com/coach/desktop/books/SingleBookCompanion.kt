@@ -550,6 +550,45 @@ internal object ChapterCompanionGrouping {
 
     fun isExerciseSection(title: String): Boolean = EXERCISE_RE.containsMatchIn(title.trim())
 
+    fun filterForCompanion(book: Textbook, group: ChapterSectionGroup): ChapterSectionGroup {
+        val captionCache = HashMap<Int, Set<String>>()
+        fun captionsFor(page: Int): Set<String> = captionCache.getOrPut(page) { pageIllustrationCaptions(book, page) }
+
+        val hasAnyProse = group.sections.any { sec ->
+            sec.blocks.any { blk -> !blk.heading && !isLeadingImageCaptionBlock(blk, captionsFor(blk.page)) }
+        }
+        if (!hasAnyProse) return group
+
+        val withoutLeadingCaptionSections = group.sections.dropWhile { sec ->
+            val effective = sec.blocks.filterNot { it.heading }.ifEmpty { sec.blocks }
+            effective.isEmpty() || effective.all { blk -> isLeadingImageCaptionBlock(blk, captionsFor(blk.page)) }
+        }.ifEmpty { group.sections }
+
+        var proseSeen = false
+        val cleanedSections = withoutLeadingCaptionSections.mapNotNull { sec ->
+            if (proseSeen) {
+                sec
+            } else {
+                val filteredBlocks = ArrayList<SourceBlock>(sec.blocks.size)
+                for (blk in sec.blocks) {
+                    if (proseSeen || blk.heading) {
+                        filteredBlocks += blk
+                    } else if (!isLeadingImageCaptionBlock(blk, captionsFor(blk.page))) {
+                        proseSeen = true
+                        filteredBlocks += blk
+                    }
+                }
+                if (filteredBlocks.any { !it.heading }) sec.copy(blocks = filteredBlocks) else null
+            }
+        }.ifEmpty { withoutLeadingCaptionSections }
+
+        return group.copy(
+            firstPage = cleanedSections.minOf { it.firstPage },
+            lastPage = cleanedSections.maxOf { it.lastPage },
+            sections = cleanedSections,
+        )
+    }
+
     fun wireBlocks(group: ChapterSectionGroup): List<SourceBlock> {
         val seen = HashSet<String>()
         return group.sections.flatMap { sec ->
@@ -558,13 +597,14 @@ internal object ChapterCompanionGrouping {
     }
 
     fun buildWireRequest(book: Textbook, group: ChapterSectionGroup): JsonObject = buildJsonObject {
+        val effectiveGroup = filterForCompanion(book, group)
         val seen = HashSet<String>()
         put("bookId", book.id)
         put("bookPages", book.pages.size.coerceAtLeast(1))
-        put("chapterId", group.chapterId)
-        put("chapterTitle", group.chapterTitle)
+        put("chapterId", effectiveGroup.chapterId)
+        put("chapterTitle", effectiveGroup.chapterTitle)
         put("sections", buildJsonArray {
-            for (sec in group.sections) {
+            for (sec in effectiveGroup.sections) {
                 val bodyBlocks = (sec.blocks.filterNot { it.heading }.ifEmpty { sec.blocks }).filter { seen.add(it.id) }
                 if (bodyBlocks.isEmpty()) continue
                 add(buildJsonObject {

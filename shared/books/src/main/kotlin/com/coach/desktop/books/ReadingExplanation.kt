@@ -18,16 +18,27 @@ internal fun explanationScope(first: Int, last: Int, title: String): String {
 }
 
 private val LEADING_CAPTION_LINE_RE = Regex(
-    "^(?:fig(?:ure)?\\.?|plate|illustration|photo(?:graph)?|x-?ray|diagram|chart|图\\s*\\d+|插图)\\b.*",
+    "^(?:(?:fig(?:ure)?\\.?|plate|illustration|photo(?:graph)?|x-?ray|diagram|chart)(?:\\b|(?=[\\s:：.\\-—]|$))|(?:图\\s*\\d+|插图)).*",
     RegexOption.IGNORE_CASE,
 )
 
-private fun isLeadingImageCaptionBlock(block: SourceBlock, illustrationCaptions: Set<String>): Boolean {
+internal fun pageIllustrationCaptions(book: Textbook, page: Int): Set<String> =
+    book.page(page)?.illustrations.orEmpty()
+        .mapNotNull { it.caption?.trim()?.takeIf(String::isNotEmpty) }
+        .toSet()
+
+internal fun isLeadingImageCaptionBlock(block: SourceBlock, illustrationCaptions: Set<String>): Boolean {
     val trimmed = block.text.trim()
     if (trimmed.isEmpty()) return true
     if (trimmed in illustrationCaptions) return true
     if (trimmed.length <= 220 && LEADING_CAPTION_LINE_RE.matches(trimmed)) return true
     return false
+}
+
+internal fun isLeadingCaptionOnlySection(book: Textbook, section: BookLesson): Boolean {
+    val effective = section.blocks.filterNot { it.heading }.ifEmpty { section.blocks }
+    if (effective.isEmpty()) return false
+    return effective.all { blk -> isLeadingImageCaptionBlock(blk, pageIllustrationCaptions(book, blk.page)) }
 }
 
 /**
@@ -62,9 +73,7 @@ internal fun selectScreenExplainBlocks(
         else -> bodyOnPage
     }
 
-    val captionSet = book.page(page)?.illustrations.orEmpty()
-        .mapNotNull { it.caption?.trim()?.takeIf(String::isNotEmpty) }
-        .toSet()
+    val captionSet = pageIllustrationCaptions(book, page)
     val hasFollowingProse = screenCandidates.any { !isLeadingImageCaptionBlock(it, captionSet) }
     val hasPrecedingHeading = allOnPage.any { it.heading && it.start < (screenCandidates.lastOrNull()?.start ?: 0) }
     val filtered = if (screenCandidates.size >= 2 && hasFollowingProse &&

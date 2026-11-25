@@ -208,7 +208,8 @@ internal fun SingleBookCompanionPanel(
         modeError = null
         try {
             val wire = withContext(Dispatchers.IO) {
-                StudyModeWireBuilder.buildModeRequestJson(library, book, group, chapterNum, studyPreference)
+                val companionGroup = ChapterCompanionGrouping.filterForCompanion(book, group)
+                StudyModeWireBuilder.buildModeRequestJson(library, book, companionGroup, chapterNum, studyPreference)
             }
             modeSourcePages = wire.getValue("pages").jsonArray.map { it.jsonObject.getValue("pdfPage").jsonPrimitive.int }
             val res = explainer.fetchStudyModePack(book.id, studyPreference.mode.name, wire) { chars, _, delta ->
@@ -309,9 +310,10 @@ internal fun SingleBookCompanionPanel(
         }
         packState = CompanionPackState.Loading
         try {
-            val firstGroup = ChapterCompanionProgressive.firstSectionGroup(group, currentSection?.id)
+            val companionGroup = ChapterCompanionGrouping.filterForCompanion(book, group)
+            val firstGroup = ChapterCompanionProgressive.firstSectionGroup(companionGroup, currentSection?.id)
             val restGroup = firstGroup?.sections?.singleOrNull()?.id?.let {
-                ChapterCompanionProgressive.remainingSectionGroup(group, it)
+                ChapterCompanionProgressive.remainingSectionGroup(companionGroup, it)
             }
             if (firstGroup != null && restGroup != null) {
                 val firstWire = ChapterCompanionGrouping.buildWireRequest(book, firstGroup)
@@ -337,8 +339,8 @@ internal fun SingleBookCompanionPanel(
                     }
                 }
             } else {
-                val wire = ChapterCompanionGrouping.buildWireRequest(book, group)
-                val blocks = ChapterCompanionGrouping.wireBlocks(group)
+                val wire = ChapterCompanionGrouping.buildWireRequest(book, companionGroup)
+                val blocks = ChapterCompanionGrouping.wireBlocks(companionGroup)
                 when (val res = explainer.fetchChapterCompanion(wire, blocks)) {
                     is ChapterCompanionFetchResult.Ready -> {
                         withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, res.pack) }
@@ -622,7 +624,9 @@ internal fun SingleBookCompanionPanel(
                         }
                     }
                     is CompanionPackState.Failed -> {
-                        val pages = remember(chapterGroup) { ChapterCompanionGrouping.wireBlocks(chapterGroup).distinctBy { it.page } }
+                        val pages = remember(book.id, chapterGroup) {
+                            ChapterCompanionGrouping.wireBlocks(ChapterCompanionGrouping.filterForCompanion(book, chapterGroup)).distinctBy { it.page }
+                        }
                         RetrievedPageLinks(pages, { "第 ${it.page} 页" }, { onJumpPage(it.page) })
                         CoachErrorBanner(
                             message = state.message,

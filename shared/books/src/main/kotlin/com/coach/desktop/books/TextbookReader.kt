@@ -132,6 +132,7 @@ internal fun TextbookReader(
     onUpdateCollectionQaSession: ((String, CollectionQaSessionState) -> Unit)? = null,
     onJumpCollectionCitation: ((CollectionQaCitation) -> Unit)? = null,
     onConsumeKeepAskTabOpen: () -> Unit = {},
+    onBrowsePage: ((Int) -> Unit)? = null,
 ) {
     val book = checkNotNull(ui.book)
     val page = book.page(ui.page)
@@ -506,12 +507,33 @@ internal fun TextbookReader(
     }
     var askInputFocused by remember(book.id) { mutableStateOf(false) }
     var practiceInputFocused by remember(book.id) { mutableStateOf(false) }
+    var explicitTocNodeId by remember(book.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(readingAnchor, explicitTocNodeId) {
+        val id = explicitTocNodeId ?: return@LaunchedEffect
+        val chosenNode = navigationBook.tocNodes.firstOrNull { it.id == id }
+        if (chosenNode == null || readingAnchor.importPage != chosenNode.startPage || readingAnchor.offsetUtf16 < chosenNode.startOffset) {
+            explicitTocNodeId = null
+        }
+    }
+    val activeTocNode = remember(navigationBook, readingAnchor, explicitTocNodeId) {
+        BookBoundaries.activeTocNode(
+            navigationBook.tocNodes,
+            readingAnchor.importPage,
+            readingAnchor.offsetUtf16,
+            explicitTocNodeId,
+            book.page(readingAnchor.importPage)?.text,
+        )
+    }
     val currentChapterGroup = remember(book.id, book.lessons, currentSectionIndex) {
         ChapterCompanionGrouping.groupForSection(book, currentSectionIndex)
     }
     val currentChapterSpan = remember(navigationBook, readingAnchor) {
         BookChapterResolver.chapterForPage(navigationBook, readingAnchor.importPage, readingAnchor.offsetUtf16)
     }
+    val effectiveChapterSpan = remember(navigationBook, readingAnchor, explicitTocNodeId) {
+        BookBoundaries.effectiveChapterForFooter(navigationBook, readingAnchor.importPage, readingAnchor.offsetUtf16, explicitTocNodeId)
+    }
+    var endOrHomeBrowseActive by remember(book.id) { mutableStateOf(false) }
     var correctedBodyPage by remember(book.id, book.correctedBodyPage) { mutableStateOf(book.correctedBodyPage) }
     val bodyStart = remember(book, correctedBodyPage) { BookBoundaries.bodyStart(book.pages, book.structure, correctedBodyPage) }
     val dwellThresholdMs = LocalChapterDwellMs.current
@@ -642,7 +664,7 @@ internal fun TextbookReader(
     // 3. 目录跳读、Home/End 或进度条跳页绝不自动标已读跳过的中间章。
     // 同时持续累计页停留并检测 p+1 -> p 往返重读（累计停留 > 个人页速中位数 2.2 倍记 REREAD_BACKTRACK）。
     val dwellPage = readingAnchor.importPage
-    LaunchedEffect(book.id, readingAnchor, paging.pages.size, ui.source, dwellThresholdMs) {
+    LaunchedEffect(book.id, readingAnchor, paging.pages.size, ui.source, dwellThresholdMs, endOrHomeBrowseActive, pageRole) {
         if (ui.source != null) return@LaunchedEffect
         val span = currentChapterSpan
         val secId = currentSection?.id ?: span?.tocNodeId
@@ -697,6 +719,8 @@ internal fun TextbookReader(
         val waitMs = dwellThresholdMs.coerceAtLeast(1L)
         val tickMs = minOf(250L, waitMs)
         var trackerElapsedMs = 0L
+        var pageCommitElapsedMs = 0L
+        var committedPageOnDwell = false
         while (true) {
             delay(tickMs)
             val nowMs = System.currentTimeMillis()
@@ -704,6 +728,13 @@ internal fun TextbookReader(
             lastDwellSampleAtMs = nowMs
             for ((recSpan, recPage) in chapterDwellTracker.onTick(span, visiblePagesInSpan, deltaMs)) {
                 commitChapterDwell(recSpan, recPage)
+            }
+            pageCommitElapsedMs += deltaMs
+            if (!committedPageOnDwell && pageCommitElapsedMs >= waitMs) {
+                committedPageOnDwell = true
+                if (!endOrHomeBrowseActive && pageRole == BookPageRole.BODY && book.readingPage != dwellPage) {
+                    onPage(dwellPage)
+                }
             }
             trackerElapsedMs += deltaMs
             if (span != null && secId != null && trackerElapsedMs >= waitMs) {
@@ -802,13 +833,38 @@ internal fun TextbookReader(
             if (requested) return@LaunchedEffect
         }
     }
+    fun emitReaderPage(targetPage: Int, forceCommit: Boolean = false, fromEndOrHome: Boolean = false) {
+        if (ui.source != null || forceCommit) {
+            if (forceCommit) endOrHomeBrowseActive = false
+            onPage(targetPage)
+            return
+        }
+        if (fromEndOrHome) {
+            endOrHomeBrowseActive = true
+            onBrowsePage?.invoke(targetPage)
+            return
+        }
+        val jumpDist = kotlin.math.abs(targetPage - book.readingPage)
+        if (endOrHomeBrowseActive) {
+            if (jumpDist <= 2) {
+                endOrHomeBrowseActive = false
+                onPage(targetPage)
+            } else {
+                onBrowsePage?.invoke(targetPage)
+            }
+        } else if (jumpDist > 5 && onBrowsePage != null) {
+            onBrowsePage(targetPage)
+        } else {
+            onPage(targetPage)
+        }
+    }
     val publishPdfPage: (Int) -> Unit = { number ->
         val selection = pdf.selection?.takeIf { it.page == number }
         paging.anchor = BookPageAnchor(number, selection?.range?.startUtf16 ?: 0)
-        if (paging.publishImportPage(number)) onPage(number)
+        if (paging.publishImportPage(number)) emitReaderPage(number)
         session.goToPage(number)
     }
-    fun turnToAnchor(pageNumber: Int?, offset: Int = 0) {
+    fun turnToAnchor(pageNumber: Int?, offset: Int = 0, forceCommit: Boolean = false, fromEndOrHome: Boolean = false) {
         val targetPage = pageNumber?.let(book::page)
         if (pageNumber != null && targetPage != null) {
             passageJump = null
@@ -816,7 +872,7 @@ internal fun TextbookReader(
             val targetUnrecognized = hasOriginal && (targetPage.ocrPending || (targetPage.text.isBlank() && book.hasPendingOcr))
             if (pdfVisible || (originalPdf && targetUnrecognized)) pdf.jump(pageNumber)
             paging.anchor = BookPageAnchor(pageNumber, offset.coerceIn(0, targetPage.text.length))
-            if (paging.publishImportPage(pageNumber)) onPage(pageNumber)
+            if (paging.publishImportPage(pageNumber)) emitReaderPage(pageNumber, forceCommit = forceCommit, fromEndOrHome = fromEndOrHome)
             session.goToPage(pageNumber)
         }
     }
@@ -834,7 +890,8 @@ internal fun TextbookReader(
         return first..last
     }
     val turnLayout by rememberUpdatedState<(ReaderTurn) -> Unit> { turn ->
-        if (turn == ReaderTurn.First || turn == ReaderTurn.Last) {
+        val isEndOrHome = turn == ReaderTurn.First || turn == ReaderTurn.Last
+        if (isEndOrHome) {
             pendingNavigationIsJump = true
             pendingDwellJump = true
         }
@@ -842,8 +899,8 @@ internal fun TextbookReader(
             when (turn) {
                 ReaderTurn.Previous -> turnTo(previousPage)
                 ReaderTurn.Next -> turnTo(nextPage)
-                ReaderTurn.First -> turnTo(book.pages.first().number)
-                ReaderTurn.Last -> turnTo(lastPage)
+                ReaderTurn.First -> turnToAnchor(book.pages.first().number, fromEndOrHome = true)
+                ReaderTurn.Last -> turnToAnchor(lastPage, fromEndOrHome = true)
             }
         } else when {
             turn == ReaderTurn.Next && !paging.canNext ->
@@ -851,11 +908,14 @@ internal fun TextbookReader(
             turn == ReaderTurn.Previous && !paging.canPrevious ->
                 book.pages.lastOrNull { it.number < visibleImportPageRange().first }?.number?.let(turnTo)
             turn == ReaderTurn.Last && book.pages.last().ocrPending ->
-                turnTo(book.pages.last().number)
-            else -> paging.move(turn)?.let { anchor ->
-                if (paging.publishImportPage(anchor.importPage)) {
-                    onPage(anchor.importPage)
-                    session.goToPage(anchor.importPage)
+                turnToAnchor(book.pages.last().number, fromEndOrHome = true)
+            else -> {
+                if (isEndOrHome) endOrHomeBrowseActive = true
+                paging.move(turn)?.let { anchor ->
+                    if (paging.publishImportPage(anchor.importPage)) {
+                        emitReaderPage(anchor.importPage, fromEndOrHome = isEndOrHome)
+                        session.goToPage(anchor.importPage)
+                    }
                 }
             }
         }
@@ -875,7 +935,7 @@ internal fun TextbookReader(
         passageJumpTick++
         if (originalPdf) pdf.jump(passage.page)
         paging.anchor = BookPageAnchor(passage.page, passage.start)
-        if (paging.publishImportPage(passage.page)) onPage(passage.page)
+        if (paging.publishImportPage(passage.page)) emitReaderPage(passage.page, forceCommit = true)
     }
 
     LaunchedEffect(pendingCourseJump, book.id) {
@@ -903,7 +963,7 @@ internal fun TextbookReader(
             if (originalPdf) pdf.jump(hit.page)
         }
         paging.anchor = BookPageAnchor(hit.page, hit.start)
-        if (paging.publishImportPage(hit.page)) onPage(hit.page)
+        if (paging.publishImportPage(hit.page)) emitReaderPage(hit.page, forceCommit = true)
         session.goToPage(hit.page)
     }
     val selectSearchHit: (Int) -> Unit = { index ->
@@ -1326,8 +1386,14 @@ internal fun TextbookReader(
                             passageJump = null
                             scope.launch {
                                 when (event.key) {
-                                    Key.MoveEnd -> scroll.scrollToEnd()
-                                    Key.MoveHome -> scroll.scrollTo(ScrollReadPosition(0))
+                                    Key.MoveEnd -> {
+                                        endOrHomeBrowseActive = true
+                                        scroll.scrollToEnd()
+                                    }
+                                    Key.MoveHome -> {
+                                        endOrHomeBrowseActive = true
+                                        scroll.scrollTo(ScrollReadPosition(0))
+                                    }
                                     Key.DirectionDown, Key.DirectionUp -> scroll.scrollLine(event.key == Key.DirectionDown)
                                     else -> scroll.scrollScreen(event.key == Key.PageDown || (event.key == Key.Spacebar && !event.isShiftPressed))
                                 }
@@ -1391,12 +1457,14 @@ internal fun TextbookReader(
                             pdf.selection = null
                         },
                         onSpot = { anchor ->
-                            if (ui.source == null) runCatching { library.saveReadSpot(book.id, anchor.importPage, anchor.offsetUtf16) }
+                            if (ui.source == null && !endOrHomeBrowseActive && kotlin.math.abs(anchor.importPage - book.readingPage) <= 5) {
+                                runCatching { library.saveReadSpot(book.id, anchor.importPage, anchor.offsetUtf16) }
+                            }
                         },
                         onPosition = { number ->
                             if (paging.publishImportPage(number)) {
                                 if (textSelection?.page != number) textSelection = null
-                                onPage(number)
+                                emitReaderPage(number)
                                 session.goToPage(number)
                             }
                         },
@@ -1939,11 +2007,47 @@ internal fun TextbookReader(
             readerViewport(Modifier.fillMaxSize())
         }
 
+        val (currentSubPage, currentSubPageCount) = remember(textView, pageUnrecognizedOriginal, paging.pages, paging.anchor) {
+            if (!textView || pageUnrecognizedOriginal || paging.pages.isEmpty()) 1 to 1
+            else {
+                val targetPage = paging.anchor.importPage
+                val indices = paging.pages.indices.filter { idx ->
+                    val sheet = paging.pages[idx]
+                    sheet.anchor.importPage == targetPage || sheet.sources.any { it.importPage == targetPage }
+                }
+                if (indices.size <= 1) 1 to 1
+                else {
+                    val activeIdx = paging.pages.pageContaining(paging.anchor)
+                    val pos = indices.indexOf(activeIdx).let { if (it >= 0) it + 1 else 1 }
+                    pos to indices.size
+                }
+            }
+        }
+        val currentSubPageFraction = if (currentSubPageCount > 1) {
+            (currentSubPage - 1).toFloat() / currentSubPageCount.toFloat()
+        } else 0f
+        val currentChapterRemainingScreens = remember(
+            textView, pageUnrecognizedOriginal, navigationBook, effectiveChapterSpan, paging.pages, paging.anchor, paging.columns,
+        ) {
+            if (!textView || pageUnrecognizedOriginal || paging.pages.isEmpty() || effectiveChapterSpan == null) 0
+            else {
+                val activeIdx = paging.pages.pageContaining(paging.anchor)
+                BookBoundaries.remainingChapterScreens(
+                    book = navigationBook,
+                    chapter = effectiveChapterSpan,
+                    laidPages = paging.pages,
+                    activeSheetIndex = activeIdx,
+                    visibleColumns = paging.columns,
+                )
+            }
+        }
+
         // 2. 底边 2dp 静默进度细线（HUD 隐藏且非底抽屉时可见，占面积 <0.2%）。
         if (!showHud && !effectiveBottomSheet) {
             ImmersiveProgressHairline(
-                currentPage = ui.page,
+                currentPage = readingAnchor.importPage,
                 lastPage = lastPage,
+                subPageFraction = currentSubPageFraction,
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
         }
@@ -2027,16 +2131,27 @@ internal fun TextbookReader(
             book = book,
             currentPage = ui.page,
             currentAnchor = readingAnchor,
-            currentChapterId = currentChapterSpan?.tocNodeId,
+            currentChapterId = effectiveChapterSpan?.tocNodeId,
             bodyStart = bodyStart,
             bodyStartCorrected = correctedBodyPage != null,
             bookmarks = bookmarks,
             busy = ui.busy,
-            onJumpPage = { target -> pendingNavigationIsJump = true; pendingDwellJump = true; turnTo(target); tocOpen = false },
+            onJumpPage = { target ->
+                pendingNavigationIsJump = true
+                pendingDwellJump = true
+                endOrHomeBrowseActive = false
+                turnTo(target)
+                tocOpen = false
+            },
             onJumpToc = { target ->
                 pendingNavigationIsJump = true
                 pendingDwellJump = true
-                turnToAnchor(target.startPage, target.startOffset)
+                endOrHomeBrowseActive = false
+                explicitTocNodeId = target.id
+                val cleanOffset = book.page(target.startPage)?.let {
+                    BookBoundaries.snapToCleanBodyOffset(it.text, target.startOffset)
+                } ?: target.startOffset
+                turnToAnchor(target.startPage, cleanOffset)
                 tocOpen = false
             },
             onSaveBodyStart = { corrected ->
@@ -2045,12 +2160,13 @@ internal fun TextbookReader(
                 val start = BookBoundaries.bodyStart(book.pages, book.structure, corrected)
                 pendingNavigationIsJump = true
                 pendingDwellJump = true
-                turnToAnchor(start.importPage, start.offsetUtf16)
+                turnToAnchor(start.importPage, start.offsetUtf16, forceCommit = true)
             },
             onToggleBookmark = { toggleBookmark(it) },
             onReorganizeSections = onReorganizeSections,
             onClose = { tocOpen = false },
             readChapterIds = chapterReadStates,
+            activeTocNodeId = explicitTocNodeId ?: activeTocNode?.id,
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(
@@ -2086,7 +2202,7 @@ internal fun TextbookReader(
             visible = showHud,
             availableWidth = maxWidth,
             bookTitle = book.title,
-            sectionTitle = if (source != null) "出处 · ${source.title}" else currentChapterSpan?.title,
+            sectionTitle = if (source != null) "出处 · ${source.title}" else activeTocNode?.title ?: effectiveChapterSpan?.title ?: currentSection?.title,
             backLabel = if (source != null) { if (ui.review != null) "返回复习" else "返回学习" } else "书架",
             hasOriginal = hasOriginal,
             textView = textView,
@@ -2154,9 +2270,23 @@ internal fun TextbookReader(
             currentPage = readingAnchor.importPage,
             lastPage = lastPage,
             pageStatus = { preview ->
-                val chapter = if (preview == readingAnchor.importPage) currentChapterSpan
-                    else BookChapterResolver.chapterForPage(navigationBook, preview)
-                BookBoundaries.pageStatus(preview, lastPage, chapter?.takeUnless { it.tocNodeId == "ch-all" })
+                val isCurrent = preview == readingAnchor.importPage
+                val chapter = if (isCurrent) effectiveChapterSpan
+                    else BookBoundaries.effectiveChapterForFooter(navigationBook, preview)
+                val remScreens = if (isCurrent) {
+                    currentChapterRemainingScreens
+                } else if (textView && !pageUnrecognizedOriginal && paging.pages.isNotEmpty() && chapter != null && preview == chapter.lastPage) {
+                    val previewIdx = paging.pages.pageContaining(BookPageAnchor(preview, 0))
+                    BookBoundaries.remainingChapterScreens(navigationBook, chapter, paging.pages, previewIdx, paging.columns)
+                } else 0
+                BookBoundaries.pageStatus(
+                    page = preview,
+                    lastPage = lastPage,
+                    chapter = chapter,
+                    subPage = if (isCurrent) currentSubPage else 1,
+                    subPageCount = if (isCurrent) currentSubPageCount else 1,
+                    chapterRemainingScreens = remScreens,
+                )
             },
             canPrev = canPrev,
             canNext = canNext,
@@ -2170,6 +2300,7 @@ internal fun TextbookReader(
                 if (book.page(target) != null) {
                     pendingNavigationIsJump = true
                     pendingDwellJump = true
+                    endOrHomeBrowseActive = false
                     turnTo(target)
                     editingJump = false
                     focusManager.clearFocus()
@@ -2180,8 +2311,10 @@ internal fun TextbookReader(
             onScrubToPage = { target ->
                 pendingNavigationIsJump = true
                 pendingDwellJump = true
+                endOrHomeBrowseActive = false
                 turnTo(target)
             },
+            subPageFraction = currentSubPageFraction,
             modifier = Modifier.align(Alignment.BottomStart).then(if (effectiveSideDocked) Modifier.width(rootWidth - sideDrawerWidth) else Modifier.fillMaxWidth()),
         )
 
@@ -2251,7 +2384,8 @@ internal data class MarkdownHeading(val level: Int, val marks: IntRange, val tit
 
 private val markdownHeadingLine = Regex("(?m)^(#{1,6})[ \\t]+(\\S.*?)[ \\t\\r]*$")
 
-internal fun markdownHeadings(text: String): List<MarkdownHeading> = markdownHeadingLine.findAll(text).map { m ->
+internal fun markdownHeadings(text: String): List<MarkdownHeading> = markdownHeadingLine.findAll(text).mapNotNull { m ->
+    if (BookBoundaries.isBogusMarkdownHeadingLine(m.value)) return@mapNotNull null
     val hashes = m.groups[1]!!.range
     val title = m.groups[2]!!.range
     MarkdownHeading(hashes.last - hashes.first + 1, hashes.first until title.first, title)

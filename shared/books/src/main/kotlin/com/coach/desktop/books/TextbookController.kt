@@ -1080,7 +1080,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 val catalog = library.catalog()
                 mutable.update { current ->
                     val openBook = current.book
-                    val refreshed = if (openBook?.id == indexed.id) indexed.copy(readingPage = current.page) else openBook
+                    val refreshed = if (openBook?.id == indexed.id) indexed.copy(readingPage = openBook.readingPage) else openBook
                     current.copy(
                         catalog = catalog,
                         book = refreshed,
@@ -1132,7 +1132,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         } ?: return
         mutable.update { current ->
             if (current.book?.id == updated.id) {
-                current.copy(book = updated.copy(readingPage = current.page))
+                current.copy(book = updated.copy(readingPage = current.book.readingPage))
             } else current
         }
     }
@@ -1348,22 +1348,23 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         mutable.update { it.copy(answer = answer) }
     }
 
-    suspend fun page(number: Int) {
+    suspend fun page(number: Int, commitProgress: Boolean = true) {
         val current = mutable.value
         val book = current.book ?: return
         if (book.page(number) == null) {
             mutable.update { it.copy(error = "页码超出了这本教材的范围。") }
             return
         }
-        val updatingBook = current.source == null
+        val updatingBook = commitProgress && current.source == null
         val updatedBook = if (updatingBook) book.copy(readingPage = number) else book
         // 立刻同步更新 UI 页码与内存中的 book.readingPage，绝不重读 620 页 SQLite 导致标题/页码滞后 2–5 秒。
+        // 当 commitProgress = false（如按 End 跳末页或未停留的大跨度跳转）时，仅移动视口页码，不改写书架「读到第 N 页」。
         mutable.update { state ->
             if (state.book?.id != book.id) state
             else state.copy(
                 page = number,
-                book = if (state.source == null) state.book.copy(readingPage = number) else state.book,
-                catalog = if (state.source == null) state.catalog.map { s ->
+                book = if (commitProgress && state.source == null) state.book.copy(readingPage = number) else state.book,
+                catalog = if (commitProgress && state.source == null) state.catalog.map { s ->
                     if (s.id == book.id) s.copy(readingPage = number) else s
                 } else state.catalog,
                 error = null,
@@ -1436,6 +1437,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             mutable.update {
                 it.copy(
                     screen = BookScreen.BOOKLIST,
+                    page = it.book?.readingPage ?: it.page,
                     collections = library.collectionSummaries(),
                     review = null,
                     prompt = null,
@@ -1448,6 +1450,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             mutable.update {
                 it.copy(
                     screen = if (fromReview) BookScreen.REVIEWS else BookScreen.HOME,
+                    page = if (fromReview) it.page else (it.book?.readingPage ?: it.page),
                     review = null,
                     prompt = null,
                     activeCourseId = null,
@@ -1645,7 +1648,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val catalog = withContext(Dispatchers.IO) { library.catalog() }
         mutable.update { state ->
             state.copy(
-                book = if (state.book?.id == savedBook.id) savedBook.copy(readingPage = state.page) else state.book,
+                book = if (state.book?.id == savedBook.id) savedBook.copy(readingPage = state.book.readingPage) else state.book,
                 catalog = catalog,
             )
         }

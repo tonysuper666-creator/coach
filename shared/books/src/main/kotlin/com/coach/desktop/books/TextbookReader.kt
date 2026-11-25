@@ -1379,7 +1379,7 @@ internal fun TextbookReader(
                     }
                     BookPageView(
                         book, paging, ranges, turnLayout, libraryDirectory = library.directory,
-                        modifier = Modifier.align(Alignment.Center).widthIn(max = 720.dp),
+                        modifier = if (companionOpen) Modifier.align(Alignment.Center).widthIn(max = 720.dp) else Modifier.fillMaxSize(),
                         turnStyle = turnStyle, readMode = readMode, onOpenTableRow = openPassage,
                         onSelectText = { textSelection = it },
                         hardPoints = sectionHardPoints,
@@ -1509,7 +1509,7 @@ internal fun TextbookReader(
                             textView, pageUnrecognizedOriginal, paging.pages, paging.anchor, paging.spread, paragraphPage.number,
                         ) {
                             if (!textView || pageUnrecognizedOriginal || paging.pages.isEmpty()) emptyList()
-                            else (0 until if (paging.spread) 2 else 1)
+                            else (0 until paging.columns)
                                 .mapNotNull { paging.pages.getOrNull(paging.index + it) }
                                 .flatMap { it.sources }
                                 .filter { it.importPage == paragraphPage.number && it.endUtf16 > it.startUtf16 }

@@ -159,6 +159,11 @@ public final class ReaderAcceptanceHarness {
                 try {
                     long nano = pumpSceneUntilSettled(scene, 0L, 22, 45, 120,
                         () -> !hasTextContainingScene(scene, "正在加载页面"));
+                    if (isV2Flavor(flavor)) {
+                        nano = dismissV2HudIfVisibleScene(scene, nano);
+                        nano = pumpSceneUntilSettled(scene, nano, 5, 45, 50,
+                            () -> !hasTextContainingScene(scene, "正在加载页面"));
+                    }
                     dumpScene(scene, nano, outDir, flavor, resTag, "pure_read_original");
 
                     if (isV2Flavor(flavor)) {
@@ -218,6 +223,13 @@ public final class ReaderAcceptanceHarness {
                         () -> !hasTextContainingScene(scene, "正在加载")
                             && !hasTextContainingScene(scene, "正在排版")
                             && onEdt(() -> findNodeByTag(scene.getSemanticsOwners(), "book-page-loading") == null));
+                    if (isV2Flavor(flavor)) {
+                        nano = dismissV2HudIfVisibleScene(scene, nano);
+                        nano = pumpSceneUntilSettled(scene, nano, 8, 60, 50,
+                            () -> !hasTextContainingScene(scene, "正在加载")
+                                && !hasTextContainingScene(scene, "正在排版")
+                                && onEdt(() -> findNodeByTag(scene.getSemanticsOwners(), "book-page-loading") == null));
+                    }
                     dumpScene(scene, nano, outDir, flavor, resTag, "pure_read_text");
                 } finally {
                     onEdt(() -> { scene.close(); return null; });
@@ -261,6 +273,10 @@ public final class ReaderAcceptanceHarness {
             try {
                 Thread.sleep(2800);
                 waitFor(6000, () -> !hasTextContaining(win, "正在加载页面"));
+                if (isV2Flavor(flavor)) {
+                    dismissV2HudIfVisibleWin32(win);
+                    waitFor(6000, () -> !hasTextContaining(win, "正在加载页面"));
+                }
                 dumpWin32(win, outDir, flavor, "win32", "pure_read_original");
 
                 if (isV2Flavor(flavor)) {
@@ -298,6 +314,12 @@ public final class ReaderAcceptanceHarness {
                 waitFor(6000, () -> !hasTextContaining(win, "正在加载")
                     && !hasTextContaining(win, "正在排版")
                     && findNodeByTag(win, "book-page-loading") == null);
+                if (isV2Flavor(flavor)) {
+                    dismissV2HudIfVisibleWin32(win);
+                    waitFor(6000, () -> !hasTextContaining(win, "正在加载")
+                        && !hasTextContaining(win, "正在排版")
+                        && findNodeByTag(win, "book-page-loading") == null);
+                }
                 dumpWin32(win, outDir, flavor, "win32", "pure_read_text");
             } finally {
                 disposeWindow(win);
@@ -999,6 +1021,78 @@ public final class ReaderAcceptanceHarness {
             }
             return false;
         });
+    }
+
+    private static long dismissV2HudIfVisibleScene(ImageComposeScene scene, long nano) throws Exception {
+        boolean hasHud = onEdt(() ->
+            findNodeByTag(scene.getSemanticsOwners(), "immersive-top-hud") != null
+                || findNodeByTag(scene.getSemanticsOwners(), "immersive-bottom-hud") != null
+        );
+        if (!hasHud) return nano;
+        sendTabScene(scene);
+        nano = pumpSceneUntilSettled(scene, nano, 10, 45, 20, () -> onEdt(() ->
+            findNodeByTag(scene.getSemanticsOwners(), "immersive-top-hud") == null
+                && findNodeByTag(scene.getSemanticsOwners(), "immersive-bottom-hud") == null
+                && findNodeByTag(scene.getSemanticsOwners(), "immersive-progress-hairline") != null
+        ));
+        return pumpScene(scene, nano, 20, 20);
+    }
+
+    private static void sendTabScene(ImageComposeScene scene) throws Exception {
+        onEdt(() -> {
+            SemanticsNode readerPage = findNodeByTag(scene.getSemanticsOwners(), "reader-page");
+            if (readerPage != null) {
+                Object reqFocus = findSemanticsActionFn(readerPage, "RequestFocus");
+                if (reqFocus instanceof Function0<?> f0) {
+                    f0.invoke();
+                }
+            }
+            return null;
+        });
+        Class<?> ktClass = Class.forName("androidx.compose.ui.input.key.KeyEvent_desktopKt");
+        Method toCompose = ktClass.getMethod("toComposeEvent", KeyEvent.class);
+        Method sendKey = null;
+        for (Method m : ImageComposeScene.class.getDeclaredMethods()) {
+            if (m.getName().startsWith("sendKeyEvent-")) {
+                sendKey = m;
+                break;
+            }
+        }
+        if (sendKey == null) throw new IllegalStateException("ImageComposeScene.sendKeyEvent not found");
+        sendKey.setAccessible(true);
+        final Method sendKeyFinal = sendKey;
+        java.awt.Component dummy = new java.awt.Canvas();
+        long now = System.currentTimeMillis();
+        Object press = toCompose.invoke(null, new KeyEvent(dummy, KeyEvent.KEY_PRESSED, now, 0, KeyEvent.VK_TAB, '\t'));
+        Object release = toCompose.invoke(null, new KeyEvent(dummy, KeyEvent.KEY_RELEASED, now + 5, 0, KeyEvent.VK_TAB, '\t'));
+        onEdt(() -> {
+            try {
+                sendKeyFinal.invoke(scene, press);
+                sendKeyFinal.invoke(scene, release);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+            return null;
+        });
+    }
+
+    private static void dismissV2HudIfVisibleWin32(ComposeWindow win) throws Exception {
+        if (findNodeByTag(win, "immersive-top-hud") == null && findNodeByTag(win, "immersive-bottom-hud") == null) return;
+        onEdt(() -> {
+            SemanticsNode readerPage = findNodeByTag(win.getSemanticsOwners(), "reader-page");
+            if (readerPage != null) {
+                Object reqFocus = findSemanticsActionFn(readerPage, "RequestFocus");
+                if (reqFocus instanceof Function0<?> f0) {
+                    f0.invoke();
+                }
+            }
+            return null;
+        });
+        sendKeysWin32(win, KeyEvent.VK_TAB, 0);
+        waitFor(4000, () -> findNodeByTag(win, "immersive-top-hud") == null
+            && findNodeByTag(win, "immersive-bottom-hud") == null
+            && findNodeByTag(win, "immersive-progress-hairline") != null);
+        Thread.sleep(350);
     }
 
     private static long revealV2HudScene(ImageComposeScene scene, long nano, int w) throws Exception {

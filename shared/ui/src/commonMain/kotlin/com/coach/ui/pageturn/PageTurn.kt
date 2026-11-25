@@ -8,6 +8,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.width
@@ -213,9 +214,9 @@ fun PageTurnView(
     var widthPx by remember { mutableIntStateOf(0) }
     val cols = columns ?: pageTurnColumns(with(density) { widthPx.toDp().value }, spreadMinDp)
     if (cols != state.columns) state.clampTo(cols)
-    val pageW = with(density) { (if (cols == 2) widthPx / 2 else widthPx).toDp() }
+    val pageW = with(density) { (widthPx.toFloat() / cols).toDp() }
     var scrollAcc by remember { mutableFloatStateOf(0f) }
-    val travelFactor = if (cols == 2) 0.9f else 0.6f
+    val travelFactor = if (cols >= 2) 0.9f else 0.6f
 
     fun launchTurn(fwd: Boolean) { scope.launch { try { state.turn(fwd) } catch (_: CancellationException) { } } }
 
@@ -256,7 +257,7 @@ fun PageTurnView(
                     val h = size.height.toFloat()
                     val touch = down.type == PointerType.Touch
                     // 手指：单页左右 28% / 双页左右 14%（各页 28%）点一下翻页，整页任何位置横滑都能翻；鼠标：只认窄边和页角
-                    val edge = w * (if (touch) (if (cols == 2) 0.14f else 0.28f) else if (cols == 2) 0.08f else 0.14f)
+                    val edge = w * (if (touch) (if (cols >= 2) 0.14f else 0.28f) else if (cols >= 2) 0.08f else 0.14f)
                     var fwd = down.position.x > w / 2f
                     val inEdge = down.position.x < edge || down.position.x > w - edge
                     val inCorner = inEdge && (down.position.y < h * 0.18f || down.position.y > h * 0.82f)
@@ -330,17 +331,15 @@ fun PageTurnView(
         val turning = state.turning
         val c = state.columns
 
-        if (style == PageTurnStyle.Slide) {
+        if (style == PageTurnStyle.Slide || (style == PageTurnStyle.Flip && c > 2)) {
             val sgn = if (fwd) -1f else 1f
             val step = if (turning) (if (fwd) pos + c else pos - c) else pos
             Box(Modifier.fillMaxSize().graphicsLayer { translationX = if (turning) sgn * t * widthPx else 0f }) {
-                SpreadBox(pos, c, n, pageW, paper, page)
+                SpreadBox(pos, c, n, paper, shadow, page)
             }
             if (turning) Box(Modifier.fillMaxSize().graphicsLayer { translationX = -sgn * (1f - t) * widthPx }) {
-                SpreadBox(step, c, n, pageW, paper, page)
+                SpreadBox(step, c, n, paper, shadow, page)
             }
-            if (c == 2) Box(Modifier.align(Alignment.Center).width(28.dp).fillMaxHeight()
-                .background(Brush.horizontalGradient(listOf(Color.Transparent, shadow.copy(alpha = 0.16f), Color.Transparent))))
             return@Box
         }
 
@@ -394,9 +393,18 @@ fun PageTurnView(
 }
 
 @Composable
-private fun SpreadBox(first: Int, c: Int, n: Int, pageW: Dp, paper: Color, page: @Composable (Int) -> Unit) {
-    PageBox(first, n, pageW, paper, Alignment.CenterStart, page)
-    if (c == 2) PageBox(first + 1, n, pageW, paper, Alignment.CenterEnd, page)
+private fun SpreadBox(first: Int, c: Int, n: Int, paper: Color, shadow: Color, page: @Composable (Int) -> Unit) {
+    Box(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxSize()) {
+            for (i in 0 until c) {
+                Box(Modifier.weight(1f).fillMaxHeight().background(paper)) {
+                    if (first + i in 0 until n) page(first + i)
+                }
+            }
+        }
+        if (c == 2) Box(Modifier.align(Alignment.Center).width(28.dp).fillMaxHeight()
+            .background(Brush.horizontalGradient(listOf(Color.Transparent, shadow.copy(alpha = 0.16f), Color.Transparent))))
+    }
 }
 
 @Composable

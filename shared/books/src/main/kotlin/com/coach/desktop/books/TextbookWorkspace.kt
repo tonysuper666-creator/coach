@@ -607,6 +607,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 answer = drafts.current(activeBook.id, lesson.id, activeBook.questionMode, ui.answer))
                             TextbookLearning(displayed, learningSupport, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
                             explanationReply, answerExplain, answerExplainReply, sourceResolver, citationFocus, citationIndex,
+                            library = controller.library,
                             onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
                             onSource = { openLessonSource(pairing = false) }, onPair = { openLessonSource(pairing = true) },
                             onCitation = { index, target ->

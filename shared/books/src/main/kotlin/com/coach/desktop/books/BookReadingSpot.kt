@@ -1,6 +1,7 @@
 package com.coach.desktop.books
 
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.unit.Constraints
 
@@ -49,14 +50,12 @@ internal fun BookLaidPage.yOfAnchor(anchor: BookPageAnchor, measurer: TextMeasur
 internal fun BookLaidPage.textPositionAt(
     xPx: Float,
     yPx: Float,
-    measurer: TextMeasurer,
-    typography: BookPageTypography,
-    widthPx: Int,
+    rendered: Map<Int, TextLayoutResult>,
 ): BookPageAnchor? {
     val run = runs.lastOrNull { it.topPx <= yPx } ?: runs.firstOrNull() ?: return null
     if (run.sources.isEmpty() || run.text.isEmpty()) return null
-    val layout = measurer.measure(run.text, typography.body, placeholders = run.placeholders, constraints = Constraints(maxWidth = widthPx))
-    val localX = xPx.coerceIn(0f, widthPx.toFloat())
+    val layout = rendered[run.topPx] ?: return null
+    val localX = xPx.coerceIn(0f, layout.size.width.toFloat())
     val localY = (yPx - run.topPx).coerceIn(0f, (layout.size.height - 1).coerceAtLeast(0).toFloat())
     val display = layout.getOffsetForPosition(Offset(localX, localY)).coerceIn(0, run.text.length)
     var at = 0
@@ -76,12 +75,10 @@ internal fun BookLaidPage.selectionBetween(
     up: Offset,
     insetPx: Float,
     topMarginPx: Float,
-    measurer: TextMeasurer,
-    typography: BookPageTypography,
-    widthPx: Int,
+    rendered: Map<Int, TextLayoutResult>,
 ): SourceBlock? {
-    val a = textPositionAt(down.x - insetPx, down.y - topMarginPx, measurer, typography, widthPx) ?: return null
-    val b = textPositionAt(up.x - insetPx, up.y - topMarginPx, measurer, typography, widthPx) ?: return null
+    val a = textPositionAt(down.x - insetPx, down.y - topMarginPx, rendered) ?: return null
+    val b = textPositionAt(up.x - insetPx, up.y - topMarginPx, rendered) ?: return null
     val (pageNumber, rawStart, rawEnd) = if (a.importPage == b.importPage) {
         Triple(a.importPage, minOf(a.offsetUtf16, b.offsetUtf16), maxOf(a.offsetUtf16, b.offsetUtf16))
     } else {
@@ -105,16 +102,15 @@ internal fun BookLaidPage.selectionAt(
     point: Offset,
     insetPx: Float,
     topMarginPx: Float,
-    measurer: TextMeasurer,
-    typography: BookPageTypography,
-    widthPx: Int,
+    rendered: Map<Int, TextLayoutResult>,
 ): SourceBlock? {
-    if (point.x < insetPx - 8f || point.x > insetPx + widthPx + 8f || point.y < topMarginPx - 8f) return null
+    if (point.x < insetPx - 8f || point.y < topMarginPx - 8f) return null
     val localY = point.y - topMarginPx
     val lastRun = runs.lastOrNull() ?: return null
-    val lastLayout = measurer.measure(lastRun.text, typography.body, placeholders = lastRun.placeholders, constraints = Constraints(maxWidth = widthPx))
+    val lastLayout = rendered[lastRun.topPx] ?: return null
+    if (point.x > insetPx + lastLayout.size.width + 8f) return null
     if (localY > lastRun.topPx + lastLayout.size.height + 48f) return null
-    val anchor = textPositionAt(point.x - insetPx, localY, measurer, typography, widthPx) ?: return null
+    val anchor = textPositionAt(point.x - insetPx, localY, rendered) ?: return null
     val stored = book.page(anchor.importPage)?.text ?: return null
     if (stored.isEmpty()) return null
     var offset = anchor.offsetUtf16.coerceIn(0, stored.lastIndex)

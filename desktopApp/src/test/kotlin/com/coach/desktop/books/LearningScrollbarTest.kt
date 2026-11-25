@@ -17,7 +17,7 @@ import kotlin.test.*
 
 /**
  * TON-1659 第 8 项（B9）：做题和六题小结共用学习页那个滚动区。一屏放不下时右侧要有一道看得见的
- * V7 细滚动条——滑块比轨道短，读者就知道下面还有卡；拖到底，最后的操作（选项 D、「接着做题」）整颗露出来。
+ * V7 细滚动条——滑块比轨道短，读者就知道下面还有卡；拖到底，最后的操作（选项 D、「读完这一节」）整颗露出来。
  * 条子落在正文右侧 24dp 的内边距里，不压住卡片；一屏放得下的短页不多这一条。
  */
 @OptIn(ExperimentalTestApi::class)
@@ -42,13 +42,13 @@ class LearningScrollbarTest {
             scrollToTop()
             capture("${theme(dark)}-practice", 520)
 
-            // 答第六题：两张小结同屏，比做题页更长；图从最上面那张卡的顶边取起，不从半句话开始。
+            // 答第六题：本次生成练习的讲解与小结同屏；图从最上面那张卡的顶边取起，不从半句话开始。
             onNodeWithTag("choice-${practice.options.indexOf(practice.answer)}").performScrollTo().performClick()
             waitForIdle()
-            onNodeWithTag("book-knowledge-recap").performScrollTo()
+            onNodeWithTag("book-summary-card").performScrollTo()
             waitForIdle()
             val recapBar = bar()
-            val recap = onNodeWithTag("book-knowledge-recap").fetchSemanticsNode().boundsInRoot
+            val recap = onNodeWithTag("book-summary-card").fetchSemanticsNode().boundsInRoot
             assertTrue(recap.height > 0f && recap.right <= recapBar.left + 1f,
                 "滚动条不压住小结卡：card=${recap.right} bar=${recapBar.left}（dark=$dark）")
             assertTrue(thumb(recapBar, dark).last - thumb(recapBar, dark).first + 1 < recapBar.height - 20f,
@@ -56,9 +56,10 @@ class LearningScrollbarTest {
             cardTop("book-summary-card")
             capture("${theme(dark)}-recap", 520)
             dragToBottom(dark)
-            val keepGoing = onNodeWithTag("book-knowledge-recap-continue").fetchSemanticsNode().boundsInRoot
+            val keepGoing = onNodeWithTag("next-lesson").fetchSemanticsNode().boundsInRoot
             assertTrue(keepGoing.height > 0f && keepGoing.bottom <= recapBar.bottom + 1f,
-                "拖到底后「接着做题」应整颗看得见：bounds=$keepGoing bar=${recapBar.bottom}（dark=$dark）")
+                "拖到底后「读完这一节」应整颗看得见：bounds=$keepGoing bar=${recapBar.bottom}（dark=$dark）")
+            onNodeWithTag("next-lesson").assertTextContains("读完这一节").assertIsEnabled()
             capture("${theme(dark)}-recap-bottom", 520)
         }
     }

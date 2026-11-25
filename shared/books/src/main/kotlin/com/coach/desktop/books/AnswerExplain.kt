@@ -23,9 +23,11 @@ import com.coach.ui.v7.PaperCard
 import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.V7TextButton
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
- * 「做题学」答完之后的讲解：同一本书只问一次能不能把这段发出去，问过之后才连已配对的 Mac。
+ * 「做题学」答完之后的讲解：全局讲解开启后，通过已配对的服务解释本题的一段原文。
  * [load] 每次进入这张卡都重读配对文件，所以在原文页配好对回到这里就能直接用。
  * [explain] 与 [ask] 复用同一配对通道，测试传本地函数即可，不碰网络。
  */
@@ -46,7 +48,7 @@ internal class AnswerExplain(
     val recaps = mutableStateMapOf<String, com.coach.domain.LadderSession>()
 }
 
-/** Windows 主机的接线：配对与「这本书允许吗」沿用原文页已有的那一套，不另建通道。 */
+/** Windows 主机的接线：与原文页共用配对和全局讲解设置。 */
 internal fun answerExplainWith(explainer: BookExplainer, consent: ExplainConsent) = AnswerExplain(
     consent = consent,
     load = { explainer.load() },
@@ -65,6 +67,7 @@ internal fun answerExplainWith(explainer: BookExplainer, consent: ExplainConsent
 internal class PairedBookExplainSupport(
     private val gate: AnswerExplain,
     private val focusText: String? = null,
+    private val library: TextbookLibrary? = null,
 ) : BookLearningSupport {
     override suspend fun explain(request: BookExplanationRequest): BookLearningReply {
         if (!gate.consent.allowed(request.book)) return BookLearningReply.Unavailable(CONSENT_FIRST)
@@ -72,15 +75,26 @@ internal class PairedBookExplainSupport(
         val chosen = focusText?.let { text -> body.firstOrNull { it.text.contains(text) } } ?: body.firstOrNull()
             ?: return BookLearningReply.Unavailable("这一节没有可讲的正文。")
         return try {
-            when (val result = gate.explain(chosen, request.blocks)) {
+            val key = "answer-explain:${request.lesson}:${chosen.id}"
+            val cached = withContext(Dispatchers.IO) {
+                library?.sectionGuide(request.book, key)
+            }?.takeIf { it.citations.isNotEmpty() && it.citations.all { c -> c.blockId == chosen.id && c.page == chosen.page } }
+            val result = cached?.let { ExplainResult.Done(SectionGuide.fromCached(it).explanation) }
+                ?: gate.explain(chosen, listOf(chosen))
+            when (result) {
                 is ExplainResult.Done -> {
-                    val byId = request.blocks.associateBy { it.id }
-                    val cited = result.explanation.citations.mapNotNull { citation ->
-                        byId[citation.blockId]?.let { block ->
-                            BookPassage(request.book, block.page, block.start, block.end, block.text)
-                        }
+                    val explanation = result.explanation
+                    if (explanation.citations.isEmpty() || explanation.citations.any { it.blockId != chosen.id || it.page != chosen.page }) {
+                        return BookLearningReply.Unavailable("讲解出处与本题原文不符。")
                     }
-                    BookLearningReply.Text(ReadableText.withoutCitationMarks(result.explanation.text), cited)
+                    if (cached == null && library != null) withContext(Dispatchers.IO) {
+                        library.saveSectionGuide(request.book, key, CachedSectionGuide(
+                            brief = emptyList(), text = explanation.text, recap = "",
+                            citations = explanation.citations.map { CachedCitation(it.anchor, it.blockId, it.page) },
+                        ))
+                    }
+                    val passage = BookPassage(request.book, chosen.page, chosen.start, chosen.end, chosen.text)
+                    BookLearningReply.Text(ReadableText.withoutCitationMarks(explanation.text), listOf(passage))
                 }
                 is ExplainResult.Refused -> BookLearningReply.Unavailable(result.message, result.trouble)
             }
@@ -95,13 +109,12 @@ internal class PairedBookExplainSupport(
         BookLearningReply.Unavailable("选段问答还没接通；这里的讲解讲的是这一节正文。")
 
     private companion object {
-        const val CONSENT_FIRST = "讲解要先得到你的允许：在原文页点「讲解」并允许一次，或在这里直接允许。"
+        const val CONSENT_FIRST = "已在设置中关闭伴读讲解与提问。"
     }
 }
 
 /**
- * 答完题之后的这一块：没配对就指路，没允许就问一次，都齐了才真的去取讲解。
- * 一次都不自动发送原文；跳过之后保留一行可以反悔的入口。
+ * 答完后按全局设置显示讲解。重开书库时复用已经核对过出处的结果。
  */
 @Composable
 internal fun LessonAnswerExplanation(
@@ -112,10 +125,10 @@ internal fun LessonAnswerExplanation(
     reply: MutableState<BookLearningReply?>,
     sources: @Composable (List<BookPassage>) -> Unit,
     onOpenSourcePage: () -> Unit,
+    library: TextbookLibrary? = null,
 ) {
     LaunchedEffect(gate) { gate.load() }
     val allowed = LocalReadingAiExplain.current && gate.consent.allowed(book.id)
-    var skipped by remember(book.id, lesson.id) { mutableStateOf(false) }
     val ready = gate.ready()
     val paired = gate.paired()
     when {
@@ -132,15 +145,10 @@ internal fun LessonAnswerExplanation(
                 ) { Text("重新登录") }
             }
         }
-        skipped -> Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.testTag("answer-explain-skipped")) {
-            Text("这次先不看讲解。", style = MaterialTheme.typography.bodySmall)
-            V7TextButton({ skipped = false }, modifier = Modifier.testTag("answer-explain-resume")) { Text("还是看一下") }
-        }
         !allowed -> Text("已在设置中关闭伴读讲解与提问。", style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.fgSecondary)
         else -> {
-            val support = remember(book.id, lesson.id, practice.reference, gate) {
-                PairedBookExplainSupport(gate, practice.reference)
+            val support = remember(book.id, lesson.id, practice.reference, gate, library) {
+                PairedBookExplainSupport(gate, practice.reference, library)
             }
             // 停用之后在原文页重新配好了：留着的那条「已停用」作废，这一节重新去取讲解。
             LaunchedEffect(reply.value) {

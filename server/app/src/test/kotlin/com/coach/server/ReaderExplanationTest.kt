@@ -282,4 +282,66 @@ class ReaderExplanationTest {
             assertEquals(1, reasons.size)
         }
     }
+
+    @Test fun friendGuideUsesHaikuMinimalEffortWhileOwnerAndSelectionKeepMedium(): Unit = runBlocking {
+        Harness().use { h ->
+            val pages = (1..5).map { n ->
+                SourcePage("${"a".repeat(64)}:p32:${n * 100}", 32, "Synthetic section block $n with economic reasoning.")
+            }
+            val haikuTerminal = StubTutor.terminal("complete").replace("claude-sonnet-5-5", "claude-haiku-5-5")
+            val guideReply = json(
+                "brief" to JsonArray(listOf(JsonPrimitive("一"), JsonPrimitive("二"), JsonPrimitive("三"))),
+                "recap" to JsonPrimitive("本节总结。"),
+                "summary" to JsonArray(listOf(JsonPrimitive("结一"), JsonPrimitive("结二"))),
+                "hardPoints" to JsonArray(listOf(json("blockId" to "S1", "label" to "核心", "explanation" to "首段给出主线。"))),
+                "paragraphs" to JsonArray(listOf(
+                    json("text" to "前半部分说明基础概念。", "anchors" to JsonArray(listOf(JsonPrimitive("S1"), JsonPrimitive("S2")))),
+                    json("text" to "后半部分展开机制与结论。", "anchors" to JsonArray(listOf(JsonPrimitive("S3"), JsonPrimitive("S4"), JsonPrimitive("S5")))),
+                )),
+            ).toString()
+
+            // 1) Friend guide -> Haiku + minimal effort, preserving 5/5 section citations.
+            h.stub.stream(1, guideReply, haikuTerminal, StubTutor.DONE)
+            val friendGuide = h.reader.explainLesson(
+                "dev-1",
+                json("requestId" to "aa11", "kind" to "guide"),
+                pages,
+                com.coach.domain.scope.VisibleScope.learner(),
+                friend = "b".repeat(64),
+                sourcesCurrent = { true },
+            )
+            assertEquals(5, friendGuide.getValue("sources").jsonArray.size)
+            assertEquals(pages.map { it.docId }, friendGuide.getValue("sources").jsonArray.map { it.jsonObject.str("docId") })
+
+            // 2) Owner guide -> default model + medium effort (never minimal).
+            h.stub.stream(1, guideReply, StubTutor.terminal("complete"), StubTutor.DONE)
+            val ownerGuide = h.reader.explainLesson(
+                "dev-1",
+                json("requestId" to "aa12", "kind" to "guide"),
+                pages,
+                com.coach.domain.scope.VisibleScope.learner(),
+                friend = null,
+                sourcesCurrent = { true },
+            )
+            assertEquals(5, ownerGuide.getValue("sources").jsonArray.size)
+
+            // 3) Friend selection explain -> default model + medium effort.
+            h.stub.stream(1, payload("这一段说明核心概念。", "S1"), StubTutor.terminal("complete"), StubTutor.DONE)
+            val friendExplain = h.reader.explain(
+                "dev-1",
+                "library",
+                json("requestId" to "aa13", "kind" to "explain"),
+                "Synthetic section block 1",
+                pages,
+                com.coach.domain.scope.VisibleScope.learner(),
+                friend = "b".repeat(64),
+                sourcesCurrent = { true },
+            )
+            assertEquals(1, friendExplain.getValue("sources").jsonArray.size)
+
+            assertEquals(listOf("minimal", "medium", "medium"), h.stub.requestEfforts.toList())
+            val models = h.stub.requestBodies.map { Json.parseToJsonElement(it).jsonObject.str("model") }
+            assertEquals(listOf(BridgeClient.HAIKU, BridgeClient.CLAUDE, BridgeClient.CLAUDE), models)
+        }
+    }
 }

@@ -628,7 +628,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 }
                             },
                             onPracticeSource = { openPracticeSource(it) }, onLesson = { run { drafts.flush(); controller.lesson(it) } },
-                            onSettings = { run { controller.questionSettings() } }, onAnswer = { answer ->
+                            onQuestionMode = { selected -> run { controller.mode(selected) } }, onAnswer = { answer ->
                                 ui.book?.let { current ->
                                     current.lessons.getOrNull(current.lessonIndex)?.let { lesson ->
                                         drafts.save(current.id, lesson.id, current.questionMode, answer)

@@ -60,7 +60,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
     sourceResolver: BookSourceResolver,
     citationFocus: MutableMap<Int, FocusRequester>, citationIndex: Int,
     onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit, onCitation: (Int, BookSourceTarget) -> Unit, onCitationRefused: () -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
-    onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit, onQuestions: () -> Unit,
+    onQuestionMode: (QuestionMode) -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit, onQuestions: () -> Unit,
     onRecapContinue: () -> Unit, onPair: () -> Unit = onSource, hinge: Hinge? = LocalBookHinge.current, library: TextbookLibrary? = null) {
     val book = checkNotNull(ui.book)
     val lesson = book.lessons.getOrNull(book.lessonIndex)
@@ -104,7 +104,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(if (lesson == null) "这一遍学完了" else ui.learningPath.label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
                     color = com.coach.ui.theme.CoachTheme.colors.fgSecondary)
-                V7TextButton(onSettings, enabled = !ui.busy, modifier = Modifier.testTag("question-settings")) { Text("题型：${book.questionMode.pageLabel}") }
+                QuestionTypeButton(book.questionMode, enabled = !ui.busy, onSelect = onQuestionMode)
             }
             if (lesson == null) {
                 Text("已走完「${book.title}」的 ${book.lessons.size} 节内容。", style = MaterialTheme.typography.titleLarge)
@@ -134,7 +134,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                             PaperButton(onQuestions, enabled = !ui.busy, modifier = Modifier.testTag("guided-start-questions")) { Text("继续自测") }
                         }
                     }
-                    if (book.questionMode == QuestionMode.NONE) Text("当前已关闭出题，可在出题设置中重新选择。", Modifier.testTag("book-questions-off"))
+                    if (book.questionMode == QuestionMode.NONE) Text("当前已关闭出题，可在「题型」里重新选择。", Modifier.testTag("book-questions-off"))
                     else if (ui.questionsOpen) {
                         if (practice == null) Text("本节选择题需登录 Coach 服务生成，可先点击「本节原文」在阅读器中伴读学习。")
                         else {
@@ -212,7 +212,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                         if (lesson != null) LessonNav(book, ui.busy, onLesson)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             if (lesson != null) V7TextButton(onSource, enabled = !ui.busy) { Text("本节原文") }
-                            V7TextButton(onSettings, enabled = !ui.busy) { Text("题型：${book.questionMode.pageLabel}") }
+                            QuestionTypeButton(book.questionMode, enabled = !ui.busy, onSelect = onQuestionMode, tag = null)
                         }
                     }
                 }
@@ -223,6 +223,49 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                     verticalArrangement = Arrangement.spacedBy(18.dp)) { lessonContent(true) }
                 if (scroll.maxValue > 0) BookScrollbar(scroll,
                     Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 6.dp).testTag("learning-scrollbar"))
+            }
+        }
+    }
+}
+
+/** 就地题型菜单：点开即选，不挂 BookPrompt，学习页继续留在原地。 */
+@Composable
+private fun QuestionTypeButton(
+    mode: QuestionMode,
+    enabled: Boolean,
+    onSelect: (QuestionMode) -> Unit,
+    tag: String? = "question-settings",
+) {
+    var open by remember { mutableStateOf(false) }
+    val colors = com.coach.ui.theme.CoachTheme.colors
+    Box {
+        V7TextButton(
+            { open = true },
+            enabled = enabled,
+            modifier = if (tag == null) Modifier else Modifier.testTag(tag),
+        ) { Text("题型：${mode.pageLabel}") }
+        DropdownMenu(
+            expanded = open,
+            onDismissRequest = { open = false },
+            containerColor = colors.surface1,
+            modifier = if (tag == null) Modifier else Modifier.testTag("question-settings-menu"),
+        ) {
+            for (option in listOf(QuestionMode.CHOICE, QuestionMode.SHORT_ANSWER, QuestionMode.NONE)) {
+                val current = option == mode
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            option.pageLabel + if (current) " · 当前" else "",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = colors.fgPrimary,
+                        )
+                    },
+                    onClick = {
+                        open = false
+                        if (!current) onSelect(option)
+                    },
+                    modifier = if (tag == null) Modifier else Modifier.testTag("question-mode-${option.name}"),
+                )
             }
         }
     }

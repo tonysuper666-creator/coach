@@ -513,7 +513,7 @@ class BookGuidePhase2Test {
                                             onCitationRefused = {},
                                             onPracticeSource = {},
                                             onLesson = {},
-                                            onSettings = {},
+                                            onQuestionMode = { _ -> },
                                             onAnswer = {},
                                             onReviews = {},
                                             onQuestions = {},

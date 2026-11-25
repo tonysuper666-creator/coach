@@ -1357,13 +1357,14 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         mutable.update { it.copy(prompt = null) }
     }
 
-    suspend fun questionSettings() = action { mutable.update { it.copy(prompt = BookPrompt.QUESTIONS) } }
     suspend fun mode(mode: QuestionMode) = action {
         val book = mutable.value.book ?: return@action
         val changed = book.copy(questionMode = mode)
         persist(changed)
         val answer = changed.lessons.getOrNull(changed.lessonIndex)?.let { library.answer(changed.id, it.id, mode) } ?: PracticeAnswer()
-        mutable.update { it.copy(answer = answer) }
+        mutable.update {
+            it.copy(answer = answer, prompt = if (it.prompt == BookPrompt.QUESTIONS) null else it.prompt)
+        }
     }
 
     suspend fun page(number: Int, commitProgress: Boolean = true) {

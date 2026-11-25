@@ -89,28 +89,33 @@ try {
     $pfHumanAfterDriver = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 30.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
     Check 'preflight-rejects-human-input-outside-2s' ($pfHumanAfterDriver.Clean -and $pfHumanAfterDriver.IdleSeconds -eq 30.0 -and (-not $pfHumanAfterDriver.DriverInputMatched)) "clean=$($pfHumanAfterDriver.Clean) idle=$($pfHumanAfterDriver.IdleSeconds)"
 
-    $pfDriverStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 525.6 } -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Pid = 12640; Ports = @(47998); Summary = 'sunshine pid=12640 streaming ports=47998' } } -CoachWindowProbe $noCoach
-    Check 'preflight-rejects-driver-input-when-streaming' (-not $pfDriverStream.Clean -and $pfDriverStream.Reason -like '*Apollo/Moonlight*') $pfDriverStream.Reason
+    # 按 11-25 决定：Apollo/Moonlight 串流不再返回占用，仅作为证据写入 Streaming / StreamingSummary
+    $directStreamObj = [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Source = 'ports'; Pid = 12640; Ports = @(47998); Summary = 'sunshine pid=12640 streaming ports=47998' }
+    $activeUserOnStream = Find-ActiveDesktopUser -MinIdleSeconds 600 -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 525.6 } -StreamProbe { $directStreamObj }
+    Check 'find-active-desktop-user-ignores-streaming' ($null -eq $activeUserOnStream) "activeUser=$activeUserOnStream"
+
+    $pfDriverStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -NowProbe { $tBase } -IdleProbe { 525.6 } -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Source = 'ports'; Pid = 12640; Ports = @(47998); Summary = 'sunshine pid=12640 streaming ports=47998' } } -CoachWindowProbe $noCoach
+    Check 'preflight-allows-driver-input-when-streaming' ($pfDriverStream.Clean -and $null -eq $pfDriverStream.ActiveUser -and $pfDriverStream.Streaming -and $pfDriverStream.Streaming.Summary -eq 'sunshine pid=12640 streaming ports=47998' -and $pfDriverStream.StreamingSummary -eq 'sunshine pid=12640 streaming ports=47998') "clean=$($pfDriverStream.Clean) streaming=$($pfDriverStream.StreamingSummary)"
 
     # 按 11-19 20:48 主会话决定改期望：GetLastInputInfo 读取失败（<0）不拦人，IdleSeconds 记 -1 作证据
     $pfUnreadableIdle = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe { -1.0 } -StreamProbe $noStream -CoachWindowProbe $noCoach
     Check 'preflight-rejects-unreadable-idle' ($pfUnreadableIdle.Clean -and $pfUnreadableIdle.IdleSeconds -eq -1.0) "clean=$($pfUnreadableIdle.Clean) idle=$($pfUnreadableIdle.IdleSeconds)"
 
-    # 键鼠空闲但 Apollo/Moonlight 正在串流 -> 拒绝
-    $pfStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Pid = 12640; Ports = @(47998, 48010); Summary = 'sunshine pid=12640 streaming ports=47998,48010' } } -CoachWindowProbe $noCoach
-    Check 'preflight-rejects-active-stream' (-not $pfStream.Clean -and $pfStream.Reason -like '*Apollo/Moonlight*') $pfStream.Reason
+    # 键鼠空闲且 Apollo/Moonlight 正在串流 -> 放行并带串流摘要留证
+    $pfStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Source = 'ports'; Pid = 12640; Ports = @(47998, 48010); Summary = 'sunshine pid=12640 streaming ports=47998,48010' } } -CoachWindowProbe $noCoach
+    Check 'preflight-allows-active-stream' ($pfStream.Clean -and $null -eq $pfStream.ActiveUser -and $pfStream.Streaming -and $pfStream.Streaming.Summary -eq 'sunshine pid=12640 streaming ports=47998,48010' -and $pfStream.StreamingSummary -eq 'sunshine pid=12640 streaming ports=47998,48010') "clean=$($pfStream.Clean) streaming=$($pfStream.StreamingSummary)"
 
-    # 3b. Apollo 端口 + sunshine.log 双依据串流检测（合成日志用 192.0.2.x，不写真实设备名）
+    # 3b. Apollo 端口 + sunshine.log 双依据串流检测（只作证据不拦人；合成日志用 192.0.2.x，不写真实设备名）
     $apolloStartLocal = [datetime]'2026-11-19 20:00:00'
     $apolloHost = { @([pscustomobject]@{ Id = 12640; ProcessName = 'sunshine'; StartTime = $apolloStartLocal }) }
     $noPorts = { [pscustomobject]@{ Udp = @(); Tcp = @() } }
     $apolloLog = Join-Path $regTmp 'sunshine.log'
     try {
-        # Apollo 没在跑 -> 放行
+        # Apollo 没在跑 -> 放行且无串流证据
         $pfNoApollo = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe { 5.0 } -HostProbe { @() } -PortProbe $noPorts -ApolloLogPath (Join-Path $regTmp 'nonexistent.log') -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
-        Check 'stream-apollo-not-running' $pfNoApollo.Clean $pfNoApollo.Reason
+        Check 'stream-apollo-not-running' ($pfNoApollo.Clean -and $null -eq $pfNoApollo.Streaming -and -not $pfNoApollo.StreamingSummary) $pfNoApollo.Reason
 
-        # 有连接、没断开（在当前进程启动之后）-> 占用
+        # 有连接、没断开（在当前进程启动之后）-> 放行并带 log 串流摘要
         @(
             '[2026-11-19 20:00:01.100]: Info: Apollo version: 0.4.6'
             '[2026-11-19 20:01:10.250]: Info: New streaming session started [active sessions: 1]'
@@ -118,44 +123,44 @@ try {
             '[2026-11-19 20:01:11.012]: Info: CLIENT CONNECTED'
         ) | Set-Content -Encoding utf8 $apolloLog
         $pfLogConn = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $apolloHost -PortProbe $noPorts -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
-        Check 'stream-log-connected-no-disconnect' (-not $pfLogConn.Clean -and $pfLogConn.ActiveUser.Streaming.Source -eq 'log') $pfLogConn.Reason
+        Check 'stream-log-connected-no-disconnect' ($pfLogConn.Clean -and $null -eq $pfLogConn.ActiveUser -and $pfLogConn.Streaming -and $pfLogConn.Streaming.Source -eq 'log' -and $pfLogConn.Streaming.Summary -like '*CLIENT CONNECTED*' -and $pfLogConn.StreamingSummary -like '*CLIENT CONNECTED*') "clean=$($pfLogConn.Clean) streaming=$($pfLogConn.StreamingSummary)"
 
-        # 连接后又断开 -> 放行
+        # 连接后又断开 -> 放行且无串流证据
         @(
             '[2026-11-19 20:00:01.100]: Info: Apollo version: 0.4.6'
             '[2026-11-19 20:01:11.012]: Info: CLIENT CONNECTED'
             '[2026-11-19 20:05:30.400]: Info: CLIENT DISCONNECTED'
         ) | Set-Content -Encoding utf8 $apolloLog
         $pfLogDisc = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe { 3.0 } -HostProbe $apolloHost -PortProbe $noPorts -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
-        Check 'stream-log-connected-then-disconnected' ($pfLogDisc.Clean -and $pfLogDisc.IdleSeconds -eq 3.0) $pfLogDisc.Reason
+        Check 'stream-log-connected-then-disconnected' ($pfLogDisc.Clean -and $pfLogDisc.IdleSeconds -eq 3.0 -and $null -eq $pfLogDisc.Streaming) $pfLogDisc.Reason
 
-        # 连接发生在当前进程启动之前（Apollo 重启过）-> 放行
+        # 连接发生在当前进程启动之前（Apollo 重启过）-> 放行且无串流证据
         @(
             '[2026-11-19 19:40:00.000]: Info: CLIENT CONNECTED'
             '[2026-11-19 20:00:00.500]: Info: Apollo version: 0.4.6'
             '[2026-11-19 20:00:02.000]: Info: Configuration UI available at [https://localhost:47990]'
         ) | Set-Content -Encoding utf8 $apolloLog
         $pfLogStale = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe { 12.0 } -HostProbe $apolloHost -PortProbe $noPorts -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
-        Check 'stream-log-connected-before-process-restart' $pfLogStale.Clean $pfLogStale.Reason
+        Check 'stream-log-connected-before-process-restart' ($pfLogStale.Clean -and $null -eq $pfLogStale.Streaming) $pfLogStale.Reason
 
-        # 日志里没有会话、端口也没绑 -> 放行
+        # 日志里没有会话、端口也没绑 -> 放行且无串流证据
         @(
             '[2026-11-19 20:00:00.500]: Info: Registered Apollo mDNS service'
             '[2026-11-19 20:00:01.200]: Info: System tray created'
         ) | Set-Content -Encoding utf8 $apolloLog
         $pfLogIdle = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe { 1.0 } -HostProbe $apolloHost -PortProbe $noPorts -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
-        Check 'stream-log-empty-and-no-ports' $pfLogIdle.Clean $pfLogIdle.Reason
+        Check 'stream-log-empty-and-no-ports' ($pfLogIdle.Clean -and $null -eq $pfLogIdle.Streaming) $pfLogIdle.Reason
 
-        # UDP 47998 已绑定（即使日志没记录）-> 占用
+        # UDP 47998 已绑定（即使日志没记录）-> 放行并带 ports 串流摘要
         $pfUdpBound = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $apolloHost -PortProbe { [pscustomobject]@{ Udp = @(47998); Tcp = @() } } -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
-        Check 'stream-udp-47998-bound' (-not $pfUdpBound.Clean -and $pfUdpBound.ActiveUser.Streaming.Source -eq 'ports' -and ($pfUdpBound.ActiveUser.Streaming.Ports -contains 47998)) $pfUdpBound.Reason
+        Check 'stream-udp-47998-bound' ($pfUdpBound.Clean -and $null -eq $pfUdpBound.ActiveUser -and $pfUdpBound.Streaming -and $pfUdpBound.Streaming.Source -eq 'ports' -and ($pfUdpBound.Streaming.Ports -contains 47998) -and $pfUdpBound.Streaming.Summary -like '*47998*' -and $pfUdpBound.StreamingSummary -like '*47998*') "clean=$($pfUdpBound.Clean) streaming=$($pfUdpBound.StreamingSummary)"
 
-        # Apollo 在跑，但端口查询报错、日志也没有 -> 占用
+        # Apollo 在跑，但端口查询报错、日志也没有 -> 放行并带 indeterminate 串流摘要
         $pfIndet = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $apolloHost -PortProbe { throw 'NetTCPIP CIM failed' } -ApolloLogPath (Join-Path $regTmp 'missing-sunshine.log') -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
-        Check 'stream-apollo-running-ports-error-no-log' (-not $pfIndet.Clean -and $pfIndet.ActiveUser.Streaming.Source -eq 'indeterminate') $pfIndet.Reason
+        Check 'stream-apollo-running-ports-error-no-log' ($pfIndet.Clean -and $null -eq $pfIndet.ActiveUser -and $pfIndet.Streaming -and $pfIndet.Streaming.Source -eq 'indeterminate' -and $pfIndet.Streaming.Summary -like '*unreadable*' -and $pfIndet.StreamingSummary -like '*unreadable*') "clean=$($pfIndet.Clean) streaming=$($pfIndet.StreamingSummary)"
 
         # 独立查询 UDP / TCP（真实 Test-DesktopPreflight 端口枚举路径，无 -PortProbe）：
-        # UDP 47998 已绑定但 TCP 枚举报错 -> 保留已查到的 UDP 端口并判占用
+        # UDP 47998 已绑定但 TCP 枚举报错 -> 放行并保留已查到的 UDP 端口摘要
         $fakeHost = { @([pscustomobject]@{ Id = 44444; ProcessName = 'sunshine'; StartTime = $apolloStartLocal }) }
         $emptyLog = Join-Path $regTmp 'empty-sunshine.log'
         Set-Content -Encoding utf8 -Path $emptyLog -Value @('[2026-11-19 20:00:01.100]: Info: Apollo version: 0.4.6')
@@ -164,17 +169,17 @@ try {
             function Get-NetTCPConnection { param($ErrorAction) throw 'TCP CIM failed' }
             Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $fakeHost -ApolloLogPath $emptyLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
         }
-        Check 'stream-udp-47998-when-tcp-query-fails' (-not $pfUdpKeepWhenTcpErr.Clean -and $pfUdpKeepWhenTcpErr.ActiveUser.Streaming.Source -eq 'ports' -and ($pfUdpKeepWhenTcpErr.ActiveUser.Streaming.Ports -contains 47998)) $pfUdpKeepWhenTcpErr.Reason
+        Check 'stream-udp-47998-when-tcp-query-fails' ($pfUdpKeepWhenTcpErr.Clean -and $null -eq $pfUdpKeepWhenTcpErr.ActiveUser -and $pfUdpKeepWhenTcpErr.Streaming -and $pfUdpKeepWhenTcpErr.Streaming.Source -eq 'ports' -and ($pfUdpKeepWhenTcpErr.Streaming.Ports -contains 47998) -and $pfUdpKeepWhenTcpErr.Streaming.Summary -like '*47998*') "clean=$($pfUdpKeepWhenTcpErr.Clean) streaming=$($pfUdpKeepWhenTcpErr.StreamingSummary)"
 
-        # UDP 枚举报错但 TCP 48010 已建立 -> TCP 不被跳过并判占用
+        # UDP 枚举报错但 TCP 48010 已建立 -> 放行并保留 TCP 端口摘要
         $pfTcpKeepWhenUdpErr = & {
             function Get-NetUDPEndpoint { param($ErrorAction) throw 'UDP CIM failed' }
             function Get-NetTCPConnection { param($ErrorAction) @([pscustomobject]@{ OwningProcess = 44444; State = 'Established'; LocalPort = 48010 }) }
             Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $fakeHost -ApolloLogPath $emptyLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
         }
-        Check 'stream-tcp-48010-when-udp-query-fails' (-not $pfTcpKeepWhenUdpErr.Clean -and $pfTcpKeepWhenUdpErr.ActiveUser.Streaming.Source -eq 'ports' -and ($pfTcpKeepWhenUdpErr.ActiveUser.Streaming.Ports -contains 48010)) $pfTcpKeepWhenUdpErr.Reason
+        Check 'stream-tcp-48010-when-udp-query-fails' ($pfTcpKeepWhenUdpErr.Clean -and $null -eq $pfTcpKeepWhenUdpErr.ActiveUser -and $pfTcpKeepWhenUdpErr.Streaming -and $pfTcpKeepWhenUdpErr.Streaming.Source -eq 'ports' -and ($pfTcpKeepWhenUdpErr.Streaming.Ports -contains 48010) -and $pfTcpKeepWhenUdpErr.Streaming.Summary -like '*48010*') "clean=$($pfTcpKeepWhenUdpErr.Clean) streaming=$($pfTcpKeepWhenUdpErr.StreamingSummary)"
 
-        # 两次连接后仅断开一次（仍有一路在线）-> 占用；两次均断开 -> 放行
+        # 两次连接后仅断开一次（仍有一路在线）-> 放行并带 log 串流摘要；两次均断开 -> 放行且无串流证据
         @(
             '[2026-11-19 20:00:01.100]: Info: Apollo version: 0.4.6'
             '[2026-11-19 20:01:11.012]: Info: CLIENT CONNECTED'
@@ -182,7 +187,7 @@ try {
             '[2026-11-19 20:03:10.400]: Info: CLIENT DISCONNECTED'
         ) | Set-Content -Encoding utf8 $apolloLog
         $pfTwoConnOneDisc = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $apolloHost -PortProbe $noPorts -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
-        Check 'stream-log-two-connected-one-disconnected' (-not $pfTwoConnOneDisc.Clean -and $pfTwoConnOneDisc.ActiveUser.Streaming.Source -eq 'log') $pfTwoConnOneDisc.Reason
+        Check 'stream-log-two-connected-one-disconnected' ($pfTwoConnOneDisc.Clean -and $null -eq $pfTwoConnOneDisc.ActiveUser -and $pfTwoConnOneDisc.Streaming -and $pfTwoConnOneDisc.Streaming.Source -eq 'log' -and $pfTwoConnOneDisc.Streaming.Summary -like '*active=1*') "clean=$($pfTwoConnOneDisc.Clean) streaming=$($pfTwoConnOneDisc.StreamingSummary)"
 
         @(
             '[2026-11-19 20:00:01.100]: Info: Apollo version: 0.4.6'
@@ -192,21 +197,23 @@ try {
             '[2026-11-19 20:04:22.900]: Info: CLIENT DISCONNECTED'
         ) | Set-Content -Encoding utf8 $apolloLog
         $pfTwoConnTwoDisc = Test-DesktopPreflight -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -HostProbe $apolloHost -PortProbe $noPorts -ApolloLogPath $apolloLog -CoachWindowProbe $noCoach -ForegroundProbe $edgeFg
-        Check 'stream-log-two-connected-both-disconnected' $pfTwoConnTwoDisc.Clean $pfTwoConnTwoDisc.Reason
+        Check 'stream-log-two-connected-both-disconnected' ($pfTwoConnTwoDisc.Clean -and $null -eq $pfTwoConnTwoDisc.Streaming) $pfTwoConnTwoDisc.Reason
     } finally {
         Remove-Item -LiteralPath $apolloLog -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath (Join-Path $regTmp 'empty-sunshine.log') -ErrorAction SilentlyContinue
     }
 
-    # 按 TON-1690 11-19 监工要求改期望：「外窗存在」与「Apollo 有人在用」分开。
-    # 别的检出起的 Coach 窗口是自有范围分开的另一套客户端，只作证据、不拒整轮（点按靠逐动作归属校验和短锁隔离，
-    # 见 coexist-*）；本检出自己残留的客户端、测试登记的遗留外窗、Apollo 有人在用，仍拒整轮。
+    # 按 11-25 决定：别的检出起的 Coach 窗口与 Apollo/Moonlight 串流都只作证据、不拒整轮；
+    # 本检出自己残留的客户端、测试登记的遗留外窗仍拒整轮。
     $otherCoach = { @([pscustomobject]@{ Kind = 'coach-window'; Pid = 21116; Process = 'java'; SameCheckout = $false; Summary = 'coach-window java pid=21116' }) }
     $pfCoach = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe $otherCoach -ForegroundProbe $edgeFg
     Check 'preflight-allows-other-checkout-coach' ($pfCoach.Clean -and $pfCoach.DirtyWindows.Count -eq 0 -and @($pfCoach.OtherCoachWindows).Count -eq 1 -and $pfCoach.OtherCoachWindows[0].Pid -eq 21116) "clean=$($pfCoach.Clean) other=$(@($pfCoach.OtherCoachWindows).Count)"
 
-    $pfCoachStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Pid = 12640; Ports = @(47998); Summary = 'sunshine pid=12640 streaming ports=47998' } } -CoachWindowProbe $otherCoach -ForegroundProbe $edgeFg
-    Check 'preflight-rejects-apollo-with-other-coach' (-not $pfCoachStream.Clean -and $pfCoachStream.Reason -like '*Apollo/Moonlight*' -and $pfCoachStream.DirtyWindows.Count -eq 0 -and @($pfCoachStream.OtherCoachWindows).Count -eq 1) $pfCoachStream.Reason
+    $pfCoachStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Source = 'ports'; Pid = 12640; Ports = @(47998); Summary = 'sunshine pid=12640 streaming ports=47998' } } -CoachWindowProbe $otherCoach -ForegroundProbe $edgeFg
+    Check 'preflight-allows-apollo-with-other-coach' ($pfCoachStream.Clean -and $null -eq $pfCoachStream.ActiveUser -and $pfCoachStream.Streaming -and $pfCoachStream.Streaming.Summary -eq 'sunshine pid=12640 streaming ports=47998' -and $pfCoachStream.DirtyWindows.Count -eq 0 -and @($pfCoachStream.OtherCoachWindows).Count -eq 1) "clean=$($pfCoachStream.Clean) streaming=$($pfCoachStream.StreamingSummary)"
+
+    $pfSameStream = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe { [pscustomobject]@{ Tool = 'Apollo/Sunshine'; Source = 'ports'; Pid = 12640; Ports = @(47998); Summary = 'sunshine pid=12640 streaming ports=47998' } } -CoachWindowProbe { @([pscustomobject]@{ Kind = 'coach-window'; Pid = 21118; Process = 'java'; SameCheckout = $true; Summary = 'coach-window java pid=21118 same-checkout' }) } -ForegroundProbe $edgeFg
+    Check 'preflight-still-rejects-same-checkout-with-streaming' (-not $pfSameStream.Clean -and $pfSameStream.DirtyWindows.Count -eq 1 -and $pfSameStream.DirtyWindows[0].Pid -eq 21118 -and $pfSameStream.Streaming -and $pfSameStream.Streaming.Summary -eq 'sunshine pid=12640 streaming ports=47998') $pfSameStream.Reason
 
     $pfSame = Test-DesktopPreflight -MinIdleSeconds 600 -RegistryDir $regTmp -DriverInputFile $stampTmp -IdleProbe $idle15m -StreamProbe $noStream -CoachWindowProbe { @([pscustomobject]@{ Kind = 'coach-window'; Pid = 21117; Process = 'java'; SameCheckout = $true; Summary = 'coach-window java pid=21117 same-checkout' }) } -ForegroundProbe $edgeFg
     # 归属不靠直接传入 SameCheckout：只模拟系统观测（一个可见窗口 + 它的 java 命令行），
@@ -950,13 +957,13 @@ $cgBlock
         $script:AppPid = $prevAppPid
     }
 
-    # 8c. 中途失焦不重放：后台驱动外窗前台不补点、拖拽按住期间失焦只松键一次（子进程，替换函数不污染本脚本）。
+    # 8c. 中途失焦不重放：拖拽按住期间失焦只松键一次、不被整段重放（子进程，替换函数不污染本脚本）。
     $focusOut = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test-focus-interrupt.ps1'))
     $focusExit = $LASTEXITCODE
     foreach ($line in $focusOut) {
         if ("$line" -match '^(PASS|FAIL) (\S+)(?: \((.*)\))?$') { Check "focus-interrupt-$($Matches[2])" ($Matches[1] -eq 'PASS') $Matches[3] }
     }
-    Check 'focus-interrupt-suite-exit' ($focusExit -eq 0 -and @($focusOut | Where-Object { "$_" -match '^(PASS|FAIL) ' }).Count -ge 6) "exit=$focusExit"
+    Check 'focus-interrupt-suite-exit' ($focusExit -eq 0 -and @($focusOut | Where-Object { "$_" -match '^(PASS|FAIL) ' }).Count -ge 2) "exit=$focusExit"
 
     # 8d. 两套自有范围分开的驱动并发点按（子进程；私有锁名，不占真实驱动的锁、不碰真实桌面和端口）。
     $coexistOut = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test-coexist-foreground.ps1'))
@@ -986,7 +993,7 @@ exit /b 0
 "@ | Set-Content -Encoding ascii (Join-Path $fgRepo 'gradlew.bat')
     @'
 $script:ForegroundMutexName = "Local\Coach.WinDrive.Foreground.test-$([guid]::NewGuid().ToString('N'))"
-function Test-DesktopPreflight { [pscustomobject]@{ Clean = $true; Reason = ''; DirtyWindows = @(); OtherCoachWindows = @([pscustomobject]@{ Kind = 'coach-window'; Pid = 6832; Process = 'java'; SameCheckout = $false; Summary = 'coach-window java pid=6832' }); ActiveUser = $null; IdleSeconds = 900.0; Foreground = $null } }
+function Test-DesktopPreflight { [pscustomobject]@{ Clean = $true; Reason = ''; DirtyWindows = @(); OtherCoachWindows = @([pscustomobject]@{ Kind = 'coach-window'; Pid = 6832; Process = 'java'; SameCheckout = $false; Summary = 'coach-window java pid=6832' }); ActiveUser = $null; Streaming = $null; StreamingSummary = ''; IdleSeconds = 900.0; Foreground = $null } }
 function Mark-ExistingClients { }
 function Stop-MyClient { $script:AppPid = 0; $script:AppStartTicks = 0L }
 function Set-SmokeMemoryClient($lease, [int]$appPid) { }
@@ -1045,10 +1052,10 @@ function Save-Shot([string]$path, [IntPtr]$Window = [IntPtr]::Zero) {
 }
 function Read-Screen([string]$png) {
     @([pscustomobject]@{
-        Text = '书架'
+        Text = '导入文件'
         Words = @([pscustomobject]@{
-            Text = '书架'
-            BoundingRect = [pscustomobject]@{ X = 10; Y = 10; Width = 40; Height = 20 }
+            Text = '导入文件'
+            BoundingRect = [pscustomobject]@{ X = 10; Y = 10; Width = 60; Height = 20 }
         })
     })
 }

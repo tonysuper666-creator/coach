@@ -858,6 +858,8 @@ if (-not $Background) {
             dirtyWindows = $preflight.DirtyWindows
             otherCoachWindows = @($preflight.OtherCoachWindows)
             activeUser = $preflight.ActiveUser
+            streaming = $preflight.Streaming
+            streamingSummary = $preflight.StreamingSummary
             idleSeconds = $preflight.IdleSeconds
             driverInputMatched = $preflight.DriverInputMatched
             foreground = $preflight.Foreground
@@ -867,7 +869,8 @@ if (-not $Background) {
         $global:LASTEXITCODE = 2
         exit 2
     }
-    Note "预检通过：Apollo 无活动串流（GetLastInputInfo 空闲 $($preflight.IdleSeconds) 秒，driverInputMatched=$($preflight.DriverInputMatched)，仅作证据）"
+    $streamNote = if ($preflight.Streaming) { "Apollo/Moonlight 正在串流（仅作证据：$($preflight.Streaming.Summary)）" } else { 'Apollo 无活动串流' }
+    Note "预检通过：$streamNote（GetLastInputInfo 空闲 $($preflight.IdleSeconds) 秒，driverInputMatched=$($preflight.DriverInputMatched)，仅作证据）"
     $coexisting = @($preflight.OtherCoachWindows | Where-Object { $_ })
     if ($coexisting.Count -gt 0) {
         Note "并存的其他 Coach 客户端（不属于本轮，只作证据；点按逐动作校验目标窗归属）：$(($coexisting | ForEach-Object { "pid=$($_.Pid)" }) -join ', ')"

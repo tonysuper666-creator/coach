@@ -121,8 +121,10 @@ class ReaderKeyboardPagingTest {
 
     @Test fun thePageFieldTakesTheArrowKeysAndHandsThemBackAfterJumping() {
         val controller = fivePageController()
-        runComposeUiTest {
+        runSkikoComposeUiTest(size = Size(840f, 900f), density = Density(1f)) {
             openReader(controller)
+            selectPdfMode("original-mode-paged")
+            onNodeWithTag("original-pdf-right").assertDoesNotExist()
             onNodeWithTag("reader-page").performKeyInput { keyDown(Key.CtrlLeft); pressKey(Key.G); keyUp(Key.CtrlLeft) }
             waitUntil(timeoutMillis = 20_000) { runCatching { onNodeWithTag("page-jump").assertIsFocused() }.isSuccess }
             onNodeWithTag("page-jump").performKeyInput { pressKey(Key.DirectionRight) }

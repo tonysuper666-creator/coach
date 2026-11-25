@@ -1,21 +1,18 @@
 package com.coach.desktop.books
 
-import androidx.compose.foundation.layout.Column
-import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import com.coach.client.PairedCredentials
 import com.coach.desktop.DesktopConnectionSettings
 import com.coach.desktop.DesktopIdentity
 import com.coach.ui.theme.CoachTheme
-import com.coach.ui.v7.V7TextButton
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.async
@@ -66,6 +63,18 @@ class ExplainTroubleTest {
         } finally { release.countDown(); server.stop(0) }
     }
 
+    @Composable
+    private fun WithLogin(explainer: BookExplainer, address: String, content: @Composable () -> Unit) {
+        var reason by remember { mutableStateOf<String?>(null) }
+        if (reason != null) {
+            TextbookLoginScreen(explainer.sableLogin, address, false, reason,
+                onSableLogin = { error("This test uses the local pairing server") },
+                onPair = { url, code -> explainer.pair(url, code).also { if (it) reason = null } })
+        } else CompositionLocalProvider(LocalBookRelogin provides { reason = it ?: "请重新登录。" }) {
+            content()
+        }
+    }
+
     @Test fun forbiddenExplanationChecksTheSameIdentityWithoutResendingThePassage() {
         for (status in listOf(401, 200, 0)) {
             val (library, book, chosen) = sample()
@@ -102,19 +111,22 @@ class ExplainTroubleTest {
                 val mac = TestMac("http://127.0.0.1:${server.address.port}")
                 val consent = ExplainConsent(library.directory)
                 runSkikoComposeUiTest(size = Size(1100f, 850f), density = Density(1f)) {
-                    setContent { CoachTheme(darkTheme = false) { BookExplainPanel(book, chosen.page, consent, mac, selection = chosen) } }
+                    setContent { CoachTheme(darkTheme = false) {
+                        WithLogin(mac, "") { BookExplainPanel(book, chosen.page, consent, mac, selection = chosen) }
+                    } }
                     waitUntil(timeoutMillis = 20_000) { mac.loaded }
+                    assertTrue(consent.allowed(book.id))
                     onNodeWithTag("explain-button").performClick()
-                    onNodeWithTag("explain-consent-allow").performClick()
+                    onNodeWithTag("explain-consent-allow").assertDoesNotExist()
                     waitUntil(timeoutMillis = 30_000) { onAllNodesWithTag("explain-failed").fetchSemanticsNodes().isNotEmpty() }
                     assertEquals(1, explains.get())
                     assertTrue(checks.get() >= 1)
                     if (status == 401) {
                         onNodeWithTag("explain-failed").assertTextEquals(ExplainTrouble.REVOKED)
                         onNodeWithTag("explain-repair").performScrollTo().performClick()
-                        onNodeWithTag("explain-pairing").assertExists()
-                        onNodeWithTag("explain-address").assertExists()
-                        onNodeWithTag("explain-code").assertExists()
+                        onNodeWithTag("login-pairing-form").assertExists()
+                        onNodeWithTag("login-address").assertExists()
+                        onNodeWithTag("login-code").assertExists()
                         assertNull(mac.identity)
                     } else {
                         onNodeWithTag("explain-failed").assertTextEquals("这段原文没有访问权限。")
@@ -264,10 +276,10 @@ class ExplainTroubleTest {
     }
 
     /**
-     * 做题学答完 → 讲解被 401 停用 → 去原文页重新配对 → 回到同一节：这一节重新去取讲解，不再停在旧的「已停用」上。
+     * 做题学答完 → 讲解被 401 停用 → 去登录页重新配对 → 回到同一节：这一节重新去取讲解，不再停在旧的「已停用」上。
      * 走真的配对文件和真的 HTTP，只是 Mac 换成本机一个假服务：第一次配对的凭据讲解时回 401，第二次的正常讲。
      */
-    @Test fun answerExplainComesBackAfterRepairingOnTheSourcePage() {
+    @Test fun answerExplainComesBackAfterPairingOnTheLoginScreen() {
         val (library, book, _) = sample()
         val lesson = book.lessons.first()
         val practice = assertNotNull(com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE))
@@ -277,33 +289,31 @@ class ExplainTroubleTest {
                 property = { when (it) { "jpackage.app-path" -> "/synthetic/Coach.exe"; "coach.sableLogin" -> "false"; else -> null } })
             assertTrue(runBlocking { BookExplainer(settings, library).pair(mac.url, "123456") })
             val consent = ExplainConsent(library.directory).also { it.allow(book.id) }
-            // 和 Windows 主机一样：答后讲解一个 explainer，原文页每次进来另建一个。
-            val gate = answerExplainWith(BookExplainer(settings, library), consent)
+            // 和 Windows 主机一样：登录页完成后，学习页重新加载已保存的配对。
+            val client = BookExplainer(settings, library)
             val reply = mutableStateOf<BookLearningReply?>(null)
-            var onSourcePage by mutableStateOf(false)
             runSkikoComposeUiTest(size = Size(1100f, 850f), density = Density(1f)) {
                 setContent {
                     CoachTheme(darkTheme = true) {
-                        if (onSourcePage) Column {
-                            V7TextButton({ onSourcePage = false }, Modifier.testTag("back-to-lesson")) { Text("回到这一节") }
-                            BookExplainPanel(book, lesson.firstPage, consent, remember { BookExplainer(settings, library) })
-                        } else LessonAnswerExplanation(book, lesson, practice, gate, reply, sources = {}, onOpenSourcePage = { onSourcePage = true })
+                        WithLogin(client, mac.url) {
+                            val gate = remember { answerExplainWith(BookExplainer(settings, library), consent) }
+                            LessonAnswerExplanation(book, lesson, practice, gate, reply, sources = {}, onOpenSourcePage = {})
+                        }
                     }
                 }
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("answer-explain-unpaired").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithTag("answer-explain-unpaired-text").assertTextEquals(ExplainTrouble.REVOKED)
                 assertEquals(1, mac.explains.get())
                 onNodeWithTag("answer-explain-pair").performClick()
-                // 原文页也知道这份凭据停用了：直接给配对表单，不显示「已连上 Mac」。
-                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithTag("explain-revoked").assertExists()
-                onNodeWithTag("explain-address").performTextClearance()
-                onNodeWithTag("explain-address").performTextInput(mac.url)
-                onNodeWithTag("explain-code").performTextInput("654321")
-                onNodeWithTag("explain-pair").performClick()
-                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
+                // 撤销后进入全屏登录页，配对成功后回到原来的答后讲解。
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("textbook-login-screen").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("login-revoked-reason").assertExists()
+                onNodeWithTag("login-address").performTextClearance()
+                onNodeWithTag("login-address").performTextInput(mac.url)
+                onNodeWithTag("login-code").performTextInput("654321")
+                onNodeWithTag("login-pair").performClick()
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("textbook-login-screen").fetchSemanticsNodes().isEmpty() }
                 assertEquals(2, mac.pairs.get())
-                onNodeWithTag("back-to-lesson").performClick()
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-explanation-text").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithTag("book-explanation-text").assertTextContains("Light gives the plant its energy.", substring = true)
                 onNodeWithTag("book-explanation-unavailable").assertDoesNotExist()
@@ -314,7 +324,7 @@ class ExplainTroubleTest {
 
     /**
      * 放出了 Sable 登录的构建（TON-1760 显示模式）：答后讲解碰到 401，那一句要把登录也说上；
-     * 原文页的停用提示和表单里的登录按钮同样在，配对码仍可填。
+     * 登录页的撤销提示和账号登录按钮同样在，配对码仍可填。
      */
     @Test fun answerExplain401PointsToLoginWhenTheSableEntryIsShown() {
         val (library, book, _) = sample()
@@ -325,24 +335,26 @@ class ExplainTroubleTest {
                 property = { when (it) { "jpackage.app-path" -> "/synthetic/Coach.exe"; "coach.sableLogin" -> "true"; else -> null } })
             assertTrue(runBlocking { BookExplainer(settings, library).pair(mac.url, "123456") })
             val consent = ExplainConsent(library.directory).also { it.allow(book.id) }
-            val gate = answerExplainWith(BookExplainer(settings, library), consent)
+            val client = BookExplainer(settings, library)
             val reply = mutableStateOf<BookLearningReply?>(null)
-            var onSourcePage by mutableStateOf(false)
             runSkikoComposeUiTest(size = Size(1100f, 850f), density = Density(1f)) {
                 setContent {
                     CoachTheme(darkTheme = false) {
-                        if (onSourcePage) BookExplainPanel(book, lesson.firstPage, consent, remember { BookExplainer(settings, library) })
-                        else LessonAnswerExplanation(book, lesson, practice, gate, reply, sources = {}, onOpenSourcePage = { onSourcePage = true })
+                        WithLogin(client, mac.url) {
+                            val gate = remember { answerExplainWith(BookExplainer(settings, library), consent) }
+                            LessonAnswerExplanation(book, lesson, practice, gate, reply, sources = {}, onOpenSourcePage = {})
+                        }
                     }
                 }
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("answer-explain-unpaired").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithTag("answer-explain-unpaired-text").assertTextEquals(ExplainTrouble.REVOKED_LOGIN)
                 assertTrue(ExplainTrouble.REVOKED_LOGIN.contains("登录"))
                 onNodeWithTag("answer-explain-pair").performClick()
-                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithTag("explain-revoked").assertTextContains("登录", substring = true)
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("textbook-login-screen").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("login-revoked-reason").assertTextContains("登录", substring = true)
                 onNodeWithText("用 Sable 账号登录").assertExists()
-                onNodeWithTag("explain-code").assertExists()
+                onNodeWithTag("login-pairing-toggle").performClick()
+                onNodeWithTag("login-code").assertExists()
             }
             assertEquals(1, mac.explains.get())
         }
@@ -361,6 +373,7 @@ class ExplainTroubleTest {
                 val sent = exchange.requestBody.use { it.readBytes() }.decodeToString()
                 val (status, body) = when (exchange.requestURI.path) {
                     "/v1/pair" -> 200 to """{"deviceId":"friend-pc","token":"${tokens[pairs.getAndIncrement().coerceAtMost(1)]}"}"""
+                    "/v1/public/status" -> 200 to "{}"
                     "/v1/hello" -> 200 to """{"epoch":"synthetic","lastSeq":0,"backedUpThroughSeq":0,"lastSeqBefore":0}"""
                     "/v1/library/explain" -> {
                         explains.incrementAndGet()

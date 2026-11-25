@@ -56,6 +56,7 @@ internal data class LibraryUi(
     val activeCourseTopicId: String? = null,
     val activeCourseDetail: CourseDetailSnapshot? = null,
     val pendingCourseJump: BookPassage? = null,
+    val canReturnToCitationOrigin: Boolean = false,
     val courseNotice: String? = null,
     val courseBusy: Boolean = false,
     /** 当前打开的书单 ID（从书单进入阅读器时保留上下文，返回时回到该书单页）。 */
@@ -206,7 +207,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             if (!citationNavigation && (before.screen != after.screen || before.book?.id != after.book?.id)) {
                 citationOrigins.clear()
             }
-            mutable.update { it.copy(busy = false) }
+            mutable.update { it.copy(busy = false, canReturnToCitationOrigin = citationOrigins.isNotEmpty()) }
         }
     }
 

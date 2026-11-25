@@ -15,16 +15,31 @@ import java.nio.file.Path
 import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
+internal fun ComposeUiTest.openReaderTypeSettings() {
+    if (onAllNodesWithTag("v7-type-menu").fetchSemanticsNodes().isEmpty()) {
+        onNodeWithTag("immersive-more-menu").performSemanticsAction(SemanticsActions.OnClick)
+    }
+    onNodeWithTag("v7-type-menu").performSemanticsAction(SemanticsActions.OnClick)
+    onNodeWithTag("reading-settings-panel").assertExists()
+}
+
+@OptIn(ExperimentalTestApi::class)
+internal fun ComposeUiTest.closeReaderOverflow() {
+    if (onAllNodesWithTag("v7-type-menu").fetchSemanticsNodes().isNotEmpty()) {
+        onNodeWithTag("immersive-more-menu").performSemanticsAction(SemanticsActions.OnClick)
+    }
+    onNodeWithTag("v7-type-menu").assertDoesNotExist()
+}
+
+@OptIn(ExperimentalTestApi::class)
 internal fun ComposeUiTest.chooseReadingSize(size: ReadingSize) {
-    onNodeWithTag("immersive-more-menu").performClick()
-    onNodeWithTag("v7-type-menu").performClick()
+    openReaderTypeSettings()
     val option = onNodeWithTag("reading-size-${size.name}")
     option.performClick()
     option.assertIsSelected()
-    // The Aa anchor is just outside the panel. Send a pointer click so the popup handles dismissal.
     onNodeWithTag("v7-type-menu").performMouseInput { click() }
     onNodeWithTag("reading-settings-panel").assertDoesNotExist()
-    onNodeWithTag("v7-type-menu").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Escape) }
+    closeReaderOverflow()
 }
 
 /**
@@ -71,7 +86,10 @@ class ReaderMeasureUiTest {
             it.config.getOrNull(SemanticsProperties.TestTag).orEmpty().matches(Regex("book-sheet-[0-9]+"))
         }).fetchSemanticsNodes().map { it.boundsInRoot }.sortedBy { it.left }
         val viewport = onNodeWithTag("book-page-layout").fetchSemanticsNode().boundsInRoot
-        val expectedWidth = if (sheets.size == 1) minOf(viewport.width, 720f * density) else viewport.width / sheets.size
+        // The final spread can contain fewer text sheets than the viewport reserves.
+        val columns = bookImmersiveColumns(viewport.width / density, CoachV7.Size.body.value * scale * 38f, BookPageMode.Auto, 1)
+        assertTrue(sheets.size in 1..columns)
+        val expectedWidth = if (columns == 1) minOf(viewport.width, 720f * density) else viewport.width / columns
         for (sheet in sheets) assertEquals(expectedWidth, sheet.width, 2f, "$label: immersive column width")
         visible().forEach { text ->
             val sheet = sheets.single { text.positionInRoot.x >= it.left && text.positionInRoot.x < it.right }
@@ -88,7 +106,7 @@ class ReaderMeasureUiTest {
             assertTrue(text.positionInRoot.y + laid.getLineBottom(laid.lineCount - 1) <= sheet.bottom - 4f * density + 2f,
                 "$label: last line fully above footer")
         }
-        return sheets.size == 1 && viewport.width < 720f * density
+        return columns == 1 && viewport.width < 720f * density
     }
 
     @Test fun longParagraphReadsInFullAtEveryTypeSizeAndWindowAndPagesTurnFromTheTop() {
@@ -134,7 +152,12 @@ class ReaderMeasureUiTest {
                         narrowSeen = assertColumn(scale, window.name + label, window.density) || narrowSeen
                         lastText = nodes.first().config[SemanticsProperties.Text].single().text
                         if (!isEnabled().matches(onNodeWithTag("next-page").fetchSemanticsNode())) break
-                        onNodeWithTag("next-page").performClick(); waitForIdle()
+                        onNodeWithTag("next-page").performClick()
+                        waitUntil(timeoutMillis = 5_000) {
+                            val next = visible().firstOrNull()?.config?.get(BookPageSources)
+                            next != null && next !in seen
+                        }
+                        waitForIdle()
                     }
                     assertEquals(pages.joinToString(""), rebuilt.toString(), "${window.name} Aa $label: lossless UTF16 traversal")
                     assertTrue(rebuilt.trimEnd().endsWith("全段最后一句在这里结束。"))

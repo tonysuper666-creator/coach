@@ -105,7 +105,13 @@ class StudyModeInteractionRegressionTest {
                 st.execute("INSERT OR REPLACE INTO books(id, title, format, reading_page, touched) VALUES('bk-24', 'Health Economics', 'pdf', 178, 1000)")
             }
         }
-        val structure = BookStructure(pageRoles = emptyMap(), sections = emptyList(), source = "PDF_OUTLINE").apply {
+        val chapters = (1..24).map { chapter ->
+            val start = 10 + (chapter - 1) * 24
+            BookTocNode("ch-$chapter", null, chapter - 1, 1, TocNodeKind.CHAPTER, chapter.toString(),
+                "Chapter $chapter", start, if (chapter == 24) pages.last().number else start + 23,
+                source = HeadingSource.PDF_OUTLINE)
+        }
+        val structure = BookStructure(pageRoles = emptyMap(), sections = emptyList(), source = "PDF_OUTLINE", tocNodes = chapters).apply {
             resolvedLessons = lessons
         }
         val book = Textbook(

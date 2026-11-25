@@ -20,6 +20,8 @@ class ParagraphPageAnchorTest {
             val library = TextbookLibrary(root.resolve("library"))
             val book = library.importBook(input)
             library.save(book.copy(promptSeen = true))
+            // Exercise the page-scoped explanation. Read-through can legitimately explain the whole section.
+            StudyModeStore.save(library, BookStudyPreference(book.id, BookStudyMode.BOOK_MAP))
             val controller = TextbookController(library)
             runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
@@ -27,20 +29,26 @@ class ParagraphPageAnchorTest {
                 onNodeWithTag("home-read").performClick()
                 waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER }
                 waitForIdle()
-                onNodeWithTag("reader-page-number").assertTextEquals("第 5–6 页")
+                val firstChapter = BookBoundaries.effectiveChapterForFooter(book, 5)
+                onNodeWithTag("reader-page-number").assertTextEquals(BookBoundaries.pageStatus(5, 6, firstChapter))
+                val visible = onAllNodes(SemanticsMatcher.keyIsDefined(BookPageSources)).fetchSemanticsNodes()
+                assertEquals(setOf(5, 6), visible.flatMap { it.config[BookPageSources] }.map { it.importPage }.toSet())
                 onNodeWithTag("reader-page-number").performClick()
                 onNodeWithTag("page-jump").performTextReplacement("6")
                 onNodeWithTag("page-jump").performKeyInput { pressKey(Key.Enter) }
                 waitForIdle()
-                // Retain the existing mixed-sheet bookmark contract.
-                assertEquals(5, controller.state.value.page)
-                onNodeWithTag("book-explain-toggle").performClick()
-                waitForIdle()
-                onNode(hasAnyAncestor(hasTestTag("book-explain")) and hasText("第六页可信选段", substring = true)).assertExists()
-                onNode(hasAnyAncestor(hasTestTag("book-explain")) and hasText("第五页独立正文", substring = true)).assertDoesNotExist()
-                onNodeWithTag("ask-book-passage").performClick()
-                waitForIdle()
-                onNodeWithTag("ask-paragraph-0").assertTextContains("第六页可信选段", substring = true)
+                // TON-1724 publishes the explicitly jumped import page, even on a mixed sheet.
+                assertEquals(6, controller.state.value.page)
+                assertEquals(6, library.book(book.id).readingPage)
+                onNodeWithTag("immersive-companion-toggle").performClick()
+                onNodeWithTag("companion-tab-explain").performClick()
+                val source = onNodeWithTag("explain-fallback-page-0")
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("explain-fallback-page-0").fetchSemanticsNodes().isNotEmpty() }
+                source.assertTextEquals("第 6 页")
+                onNodeWithTag("companion-tab-ask").performClick()
+                onNodeWithTag("companion-pick-paragraph").performClick()
+                onNodeWithTag("ask-passage-block-0").assertTextContains("第六页可信选段", substring = true)
+                onNode(hasAnyAncestor(hasTestTag("immersive-companion-drawer")) and hasText("第五页独立正文", substring = true)).assertDoesNotExist()
             }
         } finally { root.toFile().deleteRecursively() }
     }

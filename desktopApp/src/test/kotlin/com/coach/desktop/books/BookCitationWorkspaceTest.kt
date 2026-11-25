@@ -120,7 +120,7 @@ class BookCitationWorkspaceTest {
     @Test fun citationOpensPageAndEscapeRestoresReplyDraftAndFocus() {
         val (controller, support) = setup()
         runComposeUiTest {
-            setContent { TextbookWorkspace(controller, loadOnMount = false, support = support) { null } }
+            setContent { com.coach.desktop.WindowsTextbookHost(controller, learningSupport = support) { null } }
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-source-0").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("book-source-stale-1").assertExists()
             onNodeWithTag("guided-start-questions").performScrollTo().performClick()

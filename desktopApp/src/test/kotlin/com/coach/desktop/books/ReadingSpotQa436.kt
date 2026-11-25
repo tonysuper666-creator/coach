@@ -13,6 +13,21 @@ import kotlin.math.abs
 import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
+internal fun SkikoComposeUiTest.toggleReaderMode() {
+    val scrolling = onAllNodesWithTag("book-scroll-read").fetchSemanticsNodes().isNotEmpty()
+    if (onAllNodesWithTag("immersive-more-menu").fetchSemanticsNodes().isEmpty()) {
+        onNodeWithTag("reader-page").performSemanticsAction(SemanticsActions.RequestFocus)
+        onNodeWithTag("reader-page").performKeyInput { pressKey(Key.Tab) }
+    }
+    openReaderTypeSettings()
+    val option = if (scrolling) "text-mode-paged" else "text-mode-scroll"
+    onNodeWithTag(option).performSemanticsAction(SemanticsActions.OnClick)
+    closeReaderOverflow()
+    mainClock.advanceTimeBy(850)
+    waitForIdle()
+}
+
+@OptIn(ExperimentalTestApi::class)
 class ReadingSpotQa436 {
     data class Sentence(val id: String, val y: Float, val side: String, val rootX: Float = 0f, val rootY: Float = 0f)
 
@@ -53,20 +68,6 @@ class ReadingSpotQa436 {
         } finally { dir.toFile().deleteRecursively() }
     }
 
-    private fun SkikoComposeUiTest.toggle() {
-        val scrolling = onAllNodesWithTag("book-scroll-read").fetchSemanticsNodes().isNotEmpty()
-        if (onAllNodesWithTag("immersive-more-menu").fetchSemanticsNodes().isEmpty()) {
-            onNodeWithTag("reader-page").performSemanticsAction(SemanticsActions.RequestFocus)
-            onNodeWithTag("reader-page").performKeyInput { pressKey(Key.Tab) }
-        }
-        onNodeWithTag("immersive-more-menu").performSemanticsAction(SemanticsActions.OnClick)
-        onNodeWithTag("v7-type-menu").performClick()
-        onNodeWithTag(if (scrolling) "text-mode-paged" else "text-mode-scroll").performClick()
-        onNodeWithTag("v7-type-menu").performKeyInput { pressKey(Key.Escape) }
-        mainClock.advanceTimeBy(850)
-        waitForIdle()
-    }
-
     private fun SkikoComposeUiTest.report(stage: String, seen: List<Sentence>, id: String) {
         println("QA436 " + stage + " visible=" + seen.firstOrNull()?.id + ".." + seen.lastOrNull()?.id +
             " target=" + id + " yFromViewportTopPx=" + seen.find { it.id == id }?.y)
@@ -85,11 +86,11 @@ class ReadingSpotQa436 {
         onNodeWithTag("reader-page").performTouchInput { click(androidx.compose.ui.geometry.Offset(clicked.rootX - pageBounds.left, clicked.rootY - pageBounds.top)) }
         mainClock.advanceTimeBy(300); waitForIdle()
         report("spread-before", sentences(), target)
-        toggle()
+        toggleReaderMode()
         onNodeWithTag("book-scroll-read").assertExists()
         val scrolling = sentences()
         report("first-scroll", scrolling, target)
-        toggle()
+        toggleReaderMode()
         val restored = sentences()
         report("back-to-spread", restored, target)
         assertTrue(scrolling.any { it.id == target } && restored.any { it.id == target }, "same sentence must remain visible on both switches")
@@ -115,12 +116,12 @@ class ReadingSpotQa436 {
         val first = right[right.size / 3]
         val last = right[right.size * 2 / 3]
         dragSelect(first, last)
-        toggle()
+        toggleReaderMode()
         onNodeWithTag("book-scroll-read").assertExists()
         val inScroll = sentences().map { it.id }
         report("select-first-scroll", sentences(), first.id)
         assertTrue(first.id in inScroll, "first selected sentence ${first.id} must be visible in scroll: $inScroll")
-        toggle()
+        toggleReaderMode()
         assertTrue(first.id in sentences().map { it.id }, "and back in the spread")
     }
 
@@ -132,9 +133,9 @@ class ReadingSpotQa436 {
         val right = all.filter { it.side == "reader-text-right" }
         val first = left[left.size / 2]
         dragSelect(first, right[right.size / 3])
-        toggle()
+        toggleReaderMode()
         assertTrue(first.id in sentences().map { it.id }, "left-page first sentence ${first.id} must be visible in scroll")
-        toggle()
+        toggleReaderMode()
         assertTrue(first.id in sentences().map { it.id }, "and back in the spread")
     }
 
@@ -146,11 +147,11 @@ class ReadingSpotQa436 {
         assertTrue(left.size >= 3)
         val first = left.first().id
         val later = left[left.size / 2].id
-        toggle()
+        toggleReaderMode()
         onNodeWithTag("book-scroll-read").assertExists()
         val scrolling = sentences().map { it.id }
         assertTrue(first in scrolling && later in scrolling, "left-page sentences $first and $later must be visible in scroll: $scrolling")
-        toggle()
+        toggleReaderMode()
         val back = sentences().map { it.id }
         assertTrue(first in back && later in back, "and again in the spread: $back")
     }
@@ -158,7 +159,7 @@ class ReadingSpotQa436 {
     @Test fun partialScrollRetainsActualReadingLineAcrossRoundTrip() = withBook(1440f) {
         val paged = sentences()
         assertTrue(paged.size >= 4 && paged.none { it.side == "reader-text-right" })
-        toggle()
+        toggleReaderMode()
         val initial = sentences()
         val viewport = onNodeWithTag("reader-page").fetchSemanticsNode().boundsInRoot
         onNode(SemanticsMatcher.keyIsDefined(SemanticsActions.ScrollBy) and hasAnyAncestor(hasTestTag("book-scroll-read")))
@@ -168,10 +169,10 @@ class ReadingSpotQa436 {
         val target = afterScroll.minByOrNull { abs(it.y - viewport.height * 0.56f) }!!
         assertTrue(afterScroll.first().id != initial.first().id, "input must move the viewport")
         report("single-partially-scrolled", afterScroll, target.id)
-        toggle()
+        toggleReaderMode()
         val back = sentences()
         report("back-to-single", back, target.id)
-        toggle()
+        toggleReaderMode()
         val reopened = sentences()
         report("scroll-again", reopened, target.id)
         assertTrue(back.any { it.id == target.id } && reopened.any { it.id == target.id }, "same sentence must remain visible")

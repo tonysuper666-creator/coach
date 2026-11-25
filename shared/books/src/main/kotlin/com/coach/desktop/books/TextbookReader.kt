@@ -1097,10 +1097,14 @@ internal fun TextbookReader(
     val hudPrefStore = remember(library.directory) { BookHudPreferenceStore(library.directory) }
     var hudDismissed by remember(book.id, hudPrefStore) { mutableStateOf(hudPrefStore.isDismissed(book.id)) }
     var hudVisible by remember(book.id, hudPrefStore, ui.source) { mutableStateOf(ui.source != null || !hudDismissed) }
+    val pagedWindowsText = textView && !pageUnrecognizedOriginal && readMode == BookReadMode.Paged &&
+        System.getProperty("os.name").orEmpty().startsWith("Windows")
+    var hoverHudVisible by remember(book.id, ui.source, pagedWindowsText) { mutableStateOf(false) }
     var hudRevealedByTap by remember(book.id) { mutableStateOf(false) }
     var hudPinned by remember(book.id) { mutableStateOf(false) }
     fun markHudDismissed() {
         hudDismissed = true
+        hoverHudVisible = false
         hudRevealedByTap = false
         hudPinned = false
         scope.launch(Dispatchers.IO) { hudPrefStore.markDismissed(book.id) }
@@ -1270,7 +1274,7 @@ internal fun TextbookReader(
                         true
                     }
                     event.key == Key.F11 || (!typingNow && !mod && event.key == Key.F) -> {
-                        if (hudVisible || tocOpen || companionOpen || searchOpen) {
+                        if (hudVisible || hoverHudVisible || tocOpen || companionOpen || searchOpen) {
                             hudVisible = false
                             markHudDismissed()
                             tocOpen = false
@@ -1283,7 +1287,7 @@ internal fun TextbookReader(
                         true
                     }
                     !typingNow && !mod && event.key == Key.Tab -> {
-                        hudVisible = !hudVisible
+                        hudVisible = !(hudVisible || hoverHudVisible)
                         if (!hudVisible) markHudDismissed()
                         true
                     }
@@ -1311,21 +1315,25 @@ internal fun TextbookReader(
                     else -> false
                 }
             }
-            .pointerInput(book.id) {
+            .pointerInput(book.id, hudPrefStore, ui.source, pagedWindowsText, density) {
                 awaitPointerEventScope {
-                    val topEdgePx = with(density) { 48.dp.toPx() }
-                    val bottomEdgePx = with(density) { 48.dp.toPx() }
+                    // The first line of a full-bleed sheet sits inside the toolbar's height.
+                    // Use a narrow edge to open it, then allow movement across its controls.
+                    val revealDepth = (if (pagedWindowsText) 12.dp else 48.dp).toPx()
+                    val hideDepth = 48.dp.toPx() + 48f
                     while (true) {
                         val ev = awaitPointerEvent(PointerEventPass.Initial)
-                        if (ev.type == PointerEventType.Move) {
-                            val y = ev.changes.firstOrNull()?.position?.y ?: continue
-                            val h = size.height.toFloat()
-                            if (y <= topEdgePx || y >= h - bottomEdgePx) {
-                                hudVisible = true
-                                hudRevealedByTap = false
-                            } else if (hudDismissed && !hudRevealedByTap && !hudPinned && !editingJump && !searchOpen && y > topEdgePx + 48f && y < h - bottomEdgePx - 48f) {
-                                hudVisible = false
-                            }
+                        if (ev.type != PointerEventType.Move) continue
+                        val change = ev.changes.firstOrNull() ?: continue
+                        if (pagedWindowsText && change.pressed) continue
+                        val y = change.position.y
+                        val h = size.height.toFloat()
+                        if (y <= revealDepth || y >= h - revealDepth) {
+                            if (pagedWindowsText) hoverHudVisible = true else hudVisible = true
+                            hudRevealedByTap = false
+                        } else if (hudDismissed && !hudRevealedByTap && !hudPinned && !editingJump && !searchOpen && y > hideDepth && y < h - hideDepth) {
+                            hoverHudVisible = false
+                            hudVisible = false
                         }
                     }
                 }
@@ -1345,7 +1353,9 @@ internal fun TextbookReader(
         val effectiveSideDocked = companionOpen && canDockCompanion && verticalSplit == null && tabletopSplit == null
         val effectiveBottomSheet = companionOpen && isBottomSheetCompanion && verticalSplit == null && tabletopSplit == null
         val effectiveSideOverlay = companionOpen && !effectiveSideDocked && !effectiveBottomSheet && verticalSplit == null && tabletopSplit == null
-        val showHud = hudVisible || hudPinned || editingJump || searchOpen
+        // On Windows paged text, a temporary edge reveal overlays already laid-out pages.
+        val reserveHudSpace = hudVisible || hudPinned || editingJump || searchOpen
+        val showHud = reserveHudSpace || hoverHudVisible
         val sideDrawerWidth = companionSideWidth(rootWidth.value)
         val bottomDrawerHeight = (rootHeight * 0.50f).coerceIn(220.dp, (rootHeight - 160.dp).coerceAtLeast(220.dp))
 
@@ -1374,7 +1384,7 @@ internal fun TextbookReader(
                                         (change.position - p).getDistance() < 12f &&
                                         p.x in size.width * .3f..size.width * .7f &&
                                         p.y in size.height * .25f..size.height * .75f) {
-                                        hudVisible = !hudVisible
+                                        hudVisible = !(hudVisible || hoverHudVisible)
                                         if (hudVisible) hudRevealedByTap = true else markHudDismissed()
                                     }
                                 }
@@ -1886,8 +1896,8 @@ internal fun TextbookReader(
         val readerViewport: @Composable (Modifier) -> Unit = { viewportMod ->
             Column(viewportMod.padding(
                 start = if (tocOpen) minOf(308.dp, (rootWidth * .85f).coerceAtLeast(240.dp)) else 0.dp,
-                top = if (showHud) 45.dp else 0.dp,
-                bottom = if (showHud && !effectiveBottomSheet) 45.dp else 0.dp,
+                top = if (reserveHudSpace) 45.dp else 0.dp,
+                bottom = if (reserveHudSpace && !effectiveBottomSheet) 45.dp else 0.dp,
             )) {
                 activeWhisper?.let { whisper ->
                     MarginWhisperStrip(

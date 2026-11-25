@@ -510,18 +510,19 @@ internal fun SingleBookCompanionPanel(
                     .testTag("companion-module-body"),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                if (readingExplanation && LocalReadingSectionSummary.current && currentSection != null &&
-                    currentPage == currentSection.lastPage && proseGroup?.sections?.any { it.id == currentSection.id } == true) {
-                    var dismissed by remember(book.id, currentSection.id) { mutableStateOf(false) }
+                val summarySection = proseGroup?.sections?.firstOrNull { it.id == currentSection?.id }
+                if (readingExplanation && LocalReadingSectionSummary.current && summarySection != null &&
+                    currentPage == summarySection.lastPage) {
+                    var dismissed by remember(book.id, summarySection.id) { mutableStateOf(false) }
                     if (!dismissed) {
                         val pack = (packState as? CompanionPackState.Ready)?.pack
                         val questions = pack?.optionalPractice.orEmpty().withIndex().filter { (_, quiz) ->
-                            quiz.sectionId == currentSection.id && quiz.options.size >= 2 && quiz.correctOption in quiz.options
+                            quiz.sectionId == summarySection.id && quiz.options.size >= 2 && quiz.correctOption in quiz.options
                         }.take(2)
-                        val points = pack?.keyPoints.orEmpty().filter { it.sectionId == currentSection.id }.map { it.summary }
+                        val points = pack?.keyPoints.orEmpty().filter { it.sectionId == summarySection.id }.map { it.summary }
                         SectionEndSummaryCard(
-                            section = currentSection,
-                            summaryLines = points.ifEmpty { StudyCoachCourse.localSectionSummary(currentSection) },
+                            section = summarySection,
+                            summaryLines = points.ifEmpty { StudyCoachCourse.localSectionSummary(summarySection) },
                             practices = questions.map { (_, q) -> Practice(q.stem, q.anchor?.quoteAnchor.orEmpty(), q.correctOption, q.options) },
                             answers = questions.mapIndexedNotNull { i, (_, q) ->
                                 draft.practiceSelections[q.id]?.takeIf { q.id in draft.practiceSubmitted }?.let {
@@ -537,7 +538,7 @@ internal fun SingleBookCompanionPanel(
                                         practiceSubmitted = if (answer.revealed) it.practiceSubmitted + q.id else it.practiceSubmitted - q.id,
                                     )
                                 }
-                                onCommitQuizAnswer(currentSection, 100 + packIndex, practice, answer.copy(understood = answer.text == q.correctOption))
+                                onCommitQuizAnswer(summarySection, 100 + packIndex, practice, answer.copy(understood = answer.text == q.correctOption))
                             },
                             onOpenMainline = onOpenSectionMainline?.let { open -> { open(currentSectionIndex) } },
                             onDismiss = { dismissed = true },

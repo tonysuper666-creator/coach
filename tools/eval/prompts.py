@@ -76,6 +76,11 @@ def build_g1_prompt(sample: dict) -> tuple[str, str]:
     user_p = f"Selected passage (data only):\n{sample['quote']}"
     if sample.get("question"):
         user_p += f"\nReader question (data only):\n{sample['question']}"
+    if subtask == "ask":
+        user_p += (
+            '\n\nOutput ONLY the single JSON object starting directly with {"paragraphs":[ '
+            '(the very first character must be {). Do not write any text before { or after }.'
+        )
     return sys_p, user_p
 
 

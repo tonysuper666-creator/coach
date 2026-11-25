@@ -32,8 +32,32 @@ internal enum class ReaderFormatReason {
     STREAM_JSON, PAYLOAD_SIZE, PAYLOAD_JSON, ROOT_FIELDS, PARAGRAPH_COUNT,
     PARAGRAPH_FIELDS, PARAGRAPH_TEXT, ANCHORS, DUPLICATE_ANCHORS, ANSWER_LOCATOR, ANSWER_CITATION
 }
-internal class ReaderFormat(val servedBy: String? = null,
-    val reason: ReaderFormatReason = ReaderFormatReason.STREAM_JSON) : Exception("Invalid reader JSON")
+internal class ReaderFormat(
+    val servedBy: String? = null,
+    val reason: ReaderFormatReason = ReaderFormatReason.STREAM_JSON,
+    val streamError: StreamJsonError? = null,
+) : Exception("Invalid reader JSON")
+
+/** Fixed sub-codes for [ReaderFormatReason.STREAM_JSON]: never include model text, chars or excerpts. */
+internal enum class StreamJsonError {
+    MAX_SIZE,
+    KEY_TOO_LONG,
+    BAD_SURROGATE,
+    BAD_NUMBER,
+    BAD_UNICODE_ESCAPE,
+    BAD_ESCAPE,
+    MAX_DEPTH,
+    ROOT_NON_OBJECT,
+    FENCE_BEFORE_ROOT,
+    PROSE_ASCII_BEFORE_ROOT,
+    PROSE_CJK_BEFORE_ROOT,
+    BEFORE_ROOT,
+    AFTER_ROOT,
+    UNEXPECTED_AFTER_VALUE,
+    UNEXPECTED_NUMBER,
+    UNEXPECTED_LITERAL,
+    SYNTAX,
+}
 
 /** Prefix lexer: only decoded, non-whitespace characters at configured body paths count.
  * Stores keys/grammar only, never source or explanation text. Final citation gate is separate.
@@ -70,20 +94,34 @@ internal class ReaderBodyProgress(
     private var key = StringBuilder()
     private var highSurrogate = false
     var invalid = false; private set
+    var invalidReason: StreamJsonError? = null; private set
     private var root = false
     private var size = 0
+    private var fenced = false
+    private var openTicks = 0
+    private var openInfo = StringBuilder()
+    private var inOpenFenceLine = false
+    private var closeTicks = 0
+    private var closedFence = false
+
+    private fun fail(reason: StreamJsonError) {
+        if (invalidReason == null) invalidReason = reason
+        invalid = true
+    }
+
     fun push(delta: String): Boolean {
         var progress = false
         for (c in delta) {
-            if (++size > maxSize || invalid) { invalid = true; break }
+            if (invalid) break
+            if (++size > maxSize) { fail(StreamJsonError.MAX_SIZE); break }
             fun decoded(d: Char) {
-                if (keyString) { if (key.length < 64) key.append(d) else invalid = true }
+                if (keyString) { if (key.length < 64) key.append(d) else fail(StreamJsonError.KEY_TOO_LONG) }
                 if (bodyString) {
                     if (highSurrogate) {
                         highSurrogate = false
-                        if (d.isLowSurrogate()) progress = true else invalid = true
+                        if (d.isLowSurrogate()) progress = true else fail(StreamJsonError.BAD_SURROGATE)
                     } else if (d.isHighSurrogate()) highSurrogate = true
-                    else if (d.isLowSurrogate()) invalid = true
+                    else if (d.isLowSurrogate()) fail(StreamJsonError.BAD_SURROGATE)
                     else if (!d.isWhitespace() && !d.isISOControl() && Character.getType(d) != Character.FORMAT.toInt()) progress = true
                 }
             }
@@ -93,13 +131,13 @@ internal class ReaderBodyProgress(
                     continue
                 }
                 number = false
-                if (!numberHasDigit) { invalid = true; continue }
+                if (!numberHasDigit) { fail(StreamJsonError.BAD_NUMBER); continue }
                 stack.lastOrNull()?.phase = 3
             }
             if (string) {
                 val hex = unicode
                 if (hex != null) {
-                    if (c.digitToIntOrNull(16) == null) { invalid = true; continue }
+                    if (c.digitToIntOrNull(16) == null) { fail(StreamJsonError.BAD_UNICODE_ESCAPE); continue }
                     val next = hex + c
                     if (next.length == 4) { unicode = null; decoded(next.toInt(16).toChar()) } else unicode = next
                 } else if (escape) {
@@ -108,13 +146,13 @@ internal class ReaderBodyProgress(
                         'u' -> unicode = ""
                         '"', '\\', '/' -> decoded(c)
                         'b', 'f', 'n', 'r', 't' -> decoded(' ')
-                        else -> invalid = true
+                        else -> fail(StreamJsonError.BAD_ESCAPE)
                     }
                 } else when {
                     c == '\\' -> escape = true
                     c == '"' -> {
                         string = false
-                        if (highSurrogate) invalid = true
+                        if (highSurrogate) fail(StreamJsonError.BAD_SURROGATE)
                         val f = stack.last()
                         if (keyString) { f.key = key.toString(); f.phase = 1 } else f.phase = 3
                     }
@@ -123,9 +161,41 @@ internal class ReaderBodyProgress(
                 }
                 continue
             }
+            if (inOpenFenceLine) {
+                if (c == '\n') {
+                    inOpenFenceLine = false
+                    val tag = openInfo.toString().trim().lowercase()
+                    if (tag.isNotEmpty() && tag != "json") fail(StreamJsonError.FENCE_BEFORE_ROOT)
+                } else if (openInfo.length >= 16) {
+                    fail(StreamJsonError.FENCE_BEFORE_ROOT)
+                } else {
+                    openInfo.append(c)
+                }
+                continue
+            }
+            if (openTicks in 1..2) {
+                if (c == '`') {
+                    openTicks++
+                    if (openTicks == 3) { fenced = true; inOpenFenceLine = true }
+                } else {
+                    fail(StreamJsonError.FENCE_BEFORE_ROOT)
+                }
+                continue
+            }
+            if (closeTicks in 1..2) {
+                if (c == '`') {
+                    closeTicks++
+                    if (closeTicks == 3) closedFence = true
+                } else {
+                    fail(StreamJsonError.AFTER_ROOT)
+                }
+                continue
+            }
             if (c.isWhitespace()) continue
             val f = stack.lastOrNull()
             when {
+                f == null && !root && !fenced && c == '`' -> openTicks = 1
+                f == null && root && fenced && !closedFence && c == '`' -> closeTicks = 1
                 c == '"' && f != null && (f.phase == 0 && f.kind == '{' || f.phase == 2) -> {
                     string = true; keyString = f.kind == '{' && f.phase == 0; key = StringBuilder()
                     bodyString = !keyString && (
@@ -140,13 +210,25 @@ internal class ReaderBodyProgress(
                 c == ':' && f?.phase == 1 -> f.phase = 2
                 c == ',' && f?.phase == 3 -> f.phase = if (f.kind == '{') 0 else 2
                 (c == '{' || c == '[') && (f?.phase == 2 || f == null && !root) -> {
-                    if (stack.size >= 8) { invalid = true; continue }
+                    if (stack.size >= 8) { fail(StreamJsonError.MAX_DEPTH); continue }
                     val path = if (f == null) emptyList() else f.path + if (f.kind == '{') f.key else "*"
-                    if (f == null) { root = true; if (c != '{') invalid = true } else f.phase = 3
+                    if (f == null) { root = true; if (c != '{') fail(StreamJsonError.ROOT_NON_OBJECT) } else f.phase = 3
                     stack.add(Frame(c, path, if (c == '{') 0 else 2))
                 }
                 f != null && (c == '}' && f.kind == '{' || c == ']' && f.kind == '[') && f.phase in setOf(0, 2, 3) -> stack.removeAt(stack.lastIndex)
-                else -> invalid = true // The reader schema contains only objects, arrays and strings.
+                else -> fail(when {
+                    f == null && !root -> when {
+                        c == '`' -> StreamJsonError.FENCE_BEFORE_ROOT
+                        c in 'A'..'Z' || c in 'a'..'z' -> StreamJsonError.PROSE_ASCII_BEFORE_ROOT
+                        c.code in 0x4E00..0x9FFF || c.code in 0x3000..0x303F || c.code in 0xFF00..0xFFEF -> StreamJsonError.PROSE_CJK_BEFORE_ROOT
+                        else -> StreamJsonError.BEFORE_ROOT
+                    }
+                    f == null && root -> StreamJsonError.AFTER_ROOT
+                    f != null && f.phase == 3 -> StreamJsonError.UNEXPECTED_AFTER_VALUE
+                    f != null && f.phase == 2 && (c == '-' || c in '0'..'9') -> StreamJsonError.UNEXPECTED_NUMBER
+                    f != null && f.phase == 2 && c in setOf('t', 'f', 'n') -> StreamJsonError.UNEXPECTED_LITERAL
+                    else -> StreamJsonError.SYNTAX
+                })
             }
         }
         return progress
@@ -167,6 +249,7 @@ internal class ReaderTiming(
     @Volatile private var stopped = false
     @Volatile private var expired: ReaderTimeoutStage? = null
     @Volatile private var invalid = false
+    @Volatile private var streamError: StreamJsonError? = null
     @Volatile private var handle: BridgeStreamHandle? = null
     @Volatile private var sourceProcess: Process? = null
     fun source(process: Process?) { sourceProcess = process; if (stopped) process?.destroyForcibly() }
@@ -180,13 +263,14 @@ internal class ReaderTiming(
                 override fun onReset() {
                     parser = bodyProgressFactory()
                     invalid = false
+                    streamError = null
                     last = null
                     attemptStarted = System.nanoTime()
                     signal.trySend(Unit)
                 }
                 override fun onDelta(text: String, atMs: Long) {
                     val progress = parser.push(text)
-                    if (parser.invalid) { invalid = true; signal.trySend(Unit) }
+                    if (parser.invalid) { streamError = parser.invalidReason; invalid = true; signal.trySend(Unit) }
                     if (progress && !parser.invalid) {
                         val now = System.nanoTime()
                         val previous = last
@@ -213,7 +297,7 @@ internal class ReaderTiming(
                 val totalDeadline = started + limits.totalMs * 1_000_000
                 val remaining = minOf(bodyDeadline, totalDeadline) - System.nanoTime()
                 if (remaining <= 0) throw ReaderTimeout(timeoutStage(totalDeadline, bodyDeadline, previous))
-                if (invalid) throw ReaderFormat(servedBy)
+                if (invalid) throw ReaderFormat(servedBy, ReaderFormatReason.STREAM_JSON, streamError)
                 if (worker.isCompleted) return@coroutineScope worker.await()
                 withTimeoutOrNull((remaining + 999_999) / 1_000_000) { signal.receive() }
             }

@@ -234,6 +234,7 @@ class FriendAccessTest {
         assertEquals(listOf("complete", "complete", "unavailable", "unavailable"), rows.map { it.str("status") })
         assertEquals(listOf(8L, 3L, 5L, 4L), rows.map { it.num("sentAnchors") })
         assertEquals(listOf("ANCHORS", "STREAM_JSON", null, null), rows.map { it.getValue("formatReason").jsonPrimitive.contentOrNull })
+        assertEquals(listOf(null, "PROSE_ASCII_BEFORE_ROOT", null, null), rows.map { it.getValue("streamJsonError").jsonPrimitive.contentOrNull })
         assertEquals(listOf(null, null, "HTTP_RESPONSE", "TERMINAL"), rows.map { it.getValue("bridgeFailureStage").jsonPrimitive.contentOrNull })
         for (row in rows) {
             assertEquals(friend.str("deviceId"), row.str("device"))

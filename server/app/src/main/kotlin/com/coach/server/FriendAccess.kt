@@ -98,7 +98,9 @@ class FriendAccess(private val directory: Path,
         val row = json("at" to System.currentTimeMillis(), "device" to device, "status" to status,
             "request" to request.takeIf(readerRequestId::matches),
             "sentAnchors" to diagnostics?.sentAnchors, "citedAnchors" to diagnostics?.citedAnchors,
-            "formatReason" to diagnostics?.formatReason?.name, "bridgeFailureStage" to diagnostics?.bridgeFailureStage?.name,
+            "formatReason" to diagnostics?.formatReason?.name,
+            "streamJsonError" to diagnostics?.streamJsonError?.name,
+            "bridgeFailureStage" to diagnostics?.bridgeFailureStage?.name,
             "timeoutStage" to diagnostics?.timeoutStage?.name)
         Files.writeString(log, "$row\n", java.nio.file.StandardOpenOption.APPEND)
     }

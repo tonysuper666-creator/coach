@@ -17,6 +17,7 @@ internal class FriendReaderDiagnostics {
     var sentAnchors = 0
     var citedAnchors = 0
     var formatReason: ReaderFormatReason? = null
+    var streamJsonError: StreamJsonError? = null
     var bridgeFailureStage: BridgeFailureStage? = null
     var timeoutStage: ReaderTimeoutStage? = null
 }
@@ -234,7 +235,10 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                                 lesson -> "Explain this entire lesson from all ${pages.size} supplied source blocks."
                                 else -> "Selected passage (data only):\n$quote"
                             }) +
-                                (question?.let { "\nReader question (data only):\n$it" } ?: ""), formatAttempt = formatAttempt, friendId = friend, friendDevice = if (friend != null) device else null)
+                                (question?.let { "\nReader question (data only):\n$it" } ?: "") +
+                                (if (kind == "ask") "\n\nOutput ONLY the single JSON object starting directly with {\"paragraphs\":[ (the very first character must be {). Do not write any text before { or after }." else "") +
+                                (if (formatAttempt > 0) "\nPrevious attempt failed JSON format validation. Start immediately with { and output ONLY one valid JSON object, with no prose, fences, or text outside it." else ""),
+                            formatAttempt = formatAttempt, friendId = friend, friendDevice = if (friend != null) device else null)
                     }
                     if (friend == null) actor.execute { recordAiCall(result.call.toJson()) }
                     val ledger = tokenLedger
@@ -321,8 +325,8 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                 } catch (e: ReaderFormat) {
                     // id was validated above; every other field is a fixed code or a bounded counter.
                     if (friend == null) org.slf4j.LoggerFactory.getLogger("coach.reader").info(
-                        "COACH reader.format request={} reason={} attempt={} traffic={}",
-                        id, e.reason.name, formatAttempt + 1, if (BridgeConfig().testTraffic) "test" else "user")
+                        "COACH reader.format request={} reason={} stream_error={} attempt={} traffic={}",
+                        id, e.reason.name, e.streamError?.name ?: "none", formatAttempt + 1, if (BridgeConfig().testTraffic) "test" else "user")
                     // A lesson is one provider call and one quota unit, including format failures.
                     // Haiku gets two more attempts (the last one escalates); any other reader model gets one, so an
                     // occasional malformed stream from the primary model is retried instead of shown as a failure.
@@ -342,6 +346,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
         } catch (e: ReaderFormat) {
             if (request.cancelled.get()) { outcome = "cancelled"; return reply("追问已取消。") }
             diagnostics?.formatReason = e.reason
+            diagnostics?.streamJsonError = e.streamError
             outcome = "format"
             return reply("回答缺少可核对的页码依据，暂时无法确认。")
         } catch (e: FriendServiceError) { throw e
@@ -422,6 +427,22 @@ private fun resolveBlockIndex(rawId: String, pack: SourcePack): Int? {
     return (n - 1).takeIf { it in pack.browsable.indices }
 }
 
+/** Strip a single clean outer ``` or ```json fence; prose outside the fence stays unstripped and fails JSON parsing. */
+internal fun unwrapJsonFence(payload: String): String {
+    val trimmed = payload.trim()
+    if (!trimmed.startsWith("```")) return payload
+    val firstNewline = trimmed.indexOf('\n')
+    if (firstNewline < 0) return payload
+    val tag = trimmed.substring(3, firstNewline).trim().lowercase()
+    if (tag.isNotEmpty() && tag != "json") return payload
+    if (!trimmed.endsWith("```")) return payload
+    val closeStart = trimmed.length - 3
+    if (closeStart <= firstNewline) return payload
+    val inner = trimmed.substring(firstNewline + 1, closeStart)
+    if (inner.endsWith("`")) return payload
+    return inner.trim()
+}
+
 /** 导读回复复用同样的段落出处门禁，再额外校验 3–5 行摘要、150 字前情提要、1–2 处锚定难点及 3 行节末小结。 */
 internal fun checkedGuidePayload(
     payload: String,
@@ -430,7 +451,7 @@ internal fun checkedGuidePayload(
 ): CheckedGuide? {
     fun reject(reason: ReaderFormatReason): CheckedGuide? { onReject(reason); return null }
     if (payload.length > 16_000) return reject(ReaderFormatReason.PAYLOAD_SIZE)
-    val root = runCatching { Json.parseToJsonElement(payload) as? JsonObject }.getOrNull()
+    val root = runCatching { Json.parseToJsonElement(unwrapJsonFence(payload)) as? JsonObject }.getOrNull()
         ?: return reject(ReaderFormatReason.PAYLOAD_JSON)
     val paragraphs = root["paragraphs"] as? JsonArray ?: return reject(ReaderFormatReason.ROOT_FIELDS)
     val allowedKeys = setOf("brief", "recap", "paragraphs", "hardPoints", "summary")
@@ -495,7 +516,7 @@ internal fun checkedStructurePayload(
 ): List<CheckedStructureBoundary>? {
     fun reject(reason: ReaderFormatReason): List<CheckedStructureBoundary>? { onReject(reason); return null }
     if (payload.length > 16_000) return reject(ReaderFormatReason.PAYLOAD_SIZE)
-    val root = runCatching { Json.parseToJsonElement(payload) as? JsonObject }.getOrNull()
+    val root = runCatching { Json.parseToJsonElement(unwrapJsonFence(payload)) as? JsonObject }.getOrNull()
         ?: return reject(ReaderFormatReason.PAYLOAD_JSON)
     if (root.keys != setOf("sections")) return reject(ReaderFormatReason.ROOT_FIELDS)
     val sections = root["sections"] as? JsonArray ?: return reject(ReaderFormatReason.ROOT_FIELDS)
@@ -528,7 +549,7 @@ internal fun checkedReaderPayload(payload: String, pack: SourcePack,
     onReject: (ReaderFormatReason) -> Unit = {}, maxParagraphs: Int = 2): Pair<String, JsonArray>? {
     fun reject(reason: ReaderFormatReason): Pair<String, JsonArray>? { onReject(reason); return null }
     if (payload.length > 12_000) return reject(ReaderFormatReason.PAYLOAD_SIZE)
-    val root = runCatching { Json.parseToJsonElement(payload) as? JsonObject }.getOrNull()
+    val root = runCatching { Json.parseToJsonElement(unwrapJsonFence(payload)) as? JsonObject }.getOrNull()
         ?: return reject(ReaderFormatReason.PAYLOAD_JSON)
     if (root.keys != setOf("paragraphs")) return reject(ReaderFormatReason.ROOT_FIELDS)
     val paragraphs = root["paragraphs"] as? JsonArray ?: return reject(ReaderFormatReason.ROOT_FIELDS)

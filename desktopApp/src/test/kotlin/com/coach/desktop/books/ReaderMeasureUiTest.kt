@@ -93,7 +93,8 @@ class ReaderMeasureUiTest {
         for (sheet in sheets) assertEquals(expectedWidth, sheet.width, 2f, "$label: immersive column width")
         visible().forEach { text ->
             val sheet = sheets.single { text.positionInRoot.x >= it.left && text.positionInRoot.x < it.right }
-            val inset = minOf(10f * density, sheet.width * .02f)
+            // TON-1854（#639）：沉浸式左右边距收到 min(4dp, 栏宽 0.8%)。
+            val inset = minOf(4f * density, sheet.width * .008f)
             assertEquals(sheet.width - 2f * inset, text.size.width.toFloat(), 2f, "$label: full text column")
             assertEquals(sheet.left + inset, text.positionInRoot.x, 2f, "$label: text inset")
             val layouts = mutableListOf<TextLayoutResult>()
@@ -102,8 +103,9 @@ class ReaderMeasureUiTest {
             assertEquals(CoachV7.Size.body.value * scale, laid.layoutInput.style.fontSize.value, 0.01f, "$label: body size")
             assertFalse(laid.hasVisualOverflow, "$label: no clipped text")
             assertEquals(laid.layoutInput.text.length, laid.getLineEnd(laid.lineCount - 1))
-            assertTrue(text.positionInRoot.y >= sheet.top + 18f * density - 1f)
-            assertTrue(text.positionInRoot.y + laid.getLineBottom(laid.lineCount - 1) <= sheet.bottom - 4f * density + 2f,
+            // TON-1854：沉浸式上边距 8dp（章首页 2dp，省下的高度补给正文），正文区高 = 栏高 - 8dp，底部不再留 4dp。
+            assertTrue(text.positionInRoot.y >= sheet.top + 2f * density - 1f)
+            assertTrue(text.positionInRoot.y + laid.getLineBottom(laid.lineCount - 1) <= sheet.bottom + 2f,
                 "$label: last line fully above footer")
         }
         return columns == 1 && viewport.width < 720f * density

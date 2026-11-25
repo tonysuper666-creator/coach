@@ -115,7 +115,8 @@ class ReviewerKPhysicalPagesUiTest {
         val imported = library.importBook(input)
         library.save(imported.copy(promptSeen = true))
         val controller = TextbookController(library)
-        runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
+        // TON-1854（#639）：≥1080dp 宽窗沉浸文字排两栏、按屏翻；这里要逐页翻，窗口取 1000dp 宽（单栏）。
+        runSkikoComposeUiTest(size = Size(2000f, 1800f), density = Density(2f)) {
             setContent { WindowsTextbookHost(controller) { null } }
             ready(controller) { it.book?.id == imported.id }
             onNodeWithTag("home-read").performClick()
@@ -141,7 +142,8 @@ class ReviewerKPhysicalPagesUiTest {
         }
         assertEquals(6, TextbookLibrary(library.directory).book(imported.id).readingPage)
         val reopened = TextbookController(TextbookLibrary(library.directory))
-        runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
+        // TON-1854（#639）：≥1080dp 宽窗沉浸文字排两栏、按屏翻；这里要逐页翻，窗口取 1000dp 宽（单栏）。
+        runSkikoComposeUiTest(size = Size(2000f, 1800f), density = Density(2f)) {
             setContent { WindowsTextbookHost(reopened) { null } }
             ready(reopened) { it.book?.id == imported.id }
             onNodeWithTag("home-read").performClick()

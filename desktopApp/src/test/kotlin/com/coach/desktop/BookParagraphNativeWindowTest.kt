@@ -90,7 +90,8 @@ class BookParagraphNativeWindowTest {
                 val window = edt { ComposeWindow().apply {
                     title = "LearningCoach · 段落验收（自造 PDF）"
                     val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
-                    setBounds(screen.x + 20, screen.y + 20, minOf(1600, screen.width - 40), minOf(1000, screen.height - 40))
+                    // TON-1854（#639）：阅读区 ≥1080dp 就排两栏、按屏翻。逐页按 PageDown 的验收要单栏，开窗取 1000 宽。
+                    setBounds(screen.x + 20, screen.y + 20, minOf(1000, screen.width - 40), minOf(1000, screen.height - 40))
                     setContent { WindowsTextbookHost(controller, bookExplainer = explainer) { null } }
                     isAlwaysOnTop = true
                     isVisible = true
@@ -136,7 +137,8 @@ class BookParagraphNativeWindowTest {
                     assertEquals(11, controller.state.value.page)
                     shot(window, dark, "keyboard-page-11")
                     // Resize the actual window; this card still uses the existing single column.
-                    edt { window.setSize(1100, minOf(window.height, 850)) }
+                    // TON-1854：1100 宽在 150% 缩放下阅读区仍可能 ≥1080dp（两栏），收窄到 1000 才是单栏。
+                    edt { window.setSize(1000, minOf(window.height, 850)) }
                     shot(window, dark, "narrow-single-column")
                     // #570（TON-1784）起「问这段」在伴读侧栏：开侧栏 → 提问 → 选本页段落 → 在侧栏输入框发问；
                     // 原来的出处弹窗已删，出处是回复里的引用，点它回到原文。

@@ -89,6 +89,9 @@ class BookPageNativeWindowTest {
                     return ExplainResult.Done(Explanation("隔离验收回复，用于检查出处。【S1】", listOf(Citation("S1", chosen.id, chosen.page)), 10L))
                 }
             }
+            // 本条验键盘逐页翻和重排锚点，不验导读。自动导读开着、讲解可用时，沉浸正文外侧会留难点小标栏（TON-1853），
+            // 正文变窄、这本自造书一页就排不进一屏，「一页一屏」的前提不成立；这里关掉自动导读。
+            ReadingSettings(controller.library.directory).chooseAutoGuide(false)
             for (dark in listOf(false, true)) {
                 System.setProperty("coach.windows.theme", if (dark) "dark" else "light")
                 controller.library.saveTextView(controller.state.value.book!!.id, false)
@@ -96,7 +99,8 @@ class BookPageNativeWindowTest {
                 val window = edt { ComposeWindow().apply {
                     title = "LearningCoach · 分页验收（自造 PDF）"
                     val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
-                    setBounds(screen.x + 20, screen.y + 20, minOf(1600, screen.width - 40), minOf(1000, screen.height - 40))
+                    // TON-1854（#639）：阅读区 ≥1080dp 就排两栏、按屏翻。逐页按 PageDown 的验收要单栏，开窗取 1000 宽。
+                    setBounds(screen.x + 20, screen.y + 20, minOf(1000, screen.width - 40), minOf(1000, screen.height - 40))
                     setContent { WindowsTextbookHost(controller, bookExplainer = explainer) { null } }
                     isAlwaysOnTop = true
                     isVisible = true
@@ -193,7 +197,8 @@ class BookPageNativeWindowTest {
                     }
                     assertTrue(edt { node(window, "reader-text-right")!!.config[SemanticsProperties.Text].single().text.isNotBlank() })
                     shot(window, dark, "wide-spread")
-                    edt { window.setSize(1100, minOf(window.height, 850)) }
+                    // TON-1854：1100 宽在 150% 缩放下阅读区仍可能 ≥1080dp（两栏），收窄到 1000 才是单栏。
+                    edt { window.setSize(1000, minOf(window.height, 850)) }
                     waitFor("single sheet after resize") { node(window, "book-sheet-1") == null }
                     assertEquals(anchorBeforeResize, controller.state.value.page)
                     shot(window, dark, "narrow-single-page")

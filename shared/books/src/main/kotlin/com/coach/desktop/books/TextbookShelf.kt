@@ -41,6 +41,8 @@ import com.coach.ui.v7.V7TextButton
 import com.coach.ui.v7.paperShadow
 import com.coach.ui.v7.v7FocusRing
 
+private const val HOME_REVIEW_EMPTY_MESSAGE = "还没有要复习的。做错的题会在这里出现。"
+
 @Composable
 internal fun BookImportProgressBar(
     progress: BookImportProgress,
@@ -242,7 +244,7 @@ internal fun LibraryHome(
                             }
                         }
                         CoachCardMeta(
-                            MasteryEngine.HOME_REVIEW_EMPTY_MESSAGE,
+                            HOME_REVIEW_EMPTY_MESSAGE,
                             Modifier.testTag("home-review-done"),
                         )
                     }
@@ -442,7 +444,7 @@ internal fun LibraryHome(
                         }
                     } else {
                         CoachCardMeta(
-                            MasteryEngine.HOME_REVIEW_EMPTY_MESSAGE,
+                            HOME_REVIEW_EMPTY_MESSAGE,
                             Modifier.padding(horizontal = 4.dp).testTag("home-review-done"),
                         )
                     }

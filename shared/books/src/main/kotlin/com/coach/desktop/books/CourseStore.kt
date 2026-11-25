@@ -59,6 +59,9 @@ internal data class AddCourseMaterialsResult(
  */
 internal object CourseStore {
     private val weekLabelNumberRegex = Regex("""(?:第\s*(\d{1,2})\s*周|(?i)\b(?:week|wk|w)\s*(\d{1,2})\b)""")
+    private val chapterTopicLabelRegex = Regex("""第 \d+ 章""")
+
+    fun isChapterTopicLabel(label: String): Boolean = chapterTopicLabelRegex.matches(label)
 
     fun ensureReady(db: Connection) {
         if (!BookSchemaMigration.tableExists(db, "course_topics") || !BookSchemaMigration.tableExists(db, "course_topic_sources")) {
@@ -558,10 +561,10 @@ internal object CourseStore {
             }
             val touchedTopicIds = mutableSetOf<String>()
 
+            val existingById = existingTopics.associateBy { it.topicId }
             for (incoming in plan.topics) {
-                val matched = existingTopics.firstOrNull { ex ->
-                    (incoming.topicId != null && ex.topicId == incoming.topicId) ||
-                        (ex.weekLabel == incoming.weekLabel && normalizeMatch(ex.title) == normalizeMatch(incoming.title)) ||
+                val matched = incoming.topicId?.let(existingById::get) ?: existingTopics.firstOrNull { ex ->
+                    (ex.weekLabel == incoming.weekLabel && normalizeMatch(ex.title) == normalizeMatch(incoming.title)) ||
                         (incoming.weekNum != null && extractWeekNum(ex.weekLabel) == incoming.weekNum &&
                             (ex.examStatus != CourseTopicStatus.EXCLUDED && incoming.examStatus != CourseTopicStatus.EXCLUDED))
                 }
@@ -853,12 +856,14 @@ internal object CourseStore {
             }
         }.sortedWith(compareBy<CourseMaterialEntry>({ it.weekNum ?: 999 }, { it.role.displayOrder }, { it.title }))
 
+        val frontMatterTopics = mutableSetOf<String>()
         val sourcesByTopic = db.prepareStatement(
             """SELECT cs.topic_id, cs.book_id, b.title, b.format, cs.source_role, cs.toc_node_id,
-                      cs.start_page, cs.end_page, cs.user_locked, cs.scope_note
+                      cs.start_page, cs.end_page, cs.user_locked, cs.scope_note, n.kind
                FROM course_topic_sources cs
                JOIN course_topics ct ON ct.topic_id = cs.topic_id
                JOIN books b ON b.id = cs.book_id
+               LEFT JOIN book_toc_nodes n ON n.book = cs.book_id AND n.id = cs.toc_node_id
                WHERE ct.collection_id=? AND cs.user_locked >= 0""",
         ).use { sql ->
             sql.setString(1, courseId)
@@ -879,6 +884,11 @@ internal object CourseStore {
                         userLocked = rows.getInt(9),
                         scopeNote = rows.getString(10),
                     )
+                    if (role == CourseMaterialRole.CORE_TEXTBOOK && link.userLocked == 0 &&
+                        rows.getString(11) in setOf(TocNodeKind.FRONT_MATTER.name, TocNodeKind.PART.name)
+                    ) {
+                        frontMatterTopics += link.topicId
+                    }
                     map.getOrPut(link.topicId) { mutableListOf() }.add(link)
                 }
                 map.mapValues { (_, list) ->
@@ -905,6 +915,13 @@ internal object CourseStore {
                         val decodedPack = CourseJson.decodeTopicPack(rows.getString(8))
                             ?.takeIf { packHash.isNullOrBlank() || it.generatedFromHash.isBlank() || it.generatedFromHash == packHash }
                         val draft = CourseJson.decodePracticeDraft(rows.getString(10), tid)
+                        val userLocked = rows.getInt(6) == 1
+                        val sources = sourcesByTopic[tid].orEmpty()
+                        val mastery = rows.getString(11)
+                        // Older alignments generated standalone topics for front matter. Keep edited or studied topics.
+                        if (tid in frontMatterTopics && isChapterTopicLabel(weekLabel) && sources.size == 1 &&
+                            !userLocked && (draft?.updatedAt ?: 0L) == 0L && mastery == "UNSEEN"
+                        ) continue
                         add(
                             CourseTopicEntry(
                                 topicId = tid,
@@ -914,13 +931,13 @@ internal object CourseStore {
                                 ord = rows.getInt(3),
                                 title = rows.getString(4),
                                 examStatus = status,
-                                userLocked = rows.getInt(6) == 1,
+                                userLocked = userLocked,
                                 examWeight = rows.getDouble(7),
-                                sources = sourcesByTopic[tid].orEmpty(),
+                                sources = sources,
                                 pack = decodedPack,
                                 packSourcesHash = packHash,
                                 practiceDraft = draft,
-                                masteryState = rows.getString(11),
+                                masteryState = mastery,
                                 updatedAt = rows.getLong(12),
                             ),
                         )
@@ -979,6 +996,12 @@ internal object CourseStore {
                     }
                 }
             }
+        }
+
+    fun loadCorrectedBodyPage(db: Connection, bookId: String): Int? =
+        db.prepareStatement("SELECT page FROM book_body_start WHERE book=?").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { rows -> if (rows.next()) rows.getInt(1) else null }
         }
 
     fun recomputeTopicSourcesHash(db: Connection, courseId: String, topicId: String): String {

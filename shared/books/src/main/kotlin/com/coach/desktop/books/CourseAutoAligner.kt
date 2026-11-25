@@ -23,6 +23,7 @@ internal object CourseAutoAligner {
         """(?im)^(?:\s*[-*#•]*\s*)?(?:week|wk)\s*(\d{1,2})\s*[:：\-—.]\s*(.{2,120})$|^第\s*(\d{1,2})\s*周\s*[:：\-—.]\s*(.{2,120})$""",
     )
     private val chapterTokenRegex = Regex("""(?i)\b(?:ch(?:apter)?\.?|第)\s*(\d{1,2})\b""")
+    private val chapterHeadingRegex = Regex("""(?i)^chapter\s+\d+|^第\s*[0-9一二三四五六七八九十]+\s*章""")
     private val stopWords = setOf(
         "week", "lecture", "slides", "tutorial", "solution", "solutions", "key", "chapter",
         "textbook", "notes", "summary", "review", "course", "handbook", "syllabus", "part",
@@ -31,7 +32,6 @@ internal object CourseAutoAligner {
 
     data class TextbookChapterRange(
         val bookId: String,
-        val bookTitle: String,
         val tocNodeId: String?,
         val title: String,
         val startPage: Int,
@@ -87,6 +87,7 @@ internal object CourseAutoAligner {
         val textbookChapters = current.materials
             .filter { (specByBook[it.bookId]?.role ?: it.role) == CourseMaterialRole.CORE_TEXTBOOK }
             .flatMap { loadTextbookChapters(db, it) }
+        val firstChapterByBook = textbookChapters.distinctBy { it.bookId }.associateBy { it.bookId }
 
         val coveredChapterTitles = mutableSetOf<String>()
         val weeksWithMaterials = resolvedMaterials.mapNotNull { it.weekNum }.toSortedSet()
@@ -127,7 +128,7 @@ internal object CourseAutoAligner {
                 links += CourseTopicLinkPlan(
                     bookId = m.bookId,
                     tocNodeId = null,
-                    startPage = 1,
+                    startPage = firstChapterByBook[m.bookId]?.startPage ?: 1,
                     endPage = m.pageCount.coerceAtLeast(1),
                     role = effRole,
                     scopeNote = "第 $wk 周",
@@ -219,11 +220,18 @@ internal object CourseAutoAligner {
             val chapterPosByKey = textbookChapters.withIndex().associate { (i, ch) ->
                 Triple(ch.bookId, ch.startPage, ch.title) to (i + 1)
             }
+            // Chapter labels can shift when front matter is removed. Keep the existing topic's ID.
+            val existingChapterTopics = current.allTopics.mapNotNull { topic ->
+                val source = topic.sources.singleOrNull()
+                    ?.takeIf { CourseStore.isChapterTopicLabel(topic.weekLabel) && it.role == CourseMaterialRole.CORE_TEXTBOOK }
+                source?.tocNodeId?.let { (source.bookId to it) to topic.topicId }
+            }.toMap()
             val uncoveredChapters = textbookChapters.filter { it.title !in coveredChapterTitles }
             if (uncoveredChapters.isNotEmpty()) {
                 uncoveredChapters.forEachIndexed { idx, ch ->
                     val chapterOrder = chapterPosByKey[Triple(ch.bookId, ch.startPage, ch.title)] ?: (idx + 1)
                     topics += CourseTopicPlan(
+                        topicId = ch.tocNodeId?.let { existingChapterTopics[ch.bookId to it] },
                         weekLabel = "第 $chapterOrder 章",
                         weekNum = null,
                         ord = if (allWeeks.isEmpty()) chapterOrder * 10 else 500 + chapterOrder,
@@ -402,62 +410,38 @@ internal object CourseAutoAligner {
     }
 
     private fun loadTextbookChapters(db: Connection, mat: CourseMaterialEntry): List<TextbookChapterRange> {
-        val fromToc = if (BookSchemaMigration.tableExists(db, "book_toc_nodes")) {
-            db.prepareStatement(
-                """SELECT id, title, start_page, end_page
-                   FROM book_toc_nodes
-                   WHERE book=? AND level <= 2
-                   ORDER BY ordinal""",
-            ).use { sql ->
-                sql.setString(1, mat.bookId)
-                sql.executeQuery().use { rows ->
-                    buildList {
-                        while (rows.next()) {
-                            val title = rows.getString(2).trim()
-                            val start = rows.getInt(3).coerceAtLeast(1)
-                            val end = rows.getInt(4).coerceAtLeast(start)
-                            if (title.isNotBlank()) {
-                                add(
-                                    TextbookChapterRange(
-                                        bookId = mat.bookId,
-                                        bookTitle = mat.title,
-                                        tocNodeId = rows.getString(1),
-                                        title = title,
-                                        startPage = start,
-                                        endPage = end,
-                                        keywords = keywordsOf(title),
-                                    ),
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            emptyList()
+        val pages = CourseStore.loadPagesForBook(db, mat.bookId, maxPages = mat.pageCount)
+        if (pages.isEmpty()) return emptyList()
+        val structure = BookStructureStore.loadStructure(db, mat.bookId, pages)
+        val nodes = structure?.tocNodes ?: BookTocStore.loadTocNodes(db, mat.bookId)
+        val bodyStart = BookBoundaries.bodyStart(pages, structure, CourseStore.loadCorrectedBodyPage(db, mat.bookId))
+        val opening = BookBoundaries.openingNode(nodes)
+        val fromToc = nodes.mapNotNull { node ->
+            val title = node.title.trim()
+            if (title.isBlank() || node.kind == TocNodeKind.FRONT_MATTER || node.kind == TocNodeKind.PART ||
+                (node.level > 2 && node.id != opening?.id) ||
+                (opening != null && node.ordinal < opening.ordinal) ||
+                node.endPage < bodyStart.importPage
+            ) return@mapNotNull null
+            val start = maxOf(node.startPage, bodyStart.importPage)
+            TextbookChapterRange(mat.bookId, node.id, title, start, node.endPage.coerceAtLeast(start), keywordsOf(title))
         }
         if (fromToc.isNotEmpty()) return fromToc
 
-        // Fallback: infer chapter headers directly from textbook pages
-        val pages = CourseStore.loadPagesForBook(db, mat.bookId, maxPages = 800)
-        val starts = mutableListOf<Pair<Int, String>>()
-        for (p in pages) {
-            val heading = p.text.lines()
-                .map { it.trim() }
-                .firstOrNull { line ->
-                    line.length in 4..80 &&
-                        (line.startsWith("# ") || Regex("""(?i)^chapter\s+\d+|^第\s*[0-9一二三四五六七八九十]+\s*章""").containsMatchIn(line))
-                }
-            if (heading != null) {
-                starts += p.number to heading.removePrefix("# ").trim()
-            }
-        }
-        if (starts.isEmpty()) return emptyList()
+        val starts = pages.asSequence()
+            .filter { it.number >= bodyStart.importPage }
+            .take(800)
+            .filter { structure == null || structure.pageRole(it.number) == BookPageRole.BODY }
+            .mapNotNull { page ->
+                page.text.lineSequence().map(String::trim).firstOrNull { line ->
+                    line.length in 4..80 && (line.startsWith("# ") || chapterHeadingRegex.containsMatchIn(line))
+                }?.let { page.number to it.removePrefix("# ").trim() }
+            }.toList()
+            .ifEmpty { listOf(bodyStart.importPage to mat.title) }
         return starts.mapIndexed { i, (startPage, chTitle) ->
             val endPage = (starts.getOrNull(i + 1)?.first?.minus(1) ?: mat.pageCount).coerceAtLeast(startPage)
             TextbookChapterRange(
                 bookId = mat.bookId,
-                bookTitle = mat.title,
                 tocNodeId = null,
                 title = chTitle,
                 startPage = startPage,

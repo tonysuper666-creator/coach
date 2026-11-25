@@ -589,6 +589,59 @@ internal object ChapterCompanionGrouping {
         )
     }
 
+    private data class DroppedCaptionContext(
+        val droppedBlockIds: Set<String>,
+        val droppedSectionIds: Set<String>,
+        val droppedBlocks: List<SourceBlock>,
+    )
+
+    private fun droppedLeadingCaptionContext(book: Textbook, group: ChapterSectionGroup): DroppedCaptionContext {
+        val companionGroup = filterForCompanion(book, group)
+        val allowedBlockIds = wireBlocks(companionGroup).mapTo(HashSet()) { it.id }
+        val droppedBlocks = wireBlocks(group).filter { it.id !in allowedBlockIds }
+        val allowedSectionIds = companionGroup.sections.mapTo(HashSet()) { it.id }
+        val droppedSectionIds = group.sections.map { it.id }.filterTo(HashSet()) { it !in allowedSectionIds }
+        return DroppedCaptionContext(
+            droppedBlockIds = droppedBlocks.mapTo(HashSet()) { it.id },
+            droppedSectionIds = droppedSectionIds,
+            droppedBlocks = droppedBlocks,
+        )
+    }
+
+    private fun matchesDroppedCaption(
+        sectionId: String,
+        anchor: BookCompanionAnchor?,
+        ctx: DroppedCaptionContext,
+    ): Boolean {
+        if (anchor != null && anchor.blockId in ctx.droppedBlockIds) return true
+        if (sectionId.isNotBlank() && sectionId in ctx.droppedSectionIds) return true
+        if (anchor != null) {
+            val quote = anchor.quoteAnchor.trim()
+            return ctx.droppedBlocks.any { blk ->
+                blk.page == anchor.pdfPage && (
+                    (anchor.endUtf16 > blk.start && anchor.startUtf16 < blk.end) ||
+                        (quote.isNotBlank() && (blk.text.contains(quote, ignoreCase = true) || quote.contains(blk.text.trim(), ignoreCase = true)))
+                    )
+            }
+        }
+        return false
+    }
+
+    fun hasStaleLeadingCaption(book: Textbook, group: ChapterSectionGroup, pack: BookCompanionPack): Boolean {
+        val ctx = droppedLeadingCaptionContext(book, group)
+        if (ctx.droppedBlocks.isEmpty()) return false
+        return pack.keyPoints.any { kp -> matchesDroppedCaption(kp.sectionId, kp.anchor, ctx) }
+    }
+
+    fun sanitizeCachedPack(book: Textbook, group: ChapterSectionGroup, pack: BookCompanionPack): BookCompanionPack? {
+        val ctx = droppedLeadingCaptionContext(book, group)
+        if (ctx.droppedBlocks.isEmpty()) return pack
+        val cleanKeyPoints = pack.keyPoints.filterNot { kp -> matchesDroppedCaption(kp.sectionId, kp.anchor, ctx) }
+        if (cleanKeyPoints.isEmpty()) return null
+        val cleanJargon = pack.jargonGlosses.filterNot { g -> matchesDroppedCaption("", g.anchor, ctx) }
+        return pack.copy(keyPoints = cleanKeyPoints, jargonGlosses = cleanJargon)
+    }
+
     fun wireBlocks(group: ChapterSectionGroup): List<SourceBlock> {
         val seen = HashSet<String>()
         return group.sections.flatMap { sec ->

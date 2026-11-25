@@ -49,6 +49,8 @@ class Ton1848CompanionFixesTest {
         library: TextbookLibrary,
         private val refuseSelection: Boolean = false,
         private val respondChapterCompanion: Boolean = false,
+        startLoaded: Boolean = true,
+        paired: Boolean = true,
     ) : BookExplainer(DesktopConnectionSettings(home = home, environment = { null }), library) {
         val chapterCalls = mutableListOf<Pair<JsonObject, List<SourceBlock>>>()
         val lessonCalls = mutableListOf<List<SourceBlock>>()
@@ -56,8 +58,8 @@ class Ton1848CompanionFixesTest {
         val selectionCalls = mutableListOf<Triple<String, SourceBlock, String?>>()
 
         init {
-            identity = DesktopIdentity("http://127.0.0.1:1", PairedCredentials("dev-ton1848", "tok-ton1848"))
-            loaded = true
+            identity = if (paired) DesktopIdentity("http://127.0.0.1:1", PairedCredentials("dev-ton1848", "tok-ton1848")) else null
+            loaded = startLoaded
             revoked = false
         }
 
@@ -761,6 +763,202 @@ class Ton1848CompanionFixesTest {
                 onNodeWithTag("companion-kp-0").assertIsDisplayed()
                 onNodeWithText("The lighthouse team measures tides", substring = true).assertIsDisplayed()
                 assertTrue(onAllNodesWithText("synthetic caption", substring = true).fetchSemanticsNodes().isEmpty())
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun upgradedLegacyCaptionCacheRefetchesOnlineAndSanitizesOffline() {
+        val root = Files.createTempDirectory("ton1848-upgrade-cache-")
+        try {
+            val xrayCaption = "X-Ray photograph of a hand, making this a synthetic caption."
+            val introPara1 = "The lighthouse team measures tides before testing the blue signal."
+            val introPara2 = "Independent measurements help the observers verify the pattern."
+            val page1Text = "$xrayCaption\n\nINTRODUCTION\n\n$introPara1\n\n$introPara2"
+            val page2Text = "CHAPTER 1: OBSERVATIONS\n\nObservation 1.1: observers compare notes across stations."
+            val (library, rawBook) = importSyntheticBook(root, "placeholder")
+
+            val capStart = page1Text.indexOf(xrayCaption)
+            val headingStart = page1Text.indexOf("INTRODUCTION")
+            val intro1Start = page1Text.indexOf(introPara1)
+            val intro2Start = page1Text.indexOf(introPara2)
+            val blockCap = SourceBlock("${rawBook.id}:p1:$capStart", 1, capStart, capStart + xrayCaption.length, false, xrayCaption)
+            val blockHeading = SourceBlock("${rawBook.id}:p1:$headingStart", 1, headingStart, headingStart + "INTRODUCTION".length, true, "INTRODUCTION")
+            val blockIntro1 = SourceBlock("${rawBook.id}:p1:$intro1Start", 1, intro1Start, intro1Start + introPara1.length, false, introPara1)
+            val blockIntro2 = SourceBlock("${rawBook.id}:p1:$intro2Start", 1, intro2Start, intro2Start + introPara2.length, false, introPara2)
+            val blockCh1Head = SourceBlock("${rawBook.id}:p2:0", 2, 0, "CHAPTER 1: OBSERVATIONS".length, true, "CHAPTER 1: OBSERVATIONS")
+            val blockCh1Body = SourceBlock("${rawBook.id}:p2:25", 2, 25, page2Text.length, false, "Observation 1.1: observers compare notes across stations.")
+
+            val lessons = listOf(
+                BookLesson("sec-caption", "Illustrations", listOf(blockCap)),
+                BookLesson("sec-intro", "INTRODUCTION", listOf(blockHeading, blockIntro1, blockIntro2)),
+                BookLesson("sec-ch1", "CHAPTER 1: OBSERVATIONS", listOf(blockCh1Head, blockCh1Body)),
+            )
+            val tocNodes = listOf(
+                BookTocNode("ch-intro", null, 0, 1, TocNodeKind.CHAPTER, "1", "INTRODUCTION", 1, 1, null, HeadingSource.PDF_OUTLINE),
+                BookTocNode("ch-1", null, 0, 2, TocNodeKind.CHAPTER, "2", "CHAPTER 1: OBSERVATIONS", 2, 2, null, HeadingSource.PDF_OUTLINE),
+            )
+            val structure = BookStructure(
+                version = BookStructure.CURRENT_VERSION,
+                pageRoles = mapOf(1 to BookPageRole.BODY, 2 to BookPageRole.BODY),
+                sections = lessons.map { sec ->
+                    BookSection(sec.id, sec.title, sec.breadcrumb, sec.firstPage, sec.lastPage, 1, sec.blocks.map(SourceBlock::id))
+                },
+                source = HeadingSource.PDF_OUTLINE.name,
+                tocNodes = tocNodes,
+            ).also { st -> st.deferResolvedLessons { lessons } }
+
+            val book = rawBook.copy(
+                pages = listOf(BookPage(1, page1Text), BookPage(2, page2Text)),
+                structure = structure,
+            )
+
+            // Seed legacy 5ed3cf90 cache with two caption key points first, followed by intro prose points.
+            val capAnchor = BookCompanionAnchor(1, blockCap.id, blockCap.start, blockCap.end, xrayCaption.take(40))
+            val intro1Anchor = BookCompanionAnchor(1, blockIntro1.id, blockIntro1.start, blockIntro1.end, introPara1.take(40))
+            val intro2Anchor = BookCompanionAnchor(1, blockIntro2.id, blockIntro2.start, blockIntro2.end, introPara2.take(40))
+            val legacyPack = BookCompanionPack(
+                bookId = book.id,
+                chapterId = "ch-intro",
+                chapterTitle = "INTRODUCTION",
+                coreQuestion = "INTRODUCTION",
+                keyPoints = listOf(
+                    BookCompanionKeyPoint("kp-0", "sec-caption", "当前章首个要点 · 图注。", capAnchor),
+                    BookCompanionKeyPoint("kp-1", "sec-caption", "当前章另一个要点 · 图注。", capAnchor),
+                    BookCompanionKeyPoint("kp-2", "sec-intro", "当前章首个要点 · 正文：潮汐与信号。", intro1Anchor),
+                    BookCompanionKeyPoint("kp-3", "sec-intro", "当前章另一个要点 · 正文：独立测量。", intro2Anchor),
+                ),
+            )
+            library.saveChapterCompanion(book.id, "ch-intro", legacyPack)
+            val group = ChapterCompanionGrouping.groupForSection(book, 0)!!
+            assertTrue(ChapterCompanionGrouping.hasStaleLeadingCaption(book, group, legacyPack))
+
+            // 1. Online cold-start upgrade (startLoaded = false -> load() completes -> refetches clean intro pack).
+            val explainer = FakeCompanionExplainer(
+                root.resolve("home-online"),
+                library,
+                respondChapterCompanion = true,
+                startLoaded = false,
+                paired = true,
+            )
+            val pref = BookStudyPreference(book.id, BookStudyMode.READ_THROUGH, detailLevel = ExplainDetailLevel.DETAILED)
+            runSkikoComposeUiTest(size = Size(820f, 620f)) {
+                setContent {
+                    CoachTheme(false) {
+                        CompositionLocalProvider(LocalReadingAiExplain provides true, LocalV7ReducedMotion provides true) {
+                            SingleBookCompanionPanel(
+                                book = book,
+                                currentPage = 1,
+                                currentPageOffset = 0,
+                                currentSectionIndex = 0,
+                                explainer = explainer,
+                                library = library,
+                                draft = ChapterPracticeDraft(bookId = book.id, tocNodeId = "ch-intro", page = 1),
+                                studyPreference = pref,
+                                onDraftChange = {},
+                                onOpenAnchor = {},
+                                onCommitQuizAnswer = { _, _, _, _ -> },
+                                onAskAboutText = {},
+                                onOpenLogin = {},
+                            )
+                        }
+                    }
+                }
+                waitUntil(timeoutMillis = 5_000) { explainer.chapterCalls.isNotEmpty() }
+                waitUntil(timeoutMillis = 5_000) {
+                    onAllNodesWithText("The lighthouse team measures tides", substring = true).fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+                assertEquals(1, explainer.chapterCalls.size)
+                val sentTexts = explainer.chapterCalls.single().second.map { it.text }
+                assertTrue(sentTexts.any { introPara1 in it })
+                assertFalse(sentTexts.any { "synthetic caption" in it })
+                onNodeWithTag("companion-kp-0").assertIsDisplayed()
+                assertTrue(onAllNodesWithText("图注", substring = true).fetchSemanticsNodes().isEmpty())
+                assertTrue(onAllNodesWithText("synthetic caption", substring = true).fetchSemanticsNodes().isEmpty())
+            }
+
+            val updatedCache = library.cachedChapterCompanion(book.id, "ch-intro")!!
+            assertFalse(ChapterCompanionGrouping.hasStaleLeadingCaption(book, group, updatedCache))
+            assertEquals(blockIntro1.id, updatedCache.keyPoints.first().anchor?.blockId)
+
+            // Subsequent reopen hits upgraded clean SQLite cache with 0 additional HTTP calls.
+            val reopenExplainer = FakeCompanionExplainer(root.resolve("home-reopen"), library, respondChapterCompanion = true)
+            runSkikoComposeUiTest(size = Size(820f, 620f)) {
+                setContent {
+                    CoachTheme(false) {
+                        CompositionLocalProvider(LocalReadingAiExplain provides true, LocalV7ReducedMotion provides true) {
+                            SingleBookCompanionPanel(
+                                book = book,
+                                currentPage = 1,
+                                currentPageOffset = 0,
+                                currentSectionIndex = 0,
+                                explainer = reopenExplainer,
+                                library = library,
+                                draft = ChapterPracticeDraft(bookId = book.id, tocNodeId = "ch-intro", page = 1),
+                                studyPreference = pref,
+                                onDraftChange = {},
+                                onOpenAnchor = {},
+                                onCommitQuizAnswer = { _, _, _, _ -> },
+                                onAskAboutText = {},
+                                onOpenLogin = {},
+                            )
+                        }
+                    }
+                }
+                waitUntil(timeoutMillis = 5_000) { onAllNodesWithTag("companion-kp-0").fetchSemanticsNodes().isNotEmpty() }
+                waitForIdle()
+                assertTrue(reopenExplainer.chapterCalls.isEmpty())
+                onNodeWithText("The lighthouse team measures tides", substring = true).assertIsDisplayed()
+            }
+
+            // 2. Offline/unpaired upgrade sanitizes stale caption points locally and persists cleaned cache.
+            val (offlineLib, offlineRawBook) = importSyntheticBook(root.resolve("offline"), "placeholder")
+            val offlineBook = offlineRawBook.copy(
+                pages = listOf(BookPage(1, page1Text), BookPage(2, page2Text)),
+                structure = structure,
+            )
+            val offlineLegacy = legacyPack.copy(bookId = offlineBook.id)
+            offlineLib.saveChapterCompanion(offlineBook.id, "ch-intro", offlineLegacy)
+            val offlineExplainer = FakeCompanionExplainer(
+                root.resolve("home-offline"),
+                offlineLib,
+                startLoaded = true,
+                paired = false,
+            )
+            runSkikoComposeUiTest(size = Size(820f, 620f)) {
+                setContent {
+                    CoachTheme(false) {
+                        CompositionLocalProvider(LocalReadingAiExplain provides true, LocalV7ReducedMotion provides true) {
+                            SingleBookCompanionPanel(
+                                book = offlineBook,
+                                currentPage = 1,
+                                currentPageOffset = 0,
+                                currentSectionIndex = 0,
+                                explainer = offlineExplainer,
+                                library = offlineLib,
+                                draft = ChapterPracticeDraft(bookId = offlineBook.id, tocNodeId = "ch-intro", page = 1),
+                                studyPreference = BookStudyPreference(offlineBook.id, BookStudyMode.READ_THROUGH, detailLevel = ExplainDetailLevel.DETAILED),
+                                onDraftChange = {},
+                                onOpenAnchor = {},
+                                onCommitQuizAnswer = { _, _, _, _ -> },
+                                onAskAboutText = {},
+                                onOpenLogin = {},
+                            )
+                        }
+                    }
+                }
+                waitUntil(timeoutMillis = 5_000) {
+                    onAllNodesWithText("当前章首个要点 · 正文", substring = true).fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+                assertTrue(offlineExplainer.chapterCalls.isEmpty())
+                assertTrue(onAllNodesWithText("图注", substring = true).fetchSemanticsNodes().isEmpty())
+                val sanitized = offlineLib.cachedChapterCompanion(offlineBook.id, "ch-intro")!!
+                assertFalse(ChapterCompanionGrouping.hasStaleLeadingCaption(offlineBook, group, sanitized))
+                assertEquals(listOf("kp-2", "kp-3"), sanitized.keyPoints.map { it.id })
             }
         } finally {
             root.toFile().deleteRecursively()

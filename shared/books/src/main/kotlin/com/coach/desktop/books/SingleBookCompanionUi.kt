@@ -299,16 +299,40 @@ internal fun SingleBookCompanionPanel(
     LaunchedEffect(book.id, chapterGroup?.chapterId, explainer.loaded, explainer.identity, aiEnabled, fetchNonce, pageOnly) {
         val group = chapterGroup ?: return@LaunchedEffect
         val cached = withContext(Dispatchers.IO) { library.cachedChapterCompanion(book.id, group.chapterId) }
-        if (cached != null) {
+        val staleCaptionCache = cached != null && ChapterCompanionGrouping.hasStaleLeadingCaption(book, group, cached)
+        if (cached != null && !staleCaptionCache) {
             packState = CompanionPackState.Ready(cached)
             return@LaunchedEffect
         }
-        if (pageOnly) return@LaunchedEffect
-        if (!aiEnabled || !explainer.loaded || explainer.identity == null) {
-            packState = CompanionPackState.Idle
+        val sanitizedCached = if (cached != null && staleCaptionCache) {
+            ChapterCompanionGrouping.sanitizeCachedPack(book, group, cached)
+        } else null
+        if (pageOnly) {
+            packState = sanitizedCached?.let { CompanionPackState.Ready(it) } ?: CompanionPackState.Idle
+            return@LaunchedEffect
+        }
+        if (aiEnabled && !explainer.loaded) {
+            packState = CompanionPackState.Loading
+            return@LaunchedEffect
+        }
+        if (!aiEnabled || explainer.identity == null) {
+            if (sanitizedCached != null) {
+                withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, sanitizedCached) }
+                packState = CompanionPackState.Ready(sanitizedCached)
+            } else {
+                packState = CompanionPackState.Idle
+            }
             return@LaunchedEffect
         }
         packState = CompanionPackState.Loading
+        suspend fun fallbackToSanitizedOrFailed(message: String, trouble: ExplainTrouble) {
+            if (sanitizedCached != null) {
+                withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, sanitizedCached) }
+                packState = CompanionPackState.Ready(sanitizedCached)
+            } else {
+                packState = CompanionPackState.Failed(message, trouble)
+            }
+        }
         try {
             val companionGroup = ChapterCompanionGrouping.filterForCompanion(book, group)
             val firstGroup = ChapterCompanionProgressive.firstSectionGroup(companionGroup, currentSection?.id)
@@ -335,7 +359,7 @@ internal fun SingleBookCompanionPanel(
                         }
                     }
                     is ChapterCompanionFetchResult.Failed -> {
-                        packState = CompanionPackState.Failed(firstRes.message, firstRes.trouble)
+                        fallbackToSanitizedOrFailed(firstRes.message, firstRes.trouble)
                     }
                 }
             } else {
@@ -347,14 +371,14 @@ internal fun SingleBookCompanionPanel(
                         packState = CompanionPackState.Ready(res.pack, expanding = false)
                     }
                     is ChapterCompanionFetchResult.Failed -> {
-                        packState = CompanionPackState.Failed(res.message, res.trouble)
+                        fallbackToSanitizedOrFailed(res.message, res.trouble)
                     }
                 }
             }
         } catch (c: CancellationException) {
             throw c
         } catch (_: Exception) {
-            packState = CompanionPackState.Failed("本章伴读暂时连不上，已有练习草稿已保留。", ExplainTrouble.Other)
+            fallbackToSanitizedOrFailed("本章伴读暂时连不上，已有练习草稿已保留。", ExplainTrouble.Other)
         }
     }
 

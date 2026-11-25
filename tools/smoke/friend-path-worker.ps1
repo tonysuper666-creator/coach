@@ -243,7 +243,9 @@ function Get-HudCounter([string]$png) {
         # 这个字号 4 倍会把「第154页/620」的「54」吞掉，认成「第1页/620」（11-21 10:43 那轮就是这么把 154 读成 1 的）；
         # 6 倍又常把这一行拆成「第154」「页」「/620」三段，逐行匹配一条都对不上。5 倍一般整行读全，
         # 所以先试 5 倍，再把各行的数字和斜杠拼起来兜底。
-        foreach ($scale in 5, 6, 4) {
+        # 高分屏（如 Apollo 2160x1350）直接乘 5 会超过 OcrEngine::MaxImageDimension(10000)，按上限夹紧倍率。
+        $scales = @(@(5, 6, 4, 2) | ForEach-Object { Get-SafeOcrScale $src.Width $h $_ } | Select-Object -Unique)
+        foreach ($scale in $scales) {
             $zoom = [Drawing.Bitmap]::new($src.Width * $scale, $h * $scale)
             try {
                 $g = [Drawing.Graphics]::FromImage($zoom)
@@ -516,7 +518,8 @@ function Read-ZoomStrip([string]$png, [int]$top, [int]$bottom, [int]$scale = 3) 
         $h = $bottom - $top
         if ($h -lt 8) { return @() }
         $rect = [Drawing.Rectangle]::new(0, $top, $src.Width, $h)
-        $zoom = [Drawing.Bitmap]::new($src.Width * $scale, $h * $scale)
+        $effectiveScale = Get-SafeOcrScale $src.Width $h $scale
+        $zoom = [Drawing.Bitmap]::new($src.Width * $effectiveScale, $h * $effectiveScale)
         try {
             $g = [Drawing.Graphics]::FromImage($zoom)
             try {
@@ -530,8 +533,8 @@ function Read-ZoomStrip([string]$png, [int]$top, [int]$bottom, [int]$scale = 3) 
             $ws = @(foreach ($w in $line.Words) {
                 $b = $w.BoundingRect
                 [pscustomobject]@{ Text = $w.Text; BoundingRect = [pscustomobject]@{
-                        X = $b.X / $scale; Y = ($b.Y / $scale) + $top
-                        Width = $b.Width / $scale; Height = $b.Height / $scale } }
+                        X = $b.X / $effectiveScale; Y = ($b.Y / $effectiveScale) + $top
+                        Width = $b.Width / $effectiveScale; Height = $b.Height / $effectiveScale } }
             })
             $out += [pscustomobject]@{ Text = (($ws | ForEach-Object { $_.Text }) -join ''); Words = $ws }
         }

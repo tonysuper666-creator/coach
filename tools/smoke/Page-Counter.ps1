@@ -67,7 +67,8 @@ function Get-CounterBand([string]$png, $Prev, $Next) {
         $rect = [Drawing.Rectangle]::new($left, $top, $w, $h)
         # 四倍还认不出（斜杠被吞掉）就再来一次六倍：整帧读丢字符是这个字号的老毛病，
         # 放大一档基本都能救回来，比在没斜杠的一大串数字里猜拆分可靠。
-        foreach ($scale in 4, 6) {
+        $scales = @(@(4, 6, 2) | ForEach-Object { Get-SafeOcrScale $w $h $_ } | Select-Object -Unique)
+        foreach ($scale in $scales) {
             $zoom = [Drawing.Bitmap]::new($w * $scale, $h * $scale)
             try {
                 $g = [Drawing.Graphics]::FromImage($zoom)

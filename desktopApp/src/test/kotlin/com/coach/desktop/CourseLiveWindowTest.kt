@@ -49,6 +49,7 @@ class CourseLiveWindowTest {
         val window = edt {
             ComposeWindow().apply {
                 title = "LearningCoach · TON-1849"
+                isAlwaysOnTop = !System.getenv("COACH_TON1849_SHOTS_DIR").isNullOrBlank()
                 val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
                 setBounds(screen.x, screen.y, minOf(1120, screen.width), minOf(840, screen.height))
             }
@@ -152,6 +153,7 @@ class CourseLiveWindowTest {
 
     private fun captureTon1849Window(window: ComposeWindow, name: String) {
         val out = System.getenv("COACH_TON1849_SHOTS_DIR")?.let(Path::of) ?: return
+        edt { window.toFront() }
         Thread.sleep(500) // Let the native transition settle before capturing the window.
         val bounds = edt {
             window.renderImmediately()

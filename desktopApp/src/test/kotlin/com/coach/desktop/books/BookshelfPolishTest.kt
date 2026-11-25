@@ -2,7 +2,7 @@ package com.coach.desktop.books
 
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
-import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.*
 import androidx.compose.ui.InternalComposeUiApi
 import androidx.compose.ui.LocalSystemTheme
 import androidx.compose.ui.SystemTheme
@@ -27,14 +27,16 @@ class BookshelfPolishTest {
         val book = Textbook(books[0].id, books[0].title, "md", listOf(BookPage(1, "隔离样例")), readingPage = 12, learning = true)
         for ((width, height) in listOf(1920 to 1080, 2560 to 1440, 900 to 720)) for (dark in listOf(false, true)) {
             var selected = ""
+            var ui by mutableStateOf(LibraryUi())
             val actions = mutableListOf<String>()
             runSkikoComposeUiTest(size = Size(width.toFloat(), height.toFloat()), density = Density(1.5f)) {
                 setContent {
                     CompositionLocalProvider(LocalSystemTheme provides if (dark) SystemTheme.Dark else SystemTheme.Light) {
                         CoachTheme(dark) {
                             Surface(Modifier.fillMaxSize(), color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
-                                LibraryHome(LibraryUi(catalog = books, book = book), { actions += "upload" }, { selected = it },
-                                    { actions += "read" }, { actions += "continue" }, { actions += it.name })
+                                LibraryHome(ui, onImport = { actions += "import" }, onSelect = { selected = it },
+                                    onRead = { actions += "read" }, onNewCourse = { actions += "course" },
+                                    onNewBooklist = { actions += "booklist" })
                             }
                         }
                     }
@@ -47,14 +49,15 @@ class BookshelfPolishTest {
                     assertTrue(ImageIO.write(image, "png", path.toFile()))
                 }
                 waitForIdle()
-                shot("top")
-                onNodeWithTag("home-read").assertIsDisplayed()
                 onNodeWithTag("upload-textbook").performScrollTo().performClick()
-                onNodeWithTag("home-learn").performScrollTo().performClick()
-                onNodeWithTag("home-read").performScrollTo().performClick()
-                onNodeWithTag("home-guided").performScrollTo().performClick()
-                onNodeWithTag("home-question").performScrollTo().performClick()
-                assertEquals(listOf("upload", "continue", "read", "READ_AND_LEARN", "QUESTION_FIRST"), actions)
+                onNodeWithTag("empty-route-single").performScrollTo().performClick()
+                onNodeWithTag("empty-route-course").performScrollTo().performClick()
+                onNodeWithTag("empty-route-booklist").performScrollTo().performClick()
+                runOnIdle { ui = LibraryUi(catalog = books, book = book) }
+                waitForIdle()
+                shot("top")
+                onNodeWithTag("home-read").assertIsDisplayed().performClick()
+                assertEquals(listOf("import", "import", "course", "booklist", "read"), actions)
                 onNodeWithTag("book-sample-5").performScrollTo().assertIsDisplayed()
                 onNodeWithTag("shelf-sheet").performTouchInput { swipeUp() }
                 waitForIdle()

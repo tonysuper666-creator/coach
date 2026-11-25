@@ -30,9 +30,8 @@ class UnifiedReviewScreensTest {
                     c.importBook(syntheticTextbook(root.resolve("synthetic")))
                     c.chooseLearningPath(LearningPath.QUESTION_FIRST)
                     c.enableLearning()
-                    val book = c.state.value.book!!
-                    val practice = com.coach.desktop.books.testPracticeFixture(book, book.lessons.first(), QuestionMode.CHOICE)!!
-                    c.answer(PracticeAnswer(practice.options.first { it != practice.answer }, true))
+                    c.mode(QuestionMode.SHORT_ANSWER)
+                    c.answer(PracticeAnswer("Needs another look", revealed = true, understood = false))
                 }
                 runSkikoComposeUiTest(size = Size(1440f, 1000f), density = Density(1.5f)) {
                     setContent {

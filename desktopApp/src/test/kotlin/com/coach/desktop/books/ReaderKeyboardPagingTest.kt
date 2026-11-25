@@ -44,19 +44,29 @@ class ReaderKeyboardPagingTest {
     }
 
     private fun ComposeUiTest.openReader(controller: TextbookController) {
-        setContent { TextbookWorkspace(controller) { null } }
+        setContent { com.coach.desktop.WindowsTextbookHost(controller) { null } }
         waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
         onNodeWithTag("home-read").performScrollTo().performClick()
         waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && !controller.state.value.busy }
         waitUntil(timeoutMillis = 20_000) { runCatching { onNodeWithTag("reader-page").assertIsFocused() }.isSuccess }
     }
 
+    private fun ComposeUiTest.selectPdfMode(tag: String) {
+        if (onAllNodesWithTag("immersive-more-menu").fetchSemanticsNodes().isEmpty()) {
+            onNodeWithTag("reader-page").performKeyInput { pressKey(Key.Tab) }
+        }
+        onNodeWithTag("immersive-more-menu").performClick()
+        onNodeWithTag("v7-type-menu").performClick()
+        onNodeWithTag(tag).performClick()
+        // The type panel closes after choosing a mode. Dismiss its parent overflow menu.
+        onNodeWithTag("immersive-more-menu").performMouseInput { click() }
+    }
+
     @Test fun arrowsAndPageKeysTurnPagesAndHomeEndJumpToTheEnds() {
         val controller = fivePageController()
         runSkikoComposeUiTest(size = Size(840f, 900f), density = Density(1f)) {
             openReader(controller)
-            onNodeWithTag("v7-type-menu").performClick()
-            onNodeWithTag("original-mode-paged").performClick()
+            selectPdfMode("original-mode-paged")
             onNodeWithTag("original-pdf-paged").assertExists()
             onNodeWithTag("original-pdf-right").assertDoesNotExist()
             waitUntil(timeoutMillis = 20_000) { runCatching { onNodeWithTag("reader-page").assertIsFocused() }.isSuccess }
@@ -85,10 +95,11 @@ class ReaderKeyboardPagingTest {
         }
     }
 
-    @Test fun pageDownScrollsAScreenAndHomeEndReachTheBookEdgesByDefault() {
+    @Test fun pageDownScrollsAScreenAndHomeEndReachTheBookEdgesInScrollMode() {
         val controller = fivePageController()
         runComposeUiTest {
             openReader(controller)
+            selectPdfMode("original-mode-scroll")
             onNodeWithTag("original-pdf-scroll").assertExists()
             val reading = onNodeWithTag("reader-page")
             fun press(key: Key) = reading.performKeyInput { pressKey(key) }
@@ -112,7 +123,7 @@ class ReaderKeyboardPagingTest {
         val controller = fivePageController()
         runComposeUiTest {
             openReader(controller)
-            onNodeWithTag("page-jump").performClick()
+            onNodeWithTag("reader-page").performKeyInput { keyDown(Key.CtrlLeft); pressKey(Key.G); keyUp(Key.CtrlLeft) }
             waitUntil(timeoutMillis = 20_000) { runCatching { onNodeWithTag("page-jump").assertIsFocused() }.isSuccess }
             onNodeWithTag("page-jump").performKeyInput { pressKey(Key.DirectionRight) }
             onNodeWithTag("page-jump").performKeyInput { pressKey(Key.MoveEnd) }

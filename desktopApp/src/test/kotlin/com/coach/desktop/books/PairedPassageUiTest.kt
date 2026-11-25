@@ -22,6 +22,7 @@ class PairedPassageUiTest {
         val book = library.importBook(syntheticTextbook(root.resolve("synthetic")))
         val block = book.lessons.first().blocks.first { !it.heading }
         var calls = 0
+        ReadingSettings(library.directory).chooseAiExplain(false)
         val paired = PairedBookLearningSupport(library) { sent, question ->
             calls++
             assertEquals(block, sent)

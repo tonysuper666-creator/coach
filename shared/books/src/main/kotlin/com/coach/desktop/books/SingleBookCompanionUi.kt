@@ -211,8 +211,8 @@ internal fun SingleBookCompanionPanel(
         modeStreamingText = ""
         modeError = null
         try {
+            val companionGroup = proseGroup ?: return@LaunchedEffect
             val wire = withContext(Dispatchers.IO) {
-                val companionGroup = proseGroup ?: return@LaunchedEffect
                 StudyModeWireBuilder.buildModeRequestJson(library, book, companionGroup, chapterNum, studyPreference)
             }
             modeSourcePages = wire.getValue("pages").jsonArray.map { it.jsonObject.getValue("pdfPage").jsonPrimitive.int }

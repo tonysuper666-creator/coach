@@ -127,7 +127,7 @@ class ProgressivePdfImportTest {
                 }
                 waitForIdle()
                 assertEquals(1, onAllNodesWithTag("library-loading").fetchSemanticsNodes().size)
-                assertEquals(0, onAllNodesWithText("书架还是空的", substring = true).fetchSemanticsNodes().size)
+                assertEquals(0, onAllNodesWithTag("home-empty-hub").fetchSemanticsNodes().size)
             } finally {
                 runCatching { lockConn.createStatement().use { it.execute("COMMIT") } }
                 lockConn.close()
@@ -154,11 +154,11 @@ class ProgressivePdfImportTest {
             }
             waitForIdle()
             assertEquals(1, onAllNodesWithTag("library-loading").fetchSemanticsNodes().size)
-            assertEquals(0, onAllNodesWithText("书架还是空的", substring = true).fetchSemanticsNodes().size)
+            assertEquals(0, onAllNodesWithTag("home-empty-hub").fetchSemanticsNodes().size)
             runBlocking { controller.load() }
             waitUntil(timeoutMillis = 5_000) { controller.state.value.initialized }
             assertEquals(0, onAllNodesWithTag("library-loading").fetchSemanticsNodes().size)
-            assertEquals(1, onAllNodesWithText("书架还是空的", substring = true).fetchSemanticsNodes().size)
+            assertEquals(1, onAllNodesWithTag("home-empty-hub").fetchSemanticsNodes().size)
         } finally {
             root.toFile().deleteRecursively()
         }

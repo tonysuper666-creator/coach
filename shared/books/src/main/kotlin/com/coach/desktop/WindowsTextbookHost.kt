@@ -199,7 +199,6 @@ internal fun WindowsTextbookHost(
                 ) {
                     val hostTopDp = hostOriginDp?.second ?: 0f
                     val hostTabletop = if (!deskPage) bookTabletopSplit(maxWidth.value, maxHeight.value, hostTopDp, hinge) else null
-                    val immersiveReader = ui.screen == BookScreen.READER && book != null
 
                     val deskSelect = remember(controller, scope) {
                         { _: AppTab ->
@@ -290,9 +289,9 @@ internal fun WindowsTextbookHost(
                                     V7TextButton({ settings = true }, ringInside = true) { Text("设置") }
                                 }
                             }
-                        } else if (immersiveReader) {
-                            Box(Modifier.fillMaxSize()) { workspaceContent() }
                         } else {
+                            // Keep the workspace mounted across lesson and reader navigation. It owns
+                            // the verified citation, reply, scroll position and return-focus requester.
                             Column(Modifier.fillMaxSize()) {
                                 if (!deskPage) {
                                     HostTopBar(

@@ -9,6 +9,7 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import com.coach.ui.theme.CoachColors
 import com.coach.ui.theme.CoachTheme
+import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import java.nio.file.Path
 import javax.imageio.ImageIO
@@ -16,7 +17,7 @@ import kotlin.test.*
 
 /**
  * TON-1659 第 8 项（B9）：做题和六题小结共用学习页那个滚动区。一屏放不下时右侧要有一道看得见的
- * V7 细滚动条——滑块比轨道短，读者就知道下面还有卡；拖到底，最后的操作（选项 D、「接着做题」）整颗露出来。
+ * V7 细滚动条——滑块比轨道短，读者就知道下面还有卡；拖到底，最后的操作（选项 D、「读完这一节」）整颗露出来。
  * 条子落在正文右侧 24dp 的内边距里，不压住卡片；一屏放得下的短页不多这一条。
  */
 @OptIn(ExperimentalTestApi::class)
@@ -41,13 +42,13 @@ class LearningScrollbarTest {
             scrollToTop()
             capture("${theme(dark)}-practice", 520)
 
-            // 答第六题：两张小结同屏，比做题页更长；图从最上面那张卡的顶边取起，不从半句话开始。
+            // 答第六题：本次生成练习的讲解与小结同屏；图从最上面那张卡的顶边取起，不从半句话开始。
             onNodeWithTag("choice-${practice.options.indexOf(practice.answer)}").performScrollTo().performClick()
             waitForIdle()
-            onNodeWithTag("book-knowledge-recap").performScrollTo()
+            onNodeWithTag("book-summary-card").performScrollTo()
             waitForIdle()
             val recapBar = bar()
-            val recap = onNodeWithTag("book-knowledge-recap").fetchSemanticsNode().boundsInRoot
+            val recap = onNodeWithTag("book-summary-card").fetchSemanticsNode().boundsInRoot
             assertTrue(recap.height > 0f && recap.right <= recapBar.left + 1f,
                 "滚动条不压住小结卡：card=${recap.right} bar=${recapBar.left}（dark=$dark）")
             assertTrue(thumb(recapBar, dark).last - thumb(recapBar, dark).first + 1 < recapBar.height - 20f,
@@ -55,9 +56,10 @@ class LearningScrollbarTest {
             cardTop("book-summary-card")
             capture("${theme(dark)}-recap", 520)
             dragToBottom(dark)
-            val keepGoing = onNodeWithTag("book-knowledge-recap-continue").fetchSemanticsNode().boundsInRoot
+            val keepGoing = onNodeWithTag("next-lesson").fetchSemanticsNode().boundsInRoot
             assertTrue(keepGoing.height > 0f && keepGoing.bottom <= recapBar.bottom + 1f,
-                "拖到底后「接着做题」应整颗看得见：bounds=$keepGoing bar=${recapBar.bottom}（dark=$dark）")
+                "拖到底后「读完这一节」应整颗看得见：bounds=$keepGoing bar=${recapBar.bottom}（dark=$dark）")
+            onNodeWithTag("next-lesson").assertTextContains("读完这一节").assertIsEnabled()
             capture("${theme(dark)}-recap-bottom", 520)
         }
     }
@@ -134,27 +136,35 @@ class LearningScrollbarTest {
         val directory = root.resolve("library")
         val file = knowledgeRecapTextbook(root)
         val controller = TextbookController(TextbookLibrary(directory))
-        val gate = AnswerExplain(ExplainConsent(directory), load = {}, ready = { true }, paired = { false },
-            explain = { _, _ -> ExplainResult.Refused("测试里不配对") })
+        // TON-1784 retired the local cloze generator. Exercise an existing learning session with service-generated questions.
+        runBlocking {
+            controller.importBook(file)
+            controller.chooseLearningPath(LearningPath.QUESTION_FIRST)
+            controller.enableLearning()
+        }
+        val gate = AnswerExplain(ExplainConsent(directory), load = {}, ready = { true }, paired = { true },
+            explain = { _, _ -> error("Generated questions carry their explanation") },
+            ask = { block, _ ->
+                ExplainResult.Done(Explanation(
+                    "题干：合成练习的标记是什么？ 选项A：甲 选项B：乙 选项C：丙 选项D：丁 答案：A 解析：标记为甲。【S1】",
+                    listOf(Citation("S1", block.id, block.page)), 1L,
+                ))
+            })
         runSkikoComposeUiTest(size = Size(1100f, height), density = Density(1f)) {
-            // 正文按外层 CoachTheme 的明暗重包一层（TextbookWorkspace 只沿用、不自选），
-            // 所以这里给的就是窗口真正会用的浅色/深色。
-            setContent { CoachTheme(dark) { TextbookWorkspace(controller, answerExplain = gate) { file } } }
-            ready(controller) { it.catalog.isEmpty() }
-            onNodeWithTag("upload-textbook").performClick()
-            ready(controller) { it.prompt == BookPrompt.IMPORTED }
-            onNodeWithTag("enable-learning").performClick()
+            setContent { CoachTheme(dark) { TextbookWorkspace(controller, loadOnMount = false, answerExplain = gate) { file } } }
             ready(controller) { it.screen == BookScreen.LEARNING && it.questionsOpen }
+            val book = checkNotNull(controller.state.value.book)
             repeat(5) { index ->
-                val current = controller.state.value.book!!
-                val practice = com.coach.desktop.books.testPracticeFixture(current, current.lessons[index], QuestionMode.CHOICE)!!
-                onNodeWithTag("choice-${practice.options.indexOf(practice.answer)}").performScrollTo().performClick()
-                ready(controller) { it.answer.revealed }
+                val key = "${book.id}:${book.lessons[index].id}"
+                waitUntil(timeoutMillis = 20_000) { gate.practices[key] != null }
+                onNodeWithTag("choice-0").assertTextContains("甲", substring = true).performScrollTo().performClick()
+                waitUntil(timeoutMillis = 20_000) { gate.answers[key]?.revealed == true }
                 onNodeWithTag("next-lesson").performScrollTo().performClick()
                 ready(controller) { it.book?.lessonIndex == index + 1 }
             }
-            val last = controller.state.value.book!!
-            body(dark, controller, com.coach.desktop.books.testPracticeFixture(last, last.lessons[5], QuestionMode.CHOICE)!!)
+            val lastKey = "${book.id}:${book.lessons[5].id}"
+            waitUntil(timeoutMillis = 20_000) { gate.practices[lastKey] != null }
+            body(dark, controller, checkNotNull(gate.practices[lastKey]).practice)
         }
         root.toFile().deleteRecursively()
     }

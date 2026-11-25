@@ -6,7 +6,11 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
-import com.coach.ui.CoachTheme
+import com.coach.desktop.WindowsTextbookHost
+import androidx.compose.ui.InternalComposeUiApi
+import androidx.compose.ui.LocalSystemTheme
+import androidx.compose.ui.SystemTheme
+import androidx.compose.runtime.CompositionLocalProvider
 import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import java.nio.file.Path
@@ -16,7 +20,7 @@ import kotlin.test.*
  * TON-1671：从真实的「出处」按钮（讲解里的 book-source-0）进入阅读器，再切到连续滚动，
  * 浅色、深色下被引原句都在视口内、被引范围的可见部分都带高亮背景。自写材料、独立临时书库、离线。
  */
-@OptIn(ExperimentalTestApi::class)
+@OptIn(ExperimentalTestApi::class, InternalComposeUiApi::class)
 class ScrollSourceButtonTest {
     private fun longParagraphBook(root: Path): Path {
         val sentences = StringBuilder()
@@ -50,11 +54,17 @@ class ScrollSourceButtonTest {
                 override suspend fun ask(request: BookPassageQuestion) = BookLearningReply.Unavailable("unused")
             }
             runSkikoComposeUiTest(size = Size(1600f, 1440f), density = Density(1.5f)) {
-                setContent { CoachTheme(dark) { TextbookWorkspace(controller, loadOnMount = false, support = support) { null } } }
+                setContent {
+                    CompositionLocalProvider(LocalSystemTheme provides if (dark) SystemTheme.Dark else SystemTheme.Light) {
+                        WindowsTextbookHost(controller, learningSupport = support) { null }
+                    }
+                }
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-source-0").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithTag("book-source-0").performScrollTo().performClick() // 真实的「出处」按钮
                 ready(controller) { it.screen == BookScreen.READER }
-                onNodeWithTag("read-mode").performClick() // 连续滚动
+                onNodeWithTag("immersive-more-menu").performClick()
+                onNodeWithTag("v7-type-menu").performClick()
+                onNodeWithTag("text-mode-scroll").performClick()
                 waitForIdle()
                 onNodeWithTag("book-scroll-read").assertExists()
                 var landed = ""

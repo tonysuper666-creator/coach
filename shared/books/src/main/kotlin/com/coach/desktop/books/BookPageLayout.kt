@@ -25,10 +25,11 @@ internal fun bookSpread(widthDp: Float, columnDp: Float, mode: BookPageMode, was
     BookPageMode.Auto -> widthDp >= 2 * (columnDp + 112) + 48 - if (wasSpread) 24 else 0
 }
 
-/** 沉浸式宽屏达到对开阈值后按每栏 <= 720dp 连续分栏，占满可用宽度。 */
+/** 沉浸式纯读按最小可读栏宽（约 540dp/栏）自动分栏，且每栏不超过 720dp，占满整个可用阅读视口。 */
 internal fun bookImmersiveColumns(widthDp: Float, columnDp: Float, mode: BookPageMode, wasColumns: Int): Int {
     if (mode == BookPageMode.Single) return 1
-    if (!bookSpread(widthDp, columnDp, mode, wasColumns > 1)) return 1
+    val twoColumnMin = if (mode == BookPageMode.Spread) 760f else (1080f - if (wasColumns > 1) 24f else 0f)
+    if (widthDp < twoColumnMin) return 1
     return maxOf(2, kotlin.math.ceil(widthDp / 720f).toInt())
 }
 
@@ -120,8 +121,124 @@ internal fun placeBookFigure(block: BookFigureBlock, columnPx: Int, bodyPx: Int,
         (block.widthPx * scale).toInt().coerceAtLeast(1), height, block.captionHeightPx)
 }
 
-private data class BookChapter(val start: Int, val end: Int, val title: String?, val headingStart: Int)
+internal data class BookChapter(val start: Int, val end: Int, val title: String?, val headingStart: Int)
+internal data class BookChapterPlan(
+    val source: String,
+    val starts: List<Pair<Int, BookPage>>,
+    val chapters: List<BookChapter>,
+    val leadingImages: Boolean,
+    val hasAuthoritativeTocHeadings: Boolean,
+)
+internal data class BookNearLayoutWindow(
+    val pages: List<BookPage>,
+    val authoritativeTocHeadings: Boolean,
+)
 private data class BookPageText(val text: AnnotatedString, val placeholders: List<AnnotatedString.Range<Placeholder>>)
+
+private val physicalPageMarkerRegex = Regex("<!--\\s*PDF 第 \\d+ 页 · 书第 .*? 页\\s*-->")
+
+internal fun planBookChapters(
+    pages: List<BookPage>,
+    pdf: Boolean = false,
+    tocNodes: List<BookTocNode> = emptyList(),
+    forceAuthoritativeTocHeadings: Boolean = false,
+    checkCancelled: () -> Unit = {},
+): BookChapterPlan {
+    val source = pages.joinToString("") { it.text }
+    val starts = mutableListOf<Pair<Int, BookPage>>()
+    var at = 0
+    pages.forEach { starts += at to it; at += it.text.length }
+    checkCancelled()
+    val tocHeadings = if (pdf || tocNodes.isEmpty()) emptyList() else tocNodes.mapNotNull { node ->
+        if (node.level > 1 && node.kind !in setOf(TocNodeKind.FRONT_MATTER, TocNodeKind.CHAPTER, TocNodeKind.PART, TocNodeKind.APPENDIX, TocNodeKind.BACK_MATTER)) {
+            return@mapNotNull null
+        }
+        val (base, page) = starts.firstOrNull { it.second.number == node.startPage } ?: return@mapNotNull null
+        val localPos = BookBoundaries.snapToCleanBodyOffset(page.text, node.startOffset).coerceIn(0, page.text.length)
+        if (localPos >= page.text.length) return@mapNotNull null
+        val lineEnd = page.text.indexOf('\n', localPos).let { if (it < 0) page.text.length else it }
+        val rawLine = page.text.substring(localPos, lineEnd)
+        val trimmedLine = rawLine.trimStart()
+        val cleanLine = trimmedLine.trim().trimStart('#').trim()
+        if (cleanLine.isNotEmpty() && cleanLine.equals(node.title.trim(), ignoreCase = true)) {
+            (base + localPos + (rawLine.length - trimmedLine.length)) to node.title
+        } else null
+    }
+    val hasAuthoritativeTocHeadings = !pdf && (forceAuthoritativeTocHeadings || tocHeadings.isNotEmpty())
+    val lineHeadings = Regex("(?m)^[^\\r\\n]+$").findAll(source).mapNotNull { line ->
+        if (BookBoundaries.isBogusMarkdownHeadingLine(line.value)) return@mapNotNull null
+        val trimmed = line.value.trimStart()
+        val indent = line.value.length - trimmed.length
+        val title = BookText.chapterTitle(trimmed) ?: return@mapNotNull null
+        if (hasAuthoritativeTocHeadings && BookStructurePlanner.inferTextHeadingLevel(title) != 1) {
+            return@mapNotNull null
+        }
+        (line.range.first + indent) to title
+    }.toList()
+    // Text import trims chapter chunks. A real heading at an import-page start
+    // still starts a chapter when the preceding chunk has no trailing newline.
+    val headings = (tocHeadings + lineHeadings + starts.mapNotNull { (base, page) ->
+        val firstLine = page.text.lineSequence().firstOrNull().orEmpty()
+        if (BookBoundaries.isBogusMarkdownHeadingLine(firstLine)) return@mapNotNull null
+        val trimmed = firstLine.trimStart()
+        val indent = firstLine.length - trimmed.length
+        val title = BookText.chapterTitle(trimmed) ?: return@mapNotNull null
+        if (hasAuthoritativeTocHeadings && BookStructurePlanner.inferTextHeadingLevel(title) != 1) {
+            return@mapNotNull null
+        }
+        (base + indent) to title
+    }).distinctBy { it.first }.sortedBy { it.first }
+    // Physical-page metadata belongs to the following heading. Keep its source
+    // coordinates, without manufacturing a separate preamble sheet for it.
+    val chapterStarts = headings.map { (heading, title) ->
+        val base = starts.last { it.first <= heading }.first
+        val prefix = source.substring(base, heading)
+        val start = if (prefix.lineSequence().all { it.isBlank() || physicalPageMarkerRegex.matches(it.trim()) }) base else heading
+        Triple(start, heading, title)
+    }.distinctBy { it.first }
+    // Isolate Project Gutenberg boilerplate headers/footers on their own sheets so opening at bodyStart
+    // never mixes English Gutenberg license boilerplate onto the first body page.
+    val boilerplateBreaks = gutenbergBoilerplateBoundaries(source)
+    val boundaries = (listOf(0) + chapterStarts.map { it.first } + boilerplateBreaks + source.length).distinct().sorted()
+    val textChapters = if (source.isEmpty()) listOf(BookChapter(0, 0, null, 0)) else boundaries.zipWithNext { start, end ->
+        val heading = chapterStarts.firstOrNull { it.first == start }
+        BookChapter(start, end, heading?.third, heading?.second ?: start)
+    }
+    val leadingImages = textChapters.first().title != null && pages.takeWhile { it.text.isEmpty() }.any { it.illustrations.isNotEmpty() }
+    val chapters = if (leadingImages) listOf(BookChapter(0, 0, null, 0)) + textChapters else textChapters
+    return BookChapterPlan(source, starts, chapters, leadingImages, hasAuthoritativeTocHeadings)
+}
+
+/**
+ * 局部首屏排版窗口：从包含 [anchor] 的整章起始导入页起排到 `anchor.importPage + tailPages`
+ * （异常超大无标题单章最多取 [maxPages] 个导入页），确保章内分页边界与整本排版完全一致。
+ */
+internal fun nearChapterLayoutPages(
+    pages: List<BookPage>,
+    anchor: BookPageAnchor,
+    tailPages: Int,
+    maxPages: Int = 64,
+    pdf: Boolean = false,
+    tocNodes: List<BookTocNode> = emptyList(),
+    checkCancelled: () -> Unit = {},
+): BookNearLayoutWindow {
+    if (pages.isEmpty()) return BookNearLayoutWindow(emptyList(), false)
+    val plan = planBookChapters(pages, pdf, tocNodes, checkCancelled = checkCancelled)
+    val anchorIndex = pages.indexOfFirst { it.number == anchor.importPage }.takeIf { it >= 0 }
+        ?: pages.indexOfLast { it.number < anchor.importPage }.coerceAtLeast(0)
+    val (anchorBase, anchorPage) = plan.starts[anchorIndex]
+    val globalAnchor = anchorBase + anchor.offsetUtf16.coerceIn(0, anchorPage.text.length)
+    val maxOffset = (plan.source.length - 1).coerceAtLeast(0)
+    val chapter = plan.chapters.lastOrNull { it.start <= globalAnchor.coerceAtMost(maxOffset) } ?: plan.chapters.first()
+    val chapterStartIdx = plan.starts.indexOfFirst { (base, page) ->
+        chapter.start < base + page.text.length
+    }.takeIf { it >= 0 } ?: plan.starts.indexOfLast { it.first <= chapter.start }.coerceAtLeast(0)
+    val tailLimit = anchor.importPage + tailPages
+    val endIdx = ((plan.starts.indexOfLast { it.second.number <= tailLimit }.takeIf { it >= 0 } ?: anchorIndex) + 1)
+        .coerceIn(anchorIndex + 1, pages.size)
+    val startIdx = maxOf(chapterStartIdx.coerceAtMost(anchorIndex), endIdx - maxPages).coerceAtLeast(0)
+    return BookNearLayoutWindow(pages.subList(startIdx, endIdx), plan.hasAuthoritativeTocHeadings)
+}
 
 /** TextMeasurer and Text receive identical styles, placeholders and integer column width. */
 internal class BookPageLayouter(
@@ -131,42 +248,22 @@ internal class BookPageLayouter(
 ) {
     fun layout(pages: List<BookPage>, widthPx: Int, bodyHeightPx: Int,
         highlights: Map<Int, List<IntRange>> = emptyMap(), tableRows: Map<BookIllustration, BookTableRows> = emptyMap(),
+        tocNodes: List<BookTocNode> = emptyList(),
+        forceAuthoritativeTocHeadings: Boolean = false,
+        openerExtraHeightPx: Int = 0,
         checkCancelled: () -> Unit = {},
     ): List<BookLaidPage> {
         require(widthPx > 0 && bodyHeightPx > 0)
-        val source = pages.joinToString("") { it.text }
-        if (source.isEmpty() && pages.all { it.illustrations.isEmpty() }) return emptyList()
-        val starts = mutableListOf<Pair<Int, BookPage>>()
-        var at = 0
-        pages.forEach { starts += at to it; at += it.text.length }
+        if (pages.all { it.text.isEmpty() && it.illustrations.isEmpty() }) return emptyList()
+        val plan = planBookChapters(pages, pdf, tocNodes, forceAuthoritativeTocHeadings, checkCancelled)
+        val source = plan.source
+        val starts = plan.starts
+        val leadingImages = plan.leadingImages
+        val chapters = plan.chapters
         fun slices(start: Int, end: Int) = starts.mapNotNull { (base, page) ->
             val left = maxOf(start, base); val right = minOf(end, base + page.text.length)
             if (left < right) BookPageSlice(page.number, left - base, right - base) else null
         }
-        val lineHeadings = Regex("(?m)^[^\\r\\n]+$").findAll(source).mapNotNull { line ->
-            BookText.chapterTitle(line.value)?.let { line.range.first to it }
-        }.toList()
-        // Text import trims chapter chunks. A real heading at an import-page start
-        // still starts a chapter when the preceding chunk has no trailing newline.
-        val headings = (lineHeadings + starts.mapNotNull { (base, page) ->
-            BookText.chapterTitle(page.text.lineSequence().firstOrNull().orEmpty())?.let { base to it }
-        }).distinctBy { it.first }.sortedBy { it.first }
-        // Physical-page metadata belongs to the following heading. Keep its source
-        // coordinates, without manufacturing a separate preamble sheet for it.
-        val physicalMarker = Regex("<!--\\s*PDF 第 \\d+ 页 · 书第 .*? 页\\s*-->")
-        val chapterStarts = headings.map { (heading, title) ->
-            val base = starts.last { it.first <= heading }.first
-            val prefix = source.substring(base, heading)
-            val start = if (prefix.lineSequence().all { it.isBlank() || physicalMarker.matches(it.trim()) }) base else heading
-            Triple(start, heading, title)
-        }.distinctBy { it.first }
-        val boundaries = (listOf(0) + chapterStarts.map { it.first } + source.length).distinct().sorted()
-        val textChapters = if (source.isEmpty()) listOf(BookChapter(0, 0, null, 0)) else boundaries.zipWithNext { start, end ->
-            val heading = chapterStarts.firstOrNull { it.first == start }
-            BookChapter(start, end, heading?.third, heading?.second ?: start)
-        }
-        val leadingImages = textChapters.first().title != null && pages.takeWhile { it.text.isEmpty() }.any { it.illustrations.isNotEmpty() }
-        val chapters = if (leadingImages) listOf(BookChapter(0, 0, null, 0)) + textChapters else textChapters
         val chapterVisuals = starts.flatMap { (base, page) ->
             checkCancelled()
             if (page.illustrations.isEmpty()) return@flatMap emptyList()
@@ -214,10 +311,33 @@ internal class BookPageLayouter(
             val headingEnd = if (chapter.title != null) raw.indexOf('\n', headingStart).let { if (it < 0) raw.length else it + 1 } else 0
             val head = bookParagraphs(raw.take(headingEnd), pdf = false)
             val tail = bookParagraphs(raw.substring(headingEnd), pdf = pdf)
-            val model = BookParagraphs(head.display + tail.display,
+            val tailDisplayChars = tail.display.toCharArray()
+            val bogusPrefixRanges = mutableListOf<IntRange>()
+            var prevWasRealHeading = headingEnd > 0
+            val adjustedTailParagraphs = tail.paragraphs.map { p ->
+                val localSlice = raw.substring(headingEnd + p.start, headingEnd + p.end)
+                val bogus = p.kind == BookParagraph.Kind.HEADING && BookBoundaries.isBogusMarkdownHeadingLine(localSlice)
+                val effectiveKind = if (bogus) {
+                    val maskLen = BookBoundaries.bogusMarkdownPrefixEnd(localSlice).coerceAtMost(p.end - p.start)
+                    if (maskLen > 0) {
+                        for (k in 0 until maskLen) tailDisplayChars[p.start + k] = '\u200b'
+                        bogusPrefixRanges += (headingEnd + p.start) until (headingEnd + p.start + maskLen)
+                    }
+                    val rest = localSlice.substring(maskLen)
+                    if (rest.startsWith("    ") || rest.startsWith("\t")) BookParagraph.Kind.SPECIAL else BookParagraph.Kind.BODY
+                } else p.kind
+                val mapped = p.copy(
+                    start = p.start + headingEnd,
+                    end = p.end + headingEnd,
+                    kind = effectiveKind,
+                    afterHeading = prevWasRealHeading,
+                )
+                prevWasRealHeading = effectiveKind == BookParagraph.Kind.HEADING
+                mapped
+            }
+            val model = BookParagraphs(head.display + String(tailDisplayChars),
                 head.paragraphs.map { if (it.start >= headingStart) it.copy(kind = BookParagraph.Kind.HEADING) else it } +
-                    tail.paragraphs.mapIndexed { i, p -> p.copy(start = p.start + headingEnd, end = p.end + headingEnd,
-                        afterHeading = p.afterHeading || (i == 0 && headingEnd > 0)) })
+                    adjustedTailParagraphs)
             val original = buildAnnotatedString {
                 append(raw)
                 applyReadingFont(typography.readingFont, raw, model)
@@ -228,6 +348,12 @@ internal class BookPageLayouter(
                 markdownHeadings(raw).forEach {
                     addStyle(if (it.level == 1) typography.chapter else typography.section, it.title.first, it.title.last + 1)
                     addStyle(SpanStyle(color = androidx.compose.ui.graphics.Color.Transparent, fontSize = 1.sp), it.marks.first, it.marks.last + 1)
+                }
+                orphanMarkdownHeadingMarks(raw).forEach { markRange ->
+                    addStyle(SpanStyle(color = androidx.compose.ui.graphics.Color.Transparent, fontSize = 1.sp), markRange.first, markRange.last + 1)
+                }
+                bogusPrefixRanges.forEach { markRange ->
+                    addStyle(SpanStyle(color = androidx.compose.ui.graphics.Color.Transparent, fontSize = 1.sp), markRange.first, markRange.last + 1)
                 }
                 for ((base, page) in starts) for (range in highlights[page.number].orEmpty()) {
                     val left = maxOf(chapter.start, base + range.first)
@@ -242,11 +368,21 @@ internal class BookPageLayouter(
             var start = 0
             var firstSheet = true
             val pending = ArrayDeque<VisualEvent>()
+            var lastSheetGlobalStart = chapter.start
             while (start < raw.length || next < events.size || pending.isNotEmpty()) {
                 checkCancelled()
+                if (!firstSheet && result.isNotEmpty() && next >= events.size && pending.isEmpty() &&
+                    raw.substring(start).lineSequence().all { it.isBlank() || orphanHashLineRegex.matches(it.trim()) }
+                ) {
+                    val prev = result.last()
+                    result[result.lastIndex] = prev.copy(sources = slices(lastSheetGlobalStart, chapter.end).ifEmpty { prev.sources })
+                    previousTextEnd = chapter.end
+                    break
+                }
                 val opener = firstSheet && chapter.title != null
                 val number = if (opener) bookChapterNumber(chapter.title!!) else null
-                val top = if (opener && !immersive) bodyHeightPx / 4 else 0
+                val sheetHeightPx = if (opener && immersive) bodyHeightPx + openerExtraHeightPx else bodyHeightPx
+                val top = if (opener && !immersive) sheetHeightPx / 4 else 0
                 val titleInset = if (number != null) measurer.measure(bookChapterDisplayNumber(number), typography.number).size.width +
                     with(density) { 20.dp.roundToPx() } else 0
                 val sheetStart = start
@@ -254,8 +390,8 @@ internal class BookPageLayouter(
                 val runs = mutableListOf<BookTextRun>()
                 val visuals = mutableListOf<BookPlacedVisual>()
                 fun place(event: VisualEvent): Boolean {
-                    val box = boxFor(event, if (runs.isEmpty() && visuals.isEmpty()) bodyHeightPx - y else bodyHeightPx)
-                    if (box.totalHeight > bodyHeightPx - y && (runs.isNotEmpty() || visuals.isNotEmpty() || y > 0)) return false
+                    val box = boxFor(event, if (runs.isEmpty() && visuals.isEmpty()) sheetHeightPx - y else sheetHeightPx)
+                    if (box.totalHeight > sheetHeightPx - y && (runs.isNotEmpty() || visuals.isNotEmpty() || y > 0)) return false
                     visuals += box.block.copy(topPx = y + box.margin)
                     y += box.totalHeight
                     return true
@@ -267,8 +403,8 @@ internal class BookPageLayouter(
                         if (event.band?.let { it.startY > it.headerBottom } == true && (runs.isNotEmpty() || visuals.isNotEmpty())) break
                         if (pending.isNotEmpty() || !place(event)) {
                             if (event.inline || (pending.isNotEmpty() &&
-                                    (pending.sumOf { boxFor(it, bodyHeightPx).totalHeight } +
-                                        boxFor(event, bodyHeightPx).totalHeight > bodyHeightPx))) break
+                                    (pending.sumOf { boxFor(it, sheetHeightPx).totalHeight } +
+                                        boxFor(event, sheetHeightPx).totalHeight > sheetHeightPx))) break
                             pending.addLast(event)
                         }
                         next++
@@ -276,10 +412,10 @@ internal class BookPageLayouter(
                         continue
                     }
                     val limit = event?.let { it.at - chapter.start } ?: raw.length
-                    if (start >= limit || y >= bodyHeightPx) break
-                    val fit = fitText(raw, original, model, start, limit, widthPx, bodyHeightPx - y,
+                    if (start >= limit || y >= sheetHeightPx) break
+                    val fit = fitText(raw, original, model, start, limit, widthPx, sheetHeightPx - y,
                         if (start == 0 && opener) titleInset else 0)
-                    if (fit.height > bodyHeightPx - y && (runs.isNotEmpty() || visuals.isNotEmpty())) break
+                    if (fit.height > sheetHeightPx - y && (runs.isNotEmpty() || visuals.isNotEmpty())) break
                     val sources = slices(chapter.start + start, chapter.start + fit.end)
                     runs += BookTextRun(y, fit.laid.text, fit.laid.placeholders, sources, source.substring(previousTextEnd, chapter.start + start))
                     previousTextEnd = chapter.start + fit.end
@@ -294,6 +430,7 @@ internal class BookPageLayouter(
                 }
                 val fullRun = runs.singleOrNull()?.takeIf { it.text.length == start - sheetStart }
                 val text = fullRun?.text ?: original.subSequence(sheetStart, start)
+                lastSheetGlobalStart = chapter.start + sheetStart
                 result += BookLaidPage(sources, chapterIndex, chapter.title, number, opener, text,
                     fullRun?.placeholders.orEmpty(), top, y - top, runs, visuals)
                 firstSheet = false
@@ -400,17 +537,20 @@ internal class BookPageLayouter(
             measured = measure(rest, widthPx)
         }
         var lines = (0 until measured.lineCount).takeWhile { measured.getLineBottom(it) <= available }.size.coerceAtLeast(1)
+        val compactImmersive = immersive && available <= with(density) { 720.dp.roundToPx() }
         if (lines < measured.lineCount) {
             var end = measured.getLineEnd(lines - 1)
-            // At least two lines at either end of a paragraph with four or more lines.
-            for (paragraph in model.paragraphs) {
-                if (paragraph.start < start + end && paragraph.end > start + end) {
-                    val first = measured.getLineForOffset((paragraph.start - start).coerceAtLeast(0))
-                    val last = if (paragraph.end > lookAhead) measured.lineCount + 1 else
-                        measured.getLineForOffset((paragraph.end - start - 1).coerceIn(0, rest.text.lastIndex))
-                    if (last - first + 1 >= 4) {
-                        if (lines - first == 1 && first > 0) lines = first
-                        else if (last - lines + 1 == 1 && lines - first > 2) lines--
+            // At least two lines at either end of a paragraph with four or more lines (skip on compact laptop immersive screens to avoid large bottom gaps).
+            if (!compactImmersive) {
+                for (paragraph in model.paragraphs) {
+                    if (paragraph.start < start + end && paragraph.end > start + end) {
+                        val first = measured.getLineForOffset((paragraph.start - start).coerceAtLeast(0))
+                        val last = if (paragraph.end > lookAhead) measured.lineCount + 1 else
+                            measured.getLineForOffset((paragraph.end - start - 1).coerceIn(0, rest.text.lastIndex))
+                        if (last - first + 1 >= 4) {
+                            if (lines - first == 1 && first > 0) lines = first
+                            else if (last - lines + 1 == 1 && lines - first > 2) lines--
+                        }
                     }
                 }
             }
@@ -442,15 +582,17 @@ internal class BookPageLayouter(
         // final fragment can fit on one line even when the uncut layout's
         // line indices predicted two. Check that actual continuation after
         // fitting this page, using the same no-indent continuation style.
-        val continuing = model.paragraphs.firstOrNull {
-            it.kind == BookParagraph.Kind.BODY && it.start < end && it.end > end
-        }
-        if (continuing != null && continuing.end <= lookAhead && lines > 2 &&
-            measure(pageText(original, model, end, continuing.end, 0), widthPx).lineCount == 1) {
-            lines--
-            end = safeBookBoundary(raw, start + measured.getLineEnd(lines - 1))
-            laid = pageText(original, model, start, end, titleInset)
-            height = measure(laid, widthPx).size.height
+        if (!compactImmersive) {
+            val continuing = model.paragraphs.firstOrNull {
+                it.kind == BookParagraph.Kind.BODY && it.start < end && it.end > end
+            }
+            if (continuing != null && continuing.end <= lookAhead && lines > 2 &&
+                measure(pageText(original, model, end, continuing.end, 0), widthPx).lineCount == 1) {
+                lines--
+                end = safeBookBoundary(raw, start + measured.getLineEnd(lines - 1))
+                laid = pageText(original, model, start, end, titleInset)
+                height = measure(laid, widthPx).size.height
+            }
         }
         return TextFit(end, laid, height)
     }
@@ -498,6 +640,23 @@ internal class BookPageLayouter(
 
 internal fun safeBookBoundary(text: String, end: Int): Int = if (end in 1 until text.length &&
     text[end - 1].isHighSurrogate() && text[end].isLowSurrogate()) end - 1 else end
+
+private val orphanHashLineRegex = Regex("""(?m)^(#{1,6})[ \t]*\r?$""")
+private val gutenbergStartSeparatorRegex = Regex("""(?im)^\*{3}\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK\b[^\r\n]*$""")
+private val gutenbergEndSeparatorRegex = Regex("""(?im)^\*{3}\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK\b[^\r\n]*$""")
+
+internal fun orphanMarkdownHeadingMarks(text: String): List<IntRange> =
+    orphanHashLineRegex.findAll(text).map { it.groups[1]!!.range }.toList()
+
+internal fun gutenbergBoilerplateBoundaries(source: String): List<Int> = buildList {
+    for (m in gutenbergStartSeparatorRegex.findAll(source)) {
+        val afterCredits = BookBoundaries.skipGutenbergCredits(source, m.range.last + 1)
+        if (afterCredits in 1 until source.length) add(afterCredits)
+    }
+    for (m in gutenbergEndSeparatorRegex.findAll(source)) {
+        if (m.range.first in 1 until source.length) add(m.range.first)
+    }
+}
 
 internal fun bookChapterNumber(title: String): String? = Regex("^第\\s*([零〇一二三四五六七八九十百千万两0-9]+)\\s*[章节篇]")
     .find(title)?.groupValues?.get(1) ?: Regex("^(?:Chapter|Section)\\s+([0-9]+|[IVXLC]+)\\b", RegexOption.IGNORE_CASE)

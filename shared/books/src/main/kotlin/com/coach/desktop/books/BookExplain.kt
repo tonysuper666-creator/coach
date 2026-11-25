@@ -115,10 +115,13 @@ internal sealed interface SectionGuideResult {
  * 保留类签名以兼容既有调用方与测试夹具，默认允许发送所选片段，可在设置中全局关闭。
  */
 internal class ExplainConsent(private val directory: Path) {
-    private val settings by lazy { runCatching { ReadingSettings(directory) }.getOrNull() }
-    fun allowed(@Suppress("UNUSED_PARAMETER") bookId: String): Boolean = settings?.aiExplain ?: true
-    fun allow(@Suppress("UNUSED_PARAMETER") bookId: String) {
-        runCatching { settings?.chooseAiExplain(true) }
+    private val validId = Regex("[A-Za-z0-9._-]{1,80}")
+    private val settings by lazy { ReadingSettings(directory) }
+    fun allowed(bookId: String): Boolean = validId.matches(bookId) &&
+        runCatching { settings.storedAiExplainEnabled() }.getOrDefault(false)
+
+    fun allow(bookId: String) {
+        if (validId.matches(bookId)) runCatching { settings.chooseAiExplain(true) }
     }
 }
 
@@ -126,10 +129,39 @@ internal class ExplainConsent(private val directory: Path) {
 internal object ExplainWire {
     fun selectionBlocks(chosen: SourceBlock, context: ExplainSectionContext?): List<SourceBlock> {
         val blocks = context?.sectionBlocks?.filterNot { it.heading }.orEmpty()
-        val containsSelection = blocks.any {
+        val at = blocks.indexOfFirst {
             it.id == chosen.id || (it.page == chosen.page && chosen.text.trim() in it.text)
         }
-        return if (containsSelection && BookLessonWire.fits(blocks)) blocks else listOf(chosen)
+        if (at < 0) return listOf(chosen)
+        if (BookLessonWire.fits(blocks)) return blocks
+        // TON-1855: a section too long for one request still answers from the selection's own neighbourhood
+        // inside this section, instead of shrinking to the single selected block.
+        return sectionWindow(blocks, at) ?: listOf(chosen)
+    }
+
+    /** The widest run of consecutive section blocks around [at] that still fits one section request. */
+    internal fun sectionWindow(blocks: List<SourceBlock>, at: Int): List<SourceBlock>? {
+        fun usable(b: SourceBlock) = !b.heading && b.text.isNotBlank() && b.text.length <= 8_000
+        if (at !in blocks.indices || !usable(blocks[at])) return null
+        var lo = at
+        var hi = at
+        var chars = blocks[at].text.length.toLong()
+        var growLeft = true
+        var leftOpen = true
+        var rightOpen = true
+        while ((leftOpen || rightOpen) && hi - lo + 1 < 128) {
+            val left = growLeft && leftOpen || !rightOpen
+            val next = if (left) lo - 1 else hi + 1
+            val candidate = blocks.getOrNull(next)
+            if (candidate == null || !usable(candidate) || chars + candidate.text.length > 24_000) {
+                if (left) leftOpen = false else rightOpen = false
+            } else {
+                chars += candidate.text.length
+                if (left) lo = next else hi = next
+            }
+            growLeft = !growLeft
+        }
+        return blocks.subList(lo, hi + 1).toList().takeIf(BookLessonWire::fits)
     }
 
     fun question(requestId: String, chosen: SourceBlock, question: String): JsonObject {

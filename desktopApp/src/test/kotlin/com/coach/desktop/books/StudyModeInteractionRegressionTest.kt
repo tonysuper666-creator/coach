@@ -105,7 +105,13 @@ class StudyModeInteractionRegressionTest {
                 st.execute("INSERT OR REPLACE INTO books(id, title, format, reading_page, touched) VALUES('bk-24', 'Health Economics', 'pdf', 178, 1000)")
             }
         }
-        val structure = BookStructure(pageRoles = emptyMap(), sections = emptyList(), source = "PDF_OUTLINE").apply {
+        val chapters = (1..24).map { chapter ->
+            val start = 10 + (chapter - 1) * 24
+            BookTocNode("ch-$chapter", null, chapter - 1, 1, TocNodeKind.CHAPTER, chapter.toString(),
+                "Chapter $chapter", start, if (chapter == 24) pages.last().number else start + 23,
+                source = HeadingSource.PDF_OUTLINE)
+        }
+        val structure = BookStructure(pageRoles = emptyMap(), sections = emptyList(), source = "PDF_OUTLINE", tocNodes = chapters).apply {
             resolvedLessons = lessons
         }
         val book = Textbook(
@@ -308,7 +314,7 @@ class StudyModeInteractionRegressionTest {
                         }
                     }
                 }
-                waitForIdle()
+                waitUntil(timeoutMillis = 5_000) { runCatching { onNodeWithTag("book-map-section-0").assertExists() }.isSuccess }
                 onNodeWithTag("book-map-section-0").performScrollTo().performClick()
                 assertEquals(178, jumpedPage, "Missing pdfPage in batch section must resolve to section p.178, never p.1")
 
@@ -435,19 +441,19 @@ class StudyModeInteractionRegressionTest {
                         }
                     }
                 }
-                waitForIdle()
+                waitUntil(timeoutMillis = 5_000) { runCatching { onNodeWithTag("diagnostic-live-skip-progress").assertExists() }.isSuccess }
                 onNodeWithTag("diagnostic-live-skip-progress").assertTextContains("0 / 1", substring = true)
                 onNodeWithTag("diagnostic-live-opt-g1-0").performScrollTo().performClick()
-                waitForIdle()
+                waitUntil(timeoutMillis = 5_000) { runCatching { onNodeWithTag("diagnostic-live-skip-progress").assertExists() }.isSuccess }
                 onNodeWithTag("diagnostic-live-skip-progress").assertTextContains("1 / 1", substring = true)
                 assertTrue("skip-ch-8-1" in draft.pretestSubmitted, "Passing gate must record skip-ch-8-1 progress")
                 assertTrue("diag-live-8-g1" in draft.pretestSubmitted)
 
                 // Switch to PROBLEM_DRIVEN and reveal Step 1 hint
                 pref = pref.copy(mode = BookStudyMode.PROBLEM_DRIVEN)
-                waitForIdle()
+                waitUntil(timeoutMillis = 5_000) { runCatching { onNodeWithTag("problem-live-hint-p1").assertExists() }.isSuccess }
                 onNodeWithTag("problem-live-hint-p1").performScrollTo().performClick()
-                waitForIdle()
+                waitUntil(timeoutMillis = 5_000) { runCatching { onNodeWithText("提示：Step 1: Compute pooled premium").assertExists() }.isSuccess }
                 onNodeWithText("提示：Step 1: Compute pooled premium").assertIsDisplayed()
                 assertEquals(1, draft.exerciseHintLevels["prob-live-8-p1"])
 
@@ -460,13 +466,13 @@ class StudyModeInteractionRegressionTest {
                 draft = library.loadChapterPracticeDraft(book.id, ch8Group.chapterId)!!
                 pref = pref.copy(mode = BookStudyMode.DIAGNOSTIC_SKIP)
                 showPanel = true
-                waitForIdle()
+                waitUntil(timeoutMillis = 5_000) { runCatching { onNodeWithTag("diagnostic-live-skip-progress").assertExists() }.isSuccess }
 
                 onNodeWithTag("diagnostic-live-skip-progress").assertTextContains("1 / 1", substring = true)
                 onNodeWithText("✓ 已掌握（已标为跳过「8.1 Core Model 8」）：Skip 8.1").assertIsDisplayed()
 
                 pref = pref.copy(mode = BookStudyMode.PROBLEM_DRIVEN)
-                waitForIdle()
+                waitUntil(timeoutMillis = 5_000) { runCatching { onNodeWithText("提示：Step 1: Compute pooled premium").assertExists() }.isSuccess }
                 onNodeWithText("提示：Step 1: Compute pooled premium").assertIsDisplayed()
             }
         } finally {

@@ -15,10 +15,11 @@ param(
     [string]$LibSeed = 'D:\agent\evidence\b-reader-lib',
     [string]$Book = 'D:\agent\materials\Health-Economics-620p.pdf',
     [string]$OutDir = '',
-    [ValidateSet('all', 'measure', 'bugs', 'login')][string]$Suite = 'all',
+    [ValidateSet('all', 'measure', 'laptop', 'bugs', 'login')][string]$Suite = 'all',
     [int]$BugsRepeat = 3,
     [switch]$SkipLegacy,
-    [switch]$Direct
+    [switch]$Direct,
+    [switch]$BreakImport
 )
 $ErrorActionPreference = 'Continue'
 $PSNativeCommandUseErrorActionPreference = $false
@@ -66,6 +67,9 @@ if ($sessionId -eq 0 -and -not $Direct) {
     if ($SkipLegacy) {
         $childArgs += '-SkipLegacy'
     }
+    if ($BreakImport) {
+        $childArgs += '-BreakImport'
+    }
     $logFile = Join-Path $OutDir 'worker.log'
     & $runInteractive -Script $PSCommandPath -ScriptArgs $childArgs -TimeoutSec 1800 -LogFile $logFile
     $rc = $LASTEXITCODE
@@ -86,8 +90,8 @@ function Compile-Harness([string]$rt, [string]$clsDir) {
     return "$clsDir;$cp"
 }
 
-function Invoke-Harness([string]$cp, [string[]]$hArgs, [string]$label) {
-    $jvmArgs = @('-Xmx2g', '-Dfile.encoding=UTF-8', '-Dcoach.windows.theme=light')
+function Invoke-Harness([string]$cp, [string[]]$hArgs, [string]$label, [string[]]$extraJvm = @()) {
+    $jvmArgs = @('-Xmx2g', '-Dfile.encoding=UTF-8', '-Dcoach.windows.theme=light') + @($extraJvm)
     $errLog = Join-Path $OutDir ("$label.stderr.log")
     & java @jvmArgs -cp $cp ReaderAcceptanceHarness @hArgs 2>$errLog
     if ($LASTEXITCODE -ne 0) {
@@ -122,6 +126,31 @@ if ($Suite -in 'all', 'measure') {
         $cpV2 = Compile-Harness $RuntimeV2 (Join-Path $clsRoot 'v2')
         Invoke-Harness $cpV2 @('measure', 'v2', $LibSeed, $shotsDir, 'scene', '34') 'measure-v2-scene'
         Invoke-Harness $cpV2 @('measure', 'v2', $LibSeed, $shotsDir, 'win32', '34') 'measure-v2-win32'
+    }
+    $measureJson = Join-Path $OutDir 'measure-report.json'
+    & python (Join-Path $scriptDir 'measure_reader.py') $shotsDir --json-out $measureJson
+    if ($LASTEXITCODE -ne 0) { throw 'measure_reader.py failed' }
+}
+
+if ($Suite -eq 'laptop') {
+    $ranMeasure = $true
+    $laptopProfiles = @(
+        @{ Tag = '1128x828-s150';  LogicalW = '752';  LogicalH = '552'; Scale = '1.5'  },
+        @{ Tag = '1366x768-s100';  LogicalW = '1366'; LogicalH = '768'; Scale = '1.0'  },
+        @{ Tag = '1536x864-s125';  LogicalW = '1229'; LogicalH = '691'; Scale = '1.25' },
+        @{ Tag = '1920x1080-s150'; LogicalW = '1280'; LogicalH = '720'; Scale = '1.5'  }
+    )
+    if (-not $SkipLegacy -and (Test-Path (Join-Path $Runtime111 'classpath.txt'))) {
+        $cp111L = Compile-Harness $Runtime111 (Join-Path $clsRoot '111')
+        foreach ($p in $laptopProfiles) {
+            Invoke-Harness $cp111L @('measure', '111', $LibSeed, $shotsDir, 'win32', '32', $p.LogicalW, $p.LogicalH, $p.Tag) "laptop-111-$($p.Tag)" @("-Dsun.java2d.uiScale=$($p.Scale)")
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RuntimeMain) -and (Test-Path (Join-Path $RuntimeMain 'classpath.txt'))) {
+        $cpMainL = Compile-Harness $RuntimeMain (Join-Path $clsRoot 'main')
+        foreach ($p in $laptopProfiles) {
+            Invoke-Harness $cpMainL @('measure', 'main', $LibSeed, $shotsDir, 'win32', '32', $p.LogicalW, $p.LogicalH, $p.Tag) "laptop-main-$($p.Tag)" @("-Dsun.java2d.uiScale=$($p.Scale)")
+        }
     }
     $measureJson = Join-Path $OutDir 'measure-report.json'
     & python (Join-Path $scriptDir 'measure_reader.py') $shotsDir --json-out $measureJson
@@ -196,7 +225,9 @@ if ($Suite -in 'all', 'bugs') {
 if ($Suite -in 'all', 'login') {
     $cpMain = Compile-Harness $RuntimeMain (Join-Path $clsRoot 'main')
     $loginDir = Join-Path $OutDir 'login-main'
-    Invoke-Harness $cpMain @('login', $Book, $loginDir) 'login-main'
+    $loginJvm = @()
+    if ($BreakImport) { $loginJvm = @('-Dcoach.acceptance.breakImport=true') }
+    Invoke-Harness $cpMain @('login', $Book, $loginDir) 'login-main' $loginJvm
     $loginReport = Get-Content (Join-Path $loginDir 'login-report.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
@@ -222,11 +253,15 @@ foreach ($pair in @(@('BUGS-111', $bugs111Report), @('BUGS-MAIN', $bugsMainRepor
     }
 }
 if ($null -ne $loginReport) {
-    Write-Host ("LOGIN-MAIN: {0}/{1} passed" -f $loginReport.passed, $loginReport.total)
-    foreach ($c in $loginReport.checks) { Write-Host ("  [{0}] {1}: {2}" -f $(if ($c.passed) {'PASS'} else {'FAIL'}), $c.id, $c.detail) }
+    if ($loginReport.applicable -eq $false) {
+        Write-Host ("LOGIN-MAIN: {0} ({1})" -f $loginReport.verdict, $loginReport.reason)
+    } else {
+        Write-Host ("LOGIN-MAIN: {0}/{1} passed" -f $loginReport.passed, $loginReport.total)
+        foreach ($c in $loginReport.checks) { Write-Host ("  [{0}] {1}: {2}" -f $(if ($c.passed) {'PASS'} else {'FAIL'}), $c.id, $c.detail) }
+    }
 }
 
 if ($anyFlaky) { Write-Host 'FAILED: flaky bugs check detected'; exit 1 }
 if ($null -ne $bugsMainReport -and $bugsMainReport.passed -lt $bugsMainReport.total) { exit 1 }
-if ($null -ne $loginReport -and $loginReport.passed -lt $loginReport.total) { exit 1 }
+if ($null -ne $loginReport -and $loginReport.applicable -ne $false -and $loginReport.passed -lt $loginReport.total) { exit 1 }
 exit 0

@@ -91,15 +91,19 @@ internal fun ReadingSettingsPanel(settings: ReadingSettings, isOriginal: () -> B
                 HorizontalDivider(color = if (colors.dark) CoachV7.Dark.menuSep else CoachV7.Light.menuSep)
             }
             SettingRow("字号", "size", ReadingSize.entries, settings.size, { it.label }, sizes, !original,
-                previousRow = { focusGuide() }, nextRow = { focusPaper() }, choose = settings::chooseSize)
+                previousRow = { focusSummary() }, nextRow = { focusPaper() }, choose = settings::chooseSize)
             if (original) Text("原版按原书大小显示", style = MaterialTheme.typography.labelSmall, color = colors.fgTertiary)
             SettingRow("纸色", "paper", PaperColor.entries, settings.paper, { it.label }, papers, true,
-                previousRow = { if (!original) focusSize() else focusGuide() }, nextRow = { focusGuide() },
+                previousRow = { if (!original) focusSize() else focusSummary() }, nextRow = { focusGuide() },
                 choose = settings::choosePaper)
             SettingRow("自动备好导读", "autoGuide", AutoGuideOption.entries,
                 if (settings.autoGuide) AutoGuideOption.ON else AutoGuideOption.OFF, { it.label }, guides, true,
-                previousRow = { focusPaper() }, nextRow = { if (!original) focusSize() else focusPaper() },
+                previousRow = { focusPaper() }, nextRow = { focusSummary() },
                 choose = { settings.chooseAutoGuide(it.enabled) })
+            SettingRow("节末小结", "sectionSummary", AutoGuideOption.entries,
+                if (settings.sectionSummary) AutoGuideOption.ON else AutoGuideOption.OFF, { it.label }, summaries, true,
+                previousRow = { focusGuide() }, nextRow = { if (!original) focusSize() else focusPaper() },
+                choose = { settings.chooseSectionSummary(it.enabled) })
         }
         LaunchedEffect(Unit) { if (original) focusPaper() else focusSize() }
     }

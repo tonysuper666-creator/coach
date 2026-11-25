@@ -57,7 +57,7 @@ internal object BookTocWaterfall {
         RegexOption.IGNORE_CASE,
     )
     private val FRONT_MATTER_TITLE = Regex(
-        """^(?:Preface|Foreword|About\s+the\s+Authors?|Authors?[’']?\s+Acknowledgments?|Publisher[’']?s?\s+Acknowledgments?|Acknowledgments?|Suggested\s+Pathways.*|How\s+to\s+Use\s+This\s+Book|Introduction\s+to\s+the\s+Book|前\s*言|序\s*言?|自\s*序|编\s*者\s*按|凡\s*例|致\s*谢)$""",
+        """^(?:Preface|Foreword|About\s+the\s+Authors?|Authors?[’']?\s+Acknowledgments?|Publisher[’']?s?\s+Acknowledgments?|Acknowledgments?|Suggested\s+Pathways.*|How\s+to\s+Use\s+This\s+Book|Introduction\s+to\s+the\s+Book|(?:《[^》]{1,30}》\s*)?(?:作者\s*|著者\s*|译者\s*|譯者\s*|编者\s*|編者\s*)?(?:前\s*言|序\s*言?|自\s*序|代\s*序|导\s*言|導\s*言|引\s*言|编\s*者\s*按|凡\s*例|致\s*谢))$""",
         RegexOption.IGNORE_CASE,
     )
     private val BACK_MATTER_TITLE = Regex(
@@ -95,7 +95,7 @@ internal object BookTocWaterfall {
     private val CHAPTER_LEADING_NUM = Regex(
         """^(\d{1,2})[.:：]?\s+(.+)$""",
     )
-    private val CN_CHAPTER_PREFIX = Regex("""^(第[一二三四五六七八九十百千0-9]+章)(?:[\s：:·\-—]+(.*))?$""")
+    private val CN_CHAPTER_PREFIX = Regex("""^(第[一二三四五六七八九十百千0-9]+章)(?:[\s：:·\-—]*(.*))?$""")
     private val CN_SECTION_PREFIX = Regex("""^(第[一二三四五六七八九十百千0-9]+[节讲课单元])(?:[\s：:·\-—]+(.*))?$""")
     private val CN_NUM_L1 = Regex("""^([一二三四五六七八九十百]+)[、.．]\s*(.+)$""")
     private val CN_NUM_L2 = Regex("""^([（(][一二三四五六七八九十0-9]+[）)])\s*(.+)$""")
@@ -299,7 +299,8 @@ internal object BookTocWaterfall {
             }
         }
         CN_CHAPTER_PREFIX.matchEntire(cleaned)?.let { m ->
-            return ClassifiedOutline(TocNodeKind.CHAPTER, m.groupValues[1], cleaned)
+            val kind = if (rawLevel >= 2) TocNodeKind.SECTION else TocNodeKind.CHAPTER
+            return ClassifiedOutline(kind, m.groupValues[1], cleaned)
         }
         CN_NUM_L1.matchEntire(cleaned)?.let { m ->
             return ClassifiedOutline(TocNodeKind.CHAPTER, m.groupValues[1], cleaned)
@@ -362,7 +363,7 @@ internal object BookTocWaterfall {
         val totalPages = pages.maxOfOrNull { it.number } ?: pages.size.coerceAtLeast(1)
         val allBlocks = StudyCoachCourse.blocks(bookId, pages, snapSentences = true)
         val repeatingEdges = ExplainClassifier.precomputeRepeatingEdges(allBlocks)
-        val initialRoles = classifyPagesFast(allBlocks, pages, repeatingEdges)
+        val initialRoles = classifyPagesFast(allBlocks, pages, repeatingEdges, format)
         val byPage = allBlocks.groupBy { it.page }
 
         // Stage A: External outline (PDF Outline / EPUB TOC / Word styles)
@@ -372,7 +373,7 @@ internal object BookTocWaterfall {
         val stageANodes = buildCanonicalNodes(bookId, totalPages, stageARaw, confidence = 1.0)
         if (stageARaw.isNotEmpty()) {
             val refinedRoles = refinePageRolesWithToc(pages, initialRoles, stageANodes, byPage, nativeBodyStart = nativeBodyStart)
-            val (chunks, sections, lessons) = buildStudyChunks(bookId, bookTitle, pages, refinedRoles, stageANodes, byPage)
+            val (chunks, sections, lessons) = buildStudyChunks(bookId, bookTitle, pages, refinedRoles, stageANodes, byPage, nativeBodyStart)
             return WaterfallOutcome(stageANodes, chunks, sections, lessons, refinedRoles, stageARaw.first().source.name, 1.0)
         }
 
@@ -382,7 +383,7 @@ internal object BookTocWaterfall {
             val (tocNodes, conf) = stageBResult
             if (conf >= 0.85) {
                 val refinedRoles = refinePageRolesWithToc(pages, initialRoles, tocNodes, byPage, nativeBodyStart = nativeBodyStart)
-                val (chunks, sections, lessons) = buildStudyChunks(bookId, bookTitle, pages, refinedRoles, tocNodes, byPage)
+                val (chunks, sections, lessons) = buildStudyChunks(bookId, bookTitle, pages, refinedRoles, tocNodes, byPage, nativeBodyStart)
                 return WaterfallOutcome(tocNodes, chunks, sections, lessons, refinedRoles, HeadingSource.TOC_PAGE.name, conf)
             }
         }
@@ -394,7 +395,7 @@ internal object BookTocWaterfall {
         val finalConf = stageC.confidence
         val finalSource = stageC.source
         val refinedRoles = refinePageRolesWithToc(pages, initialRoles, finalNodes, byPage, authoritativeFrontMatter = false, nativeBodyStart = nativeBodyStart)
-        val (chunks, sections, lessons) = buildStudyChunks(bookId, bookTitle, pages, refinedRoles, finalNodes, byPage)
+        val (chunks, sections, lessons) = buildStudyChunks(bookId, bookTitle, pages, refinedRoles, finalNodes, byPage, nativeBodyStart)
         return WaterfallOutcome(finalNodes, chunks, sections, lessons, refinedRoles, finalSource.name, finalConf)
     }
 
@@ -402,6 +403,7 @@ internal object BookTocWaterfall {
         allBlocks: List<SourceBlock>,
         pages: List<BookPage>,
         repeatingEdges: Set<String>,
+        format: String? = null,
     ): Map<Int, BookPageRole> {
         val result = LinkedHashMap<Int, BookPageRole>(pages.size)
         val totalPages = pages.size
@@ -440,6 +442,8 @@ internal object BookTocWaterfall {
             val hasFrontH = nonPage.any { frontHeading.matches(it.text.trim().trimStart('#').trim()) }
             val startsMain = BookStructurePlanner.matchHeadingRule(firstHeading, false)?.level == 1
 
+            // Slide titles, bullet points and speaker notes may all be shorter than a prose paragraph.
+            val hasSlideNotes = format == "pptx" && page.text.substringAfter("\n\n备注\n\n", "").isNotBlank()
             val role = when {
                 nonPage.isEmpty() -> BookPageRole.BLANK
                 analysis.kind == ExplainPageKind.TOC -> BookPageRole.TOC
@@ -448,7 +452,7 @@ internal object BookTocWaterfall {
                 hasRefH || isRefs(nonPage) -> { inBackSection = BookPageRole.REFERENCES; BookPageRole.REFERENCES }
                 inBackSection != null && idx >= totalPages / 2 && !startsMain -> inBackSection
                 hasFrontH && (hasRoman || idx < minOf(6, totalPages / 3 + 1)) && analysis.bodyBlocks.size <= 3 -> BookPageRole.FRONT_MATTER
-                analysis.kind == ExplainPageKind.HEADINGS_ONLY && !startsMain && (hasRoman || (idx == 0 && totalPages >= 3)) -> BookPageRole.FRONT_MATTER
+                analysis.kind == ExplainPageKind.HEADINGS_ONLY && !hasSlideNotes && !startsMain && (hasRoman || (idx == 0 && totalPages >= 3)) -> BookPageRole.FRONT_MATTER
                 analysis.kind == ExplainPageKind.BLANK -> BookPageRole.BLANK
                 else -> {
                     inBackSection = null
@@ -497,6 +501,16 @@ internal object BookTocWaterfall {
                 continue
             }
             if ((current == BookPageRole.COPYRIGHT || current == BookPageRole.FRONT_MATTER) && nonWs >= 400) {
+                val firstBodyAnchor = nativeBodyStart
+                    ?: BookBoundaries.openingNode(tocNodes)?.let { BookPageAnchor(it.startPage, it.startOffset) }
+                val bodyOffset = firstBodyAnchor?.takeIf { it.importPage == p && it.offsetUtf16 > 0 }?.offsetUtf16 ?: 0
+                if (bodyOffset > 0 && bodyOffset < page.text.length) {
+                    val tail = page.text.substring(bodyOffset)
+                    if (ExplainClassifier.nonWhitespaceLength(tail) >= 200 && ExplainClassifier.copyrightMarkerCount(tail) < 2) {
+                        out[p] = BookPageRole.BODY
+                        continue
+                    }
+                }
                 val maxMarkers = byPage[p].orEmpty().maxOfOrNull { ExplainClassifier.copyrightMarkerCount(it.text.trim()) } ?: 0
                 if (maxMarkers < 2) out[p] = BookPageRole.BODY
             }
@@ -1043,9 +1057,9 @@ internal object BookTocWaterfall {
                     val matched = BookStructurePlanner.matchHeadingRule(firstLine, block.heading)
                     val isAcademicName = firstLine.lowercase().trimEnd(':') in ACADEMIC_NAMED_HEADINGS
                     if (matched != null) {
-                        candidates += RawCandidate(matched.title, matched.level, page.number, null, HeadingSource.HEADING_RULE)
+                        candidates += RawCandidate(matched.title, matched.level, page.number, null, HeadingSource.HEADING_RULE, startOffset = block.start)
                     } else if (isAcademicName && ExplainClassifier.nonWhitespaceLength(block.text) <= 60) {
-                        candidates += RawCandidate(firstLine, 1, page.number, null, HeadingSource.HEADING_RULE)
+                        candidates += RawCandidate(firstLine, 1, page.number, null, HeadingSource.HEADING_RULE, startOffset = block.start)
                     }
                 }
             }
@@ -1169,20 +1183,51 @@ internal object BookTocWaterfall {
         pageRoles: Map<Int, BookPageRole>,
         tocNodes: List<BookTocNode>,
         byPage: Map<Int, List<SourceBlock>>,
+        nativeBodyStart: BookPageAnchor? = null,
     ): Triple<List<BookStudyChunk>, List<BookSection>, List<BookLesson>> {
         val bodyPages = pageRoles.filterValues { it == BookPageRole.BODY }.keys
         val activePages = if (bodyPages.isNotEmpty()) bodyPages
         else pageRoles.filterValues { it != BookPageRole.BLANK && it != BookPageRole.TOC && it != BookPageRole.COPYRIGHT }.keys
             .ifEmpty { pages.map { it.number }.toSet() }
 
+        val pageTextByNum = pages.associate { it.number to it.text }
+        val firstBodyAnchor = nativeBodyStart
+            ?: BookBoundaries.openingNode(tocNodes)?.let { open ->
+                val hasPrecedingFrontMatter = tocNodes.any { node ->
+                    node.kind == TocNodeKind.FRONT_MATTER &&
+                        (node.startPage < open.startPage || (node.startPage == open.startPage && node.startOffset < open.startOffset))
+                }
+                val pageText = pageTextByNum[open.startPage].orEmpty()
+                val prefix = if (open.startOffset in 1..pageText.length) pageText.substring(0, open.startOffset) else ""
+                val hasLeadingBoilerplate = prefix.isNotEmpty() && (
+                    ExplainClassifier.copyrightMarkerCount(prefix) >= 1 ||
+                        BookBoundaries.snapToCleanBodyOffset(pageText, 0, skipGutenbergHeader = true) > 0
+                    )
+                if (hasPrecedingFrontMatter || hasLeadingBoilerplate) BookPageAnchor(open.startPage, open.startOffset) else null
+            }
+
         val activeBlocks = pages.asSequence()
             .filter { it.number in activePages }
             .flatMap { byPage[it.number].orEmpty().asSequence() }
-            .filter { block ->
+            .mapNotNull { rawBlock ->
+                val block = if (firstBodyAnchor != null && rawBlock.page == firstBodyAnchor.importPage && firstBodyAnchor.offsetUtf16 > 0) {
+                    if (rawBlock.end <= firstBodyAnchor.offsetUtf16) return@mapNotNull null
+                    if (rawBlock.start < firstBodyAnchor.offsetUtf16) {
+                        val pageText = pageTextByNum[rawBlock.page]
+                        val sliceStart = firstBodyAnchor.offsetUtf16
+                        if (pageText != null && sliceStart < rawBlock.end && rawBlock.end <= pageText.length) {
+                            val sliced = pageText.substring(sliceStart, rawBlock.end)
+                            if (sliced.isBlank()) return@mapNotNull null
+                            rawBlock.copy(start = sliceStart, text = sliced)
+                        } else rawBlock
+                    } else rawBlock
+                } else rawBlock
                 val trimmed = block.text.trim()
-                if (trimmed.isEmpty() || PRINTED_PAGE_MARK.matches(trimmed)) return@filter false
+                if (trimmed.isEmpty() || PRINTED_PAGE_MARK.matches(trimmed)) return@mapNotNull null
                 val kind = ExplainClassifier.classifyBlock(block)
-                kind != ExplainBlockKind.PAGE_NUMBER && kind != ExplainBlockKind.HEADER_FOOTER
+                if (kind != ExplainBlockKind.PAGE_NUMBER && kind != ExplainBlockKind.HEADER_FOOTER && !ExplainClassifier.isCopyrightBlock(trimmed)) {
+                    block
+                } else null
             }
             .toList()
 

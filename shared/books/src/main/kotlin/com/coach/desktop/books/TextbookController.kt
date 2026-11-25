@@ -56,6 +56,7 @@ internal data class LibraryUi(
     val activeCourseTopicId: String? = null,
     val activeCourseDetail: CourseDetailSnapshot? = null,
     val pendingCourseJump: BookPassage? = null,
+    val canReturnToCitationOrigin: Boolean = false,
     val courseNotice: String? = null,
     val courseBusy: Boolean = false,
     /** 当前打开的书单 ID（从书单进入阅读器时保留上下文，返回时回到该书单页）。 */
@@ -79,6 +80,16 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     suspend fun awaitBooklistAlignment() { activeBooklistAlignJob?.join() }
     private val mutable = MutableStateFlow(LibraryUi(initialized = false))
     val state = mutable.asStateFlow()
+    private data class CitationOrigin(
+        val bookId: String,
+        val anchor: BookPageAnchor,
+        val courseId: String?,
+        val topicId: String?,
+        val booklistId: String?,
+        val source: BookLesson?,
+        val review: LocalBookReview?,
+    )
+    private val citationOrigins = ArrayDeque<CitationOrigin>()
     private val actions = Mutex()
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var activeImport: BookImportControl? = null
@@ -118,17 +129,58 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         runCatching { uploadCoordinator.retryBook(localBookId) }
     }
 
-    private fun enqueueBookForUnifiedUpload(book: Textbook) {
+    private fun persistImportOwnerIfNew(staged: TextbookLibrary.StagedBookImport, initiatingAccountKey: String?) {
+        if (!staged.alreadyExisted && initiatingAccountKey != null) {
+            val effectiveAccountKey = runCatching { library.boundUploadAccountKey(initiatingAccountKey) }.getOrNull()
+                ?: initiatingAccountKey
+            runCatching { library.saveImportAccountKey(staged.book.id, effectiveAccountKey) }
+        }
+    }
+
+    private fun enqueueBookForUnifiedUpload(book: Textbook, initiatingAccountKey: String? = null) {
         if (unifiedUploadClient == null) return
+        if (book.indexState != "READY" || book.hasPendingOcr) return
         backgroundScope.launch {
             runCatching {
-                uploadCoordinator.enqueueBook(
+                val rawAccountKey = initiatingAccountKey ?: uploadCoordinator.resolveInitiatingAccountKey()
+                val accountKey = rawAccountKey?.let { key -> library.boundUploadAccountKey(key) ?: key }
+                if (accountKey != null) {
+                    uploadCoordinator.enqueueBookForAccount(
+                        accountKey = accountKey,
+                        localBookId = book.id,
+                        fileSha256 = book.id,
+                        format = book.format,
+                        title = book.title,
+                    )
+                    if (accountKey == uploadCoordinator.currentAccountKey()) {
+                        uploadCoordinator.syncOnce()
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun enqueueAndSyncCompletedImport(
+        book: Textbook,
+        initiatingAccountKey: String?,
+        isCancelled: () -> Boolean = { false },
+    ) {
+        if (book.indexState != "READY" || book.hasPendingOcr) return
+        val effectiveAccountKey = initiatingAccountKey?.let { key ->
+            runCatching { library.boundUploadAccountKey(key) }.getOrNull() ?: key
+        }
+        if (effectiveAccountKey != null && unifiedUploadClient != null) {
+            runCatching {
+                uploadCoordinator.enqueueBookForAccount(
+                    accountKey = effectiveAccountKey,
                     localBookId = book.id,
                     fileSha256 = book.id,
                     format = book.format,
                     title = book.title,
                 )
-                uploadCoordinator.syncOnce()
+            }
+            if (!isCancelled() && effectiveAccountKey == uploadCoordinator.currentAccountKey()) {
+                syncBookUploads()
             }
         }
     }
@@ -142,14 +194,21 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         pendingPageSaveJob?.join()
     }
 
-    private suspend fun action(showBusy: Boolean = true, block: suspend () -> Unit) = actions.withLock {
+    private suspend fun action(showBusy: Boolean = true, citationNavigation: Boolean = false, block: suspend () -> Unit) = actions.withLock {
+        val before = mutable.value
         mutable.update { it.copy(busy = showBusy, error = null) }
         try { withContext(Dispatchers.IO) { block() } }
         catch (cancel: CancellationException) { throw cancel }
         catch (failure: Exception) {
             mutable.update { it.copy(error = failure.message.takeIf { failure is IllegalArgumentException && ReadableText.readsAsChinese(it) }
                 ?: "暂时无法读取或保存教材，请确认文件完整、未加密，然后重试。") }
-        } finally { mutable.update { it.copy(busy = false) } }
+        } finally {
+            val after = mutable.value
+            if (!citationNavigation && (before.screen != after.screen || before.book?.id != after.book?.id)) {
+                citationOrigins.clear()
+            }
+            mutable.update { it.copy(busy = false, canReturnToCitationOrigin = citationOrigins.isNotEmpty()) }
+        }
     }
 
     suspend fun load() {
@@ -288,12 +347,15 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
 
     private fun importMultipleStandalone(paths: List<Path>, onStaged: () -> Unit = {}): Job = backgroundScope.launch {
         try {
+            val initiatingAccountKey = uploadCoordinator.currentAccountKey()
+                ?: runCatching { uploadCoordinator.resolveInitiatingAccountKey() }.getOrNull()
             action {
                 var lastBook: Textbook? = null
                 for (path in paths) {
                     val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
                     val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
-                    enqueueBookForUnifiedUpload(staged.book)
+                    persistImportOwnerIfNew(staged, initiatingAccountKey)
+                    enqueueBookForUnifiedUpload(staged.book, initiatingAccountKey)
                     lastBook = staged.book
                 }
                 val catalog = library.catalog()
@@ -336,6 +398,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         onStaged: () -> Unit = {},
     ): Job = backgroundScope.launch {
         try {
+            val initiatingAccountKey = uploadCoordinator.currentAccountKey()
+                ?: runCatching { uploadCoordinator.resolveInitiatingAccountKey() }.getOrNull()
             action {
                 val cleanTitle = title.trim()
                 require(cleanTitle.isNotEmpty()) { if (kind == CollectionKind.COURSE) "请填写课程名。" else "请填写书单名。" }
@@ -352,7 +416,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     if (kind == CollectionKind.COURSE && !staged.alreadyExisted) {
                         library.setBookShowStandalone(staged.book.id, false)
                     }
-                    enqueueBookForUnifiedUpload(staged.book)
+                    persistImportOwnerIfNew(staged, initiatingAccountKey)
+                    enqueueBookForUnifiedUpload(staged.book, initiatingAccountKey)
                     importedBooks += staged.book
                 }
                 val allIds = (existingBookIds + importedBooks.map { it.id }).distinct()
@@ -477,13 +542,16 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         onStaged: () -> Unit = {},
     ): Job = backgroundScope.launch {
         try {
+            val initiatingAccountKey = uploadCoordinator.currentAccountKey()
+                ?: runCatching { uploadCoordinator.resolveInitiatingAccountKey() }.getOrNull()
             action {
                 val now = System.currentTimeMillis()
                 val importedIds = mutableListOf<String>()
                 for (path in newFiles) {
                     val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
                     val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
-                    enqueueBookForUnifiedUpload(staged.book)
+                    persistImportOwnerIfNew(staged, initiatingAccountKey)
+                    enqueueBookForUnifiedUpload(staged.book, initiatingAccountKey)
                     importedIds += staged.book.id
                 }
                 val currentMembers = library.collectionMaterials(collectionId)
@@ -641,6 +709,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             return Job().apply { complete() }
         }
         val startedAtNs = System.nanoTime()
+        val capturedAccountAtLaunch = uploadCoordinator.currentAccountKey()
         val control = BookImportControl(
             progress = { progress -> mutable.update { it.copy(importing = progress) } },
         )
@@ -648,6 +717,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val job = backgroundScope.launch {
             var staged: TextbookLibrary.StagedBookImport? = null
             var stagedNotified = false
+            var initiatingAccountKey: String? = capturedAccountAtLaunch
             fun releaseOnce() {
                 if (!stagedNotified) {
                     stagedNotified = true
@@ -655,6 +725,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 }
             }
             try {
+                if (initiatingAccountKey == null) {
+                    initiatingAccountKey = runCatching { uploadCoordinator.resolveInitiatingAccountKey() }.getOrNull()
+                }
                 mutable.update { it.copy(error = null, importing = BookImportProgress(0, 0)) }
                 val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
                 val result = if (useTier0) {
@@ -665,7 +738,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 staged = result
                 releaseOnce()
                 val book = result.book
-                enqueueBookForUnifiedUpload(book)
+                persistImportOwnerIfNew(result, initiatingAccountKey)
+                control.check()
                 if (book.indexState != "READY") {
                     actions.withLock {
                         library.closeReview()
@@ -706,7 +780,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                             )
                         }
                     }
-                    launchTier1Indexing(book.id)
+                    launchTier1Indexing(book.id, initiatingAccountKey = initiatingAccountKey)
                     return@launch
                 }
                 if (!book.hasPendingOcr) {
@@ -749,6 +823,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                             )
                         }
                     }
+                    enqueueAndSyncCompletedImport(book, initiatingAccountKey) { control.isCancelled() }
                     ensureUnstructuredBookSectioned(book.id)
                     return@launch
                 }
@@ -804,17 +879,19 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         )
                     }
                 }
-                runOcrLoop(book.id, control, deleteOnEmptyFailure = !result.alreadyExisted)
+                val finalBook = runOcrLoop(book.id, control, deleteOnEmptyFailure = !result.alreadyExisted)
+                control.check()
+                enqueueAndSyncCompletedImport(finalBook, initiatingAccountKey) { control.isCancelled() }
             } catch (_: BookImportCancelled) {
                 releaseOnce()
-                handleCancelledImport(staged?.book?.id)
+                handleCancelledImport(staged?.book?.id, staged?.alreadyExisted == false, initiatingAccountKey)
             } catch (cancel: CancellationException) {
                 releaseOnce()
-                handleCancelledImport(staged?.book?.id)
+                handleCancelledImport(staged?.book?.id, staged?.alreadyExisted == false, initiatingAccountKey)
                 throw cancel
             } catch (failure: Exception) {
                 releaseOnce()
-                handleFailedImport(staged?.book?.id, staged?.alreadyExisted == false, failure)
+                handleFailedImport(staged?.book?.id, staged?.alreadyExisted == false, failure, initiatingAccountKey)
             } finally {
                 releaseOnce()
                 if (activeImport === control) {
@@ -828,12 +905,13 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         return job
     }
 
-    private fun resumePendingOcrInBackground(bookId: String): Job {
+    private fun resumePendingOcrInBackground(bookId: String, fallbackAccountKey: String? = null): Job {
         val control = BookImportControl(
             progress = { progress -> mutable.update { it.copy(importing = progress) } },
         )
         activeImport = control
         val job = backgroundScope.launch {
+            val initiatingAccountKey = runCatching { library.importAccountKey(bookId) }.getOrNull()
             try {
                 val book = library.book(bookId)
                 val totalPages = book.pages.size
@@ -853,15 +931,20 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                             ),
                         )
                     }
-                    runOcrLoop(bookId, control, deleteOnEmptyFailure = false)
+                    val finalBook = runOcrLoop(bookId, control, deleteOnEmptyFailure = false)
+                    control.check()
+                    enqueueAndSyncCompletedImport(finalBook, initiatingAccountKey ?: fallbackAccountKey) { control.isCancelled() }
                 }
             } catch (_: BookImportCancelled) {
-                handleCancelledImport(bookId)
+                if (initiatingAccountKey == null) {
+                    runCatching { library.clearPendingOcr(bookId) }
+                }
+                handleCancelledImport(bookId, deleteLocalBook = initiatingAccountKey != null, initiatingAccountKey = initiatingAccountKey)
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
                 runCatching { library.clearPendingOcr(bookId) }
-                handleFailedImport(bookId, deleteIfNoOcrYet = false, failure = failure)
+                handleFailedImport(bookId, deleteIfNoOcrYet = false, failure = failure, initiatingAccountKey = initiatingAccountKey)
             } finally {
                 if (activeImport === control) {
                     activeImport = null
@@ -874,7 +957,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         return job
     }
 
-    private suspend fun runOcrLoop(bookId: String, control: BookImportControl, deleteOnEmptyFailure: Boolean) {
+    private suspend fun runOcrLoop(bookId: String, control: BookImportControl, deleteOnEmptyFailure: Boolean): Textbook {
         var finalBook = library.resumeBookOcr(bookId, control) { updatedBook, progress ->
             val remainingPending = updatedBook.pages.count { it.ocrPending }
             mutable.update { current ->
@@ -900,11 +983,23 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 importNotice = BookImportNotice(System.nanoTime(), "《${finalBook.title}》识别完了"),
             )
         }
+        return finalBook
     }
 
-    private suspend fun handleCancelledImport(bookId: String?) = withContext(NonCancellable) {
-        if (bookId != null) {
-            runCatching { library.deleteBook(bookId, uploadCoordinator.currentAccountKey()) }
+    private suspend fun handleCancelledImport(
+        bookId: String?,
+        deleteLocalBook: Boolean,
+        initiatingAccountKey: String?,
+    ) = withContext(NonCancellable) {
+        if (bookId != null && deleteLocalBook) {
+            runCatching { library.deleteBook(bookId, initiatingAccountKey) }
+            runCatching { uploadCoordinator.refreshCurrentAccountStatuses() }
+            val effectiveAccountKey = initiatingAccountKey?.let { key ->
+                runCatching { library.boundUploadAccountKey(key) }.getOrNull() ?: key
+            }
+            if (effectiveAccountKey != null && effectiveAccountKey == uploadCoordinator.currentAccountKey() && unifiedUploadClient != null) {
+                syncBookUploads()
+            }
         }
         val catalog = runCatching { library.catalog() }.getOrElse { emptyList() }
         val fallbackBook = catalog.firstOrNull()?.let { runCatching { library.book(it.id) }.getOrNull() }
@@ -912,7 +1007,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val fallbackRec = runCatching { library.topHomeRecommendation(fallbackBook?.id) }.getOrNull()
         val fallbackLastQ = runCatching { loadLastQuestion(fallbackBook?.id) }.getOrNull()
         mutable.update { current ->
-            val removedOpen = bookId != null && current.book?.id == bookId
+            val removedOpen = deleteLocalBook && bookId != null && current.book?.id == bookId
             current.copy(
                 catalog = catalog,
                 book = if (removedOpen) fallbackBook else current.book,
@@ -931,13 +1026,25 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
-    private suspend fun handleFailedImport(bookId: String?, deleteIfNoOcrYet: Boolean, failure: Exception) = withContext(NonCancellable) {
+    private suspend fun handleFailedImport(
+        bookId: String?,
+        deleteIfNoOcrYet: Boolean,
+        failure: Exception,
+        initiatingAccountKey: String?,
+    ) = withContext(NonCancellable) {
         val message = failure.message.takeIf { failure is IllegalArgumentException && ReadableText.readsAsChinese(it) }
             ?: "暂时无法读取或保存教材，请确认文件完整、未加密，然后重试。"
         val shouldDelete = bookId != null && deleteIfNoOcrYet &&
             runCatching { library.book(bookId).pages.none { it.ocr } }.getOrDefault(false)
         if (shouldDelete) {
-            runCatching { library.deleteBook(checkNotNull(bookId), uploadCoordinator.currentAccountKey()) }
+            runCatching { library.deleteBook(checkNotNull(bookId), initiatingAccountKey) }
+            runCatching { uploadCoordinator.refreshCurrentAccountStatuses() }
+            val effectiveAccountKey = initiatingAccountKey?.let { key ->
+                runCatching { library.boundUploadAccountKey(key) }.getOrNull() ?: key
+            }
+            if (effectiveAccountKey != null && effectiveAccountKey == uploadCoordinator.currentAccountKey() && unifiedUploadClient != null) {
+                syncBookUploads()
+            }
         }
         val catalog = runCatching { library.catalog() }.getOrElse { emptyList() }
         val fallbackBook = catalog.firstOrNull()?.let { runCatching { library.book(it.id) }.getOrNull() }
@@ -972,6 +1079,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         bookId: String,
         waitForFirstRender: Boolean = true,
         skipOnContinue: Set<String> = emptySet(),
+        initiatingAccountKey: String? = null,
     ): Job? {
         val indexControl = BookImportControl()
         if (indexingControls.putIfAbsent(bookId, indexControl) != null) {
@@ -990,16 +1098,20 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 val catalog = library.catalog()
                 mutable.update { current ->
                     val openBook = current.book
-                    val refreshed = if (openBook?.id == indexed.id) indexed.copy(readingPage = current.page) else openBook
+                    val refreshed = if (openBook?.id == indexed.id) indexed.copy(readingPage = openBook.readingPage) else openBook
                     current.copy(
                         catalog = catalog,
                         book = refreshed,
                         indexing = if (current.indexing?.bookId == bookId) null else current.indexing,
                     )
                 }
-                if (indexed.hasPendingOcr && activeImport == null) {
-                    resumePendingOcrInBackground(indexed.id)
+                if (indexed.hasPendingOcr) {
+                    if (activeImport == null) {
+                        resumePendingOcrInBackground(indexed.id, fallbackAccountKey = initiatingAccountKey)
+                    }
                 } else {
+                    val owner = initiatingAccountKey ?: runCatching { library.importAccountKey(indexed.id) }.getOrNull()
+                    enqueueAndSyncCompletedImport(indexed, owner)
                     ensureUnstructuredBookSectioned(indexed.id)
                 }
                 shouldContinueQueue = true
@@ -1038,7 +1150,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         } ?: return
         mutable.update { current ->
             if (current.book?.id == updated.id) {
-                current.copy(book = updated.copy(readingPage = current.page))
+                current.copy(book = updated.copy(readingPage = current.book.readingPage))
             } else current
         }
     }
@@ -1254,22 +1366,23 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         mutable.update { it.copy(answer = answer) }
     }
 
-    suspend fun page(number: Int) {
+    suspend fun page(number: Int, commitProgress: Boolean = true) {
         val current = mutable.value
         val book = current.book ?: return
         if (book.page(number) == null) {
             mutable.update { it.copy(error = "页码超出了这本教材的范围。") }
             return
         }
-        val updatingBook = current.source == null
+        val updatingBook = commitProgress && current.source == null
         val updatedBook = if (updatingBook) book.copy(readingPage = number) else book
         // 立刻同步更新 UI 页码与内存中的 book.readingPage，绝不重读 620 页 SQLite 导致标题/页码滞后 2–5 秒。
+        // 当 commitProgress = false（如按 End 跳末页或未停留的大跨度跳转）时，仅移动视口页码，不改写书架「读到第 N 页」。
         mutable.update { state ->
             if (state.book?.id != book.id) state
             else state.copy(
                 page = number,
-                book = if (state.source == null) state.book.copy(readingPage = number) else state.book,
-                catalog = if (state.source == null) state.catalog.map { s ->
+                book = if (commitProgress && state.source == null) state.book.copy(readingPage = number) else state.book,
+                catalog = if (commitProgress && state.source == null) state.catalog.map { s ->
                     if (s.id == book.id) s.copy(readingPage = number) else s
                 } else state.catalog,
                 error = null,
@@ -1304,9 +1417,37 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         mutable.update { it.copy(screen = BookScreen.READER, source = lesson, page = page, prompt = null) }
     }
 
-    suspend fun back() = action {
+    private fun citationOrigin(targetBookId: String, visibleAnchor: BookPageAnchor?): CitationOrigin? {
+        val ui = mutable.value
+        val book = ui.book ?: return null
+        if (ui.screen != BookScreen.READER || book.id == targetBookId) return null
+        val offset = library.savedReadSpot(book.id)?.takeIf { it.first == ui.page }?.second ?: 0
+        return CitationOrigin(book.id, visibleAnchor ?: BookPageAnchor(ui.page, offset),
+            ui.activeCourseId, ui.activeCourseTopicId, ui.activeBooklistId, ui.source, ui.review)
+    }
+
+    suspend fun back() = action(citationNavigation = true) {
         val cur = mutable.value
-        if (cur.source != null) {
+        val origin = citationOrigins.lastOrNull()
+        if (cur.screen == BookScreen.READER && origin != null) {
+            val book = library.book(origin.bookId)
+            val page = origin.anchor.importPage
+            val restored = if (origin.source == null) book.copy(readingPage = page) else book
+            if (origin.source == null) {
+                library.save(restored)
+                library.saveReadSpot(book.id, page, origin.anchor.offsetUtf16)
+            }
+            library.saveOpenSession(book.id, "READER")
+            origin.courseId?.let { courseId -> library.withCourseDatabase { db ->
+                CourseStore.saveActiveAnchor(db, CourseActiveAnchor(courseId, origin.topicId, book.id, page, true))
+            } }
+            val detail = origin.courseId?.let { library.courseDetail(it) }
+            val catalog = library.catalog()
+            mutable.update { it.copy(book = restored, page = page, source = origin.source, review = origin.review,
+                activeCourseId = origin.courseId, activeCourseTopicId = origin.topicId, activeCourseDetail = detail,
+                activeBooklistId = origin.booklistId, pendingCourseJump = null, keepAskTabOpen = false, catalog = catalog) }
+            citationOrigins.removeLast()
+        } else if (cur.source != null) {
             mutable.update {
                 it.copy(screen = if (it.review == null) BookScreen.LEARNING else BookScreen.REVIEWING, source = null)
             }
@@ -1342,6 +1483,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             mutable.update {
                 it.copy(
                     screen = BookScreen.BOOKLIST,
+                    page = it.book?.readingPage ?: it.page,
                     collections = library.collectionSummaries(),
                     review = null,
                     prompt = null,
@@ -1354,6 +1496,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             mutable.update {
                 it.copy(
                     screen = if (fromReview) BookScreen.REVIEWS else BookScreen.HOME,
+                    page = if (fromReview) it.page else (it.book?.readingPage ?: it.page),
                     review = null,
                     prompt = null,
                     activeCourseId = null,
@@ -1551,7 +1694,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val catalog = withContext(Dispatchers.IO) { library.catalog() }
         mutable.update { state ->
             state.copy(
-                book = if (state.book?.id == savedBook.id) savedBook.copy(readingPage = state.page) else state.book,
+                book = if (state.book?.id == savedBook.id) savedBook.copy(readingPage = state.book.readingPage) else state.book,
                 catalog = catalog,
             )
         }
@@ -1747,7 +1890,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
-    suspend fun jumpToCourseCitation(ref: CourseCitationRef) = action {
+    suspend fun jumpToCourseCitation(ref: CourseCitationRef, visibleAnchor: BookPageAnchor? = null) = action(citationNavigation = true) {
+        val origin = citationOrigin(ref.bookId, visibleAnchor)
         val loaded = library.book(ref.bookId)
         val verified = CourseClientGates.verifySingleCitation(ref, loaded.pages)
         val targetPage = verified?.page ?: ref.page.coerceIn(1, loaded.pages.size.coerceAtLeast(1))
@@ -1792,6 +1936,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 activeCourseDetail = it.activeCourseId?.let { cid -> library.courseDetail(cid) },
             )
         }
+        if (origin != null) citationOrigins.addLast(origin)
     }
 
     fun consumePendingCourseJump() {
@@ -1803,7 +1948,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     }
 
     /** 2.0-AI-3：从「整门课 / 已读书目」问答或全局搜索点击跨材料页码胶囊，1 击切书跳页并保留「提问」抽屉。 */
-    suspend fun jumpToCollectionCitation(citation: CollectionQaCitation) = action {
+    suspend fun jumpToCollectionCitation(citation: CollectionQaCitation, visibleAnchor: BookPageAnchor? = null) = action(citationNavigation = true) {
+        val origin = citationOrigin(citation.bookId, visibleAnchor)
         val loaded = library.book(citation.bookId)
         val clampedPage = citation.page.coerceIn(1, loaded.pages.size.coerceAtLeast(1))
         val pageObj = loaded.page(clampedPage)
@@ -1866,6 +2012,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 catalog = library.catalog(),
             )
         }
+        if (origin != null) citationOrigins.addLast(origin)
     }
 
     fun dismissCourseNotice() {
@@ -1949,6 +2096,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
 
     fun addMaterialsToCourse(courseId: String, files: List<Path>, onStaged: () -> Unit = {}): Job = backgroundScope.launch {
         try {
+            val initiatingAccountKey = uploadCoordinator.currentAccountKey()
+                ?: runCatching { uploadCoordinator.resolveInitiatingAccountKey() }.getOrNull()
             action {
                 val importedIds = mutableListOf<String>()
                 val preRejected = mutableListOf<String>()
@@ -1961,7 +2110,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     val useTier0 = library.lazyPdfExtras && fileName.endsWith(".pdf", ignoreCase = true)
                     val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
                     if (!staged.alreadyExisted) library.setBookShowStandalone(staged.book.id, false)
-                    enqueueBookForUnifiedUpload(staged.book)
+                    persistImportOwnerIfNew(staged, initiatingAccountKey)
+                    enqueueBookForUnifiedUpload(staged.book, initiatingAccountKey)
                     importedIds += staged.book.id
                 }
                 val (detail, rejected) = library.withCourseDatabase { db ->

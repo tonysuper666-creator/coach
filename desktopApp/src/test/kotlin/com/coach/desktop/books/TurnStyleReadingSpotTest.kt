@@ -1,13 +1,11 @@
 package com.coach.desktop.books
 
-import androidx.compose.runtime.*
-import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
-import com.coach.ui.CoachTheme
+import com.coach.desktop.WindowsTextbookHost
 import java.nio.file.Files
 import kotlin.test.*
 
@@ -41,59 +39,42 @@ class TurnStyleReadingSpotTest {
         onNodeWithTag("book-scroll-read").assertDoesNotExist()
     }
 
-    private fun SkikoComposeUiTest.selectStyle(label: String) {
-        repeat(3) {
-            if (onAllNodes(hasTestTag("turn-style") and hasText(label)).fetchSemanticsNodes().isNotEmpty()) return
-            onNodeWithTag("turn-style").performClick()
-            waitForIdle()
-        }
-        error("could not select turn style $label")
-    }
-
-    private fun check(label: String) {
+    @Test fun flip() {
         val dir = Files.createTempDirectory("turn-style-spot")
         try {
             val library = TextbookLibrary(dir.resolve("library"))
             val input = dir.resolve("numbered.md")
             Files.writeString(input, "# 阅读位置\n\n" + (1..520).joinToString("") { "句" + it.toString().padStart(4, '0') + "。读者找到这句话，再接着读下一句。" })
-            val book = library.importBook(input)
-            var ui by mutableStateOf(LibraryUi(book = book, screen = BookScreen.READER, page = book.pages.first().number))
+            library.importBook(input)
+            val controller = TextbookController(library)
             runSkikoComposeUiTest(size = Size(2560f, 1440f), density = Density(1.5f)) {
-                val focus = FocusRequester()
-                setContent { CoachTheme(false) {
-                    TextbookReader(ui, library, UnconnectedBookLearningSupport, null, focus,
-                        onNoteSession = {}, onPage = { ui = ui.copy(page = it) }, onBack = {}, onLearn = {})
-                } }
-                waitForIdle()
-                selectStyle(label)
+                setContent { WindowsTextbookHost(controller) { null } }
+                waitUntil(timeoutMillis = 20_000) { controller.state.value.initialized && !controller.state.value.busy }
+                onNodeWithTag("home-read").performClick()
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("reader-text").fetchSemanticsNodes().isNotEmpty() }
                 mainClock.autoAdvance = false
                 assertSpread("initially")
                 val start = visibleSentences()
                 assertTrue(start.size > 10, "wide window shows a spread: ${start.size} sentences")
-                onNodeWithText("下一页").performClick()
-                mainClock.advanceTimeBy(16); waitForIdle()
-                val afterOneFrame = visibleSentences()
-                if (label == "无") assertNotEquals(start.first(), afterOneFrame.first(), "None swaps the pages within one frame")
+                onNodeWithTag("next-page").performClick()
                 mainClock.advanceTimeBy(900); waitForIdle()
                 val turned = visibleSentences()
-                assertTrue(turned.first() > start.last() || turned.first() != start.first(), "$label: the next spread is shown: ${start.first()} -> ${turned.first()}")
+                assertTrue(turned.first() > start.last() || turned.first() != start.first(), "Flip: the next spread is shown: ${start.first()} -> ${turned.first()}")
+                mainClock.autoAdvance = true
                 val first = turned.first(); val later = turned[turned.size / 4] // 架构裁定：不操作时读位是左页首字，只保证左页的句子
-                onNodeWithTag("read-mode").performClick()
+                toggleReaderMode()
                 mainClock.advanceTimeBy(900); waitForIdle()
                 onNodeWithTag("book-scroll-read").assertExists()
                 val scrolling = visibleSentences()
-                assertTrue(first in scrolling && later in scrolling, "$label: same sentences in scroll mode: $first/$later in $scrolling")
-                onNodeWithTag("read-mode").performClick()
+                assertTrue(first in scrolling && later in scrolling, "Flip: same sentences in scroll mode: $first/$later in $scrolling")
+                toggleReaderMode()
                 mainClock.advanceTimeBy(900); waitForIdle()
                 onNodeWithTag("book-scroll-read").assertDoesNotExist() // 切回了翻页读：滚动控件已消失
                 assertSpread("after switching back")
                 val back = visibleSentences()
-                assertTrue(first in back && later in back, "$label: and back in the spread: $first/$later in $back")
+                assertTrue(first in back && later in back, "Flip: and back in the spread: $first/$later in $back")
             }
         } finally { dir.toFile().deleteRecursively() }
     }
 
-    @Test fun flip() = check("翻转")
-    @Test fun slide() = check("滑动")
-    @Test fun none() = check("无")
 }

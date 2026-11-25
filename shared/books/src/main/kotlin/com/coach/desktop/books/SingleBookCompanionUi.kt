@@ -83,6 +83,8 @@ internal fun SingleBookCompanionPanel(
     modifier: Modifier = Modifier,
     currentPageOffset: Int = 0,
     visiblePageRanges: List<IntRange> = emptyList(),
+    onOpenSectionMainline: ((Int) -> Unit)? = null,
+    wholeOriginalPageVisible: Boolean = false,
 ) {
     val colors = CoachTheme.colors
     val originalOnly = studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY
@@ -92,6 +94,9 @@ internal fun SingleBookCompanionPanel(
         ChapterCompanionGrouping.groupForSection(book, currentSectionIndex)
     }
     val currentSection = book.lessons.getOrNull(currentSectionIndex)
+    val proseGroup = remember(book, chapterGroup) {
+        chapterGroup?.let { ChapterCompanionGrouping.filterForCompanion(book, it) }
+    }
     val chapterNum = remember(book.id, chapterGroup?.chapterId, currentPage) {
         chapterGroup?.let { StudyModeChapterNumbering.resolve(book, currentPage, it.firstPage).chapterNumber } ?: 0
     }
@@ -207,8 +212,8 @@ internal fun SingleBookCompanionPanel(
         modeStreamingText = ""
         modeError = null
         try {
+            val companionGroup = proseGroup ?: return@LaunchedEffect
             val wire = withContext(Dispatchers.IO) {
-                val companionGroup = ChapterCompanionGrouping.filterForCompanion(book, group)
                 StudyModeWireBuilder.buildModeRequestJson(library, book, companionGroup, chapterNum, studyPreference)
             }
             modeSourcePages = wire.getValue("pages").jsonArray.map { it.jsonObject.getValue("pdfPage").jsonPrimitive.int }
@@ -334,7 +339,7 @@ internal fun SingleBookCompanionPanel(
             }
         }
         try {
-            val companionGroup = ChapterCompanionGrouping.filterForCompanion(book, group)
+            val companionGroup = proseGroup ?: return@LaunchedEffect
             val firstGroup = ChapterCompanionProgressive.firstSectionGroup(companionGroup, currentSection?.id)
             val restGroup = firstGroup?.sections?.singleOrNull()?.id?.let {
                 ChapterCompanionProgressive.remainingSectionGroup(companionGroup, it)
@@ -506,6 +511,43 @@ internal fun SingleBookCompanionPanel(
                     .testTag("companion-module-body"),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                val summarySection = proseGroup?.sections?.firstOrNull { it.id == currentSection?.id }
+                val endOffset = summarySection?.blocks?.lastOrNull()?.end?.minus(1)
+                if (readingExplanation && LocalReadingSectionSummary.current && summarySection != null && endOffset != null &&
+                    currentPage == summarySection.lastPage && (wholeOriginalPageVisible || currentPageOffset >= endOffset ||
+                        visiblePageRanges.any { endOffset in it })) {
+                    var dismissed by remember(book.id, summarySection.id) { mutableStateOf(false) }
+                    if (!dismissed) {
+                        val pack = (packState as? CompanionPackState.Ready)?.pack
+                        val questions = pack?.optionalPractice.orEmpty().withIndex().filter { (_, quiz) ->
+                            quiz.sectionId == summarySection.id && quiz.options.size >= 2 && quiz.correctOption in quiz.options
+                        }.take(2)
+                        val points = pack?.keyPoints.orEmpty().filter { it.sectionId == summarySection.id }.map { it.summary }
+                        SectionEndSummaryCard(
+                            section = summarySection,
+                            summaryLines = points.ifEmpty { StudyCoachCourse.localSectionSummary(summarySection) },
+                            practices = questions.map { (_, q) -> Practice(q.stem, q.anchor?.quoteAnchor.orEmpty(), q.correctOption, q.options) },
+                            answers = questions.mapIndexedNotNull { i, (_, q) ->
+                                draft.practiceSelections[q.id]?.takeIf { q.id in draft.practiceSubmitted }?.let {
+                                    i to PracticeAnswer(text = it, revealed = true, understood = it == q.correctOption)
+                                }
+                            }.toMap(),
+                            onAnswer = { i, practice, answer ->
+                                val (packIndex, q) = questions[i]
+                                updateDraft {
+                                    it.copy(
+                                        practiceSelections = if (answer.revealed) it.practiceSelections + (q.id to answer.text)
+                                            else it.practiceSelections - q.id,
+                                        practiceSubmitted = if (answer.revealed) it.practiceSubmitted + q.id else it.practiceSubmitted - q.id,
+                                    )
+                                }
+                                onCommitQuizAnswer(summarySection, 100 + packIndex, practice, answer.copy(understood = answer.text == q.correctOption))
+                            },
+                            onOpenMainline = onOpenSectionMainline?.let { open -> { open(currentSectionIndex) } },
+                            onDismiss = { dismissed = true },
+                        )
+                    }
+                }
                 if (readingExplanation) {
                     val chapter = remember(book, currentPage, currentPageOffset) {
                         BookChapterResolver.chapterForPage(book, currentPage, currentPageOffset)

@@ -269,8 +269,13 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
             Box(Modifier.fillMaxSize()) {
                 Column {
                     ui.importing?.let { progress ->
+                        val readingImport = ui.screen == BookScreen.READER && progress.recognizing &&
+                            progress.bookId != null && progress.bookId == ui.book?.id
                         val handledElsewhere = (ui.screen == BookScreen.HOME && progress.recognizing) ||
-                            ui.screen == BookScreen.READER
+                            (ui.screen == BookScreen.READER && !readingImport)
+                        if (readingImport && ui.book?.page(ui.page)?.ocrPending == true) {
+                            Text("这一页还在识别，可以先看原页。", Modifier.padding(horizontal = 16.dp).testTag("page-ocr-pending"))
+                        }
                         if (!handledElsewhere) {
                             BookImportProgressBar(
                                 progress = progress,
@@ -542,8 +547,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                         scope.launch { controller.refreshCourseTopicPack(activeCourse.courseId, activeTopic.topicId, explainer) }
                                     }
                                 },
-                                onJumpCourseCitation = { citation ->
-                                    run { controller.jumpToCourseCitation(citation) }
+                                onJumpCourseCitation = { citation, origin ->
+                                    run { controller.jumpToCourseCitation(citation, origin) }
                                 },
                                 onCancelImport = controller::cancelImport,
                                 onReorganizeSections = { run { controller.reorganizeSections() } },
@@ -573,13 +578,16 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 },
                                 collectionQaSessions = collectionQaSessions,
                                 onUpdateCollectionQaSession = { colId, next -> collectionQaSessions[colId] = next },
-                                onJumpCollectionCitation = { citation ->
-                                    run { controller.jumpToCollectionCitation(citation) }
+                                onJumpCollectionCitation = { citation, origin ->
+                                    run { controller.jumpToCollectionCitation(citation, origin) }
                                 },
                                 onConsumeKeepAskTabOpen = controller::consumeKeepAskTabOpen,
                                 hinge = hinge,
                                 onExportNotes = onExportNotes,
                                 onNoteSession = { noteReader = it },
+                                onBrowsePage = { page ->
+                                    run { controller.page(page, commitProgress = false) }
+                                },
                                 onPage = { page ->
                                     val restoreFocus = ui.source != null && readerHasFocus
                                     val startBookId = ui.book?.id; val startSource = ui.source
@@ -599,6 +607,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 answer = drafts.current(activeBook.id, lesson.id, activeBook.questionMode, ui.answer))
                             TextbookLearning(displayed, learningSupport, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
                             explanationReply, answerExplain, answerExplainReply, sourceResolver, citationFocus, citationIndex,
+                            library = controller.library,
                             onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
                             onSource = { openLessonSource(pairing = false) }, onPair = { openLessonSource(pairing = true) },
                             onCitation = { index, target ->

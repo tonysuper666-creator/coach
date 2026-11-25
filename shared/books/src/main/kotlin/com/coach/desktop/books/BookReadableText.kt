@@ -86,7 +86,11 @@ internal object ReadableText {
 
 /** 出处一行用的那句短引文：「“前 16 字…”」，按码点截，不切断代理对；换行先接上。 */
 internal fun shortQuote(text: String): String {
-    val flat = text.replace(Regex("""\s+"""), " ").trim()
+    // Imported Markdown can store a physical-page marker and its first paragraph in the same source block.
+    val source = text.trimStart()
+    val marker = PRINTED_PAGE_MARK.matchAt(source, 0)
+    val prose = if (marker == null) source else source.substring(marker.range.last + 1)
+    val flat = prose.replace(Regex("""\s+"""), " ").trim()
     val points = flat.codePointCount(0, flat.length)
     return "“" + (if (points <= 16) flat else flat.substring(0, flat.offsetByCodePoints(0, 16)).trimEnd() + "…") + "”"
 }

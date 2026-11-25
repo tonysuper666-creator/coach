@@ -10,9 +10,21 @@ internal class EpubNavigation(packagePath: String, opf: Element, read: (String) 
     private data class TargetText(val element: String, val text: String)
 
     private val epubNamespace = "http://www.idpf.org/2007/ops"
+    private val gutenbergStartLine = Regex("""(?im)^\*{3}\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK\b[^\r\n]*$""")
+    private val gutenbergCreditLine = Regex(
+        """(?i)^(?:Produced|Transcribed|Prepared|Scanned|Proofread)\s+by\b.*|^Online Distributed Proofreading\b.*|^Updated editions will replace\b.*""",
+    )
+    private val orphanHeadingMarks = Regex("""^(?:[ \t\r\n\u000c]+|#{1,6}[ \t]*(?=\r?\n|$))+""")
+    private val licenseLabelRegex = Regex("""(?i)^(?:The Full )?Project Gutenberg.*License.*$""")
+    private val noteHeaderRegex = Regex("""^[□■※*\s]*(?:注\s*釋|注\s*释|附\s*注)[:：︰]?$""")
+    private val bareChineseNumeralRegex = Regex("""^[一二三四五六七八九十百〇零]+$""")
+    private val numberedChineseChapterRegex = Regex("""^第\s*[零〇一二三四五六七八九十百千万两0-9]+\s*[章节回篇].*$""")
+    private val prefaceSuffixRegex = Regex("""(?:自\s*序|序\s*言?|前\s*言|代\s*序|导\s*言|導\s*言|引\s*言)$""")
+    private val headingForbiddenPunctuation = "。！？，、；：︰:;,.!?“”‘’\"'「」『』…—()（）[]【】﹝﹞<>"
     private val packageUri = URI(null, null, "/$packagePath", null)
     private val navEntries = mutableListOf<Entry>()
     private val ncxEntries = mutableListOf<Entry>()
+    private val inferredEntries = mutableListOf<Entry>()
     private val destinations = mutableMapOf<Target, BookPageAnchor>()
     private val bodyTargets = mutableListOf<Target>()
     private val targetText = mutableMapOf<Target, TargetText>()
@@ -58,7 +70,12 @@ internal class EpubNavigation(packagePath: String, opf: Element, read: (String) 
         opf.descendants("guide").flatMap { it.children("reference") }
             .filter { it.getAttribute("type") in setOf("text", "bodymatter") }
             .mapNotNullTo(bodyTargets) { target(packageUri, it.getAttribute("href")) }
-        for (destination in navEntries.map { it.target } + ncxEntries.map { it.target } + bodyTargets) {
+        val candidateNav = navEntries.ifEmpty { ncxEntries }
+        val nonLicenseNav = candidateNav.filterNot { licenseLabelRegex.matches(it.label) }
+        if (nonLicenseNav.isNotEmpty() && nonLicenseNav.all { it.label.length >= 25 }) {
+            inferSpineHeadings(opf, manifest, read)
+        }
+        for (destination in navEntries.map { it.target } + ncxEntries.map { it.target } + inferredEntries.map { it.target } + bodyTargets) {
             requested.getOrPut(destination.member) { mutableSetOf() }.add(destination.fragment)
         }
     }
@@ -73,6 +90,34 @@ internal class EpubNavigation(packagePath: String, opf: Element, read: (String) 
         destinations.putIfAbsent(Target(member, fragment), anchor)
     }
 
+    private fun locateInPages(pages: List<BookPage>, content: String, pageBase: Int, position: Int): BookPageAnchor {
+        val clamped = position.coerceIn(0, content.length)
+        var pageIndex = 0
+        var pageStart = 0
+        while (pageIndex < pages.lastIndex && clamped >= pageStart + pages[pageIndex].text.length) {
+            pageStart += pages[pageIndex++].text.length
+            if (content.getOrNull(pageStart) == '\u000c') pageStart++
+        }
+        val withinPage = (clamped - pageStart).coerceIn(0, pages[pageIndex].text.length)
+        return BookPageAnchor(pageBase + pageIndex + 1, withinPage)
+    }
+
+    private fun skipPostBoilerplateCredits(content: String, fromPos: Int): Int {
+        var cursor = fromPos.coerceIn(0, content.length)
+        while (cursor < content.length) {
+            while (cursor < content.length && content[cursor] in " \t\r\n\u000c") cursor++
+            if (cursor >= content.length) break
+            val lineEnd = content.indexOf('\n', cursor).let { if (it < 0) content.length else it }
+            val line = content.substring(cursor, lineEnd).trim().trimStart('#').trim()
+            if (line.isEmpty() || gutenbergCreditLine.matches(line)) {
+                cursor = if (lineEnd < content.length) lineEnd + 1 else content.length
+            } else {
+                break
+            }
+        }
+        return cursor.coerceIn(0, content.length)
+    }
+
     fun recordMember(
         member: String, raw: String, cleaned: String, pages: List<BookPage>,
         pageBase: Int, offsets: Map<String?, Int>, boilerplateEnd: Int?,
@@ -81,8 +126,6 @@ internal class EpubNavigation(packagePath: String, opf: Element, read: (String) 
         val content = cleaned.trim()
         var rawCursor = 0
         var normalized = 0
-        var pageIndex = 0
-        var pageStart = 0
         val bodyMarker = "\u0000"
         val targets = if (boilerplateEnd == null) offsets else offsets + (bodyMarker to boilerplateEnd)
         for ((fragment, offset) in targets.entries.sortedBy { it.value }) {
@@ -92,14 +135,23 @@ internal class EpubNavigation(packagePath: String, opf: Element, read: (String) 
                 rawCursor++
             }
             val position = (normalized - start).coerceIn(0, content.length)
-            while (fragment != null && pageIndex < pages.lastIndex && position >= pageStart + pages[pageIndex].text.length) {
-                pageStart += pages[pageIndex++].text.length
-                if (content.getOrNull(pageStart) == '\u000c') pageStart++
+            if (fragment == bodyMarker) {
+                val postHeader = skipPostBoilerplateCredits(content, position)
+                afterBoilerplate[member] = locateInPages(pages, content, pageBase, postHeader)
+            } else if (fragment == null) {
+                record(member, null, BookPageAnchor(pageBase + 1, 0))
+            } else {
+                val skipMarks = orphanHeadingMarks.find(content.substring(position))?.value?.length ?: 0
+                val cleanPos = (position + skipMarks).coerceIn(0, content.length)
+                record(member, fragment, locateInPages(pages, content, pageBase, cleanPos))
             }
-            val page = if (fragment == null) 0 else pageIndex
-            val withinPage = if (fragment == null) 0 else (position - pageStart).coerceIn(0, pages[page].text.length)
-            val anchor = BookPageAnchor(pageBase + page + 1, withinPage)
-            if (fragment == bodyMarker) afterBoilerplate[member] = anchor else record(member, fragment, anchor)
+        }
+        if (member !in afterBoilerplate) {
+            val sep = gutenbergStartLine.find(content)
+            if (sep != null) {
+                val postHeader = skipPostBoilerplateCredits(content, sep.range.last + 1)
+                afterBoilerplate[member] = locateInPages(pages, content, pageBase, postHeader)
+            }
         }
     }
 
@@ -113,14 +165,129 @@ internal class EpubNavigation(packagePath: String, opf: Element, read: (String) 
             (target.element == "p" || entry.target.member in afterBoilerplate && entry.label.count { it in "，。；！？" } >= 2)
     }
 
-    fun outline(): List<BookOutlineItem> = resolvedEntries().map { entry ->
-        val anchor = destinations.getValue(entry.target)
-        val title = if (copiedParagraph(entry)) "正文" else entry.label
-        BookOutlineItem(title, entry.level, anchor.importPage, HeadingSource.EPUB_TOC, anchor.offsetUtf16)
+    fun outline(): List<BookOutlineItem> {
+        val entries = resolvedEntries()
+        val nonLicense = entries.filterNot { licenseLabelRegex.matches(it.label) }
+        val resolvedInferred = inferredEntries.filter { it.target in destinations }
+        if (nonLicense.isNotEmpty() && nonLicense.all(::copiedParagraph) && resolvedInferred.isNotEmpty()) {
+            val preservedBackMatter = entries.filter { licenseLabelRegex.matches(it.label) }
+            return (resolvedInferred + preservedBackMatter).map { entry ->
+                val anchor = destinations.getValue(entry.target)
+                BookOutlineItem(entry.label, entry.level, anchor.importPage, HeadingSource.EPUB_TOC, anchor.offsetUtf16)
+            }
+        }
+        return entries.mapIndexed { index, entry ->
+            val rawAnchor = destinations.getValue(entry.target)
+            val isCopied = copiedParagraph(entry)
+            val anchor = if (index == 0 && isCopied) {
+                afterBoilerplate[entry.target.member] ?: rawAnchor
+            } else rawAnchor
+            val title = if (isCopied) "正文" else entry.label
+            BookOutlineItem(title, entry.level, anchor.importPage, HeadingSource.EPUB_TOC, anchor.offsetUtf16)
+        }
     }
 
-    fun bodyStart(): BookPageAnchor? = bodyTargets.firstNotNullOfOrNull(destinations::get)
-        ?: resolvedEntries().firstOrNull()?.takeIf(::copiedParagraph)?.let { afterBoilerplate[it.target.member] }
+    fun bodyStart(): BookPageAnchor? {
+        val explicit = bodyTargets.firstNotNullOfOrNull { target ->
+            val anchor = destinations[target] ?: return@firstNotNullOfOrNull null
+            val postHeader = afterBoilerplate[target.member]
+            if (postHeader != null && (target.fragment == null || anchor.importPage < postHeader.importPage ||
+                    (anchor.importPage == postHeader.importPage && anchor.offsetUtf16 < postHeader.offsetUtf16))
+            ) {
+                postHeader
+            } else anchor
+        }
+        if (explicit != null) return explicit
+        val entries = resolvedEntries()
+        if (entries.isEmpty()) return afterBoilerplate.values.firstOrNull()
+        val nonLicense = entries.filterNot { licenseLabelRegex.matches(it.label) }
+        if (nonLicense.isNotEmpty() && nonLicense.all(::copiedParagraph) && inferredEntries.any { it.target in destinations }) {
+            return null
+        }
+        return entries.firstOrNull()?.takeIf(::copiedParagraph)?.let { afterBoilerplate[it.target.member] }
+    }
+
+    /**
+     * Plain-text-converted EPUBs (such as Project Gutenberg Ebookmaker Chinese editions) often emit a single
+     * copied sentence as their only body nav entry while tagging every real preface and story/chapter heading
+     * as standalone `<p id="...">` / `<h* id="...">` blocks in the spine XHTML.
+     */
+    private fun inferSpineHeadings(opf: Element, manifest: List<Element>, read: (String) -> ByteArray?) {
+        val bookTitle = normalizeLabel(opf.descendants("title").firstOrNull()?.textContent.orEmpty())
+        val normBookTitle = cleanBookTitleForCompare(bookTitle)
+        val hrefById = manifest.associate { it.getAttribute("id") to it.getAttribute("href") }
+        val spineItems = opf.descendants("itemref").filter { it.getAttribute("linear") != "no" }
+        var hasUnnumberedStory = false
+        var proseSinceLastHeading = false
+
+        for (itemRef in spineItems) {
+            val href = hrefById[itemRef.getAttribute("idref")] ?: continue
+            val member = target(packageUri, href)?.member ?: continue
+            val bytes = read(member) ?: continue
+            val doc = runCatching { EpubXml.parse(bytes) }.getOrNull() ?: continue
+
+            fun walk(el: Element) {
+                val tag = el.localName?.lowercase().orEmpty()
+                if (tag in setOf("head", "script", "style")) return
+                val elId = listOf("id", "xml:id", "name").firstNotNullOfOrNull { attr ->
+                    el.getAttribute(attr).takeIf(String::isNotEmpty)
+                }
+                val cls = el.getAttribute("class")
+                if ((tag == "header" || tag == "footer") &&
+                    (elId?.startsWith("pg-") == true || "pg-boilerplate" in cls)
+                ) {
+                    return
+                }
+                if (tag == "p" || (tag.length == 2 && tag[0] == 'h' && tag[1] in '1'..'6')) {
+                    val txt = normalizeLabel(el.textContent)
+                    if (txt.isEmpty()) return
+                    if (elId != null && isStandaloneSpineHeading(txt, bookTitle, normBookTitle)) {
+                        val isNumberedChapter = numberedChineseChapterRegex.matches(txt)
+                        val level = if (!isNumberedChapter) {
+                            if (!prefaceSuffixRegex.containsMatchIn(txt)) hasUnnumberedStory = true
+                            1
+                        } else {
+                            if (hasUnnumberedStory) 2 else 1
+                        }
+                        val entry = Entry(txt, level, Target(member, elId))
+                        if (!proseSinceLastHeading && inferredEntries.lastOrNull()?.label == txt) {
+                            inferredEntries[inferredEntries.lastIndex] = entry
+                        } else if (inferredEntries.lastOrNull()?.label != txt) {
+                            inferredEntries += entry
+                        }
+                        proseSinceLastHeading = false
+                    } else {
+                        proseSinceLastHeading = true
+                    }
+                    return
+                }
+                val children = el.childNodes
+                for (i in 0 until children.length) {
+                    (children.item(i) as? Element)?.let(::walk)
+                }
+            }
+            walk(doc)
+        }
+    }
+
+    private fun isStandaloneSpineHeading(txt: String, bookTitle: String, normBookTitle: String): Boolean {
+        if (txt.length !in 1..18) return false
+        if (txt.any { it in headingForbiddenPunctuation }) return false
+        if (noteHeaderRegex.matches(txt) || bareChineseNumeralRegex.matches(txt)) return false
+        if (gutenbergCreditLine.matches(txt) || licenseLabelRegex.matches(txt)) return false
+        val norm = cleanBookTitleForCompare(txt)
+        if (norm.isEmpty()) return false
+        if (normBookTitle.isNotEmpty()) {
+            if (norm == normBookTitle) return false
+            if (bookTitle in txt && !prefaceSuffixRegex.containsMatchIn(txt) && txt.length <= bookTitle.length + 6) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun cleanBookTitleForCompare(s: String): String =
+        s.replace(Regex("""[《》〈〉\s:：︰\-—]"""), "")
 
     private fun add(entries: MutableList<Entry>, label: String, level: Int, base: URI, href: String) {
         val cleanLabel = normalizeLabel(label)

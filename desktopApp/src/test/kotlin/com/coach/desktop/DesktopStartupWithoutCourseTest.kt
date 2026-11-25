@@ -41,11 +41,8 @@ class DesktopStartupWithoutCourseTest {
             setContent { key(controller) { WindowsTextbookHost(controller) { source } } }
             ready(controller) { it.catalog.isEmpty() }
             onNodeWithTag("upload-textbook").performClick()
-            ready(controller) { it.prompt == BookPrompt.IMPORTED }
-            onNodeWithTag("learning-path-READ").performClick()
-            ready(controller) { it.learningPath == LearningPath.READ }
-            onNodeWithTag("enable-learning").performClick()
             ready(controller) { it.screen == BookScreen.READER && it.prompt == null }
+            assertEquals(LearningPath.READ, controller.state.value.learningPath)
             val id = controller.state.value.book!!.id
             onNodeWithTag("reader-text").assertTextContains("Orbit is the path", substring = true)
             onNodeWithTag("choice-0").assertDoesNotExist()
@@ -56,7 +53,8 @@ class DesktopStartupWithoutCourseTest {
             runOnIdle { controller = TextbookController(TextbookLibrary(directory)) }
             ready(controller) { it.book?.id == id && it.screen == BookScreen.READER && it.page == 2 }
             assertEquals(id, controller.state.value.book!!.id)
-            assertEquals("READ", controller.library.learningPath(id))
+            assertEquals(LearningPath.READ, controller.state.value.learningPath)
+            assertNull(controller.library.learningPath(id), "Default reading does not write an explicit preference")
             onNodeWithTag("reader-text").assertTextContains("Gravity is the attraction", substring = true)
             val image = onNodeWithTag("windows-host").captureToImage().toAwtImage()
             val output = Path.of("build/screens/startup-without-course/local-reading-reopened.png")

@@ -37,6 +37,7 @@ internal data class LocalExamUi(
     val saving: Boolean = false,
     val gradingInFlight: Boolean = false,
     val generatingCourseMock: Boolean = false,
+    val courseGenerationFailed: Boolean = false,
     val gradingError: String? = null,
     val error: String? = null,
     val conflict: Boolean = false,
@@ -89,7 +90,7 @@ internal class LocalExamController(
     }
 
     private suspend fun action(showBusy: Boolean = true, block: suspend () -> Unit): Boolean = actions.withLock {
-        mutable.update { it.copy(busy = showBusy, error = null) }
+        mutable.update { it.copy(busy = showBusy, error = null, courseGenerationFailed = false) }
         try {
             withContext(Dispatchers.IO) { block() }
             true
@@ -221,6 +222,7 @@ internal class LocalExamController(
                 it.copy(
                     busy = true,
                     generatingCourseMock = true,
+                    courseGenerationFailed = false,
                     error = null,
                     gradingError = null,
                 )
@@ -247,7 +249,8 @@ internal class LocalExamController(
                 throw cancel
             } catch (failure: Exception) {
                 mutable.update {
-                    it.copy(error = failure.message ?: "暂时无法生成考前模拟卷，请稍后重试。")
+                    it.copy(courseGenerationFailed = failure !is java.sql.SQLException,
+                        error = failure.message ?: "暂时无法生成考前模拟卷，请稍后重试。")
                 }
                 false
             } finally {

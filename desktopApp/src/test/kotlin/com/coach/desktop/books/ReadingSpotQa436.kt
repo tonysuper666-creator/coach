@@ -1,16 +1,31 @@
 package com.coach.desktop.books
 
-import androidx.compose.runtime.*
-import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
-import com.coach.ui.CoachTheme
+import com.coach.desktop.WindowsTextbookHost
+import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import kotlin.math.abs
 import kotlin.test.*
+
+@OptIn(ExperimentalTestApi::class)
+internal fun SkikoComposeUiTest.toggleReaderMode() {
+    val scrolling = onAllNodesWithTag("book-scroll-read").fetchSemanticsNodes().isNotEmpty()
+    if (onAllNodesWithTag("immersive-more-menu").fetchSemanticsNodes().isEmpty()) {
+        onNodeWithTag("reader-page").performSemanticsAction(SemanticsActions.RequestFocus)
+        onNodeWithTag("reader-page").performKeyInput { pressKey(Key.Tab) }
+    }
+    openReaderTypeSettings()
+    val option = if (scrolling) "text-mode-paged" else "text-mode-scroll"
+    onNodeWithTag(option).performSemanticsAction(SemanticsActions.OnClick)
+    closeReaderOverflow()
+    mainClock.advanceTimeBy(850)
+    waitForIdle()
+}
 
 @OptIn(ExperimentalTestApi::class)
 class ReadingSpotQa436 {
@@ -41,23 +56,16 @@ class ReadingSpotQa436 {
             val input = dir.resolve("numbered.md")
             Files.writeString(input, "# 阅读位置\n\n" + (1..520).joinToString("") { "句" + it.toString().padStart(4, '0') + "。读者找到这句话，再接着读下一句。" })
             val book = library.importBook(input)
-            var ui by mutableStateOf(LibraryUi(book = book, screen = BookScreen.READER, page = book.pages.first().number))
+            val controller = TextbookController(library)
+
             runSkikoComposeUiTest(size = Size(width, 1440f), density = Density(1.5f)) {
-                val focus = FocusRequester()
-                setContent { CoachTheme(false) {
-                    TextbookReader(ui, library, UnconnectedBookLearningSupport, null, focus,
-                        onNoteSession = {}, onPage = { ui = ui.copy(page = it) }, onBack = {}, onLearn = {})
-                } }
-                waitForIdle()
+                setContent { WindowsTextbookHost(controller) { null } }
+                waitUntil(timeoutMillis = 20_000) { controller.state.value.initialized && !controller.state.value.busy }
+                onNodeWithTag("home-read").performClick()
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("reader-text").fetchSemanticsNodes().isNotEmpty() }
                 check()
             }
         } finally { dir.toFile().deleteRecursively() }
-    }
-
-    private fun SkikoComposeUiTest.toggle() {
-        onNodeWithTag("read-mode").performClick()
-        mainClock.advanceTimeBy(850)
-        waitForIdle()
     }
 
     private fun SkikoComposeUiTest.report(stage: String, seen: List<Sentence>, id: String) {
@@ -66,7 +74,7 @@ class ReadingSpotQa436 {
     }
 
     @Test fun rightHandSentenceSurvivesFirstSwitch() = withBook(2560f) {
-        onNodeWithText("下一页").performClick()
+        onNodeWithTag("next-page").performClick()
         mainClock.advanceTimeBy(850); waitForIdle()
         val before = sentences()
         val right = before.filter { it.side == "reader-text-right" }
@@ -78,11 +86,11 @@ class ReadingSpotQa436 {
         onNodeWithTag("reader-page").performTouchInput { click(androidx.compose.ui.geometry.Offset(clicked.rootX - pageBounds.left, clicked.rootY - pageBounds.top)) }
         mainClock.advanceTimeBy(300); waitForIdle()
         report("spread-before", sentences(), target)
-        toggle()
+        toggleReaderMode()
         onNodeWithTag("book-scroll-read").assertExists()
         val scrolling = sentences()
         report("first-scroll", scrolling, target)
-        toggle()
+        toggleReaderMode()
         val restored = sentences()
         report("back-to-spread", restored, target)
         assertTrue(scrolling.any { it.id == target } && restored.any { it.id == target }, "same sentence must remain visible on both switches")
@@ -101,49 +109,49 @@ class ReadingSpotQa436 {
     }
 
     @Test fun selectingOnTheRightPageKeepsItsFirstSentenceVisibleAcrossSwitches() = withBook(2560f) {
-        onNodeWithText("下一页").performClick()
+        onNodeWithTag("next-page").performClick()
         mainClock.advanceTimeBy(850); waitForIdle()
         val right = sentences().filter { it.side == "reader-text-right" }
         assertTrue(right.size >= 6)
         val first = right[right.size / 3]
         val last = right[right.size * 2 / 3]
         dragSelect(first, last)
-        toggle()
+        toggleReaderMode()
         onNodeWithTag("book-scroll-read").assertExists()
         val inScroll = sentences().map { it.id }
         report("select-first-scroll", sentences(), first.id)
         assertTrue(first.id in inScroll, "first selected sentence ${first.id} must be visible in scroll: $inScroll")
-        toggle()
+        toggleReaderMode()
         assertTrue(first.id in sentences().map { it.id }, "and back in the spread")
     }
 
     @Test fun selectingFromTheLeftPageIntoTheRightKeepsTheLeftFirstSentence() = withBook(2560f) {
-        onNodeWithText("下一页").performClick()
+        onNodeWithTag("next-page").performClick()
         mainClock.advanceTimeBy(850); waitForIdle()
         val all = sentences()
         val left = all.filter { it.side == "reader-text" }
         val right = all.filter { it.side == "reader-text-right" }
         val first = left[left.size / 2]
         dragSelect(first, right[right.size / 3])
-        toggle()
+        toggleReaderMode()
         assertTrue(first.id in sentences().map { it.id }, "left-page first sentence ${first.id} must be visible in scroll")
-        toggle()
+        toggleReaderMode()
         assertTrue(first.id in sentences().map { it.id }, "and back in the spread")
     }
 
     @Test fun leftPageSentencesSurviveFirstSwitchWithoutAnyClick() = withBook(2560f) {
-        onNodeWithText("下一页").performClick()
+        onNodeWithTag("next-page").performClick()
         mainClock.advanceTimeBy(850); waitForIdle()
         val before = sentences()
         val left = before.filter { it.side == "reader-text" }
         assertTrue(left.size >= 3)
         val first = left.first().id
         val later = left[left.size / 2].id
-        toggle()
+        toggleReaderMode()
         onNodeWithTag("book-scroll-read").assertExists()
         val scrolling = sentences().map { it.id }
         assertTrue(first in scrolling && later in scrolling, "left-page sentences $first and $later must be visible in scroll: $scrolling")
-        toggle()
+        toggleReaderMode()
         val back = sentences().map { it.id }
         assertTrue(first in back && later in back, "and again in the spread: $back")
     }
@@ -151,7 +159,7 @@ class ReadingSpotQa436 {
     @Test fun partialScrollRetainsActualReadingLineAcrossRoundTrip() = withBook(1440f) {
         val paged = sentences()
         assertTrue(paged.size >= 4 && paged.none { it.side == "reader-text-right" })
-        toggle()
+        toggleReaderMode()
         val initial = sentences()
         val viewport = onNodeWithTag("reader-page").fetchSemanticsNode().boundsInRoot
         onNode(SemanticsMatcher.keyIsDefined(SemanticsActions.ScrollBy) and hasAnyAncestor(hasTestTag("book-scroll-read")))
@@ -161,10 +169,10 @@ class ReadingSpotQa436 {
         val target = afterScroll.minByOrNull { abs(it.y - viewport.height * 0.56f) }!!
         assertTrue(afterScroll.first().id != initial.first().id, "input must move the viewport")
         report("single-partially-scrolled", afterScroll, target.id)
-        toggle()
+        toggleReaderMode()
         val back = sentences()
         report("back-to-single", back, target.id)
-        toggle()
+        toggleReaderMode()
         val reopened = sentences()
         report("scroll-again", reopened, target.id)
         assertTrue(back.any { it.id == target.id } && reopened.any { it.id == target.id }, "same sentence must remain visible")

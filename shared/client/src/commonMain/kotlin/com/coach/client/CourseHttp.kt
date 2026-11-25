@@ -14,6 +14,7 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.defaultRequest
 import io.ktor.client.plugins.timeout
+import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -285,6 +286,30 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             status == 401 -> MockReply(null, "授权已失效", statusCode = 401, code = "unauthorized")
             response.status.isSuccess() && parsed != null -> MockReply(parsed, null, statusCode = status)
             else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "无法获取书架列表", retryable = status >= 500, statusCode = status)
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        MockReply(null, "等待联网", retryable = true, code = "offline")
+    }
+
+    suspend fun deleteUnifiedBook(shelfBookId: String): MockReply = try {
+        val response = http.delete("$base/v1/books/${shelfBookId.encodeURLPathPart()}")
+        val status = response.status.value
+        val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+        val code = parsed?.s("code")?.ifBlank { null }
+        when {
+            status == 401 -> MockReply(null, "授权已失效", statusCode = 401, code = "unauthorized")
+            status == 404 && code == "not_found" -> MockReply(parsed, null, statusCode = 404, code = "not_found")
+            status == 404 -> MockReply(null, "等待服务支持", retryable = true, statusCode = 404, code = "unsupported")
+            response.status.isSuccess() -> MockReply(parsed ?: buildJsonObject { put("deleted", true) }, null, statusCode = status)
+            else -> MockReply(
+                null,
+                parsed?.s("error")?.ifBlank { null } ?: "解绑失败",
+                retryable = status >= 500 || status == 408 || status == 429,
+                statusCode = status,
+                code = code,
+            )
         }
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e

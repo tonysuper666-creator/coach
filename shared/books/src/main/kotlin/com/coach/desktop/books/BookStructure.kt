@@ -94,9 +94,38 @@ internal data class BookStructure(
         val blocks = precomputedBlocks ?: StudyCoachCourse.blocks(bookId, pages, snapSentences = true)
         val byId = HashMap<String, SourceBlock>(blocks.size * 2)
         for (block in blocks) byId[block.id] = block
+        val firstBodyAnchor = nativeBodyStart
+            ?: BookBoundaries.openingNode(tocNodes)?.let { open ->
+                val hasPrecedingFrontMatter = tocNodes.any { node ->
+                    node.kind == TocNodeKind.FRONT_MATTER &&
+                        (node.startPage < open.startPage || (node.startPage == open.startPage && node.startOffset < open.startOffset))
+                }
+                val pageText = pages.firstOrNull { it.number == open.startPage }?.text.orEmpty()
+                val prefix = if (open.startOffset in 1..pageText.length) pageText.substring(0, open.startOffset) else ""
+                val hasLeadingBoilerplate = prefix.isNotEmpty() && (
+                    ExplainClassifier.copyrightMarkerCount(prefix) >= 1 ||
+                        BookBoundaries.snapToCleanBodyOffset(pageText, 0, skipGutenbergHeader = true) > 0
+                    )
+                if (hasPrecedingFrontMatter || hasLeadingBoilerplate) BookPageAnchor(open.startPage, open.startOffset) else null
+            }
+        val pageTextByNum = if (firstBodyAnchor != null && firstBodyAnchor.offsetUtf16 > 0) {
+            pages.associate { it.number to it.text }
+        } else emptyMap()
         return sections.mapNotNull { section ->
             val resolved = section.blockIds.mapNotNull { bid ->
-                val block = byId[bid] ?: return@mapNotNull null
+                val rawBlock = byId[bid] ?: return@mapNotNull null
+                val block = if (firstBodyAnchor != null && rawBlock.page == firstBodyAnchor.importPage && firstBodyAnchor.offsetUtf16 > 0) {
+                    if (rawBlock.end <= firstBodyAnchor.offsetUtf16) return@mapNotNull null
+                    if (rawBlock.start < firstBodyAnchor.offsetUtf16) {
+                        val pageText = pageTextByNum[rawBlock.page]
+                        val sliceStart = firstBodyAnchor.offsetUtf16
+                        if (pageText != null && sliceStart < rawBlock.end && rawBlock.end <= pageText.length) {
+                            val sliced = pageText.substring(sliceStart, rawBlock.end)
+                            if (sliced.isBlank()) return@mapNotNull null
+                            rawBlock.copy(start = sliceStart, text = sliced)
+                        } else rawBlock
+                    } else rawBlock
+                } else rawBlock
                 if (!block.heading && block.text.length <= 150 && '\n' !in block.text && '\r' !in block.text &&
                     BookStructurePlanner.matchHeadingRule(block.text.trim(), false) != null
                 ) {

@@ -238,7 +238,7 @@ internal fun BookPageView(
     val clipboard = LocalClipboard.current
     val pageClipboard = remember(clipboard) { PageClipboard(clipboard) }
     val latestOnSelectText by rememberUpdatedState(onSelectText)
-    val topMargin = if (immersive) 18.dp else 52.dp
+    val topMargin = if (immersive) 14.dp else 52.dp
     val topMarginPx = with(density) { topMargin.toPx() }
     val paperBg = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
     var pointerActive by remember(state) { mutableStateOf(false) }
@@ -267,16 +267,15 @@ internal fun BookPageView(
         }
         val spread = visibleColumns > 1
         val sheetWidth = when {
-            immersive && spread -> maxWidth / visibleColumns
-            immersive -> minOf(maxWidth, 720.dp)
+            immersive -> maxWidth / visibleColumns
             !spread -> minOf(maxWidth, column + 128.dp)
             mode == BookPageMode.Spread -> minOf((maxWidth - 48.dp) / 2, column + 112.dp)
             else -> minOf(maxWidth / 2, column + 112.dp)
         }
-        val leftInset = if (immersive) minOf(10.dp, sheetWidth * 0.02f) else 64.dp
-        val rightInset = if (immersive) minOf(10.dp, sheetWidth * 0.02f) else if (spread) 48.dp else 64.dp
+        val leftInset = if (immersive) minOf(6.dp, sheetWidth * 0.01f) else 64.dp
+        val rightInset = if (immersive) minOf(6.dp, sheetWidth * 0.01f) else if (spread) 48.dp else 64.dp
         val widthPx = with(density) { (sheetWidth - leftInset - rightInset).roundToPx().coerceAtLeast(1) }
-        val bodyHeight = with(density) { (maxHeight - if (immersive) 22.dp else 116.dp).roundToPx().coerceAtLeast(1) }
+        val bodyHeight = with(density) { (maxHeight - if (immersive) 16.dp else 116.dp).roundToPx().coerceAtLeast(1) }
         val failed = remember(book.id, libraryDirectory) { mutableStateListOf<BookIllustration>() }
         val layoutPages = remember(book.pages, libraryDirectory, failed.toList()) {
             if (libraryDirectory != null && failed.isEmpty()) book.pages else book.pages.map { page ->
@@ -547,7 +546,7 @@ internal fun BookPageView(
                         val ignoreTurnGesture = rememberUpdatedState { downUptimeMs: Long ->
                             turnState.lastHandledPointerDownUptimeMs == downUptimeMs
                         }
-                        val turnMod = if (immersive && spread) Modifier.fillMaxSize() else Modifier.width(sheetWidth * visibleColumns).fillMaxHeight()
+                        val turnMod = if (immersive) Modifier.fillMaxSize() else Modifier.width(sheetWidth * visibleColumns).fillMaxHeight()
                         PageTurnView(turnState, paper = paper, style = turnStyle, columns = visibleColumns, handleKeys = false,
                             handleMouseDrag = false,
                             canMouseTurnAt = { pos ->
@@ -667,10 +666,11 @@ private fun Modifier.readingSpot(
  * 阅读信号 -> 原文锚点。点：点中那一行。拖选：选区第一个字所在那一行；左页拖到右页取左页按下点，
  * 右页往回拖到左页取左页抬起点；同页内取更靠上的那一端。
  */
-private fun spotAnchor(pages: List<BookLaidPage>, index: Int, multiColumn: Boolean, side: Int, down: Offset, up: Offset,
+internal fun spotAnchor(pages: List<BookLaidPage>, index: Int, multiColumn: Boolean, side: Int, down: Offset, up: Offset,
     dragged: Boolean, sheetWidthPx: Float, measurer: TextMeasurer, typography: BookPageTypography, widthPx: Int): BookPageAnchor? {
     fun at(i: Int, y: Float) = pages.getOrNull(i)?.anchorAtY(y.toInt().coerceAtLeast(0), measurer, typography, widthPx)
-    if (!dragged || !multiColumn) return at(index, down.y)
+    if (!dragged) return at(index, down.y)
+    if (!multiColumn) return at(index, minOf(down.y, up.y))
     val deltaCols = kotlin.math.floor(up.x / sheetWidthPx).toInt()
     return when {
         deltaCols > 0 -> at(index, down.y)
@@ -693,10 +693,12 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
     val colors = CoachTheme.colors
     val column = with(density) { widthPx.toDp() }
     val runningTitle = remember(book, page) { BookBoundaries.runningHeaderTitle(book, page) }
+    val compactHeader = topMargin < 44.dp
     DisableSelection { if (!page.opener && (spread && side == 0 || runningTitle.isNotEmpty())) Text(if (spread && side == 0) book.title else runningTitle,
-        Modifier.align(Alignment.TopStart).padding(start = inset, top = if (topMargin < 44.dp) 2.dp else 20.dp).width(column),
+        Modifier.align(Alignment.TopStart).padding(start = inset, top = if (compactHeader) 1.dp else 20.dp).width(column),
         textAlign = androidx.compose.ui.text.style.TextAlign.Center, color = colors.fgTertiary,
-        style = MaterialTheme.typography.labelSmall.copy(fontSize = CoachV7.Size.cap,
+        style = MaterialTheme.typography.labelSmall.copy(fontSize = if (compactHeader) 11.sp else CoachV7.Size.cap,
+            lineHeight = if (compactHeader) 12.sp else MaterialTheme.typography.labelSmall.lineHeight,
             fontWeight = androidx.compose.ui.text.font.FontWeight.Normal, letterSpacing = CoachV7.Tracking.cap), maxLines = 1) }
     val bodyTag = when (side) {
         0 -> "reader-text"

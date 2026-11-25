@@ -122,8 +122,8 @@ internal fun originalPdfSheets(
     immersive: Boolean = false,
 ): List<List<Int>> {
     val result = mutableListOf<List<Int>>()
-    val perPageChrome = if (immersive) 10f else 88f
-    val gutter = if (immersive) 4f else 48f
+    val perPageChrome = if (immersive) 3f else 88f
+    val gutter = if (immersive) 2f else 48f
     var index = 0
     while (index < pages.size) {
         val left = pages[index]
@@ -131,8 +131,8 @@ internal fun originalPdfSheets(
         val a = aspects[left] ?: FallbackPdfAspect
         val b = right?.let(aspects::get) ?: FallbackPdfAspect
         val spreadWidth = 2 * (maxOf(a, b) * imageHeight + perPageChrome) + gutter
-        // 沉浸式宽屏（含并排伴读态）只要双页总书页面积大于单页且总宽 >= 1000dp，就保持双页对开，避免打开伴读后退回单页导致书页面积骤降。
-        val canPair = if (immersive) width >= 1000f && width >= spreadWidth * 0.72f else width >= spreadWidth
+        // 沉浸式常见笔记本窗口（含 1128x828）与并排伴读态：只要双页总书页面积明显大于单页且总宽 >= 700dp，就保持双页对开。
+        val canPair = if (immersive) width >= 700f && width >= spreadWidth * 0.72f else width >= spreadWidth
         if (right != null && a <= 1f && b <= 1f && canPair) {
             result.add(listOf(left, right))
             index += 2
@@ -249,8 +249,8 @@ internal fun OriginalPdfReader(
             }
         }
     } else BoxWithConstraints(Modifier.fillMaxSize().background(if (immersive) paper else colors.bgCanvas), contentAlignment = Alignment.Center) {
-        val top = if (immersive) 4.dp else minOf(52.dp, maxHeight * .12f)
-        val bottom = if (immersive) 6.dp else minOf(64.dp, maxHeight * .14f)
+        val top = if (immersive) 2.dp else minOf(52.dp, maxHeight * .12f)
+        val bottom = if (immersive) 2.dp else minOf(64.dp, maxHeight * .14f)
         val imageHeight = (maxHeight - top - bottom).coerceAtLeast(1.dp)
         val sheets = remember(pageNumbers, aspects, maxWidth, imageHeight, immersive) {
             originalPdfSheets(pageNumbers, aspects, maxWidth.value, imageHeight.value, immersive = immersive)
@@ -260,7 +260,7 @@ internal fun OriginalPdfReader(
         val columns = sheets[sheet].size
         val maxAspect = sheets[sheet].maxOf { aspects[it] ?: FallbackPdfAspect }
         val sheetWidth = if (immersive) {
-            minOf(maxWidth, (imageHeight * maxAspect + if (columns == 2) 10.dp else 12.dp) * columns)
+            minOf(maxWidth, (imageHeight * maxAspect + if (columns == 2) 3.dp else 4.dp) * columns)
         } else {
             minOf(maxWidth, (imageHeight * maxAspect + if (columns == 2) 88.dp else 128.dp) * columns)
         }
@@ -293,8 +293,8 @@ internal fun OriginalPdfReader(
                 val right = columns == 2 && slot % columns == 1
                 BoxWithConstraints(Modifier.fillMaxSize().testTag(if (right) "original-pdf-right" else "original-pdf-left"),
                     contentAlignment = Alignment.Center) {
-                    val outside = if (immersive) 4.dp else minOf(64.dp, maxWidth * .16f)
-                    val inside = if (immersive) (if (columns == 2) 2.dp else 4.dp) else (if (columns == 2) minOf(24.dp, maxWidth * .08f) else outside)
+                    val outside = if (immersive) 2.dp else minOf(64.dp, maxWidth * .16f)
+                    val inside = if (immersive) (if (columns == 2) 1.dp else 2.dp) else (if (columns == 2) minOf(24.dp, maxWidth * .08f) else outside)
                     val start = if (right) inside else outside
                     val end = if (right) outside else inside
                     val width = minOf(maxWidth - start - end, imageHeight * (aspects[number] ?: FallbackPdfAspect))

@@ -311,4 +311,65 @@ class BookPageLayoutTest {
         assertTrue(placed.widthPx <= 594)
         assertEquals(0, placeBookFigure(block.copy(kind = BookFigureBlock.Kind.Formula), 594, 700, 100).pageDelta)
     }
+
+    @Test fun immersiveLaptopColumnsAndPdfPairingScaleAcrossLaptopWidths() {
+        // 1128x828 @ 150% (~738dp client) & 980dp window: single full-bleed column, no 720dp nesting box
+        assertEquals(1, bookImmersiveColumns(738f, 684f, BookPageMode.Auto, 1))
+        assertEquals(1, bookImmersiveColumns(980f, 684f, BookPageMode.Auto, 1))
+        // 1536x864 @ 125% (~1213dp), 1920x1080 @ 150% (~1266dp), 1366x768 @ 100% (~1350dp): 2 columns <= 720dp each
+        for (w in listOf(1080f, 1213f, 1266f, 1350f, 1440f)) {
+            val cols = bookImmersiveColumns(w, 684f, BookPageMode.Auto, 1)
+            assertEquals(2, cols, "widthDp=$w should use 2 columns")
+            assertTrue(w / cols <= 720.01f, "widthDp=$w column width ${w / cols} exceeds 720dp")
+        }
+        // 1920dp wide screens: 3 columns <= 720dp each
+        assertEquals(3, bookImmersiveColumns(1920f, 684f, BookPageMode.Auto, 1))
+        // Hysteresis keeps 2 columns slightly below 1080dp when shrinking
+        assertEquals(2, bookImmersiveColumns(1060f, 684f, BookPageMode.Auto, 2))
+        assertEquals(1, bookImmersiveColumns(1050f, 684f, BookPageMode.Auto, 2))
+        assertEquals(1, bookImmersiveColumns(1600f, 684f, BookPageMode.Single, 2))
+
+        // Immersive original PDF pairs 2 portrait pages on 1128x828 (738x511dp) and drops to 1 when TOC narrows width
+        val aspects = mapOf(31 to 0.7683f, 32 to 0.7683f)
+        assertEquals(listOf(listOf(31, 32)), originalPdfSheets(listOf(31, 32), aspects, 738f, 511f, immersive = true))
+        assertEquals(listOf(listOf(31), listOf(32)), originalPdfSheets(listOf(31, 32), aspects, 460f, 511f, immersive = true))
+    }
+
+    @Test fun singleColumnUpwardDragSpotAnchorUsesTopEndOfSelection() = runSkikoComposeUiTest(density = Density(1f)) {
+        val raw = (1..25).joinToString("\n\n") { "Paragraph $it discusses health economics demand elasticity and empirical bounds." }
+        var pages = emptyList<BookLaidPage>()
+        var capturedMeasurer: TextMeasurer? = null
+        var capturedType: BookPageTypography? = null
+        setContent { CoachTheme {
+            val measurer = rememberTextMeasurer()
+            val type = BookPageTypography(
+                MaterialTheme.typography.bodyLarge.copy(fontSize = 18.sp, lineHeight = 33.sp),
+                SpanStyle(), SpanStyle(), 40.sp, 32.sp, 12.sp, 32.sp,
+            )
+            capturedMeasurer = measurer
+            capturedType = type
+            pages = BookPageLayouter(measurer, LocalDensity.current, type, immersive = true)
+                .layout(listOf(BookPage(32, raw)), 640, 500)
+        } }
+        waitForIdle()
+        val measurer = assertNotNull(capturedMeasurer)
+        val type = assertNotNull(capturedType)
+        assertTrue(pages.isNotEmpty())
+        val topAnchor = spotAnchor(
+            pages, 0, multiColumn = false, side = 0,
+            down = androidx.compose.ui.geometry.Offset(200f, 360f),
+            up = androidx.compose.ui.geometry.Offset(120f, 40f),
+            dragged = true, sheetWidthPx = 680f, measurer = measurer, typography = type, widthPx = 640,
+        )
+        val pressAnchor = spotAnchor(
+            pages, 0, multiColumn = false, side = 0,
+            down = androidx.compose.ui.geometry.Offset(200f, 360f),
+            up = androidx.compose.ui.geometry.Offset(200f, 360f),
+            dragged = false, sheetWidthPx = 680f, measurer = measurer, typography = type, widthPx = 640,
+        )
+        val expectedTop = pages[0].anchorAtY(40, measurer, type, 640)
+        assertEquals(expectedTop, topAnchor, "single-column upward drag must record top end (up.y), not press point (down.y)")
+        assertNotNull(pressAnchor)
+        assertTrue(topAnchor!!.offsetUtf16 < pressAnchor.offsetUtf16, "top anchor offset ${topAnchor.offsetUtf16} must precede press offset ${pressAnchor.offsetUtf16}")
+    }
 }

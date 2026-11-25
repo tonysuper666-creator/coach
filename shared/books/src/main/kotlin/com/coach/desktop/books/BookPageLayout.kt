@@ -25,10 +25,11 @@ internal fun bookSpread(widthDp: Float, columnDp: Float, mode: BookPageMode, was
     BookPageMode.Auto -> widthDp >= 2 * (columnDp + 112) + 48 - if (wasSpread) 24 else 0
 }
 
-/** 沉浸式宽屏达到对开阈值后按每栏 <= 720dp 连续分栏，占满可用宽度。 */
+/** 沉浸式纯读按最小可读栏宽（约 540dp/栏）自动分栏，且每栏不超过 720dp，占满整个可用阅读视口。 */
 internal fun bookImmersiveColumns(widthDp: Float, columnDp: Float, mode: BookPageMode, wasColumns: Int): Int {
     if (mode == BookPageMode.Single) return 1
-    if (!bookSpread(widthDp, columnDp, mode, wasColumns > 1)) return 1
+    val twoColumnMin = if (mode == BookPageMode.Spread) 760f else (1080f - if (wasColumns > 1) 24f else 0f)
+    if (widthDp < twoColumnMin) return 1
     return maxOf(2, kotlin.math.ceil(widthDp / 720f).toInt())
 }
 

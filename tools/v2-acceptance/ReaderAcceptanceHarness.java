@@ -136,7 +136,11 @@ public final class ReaderAcceptanceHarness {
             int[][] profiles = { {1920, 1080, 100}, {2880, 1800, 150} };
             captureMeasureStatesSceneAll(flavor, libSeed, outDir, profiles, targetPage);
         } else if ("win32".equals(surface)) {
-            captureMeasureStatesWin32(flavor, libSeed, outDir, targetPage);
+            boolean customWindow = args.length >= 8;
+            int logicalW = customWindow ? Integer.parseInt(args[6]) : 752;
+            int logicalH = customWindow ? Integer.parseInt(args[7]) : 552;
+            String resTag = args.length >= 9 ? args[8] : "win32";
+            captureMeasureStatesWin32(flavor, libSeed, outDir, targetPage, logicalW, logicalH, resTag, !customWindow);
         } else {
             throw new IllegalArgumentException("Unknown surface: " + surface);
         }
@@ -265,13 +269,13 @@ public final class ReaderAcceptanceHarness {
     }
 
     private static void captureMeasureStatesWin32(
-        String flavor, Path libSeed, Path outDir, int targetPage
+        String flavor, Path libSeed, Path outDir, int targetPage, int logicalW, int logicalH, String resTag, boolean includeOverlays
     ) throws Exception {
-        // Real OS window at 752x552 (winbox native console bounds)
+        // Real OS window at requested logical dimensions (default 752x552 = 1128x828 @ 150%)
         Path libOrig = copyTempDir(libSeed, "w-orig-");
         try {
             TextbookController c = openReaderAt(libOrig, targetPage, false);
-            ComposeWindow win = openHostWindow(c, 24, 24, 752, 552);
+            ComposeWindow win = openHostWindow(c, 24, 24, logicalW, logicalH);
             try {
                 Thread.sleep(2800);
                 waitFor(6000, () -> !hasTextContaining(win, "正在加载页面"));
@@ -279,26 +283,28 @@ public final class ReaderAcceptanceHarness {
                     dismissV2HudIfVisibleWin32(win);
                     waitFor(6000, () -> !hasTextContaining(win, "正在加载页面"));
                 }
-                dumpWin32(win, outDir, flavor, "win32", "pure_read_original");
+                dumpWin32(win, outDir, flavor, resTag, "pure_read_original");
 
-                if (isV2Flavor(flavor)) {
-                    revealV2HudWin32(win);
-                    clickTagWin32(win, "immersive-companion-toggle");
-                    Thread.sleep(700);
-                    dumpWin32(win, outDir, flavor, "win32", "companion_initial");
-                    clickTagWin32(win, "companion-close");
-                    Thread.sleep(400);
-                    revealV2HudWin32(win);
-                    clickTagWin32(win, "v7-directory-toggle");
-                    waitFor(4000, () -> findNodeByTag(win, "v7-directory-drawer") != null);
-                    Thread.sleep(300);
-                    dumpWin32(win, outDir, flavor, "win32", "toc_expanded");
-                } else {
-                    waitFor(5000, () -> isNodeEnabled(findNodeByTag(win, "v7-directory-toggle")));
-                    clickTagWin32(win, "v7-directory-toggle");
-                    waitFor(4000, () -> findNodeByTag(win, "v7-directory-drawer") != null);
-                    Thread.sleep(400);
-                    dumpWin32(win, outDir, flavor, "win32", "toc_expanded");
+                if (includeOverlays) {
+                    if (isV2Flavor(flavor)) {
+                        revealV2HudWin32(win);
+                        clickTagWin32(win, "immersive-companion-toggle");
+                        Thread.sleep(700);
+                        dumpWin32(win, outDir, flavor, resTag, "companion_initial");
+                        clickTagWin32(win, "companion-close");
+                        Thread.sleep(400);
+                        revealV2HudWin32(win);
+                        clickTagWin32(win, "v7-directory-toggle");
+                        waitFor(4000, () -> findNodeByTag(win, "v7-directory-drawer") != null);
+                        Thread.sleep(300);
+                        dumpWin32(win, outDir, flavor, resTag, "toc_expanded");
+                    } else {
+                        waitFor(5000, () -> isNodeEnabled(findNodeByTag(win, "v7-directory-toggle")));
+                        clickTagWin32(win, "v7-directory-toggle");
+                        waitFor(4000, () -> findNodeByTag(win, "v7-directory-drawer") != null);
+                        Thread.sleep(400);
+                        dumpWin32(win, outDir, flavor, resTag, "toc_expanded");
+                    }
                 }
             } finally {
                 disposeWindow(win);
@@ -310,7 +316,7 @@ public final class ReaderAcceptanceHarness {
         Path libText = copyTempDir(libSeed, "w-text-");
         try {
             TextbookController c = openReaderAt(libText, targetPage, true);
-            ComposeWindow win = openHostWindow(c, 24, 24, 752, 552);
+            ComposeWindow win = openHostWindow(c, 24, 24, logicalW, logicalH);
             try {
                 Thread.sleep(3600);
                 waitFor(6000, () -> !hasTextContaining(win, "正在加载")
@@ -322,7 +328,7 @@ public final class ReaderAcceptanceHarness {
                         && !hasTextContaining(win, "正在排版")
                         && findNodeByTag(win, "book-page-loading") == null);
                 }
-                dumpWin32(win, outDir, flavor, "win32", "pure_read_text");
+                dumpWin32(win, outDir, flavor, resTag, "pure_read_text");
             } finally {
                 disposeWindow(win);
             }
@@ -330,14 +336,14 @@ public final class ReaderAcceptanceHarness {
             deleteQuietly(libText);
         }
 
-        if ("111".equals(flavor)) {
+        if (includeOverlays && "111".equals(flavor)) {
             Path libGuided = copyTempDir(libSeed, "w-guided-");
             try {
                 TextbookController c = openGuided(libGuided);
-                ComposeWindow win = openHostWindow(c, 24, 24, 752, 552);
+                ComposeWindow win = openHostWindow(c, 24, 24, logicalW, logicalH);
                 try {
                     Thread.sleep(2000);
-                    dumpWin32(win, outDir, flavor, "win32", "guided");
+                    dumpWin32(win, outDir, flavor, resTag, "guided");
                 } finally {
                     disposeWindow(win);
                 }
@@ -1905,8 +1911,8 @@ public final class ReaderAcceptanceHarness {
         window.renderImmediately();
         double scale = window.getGraphicsConfiguration().getDefaultTransform().getScaleX();
         BufferedImage output = new BufferedImage(
-            (int) Math.ceil(window.getWidth() * scale),
-            (int) Math.ceil(window.getHeight() * scale),
+            (int) Math.round(window.getWidth() * scale),
+            (int) Math.round(window.getHeight() * scale),
             BufferedImage.TYPE_INT_RGB
         );
         Graphics2D g = output.createGraphics();

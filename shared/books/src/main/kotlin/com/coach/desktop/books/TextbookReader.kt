@@ -814,6 +814,10 @@ internal fun TextbookReader(
         notesOpen = false
         askInputFocused = false
         practiceInputFocused = false
+        if (companionTab == ReaderCompanionTab.ASK && inlineThread != null) {
+            textSelection = null
+            pdf.selection = null
+        }
         inlineThread = inlineThread?.copy(askingOpen = false)
         focusManager.clearFocus()
     }

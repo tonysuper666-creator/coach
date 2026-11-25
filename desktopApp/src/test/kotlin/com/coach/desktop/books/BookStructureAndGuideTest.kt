@@ -272,24 +272,28 @@ class BookStructureAndGuideTest {
 
             // 3) 真实阅读器文字版拖选文字自动浮出工具条 + 4) 点击「讲讲」就地回答并连续追问（共用整节上下文）
             library.saveTextView(book.id, true)
-            runSkikoComposeUiTest(size = Size(980f, 820f), density = Density(1f)) {
+            // Standard Windows 150% scaling uses a full-height side drawer.
+            runSkikoComposeUiTest(size = Size(1920f, 1080f), density = Density(1.5f)) {
                 var activePage by mutableStateOf(secondSection.firstPage)
+                var readerWidth by mutableStateOf(1280.dp)
                 setContent {
                     val focus = remember { FocusRequester() }
                     CoachTheme(darkTheme = false) {
                         CompositionLocalProvider(LocalReadingAutoGuide provides true) {
-                            TextbookReader(
-                                ui = LibraryUi(library.catalog(), book, screen = BookScreen.READER, page = activePage),
-                                library = library,
-                                support = UnconnectedBookLearningSupport,
-                                practiceSource = null,
-                                pageFocus = focus,
-                                onNoteSession = {},
-                                onPage = { activePage = it },
-                                onBack = {},
-                                onLearn = {},
-                                explainProvider = explainer,
-                            )
+                            Box(Modifier.width(readerWidth).fillMaxHeight()) {
+                                TextbookReader(
+                                    ui = LibraryUi(library.catalog(), book, screen = BookScreen.READER, page = activePage),
+                                    library = library,
+                                    support = UnconnectedBookLearningSupport,
+                                    practiceSource = null,
+                                    pageFocus = focus,
+                                    onNoteSession = {},
+                                    onPage = { activePage = it },
+                                    onBack = {},
+                                    onLearn = {},
+                                    explainProvider = explainer,
+                                )
+                            }
                         }
                     }
                 }
@@ -332,6 +336,12 @@ class BookStructureAndGuideTest {
                 assertEquals(1, explainer.selectionCalls.last().third.size, "追问必须携带上一轮问答历史")
                 assertTrue(onNodeWithTag("inline-explain-turn-0").fetchSemanticsNode().boundsInRoot.height > 20f, "第一轮回答必须可见")
                 assertTrue(onNodeWithTag("inline-explain-turn-1").fetchSemanticsNode().boundsInRoot.height > 20f, "追问回答必须可见")
+                // The side drawer scrolls history independently of its composer. The narrow
+                // presentation moves the same input below the page with room for a full line.
+                onNodeWithTag("inline-followup-input").assertIsDisplayed()
+                runOnIdle { readerWidth = 900.dp }
+                waitForIdle()
+                onNodeWithTag("inline-explain-turn-1").assertExists()
                 val inputBounds = onNodeWithTag("inline-followup-input").fetchSemanticsNode().boundsInRoot
                 assertTrue(inputBounds.width > 400f && inputBounds.height < 120f, "追问输入框应为横向单行输入：$inputBounds")
                 waitForIdle()

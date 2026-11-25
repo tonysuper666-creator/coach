@@ -118,17 +118,23 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         runCatching { uploadCoordinator.retryBook(localBookId) }
     }
 
-    private fun enqueueBookForUnifiedUpload(book: Textbook) {
+    private fun enqueueBookForUnifiedUpload(book: Textbook, initiatingAccountKey: String? = null) {
         if (unifiedUploadClient == null) return
         backgroundScope.launch {
             runCatching {
-                uploadCoordinator.enqueueBook(
-                    localBookId = book.id,
-                    fileSha256 = book.id,
-                    format = book.format,
-                    title = book.title,
-                )
-                uploadCoordinator.syncOnce()
+                val accountKey = initiatingAccountKey ?: uploadCoordinator.resolveInitiatingAccountKey()
+                if (accountKey != null) {
+                    uploadCoordinator.enqueueBookForAccount(
+                        accountKey = accountKey,
+                        localBookId = book.id,
+                        fileSha256 = book.id,
+                        format = book.format,
+                        title = book.title,
+                    )
+                    if (accountKey == uploadCoordinator.currentAccountKey()) {
+                        uploadCoordinator.syncOnce()
+                    }
+                }
             }
         }
     }
@@ -288,12 +294,14 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
 
     private fun importMultipleStandalone(paths: List<Path>, onStaged: () -> Unit = {}): Job = backgroundScope.launch {
         try {
+            val initiatingAccountKey = uploadCoordinator.currentAccountKey()
+                ?: runCatching { uploadCoordinator.resolveInitiatingAccountKey() }.getOrNull()
             action {
                 var lastBook: Textbook? = null
                 for (path in paths) {
                     val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
                     val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
-                    enqueueBookForUnifiedUpload(staged.book)
+                    enqueueBookForUnifiedUpload(staged.book, initiatingAccountKey)
                     lastBook = staged.book
                 }
                 val catalog = library.catalog()
@@ -336,6 +344,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         onStaged: () -> Unit = {},
     ): Job = backgroundScope.launch {
         try {
+            val initiatingAccountKey = uploadCoordinator.currentAccountKey()
+                ?: runCatching { uploadCoordinator.resolveInitiatingAccountKey() }.getOrNull()
             action {
                 val cleanTitle = title.trim()
                 require(cleanTitle.isNotEmpty()) { if (kind == CollectionKind.COURSE) "请填写课程名。" else "请填写书单名。" }
@@ -352,7 +362,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     if (kind == CollectionKind.COURSE && !staged.alreadyExisted) {
                         library.setBookShowStandalone(staged.book.id, false)
                     }
-                    enqueueBookForUnifiedUpload(staged.book)
+                    enqueueBookForUnifiedUpload(staged.book, initiatingAccountKey)
                     importedBooks += staged.book
                 }
                 val allIds = (existingBookIds + importedBooks.map { it.id }).distinct()
@@ -477,13 +487,15 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         onStaged: () -> Unit = {},
     ): Job = backgroundScope.launch {
         try {
+            val initiatingAccountKey = uploadCoordinator.currentAccountKey()
+                ?: runCatching { uploadCoordinator.resolveInitiatingAccountKey() }.getOrNull()
             action {
                 val now = System.currentTimeMillis()
                 val importedIds = mutableListOf<String>()
                 for (path in newFiles) {
                     val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
                     val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
-                    enqueueBookForUnifiedUpload(staged.book)
+                    enqueueBookForUnifiedUpload(staged.book, initiatingAccountKey)
                     importedIds += staged.book.id
                 }
                 val currentMembers = library.collectionMaterials(collectionId)
@@ -641,6 +653,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             return Job().apply { complete() }
         }
         val startedAtNs = System.nanoTime()
+        val capturedAccountAtLaunch = uploadCoordinator.currentAccountKey()
         val control = BookImportControl(
             progress = { progress -> mutable.update { it.copy(importing = progress) } },
         )
@@ -648,6 +661,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val job = backgroundScope.launch {
             var staged: TextbookLibrary.StagedBookImport? = null
             var stagedNotified = false
+            var initiatingAccountKey: String? = capturedAccountAtLaunch
             fun releaseOnce() {
                 if (!stagedNotified) {
                     stagedNotified = true
@@ -655,6 +669,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 }
             }
             try {
+                if (initiatingAccountKey == null) {
+                    initiatingAccountKey = runCatching { uploadCoordinator.resolveInitiatingAccountKey() }.getOrNull()
+                }
                 mutable.update { it.copy(error = null, importing = BookImportProgress(0, 0)) }
                 val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
                 val result = if (useTier0) {
@@ -665,7 +682,21 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 staged = result
                 releaseOnce()
                 val book = result.book
-                enqueueBookForUnifiedUpload(book)
+                control.check()
+                if (initiatingAccountKey != null && unifiedUploadClient != null) {
+                    runCatching {
+                        uploadCoordinator.enqueueBookForAccount(
+                            accountKey = initiatingAccountKey,
+                            localBookId = book.id,
+                            fileSha256 = book.id,
+                            format = book.format,
+                            title = book.title,
+                        )
+                    }
+                    if (!control.isCancelled() && initiatingAccountKey == uploadCoordinator.currentAccountKey()) {
+                        syncBookUploads()
+                    }
+                }
                 if (book.indexState != "READY") {
                     actions.withLock {
                         library.closeReview()
@@ -807,14 +838,14 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 runOcrLoop(book.id, control, deleteOnEmptyFailure = !result.alreadyExisted)
             } catch (_: BookImportCancelled) {
                 releaseOnce()
-                handleCancelledImport(staged?.book?.id)
+                handleCancelledImport(staged?.book?.id, initiatingAccountKey)
             } catch (cancel: CancellationException) {
                 releaseOnce()
-                handleCancelledImport(staged?.book?.id)
+                handleCancelledImport(staged?.book?.id, initiatingAccountKey)
                 throw cancel
             } catch (failure: Exception) {
                 releaseOnce()
-                handleFailedImport(staged?.book?.id, staged?.alreadyExisted == false, failure)
+                handleFailedImport(staged?.book?.id, staged?.alreadyExisted == false, failure, initiatingAccountKey)
             } finally {
                 releaseOnce()
                 if (activeImport === control) {
@@ -829,11 +860,14 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     }
 
     private fun resumePendingOcrInBackground(bookId: String): Job {
+        val capturedAccountAtStart = uploadCoordinator.currentAccountKey()
         val control = BookImportControl(
             progress = { progress -> mutable.update { it.copy(importing = progress) } },
         )
         activeImport = control
         val job = backgroundScope.launch {
+            val initiatingAccountKey = capturedAccountAtStart
+                ?: runCatching { uploadCoordinator.resolveInitiatingAccountKey() }.getOrNull()
             try {
                 val book = library.book(bookId)
                 val totalPages = book.pages.size
@@ -856,12 +890,12 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     runOcrLoop(bookId, control, deleteOnEmptyFailure = false)
                 }
             } catch (_: BookImportCancelled) {
-                handleCancelledImport(bookId)
+                handleCancelledImport(bookId, initiatingAccountKey)
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
                 runCatching { library.clearPendingOcr(bookId) }
-                handleFailedImport(bookId, deleteIfNoOcrYet = false, failure = failure)
+                handleFailedImport(bookId, deleteIfNoOcrYet = false, failure = failure, initiatingAccountKey = initiatingAccountKey)
             } finally {
                 if (activeImport === control) {
                     activeImport = null
@@ -902,9 +936,13 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
-    private suspend fun handleCancelledImport(bookId: String?) = withContext(NonCancellable) {
+    private suspend fun handleCancelledImport(bookId: String?, initiatingAccountKey: String?) = withContext(NonCancellable) {
         if (bookId != null) {
-            runCatching { library.deleteBook(bookId, uploadCoordinator.currentAccountKey()) }
+            runCatching { library.deleteBook(bookId, initiatingAccountKey) }
+            runCatching { uploadCoordinator.refreshCurrentAccountStatuses() }
+            if (initiatingAccountKey != null && initiatingAccountKey == uploadCoordinator.currentAccountKey() && unifiedUploadClient != null) {
+                syncBookUploads()
+            }
         }
         val catalog = runCatching { library.catalog() }.getOrElse { emptyList() }
         val fallbackBook = catalog.firstOrNull()?.let { runCatching { library.book(it.id) }.getOrNull() }
@@ -931,13 +969,22 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
-    private suspend fun handleFailedImport(bookId: String?, deleteIfNoOcrYet: Boolean, failure: Exception) = withContext(NonCancellable) {
+    private suspend fun handleFailedImport(
+        bookId: String?,
+        deleteIfNoOcrYet: Boolean,
+        failure: Exception,
+        initiatingAccountKey: String?,
+    ) = withContext(NonCancellable) {
         val message = failure.message.takeIf { failure is IllegalArgumentException && ReadableText.readsAsChinese(it) }
             ?: "暂时无法读取或保存教材，请确认文件完整、未加密，然后重试。"
         val shouldDelete = bookId != null && deleteIfNoOcrYet &&
             runCatching { library.book(bookId).pages.none { it.ocr } }.getOrDefault(false)
         if (shouldDelete) {
-            runCatching { library.deleteBook(checkNotNull(bookId), uploadCoordinator.currentAccountKey()) }
+            runCatching { library.deleteBook(checkNotNull(bookId), initiatingAccountKey) }
+            runCatching { uploadCoordinator.refreshCurrentAccountStatuses() }
+            if (initiatingAccountKey != null && initiatingAccountKey == uploadCoordinator.currentAccountKey() && unifiedUploadClient != null) {
+                syncBookUploads()
+            }
         }
         val catalog = runCatching { library.catalog() }.getOrElse { emptyList() }
         val fallbackBook = catalog.firstOrNull()?.let { runCatching { library.book(it.id) }.getOrNull() }
@@ -1949,6 +1996,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
 
     fun addMaterialsToCourse(courseId: String, files: List<Path>, onStaged: () -> Unit = {}): Job = backgroundScope.launch {
         try {
+            val initiatingAccountKey = uploadCoordinator.currentAccountKey()
+                ?: runCatching { uploadCoordinator.resolveInitiatingAccountKey() }.getOrNull()
             action {
                 val importedIds = mutableListOf<String>()
                 val preRejected = mutableListOf<String>()
@@ -1961,7 +2010,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     val useTier0 = library.lazyPdfExtras && fileName.endsWith(".pdf", ignoreCase = true)
                     val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
                     if (!staged.alreadyExisted) library.setBookShowStandalone(staged.book.id, false)
-                    enqueueBookForUnifiedUpload(staged.book)
+                    enqueueBookForUnifiedUpload(staged.book, initiatingAccountKey)
                     importedIds += staged.book.id
                 }
                 val (detail, rejected) = library.withCourseDatabase { db ->

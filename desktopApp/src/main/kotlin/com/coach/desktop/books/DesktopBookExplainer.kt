@@ -480,6 +480,28 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
                     http.close()
                 }
             }
+
+            override suspend fun deleteBook(shelfBookId: String): UnifiedBookDeleteOutcome {
+                ensurePinned()
+                val http = CourseHttp(pinned.serverUrl, pinned.credentials.deviceId, pinned.credentials.token, "library")
+                return try {
+                    val reply = http.deleteUnifiedBook(shelfBookId)
+                    ensurePinned()
+                    when {
+                        reply.statusCode == 401 -> {
+                            markRevoked()
+                            UnifiedBookDeleteOutcome.Unauthorized
+                        }
+                        reply.code == "not_found" -> UnifiedBookDeleteOutcome.NotFound
+                        reply.statusCode == 404 || reply.code == "unsupported" -> UnifiedBookDeleteOutcome.UnsupportedServer
+                        reply.code == "offline" -> UnifiedBookDeleteOutcome.Offline
+                        reply.statusCode in 200..299 -> UnifiedBookDeleteOutcome.Deleted
+                        else -> UnifiedBookDeleteOutcome.Failed(reply.error ?: "解绑失败", reply.retryable)
+                    }
+                } finally {
+                    http.close()
+                }
+            }
         }
 
         override suspend fun activeAccountKey(): String? = currentIdentity()?.let(::fallbackAccountKey)
@@ -500,5 +522,8 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
 
         override suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome =
             openSession()?.fetchStatus(shelfBookId) ?: UnifiedBookStatusOutcome.Unauthorized
+
+        override suspend fun deleteBook(shelfBookId: String): UnifiedBookDeleteOutcome =
+            openSession()?.deleteBook(shelfBookId) ?: UnifiedBookDeleteOutcome.Unauthorized
     }
 }

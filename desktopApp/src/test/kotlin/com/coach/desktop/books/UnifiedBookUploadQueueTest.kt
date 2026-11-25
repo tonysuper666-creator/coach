@@ -50,7 +50,10 @@ class UnifiedBookUploadQueueTest {
     ) : UnifiedBookRemoteClient {
         var uploadCalls = 0
         var statusCalls = 0
+        var deleteCalls = 0
         var lastUploadedFile: Path? = null
+        val deletedShelfBookIds = mutableListOf<String>()
+        var nextDeleteOutcome: UnifiedBookDeleteOutcome = UnifiedBookDeleteOutcome.Deleted
 
         override suspend fun activeAccountKey(): String? = accountKey
         override suspend fun checkCapability(): UnifiedBookCapability = capability
@@ -74,6 +77,12 @@ class UnifiedBookUploadQueueTest {
         override suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome {
             statusCalls++
             return nextStatusOutcome
+        }
+
+        override suspend fun deleteBook(shelfBookId: String): UnifiedBookDeleteOutcome {
+            deleteCalls++
+            deletedShelfBookIds += shelfBookId
+            return nextDeleteOutcome
         }
     }
 
@@ -351,10 +360,24 @@ class UnifiedBookUploadQueueTest {
     fun cancelImportDuringAccountSwitchWithoutActiveAccountPreservesAllAccountsRemoteRecords() = runBlocking {
         val root = Files.createTempDirectory("coach-upload-cancel-switch-")
         try {
-            val lib = TextbookLibrary(root.resolve("library"))
+            val lib = TextbookLibrary(
+                root.resolve("library"),
+                ocr = BookOcr { _, control ->
+                    while (!control.isCancelled()) Thread.sleep(10)
+                    control.check()
+                    ""
+                },
+            )
             val sharedBook = lib.importBook(createSampleTxt(root, "shared.txt", "Chapter 1\nShared remote shelf textbook."))
             val secondBook = lib.importBook(createSampleTxt(root, "second.txt", "Chapter 1\nSecond remote shelf textbook."))
             val unsyncedBook = lib.importBook(createSampleTxt(root, "unsynced.txt", "Chapter 1\nLocal unsynced draft."))
+            val scannedDraft = createSampleTxt(root, "pending-scan.png", "") // handled below via tiny image
+            Files.deleteIfExists(scannedDraft)
+            val imageFile = root.resolve("pending-scan.png")
+            val raster = java.awt.image.BufferedImage(32, 32, java.awt.image.BufferedImage.TYPE_BYTE_GRAY)
+            ImageIO.write(raster, "png", imageFile.toFile())
+            raster.flush()
+
             val remoteShelfRecords = linkedMapOf(
                 ("sable-alpha" to "sb_aaaaaaaaaaaaaaaaaaaaaaaa") to sharedBook.id,
                 ("sable-beta" to "sb_bbbbbbbbbbbbbbbbbbbbbbbb") to sharedBook.id,
@@ -374,7 +397,12 @@ class UnifiedBookUploadQueueTest {
                     onProgress: (Int) -> Unit,
                 ): UnifiedBookUploadOutcome {
                     val account = requireNotNull(activeKey)
-                    val shelfId = remoteShelfRecords.entries.first { it.key.first == account && it.value == sha256 }.key.second
+                    val shelfId = remoteShelfRecords.entries
+                        .firstOrNull { it.key.first == account && it.value == sha256 }
+                        ?.key?.second
+                        ?: "sb_${account.takeLast(4).padStart(4, '0')}_${sha256.take(19)}".also {
+                            remoteShelfRecords[account to it] = sha256
+                        }
                     return UnifiedBookUploadOutcome.Accepted(
                         shelfBookId = shelfId,
                         sha256 = sha256,
@@ -386,11 +414,19 @@ class UnifiedBookUploadQueueTest {
 
                 override suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome {
                     val account = activeKey ?: return UnifiedBookStatusOutcome.Unauthorized
-                    return if ((account to shelfBookId) in remoteShelfRecords) {
+                    return if ((account to shelfIdKey(shelfBookId)) in remoteShelfRecords) {
                         UnifiedBookStatusOutcome.Ready(BookUploadState.QUEUED, 0, "已排队，等待整理")
                     } else {
                         UnifiedBookStatusOutcome.NotFound
                     }
+                }
+
+                private fun shelfIdKey(id: String) = id
+
+                override suspend fun deleteBook(shelfBookId: String): UnifiedBookDeleteOutcome {
+                    val account = activeKey ?: return UnifiedBookDeleteOutcome.Unauthorized
+                    val removed = remoteShelfRecords.remove(account to shelfBookId) != null
+                    return if (removed) UnifiedBookDeleteOutcome.Deleted else UnifiedBookDeleteOutcome.NotFound
                 }
             }
             val controller = TextbookController(lib).apply { unifiedUploadClient = remote }
@@ -412,42 +448,224 @@ class UnifiedBookUploadQueueTest {
 
             // Simulate account switch where active account cannot be resolved (currentAccountKey() == null).
             activeKey = null
-            controller.onUploadIdentityChanged(null)
+            controller.onUploadIdentityChanged(null)?.join()
             assertNull(coordinator.currentAccountKey())
 
-            // Cancelling import / deleting local books while account is unavailable only touches local storage.
-            lib.deleteBook(sharedBook.id, initiatingAccountKey = coordinator.currentAccountKey())
-            lib.deleteBook(unsyncedBook.id, initiatingAccountKey = coordinator.currentAccountKey())
-            // Local delete with an explicit account key also leaves remote shelf records untouched.
-            lib.deleteBook(secondBook.id, initiatingAccountKey = "sable-beta")
+            // Cancelling an import started during account switch (no active account) must NOT create remote unbinds.
+            val importJob = launch(Dispatchers.Default) {
+                controller.importBook(imageFile)
+            }
+            while (controller.state.value.importing?.recognizing != true) {
+                kotlinx.coroutines.delay(10)
+            }
+            controller.cancelImport()
+            importJob.join()
+
+            // Local deletes when initiating account is unknown (null) also preserve all remote records and unsynced originals.
+            lib.deleteBook(sharedBook.id, initiatingAccountKey = null)
+            lib.deleteBook(secondBook.id, initiatingAccountKey = null)
+            lib.deleteBook(unsyncedBook.id, initiatingAccountKey = null)
 
             assertTrue(lib.catalog().isEmpty(), "Local books should be deleted from local catalog")
+            assertNotNull(lib.originalFileIfPresent(unsyncedBook.id, unsyncedBook.format), "Other accounts' unsynced local original must be preserved")
 
             val allAfterDelete = lib.allUploadEntries()
-            val alphaShared = allAfterDelete.single { it.accountKey == "sable-alpha" && it.localBookId == sharedBook.id }
-            val betaShared = allAfterDelete.single { it.accountKey == "sable-beta" && it.localBookId == sharedBook.id }
-            val betaSecond = allAfterDelete.single { it.accountKey == "sable-beta" && it.localBookId == secondBook.id }
-            assertEquals("sb_aaaaaaaaaaaaaaaaaaaaaaaa", alphaShared.serverShelfBookId)
-            assertEquals(BookUploadState.QUEUED, alphaShared.state)
-            assertEquals("sb_bbbbbbbbbbbbbbbbbbbbbbbb", betaShared.serverShelfBookId)
-            assertEquals(BookUploadState.QUEUED, betaShared.state)
-            assertEquals("sb_cccccccccccccccccccccccc", betaSecond.serverShelfBookId)
-            assertEquals(BookUploadState.QUEUED, betaSecond.state)
-            // Unsynced rows were not wiped while active account was null.
+            assertTrue(allAfterDelete.none { it.state == BookUploadState.PENDING_DELETE })
+            assertEquals("sb_aaaaaaaaaaaaaaaaaaaaaaaa", allAfterDelete.single { it.accountKey == "sable-alpha" && it.localBookId == sharedBook.id }.serverShelfBookId)
+            assertEquals("sb_bbbbbbbbbbbbbbbbbbbbbbbb", allAfterDelete.single { it.accountKey == "sable-beta" && it.localBookId == sharedBook.id }.serverShelfBookId)
+            assertEquals("sb_cccccccccccccccccccccccc", allAfterDelete.single { it.accountKey == "sable-beta" && it.localBookId == secondBook.id }.serverShelfBookId)
             assertEquals(2, allAfterDelete.count { it.localBookId == unsyncedBook.id })
 
-            // Resuming sync on Account A and Account B keeps every remote shelf record intact.
+            // Resuming sync on Account A and Account B keeps every remote shelf record intact (one each + unsyncedBook uploaded).
             activeKey = "sable-alpha"
-            controller.onUploadIdentityChanged("sable-alpha")
+            controller.onUploadIdentityChanged("sable-alpha")?.join()
             coordinator.syncOnce()
             activeKey = "sable-beta"
-            controller.onUploadIdentityChanged("sable-beta")
+            controller.onUploadIdentityChanged("sable-beta")?.join()
             coordinator.syncOnce()
 
-            assertEquals(3, remoteShelfRecords.size)
-            assertEquals("sb_aaaaaaaaaaaaaaaaaaaaaaaa", lib.allUploadEntries().single { it.accountKey == "sable-alpha" && it.localBookId == sharedBook.id }.serverShelfBookId)
-            assertEquals("sb_bbbbbbbbbbbbbbbbbbbbbbbb", lib.allUploadEntries().single { it.accountKey == "sable-beta" && it.localBookId == sharedBook.id }.serverShelfBookId)
-            assertEquals("sb_cccccccccccccccccccccccc", lib.allUploadEntries().single { it.accountKey == "sable-beta" && it.localBookId == secondBook.id }.serverShelfBookId)
+            assertTrue(("sable-alpha" to "sb_aaaaaaaaaaaaaaaaaaaaaaaa") in remoteShelfRecords)
+            assertTrue(("sable-beta" to "sb_bbbbbbbbbbbbbbbbbbbbbbbb") in remoteShelfRecords)
+            assertTrue(("sable-beta" to "sb_cccccccccccccccccccccccc") in remoteShelfRecords)
+            assertTrue(remoteShelfRecords.values.count { it == unsyncedBook.id } == 2, "Preserved local original allowed both accounts to upload")
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun cancelImportAfterAccountSwitchUnbindsOnlyInitiatingAccountAndPreservesOtherAccountPendingOriginal() = runBlocking {
+        val root = Files.createTempDirectory("coach-upload-initiating-account-")
+        try {
+            val lib = TextbookLibrary(
+                root.resolve("library"),
+                ocr = BookOcr { _, control ->
+                    while (!control.isCancelled()) Thread.sleep(10)
+                    control.check()
+                    ""
+                },
+            )
+            val imageFile = root.resolve("scan-book.png")
+            val raster = java.awt.image.BufferedImage(32, 32, java.awt.image.BufferedImage.TYPE_BYTE_GRAY)
+            ImageIO.write(raster, "png", imageFile.toFile())
+            raster.flush()
+
+            val remoteShelfRecords = linkedMapOf<Pair<String, String>, String>()
+            val deletedOnServer = mutableListOf<Pair<String, String>>()
+            var activeKey: String? = "sable-alpha"
+            var serverOnline = true
+            val remote = object : UnifiedBookRemoteClient {
+                override suspend fun activeAccountKey(): String? = activeKey
+                override suspend fun checkCapability(): UnifiedBookCapability = when {
+                    activeKey == null -> UnifiedBookCapability.Unauthorized
+                    !serverOnline -> UnifiedBookCapability.Offline
+                    else -> UnifiedBookCapability.Supported(activeKey!!)
+                }
+
+                override suspend fun uploadBook(
+                    file: Path,
+                    format: String,
+                    title: String,
+                    sha256: String,
+                    onProgress: (Int) -> Unit,
+                ): UnifiedBookUploadOutcome {
+                    val account = requireNotNull(activeKey)
+                    val shelfId = "sb_${if (account == "sable-alpha") "1111" else "2222"}_${sha256.take(19)}"
+                    remoteShelfRecords[account to shelfId] = sha256
+                    return UnifiedBookUploadOutcome.Accepted(
+                        shelfBookId = shelfId,
+                        sha256 = sha256,
+                        jobState = BookUploadState.QUEUED,
+                        progressPct = 0,
+                        stageLabel = "已排队，等待整理",
+                    )
+                }
+
+                override suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome =
+                    UnifiedBookStatusOutcome.Ready(BookUploadState.QUEUED, 0, "已排队，等待整理")
+
+                override suspend fun deleteBook(shelfBookId: String): UnifiedBookDeleteOutcome {
+                    val account = activeKey ?: return UnifiedBookDeleteOutcome.Unauthorized
+                    deletedOnServer += account to shelfBookId
+                    val removed = remoteShelfRecords.remove(account to shelfBookId) != null
+                    return if (removed) UnifiedBookDeleteOutcome.Deleted else UnifiedBookDeleteOutcome.NotFound
+                }
+            }
+
+            val controller = TextbookController(lib).apply { unifiedUploadClient = remote }
+            controller.onUploadIdentityChanged("sable-alpha")?.join()
+
+            // Start import as Account A (sable-alpha) and wait until upload has produced a server shelfBookId.
+            val importJob = launch(Dispatchers.Default) {
+                controller.importBook(imageFile)
+            }
+            while (controller.state.value.importing?.recognizing != true) {
+                kotlinx.coroutines.delay(10)
+            }
+            val importedId = controller.state.value.importing!!.bookId!!
+            while (lib.readUploadEntry("sable-alpha", importedId)?.serverShelfBookId == null) {
+                kotlinx.coroutines.delay(10)
+            }
+            val alphaShelfId = lib.readUploadEntry("sable-alpha", importedId)!!.serverShelfBookId!!
+
+            // Switch to Account B (sable-beta) while offline so beta's copy is still waiting to upload, then cancel Account A's import!
+            lib.enqueueBookUpload("sable-beta", importedId, importedId, "png", "scan-book")
+            serverOnline = false
+            activeKey = "sable-beta"
+            controller.onUploadIdentityChanged("sable-beta")?.join()
+
+            controller.cancelImport()
+            importJob.join()
+
+            // Only Account A is marked PENDING_DELETE; Account B keeps its pending upload AND local original file!
+            val alphaAfterCancel = assertNotNull(lib.readUploadEntry("sable-alpha", importedId))
+            assertEquals(BookUploadState.PENDING_DELETE, alphaAfterCancel.state)
+            assertEquals(alphaShelfId, alphaAfterCancel.serverShelfBookId)
+            val betaAfterCancel = assertNotNull(lib.readUploadEntry("sable-beta", importedId))
+            assertNull(betaAfterCancel.serverShelfBookId)
+            assertNotNull(lib.originalFileIfPresent(importedId, "png"))
+
+            // Account B goes back online, syncs cleanly, and uploads its copy using the preserved local original.
+            serverOnline = true
+            controller.uploadCoordinator.syncOnce()
+            assertEquals(1, remoteShelfRecords.keys.count { it.first == "sable-beta" })
+            assertEquals(BookUploadState.QUEUED, lib.readUploadEntry("sable-beta", importedId)?.state)
+
+            // Restart library & switch back to Account A -> PENDING_DELETE unbinds only Account A's shelfId.
+            val restartedLib = TextbookLibrary(lib.directory)
+            activeKey = "sable-alpha"
+            val restartedCoordinator = UnifiedBookUploadCoordinator(restartedLib) { remote }
+            restartedCoordinator.syncOnce()
+
+            assertEquals(listOf("sable-alpha" to alphaShelfId), deletedOnServer)
+            assertNull(restartedLib.readUploadEntry("sable-alpha", importedId))
+            assertEquals(1, remoteShelfRecords.keys.count { it.first == "sable-beta" })
+            assertNull(restartedLib.originalFileIfPresent(importedId, "png"))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun schemaMigrationV5ToV6PreservesExistingQueueAndSupportsPendingDelete() {
+        val root = Files.createTempDirectory("coach-v5-to-v6-")
+        try {
+            val dir = Files.createDirectories(root.resolve("library"))
+            val dbFile = dir.resolve("library.sqlite")
+            // Build a real V5 database with the older CHECK constraint (no PENDING_DELETE).
+            java.sql.DriverManager.getConnection("jdbc:sqlite:$dbFile").use { db ->
+                db.createStatement().use { sql ->
+                    sql.execute("CREATE TABLE books(id TEXT PRIMARY KEY,title TEXT NOT NULL,format TEXT NOT NULL,reading_page INTEGER NOT NULL DEFAULT 1,lesson_index INTEGER NOT NULL DEFAULT 0,learning INTEGER NOT NULL DEFAULT 0,prompt_seen INTEGER NOT NULL DEFAULT 0,mode TEXT NOT NULL DEFAULT 'NONE',touched INTEGER NOT NULL)")
+                    sql.execute("CREATE TABLE pages(book TEXT NOT NULL,page INTEGER NOT NULL,text TEXT NOT NULL,PRIMARY KEY(book,page))")
+                    sql.execute("CREATE TABLE answers(book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL,text TEXT NOT NULL,revealed INTEGER NOT NULL,understood INTEGER,PRIMARY KEY(book,lesson,mode))")
+                    sql.execute("CREATE TABLE book_reviews(book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL,book_title TEXT NOT NULL,lesson_title TEXT NOT NULL,prompt TEXT NOT NULL,reference TEXT NOT NULL,solution TEXT NOT NULL,options TEXT NOT NULL,wrong_text TEXT NOT NULL,answer_text TEXT NOT NULL DEFAULT '',revealed INTEGER NOT NULL DEFAULT 0,understood INTEGER,completed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(book,lesson,mode))")
+                    sql.execute("CREATE TABLE book_review_position(slot INTEGER PRIMARY KEY CHECK(slot=1),book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL)")
+                    sql.execute("CREATE TABLE book_open_session(slot INTEGER PRIMARY KEY CHECK(slot=1),book TEXT NOT NULL,screen TEXT NOT NULL CHECK(screen IN ('READER','LEARNING')))")
+                    sql.execute("CREATE TABLE book_learning_paths(book TEXT PRIMARY KEY,path TEXT NOT NULL CHECK(path IN ('READ','READ_AND_LEARN','QUESTION_FIRST')))")
+                    sql.execute("CREATE TABLE book_ladders(book TEXT PRIMARY KEY,session TEXT NOT NULL)")
+                    sql.execute("CREATE TABLE book_reader_views(book TEXT PRIMARY KEY,text_view INTEGER NOT NULL)")
+                    sql.execute("CREATE TABLE book_pdf_modes(book TEXT PRIMARY KEY,scrolling INTEGER NOT NULL)")
+                    sql.execute("CREATE TABLE book_text_modes(book TEXT PRIMARY KEY,scrolling INTEGER NOT NULL)")
+                    sql.execute("CREATE TABLE book_read_spots(book TEXT PRIMARY KEY,page INTEGER NOT NULL,offset_utf16 INTEGER NOT NULL)")
+                    sql.execute("CREATE TABLE book_highlights(book TEXT NOT NULL,page INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,quote TEXT NOT NULL,PRIMARY KEY(book,page,start,end))")
+                    sql.execute("CREATE TABLE book_notes(book TEXT NOT NULL,id TEXT NOT NULL,version TEXT NOT NULL,page INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,quote TEXT NOT NULL,note TEXT NOT NULL,text_sha256 TEXT NOT NULL,revision INTEGER NOT NULL,last_mutation_id TEXT NOT NULL,deleted INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(book,id))")
+                    sql.execute("CREATE TABLE reading_settings(name TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                    sql.execute(
+                        """CREATE TABLE book_upload_queue(
+                            account_key TEXT NOT NULL,
+                            local_book_id TEXT NOT NULL,
+                            file_sha256 TEXT NOT NULL,
+                            server_shelf_book_id TEXT,
+                            format TEXT NOT NULL,
+                            title TEXT NOT NULL,
+                            state TEXT NOT NULL CHECK(state IN (
+                                'WAITING_NETWORK','WAITING_SERVER','UPLOADING','RECEIVED','QUEUED','PROCESSING','READY','FAILED','PAUSED'
+                            )),
+                            progress_pct INTEGER NOT NULL DEFAULT 0,
+                            stage_label TEXT NOT NULL DEFAULT '',
+                            error_message TEXT,
+                            paused INTEGER NOT NULL DEFAULT 0,
+                            updated_at INTEGER NOT NULL,
+                            PRIMARY KEY(account_key, local_book_id)
+                        )""".trimIndent(),
+                    )
+                    sql.execute(
+                        "INSERT INTO books(id,title,format,touched) VALUES('${"a".repeat(64)}','Legacy V5 Book','txt',1)",
+                    )
+                    sql.execute(
+                        """INSERT INTO book_upload_queue(account_key,local_book_id,file_sha256,server_shelf_book_id,format,title,state,updated_at)
+                           VALUES('sable-a','${"a".repeat(64)}','${"a".repeat(64)}','sb_000000000000000000000001','txt','Legacy V5 Book','QUEUED',1)""".trimIndent(),
+                    )
+                    sql.execute("PRAGMA user_version = 5")
+                }
+            }
+
+            val lib = TextbookLibrary(dir)
+            lib.deleteBook("a".repeat(64), initiatingAccountKey = "sable-a")
+            val entry = assertNotNull(lib.readUploadEntry("sable-a", "a".repeat(64)))
+            assertEquals(BookUploadState.PENDING_DELETE, entry.state)
+            assertEquals("sb_000000000000000000000001", entry.serverShelfBookId)
+            assertTrue(Files.isRegularFile(dir.resolve(BookSchemaMigration.V5_BACKUP_FILENAME)))
         } finally {
             root.toFile().deleteRecursively()
         }

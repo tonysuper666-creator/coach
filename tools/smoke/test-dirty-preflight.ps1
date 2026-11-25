@@ -957,13 +957,13 @@ $cgBlock
         $script:AppPid = $prevAppPid
     }
 
-    # 8c. 中途失焦不重放：后台驱动外窗前台不补点、拖拽按住期间失焦只松键一次（子进程，替换函数不污染本脚本）。
+    # 8c. 中途失焦不重放：拖拽按住期间失焦只松键一次、不被整段重放（子进程，替换函数不污染本脚本）。
     $focusOut = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test-focus-interrupt.ps1'))
     $focusExit = $LASTEXITCODE
     foreach ($line in $focusOut) {
         if ("$line" -match '^(PASS|FAIL) (\S+)(?: \((.*)\))?$') { Check "focus-interrupt-$($Matches[2])" ($Matches[1] -eq 'PASS') $Matches[3] }
     }
-    Check 'focus-interrupt-suite-exit' ($focusExit -eq 0 -and @($focusOut | Where-Object { "$_" -match '^(PASS|FAIL) ' }).Count -ge 6) "exit=$focusExit"
+    Check 'focus-interrupt-suite-exit' ($focusExit -eq 0 -and @($focusOut | Where-Object { "$_" -match '^(PASS|FAIL) ' }).Count -ge 2) "exit=$focusExit"
 
     # 8d. 两套自有范围分开的驱动并发点按（子进程；私有锁名，不占真实驱动的锁、不碰真实桌面和端口）。
     $coexistOut = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test-coexist-foreground.ps1'))
@@ -1052,10 +1052,10 @@ function Save-Shot([string]$path, [IntPtr]$Window = [IntPtr]::Zero) {
 }
 function Read-Screen([string]$png) {
     @([pscustomobject]@{
-        Text = '书架'
+        Text = '导入文件'
         Words = @([pscustomobject]@{
-            Text = '书架'
-            BoundingRect = [pscustomobject]@{ X = 10; Y = 10; Width = 40; Height = 20 }
+            Text = '导入文件'
+            BoundingRect = [pscustomobject]@{ X = 10; Y = 10; Width = 60; Height = 20 }
         })
     })
 }

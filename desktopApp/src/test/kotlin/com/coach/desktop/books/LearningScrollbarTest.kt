@@ -9,6 +9,7 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import com.coach.ui.theme.CoachColors
 import com.coach.ui.theme.CoachTheme
+import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import java.nio.file.Path
 import javax.imageio.ImageIO
@@ -134,27 +135,35 @@ class LearningScrollbarTest {
         val directory = root.resolve("library")
         val file = knowledgeRecapTextbook(root)
         val controller = TextbookController(TextbookLibrary(directory))
-        val gate = AnswerExplain(ExplainConsent(directory), load = {}, ready = { true }, paired = { false },
-            explain = { _, _ -> ExplainResult.Refused("测试里不配对") })
+        // TON-1784 retired the local cloze generator. Exercise an existing learning session with service-generated questions.
+        runBlocking {
+            controller.importBook(file)
+            controller.chooseLearningPath(LearningPath.QUESTION_FIRST)
+            controller.enableLearning()
+        }
+        val gate = AnswerExplain(ExplainConsent(directory), load = {}, ready = { true }, paired = { true },
+            explain = { _, _ -> error("Generated questions carry their explanation") },
+            ask = { block, _ ->
+                ExplainResult.Done(Explanation(
+                    "题干：合成练习的标记是什么？ 选项A：甲 选项B：乙 选项C：丙 选项D：丁 答案：A 解析：标记为甲。【S1】",
+                    listOf(Citation("S1", block.id, block.page)), 1L,
+                ))
+            })
         runSkikoComposeUiTest(size = Size(1100f, height), density = Density(1f)) {
-            // 正文按外层 CoachTheme 的明暗重包一层（TextbookWorkspace 只沿用、不自选），
-            // 所以这里给的就是窗口真正会用的浅色/深色。
-            setContent { CoachTheme(dark) { TextbookWorkspace(controller, answerExplain = gate) { file } } }
-            ready(controller) { it.catalog.isEmpty() }
-            onNodeWithTag("upload-textbook").performClick()
-            ready(controller) { it.prompt == BookPrompt.IMPORTED }
-            onNodeWithTag("enable-learning").performClick()
+            setContent { CoachTheme(dark) { TextbookWorkspace(controller, loadOnMount = false, answerExplain = gate) { file } } }
             ready(controller) { it.screen == BookScreen.LEARNING && it.questionsOpen }
+            val book = checkNotNull(controller.state.value.book)
             repeat(5) { index ->
-                val current = controller.state.value.book!!
-                val practice = com.coach.desktop.books.testPracticeFixture(current, current.lessons[index], QuestionMode.CHOICE)!!
-                onNodeWithTag("choice-${practice.options.indexOf(practice.answer)}").performScrollTo().performClick()
-                ready(controller) { it.answer.revealed }
+                val key = "${book.id}:${book.lessons[index].id}"
+                waitUntil(timeoutMillis = 20_000) { gate.practices[key] != null }
+                onNodeWithTag("choice-0").assertTextContains("甲", substring = true).performScrollTo().performClick()
+                waitUntil(timeoutMillis = 20_000) { gate.answers[key]?.revealed == true }
                 onNodeWithTag("next-lesson").performScrollTo().performClick()
                 ready(controller) { it.book?.lessonIndex == index + 1 }
             }
-            val last = controller.state.value.book!!
-            body(dark, controller, com.coach.desktop.books.testPracticeFixture(last, last.lessons[5], QuestionMode.CHOICE)!!)
+            val lastKey = "${book.id}:${book.lessons[5].id}"
+            waitUntil(timeoutMillis = 20_000) { gate.practices[lastKey] != null }
+            body(dark, controller, checkNotNull(gate.practices[lastKey]).practice)
         }
         root.toFile().deleteRecursively()
     }

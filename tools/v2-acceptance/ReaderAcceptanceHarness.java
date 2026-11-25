@@ -94,6 +94,8 @@ import java.util.concurrent.atomic.AtomicReference;
  *   ReaderAcceptanceHarness measure <flavor:111|v2|main> <libDir> <outDir> <surface:scene|win32> [page]
  *   ReaderAcceptanceHarness bugs    <flavor:111|v2|main> <libDir> <outDir>
  *   ReaderAcceptanceHarness login   <bookPdf> <outDir>
+ * Login on a runtime without WindowsTextbookGate prints 不适用 and exits 0.
+ * -Dcoach.acceptance.breakImport=true feeds login_0 a missing file; that check must fail.
  */
 public final class ReaderAcceptanceHarness {
     private static ComposeWindow activeWindow;
@@ -771,6 +773,21 @@ public final class ReaderAcceptanceHarness {
         Path bookPdf = Path.of(args[1]);
         Path outDir = Path.of(args[2]);
         Files.createDirectories(outDir);
+        if (!windowsTextbookGatePresent()) {
+            Map<String, Object> report = new HashMap<>();
+            report.put("flavor", "legacy");
+            report.put("applicable", false);
+            report.put("verdict", "不适用");
+            report.put("reason", "WindowsTextbookGate not found");
+            report.put("surface_type", "real_os_window");
+            report.put("passed", 0);
+            report.put("total", 0);
+            report.put("checks", List.of());
+            Files.writeString(outDir.resolve("login-report.json"), toJson(report, 0), StandardCharsets.UTF_8);
+            System.out.println("不适用");
+            System.out.println("LOGIN_REPORT 不适用 WindowsTextbookGate not found");
+            return;
+        }
 
         Path root = Files.createTempDirectory("coach-login-accept-").toRealPath();
         Path home = Files.createDirectories(root.resolve("home"));
@@ -806,30 +823,42 @@ public final class ReaderAcceptanceHarness {
                 }
             );
 
-            // Path 0: Cold empty-library onboarding -> login screen -> 1 click Sable -> 1 click 导入文件 -> page 1 of reader
+            // Path 0: product Windows library (stream + lazy PDF extras) so the upload click
+            // reaches TextbookController.launchImport tier-0, not a whole-book stage.
+            // Ready means textbook-reader is up and its page area is not 「正在加载页面」. 5s.
+            // Product launchImport on this book opened page 32 in 1395ms.
+            boolean breakImport = Boolean.parseBoolean(System.getProperty("coach.acceptance.breakImport", "false"));
             Path home0 = Files.createDirectories(root.resolve("home0"));
             Path libDir0 = Files.createDirectories(root.resolve("library0"));
             System.setProperty("user.home", home0.toString());
             System.setProperty("jpackage.app-path", home0.resolve("LearningCoach.exe").toString());
             Object settings0 = newSettings(home0, server.url);
-            TextbookController c0 = createController(createLibrary(libDir0));
-            Function1<Continuation<? super Path>, Object> pickBook0 = cont -> bookPdf;
+            TextbookLibrary lib0 = createLibrary(libDir0, true);
+            boolean productLazy = libraryLazyPdfExtras(lib0);
+            TextbookController c0 = createController(lib0);
+            Path picked0 = breakImport ? libDir0.resolve("deliberately-missing.pdf") : bookPdf;
+            Function1<Continuation<? super Path>, Object> pickBook0 = cont -> picked0;
             ComposeWindow w0 = openGateWindow(settings0, server.url, uriHandler, c0, pickBook0, 24, 24, 752, 552);
             try {
                 boolean loginFirst0 = waitFor(6000, () -> findNodeByTag(w0, "textbook-login-screen") != null);
                 int onboardingClicks = 0;
                 clickTextExactWin32(w0, "用 Sable 账号登录");
                 boolean emptyHub = waitFor(10000, () -> findNodeByTag(w0, "home-empty-hub") != null && findNodeByTag(w0, "upload-textbook") != null);
+                long importStarted = System.currentTimeMillis();
                 if (emptyHub) {
                     clickTagWin32(w0, "upload-textbook");
                     onboardingClicks++;
                 }
-                boolean openedFirstReadable = waitFor(12000, () -> findNodeByTag(w0, "textbook-reader") != null && controllerPage(c0) >= 1);
+                boolean readerReady = waitFor(5000, () -> readerPageReady(w0));
+                long readyMs = System.currentTimeMillis() - importStarted;
                 Thread.sleep(400);
                 dumpWin32(w0, outDir, "main", "win32", "login0-onboarding-page1");
-                checks.add(checkResult("login_0_onboarding_to_page1", loginFirst0 && emptyHub && openedFirstReadable && onboardingClicks <= 2,
-                    "loginFirst=" + loginFirst0 + " emptyHub=" + emptyHub + " openedFirstReadable=" + openedFirstReadable
-                        + " clicks_excluding_sable_auth=" + onboardingClicks + " page=" + controllerPage(c0)));
+                checks.add(checkResult("login_0_onboarding_to_page1",
+                    loginFirst0 && emptyHub && readerReady && productLazy && onboardingClicks <= 2,
+                    "loginFirst=" + loginFirst0 + " emptyHub=" + emptyHub + " readerReady=" + readerReady
+                        + " clicks_excluding_sable_auth=" + onboardingClicks + " page=" + controllerPage(c0)
+                        + " ready_ms=" + readyMs + " lazyPdfExtras=" + productLazy
+                        + " import=product-launchImport breakImport=" + breakImport));
             } finally {
                 disposeWindow(w0);
                 deleteQuietly(home0);
@@ -838,12 +867,13 @@ public final class ReaderAcceptanceHarness {
             System.setProperty("user.home", home.toString());
             System.setProperty("jpackage.app-path", home.resolve("LearningCoach.exe").toString());
 
-            // Seed library with book for paths 1..4 (keep fresh shelf until after login check)
-            TextbookLibrary seedLib = createLibrary(libDir);
-            seedLib.stageBookImport(bookPdf, new BookImportControl());
+            // Paths 1..4 reopen the same product library. Seed with tier-0, the import launchImport uses,
+            // so the shelf is not waiting on a whole-book stage.
+            TextbookLibrary seedLib = createLibrary(libDir, true);
+            stageProductSeed(seedLib, bookPdf);
 
             // Path 1 & 2: Fresh install -> first screen is login, <=2 clicks to 2.0 single-column home
-            TextbookController c1 = createController(createLibrary(libDir));
+            TextbookController c1 = createController(createLibrary(libDir, true));
             ComposeWindow w1 = openGateWindow(settings, server.url, uriHandler, c1, 24, 24, 752, 552);
             try {
                 boolean loginFirst = waitFor(6000, () -> findNodeByTag(w1, "textbook-login-screen") != null);
@@ -879,7 +909,7 @@ public final class ReaderAcceptanceHarness {
 
             // Path 3: Stop server (offline) & relaunch -> 0 clicks back to page 32
             server.close();
-            TextbookController c2 = createController(createLibrary(libDir));
+            TextbookController c2 = createController(createLibrary(libDir, true));
             ComposeWindow w2 = openGateWindow(settings, server.url, uriHandler, c2, 24, 24, 752, 552);
             try {
                 boolean resumed = waitFor(8000, () -> findNodeByTag(w2, "textbook-reader") != null && controllerPage(c2) == 32);
@@ -900,7 +930,7 @@ public final class ReaderAcceptanceHarness {
             StubAuthServer server2 = new StubAuthServer();
             try {
                 Object settings2 = newSettings(home4, server2.url);
-                TextbookController c4a = createController(createLibrary(libDir));
+                TextbookController c4a = createController(createLibrary(libDir, true));
                 ComposeWindow w4a = openGateWindow(settings2, server2.url, uriHandler, c4a, 24, 24, 752, 552);
                 try {
                     waitFor(8000, () -> findNodeByTag(w4a, "textbook-login-screen") != null);
@@ -912,7 +942,7 @@ public final class ReaderAcceptanceHarness {
                 // Now revoke on server2 and reopen: must return to login screen <= 3s with clear reason
                 server2.revokeAll = true;
                 long t0 = System.currentTimeMillis();
-                TextbookController c4b = createController(createLibrary(libDir));
+                TextbookController c4b = createController(createLibrary(libDir, true));
                 ComposeWindow w4b = openGateWindow(settings2, server2.url, uriHandler, c4b, 24, 24, 752, 552);
                 try {
                     boolean backToLogin = waitFor(5000, () -> findNodeByTag(w4b, "login-revoked-reason") != null);
@@ -1635,15 +1665,37 @@ public final class ReaderAcceptanceHarness {
     // ==================== REFLECTION / HOST / GATE ====================
 
     private static TextbookLibrary createLibrary(Path libDir) throws Exception {
+        return createLibrary(libDir, false);
+    }
+
+    /**
+     * productImport matches WindowsTextbooks: TextbookLibrary(directory, streamPdfExtras = true, lazyPdfExtras = true).
+     * Those are the only two boolean parameters, in that order. A set default-mask bit would force them false
+     * and send launchImport down the whole-book path.
+     */
+    private static TextbookLibrary createLibrary(Path libDir, boolean productImport) throws Exception {
         for (var ctor : TextbookLibrary.class.getDeclaredConstructors()) {
             Class<?>[] p = ctor.getParameterTypes();
             if (p.length >= 3 && p[0] == Path.class && p[p.length - 1].getSimpleName().equals("DefaultConstructorMarker")) {
                 Object[] a = new Object[p.length];
                 a[0] = libDir;
                 int mask = 0;
+                int boolCount = 0;
+                int seenBool = 0;
                 for (int i = 1; i < p.length - 2; i++) {
-                    mask |= (1 << i);
-                    if (p[i] == boolean.class) a[i] = false;
+                    if (p[i] == boolean.class) boolCount++;
+                }
+                if (productImport && boolCount != 2) {
+                    throw new IllegalStateException("TextbookLibrary product flags missing, booleanCount=" + boolCount);
+                }
+                for (int i = 1; i < p.length - 2; i++) {
+                    if (productImport && p[i] == boolean.class && seenBool < 2) {
+                        a[i] = true;
+                        seenBool++;
+                    } else {
+                        mask |= (1 << i);
+                        if (p[i] == boolean.class) a[i] = false;
+                    }
                 }
                 a[p.length - 2] = mask;
                 a[p.length - 1] = null;
@@ -1652,6 +1704,51 @@ public final class ReaderAcceptanceHarness {
             }
         }
         throw new IllegalStateException("TextbookLibrary ctor not found");
+    }
+
+    private static void stageProductSeed(TextbookLibrary lib, Path book) throws Exception {
+        Method tier0 = null;
+        for (Method m : TextbookLibrary.class.getMethods()) {
+            if ("stageBookImportTier0".equals(m.getName()) && m.getParameterCount() == 2) {
+                tier0 = m;
+                break;
+            }
+        }
+        if (tier0 == null) throw new IllegalStateException("stageBookImportTier0 not found");
+        tier0.setAccessible(true);
+        tier0.invoke(lib, book, new BookImportControl());
+    }
+
+    private static boolean libraryLazyPdfExtras(TextbookLibrary lib) {
+        try {
+            for (Method m : lib.getClass().getMethods()) {
+                if (m.getName().startsWith("getLazyPdfExtras") && m.getParameterCount() == 0) {
+                    return Boolean.TRUE.equals(m.invoke(lib));
+                }
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private static boolean windowsTextbookGatePresent() {
+        try {
+            Class<?> gateCls = Class.forName("com.coach.desktop.WindowsTextbooksKt");
+            for (Method m : gateCls.getDeclaredMethods()) {
+                if ("WindowsTextbookGate".equals(m.getName())) return true;
+            }
+            return false;
+        } catch (ClassNotFoundException e) {
+            return false;
+        }
+    }
+
+    /** textbook-reader is showing and the page area is not the loading placeholder. */
+    private static boolean readerPageReady(ComposeWindow win) throws Exception {
+        return Boolean.TRUE.equals(onEdt(() -> {
+            SemanticsNode reader = findNodeByTag(win.getSemanticsOwners(), "textbook-reader");
+            if (reader == null) return false;
+            return !nodeText(reader).contains("正在加载页面");
+        }));
     }
 
     private static TextbookController createController(TextbookLibrary lib) throws Exception {

@@ -250,9 +250,8 @@ internal fun BookPageView(
     val windowsPaged = immersive && readMode == BookReadMode.Paged &&
         System.getProperty("os.name").orEmpty().startsWith("Windows")
     // Reflowed PDF already has chapter and page navigation in the reader HUD.
-    val useRunningHeader = !(windowsPaged && book.format == "pdf")
     val topMargin = when {
-        !useRunningHeader -> 0.dp
+        windowsPaged && book.format == "pdf" -> 0.dp
         immersive -> 8.dp
         else -> 52.dp
     }
@@ -260,40 +259,15 @@ internal fun BookPageView(
     val openerExtraHeightPx = if (immersive) with(density) { (topMargin - openerTopMargin).roundToPx() } else 0
     val topMarginPx = with(density) { topMargin.toPx() }
     val openerTopMarginPx = with(density) { openerTopMargin.toPx() }
-    // Match the Windows page to a whole number of text baselines. Scale both axes together
-    // so source hit testing and glyph proportions follow the same layout as the reader.
-    val baselineGrid = if (windowsPaged) {
-        val pitch = remember(measurer, body) {
-            val sample = measurer.measure("Mg\nMg", body)
-            (sample.lastBaseline - sample.firstBaseline).roundToInt().coerceAtLeast(1)
-        }
-        Modifier.layout { measurable, constraints ->
-            val usable = constraints.maxHeight - topMargin.roundToPx()
-            val rows = (usable.toFloat() / pitch).roundToInt()
-            val gridHeight = rows * pitch + topMargin.roundToPx()
-            if (rows < 8 || !constraints.hasBoundedWidth || !constraints.hasBoundedHeight) {
-                val page = measurable.measure(constraints)
-                layout(page.width, page.height) { page.place(0, 0) }
-            } else {
-                val zoom = constraints.maxHeight.toFloat() / gridHeight
-                val gridWidth = (constraints.maxWidth / zoom).roundToInt().coerceAtLeast(1)
-                val page = measurable.measure(Constraints.fixed(gridWidth, gridHeight))
-                layout(constraints.maxWidth, constraints.maxHeight) {
-                    page.placeWithLayer(0, 0) {
-                        transformOrigin = TransformOrigin(0f, 0f)
-                        scaleX = zoom
-                        scaleY = zoom
-                    }
-                }
-            }
-        }
-    } else Modifier
+    val linePitchPx = if (windowsPaged) remember(measurer, body) {
+        val sample = measurer.measure("Mg\nMg", body)
+        (sample.lastBaseline - sample.firstBaseline).roundToInt().coerceAtLeast(1)
+    } else null
     val paperBg = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
     var pointerActive by remember(state) { mutableStateOf(false) }
-    BoxWithConstraints(
+    BookPageViewport(
         modifier
             .fillMaxSize()
-            .then(baselineGrid)
             .then(if (immersive) Modifier.background(paperBg) else Modifier)
             .pointerInput(state) {
                 awaitPointerEventScope {
@@ -305,12 +279,13 @@ internal fun BookPageView(
                 }
             }
             .testTag("book-page-layout"),
-    ) {
+        linePitchPx, topMargin,
+    ) { maxWidth, maxHeight, viewportWidth ->
         val column = with(density) { (body.fontSize * (if (immersive) 38 else 33)).toDp() }
         val scrolling = readMode == BookReadMode.Scroll
         val visibleColumns = when {
             scrolling -> 1
-            immersive -> bookImmersiveColumns(maxWidth.value, column.value, mode, state.columns)
+            immersive -> bookImmersiveColumns(viewportWidth.value, column.value, mode, state.columns)
             bookSpread(maxWidth.value, column.value, mode, state.spread) -> 2
             else -> 1
         }
@@ -321,10 +296,15 @@ internal fun BookPageView(
             mode == BookPageMode.Spread -> minOf((maxWidth - 48.dp) / 2, column + 112.dp)
             else -> minOf(maxWidth / 2, column + 112.dp)
         }
-        val edgeInset = if (windowsPaged) 3.dp else 4.dp
-        val leftInset = if (immersive) minOf(edgeInset, sheetWidth * 0.008f) else 64.dp
-        val rightInset = if (immersive && hardPointGutter) 48.dp
-            else if (immersive) leftInset else if (spread) 48.dp else 64.dp
+        val leftInset = if (immersive) minOf(4.dp, sheetWidth * 0.008f) else 64.dp
+        // Facing columns share a gutter. Keep the full outer margin for corner drags.
+        val rightInset = when {
+            immersive && hardPointGutter -> 48.dp
+            windowsPaged && spread -> minOf(2.dp, leftInset)
+            immersive -> leftInset
+            spread -> 48.dp
+            else -> 64.dp
+        }
         val widthPx = with(density) { (sheetWidth - leftInset - rightInset).roundToPx().coerceAtLeast(1) }
         val bodyHeight = with(density) { (maxHeight - if (immersive) topMargin else 116.dp).roundToPx().coerceAtLeast(1) }
         val failed = remember(book.id, libraryDirectory) { mutableStateListOf<BookIllustration>() }
@@ -413,7 +393,7 @@ internal fun BookPageView(
         }
         if (basePages == null || pages == null) {
             Text("正在排版…", Modifier.align(Alignment.Center).testTag("book-page-loading"), color = colors.fgSecondary)
-            return@BoxWithConstraints
+            return@BookPageViewport
         }
         SideEffect {
             if (state.layoutPages !== basePages) state.layoutPages = basePages
@@ -423,7 +403,7 @@ internal fun BookPageView(
         }
         if (pages.isEmpty()) {
             Text("这一页没有可提取文字，请切换到原页阅读。", Modifier.align(Alignment.Center))
-            return@BoxWithConstraints
+            return@BookPageViewport
         }
         val first = state.firstFor(basePages, visibleColumns, layoutIdentity = basePages)
         SideEffect { state.groupFirst = first; state.groupPages = basePages }
@@ -528,7 +508,7 @@ internal fun BookPageView(
                     }
                 }
             }
-            return@BoxWithConstraints
+            return@BookPageViewport
         }
         val fade = remember { Animatable(1f) }
         LaunchedEffect(first, basePages) { fade.snapTo(if (reduced) 1f else 0f); fade.animateTo(1f, tween(if (reduced) 0 else 150)) }
@@ -648,6 +628,42 @@ internal fun BookPageView(
             }
             if (spread && turnStyle == PageTurnStyle.None) Box(Modifier.width(48.dp).fillMaxHeight().background(Brush.horizontalGradient(listOf(
                 Color.Transparent, (if (colors.dark) Color.Black.copy(alpha = .24f) else CoachV7.Light.ink.copy(alpha = .06f)), Color.Transparent))))
+        }
+    }
+}
+
+/** Fit whole baselines under the header and above the progress line. Keep the physical
+ * viewport width for column breakpoints and scale the glyphs and pointer targets together. */
+@Composable
+private fun BookPageViewport(
+    modifier: Modifier,
+    linePitchPx: Int?,
+    topMargin: Dp,
+    content: @Composable BoxScope.(width: Dp, height: Dp, viewportWidth: Dp) -> Unit,
+) {
+    BoxWithConstraints(modifier) {
+        val density = LocalDensity.current
+        val reservedPx = with(density) { topMargin.roundToPx() + 2.dp.roundToPx() }
+        val rows = if (linePitchPx != null) (constraints.maxHeight - reservedPx) / linePitchPx else 0
+        if (linePitchPx == null || rows < 8 || !constraints.hasBoundedHeight || !constraints.hasBoundedWidth) {
+            content(maxWidth, maxHeight, maxWidth)
+            return@BoxWithConstraints
+        }
+        val gridHeight = rows * linePitchPx + reservedPx
+        val zoom = constraints.maxHeight.toFloat() / gridHeight
+        val gridWidth = (constraints.maxWidth / zoom).roundToInt().coerceAtLeast(1)
+        val viewportWidth = maxWidth
+        Box(Modifier.layout { measurable, bounds ->
+            val page = measurable.measure(Constraints.fixed(gridWidth, gridHeight))
+            layout(bounds.maxWidth, bounds.maxHeight) {
+                page.placeWithLayer(0, 0) {
+                    transformOrigin = TransformOrigin(0f, 0f)
+                    scaleX = zoom
+                    scaleY = zoom
+                }
+            }
+        }) {
+            with(density) { content(gridWidth.toDp(), gridHeight.toDp(), viewportWidth) }
         }
     }
 }

@@ -49,6 +49,36 @@ class LibraryExplainTest {
         }
     }
 
+    /** TON-1855: a broad question about the current section is answered from the whole section, not refused. */
+    @Test fun sectionQuestionPromptAnswersBroadQuestionsFromTheWholeSectionAndNamesCrossSectionGaps() = runBlocking {
+        Harness(local = true, personal = true).use { h ->
+            h.catalog()
+            h.stub.stream(1, """{"paragraphs":[{"text":"本节最重要的概念是能量守恒，上一节的做功不在本节展开。","anchors":["S1","S3"]}]}""",
+                StubTutor.terminal("complete"), StubTutor.DONE)
+            val base = lesson(h.version, 3) { "完整自写能量块 $it。" }
+            val input = JsonObject(base - "bookPages" + mapOf(
+                "kind" to JsonPrimitive("ask"),
+                "selection" to JsonPrimitive("完整自写能量块 2。"),
+                "question" to JsonPrimitive("这一段最重要的一个概念是什么？"),
+                "sectionContext" to json("location" to "物理 › 第二章 › 第二节", "previousRecap" to "上一节介绍了机械功的定义。", "nextTitle" to "第三节 功率"),
+            ))
+            val (status, body) = h.post(input)
+            assertEquals(200, status)
+            assertEquals(listOf(1L, 3L), body.getValue("sources").jsonArray.map { it.jsonObject.num("pdfPage") },
+                "Citations may point at any block of the section, not only the selected one")
+            val messages = LedgerJson.parseToJsonElement(h.stub.requestBodies.last()).jsonObject.getValue("messages").jsonArray
+                .map { it.jsonObject }
+            val system = messages.single { it.str("role") == "system" }.str("content")
+            for (n in 1..3) assertTrue(system.contains("完整自写能量块 $n。"), "The whole section is the evidence")
+            assertTrue(system.contains(readerAskInstruction(withSection = true)))
+            assertTrue(system.contains("the most important concept"))
+            assertTrue(system.contains("not covered in this section"))
+            assertTrue(system.contains("上一节介绍了机械功的定义。") && system.contains("第三节 功率"))
+            assertFalse(system.contains("If unsupported, return empty paragraphs."))
+            assertTrue(messages.single { it.str("role") == "user" }.str("content").contains("这一段最重要的一个概念是什么？"))
+        }
+    }
+
     @Test fun sectionGuideAndContextualRephraseWithFollowUpHistoryPreserveCitationGate() = runBlocking {
         Harness(local = true, personal = true).use { h ->
             h.catalog()

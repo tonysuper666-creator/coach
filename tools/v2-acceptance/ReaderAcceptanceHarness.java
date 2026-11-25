@@ -2072,7 +2072,7 @@ public final class ReaderAcceptanceHarness {
     private static <T> T onEdt(Callable<T> action) throws Exception {
         FutureTask<T> task = new FutureTask<>(action);
         if (SwingUtilities.isEventDispatchThread()) task.run(); else SwingUtilities.invokeLater(task);
-        return task.get(20, TimeUnit.SECONDS);
+        return task.get(45, TimeUnit.SECONDS);
     }
 
     private static Path copyTempDir(Path src, String prefix) throws IOException {

@@ -239,7 +239,7 @@ internal fun BookPageView(
     val clipboard = LocalClipboard.current
     val pageClipboard = remember(clipboard) { PageClipboard(clipboard) }
     val latestOnSelectText by rememberUpdatedState(onSelectText)
-    val topMargin = if (immersive) 12.dp else 52.dp
+    val topMargin = if (immersive) 8.dp else 52.dp
     val openerTopMargin = if (immersive) 2.dp else topMargin
     val openerExtraHeightPx = if (immersive) with(density) { (topMargin - openerTopMargin).roundToPx() } else 0
     val topMarginPx = with(density) { topMargin.toPx() }
@@ -279,7 +279,7 @@ internal fun BookPageView(
         val leftInset = if (immersive) minOf(4.dp, sheetWidth * 0.008f) else 64.dp
         val rightInset = if (immersive) minOf(4.dp, sheetWidth * 0.008f) else if (spread) 48.dp else 64.dp
         val widthPx = with(density) { (sheetWidth - leftInset - rightInset).roundToPx().coerceAtLeast(1) }
-        val bodyHeight = with(density) { (maxHeight - if (immersive) 14.dp else 116.dp).roundToPx().coerceAtLeast(1) }
+        val bodyHeight = with(density) { (maxHeight - if (immersive) 8.dp else 116.dp).roundToPx().coerceAtLeast(1) }
         val failed = remember(book.id, libraryDirectory) { mutableStateListOf<BookIllustration>() }
         val layoutPages = remember(book.pages, libraryDirectory, failed.toList()) {
             if (libraryDirectory != null && failed.isEmpty()) book.pages else book.pages.map { page ->
@@ -706,8 +706,8 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
     DisableSelection { if (!page.opener && (spread && side == 0 || runningTitle.isNotEmpty())) Text(if (spread && side == 0) book.title else runningTitle,
         Modifier.align(Alignment.TopStart).padding(start = inset, top = if (compactHeader) 0.dp else 20.dp).width(column),
         textAlign = androidx.compose.ui.text.style.TextAlign.Center, color = colors.fgTertiary,
-        style = MaterialTheme.typography.labelSmall.copy(fontSize = if (compactHeader) 10.sp else CoachV7.Size.cap,
-            lineHeight = if (compactHeader) 11.sp else MaterialTheme.typography.labelSmall.lineHeight,
+        style = MaterialTheme.typography.labelSmall.copy(fontSize = if (compactHeader) 9.5.sp else CoachV7.Size.cap,
+            lineHeight = if (compactHeader) 10.sp else MaterialTheme.typography.labelSmall.lineHeight,
             fontWeight = androidx.compose.ui.text.font.FontWeight.Normal, letterSpacing = CoachV7.Tracking.cap), maxLines = 1) }
     val bodyTag = when (side) {
         0 -> "reader-text"

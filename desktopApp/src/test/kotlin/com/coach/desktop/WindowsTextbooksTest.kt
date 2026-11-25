@@ -259,11 +259,11 @@ An isolated specimen uses the same process on the second page.
             onNodeWithTag("page-explanation-error").assertTextEquals(ExplainTrouble.UNREACHABLE)
             checkShell("offline")
             mac.mode = ExplainShellMac.Mode.QUOTA
-            onNodeWithText("重试").performClick()
+            onNode(hasText("重试") and hasAnySibling(hasTestTag("page-explanation-error"))).performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithText(ExplainShellMac.SERVICE_BUSY).fetchSemanticsNodes().isNotEmpty() }
             checkShell("busy")
             mac.mode = ExplainShellMac.Mode.REVOKED
-            onNodeWithText("重试").performClick()
+            onNode(hasText("重试") and hasAnySibling(hasTestTag("page-explanation-error"))).performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithText("重新登录").fetchSemanticsNodes().isNotEmpty() ||
                 onAllNodesWithTag("textbook-login-screen").fetchSemanticsNodes().isNotEmpty() ||
                 onAllNodesWithText("登录后讲解这一页").fetchSemanticsNodes().isNotEmpty() }

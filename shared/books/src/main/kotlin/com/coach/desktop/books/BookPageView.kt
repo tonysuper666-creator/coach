@@ -39,6 +39,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -407,13 +408,15 @@ internal fun BookPageView(
                     ScrollReadView(scrollState, desk = desk, paper = Color.Transparent, gap = if (immersive) 8.dp else 24.dp, handleKeys = false,
                         modifier = Modifier.fillMaxSize().testTag("book-scroll-read"),
                         scrollbar = { BookReadScrollbar(it) }) { index ->
+                        val page = pages[index]
+                        val rendered = remember(page) { mutableMapOf<Int, TextLayoutResult>() }
                         val downPos = remember(scrollState) { arrayOf<ScrollReadPosition?>(null) }
                         val scrollSpot = rememberUpdatedState { g: ReadingPointerGesture ->
                             val cb = latestOnSelectText ?: return@rememberUpdatedState
                             val moved = downPos[0] != null && downPos[0] != scrollState.position
                             when {
                                 !moved && (g.longPressed || (!g.isTouch && g.dragged)) ->
-                                    cb(pages.getOrNull(index)?.selectionForGesture(book, g, scrollInsetPx, topMarginPx, measurer, typography, widthPx))
+                                    cb(page.selectionForGesture(book, g, scrollInsetPx, topMarginPx, rendered))
                                 !g.dragged && !g.longPressed -> cb(null)
                             }
                         }
@@ -421,12 +424,11 @@ internal fun BookPageView(
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
                             Box(Modifier.width(sheetWidth).height(viewHeight).background(paper).clipToBounds()
                                 .readingSpot(scrollSpot, onDown = recordDown).testTag("book-sheet-0")) {
-                                val page = pages[index]
                                 val remaining = if (immersive) null else pages.count { it.chapter == page.chapter } -
                                     pages.take(index + 1).count { it.chapter == page.chapter }
                                 BookSheet(book, page, typography, measurer, widthPx, leftInset, remaining, false, 0,
                                     libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
-                                    topMargin = topMargin) { failed.add(it) }
+                                    topMargin = topMargin, rendered = rendered) { failed.add(it) }
                             }
                         }
                     }
@@ -459,13 +461,14 @@ internal fun BookPageView(
                     Row(Modifier.fillMaxHeight().graphicsLayer { alpha = fade.value }) {
                             repeat(visibleColumns) { side ->
                                 val page = pages.getOrNull(first + side)
+                                val rendered = remember(page) { mutableMapOf<Int, TextLayoutResult>() }
                                 val insetPx = with(density) { (if (spread && side == visibleColumns - 1) rightInset else leftInset).toPx() }
                                 val sheetSpot = rememberUpdatedState { g: ReadingPointerGesture ->
                                     state.anchor = spotAnchor(pages, first + side, spread, side, g.down, g.up, g.dragged, with(density) { sheetWidth.toPx() }, measurer, typography, widthPx) ?: state.anchor
                                     val cb = latestOnSelectText ?: return@rememberUpdatedState
                                     when {
                                         g.longPressed || (!g.isTouch && g.dragged) ->
-                                            cb(page?.selectionForGesture(book, g, insetPx, topMarginPx, measurer, typography, widthPx))
+                                            cb(page?.selectionForGesture(book, g, insetPx, topMarginPx, rendered))
                                         !g.dragged -> cb(null)
                                     }
                                 }
@@ -479,7 +482,7 @@ internal fun BookPageView(
                                         BookSheet(book, page, typography, measurer, widthPx,
                                             if (spread && side == visibleColumns - 1) rightInset else leftInset,
                                             remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
-                                            topMargin = topMargin) { failed.add(it) }
+                                            topMargin = topMargin, rendered = rendered) { failed.add(it) }
                                     }
                                 }
                             }
@@ -511,13 +514,14 @@ internal fun BookPageView(
                             shadow = if (colors.dark) Color.Black else CoachV7.Light.ink) { index ->
                             val side = if (spread) Math.floorMod(index - turnState.shownPosition, visibleColumns) else 0
                             val page = pages[index]
+                            val rendered = remember(page) { mutableMapOf<Int, TextLayoutResult>() }
                             val insetPx = with(density) { (if (spread && side == visibleColumns - 1) rightInset else leftInset).toPx() }
                             val sheetSpot = rememberUpdatedState { g: ReadingPointerGesture ->
                                 state.anchor = spotAnchor(pages, index, spread, side, g.down, g.up, g.dragged, with(density) { sheetWidth.toPx() }, measurer, typography, widthPx) ?: state.anchor
                                 val cb = latestOnSelectText ?: return@rememberUpdatedState
                                 when {
                                     g.longPressed || (!g.isTouch && g.dragged) ->
-                                        cb(page.selectionForGesture(book, g, insetPx, topMarginPx, measurer, typography, widthPx))
+                                        cb(page.selectionForGesture(book, g, insetPx, topMarginPx, rendered))
                                     !g.dragged -> cb(null)
                                 }
                             }
@@ -529,7 +533,7 @@ internal fun BookPageView(
                                 BookSheet(book, page, typography, measurer, widthPx,
                                     if (spread && side == visibleColumns - 1) rightInset else leftInset,
                                     remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
-                                    topMargin = topMargin) { failed.add(it) }
+                                    topMargin = topMargin, rendered = rendered) { failed.add(it) }
                             }
                         }
                     }
@@ -554,19 +558,17 @@ private fun BookLaidPage.selectionForGesture(
     gesture: ReadingPointerGesture,
     insetPx: Float,
     topMarginPx: Float,
-    measurer: TextMeasurer,
-    typography: BookPageTypography,
-    widthPx: Int,
+    rendered: Map<Int, TextLayoutResult>,
 ): SourceBlock? = when {
     gesture.isTouch -> if (gesture.longPressed) {
         if (gesture.dragged) {
-            selectionBetween(book, gesture.down, gesture.up, insetPx, topMarginPx, measurer, typography, widthPx)
-                ?: selectionAt(book, gesture.down, insetPx, topMarginPx, measurer, typography, widthPx)
+            selectionBetween(book, gesture.down, gesture.up, insetPx, topMarginPx, rendered)
+                ?: selectionAt(book, gesture.down, insetPx, topMarginPx, rendered)
         } else {
-            selectionAt(book, gesture.down, insetPx, topMarginPx, measurer, typography, widthPx)
+            selectionAt(book, gesture.down, insetPx, topMarginPx, rendered)
         }
     } else null
-    gesture.dragged -> selectionBetween(book, gesture.down, gesture.up, insetPx, topMarginPx, measurer, typography, widthPx)
+    gesture.dragged -> selectionBetween(book, gesture.down, gesture.up, insetPx, topMarginPx, rendered)
     else -> null
 }
 
@@ -635,6 +637,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
     hardPoints: List<Pair<SectionHardPoint, SourceBlock>> = emptyList(),
     onHardPointClick: ((SectionHardPoint, SourceBlock) -> Unit)? = null,
     topMargin: Dp = 52.dp,
+    rendered: MutableMap<Int, TextLayoutResult>,
     onMissing: (BookIllustration) -> Unit) {
     val density = LocalDensity.current
     val colors = CoachTheme.colors
@@ -668,6 +671,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
                 style = typography.number, color = colors.fgSecondary)
         }
         Text(selectable, style = typography.body, inlineContent = inline,
+            onTextLayout = { rendered[run.topPx] = it },
             modifier = Modifier.padding(start = inset, top = topMargin + top).width(column)
                 .semantics {
                     this[BookPageSources] = run.sources

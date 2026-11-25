@@ -173,7 +173,9 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
         Save-OwnWindow 'installed-window-printwindow.png'
         Write-Output 'Captured installed app window via PrintWindow; image requires visual review.'
 
-        $upload = -join ([char[]](0x4e0a,0x4f20,0x6559,0x6750))
+        # 2.0 empty shelf (TON-1790): the primary control is 「导入文件」, and the native
+        # dialog title starts with the same prefix. The 1.1.1 name 「上传教材」 is gone.
+        $upload = -join ([char[]](0x5bfc,0x5165,0x6587,0x4ef6))
         $invoked = $false
         try {
             $root = [System.Windows.Automation.AutomationElement]::FromHandle($script:Win)
@@ -184,6 +186,13 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
                 if ($pattern) { $pattern.Invoke(); $invoked = $true }
             }
         } catch { Write-Output "UI Automation unavailable: $($_.Exception.Message)" }
+        if (-not $invoked) {
+            try {
+                $hit = Find-TutorLabel 'installed-upload' @($upload)
+                Click-At $hit.X $hit.Y | Out-Null
+                $invoked = $true
+            } catch { Write-Output "Upload label was not read: $($_.Exception.Message)" }
+        }
         if (-not $invoked) {
             Click-CapturedControl 'empty-shelf-upload.png' 'installed-window-printwindow.png'
         }
@@ -200,17 +209,21 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
         Write-Output 'INSTALLED_SCAN_IMPORT_PASS'
         Save-OwnWindow 'after-import-printwindow.png'
         if ([IO.Path]::GetExtension($Fixture) -eq '.pdf') {
-            Click-CapturedControl 'shelf-read-first.png' 'after-import-printwindow.png'
-            Click-CapturedControl 'reader-defer-study.png' 'reader-first-open.png'
+            # 2.0 launchImport opens the reader itself (prompt = null). The shelf cards
+            # 「先读」 and 「暂不开启」 are not on this screen.
+            Write-Output 'INSTALLED_READER_OPEN'
+            Focus-ReaderPage
             Start-Sleep -Seconds 1
             Save-OwnWindow 'reader-before.png'
-            # The reflow reader can lay out several screenfuls per source page.
+            # The reflow reader can lay out several screenfuls per source page, and the
+            # arrow keys turn a page only while the page surface has focus.
             # Stop as soon as the book's persisted physical page changes to 2.
-            foreach ($turn in 1..8) {
+            foreach ($turn in 1..16) {
                 Send-Keys '{RIGHT}'
                 Start-Sleep -Milliseconds 900
                 & python (Join-Path $PSScriptRoot 'prism-ocr-check.py') $db $Fixture --reading-page 2
                 if ($LASTEXITCODE -eq 0) { break }
+                if ($turn % 4 -eq 0) { Focus-ReaderPage }
             }
             Save-OwnWindow 'reader-after.png'
             if ($LASTEXITCODE -ne 0) { throw 'Installed reader did not persist page 2' }

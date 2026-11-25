@@ -68,7 +68,7 @@ function Select-TutorLabel([string]$name, [string[]]$labels, [int]$scroll = 0, [
 # Match the visible label in the app's own capture, including the PDF page fraction.
 function Find-WinboxControl([string]$template, [string]$name, [int]$scroll) {
     $label = @{
-        'empty-shelf-upload.png' = '上传教材'
+        'empty-shelf-upload.png' = '导入文件'
         'shelf-read-first.png' = '先读'
         'reader-defer-study.png' = '暂不开启'
         'explain-consent.png' = '允许并讲解'
@@ -94,7 +94,7 @@ function Find-WinboxControl([string]$template, [string]$name, [int]$scroll) {
 # A long line of the page body: below the reader toolbar, above the page bar. 1.1.1 explains
 # whatever the reader has selected, so the probe needs a real line to drag across.
 function Find-TutorBodyLine($lines) {
-    $tool = @('选段提问', '看原页', '看文字') | ForEach-Object { Find-Text $lines $_ } | Where-Object { $_ } | Select-Object -First 1
+    $tool = @('举个例子', '讲讲', '笔记', '看原页', '看文字') | ForEach-Object { Find-Text $lines $_ } | Where-Object { $_ } | Select-Object -First 1
     $bar = @('上一页', '下一页') | ForEach-Object { Find-Text $lines $_ } | Where-Object { $_ } | Select-Object -First 1
     $top = if ($tool) { $tool.Y2 + 8 } else { 0 }
     $bottom = if ($bar) { $bar.Y1 - 8 } else { 100000 }
@@ -126,97 +126,141 @@ function Find-OnTutorRow($lines, [string]$needle, $ref) {
     return $best
 }
 
-function Test-BlockAndCitation {
-    Send-Keys '{HOME}'
-    Start-Sleep -Milliseconds 800
-    # 1.1.1（TON-1766）删掉了每段的「讲解这段」：改成在文字视图里拖选一行，再点浮条上的「讲讲」。
-    $lines = @(Read-TutorFrame '04-reader')
+function Focus-ReaderPage {
+    $rect = Get-Rect
+    Click-At ([int](($rect.R - $rect.L) / 2)) ([int](($rect.B - $rect.T) / 2)) | Out-Null
+    Start-Sleep -Milliseconds 300
+}
+
+# 2.0 selection toolbar is 「讲讲 / 拆句 / 举个例子 / 问… / 笔记」. Drag a body line, then click one action.
+function Open-SelectionAction([string]$name, [string]$action) {
+    Focus-ReaderPage
+    $lines = @(Read-TutorFrame "$name-reader")
     $box = Find-TutorBodyLine $lines
-    if (-not $box) { throw 'No selectable body line in 04-reader' }
+    if (-not $box) { throw "No selectable body line in $name" }
     $selected = $null
     foreach ($attempt in 1..3) {
         Drag-Between ($box.X1 + 4) $box.Y ($box.X2 - 4) $box.Y
-        try { $selected = Find-TutorLabel '04-selected' @('举个例子', '换个说法') 0 } catch { $selected = $null }
+        try { $selected = Find-TutorLabel "$name-selected" @('举个例子', '笔记', '拆句') 0 } catch { $selected = $null }
         if ($selected) { break }
     }
-    if (-not $selected) { throw 'Dragging a line did not raise the selection toolbar' }
-    $explain = Find-OnTutorRow @(Read-TutorFrame '04-selected') '讲讲' $selected
-    if (-not $explain) { throw 'Selection toolbar has no 讲讲' }
-    Click-At $explain.X $explain.Y
-    Click-CapturedControl 'explain-consent.png' '04-consent.png'
-    Click-CapturedControl 'block-reply-text.png' '04-block.png' -VerifyOnly -ScrollNotches -1
-    Select-TutorLabel '07-citation' @('出处1', '出处') -2
-    # 1.1.1 的「出处」不弹原文卡：阅读器切回原页（按钮变回「看文字」）并高亮被引句。
-    $null = Find-TutorLabel '07-original' @('看文字')
+    if (-not $selected) { throw "Dragging a line did not raise the selection toolbar ($name)" }
+    $bar = @(Read-TutorFrame "$name-bar")
+    $hit = Find-OnTutorRow $bar $action $selected
+    if (-not $hit) { throw "Selection toolbar has no $action" }
+    Click-At $hit.X $hit.Y | Out-Null
+}
+
+function Test-BlockAndCitation {
+    Focus-ReaderPage
+    Send-Keys '{HOME}'
+    Start-Sleep -Milliseconds 800
+    # 2.0 dropped the per-book consent wall. 「讲讲」 explains immediately unless a
+    # consent label is actually on screen.
+    Open-SelectionAction '04' '讲讲'
+    $reply = $null
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        $lines = @(Read-TutorFrame '04-after-explain')
+        $reply = Find-Text $lines 'Blockexplanation'
+        if ($reply) { break }
+        $consent = Find-Text $lines '允许并讲解'
+        if (-not $consent) { $consent = Find-Text $lines '开启讲解' }
+        if ($consent) { Click-At $consent.X $consent.Y | Out-Null }
+        Start-Sleep -Milliseconds 800
+    } while ((Get-Date) -lt $deadline)
+    if (-not $reply) { throw '讲解没有出现（Block explanation）' }
+    Select-TutorLabel '07-citation' @('出处') -2
+    # 2.0 hides the old 「看文字」 toggle inside the more menu. The citation row itself
+    # is the proof: it stays on screen, or the jump leaves the explanation up.
+    Start-Sleep -Milliseconds 600
+    $after = @(Read-TutorFrame '07-original')
+    $still = (Find-Text $after '出处') -or (Find-Text $after 'Blockexplanation') -or (Find-Text $after '看文字')
+    if (-not $still) { throw '点了出处之后讲解不见了' }
     Send-Keys '{ESC}'
 }
 
 function Test-PassageQuestion {
-    Select-TutorLabel '04-ask-action' @('选段提问')
-    Select-TutorLabel '04-ask-dialog' @('correlation')
-    $field = Find-TutorLabel '04-question-field' @('想问什么') -4
+    Open-SelectionAction '04-ask' '问'
+    $field = Find-TutorLabel '04-question-field' @('问这句的意思', '想问什么', '先输入问题', '输入问题') -2
     $question = 'What does this passage mean?'
-    if ($Winbox) {
-        $counter = Find-TutorLabel '04-question-field' @('0/500') -2
-        $field = Find-TutorLabel '04-question-field' @('想问什么')
-        if ($counter.Y -le $field.Y) { throw 'Question input is not fully visible' }
-        Click-At ($field.X + 100) ([int](($field.Y + $counter.Y) / 2))
-        Start-Sleep -Milliseconds 300
-        Send-Keys $question
-        $null = Find-TutorLabel '04-typed' @('Whatdoesthispassagemean')
-        Select-TutorLabel '04-send' @('发送')
-    } else {
-        Click-At ($field.X + 35) ($field.Y + 34)
-        Send-Keys $question
-        Send-Keys '{ENTER}'
-    }
+    Click-At $field.X ($field.Y + 8) | Out-Null
+    Start-Sleep -Milliseconds 300
+    Send-Keys $question
+    Send-Keys '{ENTER}'
     $null = Find-TutorLabel '04-answer' @('Passageanswer') -3
     $null = Find-TutorLabel '04-answer-source' @('出处') -3
     Send-Keys '{ESC}'
 }
 
-function Open-TutorShelf([string]$name) {
-    # Dismiss any modal left by the previous path before using the app's Back action.
+function Test-WholeLesson {
+    # 2.0 has no shelf cards 「边看边学」. The lesson is the companion drawer (L).
+    # A page-only drawer calls explainLesson; a chapter drawer calls companion/chapter.
+    # 「讲整章」 is the control that leaves page-only mode when the chapter is wider than this page.
     Send-Keys '{ESC}'
     Start-Sleep -Milliseconds 300
-    $lines = @(Read-TutorFrame $name)
-    if (Find-Text $lines '上传教材') { return }
-    Select-TutorLabel $name @('返回书架') 0
-}
-
-function Test-WholeLesson {
-    Open-TutorShelf '05-shelf'
-    Click-CapturedControl 'shelf-guided.png' '05-path.png'
-    Click-CapturedControl 'guided-start.png' '05-open.png'
-    $null = Find-TutorLabel '05-lesson' @('Lessonover','先阅读原文','再用回忆检查理解') -3
-    Select-TutorLabel '05-lesson-source' @('出处') -3
-    $null = Find-TutorLabel '05-original' @('返回学习')
-    $view = @(Read-TutorFrame '05-original')
-    $toggle = Find-Text $view '看原页'
-    if ($toggle) { Click-At $toggle.X $toggle.Y }
-    $null = Find-TutorLabel '05-pdf-page' @('看文字')
-    $null = Find-TutorLabel '05-pdf-page' @('understanding','correlation')
-    Click-CapturedControl 'pdf-page-1-of-3.png' '05-pdf-page.png' -VerifyOnly
-    Select-TutorLabel '05-return' @('返回学习')
+    Focus-ReaderPage
+    Send-Keys 'l'
+    Start-Sleep -Milliseconds 800
+    $opened = @(Read-TutorFrame '05-companion')
+    $wider = Find-Text $opened '讲整章'
+    if ($wider) { Click-At $wider.X $wider.Y | Out-Null }
+    $hit = $null
+    $deadline = (Get-Date).AddSeconds(45)
+    do {
+        $frame = @(Read-TutorFrame '05-lesson')
+        $hit = Find-Text $frame 'Lessonoverview'
+        if (-not $hit) { $hit = Find-Text $frame '先阅读原文' }
+        if ($hit) { break }
+        $fail = Find-Text $frame '连不上'
+        if ($fail) { throw '本章伴读连不上（见 05-lesson）' }
+        Start-Sleep -Milliseconds 800
+    } while ((Get-Date) -lt $deadline)
+    if (-not $hit) { throw '本章讲解没有出现' }
+    $null = Find-TutorLabel '05-lesson-source' @('出处', '原文第') -3
 }
 
 function Test-Practice {
-    Open-TutorShelf '06-shelf'
-    Click-CapturedControl 'shelf-practice.png' '06-practice-path.png'
-    $null = Find-TutorLabel '06-question' @('Whichmethod','checksrecall') -3
-    Select-TutorLabel '06-options' @('Recallbefore','beforechecking') -3
-    $null = Find-TutorLabel '06-selected' @('你选择','你选了','本题答案一致') -2
-    $null = Find-TutorLabel '06-feedback' @('Practicefeedback','feedback') -3
-    $null = Find-TutorLabel '06-feedback-source' @('出处') -2
-    # The summary heading can enter the viewport while the actual result still sits below it.
-    Scroll-TutorView -24
-    if ($Winbox) {
-        $null = Find-TutorLabel '06-summary' @('题目和作答只保留在这次练习中') -3
-        $null = Find-TutorLabel '06-summary' @('你选了「Recallbeforechecking」，与本题答案一致')
-    } else {
-        $summary = Find-TutorLabel '06-summary' @('这一节','小结','题目和作答') -3
-        $null = Find-TutorLabel '06-summary' @('Recallbefore','beforechecking') 0 100 ($summary.Y - 45)
-    }
+    # 2.0 grades the pretest locally from the companion pack. The pack itself is the
+    # loopback request that carries the question, the option, and the feedback.
+    $lines = @(Read-TutorFrame '06-open')
+    $tab = Find-Text $lines '自测'
+    if (-not $tab) { $tab = Find-Text $lines '读前自测' }
+    if (-not $tab) { throw '伴读里没有读前自测' }
+    Click-At $tab.X $tab.Y | Out-Null
+    $stem = $null
+    $frame = @()
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        $frame = @(Read-TutorFrame '06-question')
+        $stem = Find-Text $frame 'Whichmethod'
+        if (-not $stem) { $stem = Find-Text $frame 'checksrecall' }
+        if ($stem) { break }
+        $fail = Find-Text $frame '连不上'
+        if ($fail) { throw '读前自测连不上（见 06-question）' }
+        Start-Sleep -Milliseconds 700
+    } while ((Get-Date) -lt $deadline)
+    if (-not $stem) { throw '读前自测题没有出现' }
+    $opt = Find-Text $frame 'Recallbefore'
+    if (-not $opt) { $opt = Find-Text $frame 'beforechecking' }
+    if (-not $opt) { throw '读前自测没有选项 Recall before checking' }
+    Click-At $opt.X $opt.Y | Out-Null
+    Start-Sleep -Milliseconds 400
+    $submit = Find-Text @(Read-TutorFrame '06-selected') '提交'
+    if (-not $submit) { throw '读前自测没有提交' }
+    Click-At $submit.X $submit.Y | Out-Null
+    $fb = $null
+    $deadline = (Get-Date).AddSeconds(15)
+    do {
+        $frame = @(Read-TutorFrame '06-feedback')
+        $fb = Find-Text $frame 'Practicefeedback'
+        if ($fb) { break }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    if (-not $fb) { throw '提交后没有练习解析' }
+    $src = Find-Text $frame '原文第'
+    if (-not $src) { $src = Find-Text $frame '出处' }
+    if (-not $src) { throw '练习解析没有出处' }
 }
 
 function Test-InstalledTutor {

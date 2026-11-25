@@ -127,13 +127,19 @@ class BookExplainTest {
         root.toFile().deleteRecursively()
     }
 
-    @Test fun consentIsPerBookAndNothingIsAllowedByDefault() {
-        val consent = ExplainConsent(Files.createTempDirectory("coach-consent-"))
-        assertFalse(consent.allowed(book))
-        consent.allow(book)
+    @Test fun explanationPermissionTracksTheGlobalSettingAcrossBooksAndWindows() {
+        val directory = Files.createTempDirectory("coach-consent-")
+        val consent = ExplainConsent(directory)
+        val otherWindow = ReadingSettings(directory)
         assertTrue(consent.allowed(book))
+        otherWindow.chooseAiExplain(false)
+        assertFalse(consent.allowed(book))
         assertFalse(consent.allowed("another"))
         consent.allow("../escape")
         assertFalse(consent.allowed("../escape"))
+        assertFalse(consent.allowed(book))
+        consent.allow(book)
+        assertTrue(consent.allowed(book))
+        assertTrue(ExplainConsent(directory).allowed("another"))
     }
 }

@@ -197,12 +197,13 @@ class BackgroundOcrImportTest {
 
     @Test fun backgroundOcrUnblocksShelfSwitchBackAndReaderShowsOriginalPagesAndToast() = runBlocking {
         val root = Files.createTempDirectory("coach-bg-ocr-ui-")
+        val gatePage3 = CompletableDeferred<Unit>()
+        val gateFinish = CompletableDeferred<Unit>()
+        var pending: kotlinx.coroutines.Job? = null
         try {
             val otherPdf = textPdf(root.resolve("other.pdf"), "生物学导论")
             val scanPdf = scannedPdf(root.resolve("scan.pdf"), 6, "扫描教材")
-            val gatePage3 = CompletableDeferred<Unit>()
             val reachedPage3 = CountDownLatch(1)
-            val gateFinish = CompletableDeferred<Unit>()
             val reachedPage4 = CountDownLatch(1)
             val recognizedPages = AtomicInteger(0)
 
@@ -223,12 +224,13 @@ class BackgroundOcrImportTest {
 
             val controller = TextbookController(library)
             controller.importBook(otherPdf)
-            controller.dismissPrompt()
+            controller.back()
+            assertEquals(BookScreen.HOME, controller.state.value.screen)
 
             for (dark in listOf(false, true)) {
                 // Only run full UI flow in light mode once, and also verify dark screenshot
                 if (dark) break
-                val importJob = controller.launchImport(scanPdf)
+                val importJob = controller.launchImport(scanPdf).also { pending = it }
                 assertTrue(withContext(Dispatchers.IO) { reachedPage3.await(15, TimeUnit.SECONDS) })
 
                 runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1.0f)) {
@@ -315,7 +317,12 @@ class BackgroundOcrImportTest {
                     }
                 }
             }
-        } finally { root.toFile().deleteRecursively() }
+        } finally {
+            gatePage3.complete(Unit)
+            gateFinish.complete(Unit)
+            pending?.join()
+            root.toFile().deleteRecursively()
+        }
     }
 
     @Test fun darkThemeProgressBarAndToastRenderCleanly() = runBlocking {

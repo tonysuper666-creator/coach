@@ -113,6 +113,12 @@ internal class ReadingSettings(directory: Path, private val busyTimeoutMs: Int =
         sectionSummary = enabled
     }
 
+    fun storedAiExplainEnabled(): Boolean = withBusyRetry { db ->
+        db.prepareStatement("SELECT value FROM reading_settings WHERE name='aiExplain'").use { sql ->
+            sql.executeQuery().use { rows -> !rows.next() || rows.getString(1) == "true" }
+        }
+    }
+
     fun chooseAiExplain(enabled: Boolean) {
         save("aiExplain", enabled.toString())
         aiExplain = enabled

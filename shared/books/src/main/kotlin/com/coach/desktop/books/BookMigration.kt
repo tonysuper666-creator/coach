@@ -65,11 +65,15 @@ internal object BookSchemaMigration {
 
     /** TON-1823 PR A: persistent per-account unified book upload queue & local-to-server shelf mapping. */
     const val V5_SCHEMA_VERSION = 5
-    const val CURRENT_SCHEMA_VERSION = V5_SCHEMA_VERSION
+
+    /** TON-1848: transactional SQLite persistence for companion Q&A threads (`book_ask_turns`). */
+    const val V6_SCHEMA_VERSION = 6
+    const val CURRENT_SCHEMA_VERSION = V6_SCHEMA_VERSION
     const val V1_BACKUP_FILENAME = "library.sqlite.v1.bak"
     const val V2_BACKUP_FILENAME = "library.sqlite.v2.bak"
     const val V3_BACKUP_FILENAME = "library.sqlite.v3.bak"
     const val V4_BACKUP_FILENAME = "library.sqlite.v4.bak"
+    const val V5_BACKUP_FILENAME = "library.sqlite.v5.bak"
 
     private val CORE_V1_TABLES = listOf(
         "CREATE TABLE IF NOT EXISTS books(id TEXT PRIMARY KEY,title TEXT NOT NULL,format TEXT NOT NULL,reading_page INTEGER NOT NULL DEFAULT 1,lesson_index INTEGER NOT NULL DEFAULT 0,learning INTEGER NOT NULL DEFAULT 0,prompt_seen INTEGER NOT NULL DEFAULT 0,mode TEXT NOT NULL DEFAULT 'NONE',touched INTEGER NOT NULL)",
@@ -322,6 +326,30 @@ internal object BookSchemaMigration {
         )""".trimIndent(),
     )
 
+    private val V6_TABLES = listOf(
+        """CREATE TABLE IF NOT EXISTS book_ask_turns(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            selection_id TEXT NOT NULL,
+            selection_page INTEGER NOT NULL,
+            selection_start INTEGER NOT NULL,
+            selection_end INTEGER NOT NULL,
+            selection_text TEXT NOT NULL,
+            section_location TEXT NOT NULL DEFAULT '',
+            action_kind TEXT NOT NULL DEFAULT 'ask',
+            label TEXT NOT NULL,
+            question_text TEXT,
+            answer_text TEXT NOT NULL,
+            citations_json TEXT NOT NULL DEFAULT '[]',
+            sent_blocks_json TEXT NOT NULL DEFAULT '[]',
+            elapsed_ms INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL
+        )""".trimIndent(),
+        "CREATE INDEX IF NOT EXISTS idx_book_ask_turns_book_thread ON book_ask_turns(book, thread_id, id)",
+        "CREATE INDEX IF NOT EXISTS idx_book_ask_turns_book_id ON book_ask_turns(book, id)",
+    )
+
     private val V2_TABLES = listOf(
         COLLECTIONS_DDL,
         COLLECTION_MATERIALS_DDL,
@@ -405,6 +433,10 @@ internal object BookSchemaMigration {
         "book_upload_queue", "book_upload_account_bindings",
     )
 
+    private val REQUIRED_V6_TABLES = REQUIRED_V5_TABLES + setOf(
+        "book_ask_turns",
+    )
+
     fun upgradeAndMigrate(
         directory: Path,
         openConnection: () -> Connection,
@@ -435,13 +467,14 @@ internal object BookSchemaMigration {
                     upgradingFromV1 -> directory.resolve(V1_BACKUP_FILENAME)
                     currentVersion < V3_SCHEMA_VERSION -> directory.resolve(V2_BACKUP_FILENAME)
                     currentVersion < V4_SCHEMA_VERSION -> directory.resolve(V3_BACKUP_FILENAME)
-                    else -> directory.resolve(V4_BACKUP_FILENAME)
+                    currentVersion < V5_SCHEMA_VERSION -> directory.resolve(V4_BACKUP_FILENAME)
+                    else -> directory.resolve(V5_BACKUP_FILENAME)
                 }
                 if (upgradingExisting) {
                     runCatching { probe.createStatement().use { it.execute("PRAGMA wal_checkpoint(TRUNCATE)") } }
                 }
                 schemaComplete = currentVersion >= CURRENT_SCHEMA_VERSION &&
-                    REQUIRED_V5_TABLES.all { it in existingTables } &&
+                    REQUIRED_V6_TABLES.all { it in existingTables } &&
                     "show_standalone" in tableColumns(probe, "books") &&
                     "week_num" in tableColumns(probe, "collection_materials") &&
                     "index_state" in tableColumns(probe, "books") &&
@@ -487,6 +520,9 @@ internal object BookSchemaMigration {
                     }
                     db.createStatement().use { sql ->
                         for (ddl in V5_TABLES) sql.execute(ddl)
+                    }
+                    db.createStatement().use { sql ->
+                        for (ddl in V6_TABLES) sql.execute(ddl)
                     }
                     BookFtsStore.migrate(db)
                     onInTransaction(db)

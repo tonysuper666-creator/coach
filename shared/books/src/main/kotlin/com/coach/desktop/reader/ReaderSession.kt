@@ -41,10 +41,64 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         return out
     }
 
-    fun beginNote() {
+    fun beginNote(preferredOffset: Int = 0) {
         if (remote == null || currentView() == null) { message = "这一页还没加载好，不能写批注"; return }
-        if (pageLines().isEmpty()) { message = "这一页没有可选的文字"; return }
-        noteDraft = null; noteLine = 0
+        val lines = pageLines()
+        if (lines.isEmpty()) { message = "这一页没有可选的文字"; return }
+        val preferredLine = if (preferredOffset > 0) {
+            lines.indexOfFirst { it.last >= preferredOffset }.takeIf { it >= 0 } ?: 0
+        } else 0
+        noteDraft = null; noteLine = preferredLine
+    }
+
+    /**
+     * 直接针对阅读器选区开启批注编辑器，严禁回退到第 0 行。
+     * 若传入偏移与页内原文存在可核对的精确子串或唯一精确匹配，直接定位并打开；否则给出明确提示并返回 false。
+     */
+    fun beginNoteForRange(start: Int, end: Int, expectedQuote: String? = null): Boolean {
+        val r = remote
+        val v = currentView()
+        val doc = r?.current
+        if (r == null || v == null || doc == null) {
+            message = "这一页还没加载好，不能写批注"
+            return false
+        }
+        val resolved = resolveNoteRange(v.text, start, end, expectedQuote)
+        if (resolved == null) {
+            message = "选中的原文位置无法确认，请重新选择"
+            return false
+        }
+        val (adjStart, adjEnd) = resolved
+        if (adjEnd - adjStart > 4_000) {
+            message = "选中的原文超过 4000 字，请缩窄范围后再写批注"
+            return false
+        }
+        openDraftForVerifiedRange(r, doc, v, adjStart, adjEnd)
+        return true
+    }
+
+    private fun resolveNoteRange(pageText: String, start: Int, end: Int, expectedQuote: String?): Pair<Int, Int>? {
+        if (start in 0 until end && end <= pageText.length) {
+            val slice = pageText.substring(start, end)
+            if (expectedQuote == null || slice == expectedQuote) return start to end
+            val candidates = listOf(expectedQuote, expectedQuote.trim()).filter { it.isNotEmpty() }.distinct()
+            for (needle in candidates) {
+                val rel = slice.indexOf(needle)
+                if (rel >= 0 && slice.indexOf(needle, rel + 1) < 0) {
+                    return (start + rel) to (start + rel + needle.length)
+                }
+            }
+        }
+        if (!expectedQuote.isNullOrBlank()) {
+            val candidates = listOf(expectedQuote, expectedQuote.trim()).filter { it.isNotEmpty() }.distinct()
+            for (needle in candidates) {
+                val first = pageText.indexOf(needle)
+                if (first >= 0 && pageText.indexOf(needle, first + 1) < 0) {
+                    return first to (first + needle.length)
+                }
+            }
+        }
+        return null
     }
 
     /** Mouse/touch hosts select the same page line as the keyboard picker. */
@@ -175,12 +229,15 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     private fun confirmLine() {
         val r = remote ?: return; val v = currentView() ?: return
         val range = pageLines().getOrNull(noteLine) ?: return
-        val end = range.last + 1
-        val existing = r.notes.firstOrNull { it.pdfPage == v.pdfPage && it.start == range.first && it.end == end && r.noteValid(it, v) }
         val doc = r.current ?: return
-        val quote = v.text.substring(range.first, end)
+        openDraftForVerifiedRange(r, doc, v, range.first, range.last + 1)
+    }
+
+    private fun openDraftForVerifiedRange(r: ReaderRemote, doc: ReaderDocInfo, v: ReaderPageView, start: Int, end: Int) {
+        val existing = r.notes.firstOrNull { it.pdfPage == v.pdfPage && it.start == start && it.end == end && r.noteValid(it, v) }
+        val quote = v.text.substring(start, end)
         val base = NoteDraft(existing?.id ?: java.util.UUID.randomUUID().toString(), doc.id, doc.version, v.pdfPage, v.textSha256,
-            range.first, end, quote, existing?.note.orEmpty(), existing?.revision ?: 0L)
+            start, end, quote, existing?.note.orEmpty(), existing?.revision ?: 0L)
         val local = identityOf(base)?.let { drafts?.get(it) }?.takeIf { it.quote == quote } // 同一锚点上本机留着的草稿
         if (local != null) { if (!takeStored(local, doc, v)) noteLine = -1; return } // 被拒绝的本机稿：不开基线编辑器，稿原样保留
         editGen++; persistFailed = false // 新打开的编辑器还没有未落盘的新文字

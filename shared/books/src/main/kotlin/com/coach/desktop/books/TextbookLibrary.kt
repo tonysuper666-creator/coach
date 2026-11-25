@@ -12,6 +12,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.*
 import org.w3c.dom.Element
 import org.w3c.dom.Node
 import java.nio.file.Files
@@ -1815,7 +1816,7 @@ internal class TextbookLibrary(
                 for (table in listOf(
                     "pages", "book_illustrations", "book_page_text_boxes", "book_native_sources",
                     "book_learning_paths", "book_ladders", "book_reader_views", "book_pdf_modes",
-                    "book_highlights", "book_notes", "answers", "book_reviews", "book_structures", "book_section_cache", "book_body_start",
+                    "book_highlights", "book_notes", "book_ask_turns", "answers", "book_reviews", "book_structures", "book_section_cache", "book_body_start",
                     "book_open_session", "book_toc_nodes", "book_study_chunks", "book_bookmarks",
                     "book_page_aspects", "book_visual_pages",
                 )) {
@@ -2162,6 +2163,186 @@ internal class TextbookLibrary(
 
     @Synchronized fun lastQuestion(bookId: String): String? = database().use { db ->
         MasteryStore.lookupLastBookQuestion(db, bookId)
+    }
+
+    internal data class SnapshotPageMeta(val number: Int, val text: String, val ocr: Boolean)
+    internal data class BookSnapshotMeta(val format: String, val title: String, val pages: Map<Int, SnapshotPageMeta>)
+
+    /** 仅查询校验快照所需的书名/格式与目标页文本，避免每次讲解整本加载全部页与结构（#10b）。 */
+    @Synchronized fun bookSnapshotMeta(bookId: String, pageNumbers: Collection<Int>): BookSnapshotMeta? = database().use { db ->
+        val header = db.prepareStatement("SELECT format, title FROM books WHERE id=? LIMIT 1").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { row ->
+                if (!row.next()) null else row.getString(1) to row.getString(2)
+            }
+        } ?: return@use null
+        val distinctPages = pageNumbers.distinct()
+        val pages = HashMap<Int, SnapshotPageMeta>(distinctPages.size * 2)
+        if (distinctPages.isNotEmpty()) {
+            val placeholders = distinctPages.joinToString(",") { "?" }
+            db.prepareStatement("SELECT page, text, ocr FROM pages WHERE book=? AND page IN ($placeholders)").use { sql ->
+                sql.setString(1, bookId)
+                distinctPages.forEachIndexed { idx, p -> sql.setInt(idx + 2, p) }
+                sql.executeQuery().use { rs ->
+                    while (rs.next()) {
+                        val number = rs.getInt(1)
+                        pages[number] = SnapshotPageMeta(number, rs.getString(2), rs.getInt(3) == 1)
+                    }
+                }
+            }
+        }
+        BookSnapshotMeta(header.first, header.second, pages)
+    }
+
+    internal data class PersistedAskThread(
+        val threadId: String,
+        val selection: SourceBlock,
+        val sectionLocation: String,
+        val turns: List<InlineExplainEntry>,
+    )
+
+    /** 事务落盘伴读提问/追问与回答，并在同一事务内同步更新书架「上次问」，强杀重开不丢。 */
+    @Synchronized fun saveAskTurn(
+        bookId: String,
+        threadId: String,
+        selection: SourceBlock,
+        sectionLocation: String,
+        actionKind: String,
+        label: String,
+        questionText: String?,
+        explanation: Explanation,
+        sentBlocks: List<SourceBlock>,
+    ) = database().use { db ->
+        if (!BookSchemaMigration.tableExists(db, "book_ask_turns")) return@use
+        val citationsJson = buildJsonArray {
+            explanation.citations.forEach { c ->
+                add(buildJsonObject {
+                    put("anchor", c.anchor)
+                    put("blockId", c.blockId)
+                    put("page", c.page)
+                })
+            }
+        }.toString()
+        val sentBlocksJson = buildJsonArray {
+            sentBlocks.forEach { b ->
+                add(buildJsonObject {
+                    put("id", b.id)
+                    put("page", b.page)
+                    put("start", b.start)
+                    put("end", b.end)
+                    put("heading", b.heading)
+                    put("text", b.text)
+                })
+            }
+        }.toString()
+        val now = clock.millis()
+        db.autoCommit = false
+        try {
+            db.prepareStatement(
+                """INSERT INTO book_ask_turns(
+                    book, thread_id, selection_id, selection_page, selection_start, selection_end,
+                    selection_text, section_location, action_kind, label, question_text,
+                    answer_text, citations_json, sent_blocks_json, elapsed_ms, created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""".trimIndent(),
+            ).use { sql ->
+                sql.setString(1, bookId)
+                sql.setString(2, threadId)
+                sql.setString(3, selection.id)
+                sql.setInt(4, selection.page)
+                sql.setInt(5, selection.start)
+                sql.setInt(6, selection.end)
+                sql.setString(7, selection.text)
+                sql.setString(8, sectionLocation)
+                sql.setString(9, actionKind)
+                sql.setString(10, label)
+                if (questionText.isNullOrBlank()) sql.setNull(11, java.sql.Types.VARCHAR) else sql.setString(11, questionText.trim())
+                sql.setString(12, explanation.text)
+                sql.setString(13, citationsJson)
+                sql.setString(14, sentBlocksJson)
+                sql.setLong(15, explanation.elapsedMs)
+                sql.setLong(16, now)
+                sql.executeUpdate()
+            }
+            if (!questionText.isNullOrBlank()) {
+                MasteryStore.saveLastBookQuestion(db, bookId, questionText)
+            }
+            db.commit()
+        } catch (error: Throwable) {
+            runCatching { db.rollback() }
+            throw error
+        } finally {
+            runCatching { db.autoCommit = true }
+        }
+    }
+
+    @Synchronized fun loadLatestAskThread(bookId: String): PersistedAskThread? = database().use { db ->
+        if (!BookSchemaMigration.tableExists(db, "book_ask_turns")) return@use null
+        val latestThreadId = db.prepareStatement(
+            "SELECT thread_id FROM book_ask_turns WHERE book=? ORDER BY id DESC LIMIT 1",
+        ).use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { if (it.next()) it.getString(1) else null }
+        } ?: return@use null
+        var firstSelection: SourceBlock? = null
+        var sectionLoc = ""
+        val turns = mutableListOf<InlineExplainEntry>()
+        db.prepareStatement(
+            """SELECT selection_id, selection_page, selection_start, selection_end, selection_text,
+                      section_location, label, answer_text, citations_json, sent_blocks_json, elapsed_ms
+               FROM book_ask_turns
+               WHERE book=? AND thread_id=?
+               ORDER BY id ASC""".trimIndent(),
+        ).use { sql ->
+            sql.setString(1, bookId)
+            sql.setString(2, latestThreadId)
+            sql.executeQuery().use { rs ->
+                while (rs.next()) {
+                    if (firstSelection == null) {
+                        firstSelection = SourceBlock(
+                            id = rs.getString(1),
+                            page = rs.getInt(2),
+                            start = rs.getInt(3),
+                            end = rs.getInt(4),
+                            heading = false,
+                            text = rs.getString(5),
+                        )
+                        sectionLoc = rs.getString(6).orEmpty()
+                    }
+                    val label = rs.getString(7)
+                    val answerText = rs.getString(8)
+                    val citationsRaw = rs.getString(9).orEmpty()
+                    val sentRaw = rs.getString(10).orEmpty()
+                    val elapsedMs = rs.getLong(11)
+                    val citations = runCatching {
+                        LedgerJson.parseToJsonElement(citationsRaw).jsonArray.mapNotNull { el ->
+                            val o = el as? JsonObject ?: return@mapNotNull null
+                            Citation(
+                                anchor = o["anchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                                blockId = o["blockId"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                                page = o["page"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null,
+                            )
+                        }
+                    }.getOrDefault(emptyList())
+                    val sentBlocks = runCatching {
+                        LedgerJson.parseToJsonElement(sentRaw).jsonArray.mapNotNull { el ->
+                            val o = el as? JsonObject ?: return@mapNotNull null
+                            SourceBlock(
+                                id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                                page = o["page"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null,
+                                start = o["start"]?.jsonPrimitive?.intOrNull ?: 0,
+                                end = o["end"]?.jsonPrimitive?.intOrNull ?: 0,
+                                heading = o["heading"]?.jsonPrimitive?.booleanOrNull ?: false,
+                                text = o["text"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                            )
+                        }
+                    }.getOrDefault(emptyList())
+                    turns += InlineExplainEntry(label, Explanation(answerText, citations, elapsedMs), sentBlocks)
+                }
+            }
+        }
+        val sel = firstSelection ?: return@use null
+        if (turns.isEmpty()) return@use null
+        PersistedAskThread(latestThreadId, sel, sectionLoc, turns)
     }
 
     @Synchronized fun saveMarginWhisperAudit(candidate: MarginWhisperCandidate) = database().use { db ->

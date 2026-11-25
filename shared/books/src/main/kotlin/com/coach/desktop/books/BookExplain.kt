@@ -194,9 +194,10 @@ internal object ExplainWire {
         }
         put("blocks", buildJsonArray { for (b in blocks) add(buildJsonObject { put("id", b.id); put("text", b.text) }) })
         sectionContext?.let { put("sectionContext", encodeSectionContext(it)) }
-        if (history.isNotEmpty()) {
+        val nonBlankHistory = history.filter { it.question.isNotBlank() && it.answer.isNotBlank() }.takeLast(8)
+        if (nonBlankHistory.isNotEmpty()) {
             put("history", buildJsonArray {
-                history.takeLast(8).forEach { turn ->
+                nonBlankHistory.forEach { turn ->
                     add(buildJsonObject {
                         put("question", turn.question.trim().take(500))
                         put("answer", turn.answer.trim().take(2000))

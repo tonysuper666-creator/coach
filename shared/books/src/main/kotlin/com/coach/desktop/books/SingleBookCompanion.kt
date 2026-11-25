@@ -550,6 +550,98 @@ internal object ChapterCompanionGrouping {
 
     fun isExerciseSection(title: String): Boolean = EXERCISE_RE.containsMatchIn(title.trim())
 
+    fun filterForCompanion(book: Textbook, group: ChapterSectionGroup): ChapterSectionGroup {
+        val captionCache = HashMap<Int, Set<String>>()
+        fun captionsFor(page: Int): Set<String> = captionCache.getOrPut(page) { pageIllustrationCaptions(book, page) }
+
+        val hasAnyProse = group.sections.any { sec ->
+            sec.blocks.any { blk -> !blk.heading && !isLeadingImageCaptionBlock(blk, captionsFor(blk.page)) }
+        }
+        if (!hasAnyProse) return group
+
+        val withoutLeadingCaptionSections = group.sections.dropWhile { sec ->
+            val effective = sec.blocks.filterNot { it.heading }.ifEmpty { sec.blocks }
+            effective.isEmpty() || effective.all { blk -> isLeadingImageCaptionBlock(blk, captionsFor(blk.page)) }
+        }.ifEmpty { group.sections }
+
+        var proseSeen = false
+        val cleanedSections = withoutLeadingCaptionSections.mapNotNull { sec ->
+            if (proseSeen) {
+                sec
+            } else {
+                val filteredBlocks = ArrayList<SourceBlock>(sec.blocks.size)
+                for (blk in sec.blocks) {
+                    if (proseSeen || blk.heading) {
+                        filteredBlocks += blk
+                    } else if (!isLeadingImageCaptionBlock(blk, captionsFor(blk.page))) {
+                        proseSeen = true
+                        filteredBlocks += blk
+                    }
+                }
+                if (filteredBlocks.any { !it.heading }) sec.copy(blocks = filteredBlocks) else null
+            }
+        }.ifEmpty { withoutLeadingCaptionSections }
+
+        return group.copy(
+            firstPage = cleanedSections.minOf { it.firstPage },
+            lastPage = cleanedSections.maxOf { it.lastPage },
+            sections = cleanedSections,
+        )
+    }
+
+    private data class DroppedCaptionContext(
+        val droppedBlockIds: Set<String>,
+        val droppedSectionIds: Set<String>,
+        val droppedBlocks: List<SourceBlock>,
+    )
+
+    private fun droppedLeadingCaptionContext(book: Textbook, group: ChapterSectionGroup): DroppedCaptionContext {
+        val companionGroup = filterForCompanion(book, group)
+        val allowedBlockIds = wireBlocks(companionGroup).mapTo(HashSet()) { it.id }
+        val droppedBlocks = wireBlocks(group).filter { it.id !in allowedBlockIds }
+        val allowedSectionIds = companionGroup.sections.mapTo(HashSet()) { it.id }
+        val droppedSectionIds = group.sections.map { it.id }.filterTo(HashSet()) { it !in allowedSectionIds }
+        return DroppedCaptionContext(
+            droppedBlockIds = droppedBlocks.mapTo(HashSet()) { it.id },
+            droppedSectionIds = droppedSectionIds,
+            droppedBlocks = droppedBlocks,
+        )
+    }
+
+    private fun matchesDroppedCaption(
+        sectionId: String,
+        anchor: BookCompanionAnchor?,
+        ctx: DroppedCaptionContext,
+    ): Boolean {
+        if (anchor != null && anchor.blockId in ctx.droppedBlockIds) return true
+        if (sectionId.isNotBlank() && sectionId in ctx.droppedSectionIds) return true
+        if (anchor != null) {
+            val quote = anchor.quoteAnchor.trim()
+            return ctx.droppedBlocks.any { blk ->
+                blk.page == anchor.pdfPage && (
+                    (anchor.endUtf16 > blk.start && anchor.startUtf16 < blk.end) ||
+                        (quote.isNotBlank() && (blk.text.contains(quote, ignoreCase = true) || quote.contains(blk.text.trim(), ignoreCase = true)))
+                    )
+            }
+        }
+        return false
+    }
+
+    fun hasStaleLeadingCaption(book: Textbook, group: ChapterSectionGroup, pack: BookCompanionPack): Boolean {
+        val ctx = droppedLeadingCaptionContext(book, group)
+        if (ctx.droppedBlocks.isEmpty()) return false
+        return pack.keyPoints.any { kp -> matchesDroppedCaption(kp.sectionId, kp.anchor, ctx) }
+    }
+
+    fun sanitizeCachedPack(book: Textbook, group: ChapterSectionGroup, pack: BookCompanionPack): BookCompanionPack? {
+        val ctx = droppedLeadingCaptionContext(book, group)
+        if (ctx.droppedBlocks.isEmpty()) return pack
+        val cleanKeyPoints = pack.keyPoints.filterNot { kp -> matchesDroppedCaption(kp.sectionId, kp.anchor, ctx) }
+        if (cleanKeyPoints.isEmpty()) return null
+        val cleanJargon = pack.jargonGlosses.filterNot { g -> matchesDroppedCaption("", g.anchor, ctx) }
+        return pack.copy(keyPoints = cleanKeyPoints, jargonGlosses = cleanJargon)
+    }
+
     fun wireBlocks(group: ChapterSectionGroup): List<SourceBlock> {
         val seen = HashSet<String>()
         return group.sections.flatMap { sec ->
@@ -558,13 +650,14 @@ internal object ChapterCompanionGrouping {
     }
 
     fun buildWireRequest(book: Textbook, group: ChapterSectionGroup): JsonObject = buildJsonObject {
+        val effectiveGroup = filterForCompanion(book, group)
         val seen = HashSet<String>()
         put("bookId", book.id)
         put("bookPages", book.pages.size.coerceAtLeast(1))
-        put("chapterId", group.chapterId)
-        put("chapterTitle", group.chapterTitle)
+        put("chapterId", effectiveGroup.chapterId)
+        put("chapterTitle", effectiveGroup.chapterTitle)
         put("sections", buildJsonArray {
-            for (sec in group.sections) {
+            for (sec in effectiveGroup.sections) {
                 val bodyBlocks = (sec.blocks.filterNot { it.heading }.ifEmpty { sec.blocks }).filter { seen.add(it.id) }
                 if (bodyBlocks.isEmpty()) continue
                 add(buildJsonObject {

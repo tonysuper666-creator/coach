@@ -82,6 +82,7 @@ internal fun SingleBookCompanionPanel(
     bottomContent: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
     currentPageOffset: Int = 0,
+    visiblePageRanges: List<IntRange> = emptyList(),
 ) {
     val colors = CoachTheme.colors
     val originalOnly = studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY
@@ -125,15 +126,27 @@ internal fun SingleBookCompanionPanel(
     val sectionOnly = studyPreference.mode == BookStudyMode.READ_THROUGH &&
         chapterGroup?.sections?.singleOrNull()?.let { currentPage in it.firstPage..it.lastPage } == true
     val pageOnly = readingExplanation && !wholeChapter && !samePage && !sectionOnly
-    val cachedPagePack = remember(packState, pageOnly, currentPage, currentSection, studyPreference.mode) {
+    val cachedPagePack = remember(packState, pageOnly, currentPage, currentPageOffset, visiblePageRanges, currentSection, studyPreference.mode) {
         val pack = (packState as? CompanionPackState.Ready)?.pack
         if (!pageOnly || studyPreference.mode != BookStudyMode.READ_THROUGH || pack == null) null
         else {
-            val points = pack.keyPoints.filter { it.anchor?.pdfPage == currentPage }
+            val onPagePoints = pack.keyPoints.filter { it.anchor?.pdfPage == currentPage }
+            val screenPoints = when {
+                visiblePageRanges.isNotEmpty() -> onPagePoints.filter { kp ->
+                    val a = kp.anchor ?: return@filter false
+                    val aEnd = maxOf(a.endUtf16, a.startUtf16 + 1)
+                    visiblePageRanges.any { r -> aEnd > r.first && a.startUtf16 <= r.last }
+                }.ifEmpty { onPagePoints }
+                currentPageOffset > 0 -> onPagePoints.filter { kp ->
+                    val a = kp.anchor ?: return@filter false
+                    maxOf(a.endUtf16, a.startUtf16 + 1) > currentPageOffset
+                }.ifEmpty { onPagePoints }
+                else -> onPagePoints
+            }
             val pageText = book.page(currentPage)?.text.orEmpty()
-            if (points.isEmpty()) null else pack.copy(
+            if (screenPoints.isEmpty()) null else pack.copy(
                 coreQuestion = currentSection?.title.orEmpty(),
-                keyPoints = points,
+                keyPoints = screenPoints,
                 jargonGlosses = pack.jargonGlosses.filter { gloss ->
                     gloss.anchor?.pdfPage == currentPage ||
                         (gloss.anchor == null && gloss.term.isNotBlank() && pageText.contains(gloss.term, ignoreCase = true))
@@ -195,7 +208,8 @@ internal fun SingleBookCompanionPanel(
         modeError = null
         try {
             val wire = withContext(Dispatchers.IO) {
-                StudyModeWireBuilder.buildModeRequestJson(library, book, group, chapterNum, studyPreference)
+                val companionGroup = ChapterCompanionGrouping.filterForCompanion(book, group)
+                StudyModeWireBuilder.buildModeRequestJson(library, book, companionGroup, chapterNum, studyPreference)
             }
             modeSourcePages = wire.getValue("pages").jsonArray.map { it.jsonObject.getValue("pdfPage").jsonPrimitive.int }
             val res = explainer.fetchStudyModePack(book.id, studyPreference.mode.name, wire) { chars, _, delta ->
@@ -285,20 +299,45 @@ internal fun SingleBookCompanionPanel(
     LaunchedEffect(book.id, chapterGroup?.chapterId, explainer.loaded, explainer.identity, aiEnabled, fetchNonce, pageOnly) {
         val group = chapterGroup ?: return@LaunchedEffect
         val cached = withContext(Dispatchers.IO) { library.cachedChapterCompanion(book.id, group.chapterId) }
-        if (cached != null) {
+        val staleCaptionCache = cached != null && ChapterCompanionGrouping.hasStaleLeadingCaption(book, group, cached)
+        if (cached != null && !staleCaptionCache) {
             packState = CompanionPackState.Ready(cached)
             return@LaunchedEffect
         }
-        if (pageOnly) return@LaunchedEffect
-        if (!aiEnabled || !explainer.loaded || explainer.identity == null) {
-            packState = CompanionPackState.Idle
+        val sanitizedCached = if (cached != null && staleCaptionCache) {
+            ChapterCompanionGrouping.sanitizeCachedPack(book, group, cached)
+        } else null
+        if (pageOnly) {
+            packState = sanitizedCached?.let { CompanionPackState.Ready(it) } ?: CompanionPackState.Idle
+            return@LaunchedEffect
+        }
+        if (aiEnabled && !explainer.loaded) {
+            packState = CompanionPackState.Loading
+            return@LaunchedEffect
+        }
+        if (!aiEnabled || explainer.identity == null) {
+            if (sanitizedCached != null) {
+                withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, sanitizedCached) }
+                packState = CompanionPackState.Ready(sanitizedCached)
+            } else {
+                packState = CompanionPackState.Idle
+            }
             return@LaunchedEffect
         }
         packState = CompanionPackState.Loading
+        suspend fun fallbackToSanitizedOrFailed(message: String, trouble: ExplainTrouble) {
+            if (sanitizedCached != null) {
+                withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, sanitizedCached) }
+                packState = CompanionPackState.Ready(sanitizedCached)
+            } else {
+                packState = CompanionPackState.Failed(message, trouble)
+            }
+        }
         try {
-            val firstGroup = ChapterCompanionProgressive.firstSectionGroup(group, currentSection?.id)
+            val companionGroup = ChapterCompanionGrouping.filterForCompanion(book, group)
+            val firstGroup = ChapterCompanionProgressive.firstSectionGroup(companionGroup, currentSection?.id)
             val restGroup = firstGroup?.sections?.singleOrNull()?.id?.let {
-                ChapterCompanionProgressive.remainingSectionGroup(group, it)
+                ChapterCompanionProgressive.remainingSectionGroup(companionGroup, it)
             }
             if (firstGroup != null && restGroup != null) {
                 val firstWire = ChapterCompanionGrouping.buildWireRequest(book, firstGroup)
@@ -320,26 +359,26 @@ internal fun SingleBookCompanionPanel(
                         }
                     }
                     is ChapterCompanionFetchResult.Failed -> {
-                        packState = CompanionPackState.Failed(firstRes.message, firstRes.trouble)
+                        fallbackToSanitizedOrFailed(firstRes.message, firstRes.trouble)
                     }
                 }
             } else {
-                val wire = ChapterCompanionGrouping.buildWireRequest(book, group)
-                val blocks = ChapterCompanionGrouping.wireBlocks(group)
+                val wire = ChapterCompanionGrouping.buildWireRequest(book, companionGroup)
+                val blocks = ChapterCompanionGrouping.wireBlocks(companionGroup)
                 when (val res = explainer.fetchChapterCompanion(wire, blocks)) {
                     is ChapterCompanionFetchResult.Ready -> {
                         withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, res.pack) }
                         packState = CompanionPackState.Ready(res.pack, expanding = false)
                     }
                     is ChapterCompanionFetchResult.Failed -> {
-                        packState = CompanionPackState.Failed(res.message, res.trouble)
+                        fallbackToSanitizedOrFailed(res.message, res.trouble)
                     }
                 }
             }
         } catch (c: CancellationException) {
             throw c
         } catch (_: Exception) {
-            packState = CompanionPackState.Failed("本章伴读暂时连不上，已有练习草稿已保留。", ExplainTrouble.Other)
+            fallbackToSanitizedOrFailed("本章伴读暂时连不上，已有练习草稿已保留。", ExplainTrouble.Other)
         }
     }
 
@@ -473,7 +512,9 @@ internal fun SingleBookCompanionPanel(
                     }
                     val first = if (pageOnly) currentPage else chapterGroup?.firstPage ?: currentPage
                     val last = if (pageOnly) currentPage else chapterGroup?.lastPage ?: currentPage
-                    val title = if (pageOnly) chapter?.title else chapterGroup?.chapterTitle
+                    val title = if (pageOnly) {
+                        chapter?.title?.takeIf { it.isNotBlank() } ?: currentSection?.title?.takeIf { it.isNotBlank() }
+                    } else chapterGroup?.chapterTitle
                     Text(explanationScope(first, last, title ?: book.title),
                         style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag("companion-explanation-scope"))
                     if (!samePage && !sectionOnly && chapterGroup != null) {
@@ -489,10 +530,20 @@ internal fun SingleBookCompanionPanel(
                                 onOpenAnchor = onOpenAnchor, onAskTerm = onAskAboutText,
                                 onJumpPretest = { updateDraft { it.copy(activeModule = CompanionModuleTab.PRETEST.name) } },
                             )
-                        } else key(book.id, currentPage) {
-                            PageExplanation(book, currentPage, explainer, enabled = aiEnabled, onOpen = { block ->
-                                onOpenAnchor(BookCompanionAnchor(block.page, block.id, block.start, block.end, block.text))
-                            }, onLogin = onOpenLogin)
+                        } else key(book.id, currentPage, currentPageOffset, visiblePageRanges) {
+                            PageExplanation(
+                                book = book,
+                                page = currentPage,
+                                explainer = explainer,
+                                enabled = aiEnabled,
+                                onOpen = { block ->
+                                    onOpenAnchor(BookCompanionAnchor(block.page, block.id, block.start, block.end, block.text))
+                                },
+                                onLogin = onOpenLogin,
+                                currentPageOffset = currentPageOffset,
+                                visibleRanges = visiblePageRanges,
+                                library = library,
+                            )
                         }
                     }
                     if (!pageOnly && modeError != null) RetrievedPageLinks(modeSourcePages, { "第 $it 页" }, onJumpPage)
@@ -597,7 +648,9 @@ internal fun SingleBookCompanionPanel(
                         }
                     }
                     is CompanionPackState.Failed -> {
-                        val pages = remember(chapterGroup) { ChapterCompanionGrouping.wireBlocks(chapterGroup).distinctBy { it.page } }
+                        val pages = remember(book.id, chapterGroup) {
+                            ChapterCompanionGrouping.wireBlocks(ChapterCompanionGrouping.filterForCompanion(book, chapterGroup)).distinctBy { it.page }
+                        }
                         RetrievedPageLinks(pages, { "第 ${it.page} 页" }, { onJumpPage(it.page) })
                         CoachErrorBanner(
                             message = state.message,

@@ -68,13 +68,42 @@ internal class SectionGuideController(
     fun sectionIndexForPage(page: Int): Int = sectionIndexForAnchor(page, 0)
 
     fun sectionIndexForAnchor(page: Int, offsetUtf16: Int): Int {
-        val indices = if (book.tocNodes.any { it.kind == TocNodeKind.CHAPTER }) {
+        val chapterIndices = if (book.tocNodes.any { it.kind == TocNodeKind.CHAPTER }) {
             BookChapterResolver.chapterForPage(book, page, offsetUtf16)?.sectionIndices.orEmpty()
-        } else book.lessons.indices
+        } else emptyList()
+        val indices = if (chapterIndices.isNotEmpty()) chapterIndices else book.lessons.indices.toList()
         val exact = indices.firstOrNull { index ->
             book.lessons[index].blocks.any { it.page == page && offsetUtf16 in it.start until it.end }
         }
-        return exact ?: indices.firstOrNull { page in book.lessons[it].firstPage..book.lessons[it].lastPage } ?: -1
+        if (exact != null) {
+            if (offsetUtf16 == 0 && isLeadingCaptionOnlySection(book, book.lessons[exact])) {
+                val proseOnPage = indices.firstOrNull { idx ->
+                    idx > exact &&
+                        book.lessons[idx].blocks.any { it.page == page } &&
+                        !isLeadingCaptionOnlySection(book, book.lessons[idx])
+                }
+                if (proseOnPage != null) return proseOnPage
+            }
+            return exact
+        }
+        if (offsetUtf16 > 0) {
+            val atOrAfter = indices
+                .filter { index -> book.lessons[index].blocks.any { it.page == page && it.end > offsetUtf16 } }
+                .minByOrNull { index ->
+                    book.lessons[index].blocks.filter { it.page == page && it.end > offsetUtf16 }.minOf { it.start }
+                }
+            if (atOrAfter != null) return atOrAfter
+            val beforeOrAt = indices
+                .filter { index -> book.lessons[index].blocks.any { it.page == page && it.start <= offsetUtf16 } }
+                .maxByOrNull { index ->
+                    book.lessons[index].blocks.filter { it.page == page && it.start <= offsetUtf16 }.maxOf { it.end }
+                }
+            if (beforeOrAt != null) return beforeOrAt
+        }
+        val pageMatches = indices.filter { page in book.lessons[it].firstPage..book.lessons[it].lastPage }
+        return pageMatches.firstOrNull { !isLeadingCaptionOnlySection(book, book.lessons[it]) }
+            ?: pageMatches.firstOrNull()
+            ?: -1
     }
 
     fun sectionForPage(page: Int): BookLesson? =
@@ -309,6 +338,8 @@ internal data class InlineExplainThread(
     val error: Pair<String, ExplainTrouble>? = null,
     val askingOpen: Boolean = false,
     val fallbackBlocks: List<SourceBlock> = emptyList(),
+    val threadId: String = java.util.UUID.randomUUID().toString(),
+    val pendingLabel: String? = null,
 )
 
 internal data class InlineExplainEntry(
@@ -355,7 +386,13 @@ internal fun InlineSelectionExplainCard(
             }
             V7TextButton(onClose, modifier = Modifier.testTag("inline-explain-close")) { Text("收起") }
         }
-        Column(Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        val turnScroll = rememberScrollState()
+        LaunchedEffect(thread.turns.size, thread.loading, thread.error != null) {
+            withFrameNanos { }
+            withFrameNanos { }
+            if (turnScroll.maxValue > 0) turnScroll.scrollTo(turnScroll.maxValue)
+        }
+        Column(Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(turnScroll), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             for ((index, entry) in thread.turns.withIndex()) {
                 Column(Modifier.fillMaxWidth().testTag("inline-explain-turn-$index"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(entry.label, style = MaterialTheme.typography.labelMedium, color = v7Pine())
@@ -365,8 +402,13 @@ internal fun InlineSelectionExplainCard(
                 }
             }
             if (thread.loading) {
-                Text("思考中…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary,
-                    modifier = Modifier.testTag("inline-explain-loading"))
+                Column(Modifier.fillMaxWidth().testTag("inline-explain-pending"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    thread.pendingLabel?.takeIf { it.isNotBlank() }?.let {
+                        Text(it, style = MaterialTheme.typography.labelMedium, color = v7Pine())
+                    }
+                    Text("思考中…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary,
+                        modifier = Modifier.testTag("inline-explain-loading"))
+                }
             }
             thread.error?.let { (message, trouble) ->
                 val onRelogin = LocalBookRelogin.current

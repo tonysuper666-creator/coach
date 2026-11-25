@@ -127,11 +127,15 @@ class AnswerExplainCardTest {
 
     @Test fun unpairedComputerSendsNothingAndPointsAtTheExistingPairing() {
         val f = fixture()
+        runBlocking { f.controller.mode(QuestionMode.SHORT_ANSWER) }
         val channel = FakeChannel(ExplainConsent(f.directory)).apply { paired = false }
         runSkikoComposeUiTest(size = Size(1100f, 900f), density = Density(1f)) {
             setContent { TextbookWorkspace(f.controller, loadOnMount = false, answerExplain = channel.gate()) { null } }
             ready(f.controller) { it.screen == BookScreen.LEARNING }
-            onNodeWithTag("choice-${f.practice.options.indexOf(f.practice.answer)}").performScrollTo().performClick()
+            // TON-1784 keeps offline self-check available while multiple choice requires a service.
+            onNodeWithTag("short-answer").performScrollTo().performTextInput("合成答案")
+            ready(f.controller) { it.answer.text == "合成答案" }
+            onNodeWithTag("reveal-reference").performScrollTo().performClick()
             ready(f.controller) { it.answer.revealed }
             onNodeWithTag("answer-explain-unpaired").assertExists()
             onNodeWithTag("answer-explain-pair").assertExists()

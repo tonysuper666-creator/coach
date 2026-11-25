@@ -17,9 +17,9 @@ class BookLearningPathTest {
             promptSeen = true, questionMode = QuestionMode.CHOICE)
         library.save(progressed)
         val lesson = progressed.lessons[1]
-        val practice = assertNotNull(com.coach.desktop.books.testPracticeFixture(progressed, lesson, QuestionMode.CHOICE))
-        library.saveAnswer(first.id, lesson.id, QuestionMode.CHOICE,
-            PracticeAnswer(practice.options.first { it != practice.answer }, true))
+        val practice = assertNotNull(testPracticeFixture(progressed, lesson, QuestionMode.CHOICE))
+        library.saveSectionCheckAnswer(first.id, lesson, 0, practice,
+            PracticeAnswer(practice.options.first { it != practice.answer }, revealed = true))
         assertEquals(1, library.reviews().size)
         val before = existingRows(directory)
         // An old library has no path table or recorded preference; migration must not infer one.

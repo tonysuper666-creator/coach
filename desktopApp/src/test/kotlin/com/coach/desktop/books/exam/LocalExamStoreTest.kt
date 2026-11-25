@@ -124,10 +124,21 @@ class LocalExamStoreTest {
         assertNull(store.active(f.book.id))
     }
 
-    @Test fun actualTextbookPracticeIsAnUnreviewedReferenceDrill() {
+    @Test fun savedTextbookPracticeRemainsAnUnreviewedReferenceDrill() {
         val f = Fixture()
         val availability = textbookReferencePaper(f.book)
-        val drill = availability.paper!!
+        assertNull(availability.paper, "TON-1784 no longer generates reference drills")
+        val items = f.book.lessons.map { lesson ->
+            val practice = checkNotNull(testPracticeFixture(f.book, lesson, QuestionMode.CHOICE))
+            val source = json("docId" to f.book.id, "lessonId" to lesson.id,
+                "pdfPage" to lesson.firstPage, "quote" to practice.reference)
+            json("id" to lesson.id, "type" to "mcq", "marks" to 1, "stem" to practice.prompt,
+                "options" to JsonArray(practice.options.map(::JsonPrimitive)),
+                "answer" to practice.options.indexOf(practice.answer), "source" to source)
+        }
+        val drill = LocalExamPaper(json("id" to "saved-reference", "bookId" to f.book.id,
+            "title" to "Saved reference practice", "origin" to "TEXTBOOK_REFERENCE", "kind" to "drill",
+            "sections" to JsonArray(listOf(json("title" to "Reference", "items" to JsonArray(items))))))
         assertEquals("TEXTBOOK_REFERENCE", drill.origin)
         assertEquals("drill", drill.kind)
         assertEquals(f.book.lessons.size, drill.items.size)

@@ -269,8 +269,13 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
             Box(Modifier.fillMaxSize()) {
                 Column {
                     ui.importing?.let { progress ->
+                        val readingImport = ui.screen == BookScreen.READER && progress.recognizing &&
+                            progress.bookId != null && progress.bookId == ui.book?.id
                         val handledElsewhere = (ui.screen == BookScreen.HOME && progress.recognizing) ||
-                            ui.screen == BookScreen.READER
+                            (ui.screen == BookScreen.READER && !readingImport)
+                        if (readingImport && ui.book?.page(ui.page)?.ocrPending == true) {
+                            Text("这一页还在识别，可以先看原页。", Modifier.padding(horizontal = 16.dp).testTag("page-ocr-pending"))
+                        }
                         if (!handledElsewhere) {
                             BookImportProgressBar(
                                 progress = progress,

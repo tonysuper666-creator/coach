@@ -1,5 +1,6 @@
 package com.coach.desktop.books
 
+import androidx.compose.runtime.*
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.graphics.toAwtImage
 import javax.imageio.ImageIO
@@ -97,7 +98,8 @@ class GeneratedLessonPracticeTest {
             controller.chooseLearningPath(LearningPath.QUESTION_FIRST)
             controller.enableLearning()
         }
-        val consent = ExplainConsent(root.resolve("consent"))
+        var aiEnabled by mutableStateOf(false)
+        val consent = ExplainConsent(controller.library.directory)
         var calls = 0
         val gate = AnswerExplain(consent, {}, { true }, { true }, { _, _ -> error("legacy explain must not run") },
             ask = { block, question ->
@@ -106,10 +108,15 @@ class GeneratedLessonPracticeTest {
                 ExplainResult.Done(reply(block))
             })
         runSkikoComposeUiTest(size = Size(1100f, 900f), density = Density(1f)) {
-            setContent { TextbookWorkspace(controller, loadOnMount = false, answerExplain = gate) { null } }
+            setContent {
+                CompositionLocalProvider(LocalReadingAiExplain provides aiEnabled) {
+                    TextbookWorkspace(controller, loadOnMount = false, answerExplain = gate) { null }
+                }
+            }
             waitForIdle()
             assertEquals(0, calls)
-            onNodeWithTag("practice-allow").performScrollTo().performClick()
+            onNodeWithText("已在设置中关闭伴读讲解与提问。").assertExists()
+            runOnIdle { aiEnabled = true }
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("generated-practice").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("book-explanation-text").assertDoesNotExist()
             onNodeWithTag("choice-1").performScrollTo().performClick()
@@ -149,10 +156,19 @@ class GeneratedLessonPracticeTest {
                             TextbookWorkspace(controller, loadOnMount = false, answerExplain = gate) { null }
                         }
                     }
-                    waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("choice-0").fetchSemanticsNodes().isNotEmpty() }
+                    if (generated) {
+                        waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("choice-0").fetchSemanticsNodes().isNotEmpty() }
+                    } else {
+                        onNodeWithText("本节选择题需登录 Coach 服务生成", substring = true).assertExists()
+                        onNodeWithTag("choice-0").assertDoesNotExist()
+                    }
                     val dir = File("build/screens/generated-practice").also { it.mkdirs() }
                     val name = "${if (generated) "after" else "before"}-${if (dark) "dark" else "light"}"
                     ImageIO.write(onNodeWithTag("windows-textbooks").captureToImage().toAwtImage(), "png", File(dir, "$name.png"))
+                    if (!generated) {
+                        onNodeWithTag("book-summary-card").assertDoesNotExist()
+                        return@runSkikoComposeUiTest
+                    }
                     onNodeWithTag("choice-0").performScrollTo().performClick()
                     onNodeWithTag("book-summary-card").performScrollTo()
                     waitForIdle()

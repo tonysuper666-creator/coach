@@ -1527,7 +1527,8 @@ async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
             async with aclosing(API_ROUTER.events(req.task, model, req.spec_data.system, req.spec_data.prompt,
                                                  req.body.get("max_tokens"), req.format_attempt,
                                                  **({"friend": req.friend_id, "device": req.friend_device} if req.friend_id else {}),
-                                                 **({"images": images} if images else {}))) as events:
+                                                 **({"images": images} if images else {}),
+                                                 **({"effort": req.effort} if req.effort else {}))) as events:
                 async for event in events:
                     kind = event["kind"]
                     if kind == "attempt":

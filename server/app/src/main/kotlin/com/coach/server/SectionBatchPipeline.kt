@@ -968,6 +968,12 @@ class HaikuRealtimeBridgeTransport(
         else -> BridgeClient.GPT_62_ASTRA
     }
 
+    private fun effortForTask(task: String, targetModel: String): String? = when {
+        // Section companion generation does not need adaptive thinking; disabling it keeps first-section Ready <=10s.
+        targetModel == BridgeClient.HAIKU && task in setOf("BOOK_SECTION_BATCH", "BOOK_EXERCISE_HINTS") -> "minimal"
+        else -> null
+    }
+
     private suspend fun generateSectionInternal(
         systemPrompt: String,
         userPrompt: String,
@@ -985,6 +991,7 @@ class HaikuRealtimeBridgeTransport(
                 system = systemPrompt,
                 user = userPrompt,
                 stream = false,
+                effort = effortForTask(task, targetModel),
                 background = false,
                 maxTokens = maxTokens,
                 friendId = friend?.let(::friendId),
@@ -1582,16 +1589,22 @@ class SectionConcurrentCompanionPipeline(
             Anti-plagiarism rule: NEVER copy >=8 consecutive English words or >=12 consecutive Chinese characters from the source into your summaries, stems, options, derivations, or explanations. Rewrite everything in fresh plain Simplified Chinese (keep short bare English technical terms <=4 words when helpful; put verbatim quotes ONLY in quoteAnchor). NEVER emit placeholders such as "[依原文公式]" or "〔依原文公式〕".
             Mathematical accuracy rule (ZERO tolerance for errors):
             - PDF text extraction often splits stacked fractions across lines (e.g., "3" and "2" across lines around a summation for 3/2, or "5" and "2" for 5/2). ALWAYS cross-check every coefficient against surrounding prose (e.g., "50% more" => 3/2 = 1.5倍; "150% more" => 5/2 = 2.5倍, NOT 1.5倍!).
-            - For EVERY derivation and EVERY numeric/formulaic question, include a "mathChecks" array of SymPy-ready checks (`identity`, `eval`, `inequality`, `solve`, `ratio`) so the server can symbolically re-compute and verify your answer.
+            - For EVERY derivation and EVERY numeric/formulaic question, include a "mathChecks" array of SymPy-ready checks (`identity`, `eval`, `inequality`, `solve`, `ratio`) so the server can symbolically re-compute and verify your answer. Omit "mathChecks" on non-numeric qualitative items.
+            Keep output compact for fast loading:
+            - coreQuestion: 1 short sentence (<=35 Chinese chars).
+            - keyPoints: 3 to 5 concise takeaways (1 short sentence each, <=35 Chinese chars).
+            - jargonGlosses: up to 3 key terms (<=20 Chinese chars each).
+            - pretest: 1 MCQ (short stem, 4 concise options, 1-sentence explanation <=35 Chinese chars).
+            - optionalPractice: 1 MCQ (short stem, 4 concise options, 1-sentence explanation <=35 Chinese chars).
             For every citation, provide "pdfPage" (integer) and "quoteAnchor" (a short verbatim anchor of 3 to 6 words copied exactly from that page so the app can locate the UTF-16 offset).
             Output ONE valid JSON object only (no Markdown fences, no extra prose):
             {
               "coreQuestion": "1 plain Chinese sentence stating the central question of this section.",
               "keyPoints": [{"summary":"concise Chinese takeaway ending with 。","pdfPage":1,"quoteAnchor":"exact 3-6 words"}],
               "jargonGlosses": [{"term":"English term","plainMeaning":"short Chinese plain meaning","pdfPage":1,"quoteAnchor":"exact 3-6 words"}],
-              "pretest": [{"stem":"1 competitive multiple-choice question testing core mechanism before reading","options":["opt A","opt B","opt C","opt D"],"correctOption":"exact string matching one option","explanation":"concise Chinese explanation","revealHint":"答案依据在第 X 页。","kind":"MCQ","pdfPage":1,"quoteAnchor":"exact 3-6 words","mathChecks":[]}],
+              "pretest": [{"stem":"1 competitive multiple-choice question testing core mechanism before reading","options":["opt A","opt B","opt C","opt D"],"correctOption":"exact string matching one option","explanation":"concise Chinese explanation","kind":"MCQ","pdfPage":1,"quoteAnchor":"exact 3-6 words"}],
               "derivations": [{"title":"model or graph name","setup":"variables/axes setup","steps":["step 1","step 2","step 3"],"graphCheck":"what to check on axes/curves","pitfall":"common exam mistake","pdfPage":1,"quoteAnchor":"exact 3-6 words","mathChecks":[{"kind":"identity","lhs":"(5/2)*(P/2) - P","rhs":"P/4"}]}],
-              "optionalPractice": [{"stem":"practice question (MCQ or step-by-step calculation)","options":["opt1","opt2","opt3","opt4"],"correctOption":"exact answer or target value","explanation":"concise worked explanation","kind":"MCQ","pdfPage":1,"quoteAnchor":"exact 3-6 words","mathChecks":[{"kind":"eval","expression":"(3/2)*X","variables":{"X":"2"},"expected":"3"}]}]
+              "optionalPractice": [{"stem":"practice question (MCQ or step-by-step calculation)","options":["opt1","opt2","opt3","opt4"],"correctOption":"exact string matching one option","explanation":"concise worked explanation","kind":"MCQ","pdfPage":1,"quoteAnchor":"exact 3-6 words"}]
             }
             If a section has no formal math/graph, return "derivations":[]. Never fabricate facts or page numbers.
         """.trimIndent()

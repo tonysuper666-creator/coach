@@ -1,6 +1,7 @@
 package com.coach.desktop.books
 
 import androidx.compose.ui.test.*
+import kotlinx.coroutines.runBlocking
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.input.key.Key
 import androidx.compose.foundation.layout.Box
@@ -54,7 +55,7 @@ class SourceRoundTripTest {
             // constrained viewport so this still tests a real, nonzero scroll position.
             setContent { Box(Modifier.size(900.dp, 450.dp)) { TextbookWorkspace(controller) { null } } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
-            onNodeWithTag("home-learn").performScrollTo().performClick()
+            runBlocking { controller.learn() }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             val book = controller.state.value.book!!
             val lesson = book.lessons[book.lessonIndex]
@@ -66,7 +67,7 @@ class SourceRoundTripTest {
             assertTrue(before > 0f, "fixture must scroll")
             onNodeWithTag("open-practice-source").performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && !controller.state.value.busy }
-            onNodeWithText("返回学习").performClick()
+            onNodeWithTag("immersive-back").assertTextContains("返回学习", substring = true).performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             val after = onNodeWithTag("textbook-learning").fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
             assertEquals(before, after, 1f, "return must preserve scroll position")
@@ -84,7 +85,7 @@ class SourceRoundTripTest {
         runComposeUiTest {
             setContent { TextbookWorkspace(controller) { null } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
-            onNodeWithTag("home-learn").performClick()
+            runBlocking { controller.learn() }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             val book = controller.state.value.book!!
             onNodeWithTag("short-answer").performScrollTo().performTextInput("Draft for escape")
@@ -103,17 +104,17 @@ class SourceRoundTripTest {
     @Test fun escapeReturnsAfterPagingToBoundary() {
         val (controller, library) = longLessonController()
         runComposeUiTest {
-            setContent { TextbookWorkspace(controller) { null } }
+            // 2.0 宽窗原页并排两页、文字一屏多栏，逐页点「上一页 / 下一页」要在一屏一页的竖窄窗里测（SinglePageReaderWindow）。
+            setContent { Box(SinglePageReaderWindow) { TextbookWorkspace(controller) { null } } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
-            onNodeWithTag("home-learn").performClick()
+            runBlocking { controller.learn() }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             val book = controller.state.value.book!!
             onNodeWithTag("short-answer").performScrollTo().performTextInput("Boundary draft")
             onNodeWithTag("open-practice-source").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && !controller.state.value.busy }
-            onNodeWithText("下一页").performMouseInput { click() }
-            waitUntil(timeoutMillis = 20_000) { controller.state.value.page == 2 && !controller.state.value.busy }
-            onNodeWithText("下一页").assertIsNotEnabled()
+            turnUntil(controller, "next-page", click = { performMouseInput { click() } }) { it.page == 2 && runCatching { onNodeWithTag("next-page").assertIsNotEnabled() }.isSuccess }
+            onNodeWithTag("next-page").assertIsNotEnabled()
             onNodeWithTag("windows-textbooks").performKeyInput { pressKey(Key.Escape) }
             waitUntil(timeoutMillis = 5_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             assertEquals(PracticeAnswer("Boundary draft"), controller.state.value.answer)
@@ -129,7 +130,8 @@ class SourceRoundTripTest {
         val pdfFile = root.resolve("synthetic.pdf")
         PDDocument().use { pdf ->
             for ((heading, body) in listOf(
-                "Chapter 1 Plants" to "Plants grow quickly near bright windows in spring.",
+                // 第 1 页正文不足 40 字，生成题只会取第 2 页那段（与 GeneratedLessonPractice 同一规则）。
+                "Chapter 1 Plants" to "Plants grow near windows.",
                 "" to "Photosynthesis is the process by which plants use light to make sugars.",
                 "Chapter 2 Cells" to "Chlorophyll is a pigment found in plant cells."
             )) {
@@ -147,32 +149,35 @@ class SourceRoundTripTest {
         val imported = library.importBook(pdfFile)
         library.save(imported.copy(readingPage = 3, learning = true, questionMode = QuestionMode.CHOICE))
         val controller = TextbookController(library)
+        val gate = generatedChoiceGate(root)
         runComposeUiTest {
-            setContent { TextbookWorkspace(controller) { null } }
+            // 2.0 宽窗原页并排两页、文字一屏多栏，逐页点「上一页 / 下一页」要在一屏一页的竖窄窗里测（SinglePageReaderWindow）。
+            setContent { Box(SinglePageReaderWindow) { TextbookWorkspace(controller, answerExplain = gate) { null } } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
-            onNodeWithTag("home-learn").performClick()
+            runBlocking { controller.learn() }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             val book = controller.state.value.book!!
             val lesson = book.lessons[book.lessonIndex]
-            val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
+            // TON-1784（#570）：选择题由服务按本节第一段够长的正文生成，作答只留在本窗口（generatedChoiceGate）。
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("choice-1").fetchSemanticsNodes().isNotEmpty() }
+            val practice = Practice(GENERATED_CHOICE_PROMPT, generatedChoiceBlock(lesson).text, GENERATED_CHOICE_OPTIONS[0], GENERATED_CHOICE_OPTIONS)
             assertEquals(1, lesson.firstPage)
             assertEquals("Photosynthesis is the process by which plants use light to make sugars.", practice.reference)
-            val selected = practice.options.first { it != practice.answer }
-            onNodeWithTag("choice-${practice.options.indexOf(selected)}").performScrollTo().performClick()
-            waitUntil(timeoutMillis = 20_000) { controller.state.value.answer == PracticeAnswer(selected, revealed = true) }
+            val selected = GENERATED_CHOICE_OPTIONS[1]
+            onNodeWithTag("choice-1").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { gate.answerFor(book, lesson) == PracticeAnswer(selected, revealed = true) }
             onNodeWithTag("open-practice-source").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && !controller.state.value.busy }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.page == 2 && !controller.state.value.busy }
             assertEquals(2, controller.state.value.page)
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("remote-highlight").fetchSemanticsNodes().size == 1 }
             onNodeWithTag("remote-highlight").assertContentDescriptionEquals("原句：${practice.reference}")
-            onNodeWithText("上一页").performClick()
-            waitUntil(timeoutMillis = 20_000) { controller.state.value.page == 1 && !controller.state.value.busy }
+            turnUntil(controller, "previous-page") { it.page == 1 }
             onNodeWithText("无法确认原句：本题依据在第 2 页。").assertIsDisplayed()
             onNodeWithTag("remote-highlight").assertDoesNotExist()
-            onNodeWithText("返回学习").performClick()
+            onNodeWithTag("immersive-back").assertTextContains("返回学习", substring = true).performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
-            assertEquals(PracticeAnswer(selected, revealed = true), controller.state.value.answer)
+            assertEquals(PracticeAnswer(selected, revealed = true), gate.answerFor(book, lesson))
             onNodeWithText(practice.prompt).assertExists()
             assertEquals(3, library.book(book.id).readingPage)
         }
@@ -197,22 +202,27 @@ class SourceRoundTripTest {
         val imported = library.importBook(file)
         library.save(imported.copy(learning = true, questionMode = QuestionMode.CHOICE))
         val controller = TextbookController(library)
+        val gate = generatedChoiceGate(root)
         runComposeUiTest {
-            setContent { TextbookWorkspace(controller) { null } }
+            // 2.0 宽窗原页并排两页、文字一屏多栏，逐页点「上一页 / 下一页」要在一屏一页的竖窄窗里测（SinglePageReaderWindow）。
+            setContent { Box(SinglePageReaderWindow) { TextbookWorkspace(controller, answerExplain = gate) { null } } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
-            onNodeWithTag("home-learn").performClick()
+            runBlocking { controller.learn() }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+            // TON-1784（#570）：选择题由服务按本节第一段够长的正文生成，作答只留在本窗口（generatedChoiceGate）。
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("generated-practice").fetchSemanticsNodes().isNotEmpty() }
+            val book = controller.state.value.book!!
+            assertEquals(reference, generatedChoiceBlock(book.lessons[book.lessonIndex]).text)
             onNodeWithTag("open-practice-source").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("remote-image").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithText("无法确认原句：本题依据出现多次。").assertIsDisplayed()
             onNodeWithTag("remote-highlight").assertDoesNotExist()
-            onNodeWithText("下一页").performClick()
-            waitUntil(timeoutMillis = 20_000) { controller.state.value.page == 2 && !controller.state.value.busy }
+            turnUntil(controller, "next-page") { it.page == 2 }
             onNodeWithText("无法确认原句：本题依据出现多次。").assertIsDisplayed()
             onNodeWithTag("remote-highlight").assertDoesNotExist()
-            onNodeWithText("返回学习").performClick()
+            onNodeWithTag("immersive-back").assertTextContains("返回学习", substring = true).performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
-            assertEquals(PracticeAnswer(), controller.state.value.answer)
+            assertEquals(PracticeAnswer(), gate.answerFor(book, book.lessons[book.lessonIndex]))
         }
     }
     @Test fun duplicateSentenceShowsReasonAndKeepsDraftAfterTurningPage() {
@@ -237,9 +247,10 @@ class SourceRoundTripTest {
         library.save(imported.copy(readingPage = 3, lessonIndex = 1, learning = true, questionMode = QuestionMode.SHORT_ANSWER))
         val controller = TextbookController(library)
         runComposeUiTest {
-            setContent { TextbookWorkspace(controller) { null } }
+            // 2.0 宽窗原页并排两页、文字一屏多栏，逐页点「上一页 / 下一页」要在一屏一页的竖窄窗里测（SinglePageReaderWindow）。
+            setContent { Box(SinglePageReaderWindow) { TextbookWorkspace(controller) { null } } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
-            onNodeWithTag("home-learn").performClick()
+            runBlocking { controller.learn() }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             val book = controller.state.value.book!!
             val lesson = book.lessons[book.lessonIndex]
@@ -256,17 +267,15 @@ class SourceRoundTripTest {
             onNodeWithText("无法确认原句：这一页有多处相同内容。").assertIsDisplayed()
             onNodeWithTag("remote-image").assertContentDescriptionEquals("${book.title} 第 ${lesson.firstPage} 页")
             onNodeWithTag("remote-highlight").assertDoesNotExist()
-            onNodeWithText("看文字").performClick()
+            onNodeWithTag("immersive-more-menu").performClick(); onNodeWithTag("view-mode-text").performClick()
             assertTrue(onNodeWithTag("reader-text").fetchSemanticsNode().config[SemanticsProperties.Text].single().spanStyles.none { it.item.background != androidx.compose.ui.graphics.Color.Unspecified })
             onNodeWithText("无法确认原句：这一页有多处相同内容。").assertIsDisplayed()
-            onNodeWithText("看原页").performClick()
-            onNodeWithText("下一页").performClick()
-            waitUntil(timeoutMillis = 20_000) { controller.state.value.page == lesson.firstPage + 1 && !controller.state.value.busy }
+            onNodeWithTag("immersive-more-menu").performClick(); onNodeWithTag("view-mode-original").performClick()
+            turnUntil(controller, "next-page") { it.page == lesson.firstPage + 1 }
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithContentDescription("${book.title} 第 ${lesson.firstPage + 1} 页").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithText("上一页").performClick()
-            waitUntil(timeoutMillis = 20_000) { controller.state.value.page == lesson.firstPage && !controller.state.value.busy }
+            turnUntil(controller, "previous-page") { it.page == lesson.firstPage }
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithText("无法确认原句：这一页有多处相同内容。").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithText("返回学习").performClick()
+            onNodeWithTag("immersive-back").assertTextContains("返回学习", substring = true).performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             assertEquals(lesson.id, controller.state.value.book!!.lessons[controller.state.value.book!!.lessonIndex].id)
             assertEquals(PracticeAnswer("My unfinished draft"), controller.state.value.answer)
@@ -281,17 +290,20 @@ class SourceRoundTripTest {
         val imported = library.importBook(syntheticTextbook(root.resolve("synthetic")))
         library.save(imported.copy(readingPage = 3, lessonIndex = 1, learning = true, questionMode = QuestionMode.CHOICE))
         val controller = TextbookController(library)
+        val gate = generatedChoiceGate(root)
         runComposeUiTest {
-            setContent { TextbookWorkspace(controller) { null } }
+            setContent { TextbookWorkspace(controller, answerExplain = gate) { null } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
-            onNodeWithTag("home-learn").performClick()
+            runBlocking { controller.learn() }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             val book = controller.state.value.book!!
             val lesson = book.lessons[book.lessonIndex]
-            val practice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
-            val selected = practice.options.first { it != practice.answer }
-            onNodeWithTag("choice-${practice.options.indexOf(selected)}").performScrollTo().performClick()
-            waitUntil(timeoutMillis = 20_000) { controller.state.value.answer == PracticeAnswer(selected, revealed = true) }
+            // TON-1784（#570）：选择题由服务按本节第一段够长的正文生成，作答只留在本窗口（generatedChoiceGate）。
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("choice-1").fetchSemanticsNodes().isNotEmpty() }
+            val practice = Practice(GENERATED_CHOICE_PROMPT, generatedChoiceBlock(lesson).text, GENERATED_CHOICE_OPTIONS[0], GENERATED_CHOICE_OPTIONS)
+            val selected = GENERATED_CHOICE_OPTIONS[1]
+            onNodeWithTag("choice-1").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { gate.answerFor(book, lesson) == PracticeAnswer(selected, revealed = true) }
             onNodeWithTag("open-practice-source").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("remote-highlight").fetchSemanticsNodes().size == 1 }
             assertEquals(book.id, controller.state.value.book!!.id)
@@ -299,10 +311,10 @@ class SourceRoundTripTest {
             val quote = lesson.blocks.first { it.page == lesson.firstPage && !it.heading }.text
             onNodeWithTag("remote-highlight").assertContentDescriptionEquals("原句：$quote")
             onNodeWithTag("source-anchor-status").assertDoesNotExist()
-            onNodeWithText("返回学习").performClick()
+            onNodeWithTag("immersive-back").assertTextContains("返回学习", substring = true).performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             assertEquals(lesson.id, controller.state.value.book!!.lessons[controller.state.value.book!!.lessonIndex].id)
-            assertEquals(PracticeAnswer(selected, revealed = true), controller.state.value.answer)
+            assertEquals(PracticeAnswer(selected, revealed = true), gate.answerFor(book, lesson))
             onNodeWithText(practice.prompt).assertExists()
             onNodeWithText("你选择：$selected").assertExists()
             assertEquals(3, library.book(book.id).readingPage)

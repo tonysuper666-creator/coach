@@ -502,14 +502,14 @@ class WindowsPassageQuestionLimitTest {
                     title = "LearningCoach · 选段提问键盘验收"
                     val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
                     setBounds(screen.x + 20, screen.y + 20, minOf(1280, screen.width - 40), minOf(920, screen.height - 40))
-                    setContent { WindowsTextbookHost(controller, learningSupport = support) { null } }
+                    // #570 去掉了阅读器的「选段提问」入口：选段弹窗直接挂进这扇真窗口（见 openPicker 的说明）。
+                    setContent { CoachTheme(darkTheme = dark) { BookPassageAsk(book, page, support) {} } }
                     isAlwaysOnTop = true
                     isVisible = true
                     toFront(); requestFocus()
                 } }
                 try {
-                    awaitWindow("reader with the passage composer", window) { windowNode(window, "ask-book-passage") != null }
-                    windowClick(window, "ask-book-passage")
+                    awaitWindow("passage composer", window) { windowNode(window, "ask-paragraph-0") != null }
                     windowClick(window, "ask-paragraph-0")
                     val robot = Robot().apply { autoDelay = 60 }
                     val arrivals = WindowKeyArrivals(window).start()
@@ -600,14 +600,13 @@ class WindowsPassageQuestionLimitTest {
                     title = "LearningCoach · 选段列表"
                     val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
                     setBounds(screen.x + 20, screen.y + 20, minOf(1280, screen.width - 40), minOf(920, screen.height - 40))
-                    setContent { WindowsTextbookHost(controller, learningSupport = Recorder()) { null } }
+                    // #570 去掉了阅读器的「选段提问」入口：选段弹窗直接挂进这扇真窗口（见 openPicker 的说明）。
+                    setContent { CoachTheme(darkTheme = dark) { BookPassageAsk(book, page, Recorder()) {} } }
                     isAlwaysOnTop = true
                     isVisible = true
                     toFront(); requestFocus()
                 } }
                 try {
-                    awaitWindow("reader with the passage composer", window) { windowNode(window, "ask-book-passage") != null }
-                    windowClick(window, "ask-book-passage")
                     awaitWindow("numbered passage rows", window) { windowNode(window, "ask-paragraph-0") != null }
                     assertEquals(listOf("点一段，再问一句"), windowText(window, "book-passage-hint"))
                     blocks.forEachIndexed { index, block ->
@@ -920,20 +919,22 @@ class WindowsPassageQuestionLimitTest {
         return checkNotNull(result).getOrThrow()
     }
 
-    /** 打开选段列表但一段都不点：列表本身就是这次要核对的东西。 */
+    /**
+     * 打开选段列表但一段都不点：列表本身就是这次要核对的东西。
+     *
+     * TON-1784（#570）去掉了阅读器里的「选段提问」按钮（ask-book-passage），导入后也不再有
+     * IMPORTED / AFTER_READING 提示（read-only），BookPassageAsk 目前没有产品入口。这里沿用
+     * ExplainTroubleTest、ReadableScreensTest 等的做法：真导入同一本书，再把选段弹窗直接挂到第一页上，
+     * 弹窗自身的选段、字数上限、按书同意和出处行为照旧核对。
+     */
     private fun ComposeUiTest.openPicker(
         controller: TextbookController, source: Path, support: BookLearningSupport,
         wrap: @Composable (@Composable () -> Unit) -> Unit = { it() },
     ) {
-        setContent { wrap { TextbookWorkspace(controller, support = support) { source } } }
-        ready(controller) { it.catalog.isEmpty() }
-        onNodeWithTag("upload-textbook").performClick()
-        ready(controller) { it.prompt == BookPrompt.IMPORTED }
-        onNodeWithTag("read-only").performClick()
-        ready(controller) { it.screen == BookScreen.READER && it.prompt == BookPrompt.AFTER_READING }
-        onNodeWithTag("read-only").performClick()
-        ready(controller) { it.prompt == null }
-        onNodeWithTag("ask-book-passage").performClick()
+        runBlocking { controller.importBook(source) }
+        ready(controller) { it.book != null }
+        val book = controller.state.value.book!!
+        setContent { wrap { CoachTheme(darkTheme = false) { BookPassageAsk(book, book.pages.first(), support) {} } } }
         waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("ask-paragraph-0").fetchSemanticsNodes().isNotEmpty() }
     }
 

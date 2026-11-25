@@ -1,5 +1,6 @@
 package com.coach.desktop.books
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.input.key.Key
@@ -22,20 +23,31 @@ class BooksNoteDraftTest {
         waitUntil(timeoutMillis = 20_000) { !c.state.value.busy && check(c.state.value) }
     }
     private fun ComposeUiTest.uploadAndRead(c: TextbookController) {
-        waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("upload-textbook").fetchSemanticsNodes().isNotEmpty() }
-        onNodeWithTag("upload-textbook").performClick()
-        ready(c) { it.prompt == BookPrompt.IMPORTED }
-        onNodeWithTag("read-only").performClick()
-        ready(c) { it.screen == BookScreen.READER }
-        if (c.state.value.prompt != null) {
-            onNodeWithTag("read-only").performClick()
-            ready(c) { it.prompt == null }
+        ready(c) { it.screen == BookScreen.HOME }
+        // TON-1790：「上传教材」只在书架为空时出现；已有书时导入走主窗口顶栏「＋」菜单里的「导入教材」。
+        if (onAllNodesWithTag("upload-textbook").fetchSemanticsNodes().isNotEmpty()) {
+            onNodeWithTag("upload-textbook").performClick()
+        } else {
+            onNodeWithTag("host-add").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("host-add-import").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("host-add-import").performClick()
         }
+        // TON-1784（#570）起导入完成直接进阅读器，没有「导入后」提示可点。
+        ready(c) { it.screen == BookScreen.READER && it.prompt == null }
     }
     private fun ComposeUiTest.notes() {
-        onNodeWithTag("books-notes-toggle").assertExists()
-        waitUntil(timeoutMillis = 20_000) { onAllNodes(hasTestTag("books-notes-toggle") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
-        onNodeWithTag("books-notes-toggle").performClick()
+        // 2.0（TON-1784）：批注在伴读面板的「批注」页签里，不再有单独的批注开关。
+        if (onAllNodesWithTag("companion-tab-notes").fetchSemanticsNodes().isEmpty()) {
+            onNodeWithTag("immersive-companion-toggle").performClick()
+        }
+        waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("companion-tab-notes").fetchSemanticsNodes().isNotEmpty() }
+        onNodeWithTag("companion-tab-notes").performClick()
+        waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("books-notes").fetchSemanticsNodes().isNotEmpty() }
+    }
+    private fun ComposeUiTest.hideAndShowNotes() {
+        onNodeWithTag("companion-close").performClick()
+        waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("books-notes").fetchSemanticsNodes().isEmpty() }
+        notes()
     }
     private fun ComposeUiTest.unsavedDraft(text: String) {
         onNodeWithTag("books-note-new").performScrollTo().performClick()
@@ -60,13 +72,14 @@ class BooksNoteDraftTest {
         val note = "Synthetic persisted note across reopen"
         var id = ""; var lesson = ""
         runComposeUiTest {
-            setContent { TextbookWorkspace(first) { pdf } }
+            // 2.0 宽窗原页并排两页、文字一屏多栏，逐页点「上一页 / 下一页」要在一屏一页的竖窄窗里测（SinglePageReaderWindow）。
+            setContent { Box(SinglePageReaderWindow) { TextbookWorkspace(first) { pdf } } }
             uploadAndRead(first)
-            repeat(2) { onNodeWithTag("next-page").performClick(); ready(first) { ui -> ui.page == it + 2 } }
-            onNodeWithText("返回书架").performClick(); ready(first) { it.screen == BookScreen.HOME }
-            onNodeWithTag("home-question").performClick(); ready(first) { it.prompt == BookPrompt.START }
-            onNodeWithTag("question-mode-SHORT_ANSWER").performClick(); ready(first) { it.book?.questionMode == QuestionMode.SHORT_ANSWER }
-            onNodeWithTag("enable-learning").performClick(); ready(first) { it.screen == BookScreen.LEARNING }
+            turnUntil(first, "next-page") { it.page == 3 }
+            onNodeWithTag("immersive-back").assertTextContains("书架", substring = true).performClick(); ready(first) { it.screen == BookScreen.HOME }
+            // 2.0 去掉了书架上的「开始学」三选一提示（TON-1784）；入口改为阅读器的「开始学」，即 learn(QUESTION_FIRST)。
+            runBlocking { first.mode(QuestionMode.SHORT_ANSWER); first.learn(LearningPath.QUESTION_FIRST) }
+            ready(first) { it.screen == BookScreen.LEARNING && it.book?.questionMode == QuestionMode.SHORT_ANSWER }
             onNodeWithTag("short-answer").performScrollTo().performTextInput(answer)
             id = first.state.value.book!!.id; lesson = first.state.value.book!!.lessons[0].id
             onNodeWithTag("open-practice-source").performScrollTo().performClick()
@@ -87,14 +100,14 @@ class BooksNoteDraftTest {
             onNodeWithTag("books-note-close").performScrollTo().performClick()
             onNodeWithTag("note-${savedRecord.id}").assertExists()
             onNodeWithTag("local-draft-0").assertDoesNotExist()
-            onNodeWithText("返回学习").performClick(); ready(first) { it.screen == BookScreen.LEARNING }
+            onNodeWithTag("immersive-back").assertTextContains("返回学习", substring = true).performClick(); ready(first) { it.screen == BookScreen.LEARNING }
             onNodeWithText("返回书架").performClick(); ready(first) { it.screen == BookScreen.HOME }
         }
         val second = TextbookController(TextbookLibrary(directory))
         runComposeUiTest {
             setContent { TextbookWorkspace(second) { null } }
             ready(second) { it.book != null }
-            onNodeWithTag("home-learn").performClick(); ready(second) { it.screen == BookScreen.LEARNING }
+            runBlocking { second.learn() }; ready(second) { it.screen == BookScreen.LEARNING }
             onNodeWithTag("open-practice-source").performScrollTo().performClick(); ready(second) { it.screen == BookScreen.READER }
             notes()
             val savedId = second.library.allNotes(id).single().id
@@ -117,14 +130,15 @@ class BooksNoteDraftTest {
         val note = "Synthetic unsaved draft across reopen"
         var id = ""; var lesson = ""; var noteId = ""
         runComposeUiTest {
-            setContent { TextbookWorkspace(first) { pdf } }
+            // 2.0 宽窗原页并排两页、文字一屏多栏，逐页点「上一页 / 下一页」要在一屏一页的竖窄窗里测（SinglePageReaderWindow）。
+            setContent { Box(SinglePageReaderWindow) { TextbookWorkspace(first) { pdf } } }
             uploadAndRead(first)
-            repeat(2) { onNodeWithTag("next-page").performClick(); ready(first) { ui -> ui.page == it + 2 } }
-            onNodeWithText("返回书架").performClick(); ready(first) { it.screen == BookScreen.HOME }
+            turnUntil(first, "next-page") { it.page == 3 }
+            onNodeWithTag("immersive-back").assertTextContains("书架", substring = true).performClick(); ready(first) { it.screen == BookScreen.HOME }
             // Reading now persists its own walk; explicitly start studying before testing notes.
-            onNodeWithTag("home-question").performClick(); ready(first) { it.prompt == BookPrompt.START }
-            onNodeWithTag("question-mode-SHORT_ANSWER").performClick(); ready(first) { it.book?.questionMode == QuestionMode.SHORT_ANSWER }
-            onNodeWithTag("enable-learning").performClick(); ready(first) { it.screen == BookScreen.LEARNING }
+            // 2.0 去掉了书架上的「开始学」三选一提示（TON-1784）；入口改为阅读器的「开始学」，即 learn(QUESTION_FIRST)。
+            runBlocking { first.mode(QuestionMode.SHORT_ANSWER); first.learn(LearningPath.QUESTION_FIRST) }
+            ready(first) { it.screen == BookScreen.LEARNING && it.book?.questionMode == QuestionMode.SHORT_ANSWER }
             onNodeWithTag("short-answer").performScrollTo().performTextInput(answer)
             id = first.state.value.book!!.id; lesson = first.state.value.book!!.lessons[0].id
             onNodeWithTag("open-practice-source").performScrollTo().performClick()
@@ -134,7 +148,7 @@ class BooksNoteDraftTest {
             noteId = saved.noteId
             assertEquals(note, saved.note); assertEquals(0L, saved.baseRevision)
             shot("01-draft")
-            repeat(2) { onNodeWithTag("books-notes-toggle").performClick() }
+            hideAndShowNotes()
             onNodeWithTag("local-draft-0").performScrollTo().performClick()
             onNodeWithTag("note-input").assertTextEquals(note)
             onNodeWithTag("note-status").assertTextEquals("有未保存的修改")
@@ -144,16 +158,17 @@ class BooksNoteDraftTest {
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("note-input").fetchSemanticsNodes().isEmpty() }
             assertEquals(BookScreen.READER, first.state.value.screen)
             onNodeWithTag("local-draft-0").assertExists()
-            onNodeWithText("返回学习").performClick(); ready(first) { it.screen == BookScreen.LEARNING }
+            onNodeWithTag("immersive-back").assertTextContains("返回学习", substring = true).performClick(); ready(first) { it.screen == BookScreen.LEARNING }
             onNodeWithTag("short-answer").assert(SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString(answer)))
             assertFalse(first.state.value.answer.revealed)
             onNodeWithText("返回书架").performClick(); ready(first) { it.screen == BookScreen.HOME }
         }
         val second = TextbookController(TextbookLibrary(directory))
         runComposeUiTest {
-            setContent { TextbookWorkspace(second) { null } }
+            // 草稿记在第 1 页；宽窗会把第 1、2 页并排成一张，当前页对不上草稿页，所以第二次打开也放进一屏一页的竖窄窗。
+            setContent { Box(SinglePageReaderWindow) { TextbookWorkspace(second) { null } } }
             ready(second) { it.book != null }
-            onNodeWithTag("home-learn").performClick(); ready(second) { it.screen == BookScreen.LEARNING }
+            runBlocking { second.learn() }; ready(second) { it.screen == BookScreen.LEARNING }
             onNodeWithTag("short-answer").assert(SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString(answer)))
             onNodeWithTag("open-practice-source").performScrollTo().performClick(); ready(second) { it.screen == BookScreen.READER }
             notes()
@@ -163,13 +178,15 @@ class BooksNoteDraftTest {
             onNodeWithTag("note-failure-reason").assertDoesNotExist()
             assertEquals(noteId, store(second.library).listFor(id, "1", 1).single().noteId)
             // Hiding/showing the panel must not send an unrequested save.
-            repeat(2) { onNodeWithTag("books-notes-toggle").performClick() }
-            onNodeWithTag("local-draft-0").performScrollTo().performClick()
+            hideAndShowNotes()
+            // 2.0 伴读面板收起再打开时，正在编辑的批注编辑框原样保留（草稿列表只在没有打开编辑框时出现），
+            // 所以这里直接核对编辑框里的字，不再先点「继续编辑」。
+            onNodeWithTag("local-draft-0").assertDoesNotExist()
             onNodeWithTag("note-input").assertTextEquals(note)
             onNodeWithTag("note-failure-reason").assertDoesNotExist()
             shot("02-new-session-restored")
             // Close the book with the editor still open; input has already reached real disk.
-            onNodeWithText("返回学习").performClick(); ready(second) { it.screen == BookScreen.LEARNING }
+            onNodeWithTag("immersive-back").assertTextContains("返回学习", substring = true).performClick(); ready(second) { it.screen == BookScreen.LEARNING }
         }
         val reread = TextbookLibrary(directory)
         assertEquals(3, reread.book(id).readingPage)
@@ -188,17 +205,18 @@ class BooksNoteDraftTest {
         var selected = pdf
         var id = ""
         runComposeUiTest {
-            setContent { TextbookWorkspace(first) { selected } }
+            // 书架上已有书时，第二本要从主窗口顶栏的「＋」导入（TON-1790），所以这一段用整套主窗口。
+            setContent { com.coach.desktop.WindowsTextbookHost(first) { selected } }
             uploadAndRead(first); id = first.state.value.book!!.id
             notes(); unsavedDraft("Only library A and original PDF")
-            onNodeWithText("返回书架").performClick(); ready(first) { it.screen == BookScreen.HOME }
+            onNodeWithTag("immersive-back").assertTextContains("书架", substring = true).performClick(); ready(first) { it.screen == BookScreen.HOME }
             selected = other
             uploadAndRead(first)
             assertNotEquals(id, first.state.value.book!!.id)
             notes(); onNodeWithTag("local-draft-0").assertDoesNotExist()
-            onNodeWithText("返回书架").performClick(); ready(first) { it.screen == BookScreen.HOME }
-            onNodeWithTag("book-$id").performClick(); ready(first) { it.book?.id == id }
-            onNodeWithTag("home-read").performClick(); ready(first) { it.screen == BookScreen.READER }
+            onNodeWithTag("immersive-back").assertTextContains("书架", substring = true).performClick(); ready(first) { it.screen == BookScreen.HOME }
+            // 2.0 书架上点书直接打开阅读器（TextbookController.openBook），不再停在书的首页等「继续」。
+            onNodeWithTag("book-$id").performClick(); ready(first) { it.book?.id == id && it.screen == BookScreen.READER }
             notes(); onNodeWithTag("local-draft-0").assertExists()
         }
         val elsewhere = TextbookController(TextbookLibrary(root.resolve("b")))

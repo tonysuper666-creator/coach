@@ -28,6 +28,11 @@ class ExpertReaderCandidateTest {
         waitForIdle()
     }
 
+    /**
+     * TON-1784（#570）：导入直接进阅读器、不再有 IMPORTED / AFTER_READING 提示（read-only）和「开始学」提示
+     * （home-learn → START → enable-learning）；题型和进学习都只剩控制器 mode() / learn(QUESTION_FIRST)。
+     * 本节原文、高亮、书签和未交草稿的核对不变。
+     */
     @Test fun workspaceSourceShowsActualHighlightAndKeepsDraftAndBookmark() {
         val lib = library()
         val c = TextbookController(lib)
@@ -35,22 +40,14 @@ class ExpertReaderCandidateTest {
             setContent { TextbookWorkspace(c) { fixture } }
             ready(c) { it.catalog.isEmpty() }
             onNodeWithTag("upload-textbook").performClick()
-            ready(c) { it.prompt == BookPrompt.IMPORTED }
-            onNodeWithTag("read-only").performClick()
-            ready(c) { it.prompt == BookPrompt.AFTER_READING }
-            onNodeWithTag("read-only").performClick()
-            ready(c) { it.prompt == null }
-            repeat(2) {
-                onNodeWithTag("next-page").performClick()
-                ready(c) { state -> state.page == it + 2 }
-            }
-            onNodeWithText("返回书架").performClick()
+            ready(c) { it.screen == BookScreen.READER && it.prompt == null }
+            // 2.0 阅读器按屏翻，一屏可放几张导入页；直达第 3 页走底栏页码跳页。
+            jumpToPage(c, 3)
+            onNodeWithTag("immersive-back").assertTextContains("书架", substring = true).performClick()
             ready(c) { it.screen == BookScreen.HOME }
-            onNodeWithTag("home-learn").performClick()
-            ready(c) { it.prompt == BookPrompt.START }
-            onNodeWithTag("question-mode-SHORT_ANSWER").performClick()
+            runBlocking { c.mode(QuestionMode.SHORT_ANSWER) }
             ready(c) { it.book?.questionMode == QuestionMode.SHORT_ANSWER }
-            onNodeWithTag("enable-learning").performClick()
+            runBlocking { c.learn(LearningPath.QUESTION_FIRST) }
             ready(c) { it.screen == BookScreen.LEARNING }
             onNodeWithTag("short-answer").performScrollTo().performTextInput("Unsubmitted synthesis")
             ready(c) { it.answer.text == "Unsubmitted synthesis" && !it.answer.revealed }
@@ -62,7 +59,7 @@ class ExpertReaderCandidateTest {
             ImageIO.write(onNodeWithTag("windows-textbooks").captureToImage().toAwtImage(), "png", evidence.resolve("workspace-source.png").toFile())
             onNodeWithTag("remote-highlight").assertContentDescriptionEquals("原句：Photosynthesis is the process by which plants use light to make sugars.")
             val highlights = onAllNodesWithTag("remote-highlight").fetchSemanticsNodes().size
-            onNodeWithText("返回学习").performClick()
+            onNodeWithTag("immersive-back").assertTextContains("返回学习", substring = true).performClick()
             ready(c) { it.screen == BookScreen.LEARNING }
             assertEquals(3, lib.book(c.state.value.book!!.id).readingPage)
             assertEquals("Unsubmitted synthesis", c.state.value.answer.text)

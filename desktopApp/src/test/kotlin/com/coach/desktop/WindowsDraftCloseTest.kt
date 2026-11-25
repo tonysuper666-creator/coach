@@ -14,10 +14,22 @@ import androidx.compose.ui.unit.Density
 import com.coach.desktop.books.*
 import java.nio.file.Files
 import java.sql.DriverManager
+import kotlinx.coroutines.runBlocking
 import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class WindowsDraftCloseTest {
+    /**
+     * TON-1784（#570）去掉了首页「开始学 / 继续学」按钮，阅读器「更多」里的学习项也不再显示
+     * （showLearnAction = false）；进做题学只剩控制器 learn()。重开窗口时停在做题学就直接沿用（load 按 openSession 恢复）。
+     */
+    private fun ComposeUiTest.enterLearning(c: TextbookController) {
+        waitUntil(timeoutMillis = 15_000) { !c.state.value.busy && c.state.value.book != null }
+        if (c.state.value.screen != BookScreen.LEARNING) runBlocking { c.learn() }
+        waitUntil(timeoutMillis = 15_000) { !c.state.value.busy && c.state.value.screen == BookScreen.LEARNING }
+        waitForIdle()
+    }
+
     @Test fun closeAfterWriteTimeoutKeepsDraftAndRetrySavesBeforeClosing() {
         val root = Files.createTempDirectory("coach-close-draft-")
         val source = root.resolve("synthetic.txt")
@@ -45,9 +57,7 @@ class WindowsDraftCloseTest {
                     TextbookCloseWarning(guard)
                 }
             }
-            waitUntil(timeoutMillis = 15_000) { controller.state.value.book != null }
-            onNodeWithTag("home-learn").performClick()
-            waitUntil(timeoutMillis = 15_000) { controller.state.value.screen == BookScreen.LEARNING }
+            enterLearning(controller)
             DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { blocker ->
                 blocker.createStatement().use { it.execute("BEGIN IMMEDIATE") }
                 try {
@@ -71,9 +81,7 @@ class WindowsDraftCloseTest {
         val reopened = TextbookController(TextbookLibrary(library.directory))
         runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
             setContent { WindowsTextbookHost(reopened) { null } }
-            waitUntil(timeoutMillis = 15_000) { reopened.state.value.book != null }
-            onNodeWithTag("home-learn").performClick()
-            waitUntil(timeoutMillis = 15_000) { reopened.state.value.screen == BookScreen.LEARNING }
+            enterLearning(reopened)
             onNodeWithTag("short-answer").performScrollTo().assertTextContains(expected)
             println("CLOSE_REOPEN: visible='${reopened.state.value.answer.text}'")
         }

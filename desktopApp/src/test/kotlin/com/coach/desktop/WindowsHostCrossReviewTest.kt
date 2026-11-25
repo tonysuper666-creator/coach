@@ -7,6 +7,7 @@ import com.coach.desktop.books.*
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.DriverManager
+import kotlinx.coroutines.runBlocking
 import kotlin.test.*
 
 /** Independent fixed-head PR188 review. Uses disposable books, never the learner's library. */
@@ -39,8 +40,30 @@ class WindowsHostCrossReviewTest {
         waitForIdle()
     }
 
-    private fun ComposeUiTest.nav(label: String) =
-        onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText(label))
+    /**
+     * 2.0 宿主（TON-1790）去掉了「今天 / 课程 / 书架」页签（host-navigation、host-today-*、host-course-*），
+     * 只剩书架首页：点书卡进阅读器，焦点卡「继续」（home-read）回到上次那本书。
+     */
+    private fun ComposeUiTest.openBook(c: TextbookController, book: Textbook) {
+        onNodeWithTag("book-${book.id}").performClick()
+        ready(c) { it.book?.id == book.id && it.screen == BookScreen.READER }
+    }
+
+    /**
+     * TON-1784（#570）去掉了首页「开始学 / 继续学」（home-learn），阅读器「更多」里的学习项也不再显示
+     * （showLearnAction = false）；进做题学只剩控制器 learn()，与其它 2.0 用例一致。重开窗口时停在做题学就直接沿用。
+     */
+    private fun ComposeUiTest.enterLearning(c: TextbookController) {
+        ready(c) { it.book != null }
+        if (c.state.value.screen != BookScreen.LEARNING) runBlocking { c.learn() }
+        ready(c) { it.screen == BookScreen.LEARNING }
+    }
+
+    /** 2.0 离开做题学 = 「返回书架」；草稿队列属于宿主窗口（AnswerDrafts），做题页卸掉后仍要写完。 */
+    private fun ComposeUiTest.backToShelf(c: TextbookController) {
+        onNodeWithText("返回书架").performClick()
+        ready(c) { it.screen == BookScreen.HOME }
+    }
 
     /** Waits for a background write to land without turning a missing write into a timeout stack trace. */
     private fun ComposeUiTest.awaitTrue(timeoutMillis: Long = 8_000, condition: () -> Boolean) {
@@ -66,50 +89,50 @@ class WindowsHostCrossReviewTest {
         runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
             setContent { WindowsTextbookHost(c) { null } }
             ready(c) { it.catalog.size == 2 && it.book != null }
-            onNodeWithTag("book-${f.a.id}").performClick()
-            ready(c) { it.book?.id == f.a.id && it.screen == BookScreen.HOME }
-            onNodeWithTag("home-learn").performClick()
-            ready(c) { it.screen == BookScreen.LEARNING && it.answer.text == "alpha earlier draft" }
+            openBook(c, f.a)
+            assertEquals(2, c.state.value.page)
+            enterLearning(c)
+            ready(c) { it.answer.text == "alpha earlier draft" }
             onNodeWithTag("short-answer").performScrollTo().performTextReplacement("alpha revised but not submitted")
             ready(c) { it.answer.text == "alpha revised but not submitted" }
             assertFalse(c.state.value.answer.revealed)
-            nav("今天").performClick()
-            onNodeWithTag("host-today-book").assertExists()
-            onNodeWithTag("host-today-title").assertTextEquals("Alpha")
-            onNodeWithTag("host-today-progress").assertTextEquals("读到第 2 页，学习停在第 2 / 3 节")
-            onNodeWithTag("host-today-learn").performClick()
-            ready(c) { it.screen == BookScreen.LEARNING }
+            backToShelf(c)
+            // 焦点卡替代了原「今天」卡：书名 + 读到的页（MasteryEngine.formatContinueCardMeta），「继续」回到这本书。
+            onNodeWithTag("home-focus-title").assertTextEquals("Alpha")
+            onNodeWithTag("home-focus-meta").assertTextContains("第 2 页", substring = true)
+            onNodeWithTag("home-read").performClick()
+            ready(c) { it.book?.id == f.a.id && it.screen == BookScreen.READER && it.source == null && it.page == 2 }
+            enterLearning(c)
             onNodeWithTag("short-answer").performScrollTo().assertTextContains("alpha revised but not submitted")
             onNodeWithTag("open-lesson-source").performScrollTo().performClick()
             ready(c) { it.source != null && it.page == 2 }
             onNodeWithTag("next-page").performClick()
             ready(c) { it.source != null && it.page == 3 }
-            nav("课程").performClick()
-            onNodeWithTag("host-course-read").performClick()
-            ready(c) { it.screen == BookScreen.READER && it.source == null && it.page == 2 }
-            onNodeWithText("返回书架").performClick()
+            // 从原文页回学习、再回书架、点同一本书：出处里翻到的页不改书签，阅读器仍从第 2 页开。
+            onNodeWithTag("immersive-back").performClick()
+            ready(c) { it.screen == BookScreen.LEARNING && it.source == null }
+            backToShelf(c)
+            openBook(c, f.a)
+            ready(c) { it.source == null && it.page == 2 }
+            onNodeWithTag("immersive-back").assertTextContains("书架", substring = true).performClick()
             ready(c) { it.screen == BookScreen.HOME }
-            onNodeWithTag("book-${f.b.id}").performClick()
-            ready(c) { it.book?.id == f.b.id }
-            nav("课程").performClick()
-            onNodeWithText("Beta").assertExists()
-            onNodeWithTag("host-course-learn").performClick()
-            ready(c) { it.screen == BookScreen.LEARNING && it.answer.text == "beta earlier draft" }
+            openBook(c, f.b)
+            assertEquals(3, c.state.value.page)
+            enterLearning(c)
+            ready(c) { it.answer.text == "beta earlier draft" }
             onNodeWithTag("short-answer").performScrollTo().assertTextContains("beta earlier draft")
             onNodeWithTag("short-answer").performTextReplacement("beta revised but not submitted")
             ready(c) { it.answer.text == "beta revised but not submitted" }
-            nav("今天").performClick()
-            onNodeWithTag("host-today-title").assertTextEquals("Beta")
-            onNodeWithTag("host-today-progress").assertTextEquals("读到第 3 页，学习停在第 1 / 3 节")
-            onNodeWithTag("host-today-read").performClick()
+            backToShelf(c)
+            onNodeWithTag("home-focus-title").assertTextEquals("Beta")
+            onNodeWithTag("home-focus-meta").assertTextContains("第 3 页", substring = true)
+            onNodeWithTag("home-read").performClick()
             ready(c) { it.book?.id == f.b.id && it.page == 3 && it.screen == BookScreen.READER }
-            onNodeWithText("返回书架").performClick()
+            onNodeWithTag("immersive-back").performClick()
             ready(c) { it.screen == BookScreen.HOME }
-            onNodeWithTag("book-${f.a.id}").performClick()
-            ready(c) { it.book?.id == f.a.id }
-            nav("今天").performClick()
-            onNodeWithTag("host-today-learn").performClick()
-            ready(c) { it.screen == BookScreen.LEARNING && it.answer.text == "alpha revised but not submitted" }
+            openBook(c, f.a)
+            enterLearning(c)
+            ready(c) { it.answer.text == "alpha revised but not submitted" }
             assertEquals(1, c.state.value.book!!.lessonIndex)
             onNodeWithTag("short-answer").performScrollTo().assertTextContains("alpha revised but not submitted")
         }
@@ -118,15 +141,14 @@ class WindowsHostCrossReviewTest {
             setContent { WindowsTextbookHost(reopened) { null } }
             ready(reopened) { it.catalog.size == 2 && it.book != null }
             assertEquals(f.a.id, reopened.state.value.book!!.id)
-            nav("课程").performClick()
-            onNodeWithTag("host-course-learn").performClick()
-            ready(reopened) { it.screen == BookScreen.LEARNING && it.answer.text == "alpha revised but not submitted" }
+            enterLearning(reopened)
+            ready(reopened) { it.answer.text == "alpha revised but not submitted" }
             onNodeWithTag("short-answer").performScrollTo().assertTextContains("alpha revised but not submitted")
         }
         assertEquals(2, f.library.book(f.a.id).readingPage)
         assertEquals(3, f.library.book(f.b.id).readingPage)
         assertEquals("beta revised but not submitted", f.library.answer(f.b.id, f.b.lessons[0].id, QuestionMode.SHORT_ANSWER).text)
-        println("PASS: Alpha/Beta remain separate through both continue entries, source-page detour, and a new host/controller.")
+        println("PASS: Alpha/Beta remain separate through shelf/continue entries, source-page detour, and a new host/controller.")
     }
 
     @Test fun leavingBookshelfDuringAWriteMustPreserveTheLatestVisibleDraft() {
@@ -135,10 +157,9 @@ class WindowsHostCrossReviewTest {
         runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
             setContent { WindowsTextbookHost(c) { null } }
             ready(c) { it.catalog.size == 2 && it.book != null }
-            onNodeWithTag("book-${f.a.id}").performClick()
-            ready(c) { it.book?.id == f.a.id }
-            onNodeWithTag("home-learn").performClick()
-            ready(c) { it.screen == BookScreen.LEARNING && it.answer.text == "alpha earlier draft" }
+            openBook(c, f.a)
+            enterLearning(c)
+            ready(c) { it.answer.text == "alpha earlier draft" }
 
             // A real SQLite write lock simulates a short competing writer / slow write.
             // No production method is stubbed; the UI receives ordinary typing and navigation.
@@ -149,18 +170,22 @@ class WindowsHostCrossReviewTest {
                     waitForBlockedWrite()
                     onNodeWithTag("short-answer").performTextInput(" plus final edit")
                     onNodeWithTag("short-answer").assertTextContains("first edit plus final edit")
-                    nav("今天").performClick()
-                    onNodeWithTag("host-today-book").assertExists()
+                    // 2.0 没有页签（TON-1790）：离开做题页就是「返回书架」，它排在被锁住的那次写入后面。
+                    onNodeWithText("返回书架").performClick()
                 } finally {
                     blocker.createStatement().use { it.execute("ROLLBACK") }
                 }
             }
-            // The host's continue callback waits for any remaining controller action.
-            onNodeWithTag("host-today-learn").performClick()
-            ready(c) { it.screen == BookScreen.LEARNING && it.answer.text != "alpha earlier draft" }
+            ready(c) { it.screen == BookScreen.HOME }
+            onNodeWithTag("home-focus-title").assertTextEquals("Alpha")
+            awaitTrue { f.library.answer(f.a.id, f.a.lessons[1].id, QuestionMode.SHORT_ANSWER).text == "first edit plus final edit" }
+            onNodeWithTag("home-read").performClick()
+            ready(c) { it.book?.id == f.a.id && it.screen == BookScreen.READER }
+            enterLearning(c)
+            ready(c) { it.answer.text != "alpha earlier draft" }
             val stored = f.library.answer(f.a.id, f.a.lessons[1].id, QuestionMode.SHORT_ANSWER).text
             println("Latest visible draft='first edit plus final edit'; resumed='${c.state.value.answer.text}'; stored='$stored'")
-            assertEquals("first edit plus final edit", stored, "Leaving a tab must retain all visible unsubmitted input")
+            assertEquals("first edit plus final edit", stored, "Leaving the learning page must retain all visible unsubmitted input")
             onNodeWithTag("short-answer").performScrollTo().assertTextContains("first edit plus final edit")
         }
     }
@@ -173,10 +198,9 @@ class WindowsHostCrossReviewTest {
         runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
             setContent { WindowsTextbookHost(c) { null } }
             ready(c) { it.catalog.size == 2 && it.book != null }
-            onNodeWithTag("book-${f.a.id}").performClick()
-            ready(c) { it.book?.id == f.a.id }
-            onNodeWithTag("home-learn").performClick()
-            ready(c) { it.screen == BookScreen.LEARNING && it.answer.text == "alpha earlier draft" }
+            openBook(c, f.a)
+            enterLearning(c)
+            ready(c) { it.answer.text == "alpha earlier draft" }
             DriverManager.getConnection("jdbc:sqlite:${f.library.directory.resolve("library.sqlite")}").use { blocker ->
                 blocker.createStatement().use { it.execute("BEGIN IMMEDIATE") }
                 try {
@@ -214,10 +238,9 @@ class WindowsHostCrossReviewTest {
         runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
             setContent { WindowsTextbookHost(c) { null } }
             ready(c) { it.catalog.size == 2 && it.book != null }
-            onNodeWithTag("book-${f.a.id}").performClick()
-            ready(c) { it.book?.id == f.a.id }
-            onNodeWithTag("home-learn").performClick()
-            ready(c) { it.screen == BookScreen.LEARNING && it.answer.text == "alpha earlier draft" }
+            openBook(c, f.a)
+            enterLearning(c)
+            ready(c) { it.answer.text == "alpha earlier draft" }
             DriverManager.getConnection("jdbc:sqlite:${f.library.directory.resolve("library.sqlite")}").use { blocker ->
                 blocker.createStatement().use { it.execute("BEGIN IMMEDIATE") }
                 try {
@@ -247,10 +270,9 @@ class WindowsHostCrossReviewTest {
         runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
             setContent { WindowsTextbookHost(c) { null } }
             ready(c) { it.catalog.size == 2 && it.book != null }
-            onNodeWithTag("book-${f.a.id}").performClick()
-            ready(c) { it.book?.id == f.a.id }
-            onNodeWithTag("home-learn").performClick()
-            ready(c) { it.screen == BookScreen.LEARNING && it.answer.text == "alpha earlier draft" }
+            openBook(c, f.a)
+            enterLearning(c)
+            ready(c) { it.answer.text == "alpha earlier draft" }
             DriverManager.getConnection("jdbc:sqlite:${f.library.directory.resolve("library.sqlite")}").use { blocker ->
                 blocker.createStatement().use { it.execute("BEGIN IMMEDIATE") }
                 try {

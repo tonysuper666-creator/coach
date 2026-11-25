@@ -2557,6 +2557,29 @@ internal class TextbookLibrary(
                         }
                     }
                 }
+                if (BookSchemaMigration.tableExists(db, "book_pending_deletes")) {
+                    db.prepareStatement(
+                        """INSERT OR IGNORE INTO book_pending_deletes(
+                               account_key, server_shelf_book_id, local_book_id, file_sha256, format, title, created_at
+                           ) SELECT ?, server_shelf_book_id, local_book_id, file_sha256, format, title, created_at
+                           FROM book_pending_deletes WHERE account_key=?""".trimIndent(),
+                    ).use { sql ->
+                        sql.setString(1, toAccountKey)
+                        sql.setString(2, fromAccountKey)
+                        sql.executeUpdate()
+                    }
+                    db.prepareStatement("DELETE FROM book_pending_deletes WHERE account_key=?").use { sql ->
+                        sql.setString(1, fromAccountKey)
+                        sql.executeUpdate()
+                    }
+                }
+                if ("import_account_key" in BookSchemaMigration.tableColumns(db, "books")) {
+                    db.prepareStatement("UPDATE books SET import_account_key=? WHERE import_account_key=?").use { sql ->
+                        sql.setString(1, toAccountKey)
+                        sql.setString(2, fromAccountKey)
+                        sql.executeUpdate()
+                    }
+                }
                 db.commit()
             } catch (e: Exception) {
                 db.rollback()
@@ -2621,6 +2644,23 @@ internal class TextbookLibrary(
         BookUploadQueueStore.recoverInterruptedUploads(db, clock.millis())
     }
 
+    @Synchronized internal fun saveImportAccountKey(bookId: String, accountKey: String) = database().use { db ->
+        if ("import_account_key" !in BookSchemaMigration.tableColumns(db, "books")) return@use
+        db.prepareStatement("UPDATE books SET import_account_key=? WHERE id=?").use { sql ->
+            sql.setString(1, accountKey)
+            sql.setString(2, bookId)
+            sql.executeUpdate()
+        }
+    }
+
+    @Synchronized internal fun importAccountKey(bookId: String): String? = database().use { db ->
+        if ("import_account_key" !in BookSchemaMigration.tableColumns(db, "books")) return@use null
+        db.prepareStatement("SELECT import_account_key FROM books WHERE id=?").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { rs -> if (rs.next()) rs.getString(1)?.takeIf(String::isNotBlank) else null }
+        }
+    }
+
     @Synchronized internal fun updateBookUploadState(
         accountKey: String,
         localBookId: String,
@@ -2630,10 +2670,14 @@ internal class TextbookLibrary(
         errorMessage: String? = null,
         serverShelfBookId: String? = null,
         clearServerShelfBookId: Boolean = false,
-    ) = database().use { db ->
+        expectedServerShelfBookId: String? = null,
+        requireNullServerShelfBookId: Boolean = false,
+        allowedCurrentStates: Set<BookUploadState>? = null,
+    ): Int = database().use { db ->
         BookUploadQueueStore.updateState(
             db, accountKey, localBookId, state, progressPct, stageLabel, errorMessage,
             serverShelfBookId, clearServerShelfBookId, clock.millis(),
+            expectedServerShelfBookId, requireNullServerShelfBookId, allowedCurrentStates,
         )
     }
 

@@ -666,6 +666,123 @@ class UnifiedBookUploadQueueTest {
             assertEquals(BookUploadState.PENDING_DELETE, entry.state)
             assertEquals("sb_000000000000000000000001", entry.serverShelfBookId)
             assertTrue(Files.isRegularFile(dir.resolve(BookSchemaMigration.V5_BACKUP_FILENAME)))
+            assertEquals(1, lib.syncTasksForAccount("sable-a").count { it.state == BookUploadState.PENDING_DELETE })
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun offlineDeleteThenReimportOrdersUnbindBeforeUploadAndPersistsOcrInitiatingOwnerAcrossRestart() = runBlocking {
+        val root = Files.createTempDirectory("coach-offline-order-owner-")
+        try {
+            val dir = root.resolve("library")
+            val events = mutableListOf<String>()
+            var failDelete = true
+            var activeKey = "sable-alpha"
+            val remote = object : UnifiedBookRemoteClient {
+                override suspend fun activeAccountKey(): String = activeKey
+                override suspend fun checkCapability(): UnifiedBookCapability = UnifiedBookCapability.Supported(activeKey)
+                override suspend fun uploadBook(
+                    file: Path,
+                    format: String,
+                    title: String,
+                    sha256: String,
+                    onProgress: (Int) -> Unit,
+                ): UnifiedBookUploadOutcome {
+                    events += "upload:$activeKey"
+                    return UnifiedBookUploadOutcome.Accepted("sb_new_1234567890abcdef01", sha256, BookUploadState.QUEUED, 0, "")
+                }
+
+                override suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome =
+                    UnifiedBookStatusOutcome.Ready(BookUploadState.QUEUED, 0, "")
+
+                override suspend fun deleteBook(shelfBookId: String): UnifiedBookDeleteOutcome {
+                    events += "delete:$activeKey:$shelfBookId:${if (failDelete) "fail" else "ok"}"
+                    return if (failDelete) UnifiedBookDeleteOutcome.Offline else UnifiedBookDeleteOutcome.Deleted
+                }
+            }
+            val lib = TextbookLibrary(dir)
+            val source = createSampleTxt(root, "reimport.txt", "Chapter 1\nOffline delete then reimport order test.")
+            val book = lib.importBook(source)
+            lib.enqueueBookUpload("sable-alpha", book.id, book.id, book.format, book.title)
+            lib.updateBookUploadState("sable-alpha", book.id, BookUploadState.QUEUED, serverShelfBookId = "sb_old_1234567890abcdef01")
+            // Offline delete, then offline re-import of the exact same file.
+            lib.deleteBook(book.id, "sable-alpha")
+            val reimported = lib.importBook(source)
+            lib.enqueueBookUpload("sable-alpha", reimported.id, reimported.id, reimported.format, reimported.title)
+
+            val coordinator = UnifiedBookUploadCoordinator(lib) { remote }
+            // When delete fails transiently, re-import upload must NOT run ahead of unbinding sb_old.
+            coordinator.syncOnce()
+            assertEquals(listOf("delete:sable-alpha:sb_old_1234567890abcdef01:fail"), events)
+            assertNull(lib.readUploadEntry("sable-alpha", reimported.id)?.serverShelfBookId)
+
+            // Once delete succeeds, sb_old unbinds BEFORE the new upload runs.
+            failDelete = false
+            coordinator.syncOnce()
+            assertEquals(
+                listOf(
+                    "delete:sable-alpha:sb_old_1234567890abcdef01:fail",
+                    "delete:sable-alpha:sb_old_1234567890abcdef01:ok",
+                    "upload:sable-alpha",
+                ),
+                events,
+            )
+            assertEquals("sb_new_1234567890abcdef01", lib.readUploadEntry("sable-alpha", reimported.id)?.serverShelfBookId)
+
+            // Persisted initiating account survives restart on scanned OCR resume even after switching to Account B.
+            val scanDir = root.resolve("scan-library")
+            val scanImage = root.resolve("scan-owner.png")
+            ImageIO.write(java.awt.image.BufferedImage(32, 32, java.awt.image.BufferedImage.TYPE_BYTE_GRAY), "png", scanImage.toFile())
+            val firstStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val firstLib = TextbookLibrary(
+                scanDir,
+                ocr = BookOcr { _, control ->
+                    firstStarted.complete(Unit)
+                    while (!control.isCancelled()) Thread.sleep(5)
+                    control.check()
+                    ""
+                },
+            )
+            val firstController = TextbookController(firstLib).apply { unifiedUploadClient = remote }
+            firstController.onUploadIdentityChanged("sable-alpha")?.join()
+            val firstImport = launch(Dispatchers.Default) { firstController.importBook(scanImage) }
+            firstStarted.await()
+            val scanBookId = firstController.state.value.importing!!.bookId!!
+            assertEquals("sable-alpha", firstLib.importAccountKey(scanBookId))
+            // Wait for initiating account key persistence, then finish cancel cleanly before setting up restart state.
+            firstController.cancelImport()
+            firstImport.join()
+            while (firstController.state.value.importing != null) kotlinx.coroutines.delay(10)
+            val betaPre = TextbookLibrary(scanDir)
+            val reStaged = betaPre.stageBookImport(scanImage).book
+            betaPre.saveImportAccountKey(reStaged.id, "sable-alpha")
+            betaPre.enqueueBookUpload("sable-alpha", reStaged.id, reStaged.id, "png", "scan-owner")
+            betaPre.updateBookUploadState("sable-alpha", reStaged.id, BookUploadState.QUEUED, serverShelfBookId = "sb_scan_alpha_000000000001")
+            betaPre.enqueueBookUpload("sable-beta", reStaged.id, reStaged.id, "png", "scan-owner")
+            betaPre.updateBookUploadState("sable-beta", reStaged.id, BookUploadState.QUEUED, serverShelfBookId = "sb_scan_beta_0000000000002")
+
+            val resumeStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val resumedLib = TextbookLibrary(
+                scanDir,
+                ocr = BookOcr { _, control ->
+                    resumeStarted.complete(Unit)
+                    while (!control.isCancelled()) Thread.sleep(5)
+                    control.check()
+                    ""
+                },
+            )
+            activeKey = "sable-beta"
+            val resumedController = TextbookController(resumedLib).apply { unifiedUploadClient = remote }
+            resumedController.onUploadIdentityChanged("sable-beta")?.join()
+            resumedController.load()
+            resumeStarted.await()
+            resumedController.cancelImport()
+            while (resumedController.state.value.importing != null) kotlinx.coroutines.delay(10)
+
+            assertEquals(BookUploadState.PENDING_DELETE, resumedLib.readUploadEntry("sable-alpha", reStaged.id)?.state)
+            assertEquals(BookUploadState.QUEUED, resumedLib.readUploadEntry("sable-beta", reStaged.id)?.state)
         } finally {
             root.toFile().deleteRecursively()
         }

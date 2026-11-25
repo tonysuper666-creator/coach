@@ -69,7 +69,7 @@ internal object BookSchemaMigration {
     /** TON-1848: transactional SQLite persistence for companion Q&A threads (`book_ask_turns`). */
     const val V6_SCHEMA_VERSION = 6
 
-    /** TON-1833: persistent per-account remote unbind (`PENDING_DELETE`) state in `book_upload_queue`. */
+    /** TON-1833: persistent per-account remote unbind (`PENDING_DELETE`), `book_pending_deletes`, and `books.import_account_key`. */
     const val V7_SCHEMA_VERSION = 7
     const val CURRENT_SCHEMA_VERSION = V7_SCHEMA_VERSION
     const val V1_BACKUP_FILENAME = "library.sqlite.v1.bak"
@@ -356,6 +356,20 @@ internal object BookSchemaMigration {
         "CREATE INDEX IF NOT EXISTS idx_book_ask_turns_book_id ON book_ask_turns(book, id)",
     )
 
+    private val V7_TABLES = listOf(
+        """CREATE TABLE IF NOT EXISTS book_pending_deletes(
+            account_key TEXT NOT NULL,
+            server_shelf_book_id TEXT NOT NULL,
+            local_book_id TEXT NOT NULL,
+            file_sha256 TEXT NOT NULL,
+            format TEXT NOT NULL,
+            title TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(account_key, server_shelf_book_id)
+        )""".trimIndent(),
+        "CREATE INDEX IF NOT EXISTS idx_book_pending_deletes_account ON book_pending_deletes(account_key, created_at)",
+    )
+
     private val V2_TABLES = listOf(
         COLLECTIONS_DDL,
         COLLECTION_MATERIALS_DDL,
@@ -443,6 +457,10 @@ internal object BookSchemaMigration {
         "book_ask_turns",
     )
 
+    private val REQUIRED_V7_TABLES = REQUIRED_V6_TABLES + setOf(
+        "book_pending_deletes",
+    )
+
     fun upgradeAndMigrate(
         directory: Path,
         openConnection: () -> Connection,
@@ -481,8 +499,9 @@ internal object BookSchemaMigration {
                     runCatching { probe.createStatement().use { it.execute("PRAGMA wal_checkpoint(TRUNCATE)") } }
                 }
                 schemaComplete = currentVersion >= CURRENT_SCHEMA_VERSION &&
-                    REQUIRED_V6_TABLES.all { it in existingTables } &&
+                    REQUIRED_V7_TABLES.all { it in existingTables } &&
                     "show_standalone" in tableColumns(probe, "books") &&
+                    "import_account_key" in tableColumns(probe, "books") &&
                     "week_num" in tableColumns(probe, "collection_materials") &&
                     "index_state" in tableColumns(probe, "books") &&
                     "text_pending" in tableColumns(probe, "pages") &&
@@ -511,6 +530,7 @@ internal object BookSchemaMigration {
                     ensureColumn(db, "books", "source_filename", "TEXT")
                     ensureColumn(db, "books", "file_bytes", "INTEGER NOT NULL DEFAULT 0")
                     ensureColumn(db, "books", "sync_epoch", "INTEGER NOT NULL DEFAULT 0")
+                    ensureColumn(db, "books", "import_account_key", "TEXT")
                     ensureColumn(db, "pages", "ocr", "INTEGER NOT NULL DEFAULT 0")
                     ensureColumn(db, "pages", "ocr_pending", "INTEGER NOT NULL DEFAULT 0")
                     ensureColumn(db, "pages", "text_pending", "INTEGER NOT NULL DEFAULT 0")
@@ -532,6 +552,16 @@ internal object BookSchemaMigration {
                         for (ddl in V6_TABLES) sql.execute(ddl)
                     }
                     upgradeUploadQueueToV6(db)
+                    db.createStatement().use { sql ->
+                        for (ddl in V7_TABLES) sql.execute(ddl)
+                        sql.executeUpdate(
+                            """INSERT OR IGNORE INTO book_pending_deletes(
+                                   account_key, server_shelf_book_id, local_book_id, file_sha256, format, title, created_at
+                               ) SELECT account_key, server_shelf_book_id, local_book_id, file_sha256, format, title, updated_at
+                               FROM book_upload_queue
+                               WHERE state='PENDING_DELETE' AND server_shelf_book_id IS NOT NULL""".trimIndent(),
+                        )
+                    }
                     BookFtsStore.migrate(db)
                     onInTransaction(db)
                     if (upgradingFromV1 || addedIndexState) {

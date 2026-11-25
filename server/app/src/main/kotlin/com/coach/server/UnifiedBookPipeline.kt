@@ -1096,7 +1096,10 @@ class UnifiedBookPipeline internal constructor(
             accountDb.createStatement().use { it.execute("PRAGMA busy_timeout=5000") }
             accountDb.autoCommit = false
             try {
-                for (table in listOf("shelf_book_notes", "shelf_book_qa", "shelf_book_overrides", "shelf_books")) {
+                for (table in listOf(
+                    "shelf_book_notes", "shelf_book_qa", "shelf_book_overrides",
+                    "legacy_book_mappings", "legacy_receipt_alignments", "shelf_books",
+                )) {
                     val exists = accountDb.prepareStatement(
                         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                     ).use { sql ->

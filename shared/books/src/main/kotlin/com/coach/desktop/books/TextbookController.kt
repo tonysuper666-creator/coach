@@ -682,8 +682,11 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 staged = result
                 releaseOnce()
                 val book = result.book
+                if (!result.alreadyExisted && initiatingAccountKey != null) {
+                    runCatching { library.saveImportAccountKey(book.id, initiatingAccountKey) }
+                }
                 control.check()
-                if (initiatingAccountKey != null && unifiedUploadClient != null) {
+                if (!result.alreadyExisted && initiatingAccountKey != null && unifiedUploadClient != null) {
                     runCatching {
                         uploadCoordinator.enqueueBookForAccount(
                             accountKey = initiatingAccountKey,
@@ -838,10 +841,10 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 runOcrLoop(book.id, control, deleteOnEmptyFailure = !result.alreadyExisted)
             } catch (_: BookImportCancelled) {
                 releaseOnce()
-                handleCancelledImport(staged?.book?.id, initiatingAccountKey)
+                handleCancelledImport(staged?.book?.id, staged?.alreadyExisted == false, initiatingAccountKey)
             } catch (cancel: CancellationException) {
                 releaseOnce()
-                handleCancelledImport(staged?.book?.id, initiatingAccountKey)
+                handleCancelledImport(staged?.book?.id, staged?.alreadyExisted == false, initiatingAccountKey)
                 throw cancel
             } catch (failure: Exception) {
                 releaseOnce()
@@ -860,14 +863,12 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     }
 
     private fun resumePendingOcrInBackground(bookId: String): Job {
-        val capturedAccountAtStart = uploadCoordinator.currentAccountKey()
         val control = BookImportControl(
             progress = { progress -> mutable.update { it.copy(importing = progress) } },
         )
         activeImport = control
         val job = backgroundScope.launch {
-            val initiatingAccountKey = capturedAccountAtStart
-                ?: runCatching { uploadCoordinator.resolveInitiatingAccountKey() }.getOrNull()
+            val initiatingAccountKey = runCatching { library.importAccountKey(bookId) }.getOrNull()
             try {
                 val book = library.book(bookId)
                 val totalPages = book.pages.size
@@ -890,7 +891,10 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     runOcrLoop(bookId, control, deleteOnEmptyFailure = false)
                 }
             } catch (_: BookImportCancelled) {
-                handleCancelledImport(bookId, initiatingAccountKey)
+                if (initiatingAccountKey == null) {
+                    runCatching { library.clearPendingOcr(bookId) }
+                }
+                handleCancelledImport(bookId, deleteLocalBook = initiatingAccountKey != null, initiatingAccountKey = initiatingAccountKey)
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
@@ -936,8 +940,12 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
-    private suspend fun handleCancelledImport(bookId: String?, initiatingAccountKey: String?) = withContext(NonCancellable) {
-        if (bookId != null) {
+    private suspend fun handleCancelledImport(
+        bookId: String?,
+        deleteLocalBook: Boolean,
+        initiatingAccountKey: String?,
+    ) = withContext(NonCancellable) {
+        if (bookId != null && deleteLocalBook) {
             runCatching { library.deleteBook(bookId, initiatingAccountKey) }
             runCatching { uploadCoordinator.refreshCurrentAccountStatuses() }
             if (initiatingAccountKey != null && initiatingAccountKey == uploadCoordinator.currentAccountKey() && unifiedUploadClient != null) {
@@ -950,7 +958,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val fallbackRec = runCatching { library.topHomeRecommendation(fallbackBook?.id) }.getOrNull()
         val fallbackLastQ = runCatching { loadLastQuestion(fallbackBook?.id) }.getOrNull()
         mutable.update { current ->
-            val removedOpen = bookId != null && current.book?.id == bookId
+            val removedOpen = deleteLocalBook && bookId != null && current.book?.id == bookId
             current.copy(
                 catalog = catalog,
                 book = if (removedOpen) fallbackBook else current.book,

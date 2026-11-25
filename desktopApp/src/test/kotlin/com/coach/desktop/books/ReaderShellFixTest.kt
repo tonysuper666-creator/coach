@@ -774,7 +774,8 @@ class ReaderShellFixTest {
     fun realWindowSequentialBooklistProgressAndStandaloneReadLibrary() {
         assumeFalse("Requires non-headless desktop display", GraphicsEnvironment.isHeadless())
         val root = Files.createTempDirectory("coach-ton1847-realwin-")
-        val outDir = System.getProperty("coach.ton1847.out")?.takeIf { it.isNotBlank() }?.let(Path::of)
+        val outDir = (System.getenv("COACH_TON1847_OUT") ?: System.getProperty("coach.ton1847.out"))
+            ?.takeIf { it.isNotBlank() }?.let(Path::of)
         var window: ComposeWindow? = null
         try {
             fun <T> edt(block: () -> T): T {
@@ -831,13 +832,29 @@ class ReaderShellFixTest {
             fun captureWin(win: ComposeWindow, name: String) {
                 val dir = outDir ?: return
                 Files.createDirectories(dir)
-                Thread.sleep(150)
                 edt {
-                    val img = BufferedImage(win.width.coerceAtLeast(1), win.height.coerceAtLeast(1), BufferedImage.TYPE_INT_ARGB)
-                    val g = img.createGraphics()
-                    win.paintAll(g)
-                    g.dispose()
-                    ImageIO.write(img, "png", dir.resolve("$name.png").toFile())
+                    val orig = win.size
+                    win.size = Dimension(orig.width + 1, orig.height)
+                    win.size = orig
+                    win.toFront()
+                    win.repaint()
+                    java.awt.Toolkit.getDefaultToolkit().sync()
+                }
+                Thread.sleep(350)
+                val captured = runCatching {
+                    val b = edt { win.bounds }
+                    java.awt.Robot().createScreenCapture(b)
+                }.getOrNull()
+                if (captured != null) {
+                    ImageIO.write(captured, "png", dir.resolve("$name.png").toFile())
+                } else {
+                    edt {
+                        val img = BufferedImage(win.width.coerceAtLeast(1), win.height.coerceAtLeast(1), BufferedImage.TYPE_INT_ARGB)
+                        val g = img.createGraphics()
+                        win.paintAll(g)
+                        g.dispose()
+                        ImageIO.write(img, "png", dir.resolve("$name.png").toFile())
+                    }
                 }
             }
 
@@ -927,7 +944,7 @@ class ReaderShellFixTest {
             window = edt {
                 ComposeWindow().apply {
                     title = "LearningCoach · TON-1847 真窗实测 A"
-                    size = Dimension(820, 620)
+                    size = Dimension(980, 820)
                     setContent {
                         CompositionLocalProvider(LocalChapterDwellMs provides 400L) {
                             WindowsTextbookHost(controllerA, bookExplainer = explainerA, chooseBook = { null })
@@ -1023,7 +1040,7 @@ class ReaderShellFixTest {
             window = edt {
                 ComposeWindow().apply {
                     title = "LearningCoach · TON-1847 真窗实测 B"
-                    size = Dimension(820, 620)
+                    size = Dimension(980, 760)
                     setContent {
                         WindowsTextbookHost(controllerB, bookExplainer = explainerB, chooseBook = { null })
                     }

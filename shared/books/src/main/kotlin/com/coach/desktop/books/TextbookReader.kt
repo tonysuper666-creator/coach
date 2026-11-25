@@ -1591,6 +1591,7 @@ internal fun TextbookReader(
                         SingleBookCompanionPanel(
                             book = book,
                             onOpenSectionMainline = onOpenSectionMainline,
+                            wholeOriginalPageVisible = !textView,
                             currentPage = paragraphPage.number,
                             currentPageOffset = readingAnchor.offsetUtf16,
                             visiblePageRanges = visibleScreenSlices,

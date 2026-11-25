@@ -84,6 +84,7 @@ internal fun SingleBookCompanionPanel(
     currentPageOffset: Int = 0,
     visiblePageRanges: List<IntRange> = emptyList(),
     onOpenSectionMainline: ((Int) -> Unit)? = null,
+    wholeOriginalPageVisible: Boolean = false,
 ) {
     val colors = CoachTheme.colors
     val originalOnly = studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY
@@ -511,8 +512,10 @@ internal fun SingleBookCompanionPanel(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 val summarySection = proseGroup?.sections?.firstOrNull { it.id == currentSection?.id }
-                if (readingExplanation && LocalReadingSectionSummary.current && summarySection != null &&
-                    currentPage == summarySection.lastPage) {
+                val endOffset = summarySection?.blocks?.lastOrNull()?.end?.minus(1)
+                if (readingExplanation && LocalReadingSectionSummary.current && summarySection != null && endOffset != null &&
+                    currentPage == summarySection.lastPage && (wholeOriginalPageVisible || currentPageOffset >= endOffset ||
+                        visiblePageRanges.any { endOffset in it })) {
                     var dismissed by remember(book.id, summarySection.id) { mutableStateOf(false) }
                     if (!dismissed) {
                         val pack = (packState as? CompanionPackState.Ready)?.pack

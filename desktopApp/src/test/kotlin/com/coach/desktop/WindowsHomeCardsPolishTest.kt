@@ -105,12 +105,9 @@ class WindowsHomeCardsPolishTest {
                 val controller = TextbookController(library)
                 runBlocking {
                     controller.importBook(sample)
-                    controller.chooseLearningPath(LearningPath.QUESTION_FIRST)
-                    controller.enableLearning()
-                    val book = controller.state.value.book!!
-                    val practice = com.coach.desktop.books.testPracticeFixture(book, book.lessons.first(), QuestionMode.CHOICE)!!
-                    val wrong = practice.options.first { it != practice.answer }
-                    controller.answer(PracticeAnswer(wrong, revealed = true))
+                    val lesson = controller.state.value.book!!.lessons.first()
+                    val practice = Practice("合成复习题", lesson.text, "甲", listOf("甲", "乙"))
+                    controller.recordSectionQuizAnswer(lesson, 0, practice, PracticeAnswer("乙", revealed = true))
                     controller.back()
                     controller.refreshReviews()
                 }
@@ -124,66 +121,36 @@ class WindowsHomeCardsPolishTest {
                             WindowsTextbookHost(controller, learningSupport = UnconnectedBookLearningSupport) { null }
                         }
                     }
-                    fun nav(label: String) = onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText(label))
                     fun savePng(name: String) {
                         waitForIdle()
-                        ImageIO.write(captureToImage().toAwtImage(), "png", outDir.resolve("$theme-$name.png").toFile())
+                        assertTrue(ImageIO.write(captureToImage().toAwtImage(), "png", outDir.resolve("$theme-$name.png").toFile()))
                     }
-
-                    // 1. 今天页：主卡居中、宽度不超阅读栏上限、三级字号排开、仅 1 枚主按钮（复习改纸面按钮）
-                    nav("今天").performClick()
-                    onNodeWithTag("host-today-book").assertExists()
-                    onNodeWithTag("host-today-review").assertExists()
-                    val hostRect = onNodeWithTag("windows-host").fetchSemanticsNode().boundsInRoot
-                    val todaySheet = onNodeWithTag("host-sheet").fetchSemanticsNode().boundsInRoot
-                    val maxSheetPx = HostSheetMaxWidth.value * 1.5f + 2f
-                    assertTrue(todaySheet.width <= maxSheetPx, "今天页主卡宽度不应超过阅读栏上限：${todaySheet.width} > $maxSheetPx")
-                    assertTrue(todaySheet.top > 120f, "今天页主卡应在主区域内垂直居中，不能贴顶拉伸：top=${todaySheet.top}")
-                    assertTrue(todaySheet.height < hostRect.height * 0.7f, "今天页主卡应按内容收束，不拉成满高大白板：${todaySheet.height}/${hostRect.height}")
-
-                    val kickerLayout = mutableListOf<TextLayoutResult>()
-                    val titleLayout = mutableListOf<TextLayoutResult>()
-                    val progressLayout = mutableListOf<TextLayoutResult>()
-                    onNodeWithTag("host-today-kicker").performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(kickerLayout) }
-                    onNodeWithTag("host-today-title").performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(titleLayout) }
-                    onNodeWithTag("host-today-progress").performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(progressLayout) }
-                    assertTrue(titleLayout.single().layoutInput.style.fontSize.value > progressLayout.single().layoutInput.style.fontSize.value,
-                        "书名应大于进度说明")
-                    assertTrue(progressLayout.single().layoutInput.style.fontSize.value >= kickerLayout.single().layoutInput.style.fontSize.value,
-                        "进度说明应不小于页眉小标")
-                    val titleRect = onNodeWithTag("host-today-title").fetchSemanticsNode().boundsInRoot
-                    val progressRect = onNodeWithTag("host-today-progress").fetchSemanticsNode().boundsInRoot
-                    val readRect = onNodeWithTag("host-today-read").fetchSemanticsNode().boundsInRoot
-                    val reviewRect = onNodeWithTag("host-today-review").fetchSemanticsNode().boundsInRoot
-                    assertTrue(titleRect.bottom <= progressRect.top && progressRect.bottom <= readRect.top,
-                        "书名 → 进度 → 下一步应自上而下排开")
-                    savePng("today")
-
-                    // 像素核对 A13：主按钮（接着读）是深色/高对比实底，复习按钮与继续学按钮同为纸面底色
-                    val todayImage = captureToImage().toAwtImage()
-                    fun sampleEdgeRgb(rect: androidx.compose.ui.geometry.Rect): Int {
-                        val x = (rect.left + 6f).toInt().coerceIn(0, todayImage.width - 1)
-                        val y = (rect.top + rect.height / 2f).toInt().coerceIn(0, todayImage.height - 1)
-                        return todayImage.getRGB(x, y) and 0xFFFFFF
+                    waitUntil(20_000) { onAllNodesWithTag("home-review-card").fetchSemanticsNodes().isNotEmpty() }
+                    fun bounds(tag: String) = onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
+                    val host = bounds("windows-host")
+                    val sheet = bounds("shelf-sheet")
+                    assertTrue(sheet.width <= 720 * 1.5f + 1)
+                    for (tag in listOf("shelf-sheet", "home-focus-card", "home-review-card")) {
+                        assertTrue(abs(bounds(tag).center.x - host.center.x) <= 1f, "$tag 应居中")
+                        assertTrue(bounds(tag).width <= sheet.width)
                     }
-                    val learnRect = onNodeWithTag("host-today-learn").fetchSemanticsNode().boundsInRoot
-                    val readRgb = sampleEdgeRgb(readRect)
-                    val learnRgb = sampleEdgeRgb(learnRect)
-                    val reviewRgb = sampleEdgeRgb(reviewRect)
-                    assertEquals(learnRgb, reviewRgb, "复习按钮与继续学应同为 PaperButton 纸面底色")
-                    assertNotEquals(readRgb, reviewRgb, "今天页只留接着读一枚 PrimaryButton，复习不能同为主按钮实底")
-
-                    // 2. 课程页：主卡居中、宽度与阅读栏一致
-                    nav("课程").performClick()
-                    onNodeWithTag("host-course-book").assertExists()
-                    val courseSheet = onNodeWithTag("host-sheet").fetchSemanticsNode().boundsInRoot
-                    assertTrue(courseSheet.width <= maxSheetPx, "课程页主卡宽度不应超过阅读栏上限：${courseSheet.width} > $maxSheetPx")
-                    val sheetCenterX = (courseSheet.left + courseSheet.right) / 2f
-                    val contentCenterX = (76f * 1.5f + hostRect.right) / 2f
-                    assertTrue(abs(sheetCenterX - contentCenterX) < 12f,
-                        "课程页主卡应在主区域内水平居中：sheet=$sheetCenterX content=$contentCenterX")
-                    savePng("course")
-
+                    fun fontSize(tag: String): Float {
+                        val layouts = mutableListOf<TextLayoutResult>()
+                        onNodeWithTag(tag).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+                        return layouts.single().layoutInput.style.fontSize.value
+                    }
+                    assertTrue(fontSize("home-focus-title") > fontSize("home-focus-meta"))
+                    onAllNodesWithTag("home-read").assertCountEquals(1)
+                    val image = captureToImage().toAwtImage()
+                    fun fill(tag: String): Int {
+                        val rect = bounds(tag)
+                        return image.getRGB((rect.left + 8f).toInt(), rect.center.y.toInt())
+                    }
+                    val primary = fill("home-read")
+                    for (secondary in listOf("home-mode-trigger", "home-review-start")) {
+                        assertNotEquals(primary, fill(secondary), "$secondary 不应使用主按钮底色")
+                    }
+                    savePng("home")
                     // 3. 设置弹窗：真实形状路径样例，显示「用户文件夹\Coach\books」
                     onNodeWithTag("open-settings").performClick()
                     onNodeWithTag("settings-library-directory").assertTextEquals("用户文件夹${sep}Coach${sep}books")

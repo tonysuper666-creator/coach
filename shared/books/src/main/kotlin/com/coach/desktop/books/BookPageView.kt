@@ -192,8 +192,9 @@ internal class BookPagingState(initial: BookPageAnchor) {
     }
 }
 
-/** 长书先排所在位置前后各这么多导入页，整本排完再无缝替换（TON-1724）。 */
+/** 长书先从当前章首排到所在位置之后这么多导入页，整本排完再无缝替换（TON-1724）；无章标题的超大单章上限 64 页。 */
 private const val NEAR_LAYOUT_PAGES = 2
+private const val MAX_NEAR_LAYOUT_PAGES = 64
 
 /** The same source anchor survives font/width reflow and original/text view changes. */
 @Composable
@@ -239,7 +240,22 @@ internal fun BookPageView(
     val topMargin = if (immersive) 18.dp else 52.dp
     val topMarginPx = with(density) { topMargin.toPx() }
     val paperBg = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
-    BoxWithConstraints(modifier.fillMaxSize().then(if (immersive) Modifier.background(paperBg) else Modifier).testTag("book-page-layout")) {
+    var pointerActive by remember(state) { mutableStateOf(false) }
+    BoxWithConstraints(
+        modifier
+            .fillMaxSize()
+            .then(if (immersive) Modifier.background(paperBg) else Modifier)
+            .pointerInput(state) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        val pressed = event.changes.any { it.pressed }
+                        if (pointerActive != pressed) pointerActive = pressed
+                    }
+                }
+            }
+            .testTag("book-page-layout"),
+    ) {
         val column = with(density) { (body.fontSize * (if (immersive) 38 else 33)).toDp() }
         val scrolling = readMode == BookReadMode.Scroll
         val visibleColumns = when {
@@ -281,15 +297,27 @@ internal fun BookPageView(
             }
             LaunchedEffect(state, inputs) {
                 if (result != null) return@LaunchedEffect
-                // 先只排读者所在位置前后几导入页，马上有字可读；整本排完后再换上（锚点按原文位置对齐，读位不动）。
-                val at = state.anchor.importPage
-                val near = layoutPages.filter { it.number in (at - NEAR_LAYOUT_PAGES)..(at + NEAR_LAYOUT_PAGES) }
-                if (near.isNotEmpty() && near.size < layoutPages.size) {
+                // 从当前章起始导入页排到所在位置之后几页，确保章内分页边界与整本排版一致，整本排完后零跳页替换。
+                val window = withContext(Dispatchers.Default) {
+                    val context = currentCoroutineContext()
+                    nearChapterLayoutPages(
+                        pages = layoutPages,
+                        anchor = state.anchor,
+                        tailPages = NEAR_LAYOUT_PAGES,
+                        maxPages = MAX_NEAR_LAYOUT_PAGES,
+                        pdf = pdf,
+                        tocNodes = tocForLayout,
+                    ) { context.ensureActive() }
+                }
+                if (window.pages.isNotEmpty() && window.pages.size < layoutPages.size) {
                     result = withContext(Dispatchers.Default) {
                         val context = currentCoroutineContext()
                         val workerMeasurer = TextMeasurer(fontResolver, density, layoutDirection, cacheSize = 128)
                         BookPageLayouter(workerMeasurer, density, typography, pdf, immersive)
-                            .layout(near, widthPx, bodyHeight, emptyMap(), tableRows, tocForLayout) { context.ensureActive() }
+                            .layout(
+                                window.pages, widthPx, bodyHeight, emptyMap(), tableRows, tocForLayout,
+                                forceAuthoritativeTocHeadings = window.authoritativeTocHeadings,
+                            ) { context.ensureActive() }
                     }
                 }
                 // Measure with a worker-owned cache. Closing or switching views cancels this pagination.
@@ -300,6 +328,7 @@ internal fun BookPageView(
                         .layout(layoutPages, widthPx, bodyHeight, emptyMap(), tableRows, tocForLayout) { context.ensureActive() }
                 }
                 state.completedPagination = inputs to laidOut
+                snapshotFlow { !pointerActive }.first { it }
                 result = laidOut
             }
             result

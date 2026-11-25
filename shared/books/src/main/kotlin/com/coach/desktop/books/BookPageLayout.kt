@@ -120,8 +120,124 @@ internal fun placeBookFigure(block: BookFigureBlock, columnPx: Int, bodyPx: Int,
         (block.widthPx * scale).toInt().coerceAtLeast(1), height, block.captionHeightPx)
 }
 
-private data class BookChapter(val start: Int, val end: Int, val title: String?, val headingStart: Int)
+internal data class BookChapter(val start: Int, val end: Int, val title: String?, val headingStart: Int)
+internal data class BookChapterPlan(
+    val source: String,
+    val starts: List<Pair<Int, BookPage>>,
+    val chapters: List<BookChapter>,
+    val leadingImages: Boolean,
+    val hasAuthoritativeTocHeadings: Boolean,
+)
+internal data class BookNearLayoutWindow(
+    val pages: List<BookPage>,
+    val authoritativeTocHeadings: Boolean,
+)
 private data class BookPageText(val text: AnnotatedString, val placeholders: List<AnnotatedString.Range<Placeholder>>)
+
+private val physicalPageMarkerRegex = Regex("<!--\\s*PDF 第 \\d+ 页 · 书第 .*? 页\\s*-->")
+
+internal fun planBookChapters(
+    pages: List<BookPage>,
+    pdf: Boolean = false,
+    tocNodes: List<BookTocNode> = emptyList(),
+    forceAuthoritativeTocHeadings: Boolean = false,
+    checkCancelled: () -> Unit = {},
+): BookChapterPlan {
+    val source = pages.joinToString("") { it.text }
+    val starts = mutableListOf<Pair<Int, BookPage>>()
+    var at = 0
+    pages.forEach { starts += at to it; at += it.text.length }
+    checkCancelled()
+    val tocHeadings = if (pdf || tocNodes.isEmpty()) emptyList() else tocNodes.mapNotNull { node ->
+        if (node.level > 1 && node.kind !in setOf(TocNodeKind.FRONT_MATTER, TocNodeKind.CHAPTER, TocNodeKind.PART, TocNodeKind.APPENDIX, TocNodeKind.BACK_MATTER)) {
+            return@mapNotNull null
+        }
+        val (base, page) = starts.firstOrNull { it.second.number == node.startPage } ?: return@mapNotNull null
+        val localPos = BookBoundaries.snapToCleanBodyOffset(page.text, node.startOffset).coerceIn(0, page.text.length)
+        if (localPos >= page.text.length) return@mapNotNull null
+        val lineEnd = page.text.indexOf('\n', localPos).let { if (it < 0) page.text.length else it }
+        val rawLine = page.text.substring(localPos, lineEnd)
+        val trimmedLine = rawLine.trimStart()
+        val cleanLine = trimmedLine.trim().trimStart('#').trim()
+        if (cleanLine.isNotEmpty() && cleanLine.equals(node.title.trim(), ignoreCase = true)) {
+            (base + localPos + (rawLine.length - trimmedLine.length)) to node.title
+        } else null
+    }
+    val hasAuthoritativeTocHeadings = !pdf && (forceAuthoritativeTocHeadings || tocHeadings.isNotEmpty())
+    val lineHeadings = Regex("(?m)^[^\\r\\n]+$").findAll(source).mapNotNull { line ->
+        if (BookBoundaries.isBogusMarkdownHeadingLine(line.value)) return@mapNotNull null
+        val trimmed = line.value.trimStart()
+        val indent = line.value.length - trimmed.length
+        val title = BookText.chapterTitle(trimmed) ?: return@mapNotNull null
+        if (hasAuthoritativeTocHeadings && BookStructurePlanner.inferTextHeadingLevel(title) != 1) {
+            return@mapNotNull null
+        }
+        (line.range.first + indent) to title
+    }.toList()
+    // Text import trims chapter chunks. A real heading at an import-page start
+    // still starts a chapter when the preceding chunk has no trailing newline.
+    val headings = (tocHeadings + lineHeadings + starts.mapNotNull { (base, page) ->
+        val firstLine = page.text.lineSequence().firstOrNull().orEmpty()
+        if (BookBoundaries.isBogusMarkdownHeadingLine(firstLine)) return@mapNotNull null
+        val trimmed = firstLine.trimStart()
+        val indent = firstLine.length - trimmed.length
+        val title = BookText.chapterTitle(trimmed) ?: return@mapNotNull null
+        if (hasAuthoritativeTocHeadings && BookStructurePlanner.inferTextHeadingLevel(title) != 1) {
+            return@mapNotNull null
+        }
+        (base + indent) to title
+    }).distinctBy { it.first }.sortedBy { it.first }
+    // Physical-page metadata belongs to the following heading. Keep its source
+    // coordinates, without manufacturing a separate preamble sheet for it.
+    val chapterStarts = headings.map { (heading, title) ->
+        val base = starts.last { it.first <= heading }.first
+        val prefix = source.substring(base, heading)
+        val start = if (prefix.lineSequence().all { it.isBlank() || physicalPageMarkerRegex.matches(it.trim()) }) base else heading
+        Triple(start, heading, title)
+    }.distinctBy { it.first }
+    // Isolate Project Gutenberg boilerplate headers/footers on their own sheets so opening at bodyStart
+    // never mixes English Gutenberg license boilerplate onto the first body page.
+    val boilerplateBreaks = gutenbergBoilerplateBoundaries(source)
+    val boundaries = (listOf(0) + chapterStarts.map { it.first } + boilerplateBreaks + source.length).distinct().sorted()
+    val textChapters = if (source.isEmpty()) listOf(BookChapter(0, 0, null, 0)) else boundaries.zipWithNext { start, end ->
+        val heading = chapterStarts.firstOrNull { it.first == start }
+        BookChapter(start, end, heading?.third, heading?.second ?: start)
+    }
+    val leadingImages = textChapters.first().title != null && pages.takeWhile { it.text.isEmpty() }.any { it.illustrations.isNotEmpty() }
+    val chapters = if (leadingImages) listOf(BookChapter(0, 0, null, 0)) + textChapters else textChapters
+    return BookChapterPlan(source, starts, chapters, leadingImages, hasAuthoritativeTocHeadings)
+}
+
+/**
+ * 局部首屏排版窗口：从包含 [anchor] 的整章起始导入页起排到 `anchor.importPage + tailPages`
+ * （异常超大无标题单章最多取 [maxPages] 个导入页），确保章内分页边界与整本排版完全一致。
+ */
+internal fun nearChapterLayoutPages(
+    pages: List<BookPage>,
+    anchor: BookPageAnchor,
+    tailPages: Int,
+    maxPages: Int = 64,
+    pdf: Boolean = false,
+    tocNodes: List<BookTocNode> = emptyList(),
+    checkCancelled: () -> Unit = {},
+): BookNearLayoutWindow {
+    if (pages.isEmpty()) return BookNearLayoutWindow(emptyList(), false)
+    val plan = planBookChapters(pages, pdf, tocNodes, checkCancelled = checkCancelled)
+    val anchorIndex = pages.indexOfFirst { it.number == anchor.importPage }.takeIf { it >= 0 }
+        ?: pages.indexOfLast { it.number < anchor.importPage }.coerceAtLeast(0)
+    val (anchorBase, anchorPage) = plan.starts[anchorIndex]
+    val globalAnchor = anchorBase + anchor.offsetUtf16.coerceIn(0, anchorPage.text.length)
+    val maxOffset = (plan.source.length - 1).coerceAtLeast(0)
+    val chapter = plan.chapters.lastOrNull { it.start <= globalAnchor.coerceAtMost(maxOffset) } ?: plan.chapters.first()
+    val chapterStartIdx = plan.starts.indexOfFirst { (base, page) ->
+        chapter.start < base + page.text.length
+    }.takeIf { it >= 0 } ?: plan.starts.indexOfLast { it.first <= chapter.start }.coerceAtLeast(0)
+    val tailLimit = anchor.importPage + tailPages
+    val endIdx = ((plan.starts.indexOfLast { it.second.number <= tailLimit }.takeIf { it >= 0 } ?: anchorIndex) + 1)
+        .coerceIn(anchorIndex + 1, pages.size)
+    val startIdx = maxOf(chapterStartIdx.coerceAtMost(anchorIndex), endIdx - maxPages).coerceAtLeast(0)
+    return BookNearLayoutWindow(pages.subList(startIdx, endIdx), plan.hasAuthoritativeTocHeadings)
+}
 
 /** TextMeasurer and Text receive identical styles, placeholders and integer column width. */
 internal class BookPageLayouter(
@@ -132,76 +248,20 @@ internal class BookPageLayouter(
     fun layout(pages: List<BookPage>, widthPx: Int, bodyHeightPx: Int,
         highlights: Map<Int, List<IntRange>> = emptyMap(), tableRows: Map<BookIllustration, BookTableRows> = emptyMap(),
         tocNodes: List<BookTocNode> = emptyList(),
+        forceAuthoritativeTocHeadings: Boolean = false,
         checkCancelled: () -> Unit = {},
     ): List<BookLaidPage> {
         require(widthPx > 0 && bodyHeightPx > 0)
-        val source = pages.joinToString("") { it.text }
-        if (source.isEmpty() && pages.all { it.illustrations.isEmpty() }) return emptyList()
-        val starts = mutableListOf<Pair<Int, BookPage>>()
-        var at = 0
-        pages.forEach { starts += at to it; at += it.text.length }
+        if (pages.all { it.text.isEmpty() && it.illustrations.isEmpty() }) return emptyList()
+        val plan = planBookChapters(pages, pdf, tocNodes, forceAuthoritativeTocHeadings, checkCancelled)
+        val source = plan.source
+        val starts = plan.starts
+        val leadingImages = plan.leadingImages
+        val chapters = plan.chapters
         fun slices(start: Int, end: Int) = starts.mapNotNull { (base, page) ->
             val left = maxOf(start, base); val right = minOf(end, base + page.text.length)
             if (left < right) BookPageSlice(page.number, left - base, right - base) else null
         }
-        val tocHeadings = if (pdf || tocNodes.isEmpty()) emptyList() else tocNodes.mapNotNull { node ->
-            if (node.level > 1 && node.kind !in setOf(TocNodeKind.FRONT_MATTER, TocNodeKind.CHAPTER, TocNodeKind.PART, TocNodeKind.APPENDIX, TocNodeKind.BACK_MATTER)) {
-                return@mapNotNull null
-            }
-            val (base, page) = starts.firstOrNull { it.second.number == node.startPage } ?: return@mapNotNull null
-            val localPos = BookBoundaries.snapToCleanBodyOffset(page.text, node.startOffset).coerceIn(0, page.text.length)
-            if (localPos >= page.text.length) return@mapNotNull null
-            val lineEnd = page.text.indexOf('\n', localPos).let { if (it < 0) page.text.length else it }
-            val rawLine = page.text.substring(localPos, lineEnd)
-            val trimmedLine = rawLine.trimStart()
-            val cleanLine = trimmedLine.trim().trimStart('#').trim()
-            if (cleanLine.isNotEmpty() && cleanLine.equals(node.title.trim(), ignoreCase = true)) {
-                (base + localPos + (rawLine.length - trimmedLine.length)) to node.title
-            } else null
-        }
-        val hasAuthoritativeTocHeadings = !pdf && tocHeadings.isNotEmpty()
-        val lineHeadings = Regex("(?m)^[^\\r\\n]+$").findAll(source).mapNotNull { line ->
-            if (BookBoundaries.isBogusMarkdownHeadingLine(line.value)) return@mapNotNull null
-            val trimmed = line.value.trimStart()
-            val indent = line.value.length - trimmed.length
-            val title = BookText.chapterTitle(trimmed) ?: return@mapNotNull null
-            if (hasAuthoritativeTocHeadings && BookStructurePlanner.inferTextHeadingLevel(title) != 1) {
-                return@mapNotNull null
-            }
-            (line.range.first + indent) to title
-        }.toList()
-        // Text import trims chapter chunks. A real heading at an import-page start
-        // still starts a chapter when the preceding chunk has no trailing newline.
-        val headings = (tocHeadings + lineHeadings + starts.mapNotNull { (base, page) ->
-            val firstLine = page.text.lineSequence().firstOrNull().orEmpty()
-            if (BookBoundaries.isBogusMarkdownHeadingLine(firstLine)) return@mapNotNull null
-            val trimmed = firstLine.trimStart()
-            val indent = firstLine.length - trimmed.length
-            val title = BookText.chapterTitle(trimmed) ?: return@mapNotNull null
-            if (hasAuthoritativeTocHeadings && BookStructurePlanner.inferTextHeadingLevel(title) != 1) {
-                return@mapNotNull null
-            }
-            (base + indent) to title
-        }).distinctBy { it.first }.sortedBy { it.first }
-        // Physical-page metadata belongs to the following heading. Keep its source
-        // coordinates, without manufacturing a separate preamble sheet for it.
-        val physicalMarker = Regex("<!--\\s*PDF 第 \\d+ 页 · 书第 .*? 页\\s*-->")
-        val chapterStarts = headings.map { (heading, title) ->
-            val base = starts.last { it.first <= heading }.first
-            val prefix = source.substring(base, heading)
-            val start = if (prefix.lineSequence().all { it.isBlank() || physicalMarker.matches(it.trim()) }) base else heading
-            Triple(start, heading, title)
-        }.distinctBy { it.first }
-        // Isolate Project Gutenberg boilerplate headers/footers on their own sheets so opening at bodyStart
-        // never mixes English Gutenberg license boilerplate onto the first body page.
-        val boilerplateBreaks = gutenbergBoilerplateBoundaries(source)
-        val boundaries = (listOf(0) + chapterStarts.map { it.first } + boilerplateBreaks + source.length).distinct().sorted()
-        val textChapters = if (source.isEmpty()) listOf(BookChapter(0, 0, null, 0)) else boundaries.zipWithNext { start, end ->
-            val heading = chapterStarts.firstOrNull { it.first == start }
-            BookChapter(start, end, heading?.third, heading?.second ?: start)
-        }
-        val leadingImages = textChapters.first().title != null && pages.takeWhile { it.text.isEmpty() }.any { it.illustrations.isNotEmpty() }
-        val chapters = if (leadingImages) listOf(BookChapter(0, 0, null, 0)) + textChapters else textChapters
         val chapterVisuals = starts.flatMap { (base, page) ->
             checkCancelled()
             if (page.illustrations.isEmpty()) return@flatMap emptyList()

@@ -130,6 +130,8 @@ internal class BookPagingState(initial: BookPageAnchor) {
     /** 当前这组多栏的第一页下标，和排好的页表一起记着；读者点右侧栏时锚点落在对应页，但这一组不跟着移位。 */
     var groupFirst = -1
     var groupPages: List<BookLaidPage>? = null
+    /** 不含高亮覆盖层的基础排版列表，供多栏成组与 state.index 在高亮变化时保持同一布局身份。 */
+    internal var layoutPages: List<BookLaidPage>? = null
     var publishedImportPage = initial.importPage
         private set
     private val pendingImportPages = mutableListOf<Int>()
@@ -152,10 +154,14 @@ internal class BookPagingState(initial: BookPageAnchor) {
         }
     }
     /** 当前显示的第一页。多栏时锚点在这组任一可见栏里都算这一组。 */
-    fun firstFor(laid: List<BookLaidPage>, visibleColumns: Int): Int {
+    fun firstFor(
+        laid: List<BookLaidPage>,
+        visibleColumns: Int,
+        layoutIdentity: List<BookLaidPage> = layoutPages ?: laid,
+    ): Int {
         val p = laid.pageContaining(anchor)
         val g = groupFirst
-        return if (visibleColumns > 1 && groupPages === laid && p in g until (g + visibleColumns)) g else p
+        return if (visibleColumns > 1 && groupPages === layoutIdentity && p in g until (g + visibleColumns)) g else p
     }
     fun firstFor(laid: List<BookLaidPage>, twoPages: Boolean): Int = firstFor(laid, if (twoPages) 2 else 1)
     val index get() = firstFor(pages, columns)
@@ -325,6 +331,7 @@ internal fun BookPageView(
             return@BoxWithConstraints
         }
         SideEffect {
+            if (state.layoutPages !== basePages) state.layoutPages = basePages
             if (state.pages !== pages) state.pages = pages
             if (state.spread != spread) state.spread = spread
             if (state.columns != visibleColumns) state.columns = visibleColumns
@@ -333,7 +340,7 @@ internal fun BookPageView(
             Text("这一页没有可提取文字，请切换到原页阅读。", Modifier.align(Alignment.Center))
             return@BoxWithConstraints
         }
-        val first = state.firstFor(basePages, visibleColumns)
+        val first = state.firstFor(basePages, visibleColumns, layoutIdentity = basePages)
         SideEffect { state.groupFirst = first; state.groupPages = basePages }
         LaunchedEffect(basePages, first, state.anchor) {
             val activeImportPage = state.anchor.importPage.takeIf { book.page(it) != null }

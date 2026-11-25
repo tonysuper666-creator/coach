@@ -348,4 +348,71 @@ class BookPageTurnViewTest {
         assertEquals(indexBefore, state.index)
         assertEquals(visibleSourcesBefore, state.pages[state.index].sources)
     }
+
+    @Test fun spreadRightColumnHighlightKeepsGroupIndexAndAdvancesByColumns() = runSkikoComposeUiTest(
+        size = Size(2560f, 1440f),
+        density = Density(1.5f),
+    ) {
+        val state = BookPagingState(BookPageAnchor(41))
+        var selected by mutableStateOf<SourceBlock?>(null)
+        var extraHighlights by mutableStateOf<Map<Int, List<IntRange>>>(emptyMap())
+        setContent {
+            CoachTheme(false) {
+                androidx.compose.material3.Surface(color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
+                    Box(Modifier.fillMaxSize()) {
+                        val mergedHighlights = buildMap<Int, List<IntRange>> {
+                            extraHighlights.forEach { (k, v) -> put(k, v) }
+                            selected?.let { put(it.page, getOrDefault(it.page, emptyList()) + listOf(it.start until it.end)) }
+                        }
+                        BookPageView(
+                            book = book,
+                            state = state,
+                            highlights = mergedHighlights,
+                            onTurn = { state.move(it) },
+                            turnStyle = PageTurnStyle.Flip,
+                            onSelectText = { selected = it },
+                            immersive = true,
+                        )
+                    }
+                }
+            }
+        }
+        waitUntil(timeoutMillis = 10_000) { state.pages.size >= 6 && state.spread }
+        waitForIdle()
+
+        val cols = state.columns
+        assertTrue(cols >= 2, "2560x1440 @1.5 must be multi-column spread")
+        val groupStart = state.index
+        assertEquals(0, groupStart)
+
+        // Select text on the second column (book-sheet-1) so anchor moves to page 1 and highlights become non-empty
+        onNodeWithTag("book-sheet-1").performMouseInput {
+            moveTo(Offset(width * 0.25f, height * 0.35f))
+            press()
+            moveTo(Offset(width * 0.75f, height * 0.35f))
+            release()
+        }
+        mainClock.advanceTimeBy(800); waitForIdle()
+
+        assertNotNull(selected, "dragging on right column must select text")
+        assertEquals(groupStart + 1, state.pages.pageContaining(state.anchor), "anchor must sit in second column")
+        assertEquals(groupStart, state.index, "highlight update on right column must keep spread group's first index")
+
+        // Also update external highlights (e.g. bookmark/citation) while anchor remains in right column
+        val slice = state.pages[groupStart + 1].sources.first()
+        extraHighlights = mapOf(slice.importPage to listOf(slice.startUtf16 until (slice.startUtf16 + 6).coerceAtMost(slice.endUtf16)))
+        mainClock.advanceTimeBy(500); waitForIdle()
+        assertEquals(groupStart, state.index, "external highlight update must still keep spread group's first index")
+        assertTrue(
+            state.pages[groupStart + 1].runs.any { run ->
+                run.text.spanStyles.any { it.item.background != androidx.compose.ui.graphics.Color.Unspecified }
+            },
+            "highlight span must still render on the right column",
+        )
+
+        // Turning Next must advance by exactly `columns` from `groupStart`, never skipping from `groupStart + 1`
+        runOnIdle { state.move(ReaderTurn.Next) }
+        mainClock.advanceTimeBy(800); waitForIdle()
+        assertEquals(groupStart + cols, state.index, "move(Next) must advance by columns ($cols), not skip a group")
+    }
 }

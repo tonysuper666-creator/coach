@@ -25,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
@@ -205,6 +206,10 @@ fun PageTurnView(
     columns: Int? = null,
     /** Set to false when a caller arbitrates touch with its own content gestures. */
     handleTouch: Boolean = true,
+    /** Set to false on selectable text views so mouse drags near corners select text instead of flipping pages. */
+    handleMouseDrag: Boolean = true,
+    /** Optional predicate checked on mouse press; returning false lets text selection own the press/drag/click. */
+    canMouseTurnAt: ((Offset) -> Boolean)? = null,
     page: @Composable (Int) -> Unit,
 ) {
     state.reduced = LocalV7ReducedMotion.current
@@ -217,6 +222,7 @@ fun PageTurnView(
     val pageW = with(density) { (widthPx.toFloat() / cols).toDp() }
     var scrollAcc by remember { mutableFloatStateOf(0f) }
     val travelFactor = if (cols >= 2) 0.9f else 0.6f
+    val latestCanMouseTurnAt = androidx.compose.runtime.rememberUpdatedState(canMouseTurnAt)
 
     fun launchTurn(fwd: Boolean) { scope.launch { try { state.turn(fwd) } catch (_: CancellationException) { } } }
 
@@ -249,13 +255,14 @@ fun PageTurnView(
                     }
                 }
             }
-            .pointerInput(cols, handleTouch) {
+            .pointerInput(cols, handleTouch, handleMouseDrag) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = true)
                     if (!handleTouch && down.type == PointerType.Touch) return@awaitEachGesture
                     val w = size.width.toFloat()
                     val h = size.height.toFloat()
                     val touch = down.type == PointerType.Touch
+                    if (!touch && latestCanMouseTurnAt.value?.invoke(down.position) == false) return@awaitEachGesture
                     // 手指：单页左右 28% / 双页左右 14%（各页 28%）点一下翻页，整页任何位置横滑都能翻；鼠标：只认窄边和页角
                     val edge = w * (if (touch) (if (cols >= 2) 0.14f else 0.28f) else if (cols >= 2) 0.08f else 0.14f)
                     var fwd = down.position.x > w / 2f
@@ -267,6 +274,7 @@ fun PageTurnView(
                     val instantMode = state.reduced || state.style == PageTurnStyle.None
                     var dragging = false
                     var swiped = false
+                    var moved = false
                     var upConsumed = false
                     var lastX = down.position.x
                     try {
@@ -278,7 +286,7 @@ fun PageTurnView(
                             }
                             if (!c.pressed) {
                                 upConsumed = c.isConsumed
-                                if (!dragging && !swiped && inEdge && !upConsumed) {
+                                if (!dragging && !swiped && !moved && inEdge && !upConsumed) {
                                     state.lastHandledPointerDownUptimeMs = down.uptimeMillis
                                     c.consume()
                                 }
@@ -289,8 +297,11 @@ fun PageTurnView(
                             lastX = c.position.x
                             val dx = c.position.x - down.position.x
                             val dy = c.position.y - down.position.y
+                            if (!moved && (c.position - down.position).getDistance() > viewConfiguration.touchSlop) {
+                                moved = true
+                            }
                             val slop = abs(dx) > viewConfiguration.touchSlop && (!touch || abs(dx) > abs(dy))
-                            if (slop && (inCorner || c.type == PointerType.Touch)) {
+                            if (slop && ((handleMouseDrag && inCorner) || c.type == PointerType.Touch)) {
                                 if (!dragging && !swiped && !inEdge) fwd = dx < 0f
                                 if (instantMode) {
                                     swiped = true
@@ -314,7 +325,7 @@ fun PageTurnView(
                         when {
                             dragging -> { dragging = false; scope.launch { state.endDrag(complete) } }
                             swiped -> if (complete) launchTurn(fwd)
-                            inEdge && !upConsumed -> launchTurn(fwd) // 没拖动的轻点，只有落在边缘且未被子控件消费才翻页
+                            !moved && inEdge && !upConsumed -> launchTurn(fwd) // 没拖动的轻点，只有落在边缘且未被子控件消费才翻页
                         }
                     } finally {
                         // 手势协程被撤（缩放窗口、pointerInput 重启）：没走到 endDrag 就回弹，不留 turning

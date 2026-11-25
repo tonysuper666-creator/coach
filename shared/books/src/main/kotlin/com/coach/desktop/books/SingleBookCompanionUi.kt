@@ -83,6 +83,7 @@ internal fun SingleBookCompanionPanel(
     modifier: Modifier = Modifier,
     currentPageOffset: Int = 0,
     visiblePageRanges: List<IntRange> = emptyList(),
+    onOpenSectionMainline: ((Int) -> Unit)? = null,
 ) {
     val colors = CoachTheme.colors
     val originalOnly = studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY
@@ -506,6 +507,40 @@ internal fun SingleBookCompanionPanel(
                     .testTag("companion-module-body"),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                if (readingExplanation && LocalReadingSectionSummary.current && currentSection != null &&
+                    currentPage == currentSection.lastPage) {
+                    var dismissed by remember(book.id, currentSection.id) { mutableStateOf(false) }
+                    if (!dismissed) {
+                        val pack = (packState as? CompanionPackState.Ready)?.pack
+                        val questions = pack?.optionalPractice.orEmpty().withIndex().filter { (_, quiz) ->
+                            quiz.sectionId == currentSection.id && quiz.options.size >= 2 && quiz.correctOption in quiz.options
+                        }.take(2)
+                        val points = pack?.keyPoints.orEmpty().filter { it.sectionId == currentSection.id }.map { it.summary }
+                        SectionEndSummaryCard(
+                            section = currentSection,
+                            summaryLines = points.ifEmpty { StudyCoachCourse.localSectionSummary(currentSection) },
+                            practices = questions.map { (_, q) -> Practice(q.stem, q.anchor?.quoteAnchor.orEmpty(), q.correctOption, q.options) },
+                            answers = questions.mapIndexedNotNull { i, (_, q) ->
+                                draft.practiceSelections[q.id]?.takeIf { q.id in draft.practiceSubmitted }?.let {
+                                    i to PracticeAnswer(text = it, revealed = true, understood = it == q.correctOption)
+                                }
+                            }.toMap(),
+                            onAnswer = { i, practice, answer ->
+                                val (packIndex, q) = questions[i]
+                                updateDraft {
+                                    it.copy(
+                                        practiceSelections = if (answer.revealed) it.practiceSelections + (q.id to answer.text)
+                                            else it.practiceSelections - q.id,
+                                        practiceSubmitted = if (answer.revealed) it.practiceSubmitted + q.id else it.practiceSubmitted - q.id,
+                                    )
+                                }
+                                onCommitQuizAnswer(currentSection, 100 + packIndex, practice, answer.copy(understood = answer.text == q.correctOption))
+                            },
+                            onOpenMainline = onOpenSectionMainline?.let { open -> { open(currentSectionIndex) } },
+                            onDismiss = { dismissed = true },
+                        )
+                    }
+                }
                 if (readingExplanation) {
                     val chapter = remember(book, currentPage, currentPageOffset) {
                         BookChapterResolver.chapterForPage(book, currentPage, currentPageOffset)

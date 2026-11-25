@@ -2664,14 +2664,6 @@ internal class TextbookLibrary(
         }
     }
 
-    @Synchronized internal fun cancelAccountUploadIntent(bookId: String, initiatingAccountKey: String?) {
-        if (initiatingAccountKey == null) return
-        database().use { db ->
-            val resolvedAccountKey = BookUploadQueueStore.boundAccountKey(db, initiatingAccountKey) ?: initiatingAccountKey
-            BookUploadQueueStore.markDeleteOrDropForAccount(db, bookId, resolvedAccountKey, clock.millis())
-        }
-    }
-
     @Synchronized internal fun updateBookUploadState(
         accountKey: String,
         localBookId: String,

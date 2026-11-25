@@ -134,33 +134,62 @@ function Find-TutorBodyRows($lines) {
     return @($rows | Sort-Object Width -Descending)
 }
 
-# Warping the cursor with SetCursorPos or an absolute move, while the button is down,
-# does not update the pointer Compose remembers, so the gesture arrives as a click.
-# Clicks already land: put the cursor down the same way, then send relative moves.
+# This runner delivers clicks, and it does not deliver a drag. SetCursorPos, absolute
+# mouse_event, and relative mouse_event all left the glyphs unselected: Compose keeps
+# the pointer where the last mouse-move message put it, and these moves never arrive.
+# Post the move to the window under the glyph so the press and the release differ.
+function Send-TutorMouse([IntPtr]$hwnd, [int]$msg, [int]$wParam, [int]$x, [int]$y) {
+    $packed = [int]((($y -band 0xFFFF) -shl 16) -bor ($x -band 0xFFFF))
+    [Arm.Msg]::SendMessage($hwnd, $msg, [IntPtr]$wParam, [IntPtr]$packed) | Out-Null
+}
+
 function Drag-TutorLine([int]$x1, [int]$y1, [int]$x2, [int]$y2 = -1) {
     if ($x2 -lt $x1) { $swap = $x1; $x1 = $x2; $x2 = $swap }
     if ($y2 -lt 0) { $y2 = $y1 }
     $y1 = [Math]::Max(8, $y1)
     $y2 = [Math]::Max(8, $y2)
     Write-Output "DRAG $x1,$y1 -> $x2,$y2"
+    if (-not ('Arm.Msg' -as [type])) {
+        Add-Type -Namespace Arm -Name Msg -MemberDefinition '[StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; } [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p); [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h, ref POINT p); [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l); [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);'
+    }
     Invoke-ForegroundStep -InjectsInput -Action {
         $r = Get-Rect
-        [WD]::SetCursorPos($r.L + $x1, $r.T + $y1) | Out-Null
-        Start-Sleep -Milliseconds 180
+        $origin = New-Object Arm.Msg+POINT
+        $origin.X = $r.L + $x1
+        $origin.Y = $r.T + $y1
+        $hwnd = [Arm.Msg]::WindowFromPoint($origin)
+        if ($hwnd -eq [IntPtr]::Zero) { throw "WindowFromPoint missed $x1,$y1" }
+        $cls = New-Object System.Text.StringBuilder 128
+        [void][Arm.Msg]::GetClassName($hwnd, $cls, $cls.Capacity)
+        function Convert-Client([int]$x, [int]$y) {
+            $p = New-Object Arm.Msg+POINT
+            $p.X = $r.L + $x
+            $p.Y = $r.T + $y
+            [void][Arm.Msg]::ScreenToClient($hwnd, [ref]$p)
+            return ,([pscustomobject]@{ X = $p.X; Y = $p.Y })
+        }
+        $start = Convert-Client $x1 $y1
+        $end = Convert-Client $x2 $y2
+        Write-Output "DRAGMSG $($cls.ToString()) $hwnd $($start.X),$($start.Y) -> $($end.X),$($end.Y)"
         Assert-OurForeground
-        [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
+        [WD]::SetCursorPos($r.L + $x1, $r.T + $y1) | Out-Null
+        Send-TutorMouse $hwnd 0x0200 0 $start.X $start.Y
+        Start-Sleep -Milliseconds 60
+        Send-TutorMouse $hwnd 0x0201 1 $start.X $start.Y
         try {
-            $steps = 12
-            $dx = [int](($x2 - $x1) / $steps)
-            $dy = [int](($y2 - $y1) / $steps)
-            if ($dx -eq 0 -and $x2 -ne $x1) { $dx = 1 }
+            $steps = 8
             foreach ($i in 1..$steps) {
                 Start-Sleep -Milliseconds 30
-                [WD]::mouse_event(1, $dx, $dy, 0, [IntPtr]::Zero)
+                $sx = [int]($x1 + (($x2 - $x1) * $i / $steps))
+                $sy = [int]($y1 + (($y2 - $y1) * $i / $steps))
+                $at = Convert-Client $sx $sy
+                [WD]::SetCursorPos($r.L + $sx, $r.T + $sy) | Out-Null
+                Send-TutorMouse $hwnd 0x0200 1 $at.X $at.Y
             }
-            Start-Sleep -Milliseconds 80
+            Start-Sleep -Milliseconds 40
         } finally {
-            [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
+            [WD]::SetCursorPos($r.L + $x2, $r.T + $y2) | Out-Null
+            Send-TutorMouse $hwnd 0x0202 0 $end.X $end.Y
         }
     }
 }
@@ -310,6 +339,44 @@ function Test-WholeLesson {
     $null = Find-TutorLabel '05-lesson-source' @('出处', '原文第') -3
 }
 
+# 「提交」 is a short black pill. On the ARM runner the OCR reads the card titles
+# and drops both the white word and, on the later sheet, 「这题是猜的」. The pill is
+# the only short near-black run in the lower right of the window capture.
+function Find-SubmitPill([string]$name) {
+    $path = Join-Path $OutDir "$name.png"
+    if (-not (Test-Path $path)) { return $null }
+    $bmp = [Drawing.Bitmap]::new($path)
+    try {
+        $w = $bmp.Width
+        $h = $bmp.Height
+        $xs = @()
+        $ys = @()
+        for ($y = [int]($h * 0.55); $y -lt ($h - 8); $y += 2) {
+            $run = 0
+            $runStart = 0
+            for ($x = [int]($w * 0.7); $x -lt $w; $x++) {
+                $c = $bmp.GetPixel($x, $y)
+                $dark = ($c.R -lt 45 -and $c.G -lt 45 -and $c.B -lt 45)
+                if ($dark) {
+                    if ($run -eq 0) { $runStart = $x }
+                    $run++
+                } else {
+                    if ($run -ge 40 -and $run -le 90 -and ($runStart + $run) -lt ($w - 8)) {
+                        $xs += ($runStart + ($run / 2))
+                        $ys += $y
+                    }
+                    $run = 0
+                }
+            }
+        }
+        if (@($ys).Count -lt 6) { return $null }
+        return [pscustomobject]@{
+            X = [int](($xs | Measure-Object -Average).Average)
+            Y = [int](($ys | Measure-Object -Average).Average)
+        }
+    } finally { $bmp.Dispose() }
+}
+
 function Test-Practice {
     # 2.0 grades the pretest locally from the companion pack. The pack itself is the
     # loopback request that carries the question, the option, and the feedback.
@@ -346,22 +413,17 @@ function Test-Practice {
     if (-not $opt) { throw '读前自测没有选项 Recall before checking' }
     Click-At $opt.X $opt.Y | Out-Null
     Start-Sleep -Milliseconds 400
-    # 「提交」 is a black pill. The on-device OCR reads the card titles and drops that
-    # white-on-black word, the same way it dropped 「导入文件」. The pill sits on the
-    # right of the row whose left side says 「这题是猜的」, which does get read.
+    # Wheel the right side of the sheet. The centre of the sheet is an option row,
+    # and parking the pointer there paints a different option as if it were selected.
     $submit = $null
-    foreach ($pass in 1..3) {
-        $frame = @(Read-TutorFrame $(if ($pass -eq 1) { '06-selected' } else { "06-selected-$pass" }))
+    foreach ($pass in 1..4) {
+        $shot = if ($pass -eq 1) { '06-selected' } else { "06-selected-$pass" }
+        $frame = @(Read-TutorFrame $shot)
         $submit = Find-Text $frame '提交'
-        if (-not $submit) {
-            $guess = Find-Text $frame '猜的'
-            if ($guess) {
-                $bounds = Get-Rect
-                $submit = [pscustomobject]@{ X = [int](($bounds.R - $bounds.L) - 64); Y = [int]$guess.Y }
-            }
-        }
+        if (-not $submit) { $submit = Find-SubmitPill $shot }
         if ($submit) { break }
-        Scroll-TutorView -2
+        $bounds = Get-Rect
+        Scroll-At ([int](($bounds.R - $bounds.L) * 0.92)) ([int](($bounds.B - $bounds.T) * 0.62)) -2
     }
     if (-not $submit) { throw '读前自测没有提交' }
     Click-At $submit.X $submit.Y | Out-Null

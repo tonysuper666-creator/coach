@@ -1050,6 +1050,12 @@ function Read-Bitmap([string]$png) {
         [pscustomobject]@{ Text = (($ws | ForEach-Object { $_.Text }) -join ''); Words = $ws }
     }
 }
+function Get-SafeOcrScale([int]$Width, [int]$Height, [int]$DesiredScale) {
+    $maxDim = [int][Windows.Media.Ocr.OcrEngine]::MaxImageDimension
+    $maxSide = [Math]::Max(1, [Math]::Max($Width, $Height))
+    $limit = [Math]::Max(1, [int][Math]::Floor([double]$maxDim / $maxSide))
+    return [Math]::Max(1, [Math]::Min($DesiredScale, $limit))
+}
 function Read-Screen([string]$png) {
     $src = New-Object System.Drawing.Bitmap $png
     $inv = New-Object System.Drawing.Bitmap $src.Width, $src.Height
@@ -1059,9 +1065,12 @@ function Read-Screen([string]$png) {
     $g.DrawImage($src, (New-Object System.Drawing.Rectangle 0, 0, $src.Width, $src.Height), 0, 0, $src.Width, $src.Height, [System.Drawing.GraphicsUnit]::Pixel, $ia)
     $g.Dispose(); $src.Dispose()
     $invPath = [IO.Path]::ChangeExtension($png, 'inv.png'); $inv.Save($invPath, [System.Drawing.Imaging.ImageFormat]::Png); $inv.Dispose()
-    $a = @(Read-Bitmap $png); $b = @(Read-Bitmap $invPath)
-    Remove-Item $invPath -ErrorAction SilentlyContinue
-    $a + $b
+    try {
+        $a = @(Read-Bitmap $png); $b = @(Read-Bitmap $invPath)
+        $a + $b
+    } finally {
+        Remove-Item $invPath -ErrorAction SilentlyContinue
+    }
 }
 
 # Locate a substring on screen (spaces ignored); returns the centre and box of the matched words, or $null.

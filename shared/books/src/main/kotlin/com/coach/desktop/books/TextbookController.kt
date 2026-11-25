@@ -1823,11 +1823,13 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val collections = library.collectionSummaries()
         val targetCol = collections.firstOrNull { it.record.id == citation.collectionId }
         val nextCourseId = when {
+            citation.collectionId == CollectionQaVirtualCollections.READ_LIBRARY_ID -> null
             targetCol?.record?.kind == CollectionKind.COURSE -> targetCol.record.id
             targetCol?.record?.kind == CollectionKind.BOOKLIST -> null
             else -> mutable.value.activeCourseId
         }
         val nextBooklistId = when {
+            citation.collectionId == CollectionQaVirtualCollections.READ_LIBRARY_ID -> null
             targetCol?.record?.kind == CollectionKind.BOOKLIST -> targetCol.record.id
             targetCol?.record?.kind == CollectionKind.COURSE -> null
             else -> mutable.value.activeBooklistId

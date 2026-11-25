@@ -429,4 +429,76 @@ class BooklistEngineAndProgressTest {
             root.toFile().deleteRecursively()
         }
     }
+
+    @Test fun sequentialScreenReadingMarksChapterReadWhileJumpsAndRapidMashingNeverMarkSkippedChapters() {
+        val root = Files.createTempDirectory("coach-ton1847-seq-dwell-")
+        try {
+            val md = writeBook(
+                root,
+                "seq-chapters.md",
+                buildString {
+                    appendLine("# Chapter 1 Foundations")
+                    appendLine("Page one of chapter one.")
+                    appendLine("\u000c")
+                    appendLine("Page two of chapter one.")
+                    appendLine("# Chapter 2 Wages and Profits")
+                    appendLine("Wages of labour and profits of stock on page three.")
+                    appendLine("\u000c")
+                    appendLine("Page four of chapter two.")
+                    appendLine("\u000c")
+                    appendLine("Page five of chapter two.")
+                    appendLine("\u000c")
+                    appendLine("Page six of chapter two.")
+                    appendLine("\u000c")
+                    appendLine("Page seven of chapter two.")
+                    appendLine("# Chapter 3 Natural Price")
+                    appendLine("Natural and market price on page eight.")
+                },
+            )
+            val library = TextbookLibrary(root.resolve("library"))
+            val book = library.importBook(md)
+            val chapters = BookChapterResolver.chapters(book)
+            assertEquals(3, chapters.size)
+            val ch1 = chapters[0]
+            val ch2 = chapters[1]
+            val ch3 = chapters[2]
+
+            // 1. Jump directly via TOC to Chapter 2 start (skipping Chapter 1), then read sequentially ~4s/page into Chapter 3.
+            val tracker = ChapterDwellTracker(minPageDwellMs = 8_000L)
+            val committed = mutableListOf<Pair<BookChapterSpan, Int>>()
+            committed += tracker.onLocationChanged(ch2, setOf(ch2.firstPage), isJump = true)
+            assertTrue(committed.isEmpty(), "TOC jump must not mark skipped Chapter 1 or Chapter 2 yet")
+
+            for (p in ch2.firstPage..ch2.lastPage) {
+                if (p > ch2.firstPage) {
+                    committed += tracker.onLocationChanged(ch2, setOf(p), isJump = false)
+                }
+                repeat(8) { // 8 * 500ms = 4s/page (< 8s single-page, 20s total across 5 pages >= 2s/page)
+                    committed += tracker.onTick(ch2, setOf(p), 500L)
+                }
+            }
+            // Entering Chapter 3 sequentially after finishing Chapter 2 commits Chapter 2's visited pages!
+            committed += tracker.onLocationChanged(ch3, setOf(ch3.firstPage), isJump = false)
+            for ((span, page) in committed) {
+                library.recordPageDwell(book.id, span.tocNodeId, page, span.pagesTotal, ChapterReadPolicy.MIN_DWELL_MS)
+            }
+            val progressAfterCh2 = library.chapterProgressMap(book.id)
+            assertEquals(ChapterReadState.UNREAD, progressAfterCh2[ch1.tocNodeId]?.readState ?: ChapterReadState.UNREAD)
+            assertEquals(ChapterReadState.READ, progressAfterCh2[ch2.tocNodeId]?.readState)
+
+            // 2. Pressing End / jumping mid-chapter or rapid 200ms/page mashing on Chapter 3 must NOT mark it READ.
+            val antiSkipTracker = ChapterDwellTracker(minPageDwellMs = 8_000L)
+            val skippedCommits = mutableListOf<Pair<BookChapterSpan, Int>>()
+            skippedCommits += antiSkipTracker.onLocationChanged(ch1, setOf(ch1.firstPage), isJump = false)
+            skippedCommits += antiSkipTracker.onTick(ch1, setOf(ch1.firstPage), 200L)
+            skippedCommits += antiSkipTracker.onLocationChanged(ch1, setOf(ch1.lastPage), isJump = false)
+            skippedCommits += antiSkipTracker.onTick(ch1, setOf(ch1.lastPage), 200L)
+            // End jump straight to Chapter 3
+            skippedCommits += antiSkipTracker.onLocationChanged(ch3, setOf(ch3.lastPage), isJump = true)
+            skippedCommits += antiSkipTracker.onTick(ch3, setOf(ch3.lastPage), 500L)
+            assertTrue(skippedCommits.isEmpty(), "Rapid mashing and End jump must record 0 dwell pages")
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
 }

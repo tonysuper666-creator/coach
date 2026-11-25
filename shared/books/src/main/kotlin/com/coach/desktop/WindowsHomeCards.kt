@@ -28,8 +28,10 @@ import com.coach.desktop.books.CollectionQaEngine
 import com.coach.desktop.books.CollectionQaException
 import com.coach.desktop.books.CollectionQaTurn
 import com.coach.desktop.books.CollectionQaTurnView
+import com.coach.desktop.books.CollectionQaVirtualCollections
 import com.coach.desktop.books.CollectionSummary
 import com.coach.desktop.books.ExplainTrouble
+import com.coach.desktop.books.MaterialCollectionRecord
 import com.coach.desktop.books.RetrievedPageLinks
 import com.coach.desktop.books.PaperColor
 import com.coach.desktop.books.ReadingFont
@@ -248,8 +250,24 @@ internal fun HostSearchDialog(
     var query by remember { mutableStateOf("") }
     var showAllFiles by remember { mutableStateOf(false) }
     var bookMatches by remember { mutableStateOf<List<Pair<BookSummary, BookSearchResult>>>(emptyList()) }
-    val askableCollections = remember(collections) {
-        collections.filter { !it.record.archived && (it.record.kind == CollectionKind.COURSE || it.record.kind == CollectionKind.BOOKLIST) }
+    val askableCollections = remember(collections, catalog) {
+        val explicit = collections.filter {
+            !it.record.archived && (it.record.kind == CollectionKind.COURSE || it.record.kind == CollectionKind.BOOKLIST)
+        }
+        val hasBooklist = explicit.any { it.record.kind == CollectionKind.BOOKLIST }
+        val hasUncoveredBooks = catalog.any { book -> explicit.none { book.id in it.materialIds } }
+        if (catalog.isNotEmpty() && (!hasBooklist || hasUncoveredBooks)) {
+            explicit + CollectionSummary(
+                record = MaterialCollectionRecord(
+                    id = CollectionQaVirtualCollections.READ_LIBRARY_ID,
+                    kind = CollectionKind.BOOKLIST,
+                    title = CollectionQaVirtualCollections.READ_LIBRARY_TITLE,
+                ),
+                materialIds = catalog.map { it.id },
+            )
+        } else {
+            explicit
+        }
     }
     var selectedCollectionId by remember(askableCollections, preferredCollectionId) {
         mutableStateOf(
@@ -321,24 +339,23 @@ internal fun HostSearchDialog(
                 )
                 if (selectedCollection != null) {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        if (askableCollections.size > 1) {
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                                for (col in askableCollections.take(4)) {
-                                    val active = col.record.id == selectedCollection.record.id
-                                    V7TextButton(
-                                        onClick = { selectedCollectionId = col.record.id },
-                                        modifier = Modifier.testTag("host-search-col-${col.record.id}"),
-                                    ) {
-                                        Text(
-                                            col.record.title,
-                                            color = if (active) colors.actionPrimary else colors.fgSecondary,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    }
+                        FlowRow(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            for (col in askableCollections) {
+                                val active = col.record.id == selectedCollection.record.id
+                                V7TextButton(
+                                    onClick = { selectedCollectionId = col.record.id },
+                                    modifier = Modifier.testTag("host-search-col-${col.record.id}"),
+                                ) {
+                                    Text(
+                                        col.record.title,
+                                        color = if (active) colors.actionPrimary else colors.fgSecondary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
                                 }
                             }
                         }
@@ -353,10 +370,13 @@ internal fun HostSearchDialog(
                                 modifier = Modifier.testTag("host-search-ask-collection"),
                             ) {
                                 Text(
-                                    if (selectedCollection.record.kind == CollectionKind.BOOKLIST) {
-                                        "问「${selectedCollection.record.title}」已读书目"
-                                    } else {
-                                        "问「${selectedCollection.record.title}」整门课"
+                                    when {
+                                        selectedCollection.record.id == CollectionQaVirtualCollections.READ_LIBRARY_ID ->
+                                            "问「已读书目」"
+                                        selectedCollection.record.kind == CollectionKind.BOOKLIST ->
+                                            "问「${selectedCollection.record.title}」已读书目"
+                                        else ->
+                                            "问「${selectedCollection.record.title}」整门课"
                                     },
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,

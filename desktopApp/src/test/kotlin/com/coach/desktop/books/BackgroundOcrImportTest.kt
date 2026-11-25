@@ -197,12 +197,13 @@ class BackgroundOcrImportTest {
 
     @Test fun backgroundOcrUnblocksShelfSwitchBackAndReaderShowsOriginalPagesAndToast() = runBlocking {
         val root = Files.createTempDirectory("coach-bg-ocr-ui-")
+        val gatePage3 = CompletableDeferred<Unit>()
+        val gateFinish = CompletableDeferred<Unit>()
+        var pending: kotlinx.coroutines.Job? = null
         try {
             val otherPdf = textPdf(root.resolve("other.pdf"), "生物学导论")
             val scanPdf = scannedPdf(root.resolve("scan.pdf"), 6, "扫描教材")
-            val gatePage3 = CompletableDeferred<Unit>()
             val reachedPage3 = CountDownLatch(1)
-            val gateFinish = CompletableDeferred<Unit>()
             val reachedPage4 = CountDownLatch(1)
             val recognizedPages = AtomicInteger(0)
 
@@ -223,12 +224,13 @@ class BackgroundOcrImportTest {
 
             val controller = TextbookController(library)
             controller.importBook(otherPdf)
-            controller.dismissPrompt()
+            controller.back()
+            assertEquals(BookScreen.HOME, controller.state.value.screen)
 
             for (dark in listOf(false, true)) {
                 // Only run full UI flow in light mode once, and also verify dark screenshot
                 if (dark) break
-                val importJob = controller.launchImport(scanPdf)
+                val importJob = controller.launchImport(scanPdf).also { pending = it }
                 assertTrue(withContext(Dispatchers.IO) { reachedPage3.await(15, TimeUnit.SECONDS) })
 
                 runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1.0f)) {
@@ -249,25 +251,21 @@ class BackgroundOcrImportTest {
                         assertTrue(ImageIO.write(awt, "png", out.toFile()))
                     }
 
-                    // 1. Prompt is immediately shown & non-blocking: click "先读" to enter reader while OCR runs!
-                    waitUntil(timeoutMillis = 10_000) { controller.state.value.prompt == BookPrompt.IMPORTED }
-                    onNodeWithTag("read-only").performClick()
-                    waitUntil(timeoutMillis = 10_000) { controller.state.value.screen == BookScreen.READER }
-                    // Dismiss AFTER_READING prompt if shown
-                    if (controller.state.value.prompt != null) {
-                        onNodeWithTag("read-only").performClick()
-                        waitUntil(timeoutMillis = 10_000) { controller.state.value.prompt == null }
+                    // TON-1784 opens the newly imported book while the remaining pages are recognized.
+                    waitUntil(timeoutMillis = 10_000) {
+                        controller.state.value.screen == BookScreen.READER && controller.state.value.book?.title == "扫描教材"
                     }
+                    assertNull(controller.state.value.prompt)
                     // Verify page 1 is already recognized, readable, and explainable while later pages remain pending!
                     assertFalse(controller.state.value.busy)
                     assertEquals(false, controller.state.value.book!!.page(1)!!.ocrPending)
-                    onNodeWithTag("book-explain-toggle").performClick()
+                    onNodeWithTag("immersive-companion-toggle").performClick()
                     waitUntil(timeoutMillis = 5_000) {
-                        onAllNodesWithTag("book-explain").fetchSemanticsNodes().isNotEmpty()
+                        onAllNodesWithTag("companion-tab-explain").fetchSemanticsNodes().isNotEmpty()
                     }
-                    onNodeWithTag("book-explain-toggle").performClick()
+                    onNodeWithTag("immersive-companion-toggle").performClick()
                     waitUntil(timeoutMillis = 5_000) {
-                        onAllNodesWithTag("book-explain").fetchSemanticsNodes().isEmpty()
+                        onAllNodesWithTag("companion-tab-explain").fetchSemanticsNodes().isEmpty()
                     }
                     // Jump to page 4 (still pending OCR!) -> must show "这一页还在识别" + original PDF page, NOT white!
                     runBlocking { controller.page(4) }
@@ -281,7 +279,7 @@ class BackgroundOcrImportTest {
 
                     // 2. Return to shelf during OCR — response time must be well under 1 second!
                     val backStart = System.nanoTime()
-                    onNodeWithText("返回书架").performClick()
+                    onNodeWithTag("immersive-back").performClick()
                     waitUntil(timeoutMillis = 1_000) { controller.state.value.screen == BookScreen.HOME }
                     val backElapsedMs = (System.nanoTime() - backStart) / 1_000_000
                     assertTrue(backElapsedMs < 1_000, "返回书架耗时应 < 1 秒，实际 ${backElapsedMs}ms")
@@ -294,7 +292,6 @@ class BackgroundOcrImportTest {
 
                     onNodeWithTag("book-${library.catalog().first { it.title == "生物学导论" }.id}").performScrollTo().performClick()
                     waitUntil(timeoutMillis = 5_000) { controller.state.value.book?.title == "生物学导论" }
-                    onNodeWithTag("home-read").performScrollTo().performClick()
                     waitUntil(timeoutMillis = 5_000) { controller.state.value.screen == BookScreen.READER && controller.state.value.book?.title == "生物学导论" }
                     // Esc from reader returns to shelf even while OCR runs in background!
                     onNodeWithTag("windows-textbooks").performKeyInput { pressKey(Key.Escape) }
@@ -320,7 +317,12 @@ class BackgroundOcrImportTest {
                     }
                 }
             }
-        } finally { root.toFile().deleteRecursively() }
+        } finally {
+            gatePage3.complete(Unit)
+            gateFinish.complete(Unit)
+            pending?.join()
+            root.toFile().deleteRecursively()
+        }
     }
 
     @Test fun darkThemeProgressBarAndToastRenderCleanly() = runBlocking {

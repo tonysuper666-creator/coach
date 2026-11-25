@@ -2722,8 +2722,13 @@ internal class TextbookLibrary(
         val previous = this.answer(book, lesson, mode)
         val source = if (answered) book(book) else null
         val section = source?.lessons?.find { it.id == lesson }
-        val practice = section?.takeIf { mode == QuestionMode.SHORT_ANSWER && it.text.isNotBlank() }?.let {
-            Practice("合上原文，用自己的话说明「${it.title}」的主要内容，并举一个例子。", it.text, "", emptyList())
+        val practice = when {
+            section == null -> null
+            mode == QuestionMode.CHOICE -> database().use { reviewStore.find(it, book, lesson, mode)?.practice }
+                ?.takeIf { answer.text in it.options }
+            mode == QuestionMode.SHORT_ANSWER && section.text.isNotBlank() ->
+                Practice("合上原文，用自己的话说明「${section.title}」的主要内容，并举一个例子。", section.text, "", emptyList())
+            else -> null
         }
         // 题梯会话和作答写在同一个事务里：读到一半的会话不会和刚保存的答案对不上。
         // 会话按「这本书 + 当前走法」累计，只在「做题学」里记，别的走法不改这张表。
@@ -2801,16 +2806,24 @@ internal class TextbookLibrary(
         for ((id, lessonId, mode) in old) {
             val book = book(id)
             val lesson = book.lessons.find { it.id == lessonId } ?: continue
-            val practice = if (mode == QuestionMode.SHORT_ANSWER && lesson.text.isNotBlank()) {
-                Practice("合上原文，用自己的话说明「${lesson.title}」的主要内容，并举一个例子。", lesson.text, "", emptyList())
-            } else continue
             val answer = answer(id, lessonId, mode)
-            if (answer.committed(mode)) database().use { db ->
-                db.autoCommit = false
-                try {
+            val practice = when {
+                mode == QuestionMode.CHOICE -> reviewStore.legacyChoice(book, lesson, answer)
+                mode == QuestionMode.SHORT_ANSWER && lesson.text.isNotBlank() ->
+                    Practice("合上原文，用自己的话说明「${lesson.title}」的主要内容，并举一个例子。", lesson.text, "", emptyList())
+                else -> null
+            } ?: continue
+            if (!answer.committed(mode)) continue
+            db.createStatement().use { it.execute("BEGIN IMMEDIATE") }
+            try {
+                // Another window may already have migrated or replaced this answer while we rebuilt its key.
+                if (reviewStore.find(db, id, lessonId, mode) == null && answer(id, lessonId, mode) == answer) {
                     reviewStore.recordLesson(db, book, lesson, mode, practice, answer, migrated = true)
-                    db.commit()
-                } catch (failure: Exception) { db.rollback(); throw failure }
+                }
+                db.createStatement().use { it.execute("COMMIT") }
+            } catch (failure: Throwable) {
+                db.createStatement().use { it.execute("ROLLBACK") }
+                throw failure
             }
         }
     }

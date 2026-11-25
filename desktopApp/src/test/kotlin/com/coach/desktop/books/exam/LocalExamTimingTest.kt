@@ -174,7 +174,10 @@ class LocalExamTimingTest {
         val store = f.store()
         for (duration in listOf(0, -1, 1441, Int.MAX_VALUE))
             assertFailsWith<IllegalArgumentException> { store.start(f.book.id, f.paper.id, duration) }
-        val reference = textbookReferencePaper(f.book).paper!!
+        // TON-1784 retired reference generation. Persisted reference drills still cannot be timed.
+        val reference = LocalExamPaper(JsonObject(f.paper.snapshot + json(
+            "id" to "saved-reference", "origin" to "TEXTBOOK_REFERENCE", "kind" to "drill",
+        )))
         store.register(reference)
         assertFailsWith<IllegalArgumentException> { store.start(f.book.id, reference.id, 1) }
         val untimed = store.start(f.book.id, f.paper.id)

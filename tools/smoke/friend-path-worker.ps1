@@ -148,18 +148,43 @@ function Click-Folded([int]$n, [string[]]$labels, [string]$why) {
     }
     Fail $n $why
 }
+# 比较输入框区域前后两张截图有多少像素发生了明显变化：不依赖深浅主题，也不怕占位提示语本身占像素。
+function Get-FieldDiff([string]$pngA, [string]$pngB, [int]$x0, [int]$y0, [int]$x1, [int]$y1) {
+    if (-not $pngA -or -not $pngB -or -not (Test-Path -LiteralPath $pngA) -or -not (Test-Path -LiteralPath $pngB)) { return 0 }
+    $a = [System.Drawing.Bitmap]::FromFile($pngA)
+    $b = [System.Drawing.Bitmap]::FromFile($pngB)
+    try {
+        $lx0 = [Math]::Max(0, $x0); $ly0 = [Math]::Max(0, $y0)
+        $lx1 = [Math]::Min([Math]::Min($a.Width, $b.Width) - 2, $x1)
+        $ly1 = [Math]::Min([Math]::Min($a.Height, $b.Height) - 2, $y1)
+        if ($lx1 -le $lx0 -or $ly1 -le $ly0) { return 0 }
+        $diff = 0
+        for ($y = $ly0; $y -le $ly1; $y++) {
+            for ($x = $lx0; $x -le $lx1; $x++) {
+                $ca = $a.GetPixel($x, $y); $cb = $b.GetPixel($x, $y)
+                if ([Math]::Abs([int]$ca.R - [int]$cb.R) + [Math]::Abs([int]$ca.G - [int]$cb.G) + [Math]::Abs([int]$ca.B - [int]$cb.B) -gt 45) { $diff++ }
+            }
+        }
+        return $diff
+    } finally { $a.Dispose(); $b.Dispose() }
+}
 # 「继续追问」框里的字太小，OCR 读不出来；粘完要靠框内区域的亮像素数确认「框里确实有字」。
 # 空框只有深色底和一圈深色边框，加了字会多出成百上千个亮像素，和空框那张比一下就有数了。
-function Get-FieldInk([string]$png, $label) {
+function Get-FieldInk([string]$png, $label, [int]$rowY = 0) {
     $bmp = [System.Drawing.Bitmap]::FromFile($png)
     try {
-        $x0 = [int]$label.X1 + 2; $y0 = [int]$label.Y2 + 10
-        $x1 = [Math]::Min($x0 + 420, $bmp.Width - 2); $y1 = [Math]::Min($y0 + 42, $bmp.Height - 2)
+        $x0 = [Math]::Max(0, [int]$label.X1 + 2)
+        $y0 = if ($rowY -gt 0) { [Math]::Max(0, $rowY - 22) } else { [Math]::Max(0, [int]$label.Y2 + 10) }
+        $x1 = [Math]::Min($x0 + 420, $bmp.Width - 2)
+        $y1 = if ($rowY -gt 0) { [Math]::Min($rowY + 22, $bmp.Height - 2) } else { [Math]::Min($y0 + 42, $bmp.Height - 2) }
+        $bg = $bmp.GetPixel($x0, $y0)
+        $bgLum = [int](($bg.R * 299 + $bg.G * 587 + $bg.B * 114) / 1000)
         $ink = 0
         for ($y = $y0; $y -le $y1; $y++) {
             for ($x = $x0; $x -le $x1; $x++) {
                 $c = $bmp.GetPixel($x, $y)
-                if ($c.R -gt 140 -and $c.G -gt 140 -and $c.B -gt 140) { $ink++ }
+                $lum = [int](($c.R * 299 + $c.G * 587 + $c.B * 114) / 1000)
+                if ([Math]::Abs($lum - $bgLum) -gt 45) { $ink++ }
             }
         }
         return $ink
@@ -167,14 +192,16 @@ function Get-FieldInk([string]$png, $label) {
 }
 # 一条横带的粗略像素指纹（隔 3 个像素取一点、亮度分 8 档）：提问页签回答区只有 30 多 px 高，
 # 同一行字能在视野里停好几步，靠 OCR 文本相同判断「滚到顶了」会误判，这里直接比像素。
-function Get-BandSig([string]$png, [int]$y0, [int]$y1) {
+function Get-BandSig([string]$png, [int]$y0, [int]$y1, [int]$x0 = 20, [int]$x1 = -1) {
     if (-not $png -or -not (Test-Path -LiteralPath $png)) { return '' }
     $bmp = [System.Drawing.Bitmap]::FromFile($png)
     try {
         $y0 = [Math]::Max(0, $y0); $y1 = [Math]::Min($bmp.Height - 1, $y1)
+        $lx0 = [Math]::Max(0, $x0)
+        $lx1 = if ($x1 -gt 0) { [Math]::Min($bmp.Width - 1, $x1) } else { $bmp.Width - 20 }
         $sb = New-Object System.Text.StringBuilder
         for ($y = $y0; $y -le $y1; $y += 3) {
-            for ($x = 20; $x -lt $bmp.Width - 20; $x += 3) {
+            for ($x = $lx0; $x -lt $lx1; $x += 3) {
                 $c = $bmp.GetPixel($x, $y)
                 [void]$sb.Append([char](48 + [int](($c.R + $c.G + $c.B) / 96)))
             }
@@ -188,34 +215,48 @@ function Get-BandSig([string]$png, [int]$y0, [int]$y1) {
 function Scroll-AskBottom([int]$x, [int]$y) {
     $probe = Join-Path $OutDir '4-ask-bottom-probe.png'
     $prev = $null; $same = 0
+    $bx0 = [Math]::Max(20, $x - 160); $bx1 = $x + 160
     for ($k = 0; $k -lt 30 -and $same -lt 2; $k++) {
         Scroll-At $x $y -15; Start-Sleep -Milliseconds 250
         Save-Shot $probe
-        $sig = Get-BandSig $probe ($y - 12) ($y + 12)
+        $sig = Get-BandSig $probe ($y - 12) ($y + 12) $bx0 $bx1
         if ($sig -eq $prev) { $same++ } else { $same = 0 }
         $prev = $sig
     }
 }
-# 伴读抽屉体（讲解页签下面的模块内容）滚一下，并按像素核对真的动了。11-23 14:22 那轮第 6 步在
-# (0.65w, 0.72h) 连滚 5 次 -3 格，抽屉体一像素没动、只靠 OCR 文本相同判「到底了」，「提交」一直没露面。
-# 所以每滚一次都比抽屉体那条横带；没动就先把指针停稳再滚，再换左半边、右半边落点（都不进底边 HUD 区）。
+# 伴读抽屉体（讲解页签下面的模块内容）滚一下，并按像素核对真的动了。
+# 宽屏（>=1200px，如 Apollo 2160x1350）下伴读抽屉在右侧栏（约 0.72w..w），只滚右栏、只比右栏像素，
+# 绝不拿 0.35w 去滚左侧书页（否则会把书页滚走几十页）。窄屏仍按底抽屉落点。
 function Scroll-DrawerBody([int]$notches, [int]$winW, [int]$winH) {
     $probe = Join-Path $OutDir 'drawer-scroll-probe.png'
-    $y0 = [int]($winH * 0.68); $y1 = [int]($winH * 0.94)
+    $isWide = ($winW -ge 1200)
+    $y0 = if ($isWide) { [int]($winH * 0.35) } else { [int]($winH * 0.68) }
+    $y1 = if ($isWide) { [int]($winH * 0.88) } else { [int]($winH * 0.94) }
+    $bx0 = if ($isWide) { [int]($winW * 0.74) } else { 20 }
+    $bx1 = [int]($winW - 20)
     Save-Shot $probe
-    $before = Get-BandSig $probe $y0 $y1
-    $spots = @(
-        @(([int]($winW * 0.65)), ([int]($winH * 0.72)), $false),
-        @(([int]($winW * 0.65)), ([int]($winH * 0.72)), $true),
-        @(([int]($winW * 0.35)), ([int]($winH * 0.78)), $true),
-        @(([int]($winW * 0.90)), ([int]($winH * 0.78)), $true)
-    )
+    $before = Get-BandSig $probe $y0 $y1 $bx0 $bx1
+    $spots = if ($isWide) {
+        @(
+            @(([int]($winW * 0.85)), ([int]($winH * 0.62)), $false),
+            @(([int]($winW * 0.85)), ([int]($winH * 0.62)), $true),
+            @(([int]($winW * 0.90)), ([int]($winH * 0.72)), $true),
+            @(([int]($winW * 0.78)), ([int]($winH * 0.55)), $true)
+        )
+    } else {
+        @(
+            @(([int]($winW * 0.65)), ([int]($winH * 0.72)), $false),
+            @(([int]($winW * 0.65)), ([int]($winH * 0.72)), $true),
+            @(([int]($winW * 0.35)), ([int]($winH * 0.78)), $true),
+            @(([int]($winW * 0.90)), ([int]($winH * 0.78)), $true)
+        )
+    }
     for ($i = 0; $i -lt $spots.Count; $i++) {
         $sx = $spots[$i][0]; $sy = $spots[$i][1]
         if ($spots[$i][2]) { Hover $sx $sy; Start-Sleep -Milliseconds 400 }
         Scroll-At $sx $sy $notches; Start-Sleep -Milliseconds 500
         Save-Shot $probe
-        if ((Get-BandSig $probe $y0 $y1) -ne $before) {
+        if ((Get-BandSig $probe $y0 $y1 $bx0 $bx1) -ne $before) {
             if ($i -gt 0) { Note "抽屉体换第 $($i + 1) 个落点 ($sx,$sy) 才滚动" }
             return $true
         }
@@ -223,9 +264,9 @@ function Scroll-DrawerBody([int]$notches, [int]$winW, [int]$winH) {
     return $false
 }
 # #599 起「讲解」页签默认只讲当前这一页：讲解卡下面一条条「出处 N · 第 X 页 · 第 Y 段 · 开头几个字」，
-# 点了回到那一段。OCR 常把中间的「·」读成「．」或吞掉。
+# 点了回到那一段。OCR 常把中间的「·」读成「．」或吞掉，高分屏也常把「页」认成「贞 / 虫」。
 function Find-PageCite($lines) {
-    return ($lines | Where-Object { ($_.Text -replace '\s', '') -match '^出处\d.*第\d+页' } | Select-Object -First 1)
+    return ($lines | Where-Object { ($_.Text -replace '\s', '') -match '^出处\d.*第\d+[页頁贞貞虫]' } | Select-Object -First 1)
 }
 function Find-All($lines, [string]$needle) { $all = @(); foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m) { $all += $m } }; $all | Sort-Object Y }
 # 2.0（#570）的阅读器是单层满铺画布：没有常驻底栏，指针贴到窗口下缘 48dp 内才浮出来；
@@ -548,11 +589,11 @@ function Find-ZoomText([string]$png, [int]$top, [int]$bottom, [string]$label, [i
     return (Find-Text (Read-ZoomStrip $png $top $bottom $scale) $label)
 }
 function Find-AnchorChip($lines, [string]$png, [int]$winH) {
-    $m = $lines | Where-Object { ($_.Text -replace '\s', '') -match '原文第\d+页' } | Select-Object -First 1
+    $m = $lines | Where-Object { ($_.Text -replace '\s', '') -match '原文第\d+[页頁贞貞虫]' } | Select-Object -First 1
     if ($m) { return $m }
     if (-not $png -or $winH -le 0) { return $null }
     $zLines = Read-ZoomStrip $png ([int]($winH * 0.48)) ([int]($winH * 0.98)) 3
-    return ($zLines | Where-Object { ($_.Text -replace '\s', '') -match '原文第\d+页' } | Select-Object -First 1)
+    return ($zLines | Where-Object { ($_.Text -replace '\s', '') -match '原文第\d+[页頁贞貞虫]' } | Select-Object -First 1)
 }
 # 点完「讲讲」算不算生效：2.0 不再另开一张卡——伴读抽屉（窄窗是半屏底部抽屉）打开并切到「提问」页，
 # 顶上顶着「引文 · …」，先「正在整理…」，然后出正文和「出处」。第一次问还要先过同意框。
@@ -711,9 +752,9 @@ function Resolve-Step2HomeVerdict($Row, [string]$ReaderPage) {
     }
     return [pscustomobject]@{ Fail = '既没读到阅读器底栏页号，也没在首页读到「读到第 / 上次停在」的书卡'; Pass = $null }
 }
-# 阅读器顶栏/底栏的页码在 OCR 里可能被拆成「第 1 5 0 页」，先去空白再取数。
+# 阅读器顶栏/底栏的页码在 OCR 里可能被拆成「第 1 5 0 页」，高分屏也常把「页」认成「贞 / 虫」，先去空白再取数。
 function Get-CitePageNumber([string]$CiteText) {
-    $m = [regex]::Match(($CiteText -replace '\s', ''), '第(\d+)页')
+    $m = [regex]::Match(($CiteText -replace '\s', ''), '第(\d+)[页頁贞貞虫]')
     if ($m.Success) { return $m.Groups[1].Value }
     return $null
 }
@@ -723,7 +764,7 @@ function Get-CitePageNumber([string]$CiteText) {
 function Find-CiteLine($lines) {
     $hits = @($lines | Where-Object { ($_.Text -replace '\s', '') -match '出处' })
     if (-not $hits.Count) { return $null }
-    $withPage = @($hits | Where-Object { ($_.Text -replace '\s', '') -match '第\d+页' })
+    $withPage = @($hits | Where-Object { ($_.Text -replace '\s', '') -match '第\d+[页頁贞貞虫]' })
     if ($withPage.Count) { return $withPage[-1] }
     return $hits[-1]
 }
@@ -1245,91 +1286,120 @@ try {
     $askWhy = $null
     try {
         $lim = Get-Rect; $winW = [int]($lim.R - $lim.L); $winH = [int]($lim.B - $lim.T)
-        $scrollX = [int]($winW / 2); $scrollY = [int]($winH * 0.72)
+        $isWide4 = ($winW -ge 1200)
+        $scrollX = if ($isWide4) { [int]($winW * 0.85) } else { [int]($winW / 2) }
+        $scrollY = if ($isWide4) { [int]($winH * 0.55) } else { [int]($winH * 0.72) }
         # 阅读区中间带：底抽屉开着时画布只剩上半截，指针落在这里 HUD 一定收回去。
         $midY = [int]($winH * 0.30)
-        $field = $null
+        $fieldBandTop = [Math]::Max(0, $winH - [Math]::Max(130, [int]($winH * 0.22)))
+        $field = $null; $fieldIsPlaceholder = $false
         foreach ($k in 0..3) {
             if ($k -gt 0) { Start-Sleep -Milliseconds 700 }
             Hover $midX $midY; Start-Sleep -Milliseconds 700
             $null = Shot 4 "ask-field$k"
-            foreach ($hint in '问这句', '输入问题', '公式推导') {
-                $field = Find-ZoomText $script:LastPng ([Math]::Max(0, $winH - 130)) $winH $hint 4
-                if ($field) { break }
+            # 先在整帧和底部放大带里找框内占位语（「问这句」「公式推导」），它们就在输入框正中；
+            # 找不到再退回框上方的状态提示「输入问题」。
+            foreach ($hint in '问这句', '公式推导', '输入问题') {
+                $hit = Find-Text $script:Last $hint
+                if (-not $hit -or $hit.Y -lt $fieldBandTop) {
+                    $hit = Find-ZoomText $script:LastPng $fieldBandTop $winH $hint 4
+                }
+                if ($hit) {
+                    $field = $hit
+                    $fieldIsPlaceholder = ($hint -ne '输入问题')
+                    break
+                }
             }
             if ($field) { break }
         }
-        # 输入框是扁的一条（高 40px），提示语是它上方的标签，中间还隔着 6dp 的缝：照标签下沿 +18 去点，
-        # 量歪几个像素就落进缝里——12:49 那轮四次都点空了，窗口像素一个没变。
-        # 「发送」和输入框同处一个 Row、垂直居中，拿它的中心当这一行的中线最稳（框体 40px 高，差几像素不碍事）。
-        # #599 以后提问页签顶上多了「讲的是：…」一行，小窗里回答区只剩 30px 左右，winH*0.72 正落在它上沿，
-        # 滚轮可能落空。拿「引文」那一行和下面「先输入问题」/提示语之间的中点当滚动点，读不到再退回 0.72。
         $quoteRow = Find-Text $script:Last '引文'
         $hintRow = Has $script:Last @('先输入', '问这句')
         if (-not $hintRow -and $field) { $hintRow = $field }
+        if ($quoteRow) {
+            $scrollX = [Math]::Min($winW - 60, [int]$quoteRow.X + 80)
+        } elseif ($field) {
+            $scrollX = [Math]::Min($winW - 60, [int]$field.X + 80)
+        }
         if ($quoteRow -and $hintRow -and $hintRow.Y -gt $quoteRow.Y + 20) {
             $scrollY = [int](($quoteRow.Y + $hintRow.Y) / 2)
-            Note "提问回答区滚动点：引文行 $($quoteRow.Y) 与提示行 $($hintRow.Y) 之间，y=$scrollY"
+            Note "提问回答区滚动点：引文行 $($quoteRow.Y) 与提示行 $($hintRow.Y) 之间，($scrollX,$scrollY)"
         }
-        $clickX = if ($field) { [int]$field.X1 + 30 } else { [int]($winW * 0.3) }
-        $rowY = if ($field) { [int]$field.Y2 + 18 } else { [int]($winH - 46) }
-        $send = Find-ZoomText $script:LastPng ([Math]::Max(0, $winH - 130)) $winH '发送' 4
+        $clickX = if ($field) { [int]$field.X1 + 30 } elseif ($isWide4) { [int]($winW * 0.80) } else { [int]($winW * 0.3) }
+        $rowY = if ($field) {
+            if ($fieldIsPlaceholder) { [int]$field.Y } else { [int]$field.Y2 + 34 }
+        } else { [int]($winH - 46) }
+        $send = Find-Text $script:Last '发送'
+        if (-not $send -or $send.Y -lt $fieldBandTop) {
+            $send = Find-ZoomText $script:LastPng $fieldBandTop $winH '发送' 4
+        }
         if ($send) { $rowY = [int]$send.Y }
-        if ($field) { Note "追问输入框：提示语在第 $($field.Y) 行，这一行中线 $rowY，落点 x=$clickX" }
+        if ($field) { Note "追问输入框：提示语在第 $($field.Y) 行（placeholder=$fieldIsPlaceholder），这一行中线 $rowY，落点 x=$clickX" }
         else { Note "抽屉底栏没读到输入框提示语，按 ($clickX,$rowY) 试" }
+        $boxX0 = [Math]::Max(0, $clickX - 24)
+        $boxX1 = [Math]::Min($winW - 2, $boxX0 + 380)
+        $boxY0 = [Math]::Max(0, $rowY - 24)
+        $boxY1 = [Math]::Min($winH - 2, $rowY + 24)
+        $emptyPng = $script:LastPng
         $question = '用大白话解释一下，这里的专用人力资本是什么意思？'
         # 标记直接写进问题里，回答轮的标题是「问：<原问题>」，标记出现在那行才算这一问真的发出去了。
         $askText = if ($Marker) { "$Marker $question" } else { $question }
         # 粘贴走不通时的替补：纯 ASCII，只用击键、不碰剪贴板也不碰输入法，标记照样带上。
         $keyText = if ($Marker) { "$Marker what does the quoted sentence mean in plain words" } else { 'what does the quoted sentence mean in plain words' }
         $turn = $null; $cite = $null; $typed = $false
-        # 落点用对象装：PS 5.1 里 `@(a,b), @(c,d)` 这一串会当成两个数组相加，直接报 op_Addition。
+        # 落点相对 $clickX 偏移（宽屏右侧抽屉和窄屏底抽屉都能命中输入框）。
         $spots = @(
             [pscustomobject]@{ X = $clickX; Y = $rowY },
-            [pscustomobject]@{ X = $clickX + 140; Y = $rowY },
-            [pscustomobject]@{ X = [int]($winW * 0.35); Y = $rowY },
-            [pscustomobject]@{ X = $clickX; Y = $rowY - 8 }
+            [pscustomobject]@{ X = [Math]::Min($winW - 40, $clickX + 100); Y = $rowY },
+            [pscustomobject]@{ X = [Math]::Min($winW - 40, $clickX + 40); Y = $rowY + 12 },
+            [pscustomobject]@{ X = $clickX; Y = [Math]::Max(10, $rowY - 12) }
         )
         $spot = 0
         foreach ($sp in $spots) {
             $spot++
             $spotX = [int]$sp.X; $spotY = [int]$sp.Y
-            # 纯点一下（不再先 Hover：指针挪过来只是移动，不影响按下那一刻的布局）。
             Click-At $spotX $spotY; Start-Sleep -Milliseconds 500
-            # 六个字母探焦点：框里真吃到字会多出上百个亮像素，只剩一个闪动的光标也到不了 40。
+            # 六个字母探焦点：对比点击前空框与敲完后的像素变化，兼容深浅主题与占位提示语。
             Send-Keys 'zzzzzz'; Start-Sleep -Milliseconds 400
             Hover $midX $midY; Start-Sleep -Milliseconds 700
             $null = Shot 4 "ask-click$spot"
-            $probe = if ($field) { Get-FieldInk $script:LastPng $field } else { 0 }
-            Note "第 $spot 次点 ($spotX,$spotY)：探针字后框内亮像素 $probe"
-            if ($probe -lt 40) {
+            $probePng = $script:LastPng
+            $probeDiff = Get-FieldDiff $emptyPng $probePng $boxX0 $boxY0 $boxX1 $boxY1
+            $probe = if ($field) { [Math]::Max($probeDiff, (Get-FieldInk $probePng $field $rowY)) } else { $probeDiff }
+            Note "第 $spot 次点 ($spotX,$spotY)：探针字后框内变化像素 diff=$probeDiff ink=$probe"
+            if ($probeDiff -lt 40) {
                 Send-Keys '^a'; Send-Keys '{BACKSPACE}'
                 continue
             }
-            # 焦点进来了：先清掉探针字，再整句粘；粘贴不成（剪贴板那条路 12:49 那轮一次没成）就改用击键打 ASCII 那句。
+            # 焦点进来了：先清掉探针字，再整句粘；粘贴不成（剪贴板那条路失败）就改用击键打 ASCII 那句。
             Send-Keys '^a'; Send-Keys '{BACKSPACE}'; Start-Sleep -Milliseconds 300
             $textIn = $false
             Paste-Text " $askText"; Start-Sleep -Milliseconds 900
             Hover $midX $midY; Start-Sleep -Milliseconds 700
             $null = Shot 4 "ask-typed$spot"
-            $ink = if ($field) { Get-FieldInk $script:LastPng $field } else { 0 }
-            Note "第 $spot 次粘字：探针 $probe，粘完 $ink"
-            if ($ink -ge [Math]::Max(400, $probe + 120)) { $textIn = $true }
+            $typedPng = $script:LastPng
+            $typedDiffEmpty = Get-FieldDiff $emptyPng $typedPng $boxX0 $boxY0 $boxX1 $boxY1
+            $typedDiffProbe = Get-FieldDiff $probePng $typedPng $boxX0 $boxY0 $boxX1 $boxY1
+            $ink = if ($field) { Get-FieldInk $typedPng $field $rowY } else { $typedDiffEmpty }
+            Note "第 $spot 次粘字：diffEmpty=$typedDiffEmpty diffProbe=$typedDiffProbe ink=$ink"
+            if ($typedDiffEmpty -ge 80 -and $typedDiffProbe -ge 60) { $textIn = $true }
             if (-not $textIn) {
                 Send-Keys '^a'; Send-Keys '{BACKSPACE}'
                 Send-Keys $keyText; Start-Sleep -Milliseconds 900
                 Hover $midX $midY; Start-Sleep -Milliseconds 700
                 $null = Shot 4 "ask-keyed$spot"
-                $ink = if ($field) { Get-FieldInk $script:LastPng $field } else { 0 }
-                Note "第 $spot 次击键：框内亮像素 $ink"
-                if ($ink -ge [Math]::Max(400, $probe + 120)) { $textIn = $true; $askText = $keyText }
+                $typedPng = $script:LastPng
+                $typedDiffEmpty = Get-FieldDiff $emptyPng $typedPng $boxX0 $boxY0 $boxX1 $boxY1
+                $typedDiffProbe = Get-FieldDiff $probePng $typedPng $boxX0 $boxY0 $boxX1 $boxY1
+                $ink = if ($field) { Get-FieldInk $typedPng $field $rowY } else { $typedDiffEmpty }
+                Note "第 $spot 次击键：diffEmpty=$typedDiffEmpty diffProbe=$typedDiffProbe ink=$ink"
+                if ($typedDiffEmpty -ge 80 -and $typedDiffProbe -ge 60) { $textIn = $true; $askText = $keyText }
             }
             if (-not $textIn) { continue }
             $typed = $true
             # 抽屉里已经有一轮（选段讲解）的「出处」：记下它，兜底路径用它排除「把上一轮的出处当这一问的」。
-            $preCite = $script:Last | Where-Object { $_.Text -match '出处.*第\s*\d+\s*页' } | Select-Object -Last 1
+            $preCite = $script:Last | Where-Object { $_.Text -match '出处.*第\s*\d+\s*[页頁贞貞虫]' } | Select-Object -Last 1
             # 字在框里了：回车提交（CompanionAskPane 的 onPreviewKeyEvent Enter）。提交后 draft 会被清空，
-            # 所以「亮度掉回基线」同样算这一下发出去了，交给下面那段长等待认回答。
+            # 所以框内像素变回空框同样算这一下发出去了，交给下面那段长等待认回答。
             $sent = $false
             foreach ($press in 1..2) {
                 Send-Keys '{ENTER}'; Start-Sleep -Milliseconds 900
@@ -1342,10 +1412,10 @@ try {
                     if ($label) { $sent = $true; $turn = $label; break }
                 }
                 if ($sent) { break }
-                $after = if ($field) { Get-FieldInk $script:LastPng $field } else { $ink }
-                if ($after -lt [Math]::Max(400, [int]($ink * 0.5))) { $sent = $true; break }
+                $afterDiffTyped = Get-FieldDiff $typedPng $script:LastPng $boxX0 $boxY0 $boxX1 $boxY1
+                if ($afterDiffTyped -ge 80) { $sent = $true; break }
             }
-            if ($sent) { Note "追问落点：抽屉底栏 ($clickX,$spotY)"; break }
+            if ($sent) { Note "追问落点：抽屉底栏 ($spotX,$spotY)"; break }
             Send-Keys '^a'; Send-Keys '{BACKSPACE}'
             Note "第 $spot 次回车后没看到「问：…」标题、框里字也没清，换个落点再粘"
         }
@@ -1397,7 +1467,7 @@ try {
                 continue
             }
             $label = Find-AskTurnLabel $lines $Marker
-            $cites = @($lines | Where-Object { $_.Text -match '出处.*第\s*\d+\s*页' })
+            $cites = @($lines | Where-Object { $_.Text -match '出处.*第\s*\d+\s*[页頁贞貞虫]' })
             if ($label) {
                 $labelSeen = $true; $turn = $label
                 $tb = Get-LineBox $label
@@ -1779,6 +1849,9 @@ try {
             Click-At $tabX6 $tabY6; Start-Sleep -Seconds 1
             $lines = Shot 6 'explain-tab'
         }
+        # 先把指针移出顶栏让浮层自动收回，再截稳态帧定位「自测」：否则宽屏顶栏收回时抽屉整体上移 ~68px 会点偏。
+        Hover $midX ([int]($winH * 0.50)); Start-Sleep -Milliseconds 700
+        $lines = Shot 6 'strip'
         # 模块条：要点 / 自测 / 推导 / 练习 / 习题，都是两个字的短标签。
         # 「自测」认不出就拿「要点」往右退一格（三格间距一致，退一格正好落在「自测」上）。
         $strip = Find-Text $lines '自测'
@@ -1787,9 +1860,15 @@ try {
             if ($kp6) { $strip = [pscustomobject]@{ X = [int]($kp6.X + 52); Y = [int]$kp6.Y } }
         }
         if (-not $strip) { Fail 6 '伴读抽屉的模块条上找不到「自测」（见 6-*.png）' }
-        Hover $strip.X $strip.Y; Start-Sleep -Milliseconds 400
-        $null = Click-At $strip.X $strip.Y; Start-Sleep -Seconds 1
-        $null = Shot 6 'pretest'
+        foreach ($stTry in 1..2) {
+            if ($stTry -gt 1) {
+                $againStrip = Find-Text $script:Last '自测'
+                if ($againStrip) { $strip = $againStrip }
+            }
+            $null = Click-At $strip.X $strip.Y; Start-Sleep -Seconds 1
+            $lines = Shot 6 $(if ($stTry -eq 1) { 'pretest' } else { "pretest-click$stTry" })
+            if (($lines | Where-Object { ($_.Text -replace '\s', '') -match '读前自测|^第\d+[/／]\d+[题題]|本章暂无读前自测' } | Select-Object -First 1)) { break }
+        }
         # 等题目卡：题号行「第 i / N 题」（Windows OCR 偶把简写「题」认成繁写「題」）；空卡直接写「本章暂无读前自测题。」。
         $deadline = (Get-Date).AddSeconds(60); $q = $null
         while ((Get-Date) -lt $deadline -and -not $q) {
@@ -1838,10 +1917,12 @@ try {
                 $null = Shot 6 'pretest-scroll'
                 continue
             }
+            $optBandH = [Math]::Max(110, [int]($winH * 0.22))
             $above = @($lines | Where-Object {
                 $t = ($_.Text -replace '\s', '')
                 $bb = Get-LineBox $_
-                $bb.Y -lt ($sb.Y - 6) -and $bb.Y -gt ($sb.Y - 110) -and $bb.Y -gt ($strip.Y + 24) -and
+                $bb.Y -lt ($sb.Y - 6) -and $bb.Y -gt ($sb.Y - $optBandH) -and $bb.Y -gt ($strip.Y + 24) -and
+                (-not ($winW -ge 1200) -or $bb.X1 -ge [int]($winW * 0.65)) -and
                 $t -notmatch '这题是猜的|先猜一猜|^第\d+[/／]\d+[题題]$|提交'
             } | Sort-Object { (Get-LineBox $_).Y })
             # 「提交」被滚到模块条底下时，它上面就只剩模块条（14:37 那轮把「习题」当成选项点了，切走了自测）：

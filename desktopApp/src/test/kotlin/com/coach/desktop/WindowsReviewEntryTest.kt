@@ -315,9 +315,9 @@ class WindowsReviewEntryTest {
                 openReview()
                 waitUntil(timeoutMillis = 15_000) { onAllNodesWithText("待生成变式", substring = true).fetchSemanticsNodes().isNotEmpty() }
                 onAllNodesWithText("开始", substring = false).onFirst().performScrollTo().performClick()
-                onNodeWithText("这项复习还没有可用的已核变式，尚未开始；原作答已保留。").assertIsDisplayed()
+                onNodeWithText("这项复习还没有可用的新题，暂时开不了。原来的作答还留着。").assertIsDisplayed()
                 onNodeWithText("提交答案").assertDoesNotExist()
-                onNodeWithText("这道题的练习入口尚未接通", substring = true).assertDoesNotExist()
+                onNodeWithText("这道题的练习入口还没接上", substring = true).assertDoesNotExist()
             }
             assertNull(reviewPracticeTarget(session.controller.sync, "C"))
             assertEquals(before, f.facts())

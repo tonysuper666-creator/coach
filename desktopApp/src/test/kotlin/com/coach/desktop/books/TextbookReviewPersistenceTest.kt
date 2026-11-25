@@ -54,7 +54,7 @@ class TextbookReviewPersistenceTest {
         assertEquals(QuestionMode.SHORT_ANSWER, short.mode)
         val choice = com.coach.desktop.books.testPracticeFixture(second, second.lessons.first(), QuestionMode.CHOICE)!!
         val wrong = choice.options.first { it != choice.answer }
-        library.saveAnswer(second.id, second.lessons.first().id, QuestionMode.CHOICE, PracticeAnswer(wrong, true))
+        library.saveSectionCheckAnswer(second.id, second.lessons.first(), 0, choice, PracticeAnswer(wrong, true))
         assertEquals(setOf(first.id, second.id), library.reviews().map { it.book }.toSet())
         library.saveReviewAnswer(short, PracticeAnswer("Still uncertain", true, false))
         assertEquals(2, TextbookLibrary(library.directory).reviews().size)

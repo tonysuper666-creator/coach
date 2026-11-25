@@ -127,10 +127,10 @@ internal fun TextbookReader(
     onSwitchCourseSource: ((String, Int) -> Unit)? = null,
     onSaveCoursePracticeDraft: ((CourseTopicPracticeDraft) -> Unit)? = null,
     onRefreshCoursePack: (() -> Unit)? = null,
-    onJumpCourseCitation: ((CourseCitationRef) -> Unit)? = null,
+    onJumpCourseCitation: ((CourseCitationRef, BookPageAnchor) -> Unit)? = null,
     collectionQaSessions: Map<String, CollectionQaSessionState> = emptyMap(),
     onUpdateCollectionQaSession: ((String, CollectionQaSessionState) -> Unit)? = null,
-    onJumpCollectionCitation: ((CollectionQaCitation) -> Unit)? = null,
+    onJumpCollectionCitation: ((CollectionQaCitation, BookPageAnchor) -> Unit)? = null,
     onConsumeKeepAskTabOpen: () -> Unit = {},
     onBrowsePage: ((Int) -> Unit)? = null,
 ) {
@@ -1563,7 +1563,7 @@ internal fun TextbookReader(
                                 onSwitchCourseSource?.invoke(targetId, targetPage)
                             },
                             onJumpCitation = { ref ->
-                                onJumpCourseCitation?.invoke(ref)
+                                onJumpCourseCitation?.invoke(ref, readingAnchor)
                             },
                             onSavePracticeDraft = { draft ->
                                 onSaveCoursePracticeDraft?.invoke(draft)
@@ -1806,7 +1806,7 @@ internal fun TextbookReader(
                         }
                         if (passage != null) openPassage(passage) else turnTo(cit.page)
                     } else if (onJumpCollectionCitation != null) {
-                        onJumpCollectionCitation(cit)
+                        onJumpCollectionCitation(cit, readingAnchor)
                     } else {
                         onOpenCrossBookPage?.invoke(cit.bookId, cit.page, cit.quoteAnchor)
                     }

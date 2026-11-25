@@ -39,7 +39,7 @@ class BookCitationWorkspaceTest {
         controller.jumpToCollectionCitation(CollectionQaCitation(
             CollectionQaVirtualCollections.READ_LIBRARY_ID, target.id, target.title, target.title,
             passage.page, quoteAnchor = passage.text,
-        ))
+        ), BookPageAnchor(2, 4))
         assertEquals(target.id, controller.state.value.book?.id)
         assertEquals(passage.page, controller.state.value.page)
         controller.back()
@@ -47,6 +47,7 @@ class BookCitationWorkspaceTest {
         assertEquals(BookScreen.READER, returned.screen)
         assertEquals(origin.id, returned.book?.id)
         assertEquals(2, returned.page)
+        assertEquals(2 to 4, library.savedReadSpot(origin.id))
     }
 
     @Test fun timeoutFallbackRequestsFocusOnFrameOwnerThread() {

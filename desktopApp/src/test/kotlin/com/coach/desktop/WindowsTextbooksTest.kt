@@ -96,7 +96,7 @@ An isolated specimen uses the same process on the second page.
         runSkikoComposeUiTest(size = Size(1440f, 900f), density = Density(1f)) {
             setContent { WindowsTextbookHost(reopened, learningSupport = UnconnectedBookLearningSupport) { null } }
             ready(reopened) { it.book != null }
-            onNodeWithTag("home-read").performClick()
+            if (reopened.state.value.screen == BookScreen.HOME) onNodeWithTag("home-read").performClick()
             ready(reopened) { it.screen == BookScreen.READER && it.page == 2 }
             val book = reopened.state.value.book!!
             val note = reopened.library.allNotes(book.id).single()
@@ -145,6 +145,8 @@ An isolated specimen uses the same process on the second page.
                 assertEquals(book.id, controller.state.value.book!!.id)
                 assertEquals(2, controller.state.value.page)
                 assertEquals(listOf(book.id), library.catalog().map { it.id })
+                onNodeWithTag("immersive-back").performClick()
+                ready(controller) { it.screen == BookScreen.HOME }
             }
         }
     }
@@ -224,6 +226,9 @@ An isolated specimen uses the same process on the second page.
             }
             fun login(code: String) {
                 waitTag("textbook-login-screen")
+                if (onAllNodesWithTag("login-code").fetchSemanticsNodes().isEmpty()) {
+                    onNodeWithTag("login-pairing-toggle").performClick()
+                }
                 onNodeWithTag("login-address").performTextReplacement(mac.url)
                 onNodeWithTag("login-code").performTextInput(code)
                 onNodeWithTag("login-pair").performClick()

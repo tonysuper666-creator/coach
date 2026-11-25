@@ -72,6 +72,29 @@ function Save-OwnWindow([string]$name, [IntPtr]$handle = $script:Win) {
     } finally { $bmp.Dispose() }
 }
 
+function Invoke-NamedControl([string]$name) {
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($script:Win)
+    $condition = New-Object System.Windows.Automation.PropertyCondition ([System.Windows.Automation.AutomationElement]::NameProperty), $name
+    $nodes = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
+    foreach ($node in @($nodes)) {
+        $target = $node
+        for ($hop = 0; $hop -lt 5 -and $target; $hop++) {
+            $pattern = $null
+            try { $pattern = $target.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern) } catch { $pattern = $null }
+            if ($pattern) { $pattern.Invoke(); return $true }
+            $target = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($target)
+        }
+        $bounds = $node.Current.BoundingRectangle
+        if ($bounds.Width -gt 1 -and $bounds.Height -gt 1) {
+            $win = Get-Rect
+            $x = [int]($bounds.X + ($bounds.Width / 2) - $win.L)
+            $y = [int]($bounds.Y + ($bounds.Height / 2) - $win.T)
+            if ($x -gt 0 -and $y -gt 0) { Click-At $x $y | Out-Null; return $true }
+        }
+    }
+    return $false
+}
+
 function Click-CapturedControl([string]$template, [string]$shot, [switch]$VerifyOnly, [int]$ScrollNotches = 0) {
     if ($Winbox) {
         $point = Find-WinboxControl $template ([IO.Path]::GetFileNameWithoutExtension($shot)) $ScrollNotches
@@ -173,25 +196,29 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
         Save-OwnWindow 'installed-window-printwindow.png'
         Write-Output 'Captured installed app window via PrintWindow; image requires visual review.'
 
-        # 2.0 empty shelf (TON-1790): the primary control is 「导入文件」, and the native
-        # dialog title starts with the same prefix. The 1.1.1 name 「上传教材」 is gone.
+        # 2.0 empty shelf (TON-1790): the dialog title starts with 「导入文件」.
+        # The dark primary pill uses that word, but ARM UI Automation often omits Compose
+        # and the on-device OCR misreads white-on-black. The card 「单读一本书」 calls the
+        # same import action and is readable. 1.1.1's 「上传教材」 is gone.
         $upload = -join ([char[]](0x5bfc,0x5165,0x6587,0x4ef6))
+        $singleBook = -join ([char[]](0x5355,0x8bfb,0x4e00,0x672c,0x4e66))
         $invoked = $false
-        try {
-            $root = [System.Windows.Automation.AutomationElement]::FromHandle($script:Win)
-            $condition = New-Object System.Windows.Automation.PropertyCondition ([System.Windows.Automation.AutomationElement]::NameProperty), $upload
-            $button = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
-            if ($button) {
-                $pattern = $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-                if ($pattern) { $pattern.Invoke(); $invoked = $true }
-            }
-        } catch { Write-Output "UI Automation unavailable: $($_.Exception.Message)" }
-        if (-not $invoked) {
+        foreach ($name in @($upload, $singleBook)) {
+            if ($invoked) { break }
             try {
-                $hit = Find-TutorLabel 'installed-upload' @($upload)
-                Click-At $hit.X $hit.Y | Out-Null
-                $invoked = $true
-            } catch { Write-Output "Upload label was not read: $($_.Exception.Message)" }
+                if (Invoke-NamedControl $name) { Write-Output "Opened import via UI Automation: $name"; $invoked = $true }
+            } catch { Write-Output "UI Automation unavailable: $($_.Exception.Message)" }
+        }
+        if (-not $invoked) {
+            foreach ($name in @($upload, $singleBook)) {
+                if ($invoked) { break }
+                try {
+                    $hit = Find-TutorLabel 'installed-upload' @($name)
+                    Click-At $hit.X $hit.Y | Out-Null
+                    Write-Output "Opened import via visible label: $name"
+                    $invoked = $true
+                } catch { Write-Output "Upload label was not read: $($_.Exception.Message)" }
+            }
         }
         if (-not $invoked) {
             Click-CapturedControl 'empty-shelf-upload.png' 'installed-window-printwindow.png'

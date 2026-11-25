@@ -1131,22 +1131,40 @@ public final class ReaderAcceptanceHarness {
     }
 
     private static void dismissV2HudIfVisibleWin32(ComposeWindow win) throws Exception {
-        if (findNodeByTag(win, "immersive-top-hud") == null && findNodeByTag(win, "immersive-bottom-hud") == null) return;
+        // A pointer parked at the top/bottom edge reveals the HUD again on relayout.
+        // Move inside this window's canvas without moving the system pointer or taking OS focus.
         onEdt(() -> {
-            SemanticsNode readerPage = findNodeByTag(win.getSemanticsOwners(), "reader-page");
-            if (readerPage != null) {
-                Object reqFocus = findSemanticsActionFn(readerPage, "RequestFocus");
-                if (reqFocus instanceof Function0<?> f0) {
-                    f0.invoke();
-                }
-            }
+            Surface main = activeSurfaces(win).get(0);
+            Component canvas = main.layer.getCanvas();
+            takeLogicalFocus(main.mediator);
+            invoke(main.mediator, "onMouseEvent", MouseEvent.class, new MouseEvent(canvas,
+                MouseEvent.MOUSE_MOVED, System.currentTimeMillis(), 0, canvas.getWidth() / 2,
+                canvas.getHeight() / 2, 0, false, MouseEvent.NOBUTTON));
             return null;
         });
-        sendKeysWin32(win, KeyEvent.VK_TAB, 0);
-        waitFor(4000, () -> findNodeByTag(win, "immersive-top-hud") == null
+        for (int attempt = 0; attempt < 3; attempt++) {
+            if (!pureReadHudHidden(win)) {
+                onEdt(() -> {
+                    SemanticsNode reader = findNodeByTag(win.getSemanticsOwners(), "reader-page");
+                    if (reader != null && findSemanticsActionFn(reader, "RequestFocus") instanceof Function0<?> focus) {
+                        focus.invoke();
+                    }
+                    return null;
+                });
+                sendKeysWin32(win, KeyEvent.VK_TAB, 0);
+            }
+            if (waitFor(2000, () -> pureReadHudHidden(win))) {
+                Thread.sleep(350);
+                if (pureReadHudHidden(win)) return;
+            }
+        }
+        throw new IllegalStateException("Pure-read capture requires both HUDs hidden and the progress line visible");
+    }
+
+    private static boolean pureReadHudHidden(ComposeWindow win) throws Exception {
+        return findNodeByTag(win, "immersive-top-hud") == null
             && findNodeByTag(win, "immersive-bottom-hud") == null
-            && findNodeByTag(win, "immersive-progress-hairline") != null);
-        Thread.sleep(350);
+            && findNodeByTag(win, "immersive-progress-hairline") != null;
     }
 
     private static long revealV2HudScene(ImageComposeScene scene, long nano, int w) throws Exception {

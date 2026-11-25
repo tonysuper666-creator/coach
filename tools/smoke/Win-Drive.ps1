@@ -738,22 +738,7 @@ function Find-ActiveDesktopUser(
     [scriptblock]$PortProbe = $null,
     [string]$ApolloLogPath = $script:ApolloLogPath
 ) {
-    $stream = Get-ActiveStreamingSession -Probe $StreamProbe -HostProbe $HostProbe -PortProbe $PortProbe -LogPath $ApolloLogPath
-    $idle = Get-DesktopIdleEvidence -IdleProbe $IdleProbe -DriverInputFile $DriverInputFile -NowProbe $NowProbe
-    if ($stream) {
-        $reason = if ($stream.Source -eq 'indeterminate') {
-            "Apollo 正在运行但串流端口与日志均不可读，按占用处理（$($stream.Summary)）"
-        } else {
-            "Apollo/Moonlight 正在串流（$($stream.Summary)）"
-        }
-        return [pscustomobject]@{
-            Occupied = $true
-            IdleSeconds = $idle.IdleSeconds
-            DriverInputMatched = $idle.DriverInputMatched
-            Streaming = $stream
-            Reason = $reason
-        }
-    }
+    # 李政 11-25 决定：Apollo/Moonlight 串流不再拦截真窗口测试，仅在 Test-DesktopPreflight.Streaming 中留证。
     return $null
 }
 function Find-DirtyDesktopWindow(
@@ -821,8 +806,8 @@ function Test-DesktopPreflight(
 ) {
     # A Coach window from another checkout is a separate client with its own scope:
     # evidence only. Per-action ownership checks and the short foreground lock keep
-    # input on our own window. Registered test leftovers and clients from this same
-    # checkout still reject the whole round, and so does an active Apollo user.
+    # input on our own window. Apollo/Moonlight streaming is also evidence only.
+    # Registered test leftovers and clients from this same checkout still reject the whole round.
     $otherCoachWindows = New-Object System.Collections.ArrayList
     $dirtyList = New-Object System.Collections.ArrayList
     foreach ($w in @(Find-DirtyDesktopWindow -RegistryDir $RegistryDir -CoachWindowProbe $CoachWindowProbe)) {
@@ -837,7 +822,9 @@ function Test-DesktopPreflight(
     $dirtyWindows = @($dirtyList)
     $otherCoach = @($otherCoachWindows)
     $idle = Get-DesktopIdleEvidence -IdleProbe $IdleProbe -DriverInputFile $DriverInputFile -NowProbe $NowProbe
-    $activeUser = Find-ActiveDesktopUser -MinIdleSeconds $MinIdleSeconds -IdleProbe { $idle.IdleSeconds } -StreamProbe $StreamProbe -DriverInputFile $DriverInputFile -NowProbe $NowProbe -HostProbe $HostProbe -PortProbe $PortProbe -ApolloLogPath $ApolloLogPath
+    $stream = Get-ActiveStreamingSession -Probe $StreamProbe -HostProbe $HostProbe -PortProbe $PortProbe -LogPath $ApolloLogPath
+    $streamSummary = if ($stream) { [string]$stream.Summary } else { '' }
+    $activeUser = Find-ActiveDesktopUser -MinIdleSeconds $MinIdleSeconds -IdleProbe { $idle.IdleSeconds } -StreamProbe { $stream } -DriverInputFile $DriverInputFile -NowProbe $NowProbe -HostProbe $HostProbe -PortProbe $PortProbe -ApolloLogPath $ApolloLogPath
     $fg = Find-ForeignForegroundWindow -Probe $ForegroundProbe
     if ($dirtyWindows.Count -gt 0) {
         $desc = ($dirtyWindows | ForEach-Object Summary) -join '; '
@@ -847,6 +834,8 @@ function Test-DesktopPreflight(
             DirtyWindows = $dirtyWindows
             OtherCoachWindows = $otherCoach
             ActiveUser = $activeUser
+            Streaming = $stream
+            StreamingSummary = $streamSummary
             IdleSeconds = $idle.IdleSeconds
             DriverInputMatched = $idle.DriverInputMatched
             Foreground = $fg
@@ -859,6 +848,8 @@ function Test-DesktopPreflight(
             DirtyWindows = @()
             OtherCoachWindows = $otherCoach
             ActiveUser = $activeUser
+            Streaming = $stream
+            StreamingSummary = $streamSummary
             IdleSeconds = $idle.IdleSeconds
             DriverInputMatched = $idle.DriverInputMatched
             Foreground = $fg
@@ -870,6 +861,8 @@ function Test-DesktopPreflight(
         DirtyWindows = @()
         OtherCoachWindows = $otherCoach
         ActiveUser = $null
+        Streaming = $stream
+        StreamingSummary = $streamSummary
         IdleSeconds = $idle.IdleSeconds
         DriverInputMatched = $idle.DriverInputMatched
         Foreground = $fg

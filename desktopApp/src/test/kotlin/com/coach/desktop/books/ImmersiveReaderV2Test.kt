@@ -380,4 +380,77 @@ class ImmersiveReaderV2Test {
         waitForIdle()
         assertEquals(1, controller.state.value.page)
     }
+
+    @Test
+    fun pureReadWideTextFillsViewportAcross720DpColumnsWithSingleLayer() {
+        val dir = Files.createTempDirectory("coach-v2-pure-wide-text")
+        try {
+            val mdFile = dir.resolve("long-book.md")
+            val body = (1..260).joinToString("\n\n") { idx ->
+                if (idx % 90 == 1) "# Chapter ${(idx / 90) + 1} Synthetic Topic\n\nParagraph $idx explains equilibrium, supply, demand, and empirical bounds cleanly across columns."
+                else "Paragraph $idx explains equilibrium, supply, demand, and empirical bounds cleanly across columns."
+            }
+            Files.writeString(mdFile, body)
+            val library = TextbookLibrary(dir.resolve("lib"))
+            val book = library.importBook(mdFile)
+            library.saveTextView(book.id, true)
+            for ((label, w, h, d) in listOf(
+                listOf("1920x1080", 1920f, 1080f, 1f),
+                listOf("2880x1800", 2880f, 1800f, 1.5f),
+            )) {
+                val widthPx = w as Float
+                val heightPx = h as Float
+                val densityVal = d as Float
+                val controller = TextbookController(library)
+                runBlocking {
+                    controller.load()
+                    controller.openBook(book.id, 1)
+                }
+                runSkikoComposeUiTest(size = Size(widthPx, heightPx), density = Density(densityVal)) {
+                    setContent { Box(Modifier.fillMaxSize()) { WindowsTextbookHost(controller, chooseBook = { null }) } }
+                    waitUntil(timeoutMillis = 10_000) { controller.state.value.screen == BookScreen.READER }
+                    waitForIdle()
+                    if (onAllNodesWithTag("immersive-top-hud").fetchSemanticsNodes().isNotEmpty()) {
+                        onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                        waitUntil(timeoutMillis = 5_000) {
+                            onAllNodesWithTag("immersive-top-hud").fetchSemanticsNodes().isEmpty() &&
+                                onAllNodesWithTag("immersive-bottom-hud").fetchSemanticsNodes().isEmpty()
+                        }
+                        waitForIdle()
+                    }
+                    onNodeWithTag("immersive-progress-hairline").assertExists()
+                    val readerRect = onNodeWithTag("reader-page").fetchSemanticsNode().boundsInRoot
+                    val turnRect = onNodeWithTag("book-page-turn").fetchSemanticsNode().boundsInRoot
+                    assertTrue(
+                        turnRect.width >= readerRect.width - 4f,
+                        "$label: book-page-turn width ${turnRect.width} must match reader-page width ${readerRect.width} for 1-layer pure read",
+                    )
+                    val sheets = listOf("book-sheet-0", "book-sheet-1", "book-sheet-2").map { tag ->
+                        onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
+                    }
+                    sheets.forEachIndexed { idx, rect ->
+                        assertTrue(rect.width / densityVal <= 720.5f, "$label sheet-$idx exceeds 720dp: ${rect.width / densityVal}")
+                    }
+                    val textArea = listOf("reader-text", "reader-text-right", "reader-text-col-2")
+                        .flatMap { onAllNodesWithTag(it).fetchSemanticsNodes() }
+                        .sumOf { n -> (n.boundsInRoot.width * n.boundsInRoot.height).toDouble() }
+                    val ratio = textArea / (widthPx * heightPx)
+                    assertTrue(ratio >= 0.90, "$label pure-read text body ratio $ratio must be >= 0.90")
+
+                    val beforeText = onNodeWithTag("reader-text").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().text
+                    onNodeWithTag("reader-page").performSemanticsAction(SemanticsActions.RequestFocus)
+                    onNodeWithTag("reader-page").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.DirectionRight) }
+                    waitForIdle()
+                    val afterText = onNodeWithTag("reader-text").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().text
+                    assertNotEquals(beforeText, afterText, "$label: DirectionRight should advance 3-column spread")
+                    onNodeWithTag("reader-page").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.DirectionLeft) }
+                    waitForIdle()
+                    val backText = onNodeWithTag("reader-text").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().text
+                    assertEquals(beforeText, backText, "$label: DirectionLeft should return to initial spread")
+                }
+            }
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
 }

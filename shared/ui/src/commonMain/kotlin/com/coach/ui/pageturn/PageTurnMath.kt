@@ -24,11 +24,11 @@ fun shouldCompleteTurn(progress: Float, velocityAlongTurn: Float, flingPxPerSec:
         else -> progress >= 0.5f
     }
 
-/** 位置规整：双页时第一页下标取偶数，总在 [0, last] 内。 */
+/** 位置规整：多栏时第一页下标按栏数对齐，总在 [0, last] 内。 */
 fun normalizePosition(position: Int, pageCount: Int, columns: Int, align: Boolean = true): Int {
     if (pageCount <= 0) return 0
     val p = position.coerceIn(0, pageCount - 1)
-    return if (columns == 2 && align) p - p % 2 else p
+    return if (columns >= 2 && align) p - p % columns else p
 }
 
 /** 前后翻一步后的位置；到头返回 null。 */

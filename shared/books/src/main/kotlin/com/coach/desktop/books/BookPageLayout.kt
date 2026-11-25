@@ -25,6 +25,13 @@ internal fun bookSpread(widthDp: Float, columnDp: Float, mode: BookPageMode, was
     BookPageMode.Auto -> widthDp >= 2 * (columnDp + 112) + 48 - if (wasSpread) 24 else 0
 }
 
+/** 沉浸式宽屏达到对开阈值后按每栏 <= 720dp 连续分栏，占满可用宽度。 */
+internal fun bookImmersiveColumns(widthDp: Float, columnDp: Float, mode: BookPageMode, wasColumns: Int): Int {
+    if (mode == BookPageMode.Single) return 1
+    if (!bookSpread(widthDp, columnDp, mode, wasColumns > 1)) return 1
+    return maxOf(2, kotlin.math.ceil(widthDp / 720f).toInt())
+}
+
 internal data class BookPageTypography(
     val body: TextStyle, val chapter: SpanStyle, val section: SpanStyle,
     val chapterLine: TextUnit, val sectionLine: TextUnit,
@@ -120,6 +127,7 @@ private data class BookPageText(val text: AnnotatedString, val placeholders: Lis
 internal class BookPageLayouter(
     private val measurer: TextMeasurer, private val density: Density, private val typography: BookPageTypography,
     private val pdf: Boolean = false,
+    private val immersive: Boolean = false,
 ) {
     fun layout(pages: List<BookPage>, widthPx: Int, bodyHeightPx: Int,
         highlights: Map<Int, List<IntRange>> = emptyMap(), tableRows: Map<BookIllustration, BookTableRows> = emptyMap(),
@@ -238,7 +246,7 @@ internal class BookPageLayouter(
                 checkCancelled()
                 val opener = firstSheet && chapter.title != null
                 val number = if (opener) bookChapterNumber(chapter.title!!) else null
-                val top = if (opener) bodyHeightPx / 4 else 0
+                val top = if (opener && !immersive) bodyHeightPx / 4 else 0
                 val titleInset = if (number != null) measurer.measure(bookChapterDisplayNumber(number), typography.number).size.width +
                     with(density) { 20.dp.roundToPx() } else 0
                 val sheetStart = start

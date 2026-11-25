@@ -214,6 +214,11 @@ internal fun BookPageView(
     hardPoints: List<Pair<SectionHardPoint, SourceBlock>> = emptyList(),
     onHardPointClick: ((SectionHardPoint, SourceBlock) -> Unit)? = null,
     immersive: Boolean = false,
+    /**
+     * 这本书会出页边「难点」小标（自动导读开、讲解可用）。沉浸模式两边只留 4dp（TON-1854），
+     * 小标没地方放会画到栏外、看不见也点不到；这时每栏外侧留一条小标栏。按开关定、不等导读回来，免得正文中途重排。
+     */
+    hardPointGutter: Boolean = false,
 ) {
     var preview by remember(book.id, libraryDirectory) { mutableStateOf<BookFigurePreview?>(null) }
     preview?.let { BookFigureDialog(it) { preview = null } }
@@ -277,7 +282,8 @@ internal fun BookPageView(
             else -> minOf(maxWidth / 2, column + 112.dp)
         }
         val leftInset = if (immersive) minOf(4.dp, sheetWidth * 0.008f) else 64.dp
-        val rightInset = if (immersive) minOf(4.dp, sheetWidth * 0.008f) else if (spread) 48.dp else 64.dp
+        val rightInset = if (immersive && hardPointGutter) 48.dp
+            else if (immersive) minOf(4.dp, sheetWidth * 0.008f) else if (spread) 48.dp else 64.dp
         val widthPx = with(density) { (sheetWidth - leftInset - rightInset).roundToPx().coerceAtLeast(1) }
         val bodyHeight = with(density) { (maxHeight - if (immersive) 8.dp else 116.dp).roundToPx().coerceAtLeast(1) }
         val failed = remember(book.id, libraryDirectory) { mutableStateListOf<BookIllustration>() }
@@ -529,7 +535,8 @@ internal fun BookPageView(
                                         BookSheet(book, page, typography, measurer, widthPx,
                                             if (spread && side == visibleColumns - 1) rightInset else leftInset,
                                             remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
-                                            topMargin = if (page.opener) openerTopMargin else topMargin, rendered = rendered) { failed.add(it) }
+                                            topMargin = if (page.opener) openerTopMargin else topMargin,
+                                            lastColumn = spread && side == visibleColumns - 1, rendered = rendered) { failed.add(it) }
                                     }
                                 }
                             }
@@ -591,7 +598,8 @@ internal fun BookPageView(
                                 BookSheet(book, page, typography, measurer, widthPx,
                                     if (spread && side == visibleColumns - 1) rightInset else leftInset,
                                     remaining, spread, side, libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
-                                    topMargin = if (page.opener) openerTopMargin else topMargin, rendered = rendered) { failed.add(it) }
+                                    topMargin = if (page.opener) openerTopMargin else topMargin,
+                                    lastColumn = spread && side == visibleColumns - 1, rendered = rendered) { failed.add(it) }
                             }
                         }
                     }
@@ -696,6 +704,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
     hardPoints: List<Pair<SectionHardPoint, SourceBlock>> = emptyList(),
     onHardPointClick: ((SectionHardPoint, SourceBlock) -> Unit)? = null,
     topMargin: Dp = 52.dp,
+    lastColumn: Boolean = spread && side == 1,
     rendered: MutableMap<Int, TextLayoutResult>,
     onMissing: (BookIllustration) -> Unit) {
     val density = LocalDensity.current
@@ -755,7 +764,8 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
     if (hardPoints.isNotEmpty() && onHardPointClick != null) DisableSelection {
         var lastMarkerTopPx = -1000f
         val minGapPx = with(density) { 28.dp.toPx() }
-        val markerX = if (spread && side == 1) 10.dp else inset + column + 8.dp
+        // 多栏时最后一栏的宽边距在左（起始边距用 rightInset），其余栏的宽边距在右。
+        val markerX = if (lastColumn) 10.dp else inset + column + 8.dp
         val pillShape = RoundedCornerShape(CoachV7.Radius.s)
         val pillBg = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
         for (run in page.runs) {

@@ -1475,6 +1475,7 @@ internal fun TextbookReader(
                             }
                         },
                         immersive = true,
+                        hardPointGutter = autoGuide && autoExplain && explainer.identity != null,
                     )
                 } else if (originalPdf) {
                     val citation = if (boxes != null && located is com.coach.desktop.reader.Located.Found)

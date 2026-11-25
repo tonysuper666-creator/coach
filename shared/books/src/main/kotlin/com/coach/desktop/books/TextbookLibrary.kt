@@ -1828,7 +1828,10 @@ internal class TextbookLibrary(
                     db.prepareStatement("DELETE FROM collection_materials WHERE material_id=?").use { it.setString(1, bookId); it.executeUpdate() }
                 }
                 MasteryStore.deleteForBook(db, bookId)
-                BookUploadQueueStore.markDeleteOrDropForAccount(db, bookId, initiatingAccountKey, clock.millis())
+                val resolvedAccountKey = initiatingAccountKey?.let { key ->
+                    BookUploadQueueStore.boundAccountKey(db, key) ?: key
+                }
+                BookUploadQueueStore.markDeleteOrDropForAccount(db, bookId, resolvedAccountKey, clock.millis())
                 keepOriginalFile = BookUploadQueueStore.hasPendingUploadRequiringOriginal(db, bookId)
                 val hasVisualReviews = db.createStatement().use { s -> s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='book_pdf_visual_reviews'").use { it.next() } }
                 if (hasVisualReviews) db.prepareStatement("DELETE FROM book_pdf_visual_reviews WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }
@@ -2658,6 +2661,14 @@ internal class TextbookLibrary(
         db.prepareStatement("SELECT import_account_key FROM books WHERE id=?").use { sql ->
             sql.setString(1, bookId)
             sql.executeQuery().use { rs -> if (rs.next()) rs.getString(1)?.takeIf(String::isNotBlank) else null }
+        }
+    }
+
+    @Synchronized internal fun cancelAccountUploadIntent(bookId: String, initiatingAccountKey: String?) {
+        if (initiatingAccountKey == null) return
+        database().use { db ->
+            val resolvedAccountKey = BookUploadQueueStore.boundAccountKey(db, initiatingAccountKey) ?: initiatingAccountKey
+            BookUploadQueueStore.markDeleteOrDropForAccount(db, bookId, resolvedAccountKey, clock.millis())
         }
     }
 

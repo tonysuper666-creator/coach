@@ -118,11 +118,20 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         runCatching { uploadCoordinator.retryBook(localBookId) }
     }
 
+    private fun persistImportOwnerIfNew(staged: TextbookLibrary.StagedBookImport, initiatingAccountKey: String?) {
+        if (!staged.alreadyExisted && initiatingAccountKey != null) {
+            val effectiveAccountKey = runCatching { library.boundUploadAccountKey(initiatingAccountKey) }.getOrNull()
+                ?: initiatingAccountKey
+            runCatching { library.saveImportAccountKey(staged.book.id, effectiveAccountKey) }
+        }
+    }
+
     private fun enqueueBookForUnifiedUpload(book: Textbook, initiatingAccountKey: String? = null) {
         if (unifiedUploadClient == null) return
         backgroundScope.launch {
             runCatching {
-                val accountKey = initiatingAccountKey ?: uploadCoordinator.resolveInitiatingAccountKey()
+                val rawAccountKey = initiatingAccountKey ?: uploadCoordinator.resolveInitiatingAccountKey()
+                val accountKey = rawAccountKey?.let { key -> library.boundUploadAccountKey(key) ?: key }
                 if (accountKey != null) {
                     uploadCoordinator.enqueueBookForAccount(
                         accountKey = accountKey,
@@ -301,6 +310,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 for (path in paths) {
                     val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
                     val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
+                    persistImportOwnerIfNew(staged, initiatingAccountKey)
                     enqueueBookForUnifiedUpload(staged.book, initiatingAccountKey)
                     lastBook = staged.book
                 }
@@ -362,6 +372,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     if (kind == CollectionKind.COURSE && !staged.alreadyExisted) {
                         library.setBookShowStandalone(staged.book.id, false)
                     }
+                    persistImportOwnerIfNew(staged, initiatingAccountKey)
                     enqueueBookForUnifiedUpload(staged.book, initiatingAccountKey)
                     importedBooks += staged.book
                 }
@@ -495,6 +506,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 for (path in newFiles) {
                     val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
                     val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
+                    persistImportOwnerIfNew(staged, initiatingAccountKey)
                     enqueueBookForUnifiedUpload(staged.book, initiatingAccountKey)
                     importedIds += staged.book.id
                 }
@@ -662,6 +674,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             var staged: TextbookLibrary.StagedBookImport? = null
             var stagedNotified = false
             var initiatingAccountKey: String? = capturedAccountAtLaunch
+            var createdAccountUploadRow = false
             fun releaseOnce() {
                 if (!stagedNotified) {
                     stagedNotified = true
@@ -682,21 +695,29 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 staged = result
                 releaseOnce()
                 val book = result.book
-                if (!result.alreadyExisted && initiatingAccountKey != null) {
-                    runCatching { library.saveImportAccountKey(book.id, initiatingAccountKey) }
-                }
+                persistImportOwnerIfNew(result, initiatingAccountKey)
                 control.check()
-                if (!result.alreadyExisted && initiatingAccountKey != null && unifiedUploadClient != null) {
-                    runCatching {
+                val effectiveAccountKey = initiatingAccountKey?.let { key ->
+                    runCatching { library.boundUploadAccountKey(key) }.getOrNull() ?: key
+                }
+                if (effectiveAccountKey != null && unifiedUploadClient != null) {
+                    val accountHadUploadRecord = runCatching {
+                        val existing = library.readUploadEntry(effectiveAccountKey, book.id)
+                        existing != null && existing.state != BookUploadState.PENDING_DELETE
+                    }.getOrDefault(false)
+                    val enqueued = runCatching {
                         uploadCoordinator.enqueueBookForAccount(
-                            accountKey = initiatingAccountKey,
+                            accountKey = effectiveAccountKey,
                             localBookId = book.id,
                             fileSha256 = book.id,
                             format = book.format,
                             title = book.title,
                         )
+                    }.isSuccess
+                    if (enqueued && !accountHadUploadRecord) {
+                        createdAccountUploadRow = true
                     }
-                    if (!control.isCancelled() && initiatingAccountKey == uploadCoordinator.currentAccountKey()) {
+                    if (!control.isCancelled() && effectiveAccountKey == uploadCoordinator.currentAccountKey()) {
                         syncBookUploads()
                     }
                 }
@@ -841,10 +862,10 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 runOcrLoop(book.id, control, deleteOnEmptyFailure = !result.alreadyExisted)
             } catch (_: BookImportCancelled) {
                 releaseOnce()
-                handleCancelledImport(staged?.book?.id, staged?.alreadyExisted == false, initiatingAccountKey)
+                handleCancelledImport(staged?.book?.id, staged?.alreadyExisted == false, initiatingAccountKey, cancelAccountUploadRow = createdAccountUploadRow)
             } catch (cancel: CancellationException) {
                 releaseOnce()
-                handleCancelledImport(staged?.book?.id, staged?.alreadyExisted == false, initiatingAccountKey)
+                handleCancelledImport(staged?.book?.id, staged?.alreadyExisted == false, initiatingAccountKey, cancelAccountUploadRow = createdAccountUploadRow)
                 throw cancel
             } catch (failure: Exception) {
                 releaseOnce()
@@ -944,11 +965,19 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         bookId: String?,
         deleteLocalBook: Boolean,
         initiatingAccountKey: String?,
+        cancelAccountUploadRow: Boolean = false,
     ) = withContext(NonCancellable) {
-        if (bookId != null && deleteLocalBook) {
-            runCatching { library.deleteBook(bookId, initiatingAccountKey) }
+        if (bookId != null && (deleteLocalBook || cancelAccountUploadRow)) {
+            if (deleteLocalBook) {
+                runCatching { library.deleteBook(bookId, initiatingAccountKey) }
+            } else {
+                runCatching { library.cancelAccountUploadIntent(bookId, initiatingAccountKey) }
+            }
             runCatching { uploadCoordinator.refreshCurrentAccountStatuses() }
-            if (initiatingAccountKey != null && initiatingAccountKey == uploadCoordinator.currentAccountKey() && unifiedUploadClient != null) {
+            val effectiveAccountKey = initiatingAccountKey?.let { key ->
+                runCatching { library.boundUploadAccountKey(key) }.getOrNull() ?: key
+            }
+            if (effectiveAccountKey != null && effectiveAccountKey == uploadCoordinator.currentAccountKey() && unifiedUploadClient != null) {
                 syncBookUploads()
             }
         }
@@ -990,7 +1019,10 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         if (shouldDelete) {
             runCatching { library.deleteBook(checkNotNull(bookId), initiatingAccountKey) }
             runCatching { uploadCoordinator.refreshCurrentAccountStatuses() }
-            if (initiatingAccountKey != null && initiatingAccountKey == uploadCoordinator.currentAccountKey() && unifiedUploadClient != null) {
+            val effectiveAccountKey = initiatingAccountKey?.let { key ->
+                runCatching { library.boundUploadAccountKey(key) }.getOrNull() ?: key
+            }
+            if (effectiveAccountKey != null && effectiveAccountKey == uploadCoordinator.currentAccountKey() && unifiedUploadClient != null) {
                 syncBookUploads()
             }
         }
@@ -2018,6 +2050,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     val useTier0 = library.lazyPdfExtras && fileName.endsWith(".pdf", ignoreCase = true)
                     val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
                     if (!staged.alreadyExisted) library.setBookShowStandalone(staged.book.id, false)
+                    persistImportOwnerIfNew(staged, initiatingAccountKey)
                     enqueueBookForUnifiedUpload(staged.book, initiatingAccountKey)
                     importedIds += staged.book.id
                 }

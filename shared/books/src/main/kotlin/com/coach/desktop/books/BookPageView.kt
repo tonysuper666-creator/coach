@@ -68,6 +68,9 @@ import com.coach.ui.v7.LocalV7Fonts
 import com.coach.ui.v7.LocalV7ReducedMotion
 import com.coach.ui.v7.v7FocusRing
 import androidx.compose.ui.graphics.ImageBitmap
+import kotlin.math.roundToInt
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import java.nio.file.Path
@@ -244,16 +247,53 @@ internal fun BookPageView(
     val clipboard = LocalClipboard.current
     val pageClipboard = remember(clipboard) { PageClipboard(clipboard) }
     val latestOnSelectText by rememberUpdatedState(onSelectText)
-    val topMargin = if (immersive) 8.dp else 52.dp
-    val openerTopMargin = if (immersive) 2.dp else topMargin
+    val windowsPaged = immersive && readMode == BookReadMode.Paged &&
+        System.getProperty("os.name").orEmpty().startsWith("Windows")
+    // Reflowed PDF already has chapter and page navigation in the reader HUD.
+    val useRunningHeader = !(windowsPaged && book.format == "pdf")
+    val topMargin = when {
+        !useRunningHeader -> 0.dp
+        immersive -> 8.dp
+        else -> 52.dp
+    }
+    val openerTopMargin = if (immersive) minOf(2.dp, topMargin) else topMargin
     val openerExtraHeightPx = if (immersive) with(density) { (topMargin - openerTopMargin).roundToPx() } else 0
     val topMarginPx = with(density) { topMargin.toPx() }
     val openerTopMarginPx = with(density) { openerTopMargin.toPx() }
+    // Match the Windows page to a whole number of text baselines. Scale both axes together
+    // so source hit testing and glyph proportions follow the same layout as the reader.
+    val baselineGrid = if (windowsPaged) {
+        val pitch = remember(measurer, body) {
+            val sample = measurer.measure("Mg\nMg", body)
+            (sample.lastBaseline - sample.firstBaseline).roundToInt().coerceAtLeast(1)
+        }
+        Modifier.layout { measurable, constraints ->
+            val usable = constraints.maxHeight - topMargin.roundToPx()
+            val rows = (usable.toFloat() / pitch).roundToInt()
+            val gridHeight = rows * pitch + topMargin.roundToPx()
+            if (rows < 8 || !constraints.hasBoundedWidth || !constraints.hasBoundedHeight) {
+                val page = measurable.measure(constraints)
+                layout(page.width, page.height) { page.place(0, 0) }
+            } else {
+                val zoom = constraints.maxHeight.toFloat() / gridHeight
+                val gridWidth = (constraints.maxWidth / zoom).roundToInt().coerceAtLeast(1)
+                val page = measurable.measure(Constraints.fixed(gridWidth, gridHeight))
+                layout(constraints.maxWidth, constraints.maxHeight) {
+                    page.placeWithLayer(0, 0) {
+                        transformOrigin = TransformOrigin(0f, 0f)
+                        scaleX = zoom
+                        scaleY = zoom
+                    }
+                }
+            }
+        }
+    } else Modifier
     val paperBg = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
     var pointerActive by remember(state) { mutableStateOf(false) }
     BoxWithConstraints(
         modifier
             .fillMaxSize()
+            .then(baselineGrid)
             .then(if (immersive) Modifier.background(paperBg) else Modifier)
             .pointerInput(state) {
                 awaitPointerEventScope {
@@ -281,11 +321,12 @@ internal fun BookPageView(
             mode == BookPageMode.Spread -> minOf((maxWidth - 48.dp) / 2, column + 112.dp)
             else -> minOf(maxWidth / 2, column + 112.dp)
         }
-        val leftInset = if (immersive) minOf(4.dp, sheetWidth * 0.008f) else 64.dp
+        val edgeInset = if (windowsPaged) 3.dp else 4.dp
+        val leftInset = if (immersive) minOf(edgeInset, sheetWidth * 0.008f) else 64.dp
         val rightInset = if (immersive && hardPointGutter) 48.dp
-            else if (immersive) minOf(4.dp, sheetWidth * 0.008f) else if (spread) 48.dp else 64.dp
+            else if (immersive) leftInset else if (spread) 48.dp else 64.dp
         val widthPx = with(density) { (sheetWidth - leftInset - rightInset).roundToPx().coerceAtLeast(1) }
-        val bodyHeight = with(density) { (maxHeight - if (immersive) 8.dp else 116.dp).roundToPx().coerceAtLeast(1) }
+        val bodyHeight = with(density) { (maxHeight - if (immersive) topMargin else 116.dp).roundToPx().coerceAtLeast(1) }
         val failed = remember(book.id, libraryDirectory) { mutableStateListOf<BookIllustration>() }
         val layoutPages = remember(book.pages, libraryDirectory, failed.toList()) {
             if (libraryDirectory != null && failed.isEmpty()) book.pages else book.pages.map { page ->
@@ -313,7 +354,7 @@ internal fun BookPageView(
                     nearChapterLayoutPages(
                         pages = layoutPages,
                         anchor = state.anchor,
-                        tailPages = NEAR_LAYOUT_PAGES,
+                        tailPages = NEAR_LAYOUT_PAGES * (if (windowsPaged) visibleColumns else 1),
                         maxPages = MAX_NEAR_LAYOUT_PAGES,
                         pdf = pdf,
                         tocNodes = tocForLayout,
@@ -712,7 +753,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
     val column = with(density) { widthPx.toDp() }
     val runningTitle = remember(book, page) { BookBoundaries.runningHeaderTitle(book, page) }
     val compactHeader = topMargin < 44.dp
-    DisableSelection { if (!page.opener && (spread && side == 0 || runningTitle.isNotEmpty())) Text(if (spread && side == 0) book.title else runningTitle,
+    DisableSelection { if (topMargin > 0.dp && !page.opener && (spread && side == 0 || runningTitle.isNotEmpty())) Text(if (spread && side == 0) book.title else runningTitle,
         Modifier.align(Alignment.TopStart).padding(start = inset, top = if (compactHeader) 0.dp else 20.dp).width(column),
         textAlign = androidx.compose.ui.text.style.TextAlign.Center, color = colors.fgTertiary,
         style = MaterialTheme.typography.labelSmall.copy(fontSize = if (compactHeader) 9.5.sp else CoachV7.Size.cap,

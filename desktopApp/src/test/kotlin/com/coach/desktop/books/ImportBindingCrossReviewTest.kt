@@ -9,6 +9,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ImportBindingCrossReviewTest {
@@ -62,10 +63,9 @@ class ImportBindingCrossReviewTest {
         first.onUploadIdentityChanged(remote.sessionKey)?.join()
         first.createCollection(CollectionKind.BOOKLIST, "Sample", existingBookIds = emptyList(), newFiles = listOf(image)).join()
         val id = original.catalog().single().id
-        withTimeout(15000) {
-            while (original.readUploadEntry(remote.verifiedAccount, id)?.serverShelfBookId == null) kotlinx.coroutines.delay(10)
-        }
         val recorded = original.importAccountKey(id)
+        assertEquals(remote.verifiedAccount, recorded)
+        assertNull(original.readUploadEntry(remote.verifiedAccount, id))
         val resumed = CompletableDeferred<Unit>()
         val reopened = TextbookLibrary(dir, ocr = BookOcr { _, control ->
             resumed.complete(Unit)
@@ -83,8 +83,35 @@ class ImportBindingCrossReviewTest {
         }
         withTimeout(15000) { while (second.state.value.importing != null) kotlinx.coroutines.delay(10) }
         second.syncBookUploads().join()
-        assertEquals(1, remote.deletes, "Recorded import owner=" + recorded + ", queue=" +
+        assertTrue(reopened.catalog().isEmpty())
+        assertEquals(0, remote.uploads)
+        assertEquals(0, remote.deletes, "Recorded import owner=" + recorded + ", queue=" +
             reopened.readUploadEntry(remote.verifiedAccount, id)?.state)
+    }
+
+    @Test fun booklistScanUploadsAfterResumedOcrCompletes() = runBlocking {
+        val root = Files.createTempDirectory("review-booklist-complete-")
+        val dir = root.resolve("library")
+        val image = root.resolve("sample.png")
+        ImageIO.write(BufferedImage(32, 32, BufferedImage.TYPE_BYTE_GRAY), "png", image.toFile())
+        val original = TextbookLibrary(dir)
+        val remote = SyntheticRemote()
+        val first = TextbookController(original).apply { unifiedUploadClient = remote }
+        first.onUploadIdentityChanged(remote.sessionKey)?.join()
+        first.createCollection(CollectionKind.BOOKLIST, "Sample", existingBookIds = emptyList(), newFiles = listOf(image)).join()
+        val id = original.catalog().single().id
+        assertEquals(remote.verifiedAccount, original.importAccountKey(id))
+        assertEquals(0, remote.uploads)
+        val reopened = TextbookLibrary(dir, ocr = BookOcr { _, _ -> "Synthetic OCR text" })
+        val second = TextbookController(reopened).apply { unifiedUploadClient = remote }
+        second.onUploadIdentityChanged(remote.sessionKey)?.join()
+        second.load()
+        withTimeout(15000) {
+            while (reopened.readUploadEntry(remote.verifiedAccount, id)?.serverShelfBookId != remote.shelfId) {
+                kotlinx.coroutines.delay(10)
+            }
+        }
+        assertEquals(1, remote.uploads)
     }
 
     @Test fun cancelDuringFirstReconnectUsesVerifiedBinding() = runBlocking {
@@ -94,10 +121,9 @@ class ImportBindingCrossReviewTest {
         ImageIO.write(BufferedImage(32, 32, BufferedImage.TYPE_BYTE_GRAY), "png", source.toFile())
         val original = TextbookLibrary(dir)
         val remote = SyntheticRemote().apply { online = false }
-        val first = TextbookController(original).apply { unifiedUploadClient = remote }
-        first.onUploadIdentityChanged(remote.sessionKey)?.join()
-        first.createCollection(CollectionKind.BOOKLIST, "Sample", existingBookIds = emptyList(), newFiles = listOf(source)).join()
-        val bookId = original.catalog().single().id
+        val bookId = original.stageBookImport(source).book.id
+        original.saveImportAccountKey(bookId, remote.sessionKey)
+        original.enqueueBookUpload(remote.sessionKey, bookId, bookId, "png", "scan")
         assertEquals(remote.sessionKey, original.importAccountKey(bookId))
         val started = CompletableDeferred<Unit>()
         val reopened = TextbookLibrary(dir, ocr = BookOcr { _, control ->

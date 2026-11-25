@@ -550,18 +550,10 @@ class UnifiedBookUploadQueueTest {
             val setupLib = TextbookLibrary(libDir)
             val firstController = TextbookController(setupLib).apply { unifiedUploadClient = remote }
             firstController.onUploadIdentityChanged("sable-alpha")?.join()
-            firstController.createCollection(
-                CollectionKind.BOOKLIST,
-                "Sample",
-                existingBookIds = emptyList(),
-                newFiles = listOf(imageFile),
-            ).join()
-            val importedId = setupLib.catalog().single().id
-            kotlinx.coroutines.withTimeout(15000) {
-                while (setupLib.readUploadEntry("sable-alpha", importedId)?.serverShelfBookId == null) {
-                    kotlinx.coroutines.delay(10)
-                }
-            }
+            val importedId = setupLib.stageBookImport(imageFile).book.id
+            setupLib.saveImportAccountKey(importedId, "sable-alpha")
+            setupLib.enqueueBookUpload("sable-alpha", importedId, importedId, "png", "scan-book")
+            firstController.syncBookUploads().join()
             val alphaShelfId = setupLib.readUploadEntry("sable-alpha", importedId)!!.serverShelfBookId!!
 
             val ocrStarted = kotlinx.coroutines.CompletableDeferred<Unit>()

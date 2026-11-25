@@ -128,6 +128,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
 
     private fun enqueueBookForUnifiedUpload(book: Textbook, initiatingAccountKey: String? = null) {
         if (unifiedUploadClient == null) return
+        if (book.indexState != "READY" || book.hasPendingOcr) return
         backgroundScope.launch {
             runCatching {
                 val rawAccountKey = initiatingAccountKey ?: uploadCoordinator.resolveInitiatingAccountKey()
@@ -153,6 +154,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         initiatingAccountKey: String?,
         isCancelled: () -> Boolean = { false },
     ) {
+        if (book.indexState != "READY" || book.hasPendingOcr) return
         val effectiveAccountKey = initiatingAccountKey?.let { key ->
             runCatching { library.boundUploadAccountKey(key) }.getOrNull() ?: key
         }
@@ -760,8 +762,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                             )
                         }
                     }
-                    enqueueAndSyncCompletedImport(book, initiatingAccountKey) { control.isCancelled() }
-                    launchTier1Indexing(book.id)
+                    launchTier1Indexing(book.id, initiatingAccountKey = initiatingAccountKey)
                     return@launch
                 }
                 if (!book.hasPendingOcr) {
@@ -886,7 +887,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         return job
     }
 
-    private fun resumePendingOcrInBackground(bookId: String): Job {
+    private fun resumePendingOcrInBackground(bookId: String, fallbackAccountKey: String? = null): Job {
         val control = BookImportControl(
             progress = { progress -> mutable.update { it.copy(importing = progress) } },
         )
@@ -914,7 +915,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     }
                     val finalBook = runOcrLoop(bookId, control, deleteOnEmptyFailure = false)
                     control.check()
-                    enqueueAndSyncCompletedImport(finalBook, initiatingAccountKey) { control.isCancelled() }
+                    enqueueAndSyncCompletedImport(finalBook, initiatingAccountKey ?: fallbackAccountKey) { control.isCancelled() }
                 }
             } catch (_: BookImportCancelled) {
                 if (initiatingAccountKey == null) {
@@ -1060,6 +1061,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         bookId: String,
         waitForFirstRender: Boolean = true,
         skipOnContinue: Set<String> = emptySet(),
+        initiatingAccountKey: String? = null,
     ): Job? {
         val indexControl = BookImportControl()
         if (indexingControls.putIfAbsent(bookId, indexControl) != null) {
@@ -1085,9 +1087,13 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         indexing = if (current.indexing?.bookId == bookId) null else current.indexing,
                     )
                 }
-                if (indexed.hasPendingOcr && activeImport == null) {
-                    resumePendingOcrInBackground(indexed.id)
+                if (indexed.hasPendingOcr) {
+                    if (activeImport == null) {
+                        resumePendingOcrInBackground(indexed.id, fallbackAccountKey = initiatingAccountKey)
+                    }
                 } else {
+                    val owner = initiatingAccountKey ?: runCatching { library.importAccountKey(indexed.id) }.getOrNull()
+                    enqueueAndSyncCompletedImport(indexed, owner)
                     ensureUnstructuredBookSectioned(indexed.id)
                 }
                 shouldContinueQueue = true

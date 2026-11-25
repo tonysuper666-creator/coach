@@ -18,7 +18,7 @@ import kotlin.test.*
  * Verification for TON-1822 (#4A & #8A):
  * - #4A: Shelf "继续" card subtitle is plain human language ("书名 · 章名 · 第 x 页"),
  *   shows "上次问：问题前 12 个字…" after asking a question, and never leaks internal IDs or hex hashes.
- * - #8A: Home shows "还没有要复习的。做错的题会在明天出现。" when no reviews are due (never "今日复习已完成"),
+ * - #8A: Home shows "还没有要复习的。做错的题会在这里出现。" when no reviews are due (never "今日复习已完成"),
  *   and shows "今天 N 道，约 M 分钟" when reviews are due, opening the review list on click.
  */
 @OptIn(ExperimentalTestApi::class)
@@ -98,7 +98,7 @@ class ShelfTrustFixTest {
                 assertTrue("第一章 需求与供给" in meta, "Expected chapter title in meta: $meta")
 
                 val emptyReview = nodeText("home-review-done")
-                assertEquals("还没有要复习的。做错的题会在明天出现。", emptyReview)
+                assertEquals("还没有要复习的。做错的题会在这里出现。", emptyReview)
                 onAllNodesWithText("今日复习已完成", substring = true).assertCountEquals(0)
                 capture("01-home-clean-and-honest-review")
             }
@@ -198,7 +198,7 @@ class ShelfTrustFixTest {
                 ready(c) { it.initialized && it.screen == BookScreen.HOME }
 
                 onNodeWithTag("upload-textbook").assertIsDisplayed().assertTextContains("导入文件")
-                onNodeWithTag("home-review-done").assertIsDisplayed().assertTextEquals("还没有要复习的。做错的题会在明天出现。")
+                onNodeWithTag("home-review-done").assertIsDisplayed().assertTextEquals("还没有要复习的。做错的题会在这里出现。")
                 onAllNodesWithText("今日复习已完成", substring = true).assertCountEquals(0)
                 capture("00-empty-home-honest-review")
             }

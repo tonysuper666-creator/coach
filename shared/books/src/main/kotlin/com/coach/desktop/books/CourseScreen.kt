@@ -250,14 +250,6 @@ internal fun CourseScreen(
                                     onUpdateExamProfile(detail.examProfile.copy(examEnabled = true))
                                 },
                             )
-                            DropdownMenuItem(
-                                text = { Text("设置考试日") },
-                                modifier = Modifier.testTag("course-exam-profile-action"),
-                                onClick = {
-                                    courseMenuOpen = false
-                                    examDialogOpen = true
-                                },
-                            )
                         }
                         DropdownMenuItem(
                             text = { Text("查看本课材料清单") },

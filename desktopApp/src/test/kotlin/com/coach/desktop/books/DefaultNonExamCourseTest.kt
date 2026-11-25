@@ -171,7 +171,7 @@ class DefaultNonExamCourseTest {
                 controller.openCourse(courseId)
             }
 
-            // 1 & 2: CourseScreen non-exam -> set exam date -> weekly plan prompt -> skip -> re-enter no prompt
+            // CourseScreen non-exam -> enable exam -> set date -> weekly plan prompt
             runSkikoComposeUiTest(size = Size(1100f, 780f)) {
                 setContent {
                     CoachTheme(false) {
@@ -199,15 +199,23 @@ class DefaultNonExamCourseTest {
                 )
                 shotsDir?.let { savePng(it.resolve("01-non-exam-course-page.png")) }
 
-                // Check 2a: Set exam date on the same course via ⋯ -> 设置考试日
+                // Check 2a: The exam date editor is reachable only after enabling exam mode.
                 onNodeWithTag("course-overflow").performClick()
                 waitForIdle()
+                onNodeWithTag("course-exam-profile-action").assertDoesNotExist()
+                onNodeWithText("设置考试日").assertDoesNotExist()
+                onNodeWithTag("course-enable-exam-action").performClick()
+                waitUntil(timeoutMillis = 15_000) {
+                    controller.state.value.activeCourseDetail?.isExam == true
+                }
+                assertEquals("", controller.state.value.activeCourseDetail?.examProfile?.examDate)
+                onNodeWithTag("course-overflow").performClick()
                 onNodeWithTag("course-exam-profile-action").performClick()
                 waitForIdle()
                 onNodeWithTag("exam-profile-date-input").performTextInput("2027-01-15")
                 onNodeWithTag("exam-profile-save").performClick()
                 waitUntil(timeoutMillis = 15_000) {
-                    onAllNodesWithTag("course-exam-scope-line").fetchSemanticsNodes().isNotEmpty()
+                    controller.state.value.activeCourseDetail?.examProfile?.examDate == "2027-01-15"
                 }
                 waitForIdle()
 

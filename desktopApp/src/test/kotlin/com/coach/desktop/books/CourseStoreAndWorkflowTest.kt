@@ -1,7 +1,16 @@
 package com.coach.desktop.books
 
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.pdmodel.PDPage
+import org.apache.pdfbox.pdmodel.PDPageContentStream
+import org.apache.pdfbox.pdmodel.font.PDType1Font
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.destination.PDPageFitDestination
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDDocumentOutline
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem
 import java.math.BigDecimal
 import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -11,6 +20,56 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class CourseStoreAndWorkflowTest {
+    @Test
+    fun textbookCourseSkipsFrontMatterAndKeepsTheBodyTopicWhenRealigned() {
+        val dir = Files.createTempDirectory("coach-course-body-start-")
+        try {
+            val library = TextbookLibrary(dir.resolve("library"), lazyPdfExtras = false)
+            val book = library.stageBookImport(textbookWithFrontMatter(dir)).book
+            assertEquals(32, book.bodyStart.importPage)
+            assertEquals(32, book.readingPage)
+            val authorIntro = book.tocNodes.first { it.startPage == 18 }
+            val chapterOne = book.tocNodes.first { it.startPage == 32 }
+            assertEquals(TocNodeKind.FRONT_MATTER, authorIntro.kind)
+
+            val courseId = library.withCourseDatabase { db ->
+                val (cid, _) = CourseStore.createCourse(db, "植物学", CourseExamProfile(), listOf(book.id))
+                val legacyTopics = listOf(authorIntro, chapterOne).mapIndexed { index, node ->
+                    CourseTopicPlan(
+                        weekLabel = "第 ${index + 1} 章",
+                        weekNum = null,
+                        ord = (index + 1) * 10,
+                        title = node.title,
+                        examStatus = CourseTopicStatus.EXAMINABLE,
+                        examWeight = 1.0,
+                        sources = listOf(CourseTopicLinkPlan(
+                            book.id, node.id, node.startPage, node.endPage, CourseMaterialRole.CORE_TEXTBOOK, node.title,
+                        )),
+                    )
+                }
+                CourseStore.applyAlignmentRespectingLocks(db, cid, CourseAlignmentPlan(topics = legacyTopics))
+                cid
+            }
+            val reopened = TextbookLibrary(library.directory).courseDetail(courseId)
+            val first = reopened.examinableTopics.single()
+            assertEquals(chapterOne.id, first.sources.single().tocNodeId)
+            assertEquals(book.bodyStart.importPage, first.sources.single().startPage)
+
+            val realigned = library.withCourseDatabase { db ->
+                CourseStore.savePracticeDraft(db, courseId, CourseTopicPracticeDraft(
+                    first.topicId, text = "保留的答题草稿", activeSourceBookId = book.id, activePage = 33,
+                ))
+                CourseAutoAligner.alignLocally(db, courseId)
+            }
+            assertEquals(listOf(32, 39), realigned.examinableTopics.map { it.sources.single().startPage })
+            assertEquals("第 1 章", realigned.examinableTopics.first().weekLabel)
+            assertEquals(first.topicId, realigned.examinableTopics.first().topicId)
+            assertEquals("保留的答题草稿", realigned.examinableTopics.first().practiceDraft?.text)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
 
     @Test
     fun locksManualWeekAndTombstonesAcrossRealignmentAndPreservesBookOnRemove() {
@@ -231,4 +290,43 @@ class CourseStoreAndWorkflowTest {
             dir.toFile().deleteRecursively()
         }
     }
+}
+
+internal fun textbookWithFrontMatter(dir: Path): Path {
+    val file = dir.resolve("Botany Textbook.pdf")
+    val headings = mapOf(1 to "Copyright", 18 to "About the Authors", 19 to "Preface",
+        32 to "Chapter 1 Light and Leaves", 39 to "Chapter 2 Plant Cells")
+    PDDocument().use { pdf ->
+        pdf.documentInformation.title = "Botany Textbook"
+        val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+        val outline = PDDocumentOutline().also { pdf.documentCatalog.documentOutline = it }
+        for (number in 1..40) {
+            val page = PDPage()
+            pdf.addPage(page)
+            headings[number]?.let { heading ->
+                outline.addLast(PDOutlineItem().apply {
+                    title = heading
+                    destination = PDPageFitDestination().apply { this.page = page }
+                })
+            }
+            PDPageContentStream(pdf, page).use { out ->
+                out.beginText()
+                out.setFont(font, 18f)
+                out.newLineAtOffset(50f, 710f)
+                out.showText(headings[number] ?: "Botany textbook page $number")
+                out.setFont(font, 11f)
+                for (line in listOf(
+                    "Photosynthesis uses light to transform water and carbon dioxide into stored sugars.",
+                    "Chlorophyll in leaf cells absorbs light and transfers the energy to other molecules.",
+                    "Plants can use the stored sugars to grow leaves, roots, and other tissues.",
+                )) {
+                    out.newLineAtOffset(0f, -25f)
+                    out.showText(line)
+                }
+                out.endText()
+            }
+        }
+        pdf.save(file.toFile())
+    }
+    return file
 }

@@ -115,7 +115,7 @@ class SingleColumnHomeAndImportTest {
                 onNodeWithTag("host-search").assertIsDisplayed()
                 onNodeWithTag("home-focus-card").assertIsDisplayed()
                 onNodeWithTag("home-read").assertTextContains("继续")
-                onNodeWithTag("home-review-done").assertTextContains("还没有要复习的。做错的题会在明天出现。")
+                onNodeWithTag("home-review-done").assertTextContains("还没有要复习的。做错的题会在这里出现。")
                 onNodeWithText("信息与激励").assertExists()
             }
         } finally {

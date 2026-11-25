@@ -14,6 +14,7 @@ import com.coach.desktop.books.*
 import kotlinx.coroutines.runBlocking
 import org.jetbrains.skiko.SkiaLayer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -22,8 +23,11 @@ import org.junit.Test
 import java.awt.Component
 import java.awt.Container
 import java.awt.GraphicsEnvironment
+import java.awt.Rectangle
+import java.awt.Robot
 import java.nio.file.Files
 import java.nio.file.Path
+import javax.imageio.ImageIO
 import javax.swing.SwingUtilities
 
 /**
@@ -36,6 +40,126 @@ import javax.swing.SwingUtilities
  */
 @OptIn(InternalComposeUiApi::class, ExperimentalComposeUiApi::class, ComposeToolingApi::class)
 class CourseLiveWindowTest {
+
+    @Test
+    fun textbookOnlyCourseOpensFirstChapterAndWrongAnswersAppearOnHome() {
+        assumeTrue("Live ComposeWindow verification requires non-headless desktop display", !GraphicsEnvironment.isHeadless())
+        val root = Files.createTempDirectory("coach-ton1849-live-window-")
+        val dark = System.getenv("COACH_TON1849_THEME") == "dark"
+        val window = edt {
+            ComposeWindow().apply {
+                title = "LearningCoach · TON-1849"
+                val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
+                setBounds(screen.x, screen.y, minOf(1120, screen.width), minOf(840, screen.height))
+            }
+        }
+        try {
+            val library = TextbookLibrary(root.resolve("library"), lazyPdfExtras = false)
+            val controller = TextbookController(library)
+            val offlineExplainer = object : BookExplainer(library = library) {
+                override suspend fun load() { loaded = true }
+            }
+            runBlocking { controller.load() }
+            ReadingSettings(library.directory).choosePaper(if (dark) PaperColor.DARK else PaperColor.LIGHT)
+            edt {
+                window.setContent {
+                    WindowsTextbookHost(
+                        controller,
+                        answerExplain = answerExplainWith(offlineExplainer, ExplainConsent(library.directory)),
+                        bookExplainer = offlineExplainer,
+                    ) { null }
+                }
+                window.isVisible = true
+            }
+            waitFor("empty review card", window) { node(window, "home-review-done") != null }
+            assertEquals("还没有要复习的。做错的题会在这里出现。", text(window, "home-review-done"))
+            captureTon1849Window(window, "empty-review")
+
+            val book = library.stageBookImport(textbookWithFrontMatter(root)).book
+            val courseId = library.withCourseDatabase { db ->
+                val (cid, _) = CourseStore.createCourse(db, "植物学基础", CourseExamProfile(), listOf(book.id))
+                CourseAutoAligner.alignLocally(db, cid)
+                cid
+            }
+            runBlocking { controller.openBook(book.id); controller.back() }
+            click(window, "home-read")
+            waitFor("shelf reader", window) { controller.state.value.screen == BookScreen.READER }
+            val shelfPage = controller.state.value.page
+            assertEquals(32, shelfPage)
+            runBlocking { controller.openCourse(courseId) }
+            waitFor("course overview", window) { node(window, "course-primary-cta") != null }
+            assertTrue(text(window, "course-primary-cta").contains("从第一章开始"))
+            click(window, "course-primary-cta")
+            waitFor("course overview reader", window) { controller.state.value.screen == BookScreen.READER }
+            assertEquals(shelfPage, controller.state.value.page)
+            runBlocking { controller.back() }
+
+            click(window, "course-overflow")
+            waitFor("non-exam overflow", window) { node(window, "course-enable-exam-action") != null }
+            assertNull(node(window, "course-exam-profile-action"))
+            captureTon1849Window(window, "course-menu")
+
+            click(window, "course-enable-exam-action")
+            waitFor("exam mode", window) { node(window, "course-weekly-plan-btn") != null }
+            click(window, "course-overflow")
+            click(window, "course-exam-profile-action")
+            waitFor("exam date editor", window) { node(window, "exam-profile-date-input") != null }
+            click(window, "exam-profile-save")
+            click(window, "course-weekly-plan-btn")
+            waitFor("weekly plan", window) { node(window, "course-schedule-primary-cta") != null }
+            assertTrue(text(window, "course-schedule-primary-cta").contains("Chapter 1 Light and Leaves"))
+            captureTon1849Window(window, "weekly-plan")
+            click(window, "course-schedule-primary-cta")
+            waitFor("weekly plan reader", window) { controller.state.value.screen == BookScreen.READER }
+            assertEquals(shelfPage, controller.state.value.page)
+            captureTon1849Window(window, "first-chapter")
+
+            val activeBook = requireNotNull(controller.state.value.book)
+            val lesson = activeBook.lessons.first { it.firstPage == shelfPage }
+            val practice = requireNotNull(testPracticeFixture(activeBook, lesson, QuestionMode.CHOICE))
+            val wrong = practice.options.first { it != practice.answer }
+            runBlocking {
+                controller.recordSectionQuizAnswer(lesson, 0, practice, PracticeAnswer(wrong, true))
+                controller.back()
+            }
+            click(window, "course-back")
+            click(window, "home-review-start")
+            waitFor("today's review", window) { node(window, "local-review-item-0") != null }
+            click(window, "local-review-item-0")
+            waitFor("correct review destination", window) { controller.state.value.screen == BookScreen.REVIEWING }
+            assertEquals(PracticeAnswer(wrong, true), library.answer(activeBook.id, lesson.id, QuestionMode.CHOICE))
+            waitFor("previous wrong answer shown", window) {
+                edt {
+                    nodes(window).any { node ->
+                        node.config.getOrNull(SemanticsProperties.Text).orEmpty().any { it.text == "上次作答：$wrong" }
+                    }
+                }
+            }
+            captureTon1849Window(window, "same-day-review")
+            println("TON-1849_LIVE_PASS: overflow, shelf/course/plan page $shelfPage, same-day review")
+        } finally {
+            edt { window.dispose() }
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    private fun text(window: ComposeWindow, tag: String): String = edt {
+        val target = requireNotNull(node(window, tag))
+        val texts = target.config.getOrNull(SemanticsProperties.Text)
+            ?: target.children.flatMap { it.config.getOrNull(SemanticsProperties.Text).orEmpty() }
+        texts.joinToString(" ") { it.text }
+    }
+
+    private fun captureTon1849Window(window: ComposeWindow, name: String) {
+        val out = System.getenv("COACH_TON1849_SHOTS_DIR")?.let(Path::of) ?: return
+        Thread.sleep(500) // Let the native transition settle before capturing the window.
+        val bounds = edt {
+            window.renderImmediately()
+            Rectangle(window.contentPane.locationOnScreen, window.contentPane.size)
+        }
+        Files.createDirectories(out)
+        check(ImageIO.write(Robot().createScreenCapture(bounds), "png", out.resolve("$name.png").toFile()))
+    }
 
     @Test
     fun courseWorkflowCorrectionsTimestampsAndColdRestartEssayDraft() {

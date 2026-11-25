@@ -580,6 +580,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 hinge = hinge,
                                 onExportNotes = onExportNotes,
                                 onNoteSession = { noteReader = it },
+                                onBrowsePage = { page ->
+                                    run { controller.page(page, commitProgress = false) }
+                                },
                                 onPage = { page ->
                                     val restoreFocus = ui.source != null && readerHasFocus
                                     val startBookId = ui.book?.id; val startSource = ui.source

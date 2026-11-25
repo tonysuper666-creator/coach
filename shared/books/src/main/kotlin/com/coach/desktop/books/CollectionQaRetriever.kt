@@ -171,16 +171,84 @@ internal object CollectionQaRetriever {
         question: String,
         currentBookId: String? = null,
     ): RetrievalBundle {
-        val collectionRow = loadCollection(db, collectionId)
-            ?: ActiveAskCollection(collectionId, CollectionKind.COURSE, "当前合集")
-        val materials = loadCollectionMaterials(db, collectionId)
+        val isVirtualReadLibrary = collectionId == CollectionQaVirtualCollections.READ_LIBRARY_ID
+        val collectionRow = if (isVirtualReadLibrary) {
+            CollectionQaVirtualCollections.readLibraryCollection()
+        } else {
+            loadCollection(db, collectionId)
+                ?: ActiveAskCollection(collectionId, CollectionKind.COURSE, "当前合集")
+        }
+        val materials = if (isVirtualReadLibrary) {
+            loadVirtualReadLibraryMaterials(db)
+        } else {
+            loadCollectionMaterials(db, collectionId, collectionRow.kind)
+        }
         val shortLabelByBookId = materials.associate { it.bookId to it.shortLabel }
         val docLabelByBookId = materials.associate { it.bookId to it.docLabel }
 
         val allowedPagesByBook = HashMap<String, Set<Int>>()
         var unreadPagesFilteredOut = 0
 
-        if (collectionRow.kind == CollectionKind.BOOKLIST) {
+        if (isVirtualReadLibrary) {
+            val activityBooks = loadBooksWithReadActivity(db, currentBookId)
+            val fallbackAllBooks = activityBooks.isEmpty()
+            for (mat in materials) {
+                val allPages = loadAllPageNumbers(db, mat.bookId)
+                if (allPages.isEmpty()) {
+                    allowedPagesByBook[mat.bookId] = emptySet()
+                    continue
+                }
+                val progressMap = BooklistProgressStore.loadForBook(db, mat.bookId)
+                val readIds = progressMap.values.filter { it.readState == ChapterReadState.READ }.mapTo(HashSet()) { it.tocNodeId }
+                val loadedBook = runCatching { library.book(mat.bookId) }.getOrNull()
+                val chapterSpans = loadedBook?.let { BookChapterResolver.chapters(it) }.orEmpty()
+                val allowed = LinkedHashSet<Int>()
+                for (span in chapterSpans) {
+                    if (span.tocNodeId in readIds) {
+                        for (p in span.firstPage..span.lastPage) allowed += p
+                    }
+                }
+                for (rec in progressMap.values) {
+                    allowed.addAll(rec.dwelledPages)
+                }
+                val isActiveBook = fallbackAllBooks ||
+                    mat.bookId in activityBooks ||
+                    readIds.isNotEmpty() ||
+                    progressMap.values.any { it.dwelledPages.isNotEmpty() }
+                if (isActiveBook && loadedBook != null) {
+                    val bodyStart = BookBoundaries.bodyStart(
+                        loadedBook.pages,
+                        loadedBook.structure,
+                        loadedBook.correctedBodyPage,
+                    ).importPage.coerceIn(1, allPages.max())
+                    val currentOrSaved = loadedBook.readingPage.coerceIn(1, allPages.max())
+                    if (currentOrSaved >= bodyStart) {
+                        for (p in bodyStart..currentOrSaved) allowed += p
+                    } else {
+                        allowed += currentOrSaved
+                    }
+                } else if (isActiveBook) {
+                    val savedPage = loadSavedReadingPage(db, mat.bookId)?.coerceIn(1, allPages.max()) ?: allPages.first()
+                    for (p in allPages.first()..savedPage) allowed += p
+                }
+                val filteredAllowed = allowed.intersect(allPages.toSet())
+                allowedPagesByBook[mat.bookId] = filteredAllowed
+                unreadPagesFilteredOut += (allPages.size - filteredAllowed.size).coerceAtLeast(0)
+            }
+            if (allowedPagesByBook.values.all { it.isEmpty() }) {
+                return RetrievalBundle(
+                    collection = collectionRow,
+                    blocks = emptyList(),
+                    blockMap = emptyMap(),
+                    rawPagesByKey = emptyMap(),
+                    shortLabelByBookId = shortLabelByBookId,
+                    docLabelByBookId = docLabelByBookId,
+                    matchedDiscrepancies = emptyList(),
+                    blockedBooklistEmptyMessage = "书库里还没有已读或正在阅读的书。先导入并打开一本书再提问。",
+                    unreadPagesFilteredOut = unreadPagesFilteredOut,
+                )
+            }
+        } else if (collectionRow.kind == CollectionKind.BOOKLIST) {
             for (mat in materials) {
                 val readIds = BooklistProgressStore.readChapterIds(db, mat.bookId)
                 val allPages = loadAllPageNumbers(db, mat.bookId)
@@ -304,15 +372,70 @@ internal object CollectionQaRetriever {
         for (b in chosenList) {
             perBookCount[b.bookId] = (perBookCount[b.bookId] ?: 0) + 1
         }
-        // First pass: diversify across materials (at most MAX_PAGES_PER_BOOK per doc)
+        val byBookQueue = LinkedHashMap<String, ArrayDeque<ScoredPageCandidate>>()
         for (cand in candidates) {
-            if (chosenList.size >= MAX_BLOCKS) break
-            if ((cand.bookId to cand.page) in chosenKeys) continue
-            if ((perBookCount[cand.bookId] ?: 0) >= MAX_PAGES_PER_BOOK) continue
-            addBlock(cand.bookId, cand.page, cand.rawText)
-            perBookCount[cand.bookId] = (perBookCount[cand.bookId] ?: 0) + 1
+            byBookQueue.getOrPut(cand.bookId) { ArrayDeque() }.addLast(cand)
         }
-        // Second pass: fill remaining slots if needed
+        val bookOrder = byBookQueue.entries
+            .sortedByDescending { it.value.first().score }
+            .map { it.key }
+
+        // Pass 1: Guarantee at least 1 block from each book that has relevant candidates
+        for (bookId in bookOrder) {
+            if (chosenList.size >= MAX_BLOCKS) break
+            if ((perBookCount[bookId] ?: 0) > 0) continue
+            val queue = byBookQueue[bookId] ?: continue
+            while (queue.isNotEmpty()) {
+                val cand = queue.removeFirst()
+                if ((cand.bookId to cand.page) in chosenKeys) continue
+                addBlock(cand.bookId, cand.page, cand.rawText)
+                perBookCount[bookId] = (perBookCount[bookId] ?: 0) + 1
+                break
+            }
+        }
+
+        // Pass 2: Round-robin across books up to MAX_PAGES_PER_BOOK per book
+        var roundProgress = true
+        while (chosenList.size < MAX_BLOCKS && roundProgress) {
+            roundProgress = false
+            for (bookId in bookOrder) {
+                if (chosenList.size >= MAX_BLOCKS) break
+                if ((perBookCount[bookId] ?: 0) >= MAX_PAGES_PER_BOOK) continue
+                val queue = byBookQueue[bookId] ?: continue
+                while (queue.isNotEmpty()) {
+                    val cand = queue.removeFirst()
+                    if ((cand.bookId to cand.page) in chosenKeys) continue
+                    addBlock(cand.bookId, cand.page, cand.rawText)
+                    perBookCount[bookId] = (perBookCount[bookId] ?: 0) + 1
+                    roundProgress = true
+                    break
+                }
+            }
+        }
+
+        // Pass 2.5: When >= 2 read books exist in a BOOKLIST and user asks for multi-book comparison,
+        // ensure every book with allowed read pages is represented even on cross-lingual queries
+        if (collectionRow.kind == CollectionKind.BOOKLIST &&
+            chosenList.size < MAX_BLOCKS &&
+            allowedPagesByBook.count { it.value.isNotEmpty() } >= 2 &&
+            isMultiBookComparisonQuery(question)
+        ) {
+            for (mat in materials) {
+                if (chosenList.size >= MAX_BLOCKS) break
+                if ((perBookCount[mat.bookId] ?: 0) > 0) continue
+                val allowed = allowedPagesByBook[mat.bookId].orEmpty()
+                if (allowed.isEmpty()) continue
+                val bestAllowed = allowed
+                    .mapNotNull { p -> readPage(mat.bookId, p)?.let { p to it } }
+                    .maxByOrNull { (_, txt) -> txt.length }
+                if (bestAllowed != null) {
+                    addBlock(mat.bookId, bestAllowed.first, bestAllowed.second)
+                    perBookCount[mat.bookId] = (perBookCount[mat.bookId] ?: 0) + 1
+                }
+            }
+        }
+
+        // Pass 3: Fill remaining slots if needed
         for (cand in candidates) {
             if (chosenList.size >= MAX_BLOCKS) break
             if ((cand.bookId to cand.page) in chosenKeys) continue
@@ -792,7 +915,11 @@ internal object CollectionQaRetriever {
         }
     }
 
-    private fun loadCollectionMaterials(db: Connection, collectionId: String): List<CollectionMaterialMeta> {
+    private fun loadCollectionMaterials(
+        db: Connection,
+        collectionId: String,
+        collectionKind: CollectionKind = CollectionKind.COURSE,
+    ): List<CollectionMaterialMeta> {
         if (!BookSchemaMigration.tableExists(db, "collection_materials")) return emptyList()
         return db.prepareStatement(
             """SELECT cm.material_id, b.title, b.format, cm.role, cm.authority_rank, cm.week_num
@@ -814,7 +941,11 @@ internal object CollectionQaRetriever {
                             ?: weekFileRegex.find(title)?.let { m ->
                                 (m.groupValues[1].ifBlank { m.groupValues[2] }).toIntOrNull()
                             }
-                        val shortLabel = formatShortLabel(title, role, weekNum)
+                        val shortLabel = if (collectionKind == CollectionKind.BOOKLIST && role == CourseMaterialRole.CORE_TEXTBOOK) {
+                            title.take(12)
+                        } else {
+                            formatShortLabel(title, role, weekNum)
+                        }
                         val docLabel = "${shortLabel} (L$rank)"
                         add(
                             CollectionMaterialMeta(
@@ -832,6 +963,72 @@ internal object CollectionQaRetriever {
                 }
             }
         }
+    }
+
+    private fun loadVirtualReadLibraryMaterials(db: Connection): List<CollectionMaterialMeta> {
+        if (!BookSchemaMigration.tableExists(db, "books")) return emptyList()
+        return db.prepareStatement("SELECT id, title, format FROM books ORDER BY touched DESC").use { sql ->
+            sql.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) {
+                        val bookId = rows.getString(1)
+                        val title = rows.getString(2)
+                        val format = rows.getString(3)
+                        val shortLabel = title.take(12)
+                        add(
+                            CollectionMaterialMeta(
+                                bookId = bookId,
+                                title = title,
+                                format = format,
+                                role = CourseMaterialRole.LECTURE_SLIDES,
+                                authorityRank = 2,
+                                weekNum = null,
+                                shortLabel = shortLabel,
+                                docLabel = "$shortLabel (L2)",
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun loadBooksWithReadActivity(db: Connection, currentBookId: String?): Set<String> {
+        val active = HashSet<String>()
+        if (!currentBookId.isNullOrBlank()) active += currentBookId
+        val singleColumnTables = listOf(
+            "book_open_session" to "book",
+            "book_read_spots" to "book",
+            "book_highlights" to "book",
+            "book_bookmarks" to "book",
+            "book_last_questions" to "book_id",
+        )
+        for ((table, col) in singleColumnTables) {
+            if (!BookSchemaMigration.tableExists(db, table)) continue
+            db.prepareStatement("SELECT DISTINCT $col FROM $table").use { sql ->
+                sql.executeQuery().use { rows ->
+                    while (rows.next()) {
+                        rows.getString(1)?.takeIf { it.isNotBlank() }?.let { active += it }
+                    }
+                }
+            }
+        }
+        return active
+    }
+
+    private fun loadSavedReadingPage(db: Connection, bookId: String): Int? =
+        db.prepareStatement("SELECT reading_page FROM books WHERE id=?").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { rows -> if (rows.next()) rows.getInt(1) else null }
+        }
+
+    private fun isMultiBookComparisonQuery(question: String): Boolean {
+        val lower = question.lowercase()
+        val keywords = listOf(
+            "compare", "contrast", "both", "versus", "vs", "between",
+            "两本", "两位", "两书", "对照", "对比", "比较", "异同", "各自", "分别", "同时",
+        )
+        return keywords.any { it in lower }
     }
 
     private fun formatShortLabel(title: String, role: CourseMaterialRole, weekNum: Int?): String {

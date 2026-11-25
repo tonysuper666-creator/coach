@@ -291,4 +291,116 @@ class CollectionQaEngineTest {
             root.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun booklistMultiBookComparisonGuaranteesBalancedCoverageAcrossAllReadBooks() = runBlocking {
+        val root = Files.createTempDirectory("coach-ton1847-multibook-")
+        try {
+            val lib = TextbookLibrary(root.resolve("lib"))
+            // Book 1 (Malthus) has 6 high-scoring pages; Book 2 (Smith) has 2 read pages; Book 3 (Ricardo) has 4 read pages; Book 4 is unread.
+            val malthusFile = root.resolve("An-Essay-on-Population.md").also {
+                Files.writeString(
+                    it,
+                    (1..6).joinToString("\n\u000c\n") { idx ->
+                        val header = if (idx == 1) "# Chapter 1 Population\n" else ""
+                        "${header}Population increases geometrically while food subsistence increases arithmetically (page $idx)."
+                    },
+                )
+            }
+            val smithFile = root.resolve("Wealth-of-Nations.md").also {
+                Files.writeString(
+                    it,
+                    """
+                    # Chapter 6 Component Parts of Price
+                    Wages of labour and profits of stock together with rent form the price of commodities.
+                    """.trimIndent(),
+                )
+            }
+            val ricardoFile = root.resolve("Principles-of-Political-Economy.md").also {
+                Files.writeString(
+                    it,
+                    (1..4).joinToString("\n\u000c\n") { idx ->
+                        val header = if (idx == 1) "# Chapter 1 On Value\n" else ""
+                        "${header}Rent wages profits population food distribution across classes (page $idx)."
+                    },
+                )
+            }
+            val unreadFile = root.resolve("Unread-Treatise.md").also {
+                Files.writeString(it, "# Chapter 1 Secret\nWages profits population food secret unread spoiler.")
+            }
+
+            val malthus = lib.importBook(malthusFile)
+            val smith = lib.importBook(smithFile)
+            val ricardo = lib.importBook(ricardoFile)
+            val unread = lib.importBook(unreadFile)
+
+            val booklistId = "booklist-econ-balanced"
+            lib.upsertCollection(MaterialCollectionRecord(booklistId, CollectionKind.BOOKLIST, "古典经济学书单"))
+            lib.attachMaterial(CollectionMaterialRecord(booklistId, malthus.id, role = "LIST_BOOK", ordinal = 0))
+            lib.attachMaterial(CollectionMaterialRecord(booklistId, smith.id, role = "LIST_BOOK", ordinal = 1))
+            lib.attachMaterial(CollectionMaterialRecord(booklistId, ricardo.id, role = "LIST_BOOK", ordinal = 2))
+            lib.attachMaterial(CollectionMaterialRecord(booklistId, unread.id, role = "LIST_BOOK", ordinal = 3))
+
+            for (b in listOf(malthus, smith, ricardo)) {
+                val ch1 = BookChapterResolver.chapters(b).first()
+                lib.setChapterManualReadState(b.id, ch1.tocNodeId, ch1.pagesTotal, read = true)
+            }
+
+            val bundle = CollectionQaRetriever.retrieve(
+                lib,
+                booklistId,
+                "Compare Smith on wages and profits to Malthus on population and food. Cite both books.",
+            )
+            val representedBooks = bundle.blocks.map { it.bookId }.toSet()
+            assertTrue(malthus.id in representedBooks, "Malthus must be covered")
+            assertTrue(smith.id in representedBooks, "Smith must NOT be crowded out by Malthus/Ricardo")
+            assertTrue(ricardo.id in representedBooks, "Ricardo must be covered")
+            assertFalse(unread.id in representedBooks, "Unread book must remain strictly filtered out")
+
+            // Cross-lingual comparison query against English read books must still represent all read books
+            val zhBundle = CollectionQaRetriever.retrieve(
+                lib,
+                booklistId,
+                "对照斯密和马尔萨斯两本书的核心观点",
+            )
+            val zhBooks = zhBundle.blocks.map { it.bookId }.toSet()
+            assertTrue(malthus.id in zhBooks && smith.id in zhBooks, "Cross-lingual comparison must cover both read books")
+            assertFalse(unread.id in zhBooks, "Unread book must NEVER leak on cross-lingual query")
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun virtualReadLibraryScopeSupportsStandaloneSingleAndMultiBooks() = runBlocking {
+        val root = Files.createTempDirectory("coach-ton1847-virtual-lib-")
+        try {
+            val lib = TextbookLibrary(root.resolve("lib"))
+            val f1 = root.resolve("NaHan.md").also {
+                Files.writeString(
+                    it,
+                    """
+                    # 正文
+                    第一页介绍。
+                    ${"\u000c"}
+                    方玄綽為什麼不敢討債，因為伊把賬單塞在鼻子跟前。
+                    """.trimIndent(),
+                )
+            }
+            val book = lib.importBook(f1)
+            val advanced = book.copy(readingPage = 2)
+            lib.save(advanced)
+
+            val bundle = CollectionQaRetriever.retrieve(
+                lib,
+                CollectionQaVirtualCollections.READ_LIBRARY_ID,
+                "方玄綽為什麼不敢討債?",
+                currentBookId = book.id,
+            )
+            assertTrue(bundle.blocks.any { it.bookId == book.id && it.page == 2 && "方玄綽" in it.text })
+            assertEquals("已读书目", bundle.collection.title)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
 }

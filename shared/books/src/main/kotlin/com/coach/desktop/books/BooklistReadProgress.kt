@@ -82,13 +82,20 @@ internal object BookChapterResolver {
         val toc = book.tocNodes
         val chapterNodes = toc.filter { it.kind == TocNodeKind.CHAPTER }
             .ifEmpty { toc.filter { it.kind == TocNodeKind.SECTION && it.parentId == null } }
+            .ifEmpty { toc.filter { it.kind == TocNodeKind.SECTION } }
         if (chapterNodes.isNotEmpty()) {
             val ordered = chapterNodes.sortedWith(compareBy(BookTocNode::startPage, BookTocNode::startOffset, BookTocNode::ordinal))
             return ordered.mapIndexed { index, node ->
                 val next = ordered.getOrNull(index + 1)
+                val dividerAfter = toc.firstOrNull {
+                    (it.kind == TocNodeKind.PART || it.kind == TocNodeKind.APPENDIX || it.kind == TocNodeKind.BACK_MATTER) &&
+                        it.startPage > node.startPage &&
+                        (next == null || it.startPage < next.startPage)
+                }
                 val back = toc.firstOrNull { it.kind == TocNodeKind.BACK_MATTER && it.startPage > ordered.last().startPage }
                 val stopPage = listOfNotNull(
                     next?.let { it.startPage - if (it.startOffset > 0) 0 else 1 },
+                    dividerAfter?.let { it.startPage - if (it.startOffset > 0) 0 else 1 },
                     back?.let { it.startPage - if (it.startOffset > 0) 0 else 1 },
                 ).minOrNull() ?: (book.pages.lastOrNull()?.number ?: node.endPage)
                 val end = stopPage.coerceAtLeast(node.startPage)
@@ -331,5 +338,134 @@ internal object BooklistProgressStore {
                 buildSet { while (r.next()) add(r.getString(1)) }
             }
         }
+    }
+}
+
+/**
+ * 章节阅读停留与顺序翻屏判定器：
+ * 1. 按 `(tocNodeId, page)` 累计真实停留时长，跨小节/跨重排屏切页不重置单页累计；
+ * 2. 若当前屏同时展示同一章的多个导入页（EPUB 连续排版），均计入当前屏停留页；
+ * 3. 逐屏顺序读完一章（未经过目录/End/进度条跳读，覆盖该章 `>=70%` 页且起止完整、总阅读时长达标）
+ *    并顺序翻入下一章（或在末页完成阅读）时，将已顺序浏览的本章节页统一记为已停留；
+ * 4. 严格坚守防跳读契约：目录跳章、按 `Home`/`End` 或进度条大幅跳转绝不自动标已读跳过的章节。
+ */
+internal class ChapterDwellTracker(
+    private val minPageDwellMs: Long = ChapterReadPolicy.MIN_DWELL_MS,
+) {
+    private val pageDwellMs = HashMap<Pair<String, Int>, Long>()
+    private val recordedPages = HashSet<Pair<String, Int>>()
+    private var activeChapter: BookChapterSpan? = null
+    private val sequentialPages = LinkedHashSet<Int>()
+    private var sequentialDwellMs: Long = 0L
+    private var sequentialStartedAtChapterHead: Boolean = false
+    private var sequentialBroken: Boolean = false
+
+    private val minSequentialPageMs: Long
+        get() = (minPageDwellMs / 4L).coerceAtLeast(1L)
+
+    fun onLocationChanged(
+        span: BookChapterSpan?,
+        visiblePagesInSpan: Set<Int>,
+        isJump: Boolean,
+    ): List<Pair<BookChapterSpan, Int>> {
+        val toRecord = ArrayList<Pair<BookChapterSpan, Int>>()
+        val prev = activeChapter
+        val movedForwardOutOfPrev = !isJump &&
+            !sequentialBroken &&
+            prev != null &&
+            (span == null || span.tocNodeId != prev.tocNodeId) &&
+            (
+                (span != null && span.firstPage > prev.firstPage) ||
+                    visiblePagesInSpan.any { it > prev.lastPage }
+                )
+
+        if (movedForwardOutOfPrev && prev != null && isSequentialChapterCompleted(prev, exitedForward = true)) {
+            commitSequentialPages(prev, toRecord)
+        }
+
+        activeChapter = span
+        if (span == null) {
+            resetSequential(broken = true)
+            return toRecord
+        }
+
+        if (prev?.tocNodeId != span.tocNodeId) {
+            resetSequential(broken = false)
+            val normalizedPages = visiblePagesInSpan.filterTo(LinkedHashSet()) { it in span.firstPage..span.lastPage }
+            sequentialPages.addAll(normalizedPages)
+            val minVisible = normalizedPages.minOrNull()
+            sequentialStartedAtChapterHead = minVisible != null && minVisible <= span.firstPage + 1
+        } else if (isJump) {
+            sequentialBroken = true
+        } else if (!sequentialBroken) {
+            val normalizedPages = visiblePagesInSpan.filterTo(LinkedHashSet()) { it in span.firstPage..span.lastPage }
+            val prevMax = sequentialPages.maxOrNull()
+            val curMin = normalizedPages.minOrNull()
+            if (prevMax != null && curMin != null && curMin > prevMax + 2) {
+                sequentialBroken = true
+            } else {
+                sequentialPages.addAll(normalizedPages)
+            }
+        }
+        return toRecord
+    }
+
+    fun onTick(
+        span: BookChapterSpan?,
+        visiblePagesInSpan: Set<Int>,
+        elapsedMs: Long,
+    ): List<Pair<BookChapterSpan, Int>> {
+        if (span == null || elapsedMs <= 0L) return emptyList()
+        val toRecord = ArrayList<Pair<BookChapterSpan, Int>>()
+        val normalizedPages = visiblePagesInSpan.filter { it in span.firstPage..span.lastPage }
+        for (p in normalizedPages) {
+            val key = span.tocNodeId to p
+            val nextMs = (pageDwellMs[key] ?: 0L) + elapsedMs
+            pageDwellMs[key] = nextMs
+            if (nextMs >= minPageDwellMs && recordedPages.add(key)) {
+                toRecord += span to p
+            }
+        }
+        if (activeChapter?.tocNodeId == span.tocNodeId && !sequentialBroken) {
+            sequentialDwellMs += elapsedMs
+            sequentialPages.addAll(normalizedPages)
+            if (isSequentialChapterCompleted(span, exitedForward = false)) {
+                commitSequentialPages(span, toRecord)
+            }
+        }
+        return toRecord
+    }
+
+    private fun isSequentialChapterCompleted(span: BookChapterSpan, exitedForward: Boolean): Boolean {
+        if (!sequentialStartedAtChapterHead || sequentialBroken) return false
+        if (sequentialPages.isEmpty()) return false
+        if (ChapterReadPolicy.computeReadState(sequentialPages.size, span.pagesTotal) != ChapterReadState.READ) {
+            return false
+        }
+        val maxVisited = sequentialPages.maxOrNull() ?: return false
+        val reachedChapterTail = maxVisited >= (span.lastPage - 1).coerceAtLeast(span.firstPage)
+        if (!reachedChapterTail) return false
+        if (!exitedForward && span.lastPage !in sequentialPages) return false
+        val requiredDwellMs = maxOf(minPageDwellMs, sequentialPages.size.toLong() * minSequentialPageMs)
+        return sequentialDwellMs >= requiredDwellMs
+    }
+
+    private fun commitSequentialPages(
+        span: BookChapterSpan,
+        out: MutableList<Pair<BookChapterSpan, Int>>,
+    ) {
+        for (p in sequentialPages.sorted()) {
+            val key = span.tocNodeId to p
+            if (recordedPages.add(key)) {
+                out += span to p
+            }
+        }
+    }
+
+    private fun resetSequential(broken: Boolean) {
+        sequentialPages.clear()
+        sequentialDwellMs = 0L
+        sequentialStartedAtChapterHead = false
+        sequentialBroken = broken
     }
 }

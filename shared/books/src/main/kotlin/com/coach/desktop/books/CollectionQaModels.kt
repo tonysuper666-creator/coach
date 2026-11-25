@@ -10,6 +10,14 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 
+internal object CollectionQaVirtualCollections {
+    const val READ_LIBRARY_ID = "__virtual_read_library__"
+    const val READ_LIBRARY_TITLE = "已读书目"
+
+    fun readLibraryCollection(): ActiveAskCollection =
+        ActiveAskCollection(READ_LIBRARY_ID, CollectionKind.BOOKLIST, READ_LIBRARY_TITLE)
+}
+
 internal enum class CollectionAskScope {
     SECTION,
     COLLECTION,

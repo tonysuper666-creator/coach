@@ -2,6 +2,7 @@ package com.coach.desktop.books
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.tooling.ComposeToolingApi
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.InternalComposeUiApi
@@ -39,6 +40,7 @@ import java.awt.Dimension
 import java.awt.GraphicsEnvironment
 import java.awt.KeyboardFocusManager
 import java.awt.event.KeyEvent as AwtKeyEvent
+import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.FutureTask
@@ -584,7 +586,11 @@ class ReaderShellFixTest {
             }
 
             fun clickTag(win: ComposeWindow, tag: String) {
-                waitFor("clickable $tag") { findTag(win, tag)?.config?.getOrNull(SemanticsActions.OnClick) != null }
+                waitFor("clickable $tag") {
+                    val n = findTag(win, tag)
+                    n?.config?.getOrNull(SemanticsActions.OnClick) != null &&
+                        n.config.getOrNull(SemanticsProperties.Disabled) == null
+                }
                 edt { assertTrue(findTag(win, tag)!!.config[SemanticsActions.OnClick].action!!.invoke(), tag) }
             }
 
@@ -656,6 +662,397 @@ class ReaderShellFixTest {
             }
             clickTag(win, "inline-followup-send")
             waitFor("P4 cross-book reply rendered") { findTag(win, "collection-qa-turn-0") != null }
+        } finally {
+            window?.let { w -> SwingUtilities.invokeAndWait { w.dispose() } }
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun standaloneBookSupportsReadLibraryAskInReaderAndHostSearchDialog() {
+        val root = Files.createTempDirectory("coach-ton1847-standalone-")
+        try {
+            val library = TextbookLibrary(root.resolve("lib"))
+            val f1 = root.resolve("nahan-standalone.md")
+            Files.writeString(
+                f1,
+                """
+                # 正文
+                第一页正文开篇内容，讲述早年生活与读书。
+                ${"\u000c"}
+                到了陰曆五月初四的午前，方玄綽為什麼不敢討債，因為伊把賬單塞在他的鼻子跟前。
+                """.trimIndent(),
+            )
+            val book = library.importBook(f1)
+            // Zero manual collections/booklists exist!
+            assertTrue(library.collectionSummaries().isEmpty())
+
+            val explainer = object : BookExplainer(library = library) {
+                override suspend fun load() {
+                    loaded = true
+                    identity = DesktopIdentity("http://127.0.0.1:1", PairedCredentials("desk", "tok", "owner"))
+                }
+
+                override suspend fun askCollection(requestJson: JsonObject): CourseServerCallResult {
+                    val blocks = requestJson["blocks"] as? JsonArray ?: JsonArray(emptyList())
+                    val firstBlk = blocks.firstOrNull() as? JsonObject
+                    val blockId = (firstBlk?.get("blockId") as? JsonPrimitive)?.content ?: "B1"
+                    val quote = "方玄綽為什麼不敢討債"
+                    return CourseServerCallResult(
+                        body = buildJsonObject {
+                            put("sentences", buildJsonArray {
+                                add(buildJsonObject {
+                                    put("claim", "書中提到伊把賬單塞在他的鼻子跟前。")
+                                    put("blockId", blockId)
+                                    put("quoteAnchor", quote)
+                                })
+                            })
+                            put("hasMaterialConflict", false)
+                            put("conflictSummaryZh", "")
+                        },
+                        error = null,
+                    )
+                }
+            }
+            val controller = TextbookController(library)
+            runBlocking {
+                controller.load()
+                controller.openBook(book.id, 2)
+            }
+
+            runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
+                setContent {
+                    Box(Modifier.fillMaxSize()) {
+                        WindowsTextbookHost(controller, bookExplainer = explainer, chooseBook = { null })
+                    }
+                }
+                waitUntil(timeoutMillis = 10_000) { controller.state.value.screen == BookScreen.READER }
+                waitForIdle()
+
+                // 1. Reader bottom/side companion ASK tab offers "已读书目" even with 1 standalone book
+                onNodeWithTag("immersive-companion-toggle").performClick()
+                waitForIdle()
+                onNodeWithTag("companion-tab-ask").performClick()
+                waitForIdle()
+
+                onNodeWithTag("ask-scope-collection").assertExists().performClick()
+                waitForIdle()
+                onNodeWithTag("inline-followup-input").performTextInput("方玄綽為什麼不敢討債?")
+                waitForIdle()
+                onNodeWithTag("inline-followup-send").assertIsEnabled().performClick()
+                waitUntil(timeoutMillis = 5_000) {
+                    onAllNodesWithTag("collection-qa-turn-0").fetchSemanticsNodes().isNotEmpty()
+                }
+
+                // 2. Return to shelf and verify HostSearchDialog allows selecting & sending "已读书目"
+                runBlocking { controller.back() }
+                waitUntil(timeoutMillis = 5_000) { controller.state.value.screen == BookScreen.HOME }
+                waitForIdle()
+
+                onNodeWithTag("host-search").performClick()
+                waitForIdle()
+                onNodeWithTag("host-search-dialog").assertExists()
+                onNodeWithTag("host-search-col-${CollectionQaVirtualCollections.READ_LIBRARY_ID}").assertExists().performClick()
+                onNodeWithTag("host-search-input").performTextInput("方玄綽為什麼不敢討債?")
+                waitForIdle()
+                onNodeWithTag("host-search-ask-collection").assertIsEnabled().performClick()
+                waitUntil(timeoutMillis = 5_000) {
+                    onAllNodesWithTag("host-search-qa-citation-0-0").fetchSemanticsNodes().isNotEmpty()
+                }
+                onNodeWithTag("host-search-qa-citation-0-0").performClick()
+                waitUntil(timeoutMillis = 5_000) {
+                    controller.state.value.screen == BookScreen.READER &&
+                        onAllNodesWithTag("host-search-dialog").fetchSemanticsNodes().isEmpty()
+                }
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun realWindowSequentialBooklistProgressAndStandaloneReadLibrary() {
+        assumeFalse("Requires non-headless desktop display", GraphicsEnvironment.isHeadless())
+        val root = Files.createTempDirectory("coach-ton1847-realwin-")
+        val outDir = System.getProperty("coach.ton1847.out")?.takeIf { it.isNotBlank() }?.let(Path::of)
+        var window: ComposeWindow? = null
+        try {
+            fun <T> edt(block: () -> T): T {
+                if (SwingUtilities.isEventDispatchThread()) return block()
+                val task = FutureTask(block)
+                SwingUtilities.invokeLater(task)
+                return task.get(15, TimeUnit.SECONDS)
+            }
+
+            fun findTag(win: ComposeWindow, tag: String): SemanticsNode? = edt {
+                fun dfs(n: SemanticsNode): SemanticsNode? =
+                    if (n.config.getOrNull(SemanticsProperties.TestTag) == tag) n
+                    else n.children.firstNotNullOfOrNull(::dfs)
+                win.semanticsOwners.firstNotNullOfOrNull { dfs(it.unmergedRootSemanticsNode) }
+            }
+
+            fun allText(win: ComposeWindow): String = edt {
+                fun collect(n: SemanticsNode, out: StringBuilder) {
+                    n.config.getOrNull(SemanticsProperties.Text)?.forEach { out.appendLine(it.text) }
+                    n.config.getOrNull(SemanticsProperties.EditableText)?.let { out.appendLine(it.text) }
+                    n.children.forEach { collect(it, out) }
+                }
+                buildString {
+                    win.semanticsOwners.forEach { collect(it.unmergedRootSemanticsNode, this) }
+                }
+            }
+
+            fun waitFor(desc: String, timeoutMs: Long = 12_000L, cond: () -> Boolean) {
+                val deadline = System.currentTimeMillis() + timeoutMs
+                while (System.currentTimeMillis() < deadline) {
+                    if (cond()) return
+                    Thread.sleep(30)
+                }
+                fail("Timed out waiting for: $desc")
+            }
+
+            fun clickTag(win: ComposeWindow, tag: String) {
+                waitFor("clickable $tag") {
+                    val n = findTag(win, tag)
+                    n?.config?.getOrNull(SemanticsActions.OnClick) != null &&
+                        n.config.getOrNull(SemanticsProperties.Disabled) == null
+                }
+                edt { assertTrue(findTag(win, tag)!!.config[SemanticsActions.OnClick].action!!.invoke(), tag) }
+            }
+
+            fun setFieldText(win: ComposeWindow, tag: String, text: String) {
+                waitFor("editable $tag") { findTag(win, tag)?.config?.getOrNull(SemanticsActions.SetText) != null }
+                edt {
+                    val node = findTag(win, tag)!!
+                    assertTrue(node.config[SemanticsActions.SetText].action!!.invoke(androidx.compose.ui.text.AnnotatedString(text)), tag)
+                }
+            }
+
+            fun captureWin(win: ComposeWindow, name: String) {
+                val dir = outDir ?: return
+                Files.createDirectories(dir)
+                Thread.sleep(150)
+                edt {
+                    val img = BufferedImage(win.width.coerceAtLeast(1), win.height.coerceAtLeast(1), BufferedImage.TYPE_INT_ARGB)
+                    val g = img.createGraphics()
+                    win.paintAll(g)
+                    g.dispose()
+                    ImageIO.write(img, "png", dir.resolve("$name.png").toFile())
+                }
+            }
+
+            // Part A: Booklist sequential read progress (5-page Ch1 -> Ch2) + multi-book citations
+            val libDirA = root.resolve("lib-booklist")
+            val libraryA = TextbookLibrary(libDirA)
+            val smithFile = root.resolve("Smith-Wealth.md").also {
+                val filler = "The annual labour of every nation is the fund which originally supplies it with all the necessaries and conveniences of life. ".repeat(7)
+                Files.writeString(
+                    it,
+                    """
+                    # Chapter 1 Wages and Profits
+                    Wages of labour and profits of stock page 1. $filler
+                    ${"\u000c"}
+                    Wages of labour and profits of stock page 2. $filler
+                    ${"\u000c"}
+                    Wages of labour and profits of stock page 3. $filler
+                    ${"\u000c"}
+                    Wages of labour and profits of stock page 4. $filler
+                    ${"\u000c"}
+                    Wages of labour and profits of stock page 5. $filler
+                    # Chapter 2 Natural Price
+                    Natural and market price page 6. $filler
+                    """.trimIndent(),
+                )
+            }
+            val malthusFile = root.resolve("Malthus-Population.md").also {
+                Files.writeString(
+                    it,
+                    """
+                    # Chapter 1 Population Ratios
+                    Population increases geometrically while food subsistence increases arithmetically.
+                    """.trimIndent(),
+                )
+            }
+            val smith = libraryA.importBook(smithFile)
+            val malthus = libraryA.importBook(malthusFile)
+            val listId = "booklist-ton1847-win"
+            libraryA.upsertCollection(MaterialCollectionRecord(listId, CollectionKind.BOOKLIST, "古典经济书单"))
+            libraryA.attachMaterial(CollectionMaterialRecord(listId, smith.id, role = "LIST_BOOK", ordinal = 0))
+            libraryA.attachMaterial(CollectionMaterialRecord(listId, malthus.id, role = "LIST_BOOK", ordinal = 1))
+            val mCh1 = BookChapterResolver.chapters(malthus).first()
+            libraryA.setChapterManualReadState(malthus.id, mCh1.tocNodeId, mCh1.pagesTotal, read = true)
+
+            val explainerA = object : BookExplainer(library = libraryA) {
+                override suspend fun load() {
+                    loaded = true
+                    identity = DesktopIdentity("http://127.0.0.1:1", PairedCredentials("desk", "tok", "owner"))
+                }
+                override suspend fun askCollection(requestJson: JsonObject): CourseServerCallResult {
+                    val blocks = requestJson["blocks"] as? JsonArray ?: JsonArray(emptyList())
+                    val smithBlk = blocks.mapNotNull { it as? JsonObject }.firstOrNull {
+                        (it["bookId"] as? JsonPrimitive)?.content == smith.id
+                    }
+                    val malthusBlk = blocks.mapNotNull { it as? JsonObject }.firstOrNull {
+                        (it["bookId"] as? JsonPrimitive)?.content == malthus.id
+                    }
+                    assertNotNull(smithBlk, "Smith block must be included in cross-book request")
+                    assertNotNull(malthusBlk, "Malthus block must be included in cross-book request")
+                    return CourseServerCallResult(
+                        body = buildJsonObject {
+                            put("sentences", buildJsonArray {
+                                add(buildJsonObject {
+                                    put("claim", "斯密讨论劳动工资与资本利润。")
+                                    put("blockId", (smithBlk["blockId"] as JsonPrimitive).content)
+                                    put("quoteAnchor", "Wages of labour and profits of stock")
+                                })
+                                add(buildJsonObject {
+                                    put("claim", "马尔萨斯对比人口几何增长与食物算术增长。")
+                                    put("blockId", (malthusBlk["blockId"] as JsonPrimitive).content)
+                                    put("quoteAnchor", "Population increases geometrically")
+                                })
+                            })
+                            put("hasMaterialConflict", false)
+                            put("conflictSummaryZh", "")
+                        },
+                        error = null,
+                    )
+                }
+            }
+            val controllerA = TextbookController(libraryA)
+            runBlocking {
+                controllerA.load()
+                controllerA.openBooklist(listId)
+                controllerA.openBook(smith.id, 1)
+            }
+            window = edt {
+                ComposeWindow().apply {
+                    title = "LearningCoach · TON-1847 真窗实测 A"
+                    size = Dimension(820, 620)
+                    setContent {
+                        CompositionLocalProvider(LocalChapterDwellMs provides 400L) {
+                            WindowsTextbookHost(controllerA, bookExplainer = explainerA, chooseBook = { null })
+                        }
+                    }
+                    isVisible = true
+                    toFront()
+                }
+            }
+            val winA = checkNotNull(window)
+            waitFor("Smith page 1 ready") { findTag(winA, "textbook-reader") != null && controllerA.state.value.page == 1 }
+            // Read sequentially screen-by-screen (< 400ms/screen single-page threshold, > 400ms total) into Chapter 2 (page 6)
+            var turns = 0
+            while (controllerA.state.value.page < 6 && turns < 30) {
+                Thread.sleep(150)
+                clickTag(winA, "next-page")
+                turns++
+                Thread.sleep(80)
+            }
+            waitFor("advanced into Chapter 2 (page 6)") { controllerA.state.value.page == 6 }
+            val smithCh1 = BookChapterResolver.chapters(smith).first()
+            waitFor("Smith Ch1 marked READ sequentially") {
+                libraryA.chapterProgressMap(smith.id)[smithCh1.tocNodeId]?.readState == ChapterReadState.READ
+            }
+            // Return to BooklistScreen and verify 1/2 read count
+            clickTag(winA, "immersive-back")
+            waitFor("BooklistScreen shows Smith 1 / 2") {
+                findTag(winA, "booklist-screen") != null && "已读 1 / 2 章" in allText(winA)
+            }
+            captureWin(winA, "ton1847-booklist-read-progress")
+
+            // Open Smith again and ask cross-book question covering BOTH Smith & Malthus
+            clickTag(winA, "booklist-book-${smith.id}")
+            waitFor("Smith reopened") { findTag(winA, "immersive-companion-toggle") != null }
+            clickTag(winA, "immersive-companion-toggle")
+            clickTag(winA, "companion-tab-ask")
+            clickTag(winA, "ask-scope-collection")
+            setFieldText(winA, "inline-followup-input", "Compare Smith on wages and Malthus on population")
+            clickTag(winA, "inline-followup-send")
+            waitFor("Both Smith and Malthus citations rendered") {
+                findTag(winA, "collection-qa-turn-0") != null &&
+                    findTag(winA, "collection-qa-citation-0-1") != null
+            }
+            captureWin(winA, "ton1847-crossbook-both-citations")
+            edt { winA.dispose() }
+            window = null
+
+            // Part B: Standalone single book (zero manual collections) Reader + HostSearchDialog "已读书目"
+            val libDirB = root.resolve("lib-standalone")
+            val libraryB = TextbookLibrary(libDirB)
+            val nahanFile = root.resolve("NaHan.md").also {
+                Files.writeString(
+                    it,
+                    """
+                    # 正文
+                    第一页正文开篇内容。
+                    ${"\u000c"}
+                    方玄綽為什麼不敢討債，因為伊把賬單塞在他的鼻子跟前。
+                    """.trimIndent(),
+                )
+            }
+            val nahan = libraryB.importBook(nahanFile)
+            val explainerB = object : BookExplainer(library = libraryB) {
+                override suspend fun load() {
+                    loaded = true
+                    identity = DesktopIdentity("http://127.0.0.1:1", PairedCredentials("desk", "tok", "owner"))
+                }
+                override suspend fun askCollection(requestJson: JsonObject): CourseServerCallResult {
+                    val blocks = requestJson["blocks"] as? JsonArray ?: JsonArray(emptyList())
+                    val firstBlk = blocks.firstOrNull() as? JsonObject
+                    val blockId = (firstBlk?.get("blockId") as? JsonPrimitive)?.content ?: "B1"
+                    return CourseServerCallResult(
+                        body = buildJsonObject {
+                            put("sentences", buildJsonArray {
+                                add(buildJsonObject {
+                                    put("claim", "書中交代伊把賬單塞在他的鼻子跟前。")
+                                    put("blockId", blockId)
+                                    put("quoteAnchor", "方玄綽為什麼不敢討債")
+                                })
+                            })
+                            put("hasMaterialConflict", false)
+                            put("conflictSummaryZh", "")
+                        },
+                        error = null,
+                    )
+                }
+            }
+            val controllerB = TextbookController(libraryB)
+            runBlocking {
+                controllerB.load()
+                controllerB.openBook(nahan.id, 2)
+            }
+            window = edt {
+                ComposeWindow().apply {
+                    title = "LearningCoach · TON-1847 真窗实测 B"
+                    size = Dimension(820, 620)
+                    setContent {
+                        WindowsTextbookHost(controllerB, bookExplainer = explainerB, chooseBook = { null })
+                    }
+                    isVisible = true
+                    toFront()
+                }
+            }
+            val winB = checkNotNull(window)
+            waitFor("Standalone reader ready") { findTag(winB, "immersive-companion-toggle") != null }
+            clickTag(winB, "immersive-companion-toggle")
+            clickTag(winB, "companion-tab-ask")
+            waitFor("Standalone reader shows 已读书目 scope pill") { findTag(winB, "ask-scope-collection") != null }
+            clickTag(winB, "ask-scope-collection")
+            setFieldText(winB, "inline-followup-input", "方玄綽為什麼不敢討債?")
+            clickTag(winB, "inline-followup-send")
+            waitFor("Standalone reader 已读书目 reply rendered") { findTag(winB, "collection-qa-turn-0") != null }
+            captureWin(winB, "ton1847-standalone-reader-scope")
+
+            clickTag(winB, "immersive-back")
+            waitFor("Returned to shelf") { findTag(winB, "host-search") != null }
+            clickTag(winB, "host-search")
+            waitFor("HostSearchDialog shows 已读书目 ask button") {
+                findTag(winB, "host-search-dialog") != null &&
+                    findTag(winB, "host-search-ask-collection") != null
+            }
+            setFieldText(winB, "host-search-input", "方玄綽為什麼不敢討債?")
+            clickTag(winB, "host-search-ask-collection")
+            waitFor("HostSearchDialog rendered citation") { findTag(winB, "host-search-qa-citation-0-0") != null }
+            captureWin(winB, "ton1847-standalone-shelf-search")
         } finally {
             window?.let { w -> SwingUtilities.invokeAndWait { w.dispose() } }
             root.toFile().deleteRecursively()

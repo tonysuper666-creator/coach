@@ -455,6 +455,7 @@ internal fun TextbookReader(
                 val preferred = matching.firstOrNull { it.record.kind == CollectionKind.COURSE }
                     ?: matching.firstOrNull { it.record.kind == CollectionKind.BOOKLIST }
                 preferred?.let { ActiveAskCollection(it.record.id, it.record.kind, it.record.title) }
+                    ?: CollectionQaVirtualCollections.readLibraryCollection()
             }
         }
     }
@@ -490,6 +491,14 @@ internal fun TextbookReader(
     var lastTrackedPage by remember(book.id) { mutableStateOf<Int?>(null) }
     var lastTrackedSection by remember(book.id) { mutableStateOf<BookLesson?>(null) }
     var pendingNavigationIsJump by remember(book.id) { mutableStateOf(false) }
+    var pendingDwellJump by remember(book.id) { mutableStateOf(false) }
+    var lastDwellTrackedPage by remember(book.id) { mutableStateOf<Int?>(null) }
+    var lastDwellSpan by remember(book.id) { mutableStateOf<BookChapterSpan?>(null) }
+    var lastDwellVisiblePages by remember(book.id) { mutableStateOf<Set<Int>>(emptySet()) }
+    var lastDwellSampleAtMs by remember(book.id) { mutableLongStateOf(System.currentTimeMillis()) }
+    val chapterDwellTracker = remember(book.id, dwellThresholdMs) {
+        ChapterDwellTracker(dwellThresholdMs.coerceAtLeast(1L))
+    }
 
     suspend fun evaluateMarginWhisperForPage(targetPage: Int, nodeId: String, rereadCountOnPage: Int) {
         if (ui.source != null || studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) return
@@ -590,48 +599,96 @@ internal fun TextbookReader(
         evaluateMarginWhisperForPage(ui.page, secId, readingTracker.backtrackCount(ui.page))
     }
 
-    // 真实停留已读计时器：仅在当前页连续停留 >= 8 秒（测试可注入更短阈值）才记入 book_chapter_progress；
-    // 通过目录跳章或快速滑过会自动取消本协程，被跳过的中间章节绝不标为已读。
+    // 真实停留与顺序读章计时器：
+    // 1. 按 (tocNodeId, page) 累计停留，跨小节/重排屏不丢失进度；
+    // 2. 逐屏顺序读完一章进下一章时自动计入该章顺序浏览页；
+    // 3. 目录跳读、Home/End 或进度条跳页绝不自动标已读跳过的中间章。
     // 同时持续累计页停留并检测 p+1 -> p 往返重读（累计停留 > 个人页速中位数 2.2 倍记 REREAD_BACKTRACK）。
     val dwellPage = readingAnchor.importPage
-    LaunchedEffect(book.id, dwellPage, currentChapterSpan?.tocNodeId, currentSection?.id, ui.source, dwellThresholdMs) {
+    LaunchedEffect(book.id, readingAnchor, paging.pages.size, ui.source, dwellThresholdMs) {
         if (ui.source != null) return@LaunchedEffect
-        val span = currentChapterSpan ?: return@LaunchedEffect
-        val secId = currentSection?.id ?: span.tocNodeId
-        val secTitle = currentSection?.title ?: span.title
-        val waitMs = dwellThresholdMs.coerceAtLeast(1L)
-        var firstTick = true
-        while (true) {
-            delay(waitMs)
-            val recordedDwell = if (dwellThresholdMs >= ChapterReadPolicy.MIN_DWELL_MS) waitMs else maxOf(waitMs, ChapterReadPolicy.MIN_DWELL_MS)
-            val trackerDwell = waitMs
-            if (firstTick) {
-                firstTick = false
-                if (onRecordPageDwell != null) {
-                    onRecordPageDwell(book.id, span.tocNodeId, dwellPage, span.pagesTotal, recordedDwell)
-                } else {
-                    withContext(Dispatchers.IO) {
-                        runCatching { library.recordPageDwell(book.id, span.tocNodeId, dwellPage, span.pagesTotal, recordedDwell) }
-                    }
-                    localBooklistRev++
+        val span = currentChapterSpan
+        val secId = currentSection?.id ?: span?.tocNodeId
+        val secTitle = currentSection?.title ?: span?.title.orEmpty()
+        val visiblePagesInSpan: Set<Int> = if (span == null) {
+            emptySet()
+        } else if (textView && !pageUnrecognizedOriginal && paging.pages.isNotEmpty()) {
+            val idx = paging.index
+            val laid = (0 until if (paging.spread) 2 else 1)
+                .mapNotNull { paging.pages.getOrNull(idx + it) }
+                .flatMap { it.sources }
+                .map { it.importPage }
+                .filterTo(LinkedHashSet()) { it in span.firstPage..span.lastPage }
+            laid.ifEmpty { setOf(dwellPage).filterTo(LinkedHashSet()) { it in span.firstPage..span.lastPage } }
+        } else {
+            setOf(dwellPage).filterTo(LinkedHashSet()) { it in span.firstPage..span.lastPage }
+        }
+        val prevDwellPage = lastDwellTrackedPage
+        val isJump = pendingDwellJump || (prevDwellPage != null && kotlin.math.abs(dwellPage - prevDwellPage) > 2)
+        pendingDwellJump = false
+        lastDwellTrackedPage = dwellPage
+
+        fun commitChapterDwell(recSpan: BookChapterSpan, recPage: Int) {
+            val recordedDwell = maxOf(dwellThresholdMs, ChapterReadPolicy.MIN_DWELL_MS)
+            if (onRecordPageDwell != null) {
+                onRecordPageDwell(book.id, recSpan.tocNodeId, recPage, recSpan.pagesTotal, recordedDwell)
+            } else {
+                scope.launch(Dispatchers.IO) {
+                    runCatching { library.recordPageDwell(book.id, recSpan.tocNodeId, recPage, recSpan.pagesTotal, recordedDwell) }
+                }
+                localBooklistRev++
+            }
+        }
+
+        val nowAtTransition = System.currentTimeMillis()
+        if (lastDwellSpan != null && lastDwellVisiblePages.isNotEmpty()) {
+            val priorElapsed = (nowAtTransition - lastDwellSampleAtMs).coerceIn(0L, 60_000L)
+            if (priorElapsed > 0L) {
+                for ((recSpan, recPage) in chapterDwellTracker.onTick(lastDwellSpan, lastDwellVisiblePages, priorElapsed)) {
+                    commitChapterDwell(recSpan, recPage)
                 }
             }
-            val triggeredBacktrack = readingTracker.recordDwell(dwellPage, trackerDwell, secId)
-            if (triggeredBacktrack) {
-                withContext(Dispatchers.IO) {
-                    runCatching {
-                        library.recordMasteryEvidence(
-                            bookId = book.id,
-                            tocNodeId = secId,
-                            page = dwellPage,
-                            canonicalName = secTitle,
-                            signal = LearnerSignalType.REREAD_BACKTRACK,
-                            durationMs = trackerDwell,
-                        )
+        }
+        lastDwellSampleAtMs = nowAtTransition
+        lastDwellSpan = span
+        lastDwellVisiblePages = visiblePagesInSpan
+
+        for ((recSpan, recPage) in chapterDwellTracker.onLocationChanged(span, visiblePagesInSpan, isJump)) {
+            commitChapterDwell(recSpan, recPage)
+        }
+
+        val waitMs = dwellThresholdMs.coerceAtLeast(1L)
+        val tickMs = minOf(250L, waitMs)
+        var trackerElapsedMs = 0L
+        while (true) {
+            delay(tickMs)
+            val nowMs = System.currentTimeMillis()
+            val deltaMs = (nowMs - lastDwellSampleAtMs).coerceAtLeast(1L)
+            lastDwellSampleAtMs = nowMs
+            for ((recSpan, recPage) in chapterDwellTracker.onTick(span, visiblePagesInSpan, deltaMs)) {
+                commitChapterDwell(recSpan, recPage)
+            }
+            trackerElapsedMs += deltaMs
+            if (span != null && secId != null && trackerElapsedMs >= waitMs) {
+                val trackerDwell = trackerElapsedMs
+                trackerElapsedMs = 0L
+                val triggeredBacktrack = readingTracker.recordDwell(dwellPage, trackerDwell, secId)
+                if (triggeredBacktrack) {
+                    withContext(Dispatchers.IO) {
+                        runCatching {
+                            library.recordMasteryEvidence(
+                                bookId = book.id,
+                                tocNodeId = secId,
+                                page = dwellPage,
+                                canonicalName = secTitle,
+                                signal = LearnerSignalType.REREAD_BACKTRACK,
+                                durationMs = trackerDwell,
+                            )
+                        }
                     }
-                }
-                if (activeWhisper == null) {
-                    evaluateMarginWhisperForPage(dwellPage, secId, readingTracker.backtrackCount(dwellPage))
+                    if (activeWhisper == null) {
+                        evaluateMarginWhisperForPage(dwellPage, secId, readingTracker.backtrackCount(dwellPage))
+                    }
                 }
             }
         }
@@ -740,6 +797,10 @@ internal fun TextbookReader(
         return first..last
     }
     val turnLayout by rememberUpdatedState<(ReaderTurn) -> Unit> { turn ->
+        if (turn == ReaderTurn.First || turn == ReaderTurn.Last) {
+            pendingNavigationIsJump = true
+            pendingDwellJump = true
+        }
         if (!textView || pageUnrecognizedOriginal) {
             when (turn) {
                 ReaderTurn.Previous -> turnTo(previousPage)
@@ -767,6 +828,8 @@ internal fun TextbookReader(
         val target = book.page(passage.page) ?: return@open
         if (passage.book != book.id || passage.start !in 0 until passage.end || passage.end > target.text.length ||
             target.text.substring(passage.start, passage.end) != passage.text) return@open
+        pendingNavigationIsJump = true
+        pendingDwellJump = true
         pdf.selection = null
         asking = false
         explainOpen = false
@@ -790,6 +853,8 @@ internal fun TextbookReader(
         val target = book.page(hit.page) ?: return@jump
         if (hit.start !in 0 until hit.end || hit.end > target.text.length ||
             target.text.substring(hit.start, hit.end) != hit.quote) return@jump
+        pendingNavigationIsJump = true
+        pendingDwellJump = true
         val passage = hit.toPassage(book.id)
         pdf.selection = null
         asking = false
@@ -1400,7 +1465,7 @@ internal fun TextbookReader(
                                     companionTab = ReaderCompanionTab.EXPLAIN
                                 }
                             },
-                            onJumpPage = { target -> pendingNavigationIsJump = true; turnTo(target) },
+                            onJumpPage = { target -> pendingNavigationIsJump = true; pendingDwellJump = true; turnTo(target) },
                             onDraftChange = { persistPracticeDraft(it) },
                             onOpenAnchor = { anchor ->
                                 val targetPage = book.page(anchor.pdfPage)
@@ -1895,9 +1960,10 @@ internal fun TextbookReader(
             bodyStartCorrected = correctedBodyPage != null,
             bookmarks = bookmarks,
             busy = ui.busy,
-            onJumpPage = { target -> pendingNavigationIsJump = true; turnTo(target); tocOpen = false },
+            onJumpPage = { target -> pendingNavigationIsJump = true; pendingDwellJump = true; turnTo(target); tocOpen = false },
             onJumpToc = { target ->
                 pendingNavigationIsJump = true
+                pendingDwellJump = true
                 turnToAnchor(target.startPage, target.startOffset)
                 tocOpen = false
             },
@@ -1906,6 +1972,7 @@ internal fun TextbookReader(
                 correctedBodyPage = corrected
                 val start = BookBoundaries.bodyStart(book.pages, book.structure, corrected)
                 pendingNavigationIsJump = true
+                pendingDwellJump = true
                 turnToAnchor(start.importPage, start.offsetUtf16)
             },
             onToggleBookmark = { toggleBookmark(it) },
@@ -2029,6 +2096,8 @@ internal fun TextbookReader(
             onJumpFocusChange = { jumpFocused = it },
             onSubmitJump = { target ->
                 if (book.page(target) != null) {
+                    pendingNavigationIsJump = true
+                    pendingDwellJump = true
                     turnTo(target)
                     editingJump = false
                     focusManager.clearFocus()
@@ -2036,7 +2105,11 @@ internal fun TextbookReader(
             },
             onPrev = { turnLayout(ReaderTurn.Previous) },
             onNext = { turnLayout(ReaderTurn.Next) },
-            onScrubToPage = { target -> turnTo(target) },
+            onScrubToPage = { target ->
+                pendingNavigationIsJump = true
+                pendingDwellJump = true
+                turnTo(target)
+            },
             modifier = Modifier.align(Alignment.BottomStart).then(if (effectiveSideDocked) Modifier.width(rootWidth - sideDrawerWidth) else Modifier.fillMaxWidth()),
         )
 

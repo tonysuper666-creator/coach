@@ -98,7 +98,8 @@ function Find-WinboxControl([string]$template, [string]$name, [int]$scroll) {
 function Find-TutorBodyRows($lines) {
     $tool = @('举个例子', '讲讲', '笔记', '看原页', '看文字') | ForEach-Object { Find-Text $lines $_ } | Where-Object { $_ } | Select-Object -First 1
     $bar = @('上一页', '下一页') | ForEach-Object { Find-Text $lines $_ } | Where-Object { $_ } | Select-Object -First 1
-    $top = if ($tool) { $tool.Y2 + 8 } else { 36 }
+    # y=54 on this window is the HUD (书架 / 伴读), not a body line.
+    $top = if ($tool) { $tool.Y2 + 8 } else { 96 }
     $bottom = if ($bar) { $bar.Y1 - 8 } else { 100000 }
     # A generic List throws "Argument types do not match" when this script enumerates it
     # on Windows PowerShell 5.1. Keep plain arrays.
@@ -133,28 +134,52 @@ function Find-TutorBodyRows($lines) {
     return @($rows | Sort-Object Width -Descending)
 }
 
-# SetCursorPos and the button-down have to be a frame apart. Compose otherwise
-# presses wherever the cursor already was, and a same-point press clears the selection.
-function Drag-TutorLine([int]$x1, [int]$y1, [int]$x2) {
+# SetCursorPos while the button is down does not move the pointer Compose remembers,
+# so the gesture arrives as a click and the selection is cleared. mouse_event with
+# absolute coordinates is the same call the clicks already use, and it carries the
+# position in the move itself.
+function Convert-TutorAbs([int]$px, [int]$py) {
+    if (-not ('Arm.Metrics' -as [type])) {
+        Add-Type -Namespace Arm -Name Metrics -MemberDefinition '[DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);'
+    }
+    $vx = [Arm.Metrics]::GetSystemMetrics(76)
+    $vy = [Arm.Metrics]::GetSystemMetrics(77)
+    $vw = [Arm.Metrics]::GetSystemMetrics(78)
+    $vh = [Arm.Metrics]::GetSystemMetrics(79)
+    if ($vw -lt 2) { $vw = [Arm.Metrics]::GetSystemMetrics(0) }
+    if ($vh -lt 2) { $vh = [Arm.Metrics]::GetSystemMetrics(1) }
+    $ax = [int][Math]::Round(($px - $vx) * 65535.0 / ($vw - 1))
+    $ay = [int][Math]::Round(($py - $vy) * 65535.0 / ($vh - 1))
+    return @($ax, $ay)
+}
+
+function Drag-TutorLine([int]$x1, [int]$y1, [int]$x2, [int]$y2 = -1) {
     if ($x2 -lt $x1) { $swap = $x1; $x1 = $x2; $x2 = $swap }
+    if ($y2 -lt 0) { $y2 = $y1 }
     $y1 = [Math]::Max(8, $y1)
+    $y2 = [Math]::Max(8, $y2)
+    Write-Output "DRAG $x1,$y1 -> $x2,$y2"
+    $move = [uint32](0x0001 -bor 0x8000 -bor 0x4000)
+    $down = [uint32](0x0001 -bor 0x0002 -bor 0x8000 -bor 0x4000)
+    $up = [uint32](0x0001 -bor 0x0004 -bor 0x8000 -bor 0x4000)
     Invoke-ForegroundStep -InjectsInput -Action {
         $r = Get-Rect
-        $sx = $r.L + $x1
-        $sy = $r.T + $y1
-        $ex = $r.L + $x2
-        [WD]::SetCursorPos($sx, $sy) | Out-Null
+        $start = Convert-TutorAbs ($r.L + $x1) ($r.T + $y1)
+        $end = Convert-TutorAbs ($r.L + $x2) ($r.T + $y2)
+        [WD]::mouse_event($move, $start[0], $start[1], 0, [IntPtr]::Zero)
         Start-Sleep -Milliseconds 180
         Assert-OurForeground
-        [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
+        [WD]::mouse_event($down, $start[0], $start[1], 0, [IntPtr]::Zero)
         try {
             foreach ($i in 1..8) {
-                Start-Sleep -Milliseconds 35
-                [WD]::SetCursorPos([int]($sx + (($ex - $sx) * $i / 8)), $sy) | Out-Null
+                Start-Sleep -Milliseconds 40
+                $ax = [int]($start[0] + (($end[0] - $start[0]) * $i / 8))
+                $ay = [int]($start[1] + (($end[1] - $start[1]) * $i / 8))
+                [WD]::mouse_event($move, $ax, $ay, 0, [IntPtr]::Zero)
             }
-            Start-Sleep -Milliseconds 100
+            Start-Sleep -Milliseconds 80
         } finally {
-            [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
+            [WD]::mouse_event($up, $end[0], $end[1], 0, [IntPtr]::Zero)
         }
     }
 }
@@ -197,13 +222,23 @@ function Open-SelectionAction([string]$name, [string]$action) {
     $lines = @(Read-TutorFrame "$name-reader")
     $rows = @(Find-TutorBodyRows $lines)
     if (-not $rows) { throw "No selectable body line in $name" }
+    $bounds = Get-Rect
+    $width = [int]($bounds.R - $bounds.L)
+    # A mouse-down in the outer 14% belongs to page turn. Keep the gesture on the glyphs.
+    $innerL = [int]($width * 0.22)
+    $innerR = [int]($width * 0.78)
     $selected = $null
     $tries = 0
     foreach ($row in ($rows | Select-Object -First 3)) {
-        foreach ($dy in @(0, 8)) {
+        $x1 = [Math]::Max($innerL, [int]$row.X1 + 8)
+        $x2 = [Math]::Min($innerR, [int]$row.X2 - 8)
+        if (($x2 - $x1) -lt 80) { $x1 = $innerL; $x2 = $innerR }
+        # The second pass slopes down across the next line, so a few pixels of vertical
+        # error still crosses ink.
+        foreach ($dy in @(0, 28)) {
             $tries++
             if ($tries -gt 4) { break }
-            Drag-TutorLine ($row.X1 + 6) ($row.Y + $dy) ($row.X2 - 6)
+            Drag-TutorLine $x1 ([int]$row.Y) $x2 ([int]($row.Y + $dy))
             Start-Sleep -Milliseconds 400
             $frame = @(Read-TutorFrame "$name-selected")
             foreach ($label in @('举个例子', '笔记', '拆句', '讲讲')) {
@@ -212,7 +247,7 @@ function Open-SelectionAction([string]$name, [string]$action) {
             }
             if ($selected) { break }
         }
-        if ($selected) { break }
+        if ($selected -or $tries -gt 4) { break }
     }
     if (-not $selected) { throw "Dragging a line did not raise the selection toolbar ($name)" }
     $bar = @(Read-TutorFrame "$name-bar")
@@ -266,14 +301,36 @@ function Test-PassageQuestion {
     Send-Keys '{ESC}'
 }
 
+function Show-ReaderChrome {
+    # The native title bar is the top ~32px. Just under it is the 12dp strip that reveals the HUD.
+    # A center click toggles the HUD off, which is what hid 伴读 on the last red run.
+    $bounds = Get-Rect
+    $x = [int](($bounds.R - $bounds.L) / 2)
+    Invoke-ForegroundStep -InjectsInput -Action {
+        $r = Get-Rect
+        [WD]::SetCursorPos($r.L + $x, $r.T + 40) | Out-Null
+        Start-Sleep -Milliseconds 180
+        Assert-OurForeground
+    }
+    Start-Sleep -Milliseconds 400
+}
+
 function Test-WholeLesson {
-    # 2.0 has no shelf cards 「边看边学」. The lesson is the companion drawer (L).
+    # 2.0 has no shelf cards 「边看边学」. The lesson is the companion drawer.
     # A page-only drawer calls explainLesson; a chapter drawer calls companion/chapter.
     # 「讲整章」 is the control that leaves page-only mode when the chapter is wider than this page.
+    # The HUD button 「伴读」 is the same toggle as the L key, and this runner's OCR can read it.
     Send-Keys '{ESC}'
     Start-Sleep -Milliseconds 300
-    Focus-ReaderPage
-    Send-Keys 'l'
+    Show-ReaderChrome
+    $opened = @(Read-TutorFrame '05-hud')
+    $btn = Find-Text $opened '伴读'
+    if (-not $btn) { $btn = Find-Text $opened '收起' }
+    if ($btn) {
+        Click-At $btn.X $btn.Y | Out-Null
+    } else {
+        Send-Keys 'l'
+    }
     Start-Sleep -Milliseconds 800
     $opened = @(Read-TutorFrame '05-companion')
     $wider = Find-Text $opened '讲整章'

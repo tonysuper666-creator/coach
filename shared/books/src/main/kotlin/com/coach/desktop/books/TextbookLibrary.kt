@@ -1295,33 +1295,13 @@ internal class TextbookLibrary(
         val bodyStart = current.structure?.nativeBodyStart?.takeIf { outline.isNotEmpty() }
         val structure = BookStructurePlanner.plan(bookId, current.title, "pdf", indexedPages, outline, typographyLines,
             nativeBodyStart = bodyStart)
-        var readingPage = current.readingPage
-        var lessonIndex = current.lessonIndex
-        var learning = current.learning
-        var promptSeen = current.promptSeen
-        var questionMode = current.questionMode
         database().use { db ->
             db.autoCommit = false
             try {
-                val meta = db.prepareStatement("SELECT reading_page,lesson_index,learning,prompt_seen,mode FROM books WHERE id=?").use { sql ->
+                val rawLessonIndex = db.prepareStatement("SELECT lesson_index FROM books WHERE id=?").use { sql ->
                     sql.setString(1, bookId)
-                    sql.executeQuery().use { row ->
-                        if (!row.next()) null
-                        else arrayOf<Any>(
-                            row.getInt(1),
-                            row.getInt(2),
-                            row.getInt(3) == 1,
-                            row.getInt(4) == 1,
-                            QuestionMode.valueOf(row.getString(5)),
-                        )
-                    }
+                    sql.executeQuery().use { row -> if (row.next()) row.getInt(1) else null }
                 } ?: throw BookImportCancelled()
-                val rawReadingPage = meta[0] as Int
-                readingPage = if (indexedPages.any { it.number == rawReadingPage }) rawReadingPage else indexedPages.first().number
-                lessonIndex = meta[1] as Int
-                learning = meta[2] as Boolean
-                promptSeen = meta[3] as Boolean
-                questionMode = meta[4] as QuestionMode
                 if (!preserveExistingPages) {
                     db.prepareStatement(
                         """INSERT INTO pages(book,page,text,ocr,ocr_pending,text_pending) VALUES(?,?,?,?,?,0)
@@ -1350,7 +1330,7 @@ internal class TextbookLibrary(
                 } else {
                     rebuildFtsIfMissing(db, bookId, indexedPages)
                 }
-                lessonIndex = lessonIndex.coerceIn(0, structure.resolvedLessons.size)
+                val lessonIndex = rawLessonIndex.coerceIn(0, structure.resolvedLessons.size)
                 if (isLegacyTocRebuild) {
                     db.prepareStatement("UPDATE books SET index_state='READY', lesson_index=? WHERE id=?").use { sql ->
                         sql.setInt(1, lessonIndex)
@@ -1375,20 +1355,7 @@ internal class TextbookLibrary(
         if (extractedAspects.isNotEmpty()) {
             cacheAspects(bookId, extractedAspects)
         }
-        return Textbook(
-            id = bookId,
-            title = current.title,
-            format = "pdf",
-            pages = indexedPages,
-            readingPage = readingPage,
-            lessonIndex = lessonIndex,
-            learning = learning,
-            promptSeen = promptSeen,
-            questionMode = questionMode,
-            structure = structure,
-            indexState = "READY",
-            correctedBodyPage = current.correctedBodyPage,
-        )
+        return book(bookId)
     }
 
     private fun completePendingTocFromPersistedPages(
@@ -1404,37 +1371,18 @@ internal class TextbookLibrary(
                     sql.executeUpdate()
                 }
             }
-            return current.copy(indexState = "READY")
+            return book(bookId)
         }
         control.check()
         val structure = BookStructurePlanner.plan(bookId, current.title, "pdf", current.pages)
-        var readingPage = current.readingPage
-        var lessonIndex = current.lessonIndex
-        var learning = current.learning
-        var promptSeen = current.promptSeen
-        var questionMode = current.questionMode
         database().use { db ->
             db.autoCommit = false
             try {
-                val meta = db.prepareStatement("SELECT reading_page,lesson_index,learning,prompt_seen,mode FROM books WHERE id=?").use { sql ->
+                val rawLessonIndex = db.prepareStatement("SELECT lesson_index FROM books WHERE id=?").use { sql ->
                     sql.setString(1, bookId)
-                    sql.executeQuery().use { row ->
-                        if (!row.next()) null
-                        else arrayOf<Any>(
-                            row.getInt(1),
-                            row.getInt(2),
-                            row.getInt(3) == 1,
-                            row.getInt(4) == 1,
-                            QuestionMode.valueOf(row.getString(5)),
-                        )
-                    }
+                    sql.executeQuery().use { row -> if (row.next()) row.getInt(1) else null }
                 } ?: throw BookImportCancelled()
-                val rawReadingPage = meta[0] as Int
-                readingPage = if (current.pages.any { it.number == rawReadingPage }) rawReadingPage else current.pages.first().number
-                lessonIndex = (meta[1] as Int).coerceIn(0, structure.resolvedLessons.size)
-                learning = meta[2] as Boolean
-                promptSeen = meta[3] as Boolean
-                questionMode = meta[4] as QuestionMode
+                val lessonIndex = rawLessonIndex.coerceIn(0, structure.resolvedLessons.size)
                 BookStructureStore.saveStructure(db, bookId, structure)
                 rebuildFtsIfMissing(db, bookId, current.pages)
                 db.prepareStatement("UPDATE books SET index_state='READY', lesson_index=? WHERE id=?").use { sql ->
@@ -1450,19 +1398,7 @@ internal class TextbookLibrary(
             }
         }
         onProgress(current.pages.size, current.pages.size)
-        return Textbook(
-            id = bookId,
-            title = current.title,
-            format = "pdf",
-            pages = current.pages,
-            readingPage = readingPage,
-            lessonIndex = lessonIndex,
-            learning = learning,
-            promptSeen = promptSeen,
-            questionMode = questionMode,
-            structure = structure,
-            indexState = "READY",
-        )
+        return book(bookId)
     }
 
     /** Tier 2 lazy per-page visual extraction (idempotent via `book_visual_pages`). Never holds `@Synchronized`. */

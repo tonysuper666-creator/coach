@@ -409,9 +409,10 @@ class WindowShellPolishTest {
 
                 // 1. Recoverable SQLITE_BUSY during picked import -> keep picked file and retry without re-picking
                 DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { blocker ->
-                    blocker.createStatement().use { it.execute("BEGIN EXCLUSIVE") }
+                    blocker.createStatement().use { it.execute("BEGIN IMMEDIATE") }
                     try {
-                        onNodeWithTag("upload-textbook").performClick()
+                        onNodeWithTag("host-add").performClick()
+                        onNodeWithTag("host-add-import").performClick()
                         waitUntil(timeoutMillis = 20_000) {
                             controller.state.value.error != null && controller.state.value.importing == null
                         }
@@ -438,7 +439,7 @@ class WindowShellPolishTest {
                         controller.state.value.importing == null &&
                         controller.state.value.catalog.size == 2 &&
                         controller.state.value.book?.title == "待导入教材" &&
-                        controller.state.value.prompt == BookPrompt.IMPORTED
+                        controller.state.value.screen == BookScreen.READER && controller.state.value.prompt == null
                 }
                 waitUntil(timeoutMillis = 5_000) { released.isNotEmpty() }
                 waitForIdle()
@@ -449,14 +450,15 @@ class WindowShellPolishTest {
                 assertTrue(onAllNodesWithTag("book-error").fetchSemanticsNodes().isEmpty())
 
                 // 2. Non-recoverable import failure -> V7 zhu alert, no retry button, and immediate release
-                runBlocking { controller.dismissPrompt() }
+                onNodeWithTag("immersive-back").performClick()
                 waitUntil(timeoutMillis = 10_000) {
-                    !controller.state.value.busy && controller.state.value.prompt == null
+                    !controller.state.value.busy && controller.state.value.screen == BookScreen.HOME
                 }
                 waitForIdle()
 
                 nextPick = corruptPdf
-                onNodeWithTag("upload-textbook").performClick()
+                onNodeWithTag("host-add").performClick()
+                onNodeWithTag("host-add-import").performClick()
                 waitUntil(timeoutMillis = 15_000) {
                     controller.state.value.error != null && controller.state.value.importing == null
                 }
@@ -526,6 +528,11 @@ class WindowShellPolishTest {
                 assertEquals(CoachV7.Light.desk, deskColor())
                 assertEquals(CoachV7.Light.sheet, sheetColor())
 
+                fun pageColor(): Color {
+                    val paper = onNodeWithTag("book-sheet-0").captureToImage().toPixelMap()
+                    return paper[5, paper.height / 2]
+                }
+
                 // Open reader and toggle in-app Aa paper setting (深 -> 跟随系统) and re-test system switch
                 onNodeWithTag("home-read").performClick()
                 waitUntil(timeoutMillis = 20_000) {
@@ -537,21 +544,25 @@ class WindowShellPolishTest {
                 }
                 waitForIdle()
 
+                if (onAllNodesWithTag("immersive-more-menu").fetchSemanticsNodes().isEmpty()) {
+                    onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                }
+                onNodeWithTag("immersive-more-menu").performClick()
                 onNodeWithTag("v7-type-menu").performClick()
                 waitForIdle()
                 onNodeWithTag("reading-paper-DARK").performClick()
                 waitForIdle()
-                assertEquals(CoachV7.Dark.desk, deskColor(), "In-app DARK paper must override light system immediately")
+                assertEquals(CoachV7.Dark.pgPaper, pageColor(), "In-app DARK paper must override light system immediately")
 
                 onNodeWithTag("reading-paper-SYSTEM").performClick()
                 waitForIdle()
-                assertEquals(CoachV7.Light.desk, deskColor(), "Switching back to 跟随系统 must snap immediately to light system")
+                assertEquals(CoachV7.Light.pgPaper, pageColor(), "Switching back to 跟随系统 must snap immediately to light system")
                 onNodeWithTag("v7-type-menu").performMouseInput { click() }
                 onNodeWithTag("reading-settings-panel").assertDoesNotExist()
 
                 systemTheme = SystemTheme.Dark
                 waitForIdle()
-                assertEquals(CoachV7.Dark.desk, deskColor(), "With 跟随系统 active, runtime Dark switch must apply immediately")
+                assertEquals(CoachV7.Dark.pgPaper, pageColor(), "With 跟随系统 active, runtime Dark switch must apply immediately")
             }
         } finally {
             if (previousTheme == null) System.clearProperty("coach.windows.theme")

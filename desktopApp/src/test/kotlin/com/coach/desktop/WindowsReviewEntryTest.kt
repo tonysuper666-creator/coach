@@ -131,26 +131,46 @@ class WindowsReviewEntryTest {
             Gravity is the attraction between bodies with mass. Gravity keeps an orbiting body near its star.
         """.trimIndent())
         val library = TextbookLibrary(libraryDir)
+        val localController = TextbookController(library)
+        var reviewedAnswer = ""
         var localBook = ""
         var localLesson = ""
         var localAnswer = ""
         val beforeBook = f.facts()
         assertTrue(desktopUsesTextbooks("Windows 11", null, null))
         runComposeUiTest {
-            setContent { WindowsTextbooksContent(libraryDir) { source } }
+            setContent { WindowsTextbookHost(localController) { source } }
             waitUntil(timeoutMillis = 20_000) { onAllNodes(hasTestTag("upload-textbook") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("upload-textbook").performClick()
-            waitUntil(timeoutMillis = 20_000) { onAllNodes(hasTestTag("enable-learning") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("enable-learning").performClick()
-            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("choice-0").fetchSemanticsNodes().isNotEmpty() }
+            waitUntil(timeoutMillis = 20_000) {
+                val state = localController.state.value
+                !state.busy && state.screen == BookScreen.READER && state.book != null
+            }
             val book = library.book(library.catalog().single().id)
             val lesson = book.lessons[book.lessonIndex]
-            val question = assertNotNull(com.coach.desktop.books.testPracticeFixture(book, lesson, book.questionMode))
-            localBook = book.id; localLesson = lesson.id; localAnswer = question.answer
-            onNodeWithTag("choice-${question.options.indexOf(question.answer)}").performScrollTo().performClick()
-            waitUntil(timeoutMillis = 15_000) { onAllNodesWithText("与原文一致。").fetchSemanticsNodes().isNotEmpty() }
+            val question = assertNotNull(testPracticeFixture(book, lesson, QuestionMode.CHOICE))
+            localBook = book.id
+            localLesson = lesson.id
+            localAnswer = question.options.first { it != question.answer }
+            reviewedAnswer = question.answer
+            runBlocking {
+                localController.recordSectionQuizAnswer(lesson, 0, question, PracticeAnswer(localAnswer, true))
+                localController.back()
+            }
+            waitUntil(timeoutMillis = 15_000) {
+                val state = localController.state.value
+                !state.busy && state.screen == BookScreen.HOME && state.reviews.size == 1
+            }
+            onNodeWithTag("home-review-start").performClick()
+            waitUntil(timeoutMillis = 15_000) { localController.state.value.screen == BookScreen.REVIEWS }
+            onNodeWithTag("local-review-item-0").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 15_000) { localController.state.value.screen == BookScreen.REVIEWING }
+            onNodeWithText(question.prompt).assertExists()
+            onNodeWithTag("choice-${question.options.indexOf(reviewedAnswer)}").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 15_000) { onAllNodesWithText("这题已复习。").fetchSemanticsNodes().isNotEmpty() }
         }
         assertEquals(localAnswer, library.answer(localBook, localLesson, QuestionMode.CHOICE).text)
+        assertEquals(PracticeAnswer(reviewedAnswer, true), library.review(localBook, localLesson, QuestionMode.CHOICE).answer)
         f.reopenNativeWindow(configured = false, library = libraryDir)
         assertEquals(beforeBook, f.facts(), "Local textbook study cannot mint remote course facts")
 
@@ -236,6 +256,7 @@ class WindowsReviewEntryTest {
         f.reopenNativeWindow()
         assertEquals(settled, f.facts())
         assertEquals(localAnswer, library.answer(localBook, localLesson, QuestionMode.CHOICE).text)
+        assertEquals(PracticeAnswer(reviewedAnswer, true), library.review(localBook, localLesson, QuestionMode.CHOICE).answer)
         val facts = f.facts()
         assertEquals("A", facts.single { it.type == "answer_submitted" && it.payload.str("attemptId") == "original-attempt" }.payload.str("answer"))
         for (type in listOf("question_posed", "answer_submitted", "attempt_graded"))

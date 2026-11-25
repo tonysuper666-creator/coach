@@ -79,7 +79,7 @@ class MultiformatBookTest {
                     assertTrue(resolver.stillValid(target), name)
                     if (format == "pptx") assertContains(target.label, "张幻灯片")
                     val lessonIndex = book.lessons.indexOfFirst { lesson -> lesson.blocks.any { it.id == block.id } }
-                    assertTrue(lessonIndex >= 0, "$name: source ${block.page}:${block.start}-${block.end}, lessons ${book.lessons.map { it.blocks.map { b -> Triple(b.page, b.start, b.end) } }}")
+                    assertTrue(lessonIndex >= 0, "$name: page ${block.page}, role ${book.structure?.pageRole(block.page)}, block ${block.start}-${block.end}, chapter pages ${book.lessons.map { it.firstPage to it.lastPage }}")
                     controller.lesson(lessonIndex)
                     controller.citationSource(book.id, book.lessons[lessonIndex].id, target.pdfPage)
                     assertEquals(BookScreen.READER, controller.state.value.screen, name)

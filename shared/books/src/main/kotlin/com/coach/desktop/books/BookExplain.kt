@@ -121,7 +121,7 @@ internal class ExplainConsent(private val directory: Path) {
         runCatching { settings.storedAiExplainEnabled() }.getOrDefault(false)
 
     fun allow(bookId: String) {
-        if (validId.matches(bookId)) settings.chooseAiExplain(true)
+        if (validId.matches(bookId)) runCatching { settings.chooseAiExplain(true) }
     }
 }
 

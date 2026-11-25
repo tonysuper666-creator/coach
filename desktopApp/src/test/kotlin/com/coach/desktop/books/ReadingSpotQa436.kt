@@ -42,9 +42,11 @@ class ReadingSpotQa436 {
             Files.writeString(input, "# 阅读位置\n\n" + (1..520).joinToString("") { "句" + it.toString().padStart(4, '0') + "。读者找到这句话，再接着读下一句。" })
             val book = library.importBook(input)
             val controller = TextbookController(library)
-            runBlocking { controller.openBook(book.id) }
+
             runSkikoComposeUiTest(size = Size(width, 1440f), density = Density(1.5f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
+                waitUntil(timeoutMillis = 20_000) { controller.state.value.initialized && !controller.state.value.busy }
+                onNodeWithTag("home-read").performClick()
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("reader-text").fetchSemanticsNodes().isNotEmpty() }
                 check()
             }
@@ -54,9 +56,10 @@ class ReadingSpotQa436 {
     private fun SkikoComposeUiTest.toggle() {
         val scrolling = onAllNodesWithTag("book-scroll-read").fetchSemanticsNodes().isNotEmpty()
         if (onAllNodesWithTag("immersive-more-menu").fetchSemanticsNodes().isEmpty()) {
+            onNodeWithTag("reader-page").performSemanticsAction(SemanticsActions.RequestFocus)
             onNodeWithTag("reader-page").performKeyInput { pressKey(Key.Tab) }
         }
-        onNodeWithTag("immersive-more-menu").performClick()
+        onNodeWithTag("immersive-more-menu").performSemanticsAction(SemanticsActions.OnClick)
         onNodeWithTag("v7-type-menu").performClick()
         onNodeWithTag(if (scrolling) "text-mode-paged" else "text-mode-scroll").performClick()
         onNodeWithTag("v7-type-menu").performKeyInput { pressKey(Key.Escape) }

@@ -414,6 +414,12 @@ class BookStructureAndGuideTest {
             assertTrue(secondLessonId in legacy.lessons.map { it.id }, "超过 2400 字的旧书第二节 ID 必须保持 p1:2400")
 
             val savedAnswer = PracticeAnswer(text = "技术变革", revealed = true, understood = true)
+            // This is an existing review, with its original frozen options and solution.
+            val oldSection = legacy.lessons.single { it.id == secondLessonId }
+            val oldPractice = Practice("迁移验证", oldSection.text, "另一选项", listOf("技术变革", "另一选项"))
+            reopened.withCourseDatabase { db ->
+                TextbookReviewStore({ 0L }).recordLesson(db, legacy, oldSection, QuestionMode.CHOICE, oldPractice, savedAnswer)
+            }
             reopened.saveAnswer(legacy.id, secondLessonId, QuestionMode.CHOICE, savedAnswer)
             val afterReload = TextbookLibrary(library.directory)
             assertEquals(savedAnswer, afterReload.answer(legacy.id, secondLessonId, QuestionMode.CHOICE), "旧书已存作答必须持续可查")

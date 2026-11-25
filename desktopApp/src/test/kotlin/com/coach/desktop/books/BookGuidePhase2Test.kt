@@ -240,17 +240,18 @@ class BookGuidePhase2Test {
 
                 // 点击页边难点标记 -> 原地展开整节语境讲解，且 0 额外模型调用
                 onNodeWithTag(markerTag0).performClick()
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("hard-point-card").fetchSemanticsNodes().isNotEmpty() }
-                waitForIdle()
-                onNodeWithTag("hard-point-title").assertTextContains("核心概念", substring = true)
-                onNodeWithTag("hard-point-explanation").assertTextContains("整节", substring = true)
+                val drawer = hasAnyAncestor(hasTestTag("immersive-companion-drawer"))
+                val title = drawer and hasText("难点 · 核心概念")
+                waitUntil(timeoutMillis = 10_000) { onAllNodes(title).fetchSemanticsNodes().size == 1 }
+                onNode(title).assertIsDisplayed()
+                onNode(drawer and hasText("放在整节语境里看", substring = true)).assertIsDisplayed()
                 assertEquals(guideCallsBeforeClick, explainer.guideCalls.size, "点击难点不得再调导读模型")
                 assertEquals(selectionCallsBeforeClick, explainer.selectionCalls.size, "点击难点不得额外调讲解模型")
                 savePng(outDir.resolve("ton1768-02-hard-point-opened.png"))
 
-                onNodeWithTag("hard-point-close").performClick()
+                onNode(drawer and hasText("关闭") and hasClickAction()).performClick()
                 waitForIdle()
-                onNodeWithTag("hard-point-card").assertDoesNotExist()
+                onNode(title).assertDoesNotExist()
             }
         } finally {
             root.toFile().deleteRecursively()

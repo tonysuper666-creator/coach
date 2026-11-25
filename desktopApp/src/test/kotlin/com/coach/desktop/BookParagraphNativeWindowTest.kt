@@ -7,6 +7,7 @@ import androidx.compose.ui.awt.ComposeDialog
 import androidx.compose.ui.awt.ComposeWindow
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.AnnotatedString
+import com.coach.client.PairedCredentials
 import com.coach.desktop.books.*
 import kotlinx.coroutines.runBlocking
 import org.apache.pdfbox.pdmodel.PDDocument
@@ -66,12 +67,17 @@ class BookParagraphNativeWindowTest {
                 assertTrue(model.display.contains("接\u200b回"), "PDF Chinese hard line must join: ${source.replace("\n", "<LF>")}")
                 assertTrue(model.display.contains("existing experience"), "PDF English hard line must join: ${source.replace("\n", "<LF>")}")
             }
-            var requested: BookPassage? = null
-            val support = object : BookLearningSupport {
-                override suspend fun explain(request: BookExplanationRequest) = BookLearningReply.Unavailable("隔离排版验收")
-                override suspend fun ask(request: BookPassageQuestion): BookLearningReply {
-                    requested = request.passage
-                    return BookLearningReply.Text("隔离验收回复，用于检查出处。", listOf(request.passage))
+            // #570（TON-1784）起问一段走伴读侧栏，请求经 BookExplainer 发出；这里替身只记下被选中的那一段。
+            var requested: SourceBlock? = null
+            val explainer = object : BookExplainer(library = controller.library) {
+                override suspend fun load() {
+                    loaded = true
+                    identity = DesktopIdentity(serverUrl = "http://127.0.0.1:1", credentials = PairedCredentials("desktop", "tok", "owner"))
+                }
+                override suspend fun explainSelection(kind: String, chosen: SourceBlock, context: ExplainSectionContext?,
+                    question: String?, history: List<FollowUpTurn>, requestId: String): ExplainResult {
+                    requested = chosen
+                    return ExplainResult.Done(Explanation("隔离验收回复，用于检查出处。【S1】", listOf(Citation("S1", chosen.id, chosen.page)), 10L))
                 }
             }
             for (dark in listOf(false, true)) {
@@ -85,15 +91,15 @@ class BookParagraphNativeWindowTest {
                     title = "LearningCoach · 段落验收（自造 PDF）"
                     val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
                     setBounds(screen.x + 20, screen.y + 20, minOf(1600, screen.width - 40), minOf(1000, screen.height - 40))
-                    setContent { WindowsTextbookHost(controller, learningSupport = support) { null } }
+                    setContent { WindowsTextbookHost(controller, bookExplainer = explainer) { null } }
                     isAlwaysOnTop = true
                     isVisible = true
                     toFront(); requestFocus()
                 } }
                 try {
-                    waitFor("PDF original") { node(window, "book-original-toggle") != null }
+                    waitFor("PDF original") { node(window, "immersive-more-menu") != null && (node(window, "original-pdf-paged") != null || node(window, "original-pdf-scroll") != null) }
                     shot(window, dark, "pdf-original")
-                    click(window, "book-original-toggle")
+                    selectView(window, text = true)
                     waitFor("reflow text") { node(window, "reader-text") != null }
                     shot(window, dark, "pdf-text")
                     val robot = Robot().apply { autoDelay = 50 }
@@ -132,24 +138,37 @@ class BookParagraphNativeWindowTest {
                     // Resize the actual window; this card still uses the existing single column.
                     edt { window.setSize(1100, minOf(window.height, 850)) }
                     shot(window, dark, "narrow-single-column")
-                    click(window, "ask-book-passage")
-                    click(window, "ask-paragraph-0")
-                    edt { assertTrue(node(window, "book-passage-question")!!.config[SemanticsActions.SetText].action!!.invoke(AnnotatedString("解释这段话。"))) }
-                    click(window, "book-passage-send")
-                    click(window, "book-passage-citation")
-                    waitFor("source dialog") { node(window, "book-passage-source") != null }
+                    // #570（TON-1784）起「问这段」在伴读侧栏：开侧栏 → 提问 → 选本页段落 → 在侧栏输入框发问；
+                    // 原来的出处弹窗已删，出处是回复里的引用，点它回到原文。
+                    requested = null
+                    click(window, "immersive-companion-toggle")
+                    click(window, "companion-tab-ask")
+                    // TON-1848 起这本书上一次的问答存进 SQLite，再开提问页会接着显示：上一轮问过的那段还挂在引文里，
+                    // 「选本页段落」要等引文清掉才出现。像人一样先点引文旁的「清除」，再另选一段。
+                    waitFor("companion ask pane") { node(window, "companion-ask-pane") != null }
+                    if (node(window, "companion-ask-quote") != null) {
+                        clickText(window, "清除")
+                        waitFor("restored quote cleared") { node(window, "companion-ask-quote") == null }
+                    }
+                    click(window, "companion-pick-paragraph")
+                    click(window, "ask-passage-block-0")
+                    waitFor("companion question input") { node(window, "inline-followup-input") != null }
+                    edt { assertTrue(node(window, "inline-followup-input")!!.config[SemanticsActions.SetText].action!!.invoke(AnnotatedString("解释这段话。"))) }
+                    click(window, "inline-followup-send")
+                    waitFor("companion reply with its citation") { requested != null && node(window, "explain-citation") != null }
                     val passage = assertNotNull(requested)
+                    assertEquals(11, passage.page)
                     assertEquals(originals.getValue(11).substring(passage.start, passage.end), passage.text)
-                    assertEquals(passage.text, edt { node(window, "book-passage-source")!!.config[SemanticsProperties.Text].single().text })
                     shot(window, dark, "exact-source")
-                    robot.keyPress(KeyEvent.VK_ESCAPE); robot.keyRelease(KeyEvent.VK_ESCAPE)
-                    waitFor("source closed") { node(window, "book-passage-source") == null }
-                    click(window, "book-passage-close")
-                    waitFor("reader restored") { node(window, "book-passage-dialog") == null }
-                    click(window, "book-original-toggle")
-                    waitFor("original view restored") { node(window, "reader-text") == null }
+                    click(window, "explain-citation")
+                    waitFor("citation keeps the asked page") { !controller.state.value.busy && controller.state.value.page == 11 }
+                    click(window, "companion-close")
+                    waitFor("reader restored") { node(window, "immersive-companion-drawer") == null }
+                    // TON-1802 起点出处会直接切到原页去标原句；「原页」那一段此时已选中，再点不响应。
+                    // 改为确认出处把人带到了原页，再切回文字，往返照旧走一遍。
+                    waitFor("citation opens the original page") { node(window, "reader-text") == null }
                     shot(window, dark, "pdf-original-return")
-                    click(window, "book-original-toggle")
+                    selectView(window, text = true)
                     waitFor("text view restored") { node(window, "reader-text") != null }
                     assertEquals(11, controller.state.value.page)
                     shot(window, dark, "pdf-text-return")
@@ -173,8 +192,26 @@ class BookParagraphNativeWindowTest {
         return owners.flatMap { walk(it.unmergedRootSemanticsNode) } + window.ownedWindows.filter { it.isVisible }.flatMap(::nodes)
     }
     private fun node(window: ComposeWindow, tag: String) = edt { nodes(window).firstOrNull { it.config.getOrNull(SemanticsProperties.TestTag) == tag } }
+    // #570（TON-1784）把「原页 / 文字」切换收进顶栏「更多」菜单里的分段胶囊：先开菜单，再点要去的那一段。
+    private fun selectView(window: ComposeWindow, text: Boolean) {
+        // 选中一段后菜单自己收起（有退出动画）；等它真正消失，下一次再开菜单才不会撞上正在关的那一个。
+        click(window, "immersive-more-menu")
+        click(window, if (text) "view-mode-text" else "view-mode-original")
+        waitFor("more menu closed") { node(window, "view-mode-text") == null }
+    }
+    private fun clickText(window: ComposeWindow, text: String) {
+        val target = edt { nodes(window).firstOrNull { n ->
+            n.config.getOrNull(SemanticsProperties.Text)?.any { it.text == text } == true && n.config.getOrNull(SemanticsActions.OnClick) != null
+        } }
+        edt { assertTrue(assertNotNull(target, text).config[SemanticsActions.OnClick].action!!.invoke(), text) }
+        Thread.sleep(200)
+    }
     private fun click(window: ComposeWindow, tag: String) {
-        waitFor(tag) { node(window, tag) != null }
+        // 等不到按钮时把侧栏里此刻有哪些控件一起报出来，看得出是侧栏没开、停在别的分页，还是那一段没有可选的段落。
+        waitFor(tag, {
+            "tags=" + edt { nodes(window).mapNotNull { it.config.getOrNull(SemanticsProperties.TestTag) }
+                .filter { it.startsWith("companion") || it.startsWith("ask") || it.startsWith("inline") || it.startsWith("immersive") }.distinct() }
+        }) { node(window, tag) != null }
         edt { assertTrue(node(window, tag)!!.config[SemanticsActions.OnClick].action!!.invoke(), tag) }
         Thread.sleep(200)
     }

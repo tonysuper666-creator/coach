@@ -511,7 +511,7 @@ class ImmersiveReaderV2Test {
                         .sumOf { n -> (n.boundsInRoot.width * n.boundsInRoot.height).toDouble() }
                     val clientRatio = textArea / (sz.width * sz.height)
                     println("LAPTOP_TEXT_CLIENT_RATIO $label cols=$expectedCols ratio=${"%.4f".format(clientRatio)}")
-                    assertTrue(clientRatio >= 0.85, "$label pure-read text client ratio $clientRatio must be >= 0.85")
+                    assertTrue(clientRatio >= 0.92, "$label pure-read text client ratio $clientRatio must be >= 0.92")
                 }
             }
         } finally {

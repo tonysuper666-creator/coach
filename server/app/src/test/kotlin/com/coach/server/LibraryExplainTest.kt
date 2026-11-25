@@ -75,7 +75,9 @@ class LibraryExplainTest {
             assertTrue(system.contains("not covered in this section"))
             assertTrue(system.contains("上一节介绍了机械功的定义。") && system.contains("第三节 功率"))
             assertFalse(system.contains("If unsupported, return empty paragraphs."))
-            assertTrue(messages.single { it.str("role") == "user" }.str("content").contains("这一段最重要的一个概念是什么？"))
+            val user = messages.single { it.str("role") == "user" }.str("content")
+            assertTrue(user.contains("这一段最重要的一个概念是什么？"))
+            assertTrue(user.contains("starting directly with {\"paragraphs\":["))
             assertTrue(system.contains("One to three short paragraphs"))
             assertTrue(system.contains("never type a double quote"))
 
@@ -88,6 +90,17 @@ class LibraryExplainTest {
             assertEquals(3, readerMaxParagraphs(lesson = false, kind = "ask"))
             assertEquals(2, readerMaxParagraphs(lesson = false, kind = "explain"))
             assertEquals(6, readerMaxParagraphs(lesson = true, kind = "lesson"))
+
+            // Leading prose triggers STREAM_JSON and retries with explicit format correction on formatAttempt > 0.
+            h.stub.stream(1, "好的，根据本节内容：", StubTutor.terminal("complete"), StubTutor.DONE)
+            h.stub.stream(1, """{"paragraphs":[{"text":"重试后直接输出合法 JSON。","anchors":["S1"]}]}""",
+                StubTutor.terminal("complete"), StubTutor.DONE)
+            val (retryStatus, retryBody) = h.post(JsonObject(input + ("requestId" to JsonPrimitive("ab15"))))
+            assertEquals(200, retryStatus)
+            assertEquals(listOf(1L), retryBody.getValue("sources").jsonArray.map { it.jsonObject.num("pdfPage") })
+            val retryUser = LedgerJson.parseToJsonElement(h.stub.requestBodies.last()).jsonObject.getValue("messages").jsonArray
+                .map { it.jsonObject }.single { it.str("role") == "user" }.str("content")
+            assertTrue(retryUser.contains("Previous attempt failed JSON format validation"))
         }
     }
 

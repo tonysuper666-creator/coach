@@ -127,6 +127,50 @@ class ReaderExplanationTest {
         assertTrue(reasons.isEmpty())
         assertEquals(ReaderFormatReason.STREAM_JSON, ReaderFormat().reason)
     }
+
+    @Test fun cleanMarkdownJsonFenceAcceptedWhilePreambleAndTrailingTextStayRejected(): Unit = runBlocking {
+        val inner = payload("“Synthetic pears”是这里的例子。")
+        for (wrapped in listOf(
+            "```json\n$inner\n```",
+            "```JSON\r\n$inner\r\n```",
+            "```\n$inner\n```",
+        )) {
+            val parsed = assertNotNull(checkedReaderPayload(wrapped, pack), wrapped)
+            assertEquals("“Synthetic pears”是这里的例子。【S1】", parsed.first)
+            assertEquals(4, parsed.second.single().jsonObject.num("pdfPage"))
+        }
+
+        val guideInner = """{"brief":["一"],"recap":"提要","paragraphs":[{"text":"“Synthetic pears”是这里的例子。","anchors":["S1"]}]}"""
+        assertNotNull(checkedGuidePayload("```json\n$guideInner\n```", pack))
+        val structInner = """{"sections":[{"startBlockId":"S1","title":"第一节"}]}"""
+        assertNotNull(checkedStructurePayload("```json\n$structInner\n```", pack))
+
+        for (bad in listOf(
+            "Here is the answer:\n```json\n$inner\n```",
+            "```json\n$inner\n```\nWait, I should correct the formatting.",
+            "```python\n$inner\n```",
+            "```json\n$inner",
+            "```json\n${payload("“Synthetic apples”并不在原文。")}\n```",
+            "```json\n${payload("PDF page 99 says this.")}\n```",
+        )) {
+            assertNull(checkedReaderPayload(bad, pack), bad)
+        }
+
+        Harness().use { h ->
+            h.stub.stream(1, "```json\n${payload("有依据的解释。")}\n```", StubTutor.terminal("complete"), StubTutor.DONE)
+            val answer = h.reader.explain(
+                "d",
+                "c",
+                json("requestId" to "af12", "kind" to "explain"),
+                "Synthetic pears",
+                pack.pages,
+                com.coach.domain.scope.VisibleScope.learner(),
+            )
+            assertTrue(answer.str("text").contains("有依据的解释。"))
+            assertEquals(4, answer.getValue("sources").jsonArray.single().jsonObject.num("pdfPage"))
+            assertEquals(1, h.stub.requests)
+        }
+    }
     @Test fun insufficientEvidenceReturnsFixedUncitedResponseWithoutRetry() = runBlocking {
         Harness().use { h ->
             h.stub.stream(1, """{"paragraphs":[]}""", StubTutor.terminal("complete"), StubTutor.DONE)

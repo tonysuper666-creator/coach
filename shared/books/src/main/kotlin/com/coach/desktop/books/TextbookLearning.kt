@@ -61,7 +61,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
     citationFocus: MutableMap<Int, FocusRequester>, citationIndex: Int,
     onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit, onCitation: (Int, BookSourceTarget) -> Unit, onCitationRefused: () -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
     onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit, onQuestions: () -> Unit,
-    onRecapContinue: () -> Unit, onPair: () -> Unit = onSource, hinge: Hinge? = LocalBookHinge.current) {
+    onRecapContinue: () -> Unit, onPair: () -> Unit = onSource, hinge: Hinge? = LocalBookHinge.current, library: TextbookLibrary? = null) {
     val book = checkNotNull(ui.book)
     val lesson = book.lessons.getOrNull(book.lessonIndex)
     LaunchedEffect(returnFocus, ui.busy) {
@@ -150,7 +150,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                     if (ui.learningPath == LearningPath.QUESTION_FIRST && ui.answer.revealed && question != null) {
                         if (answerExplain != null) LessonAnswerExplanation(
                             book, lesson, question, answerExplain, answerExplainReply, sources = sourceRow,
-                            onOpenSourcePage = onPair,
+                            onOpenSourcePage = onPair, library = library,
                         ) else BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow, onRepair = onPair)
                         val lessonNav: @Composable () -> Unit = { if (includeNav) LessonNav(book, ui.busy, onLesson) }
                         LessonSummaryCard(book, lesson, question, ui.answer, nav = if (!includeNav) null else lessonNav)

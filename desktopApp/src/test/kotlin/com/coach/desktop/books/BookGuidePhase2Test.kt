@@ -445,11 +445,22 @@ class BookGuidePhase2Test {
             initialSettings.chooseSectionSummary(true)
             assertTrue(ReadingSettings(library.directory).sectionSummary)
 
+            val section = book.lessons.first()
+            val group = requireNotNull(ChapterCompanionGrouping.groupForSection(book, 0))
+            val quizzes = listOf(
+                BookCompanionQuiz("summary-q1", section.id, "第一步选哪项？", listOf("甲", "乙"), "乙"),
+                BookCompanionQuiz("summary-q2", section.id, "第二步选哪项？", listOf("丙", "丁"), "丁"),
+            )
+            library.saveChapterCompanion(book.id, group.chapterId, BookCompanionPack(
+                bookId = book.id, chapterId = group.chapterId, chapterTitle = group.chapterTitle,
+                keyPoints = listOf(BookCompanionKeyPoint("point", section.id, "合成小结只对应本节。")), optionalPractice = quizzes,
+            ))
+            StudyModeStore.save(library, BookStudyPreference(bookId = book.id, mode = BookStudyMode.READ_THROUGH))
             ExplainConsent(library.directory).allow(book.id)
             val explainer = Phase2FakeExplainer(root.resolve("home"))
             runBlocking { controller.learn(LearningPath.READ) }
 
-            runSkikoComposeUiTest(size = Size(960f, 840f), density = Density(1f)) {
+            runSkikoComposeUiTest(size = Size(1440f, 960f), density = Density(1f)) {
                 val activeSettings = ReadingSettings(library.directory)
                 setContent {
                     val ui by controller.state.collectAsState()
@@ -517,6 +528,10 @@ class BookGuidePhase2Test {
                 }
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("reader-text").fetchSemanticsNodes().isNotEmpty() }
                 waitForIdle()
+                if (onAllNodesWithTag("single-book-companion").fetchSemanticsNodes().isEmpty()) {
+                    onNodeWithTag("immersive-companion-toggle").performClick()
+                }
+                onNodeWithTag("single-book-companion").assertExists()
                 // 第 1 页（节首）尚未到节末，不出现节末小结
                 onNodeWithTag("section-end-summary-card").assertDoesNotExist()
 
@@ -529,7 +544,7 @@ class BookGuidePhase2Test {
                 }
                 waitUntil(timeoutMillis = 20_000) {
                     onAllNodesWithTag("section-end-summary-card").fetchSemanticsNodes().isNotEmpty() &&
-                        explainer.guideCalls.isNotEmpty()
+                        onAllNodesWithText("合成小结只对应本节。", substring = true).fetchSemanticsNodes().isNotEmpty()
                 }
                 waitForIdle()
                 onNodeWithTag("section-end-summary-lines").assertIsDisplayed()
@@ -539,13 +554,8 @@ class BookGuidePhase2Test {
                 // 展开 1–2 道选择题并作答（第 1 题选错、第 2 题选对），验证接入现有做题主线（复习队列 + 题梯）
                 onNodeWithTag("section-end-start-quiz").performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("section-end-quiz-panel").fetchSemanticsNodes().isNotEmpty() }
-                val practices = listOfNotNull(testPracticeFixture(book, book.lessons.first(), QuestionMode.CHOICE))
-                assertEquals(2, practices.size, "本节应能出 2 道选择题")
-                val wrongIdx0 = practices[0].options.indexOfFirst { it != practices[0].answer }
-                val rightIdx1 = practices[1].options.indexOfFirst { it == practices[1].answer }
-                assertTrue(wrongIdx0 >= 0 && rightIdx1 >= 0)
-                onNodeWithTag("section-quiz-0-choice-$wrongIdx0").performScrollTo().performClick()
-                onNodeWithTag("section-quiz-1-choice-$rightIdx1").performScrollTo().performClick()
+                onNodeWithTag("section-quiz-0-choice-0").performScrollTo().performClick()
+                onNodeWithTag("section-quiz-1-choice-1").performScrollTo().performClick()
                 waitUntil(timeoutMillis = 10_000) {
                     library.reviews().isNotEmpty() && library.ladder(book.id).responses.size == 2
                 }
@@ -553,7 +563,7 @@ class BookGuidePhase2Test {
                 savePng(outDir.resolve("ton1768-04-section-end-quiz.png"))
 
                 // 设置里关闭「节末小结」，卡片立即收起并持久化
-                onNodeWithTag("v7-type-menu").performClick()
+                openReaderTypeSettings()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("reading-sectionSummary-OFF").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithTag("reading-sectionSummary-OFF").performClick()
                 waitForIdle()
@@ -567,7 +577,8 @@ class BookGuidePhase2Test {
                 onNodeWithTag("v7-type-menu").performMouseInput { click() }
                 onNodeWithTag("reading-settings-panel").assertDoesNotExist()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("section-end-open-mainline").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithTag("section-end-open-mainline").performClick()
+                closeReaderOverflow()
+                onNodeWithTag("section-end-open-mainline").performScrollTo().performClick()
                 waitUntil(timeoutMillis = 10_000) { controller.state.value.screen == BookScreen.LEARNING }
                 onNodeWithTag("textbook-learning").assertIsDisplayed()
             }

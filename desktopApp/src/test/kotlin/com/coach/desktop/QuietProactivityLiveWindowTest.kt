@@ -62,6 +62,9 @@ class QuietProactivityLiveWindowTest {
         try {
             val syntheticBook = root.resolve("synthetic-econ-study.md").also { file ->
                 val content = buildString {
+                    // 第一个一级标题会被当成书名；TON-1821 起章节按目录走，书名那一节不归任何章节。
+                    // 先给书名，1.1 才是目录里的第一节，sec1 才有伴读章节可放缓存包。
+                    append("# Synthetic Econ Study\n\n")
                     for (sec in 1..6) {
                         for (p in 1..3) {
                             append("# $sec.$p Core Mechanism $sec.$p\n\n")

@@ -1,6 +1,7 @@
 package com.coach.desktop
 
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.tooling.ComposeToolingApi
@@ -19,6 +20,8 @@ import com.coach.desktop.books.*
 import com.coach.domain.reader.ReaderRect
 import com.coach.domain.reader.ReaderTextRange
 import com.coach.ui.theme.CoachTheme
+import com.coach.ui.v7.DeskTypeControl
+import com.coach.ui.v7.LocalDeskTypeControl
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
@@ -55,7 +58,6 @@ class OriginalPdfNativeWindowTest {
         val root = Files.createTempDirectory("coach-reader-view-")
         val library = TextbookLibrary(root.resolve("library"))
         val book = library.importBook(viewSwitchPdf(root))
-        val stored = TextbookLibrary(library.directory)
         val databaseUrl = "jdbc:sqlite:${library.directory.resolve("library.sqlite")}"
         DriverManager.getConnection(databaseUrl).use { db ->
             db.createStatement().use { sql ->
@@ -69,6 +71,14 @@ class OriginalPdfNativeWindowTest {
                 sql.executeQuery("SELECT text_view FROM view_writes ORDER BY rowid").use { rows ->
                     buildList { while (rows.next()) add(rows.getBoolean(1)) }
                 }
+            }
+        }
+        // TON-1783（#571）起书库实例会记住读过的视图值；另开一个书库实例去读，只会一直拿到它第一次读到的那个。
+        // 要核对真正落盘的值，就直接查 SQLite。
+        fun sqliteTextView(): Boolean? = DriverManager.getConnection(databaseUrl).use { db ->
+            db.prepareStatement("SELECT text_view FROM book_reader_views WHERE book=?").use { sql ->
+                sql.setString(1, book.id)
+                sql.executeQuery().use { if (it.next()) it.getBoolean(1) else null }
             }
         }
         fun waitForSqlite(label: String, ready: () -> Boolean) = waitFor(label) {
@@ -102,32 +112,47 @@ class OriginalPdfNativeWindowTest {
             } }
             try {
                 val edtThread = edt { Thread.currentThread() }
-                fun toggle() = click(window, "book-original-toggle")
+                // 窗口默认打开原页；toggle() 每次切到另一种视图。
+                var textNow = false
+                fun toggle() { selectView(window, text = !textNow); textNow = !textNow }
                 fun jump(page: Int, hold: Boolean = false) {
+                    edt { holdPage = hold }
+                    // #570（TON-1784）起跳页输入框收在底栏页码后面：点页码才出现输入框和「前往」。
+                    if (node(window, "page-jump") == null) click(window, "reader-page-number")
+                    waitFor("page jump field") { node(window, "page-jump") != null }
                     edt {
-                        holdPage = hold
                         val field = assertNotNull(node(window, "page-jump"))
                         assertTrue(field.config[SemanticsActions.SetText].action!!.invoke(AnnotatedString(page.toString())))
                     }
-                    waitFor("enabled page jump") { findNode(window) { it.isAction("前往") } != null }
-                    edt { assertTrue(findNode(window) { it.isAction("前往") }!!.config[SemanticsActions.OnClick].action!!.invoke()) }
+                    // 输入框预填当前页，「前往」一开始就可点；要等重组把新页码交给按钮，否则点下去提交的还是旧页。
+                    waitFor("page jump holds $page") {
+                        node(window, "page-jump")?.config?.getOrNull(SemanticsProperties.EditableText)?.text == page.toString() &&
+                            node(window, "page-jump-go")?.config?.contains(SemanticsProperties.Disabled) == false
+                    }
+                    edt { assertTrue(node(window, "page-jump-go")!!.config[SemanticsActions.OnClick].action!!.invoke()) }
                     assertEquals(page, edt { requestedPage })
                 }
                 fun visible(text: Boolean, page: Int) {
-                    val label = if (text) "看原页" else "看文字"
+                    val label = if (text) "文字视图" else "原页视图"
                     waitFor("$label and page $page", detail = {
                         edt {
                             val body = node(window, "reader-text")
                             val sources = body?.config?.getOrNull(BookPageSources)?.map { it.importPage }.orEmpty()
-                            "loading=${node(window, "book-page-loading") != null} displayedSources=$sources" +
-                                " published=${publishedPage.intValue} requested=$requestedPage sqlite=${stored.savedTextView(book.id)}"
+                            val originals = findAll(window) { it.config.getOrNull(SemanticsProperties.TestTag)?.startsWith("original-pdf-page-") == true }.mapNotNull { n ->
+                                n.config.getOrNull(SemanticsProperties.TestTag)?.takeIf { it.startsWith("original-pdf-page-") }?.let { tag ->
+                                    "$tag:" + n.children.joinToString("/") { c -> "${c.config.getOrNull(OriginalPageBitmapWidth)}@${c.boundsInRoot.isEmpty}" }
+                                }
+                            }
+                            "loading=${node(window, "book-page-loading") != null} displayedSources=$sources originals=$originals" +
+                                " published=${publishedPage.intValue} requested=$requestedPage sqlite=${runCatching { sqliteTextView() }.getOrElse { "busy" }}"
                         }
                     }, timeoutMillis = if (text) 60_000 else 20_000) {
                         edt {
-                            val button = node(window, "book-original-toggle")
+                            // #570（TON-1784）起切换胶囊只在「更多」菜单里出现，菜单收起时没有按钮文字可读；
+                            // 看的是屏上实际显示的视图，再由下面的 SQLite 断言核对保存值。
                             val body = node(window, "reader-text")
                             val original = node(window, "original-pdf-page-$page")
-                            button?.isAction(label) == true && if (text) {
+                            node(window, "immersive-more-menu") != null && if (text) {
                                 body?.config?.getOrNull(SemanticsProperties.Text).orEmpty().any { "Page sample $page:" in it.text } &&
                                     original == null
                             } else {
@@ -137,7 +162,7 @@ class OriginalPdfNativeWindowTest {
                             }
                         }
                     }
-                    waitForSqlite("SQLite text_view=$text") { stored.savedTextView(book.id) == text }
+                    waitForSqlite("SQLite text_view=$text") { sqliteTextView() == text }
                     println("READER_VIEW dark=$dark page=$page text=$text sqlite=$text")
                 }
                 fun releasePage(page: Int) = edt { holdPage = false; publishedPage.intValue = page }
@@ -148,7 +173,7 @@ class OriginalPdfNativeWindowTest {
                         frame.get(2, TimeUnit.SECONDS)
                     } catch (_: TimeoutException) {
                         val stack = edtThread.stackTrace
-                        println("READER_VIEW_BLOCKED sqlite=${stored.savedTextView(book.id)}\n${stack.take(50).joinToString("\n")}")
+                        println("READER_VIEW_BLOCKED sqlite=${runCatching { sqliteTextView() }.getOrElse { "busy" }}\n${stack.take(50).joinToString("\n")}")
                         if (!firstToggle) fail("Reader did not draw a frame within two seconds")
                         frame.get(90, TimeUnit.SECONDS)
                         fail("Reader did not draw the first text view within two seconds")
@@ -241,6 +266,7 @@ class OriginalPdfNativeWindowTest {
         val rects = PdfTextSelection.boxesForVerifiedRange(unit, page.text, range)
         assertTrue(rects.size > 2)
         LoopbackExplanation().use { service ->
+            service.cite.set("${book.id}:p1:$second")
             val settings = DesktopConnectionSettings(root.resolve("paired"), environment = { null },
                 property = { if (it == "jpackage.app-path") "/synthetic/Coach.exe" else null })
             val explainer = BookExplainer(settings, library)
@@ -265,6 +291,12 @@ class OriginalPdfNativeWindowTest {
                 try {
                     waitFor("original PDF default") { node(window, "original-pdf-text-layer") != null }
                     assertNull(node(window, "reader-text"))
+                    // 位图按落定后的版面宽度栅格化；窗口刚出现时版面还会再排一次，先等这一张位图出来再比宽度。
+                    waitFor("first raster at its laid-out width", {
+                        node(window, "remote-image")?.let { "layout=${it.size.width} bitmap=${it.config.getOrNull(OriginalPageBitmapWidth)}" }.orEmpty()
+                    }) {
+                        node(window, "remote-image")?.let { it.config.getOrNull(OriginalPageBitmapWidth) == it.size.width } == true
+                    }
                     val firstPageWidth = checkNotNull(node(window, "remote-image")).let { image ->
                         assertEquals(image.size.width, image.config[OriginalPageBitmapWidth])
                         image.size.width
@@ -276,53 +308,63 @@ class OriginalPdfNativeWindowTest {
                     }
                     shot(window, dark, "drag-selection")
                     if (!dark) {
-                        edt { window.setSize(window.width - 144, window.height) }
-                        waitFor("new raster after resizing the same page") {
+                        // #570（TON-1784）起单层阅读器把整页放进窗口，这一页受高度约束：只缩宽度页面不会变，
+                        // 宽高一起缩才一定按新版面重新栅格化。
+                        edt { window.setSize(window.width - 144, window.height - 144) }
+                        waitFor("new raster after resizing the same page", {
+                            node(window, "remote-image")?.let { "first=$firstPageWidth layout=${it.size.width} bitmap=${it.config.getOrNull(OriginalPageBitmapWidth)}" }.orEmpty()
+                        }) {
                             val image = checkNotNull(node(window, "remote-image")) { "The page became blank during resize" }
                             image.size.width != firstPageWidth && image.config[OriginalPageBitmapWidth] == image.size.width
                         }
                         assertEquals(range, selection(window), "Resizing preserves the exact UTF-16 selection")
                         shot(window, dark, "resized-selection")
-                        click(window, "ask-book-passage")
-                        waitFor("question prefilled with selected text") { node(window, "book-passage-question") != null }
+                        // #570 起提问从选段胶囊的「问…」进伴读侧栏，在侧栏输入框里发问。
+                        service.last.set(null)
+                        click(window, "selection-action-ask")
+                        waitFor("companion question input for the selection") { node(window, "inline-followup-input") != null }
                         edt {
-                            val field = checkNotNull(node(window, "book-passage-question"))
+                            val field = checkNotNull(node(window, "inline-followup-input"))
                             assertTrue(field.config[SemanticsActions.SetText].action!!.invoke(AnnotatedString("What does this sentence show?")))
                         }
-                        click(window, "book-passage-send")
-                        waitFor("selected passage question reply") { node(window, "book-passage-citation") != null }
+                        click(window, "inline-followup-send")
+                        waitFor("selected passage question reply", { "request=${service.last.get()?.get("kind")}" }) {
+                            service.last.get() != null && node(window, "inline-explain-loading") == null &&
+                                citation(window) != null
+                        }
                         val asked = checkNotNull(service.last.get())
                         assertEquals("ask", asked.getValue("kind").jsonPrimitive.content)
-                        assertEquals(phrase, asked.getValue("selection").jsonPrimitive.content)
-                        assertEquals("${book.id}:p1:$second", asked.getValue("blocks").jsonArray.single().jsonObject
-                            .getValue("id").jsonPrimitive.content)
-                        click(window, "book-passage-citation")
+                        assertEquals("What does this sentence show?", asked.getValue("question").jsonPrimitive.content)
+                        assertExactOccurrence(asked, phrase, "${book.id}:p1:$second")
+                        clickNode(window, "ask citation") { citation(window) }
                         waitFor("question citation visible on original") { node(window, "remote-highlight") != null }
                         drag(window, rects.first(), rects.last())
                         waitFor("reselected original text") { selection(window) == range }
                     }
-                    click(window, "book-explain-toggle")
-                    click(window, "explain-button")
-                    waitFor("paired explanation") { node(window, "explain-citation") != null }
+                    // #570 起「讲讲」也在选段胶囊上，讲解出现在伴读侧栏的同一段对话里。
+                    service.last.set(null)
+                    val turnsBefore = turns(window)
+                    click(window, "selection-action-explain")
+                    waitFor("paired explanation", { "request=${service.last.get()?.get("kind")} turns=${turns(window)}" }) {
+                        service.last.get() != null && node(window, "inline-explain-loading") == null &&
+                            turns(window) > turnsBefore && citation(window) != null
+                    }
                     val request = checkNotNull(service.last.get())
-                    assertEquals(phrase, request.getValue("selection").jsonPrimitive.content)
-                    val sent = request.getValue("blocks").jsonArray.single().jsonObject
-                    assertEquals("${book.id}:p1:$second", sent.getValue("id").jsonPrimitive.content)
-                    assertEquals(phrase, sent.getValue("text").jsonPrimitive.content)
+                    assertEquals("explain", request.getValue("kind").jsonPrimitive.content)
+                    assertExactOccurrence(request, phrase, "${book.id}:p1:$second")
                     shot(window, dark, "explanation")
-                    click(window, "explain-citation")
+                    clickNode(window, "explanation citation") { citation(window) }
                     waitFor("exact source visible") {
-                        node(window, "remote-highlight") != null && selection(window) == null &&
-                            node(window, "explain-button") == null
+                        node(window, "remote-highlight") != null && selection(window) == null
                     }
                     shot(window, dark, "cite-original")
                     if (!dark) {
                         // The cited line has been scrolled into the viewport. Hit it in the same
                         // physical page again after re-opening the ordinary reading position.
-                        click(window, "book-original-toggle")
+                        selectView(window, text = true)
                         waitFor("text view") { node(window, "reader-text") != null }
                         waitFor("text view saved to SQLite") { library.savedTextView(book.id) == true }
-                        click(window, "book-original-toggle")
+                        selectView(window, text = false)
                         waitFor("original view") { node(window, "original-pdf-text-layer") != null }
                     }
                     drag(window, rects.first(), rects.last())
@@ -351,6 +393,7 @@ class OriginalPdfNativeWindowTest {
         val layer = assertNotNull(library.pdfTextLayer(book, right))
         val boxes = PdfTextSelection.boxesForVerifiedRange(layer, right.text, range)
         LoopbackExplanation().use { service ->
+            service.cite.set("${book.id}:p2:$start")
             val settings = DesktopConnectionSettings(root.resolve("paired"), environment = { null },
                 property = { if (it == "jpackage.app-path") "/synthetic/Coach.exe" else null })
             val explainer = BookExplainer(settings, library)
@@ -366,9 +409,16 @@ class OriginalPdfNativeWindowTest {
                     setContent { CoachTheme(darkTheme = dark) {
                         Surface(color = CoachTheme.colors.bgCanvas) {
                             val visible = remember { mutableIntStateOf(1) }
-                            TextbookReader(LibraryUi(book = book, page = visible.intValue, screen = BookScreen.READER), library,
-                                questions, null, remember { FocusRequester() }, onNoteSession = {},
-                                onPage = { visible.intValue = it }, onBack = {}, onLearn = {}, explainProvider = explainer)
+                            // 「Aa」排版控件由 WindowsTextbookHost 提供；这里直接渲染阅读器，按宿主同样的方式接上。
+                            val prefs = remember { ReadingSettings(library.directory) }
+                            val typePanel: DeskTypeControl = { extra ->
+                                ReadingSettingsPanel(prefs, { library.preferredTextView(book.id) != true }, extra)
+                            }
+                            CompositionLocalProvider(LocalDeskTypeControl provides typePanel) {
+                                TextbookReader(LibraryUi(book = book, page = visible.intValue, screen = BookScreen.READER), library,
+                                    questions, null, remember { FocusRequester() }, onNoteSession = {},
+                                    onPage = { visible.intValue = it }, onBack = {}, onLearn = {}, explainProvider = explainer)
+                            }
                         }
                     } }
                     isAlwaysOnTop = true
@@ -408,15 +458,24 @@ class OriginalPdfNativeWindowTest {
                     }
                     shot(window, dark, "modes-right-after")
                     assertFalse(TextbookLibrary(library.directory).pdfScrollMode(book.id))
-                    click(window, "book-explain-toggle")
-                    click(window, "explain-button")
-                    waitFor("selected right page explanation") { node(window, "explain-citation") != null }
+                    // #570（TON-1784）起「讲讲」在选段胶囊上，讲解出现在伴读侧栏。
+                    service.last.set(null)
+                    click(window, "selection-action-explain")
+                    waitFor("selected right page explanation", { "request=${service.last.get()?.get("kind")}" }) {
+                        service.last.get() != null && node(window, "inline-explain-loading") == null && citation(window) != null
+                    }
                     val request = checkNotNull(service.last.get())
-                    assertEquals(phrase, request.getValue("selection").jsonPrimitive.content)
-                    val sent = request.getValue("blocks").jsonArray.single().jsonObject
-                    assertEquals("${book.id}:p2:$start", sent.getValue("id").jsonPrimitive.content)
-                    click(window, "explain-citation")
-                    waitFor("citation visible in the right sheet") {
+                    assertEquals("explain", request.getValue("kind").jsonPrimitive.content)
+                    assertExactOccurrence(request, phrase, "${book.id}:p2:$start")
+                    clickNode(window, "right page citation") { citation(window) }
+                    // 伴读侧栏占去宽度时双页会退成单页；收起侧栏后回到双页，再查右页上的出处高亮。
+                    click(window, "companion-close")
+                    waitFor("companion closed") { node(window, "immersive-companion-drawer") == null }
+                    waitFor("citation visible in the right sheet", {
+                        "right=${node(window, "original-pdf-right") != null} highlight=${node(window, "remote-highlight") != null} " +
+                            "visible=${lineVisible(window, boxes.first())} image=" +
+                            node(window, "remote-image")?.config?.getOrNull(SemanticsProperties.ContentDescription)
+                    }) {
                         node(window, "original-pdf-right") != null && node(window, "remote-highlight") != null && lineVisible(window, boxes.first())
                     }
                     mode(window, scroll = true)
@@ -430,9 +489,22 @@ class OriginalPdfNativeWindowTest {
         println("ORIGINAL_PDF_MODES themes=2 switchesPerTheme=10 rightPage=2 sameRange=true citationInBoth=true")
     }
 
+    // #570（TON-1784）起「Aa」排版菜单也收进顶栏「更多」菜单：先开「更多」，选完版式后再把「更多」收起。
     private fun mode(window: ComposeWindow, scroll: Boolean) {
+        if (node(window, "v7-type-menu") == null) click(window, "immersive-more-menu")
         click(window, "v7-type-menu")
         click(window, if (scroll) "original-mode-scroll" else "original-mode-paged")
+        waitFor("reading settings closed") { node(window, "reading-settings-panel") == null }
+        if (node(window, "v7-type-menu") != null) click(window, "immersive-more-menu")
+        waitFor("more menu closed") { node(window, "v7-type-menu") == null }
+    }
+
+    // #570（TON-1784）把「原页 / 文字」切换收进顶栏「更多」菜单里的分段胶囊：先开菜单，再点要去的那一段。
+    private fun selectView(window: ComposeWindow, text: Boolean) {
+        // 选中一段后菜单自己收起（有退出动画）；等它真正消失，下一次再开菜单才不会撞上正在关的那一个。
+        click(window, "immersive-more-menu")
+        click(window, if (text) "view-mode-text" else "view-mode-original")
+        waitFor("more menu closed") { node(window, "view-mode-text") == null }
     }
 
     private fun lineVisible(window: ComposeWindow, rect: ReaderRect, nearUpperThird: Boolean = false): Boolean = edt {
@@ -471,6 +543,7 @@ class OriginalPdfNativeWindowTest {
 
     private class LoopbackExplanation : AutoCloseable {
         val last = AtomicReference<JsonObject?>()
+        val cite = AtomicReference<String?>()
         private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val url = "http://127.0.0.1:${server.address.port}"
         init {
@@ -480,10 +553,17 @@ class OriginalPdfNativeWindowTest {
                     "/v1/pair" -> 200 to """{"deviceId":"synthetic-reader","token":"${"a".repeat(43)}"}"""
                     "/v1/hello" -> 200 to """{"epoch":"synthetic","lastSeq":0,"backedUpThroughSeq":0,"lastSeqBefore":0}"""
                     "/v1/library/explain" -> {
-                        val request = Json.parseToJsonElement(body).jsonObject.also(last::set)
-                        val id = request.getValue("blocks").jsonArray.single().jsonObject.getValue("id").jsonPrimitive.content
-                        val page = id.substringAfterLast(":p").substringBefore(':').toInt()
-                        200 to """{"text":"A repeated sentence tests location accuracy.【S1】","sources":[{"docId":"$id","pdfPage":$page,"anchor":"S1"}]}"""
+                        val request = Json.parseToJsonElement(body).jsonObject
+                        // #570（TON-1784）后阅读器还会预取本节导读；这里只记录、只回答选段讲解和提问。
+                        if ("selection" !in request) 404 to "{}" else {
+                            last.set(request)
+                            val ids = request.getValue("blocks").jsonArray.map { it.jsonObject.getValue("id").jsonPrimitive.content }
+                            println("LOOPBACK_EXPLAIN kind=${request["kind"]} blocks=$ids")
+                            // 模拟服务端引用选中的那一处；它不在请求里时退回第一块，由测试断言指出。
+                            val id = cite.get()?.takeIf { it in ids } ?: ids.first()
+                            val page = id.substringAfterLast(":p").substringBefore(':').toInt()
+                            200 to """{"text":"A repeated sentence tests location accuracy.【S1】","sources":[{"docId":"$id","pdfPage":$page,"anchor":"S1"}]}"""
+                        }
                     }
                     else -> 404 to "{}"
                 }
@@ -521,6 +601,44 @@ class OriginalPdfNativeWindowTest {
                 ?: owner.ownedWindows.filter { it.isVisible }.firstNotNullOfOrNull(::findIn)
         }
         findIn(window)
+    }
+
+    private fun findAll(window: ComposeWindow, matches: (SemanticsNode) -> Boolean): List<SemanticsNode> = edt {
+        val found = mutableListOf<SemanticsNode>()
+        fun walk(node: SemanticsNode) { if (matches(node)) found += node; node.children.forEach(::walk) }
+        fun walkIn(owner: Window) {
+            val owners = when (owner) {
+                is ComposeWindow -> owner.semanticsOwners
+                is ComposeDialog -> owner.semanticsOwners
+                else -> emptyList()
+            }
+            owners.forEach { walk(it.unmergedRootSemanticsNode) }
+            owner.ownedWindows.filter { it.isVisible }.forEach(::walkIn)
+        }
+        walkIn(window)
+        found
+    }
+
+    /** The newest citation chip in the companion conversation. */
+    private fun citation(window: ComposeWindow): SemanticsNode? =
+        findAll(window) { it.config.getOrNull(SemanticsProperties.TestTag) == "explain-citation" }.lastOrNull()
+
+    private fun turns(window: ComposeWindow): Int =
+        findAll(window) { it.config.getOrNull(SemanticsProperties.TestTag)?.startsWith("inline-explain-turn-") == true }.size
+
+    private fun clickNode(window: ComposeWindow, label: String, find: () -> SemanticsNode?) {
+        waitFor(label) { find()?.config?.getOrNull(SemanticsActions.OnClick) != null }
+        edt { assertTrue(checkNotNull(find()).config[SemanticsActions.OnClick].action!!.invoke(), label) }
+    }
+
+    // TON-1855 起请求带上本节上下文块，不再只有选中那一块；要核对的是选段原文和「被选中的那一处」作为单独一块在里面。
+    private fun assertExactOccurrence(request: JsonObject, phrase: String, id: String) {
+        assertEquals(phrase, request.getValue("selection").jsonPrimitive.content)
+        val blocks = request.getValue("blocks").jsonArray.map { it.jsonObject }
+        val ids = blocks.map { it.getValue("id").jsonPrimitive.content }
+        val chosen = blocks.filter { it.getValue("id").jsonPrimitive.content == id }
+        assertEquals(1, chosen.size, "The selected occurrence $id must be sent exactly once; blocks=$ids")
+        assertEquals(phrase, chosen.single().getValue("text").jsonPrimitive.content, "blocks=$ids")
     }
 
     private fun click(window: ComposeWindow, tag: String) {

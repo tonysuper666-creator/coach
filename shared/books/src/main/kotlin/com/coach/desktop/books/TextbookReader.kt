@@ -781,13 +781,25 @@ internal fun TextbookReader(
         chapterReadStates = loaded.first
         crossBookCards = loaded.second
     }
+    val practiceDraftNodeId = remember(book.id, currentChapterGroup?.chapterId) {
+        currentChapterGroup?.chapterId ?: currentSection?.id ?: "p${ui.page}"
+    }
+    val exactResumeDraft = resumeDraft?.takeIf { it.bookId == book.id && it.tocNodeId == practiceDraftNodeId }
     var practiceDraft by remember(book.id, currentChapterGroup?.chapterId) {
-        val nodeId = currentChapterGroup?.chapterId ?: currentSection?.id ?: "p${ui.page}"
-        val restored = resumeDraft?.takeIf { it.bookId == book.id && it.tocNodeId == nodeId }
-            ?: runCatching { library.loadChapterPracticeDraft(book.id, nodeId) }.getOrNull()
+        // 存盘的草稿放到下面后台去读：书库在等别处的写锁时，这里同步去读会把整个窗口卡住。
+        val restored = exactResumeDraft
             ?: resumeDraft?.takeIf { it.bookId == book.id && it.hasMeaningfulDraft() }
-            ?: ChapterPracticeDraft(bookId = book.id, tocNodeId = nodeId, page = ui.page)
+            ?: ChapterPracticeDraft(bookId = book.id, tocNodeId = practiceDraftNodeId, page = ui.page)
         mutableStateOf(restored)
+    }
+    LaunchedEffect(book.id, currentChapterGroup?.chapterId) {
+        if (exactResumeDraft != null) return@LaunchedEffect
+        val shown = practiceDraft
+        val stored = withContext(Dispatchers.IO) {
+            runCatching { library.loadChapterPracticeDraft(book.id, practiceDraftNodeId) }.getOrNull()
+        } ?: return@LaunchedEffect
+        // 读回来之前人已经动过草稿，就以人手上的为准。
+        if (practiceDraft === shown) practiceDraft = stored
     }
     fun persistPracticeDraft(updated: ChapterPracticeDraft) {
         practiceDraft = updated

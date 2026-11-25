@@ -49,6 +49,8 @@ import javax.swing.SwingUtilities
 @OptIn(InternalComposeUiApi::class, ExperimentalComposeUiApi::class, ComposeToolingApi::class)
 class PracticeGradeLiveWindowTest {
 
+    // TON-1821（#603）起按书的目录分章：每个一级标题是一章，伴读跟着当前章走。
+    // 第 2 页不另起标题，课本第 2 页仍在同一章里，点页码跳过去后批改卡和变式按钮还在原地。
     private fun buildSyntheticBook(dir: Path): Path = dir.resolve("synthetic-econ-grading.md").also { file ->
         Files.writeString(
             file,
@@ -59,7 +61,7 @@ class PracticeGradeLiveWindowTest {
             Equilibrium occurs where MEC(H*) equals r plus gamma, combining the market interest rate and depreciation.
 
             ${"\u000C"}
-            # 1.2 Aging and Depreciation Shift
+            Aging and depreciation shift.
 
             When an individual ages, the depreciation rate gamma increases over time.
             Because gamma raises the user cost of health capital, the horizontal line r + gamma shifts upward while the MEC curve stays fixed.

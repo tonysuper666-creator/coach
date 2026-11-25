@@ -200,16 +200,27 @@ class IllustratedReaderWindowTest {
                                 VerifyHooks.capture(dialog ?: window, path.toFile())
                             }
                         }
-                        click("home-read")
-                        if (format == "pdf" && library.savedTextView(book.id) != true) click("book-original-toggle")
+                        // TON-1782 起重开零点击回原位：同一本书第二次开窗直接回到阅读器，只有落在书架时才点「看书」。
+                        await("shelf or restored reader") {
+                            tagged("home-read") != null || controller.state.value.screen == BookScreen.READER
+                        }
+                        if (controller.state.value.screen != BookScreen.READER) click("home-read")
+                        if (format == "pdf" && library.savedTextView(book.id) != true) {
+                            // #570（TON-1784）起「原页 / 文字」在顶栏「更多」菜单里，切到文字版才看得到图注。
+                            click("immersive-more-menu")
+                            click("view-mode-text")
+                        }
                         await("loaded figure in $format") { nodes(window).any {
                             it.config.getOrNull(SemanticsProperties.ContentDescription)?.contains(caption) == true
                         } }
                         shot("inline")
                         val figure = book.pages.first().illustrations.first { it.caption == caption }
                         val figureTag = "book-figure-${figure.page}-${figure.order}"
-                        for (style in listOf("flip", "slide")) {
-                            if (style == "slide") click("turn-style")
+                        // #570（TON-1784）的沉浸阅读器把翻页样式定为翻转，窗口里不再有 turn-style 切换；
+                        // 滑动样式下的放大 / 关闭仍由上面的 pointerAndKeyboardDismissWithoutMovingTheReadingAnchor 覆盖。
+                        for (style in listOf("flip")) {
+                            // 图注的语义先于正文页的来源语义落定（TON-1853 d29 撞上过），先等来源出现再记下，条件不变。
+                            await("page sources in $format") { nodes(window).any { it.config.getOrNull(BookPageSources) != null } }
                             val sources = edt { nodes(window).mapNotNull { it.config.getOrNull(BookPageSources) } }
                             assertTrue(sources.isNotEmpty())
                             val inlineWidth = click(figureTag)

@@ -26,6 +26,7 @@ import com.coach.client.PairedCredentials
 import com.coach.desktop.DesktopConnectionSettings
 import com.coach.desktop.DesktopIdentity
 import com.coach.desktop.books.BookExplainer
+import com.coach.desktop.books.BookHudPreferenceStore
 import com.coach.desktop.books.BookScreen
 import com.coach.desktop.books.Citation
 import com.coach.desktop.books.ExplainResult
@@ -41,7 +42,13 @@ import com.coach.desktop.books.TextbookReader
 import com.coach.desktop.books.UnconnectedBookLearningSupport
 import com.coach.ui.CoachTheme
 import java.nio.file.Files
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.pdmodel.PDPage
+import org.apache.pdfbox.pdmodel.PDPageContentStream
+import org.apache.pdfbox.pdmodel.font.PDType1Font
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
@@ -51,6 +58,84 @@ import kotlin.test.assertTrue
  */
 @OptIn(ExperimentalTestApi::class)
 class R1860ImmersiveDragSelectionTest {
+    @Test fun hoveringThenDraggingFirstLineOfRightColumnKeepsTextInPlace() {
+        org.junit.Assume.assumeTrue(System.getProperty("os.name").startsWith("Windows"))
+        val root = Files.createTempDirectory("coach-right-column-hover-")
+        try {
+            val file = root.resolve("observations.pdf")
+            PDDocument().use { pdf ->
+                val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+                repeat(3) { p ->
+                    val page = PDPage()
+                    pdf.addPage(page)
+                    PDPageContentStream(pdf, page).use { canvas ->
+                        canvas.beginText()
+                        canvas.setFont(font, 12f)
+                        canvas.setLeading(18f)
+                        canvas.newLineAtOffset(44f, 740f)
+                        repeat(36) { line ->
+                            canvas.showText("Observation ${p * 36 + line} records the tide height.")
+                            canvas.newLine()
+                        }
+                        canvas.endText()
+                    }
+                }
+                pdf.save(file.toFile())
+            }
+            val library = TextbookLibrary(root.resolve("library"))
+            val book = library.importBook(file)
+            library.saveTextView(book.id, true)
+            BookHudPreferenceStore(library.directory).markDismissed(book.id)
+            val explainer = RecordingExplainer(root.resolve("home"), library)
+            runSkikoComposeUiTest(size = Size(2160f, 1350f), density = Density(1.5f)) {
+                openReader(library, book, 1, explainer)
+                waitUntil(timeoutMillis = 15_000) { onAllNodesWithTag("reader-text-right").fetchSemanticsNodes().isNotEmpty() }
+                fun bounds(tag: String) = onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
+                fun visible(tag: String) = onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
+                val reader = onNodeWithTag("textbook-reader")
+                fun hover(at: Offset) {
+                    reader.performMouseInput { moveTo(at) }
+                    waitForIdle()
+                }
+                val page = bounds("reader-page")
+                val right = bounds("reader-text-right")
+                val text = nodeText("reader-text-right")
+                val sentence = Regex("Observation \\d+ records the tide height[.]").find(text)!!.value
+                fun assertSamePage() {
+                    assertEquals(page, bounds("reader-page"), "Hover changed the viewport")
+                    assertEquals(right, bounds("reader-text-right"), "Hover moved the right column")
+                    assertEquals(text, nodeText("reader-text-right"), "Hover changed the displayed lines")
+                }
+                for (edgeY in listOf(15f, page.bottom - 4f)) {
+                    hover(page.center)
+                    assertTrue(visible("immersive-progress-hairline"))
+                    hover(Offset(page.center.x, edgeY))
+                    assertTrue(visible("immersive-top-hud") && visible("immersive-bottom-hud"))
+                    assertSamePage()
+                }
+                hover(page.center)
+                val start = Offset(right.left + 3f, right.top + 30f)
+                val end = Offset(right.right - 8f, start.y)
+                hover(start)
+                assertSamePage()
+                assertTrue(visible("immersive-progress-hairline"), "First line must be available for selection")
+                reader.performMouseInput {
+                    press()
+                    moveTo((start + end) / 2f)
+                    moveTo(end)
+                    release()
+                }
+                waitForIdle()
+                assertTrue(visible("selection-explain-toolbar"))
+                onNodeWithTag("selection-action-explain").performClick()
+                waitUntil(timeoutMillis = 10_000) { explainer.selections.isNotEmpty() }
+                assertTrue(sentence in explainer.selections.last().text, "Selection missed the first visible sentence")
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
     @Test fun upperLeftLineDragAt2160x1350KeepsThePageAndSelectsThatSentence() =
         upperLeftLineDrag(Size(2160f, 1350f))
 

@@ -46,7 +46,7 @@ An isolated specimen uses the same process on the second page.
     }
 
     private fun ComposeUiTest.waitTag(tag: String) =
-        waitUntil(20_000) { onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty() }
+        waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty() }
 
     private fun ComposeUiTest.openCompanion() {
         if (onAllNodesWithTag("immersive-companion-drawer").fetchSemanticsNodes().isEmpty()) {
@@ -90,7 +90,7 @@ An isolated specimen uses the same process on the second page.
             onNodeWithTag("note-input").performTextInput("合成选段批注")
             onNodeWithTag("books-note-save").performScrollTo().performClick()
             val id = controller.state.value.book!!.id
-            waitUntil(20_000) { library.allNotes(id).size == 1 }
+            waitUntil(timeoutMillis = 20_000) { library.allNotes(id).size == 1 }
         }
         val reopened = TextbookController(TextbookLibrary(library.directory))
         runSkikoComposeUiTest(size = Size(1440f, 900f), density = Density(1f)) {
@@ -260,11 +260,11 @@ An isolated specimen uses the same process on the second page.
             checkShell("offline")
             mac.mode = ExplainShellMac.Mode.QUOTA
             onNodeWithText("重试").performClick()
-            waitUntil(20_000) { onAllNodesWithText(ExplainShellMac.SERVICE_BUSY).fetchSemanticsNodes().isNotEmpty() }
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithText(ExplainShellMac.SERVICE_BUSY).fetchSemanticsNodes().isNotEmpty() }
             checkShell("busy")
             mac.mode = ExplainShellMac.Mode.REVOKED
             onNodeWithText("重试").performClick()
-            waitUntil(20_000) { onAllNodesWithText("重新登录").fetchSemanticsNodes().isNotEmpty() ||
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithText("重新登录").fetchSemanticsNodes().isNotEmpty() ||
                 onAllNodesWithTag("textbook-login-screen").fetchSemanticsNodes().isNotEmpty() ||
                 onAllNodesWithText("登录后讲解这一页").fetchSemanticsNodes().isNotEmpty() }
             if (onAllNodesWithTag("textbook-login-screen").fetchSemanticsNodes().isEmpty()) {
@@ -276,7 +276,7 @@ An isolated specimen uses the same process on the second page.
             mac.mode = ExplainShellMac.Mode.OK
             login("135791")
             read()
-            waitUntil(20_000) { onAllNodesWithText("This passage says", substring = true).fetchSemanticsNodes().isNotEmpty() }
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithText("This passage says", substring = true).fetchSemanticsNodes().isNotEmpty() }
             checkShell("connected")
             assertEquals(2, mac.pairs.get())
             onNodeWithTag("immersive-back").performClick()

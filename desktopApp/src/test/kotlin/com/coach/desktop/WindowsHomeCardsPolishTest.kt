@@ -125,7 +125,7 @@ class WindowsHomeCardsPolishTest {
                         waitForIdle()
                         assertTrue(ImageIO.write(captureToImage().toAwtImage(), "png", outDir.resolve("$theme-$name.png").toFile()))
                     }
-                    waitUntil(20_000) { onAllNodesWithTag("home-review-card").fetchSemanticsNodes().isNotEmpty() }
+                    waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("home-review-card").fetchSemanticsNodes().isNotEmpty() }
                     fun bounds(tag: String) = onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
                     val host = bounds("windows-host")
                     val sheet = bounds("shelf-sheet")

@@ -127,10 +127,10 @@ internal fun TextbookReader(
     onSwitchCourseSource: ((String, Int) -> Unit)? = null,
     onSaveCoursePracticeDraft: ((CourseTopicPracticeDraft) -> Unit)? = null,
     onRefreshCoursePack: (() -> Unit)? = null,
-    onJumpCourseCitation: ((CourseCitationRef) -> Unit)? = null,
+    onJumpCourseCitation: ((CourseCitationRef, BookPageAnchor) -> Unit)? = null,
     collectionQaSessions: Map<String, CollectionQaSessionState> = emptyMap(),
     onUpdateCollectionQaSession: ((String, CollectionQaSessionState) -> Unit)? = null,
-    onJumpCollectionCitation: ((CollectionQaCitation) -> Unit)? = null,
+    onJumpCollectionCitation: ((CollectionQaCitation, BookPageAnchor) -> Unit)? = null,
     onConsumeKeepAskTabOpen: () -> Unit = {},
     onBrowsePage: ((Int) -> Unit)? = null,
 ) {
@@ -814,13 +814,18 @@ internal fun TextbookReader(
         notesOpen = false
         askInputFocused = false
         practiceInputFocused = false
+        if (companionTab == ReaderCompanionTab.ASK && inlineThread != null) {
+            textSelection = null
+            pdf.selection = null
+        }
         inlineThread = inlineThread?.copy(askingOpen = false)
         focusManager.clearFocus()
     }
     // 仅在输入框真实聚焦或页码/批注/搜索正在输入时屏蔽翻页键，绝不用持久的 inlineThread.askingOpen 锁死键盘。
-    val typing = readerTyping(asking, jumpFocused, false, session.noting) ||
+    val typing = readerTyping(asking, editingJump || jumpFocused, false, session.noting) ||
         askInputFocused || practiceInputFocused || searchOpen || searchFocused
-    LaunchedEffect(book.id, ui.page, typing, pdfScrolling, companionOpen, companionTab, tocOpen) {
+    var pageFocusTick by remember(book.id) { mutableIntStateOf(0) }
+    LaunchedEffect(book.id, ui.page, typing, pdfScrolling, companionOpen, companionTab, tocOpen, pageFocusTick) {
         if (typing || (companionOpen && companionTab == ReaderCompanionTab.ASK)) return@LaunchedEffect
         // A successful request already owns focus. Do not leave another frame's
         // request pending: it could steal focus from a newly clicked page field.
@@ -1563,7 +1568,7 @@ internal fun TextbookReader(
                                 onSwitchCourseSource?.invoke(targetId, targetPage)
                             },
                             onJumpCitation = { ref ->
-                                onJumpCourseCitation?.invoke(ref)
+                                onJumpCourseCitation?.invoke(ref, readingAnchor)
                             },
                             onSavePracticeDraft = { draft ->
                                 onSaveCoursePracticeDraft?.invoke(draft)
@@ -1806,7 +1811,7 @@ internal fun TextbookReader(
                         }
                         if (passage != null) openPassage(passage) else turnTo(cit.page)
                     } else if (onJumpCollectionCitation != null) {
-                        onJumpCollectionCitation(cit)
+                        onJumpCollectionCitation(cit, readingAnchor)
                     } else {
                         onOpenCrossBookPage?.invoke(cit.bookId, cit.page, cit.quoteAnchor)
                     }
@@ -2203,7 +2208,12 @@ internal fun TextbookReader(
             availableWidth = maxWidth,
             bookTitle = book.title,
             sectionTitle = if (source != null) "出处 · ${source.title}" else activeTocNode?.title ?: effectiveChapterSpan?.title ?: currentSection?.title,
-            backLabel = if (source != null) { if (ui.review != null) "返回复习" else "返回学习" } else "书架",
+            backLabel = when {
+                ui.canReturnToCitationOrigin -> "返回引用前的位置"
+                source != null && ui.review != null -> "返回复习"
+                source != null -> "返回学习"
+                else -> "书架"
+            },
             hasOriginal = hasOriginal,
             textView = textView,
             tocOpen = tocOpen,
@@ -2254,7 +2264,7 @@ internal fun TextbookReader(
                     )
                 }
             } else null,
-            onMoreMenuDismiss = { if (searchOpen) searchFocusTick++ },
+            onMoreMenuDismiss = { if (searchOpen) searchFocusTick++ else pageFocusTick++ },
             modifier = Modifier.align(Alignment.TopCenter),
         )
 
@@ -2294,7 +2304,7 @@ internal fun TextbookReader(
             jumpText = jump,
             onJumpTextChange = { jump = it },
             onStartEditJump = { editingJump = true; jump = readingAnchor.importPage.toString() },
-            onCancelEditJump = { editingJump = false; focusManager.clearFocus() },
+            onCancelEditJump = { editingJump = false; jumpFocused = false; focusManager.clearFocus(); pageFocusTick++ },
             onJumpFocusChange = { jumpFocused = it },
             onSubmitJump = { target ->
                 if (book.page(target) != null) {
@@ -2303,7 +2313,9 @@ internal fun TextbookReader(
                     endOrHomeBrowseActive = false
                     turnTo(target)
                     editingJump = false
+                    jumpFocused = false
                     focusManager.clearFocus()
+                    pageFocusTick++
                 }
             },
             onPrev = { turnLayout(ReaderTurn.Previous) },

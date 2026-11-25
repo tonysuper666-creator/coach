@@ -47,10 +47,10 @@ class ReadableScreensTest {
             val (root, library, book) = fixture()
             val consent = ExplainConsent(library.directory).apply { allow(book.id) }
             val explainer = FakeMac(root.resolve("home"), trouble)
-            val page = book.pages.first { p -> StudyCoachCourse.blocks(book.id, listOf(p)).any { !it.heading } }.number
+            val selected = book.sourceBlocks().first { it.isBodyParagraph }
             runSkikoComposeUiTest(size = Size(1000f, 500f), density = Density(1f)) {
                 setContent { CoachTheme(darkTheme = dark) {
-                    Box(Modifier.fillMaxSize().background(CoachTheme.colors.surface1)) { BookExplainPanel(book, page, consent, explainer) }
+                    Box(Modifier.fillMaxSize().background(CoachTheme.colors.surface1)) { BookExplainPanel(book, selected.page, consent, explainer, selection = selected) }
                 } }
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-button").fetchSemanticsNodes().isNotEmpty() }
                 onAllNodesWithTag("explain-button")[0].performClick()
@@ -72,10 +72,10 @@ class ReadableScreensTest {
         val (root, library, book) = fixture()
         val consent = ExplainConsent(library.directory).apply { allow(book.id) }
         val explainer = FakeMac(root.resolve("home"))
-        val page = book.pages.first { p -> StudyCoachCourse.blocks(book.id, listOf(p)).any { !it.heading } }.number
+        val selected = book.sourceBlocks().first { it.isBodyParagraph }
         runSkikoComposeUiTest(size = Size(1000f, 1100f), density = Density(1f)) {
             setContent { CoachTheme(darkTheme = dark) {
-                Box(Modifier.fillMaxSize().background(CoachTheme.colors.surface1)) { BookExplainPanel(book, page, consent, explainer) }
+                Box(Modifier.fillMaxSize().background(CoachTheme.colors.surface1)) { BookExplainPanel(book, selected.page, consent, explainer, selection = selected) }
             } }
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-button").fetchSemanticsNodes().isNotEmpty() }
             onAllNodesWithTag("explain-button")[0].performClick()

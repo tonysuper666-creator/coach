@@ -57,7 +57,29 @@ class BookExplainTest {
         val elsewhere = block(9, 30, selection.text)
         assertEquals(listOf(elsewhere), ExplainWire.selectionBlocks(elsewhere, context))
         val oversized = context.copy(sectionBlocks = blocks + block(4, 30, "x".repeat(8_001)))
-        assertEquals(listOf(selection), ExplainWire.selectionBlocks(selection, oversized))
+        assertEquals(blocks.drop(1), ExplainWire.selectionBlocks(selection, oversized),
+            "An unsendable block narrows the request to the sendable run around the selection, not to one block")
+        val unsendableSelection = block(4, 30, "y".repeat(8_001))
+        assertEquals(listOf(unsendableSelection), ExplainWire.selectionBlocks(unsendableSelection,
+            context.copy(sectionBlocks = blocks + unsendableSelection)))
+    }
+
+    /** TON-1855: a long section keeps the question inside this section, centred on the selection. */
+    @Test fun longSectionQuestionSendsAFittingWindowOfTheSameSectionAroundTheSelection() {
+        val long = (0 until 40).map { n -> block(10 + n / 4, (n % 4) * 1_000, "Synthetic long section paragraph $n. " + "z".repeat(900)) }
+        assertFalse(BookLessonWire.fits(long))
+        val chosen = long[20]
+        val sent = ExplainWire.selectionBlocks(chosen, ExplainSectionContext("长节", null, null, long))
+        assertTrue(BookLessonWire.fits(sent))
+        assertTrue(sent.size > 1, "More than the selected block is sent")
+        assertTrue(chosen in sent)
+        val first = long.indexOf(sent.first())
+        assertEquals(long.subList(first, first + sent.size), sent, "The window is one contiguous run of this section")
+        assertTrue(sent.sumOf { it.text.length } + long[first + sent.size].text.length > 24_000 || first + sent.size == long.size)
+        assertTrue(kotlin.math.abs((20 - first) - (first + sent.size - 1 - 20)) <= 1, "The window is centred on the selection")
+        val atStart = ExplainWire.selectionBlocks(long.first(), ExplainSectionContext("长节", null, null, long))
+        assertEquals(long.first(), atStart.first())
+        assertTrue(BookLessonWire.fits(atStart) && atStart.size > 1)
     }
 
     /**

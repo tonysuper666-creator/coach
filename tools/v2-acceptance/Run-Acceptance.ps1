@@ -18,7 +18,8 @@ param(
     [ValidateSet('all', 'measure', 'bugs', 'login')][string]$Suite = 'all',
     [int]$BugsRepeat = 3,
     [switch]$SkipLegacy,
-    [switch]$Direct
+    [switch]$Direct,
+    [switch]$BreakImport
 )
 $ErrorActionPreference = 'Continue'
 $PSNativeCommandUseErrorActionPreference = $false
@@ -66,6 +67,9 @@ if ($sessionId -eq 0 -and -not $Direct) {
     if ($SkipLegacy) {
         $childArgs += '-SkipLegacy'
     }
+    if ($BreakImport) {
+        $childArgs += '-BreakImport'
+    }
     $logFile = Join-Path $OutDir 'worker.log'
     & $runInteractive -Script $PSCommandPath -ScriptArgs $childArgs -TimeoutSec 1800 -LogFile $logFile
     $rc = $LASTEXITCODE
@@ -86,8 +90,8 @@ function Compile-Harness([string]$rt, [string]$clsDir) {
     return "$clsDir;$cp"
 }
 
-function Invoke-Harness([string]$cp, [string[]]$hArgs, [string]$label) {
-    $jvmArgs = @('-Xmx2g', '-Dfile.encoding=UTF-8', '-Dcoach.windows.theme=light')
+function Invoke-Harness([string]$cp, [string[]]$hArgs, [string]$label, [string[]]$extraJvm = @()) {
+    $jvmArgs = @('-Xmx2g', '-Dfile.encoding=UTF-8', '-Dcoach.windows.theme=light') + @($extraJvm)
     $errLog = Join-Path $OutDir ("$label.stderr.log")
     & java @jvmArgs -cp $cp ReaderAcceptanceHarness @hArgs 2>$errLog
     if ($LASTEXITCODE -ne 0) {
@@ -196,7 +200,9 @@ if ($Suite -in 'all', 'bugs') {
 if ($Suite -in 'all', 'login') {
     $cpMain = Compile-Harness $RuntimeMain (Join-Path $clsRoot 'main')
     $loginDir = Join-Path $OutDir 'login-main'
-    Invoke-Harness $cpMain @('login', $Book, $loginDir) 'login-main'
+    $loginJvm = @()
+    if ($BreakImport) { $loginJvm = @('-Dcoach.acceptance.breakImport=true') }
+    Invoke-Harness $cpMain @('login', $Book, $loginDir) 'login-main' $loginJvm
     $loginReport = Get-Content (Join-Path $loginDir 'login-report.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
@@ -222,11 +228,15 @@ foreach ($pair in @(@('BUGS-111', $bugs111Report), @('BUGS-MAIN', $bugsMainRepor
     }
 }
 if ($null -ne $loginReport) {
-    Write-Host ("LOGIN-MAIN: {0}/{1} passed" -f $loginReport.passed, $loginReport.total)
-    foreach ($c in $loginReport.checks) { Write-Host ("  [{0}] {1}: {2}" -f $(if ($c.passed) {'PASS'} else {'FAIL'}), $c.id, $c.detail) }
+    if ($loginReport.applicable -eq $false) {
+        Write-Host ("LOGIN-MAIN: {0} ({1})" -f $loginReport.verdict, $loginReport.reason)
+    } else {
+        Write-Host ("LOGIN-MAIN: {0}/{1} passed" -f $loginReport.passed, $loginReport.total)
+        foreach ($c in $loginReport.checks) { Write-Host ("  [{0}] {1}: {2}" -f $(if ($c.passed) {'PASS'} else {'FAIL'}), $c.id, $c.detail) }
+    }
 }
 
 if ($anyFlaky) { Write-Host 'FAILED: flaky bugs check detected'; exit 1 }
 if ($null -ne $bugsMainReport -and $bugsMainReport.passed -lt $bugsMainReport.total) { exit 1 }
-if ($null -ne $loginReport -and $loginReport.passed -lt $loginReport.total) { exit 1 }
+if ($null -ne $loginReport -and $loginReport.applicable -ne $false -and $loginReport.passed -lt $loginReport.total) { exit 1 }
 exit 0

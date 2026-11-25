@@ -136,10 +136,12 @@ internal fun companionSideWidth(widthDp: Float): Dp = when {
 internal fun ImmersiveProgressHairline(
     currentPage: Int,
     lastPage: Int,
+    subPageFraction: Float = 0f,
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
-    val fraction = if (lastPage > 1) ((currentPage - 1).toFloat() / (lastPage - 1)).coerceIn(0f, 1f) else 1f
+    val effectivePage = (currentPage - 1 + subPageFraction.coerceIn(0f, 0.99f))
+    val fraction = if (lastPage > 1) (effectivePage / (lastPage - 1)).coerceIn(0f, 1f) else (subPageFraction.takeIf { it > 0f } ?: 1f).coerceIn(0f, 1f)
     Box(
         modifier
             .fillMaxWidth()
@@ -425,6 +427,7 @@ internal fun ImmersiveBottomScrubber(
     onPrev: () -> Unit,
     onNext: () -> Unit,
     onScrubToPage: (Int) -> Unit,
+    subPageFraction: Float = 0f,
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
@@ -432,7 +435,7 @@ internal fun ImmersiveBottomScrubber(
     val compact = availableWidth < 760.dp
     var sliderPos by remember(currentPage) { mutableFloatStateOf(currentPage.toFloat()) }
     var dragging by remember { mutableStateOf(false) }
-    val effectiveSlider = if (dragging) sliderPos else currentPage.toFloat()
+    val effectiveSlider = if (dragging) sliderPos else (currentPage + subPageFraction.coerceIn(0f, 0.99f)).coerceIn(1f, lastPage.coerceAtLeast(1).toFloat())
     val shownPage = if (dragging) sliderPos.roundToInt().coerceIn(1, lastPage.coerceAtLeast(1)) else currentPage
 
     AnimatedVisibility(
@@ -577,6 +580,7 @@ internal fun ImmersiveTocDrawer(
     onReorganizeSections: (() -> Unit)?,
     onClose: () -> Unit,
     readChapterIds: Set<String> = emptySet(),
+    activeTocNodeId: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
@@ -587,13 +591,22 @@ internal fun ImmersiveTocDrawer(
     val tocListState = rememberLazyListState()
 
     val entries = book.tocNodes
-    val activeIndex = entries.indexOfLast {
-        it.startPage < currentAnchor.importPage ||
-            it.startPage == currentAnchor.importPage && it.startOffset <= currentAnchor.offsetUtf16
+    val resolvedNode = remember(entries, currentAnchor, activeTocNodeId, book) {
+        BookBoundaries.activeTocNode(
+            entries,
+            currentAnchor.importPage,
+            currentAnchor.offsetUtf16,
+            activeTocNodeId,
+            book.page(currentAnchor.importPage)?.text,
+        )
     }
+    val activeIndex = if (resolvedNode != null) entries.indexOfFirst { it.id == resolvedNode.id } else -1
     LaunchedEffect(visible, activeTab, activeIndex) {
         if (visible && activeTab == ReaderLeftTab.TOC && activeIndex >= 0) {
-            tocListState.scrollToItem((activeIndex - 2).coerceAtLeast(0))
+            withFrameNanos { }
+            if (tocListState.layoutInfo.totalItemsCount > 0) {
+                tocListState.scrollToItem((activeIndex - 2).coerceAtLeast(0))
+            }
         }
     }
 

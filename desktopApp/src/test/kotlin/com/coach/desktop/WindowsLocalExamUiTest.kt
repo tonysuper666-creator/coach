@@ -165,100 +165,11 @@ class WindowsLocalExamUiTest {
         }
     }
 
-    private fun ComposeUiTest.nav(label: String) =
-        onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText(label))
-
-    private fun ComposeUiTest.ready(c: TextbookController) {
-        waitUntil(timeoutMillis = 20_000) { !c.state.value.busy && c.state.value.book != null }
-        assertNull(c.state.value.error)
-        waitForIdle()
-    }
-
     private fun ComposeUiTest.capture(name: String, rootTag: String = "windows-host") {
         val dir = Path.of("build/screens/local-exam-ui")
         Files.createDirectories(dir)
         assertTrue(ImageIO.write(onNodeWithTag(rootTag).captureToImage().toAwtImage(),
             "png", dir.resolve("$name.png").toFile()))
-    }
-
-    @Test fun courseGeneratesRealPracticeReopensDraftAndShowsTraceableResult() {
-        val root = Files.createTempDirectory("coach-course-exam-ui-")
-        val library = TextbookLibrary(root.resolve("library"))
-        val imported = library.importBook(syntheticTextbook(root.resolve("synthetic")))
-        val book = imported.copy(readingPage = 3, lessonIndex = 1, learning = true, promptSeen = true)
-        library.save(book)
-        val c = TextbookController(library)
-        val store = LocalExamStore(library)
-        lateinit var attempt: String
-        val first = book.lessons.first()
-        val practice = com.coach.desktop.books.testPracticeFixture(book, first, QuestionMode.CHOICE)!!
-        val correct = practice.options.indexOf(practice.answer)
-        runSkikoComposeUiTest(size = Size(1440f, 900f), density = Density(1f)) {
-            setContent { WindowsTextbookHost(c) { null } }
-            ready(c)
-            nav("课程").performClick()
-            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("course-exams-summary").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("course-exams-summary").performScrollTo().assertIsDisplayed()
-            onNodeWithText("教材参考练习，答案尚未独立核对，不计时。").assertExists()
-            onNodeWithTag("local-generate-start").performScrollTo()
-            capture("00-course-real-entry")
-            onNodeWithTag("local-generate-start").performClick()
-            waitUntil(timeoutMillis = 20_000) { store.active(book.id) != null }
-            attempt = store.active(book.id)!!.str("mockId")
-            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-exam-attempt").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("local-choice-${first.id}-$correct").performScrollTo().performClick()
-            waitUntil(timeoutMillis = 20_000) { store.get(book.id, attempt)["answers"]!!.jsonObject[first.id]?.jsonObject?.num("choice", -1) == correct.toLong() }
-            capture("01-course-practice-saved")
-            nav("今天").performClick()
-            nav("课程").performClick()
-            onNodeWithTag("local-choice-${first.id}-$correct").performScrollTo().assertIsSelected()
-        }
-
-        val reopened = TextbookController(TextbookLibrary(library.directory))
-        val reopenedStore = LocalExamStore(reopened.library)
-        runSkikoComposeUiTest(size = Size(1440f, 900f), density = Density(1f)) {
-            setContent { WindowsTextbookHost(reopened) { null } }
-            ready(reopened)
-            nav("课程").performClick()
-            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-resume").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("local-resume").performScrollTo()
-            capture("00b-course-resume-entry")
-            onNodeWithTag("local-resume").performClick()
-            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-exam-attempt").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("local-choice-${first.id}-$correct").performScrollTo().assertIsSelected()
-            onNodeWithTag("local-attempt-id").assertTextContains("第 1 次", substring = true)
-            onNodeWithText("local-", substring = true).assertDoesNotExist()
-            capture("02-sqlite-reopened-draft")
-            onNodeWithTag("local-submit").performScrollTo().performClick()
-            onNodeWithTag("local-confirm-submit").performClick()
-            waitUntil(timeoutMillis = 20_000) { reopenedStore.get(book.id, attempt).str("status") == "submitted" }
-            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-exam-result").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithText("参考得分：1 / 3").assertIsDisplayed()
-            onNodeWithText("参考答案尚未独立核对，结果仅供对照。").assertExists()
-            onNodeWithTag("local-attempt-id").assertTextContains("第 1 次", substring = true)
-            onNodeWithText("local-", substring = true).assertDoesNotExist()
-            capture("03-submitted-result")
-            onNodeWithTag("local-source-${first.id}").performScrollTo().performClick()
-            onNodeWithTag("local-frozen-source").assertExists()
-            onNodeWithText("本次题卷保存的教材片段 · 第 1 页").assertExists()
-            onNodeWithTag("local-source-quote").assertTextEquals(practice.reference)
-            capture("04-frozen-source")
-            onNodeWithTag("local-source-back").performClick()
-            onNodeWithTag("local-exam-back").performClick()
-            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-history-0").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("local-history-0").performScrollTo().performClick()
-            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-exam-result").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("local-attempt-id").assertTextContains("第 1 次", substring = true)
-            onNodeWithText("local-", substring = true).assertDoesNotExist()
-            capture("05-history-original-attempt")
-        }
-        assertEquals(3, reopened.library.book(book.id).readingPage)
-        assertEquals(1, reopened.library.book(book.id).lessonIndex)
-        val result = reopenedStore.get(book.id, attempt)
-        assertEquals(result, reopenedStore.history(book.id).single())
-        val dir = Path.of("build/screens/local-exam-ui")
-        Files.writeString(dir.resolve("sqlite-readback.json"), result.toString())
-        println("LOCAL_EXAM_UI_PASS: course -> generate/start -> answer -> reopen/resume -> submit -> frozen source -> original history; bookmark=3 lessonIndex=1")
     }
 
     @Test fun authoredEssayClearsAsTextAndRemainsPendingWithFrozenSource() {
@@ -325,37 +236,6 @@ class WindowsLocalExamUiTest {
             onNodeWithTag("course-mock-resume-btn").assertDoesNotExist()
             assertTrue(LocalExamStore(library).papers(LocalExamController.courseMockScopeId(courseId)).isEmpty())
             capture("07-no-usable-question")
-        }
-    }
-
-    @Test fun partialReferencePaperNamesTheChaptersItCouldNotUse() {
-        val root = Files.createTempDirectory("coach-course-partial-gap-")
-        val file = root.resolve("mixed.md")
-        val sections = listOf(
-            "细胞" to "细胞是生物体结构和功能的基本单位。细胞里有细胞核，并能通过分裂和分化维持生命的连续性。",
-            "细胞膜" to "细胞膜是包围细胞的一层薄膜。它控制物质进出，同时保护内部环境并参与细胞之间的交流。",
-            "细胞核" to "细胞核是细胞里储存遗传信息的结构。它里面有染色体，负责调控细胞代谢和生长繁殖。",
-            "补充说明" to "略。",
-        )
-        Files.writeString(file, sections.mapIndexed { index, (title, body) -> "## 第${index + 1}节 $title\n\n$body" }.joinToString("\n\n"))
-        val library = TextbookLibrary(root.resolve("library"))
-        library.importBook(file)
-        val c = TextbookController(library)
-        runSkikoComposeUiTest(size = Size(1440f, 900f), density = Density(1f)) {
-            setContent { WindowsTextbookHost(c) { null } }
-            ready(c)
-            nav("课程").performClick()
-            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-generate-start").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("local-generate-start").performScrollTo().performClick()
-            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-exam-attempt").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("local-exam-back").performScrollTo().performClick()
-            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-exam-gaps").fetchSemanticsNodes().isNotEmpty() }
-            // 缺题说清是哪一节、去哪儿补；不再出现「暂无」这类系统腔。
-            onNodeWithTag("local-exam-gaps").performScrollTo().assertTextContains("补充说明", substring = true)
-            onNodeWithTag("local-exam-gaps").assertTextContains("回教材", substring = true)
-            onNodeWithText("暂无", substring = true).assertDoesNotExist()
-            onNodeWithText("缺少可用选择题", substring = true).assertDoesNotExist()
-            capture("08-partial-reference-gap")
         }
     }
 

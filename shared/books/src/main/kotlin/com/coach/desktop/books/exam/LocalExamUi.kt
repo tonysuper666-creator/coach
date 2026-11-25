@@ -211,17 +211,20 @@ internal fun CourseMockHubPane(
             }
 
             ui.error?.let { errMsg ->
-                CoachErrorBanner(
+                ShellErrorRow(
                     message = errMsg,
-                    retryLabel = "重新组卷",
-                    onRetry = if (mockHost != null && detail.examinableTopics.isNotEmpty() && ui.active == null) {
-                        {
-                            scope.launch {
-                                controller.generateAndStartCourseMock(detail, mockHost.generateCourseMock)
-                            }
-                        }
-                    } else null,
+                    busy = ui.busy,
+                    textTag = "course-mock-error",
                     retryTag = "course-mock-retry-btn",
+                    onRetry = when {
+                        !ui.courseGenerationFailed -> {
+                            { scope.launch { controller.loadCourse(detail.courseId, detail.title) } }
+                        }
+                        mockHost != null && detail.examinableTopics.isNotEmpty() && ui.active == null -> {
+                            { scope.launch { controller.generateAndStartCourseMock(detail, mockHost.generateCourseMock) } }
+                        }
+                        else -> null
+                    },
                 )
             }
 

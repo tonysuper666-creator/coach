@@ -254,6 +254,9 @@ class WindowShellPolishTest {
                 val library = TextbookLibrary(root.resolve("library"))
                 val book = library.importBook(sampleChineseBook(root))
                 val controller = TextbookController(library)
+                val courseId = library.withCourseDatabase { db ->
+                    com.coach.desktop.books.CourseStore.createCourse(db, "Exam", com.coach.desktop.books.CourseExamProfile(examEnabled = true)).first
+                }
                 lateinit var exams: LocalExamController
 
                 runSkikoComposeUiTest(size = Size(1920f, 1080f), density = Density(1.5f)) {
@@ -324,25 +327,25 @@ class WindowShellPolishTest {
                     setControllerError(controller, null)
                     waitForIdle()
 
-                    // 4. WindowsTextbookHost course exam error slot (host-exam-error / host-exam-retry)
-                    onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText("课程")).performClick()
-                    waitUntil(timeoutMillis = 20_000) {
-                        onAllNodesWithTag("course-exams-summary").fetchSemanticsNodes().isNotEmpty()
-                    }
+                    // TON-1790: exercise error recovery on the course page reached from the shelf.
+                    onNodeWithTag("collection-$courseId").performScrollTo().performClick()
+                    waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.COURSE && !controller.state.value.busy }
+                    onNodeWithTag("course-mock-exam-btn").performScrollTo().performClick()
+                    waitUntil(timeoutMillis = 20_000) { exams.state.value.courseId == courseId && !exams.state.value.busy }
                     setExamError(exams, "作答还没保存，请稍后重试。当前内容仍在本页。")
                     waitForIdle()
-                    assertTrue(colorsClose(v7.fgSecondary, textColorOf(onNodeWithTag("host-exam-error").fetchSemanticsNode())))
-                    onNodeWithTag("host-exam-retry").assertIsDisplayed()
+                    assertTrue(colorsClose(v7.fgSecondary, textColorOf(onNodeWithTag("course-mock-error").fetchSemanticsNode())))
+                    onNodeWithTag("course-mock-retry-btn").performScrollTo().assertIsDisplayed()
                     onNodeWithText("正在读取本书练习…").assertDoesNotExist()
-                    onNodeWithTag("host-exam-retry").performClick()
+                    onNodeWithTag("course-mock-retry-btn").performClick()
                     waitUntil(timeoutMillis = 20_000) {
-                        onAllNodesWithTag("course-exams-summary").fetchSemanticsNodes().isNotEmpty()
+                        exams.state.value.error == null && onAllNodesWithTag("course-mock-hub").fetchSemanticsNodes().isNotEmpty()
                     }
 
                     setExamError(exams, "今天的讲解额度用完了，明天再来。")
                     waitForIdle()
-                    assertTrue(colorsClose(zhu, textColorOf(onNodeWithTag("host-exam-error").fetchSemanticsNode())))
-                    onNodeWithTag("host-exam-retry").assertDoesNotExist()
+                    assertTrue(colorsClose(zhu, textColorOf(onNodeWithTag("course-mock-error").fetchSemanticsNode())))
+                    onNodeWithTag("course-mock-retry-btn").assertDoesNotExist()
                 }
             }
         } finally {

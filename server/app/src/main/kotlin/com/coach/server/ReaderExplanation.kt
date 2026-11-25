@@ -206,7 +206,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                                     }}
                                     Output exactly one JSON object, with no fences, commentary or self-correction outside it:
                                     {"paragraphs":[{"text":"one short Chinese paragraph","anchors":["S1"]}]}
-                                    Use only these keys. ${if (lesson) "One to six short paragraphs" else "One or two paragraphs"}; each needs nonempty text and one or more supporting anchor IDs.
+                                    Use only these keys. ${when { lesson -> "One to six short paragraphs"; kind == "ask" -> "One to three short paragraphs"; else -> "One or two paragraphs" }}; each needs nonempty text and one or more supporting anchor IDs.
                                     Each text must be a single plain paragraph: no line breaks, headings, lists, Markdown or inline anchors.
                                     Never guess anchor IDs. In text values use no quotation marks of any kind; write source terms bare.
                                     Do not invent facts or citations, and do not write page numbers or document names; the application adds them.
@@ -306,7 +306,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                         result.text,
                         safePack,
                         onReject = { reason -> throw ReaderFormat(result.call.servedBy, reason) },
-                        maxParagraphs = if (lesson) 6 else 2,
+                        maxParagraphs = readerMaxParagraphs(lesson, kind),
                     ) ?: error("Reader payload rejected without a reason")
                     diagnostics?.citedAnchors = checked.second.size
                     outcome = "complete"
@@ -376,9 +376,20 @@ internal fun readerAskInstruction(withSection: Boolean): String = buildString {
     append("answer directly and anchor every paragraph to the blocks that actually discuss the point, not only to the selected passage. ")
     append("If the question also reaches beyond the supplied blocks, for example to an earlier or later chapter, answer the part these blocks cover, ")
     append("anchored to them, and say plainly in the text that the rest is not covered in ")
-    append(if (withSection) "this section, naming the previous or next section from the section context when it tells you which one" else "this passage")
+    append(if (withSection) "this section, naming the previous or next section from the section context when it tells you which one, with its title written bare or inside 《》" else "this passage")
     append("; never guess what other parts of the book say. ")
-    append("Return empty paragraphs only when none of the supplied blocks bears on the question at all.")
+    append("Return empty paragraphs only when none of the supplied blocks bears on the question at all. ")
+    // TON-1855 live check: term and cross-section answers quoted terms or titles with a bare double quote, which
+    // breaks the streamed JSON (STREAM_JSON), and ran past two paragraphs (PARAGRAPH_COUNT).
+    append("Keep the answer to at most three short paragraphs. Inside text values never type a double quote or any other quotation mark: ")
+    append("write English terms bare, for example moral hazard, never wrapped in quotes.")
+}
+
+/** Questions may need a third short paragraph for the cross-section note; other selection kinds stay at two. */
+internal fun readerMaxParagraphs(lesson: Boolean, kind: String): Int = when {
+    lesson -> 6
+    kind == "ask" -> 3
+    else -> 2
 }
 
 internal data class CheckedHardPoint(val blockId: String, val anchor: String, val pdfPage: Int, val label: String, val explanation: String)

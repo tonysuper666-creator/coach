@@ -14,9 +14,11 @@ def reader_ask_instruction(with_section: bool) -> str:
         "answer directly and anchor every paragraph to the blocks that actually discuss the point, not only to the selected passage. "
         "If the question also reaches beyond the supplied blocks, for example to an earlier or later chapter, answer the part these blocks cover, "
         "anchored to them, and say plainly in the text that the rest is not covered in "
-        + ("this section, naming the previous or next section from the section context when it tells you which one" if with_section else "this passage")
+        + ("this section, naming the previous or next section from the section context when it tells you which one, with its title written bare or inside 《》" if with_section else "this passage")
         + "; never guess what other parts of the book say. "
-        "Return empty paragraphs only when none of the supplied blocks bears on the question at all."
+        "Return empty paragraphs only when none of the supplied blocks bears on the question at all. "
+        "Keep the answer to at most three short paragraphs. Inside text values never type a double quote or any other quotation mark: "
+        "write English terms bare, for example moral hazard, never wrapped in quotes."
     )
 
 
@@ -64,7 +66,7 @@ def build_g1_prompt(sample: dict) -> tuple[str, str]:
         f"Use Simplified Chinese. {kind_instr}\n"
         "Output exactly one JSON object, with no fences, commentary or self-correction outside it:\n"
         '{"paragraphs":[{"text":"one short Chinese paragraph","anchors":["S1"]}]}\n'
-        "Use only these keys. One or two paragraphs; each needs nonempty text and one or more supporting anchor IDs.\n"
+        f"Use only these keys. {'One to three short paragraphs' if subtask == 'ask' else 'One or two paragraphs'}; each needs nonempty text and one or more supporting anchor IDs.\n"
         "Each text must be a single plain paragraph: no line breaks, headings, lists, Markdown or inline anchors.\n"
         "Never guess anchor IDs. In text values use no quotation marks of any kind; write source terms bare.\n"
         "Do not invent facts or citations, and do not write page numbers or document names; the application adds them.\n"

@@ -311,7 +311,7 @@ class BookStructureAndGuideTest {
                 waitForIdle()
                 onNodeWithTag("selection-action-explain").assertTextEquals("讲讲")
                 onNodeWithTag("selection-action-example").assertTextEquals("举个例子")
-                onNodeWithTag("selection-action-rephrase").assertTextEquals("换个说法")
+                onNodeWithTag("selection-action-split").assertTextEquals("拆句")
                 onNodeWithTag("selection-action-ask").assertTextEquals("问…")
                 savePng(outDir.resolve("ton1766-03-selection-toolbar.png"))
 
@@ -389,9 +389,9 @@ class BookStructureAndGuideTest {
                     release()
                 }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("selection-explain-toolbar").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithTag("selection-action-rephrase").performClick()
+                onNodeWithTag("selection-action-split").performClick()
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("inline-explain-turn-0").fetchSemanticsNodes().isNotEmpty() }
-                assertEquals("rephrase", explainer.selectionCalls.last().first)
+                assertEquals("split", explainer.selectionCalls.last().first)
                 assertEquals(epub.lessons.first().breadcrumb, explainer.selectionCalls.last().second?.location)
             }
 

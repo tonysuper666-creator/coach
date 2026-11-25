@@ -27,6 +27,28 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class BookCitationWorkspaceTest {
+    @Test fun returningFromCollectionCitationRestoresTheOriginBookAndPage() = runBlocking {
+        val (controller, _) = setup()
+        val library = controller.library
+        val origin = controller.state.value.book!!
+        val path = library.directory.resolveSibling("second.md")
+        Files.writeString(path, "# Second book\n\nA distinct sentence for the citation target.")
+        val target = library.importBook(path)
+        controller.openBook(origin.id, targetPage = 2)
+        val passage = target.sourceBlocks().first { it.isBodyParagraph }
+        controller.jumpToCollectionCitation(CollectionQaCitation(
+            CollectionQaVirtualCollections.READ_LIBRARY_ID, target.id, target.title, target.title,
+            passage.page, quoteAnchor = passage.text,
+        ))
+        assertEquals(target.id, controller.state.value.book?.id)
+        assertEquals(passage.page, controller.state.value.page)
+        controller.back()
+        val returned = controller.state.value
+        assertEquals(BookScreen.READER, returned.screen)
+        assertEquals(origin.id, returned.book?.id)
+        assertEquals(2, returned.page)
+    }
+
     @Test fun timeoutFallbackRequestsFocusOnFrameOwnerThread() {
         val calls = mutableListOf<Pair<String, Thread>>()
         runComposeUiTest {
@@ -238,7 +260,8 @@ class BookCitationWorkspaceTest {
             onNodeWithTag("book-source-0").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && controller.state.value.page == 1 && !controller.state.value.busy }
             // 文字视图标的是被点的第二块，不是这一页第一次出现的同一句。
-            onNodeWithText("看文字").performClick()
+            onNodeWithTag("immersive-more-menu").performClick()
+            onNodeWithTag("view-mode-text").performClick()
             waitForIdle()
             val marked = onNodeWithTag("reader-text").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text].single()
             val sourceSpans = marked.spanStyles.filter { it.item.background != androidx.compose.ui.graphics.Color.Unspecified }
@@ -249,16 +272,18 @@ class BookCitationWorkspaceTest {
             assertEquals(sentence, marked.text.substring(span.start, span.end))
             assertFalse(span.start <= body[0].start && span.end >= body[0].end, "标记不能落在第一处相同原文上")
             // 原页视图落在同一处，而不是提示「多处相同内容」或各处都不标。
-            onNodeWithText("看原页").performClick()
+            onNodeWithTag("immersive-more-menu").performClick()
+            onNodeWithTag("view-mode-original").performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("remote-highlight").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("remote-highlight").assertContentDescriptionEquals("原句：$sentence")
             onNodeWithText("无法确认原句：这一页有多处相同内容。").assertDoesNotExist()
             // 回退行没有块编号：同页打开不替用户猜是哪一处，也就不标任何范围。
-            onNodeWithText("返回学习").performClick()
+            onNodeWithTag("immersive-back").performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             onNodeWithTag("open-lesson-source").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && controller.state.value.page == 1 && !controller.state.value.busy }
-            onNodeWithText("看文字").performClick()
+            onNodeWithTag("immersive-more-menu").performClick()
+            onNodeWithTag("view-mode-text").performClick()
             waitForIdle()
             assertTrue(onNodeWithTag("reader-text").fetchSemanticsNode()
                 .config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().spanStyles.none { it.item.background != androidx.compose.ui.graphics.Color.Unspecified })

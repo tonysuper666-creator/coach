@@ -1,13 +1,12 @@
 package com.coach.desktop.books
 
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
-import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
 import com.coach.desktop.WindowsTextbookHost
 import kotlinx.coroutines.runBlocking
@@ -17,6 +16,7 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 internal fun ComposeUiTest.chooseReadingSize(size: ReadingSize) {
+    onNodeWithTag("immersive-more-menu").performClick()
     onNodeWithTag("v7-type-menu").performClick()
     val option = onNodeWithTag("reading-size-${size.name}")
     option.performClick()
@@ -24,10 +24,11 @@ internal fun ComposeUiTest.chooseReadingSize(size: ReadingSize) {
     // The Aa anchor is just outside the panel. Send a pointer click so the popup handles dismissal.
     onNodeWithTag("v7-type-menu").performMouseInput { click() }
     onNodeWithTag("reading-settings-panel").assertDoesNotExist()
+    onNodeWithTag("v7-type-menu").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Escape) }
 }
 
 /**
- * 第 12 刀：阅读器正文栏按 V7 `measure: 33em` 限宽并在纸面内居中。
+ * TON-1784 沉浸阅读器按窗口分栏，每栏上限 720dp，两侧保留相同边距。
  * 用合成的一整段长文（导入时按文字块切成多页）核对：两种常见屏和窄窗口、Aa 小/中/大下
  * 栏宽与居中、逐页重建到最后一个字、翻页从版心开始，以及出处打开后落在被引的那一块。
  */
@@ -62,36 +63,32 @@ class ReaderMeasureUiTest {
         return layouts.single()
     }
 
-    private fun ComposeUiTest.visible() = listOf("reader-text", "reader-text-right").flatMap {
-        onAllNodesWithTag(it).fetchSemanticsNodes()
-    }
+    private fun ComposeUiTest.visible() = onAllNodes(SemanticsMatcher.keyIsDefined(BookPageSources))
+        .fetchSemanticsNodes().sortedWith(compareBy({ it.positionInRoot.x }, { it.positionInRoot.y }))
 
     private fun ComposeUiTest.assertColumn(scale: Float, label: String, density: Float): Boolean {
-        val spread = onAllNodesWithTag("book-sheet-1").fetchSemanticsNodes().isNotEmpty()
-        var narrow = false
-        visible().forEachIndexed { side, text ->
-            val sheet = onNodeWithTag("book-sheet-$side").fetchSemanticsNode().boundsInRoot
-            val available = sheet.width - (if (spread) 112f else 128f) * density
-            val measure = CoachV7.Size.body.value * 33f * scale * density
-            narrow = narrow || available < measure - 2f
-            assertEquals(minOf(measure, available), text.size.width.toFloat(), 2f, "$label: 33em inside actual sheet")
-            assertEquals(sheet.left + (if (spread && side == 1) 48f else 64f) * density,
-                text.positionInRoot.x, 2f, "$label: inner/outer margins")
+        val sheets = onAllNodes(SemanticsMatcher("numbered reader sheet") {
+            it.config.getOrNull(SemanticsProperties.TestTag).orEmpty().matches(Regex("book-sheet-[0-9]+"))
+        }).fetchSemanticsNodes().map { it.boundsInRoot }.sortedBy { it.left }
+        val viewport = onNodeWithTag("book-page-layout").fetchSemanticsNode().boundsInRoot
+        val expectedWidth = if (sheets.size == 1) minOf(viewport.width, 720f * density) else viewport.width / sheets.size
+        for (sheet in sheets) assertEquals(expectedWidth, sheet.width, 2f, "$label: immersive column width")
+        visible().forEach { text ->
+            val sheet = sheets.single { text.positionInRoot.x >= it.left && text.positionInRoot.x < it.right }
+            val inset = minOf(10f * density, sheet.width * .02f)
+            assertEquals(sheet.width - 2f * inset, text.size.width.toFloat(), 2f, "$label: full text column")
+            assertEquals(sheet.left + inset, text.positionInRoot.x, 2f, "$label: text inset")
             val layouts = mutableListOf<TextLayoutResult>()
             text.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts)
             val laid = layouts.single()
+            assertEquals(CoachV7.Size.body.value * scale, laid.layoutInput.style.fontSize.value, 0.01f, "$label: body size")
             assertFalse(laid.hasVisualOverflow, "$label: no clipped text")
             assertEquals(laid.layoutInput.text.length, laid.getLineEnd(laid.lineCount - 1))
-            assertTrue(text.positionInRoot.y >= sheet.top + 52f * density - 1f)
-            assertTrue(text.positionInRoot.y + laid.getLineBottom(laid.lineCount - 1) <= sheet.bottom - 64f * density + 2f,
+            assertTrue(text.positionInRoot.y >= sheet.top + 18f * density - 1f)
+            assertTrue(text.positionInRoot.y + laid.getLineBottom(laid.lineCount - 1) <= sheet.bottom - 4f * density + 2f,
                 "$label: last line fully above footer")
         }
-        return narrow
-    }
-
-    private fun ComposeUiTest.chooseWorkspaceMenuSize(label: String) {
-        onNodeWithTag("v7-type-menu").performClick(); waitForIdle()
-        onNodeWithTag("v7-type-$label").performClick(); waitForIdle()
+        return sheets.size == 1 && viewport.width < 720f * density
     }
 
     @Test fun longParagraphReadsInFullAtEveryTypeSizeAndWindowAndPagesTurnFromTheTop() {
@@ -152,7 +149,7 @@ class ReaderMeasureUiTest {
                 }
             }
             if (window.name == "narrow") assertTrue(narrowSeen)
-            else assertFalse(narrowSeen, "${window.name}: each sheet has room for the full 33em column")
+            else assertFalse(narrowSeen, "${window.name}: window has room for a full immersive column")
         }
     }
 
@@ -171,7 +168,7 @@ class ReaderMeasureUiTest {
             override suspend fun ask(request: BookPassageQuestion) = BookLearningReply.Unavailable("unused")
         }
         runSkikoComposeUiTest(size = Size(2560f, 1440f), density = Density(1.5f)) {
-            setContent { TextbookWorkspace(controller, loadOnMount = false, support = support) { null } }
+            setContent { WindowsTextbookHost(controller, learningSupport = support) { null } }
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-source-0").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("book-source-0").performScrollTo().performClick()
             ready(controller) { it.screen == BookScreen.READER }
@@ -197,8 +194,8 @@ class ReaderMeasureUiTest {
                 assertColumn(scale, "source", 1.5f)
             }
             checkAnchor(1f)
-            chooseWorkspaceMenuSize("大"); checkAnchor(1.15f)
-            chooseWorkspaceMenuSize("中"); checkAnchor(1f)
+            chooseReadingSize(ReadingSize.LARGE); checkAnchor(1.15f)
+            chooseReadingSize(ReadingSize.MEDIUM); checkAnchor(1f)
             val covered = mutableSetOf<Int>()
             while (true) {
                 visible().forEach { node ->

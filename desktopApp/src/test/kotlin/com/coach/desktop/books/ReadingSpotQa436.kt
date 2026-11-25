@@ -1,13 +1,13 @@
 package com.coach.desktop.books
 
-import androidx.compose.runtime.*
-import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
-import com.coach.ui.CoachTheme
+import com.coach.desktop.WindowsTextbookHost
+import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import kotlin.math.abs
 import kotlin.test.*
@@ -41,21 +41,25 @@ class ReadingSpotQa436 {
             val input = dir.resolve("numbered.md")
             Files.writeString(input, "# 阅读位置\n\n" + (1..520).joinToString("") { "句" + it.toString().padStart(4, '0') + "。读者找到这句话，再接着读下一句。" })
             val book = library.importBook(input)
-            var ui by mutableStateOf(LibraryUi(book = book, screen = BookScreen.READER, page = book.pages.first().number))
+            val controller = TextbookController(library)
+            runBlocking { controller.openBook(book.id) }
             runSkikoComposeUiTest(size = Size(width, 1440f), density = Density(1.5f)) {
-                val focus = FocusRequester()
-                setContent { CoachTheme(false) {
-                    TextbookReader(ui, library, UnconnectedBookLearningSupport, null, focus,
-                        onNoteSession = {}, onPage = { ui = ui.copy(page = it) }, onBack = {}, onLearn = {})
-                } }
-                waitForIdle()
+                setContent { WindowsTextbookHost(controller) { null } }
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("reader-text").fetchSemanticsNodes().isNotEmpty() }
                 check()
             }
         } finally { dir.toFile().deleteRecursively() }
     }
 
     private fun SkikoComposeUiTest.toggle() {
-        onNodeWithTag("read-mode").performClick()
+        val scrolling = onAllNodesWithTag("book-scroll-read").fetchSemanticsNodes().isNotEmpty()
+        if (onAllNodesWithTag("immersive-more-menu").fetchSemanticsNodes().isEmpty()) {
+            onNodeWithTag("reader-page").performKeyInput { pressKey(Key.Tab) }
+        }
+        onNodeWithTag("immersive-more-menu").performClick()
+        onNodeWithTag("v7-type-menu").performClick()
+        onNodeWithTag(if (scrolling) "text-mode-paged" else "text-mode-scroll").performClick()
+        onNodeWithTag("v7-type-menu").performKeyInput { pressKey(Key.Escape) }
         mainClock.advanceTimeBy(850)
         waitForIdle()
     }
@@ -66,7 +70,7 @@ class ReadingSpotQa436 {
     }
 
     @Test fun rightHandSentenceSurvivesFirstSwitch() = withBook(2560f) {
-        onNodeWithText("下一页").performClick()
+        onNodeWithTag("next-page").performClick()
         mainClock.advanceTimeBy(850); waitForIdle()
         val before = sentences()
         val right = before.filter { it.side == "reader-text-right" }
@@ -101,7 +105,7 @@ class ReadingSpotQa436 {
     }
 
     @Test fun selectingOnTheRightPageKeepsItsFirstSentenceVisibleAcrossSwitches() = withBook(2560f) {
-        onNodeWithText("下一页").performClick()
+        onNodeWithTag("next-page").performClick()
         mainClock.advanceTimeBy(850); waitForIdle()
         val right = sentences().filter { it.side == "reader-text-right" }
         assertTrue(right.size >= 6)
@@ -118,7 +122,7 @@ class ReadingSpotQa436 {
     }
 
     @Test fun selectingFromTheLeftPageIntoTheRightKeepsTheLeftFirstSentence() = withBook(2560f) {
-        onNodeWithText("下一页").performClick()
+        onNodeWithTag("next-page").performClick()
         mainClock.advanceTimeBy(850); waitForIdle()
         val all = sentences()
         val left = all.filter { it.side == "reader-text" }
@@ -132,7 +136,7 @@ class ReadingSpotQa436 {
     }
 
     @Test fun leftPageSentencesSurviveFirstSwitchWithoutAnyClick() = withBook(2560f) {
-        onNodeWithText("下一页").performClick()
+        onNodeWithTag("next-page").performClick()
         mainClock.advanceTimeBy(850); waitForIdle()
         val before = sentences()
         val left = before.filter { it.side == "reader-text" }

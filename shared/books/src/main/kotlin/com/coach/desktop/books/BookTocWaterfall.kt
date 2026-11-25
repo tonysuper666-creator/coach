@@ -162,6 +162,7 @@ internal object BookTocWaterfall {
         val pageRoles: Map<Int, BookPageRole>,
         val source: String,
         val confidence: Double,
+        val allBlocks: List<SourceBlock>,
     )
 
     private data class RawCandidate(
@@ -374,7 +375,7 @@ internal object BookTocWaterfall {
         if (stageARaw.isNotEmpty()) {
             val refinedRoles = refinePageRolesWithToc(pages, initialRoles, stageANodes, byPage, nativeBodyStart = nativeBodyStart)
             val (chunks, sections, lessons) = buildStudyChunks(bookId, bookTitle, pages, refinedRoles, stageANodes, byPage, nativeBodyStart)
-            return WaterfallOutcome(stageANodes, chunks, sections, lessons, refinedRoles, stageARaw.first().source.name, 1.0)
+            return WaterfallOutcome(stageANodes, chunks, sections, lessons, refinedRoles, stageARaw.first().source.name, 1.0, allBlocks)
         }
 
         // Stage B: Extended leading printed TOC parser (for PDFs without outline)
@@ -384,7 +385,7 @@ internal object BookTocWaterfall {
             if (conf >= 0.85) {
                 val refinedRoles = refinePageRolesWithToc(pages, initialRoles, tocNodes, byPage, nativeBodyStart = nativeBodyStart)
                 val (chunks, sections, lessons) = buildStudyChunks(bookId, bookTitle, pages, refinedRoles, tocNodes, byPage, nativeBodyStart)
-                return WaterfallOutcome(tocNodes, chunks, sections, lessons, refinedRoles, HeadingSource.TOC_PAGE.name, conf)
+                return WaterfallOutcome(tocNodes, chunks, sections, lessons, refinedRoles, HeadingSource.TOC_PAGE.name, conf, allBlocks)
             }
         }
 
@@ -396,7 +397,7 @@ internal object BookTocWaterfall {
         val finalSource = stageC.source
         val refinedRoles = refinePageRolesWithToc(pages, initialRoles, finalNodes, byPage, authoritativeFrontMatter = false, nativeBodyStart = nativeBodyStart)
         val (chunks, sections, lessons) = buildStudyChunks(bookId, bookTitle, pages, refinedRoles, finalNodes, byPage, nativeBodyStart)
-        return WaterfallOutcome(finalNodes, chunks, sections, lessons, refinedRoles, finalSource.name, finalConf)
+        return WaterfallOutcome(finalNodes, chunks, sections, lessons, refinedRoles, finalSource.name, finalConf, allBlocks)
     }
 
     internal fun classifyPagesFast(

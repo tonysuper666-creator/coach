@@ -371,7 +371,7 @@ internal object BookStructurePlanner {
             studyChunks = outcome.studyChunks,
             confidence = outcome.confidence,
             nativeBodyStart = nativeBodyStart,
-        ).also { it.resolvedLessons = outcome.lessons }
+        ).also { it.resolvedLessons = it.toLessons(bookId, pages, outcome.allBlocks) }
     }
 
     /** 仅提取每页前几行与候选标题（保持原块 id 与 exact prefix 偏移，供无结构书单次分节使用）。 */
@@ -518,7 +518,6 @@ internal object BookStructurePlanner {
         val tocNodes = mutableListOf<BookTocNode>()
         val studyChunks = mutableListOf<BookStudyChunk>()
         val finalSections = mutableListOf<BookSection>()
-        val finalLessons = mutableListOf<BookLesson>()
         var chunkOrdinal = 0
         ranges.forEachIndexed { nodeOrdinal, (start, end, secTitle) ->
             val slice = activeBlocks.subList(start, end)
@@ -566,7 +565,6 @@ internal object BookStructurePlanner {
                     endPage = cEnd,
                     blockIds = bIds,
                 )
-                finalLessons += BookLesson(id, chunkTitle, chunkBlocks, breadcrumb)
             }
         }
         return BookStructure(
@@ -578,7 +576,7 @@ internal object BookStructurePlanner {
             source = HeadingSource.MODEL_HAIKU.name,
             confidence = 0.90,
             modelAttempted = true,
-        ).also { it.resolvedLessons = finalLessons }
+        ).also { it.resolvedLessons = it.toLessons(bookId, pages, allBlocks) }
     }
 
     internal fun bodyCharsPublic(blocks: List<SourceBlock>): Int = bodyChars(blocks)

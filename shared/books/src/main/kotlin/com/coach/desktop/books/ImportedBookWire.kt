@@ -10,26 +10,27 @@ internal class ImportedBookWire(private val library: TextbookLibrary) {
     fun snapshot(blocks: List<SourceBlock>): JsonObject {
         val id = blocks.map { it.id.substringBefore(":p") }.distinct().single()
         require(id.matches(Regex("[0-9a-f]{64}")) && ExplainConsent(library.directory).allowed(id))
-        val book = library.book(id)
-        require(book.format in BookFormats.supported)
+        val requestedPages = blocks.map { it.page }.distinct()
+        val meta = requireNotNull(library.bookSnapshotMeta(id, requestedPages))
+        require(meta.format in BookFormats.supported)
         val digest = MessageDigest.getInstance("SHA-256")
-        Files.newInputStream(library.directory.resolve("$id.${book.format}")).use { input ->
+        Files.newInputStream(library.directory.resolve("$id.${meta.format}")).use { input ->
             val buffer = ByteArray(65536)
             while (true) { val n = input.read(buffer); if (n < 0) break; digest.update(buffer, 0, n) }
         }
         require(hex(digest.digest()) == id)
         for (block in blocks) {
-            val page = requireNotNull(book.pages.singleOrNull { it.number == block.page })
+            val page = requireNotNull(meta.pages[block.page])
             require(block.id == "$id:p${block.page}:${block.start}" && block.start >= 0 &&
                 block.end > block.start && block.end <= page.text.length &&
                 page.text.substring(block.start, block.end) == block.text)
         }
         return buildJsonObject {
-            put("schema", 1); put("book", id); put("format", book.format); put("title", book.title)
+            put("schema", 1); put("book", id); put("format", meta.format); put("title", meta.title)
             put("consented", true)
             put("pages", buildJsonArray {
-                for (number in blocks.map { it.page }.distinct()) {
-                    val page = book.pages.single { it.number == number }
+                for (number in requestedPages) {
+                    val page = requireNotNull(meta.pages[number])
                     add(buildJsonObject {
                         put("number", number); put("length", page.text.length); put("ocr", page.ocr)
                         put("sha256", hex(MessageDigest.getInstance("SHA-256").digest(page.text.toByteArray(Charsets.UTF_8))))

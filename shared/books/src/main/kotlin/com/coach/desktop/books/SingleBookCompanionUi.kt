@@ -82,6 +82,7 @@ internal fun SingleBookCompanionPanel(
     bottomContent: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
     currentPageOffset: Int = 0,
+    visiblePageRanges: List<IntRange> = emptyList(),
 ) {
     val colors = CoachTheme.colors
     val originalOnly = studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY
@@ -125,15 +126,27 @@ internal fun SingleBookCompanionPanel(
     val sectionOnly = studyPreference.mode == BookStudyMode.READ_THROUGH &&
         chapterGroup?.sections?.singleOrNull()?.let { currentPage in it.firstPage..it.lastPage } == true
     val pageOnly = readingExplanation && !wholeChapter && !samePage && !sectionOnly
-    val cachedPagePack = remember(packState, pageOnly, currentPage, currentSection, studyPreference.mode) {
+    val cachedPagePack = remember(packState, pageOnly, currentPage, currentPageOffset, visiblePageRanges, currentSection, studyPreference.mode) {
         val pack = (packState as? CompanionPackState.Ready)?.pack
         if (!pageOnly || studyPreference.mode != BookStudyMode.READ_THROUGH || pack == null) null
         else {
-            val points = pack.keyPoints.filter { it.anchor?.pdfPage == currentPage }
+            val onPagePoints = pack.keyPoints.filter { it.anchor?.pdfPage == currentPage }
+            val screenPoints = when {
+                visiblePageRanges.isNotEmpty() -> onPagePoints.filter { kp ->
+                    val a = kp.anchor ?: return@filter false
+                    val aEnd = maxOf(a.endUtf16, a.startUtf16 + 1)
+                    visiblePageRanges.any { r -> aEnd > r.first && a.startUtf16 <= r.last }
+                }.ifEmpty { onPagePoints }
+                currentPageOffset > 0 -> onPagePoints.filter { kp ->
+                    val a = kp.anchor ?: return@filter false
+                    maxOf(a.endUtf16, a.startUtf16 + 1) > currentPageOffset
+                }.ifEmpty { onPagePoints }
+                else -> onPagePoints
+            }
             val pageText = book.page(currentPage)?.text.orEmpty()
-            if (points.isEmpty()) null else pack.copy(
+            if (screenPoints.isEmpty()) null else pack.copy(
                 coreQuestion = currentSection?.title.orEmpty(),
-                keyPoints = points,
+                keyPoints = screenPoints,
                 jargonGlosses = pack.jargonGlosses.filter { gloss ->
                     gloss.anchor?.pdfPage == currentPage ||
                         (gloss.anchor == null && gloss.term.isNotBlank() && pageText.contains(gloss.term, ignoreCase = true))
@@ -473,7 +486,9 @@ internal fun SingleBookCompanionPanel(
                     }
                     val first = if (pageOnly) currentPage else chapterGroup?.firstPage ?: currentPage
                     val last = if (pageOnly) currentPage else chapterGroup?.lastPage ?: currentPage
-                    val title = if (pageOnly) chapter?.title else chapterGroup?.chapterTitle
+                    val title = if (pageOnly) {
+                        chapter?.title?.takeIf { it.isNotBlank() } ?: currentSection?.title?.takeIf { it.isNotBlank() }
+                    } else chapterGroup?.chapterTitle
                     Text(explanationScope(first, last, title ?: book.title),
                         style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag("companion-explanation-scope"))
                     if (!samePage && !sectionOnly && chapterGroup != null) {
@@ -489,10 +504,20 @@ internal fun SingleBookCompanionPanel(
                                 onOpenAnchor = onOpenAnchor, onAskTerm = onAskAboutText,
                                 onJumpPretest = { updateDraft { it.copy(activeModule = CompanionModuleTab.PRETEST.name) } },
                             )
-                        } else key(book.id, currentPage) {
-                            PageExplanation(book, currentPage, explainer, enabled = aiEnabled, onOpen = { block ->
-                                onOpenAnchor(BookCompanionAnchor(block.page, block.id, block.start, block.end, block.text))
-                            }, onLogin = onOpenLogin)
+                        } else key(book.id, currentPage, currentPageOffset, visiblePageRanges) {
+                            PageExplanation(
+                                book = book,
+                                page = currentPage,
+                                explainer = explainer,
+                                enabled = aiEnabled,
+                                onOpen = { block ->
+                                    onOpenAnchor(BookCompanionAnchor(block.page, block.id, block.start, block.end, block.text))
+                                },
+                                onLogin = onOpenLogin,
+                                currentPageOffset = currentPageOffset,
+                                visibleRanges = visiblePageRanges,
+                                library = library,
+                            )
                         }
                     }
                     if (!pageOnly && modeError != null) RetrievedPageLinks(modeSourcePages, { "第 $it 页" }, onJumpPage)

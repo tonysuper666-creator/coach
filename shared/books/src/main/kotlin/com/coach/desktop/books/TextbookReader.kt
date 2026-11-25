@@ -247,6 +247,23 @@ internal fun TextbookReader(
     var inlineDraft by remember(book.id) { mutableStateOf("") }
     var inlineRequest by remember(book.id) { mutableIntStateOf(0) }
     var lastInlineAction by remember(book.id) { mutableStateOf<Pair<SelectionExplainAction, String?>?>(null) }
+    LaunchedEffect(book.id) {
+        val restored = withContext(Dispatchers.IO) { runCatching { library.loadLatestAskThread(book.id) }.getOrNull() }
+        if (restored != null && inlineThread == null) {
+            val secIdx = guideController.sectionIndexForAnchor(restored.selection.page, restored.selection.start)
+                .takeIf { it >= 0 } ?: currentSectionIndex
+            val secCtx = guideController.contextForSection(secIdx) ?: restored.sectionLocation
+                .takeIf { it.isNotBlank() }
+                ?.let { ExplainSectionContext(it, null, null, emptyList()) }
+            inlineThread = InlineExplainThread(
+                selection = restored.selection,
+                context = secCtx,
+                turns = restored.turns,
+                askingOpen = false,
+                threadId = restored.threadId,
+            )
+        }
+    }
     val currentGuideState = currentSection?.let { guideController.states[it.id] }
     val currentGuide = (currentGuideState as? SectionGuideState.Ready)?.guide
     val sectionHardPoints = remember(currentSection, currentGuide, allBookBlocks) {
@@ -303,7 +320,8 @@ internal fun TextbookReader(
         }
         val existing = inlineThread?.takeIf { it.selection.id == target.id } ?: InlineExplainThread(target, secCtx)
         val history = existing.turns.map { FollowUpTurn(it.label, ReadableText.withoutCitationMarks(it.explanation.text)) }
-        val pending = existing.copy(loading = true, error = null, fallbackBlocks = emptyList(), askingOpen = true)
+        val label = if (action == SelectionExplainAction.ASK && !questionText.isNullOrBlank()) "问：${questionText.trim()}" else action.label
+        val pending = existing.copy(loading = true, error = null, fallbackBlocks = emptyList(), askingOpen = true, pendingLabel = label)
         inlineThread = pending
         scope.launch {
             if (!explainer.loaded) explainer.load()
@@ -317,19 +335,38 @@ internal fun TextbookReader(
             if (inlineRequest != request || inlineThread?.selection?.id != target.id) return@launch
             val sent = ExplainWire.selectionBlocks(target, secCtx)
             if (result is ExplainResult.Done && questionText != null && inlineDraft.trim() == questionText) inlineDraft = ""
-            val label = if (action == SelectionExplainAction.ASK && !questionText.isNullOrBlank()) "问：${questionText.trim()}" else action.label
+            if (result is ExplainResult.Done) {
+                val persistedQuestion = if (action == SelectionExplainAction.ASK) questionText?.trim()?.takeIf { it.isNotEmpty() } else null
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        library.saveAskTurn(
+                            bookId = book.id,
+                            threadId = pending.threadId,
+                            selection = target,
+                            sectionLocation = secCtx?.location.orEmpty(),
+                            actionKind = action.kind,
+                            label = label,
+                            questionText = persistedQuestion,
+                            explanation = result.explanation,
+                            sentBlocks = sent,
+                        )
+                    }
+                }
+            }
             inlineThread = when (result) {
                 is ExplainResult.Done -> pending.copy(
                     turns = existing.turns + InlineExplainEntry(label, result.explanation, sent),
                     loading = false,
                     error = null,
                     askingOpen = true,
+                    pendingLabel = null,
                 )
                 is ExplainResult.Refused -> pending.copy(
                     loading = false,
                     error = result.message to result.trouble,
                     fallbackBlocks = (listOf(target) + sent).distinctBy { it.page },
                     askingOpen = true,
+                    pendingLabel = null,
                 )
             }
         }
@@ -951,6 +988,29 @@ internal fun TextbookReader(
             companionTab = ReaderCompanionTab.EXPLAIN
         }
     }
+    var pendingNoteSelection by remember(book.id) { mutableStateOf<SourceBlock?>(null) }
+    fun startNoteFromSelection(sel: SourceBlock) {
+        companionOpen = true
+        companionTab = ReaderCompanionTab.NOTES
+        notesOpen = true
+        if (samePage && view != null && view.pdfPage == sel.page) {
+            if (session.noting) session.cancelNote()
+            session.beginNoteForRange(sel.start, sel.end, sel.text)
+            pendingNoteSelection = null
+        } else {
+            pendingNoteSelection = sel
+            if (sel.page != ui.page) onPage(sel.page)
+        }
+    }
+    LaunchedEffect(pendingNoteSelection, samePage, view) {
+        val sel = pendingNoteSelection ?: return@LaunchedEffect
+        val readyView = view ?: return@LaunchedEffect
+        if (samePage && readyView.pdfPage == sel.page) {
+            if (session.noting) session.cancelNote()
+            session.beginNoteForRange(sel.start, sel.end, sel.text)
+            pendingNoteSelection = null
+        }
+    }
     fun switchView(nextTextView: Boolean) {
         if (nextTextView == textView) return
         val touchPdf = originalPdf && originalPdfTouchEnabled
@@ -1380,10 +1440,21 @@ internal fun TextbookReader(
                             },
                         )
                     } else {
+                        val visibleScreenSlices = remember(
+                            textView, pageUnrecognizedOriginal, paging.pages, paging.anchor, paging.spread, paragraphPage.number,
+                        ) {
+                            if (!textView || pageUnrecognizedOriginal || paging.pages.isEmpty()) emptyList()
+                            else (0 until if (paging.spread) 2 else 1)
+                                .mapNotNull { paging.pages.getOrNull(paging.index + it) }
+                                .flatMap { it.sources }
+                                .filter { it.importPage == paragraphPage.number && it.endUtf16 > it.startUtf16 }
+                                .map { it.startUtf16 until it.endUtf16 }
+                        }
                         SingleBookCompanionPanel(
                             book = book,
                             currentPage = paragraphPage.number,
                             currentPageOffset = readingAnchor.offsetUtf16,
+                            visiblePageRanges = visibleScreenSlices,
                             currentSectionIndex = currentSectionIndex,
                             explainer = explainer,
                             library = library,
@@ -1617,7 +1688,11 @@ internal fun TextbookReader(
             ) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (!session.noting && samePage && view != null) {
-                        V7TextButton({ session.beginNote() }, modifier = Modifier.testTag("books-note-new")) { Text("＋ 写批注") }
+                        V7TextButton({
+                            val sel = learnableSelection
+                            if (sel != null) startNoteFromSelection(sel)
+                            else session.beginNote(readingAnchor.offsetUtf16)
+                        }, modifier = Modifier.testTag("books-note-new")) { Text("＋ 写批注") }
                     }
                     Spacer(Modifier.weight(1f))
                     if (onExportNotes != null) {
@@ -1843,10 +1918,7 @@ internal fun TextbookReader(
                     runInlineSelection(learnableSelection, action)
                 },
                 onNote = {
-                    companionOpen = true
-                    companionTab = ReaderCompanionTab.NOTES
-                    notesOpen = true
-                    if (!session.noting && samePage && view != null) session.beginNote()
+                    startNoteFromSelection(learnableSelection)
                 },
                 onDismiss = { pdf.selection = null; textSelection = null },
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = if (showHud) 54.dp else 14.dp),

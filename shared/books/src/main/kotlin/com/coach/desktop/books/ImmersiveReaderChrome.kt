@@ -1093,112 +1093,137 @@ internal fun CompanionAskPane(
             }
         }
 
-        Column(
-            Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            if (isCollectionMode) {
-                for ((index, turn) in collectionTurns.withIndex()) {
-                    CollectionQaTurnView(
-                        turn = turn,
-                        turnIndex = index,
-                        tagPrefix = "collection-qa",
-                        onOpenCitation = onOpenCollectionCitation,
-                    )
-                    HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.6f))
-                }
-                if (collectionLoading) {
-                    Text(
-                        "正在跨材料核对原页…",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colors.fgSecondary,
-                        modifier = Modifier.testTag("collection-qa-loading"),
-                    )
-                }
-                collectionError?.let { (message, trouble) ->
-                    RetrievedPageLinks(collectionFallbackPages, { "${it.shortLabel} · 第 ${it.page} 页" }, onOpenCollectionCitation)
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            message,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (trouble == ExplainTrouble.Revoked) v7Alert() else colors.fgSecondary,
-                            modifier = Modifier.weight(1f).testTag("collection-qa-error"),
+        val listScroll = rememberScrollState()
+        val scrollTrigger = if (isCollectionMode) {
+            Triple(collectionTurns.size, collectionLoading, collectionError != null)
+        } else {
+            Triple(thread?.turns?.size ?: 0, thread?.loading == true, thread?.error != null)
+        }
+        LaunchedEffect(isCollectionMode, scrollTrigger) {
+            withFrameNanos { }
+            withFrameNanos { }
+            if (listScroll.maxValue > 0) listScroll.scrollTo(listScroll.maxValue)
+        }
+
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            Column(
+                Modifier.fillMaxSize().verticalScroll(listScroll).padding(end = if (listScroll.maxValue > 0) 14.dp else 0.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (isCollectionMode) {
+                    for ((index, turn) in collectionTurns.withIndex()) {
+                        CollectionQaTurnView(
+                            turn = turn,
+                            turnIndex = index,
+                            tagPrefix = "collection-qa",
+                            onOpenCitation = onOpenCollectionCitation,
                         )
-                        if (trouble.needsPairing) {
-                            TextButton(onClick = onOpenLogin) { Text("重新登录", maxLines = 1, softWrap = false) }
-                        } else {
-                            TextButton(
-                                onClick = onRetryCollection,
-                                modifier = Modifier.testTag("collection-qa-retry"),
-                            ) { Text("重试", maxLines = 1, softWrap = false) }
-                        }
-                    }
-                }
-            } else {
-                if (pickingParagraph && quoteSource == null) {
-                    pageBlocks.forEachIndexed { idx, block ->
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(CoachV7.Radius.s))
-                                .clickable {
-                                    pickingParagraph = false
-                                    onPickPassage(block)
-                                }
-                                .pointerHoverIcon(PointerIcon.Hand)
-                                .padding(horizontal = 8.dp, vertical = 6.dp)
-                                .testTag("ask-passage-block-$idx"),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Text(
-                                "${idx + 1}",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontFamily = LocalV7Fonts.current.numbers,
-                                color = colors.actionPrimary,
-                            )
-                            Text(
-                                shortQuote(block.text),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.fgPrimary,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-                        HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.5f))
-                    }
-                }
-                if (thread != null) {
-                    for ((index, entry) in thread.turns.withIndex()) {
-                        Column(Modifier.fillMaxWidth().testTag("inline-explain-turn-$index"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(entry.label, style = MaterialTheme.typography.labelMedium, color = colors.actionPrimary)
-                            ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks, showReaderPage = true) { citation ->
-                                entry.sentBlocks.firstOrNull { it.id == citation.blockId }?.let { onOpenCitation(citation, it) }
-                            }
-                        }
                         HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.6f))
                     }
-                    if (thread.loading) {
-                        Text("正在整理…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("inline-explain-loading"))
+                    if (collectionLoading) {
+                        Text(
+                            "正在跨材料核对原页…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.fgSecondary,
+                            modifier = Modifier.testTag("collection-qa-loading"),
+                        )
                     }
-                    thread.error?.let { (message, trouble) ->
-                        RetrievedPageLinks(thread.fallbackBlocks, { block ->
-                            if (block.page == thread.selection.page) "选段在第 ${block.page} 页" else "相关段落在第 ${block.page} 页"
-                        }) { block ->
-                            onOpenCitation(Citation("", block.id, block.page), block)
-                        }
+                    collectionError?.let { (message, trouble) ->
+                        RetrievedPageLinks(collectionFallbackPages, { "${it.shortLabel} · 第 ${it.page} 页" }, onOpenCollectionCitation)
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(
                                 message,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = if (trouble == ExplainTrouble.Revoked) v7Alert() else colors.fgSecondary,
-                                modifier = Modifier.weight(1f).testTag("inline-explain-error"),
+                                modifier = Modifier.weight(1f).testTag("collection-qa-error"),
                             )
-                            if (trouble.needsPairing) TextButton(onClick = onOpenLogin) { Text("重新登录", maxLines = 1, softWrap = false) }
-                            else TextButton(onClick = onRetry) { Text("重试", maxLines = 1, softWrap = false) }
+                            if (trouble.needsPairing) {
+                                TextButton(onClick = onOpenLogin) { Text("重新登录", maxLines = 1, softWrap = false) }
+                            } else {
+                                TextButton(
+                                    onClick = onRetryCollection,
+                                    modifier = Modifier.testTag("collection-qa-retry"),
+                                ) { Text("重试", maxLines = 1, softWrap = false) }
+                            }
+                        }
+                    }
+                } else {
+                    if (pickingParagraph && quoteSource == null) {
+                        pageBlocks.forEachIndexed { idx, block ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(CoachV7.Radius.s))
+                                    .clickable {
+                                        pickingParagraph = false
+                                        onPickPassage(block)
+                                    }
+                                    .pointerHoverIcon(PointerIcon.Hand)
+                                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                                    .testTag("ask-passage-block-$idx"),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text(
+                                    "${idx + 1}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = LocalV7Fonts.current.numbers,
+                                    color = colors.actionPrimary,
+                                )
+                                Text(
+                                    shortQuote(block.text),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.fgPrimary,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+                            HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.5f))
+                        }
+                    }
+                    if (thread != null) {
+                        for ((index, entry) in thread.turns.withIndex()) {
+                            Column(Modifier.fillMaxWidth().testTag("inline-explain-turn-$index"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(entry.label, style = MaterialTheme.typography.labelMedium, color = colors.actionPrimary)
+                                ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks, showReaderPage = true) { citation ->
+                                    entry.sentBlocks.firstOrNull { it.id == citation.blockId }?.let { onOpenCitation(citation, it) }
+                                }
+                            }
+                            HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.6f))
+                        }
+                        if (thread.loading) {
+                            Column(Modifier.fillMaxWidth().testTag("inline-explain-pending"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                thread.pendingLabel?.takeIf { it.isNotBlank() }?.let {
+                                    Text(it, style = MaterialTheme.typography.labelMedium, color = colors.actionPrimary)
+                                }
+                                Text("正在整理…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("inline-explain-loading"))
+                            }
+                        }
+                        thread.error?.let { (message, trouble) ->
+                            RetrievedPageLinks(thread.fallbackBlocks, { block ->
+                                if (block.page == thread.selection.page) "选段在第 ${block.page} 页" else "相关段落在第 ${block.page} 页"
+                            }) { block ->
+                                onOpenCitation(Citation("", block.id, block.page), block)
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(
+                                    message,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (trouble == ExplainTrouble.Revoked) v7Alert() else colors.fgSecondary,
+                                    modifier = Modifier.weight(1f).testTag("inline-explain-error"),
+                                )
+                                if (trouble.needsPairing) TextButton(onClick = onOpenLogin) { Text("重新登录", maxLines = 1, softWrap = false) }
+                                else TextButton(onClick = onRetry) { Text("重试", maxLines = 1, softWrap = false) }
+                            }
                         }
                     }
                 }
+            }
+            if (listScroll.maxValue > 0) {
+                BookScrollbar(
+                    listScroll,
+                    Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp).testTag("companion-ask-scrollbar"),
+                )
             }
         }
 

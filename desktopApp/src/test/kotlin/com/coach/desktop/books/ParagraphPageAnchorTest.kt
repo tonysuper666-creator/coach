@@ -47,7 +47,10 @@ class ParagraphPageAnchorTest {
                 source.assertTextEquals("第 6 页")
                 onNodeWithTag("companion-tab-ask").performClick()
                 onNodeWithTag("companion-pick-paragraph").performClick()
-                onNodeWithTag("ask-passage-block-0").assertTextContains("第六页可信选段", substring = true)
+                val paragraph = onNodeWithTag("ask-passage-block-0")
+                paragraph.assertTextContains("第六页可信选段", substring = true)
+                paragraph.performClick()
+                onNodeWithTag("companion-ask-quote").assertTextEquals("引文 · “第六页可信选段”")
                 onNode(hasAnyAncestor(hasTestTag("immersive-companion-drawer")) and hasText("第五页独立正文", substring = true)).assertDoesNotExist()
             }
         } finally { root.toFile().deleteRecursively() }

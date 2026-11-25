@@ -100,25 +100,27 @@ function Find-TutorBodyRows($lines) {
     $bar = @('上一页', '下一页') | ForEach-Object { Find-Text $lines $_ } | Where-Object { $_ } | Select-Object -First 1
     $top = if ($tool) { $tool.Y2 + 8 } else { 36 }
     $bottom = if ($bar) { $bar.Y1 - 8 } else { 100000 }
-    $buckets = New-Object System.Collections.Generic.List[object]
+    # A generic List throws "Argument types do not match" when this script enumerates it
+    # on Windows PowerShell 5.1. Keep plain arrays.
+    $buckets = @()
     foreach ($l in @($lines)) {
         foreach ($w in @($l.Words)) {
             $rect = $w.BoundingRect
-            if ($rect.Width -lt 2 -or $rect.Height -lt 2) { continue }
-            $cy = $rect.Y + ($rect.Height / 2)
+            if (-not $rect -or $rect.Width -lt 2 -or $rect.Height -lt 2) { continue }
+            $cy = [double]$rect.Y + ([double]$rect.Height / 2)
             if ($cy -lt $top -or $cy -gt $bottom) { continue }
-            $hit = $null
-            foreach ($bucket in $buckets) {
-                if ([Math]::Abs($bucket.Y - $cy) -le 9) { $hit = $bucket; break }
+            $hitIndex = -1
+            for ($i = 0; $i -lt @($buckets).Count; $i++) {
+                if ([Math]::Abs([double]$buckets[$i].Y - $cy) -le 9) { $hitIndex = $i; break }
             }
-            if (-not $hit) {
-                $hit = [pscustomobject]@{ Y = [double]$cy; Items = (New-Object System.Collections.Generic.List[object]) }
-                $buckets.Add($hit) | Out-Null
+            if ($hitIndex -lt 0) {
+                $buckets += ,([pscustomobject]@{ Y = $cy; Items = @($w) })
+            } else {
+                $buckets[$hitIndex].Items = @($buckets[$hitIndex].Items) + $w
             }
-            $hit.Items.Add($w) | Out-Null
         }
     }
-    $rows = foreach ($bucket in $buckets) {
+    $rows = foreach ($bucket in @($buckets)) {
         $items = @($bucket.Items)
         $text = ($items | ForEach-Object { $_.Text }) -join ''
         if (($text -replace '[^\p{L}\p{N}]', '').Length -lt 8) { continue }
@@ -323,24 +325,36 @@ function Test-Practice {
     if (-not $opt) { throw '读前自测没有选项 Recall before checking' }
     Click-At $opt.X $opt.Y | Out-Null
     Start-Sleep -Milliseconds 400
-    $submit = Find-Text @(Read-TutorFrame '06-selected') '提交'
-    if (-not $submit) {
+    # 「提交」 is a black pill. The on-device OCR reads the card titles and drops that
+    # white-on-black word, the same way it dropped 「导入文件」. The pill sits on the
+    # right of the row whose left side says 「这题是猜的」, which does get read.
+    $submit = $null
+    foreach ($pass in 1..3) {
+        $frame = @(Read-TutorFrame $(if ($pass -eq 1) { '06-selected' } else { "06-selected-$pass" }))
+        $submit = Find-Text $frame '提交'
+        if (-not $submit) {
+            $guess = Find-Text $frame '猜的'
+            if ($guess) {
+                $bounds = Get-Rect
+                $submit = [pscustomobject]@{ X = [int](($bounds.R - $bounds.L) - 64); Y = [int]$guess.Y }
+            }
+        }
+        if ($submit) { break }
         Scroll-TutorView -2
-        $submit = Find-Text @(Read-TutorFrame '06-selected-down') '提交'
     }
     if (-not $submit) { throw '读前自测没有提交' }
     Click-At $submit.X $submit.Y | Out-Null
-    $fb = $null
-    $deadline = (Get-Date).AddSeconds(15)
-    do {
-        $frame = @(Read-TutorFrame '06-feedback')
-        $fb = Find-Text $frame 'Practicefeedback'
-        if ($fb) { break }
-        Start-Sleep -Milliseconds 500
-    } while ((Get-Date) -lt $deadline)
+    $fb = Wait-TutorText '06-feedback' @('Practicefeedback') 20 -2
     if (-not $fb) { throw '提交后没有练习解析' }
+    $frame = @(Read-TutorFrame '06-feedback-source')
     $src = Find-Text $frame '原文第'
     if (-not $src) { $src = Find-Text $frame '出处' }
+    if (-not $src) {
+        Scroll-TutorView -2
+        $frame = @(Read-TutorFrame '06-feedback-source-down')
+        $src = Find-Text $frame '原文第'
+        if (-not $src) { $src = Find-Text $frame '出处' }
+    }
     if (-not $src) { throw '练习解析没有出处' }
 }
 

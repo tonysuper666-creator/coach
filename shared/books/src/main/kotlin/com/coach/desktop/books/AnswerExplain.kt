@@ -65,6 +65,7 @@ internal fun answerExplainWith(explainer: BookExplainer, consent: ExplainConsent
 internal class PairedBookExplainSupport(
     private val gate: AnswerExplain,
     private val focusText: String? = null,
+    private val library: TextbookLibrary? = null,
 ) : BookLearningSupport {
     override suspend fun explain(request: BookExplanationRequest): BookLearningReply {
         if (!gate.consent.allowed(request.book)) return BookLearningReply.Unavailable(CONSENT_FIRST)
@@ -72,15 +73,26 @@ internal class PairedBookExplainSupport(
         val chosen = focusText?.let { text -> body.firstOrNull { it.text.contains(text) } } ?: body.firstOrNull()
             ?: return BookLearningReply.Unavailable("这一节没有可讲的正文。")
         return try {
-            when (val result = gate.explain(chosen, request.blocks)) {
+            val key = "answer-explain:${request.lesson}:${chosen.id}"
+            val cached = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                library?.sectionGuide(request.book, key)
+            }?.takeIf { it.citations.isNotEmpty() && it.citations.all { c -> c.blockId == chosen.id && c.page == chosen.page } }
+            val result = cached?.let { ExplainResult.Done(SectionGuide.fromCached(it).explanation) }
+                ?: gate.explain(chosen, listOf(chosen))
+            when (result) {
                 is ExplainResult.Done -> {
-                    val byId = request.blocks.associateBy { it.id }
-                    val cited = result.explanation.citations.mapNotNull { citation ->
-                        byId[citation.blockId]?.let { block ->
-                            BookPassage(request.book, block.page, block.start, block.end, block.text)
-                        }
+                    val explanation = result.explanation
+                    if (explanation.citations.isEmpty() || explanation.citations.any { it.blockId != chosen.id || it.page != chosen.page }) {
+                        return BookLearningReply.Unavailable("讲解出处与本题原文不符。")
                     }
-                    BookLearningReply.Text(ReadableText.withoutCitationMarks(result.explanation.text), cited)
+                    if (cached == null && library != null) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        library.saveSectionGuide(request.book, key, CachedSectionGuide(
+                            brief = emptyList(), text = explanation.text, recap = "",
+                            citations = explanation.citations.map { CachedCitation(it.anchor, it.blockId, it.page) },
+                        ))
+                    }
+                    val passage = BookPassage(request.book, chosen.page, chosen.start, chosen.end, chosen.text)
+                    BookLearningReply.Text(ReadableText.withoutCitationMarks(explanation.text), listOf(passage))
                 }
                 is ExplainResult.Refused -> BookLearningReply.Unavailable(result.message, result.trouble)
             }
@@ -95,7 +107,7 @@ internal class PairedBookExplainSupport(
         BookLearningReply.Unavailable("选段问答还没接通；这里的讲解讲的是这一节正文。")
 
     private companion object {
-        const val CONSENT_FIRST = "讲解要先得到你的允许：在原文页点「讲解」并允许一次，或在这里直接允许。"
+        const val CONSENT_FIRST = "已在设置中关闭伴读讲解与提问。"
     }
 }
 
@@ -112,6 +124,7 @@ internal fun LessonAnswerExplanation(
     reply: MutableState<BookLearningReply?>,
     sources: @Composable (List<BookPassage>) -> Unit,
     onOpenSourcePage: () -> Unit,
+    library: TextbookLibrary? = null,
 ) {
     LaunchedEffect(gate) { gate.load() }
     val allowed = LocalReadingAiExplain.current && gate.consent.allowed(book.id)
@@ -139,8 +152,8 @@ internal fun LessonAnswerExplanation(
         }
         !allowed -> Text("已在设置中关闭伴读讲解与提问。", style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.fgSecondary)
         else -> {
-            val support = remember(book.id, lesson.id, practice.reference, gate) {
-                PairedBookExplainSupport(gate, practice.reference)
+            val support = remember(book.id, lesson.id, practice.reference, gate, library) {
+                PairedBookExplainSupport(gate, practice.reference, library)
             }
             // 停用之后在原文页重新配好了：留着的那条「已停用」作废，这一节重新去取讲解。
             LaunchedEffect(reply.value) {

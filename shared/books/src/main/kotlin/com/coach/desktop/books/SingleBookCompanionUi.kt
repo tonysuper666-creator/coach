@@ -93,6 +93,9 @@ internal fun SingleBookCompanionPanel(
         ChapterCompanionGrouping.groupForSection(book, currentSectionIndex)
     }
     val currentSection = book.lessons.getOrNull(currentSectionIndex)
+    val proseGroup = remember(book, chapterGroup) {
+        chapterGroup?.let { ChapterCompanionGrouping.filterForCompanion(book, it) }
+    }
     val chapterNum = remember(book.id, chapterGroup?.chapterId, currentPage) {
         chapterGroup?.let { StudyModeChapterNumbering.resolve(book, currentPage, it.firstPage).chapterNumber } ?: 0
     }
@@ -209,7 +212,7 @@ internal fun SingleBookCompanionPanel(
         modeError = null
         try {
             val wire = withContext(Dispatchers.IO) {
-                val companionGroup = ChapterCompanionGrouping.filterForCompanion(book, group)
+                val companionGroup = proseGroup ?: return@LaunchedEffect
                 StudyModeWireBuilder.buildModeRequestJson(library, book, companionGroup, chapterNum, studyPreference)
             }
             modeSourcePages = wire.getValue("pages").jsonArray.map { it.jsonObject.getValue("pdfPage").jsonPrimitive.int }
@@ -335,7 +338,7 @@ internal fun SingleBookCompanionPanel(
             }
         }
         try {
-            val companionGroup = ChapterCompanionGrouping.filterForCompanion(book, group)
+            val companionGroup = proseGroup ?: return@LaunchedEffect
             val firstGroup = ChapterCompanionProgressive.firstSectionGroup(companionGroup, currentSection?.id)
             val restGroup = firstGroup?.sections?.singleOrNull()?.id?.let {
                 ChapterCompanionProgressive.remainingSectionGroup(companionGroup, it)
@@ -508,7 +511,7 @@ internal fun SingleBookCompanionPanel(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (readingExplanation && LocalReadingSectionSummary.current && currentSection != null &&
-                    currentPage == currentSection.lastPage) {
+                    currentPage == currentSection.lastPage && proseGroup?.sections?.any { it.id == currentSection.id } == true) {
                     var dismissed by remember(book.id, currentSection.id) { mutableStateOf(false) }
                     if (!dismissed) {
                         val pack = (packState as? CompanionPackState.Ready)?.pack

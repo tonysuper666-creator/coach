@@ -29,7 +29,11 @@ class AnswerExplainCardTest {
 
         fun gate() = AnswerExplain(
             consent = consent, load = {}, ready = { true }, paired = { paired },
-            explain = { chosen, _ -> asked += chosen.id to chosen.text; reply(chosen) },
+            explain = { chosen, blocks ->
+                assertEquals(listOf(chosen), blocks)
+                asked += chosen.id to chosen.text
+                reply(chosen)
+            },
         )
     }
 
@@ -116,7 +120,7 @@ class AnswerExplainCardTest {
             onNodeWithTag("book-summary-detail").assertTextContains("你写下了 4 个字", substring = true)
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-explanation-text").fetchSemanticsNodes().isNotEmpty() }
             val chosen = f.book.lessons.first().blocks.first { it.isBodyParagraph }
-            assertEquals(List(2) { chosen.id to chosen.text }, channel.asked)
+            assertEquals(listOf(chosen.id to chosen.text), channel.asked)
             onNodeWithText(f.book.lessons[1].text).assertDoesNotExist()
         }
     }

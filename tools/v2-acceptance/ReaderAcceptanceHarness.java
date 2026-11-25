@@ -136,7 +136,11 @@ public final class ReaderAcceptanceHarness {
             int[][] profiles = { {1920, 1080, 100}, {2880, 1800, 150} };
             captureMeasureStatesSceneAll(flavor, libSeed, outDir, profiles, targetPage);
         } else if ("win32".equals(surface)) {
-            captureMeasureStatesWin32(flavor, libSeed, outDir, targetPage);
+            boolean customWindow = args.length >= 8;
+            int logicalW = customWindow ? Integer.parseInt(args[6]) : 752;
+            int logicalH = customWindow ? Integer.parseInt(args[7]) : 552;
+            String resTag = args.length >= 9 ? args[8] : "win32";
+            captureMeasureStatesWin32(flavor, libSeed, outDir, targetPage, logicalW, logicalH, resTag, !customWindow);
         } else {
             throw new IllegalArgumentException("Unknown surface: " + surface);
         }
@@ -265,13 +269,13 @@ public final class ReaderAcceptanceHarness {
     }
 
     private static void captureMeasureStatesWin32(
-        String flavor, Path libSeed, Path outDir, int targetPage
+        String flavor, Path libSeed, Path outDir, int targetPage, int logicalW, int logicalH, String resTag, boolean includeOverlays
     ) throws Exception {
-        // Real OS window at 752x552 (winbox native console bounds)
+        // Real OS window at requested logical dimensions (default 752x552 = 1128x828 @ 150%)
         Path libOrig = copyTempDir(libSeed, "w-orig-");
         try {
             TextbookController c = openReaderAt(libOrig, targetPage, false);
-            ComposeWindow win = openHostWindow(c, 24, 24, 752, 552);
+            ComposeWindow win = openHostWindow(c, 24, 24, logicalW, logicalH);
             try {
                 Thread.sleep(2800);
                 waitFor(6000, () -> !hasTextContaining(win, "正在加载页面"));
@@ -279,26 +283,28 @@ public final class ReaderAcceptanceHarness {
                     dismissV2HudIfVisibleWin32(win);
                     waitFor(6000, () -> !hasTextContaining(win, "正在加载页面"));
                 }
-                dumpWin32(win, outDir, flavor, "win32", "pure_read_original");
+                dumpWin32(win, outDir, flavor, resTag, "pure_read_original");
 
-                if (isV2Flavor(flavor)) {
-                    revealV2HudWin32(win);
-                    clickTagWin32(win, "immersive-companion-toggle");
-                    Thread.sleep(700);
-                    dumpWin32(win, outDir, flavor, "win32", "companion_initial");
-                    clickTagWin32(win, "companion-close");
-                    Thread.sleep(400);
-                    revealV2HudWin32(win);
-                    clickTagWin32(win, "v7-directory-toggle");
-                    waitFor(4000, () -> findNodeByTag(win, "v7-directory-drawer") != null);
-                    Thread.sleep(300);
-                    dumpWin32(win, outDir, flavor, "win32", "toc_expanded");
-                } else {
-                    waitFor(5000, () -> isNodeEnabled(findNodeByTag(win, "v7-directory-toggle")));
-                    clickTagWin32(win, "v7-directory-toggle");
-                    waitFor(4000, () -> findNodeByTag(win, "v7-directory-drawer") != null);
-                    Thread.sleep(400);
-                    dumpWin32(win, outDir, flavor, "win32", "toc_expanded");
+                if (includeOverlays) {
+                    if (isV2Flavor(flavor)) {
+                        revealV2HudWin32(win);
+                        clickTagWin32(win, "immersive-companion-toggle");
+                        Thread.sleep(700);
+                        dumpWin32(win, outDir, flavor, resTag, "companion_initial");
+                        clickTagWin32(win, "companion-close");
+                        Thread.sleep(400);
+                        revealV2HudWin32(win);
+                        clickTagWin32(win, "v7-directory-toggle");
+                        waitFor(4000, () -> findNodeByTag(win, "v7-directory-drawer") != null);
+                        Thread.sleep(300);
+                        dumpWin32(win, outDir, flavor, resTag, "toc_expanded");
+                    } else {
+                        waitFor(5000, () -> isNodeEnabled(findNodeByTag(win, "v7-directory-toggle")));
+                        clickTagWin32(win, "v7-directory-toggle");
+                        waitFor(4000, () -> findNodeByTag(win, "v7-directory-drawer") != null);
+                        Thread.sleep(400);
+                        dumpWin32(win, outDir, flavor, resTag, "toc_expanded");
+                    }
                 }
             } finally {
                 disposeWindow(win);
@@ -310,7 +316,7 @@ public final class ReaderAcceptanceHarness {
         Path libText = copyTempDir(libSeed, "w-text-");
         try {
             TextbookController c = openReaderAt(libText, targetPage, true);
-            ComposeWindow win = openHostWindow(c, 24, 24, 752, 552);
+            ComposeWindow win = openHostWindow(c, 24, 24, logicalW, logicalH);
             try {
                 Thread.sleep(3600);
                 waitFor(6000, () -> !hasTextContaining(win, "正在加载")
@@ -322,7 +328,7 @@ public final class ReaderAcceptanceHarness {
                         && !hasTextContaining(win, "正在排版")
                         && findNodeByTag(win, "book-page-loading") == null);
                 }
-                dumpWin32(win, outDir, flavor, "win32", "pure_read_text");
+                dumpWin32(win, outDir, flavor, resTag, "pure_read_text");
             } finally {
                 disposeWindow(win);
             }
@@ -330,14 +336,14 @@ public final class ReaderAcceptanceHarness {
             deleteQuietly(libText);
         }
 
-        if ("111".equals(flavor)) {
+        if (includeOverlays && "111".equals(flavor)) {
             Path libGuided = copyTempDir(libSeed, "w-guided-");
             try {
                 TextbookController c = openGuided(libGuided);
-                ComposeWindow win = openHostWindow(c, 24, 24, 752, 552);
+                ComposeWindow win = openHostWindow(c, 24, 24, logicalW, logicalH);
                 try {
                     Thread.sleep(2000);
-                    dumpWin32(win, outDir, flavor, "win32", "guided");
+                    dumpWin32(win, outDir, flavor, resTag, "guided");
                 } finally {
                     disposeWindow(win);
                 }
@@ -901,7 +907,7 @@ public final class ReaderAcceptanceHarness {
                 runSuspend(cont -> c1.load(cont));
                 runSuspend(cont -> c1.read(cont));
                 runSuspend(cont -> c1.dismissPrompt(cont));
-                runSuspend(cont -> c1.page(32, cont));
+                controllerPageTo(c1, 32);
                 Thread.sleep(800);
             } finally {
                 disposeWindow(w1);
@@ -996,8 +1002,26 @@ public final class ReaderAcceptanceHarness {
         runSuspend(c -> controller.load(c));
         runSuspend(c -> controller.read(c));
         runSuspend(c -> controller.dismissPrompt(c));
-        runSuspend(c -> controller.page(page, c));
+        controllerPageTo(controller, page);
         return controller;
+    }
+
+    private static void controllerPageTo(TextbookController controller, int page) throws Exception {
+        for (Method m : TextbookController.class.getDeclaredMethods()) {
+            if (!"page".equals(m.getName())) continue;
+            Class<?>[] p = m.getParameterTypes();
+            if (p.length == 2 && p[0] == int.class) {
+                m.setAccessible(true);
+                runSuspend(c -> m.invoke(controller, page, c));
+                return;
+            }
+            if (p.length == 3 && p[0] == int.class && p[1] == boolean.class) {
+                m.setAccessible(true);
+                runSuspend(c -> m.invoke(controller, page, true, c));
+                return;
+            }
+        }
+        throw new IllegalStateException("TextbookController.page(...) not found");
     }
 
     private static TextbookController openGuided(Path libDir) throws Exception {
@@ -1148,7 +1172,7 @@ public final class ReaderAcceptanceHarness {
         });
         Files.write(pngPath, pngBytes);
         Collection<SemanticsOwner> owners = onEdt(scene::getSemanticsOwners);
-        writeMeta(metaPath, flavor, stateName, "image_compose_scene_offscreen", dims[0], dims[1], resTag.startsWith("2880") ? 1.5f : 1.0f, owners);
+        writeMeta(metaPath, flavor, stateName, "image_compose_scene_offscreen", dims[0], dims[1], resTag.startsWith("2880") ? 1.5f : 1.0f, owners, 0, 0);
         System.out.println("DUMP " + pngPath.getFileName() + " (image_compose_scene_offscreen " + dims[0] + "x" + dims[1] + ")");
     }
 
@@ -1161,17 +1185,34 @@ public final class ReaderAcceptanceHarness {
         BufferedImage img = onEdt(() -> screenshotWin32(win));
         ImageIO.write(img, "png", pngPath.toFile());
         float scale = onEdt(() -> (float) win.getGraphicsConfiguration().getDefaultTransform().getScaleX());
+        int[] canvasOffset = onEdt(() -> mainCanvasPixelOffset(win, scale));
         Collection<SemanticsOwner> owners = onEdt(win::getSemanticsOwners);
-        writeMeta(metaPath, flavor, stateName, "real_os_window", img.getWidth(), img.getHeight(), scale, owners);
+        writeMeta(metaPath, flavor, stateName, "real_os_window", img.getWidth(), img.getHeight(), scale, owners, canvasOffset[0], canvasOffset[1]);
         System.out.println("DUMP " + pngPath.getFileName() + " (real_os_window " + img.getWidth() + "x" + img.getHeight() + ")");
     }
 
+    private static int[] mainCanvasPixelOffset(ComposeWindow window, double scale) {
+        try {
+            Point origin = window.getLocationOnScreen();
+            for (Surface s : activeSurfaces(window)) {
+                if (!s.layer.isShowing()) continue;
+                Point pt = s.layer.getCanvas().getLocationOnScreen();
+                return new int[]{
+                    (int) Math.round((pt.x - origin.x) * scale),
+                    (int) Math.round((pt.y - origin.y) * scale)
+                };
+            }
+        } catch (Exception ignored) {}
+        return new int[]{0, 0};
+    }
+
     private static void writeMeta(
-        Path metaPath, String flavor, String stateName, String surfaceType, int w, int h, float scale, Collection<SemanticsOwner> owners
+        Path metaPath, String flavor, String stateName, String surfaceType, int w, int h, float scale,
+        Collection<SemanticsOwner> owners, int offsetX, int offsetY
     ) throws IOException {
         List<Map<String, Object>> roots = new ArrayList<>();
         for (SemanticsOwner o : owners) {
-            roots.add(serializeNode(o.getUnmergedRootSemanticsNode()));
+            roots.add(serializeNode(o.getUnmergedRootSemanticsNode(), offsetX, offsetY));
         }
         Map<String, Object> meta = new HashMap<>();
         meta.put("flavor", flavor);
@@ -1183,7 +1224,7 @@ public final class ReaderAcceptanceHarness {
         Files.writeString(metaPath, toJson(meta, 0), StandardCharsets.UTF_8);
     }
 
-    private static Map<String, Object> serializeNode(SemanticsNode node) {
+    private static Map<String, Object> serializeNode(SemanticsNode node, int offsetX, int offsetY) {
         Rect r = node.getBoundsInRoot();
         String tag = "";
         List<String> texts = new ArrayList<>();
@@ -1200,12 +1241,17 @@ public final class ReaderAcceptanceHarness {
         }
         List<Map<String, Object>> children = new ArrayList<>();
         for (SemanticsNode ch : node.getChildren()) {
-            children.add(serializeNode(ch));
+            children.add(serializeNode(ch, offsetX, offsetY));
         }
         Map<String, Object> m = new HashMap<>();
         m.put("tag", tag);
         m.put("text", String.join(" ", texts));
-        m.put("bounds", List.of(Math.round(r.getLeft()), Math.round(r.getTop()), Math.round(r.getRight()), Math.round(r.getBottom())));
+        m.put("bounds", List.of(
+            Math.round(r.getLeft()) + offsetX,
+            Math.round(r.getTop()) + offsetY,
+            Math.round(r.getRight()) + offsetX,
+            Math.round(r.getBottom()) + offsetY
+        ));
         m.put("children", children);
         return m;
     }
@@ -1905,8 +1951,8 @@ public final class ReaderAcceptanceHarness {
         window.renderImmediately();
         double scale = window.getGraphicsConfiguration().getDefaultTransform().getScaleX();
         BufferedImage output = new BufferedImage(
-            (int) Math.ceil(window.getWidth() * scale),
-            (int) Math.ceil(window.getHeight() * scale),
+            (int) Math.round(window.getWidth() * scale),
+            (int) Math.round(window.getHeight() * scale),
             BufferedImage.TYPE_INT_RGB
         );
         Graphics2D g = output.createGraphics();
@@ -2026,7 +2072,7 @@ public final class ReaderAcceptanceHarness {
     private static <T> T onEdt(Callable<T> action) throws Exception {
         FutureTask<T> task = new FutureTask<>(action);
         if (SwingUtilities.isEventDispatchThread()) task.run(); else SwingUtilities.invokeLater(task);
-        return task.get(20, TimeUnit.SECONDS);
+        return task.get(45, TimeUnit.SECONDS);
     }
 
     private static Path copyTempDir(Path src, String prefix) throws IOException {
@@ -2155,7 +2201,7 @@ public final class ReaderAcceptanceHarness {
 
             TextbookController controller = createController(lib);
             runSuspend(c -> controller.load(c));
-            runSuspend(c -> controller.page(179, c));
+            controllerPageTo(controller, 179);
             int pageBefore = controllerPage(controller);
             runSuspend(c -> controller.back(c));
             seedHighlightsAndNotesForModeTest(libWork, bookId, 179, sampleCh8Json);
@@ -2279,7 +2325,7 @@ public final class ReaderAcceptanceHarness {
             TextbookLibrary lib = createLibrary(libWork);
             TextbookController controller = createController(lib);
             runSuspend(c -> controller.load(c));
-            runSuspend(c -> controller.page(172, c));
+            controllerPageTo(controller, 172);
             runSuspend(c -> controller.back(c));
 
             ComposeWindow[] box = new ComposeWindow[1];

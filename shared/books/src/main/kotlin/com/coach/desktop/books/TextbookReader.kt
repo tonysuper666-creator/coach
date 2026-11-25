@@ -1199,8 +1199,8 @@ internal fun TextbookReader(
     var readerOriginDp by remember { mutableStateOf<Pair<Float, Float>?>(null) }
     val typeMenuExtra: @Composable (() -> Unit) -> Unit = { close ->
         if (pdfVisible) {
-            for (scrolling in listOf(false, true)) {
-                val label = if (scrolling) "单页滚动" else "双页对开"
+            for (scrolling in listOf(true, false)) {
+                val label = if (scrolling) "适宽连续" else "双页对开"
                 DropdownMenuItem(
                     text = { Text(label + if (pdf.scrolling == scrolling) " ✓" else "") },
                     modifier = Modifier.testTag(if (scrolling) "original-mode-scroll" else "original-mode-paged"),
@@ -1390,17 +1390,18 @@ internal fun TextbookReader(
                             pdf.selection = null
                             passageJump = null
                             scope.launch {
+                                val targetScroll = pdf.activeScroll ?: scroll
                                 when (event.key) {
                                     Key.MoveEnd -> {
                                         endOrHomeBrowseActive = true
-                                        scroll.scrollToEnd()
+                                        targetScroll.scrollToEnd()
                                     }
                                     Key.MoveHome -> {
                                         endOrHomeBrowseActive = true
-                                        scroll.scrollTo(ScrollReadPosition(0))
+                                        targetScroll.scrollTo(ScrollReadPosition(0))
                                     }
-                                    Key.DirectionDown, Key.DirectionUp -> scroll.scrollLine(event.key == Key.DirectionDown)
-                                    else -> scroll.scrollScreen(event.key == Key.PageDown || (event.key == Key.Spacebar && !event.isShiftPressed))
+                                    Key.DirectionDown, Key.DirectionUp -> targetScroll.scrollLine(event.key == Key.DirectionDown)
+                                    else -> targetScroll.scrollScreen(event.key == Key.PageDown || (event.key == Key.Spacebar && !event.isShiftPressed))
                                 }
                             }
                             return@onPreviewKeyEvent true

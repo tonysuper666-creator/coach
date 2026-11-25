@@ -15,7 +15,7 @@ param(
     [string]$LibSeed = 'D:\agent\evidence\b-reader-lib',
     [string]$Book = 'D:\agent\materials\Health-Economics-620p.pdf',
     [string]$OutDir = '',
-    [ValidateSet('all', 'measure', 'bugs', 'login')][string]$Suite = 'all',
+    [ValidateSet('all', 'measure', 'laptop', 'bugs', 'login')][string]$Suite = 'all',
     [int]$BugsRepeat = 3,
     [switch]$SkipLegacy,
     [switch]$Direct,
@@ -126,6 +126,31 @@ if ($Suite -in 'all', 'measure') {
         $cpV2 = Compile-Harness $RuntimeV2 (Join-Path $clsRoot 'v2')
         Invoke-Harness $cpV2 @('measure', 'v2', $LibSeed, $shotsDir, 'scene', '34') 'measure-v2-scene'
         Invoke-Harness $cpV2 @('measure', 'v2', $LibSeed, $shotsDir, 'win32', '34') 'measure-v2-win32'
+    }
+    $measureJson = Join-Path $OutDir 'measure-report.json'
+    & python (Join-Path $scriptDir 'measure_reader.py') $shotsDir --json-out $measureJson
+    if ($LASTEXITCODE -ne 0) { throw 'measure_reader.py failed' }
+}
+
+if ($Suite -eq 'laptop') {
+    $ranMeasure = $true
+    $laptopProfiles = @(
+        @{ Tag = '1128x828-s150';  LogicalW = '752';  LogicalH = '552'; Scale = '1.5'  },
+        @{ Tag = '1366x768-s100';  LogicalW = '1366'; LogicalH = '768'; Scale = '1.0'  },
+        @{ Tag = '1536x864-s125';  LogicalW = '1229'; LogicalH = '691'; Scale = '1.25' },
+        @{ Tag = '1920x1080-s150'; LogicalW = '1280'; LogicalH = '720'; Scale = '1.5'  }
+    )
+    if (-not $SkipLegacy -and (Test-Path (Join-Path $Runtime111 'classpath.txt'))) {
+        $cp111L = Compile-Harness $Runtime111 (Join-Path $clsRoot '111')
+        foreach ($p in $laptopProfiles) {
+            Invoke-Harness $cp111L @('measure', '111', $LibSeed, $shotsDir, 'win32', '32', $p.LogicalW, $p.LogicalH, $p.Tag) "laptop-111-$($p.Tag)" @("-Dsun.java2d.uiScale=$($p.Scale)")
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RuntimeMain) -and (Test-Path (Join-Path $RuntimeMain 'classpath.txt'))) {
+        $cpMainL = Compile-Harness $RuntimeMain (Join-Path $clsRoot 'main')
+        foreach ($p in $laptopProfiles) {
+            Invoke-Harness $cpMainL @('measure', 'main', $LibSeed, $shotsDir, 'win32', '32', $p.LogicalW, $p.LogicalH, $p.Tag) "laptop-main-$($p.Tag)" @("-Dsun.java2d.uiScale=$($p.Scale)")
+        }
     }
     $measureJson = Join-Path $OutDir 'measure-report.json'
     & python (Join-Path $scriptDir 'measure_reader.py') $shotsDir --json-out $measureJson

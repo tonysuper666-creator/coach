@@ -111,6 +111,7 @@ internal data class BookPaginationInputs(
     val highlights: Map<Int, List<IntRange>>, val tableRows: Map<BookIllustration, BookTableRows>,
     val density: Density, val direction: LayoutDirection, val fonts: FontFamily.Resolver, val pdf: Boolean,
     val immersive: Boolean = false,
+    val tocNodes: List<BookTocNode> = emptyList(),
 )
 
 @Stable
@@ -265,8 +266,9 @@ internal fun BookPageView(
             layoutPages.size > 64 || layoutPages.sumOf { it.illustrations.size } > 64 ||
                 layoutPages.sumOf { it.text.length.toLong() } > 32_768
         }
+        val tocForLayout = if (pdf) emptyList() else book.tocNodes
         val inputs = BookPaginationInputs(layoutPages, widthPx, bodyHeight, typography, highlights, tableRows,
-            density, layoutDirection, fontResolver, pdf, immersive)
+            density, layoutDirection, fontResolver, pdf, immersive, tocForLayout)
         val pages = if (backgroundLayout) {
             var result by remember(state, inputs) {
                 mutableStateOf(state.completedPagination?.takeIf { it.first == inputs }?.second)
@@ -281,7 +283,7 @@ internal fun BookPageView(
                         val context = currentCoroutineContext()
                         val workerMeasurer = TextMeasurer(fontResolver, density, layoutDirection, cacheSize = 128)
                         BookPageLayouter(workerMeasurer, density, typography, pdf, immersive)
-                            .layout(near, widthPx, bodyHeight, highlights, tableRows) { context.ensureActive() }
+                            .layout(near, widthPx, bodyHeight, highlights, tableRows, tocForLayout) { context.ensureActive() }
                     }
                 }
                 // Measure with a worker-owned cache. Closing or switching views cancels this pagination.
@@ -289,14 +291,14 @@ internal fun BookPageView(
                     val context = currentCoroutineContext()
                     val workerMeasurer = TextMeasurer(fontResolver, density, layoutDirection, cacheSize = 128)
                     BookPageLayouter(workerMeasurer, density, typography, pdf, immersive)
-                        .layout(layoutPages, widthPx, bodyHeight, highlights, tableRows) { context.ensureActive() }
+                        .layout(layoutPages, widthPx, bodyHeight, highlights, tableRows, tocForLayout) { context.ensureActive() }
                 }
                 state.completedPagination = inputs to laidOut
                 result = laidOut
             }
             result
         } else remember(inputs) {
-            BookPageLayouter(measurer, density, typography, pdf, immersive).layout(layoutPages, widthPx, bodyHeight, highlights, tableRows)
+            BookPageLayouter(measurer, density, typography, pdf, immersive).layout(layoutPages, widthPx, bodyHeight, highlights, tableRows, tocForLayout)
         }
         // 读位只在读者自己动了锚点（翻页、滚动、点选、目录、出处）时写；重排（字号、宽度、字体、开合）
         // 只按锚点找页、不改锚点也不写，且提在加载态提前返回之前，避免重排取消待写入的读位。
@@ -637,7 +639,8 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
     val density = LocalDensity.current
     val colors = CoachTheme.colors
     val column = with(density) { widthPx.toDp() }
-    DisableSelection { if (!page.opener) Text(if (spread && side == 0) book.title else page.title.orEmpty(),
+    val runningTitle = remember(book, page) { BookBoundaries.runningHeaderTitle(book, page) }
+    DisableSelection { if (!page.opener && (spread && side == 0 || runningTitle.isNotEmpty())) Text(if (spread && side == 0) book.title else runningTitle,
         Modifier.align(Alignment.TopStart).padding(start = inset, top = if (topMargin < 44.dp) 2.dp else 20.dp).width(column),
         textAlign = androidx.compose.ui.text.style.TextAlign.Center, color = colors.fgTertiary,
         style = MaterialTheme.typography.labelSmall.copy(fontSize = CoachV7.Size.cap,

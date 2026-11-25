@@ -7,7 +7,7 @@
 - `ReaderAcceptanceHarness.java`：针对任意 `smoke-runtime` 编译运行，支持三个子命令：
   - `measure`：在 `ImageComposeScene 离屏`（`1920x1080 @ 1.0x`、`2880x1800 @ 1.5x`）与 `真 OS 窗口`（`ComposeWindow`）下抓取四种状态（纯读原页、纯读文字、伴读/并排伴读、目录展开）的 PNG 与 Compose 语义树 `.meta.json`。
   - `bugs`：在真 OS 窗口运行 A 卡发现的 5 项阻断缺陷回归检查（跳页同步、原页/文字切换不回弹、目录抽屉可用、选段提问无须长滚、重启不闪空书架且 0 点击续读）。
-  - `login`：在真 OS 窗口运行登录 4 条验收（首屏即登录且无内部词、登录到书架 `<= 2` 次点击、断网重启 `0` 点击回上次页、服务端吊销 `<= 3s` 回登录页并给出人话提示）。
+  - `login`：在真 OS 窗口运行登录验收。`login_0` 走产品书库（`streamPdfExtras` + `lazyPdfExtras`，界面点击进入 `launchImport`），5 秒内看到 `textbook-reader` 且页面区域不是「正在加载页面」。其余为：首屏即登录且无内部词、登录到书架 `<= 2` 次点击、断网重启 `0` 点击回上次页、服务端吊销 `<= 3s` 回登录页并给出人话提示。运行时没有 `WindowsTextbookGate` 时输出「不适用」并以 0 退出。`-BreakImport` 故意给 `login_0` 一个不存在的文件，该条必须失败。
 - `measure_reader.py`：结合 Compose 语义树节点矩形与 PNG 实际渲染位图非背景像素，输出视口占比、正文/书页矩形与墨迹像素占比、嵌套层数、抽屉遮挡像素，并显式标注 `real_os_window`（真 OS 窗口）或 `image_compose_scene_offscreen`（ImageComposeScene 离屏）。零外部强依赖（有 Pillow 时优先使用，无 Pillow 时自动回退 Python 标准库解码）。
 - `Run-Acceptance.ps1`：winbox 一键运行脚本。从 SSH（Session 0）调用时自动切入 Session 1 交互控制台运行真窗口，输出汇总表与 JSON/截图证据。
 - `test_measure_reader.py`：`measure_reader.py` 单元测试。

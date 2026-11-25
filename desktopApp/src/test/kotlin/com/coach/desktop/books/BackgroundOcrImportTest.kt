@@ -249,25 +249,21 @@ class BackgroundOcrImportTest {
                         assertTrue(ImageIO.write(awt, "png", out.toFile()))
                     }
 
-                    // 1. Prompt is immediately shown & non-blocking: click "先读" to enter reader while OCR runs!
-                    waitUntil(timeoutMillis = 10_000) { controller.state.value.prompt == BookPrompt.IMPORTED }
-                    onNodeWithTag("read-only").performClick()
-                    waitUntil(timeoutMillis = 10_000) { controller.state.value.screen == BookScreen.READER }
-                    // Dismiss AFTER_READING prompt if shown
-                    if (controller.state.value.prompt != null) {
-                        onNodeWithTag("read-only").performClick()
-                        waitUntil(timeoutMillis = 10_000) { controller.state.value.prompt == null }
+                    // TON-1784 opens the newly imported book while the remaining pages are recognized.
+                    waitUntil(timeoutMillis = 10_000) {
+                        controller.state.value.screen == BookScreen.READER && controller.state.value.book?.title == "扫描教材"
                     }
+                    assertNull(controller.state.value.prompt)
                     // Verify page 1 is already recognized, readable, and explainable while later pages remain pending!
                     assertFalse(controller.state.value.busy)
                     assertEquals(false, controller.state.value.book!!.page(1)!!.ocrPending)
-                    onNodeWithTag("book-explain-toggle").performClick()
+                    onNodeWithTag("immersive-companion-toggle").performClick()
                     waitUntil(timeoutMillis = 5_000) {
-                        onAllNodesWithTag("book-explain").fetchSemanticsNodes().isNotEmpty()
+                        onAllNodesWithTag("companion-tab-explain").fetchSemanticsNodes().isNotEmpty()
                     }
-                    onNodeWithTag("book-explain-toggle").performClick()
+                    onNodeWithTag("immersive-companion-toggle").performClick()
                     waitUntil(timeoutMillis = 5_000) {
-                        onAllNodesWithTag("book-explain").fetchSemanticsNodes().isEmpty()
+                        onAllNodesWithTag("companion-tab-explain").fetchSemanticsNodes().isEmpty()
                     }
                     // Jump to page 4 (still pending OCR!) -> must show "这一页还在识别" + original PDF page, NOT white!
                     runBlocking { controller.page(4) }
@@ -281,7 +277,7 @@ class BackgroundOcrImportTest {
 
                     // 2. Return to shelf during OCR — response time must be well under 1 second!
                     val backStart = System.nanoTime()
-                    onNodeWithText("返回书架").performClick()
+                    onNodeWithTag("immersive-back").performClick()
                     waitUntil(timeoutMillis = 1_000) { controller.state.value.screen == BookScreen.HOME }
                     val backElapsedMs = (System.nanoTime() - backStart) / 1_000_000
                     assertTrue(backElapsedMs < 1_000, "返回书架耗时应 < 1 秒，实际 ${backElapsedMs}ms")
@@ -294,7 +290,6 @@ class BackgroundOcrImportTest {
 
                     onNodeWithTag("book-${library.catalog().first { it.title == "生物学导论" }.id}").performScrollTo().performClick()
                     waitUntil(timeoutMillis = 5_000) { controller.state.value.book?.title == "生物学导论" }
-                    onNodeWithTag("home-read").performScrollTo().performClick()
                     waitUntil(timeoutMillis = 5_000) { controller.state.value.screen == BookScreen.READER && controller.state.value.book?.title == "生物学导论" }
                     // Esc from reader returns to shelf even while OCR runs in background!
                     onNodeWithTag("windows-textbooks").performKeyInput { pressKey(Key.Escape) }

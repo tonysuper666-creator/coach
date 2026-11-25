@@ -11,7 +11,11 @@ class TextbookReviewPersistenceTest {
         val library = TextbookLibrary(root.resolve("library"))
         val book = library.importBook(syntheticTextbook(root.resolve("synthetic")))
         val lesson = book.lessons.first()
-        val choice = com.coach.desktop.books.testPracticeFixture(book, lesson, QuestionMode.CHOICE)!!
+        // These are the options and deterministic ordering emitted by the pre-2.0 writer.
+        val sentence = "Photosynthesis is the process by which plants use light to make sugars."
+        val choice = Practice("根据本节原文，补全这句话：\n____ is the process by which plants use light to make sugars.",
+            sentence, "Photosynthesis", listOf("Chlorophyll", "Respiration", "Chapter", "Photosynthesis")
+                .shuffled(kotlin.random.Random(lesson.id.hashCode())))
         val wrong = choice.options.first { it != choice.answer }
         // The pre-upgrade writer had no review table: insert its actual legacy answer shape.
         DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->

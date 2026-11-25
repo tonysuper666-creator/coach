@@ -284,6 +284,9 @@ class SingleBookCompanionFlowTest {
             val bookCompact = libCompact.importBook(md)
             val groupCompact = assertNotNull(ChapterCompanionGrouping.groupForSection(bookCompact, 0))
             libCompact.saveChapterCompanion(bookCompact.id, groupCompact.chapterId, samplePack(bookCompact, groupCompact))
+            // 本条验抽屉排版和正文能滚，不验节末小结。这本自造书一屏就读到节末，TON-1859（34df53d6）起节末小结会顶在抽屉正文最上面、
+            // 把要点挤出可视区；这里关掉节末小结。
+            ReadingSettings(libCompact.directory).chooseSectionSummary(false)
             val controllerCompact = TextbookController(libCompact)
             runBlocking {
                 controllerCompact.load()

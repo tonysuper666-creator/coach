@@ -961,6 +961,12 @@ class ReaderShellFixTest {
                     Wages of labour and profits of stock page 5. $filler
                     # Chapter 2 Natural Price
                     Natural and market price page 6. $filler
+                    ${"\u000c"}
+                    Natural and market price page 7. $filler
+                    ${"\u000c"}
+                    Natural and market price page 8. $filler
+                    ${"\u000c"}
+                    Natural and market price page 9. $filler
                     """.trimIndent(),
                 )
             }
@@ -973,6 +979,8 @@ class ReaderShellFixTest {
                     """.trimIndent(),
                 )
             }
+            // 第 2 章给 4 页：测试停在第 6 页时只读了这章的 1/4，到不了 70% 的「已读」线。原来第 2 章只有 1 页，
+            // 机器一忙、在第 6 页多停过 400ms 就整章算读完，书单显示「已读 2 / 2 章」（全量跑时偶发）。
             val smith = libraryA.importBook(smithFile)
             val malthus = libraryA.importBook(malthusFile)
             val listId = "booklist-ton1847-win"

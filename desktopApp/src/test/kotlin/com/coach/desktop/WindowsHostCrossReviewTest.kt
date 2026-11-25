@@ -86,7 +86,8 @@ class WindowsHostCrossReviewTest {
     @Test fun twoBooksKeepIndependentUnsubmittedDraftsBookmarksAndSelectionAcrossContinueAndReload() {
         val f = fixture()
         val c = TextbookController(f.library)
-        runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
+        // TON-1854（#639）：≥1080dp 宽窗沉浸文字排两栏、按屏翻；这里要逐页翻，窗口取 1000dp 宽（单栏）。
+        runSkikoComposeUiTest(size = Size(2000f, 1800f), density = Density(2f)) {
             setContent { WindowsTextbookHost(c) { null } }
             ready(c) { it.catalog.size == 2 && it.book != null }
             openBook(c, f.a)

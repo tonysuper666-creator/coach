@@ -37,7 +37,8 @@ class DesktopStartupWithoutCourseTest {
         val directory = root.resolve("library")
         var controller by mutableStateOf(TextbookController(TextbookLibrary(directory)))
         assertTrue(desktopUsesTextbooks(System.getProperty("os.name"), null, null))
-        runSkikoComposeUiTest(size = Size(1100f, 800f), density = Density(1f)) {
+        // TON-1854（#639）：≥1080dp 宽窗沉浸文字排两栏、按屏翻；这里要逐页翻，窗口取 1000dp 宽（单栏）。
+        runSkikoComposeUiTest(size = Size(1000f, 800f), density = Density(1f)) {
             setContent { key(controller) { WindowsTextbookHost(controller) { source } } }
             ready(controller) { it.catalog.isEmpty() }
             onNodeWithTag("upload-textbook").performClick()
@@ -60,7 +61,7 @@ class DesktopStartupWithoutCourseTest {
             val output = Path.of("build/screens/startup-without-course/local-reading-reopened.png")
             Files.createDirectories(output.parent)
             assertTrue(ImageIO.write(image, "png", output.toFile()))
-            assertEquals(1100, image.width); assertEquals(800, image.height)
+            assertEquals(1000, image.width); assertEquals(800, image.height)
             println("NO_COURSE_BOOKS_TRACE local-import -> READ -> page2 -> new-library/controller/host -> same-book/page2; no paired course supplied; offscreen=true")
         }
     }

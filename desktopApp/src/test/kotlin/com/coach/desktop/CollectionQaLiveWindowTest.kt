@@ -310,7 +310,11 @@ class CollectionQaLiveWindowTest {
                 }
 
                 // 3. Open HostSearchDialog via top bar after returning Home, ask course question, and 1-click jump!
-                runBlocking { controller.back(); controller.back() }
+                // TON-1859 C（5c88ea7e）：跟过跨书引用后，「返回」先逐次回到跳转前的那本书；回完再退出阅读器回课程、再回首页。
+                runBlocking {
+                    while (controller.state.value.canReturnToCitationOrigin) controller.back()
+                    controller.back(); controller.back()
+                }
                 click(window, "host-search")
                 waitFor("HostSearchDialog opens", window) { node(window, "host-search-dialog") != null }
                 setText(window, "host-search-input", "零利润线亏损方位")

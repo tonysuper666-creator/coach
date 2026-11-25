@@ -254,6 +254,9 @@ class WindowShellPolishTest {
                 val library = TextbookLibrary(root.resolve("library"))
                 val book = library.importBook(sampleChineseBook(root))
                 val controller = TextbookController(library)
+                val courseId = library.withCourseDatabase { db ->
+                    com.coach.desktop.books.CourseStore.createCourse(db, "Exam", com.coach.desktop.books.CourseExamProfile(examEnabled = true)).first
+                }
                 lateinit var exams: LocalExamController
 
                 runSkikoComposeUiTest(size = Size(1920f, 1080f), density = Density(1.5f)) {
@@ -324,25 +327,25 @@ class WindowShellPolishTest {
                     setControllerError(controller, null)
                     waitForIdle()
 
-                    // 4. WindowsTextbookHost course exam error slot (host-exam-error / host-exam-retry)
-                    onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText("课程")).performClick()
-                    waitUntil(timeoutMillis = 20_000) {
-                        onAllNodesWithTag("course-exams-summary").fetchSemanticsNodes().isNotEmpty()
-                    }
+                    // TON-1790: exercise error recovery on the course page reached from the shelf.
+                    onNodeWithTag("collection-$courseId").performScrollTo().performClick()
+                    waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.COURSE && !controller.state.value.busy }
+                    onNodeWithTag("course-mock-exam-btn").performScrollTo().performClick()
+                    waitUntil(timeoutMillis = 20_000) { exams.state.value.courseId == courseId && !exams.state.value.busy }
                     setExamError(exams, "作答还没保存，请稍后重试。当前内容仍在本页。")
                     waitForIdle()
-                    assertTrue(colorsClose(v7.fgSecondary, textColorOf(onNodeWithTag("host-exam-error").fetchSemanticsNode())))
-                    onNodeWithTag("host-exam-retry").assertIsDisplayed()
+                    assertTrue(colorsClose(v7.fgSecondary, textColorOf(onNodeWithTag("course-mock-error").fetchSemanticsNode())))
+                    onNodeWithTag("course-mock-retry-btn").performScrollTo().assertIsDisplayed()
                     onNodeWithText("正在读取本书练习…").assertDoesNotExist()
-                    onNodeWithTag("host-exam-retry").performClick()
+                    onNodeWithTag("course-mock-retry-btn").performClick()
                     waitUntil(timeoutMillis = 20_000) {
-                        onAllNodesWithTag("course-exams-summary").fetchSemanticsNodes().isNotEmpty()
+                        exams.state.value.error == null && onAllNodesWithTag("course-mock-hub").fetchSemanticsNodes().isNotEmpty()
                     }
 
                     setExamError(exams, "今天的讲解额度用完了，明天再来。")
                     waitForIdle()
-                    assertTrue(colorsClose(zhu, textColorOf(onNodeWithTag("host-exam-error").fetchSemanticsNode())))
-                    onNodeWithTag("host-exam-retry").assertDoesNotExist()
+                    assertTrue(colorsClose(zhu, textColorOf(onNodeWithTag("course-mock-error").fetchSemanticsNode())))
+                    onNodeWithTag("course-mock-retry-btn").assertDoesNotExist()
                 }
             }
         } finally {
@@ -409,9 +412,10 @@ class WindowShellPolishTest {
 
                 // 1. Recoverable SQLITE_BUSY during picked import -> keep picked file and retry without re-picking
                 DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { blocker ->
-                    blocker.createStatement().use { it.execute("BEGIN EXCLUSIVE") }
+                    blocker.createStatement().use { it.execute("BEGIN IMMEDIATE") }
                     try {
-                        onNodeWithTag("upload-textbook").performClick()
+                        onNodeWithTag("host-add").performClick()
+                        onNodeWithTag("host-add-import").performClick()
                         waitUntil(timeoutMillis = 20_000) {
                             controller.state.value.error != null && controller.state.value.importing == null
                         }
@@ -438,7 +442,7 @@ class WindowShellPolishTest {
                         controller.state.value.importing == null &&
                         controller.state.value.catalog.size == 2 &&
                         controller.state.value.book?.title == "待导入教材" &&
-                        controller.state.value.prompt == BookPrompt.IMPORTED
+                        controller.state.value.screen == BookScreen.READER && controller.state.value.prompt == null
                 }
                 waitUntil(timeoutMillis = 5_000) { released.isNotEmpty() }
                 waitForIdle()
@@ -449,14 +453,15 @@ class WindowShellPolishTest {
                 assertTrue(onAllNodesWithTag("book-error").fetchSemanticsNodes().isEmpty())
 
                 // 2. Non-recoverable import failure -> V7 zhu alert, no retry button, and immediate release
-                runBlocking { controller.dismissPrompt() }
+                onNodeWithTag("immersive-back").performClick()
                 waitUntil(timeoutMillis = 10_000) {
-                    !controller.state.value.busy && controller.state.value.prompt == null
+                    !controller.state.value.busy && controller.state.value.screen == BookScreen.HOME
                 }
                 waitForIdle()
 
                 nextPick = corruptPdf
-                onNodeWithTag("upload-textbook").performClick()
+                onNodeWithTag("host-add").performClick()
+                onNodeWithTag("host-add-import").performClick()
                 waitUntil(timeoutMillis = 15_000) {
                     controller.state.value.error != null && controller.state.value.importing == null
                 }
@@ -526,6 +531,11 @@ class WindowShellPolishTest {
                 assertEquals(CoachV7.Light.desk, deskColor())
                 assertEquals(CoachV7.Light.sheet, sheetColor())
 
+                fun pageColor(): Color {
+                    val paper = onNodeWithTag("book-sheet-0").captureToImage().toPixelMap()
+                    return paper[5, paper.height / 2]
+                }
+
                 // Open reader and toggle in-app Aa paper setting (深 -> 跟随系统) and re-test system switch
                 onNodeWithTag("home-read").performClick()
                 waitUntil(timeoutMillis = 20_000) {
@@ -537,21 +547,25 @@ class WindowShellPolishTest {
                 }
                 waitForIdle()
 
+                if (onAllNodesWithTag("immersive-more-menu").fetchSemanticsNodes().isEmpty()) {
+                    onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                }
+                onNodeWithTag("immersive-more-menu").performClick()
                 onNodeWithTag("v7-type-menu").performClick()
                 waitForIdle()
                 onNodeWithTag("reading-paper-DARK").performClick()
                 waitForIdle()
-                assertEquals(CoachV7.Dark.desk, deskColor(), "In-app DARK paper must override light system immediately")
+                assertEquals(CoachV7.Dark.pgPaper, pageColor(), "In-app DARK paper must override light system immediately")
 
                 onNodeWithTag("reading-paper-SYSTEM").performClick()
                 waitForIdle()
-                assertEquals(CoachV7.Light.desk, deskColor(), "Switching back to 跟随系统 must snap immediately to light system")
+                assertEquals(CoachV7.Light.pgPaper, pageColor(), "Switching back to 跟随系统 must snap immediately to light system")
                 onNodeWithTag("v7-type-menu").performMouseInput { click() }
                 onNodeWithTag("reading-settings-panel").assertDoesNotExist()
 
                 systemTheme = SystemTheme.Dark
                 waitForIdle()
-                assertEquals(CoachV7.Dark.desk, deskColor(), "With 跟随系统 active, runtime Dark switch must apply immediately")
+                assertEquals(CoachV7.Dark.pgPaper, pageColor(), "With 跟随系统 active, runtime Dark switch must apply immediately")
             }
         } finally {
             if (previousTheme == null) System.clearProperty("coach.windows.theme")

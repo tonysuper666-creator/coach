@@ -134,12 +134,11 @@ function Find-TutorBodyRows($lines) {
     return @($rows | Sort-Object Width -Descending)
 }
 
-# Clicks land on the glyphs. Pointer motion does not, and a still hold did not select.
-# The page selects the word under a single click.
-function Click-TutorWord([int]$x, [int]$y) {
-    $y = [Math]::Max(8, $y)
-    Write-Output "CLICKWORD $x,$y"
-    Click-At $x $y | Out-Null
+# Clicks, drags, holds, and posted mouse messages never select on the ARM package.
+# The reader already takes keys. F2 selects the first body word on the open page.
+function Select-TutorWord {
+    Write-Output "SELECTKEY F2"
+    Send-Keys '{F2}'
 }
 
 function Wait-TutorText([string]$name, [string[]]$labels, [int]$seconds, [int]$scroll = -2) {
@@ -175,22 +174,12 @@ function Focus-ReaderPage {
 }
 
 # 2.0 selection toolbar is a light pill: 「讲讲 / 拆句 / 举个例子 / 问… / 笔记」.
-# One click on a glyph selects that word. The body text consumes the click.
+# F2 selects the open page. A glyph click does not.
 function Open-SelectionAction([string]$name, [string]$action) {
-    $lines = @(Read-TutorFrame "$name-reader")
-    $rows = @(Find-TutorBodyRows $lines)
-    if (-not $rows) { throw "No selectable body line in $name" }
-    $bounds = Get-Rect
-    $width = [int]($bounds.R - $bounds.L)
-    # A mouse-down in the outer 14% belongs to page turn. Keep the press on the glyphs.
-    $innerL = [int]($width * 0.22)
-    $innerR = [int]($width * 0.78)
+    Focus-ReaderPage
+    Select-TutorWord
     $selected = $null
-    foreach ($row in ($rows | Select-Object -First 3)) {
-        $x1 = [Math]::Max($innerL, [int]$row.X1 + 8)
-        $x2 = [Math]::Min($innerR, [int]$row.X2 - 8)
-        if (($x2 - $x1) -lt 80) { $x1 = $innerL; $x2 = $innerR }
-        Click-TutorWord ([int](($x1 + $x2) / 2)) ([int]$row.Y)
+    foreach ($spin in 0..2) {
         Start-Sleep -Milliseconds 400
         $frame = @(Read-TutorFrame "$name-selected")
         foreach ($label in @('举个例子', '笔记', '拆句', '讲讲')) {
@@ -199,7 +188,7 @@ function Open-SelectionAction([string]$name, [string]$action) {
         }
         if ($selected) { break }
     }
-    if (-not $selected) { throw "Clicking a word did not raise the selection toolbar ($name)" }
+    if (-not $selected) { throw "Selecting the page word did not raise the selection toolbar ($name)" }
     $bar = @(Read-TutorFrame "$name-bar")
     $hit = Find-OnTutorRow $bar $action $selected
     if (-not $hit) { $hit = Find-Text $bar $action }

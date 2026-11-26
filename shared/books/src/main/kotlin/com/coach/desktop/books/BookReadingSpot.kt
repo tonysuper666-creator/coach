@@ -181,3 +181,32 @@ private fun wordAt(book: Textbook, anchor: BookPageAnchor): SourceBlock? {
     val text = stored.substring(start, end)
     return SourceBlock("${book.id}:p${anchor.importPage}:$start", anchor.importPage, start, end, false, text)
 }
+
+/**
+ * 当前页第一段正文里的一个词。安装包上的点击到不了字形，阅读器仍认键盘，
+ * 所以选词不依赖指针落点。选出的词落在这段正文里面，讲解请求才能对上原文。
+ */
+internal fun Textbook.firstBodyWord(pageNumber: Int): SourceBlock? {
+    val stored = page(pageNumber)?.text ?: return null
+    if (stored.isEmpty()) return null
+    val block = sourceBlocks().firstOrNull { candidate ->
+        candidate.page == pageNumber && candidate.isBodyParagraph &&
+            candidate.start >= 0 && candidate.end <= stored.length && candidate.end > candidate.start &&
+            stored.substring(candidate.start, candidate.end) == candidate.text &&
+            candidate.text.any { it.isLetterOrDigit() }
+    }
+    val origin = if (block != null) {
+        block.start + block.text.indexOfFirst { it.isLetterOrDigit() }
+    } else {
+        stored.indexOfFirst { it.isLetterOrDigit() }.takeIf { it >= 0 } ?: return null
+    }
+    val word = wordAt(this, BookPageAnchor(pageNumber, origin)) ?: return null
+    if (block == null || word.text in block.text) return word
+    val local = block.text.indexOfFirst { it.isLetterOrDigit() }
+    var end = local
+    while (end < block.text.length && block.text[end].isLetterOrDigit()) end++
+    if (end <= local) return null
+    val start = block.start + local
+    val stop = block.start + end
+    return SourceBlock("$id:p$pageNumber:$start", pageNumber, start, stop, false, stored.substring(start, stop))
+}

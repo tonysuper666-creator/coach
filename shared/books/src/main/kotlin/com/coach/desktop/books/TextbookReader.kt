@@ -1303,6 +1303,12 @@ internal fun TextbookReader(
                         switchView(!textView)
                         true
                     }
+                    // 字形上的点击在 ARM 安装包里到不了选区。F2 选中当前页第一段正文的一个词。
+                    !typingNow && !mod && !event.isAltPressed && textView && event.key == Key.F2 -> {
+                        val word = book.firstBodyWord(ui.page) ?: return@onPreviewKeyEvent false
+                        textSelection = word
+                        true
+                    }
                     event.key == Key.Escape -> {
                         when {
                             searchOpen -> { searchOpen = false; searchFocused = false; true }

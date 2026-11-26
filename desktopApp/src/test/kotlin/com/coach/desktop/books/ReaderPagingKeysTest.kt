@@ -23,7 +23,7 @@ class ReaderPagingKeysTest {
     }
 
     @Test fun otherKeysAreLeftToTheRestOfTheApp() {
-        for (key in listOf(Key.Spacebar, Key.Tab, Key.Escape, Key.Enter, Key.DirectionUp, Key.DirectionDown, Key.A)) {
+        for (key in listOf(Key.Spacebar, Key.Tab, Key.Escape, Key.Enter, Key.DirectionUp, Key.DirectionDown, Key.A, Key.F2)) {
             assertNull(readerPagingTurn(key, typing = false), "$key 不该翻页")
         }
     }

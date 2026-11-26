@@ -134,23 +134,12 @@ function Find-TutorBodyRows($lines) {
     return @($rows | Sort-Object Width -Descending)
 }
 
-# Clicks land on this runner. Pointer motion does not, and a still hold did not select.
-# Two clicks on the same glyph are the click path the runner already accepts.
-function Double-ClickTutorWord([int]$x, [int]$y) {
+# Clicks land on the glyphs. Pointer motion does not, and a still hold did not select.
+# The page selects the word under a single click.
+function Click-TutorWord([int]$x, [int]$y) {
     $y = [Math]::Max(8, $y)
-    Write-Output "DCLICK $x,$y"
-    Invoke-ForegroundStep -InjectsInput -Action {
-        $r = Get-Rect
-        [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null
-        Start-Sleep -Milliseconds 180
-        Assert-OurForeground
-        foreach ($n in 1..2) {
-            [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
-            Start-Sleep -Milliseconds 50
-            [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
-            if ($n -eq 1) { Start-Sleep -Milliseconds 160 }
-        }
-    }
+    Write-Output "CLICKWORD $x,$y"
+    Click-At $x $y | Out-Null
 }
 
 function Wait-TutorText([string]$name, [string[]]$labels, [int]$seconds, [int]$scroll = -2) {
@@ -186,7 +175,7 @@ function Focus-ReaderPage {
 }
 
 # 2.0 selection toolbar is a light pill: 「讲讲 / 拆句 / 举个例子 / 问… / 笔记」.
-# Double-click a glyph. A single click clears the selection.
+# One click on a glyph selects that word. The body text consumes the click.
 function Open-SelectionAction([string]$name, [string]$action) {
     $lines = @(Read-TutorFrame "$name-reader")
     $rows = @(Find-TutorBodyRows $lines)
@@ -201,7 +190,7 @@ function Open-SelectionAction([string]$name, [string]$action) {
         $x1 = [Math]::Max($innerL, [int]$row.X1 + 8)
         $x2 = [Math]::Min($innerR, [int]$row.X2 - 8)
         if (($x2 - $x1) -lt 80) { $x1 = $innerL; $x2 = $innerR }
-        Double-ClickTutorWord ([int](($x1 + $x2) / 2)) ([int]$row.Y)
+        Click-TutorWord ([int](($x1 + $x2) / 2)) ([int]$row.Y)
         Start-Sleep -Milliseconds 400
         $frame = @(Read-TutorFrame "$name-selected")
         foreach ($label in @('举个例子', '笔记', '拆句', '讲讲')) {
@@ -210,7 +199,7 @@ function Open-SelectionAction([string]$name, [string]$action) {
         }
         if ($selected) { break }
     }
-    if (-not $selected) { throw "Double-clicking a word did not raise the selection toolbar ($name)" }
+    if (-not $selected) { throw "Clicking a word did not raise the selection toolbar ($name)" }
     $bar = @(Read-TutorFrame "$name-bar")
     $hit = Find-OnTutorRow $bar $action $selected
     if (-not $hit) { $hit = Find-Text $bar $action }

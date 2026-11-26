@@ -501,7 +501,8 @@ internal fun BookPageView(
                                     pages.take(index + 1).count { it.chapter == page.chapter }
                                 BookSheet(book, page, typography, measurer, widthPx, leftInset, remaining, false, 0,
                                     libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
-                                    topMargin = if (page.opener) openerTopMargin else topMargin, rendered = rendered) { failed.add(it) }
+                                    topMargin = if (page.opener) openerTopMargin else topMargin, rendered = rendered,
+                                    onMouseClickWord = { latestOnSelectText?.invoke(it) }) { failed.add(it) }
                             }
                         }
                     }
@@ -532,8 +533,6 @@ internal fun BookPageView(
             val inset = if (isLast) rightInset + with(density) { extraPx.toDp() } else leftInset
             val rendered = remember(page) { mutableMapOf<Int, TextLayoutResult>() }
             val scale = sheetWidthPx.toFloat() / (sheetWidthPx + extraPx)
-            // A second click on the same spot selects the word. One click still clears.
-            val lastPlainClick = remember { PlainClickMemory() }
             val sheetSpot = rememberUpdatedState { g: ReadingPointerGesture ->
                 state.anchor = spotAnchor(pages, index, spread, side, g.down, g.up, g.dragged,
                     sheetWidthPx.toFloat(), measurer, typography, widthPx, ::sheetScale) ?: state.anchor
@@ -544,16 +543,8 @@ internal fun BookPageView(
                 when {
                     g.longPressed || (!g.isTouch && g.dragged) ->
                         cb(page?.selectionForGesture(book, local, insetPx, topPx, rendered))
-                    !g.dragged -> {
-                        val now = System.currentTimeMillis()
-                        val second = now - lastPlainClick.at in 40..800 &&
-                            (local.down - Offset(lastPlainClick.x, lastPlainClick.y)).getDistance() < 24f
-                        lastPlainClick.at = now
-                        lastPlainClick.x = local.down.x
-                        lastPlainClick.y = local.down.y
-                        if (second) cb(page?.selectionAt(book, local.down, insetPx, topPx, rendered))
-                        else cb(null)
-                    }
+                    // 点在字上的那一下由正文自己收下并选词。这里只清纸面空白处的单击。
+                    !g.dragged -> cb(null)
                 }
             }
             Box(sheetModifier.background(paper).clipToBounds().readingSpot(sheetSpot, ignoreDown)
@@ -565,7 +556,8 @@ internal fun BookPageView(
                         BookSheet(book, page, typography, measurer, widthPx, inset, remaining, spread, side,
                             libraryDirectory, onOpenTableRow, { preview = it }, displayedPoints, onHardPointClick,
                             topMargin = if (page.opener) openerTopMargin else topMargin,
-                            lastColumn = isLast, rendered = rendered) { failed.add(it) }
+                            lastColumn = isLast, rendered = rendered,
+                            onMouseClickWord = { latestOnSelectText?.invoke(it) }) { failed.add(it) }
                     }
                 }
             }
@@ -692,8 +684,6 @@ private fun BookPageViewport(
     }
 }
 
-private class PlainClickMemory(var at: Long = 0L, var x: Float = 0f, var y: Float = 0f)
-
 private data class ReadingPointerGesture(
     val down: Offset,
     val up: Offset,
@@ -721,6 +711,30 @@ private fun BookLaidPage.selectionForGesture(
     // A still mouse hold selects the word, same as a touch long-press. A drag keeps the span.
     gesture.longPressed -> selectionAt(book, gesture.down, insetPx, topMarginPx, rendered)
     else -> null
+}
+
+/**
+ * 鼠标点在字上时，正文先于这里消费掉这一下，并直接选中那个词。
+ * 纸面空白处的单击仍然清选区。拖选和触屏长按还走这里。
+ */
+private fun Modifier.mouseClickSelectsWord(
+    onClick: State<(Offset) -> Boolean>,
+): Modifier = pointerInput(Unit) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        val touch = down.type == PointerType.Touch
+        var last = down.position
+        while (true) {
+            val event = awaitPointerEvent()
+            val change = event.changes.firstOrNull { it.id == down.id } ?: return@awaitEachGesture
+            last = change.position
+            if (!change.pressed) {
+                val still = (last - down.position).getDistance() <= viewConfiguration.touchSlop
+                if (!touch && still && onClick.value(down.position)) change.consume()
+                break
+            }
+        }
+    }
 }
 
 /**
@@ -792,6 +806,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
     topMargin: Dp = 52.dp,
     lastColumn: Boolean = spread && side == 1,
     rendered: MutableMap<Int, TextLayoutResult>,
+    onMouseClickWord: ((SourceBlock) -> Unit)? = null,
     onMissing: (BookIllustration) -> Unit) {
     val density = LocalDensity.current
     val colors = CoachTheme.colors
@@ -826,9 +841,17 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
             Text(number, Modifier.padding(start = inset, top = numberTop),
                 style = typography.number, color = colors.fgSecondary)
         }
+        val clickWord = rememberUpdatedState { local: Offset ->
+            val layout = rendered[run.topPx] ?: return@rememberUpdatedState false
+            val word = run.selectionAtLocal(book, local, layout) ?: return@rememberUpdatedState false
+            val listener = onMouseClickWord ?: return@rememberUpdatedState false
+            listener(word)
+            true
+        }
         Text(selectable, style = typography.body, inlineContent = inline,
             onTextLayout = { rendered[run.topPx] = it },
             modifier = Modifier.padding(start = inset, top = topMargin + top).width(column)
+                .mouseClickSelectsWord(clickWord)
                 .semantics {
                     this[BookPageSources] = run.sources
                     // Expose original heading/citation ranges, as the reader did before

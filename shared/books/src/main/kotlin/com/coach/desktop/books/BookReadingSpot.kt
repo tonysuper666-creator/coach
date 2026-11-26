@@ -111,6 +111,42 @@ internal fun BookLaidPage.selectionAt(
     if (point.x > insetPx + lastLayout.size.width + 8f) return null
     if (localY > lastRun.topPx + lastLayout.size.height + 48f) return null
     val anchor = textPositionAt(point.x - insetPx, localY, rendered) ?: return null
+    return wordAt(book, anchor)
+}
+
+/**
+ * 鼠标点在某一行文字自己的布局坐标上。正文 [Text] 会先消费这一下，纸面手势拿不到，
+ * 所以选词直接用这一行的局部坐标，不经整页换算。
+ */
+internal fun BookTextRun.selectionAtLocal(
+    book: Textbook,
+    local: Offset,
+    layout: TextLayoutResult,
+): SourceBlock? {
+    if (sources.isEmpty() || text.isEmpty()) return null
+    if (local.x < -8f || local.y < -8f) return null
+    if (local.x > layout.size.width + 8f || local.y > layout.size.height + 8f) return null
+    val display = layout.getOffsetForPosition(
+        Offset(
+            local.x.coerceIn(0f, layout.size.width.toFloat()),
+            local.y.coerceIn(0f, (layout.size.height - 1).coerceAtLeast(0).toFloat()),
+        ),
+    ).coerceIn(0, text.length)
+    var at = 0
+    var anchor: BookPageAnchor? = null
+    for (slice in sources) {
+        val length = slice.endUtf16 - slice.startUtf16
+        if (display <= at + length) {
+            anchor = BookPageAnchor(slice.importPage, slice.startUtf16 + (display - at).coerceAtLeast(0))
+            break
+        }
+        at += length
+    }
+    val resolved = anchor ?: BookPageAnchor(sources.last().importPage, sources.last().endUtf16)
+    return wordAt(book, resolved)
+}
+
+private fun wordAt(book: Textbook, anchor: BookPageAnchor): SourceBlock? {
     val stored = book.page(anchor.importPage)?.text ?: return null
     if (stored.isEmpty()) return null
     var offset = anchor.offsetUtf16.coerceIn(0, stored.lastIndex)

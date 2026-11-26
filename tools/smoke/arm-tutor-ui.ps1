@@ -725,7 +725,9 @@ function Hover-TutorEdge([int]$windowY) {
         $away = Move-TutorPointer $x ($y + 28) $true
         Start-Sleep -Milliseconds 90
         $landed = Move-TutorPointer $x $y $true
-        Write-Output "HOVER $windowY -> $($landed.X),$($landed.Y) via $($away.X),$($away.Y)"
+        # Host stream only. A success-stream line becomes part of Get-TutorShownPage's
+        # return, and the page check then reads the trace as the page number.
+        Write-Host "HOVER $windowY -> $($landed.X),$($landed.Y) via $($away.X),$($away.Y)"
     }
 }
 
@@ -755,6 +757,14 @@ function Get-PersistedReaderPage {
     if ($LASTEXITCODE -ne 0) { return $null }
     $text = "$raw".Trim()
     if ($text -match '^\d+$') { return $text }
+    return $null
+}
+
+function Get-ShownPageToken($value) {
+    foreach ($item in @($value)) {
+        $text = "$item".Trim()
+        if ($text -match '^\d+$') { return $text }
+    }
     return $null
 }
 
@@ -1009,7 +1019,9 @@ function Assert-CitationPage([string]$citePage, [string]$citeText, [string]$befo
     foreach ($try in 1..3) {
         Start-Sleep -Milliseconds 700
         $frame = @(Read-TutorFrame $(if ($try -eq 1) { '07-cite' } else { "07-cite$try" }))
-        foreach ($label in @('无法确认原句', '无法确认', '正在加载')) {
+        # chi_sim drops the leading 「无」, so the toast 「无法确认原句：无法读取这一页的文字位置。」
+        # comes back as 「法确认原句:无法读取…」. Either fragment is that toast.
+        foreach ($label in @('无法确认原句', '无法确认', '确认原句', '无法读取', '正在加载')) {
             if (Find-Text $frame $label) {
                 $notice = $true
                 Write-Output "CITATION_NOTICE $label try=$try"
@@ -1017,7 +1029,7 @@ function Assert-CitationPage([string]$citePage, [string]$citeText, [string]$befo
             }
         }
         $persisted = Get-PersistedReaderPage
-        $shown = Get-TutorShownPage "07-bar$try"
+        $shown = Get-ShownPageToken (Get-TutorShownPage "07-bar$try")
         Write-Output "STEP7 open try=$try cite=$citePage shown=$shown persisted=$persisted before=$beforePage notice=$notice"
         if ($shown -and $shown -ne $citePage) {
             throw "点了出处没停在第 $citePage 页（底栏第 $shown 页，见 07-cite）"
@@ -1040,7 +1052,7 @@ function Assert-CitationPage([string]$citePage, [string]$citeText, [string]$befo
     $persisted = Get-PersistedReaderPage
     $shown = $null
     foreach ($try in 1..4) {
-        $shown = Get-TutorShownPage "07-card$try"
+        $shown = Get-ShownPageToken (Get-TutorShownPage "07-card$try")
         if ($shown) { break }
     }
     Write-Output "STEP7 closed cite=$citePage shown=$shown persisted=$persisted"

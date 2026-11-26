@@ -2070,6 +2070,48 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
+    /** Jump directly to a PDF page from the literature one-page guide (original PDF view, no sentence highlight). */
+    suspend fun jumpToLiteraturePage(courseId: String, bookId: String, page: Int) = action {
+        val loaded = library.book(bookId)
+        val clampedPage = page.coerceIn(1, loaded.pages.size.coerceAtLeast(1))
+        require(loaded.page(clampedPage) != null && page == clampedPage) { "原页已变更，请重新打开导读。" }
+        library.saveTextView(bookId, false)
+        val updatedBook = loaded.copy(readingPage = clampedPage)
+        library.save(updatedBook)
+        library.saveOpenSession(updatedBook.id, "READER")
+        val collections = library.collectionSummaries()
+        val detail = library.withCourseDatabase { db ->
+            CourseStore.saveActiveAnchor(
+                db,
+                CourseActiveAnchor(
+                    courseId = courseId,
+                    topicId = null,
+                    bookId = updatedBook.id,
+                    page = clampedPage,
+                    companionOpen = false,
+                ),
+            )
+            CourseStore.loadCourseDetail(db, courseId, library.clock)
+        }
+        mutable.update { cur ->
+            cur.copy(
+                book = updatedBook,
+                page = clampedPage,
+                screen = BookScreen.READER,
+                source = null,
+                prompt = null,
+                review = null,
+                pendingCourseJump = null,
+                keepAskTabOpen = false,
+                activeCourseId = courseId,
+                activeCourseTopicId = null,
+                activeCourseDetail = detail,
+                collections = collections,
+                catalog = library.catalog(),
+            )
+        }
+    }
+
     suspend fun jumpToMockSourcePage(courseId: String, bookId: String, page: Int, quote: String,
         exactAnchor: BookCompanionAnchor? = null) = action {
         val loaded = library.book(bookId)

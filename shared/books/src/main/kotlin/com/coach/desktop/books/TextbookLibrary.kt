@@ -1689,34 +1689,74 @@ internal class TextbookLibrary(
         return StagedBookImport(book(id), alreadyExisted = false)
     }
 
+    private fun sourceFilename(bookId: String): String? = database().use { db ->
+        if (!BookSchemaMigration.tableColumns(db, "books").contains("source_filename")) return@use null
+        db.prepareStatement("SELECT source_filename FROM books WHERE id=?").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { r -> if (r.next()) r.getString(1) else null }
+        }
+    }
+
+    /** Pre-fill author, year, and HTML-decoded title from PDF metadata, source filename, and front pages. */
+    fun literaturePaperMeta(bookId: String): LiteraturePaperMeta {
+        val source = book(bookId)
+        val filename = sourceFilename(bookId)
+        val frontPages = source.pages.take(2).map { it.text }
+        val file = original(bookId, "pdf").toFile()
+        return if (source.format == "pdf" && file.isFile) {
+            runCatching {
+                BookPdfLoader.read(file) { pdf ->
+                    LiteratureMetadata.extract(pdf, source.id, source.title, filename, frontPages)
+                }
+            }.getOrElse { LiteratureMetadata.extract(null, source.id, source.title, filename, frontPages) }
+        } else {
+            LiteratureMetadata.extract(null, source.id, source.title, filename, frontPages)
+        }
+    }
+
+    /** Independent 300 dpi OCR verification of a single PDF page via the library's Tesseract engine. */
+    fun ocrPdfPageForGuide(bookId: String, pdfPage: Int, control: BookImportControl = BookImportControl()): String {
+        val file = original(bookId, "pdf").toFile()
+        require(file.isFile) { "原 PDF 文件不存在，无法独立 OCR 核对引文。" }
+        return BookPdfLoader.read(file) { pdf ->
+            require(pdfPage in 1..pdf.numberOfPages) { "PDF 页码超出范围：$pdfPage" }
+            recognizePdfPage(file, pdf, pdfPage, control)
+        }
+    }
+
     /** A scan can have a nonempty text layer containing only a running page number or broken glyphs.
      * Keep this OCR transcript local to the guide so existing highlights retain their original offsets. */
     fun literatureBook(bookId: String): Textbook {
         val source = book(bookId)
         require(source.format == "pdf" && source.indexState == "READY" && !source.hasPendingOcr) { "请等待 PDF 导入和扫描页识别完成。" }
+        val filename = sourceFilename(bookId)
         val file = original(bookId, "pdf").toFile()
-        val pages = BookPdfLoader.read(file) { pdf ->
-            val labels = pdf.documentCatalog.pageLabels?.labelsByPageIndices
-            source.pages.map { page ->
+        val (pages, meta) = BookPdfLoader.read(file) { pdf ->
+            val extractedPages = source.pages.map { page ->
                 val physical = LiteraturePdfLayout.extract(pdf, page.number)
                 val layer = physical.joinToString("\n\n") { it.text }
                 val regions = when {
-                    layer.count(Char::isLetter) >= 6 && '�' !in layer -> physical
+                    layer.count(Char::isLetter) >= 6 -> physical
                     else -> {
-                        // Bundled OCR uses automatic page segmentation (columns and blocks).
                         val transcript = if (page.ocr) page.text else recognizePdfPage(file, pdf, page.number, BookImportControl())
-                        listOf(GuideRegion(transcript, physical.firstOrNull()?.printedPage))
+                        listOf(GuideRegion(transcript))
                     }
                 }
-                val pageFolio = regions.mapNotNull { it.printedPage }.distinct().singleOrNull()
-                    ?: labels?.getOrNull(page.number - 1)
-                val labeled = regions.map { r ->
-                    r.copy(text = r.text.replace("\r\n", "\n").replace('\r', '\n'), printedPage = r.printedPage ?: pageFolio)
+                val cleaned = regions.map { r ->
+                    r.copy(text = r.text.replace("\r\n", "\n").replace('\r', '\n'), printedPage = null)
                 }
-                page.copy(text = labeled.joinToString("\n\n") { it.text }, textLayout = null, guideRegions = labeled)
+                page.copy(text = cleaned.joinToString("\n\n") { it.text }, textLayout = null, guideRegions = cleaned)
             }
+            val extractedMeta = LiteratureMetadata.extract(
+                pdf = pdf,
+                bookId = source.id,
+                storedTitle = source.title,
+                sourceFilename = filename,
+                firstPagesText = extractedPages.take(2).map { it.text }.ifEmpty { source.pages.take(2).map { it.text } },
+            )
+            extractedPages to extractedMeta
         }
-        return source.copy(pages = pages)
+        return source.copy(pages = pages, literatureMeta = meta)
     }
 
     private fun recognizePdfPage(file: java.io.File, pdf: BookPdfDocument, page: Int, control: BookImportControl): String {

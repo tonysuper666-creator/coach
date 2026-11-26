@@ -45,6 +45,7 @@ internal data class Textbook(
     val structure: BookStructure? = null,
     val indexState: String = "READY",
     val correctedBodyPage: Int? = null,
+    val literatureMeta: LiteraturePaperMeta? = null,
 ) {
     val tocNodes: List<BookTocNode> get() = structure?.tocNodes.orEmpty()
     val bodyStart: BookPageAnchor by lazy { BookBoundaries.bodyStart(pages, structure, correctedBodyPage) }

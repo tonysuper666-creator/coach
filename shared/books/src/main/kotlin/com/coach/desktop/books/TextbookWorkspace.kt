@@ -79,7 +79,6 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     val explainer = remember(controller.library, explainProvider) { explainProvider ?: BookExplainer(library = controller.library) }
     val collectionQaSessions = remember { mutableStateMapOf<String, CollectionQaSessionState>() }
     var guideCourse by remember { mutableStateOf<String?>(null) }
-    var guideTab by remember { mutableStateOf(0) }
     val aiEnabled = LocalReadingAiExplain.current
     val currentAiEnabled by rememberUpdatedState(aiEnabled)
     val booklistJudge = remember(explainer) {
@@ -402,17 +401,16 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         ui.screen == BookScreen.COURSE && ui.activeCourseDetail != null -> {
                             val detail = checkNotNull(ui.activeCourseDetail)
                             if (guideCourse == detail.courseId) {
-                                LiteratureGuidePane(detail, controller.library, explainer, guideTab, { guideTab = it },
+                                LiteratureGuidePane(detail, controller.library, explainer,
                                     onBack = { guideCourse = null }) { source ->
-                                    run { controller.jumpToMockSourcePage(detail.courseId, source.book.id,
-                                        source.anchor.pdfPage, source.anchor.quoteAnchor, source.anchor) }
+                                    run { controller.jumpToLiteraturePage(detail.courseId, source.book.id, source.anchor.pdfPage) }
                                 }
                             } else CourseScreen(
                                 detail = detail,
                                 busy = ui.busy || ui.courseBusy,
                                 notice = ui.courseNotice,
-                                onOpenLiteratureGuide = if (System.getProperty("os.name").startsWith("Windows", true)) {
-                                    { guideTab = 0; guideCourse = detail.courseId }
+                                onOpenLiteratureGuide = if (!originalPdfTouchEnabled) {
+                                    { guideCourse = detail.courseId }
                                 } else null,
                                 onBack = { run { controller.back() } },
                                 onOpenTopic = { topic -> run { controller.openCourseTopic(detail.courseId, topic.topicId, explainer) } },

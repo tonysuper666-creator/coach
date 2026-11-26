@@ -676,6 +676,8 @@ internal fun TextbookReader(
     var sayingsOpenTick by remember(book.id) { mutableIntStateOf(0) }
     var conceptSayings by remember(book.id) { mutableStateOf<ConceptSayingsBoard?>(null) }
     var checkingSayings by remember(book.id) { mutableStateOf(false) }
+    var sayingsNotice by remember(book.id) { mutableStateOf<String?>(null) }
+    val sayingGates = remember(book.id) { HashMap<String, Long>() }
     val readingTracker = remember(book.id, book.structure?.editRevision, dwellThresholdMs) {
         val floor = if (dwellThresholdMs < ChapterReadPolicy.MIN_DWELL_MS) maxOf(dwellThresholdMs, 40L) else 15_000L
         PageReadingTracker(defaultMedianFloorMs = floor)
@@ -920,6 +922,30 @@ internal fun TextbookReader(
     LaunchedEffect(book.id, ui.booklistRevision, localBooklistRev) {
         bookConceptNames = withContext(Dispatchers.IO) { library.conceptNamesForBook(book.id) }
     }
+    fun openOtherBooks(conceptId: String?) {
+        companionOpen = true
+        companionTab = ReaderCompanionTab.EXPLAIN
+        pdf.selection = null
+        textSelection = null
+        if (conceptId == null) {
+            openedConceptId = null
+            conceptSayings = null
+            checkingSayings = false
+            sayingsNotice = ConceptSayingLogic.NO_MATCH
+            return
+        }
+        val now = System.currentTimeMillis()
+        val until = sayingGates[conceptId] ?: 0L
+        if (now < until) {
+            openedConceptId = conceptId
+            if (!checkingSayings) sayingsNotice = ConceptSayingLogic.RETRY_LATER
+            return
+        }
+        sayingGates[conceptId] = now + ConceptSayingLogic.RETRY_HOLD_MS
+        sayingsNotice = null
+        openedConceptId = conceptId
+        sayingsOpenTick++
+    }
     LaunchedEffect(openedConceptId, sayingsOpenTick, book.id, ui.booklistRevision, localBooklistRev, aiEnabled) {
         val id = openedConceptId
         if (id == null) {
@@ -928,14 +954,29 @@ internal fun TextbookReader(
             return@LaunchedEffect
         }
         val loaded = withContext(Dispatchers.IO) {
-            library.conceptSayings(id, book.id) to library.isReadingAiExplainEnabled()
+            val board = library.conceptSayings(id, book.id)
+            val aiOn = library.isReadingAiExplainEnabled()
+            val hold = board?.let { library.sayingHoldUntil(id, it.inputHash) }
+            Triple(board, aiOn, hold)
         }
         val board = loaded.first
         // 与书单对齐同一条：界面开关或本机「伴读讲解与提问」任一关闭，正文都不发到远端。
         val remoteAllowed = aiEnabled && loaded.second
+        val persistedHold = loaded.third
         conceptSayings = board
-        if (board != null && ConceptSayingLogic.mayRequestConceptSayings(board, remoteAllowed)) {
+        val now = System.currentTimeMillis()
+        if (board != null && persistedHold != null && now < persistedHold &&
+            ConceptSayingLogic.mayRequestConceptSayings(board, remoteAllowed)
+        ) {
+            sayingGates[id] = persistedHold
+            checkingSayings = false
+            sayingsNotice = ConceptSayingLogic.RETRY_LATER
+            return@LaunchedEffect
+        }
+        if (board != null && ConceptSayingLogic.mayRequestConceptSayings(board, remoteAllowed, persistedHold, now)) {
             checkingSayings = true
+            sayingsNotice = null
+            var unavailable = false
             val settled = settleConceptSayings(
                 board,
                 fetch = { explainer.alignConceptSayings(it) },
@@ -943,11 +984,23 @@ internal fun TextbookReader(
                 reload = { withContext(Dispatchers.IO) { library.conceptSayings(id, book.id) } },
                 delayMillis = { delay(it) },
                 remoteAllowed = remoteAllowed,
+                onUnavailable = { unavailable = true },
             )
             checkingSayings = false
             conceptSayings = settled
+            if (unavailable) {
+                val until = System.currentTimeMillis() + ConceptSayingLogic.RETRY_HOLD_MS
+                sayingGates[id] = until
+                withContext(Dispatchers.IO) { library.rememberSayingHold(id, board.inputHash, until) }
+                sayingsNotice = ConceptSayingLogic.RETRY_LATER
+            } else {
+                sayingGates.remove(id)
+                sayingsNotice = null
+            }
         } else {
+            sayingGates.remove(id)
             checkingSayings = false
+            sayingsNotice = null
         }
     }
     val practiceDraftNodeId = remember(book.id, currentChapterGroup?.chapterId) {
@@ -1906,18 +1959,14 @@ internal fun TextbookReader(
                                 else companionTab = ReaderCompanionTab.EXPLAIN
                             },
                             onInputFocusChanged = { practiceInputFocused = it },
-                            bottomContent = if (crossBookCards.isNotEmpty() || conceptSayings != null || checkingSayings) {
+                            bottomContent = if (crossBookCards.isNotEmpty() || conceptSayings != null || checkingSayings || !sayingsNotice.isNullOrBlank()) {
                                 {
                                     CrossBookCompanionSection(
                                         cards = crossBookCards,
                                         board = conceptSayings,
                                         checking = checkingSayings,
-                                        onOpenConcept = { conceptId ->
-                                            openedConceptId = conceptId
-                                            sayingsOpenTick++
-                                            companionOpen = true
-                                            companionTab = ReaderCompanionTab.EXPLAIN
-                                        },
+                                        notice = sayingsNotice,
+                                        onOpenConcept = { conceptId -> openOtherBooks(conceptId) },
                                         onJumpToBookPage = { targetBookId, targetPage, quote, offset ->
                                             if (targetBookId == book.id) {
                                                 val pageObj = book.page(targetPage)
@@ -1935,6 +1984,7 @@ internal fun TextbookReader(
                                                 openedConceptId = null
                                                 conceptSayings = null
                                                 checkingSayings = false
+                                                sayingsNotice = null
                                             }
                                             if (onMuteConcept != null) {
                                                 onMuteConcept(conceptId)
@@ -2435,16 +2485,9 @@ internal fun TextbookReader(
                     startNoteFromSelection(learnableSelection)
                 },
                 onDismiss = { pdf.selection = null; textSelection = null },
-                onCompare = ConceptSayingLogic.matchConcept(learnableSelection.text, bookConceptNames)?.let { conceptId ->
-                    {
-                        openedConceptId = conceptId
-                        sayingsOpenTick++
-                        companionOpen = true
-                        companionTab = ReaderCompanionTab.EXPLAIN
-                        pdf.selection = null
-                        textSelection = null
-                    }
-                },
+                onCompare = if (ConceptSayingLogic.canAskOtherBooks(learnableSelection.text)) {
+                    { openOtherBooks(ConceptSayingLogic.matchConcept(learnableSelection.text, bookConceptNames)) }
+                } else null,
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = if (showHud) 54.dp else 14.dp),
             )
         }

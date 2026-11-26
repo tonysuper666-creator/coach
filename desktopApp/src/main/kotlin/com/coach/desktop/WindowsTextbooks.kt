@@ -4,6 +4,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
@@ -29,6 +30,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
+import com.coach.desktop.incident.IncidentExitPrompt
+import com.coach.desktop.incident.IncidentLog
+import com.coach.desktop.incident.IncidentWatchdog
+import com.coach.desktop.incident.runIncidentTestSwitch
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.swing.Swing
@@ -123,6 +129,7 @@ internal fun WindowsTextbookGate(
     }
 
     val paired = identity
+    Box(Modifier.fillMaxSize()) {
     if (paired != null) {
         val onRelogin: (String?) -> Unit = remember(pairing, paired, sable) {
             { reason ->
@@ -177,6 +184,8 @@ internal fun WindowsTextbookGate(
             }
         }
     }
+    IncidentExitPrompt(paired, Modifier.align(Alignment.TopCenter).padding(top = 8.dp), darkTheme)
+    }
 }
 
 /** Windows mainline: first-run login gate, then local textbook shelf with zero-click resume. */
@@ -184,6 +193,9 @@ internal fun runWindowsTextbooks() {
     val directory = windowsLibraryDirectory()
     val initialBounds = windowsInitialWindowBounds()
     val settings = DesktopConnectionSettings()
+    IncidentLog.installCrashHandler()
+    IncidentLog.startSession(settings.home)
+    IncidentWatchdog.start()
     application {
         val scope = rememberCoroutineScope()
         var saveDrafts by remember { mutableStateOf<suspend () -> Boolean>({ true }) }
@@ -195,6 +207,12 @@ internal fun runWindowsTextbooks() {
                 width = initialBounds.width.dp, height = initialBounds.height.dp,
                 position = WindowPosition.Absolute(initialBounds.x.dp, initialBounds.y.dp),
             )) {
+            CompositionLocalProvider(
+                LocalIncidentFolderActions provides IncidentFolderActions(
+                    openFolder = IncidentLog::openFolder,
+                    clearRecords = IncidentLog::clear,
+                ),
+            ) {
             WindowsReadingMinimum(window)
             WindowsTextbookGate(settings) { identity ->
                 val profiles = remember(directory) { LearningProfiles(directory) }
@@ -210,6 +228,17 @@ internal fun runWindowsTextbooks() {
                 } else LearningProfile(directory,null)
                 key(profile.directory) {
                     val controller = remember { windowsBookController(profile.directory) }
+                    LaunchedEffect(controller) {
+                        var previous = controller.state.value
+                        controller.state.collect { next ->
+                            val message = next.error
+                            if (previous.importing != null && next.importing == null && !message.isNullOrBlank()
+                                && message != "已取消导入，书架没有新增教材。") {
+                                runCatching { IncidentLog.recordImportFailure(message) }
+                            }
+                            previous = next
+                        }
+                    }
                     val drafts = rememberAnswerDrafts(controller)
                     val exams = rememberLocalExamController(controller.library)
                     DisposableEffect(controller,drafts,exams) {
@@ -252,10 +281,18 @@ internal fun runWindowsTextbooks() {
                 }
             }
             TextbookCloseWarning(closeGuard)
+            }
             LaunchedEffect(window) { VerifyHooks.captures(window) }
             LaunchedEffect(Unit) {
                 System.getProperty("coach.autoExitSeconds")?.toLongOrNull()?.let { delay(it * 1000); closeGuard.requestClose() }
             }
+            LaunchedEffect(Unit) {
+                while (isActive) {
+                    IncidentWatchdog.beat()
+                    delay(1_000)
+                }
+            }
+            LaunchedEffect(Unit) { runIncidentTestSwitch() }
         }
     }
 }
@@ -337,7 +374,10 @@ private fun LearningSyncEffect(identity: DesktopIdentity, profile: LearningProfi
                             LearningTransfer(profile.directory.resolve("exams.sqlite"),true).sync(account,remote,profile.epoch) { isActive }
                         }
                     } catch (cancel: CancellationException) { throw cancel }
-                    catch (_: Exception) { /* Durable outbox and cursor survive transient failures. */ }
+                    catch (failure: Exception) {
+                        // The outbox keeps the change. The record stays on this computer until the user sends it.
+                        runCatching { IncidentLog.recordSyncFailure("${failure.javaClass.name} ${failure.message.orEmpty()}") }
+                    }
                     delay(15_000)
                 }
             } finally { http.close() }

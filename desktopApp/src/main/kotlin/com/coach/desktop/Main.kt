@@ -23,6 +23,7 @@ private fun Component.skiaLayers(): Sequence<SkiaLayer> = sequence {
 }
 
 fun main() {
+    com.coach.desktop.incident.IncidentLog.installCrashHandler()
     com.coach.desktop.books.PdfWarmup.start() // 应用一启动就在后台预热 PDF 渲染，不占打开书本/目标页的关键路径
     if (System.getProperty("coach.exportFormulas") != null) { exportFormulas(); return }
     if (System.getenv("COACH_MODE") != "spike") { runCoach(); return }

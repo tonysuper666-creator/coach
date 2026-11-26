@@ -186,7 +186,18 @@ val notesCore by tasks.registering(Zip::class) {
     destinationDirectory.set(layout.buildDirectory.dir("generated/notes"))
 }
 sourceSets.main { resources.srcDir(notesCore.map { it.destinationDirectory }) }
-tasks.processResources { dependsOn(notesCore) }
+val coachVersionDir = layout.buildDirectory.dir("generated/coach-version")
+val writeCoachVersion by tasks.registering {
+    inputs.property("version", releaseVersion)
+    outputs.dir(coachVersionDir)
+    doLast {
+        val dir = coachVersionDir.get().asFile
+        dir.mkdirs()
+        dir.resolve("coach-version.txt").writeText(releaseVersion)
+    }
+}
+sourceSets.main { resources.srcDir(coachVersionDir) }
+tasks.processResources { dependsOn(notesCore, writeCoachVersion) }
 
 // currentOs selects Skiko from the build JVM. Ship the OCR payload for that same JVM.
 if (System.getProperty("os.name").startsWith("Windows") &&

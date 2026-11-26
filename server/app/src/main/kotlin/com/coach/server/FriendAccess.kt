@@ -37,6 +37,7 @@ internal fun friendPath(call: ApplicationCall): Boolean {
         HttpMethod.Post to "/v1/library/collection/ask",
         HttpMethod.Post to "/v1/books/upload",
         HttpMethod.Get to "/v1/books",
+        HttpMethod.Post to "/v1/incidents",
         HttpMethod.Delete to "/v1/account" -> true
         else -> (method == HttpMethod.Post && (friendStudyModeRegex.matches(path) || friendBookMapBatchRegex.matches(path))) ||
             (method == HttpMethod.Get && (unifiedBookStatusRegex.matches(path) || unifiedBookOriginalRegex.matches(path) || unifiedBookArtifactRegex.matches(path))) ||

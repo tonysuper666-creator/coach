@@ -9,8 +9,8 @@ import kotlin.io.path.Path
 
 /** Classifier checks use invented titles only. Real books stay out of this test. */
 class StructureAuditTest {
-    private fun item(title: String, page: Int, level: Int = 1) =
-        BookOutlineItem(title, level, page, HeadingSource.PDF_OUTLINE)
+    private fun item(title: String, page: Int, level: Int = 1, offset: Int = 0) =
+        BookOutlineItem(title, level, page, HeadingSource.PDF_OUTLINE, offset)
 
     @Test
     fun explicitChapterKeepsALongTitleAndSkipsDottedSections() {
@@ -86,6 +86,76 @@ class StructureAuditTest {
         assertEquals(listOf(32, 100, 168, 236, 305), StructureAuditMain.samplePages(32, 305, 5))
         assertEquals(listOf(1, 2, 3), StructureAuditMain.samplePages(1, 3, 10))
         assertEquals(emptyList<Int>(), StructureAuditMain.samplePages(5, 4, 3))
+    }
+
+    private fun epub(title: String, page: Int, level: Int = 1) =
+        BookOutlineItem(title, level, page, HeadingSource.EPUB_TOC)
+
+    @Test
+    fun introductionIsBodyAndTheNumberedChapterStaysLater() {
+        val structure = StructureAuditMain.readerStructure(listOf(
+            epub("A Note Before The Work Starts", 2),
+            epub("Introduction and Plan of the Work", 4),
+            epub("Chapter 1 Opening", 7),
+            epub("Chapter 2 Later", 12),
+        ))
+        assertEquals(4, structure.bodyStart)
+        assertEquals(7, structure.firstChapter)
+        assertEquals(listOf(7, 12), structure.chapterPages)
+    }
+
+    @Test
+    fun aPrefaceIsFrontMatterAndADeeperNumberedHeadingStaysInsideThePiece() {
+        val structure = StructureAuditMain.readerStructure(listOf(
+            epub("序", 2),
+            epub("Opening Piece", 3),
+            epub("第一章 内文", 13, level = 2),
+            epub("第二章 内文", 14, level = 2),
+        ))
+        assertEquals(3, structure.bodyStart)
+        assertEquals(3, structure.firstChapter)
+        assertEquals(listOf(3), structure.chapterPages)
+    }
+
+    @Test
+    fun aPlainBodyLabelIsASectionAndARomanHeadingOpensTheChapterRun() {
+        val adjusted = StructureAuditMain.adjustOutline(listOf(
+            epub("正文", 2),
+            epub("I OPENING MATTER HERE", 3),
+            epub("Later Piece", 8),
+        ))
+        assertEquals(TocNodeKind.SECTION, adjusted[0].kind)
+        assertEquals(TocNodeKind.CHAPTER, adjusted[1].kind)
+        assertEquals(TocNodeKind.BACK_MATTER, adjusted[2].kind)
+        val structure = StructureAuditMain.readerStructure(listOf(
+            epub("正文", 2),
+            epub("I OPENING MATTER HERE", 3),
+            epub("Later Piece", 8),
+        ))
+        assertEquals(3, structure.bodyStart)
+        assertEquals(3, structure.firstChapter)
+        assertEquals(listOf(3), structure.chapterPages)
+    }
+
+    @Test
+    fun headerExpectationUsesTheOutlineItemOfTheSameKind() {
+        val adjusted = StructureAuditMain.adjustOutline(listOf(
+            item("1 Why markets fail here", 32),
+            item("1.1 Detail of the topic", 40, level = 2),
+            item("Index", 90),
+        ))
+        assertEquals(
+            "1.1 Detail of the topic",
+            StructureAuditMain.expectedHeaderTitle(adjusted, 50, TocNodeKind.SECTION),
+        )
+        assertEquals(
+            "1 Why markets fail here",
+            StructureAuditMain.expectedHeaderTitle(adjusted, 50, TocNodeKind.CHAPTER),
+        )
+        assertEquals("Index", StructureAuditMain.expectedHeaderTitle(adjusted, 90, TocNodeKind.BACK_MATTER))
+        val later = StructureAuditMain.adjustOutline(listOf(item("Index", 31, offset = 1360)))
+        assertEquals(null, StructureAuditMain.expectedHeaderTitle(later, 31, TocNodeKind.BACK_MATTER, 0))
+        assertEquals("Index", StructureAuditMain.expectedHeaderTitle(later, 31, TocNodeKind.BACK_MATTER, 1360))
     }
 
     @Test

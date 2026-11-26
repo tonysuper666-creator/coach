@@ -1,5 +1,6 @@
 package com.coach.desktop.books
 
+import androidx.compose.ui.text.AnnotatedString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
@@ -76,6 +77,75 @@ object StructureAuditMain {
         if (shallow != null) return shallow
         return NativeOutline("none", emptyList())
     }
+
+    internal data class AdjustedOutline(val item: BookOutlineItem, val title: String, val kind: TocNodeKind)
+
+    internal data class ReaderStructure(val chapterPages: List<Int>, val bodyStart: Int?, val firstChapter: Int?)
+
+    /**
+     * A real introduction before chapter 1 counts as the body.
+     * Same shape as [BookBoundaries.openingNode], plus a Chinese introduction heading.
+     * An earlier unnumbered note that the importer files as front matter does not.
+     */
+    private val substantiveIntroduction = Regex("""(?i)^Introduction(?:\s+and\s+.+)?$|^导\s*言$|^引\s*言$""")
+
+    /** Same chapter/front split the importer uses. Body keeps an introduction; a preface stays front matter. */
+    internal fun readerStructure(items: List<BookOutlineItem>): ReaderStructure {
+        if (items.isEmpty()) return ReaderStructure(emptyList(), null, null)
+        val adjusted = adjustOutline(items)
+        val chapters = adjusted.filter { it.kind == TocNodeKind.CHAPTER }.map { it.item.page }.sorted()
+        val firstChapter = chapters.firstOrNull()
+        val introduction = adjusted.firstOrNull { row ->
+            val title = BookTocWaterfall.cleanTocTitle(row.title).trimEnd('.', ':', '：')
+            substantiveIntroduction.matches(title) && (firstChapter == null || row.item.page <= firstChapter)
+        }?.item?.page
+        val fallback = adjusted.firstOrNull {
+            it.kind != TocNodeKind.FRONT_MATTER && it.kind != TocNodeKind.BACK_MATTER && it.kind != TocNodeKind.PART
+        }?.item?.page
+        return ReaderStructure(chapters, introduction ?: firstChapter ?: fallback, firstChapter)
+    }
+
+    /** Same shape as the importer's private roman-chapter heading. */
+    private val romanChapterHeading = Regex("""^([IVXLC]+)\s+([A-Z][A-Z\s’'—-]{5,})$""")
+
+    internal fun adjustOutline(items: List<BookOutlineItem>): List<AdjustedOutline> {
+        if (items.isEmpty()) return emptyList()
+        val labeled = items.map { it to BookTocWaterfall.classifyOutlineLabel(it.title, it.level) }
+        val epub = items.first().source == HeadingSource.EPUB_TOC
+        fun explicit(index: Int): Boolean {
+            val (item, info) = labeled[index]
+            val numbered = info.kind == TocNodeKind.CHAPTER && info.numberLabel != null
+            val roman = epub && item.level <= 3 && romanChapterHeading.matches(item.title)
+            return numbered || roman
+        }
+        val firstExplicit = labeled.indices.firstOrNull(::explicit) ?: -1
+        val lastExplicit = if (firstExplicit >= 0) labeled.indices.lastOrNull(::explicit) ?: -1 else -1
+        return labeled.mapIndexedNotNull { index, (item, info) ->
+            if (info.isScaffoldNoise || info.title.isEmpty()) return@mapIndexedNotNull null
+            val kind = when {
+                !epub -> info.kind
+                info.title == "正文" -> TocNodeKind.SECTION
+                item.level <= 3 && romanChapterHeading.matches(item.title) -> TocNodeKind.CHAPTER
+                firstExplicit >= 0 && info.kind == TocNodeKind.CHAPTER && info.numberLabel == null -> when {
+                    index < firstExplicit -> TocNodeKind.FRONT_MATTER
+                    index > lastExplicit -> TocNodeKind.BACK_MATTER
+                    else -> TocNodeKind.SECTION
+                }
+                else -> info.kind
+            }
+            AdjustedOutline(item, info.title, kind)
+        }
+    }
+
+    internal fun expectedHeaderTitle(
+        adjusted: List<AdjustedOutline>,
+        page: Int,
+        kind: TocNodeKind,
+        offset: Int = 0,
+    ): String? =
+        adjusted.filter { row ->
+            row.kind == kind && (row.item.page < page || (row.item.page == page && row.item.startOffset <= offset))
+        }.maxWithOrNull(compareBy({ it.item.page }, { it.item.startOffset }))?.title
 
     private fun shallowBand(items: List<BookOutlineItem>): NativeOutline? {
         if (items.isEmpty()) return null
@@ -192,8 +262,8 @@ object StructureAuditMain {
         val fileName = source.fileName.toString()
         val truth = options.truth[fileName.lowercase()]
         val pdfOutline = if (source.extension.equals("pdf", true)) readPdfOutline(source) else emptyList()
-        val work = options.library.resolve("book-$index")
-        Files.createDirectories(work)
+        Files.createDirectories(options.library)
+        val work = Files.createTempDirectory(options.library, "audit-")
         try {
             val library = TextbookLibrary(work.resolve("library"), streamPdfExtras = true, lazyPdfExtras = true)
             val isPdf = source.extension.equals("pdf", true)
@@ -211,12 +281,18 @@ object StructureAuditMain {
                 outline.isNotEmpty() -> classifyOutline(outline)
                 else -> classifyHeadingLines(indexed.pages)
             }
+            val reader = if (outline.isNotEmpty()) readerStructure(outline) else {
+                ReaderStructure(classified.pages, classified.pages.firstOrNull(), classified.pages.firstOrNull())
+            }
             val autoPages = classified.pages
-            val autoBody = autoPages.firstOrNull()
-            val nativeChapters = truth?.chapters ?: autoPages.size
-            val nativeBody = truth?.bodyStart ?: autoBody
+            val chapterPages = if (outline.isNotEmpty()) reader.chapterPages else classified.pages
+            val autoBody = reader.bodyStart
+            val nativeChapters = truth?.chapters ?: chapterPages.size
+            val nativeBody = truth?.bodyStart ?: reader.bodyStart
+            val nativeFirst = reader.firstChapter
             val softwareBody = BookBoundaries.bodyStart(indexed.pages, indexed.structure).importPage
-            val header = headerMismatches(indexed, autoPages, options.headerSamples)
+            val softwareFirst = indexed.tocNodes.filter { it.kind == TocNodeKind.CHAPTER }.minOfOrNull { it.startPage }
+            val header = headerMismatches(indexed, outline, options.headerSamples, nativeFirst ?: nativeBody)
             val nodes = indexed.tocNodes
             val roles = indexed.structure?.pageRoles
             val bodyLike = nodes.count { looksLikeBodyDump(it.title) }
@@ -224,20 +300,23 @@ object StructureAuditMain {
             val elapsed = (System.nanoTime() - started) / 1_000_000L
             println(
                 "AUDIT file=$fileName pages=${indexed.pages.size} softwareChapters=${nodes.count { it.kind == TocNodeKind.CHAPTER }} " +
-                    "native=$nativeChapters body=$softwareBody open=$firstOpen headerWrong=${header.wrong} ms=$elapsed",
+                    "native=$nativeChapters body=$nativeBody first=$nativeFirst swBody=$softwareBody swFirst=$softwareFirst " +
+                    "open=$firstOpen headerWrong=${header.wrong} ms=$elapsed",
             )
             return BookRow(
                 file = fileName,
                 format = indexed.format,
                 pages = indexed.pages.size,
                 bytes = Files.size(source),
-                nativeMethod = if (truth?.chapters != null) "given" else classified.method,
+                nativeMethod = if (truth?.chapters != null) "given" else if (outline.isNotEmpty()) "reader-kind" else classified.method,
                 autoMethod = classified.method,
                 nativeChapters = nativeChapters,
                 autoChapters = autoPages.size,
-                nativeChapterPages = autoPages,
+                nativeChapterPages = chapterPages,
                 nativeBodyStart = nativeBody,
                 autoBodyStart = autoBody,
+                nativeFirstChapter = nativeFirst,
+                softwareFirstChapter = softwareFirst,
                 softwareChapters = nodes.count { it.kind == TocNodeKind.CHAPTER },
                 softwareSections = nodes.count { it.kind == TocNodeKind.SECTION || it.kind == TocNodeKind.SUBSECTION },
                 softwareTocNodes = nodes.size,
@@ -249,6 +328,7 @@ object StructureAuditMain {
                 readingPageAfterIndex = indexed.readingPage,
                 headerSamples = header.samples,
                 headerWrong = header.wrong,
+                headerKinds = header.kinds,
                 tocBodyLikeNodes = bodyLike,
                 tocMaxTitleChars = maxTitle,
                 structureSource = indexed.structure?.source,
@@ -279,21 +359,48 @@ object StructureAuditMain {
         return NativeOutline("heading-lines", pagesHit.distinct().sorted())
     }
 
-    private data class HeaderScore(val samples: Int, val wrong: Int?)
+    private data class HeaderScore(val samples: Int, val wrong: Int?, val kinds: Map<String, Int>)
 
-    private fun headerMismatches(book: Textbook, chapterPages: List<Int>, sampleCount: Int): HeaderScore {
-        if (chapterPages.isEmpty()) return HeaderScore(0, null)
-        val lastPage = book.pages.lastOrNull()?.number ?: chapterPages.last()
-        val bodyEnd = lastPage.coerceAtLeast(chapterPages.first())
-        val chosen = samplePages(chapterPages.first(), bodyEnd, sampleCount)
+    private fun laidAt(page: Int) = BookLaidPage(
+        sources = listOf(BookPageSlice(page, 0, 0)),
+        chapter = 0,
+        title = null,
+        chapterNumber = null,
+        opener = false,
+        text = AnnotatedString(""),
+        placeholders = emptyList(),
+        topPx = 0,
+        heightPx = 0,
+    )
+
+    /** Page-start header from [BookBoundaries.runningHeaderTitle], compared with the outline item of that same kind. */
+    private fun headerMismatches(
+        book: Textbook,
+        outline: List<BookOutlineItem>,
+        sampleCount: Int,
+        contentStart: Int?,
+    ): HeaderScore {
+        if (outline.isEmpty()) return HeaderScore(0, null, emptyMap())
+        val adjusted = adjustOutline(outline)
+        val lastPage = book.pages.lastOrNull()?.number ?: return HeaderScore(0, null, emptyMap())
+        val start = (contentStart ?: adjusted.firstOrNull()?.item?.page ?: 1).coerceIn(1, lastPage)
+        val chosen = samplePages(start, lastPage, sampleCount)
         var wrong = 0
+        val kinds = LinkedHashMap<String, Int>()
         for (page in chosen) {
-            val expected = chapterPages.lastOrNull { it <= page } ?: continue
-            val span = BookChapterResolver.chapterForPage(book, page, 0)
-            val bad = span == null || span.tocNodeId == "ch-all" || span.firstPage != expected || looksLikeBodyDump(span.title)
-            if (bad) wrong++
+            val header = BookBoundaries.runningHeaderTitle(book, laidAt(page))
+            val node = BookBoundaries.activeTocNode(book.tocNodes, page, 0, null, book.page(page)?.text)
+            val kindName = node?.kind?.name ?: "NONE"
+            kinds[kindName] = (kinds[kindName] ?: 0) + 1
+            val expected = node?.let { expectedHeaderTitle(adjusted, it.startPage, it.kind, it.startOffset) }
+            val mismatch = when {
+                expected == null && header.isEmpty() -> false
+                expected == null -> true
+                else -> BookTocWaterfall.cleanTocTitle(header) != BookTocWaterfall.cleanTocTitle(expected)
+            }
+            if (mismatch) wrong++
         }
-        return HeaderScore(chosen.size, wrong)
+        return HeaderScore(chosen.size, wrong, kinds)
     }
 
     internal fun samplePages(start: Int, end: Int, count: Int): List<Int> {
@@ -433,6 +540,8 @@ object StructureAuditMain {
         val nativeChapterPages: List<Int>,
         val nativeBodyStart: Int?,
         val autoBodyStart: Int?,
+        val nativeFirstChapter: Int?,
+        val softwareFirstChapter: Int?,
         val softwareChapters: Int,
         val softwareSections: Int,
         val softwareTocNodes: Int,
@@ -444,6 +553,7 @@ object StructureAuditMain {
         val readingPageAfterIndex: Int,
         val headerSamples: Int,
         val headerWrong: Int?,
+        val headerKinds: Map<String, Int>,
         val tocBodyLikeNodes: Int,
         val tocMaxTitleChars: Int,
         val structureSource: String?,
@@ -465,6 +575,8 @@ object StructureAuditMain {
             put("nativeChapterPagesTruncated", nativeChapterPages.size > 80)
             put("nativeBodyStart", nativeBodyStart?.let(::JsonPrimitive) ?: JsonNull)
             put("autoBodyStart", autoBodyStart?.let(::JsonPrimitive) ?: JsonNull)
+            put("nativeFirstChapter", nativeFirstChapter?.let(::JsonPrimitive) ?: JsonNull)
+            put("softwareFirstChapter", softwareFirstChapter?.let(::JsonPrimitive) ?: JsonNull)
             put("softwareChapters", softwareChapters)
             put("softwareSections", softwareSections)
             put("softwareTocNodes", softwareTocNodes)
@@ -476,6 +588,7 @@ object StructureAuditMain {
             put("readingPageAfterIndex", readingPageAfterIndex)
             put("headerSamples", headerSamples)
             put("headerWrong", headerWrong?.let(::JsonPrimitive) ?: JsonNull)
+            put("headerKinds", buildJsonObject { headerKinds.forEach { (kind, count) -> put(kind, count) } })
             put("tocBodyLikeNodes", tocBodyLikeNodes)
             put("tocBodyMixed", tocBodyLikeNodes > 0)
             put("tocMaxTitleChars", tocMaxTitleChars)
@@ -502,6 +615,8 @@ object StructureAuditMain {
                     nativeChapterPages = emptyList(),
                     nativeBodyStart = null,
                     autoBodyStart = null,
+                    nativeFirstChapter = null,
+                    softwareFirstChapter = null,
                     softwareChapters = 0,
                     softwareSections = 0,
                     softwareTocNodes = 0,
@@ -513,6 +628,7 @@ object StructureAuditMain {
                     readingPageAfterIndex = 0,
                     headerSamples = 0,
                     headerWrong = null,
+                    headerKinds = emptyMap(),
                     tocBodyLikeNodes = 0,
                     tocMaxTitleChars = 0,
                     structureSource = null,

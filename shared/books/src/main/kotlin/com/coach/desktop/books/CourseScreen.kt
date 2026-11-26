@@ -282,7 +282,7 @@ internal fun CourseScreen(
             PageHeader(
                 kicker = when {
                     !isExam -> "课程学习"
-                    detail.hasSyllabusOrScope -> "课程备考 · L1 大纲/讲义优先"
+                    detail.hasSyllabusOrScope -> "课程备考 · 已有考纲"
                     else -> "课程备考"
                 },
                 title = detail.title,
@@ -322,6 +322,8 @@ internal fun CourseScreen(
                         )
                     }
                 }
+
+                CourseExamPointMap(detail, onRealign = onRealign, onPractice = onOpenTopic)
 
                 // Visible, editable record of the user's exam & syllabus answers
                 Row(

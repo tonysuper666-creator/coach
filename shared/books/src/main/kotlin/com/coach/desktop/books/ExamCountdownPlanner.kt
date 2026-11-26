@@ -548,6 +548,7 @@ internal object ExamCountdownPlanner {
             }
             phase == CountdownPhase.SPRINT_CLEAR && gap.discrepancyCount > 0 ->
                 "${gap.discrepancyCount} 处材料口径对照"
+            !gap.hasPracticeEvidence -> "待练习"
             else -> "掌握 $pct%"
         }
         val gapFmt = "%.2f".format(gap.gapScore)

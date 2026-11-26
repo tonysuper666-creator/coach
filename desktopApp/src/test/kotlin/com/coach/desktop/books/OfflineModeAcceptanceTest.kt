@@ -2,7 +2,9 @@ package com.coach.desktop.books
 
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.ComposeUiTest
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
@@ -14,9 +16,12 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.runSkikoComposeUiTest
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import com.coach.client.HttpLedgerTransport
@@ -631,6 +636,72 @@ class OfflineModeAcceptanceTest {
                     }
                     assertTrue(server.bookMapBatchCalls.get() >= 1)
                 }
+
+                // 4E. 阅读器真实入口 (TextbookReader + CompanionAskPane + 选段「讲讲」):
+                //     已判离线时立即显示「需要联网」，不闪出「正在整理…」，保留草稿并在联网后一键发送成功
+                server.online.set(false)
+                val callsBeforeReader = server.explainCalls.get()
+                val readerController = TextbookController(library)
+                runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
+                    setContent {
+                        CompositionLocalProvider(LocalConnectivityPollMs provides 150L) {
+                            WindowsTextbookGate(settings) {
+                                WindowsTextbookHost(readerController, bookExplainer = explainer) { null }
+                            }
+                        }
+                    }
+                    waitUntil(timeoutMillis = 15_000) {
+                        !readerController.state.value.busy && readerController.state.value.screen == BookScreen.HOME &&
+                            onAllNodesWithTag("host-offline-badge").fetchSemanticsNodes().isNotEmpty()
+                    }
+                    onNodeWithTag("home-read").performClick()
+                    waitUntil(timeoutMillis = 10_000) { readerController.state.value.screen == BookScreen.READER }
+                    waitForIdle()
+
+                    // Drag-select passage on page 1 and click "讲讲" (selection-action-explain)
+                    val targetQuote = "Consumer preferences satisfy"
+                    val textNode = onNode(hasTestTag("reader-text") and hasText(targetQuote, substring = true))
+                    val layouts = mutableListOf<TextLayoutResult>()
+                    textNode.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+                    val layout = layouts.single()
+                    val qStart = layout.layoutInput.text.text.indexOf(targetQuote)
+                    val leftBox = layout.getBoundingBox(qStart)
+                    val rightBox = layout.getBoundingBox(qStart + targetQuote.length - 1)
+                    textNode.performMouseInput {
+                        moveTo(Offset(leftBox.left + 0.5f, leftBox.center.y))
+                        press()
+                        moveTo(Offset(rightBox.right - 0.5f, rightBox.center.y))
+                        release()
+                    }
+                    waitUntil(timeoutMillis = 5_000) {
+                        onAllNodesWithTag("selection-action-explain").fetchSemanticsNodes().isNotEmpty()
+                    }
+                    onNodeWithTag("selection-action-explain").performClick()
+                    waitUntil(timeoutMillis = 5_000) {
+                        onAllNodesWithTag("companion-ask-pane").fetchSemanticsNodes().isNotEmpty() &&
+                            onAllNodesWithTag("inline-explain-error").fetchSemanticsNodes().isNotEmpty()
+                    }
+                    onNodeWithTag("inline-explain-loading").assertDoesNotExist()
+                    onNodeWithTag("inline-explain-error").assertTextContains("需要联网才能使用", substring = true)
+                    assertOfflineNoticeContains("companion-ask-offline-notice")
+
+                    // Type follow-up question in CompanionAskPane and click "发送" while offline
+                    onNodeWithTag("inline-followup-input").performTextInput("这段核心假设是什么？")
+                    onNodeWithTag("inline-followup-send").performClick()
+                    waitForIdle()
+                    onNodeWithTag("inline-explain-loading").assertDoesNotExist()
+                    onNodeWithTag("inline-explain-error").assertTextContains("需要联网才能提问", substring = true)
+                    onNodeWithTag("inline-followup-input").assertTextContains("这段核心假设是什么？", substring = true)
+
+                    // Bring server online and 1-click send immediately from CompanionAskPane
+                    server.online.set(true)
+                    onNodeWithTag("inline-followup-send").performClick()
+                    waitUntil(timeoutMillis = 10_000) {
+                        onAllNodesWithTag("inline-explain-turn-0").fetchSemanticsNodes().isNotEmpty() &&
+                            onAllNodesWithTag("inline-explain-error").fetchSemanticsNodes().isEmpty()
+                    }
+                    assertTrue(server.explainCalls.get() > callsBeforeReader)
+                }
             }
         } finally {
             root.toFile().deleteRecursively()
@@ -640,7 +711,6 @@ class OfflineModeAcceptanceTest {
     @Test
     fun item5_offlineToOnlineRecoversWithin30sAndCompletesQueuedUploadsAndLedgerSyncWithoutRestart() {
         val root = Files.createTempDirectory("coach-offline-item5-").toRealPath()
-        val syncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {
             ControllableCoachServer().use { server ->
                 val home = Files.createDirectories(root.resolve("home"))
@@ -652,57 +722,74 @@ class OfflineModeAcceptanceTest {
                 runBlocking { explainer.load() }
                 val controller = TextbookController(library)
 
-                // Set up SyncEngine with an offline queued command
-                val ledgerDriver = JdbcSqliteDriver("jdbc:sqlite:${root.resolve("ledger.sqlite")}", Properties(), ClientDatabase.Schema)
-                val ledgerDb = ClientDatabase(ledgerDriver)
-                val transport = HttpLedgerTransport(server.url, "offline-pc", "t".repeat(43))
-                val sync = SyncEngine(
-                    db = ledgerDb,
-                    deviceId = "offline-pc",
-                    transport = transport,
-                    courses = listOf("C1"),
-                    newId = { UUID.randomUUID().toString() },
-                    hash = { bytes -> MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) } },
-                )
-                val queuedCmd = sync.enqueue(CommandBody("mark_read", "C1", 1_700_000_000_000L, json("week" to 1)))
-                sync.start(syncScope)
+                // Pre-seed client ledger.sqlite with 1 offline queued command and close handle before mounting UI;
+                // WindowsTextbookGate (RememberDesktopLedgerRecovery) must own and drain SyncEngine without test sync.start().
+                val ledgerPath = settings.clientDirectory.resolve("ledger.sqlite")
+                Files.createDirectories(settings.clientDirectory)
+                val queuedCmd = run {
+                    val setupDriver = JdbcSqliteDriver("jdbc:sqlite:${ledgerPath.toAbsolutePath()}", Properties(), ClientDatabase.Schema)
+                    val setupTransport = HttpLedgerTransport(server.url, "offline-pc", "t".repeat(43))
+                    try {
+                        val setupSync = SyncEngine(
+                            db = ClientDatabase(setupDriver),
+                            deviceId = "offline-pc",
+                            transport = setupTransport,
+                            courses = listOf("C1"),
+                            newId = { UUID.randomUUID().toString() },
+                            hash = { bytes -> MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) } },
+                        )
+                        setupSync.enqueue(CommandBody("mark_read", "C1", 1_700_000_000_000L, json("week" to 1)))
+                    } finally {
+                        setupTransport.close()
+                        setupDriver.close()
+                    }
+                }
 
-                try {
-                    runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
-                        setContent {
-                            CompositionLocalProvider(LocalConnectivityPollMs provides 200L) {
+                runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
+                    setContent {
+                        CompositionLocalProvider(LocalConnectivityPollMs provides 200L) {
+                            WindowsTextbookGate(settings) {
                                 WindowsTextbookHost(controller, bookExplainer = explainer) { null }
                             }
                         }
-                        waitUntil(timeoutMillis = 15_000) {
-                            !controller.state.value.busy && controller.state.value.screen == BookScreen.HOME
-                        }
-                        // Enqueue book upload while offline
-                        runBlocking {
-                            controller.uploadCoordinator.enqueueBook(book.id, book.id, book.format, book.title)
-                            controller.uploadCoordinator.syncOnce()
-                        }
-                        waitUntil(timeoutMillis = 10_000) {
-                            onAllNodesWithTag("host-offline-badge").fetchSemanticsNodes().isNotEmpty() &&
-                                controller.state.value.uploadStatuses[book.id]?.state == BookUploadState.WAITING_NETWORK
-                        }
-                        assertEquals("offline", sync.connection.value)
-
-                        // Bring server online WITHOUT restarting host or SyncEngine
-                        server.online.set(true)
-                        waitUntil(timeoutMillis = 25_000) {
-                            onAllNodesWithTag("host-offline-badge").fetchSemanticsNodes().isEmpty() &&
-                                controller.state.value.uploadStatuses[book.id]?.state == BookUploadState.READY &&
-                                sync.connection.value == "online" &&
-                                queuedCmd.commandId in server.receivedCommands
-                        }
-                        assertTrue(server.uploadCalls.get() >= 1)
-                        assertNotNull(sync.receipt(queuedCmd.commandId))
                     }
-                } finally {
-                    syncScope.cancel()
-                    transport.close()
-                    ledgerDriver.close()
+                    waitUntil(timeoutMillis = 15_000) {
+                        !controller.state.value.busy &&
+                            controller.state.value.screen == BookScreen.HOME &&
+                            controller.unifiedUploadClient != null &&
+                            onAllNodesWithTag("windows-host").fetchSemanticsNodes().isNotEmpty()
+                    }
+                    // Enqueue book upload while offline
+                    runBlocking {
+                        controller.uploadCoordinator.enqueueBook(book.id, book.id, book.format, book.title)
+                        controller.uploadCoordinator.syncOnce()
+                    }
+                    controller.syncBookUploads()
+                    waitUntil(timeoutMillis = 10_000) {
+                        onAllNodesWithTag("host-offline-badge").fetchSemanticsNodes().isNotEmpty() &&
+                            controller.state.value.uploadStatuses[book.id]?.state == BookUploadState.WAITING_NETWORK
+                    }
+                    assertTrue(server.receivedCommands.isEmpty())
+
+                    // Bring server online WITHOUT restarting host; app must drain both uploads and ledger outbox within 30s
+                    server.online.set(true)
+                    waitUntil(timeoutMillis = 25_000) {
+                        onAllNodesWithTag("host-offline-badge").fetchSemanticsNodes().isEmpty() &&
+                            controller.state.value.uploadStatuses[book.id]?.state == BookUploadState.READY &&
+                            queuedCmd.commandId in server.receivedCommands
+                    }
+                    assertTrue(server.uploadCalls.get() >= 1)
+                }
+
+                DriverManager.getConnection("jdbc:sqlite:${ledgerPath.toAbsolutePath()}").use { conn ->
+                    conn.prepareStatement("SELECT ack_seq, receipt_status FROM outbox WHERE command_id=?").use { st ->
+                        st.setString(1, queuedCmd.commandId)
+                        st.executeQuery().use { rs ->
+                            assertTrue(rs.next(), "Queued ledger command row must exist")
+                            assertTrue(rs.getLong(1) > 0L, "ack_seq must be persisted")
+                            assertEquals("APPLIED", rs.getString(2))
+                        }
+                    }
                 }
             }
         } finally {

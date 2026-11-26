@@ -373,6 +373,15 @@ internal fun bookBitmapCropPng(bitmap: BookBitmap, left: Int, top: Int, width: I
     } finally { crop.flush() }
 }
 
+internal fun cropBookBitmap(bitmap: BookBitmap, left: Int, top: Int, width: Int, height: Int): BookBitmap {
+    val copy = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+    copy.createGraphics().let { g ->
+        try { g.drawImage(bitmap, 0, 0, width, height, left, top, left + width, top + height, null) }
+        finally { g.dispose() }
+    }
+    return copy
+}
+
 internal fun inspectBookRaster(bytes: ByteArray): BookRaster = ImageIO.createImageInputStream(ByteArrayInputStream(bytes)).use { input ->
     val readers = ImageIO.getImageReaders(input)
     require(readers.hasNext()) { "插图格式暂时读不了，请改用 PNG、JPEG 或 GIF。" }

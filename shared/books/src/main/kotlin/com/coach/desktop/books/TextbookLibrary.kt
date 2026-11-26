@@ -1741,13 +1741,22 @@ internal class TextbookLibrary(
         }
     }
 
+    private fun pageIsEnglishOnly(text: String?): Boolean {
+        if (text.isNullOrBlank()) return false
+        val latin = text.count { it in 'A'..'Z' || it in 'a'..'z' }
+        val han = text.count { it.code in 0x3400..0x9FFF }
+        return latin >= 20 && han < 3
+    }
+
     /** Independent 300 dpi OCR verification of a single PDF page via the library's Tesseract engine.
      * Detects blank or vector-only renders (e.g. missing scan image decoder) and reports OCR unavailable
      * instead of letting valid citations fail with low similarity. */
     fun ocrPdfPageForGuide(bookId: String, pdfPage: Int, control: BookImportControl = BookImportControl()): String {
         val file = original(bookId, "pdf").toFile()
         require(file.isFile) { "原 PDF 文件不存在，无法独立 OCR 核对引文。" }
-        val expectedLetters = runCatching { book(bookId).page(pdfPage)?.text?.count(Char::isLetter) ?: 0 }.getOrDefault(0)
+        val pageText = runCatching { book(bookId).page(pdfPage)?.text }.getOrNull()
+        val expectedLetters = pageText?.count(Char::isLetter) ?: 0
+        val englishOnly = pageIsEnglishOnly(pageText)
         return BookPdfLoader.read(file) { pdf ->
             require(pdfPage in 1..pdf.numberOfPages) { "PDF 页码超出范围：$pdfPage" }
             val hasImages = pageHasImageXObjects(pdf, pdfPage)
@@ -1762,7 +1771,7 @@ internal class TextbookLibrary(
                 if (isPdfRasterBlank(image)) {
                     throw LiteratureOcrUnavailableException("PDF 第 $pdfPage 页渲染结果为空白（扫描图层未正确解码），OCR 不可用。")
                 }
-                ocr.recognize(image, control)
+                ocr.recognize(image, control, englishOnly = englishOnly, singleBlock = false)
             } finally {
                 releaseBookBitmap(image)
             }
@@ -1776,6 +1785,47 @@ internal class TextbookLibrary(
             }
             text
         }
+    }
+
+    /** Targeted 300 dpi single-block Tesseract OCR on the exact non-interleaved bounding crop of [quote]. */
+    fun ocrPdfQuoteCropForGuide(
+        bookId: String,
+        pdfPage: Int,
+        quote: String,
+        control: BookImportControl = BookImportControl(),
+    ): String? {
+        val file = original(bookId, "pdf").toFile()
+        if (!file.isFile) return null
+        val pageText = runCatching { book(bookId).page(pdfPage)?.text }.getOrNull()
+        val englishOnly = pageIsEnglishOnly(pageText) || pageIsEnglishOnly(quote)
+        return runCatching {
+            BookPdfLoader.read(file) { pdf ->
+                if (pdfPage !in 1..pdf.numberOfPages) return@read null
+                val rect = LiteraturePdfLayout.locateQuoteCropRect(pdf, pdfPage, quote) ?: return@read null
+                val bounds = pdf.getPage(pdfPage - 1).cropBox
+                val scale = minOf(bookOcrTargetDpi / 72f, bookOcrMaxSide / maxOf(bounds.width, bounds.height))
+                BookScanImages.checkSize(kotlin.math.ceil(bounds.width * scale).toInt(), kotlin.math.ceil(bounds.height * scale).toInt())
+                val full = OcrTiming.measure("page${pdfPage}.cropRender") { renderBookPdfPage(file, pdf, pdfPage - 1, scale) }
+                try {
+                    val left = (rect.left * full.width).toInt().coerceIn(0, full.width - 1)
+                    val top = (rect.top * full.height).toInt().coerceIn(0, full.height - 1)
+                    val right = (rect.right * full.width).toInt().coerceIn(left + 1, full.width)
+                    val bottom = (rect.bottom * full.height).toInt().coerceIn(top + 1, full.height)
+                    val w = right - left
+                    val h = bottom - top
+                    if (w < 16 || h < 12) return@read null
+                    val crop = cropBookBitmap(full, left, top, w, h)
+                    try {
+                        if (isPdfRasterBlank(crop)) return@read null
+                        ocr.recognize(crop, control, englishOnly = englishOnly, singleBlock = true)
+                    } finally {
+                        releaseBookBitmap(crop)
+                    }
+                } finally {
+                    releaseBookBitmap(full)
+                }
+            }
+        }.getOrNull()
     }
 
     private fun pageHasImageXObjects(pdf: BookPdfDocument, pdfPage: Int): Boolean = runCatching {

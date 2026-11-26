@@ -110,6 +110,8 @@ internal fun bookBitmapCropPng(bitmap: BookBitmap, left: Int, top: Int, width: I
         }
     } finally { if (crop !== bitmap) crop.recycle() }
 }
+internal fun cropBookBitmap(bitmap: BookBitmap, left: Int, top: Int, width: Int, height: Int): BookBitmap =
+    Bitmap.createBitmap(bitmap, left, top, width, height)
 internal fun inspectBookRaster(bytes: ByteArray): BookRaster {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)

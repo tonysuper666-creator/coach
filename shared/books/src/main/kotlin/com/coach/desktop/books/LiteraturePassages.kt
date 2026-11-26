@@ -20,9 +20,13 @@ internal object LiteraturePassages {
     private val end = Regex("""[.!?。！？][”’"')\]]*$""")
     private val folio = Regex("""(?i)^(?:page\s*)?(?:\d+|[ivxlcdm]{1,6})$""")
     private val argument = Regex("""(?i)\b(?:argue|argues|argued|propose|because|therefore|however|whereas|suggests?|conclude|consequently|demonstrates?|explains?|evidence|defined?|central|thesis|claim|claims)\b|因此|然而|本文|表明|说明|认为|关键|核心""")
-    // Fallback safety net; primary answerability gate is structured `answerable` + evidence `refs`.
+    // Fallback safety net against evasive/deflective prose; primary answerability gate is structured `answerable` + evidence `refs`.
     private val missing = Regex(
-        """(?i)(?:片段|材料|文中|摘录|原文|资料).{0,16}(?:未(?:曾)?(?:直接)?(?:涉及|提及|说明|交代|提供|给出)|没有(?:直接)?(?:涉及|提及|提供|给出|说明)|不足以|[仅只]有.{0,4}页眉)|(?:无法|不能|难以)(?:据此|直接|从.{1,12}中)?(?:回答|作答|判断|确定|推断|验证)|(?:cannot|can't|unable to) (?:answer|determine|verify)|(?:excerpt|passage|material).{0,24}(?:does not|insufficient|not (?:mention|cover))""",
+        """(?i)(?:所给|现有|当前|本组|上述|这些|提供的)?(?:片段|材料|文中|摘录|原文|资料|文本).{0,22}(?:未(?:曾|直接|具体|正面|充分|详细)?(?:涉及|提及|说明|交代|提供|给出|涵盖|展开|讨论|记录|回答|包含|回应|记载)|并未.{0,8}(?:涉及|提及|说明|讨论|提供|给出|涵盖|展开|回答|包含)|没有(?:直接|具体)?(?:涉及|提及|提供|给出|说明|讨论|涵盖|包含|记载)|不足以|不足|缺少|缺乏|着墨有限|信息有限|仅(?:仅)?(?:提及|提到|涉及|包含|记录|有|显示|展示)|只(?:提及|提到|涉及|包含|记录|有|谈及|涵盖|给出))|(?:无法|不能|难以|无从|不足以|尚不能)(?:据此|直接|仅凭|仅从|从.{1,16}中?)?(?:回答|作答|判断|确定|推断|验证|评估|比较|概括|证实|得出|确认|全面说明|正面回应)|(?:缺乏|缺少|未见|暂无|没有).{0,10}(?:直接证据|充分证据|相关论述|直接论述|相关记载|具体说明|足够信息|足够依据)|(?:并未|未对此|未正面|未直接)(?:提及|说明|讨论|涉及|回应|回答|展开)|(?:超出|不在).{0,8}(?:所给|现有|材料|片段).{0,6}范围|(?:需|需要)(?:结合|补充|查阅)(?:完整|更多|其他)?(?:原文|材料|全文)|(?:cannot|can't|unable to) (?:answer|determine|verify|assess|conclude)|(?:excerpt|passage|material|text)s?.{0,28}(?:does not|do not|doesn't|don't|insufficient|only mentions?|not (?:mention|cover|address|discuss|provide|explain))|no direct evidence|insufficient (?:evidence|information)""",
+    )
+    // Reject technical reference/block markers leaked into user-facing Chinese prose (keeps 4-digit years like [1660]).
+    private val leakedRef = Regex(
+        """(?i)\bref\s*[:#=\[\(]?\s*\d+|\bblocks?\s*[:#\[]?\s*\d+|(?:片段|摘录|引文|编号)\s*[#＃:：\[【(（]?\s*\d{1,3}|[\[\【]\s*(?:ref\s*[:=]?\s*)?\d{1,3}(?:\s*[,，、]\s*\d{1,3})*\s*[\]\】]""",
     )
     // Bibliographic footnote lines: Author, Title, (Place, Year), p./pp. N
     private val placeYearParen = Regex("""\([A-Z][\p{L}\s.&,'\-:]{1,45},\s*(?:1[5-9]\d{2}|20\d{2})(?:[-–—]\d{2,4})?\)""")
@@ -39,7 +43,8 @@ internal object LiteraturePassages {
         Regex("(?i)如何|怎样|证据|依据|how|evidence") to Regex("(?i)通过|说明|表明|evidence|by means of|demonstrat|showed"),
     )
 
-    fun substantive(text: String) = text.isNotBlank() && !missing.containsMatchIn(text)
+    fun hasLeakedRef(text: String) = leakedRef.containsMatchIn(text)
+    fun substantive(text: String) = text.isNotBlank() && !missing.containsMatchIn(text) && !hasLeakedRef(text)
 
     fun hasControlOrBrokenChar(s: String): Boolean = s.any { ch ->
         ch == '\u0000' || ch == '\uFFFD' ||
@@ -157,11 +162,14 @@ internal object LiteraturePassages {
                         line.isBlank() || folio.matches(line) || publisher.containsMatchIn(line) ||
                             isBibliographicFootnote(line) ||
                             (isEdge && edgeKey(line) in edges && (!end.containsMatchIn(line) || line.length < 45)) -> finishParagraph()
-                        bibliography.matches(line) -> { finishParagraph(); backMatter = true }
+                        bibliography.matches(line) -> {
+                            finishParagraph()
+                            if (page.number > book.pages.size / 2) backMatter = true
+                        }
                         isHeading -> finishParagraph()
                         note.containsMatchIn(line) || (index >= lines.size / 2 && bottomBareNote.containsMatchIn(line)) -> {
                             finishParagraph()
-                            footnotes = true
+                            if (index >= lines.size * 2 / 3) footnotes = true
                         }
                         !footnotes -> {
                             if (start < 0) start = offset

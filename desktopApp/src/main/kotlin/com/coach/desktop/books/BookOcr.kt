@@ -110,7 +110,10 @@ internal object BundledBookOcr : BookOcr {
         }
     }
 
-    override fun recognize(image: BufferedImage, control: BookImportControl): String {
+    override fun recognize(image: BufferedImage, control: BookImportControl): String =
+        recognize(image, control, englishOnly = false, singleBlock = false)
+
+    override fun recognize(image: BufferedImage, control: BookImportControl, englishOnly: Boolean, singleBlock: Boolean): String {
         control.check()
         BookScanImages.checkSize(image.width, image.height)
         // Composite transparent PNGs onto white, then send a compact grayscale raster.
@@ -125,12 +128,13 @@ internal object BundledBookOcr : BookOcr {
             }
             val bridge = loaded.api
             val handle = bridge.TessBaseAPICreate()
+            val lang = if (englishOnly) "eng" else loaded.languages
             try {
-                require(bridge.TessBaseAPIInit2(handle, loaded.tessdata, loaded.languages, 1) == 0) {
+                require(bridge.TessBaseAPIInit2(handle, loaded.tessdata, lang, 1) == 0) {
                     "文字识别模型无法读取，请重新安装 LearningCoach 后重试。"
                 }
                 control.check()
-                bridge.TessBaseAPISetPageSegMode(handle, 3)
+                bridge.TessBaseAPISetPageSegMode(handle, if (singleBlock) 6 else 3)
                 val bytes = (gray.raster.dataBuffer as java.awt.image.DataBufferByte).data
                 bridge.TessBaseAPISetImage(handle, bytes, gray.width, gray.height, 1, gray.width)
                 bridge.TessBaseAPISetSourceResolution(handle, 300)

@@ -71,9 +71,12 @@ internal fun LiteratureGuidePane(
                 library.withCourseDatabase { LiteratureGuideStore.saveSelection(it, detail.courseId, key, input) }
             }
 
-            val ocr = CachingOcrVerifier { book, pdfPage ->
-                library.ocrPdfPageForGuide(book.id, pdfPage)
-            }
+            val ocr = CachingOcrVerifier(object : LiteratureOcrVerifier {
+                override fun ocrPageText(book: Textbook, pdfPage: Int): String =
+                    library.ocrPdfPageForGuide(book.id, pdfPage)
+                override fun ocrQuoteCropText(book: Textbook, pdfPage: Int, quote: String): String? =
+                    library.ocrPdfQuoteCropForGuide(book.id, pdfPage, quote)
+            })
             val passes = mutableListOf<GuidePassDiagnostic>()
 
             val firstReq = input.request()

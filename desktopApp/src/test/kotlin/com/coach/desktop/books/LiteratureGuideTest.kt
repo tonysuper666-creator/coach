@@ -490,4 +490,144 @@ class LiteratureGuideTest {
         assertEquals("2006", m3.year, "Consensus year between filename and page (2006) must override launch year 2004")
         assertEquals("Founder members of the experimental guild", m3.title)
     }
+
+    @Test fun placeholderPdfMetadataSomeAuthorSomeTitleFallsBackToFilenameAndFrontPage() {
+        val root = Files.createTempDirectory("coach-guide-placeholder-meta-")
+        try {
+            val pdfPath = root.resolve("Aldridge-Cataloguing-Curiosities-2012.pdf")
+            org.apache.pdfbox.pdmodel.PDDocument().use { pdf ->
+                pdf.documentInformation.author = "someAuthor"
+                pdf.documentInformation.title = "someTitle"
+                val page = org.apache.pdfbox.pdmodel.PDPage()
+                pdf.addPage(page)
+                val font = org.apache.pdfbox.pdmodel.font.PDType1Font(org.apache.pdfbox.pdmodel.font.Standard14Fonts.FontName.HELVETICA)
+                org.apache.pdfbox.pdmodel.PDPageContentStream(pdf, page).use { stream ->
+                    fun line(y: Float, text: String) {
+                        stream.beginText(); stream.setFont(font, 12f); stream.newLineAtOffset(45f, y); stream.showText(text); stream.endText()
+                    }
+                    line(740f, "Cataloguing Natural Curiosities in Early Archives")
+                    line(720f, "Martin Aldridge")
+                    line(700f, "University of Leeds")
+                    line(680f, "Abstract")
+                    line(660f, "We argue that printed catalogues organized natural specimens across collections.")
+                }
+                pdf.save(pdfPath.toFile())
+            }
+            val library = TextbookLibrary(root.resolve("library"))
+            val imported = library.importBook(pdfPath)
+            val meta = library.literatureBook(imported.id).literatureMeta!!
+            assertNotEquals("someAuthor", meta.author)
+            assertNotEquals("someTitle", meta.title)
+            assertEquals("Martin Aldridge", meta.author)
+            assertEquals("2012", meta.year)
+            assertFalse("someTitle" in meta.title)
+
+            // Verify lowerCamelCase placeholders (someAuthor/someTitle/bookTitle) are rejected while real surnames pass.
+            val m2 = LiteratureMetadata.extract(
+                pdf = null,
+                bookId = "b4",
+                storedTitle = "someTitle",
+                sourceFilename = "MacGregor-Cabinet-History-1994.pdf",
+                firstPagesText = listOf("Author: someAuthor\nTitle: bookTitle\nA study of historical collections."),
+            )
+            assertEquals("MacGregor", m2.author)
+            assertEquals("1994", m2.year)
+            assertFalse(m2.title == "someTitle" || m2.title == "bookTitle")
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun ocrCropFallbackEnglishModeAndTypographyNormRescueGenuineBodyQuotes() {
+        // Historical long-s, em-dash, line-wrap hyphen, full-width comma, and stray space before punctuation normalize cleanly.
+        val quote = "The collec- ting of rare specimens—catalogued by patrons, endured."
+        val ocrWithQuirks = "The collecting of rare ſpecimens - catalogued by patrons ， endured ."
+        val sim = LiteratureTextNorm.bestContiguousSimilarity(quote, ocrWithQuirks)
+        assertTrue(sim >= LiteratureTextNorm.OCR_SIMILARITY_THRESHOLD, "Expected >= 0.98 after typography norm, got $sim")
+
+        // Real 300 dpi cropped-region Tesseract OCR rescues a genuine quote when full-page OCR is degraded,
+        // while still rejecting a fabricated quote!
+        val root = Files.createTempDirectory("coach-guide-ocr-crop-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val imported = (1..3).map { library.importBook(LiteratureGuideFixture.pdf(root, it)) }
+            val litBooks = imported.map { library.literatureBook(it.id) }
+            val guideInput = LiteratureInput(litBooks, listOf("What did the plots show?"))
+            val reply = LiteratureGuideFixture.reply(guideInput.request())
+
+            // Simulate degraded full-page OCR (< 0.98) paired with real 300 dpi cropped-region Tesseract OCR.
+            val cropOnlyVerifier = object : LiteratureOcrVerifier {
+                override fun ocrPageText(book: Textbook, pdfPage: Int): String = "Noisy degraded full page scan header."
+                override fun ocrQuoteCropText(book: Textbook, pdfPage: Int, quote: String): String? =
+                    library.ocrPdfQuoteCropForGuide(book.id, pdfPage, quote)
+            }
+            val rescued = guideInput.verify(reply, cropOnlyVerifier)
+            assertNotNull(rescued.toComplete(litBooks, guideInput.questions), "Expected crop OCR rescue, failures=${rescued.failures}")
+
+            // English-only PDF must invoke BookOcr with englishOnly=true.
+            var sawEnglishOnly = false
+            val trackingOcr = object : BookOcr {
+                override fun recognize(image: BookBitmap, control: BookImportControl): String = ""
+                override fun recognize(image: BookBitmap, control: BookImportControl, englishOnly: Boolean, singleBlock: Boolean): String {
+                    if (englishOnly) sawEnglishOnly = true
+                    return "Plot 1 contained flowering plants. Sample 1 showed faster growth in shade."
+                }
+            }
+            val trackedLib = TextbookLibrary(root.resolve("tracked-lib"), ocr = trackingOcr)
+            val b1 = trackedLib.importBook(LiteratureGuideFixture.pdf(root, 1))
+            trackedLib.ocrPdfPageForGuide(b1.id, 1)
+            assertTrue(sawEnglishOnly, "Expected English-only PDF to use pure eng Tesseract model")
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun evasiveAnswersAndLeakedRefNumbersAreRejectedByGate() {
+        // Leaked ref / block numbers in prose must be rejected.
+        assertTrue(LiteraturePassages.hasLeakedRef("根据 ref 12 可知标本登记维系了可信度。"))
+        assertTrue(LiteraturePassages.hasLeakedRef("片段 4 说明早期收藏依赖捐赠者。"))
+        assertTrue(LiteraturePassages.hasLeakedRef("如 [3] 所示，编目工作持续多年。"))
+        // 4-digit historical years in brackets must NOT be flagged as leaked refs.
+        assertFalse(LiteraturePassages.hasLeakedRef("[1660] 年的会议记录证明了早期制度。"))
+
+        // Evasive / deflective sentences must be rejected by substantive().
+        val evasions = listOf(
+            "现有片段仅提及收藏地点，未涉及具体分类标准。",
+            "所给材料只提到早期捐赠者，缺乏相关论述。",
+            "当前文本着墨有限，难以全面说明其历史背景。",
+            "需要结合完整原文进一步核实该观点。",
+            "材料中并未讨论该作者对标本分类的立场。",
+        )
+        for (e in evasions) {
+            assertFalse(LiteraturePassages.substantive(e), "Expected evasion rejected: $e")
+        }
+        // Legitimate historical answers describing actors' inability must NOT be rejected.
+        assertTrue(LiteraturePassages.substantive("当时的会员未能维持日常管理，自愿团体无法承担繁重的编目与保存工作。"))
+
+        // End-to-end verify() records leaked_ref and fallback_unanswerable failure rules cleanly.
+        val req = input.request()
+        val base = LiteratureGuideFixture.reply(req)
+        val badAnswers = buildJsonArray {
+            add(buildJsonObject {
+                put("questionIndex", 0)
+                put("answerable", true)
+                put("sentences", buildJsonArray {
+                    add(buildJsonObject { put("text", "根据 ref 0，样地观察显示差异。"); put("refs", buildJsonArray { add(0) }) })
+                    add(buildJsonObject { put("text", "第二句有效总结。"); put("refs", buildJsonArray { add(1) }) })
+                })
+            })
+            add(buildJsonObject {
+                put("questionIndex", 1)
+                put("answerable", true)
+                put("sentences", buildJsonArray {
+                    add(buildJsonObject { put("text", "现有片段仅提及样地位置，未讨论具体原因。"); put("refs", buildJsonArray { add(0) }) })
+                    add(buildJsonObject { put("text", "缺乏相关论述以正面回应。"); put("refs", buildJsonArray { add(1) }) })
+                })
+            })
+        }
+        val checked = input.verify(JsonObject(base + ("answers" to badAnswers)), exactOcr)
+        assertNull(checked.toComplete(books, input.questions))
+        assertEquals(mapOf("answer:0" to "leaked_ref", "answer:1" to "fallback_unanswerable"),
+            checked.failures.associate { it.itemKey to it.rule })
+    }
 }

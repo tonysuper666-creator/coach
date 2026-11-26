@@ -64,12 +64,15 @@ internal class LiteratureOcrUnavailableException(message: String, cause: Throwab
 
 internal fun interface LiteratureOcrVerifier {
     fun ocrPageText(book: Textbook, pdfPage: Int): String
+    fun ocrQuoteCropText(book: Textbook, pdfPage: Int, quote: String): String? = null
 }
 
 internal class CachingOcrVerifier(private val delegate: LiteratureOcrVerifier) : LiteratureOcrVerifier {
     private val cache = HashMap<Pair<String, Int>, Result<String>>()
     override fun ocrPageText(book: Textbook, pdfPage: Int): String =
         cache.getOrPut(book.id to pdfPage) { runCatching { delegate.ocrPageText(book, pdfPage) } }.getOrThrow()
+    override fun ocrQuoteCropText(book: Textbook, pdfPage: Int, quote: String): String? =
+        delegate.ocrQuoteCropText(book, pdfPage, quote)
 }
 
 internal class LiteratureInput(
@@ -359,7 +362,13 @@ internal class LiteratureInput(
                 refOutcomes[ref] = res
                 return res
             }
-            val similarity = LiteratureTextNorm.bestContiguousSimilarity(a.quoteAnchor, ocrText)
+            var similarity = LiteratureTextNorm.bestContiguousSimilarity(a.quoteAnchor, ocrText)
+            if (similarity < LiteratureTextNorm.OCR_SIMILARITY_THRESHOLD) {
+                val cropOcr = runCatching { ocr.ocrQuoteCropText(excerpt.book, a.pdfPage, a.quoteAnchor) }.getOrNull()
+                if (!cropOcr.isNullOrBlank()) {
+                    similarity = maxOf(similarity, LiteratureTextNorm.bestContiguousSimilarity(a.quoteAnchor, cropOcr))
+                }
+            }
             val passed = similarity >= LiteratureTextNorm.OCR_SIMILARITY_THRESHOLD
             ocrChecks += GuideOcrCheck(ref, excerpt.book.id, a.pdfPage, similarity, passed)
             val res = if (passed) {
@@ -432,6 +441,8 @@ internal class LiteratureInput(
                         failures += GuideItemFailure("paper:$bookId", label, "invalid_keyword", "关键词为空或超过 32 字")
                     claim.isBlank() || claim.length > 120 ->
                         failures += GuideItemFailure("paper:$bookId", label, "invalid_claim", "概括句为空或超过 120 字")
+                    LiteraturePassages.hasLeakedRef(claim) ->
+                        failures += GuideItemFailure("paper:$bookId", label, "leaked_ref", "概括句泄露了 ref/片段编号")
                     !LiteraturePassages.substantive(claim) ->
                         failures += GuideItemFailure("paper:$bookId", label, "fallback_unanswerable", "概括句含「无法回答/未涉及」表述")
                     refInt == null ->
@@ -502,9 +513,15 @@ internal class LiteratureInput(
                         }
                         continue
                     }
+                    if (LiteraturePassages.hasLeakedRef(text)) {
+                        if (firstFailure == null) {
+                            firstFailure = GuideItemFailure("answer:$qIdx", label, "leaked_ref", "第 ${sIdx + 1} 句把 ref/片段编号写进了答案正文")
+                        }
+                        continue
+                    }
                     if (!LiteraturePassages.substantive(text)) {
                         if (firstFailure == null) {
-                            firstFailure = GuideItemFailure("answer:$qIdx", label, "fallback_unanswerable", "第 ${sIdx + 1} 句命中兜底「无法回答」规则")
+                            firstFailure = GuideItemFailure("answer:$qIdx", label, "fallback_unanswerable", "第 ${sIdx + 1} 句命中兜底回避/「无法回答」规则")
                         }
                         continue
                     }

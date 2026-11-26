@@ -14,8 +14,10 @@ internal data class LiteraturePaperMeta(
 internal object LiteratureTextNorm {
     const val OCR_SIMILARITY_THRESHOLD = 0.98
     private val ligature = Regex("[\uFB00-\uFB06]")
-    private val lineHyphen = Regex("""(?<=\p{L})[-\u2010\u2011]\s*\n\s*(?=\p{Ll})""")
+    private val lineHyphen = Regex("""(?<=\p{L})[-\u2010\u2011]\s+(?=\p{Ll})""")
     private val whitespace = Regex("""\s+""")
+    private val spaceBeforePunct = Regex("""\s+([,.;:!?])""")
+    private val spacedDash = Regex("""\s*-\s*""")
     private val entity = Regex("""&(?:#(\d{1,7})|#x([0-9a-fA-F]{1,6})|([a-zA-Z][a-zA-Z0-9]{1,15}));""")
     private val namedEntities = mapOf(
         "amp" to "&", "lt" to "<", "gt" to ">", "quot" to "\"", "apos" to "'", "nbsp" to " ",
@@ -49,11 +51,12 @@ internal object LiteratureTextNorm {
         return current.replace(whitespace, " ").trim()
     }
 
-    /** Normalize whitespace, line-break hyphens, ligatures, and typographic quotes/dashes for comparison. */
+    /** Normalize whitespace, line-break hyphens, ligatures, historical long-s, and typographic punctuation. */
     fun normalize(s: String): String = s
         .replace("\u00AD", "")
         .replace(ligature) { Normalizer.normalize(it.value, Normalizer.Form.NFKC) }
         .replace(lineHyphen, "")
+        .replace('\u017F', 's')
         .replace('\u2018', '\'')
         .replace('\u2019', '\'')
         .replace('\u02BC', '\'')
@@ -63,7 +66,17 @@ internal object LiteratureTextNorm {
         .replace('\u2011', '-')
         .replace('\u2012', '-')
         .replace('\u2013', '-')
+        .replace('\u2014', '-')
+        .replace('\u2015', '-')
+        .replace('\uFF0C', ',')
+        .replace('\uFF0E', '.')
+        .replace('\uFF1B', ';')
+        .replace('\uFF1A', ':')
+        .replace('\uFF08', '(')
+        .replace('\uFF09', ')')
         .replace(whitespace, " ")
+        .replace(spaceBeforePunct, "$1")
+        .replace(spacedDash, "-")
         .trim()
 
     /**
@@ -117,11 +130,16 @@ internal object LiteratureTextNorm {
 }
 
 internal object LiteratureMetadata {
-    private val junkTitle = Regex("""(?i)^(?:untitled|document\d*|microsoft word.*|acrobat.*|scan\d*|page\s*\d+|doi[:/\s].*|\d+)$""")
+    private val junkTitle = Regex(
+        """(?i)^(?:untitled(?:\s+document)?|document\d*|book\d*|slide\d*|microsoft word.*|powerpoint.*|acrobat.*|indesign.*|latex|tex|dvips|scan\d*|page\s*\d+|doi[:/\s].*|\d+|none|null|nil|n/?a|tbd|todo|draft|sample|test|placeholder|no\s+title|(?:some|your|my|the|default|sample|test|dummy|temp|placeholder|insert|enter|add|unknown|generic|example|book|article|chapter|document|paper)[\s._\-]*title)$""",
+    )
     private val nonTitleLine = Regex(
         """(?i)\b(?:isbn|issn|doi|copyright|all rights reserved|fair dealing|fair use|coursepack|course pack|course reading|university library|digitisation|digitization|licen[cs]e|downloaded from|stable url|published by|permission of|in progress|editor in chief|reference article)\b|https?://|©""",
     )
-    private val junkAuthor = Regex("""(?i)^(?:admin(?:istrator)?|user|unknown|owner|author|jstor|windows user|macbook|hp|dell|lenovo|default|system|pdf|scanner|editor|anonymous)$""")
+    private val junkAuthor = Regex(
+        """(?i)^(?:admin(?:istrator)?|user|unknown|owner|author|jstor|windows user|macbook|hp|dell|lenovo|default|system|pdf|scanner|editor|editorial|staff|anonymous|none|null|nil|n/?a|tbd|todo|placeholder|no\s+author|publisher|adobe|acrobat|indesign|latex|springer|elsevier|wiley|routledge|proquest|ebsco|oxford|cambridge|taylor\s*&\s*francis|(?:some|your|my|the|default|sample|test|dummy|temp|placeholder|insert|enter|add|unknown|generic|example|book|article|chapter|document|paper)[\s._\-]*(?:author|name|writer|creator)s?)$""",
+    )
+    private val lowerCamelPlaceholder = Regex("""^[a-z]+[A-Z][a-zA-Z0-9]*$""")
     private val nonSurnameLead = setOf(
         "the", "a", "an", "on", "in", "of", "notes", "paper", "article", "chapter", "week", "reading",
         "course", "study", "history", "science", "scientific", "introduction", "review", "report",
@@ -233,8 +251,8 @@ internal object LiteratureMetadata {
             pdfCreationYear = pdfCreationYear,
         )
 
-        val decodedStored = LiteratureTextNorm.decodeHtmlEntities(storedTitle)
-        val finalTitle = (pdfTitle ?: pageTitle ?: fileTitle ?: decodedStored.ifBlank { strippedStem }).take(180)
+        val decodedStored = LiteratureTextNorm.decodeHtmlEntities(storedTitle).takeIf { isUsefulTitle(it) }
+        val finalTitle = (pdfTitle ?: pageTitle ?: fileTitle ?: decodedStored ?: strippedStem).take(180)
         val finalAuthor = (pageAuthor ?: pdfAuthor ?: expandedFileAuthor).orEmpty().take(80)
         return LiteraturePaperMeta(bookId, finalTitle, finalAuthor, finalYear)
     }
@@ -333,12 +351,17 @@ internal object LiteratureMetadata {
         return (fileYear ?: explicitPageYear ?: pdfMetaYears.firstOrNull() ?: pageYears.firstOrNull()).orEmpty().take(10)
     }
 
-    private fun isUsefulTitle(s: String): Boolean =
-        s.length in 3..220 && !junkTitle.matches(s) && !nonTitleLine.containsMatchIn(s) && !s.endsWith(".pdf", true)
+    private fun isUsefulTitle(s: String): Boolean {
+        val clean = s.trim()
+        if (clean.length !in 3..220) return false
+        if (lowerCamelPlaceholder.matches(clean)) return false
+        return !junkTitle.matches(clean) && !nonTitleLine.containsMatchIn(clean) && !clean.endsWith(".pdf", true)
+    }
 
     private fun isUsefulAuthor(s: String): Boolean {
         val clean = s.trim()
         if (clean.length !in 2..80) return false
+        if (lowerCamelPlaceholder.matches(clean)) return false
         if (junkAuthor.matches(clean)) return false
         if (Regex("""(?i)^(?:HIST|ECON|COMP|MATH|WEEK|W\d|CH\d|CHAPTER|MODULE|LECTURE)\d*""").matches(clean)) return false
         return clean.any(Char::isLetter)
@@ -543,5 +566,136 @@ internal object LiteraturePdfLayout {
             }.apply { startPage = page; endPage = page; sortByPosition = true }.getText(pdf)
             GuideRegion(text, label, reference, wideGapRanges)
         }
+    }
+
+    internal data class QuoteCropRect(val left: Float, val top: Float, val right: Float, val bottom: Float)
+
+    /**
+     * Locate a contiguous, non-interleaved quote's normalized [0..1] display-space bounding box on [page]
+     * for targeted 300 dpi single-block Tesseract OCR verification. Returns null if the quote spans a wide
+     * intra-line gap or disjoint facing-page columns.
+     */
+    fun locateQuoteCropRect(pdf: BookPdfDocument, page: Int, quote: String): QuoteCropRect? {
+        val needle = LiteratureTextNorm.normalize(quote)
+        if (needle.length < 6) return null
+        val pdfPage = pdf.getPage(page - 1)
+        val crop = pdfPage.cropBox
+        if (crop.width <= 0f || crop.height <= 0f) return null
+        val rotation = ((pdfPage.rotation % 360) + 360) % 360
+
+        data class PlacedWord(
+            val text: String, val x: Float, val right: Float, val y: Float, val height: Float,
+            val nx0: Float, val ny0: Float, val nx1: Float, val ny1: Float,
+        )
+
+        fun normPt(tx: Float, ty: Float): Pair<Float, Float> {
+            val u = ((tx - crop.lowerLeftX) / crop.width).coerceIn(0f, 1f)
+            val v = ((crop.upperRightY - ty) / crop.height).coerceIn(0f, 1f)
+            return when (rotation) {
+                90 -> (1f - v) to u
+                180 -> (1f - u) to (1f - v)
+                270 -> v to (1f - u)
+                else -> u to v
+            }
+        }
+
+        val words = mutableListOf<PlacedWord>()
+        val stripper = object : BookPdfStripper() {
+            override fun writeString(text: String, textPositions: List<BookPdfTextPosition>) {
+                var start = 0f; var end = 0f; var y = 0f; var height = 0f
+                var minNx = 1f; var minNy = 1f; var maxNx = 0f; var maxNy = 0f
+                val token = StringBuilder()
+                fun flush() {
+                    if (token.isNotEmpty() && token.any { !it.isWhitespace() }) {
+                        words += PlacedWord(token.toString(), start, end, y, height, minNx, minNy, maxNx, maxNy)
+                    }
+                    token.clear()
+                    minNx = 1f; minNy = 1f; maxNx = 0f; maxNy = 0f
+                }
+                for (glyph in textPositions) {
+                    if (!insideCropBox(glyph, crop)) { flush(); continue }
+                    val u = glyph.unicode
+                    if (u.isNullOrEmpty() || u.all { it == ' ' || it == '\t' || it == '\r' || it == '\n' }) { flush(); continue }
+                    val x = glyph.xDirAdj
+                    val h = glyph.heightDir.takeIf { it > 0f } ?: glyph.fontSizeInPt.coerceAtLeast(1f)
+                    if (token.isNotEmpty() && x - end > glyph.widthOfSpace.coerceAtLeast(1f) * 0.6f) flush()
+                    if (token.isEmpty()) { start = x; y = glyph.yDirAdj; height = h } else if (h > height) height = h
+                    val tm = glyph.textMatrix
+                    val gx = tm.translateX
+                    val gy = tm.translateY
+                    val gw = glyph.widthDirAdj.coerceAtLeast(1f)
+                    val pts = listOf(
+                        normPt(gx, gy),
+                        normPt(gx + gw, gy),
+                        normPt(gx, gy + h),
+                        normPt(gx + gw, gy + h),
+                    )
+                    for ((px, py) in pts) {
+                        if (px < minNx) minNx = px
+                        if (py < minNy) minNy = py
+                        if (px > maxNx) maxNx = px
+                        if (py > maxNy) maxNy = py
+                    }
+                    token.append(u)
+                    end = x + glyph.widthDirAdj
+                }
+                flush()
+            }
+        }
+        stripper.startPage = page
+        stripper.endPage = page
+        stripper.sortByPosition = true
+        stripper.writeText(pdf, StringWriter())
+        if (words.isEmpty()) return null
+
+        val positiveHeights = words.map { it.height }.filter { it > 0f }.sorted()
+        val bodyHeight = if (positiveHeights.isNotEmpty()) positiveHeights[positiveHeights.size / 2] else 10f
+
+        // Match needle words sequentially against normalized word stream.
+        val needleTokens = needle.lowercase().split(' ').filter { it.isNotEmpty() }
+        if (needleTokens.size < 3) return null
+        val pageTokens = words.map { LiteratureTextNorm.normalize(it.text).lowercase() }
+        val firstKey = needleTokens.first()
+        val lastKey = needleTokens.last()
+        var bestSpan: IntRange? = null
+        var bestScore = 0.0
+        for (i in pageTokens.indices) {
+            if (!pageTokens[i].contains(firstKey) && !firstKey.contains(pageTokens[i])) continue
+            val maxEnd = minOf(words.size, i + needleTokens.size + 8)
+            val minEnd = minOf(words.size, i + maxOf(1, needleTokens.size - 4))
+            for (j in minEnd..maxEnd) {
+                val endTok = pageTokens[j - 1]
+                if (!endTok.contains(lastKey) && !lastKey.contains(endTok)) continue
+                val joined = words.subList(i, j).joinToString(" ") { it.text }
+                val sim = LiteratureTextNorm.bestContiguousSimilarity(needle, joined)
+                if (sim > bestScore) {
+                    bestScore = sim
+                    bestSpan = i until j
+                    if (sim >= 0.995) break
+                }
+            }
+            if (bestScore >= 0.995) break
+        }
+        val span = bestSpan ?: return null
+        if (bestScore < 0.92) return null
+        val matched = words.subList(span.first, span.last + 1)
+        // Refuse to crop if matched words span a wide intra-line gap (> 1.5x bodyHeight).
+        val matchedRows = mutableListOf<MutableList<PlacedWord>>()
+        for (w in matched.sortedBy { it.y }) {
+            val row = matchedRows.lastOrNull()?.takeIf { abs(it.first().y - w.y) <= maxOf(1.5f, w.height * 0.4f) }
+            if (row != null) row += w else matchedRows += mutableListOf(w)
+        }
+        for (row in matchedRows) {
+            row.sortBy { it.x }
+            if (row.zipWithNext().any { (a, b) -> b.x - a.right > bodyHeight * 1.5f }) return null
+        }
+        val padX = (bodyHeight * 2.0f / crop.width).coerceIn(0.015f, 0.06f)
+        val padY = (bodyHeight * 1.6f / crop.height).coerceIn(0.012f, 0.05f)
+        val l = (matched.minOf { it.nx0 } - padX).coerceIn(0f, 1f)
+        val t = (matched.minOf { it.ny0 } - padY).coerceIn(0f, 1f)
+        val r = (matched.maxOf { it.nx1 } + padX).coerceIn(0f, 1f)
+        val b = (matched.maxOf { it.ny1 } + padY).coerceIn(0f, 1f)
+        if (r - l < 0.02f || b - t < 0.008f) return null
+        return QuoteCropRect(l, t, r, b)
     }
 }

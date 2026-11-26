@@ -6,6 +6,8 @@ import java.awt.Point;
 import java.awt.Window;
 import java.awt.event.InputEvent;
 import java.awt.event.MouseEvent;
+import java.awt.event.MouseListener;
+import java.awt.event.MouseMotionListener;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.InputStreamReader;
@@ -25,10 +27,20 @@ import javax.swing.SwingUtilities;
 /**
  * Smoke-only AWT drag. OS cursor injection moves the pointer on the ARM runner
  * and Compose still treats the gesture as a click, so the selection toolbar
- * never appears. This posts the same MouseEvents the scene mediator listens for.
- * It stays idle unless COACH_DRAG_PORT_FILE is set, and it listens on loopback.
+ * never appears. This invokes the mouse listeners on the canvas the scene
+ * mediator registered. Dispatching through the component lets the input method
+ * eat the drag before those listeners run. Selection text is published as the
+ * gesture proceeds, and the page reads it on release, so the events are handed
+ * over one at a time and the EDT is free between them. The agent stays idle
+ * unless COACH_DRAG_PORT_FILE is set, and it listens on loopback.
  */
 public final class ArmDragAgent {
+    private static Component dragTarget;
+    private static int dragX0;
+    private static int dragY0;
+    private static int dragX1;
+    private static int dragY1;
+
     private ArmDragAgent() {}
 
     public static void premain(String args, Instrumentation instrumentation) {
@@ -81,8 +93,34 @@ public final class ArmDragAgent {
         int x2 = Integer.parseInt(parts[3]);
         int y2 = Integer.parseInt(parts[4]);
         String[] reply = new String[1];
-        SwingUtilities.invokeAndWait(() -> reply[0] = dragOnEdt(x1, y1, x2, y2));
-        return reply[0];
+        SwingUtilities.invokeAndWait(() -> reply[0] = prepareDrag(x1, y1, x2, y2));
+        if (reply[0].startsWith("ERR")) return reply[0];
+        StringBuilder errors = new StringBuilder();
+        long when = System.currentTimeMillis();
+        deliver(MouseEvent.MOUSE_MOVED, dragX0, dragY0, 0, MouseEvent.NOBUTTON, when, errors);
+        pause();
+        deliver(MouseEvent.MOUSE_PRESSED, dragX0, dragY0,
+            InputEvent.BUTTON1_DOWN_MASK, MouseEvent.BUTTON1, when + 16, errors);
+        pause();
+        int steps = 8;
+        for (int i = 1; i <= steps; i++) {
+            int x = dragX0 + (dragX1 - dragX0) * i / steps;
+            int y = dragY0 + (dragY1 - dragY0) * i / steps;
+            deliver(MouseEvent.MOUSE_DRAGGED, x, y,
+                InputEvent.BUTTON1_DOWN_MASK, MouseEvent.NOBUTTON, when + 16L + i * 16L, errors);
+            pause();
+        }
+        deliver(MouseEvent.MOUSE_RELEASED, dragX1, dragY1, 0, MouseEvent.BUTTON1, when + 200, errors);
+        if (errors.length() > 0) return "ERR " + errors.toString().trim();
+        return "OK direct " + reply[0];
+    }
+
+    private static void pause() {
+        try {
+            Thread.sleep(80);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private static String describeTargets() throws Exception {
@@ -104,7 +142,7 @@ public final class ArmDragAgent {
         return reply[0];
     }
 
-    private static String dragOnEdt(int screenX1, int screenY1, int screenX2, int screenY2) {
+    private static String prepareDrag(int screenX1, int screenY1, int screenX2, int screenY2) {
         Component target = findTarget(screenX1, screenY1);
         if (target == null) return "ERR no-mouse-target";
         try {
@@ -113,22 +151,25 @@ public final class ArmDragAgent {
             SwingUtilities.convertPointFromScreen(start, target);
             SwingUtilities.convertPointFromScreen(end, target);
             target.requestFocusInWindow();
-            long when = System.currentTimeMillis();
-            // Press must carry BUTTON1 before any dragged event. The scene filter
-            // drops a button-down move until a primary press has been seen.
-            post(target, MouseEvent.MOUSE_MOVED, start.x, start.y, 0, MouseEvent.NOBUTTON, when);
-            post(target, MouseEvent.MOUSE_PRESSED, start.x, start.y,
-                InputEvent.BUTTON1_DOWN_MASK, MouseEvent.BUTTON1, when + 16);
-            int steps = 8;
-            for (int i = 1; i <= steps; i++) {
-                int x = start.x + (end.x - start.x) * i / steps;
-                int y = start.y + (end.y - start.y) * i / steps;
-                post(target, MouseEvent.MOUSE_DRAGGED, x, y,
-                    InputEvent.BUTTON1_DOWN_MASK, MouseEvent.NOBUTTON, when + 16L + i * 12L);
-            }
-            post(target, MouseEvent.MOUSE_RELEASED, end.x, end.y, 0, MouseEvent.BUTTON1, when + 140);
+            dragTarget = target;
+            dragX0 = start.x;
+            dragY0 = start.y;
+            dragX1 = end.x;
+            dragY1 = end.y;
             Point origin = target.getLocationOnScreen();
-            return "OK " + target.getClass().getName()
+            StringBuilder names = new StringBuilder();
+            for (MouseListener listener : target.getMouseListeners()) {
+                if (names.length() > 0) names.append('+');
+                names.append(listener.getClass().getName());
+            }
+            for (MouseMotionListener listener : target.getMouseMotionListeners()) {
+                String name = listener.getClass().getName();
+                if (names.indexOf(name) >= 0) continue;
+                if (names.length() > 0) names.append('+');
+                names.append(name);
+            }
+            return target.getClass().getName()
+                + " listeners=" + names
                 + " local=" + start.x + "," + start.y + "->" + end.x + "," + end.y
                 + " origin=" + origin.x + "," + origin.y
                 + " size=" + target.getWidth() + "x" + target.getHeight();
@@ -137,9 +178,39 @@ public final class ArmDragAgent {
         }
     }
 
-    private static void post(Component target, int id, int x, int y, int modifiers, int button, long when) {
-        MouseEvent event = new MouseEvent(target, id, when, modifiers, x, y, 1, false, button);
-        target.dispatchEvent(event);
+    private static void deliver(int id, int x, int y, int modifiers, int button, long when, StringBuilder errors)
+        throws Exception {
+        String[] failure = new String[1];
+        SwingUtilities.invokeAndWait(() -> failure[0] = deliverOnEdt(id, x, y, modifiers, button, when));
+        if (failure[0] != null) errors.append(failure[0]).append(' ');
+    }
+
+    // Press must carry BUTTON1 before any dragged event. The scene filter drops a
+    // button-down move until a primary press has been seen. Listeners are called
+    // directly so a heavyweight canvas cannot swallow the event in dispatchEvent.
+    private static String deliverOnEdt(int id, int x, int y, int modifiers, int button, long when) {
+        Component target = dragTarget;
+        if (target == null) return "no-target";
+        try {
+            Point origin = target.getLocationOnScreen();
+            int clicks = (id == MouseEvent.MOUSE_PRESSED || id == MouseEvent.MOUSE_RELEASED) ? 1 : 0;
+            MouseEvent event = new MouseEvent(target, id, when, modifiers, x, y,
+                origin.x + x, origin.y + y, clicks, false, button);
+            if (id == MouseEvent.MOUSE_MOVED || id == MouseEvent.MOUSE_DRAGGED) {
+                for (MouseMotionListener listener : target.getMouseMotionListeners()) {
+                    if (id == MouseEvent.MOUSE_DRAGGED) listener.mouseDragged(event);
+                    else listener.mouseMoved(event);
+                }
+            } else {
+                for (MouseListener listener : target.getMouseListeners()) {
+                    if (id == MouseEvent.MOUSE_PRESSED) listener.mousePressed(event);
+                    else if (id == MouseEvent.MOUSE_RELEASED) listener.mouseReleased(event);
+                }
+            }
+            return null;
+        } catch (Throwable thrown) {
+            return thrown.getClass().getSimpleName() + ":" + thrown.getMessage();
+        }
     }
 
     private static Component findTarget(int screenX, int screenY) {

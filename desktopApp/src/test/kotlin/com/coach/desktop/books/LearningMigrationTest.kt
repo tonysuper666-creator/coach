@@ -4,6 +4,8 @@ import com.coach.protocol.learning.LearningTable
 import com.coach.protocol.learning.learningTables
 
 import com.coach.client.CourseHttp
+import com.coach.client.PairedCredentials
+import com.coach.desktop.DesktopIdentity
 import com.coach.core.LedgerActor
 import com.coach.desktop.LearningProfiles
 import com.coach.desktop.books.exam.LocalExamStore
@@ -332,6 +334,38 @@ class LearningMigrationTest {
             assertEquals(restoredMark,BookBookmarkStore(a).list(book).single { it.page == 4 }.note)
         } finally {
             server.stop(0,1000); issuer.stop(0); actor.close(); job.cancel(); root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun onlyAValidProfileResponseCanBindTheLocalDirectory() = runBlocking {
+        val root = Files.createTempDirectory("learning-profile-response")
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val scope = "sable-" + "1".repeat(64)
+        val epoch = java.util.UUID.randomUUID().toString()
+        val profiles = LearningProfiles(root.resolve("library"))
+        val identity = DesktopIdentity("http://127.0.0.1:${server.address.port}", PairedCredentials("test-device", "test-token", "friend"))
+        val response = java.util.concurrent.atomic.AtomicReference("text/html" to "<html></html>")
+        server.createContext("/learning-sync/profile") { exchange ->
+            val (type, body) = response.get()
+            val bytes = body.encodeToByteArray()
+            exchange.responseHeaders.add("Content-Type", type)
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        try {
+            for (reply in listOf(response.get(), "application/json" to "{", "application/json" to """{"scope":"$scope","epoch":"invalid"}""")) {
+                response.set(reply)
+                assertNull(profiles.open(identity, true).scope)
+            }
+            response.set("application/json" to """{"scope":"$scope","epoch":"$epoch"}""")
+            val verified = profiles.open(identity, true)
+            assertEquals(scope, verified.scope)
+            assertEquals(epoch, verified.epoch)
+            assertEquals(verified, profiles.open(identity, false))
+        } finally {
+            server.stop(0)
+            root.toFile().deleteRecursively()
         }
     }
 

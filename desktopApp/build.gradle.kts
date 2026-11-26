@@ -175,6 +175,8 @@ tasks.test {
     providers.gradleProperty("coach.liveBookConnection").orNull?.let { systemProperty("coach.liveBookConnection", it) }
     providers.gradleProperty("coach.ai1.soakSeconds").orNull?.let { systemProperty("coach.ai1.soakSeconds", it) }
     providers.gradleProperty("coach.ai1.reportOut").orNull?.let { systemProperty("coach.ai1.reportOut", it) }
+    // 真书阶段读 COACH_IMPORT_PHASE。不把这次成功记成可复用，否则换阶段会被 Gradle 跳过。
+    if (!System.getenv("COACH_IMPORT_PHASE").isNullOrBlank()) outputs.upToDateWhen { false }
 }
 
 // Ship the very same stdlib-only extraction core used by tools.notes, including in DMGs.

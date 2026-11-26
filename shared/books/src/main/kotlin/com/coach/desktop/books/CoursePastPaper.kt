@@ -32,11 +32,45 @@ internal object CoursePastPaper {
         }
     }
 
+    val supportedExtensions = setOf("pdf", "txt", "md")
+
+    /** Content hash of the paper file; the only thing kept about the paper besides its techniques. */
+    fun paperKey(path: Path): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path)).joinToString("") { "%02x".format(it) }
+
+    fun hasExamPoints(db: Connection, courseId: String): Boolean =
+        CourseStore.loadCourseDetail(db, courseId).examinableTopics.any { it.weekLabel == CourseExamPoints.LABEL && it.title.isNotBlank() }
+
+    private fun ensureTable(db: Connection) {
+        if (BookSchemaMigration.tableExists(db, "course_exam_techniques")) {
+            val hasKey = db.createStatement().use { s ->
+                s.executeQuery("PRAGMA table_info(course_exam_techniques)").use { rows ->
+                    var found = false
+                    while (rows.next()) if (rows.getString("name") == "paper_key") found = true
+                    found
+                }
+            }
+            if (hasKey) return
+            db.createStatement().use { it.execute("ALTER TABLE course_exam_techniques RENAME TO course_exam_techniques_old") }
+        }
+        db.createStatement().use { it.execute("""CREATE TABLE course_exam_techniques(
+            course_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+            paper_key TEXT NOT NULL, topic_id TEXT NOT NULL, technique TEXT NOT NULL,
+            PRIMARY KEY(course_id, paper_key, topic_id, technique))""") }
+        if (BookSchemaMigration.tableExists(db, "course_exam_techniques_old")) {
+            db.createStatement().use {
+                it.execute("INSERT OR IGNORE INTO course_exam_techniques SELECT course_id, '', topic_id, technique FROM course_exam_techniques_old")
+                it.execute("DROP TABLE course_exam_techniques_old")
+            }
+        }
+    }
+
     fun import(db: Connection, courseId: String, path: Path): Int {
         val patterns = CourseStore.loadCourseDetail(db, courseId).examinableTopics
             .filter { it.weekLabel == CourseExamPoints.LABEL && it.title.isNotBlank() }
             .associate { it.topicId to CourseExamPoints.termPattern(CourseExamPoints.normalize(it.title)) }
         if (patterns.isEmpty()) return 0
+        val key = paperKey(path)
         val findings = when (path.fileName.toString().substringAfterLast('.').lowercase()) {
             "pdf" -> BookPdfLoader.load(path.toFile()).use { pdf ->
                 val stripper = BookPdfStripper()
@@ -55,14 +89,13 @@ internal object CoursePastPaper {
         // One transaction per import; a retry or another paper covering the same point is idempotent.
         db.createStatement().use { it.execute("SAVEPOINT import_exam_techniques") }
         try {
-            db.createStatement().use { it.execute("""CREATE TABLE IF NOT EXISTS course_exam_techniques(
-                course_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
-                topic_id TEXT NOT NULL, technique TEXT NOT NULL, PRIMARY KEY(course_id, topic_id, technique))""") }
-            db.prepareStatement("INSERT OR IGNORE INTO course_exam_techniques(course_id, topic_id, technique) VALUES(?,?,?)").use { sql ->
+            ensureTable(db)
+            db.prepareStatement("INSERT OR IGNORE INTO course_exam_techniques(course_id, paper_key, topic_id, technique) VALUES(?,?,?,?)").use { sql ->
                 for (finding in findings) {
                     sql.setString(1, courseId)
-                    sql.setString(2, finding.topicId)
-                    sql.setString(3, finding.technique.name)
+                    sql.setString(2, key)
+                    sql.setString(3, finding.topicId)
+                    sql.setString(4, finding.technique.name)
                     sql.addBatch()
                 }
                 sql.executeBatch()
@@ -79,9 +112,26 @@ internal object CoursePastPaper {
         return findings.size
     }
 
+    /** Undo one paper, e.g. when the user says the file was a handout after all. Other papers keep their techniques. */
+    fun remove(db: Connection, courseId: String, paperKey: String): Int {
+        if (!BookSchemaMigration.tableExists(db, "course_exam_techniques")) return 0
+        val topics = db.prepareStatement("SELECT DISTINCT topic_id FROM course_exam_techniques WHERE course_id=? AND paper_key=?").use { sql ->
+            sql.setString(1, courseId)
+            sql.setString(2, paperKey)
+            sql.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
+        }
+        val removed = db.prepareStatement("DELETE FROM course_exam_techniques WHERE course_id=? AND paper_key=?").use { sql ->
+            sql.setString(1, courseId)
+            sql.setString(2, paperKey)
+            sql.executeUpdate()
+        }
+        for (topicId in topics) CourseStore.recomputeTopicPackHash(db, courseId, topicId, System.currentTimeMillis())
+        return removed
+    }
+
     fun load(db: Connection, courseId: String): Map<String, List<ExamTechnique>> {
         if (!BookSchemaMigration.tableExists(db, "course_exam_techniques")) return emptyMap()
-        return db.prepareStatement("""SELECT e.topic_id, e.technique FROM course_exam_techniques e
+        return db.prepareStatement("""SELECT DISTINCT e.topic_id, e.technique FROM course_exam_techniques e
             JOIN course_topics t ON t.topic_id=e.topic_id AND t.collection_id=e.course_id WHERE e.course_id=? ORDER BY e.technique""").use { sql ->
             sql.setString(1, courseId)
             sql.executeQuery().use { rows ->

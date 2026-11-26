@@ -179,6 +179,8 @@ internal object CourseStore {
         db: Connection,
         courseId: String,
         bookIds: List<String>,
+        /** Files the user explicitly corrected to a material type; the past-paper name gate no longer applies. */
+        trustedBookIds: Set<String> = emptySet(),
     ): AddCourseMaterialsResult {
         ensureReady(db)
         if (bookIds.isEmpty()) return AddCourseMaterialsResult(emptyList(), emptyList())
@@ -191,7 +193,7 @@ internal object CourseStore {
         }
         for (bookId in bookIds.distinct()) {
             val meta = loadBookMeta(db, bookId) ?: continue
-            if (CourseClientGates.isPastExamMaterial(meta.title, meta.sourceFilename)) {
+            if (bookId !in trustedBookIds && CourseClientGates.isPastExamMaterial(meta.title, meta.sourceFilename)) {
                 rejected += meta.title
                 continue
             }
@@ -1044,7 +1046,7 @@ internal object CourseStore {
             }
         }
         val techniques = if (BookSchemaMigration.tableExists(db, "course_exam_techniques")) {
-            db.prepareStatement("SELECT technique FROM course_exam_techniques WHERE course_id=? AND topic_id=? ORDER BY technique").use { sql ->
+            db.prepareStatement("SELECT DISTINCT technique FROM course_exam_techniques WHERE course_id=? AND topic_id=? ORDER BY technique").use { sql ->
                 sql.setString(1, courseId)
                 sql.setString(2, topicId)
                 sql.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }

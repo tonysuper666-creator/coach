@@ -49,7 +49,7 @@ internal object CourseExamPoints {
     }
 
     fun build(db: Connection, courseId: String, materials: List<CourseMaterialEntry>, excluded: List<CourseTopicLinkPlan>): List<CourseTopicPlan> {
-        val teaching = materials.filter { it.role in teachingRoles && !CourseClientGates.isPastExamMaterial(it.title, it.sourceFilename) }
+        val teaching = materials.filter { it.role in teachingRoles && (it.userLocked || !CourseClientGates.isPastExamMaterial(it.title, it.sourceFilename)) }
             .sortedBy { it.role.authorityRank }
         if (teaching.size < 2) return emptyList()
         val titles = linkedMapOf<String, String>()

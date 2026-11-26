@@ -116,6 +116,9 @@ internal fun CourseScreen(
     onSetTopicStatus: (topicId: String, status: CourseTopicStatus) -> Unit,
     onUpdateExamProfile: (CourseExamProfile) -> Unit,
     onDismissNotice: () -> Unit = {},
+    intake: CourseIntakeReceipt? = null,
+    onChangeIntakeType: (key: String, role: CourseMaterialRole?) -> Unit = { _, _ -> },
+    onDismissIntake: () -> Unit = {},
     hasActiveMockExam: Boolean = false,
     onOpenMockExam: () -> Unit = {},
 ) {
@@ -289,6 +292,11 @@ internal fun CourseScreen(
                 deck = if (isExam) buildExamSummaryLine(detail) else buildRegularSummaryLine(detail, orderedExaminableTopics),
                 meta = buildCourseMetaLine(detail, orderedExaminableTopics),
             )
+
+            // Right under the header so what was just dropped is seen without scrolling.
+            if (intake != null && intake.items.isNotEmpty()) {
+                CourseIntakeReceiptCard(intake, busy = busy, onChangeType = onChangeIntakeType, onDismiss = onDismissIntake)
+            }
 
             if (isExam) {
                 Surface(

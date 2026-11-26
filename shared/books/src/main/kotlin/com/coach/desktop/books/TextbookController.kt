@@ -60,6 +60,8 @@ internal data class LibraryUi(
     val pendingCourseJump: BookPassage? = null,
     val canReturnToCitationOrigin: Boolean = false,
     val courseNotice: String? = null,
+    /** 最近一次拖进课程的文件和认定的类型，供当场改错。 */
+    val courseIntake: CourseIntakeReceipt? = null,
     val courseBusy: Boolean = false,
     /** 当前打开的书单 ID（从书单进入阅读器时保留上下文，返回时回到该书单页）。 */
     val activeBooklistId: String? = null,
@@ -406,11 +408,11 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 val cleanTitle = title.trim()
                 require(cleanTitle.isNotEmpty()) { if (kind == CollectionKind.COURSE) "请填写课程名。" else "请填写书单名。" }
                 val importedBooks = mutableListOf<Textbook>()
-                val preRejectedPastExams = mutableListOf<String>()
+                val pastPaperPaths = mutableListOf<Path>()
                 for (path in newFiles) {
                     val fileName = path.fileName?.toString().orEmpty()
-                    if (kind == CollectionKind.COURSE && CourseClientGates.isPastExamMaterial(fileName, fileName)) {
-                        preRejectedPastExams += fileName
+                    if (kind == CollectionKind.COURSE && CourseIntake.isPastPaperFile(path)) {
+                        pastPaperPaths.add(path)
                         continue
                     }
                     val useTier0 = library.lazyPdfExtras && fileName.endsWith(".pdf", ignoreCase = true)
@@ -428,6 +430,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 val cleanExamDate = examDate?.trim()?.takeIf(String::isNotEmpty)
                 var alignedCourseDetail: CourseDetailSnapshot? = null
                 var rejectedPastExams: List<String> = emptyList()
+                var paperItems: List<CourseIntakeItem> = emptyList()
                 if (kind == CollectionKind.COURSE) {
                     val (_, rejected) = library.withCourseDatabase { db ->
                         val (cid, skipped) = CourseStore.createCourse(
@@ -440,13 +443,15 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                             materialBookIds = allIds,
                             existingId = id,
                         )
-                        val detail = CourseAutoAligner.alignLocally(db, cid)
+                        val aligned = CourseAutoAligner.alignLocally(db, cid)
+                        paperItems = pastPaperPaths.map { CourseIntake.importPaper(db, cid, it) }
+                        val detail = if (paperItems.isEmpty()) aligned else CourseStore.loadCourseDetail(db, cid, library.clock)
                         Triple(cid, skipped, detail)
                     }.let { (cid, skipped, detail) ->
                         alignedCourseDetail = detail
                         cid to skipped
                     }
-                    rejectedPastExams = preRejectedPastExams + rejected
+                    rejectedPastExams = rejected
                 } else {
                     library.upsertCollection(
                         MaterialCollectionRecord(
@@ -483,6 +488,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 val lastQ = loadLastQuestion(focusBook?.id)
                 val noticeLabel = buildString {
                     append(if (kind == CollectionKind.COURSE) "已创建课程《$cleanTitle》" else "已创建书单《$cleanTitle》")
+                    CourseIntake.summary(paperItems, isExam = true)?.let { append("（$it）") }
                     if (rejectedPastExams.isNotEmpty()) {
                         append("（已拦截 ${rejectedPastExams.size} 份历年真题文件）")
                     }
@@ -507,7 +513,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         activeCourseDetail = if (kind == CollectionKind.COURSE) alignedCourseDetail else current.activeCourseDetail,
                         courseNotice = if (rejectedPastExams.isNotEmpty()) {
                             "历年真题文件已由门禁拦截，未进入备考题库。"
-                        } else null,
+                        } else CourseIntake.summary(paperItems, isExam = true),
+                        courseIntake = if (paperItems.isNotEmpty()) CourseIntakeReceipt(id, paperItems) else current.courseIntake,
                     )
                 }
                 if (kind == CollectionKind.BOOKLIST && allIds.size >= 2) {
@@ -2158,44 +2165,124 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             val initiatingAccountKey = uploadCoordinator.currentAccountKey()
                 ?: runCatching { uploadCoordinator.resolveInitiatingAccountKey() }.getOrNull()
             action {
-                val importedIds = mutableListOf<String>()
-                val preRejected = mutableListOf<String>()
-                for (path in files) {
-                    val fileName = path.fileName?.toString().orEmpty()
-                    if (CourseClientGates.isPastExamMaterial(fileName, fileName)) {
-                        preRejected += fileName
-                        continue
+                val (papers, materials) = files.partition(CourseIntake::isPastPaperFile)
+                val staged = materials.map { path -> path to stageCourseMaterial(path, initiatingAccountKey) }
+                val (detail, items) = library.withCourseDatabase { db ->
+                    CourseStore.addMaterials(db, courseId, staged.map { it.second.book.id })
+                    CourseAutoAligner.alignLocally(db, courseId)
+                    val paperItems = papers.map { CourseIntake.importPaper(db, courseId, it) }
+                    val refreshed = CourseStore.loadCourseDetail(db, courseId, library.clock)
+                    val byId = refreshed.materials.associateBy { it.bookId }
+                    val materialItems = staged.map { (path, result) ->
+                        val entry = byId[result.book.id]
+                        CourseIntakeItem(
+                            key = path.toString(),
+                            fileName = path.fileName?.toString().orEmpty(),
+                            role = entry?.role ?: CourseMaterialRole.USER_NOTES,
+                            bookId = result.book.id,
+                            newlyStaged = !result.alreadyExisted,
+                            weekNum = entry?.weekNum,
+                        )
                     }
-                    val useTier0 = library.lazyPdfExtras && fileName.endsWith(".pdf", ignoreCase = true)
-                    val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
-                    if (!staged.alreadyExisted) library.setBookShowStandalone(staged.book.id, false)
-                    persistImportOwnerIfNew(staged, initiatingAccountKey)
-                    enqueueBookForUnifiedUpload(staged.book, initiatingAccountKey)
-                    importedIds += staged.book.id
-                }
-                val (detail, rejected) = library.withCourseDatabase { db ->
-                    val addRes = CourseStore.addMaterials(db, courseId, importedIds)
-                    val refreshed = CourseAutoAligner.alignLocally(db, courseId)
-                    refreshed to (preRejected + addRes.rejectedPastExamTitles)
-                }
-                val notice = when {
-                    rejected.isNotEmpty() -> "已拦截 ${rejected.size} 份历年真题文件；其余 ${detail.materials.size} 份材料已整理。"
-                    importedIds.isNotEmpty() && detail.isExam -> "已补充 ${importedIds.size} 份材料并更新本周对齐。"
-                    importedIds.isNotEmpty() -> "已添加 ${importedIds.size} 份材料。"
-                    else -> null
+                    refreshed to (materialItems + paperItems)
                 }
                 mutable.update {
                     it.copy(
                         catalog = library.catalog(),
                         collections = library.collectionSummaries(),
                         activeCourseDetail = detail,
-                        courseNotice = notice,
+                        courseNotice = CourseIntake.summary(items, detail.isExam),
+                        courseIntake = CourseIntakeReceipt(courseId, items).takeIf { items.isNotEmpty() },
                     )
                 }
             }
         } finally {
             onStaged()
         }
+    }
+
+    private fun stageCourseMaterial(path: Path, initiatingAccountKey: String?): TextbookLibrary.StagedBookImport {
+        val fileName = path.fileName?.toString().orEmpty()
+        val useTier0 = library.lazyPdfExtras && fileName.endsWith(".pdf", ignoreCase = true)
+        val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
+        if (!staged.alreadyExisted) library.setBookShowStandalone(staged.book.id, false)
+        persistImportOwnerIfNew(staged, initiatingAccountKey)
+        enqueueBookForUnifiedUpload(staged.book, initiatingAccountKey)
+        return staged
+    }
+
+    /**
+     * Fixes a wrong type from the latest drop, right on the course page.
+     * [role] null turns the file into a past paper: it leaves the course (and the library, if this drop added it),
+     * and only its techniques are kept. A past paper turned into a material is imported and locked to [role].
+     */
+    suspend fun changeCourseIntakeType(courseId: String, key: String, role: CourseMaterialRole?) = action {
+        val receipt = mutable.value.courseIntake?.takeIf { it.courseId == courseId } ?: return@action
+        val item = receipt.items.firstOrNull { it.key == key } ?: return@action
+        val path = Path.of(item.key)
+        val accountKey = uploadCoordinator.currentAccountKey()
+        var deletedBook = false
+        val updatedItem: CourseIntakeItem
+        when {
+            item.role != null && role != null -> {
+                library.withCourseDatabase { db ->
+                    CourseStore.updateMaterialAssignment(db, courseId, checkNotNull(item.bookId), item.weekNum, role)
+                    CourseAutoAligner.alignLocally(db, courseId)
+                }
+                updatedItem = item.copy(role = role)
+            }
+            item.role != null -> {
+                val bookId = checkNotNull(item.bookId)
+                library.withCourseDatabase { db -> CourseStore.removeMaterialFromCourse(db, courseId, bookId) }
+                if (item.newlyStaged) {
+                    library.deleteBook(bookId, accountKey)
+                    deletedBook = true
+                }
+                updatedItem = library.withCourseDatabase { db ->
+                    CourseAutoAligner.alignLocally(db, courseId)
+                    CourseIntake.importPaper(db, courseId, path, key)
+                }
+            }
+            role != null -> {
+                if (!java.nio.file.Files.isRegularFile(path)) {
+                    mutable.update { it.copy(courseNotice = "原文件不在了，请重新拖进来。") }
+                    return@action
+                }
+                val staged = stageCourseMaterial(path, accountKey)
+                val bookId = staged.book.id
+                val week = library.withCourseDatabase { db ->
+                    item.paperKey?.let { CoursePastPaper.remove(db, courseId, it) }
+                    CourseStore.addMaterials(db, courseId, listOf(bookId), trustedBookIds = setOf(bookId))
+                    val inferred = CourseStore.loadCourseDetail(db, courseId, library.clock).materials.firstOrNull { it.bookId == bookId }?.weekNum
+                    CourseStore.updateMaterialAssignment(db, courseId, bookId, inferred, role)
+                    CourseAutoAligner.alignLocally(db, courseId)
+                    inferred
+                }
+                updatedItem = item.copy(role = role, bookId = bookId, newlyStaged = !staged.alreadyExisted, weekNum = week,
+                    paperKey = null, techniqueCount = 0, note = null)
+            }
+            else -> return@action
+        }
+        if (deletedBook) {
+            runCatching { uploadCoordinator.refreshCurrentAccountStatuses() }
+            if (accountKey != null && unifiedUploadClient != null) syncBookUploads()
+        }
+        val detail = library.withCourseDatabase { db -> CourseStore.loadCourseDetail(db, courseId, library.clock) }
+        val label = updatedItem.role?.labelZh ?: "往年题"
+        val tail = if (updatedItem.role == null) "，提取 ${updatedItem.techniqueCount} 条考法，题干不保存。" else "，后续重排不会覆盖。"
+        mutable.update {
+            it.copy(
+                catalog = library.catalog(),
+                collections = library.collectionSummaries(),
+                activeCourseDetail = detail,
+                courseIntake = receipt.copy(items = receipt.items.map { old -> if (old.key == key) updatedItem else old }),
+                courseNotice = "已把 ${item.fileName} 改为$label$tail",
+            )
+        }
+    }
+
+    fun dismissCourseIntake() {
+        mutable.update { it.copy(courseIntake = null) }
     }
 
     suspend fun updateCourseMaterialAssignment(

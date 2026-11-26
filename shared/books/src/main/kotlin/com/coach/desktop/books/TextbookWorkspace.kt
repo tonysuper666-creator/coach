@@ -443,6 +443,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                     run { controller.updateCourseExamProfile(detail.courseId, profile) }
                                 },
                                 onDismissNotice = controller::dismissCourseNotice,
+                                intake = ui.courseIntake?.takeIf { it.courseId == detail.courseId },
+                                onChangeIntakeType = { key, role -> run { controller.changeCourseIntakeType(detail.courseId, key, role) } },
+                                onDismissIntake = controller::dismissCourseIntake,
                                 hasActiveMockExam = remember(detail.courseId, examUi.active, examUi.attempt) {
                                     exams.hasActiveCourseMock(detail.courseId)
                                 },

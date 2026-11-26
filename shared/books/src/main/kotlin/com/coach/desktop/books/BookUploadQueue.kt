@@ -161,6 +161,7 @@ internal interface UnifiedBookRemoteSession {
     val sessionId: String
     val fallbackAccountKey: String
     suspend fun checkCapability(): UnifiedBookCapability
+
     suspend fun uploadBook(
         file: Path,
         format: String,
@@ -183,6 +184,17 @@ internal interface UnifiedBookRemoteSession {
 internal interface UnifiedBookRemoteClient {
     suspend fun activeAccountKey(): String?
     suspend fun checkCapability(): UnifiedBookCapability
+    suspend fun probeReachability(): CoachConnectivityStatus {
+        val session = openSession() ?: return CoachConnectivityStatus.UNKNOWN
+        return when (session.checkCapability()) {
+            is UnifiedBookCapability.Supported,
+            is UnifiedBookCapability.Unsupported,
+            UnifiedBookCapability.Unauthorized -> CoachConnectivityStatus.ONLINE
+            UnifiedBookCapability.Offline -> CoachConnectivityStatus.OFFLINE
+        }
+    }
+    fun connectivityFlow(): StateFlow<CoachConnectivityStatus>? = null
+
     suspend fun uploadBook(
         file: Path,
         format: String,
@@ -801,6 +813,23 @@ internal class UnifiedBookUploadCoordinator(
     }
 
     internal fun currentAccountKey(): String? = lastAccountKey
+
+    internal suspend fun hasPendingSyncWork(): Boolean {
+        val accountKey = lastAccountKey ?: resolveInitiatingAccountKey() ?: return false
+        return withContext(Dispatchers.IO) {
+            library.syncTasksForAccount(accountKey).any { entry ->
+                !entry.paused && entry.state in setOf(
+                    BookUploadState.WAITING_NETWORK,
+                    BookUploadState.WAITING_SERVER,
+                    BookUploadState.UPLOADING,
+                    BookUploadState.RECEIVED,
+                    BookUploadState.QUEUED,
+                    BookUploadState.PROCESSING,
+                    BookUploadState.PENDING_DELETE,
+                )
+            }
+        }
+    }
 
     internal suspend fun resolveInitiatingAccountKey(): String? {
         lastAccountKey?.let { return it }

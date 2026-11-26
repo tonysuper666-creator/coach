@@ -11,6 +11,8 @@ import com.coach.domain.fsrs.LegacyCardRecord
 import com.coach.domain.fsrs.LegacyStreakMigration
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.sql.Connection
 import java.sql.ResultSet
 import java.sql.Types
@@ -138,8 +140,16 @@ internal class TextbookReviewStore(
     private fun schedule(db: Connection, old: LocalBookReview?, book: String, lesson: String, mode: QuestionMode,
         correct: Boolean): FsrsState {
         val prior = fsrsState(db, book, lesson, mode) ?: old?.let { seedLegacy(db, it) } ?: Fsrs5.newCard(today())
-        val next = Fsrs5.review(prior, rating(correct), today(), fsrsConfig)
-        writeFsrs(db, book, lesson, mode, next, "NEW")
+        val day = today()
+        val grade = rating(correct)
+        val next = Fsrs5.review(prior, grade, day, fsrsConfig)
+        withLearningFact(db,"card",{
+            buildJsonObject {
+                put("algorithm","fsrs5-default-v1")
+                put("day",day)
+                put("rating",grade.value)
+            }
+        }) { writeFsrs(db, book, lesson, mode, next, "NEW") }
         return next
     }
 

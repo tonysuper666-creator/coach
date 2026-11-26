@@ -1020,11 +1020,12 @@ private fun LiveModeStatusAndExtraDeck(
     onDiagnosticAnswer: (BookLesson, Int, Practice, PracticeAnswer) -> Unit,
 ) {
     val colors = CoachTheme.colors
+    val offline = LocalCoachConnectivity.current == CoachConnectivityStatus.OFFLINE
     if (preference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) {
         CoachCardMeta("原书原貌视图 · 仅呈现章节目录与页码定位（零额外生成开销）")
         return
     }
-    if (modeLoading) {
+    if (modeLoading && !offline) {
         val statusLabel = if (modeStreamingChars > 0) "正在流式整理首屏内容（已收到 $modeStreamingChars 字）…" else "正在准备本模式首屏…"
         val streamPreview = remember(modeStreamingText) { extractReadableStreamPreview(modeStreamingText) }
         PaperCard(Modifier.fillMaxWidth().testTag("mode-streaming-status"), color = colors.surface2, contentPadding = PaddingValues(10.dp)) {
@@ -1041,14 +1042,19 @@ private fun LiveModeStatusAndExtraDeck(
             }
         }
     } else if (modeError != null) {
-        PaperCard(Modifier.fillMaxWidth().testTag("mode-offline-banner"), color = colors.surface2, contentPadding = PaddingValues(10.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text(modeError, style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.weight(1f))
-                if (onRetryModePack != null) {
-                    V7TextButton(onClick = onRetryModePack) { Text("重试") }
-                }
-            }
-        }
+        OfflineNeedsNetworkNotice(
+            message = OfflineCopy.normalizeOfflineMessage(modeError),
+            onRetry = onRetryModePack,
+            tag = "mode-offline-banner",
+            retryTag = "mode-offline-retry",
+        )
+    } else if (modeLoading && offline) {
+        OfflineNeedsNetworkNotice(
+            message = OfflineCopy.BOOK_MAP_OFFLINE,
+            onRetry = onRetryModePack,
+            tag = "mode-offline-banner",
+            retryTag = "mode-offline-retry",
+        )
     }
 
     when (preference.mode) {
@@ -1090,8 +1096,24 @@ private fun LiveModeStatusAndExtraDeck(
                                 )
                             }
                         } else if (onRequestBookMapBatch != null) {
-                            PaperButton(onClick = onRequestBookMapBatch, enabled = !bookMapBatchLoading) {
-                                Text(if (bookMapBatchLoading) "正在整书批量整理（24 章一页纸）…" else "生成整本书全章一页纸与速览地图")
+                            if (offline) {
+                                OfflineNeedsNetworkNotice(
+                                    message = OfflineCopy.BOOK_MAP_OFFLINE,
+                                    tag = "book-map-offline-notice",
+                                )
+                            }
+                            PaperButton(
+                                onClick = onRequestBookMapBatch,
+                                enabled = !bookMapBatchLoading,
+                                modifier = Modifier.testTag("book-map-batch-button"),
+                            ) {
+                                Text(
+                                    when {
+                                        bookMapBatchLoading -> "正在整书批量整理（24 章一页纸）…"
+                                        offline -> "生成整本书全章一页纸与速览地图（需要联网）"
+                                        else -> "生成整本书全章一页纸与速览地图"
+                                    },
+                                )
                             }
                         }
                     }

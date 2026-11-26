@@ -31,7 +31,9 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     private val transport: LedgerTransport, private val courses: List<String>,
     private val newId: () -> String, private val hash: (ByteArray) -> String,
     private val retentionTimeSource: TimeSource = TimeSource.Monotonic,
-    private val agentRunId: String? = null) {
+    private val agentRunId: String? = null,
+    /** 只上传本设备写下的命令；别的配对留下的行原样留在待发队列，不上传、不记 REJECTED、也不挡本设备的命令。 */
+    private val uploadOwnCommandsOnly: Boolean = false) {
     companion object {
         // Server retention: 14 daily days + the preceding 8 weekly weeks.
         const val OUTBOX_RETENTION_MILLIS = 70L * 24 * 60 * 60 * 1000
@@ -234,7 +236,7 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
             }
         }
         retainOrPrune(hello.epoch,hello.backedUpThroughSeq)
-        val pending = q.allCommands().executeAsList().filter { it.ack_seq == null }
+        val pending = q.allCommands().executeAsList().filter { it.ack_seq == null && (!uploadOwnCommandsOnly || it.device_id == deviceId) }
         val blocked = mutableListOf<CommandBody?>()
         // Only independent retries may overtake an uncertain command within a course.
         // Include skipped commands as barriers too (e.g. a queued answer before another retry).
@@ -274,7 +276,7 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     private suspend fun syncHint() {
         val caughtUp=mutex.withLock {
             val epoch=meta("epoch") ?: return@withLock false
-            if(q.allCommands().executeAsList().any { it.ack_seq==null }) return@withLock false
+            if(q.allCommands().executeAsList().any { it.ack_seq==null && (!uploadOwnCommandsOnly || it.device_id==deviceId) }) return@withLock false
             try { pullCourses(epoch) }
             catch(e: EpochChanged) { return@withLock false }
             _connection.value="online"

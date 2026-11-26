@@ -264,9 +264,15 @@ internal fun BookPageView(
      * 滚动等布局按导读开关预留页边栏。Windows 翻页读按每张纸上的实际标记留边。
      */
     hardPointGutter: Boolean = false,
+    onLoadPdfVisuals: (suspend (String, Collection<Int>) -> Unit)? = null,
+    onOpenOriginalBlock: ((BookIllustration) -> Unit)? = null,
 ) {
     var preview by remember(book.id, libraryDirectory) { mutableStateOf<BookFigurePreview?>(null) }
-    preview?.let { BookFigureDialog(it) { preview = null } }
+    preview?.let { figure ->
+        BookFigureDialog(figure, onOriginal = onOpenOriginalBlock?.let { open ->
+            { preview = null; open(figure.item) }
+        }) { preview = null }
+    }
     val density = LocalDensity.current
     val fontResolver = LocalFontFamilyResolver.current
     val layoutDirection = LocalLayoutDirection.current
@@ -499,6 +505,7 @@ internal fun BookPageView(
                 val at = positionOf(state.anchor)
                 ScrollReadState(pages.size, at, (at.fraction * itemHeightPx).toInt())
             }
+            VisiblePdfVisuals(book, pages, scrollState.visiblePages, onLoadPdfVisuals)
             val screenScope = rememberCoroutineScope()
             DisposableEffect(scrollState) {
                 state.screenScroller = { forward -> screenScope.launch { scrollState.scrollScreen(forward) } }
@@ -567,6 +574,7 @@ internal fun BookPageView(
             }
             return@BookPageViewport
         }
+        VisiblePdfVisuals(book, pages, first until first + visibleColumns, onLoadPdfVisuals)
         // Keep pagination independent of asynchronously arriving guide annotations. Only a
         // sheet containing an anchored marker is fitted with a margin, retaining its lines.
         val sheetWidthPx = with(density) { sheetWidth.roundToPx().coerceAtLeast(1) }
@@ -953,7 +961,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
                 bitmap = withContext(Dispatchers.IO) {
                     try {
                         decodeBookBitmap(BookIllustrationAssets.imageFile(libraryDirectory, book.id, item).toFile())
-                            ?.takeIf { block.band == null || (it.width == item.width && it.height == item.height) }?.asBookImageBitmap()
+                            ?.takeIf { item.kind == PageVisualKind.ILLUSTRATION || (it.width == item.width && it.height == item.height) }?.asBookImageBitmap()
                     } catch (_: java.io.IOException) { null }
                 }
                 if (bitmap == null) onMissing(item)
@@ -970,14 +978,14 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
                 }
                 val mark = if (block.highlighted) Modifier.border(2.dp, typography.highlight, shape) else Modifier
                 val loaded = bitmap
-                val expand = if (item.kind == PageVisualKind.ILLUSTRATION && loaded != null)
-                    Modifier.testTag("book-figure-${item.page}-${item.order}").clickable(role = Role.Button, onClickLabel = "放大插图") {
+                val expand = if (block.band == null && loaded != null)
+                    Modifier.testTag("book-figure-${item.page}-${item.order}").clickable(role = Role.Button, onClickLabel = "放大${item.kind.readerLabel}") {
                         onExpand(BookFigurePreview(loaded, item))
                     } else Modifier
                 Box(Modifier.fillMaxWidth().height(height).then(expand).then(mark).then(backing), contentAlignment = Alignment.Center) {
                     bitmap?.let { image ->
                         val band = block.band
-                        if (band == null) Image(image, item.caption ?: "第 ${item.page} 页插图",
+                        if (band == null) Image(image, item.caption ?: "第 ${item.page} 页${item.kind.readerLabel}",
                             modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                         else Canvas(Modifier.fillMaxSize().semantics { contentDescription = "第 ${item.page} 页表格" }) {
                             val w = size.width.toInt()
@@ -1017,6 +1025,26 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
     } }
 }
 
+@Composable
+private fun VisiblePdfVisuals(book: Textbook, sheets: List<BookLaidPage>, visible: IntRange,
+    load: (suspend (String, Collection<Int>) -> Unit)?) {
+    if (load == null || book.format != "pdf") return
+    val physicalPages = remember(book.pages, sheets, visible) {
+        buildSet {
+            for (index in visible) {
+                val sheet = sheets.getOrNull(index) ?: continue
+                sheet.sources.forEach { add(it.importPage) }
+                sheet.visuals.forEach { add(it.item.page) }
+            }
+        }.filter { number ->
+            book.page(number)?.let { !it.ocr && !it.ocrPending && it.text.isNotBlank() } == true
+        }
+    }
+    LaunchedEffect(book.id, physicalPages, book.indexState) {
+        if (physicalPages.isNotEmpty()) load(book.id, physicalPages)
+    }
+}
+
 private fun BookTableBand.drawnHeaderHeight(height: Int): Int =
     (height.toLong() * headerBottom / sourceHeight).toInt()
 
@@ -1035,12 +1063,13 @@ private fun TableRowLinks(book: Textbook, item: BookIllustration, band: BookTabl
         val height = constraints.maxHeight
         val headerHeight = band.drawnHeaderHeight(height)
         Column {
-            var top = 0
+            var top = (headerHeight.toLong() * table.headerTopPx / band.headerBottom).toInt()
+            if (top > 0) Spacer(Modifier.height(with(LocalDensity.current) { top.toDp() }))
             for (index in 0..lastRow) {
                 if (index in 1..precedingRow) continue
                 val row = rows[index]
                 val bottom = if (index == 0) headerHeight else headerHeight +
-                    ((row.bottomPx - band.startY).toLong() * (height - headerHeight) / (band.endY - band.startY)).toInt()
+                    ((minOf(row.bottomPx, table.dataBottomPx) - band.startY).toLong() * (height - headerHeight) / (band.endY - band.startY)).toInt()
                 if (bottom > top) {
                     val label = if (index == 0) "查看原页表头" else "查看原页第 ${index} 行数据"
                     Spacer(Modifier.fillMaxWidth().height(with(LocalDensity.current) { (bottom - top).toDp() })

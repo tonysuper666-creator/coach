@@ -695,6 +695,17 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun friendName(device: String): String? = query("SELECT friend_name FROM devices WHERE device_id=? AND revoked_at IS NULL", device) { it.getString(1) }.singleOrNull()
     fun revokeFriend(name: String) { sql("UPDATE devices SET revoked_at=? WHERE friend_name=? AND revoked_at IS NULL", clock(), name) }
 
+    fun eraseSableCredentials(name: String): List<String> = transaction {
+        require(isSableFriend(name))
+        eraseBackupCredentials(directory.resolve("backups"),name)
+        val devices = query("SELECT device_id FROM devices WHERE friend_name=?",name) { it.getString(1) }
+        sql("DELETE FROM sable_grants WHERE device_id IN (SELECT device_id FROM devices WHERE friend_name=?)",name)
+        sql("DELETE FROM pairing_code WHERE friend_name=?",name)
+        sql("DELETE FROM devices WHERE friend_name=?",name)
+        sql("DELETE FROM sable_friends WHERE friend_name=?",name)
+        devices
+    }
+
     fun createPairingCode(friend: String? = null): PairingCode {
         require(friend == null || (friend.isNotBlank() && friend.length <= 80 && friend.none { it.isISOControl() }))
         val code = idRandom.nextInt(1_000_000).toString().padStart(6, '0')

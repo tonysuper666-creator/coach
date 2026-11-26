@@ -148,10 +148,19 @@ internal fun BookPassageAsk(
                 else "$typed / ${BookPassageQuestion.MAX_QUESTION_LENGTH}",
                 modifier = Modifier.testTag("book-passage-length"), style = MaterialTheme.typography.bodySmall,
                 color = if (tooLong) v7Alert() else colors.fgSecondary)
+            val offline = LocalCoachConnectivity.current == CoachConnectivityStatus.OFFLINE
+            if (offline) {
+                OfflineNeedsNetworkNotice(
+                    message = OfflineCopy.ASK_OFFLINE,
+                    tag = "book-passage-offline-notice",
+                )
+            }
             PrimaryButton(onClick = { submit() }, enabled = canSend(question),
-                modifier = Modifier.testTag("book-passage-send")) { Text("发送") }
+                modifier = Modifier.testTag("book-passage-send")) {
+                Text(if (offline) "发送（需要联网）" else "发送")
+            }
             when (val result = reply) {
-                null -> if (request != null) Text("正在读这段问题…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+                null -> if (request != null && !offline) Text("正在读这段问题…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                 is BookLearningReply.Text -> PaperCard(Modifier.testTag("book-passage-reply"), color = colors.surface1) {
                     // 回答里的【S1】是给程序的引用标记，读者看下面那行「出处 · 第 N 页 · 第 M 段」就够了。
                     Text(ReadableText.withoutCitationMarks(result.text), style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)

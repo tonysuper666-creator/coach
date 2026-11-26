@@ -217,7 +217,11 @@ Pass '安装' "DisplayName=$($product[0].DisplayName) 版本=$($product[0].Displ
 
 # 装进去的启动配置：证明包是按没课的样子打的（朋友的机器没有 config/local.properties）
 $cfg = Join-Path $location 'app\LearningCoach.cfg'
-if (Test-Path $cfg) { Copy-Item $cfg (Join-Path $OutDir 'launcher.cfg') -Force }
+if (Test-Path $cfg) {
+    Get-Content -LiteralPath $cfg -Encoding UTF8 |
+        Where-Object { -not $_.Contains('-Dcoach.friendUrl=') } |
+        Set-Content -LiteralPath (Join-Path $OutDir 'launcher.cfg') -Encoding UTF8
+}
 
 # exe 自带的图标是资源管理器、开始菜单、固定到任务栏时用的那张
 $appIcon = Join-Path $OutDir 'exe-icon.png'

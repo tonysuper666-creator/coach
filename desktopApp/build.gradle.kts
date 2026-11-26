@@ -98,6 +98,11 @@ val coachCourse = providers.gradleProperty("coach.course")
 require(coachCourse.isEmpty() || coachCourse.matches(Regex("[A-Za-z0-9_-]+"))) {
     "coach.course must contain only letters, digits, underscores or hyphens"
 }
+val coachFriendUrl = providers.gradleProperty("coach.friendUrl")
+    .orElse(localConfig.getProperty("coach.friendUrl", "")).get().trim()
+require(coachFriendUrl.isEmpty() || coachFriendUrl.matches(Regex("https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?"))) {
+    "Invalid private friend service origin"
+}
 // 「用 Sable 账号登录」入口：不传时 Windows 收起、Mac 照旧（TON-1760）。候选构建时显式传
 // -Pcoach.sableLogin=true|false 决定；不从 local.properties 读，免得哪台机器的旧配置悄悄改了包。
 val coachSableLogin = providers.gradleProperty("coach.sableLogin").orNull?.trim()?.lowercase()
@@ -107,10 +112,10 @@ require(coachSableLogin == null || coachSableLogin == "true" || coachSableLogin 
 compose.desktop {
     application {
         mainClass = "com.coach.desktop.MainKt"
-        localConfig.getProperty("coach.friendUrl")?.takeIf(String::isNotBlank)?.let { origin ->
-            require(origin.matches(Regex("https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?"))) { "Invalid private friend service origin" }
-            jvmArgs("-Dcoach.friendUrl=$origin")
+        if (System.getProperty("os.name").startsWith("Windows") && providers.gradleProperty("coach.release").orNull == "true") {
+            jvmArgs("-Dcoach.learningSync=true")
         }
+        if (coachFriendUrl.isNotEmpty()) jvmArgs("-Dcoach.friendUrl=$coachFriendUrl")
         if (coachCourse.isNotEmpty()) jvmArgs("-Dcoach.course=$coachCourse")
         if (coachSableLogin != null) jvmArgs("-Dcoach.sableLogin=$coachSableLogin")
         nativeDistributions {

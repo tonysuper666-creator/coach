@@ -22,6 +22,7 @@ import coach.design.tokens.CoachV7
 import com.coach.desktop.books.BookExplainer
 import com.coach.desktop.books.BookSearchResult
 import com.coach.desktop.books.BookSummary
+import com.coach.desktop.books.CoachConnectivityStatus
 import com.coach.desktop.books.CollectionKind
 import com.coach.desktop.books.CollectionQaCitation
 import com.coach.desktop.books.CollectionQaEngine
@@ -31,7 +32,10 @@ import com.coach.desktop.books.CollectionQaTurnView
 import com.coach.desktop.books.CollectionQaVirtualCollections
 import com.coach.desktop.books.CollectionSummary
 import com.coach.desktop.books.ExplainTrouble
+import com.coach.desktop.books.LocalCoachConnectivity
 import com.coach.desktop.books.MaterialCollectionRecord
+import com.coach.desktop.books.OfflineCopy
+import com.coach.desktop.books.OfflineNeedsNetworkNotice
 import com.coach.desktop.books.RetrievedPageLinks
 import com.coach.desktop.books.PaperColor
 import com.coach.desktop.books.ReadingFont
@@ -276,6 +280,7 @@ internal fun HostSearchDialog(
         )
     }
     val selectedCollection = askableCollections.firstOrNull { it.record.id == selectedCollectionId }
+    val offline = LocalCoachConnectivity.current == CoachConnectivityStatus.OFFLINE
     var qaLoading by remember { mutableStateOf(false) }
     var qaError by remember(selectedCollectionId) { mutableStateOf<CollectionQaException?>(null) }
     var qaTurns by remember(selectedCollectionId) { mutableStateOf<List<CollectionQaTurn>>(emptyList()) }
@@ -284,7 +289,7 @@ internal fun HostSearchDialog(
         val col = selectedCollection ?: return
         val q = query.trim()
         if (q.length !in 2..600 || qaLoading) return
-        qaLoading = true
+        qaLoading = !offline
         qaError = null
         scope.launch {
             val activeExplainer = explainer ?: BookExplainer(library = library)
@@ -300,9 +305,18 @@ internal fun HostSearchDialog(
             qaLoading = false
             res.fold(
                 onSuccess = { turn -> qaTurns = qaTurns + turn },
-                onFailure = { err -> qaError = err as? CollectionQaException ?: CollectionQaException(
-                    "这次没讲成，请重试。", ExplainTrouble.Other,
-                ) },
+                onFailure = { err ->
+                    val qaErr = err as? CollectionQaException
+                    qaError = when {
+                        qaErr?.trouble == ExplainTrouble.Unreachable -> CollectionQaException(
+                            OfflineCopy.COLLECTION_ASK_OFFLINE,
+                            ExplainTrouble.Unreachable,
+                            qaErr.fallbackPages,
+                        )
+                        qaErr != null -> qaErr
+                        else -> CollectionQaException("这次没讲成，请重试。", ExplainTrouble.Other)
+                    }
+                },
             )
         }
     }
@@ -360,6 +374,12 @@ internal fun HostSearchDialog(
                                 }
                             }
                         }
+                        if (offline) {
+                            OfflineNeedsNetworkNotice(
+                                message = OfflineCopy.COLLECTION_ASK_OFFLINE,
+                                tag = "host-search-offline-notice",
+                            )
+                        }
                         Row(
                             Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -370,16 +390,17 @@ internal fun HostSearchDialog(
                                 enabled = !qaLoading && query.trim().length in 2..600,
                                 modifier = Modifier.testTag("host-search-ask-collection"),
                             ) {
+                                val baseLabel = when {
+                                    qaError?.trouble?.retry == true -> "重试"
+                                    selectedCollection.record.id == CollectionQaVirtualCollections.READ_LIBRARY_ID ->
+                                        "问「已读书目」"
+                                    selectedCollection.record.kind == CollectionKind.BOOKLIST ->
+                                        "问「${selectedCollection.record.title}」已读书目"
+                                    else ->
+                                        "问「${selectedCollection.record.title}」整门课"
+                                }
                                 Text(
-                                    when {
-                                        qaError?.trouble?.retry == true -> "重试"
-                                        selectedCollection.record.id == CollectionQaVirtualCollections.READ_LIBRARY_ID ->
-                                            "问「已读书目」"
-                                        selectedCollection.record.kind == CollectionKind.BOOKLIST ->
-                                            "问「${selectedCollection.record.title}」已读书目"
-                                        else ->
-                                            "问「${selectedCollection.record.title}」整门课"
-                                    },
+                                    if (offline && qaError?.trouble?.retry != true) "$baseLabel（需要联网）" else baseLabel,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
@@ -394,12 +415,25 @@ internal fun HostSearchDialog(
                             }
                         }
                         qaError?.let { error ->
-                            Text(
-                                error.message,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.accentDeep,
-                                modifier = Modifier.testTag("host-search-qa-error"),
-                            )
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text(
+                                    error.message,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.accentDeep,
+                                    modifier = Modifier.weight(1f).testTag("host-search-qa-error"),
+                                )
+                                if (error.trouble.retry) {
+                                    V7TextButton(
+                                        onClick = ::submitCollectionAsk,
+                                        modifier = Modifier.testTag("host-search-qa-retry"),
+                                        ringInside = true,
+                                    ) { Text("重试", maxLines = 1, softWrap = false) }
+                                }
+                            }
                             RetrievedPageLinks(error.fallbackPages, { "${it.shortLabel} · 第 ${it.page} 页" }) { cit ->
                                 if (onJumpCollectionCitation != null) onJumpCollectionCitation(cit)
                                 else onOpenBook(cit.bookId, cit.page)

@@ -9,7 +9,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
-import fcntl
 import hashlib
 import json
 import os
@@ -57,16 +56,17 @@ def atomic_json(path: Path, value: dict | list):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = path.with_name(path.name + "." + secrets.token_hex(8) + ".tmp")
     try:
-        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as out:
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as out:
             json.dump(value, out, ensure_ascii=False, allow_nan=False)
             out.flush()
             os.fsync(out.fileno())
         os.replace(tmp, path)
-        fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        if os.name != "nt":
+            fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -134,7 +134,12 @@ class CreditLedger:
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = os.open(self.state / "api-spend.lock", os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX)
             yield
         finally:
             os.close(fd)
@@ -144,7 +149,7 @@ class CreditLedger:
         if not path.exists():
             return {"version": 1, "cycles": {}, "months": {}}
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
             require(data["version"] == 1 and isinstance(data["cycles"], dict) and isinstance(data["months"], dict))
             for cycle in data["cycles"].values():
                 require(isinstance(cycle["reserved"], dict))
@@ -186,7 +191,7 @@ class CreditLedger:
     def friend_limits(self, friend):
         path = Path(os.environ.get("COACH_FRIEND_CONFIG", str(Path.home() / "Coach/config/friends.json")))
         try:
-            data = json.loads(path.read_text()) if path.exists() else {}
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
             defaults, friends = data.get("defaults", {}), data.get("friends", {})
             require(isinstance(defaults, dict) and isinstance(friends, dict))
             override = friends.get(friend, {})
@@ -199,6 +204,24 @@ class CreditLedger:
             return limits
         except (OSError, ValueError, TypeError, AttributeError):
             raise Denied("friend_config_unreadable") from None
+
+    def erase_friend(self, friend: str, config: Path):
+        require(re.fullmatch(r"[0-9a-f]{64}", friend))
+        with self.locked():
+            data = self.read()
+            self._expire_interrupted(data, self.clock())
+            days = data.get("friends", {}).get(friend, {})
+            if any(day["reserved"] for day in days.values()):
+                raise Denied("account_has_pending_usage")
+            settings = json.loads(config.read_text(encoding="utf-8")) if config.exists() else {}
+            overrides = settings.get("friends", {})
+            require(isinstance(overrides, dict))
+            if friend in overrides:
+                del overrides[friend]
+                atomic_json(config, settings)
+            if friend in data.get("friends", {}):
+                del data["friends"][friend]
+                self.save(data)
 
     def reserve(self, provider: str, key: str, maximum: int, *, friend=None, device=None, tokens=0) -> tuple[str, str, str]:
         if not key:

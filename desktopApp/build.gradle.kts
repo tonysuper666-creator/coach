@@ -123,10 +123,12 @@ compose.desktop {
             packageName = "LearningCoach"
             packageVersion = releaseVersion
             vendor = "LearningCoach"
-            // java.instrument lets the ARM smoke append -javaagent after install.
-            // The agent posts an AWT drag into the installed app. A normal launch
-            // never loads it. OS cursor drags reach the canvas and still do not select.
-            modules("java.sql", "java.instrument")
+            // The ARM installed-app smoke appends -javaagent after install and needs java.instrument
+            // in the bundled runtime. Only the Windows ARM64 build without the private friend URL
+            // (the smoke candidate) includes it; x64 and the private ARM64 release keep the default set.
+            val smokeAgent = System.getProperty("os.arch") == "aarch64" &&
+                providers.gradleProperty("coach.friendUrl").orNull.isNullOrBlank()
+            if (smokeAgent) modules("java.sql", "java.instrument") else modules("java.sql")
             windows {
                 // Same artwork as Window(icon = AppIcon.window()); the ICO carries 16..256 so the
                 // installer, exe, Start menu shortcut and taskbar pick a pre-rendered size instead

@@ -147,8 +147,27 @@ function Submit-ScanFile([string]$title) {
     if (-not (Choose-File $title $Fixture)) { throw $script:ChooseFileWhy }
 }
 function Enable-ArmDragAgent([string]$ExePath, [string]$LibraryDir) {
-    $jar = Join-Path $PSScriptRoot 'arm-drag-agent.jar'
-    if (-not (Test-Path -LiteralPath $jar)) { throw "Drag agent jar missing: $jar" }
+    # The agent jar is never committed: build it from the .java next to this script.
+    $srcDir = Join-Path $PSScriptRoot 'arm-drag-agent'
+    $buildDir = Join-Path ([IO.Path]::GetTempPath()) 'coach-arm-drag-agent'
+    $jar = Join-Path $buildDir 'arm-drag-agent.jar'
+    if (-not (Test-Path -LiteralPath $jar)) {
+        $homes = @($env:JAVA_HOME, $env:JAVA_HOME_17_ARM64, $env:JAVA_HOME_21_ARM64, $env:JAVA_HOME_17_X64) | Where-Object { $_ }
+        $bins = @($homes | ForEach-Object { Join-Path $_ 'bin' })
+        function Find-JdkTool([string]$name) {
+            foreach ($b in $bins) { $p = Join-Path $b "$name.exe"; if (Test-Path -LiteralPath $p) { return [pscustomobject]@{ Source = $p } } }
+            Get-Command $name -ErrorAction SilentlyContinue
+        }
+        $javac = Find-JdkTool 'javac'
+        $jarTool = Find-JdkTool 'jar'
+        if (-not $javac -or -not $jarTool) { throw 'javac/jar not on PATH; cannot build the drag agent' }
+        $classes = Join-Path $buildDir 'classes'
+        New-Item -ItemType Directory -Force $classes | Out-Null
+        & $javac.Source --release 17 -d $classes (Join-Path $srcDir 'ArmDragAgent.java')
+        if ($LASTEXITCODE -ne 0) { throw "javac failed: $LASTEXITCODE" }
+        & $jarTool.Source cfm $jar (Join-Path $srcDir 'manifest.mf') -C $classes .
+        if ($LASTEXITCODE -ne 0) { throw "jar failed: $LASTEXITCODE" }
+    }
     $jar = (Resolve-Path -LiteralPath $jar).Path
     if ($jar.Contains(' ')) { throw "Drag agent path cannot contain spaces: $jar" }
     $cfg = Join-Path (Split-Path -Parent $ExePath) 'app\LearningCoach.cfg'

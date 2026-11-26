@@ -430,6 +430,15 @@ private fun CourseEssayPractice(
                     response = resp,
                     onJumpPage = jumpToPage,
                 )
+                val missedPoints = resp.rubricItems.count { it.verdict == "ZERO" && it.missCause.isNotBlank() }
+                if (missedPoints > 0) {
+                    Text(
+                        "有 $missedPoints 个点没答到。先回到书里那一句，再答一次。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.fgSecondary,
+                        modifier = Modifier.testTag("chapter-open-miss-hint"),
+                    )
+                }
                 resp.diagnosis?.takeIf { it.errorClass != MisconceptionErrorClass.NONE }?.let { diag ->
                     MisconceptionFeedbackCard(
                         diagnosis = diag,

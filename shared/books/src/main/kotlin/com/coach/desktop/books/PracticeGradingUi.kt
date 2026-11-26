@@ -64,6 +64,7 @@ internal data class PracticeRubricItemGrade(
     val pdfPage: Int = 0,
     val quoteAnchor: String = "",
     val anchorVerified: Boolean = false,
+    val missCause: String = "",
 )
 
 internal data class PracticeMisconceptionDiagnosis(
@@ -134,6 +135,7 @@ internal object PracticeGradingJson {
                 pdfPage = (o["pdfPage"] as? JsonPrimitive)?.intOrNull ?: 0,
                 quoteAnchor = o.s("quoteAnchor"),
                 anchorVerified = (o["anchorVerified"] as? JsonPrimitive)?.booleanOrNull ?: false,
+                missCause = o.s("missCause"),
             )
         }
         val diagObj = obj["diagnosis"] as? JsonObject
@@ -198,6 +200,7 @@ internal object PracticeGradingJson {
                             put("pdfPage", item.pdfPage)
                             put("quoteAnchor", item.quoteAnchor)
                             put("anchorVerified", item.anchorVerified)
+                            if (item.missCause.isNotBlank()) put("missCause", item.missCause)
                         },
                     )
                 }
@@ -499,10 +502,24 @@ internal fun RubricAnnotationSheet(
                         "PARTIAL" -> colors.actionPrimary
                         else -> v7Alert()
                     }
-                    val statusLabel = when (item.verdict) {
+                    val chapterPoint = response.mode == "CHAPTER_OPEN" || item.missCause.isNotBlank()
+                    val statusLabel = if (chapterPoint) {
+                        when (item.verdict) {
+                            "FULL" -> "答到"
+                            "PARTIAL" -> "部分"
+                            else -> "没答到"
+                        }
+                    } else when (item.verdict) {
                         "FULL" -> "得分"
                         "PARTIAL" -> "部分得分"
                         else -> "待补齐"
+                    }
+                    val causeLabel = when (item.missCause) {
+                        "NOT_READ" -> "没读到"
+                        "READ_NOT_UNDERSTOOD" -> "读了没懂"
+                        "CONCEPT_CONFUSION" -> "混淆了别的概念"
+                        "UNCLEAR_EXPRESSION" -> "表达不清"
+                        else -> ""
                     }
                     Column(
                         modifier = Modifier.fillMaxWidth().testTag("rubric-item-$idx"),
@@ -526,8 +543,17 @@ internal fun RubricAnnotationSheet(
                                 RubricPagePill(
                                     pdfPage = item.pdfPage,
                                     onClick = { onJumpPage(item.pdfPage, item.quoteAnchor) },
+                                    label = if (chapterPoint && item.verdict == "ZERO") "回到这一句" else "课本第 ${item.pdfPage} 页",
                                 )
                             }
+                        }
+                        if (causeLabel.isNotBlank()) {
+                            Text(
+                                text = "原因：$causeLabel",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.fgSecondary,
+                                modifier = Modifier.testTag("rubric-cause-$idx"),
+                            )
                         }
                         Text(
                             text = item.feedbackNoteZh.ifBlank { "请回看课本对应页核对本步要点。" },
@@ -660,11 +686,12 @@ internal fun RubricPagePill(
     pdfPage: Int,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    label: String = "课本第 $pdfPage 页",
 ) {
     val shape = RoundedCornerShape(CoachV7.Radius.s)
     val pine = v7Pine()
     Text(
-        text = "课本第 $pdfPage 页",
+        text = label,
         style = MaterialTheme.typography.labelSmall,
         fontFamily = LocalV7Fonts.current.numbers,
         color = pine,

@@ -791,6 +791,24 @@ function Get-TutorShownPage([string]$name) {
     $compact = (($parts -join '') -replace '\s', '')
     $m = [regex]::Match($compact, '第(\d{1,4})/')
     if (-not $m.Success) { $m = [regex]::Match($compact, '第(\d{1,4})页') }
+    if (-not $m.Success) {
+        # The closed bar is 「第 2 / 3 页」. chi_sim keeps 「第2」 and 「页」 and
+        # drops the slash, so they are not adjacent. Read that pair only from
+        # the bottom strip, where the page body cannot supply another 第N.
+        $barFloor = [Math]::Max(0, [int]($height - 80))
+        $bar = foreach ($line in $lines) {
+            $inBar = $false
+            foreach ($word in @($line.Words)) {
+                if ($word.BoundingRect -and [double]$word.BoundingRect.Y -ge $barFloor) { $inBar = $true; break }
+            }
+            if ($inBar) { $line.Text }
+        }
+        $barCompact = (($bar -join '') -replace '\s', '')
+        if ($barCompact -match '页') {
+            $m = [regex]::Match($barCompact, '第(\d{1,4})')
+            if ($m.Success) { Write-Host "PAGEBAR $barCompact" }
+        }
+    }
     if ($m.Success) { return $m.Groups[1].Value }
     return $null
 }

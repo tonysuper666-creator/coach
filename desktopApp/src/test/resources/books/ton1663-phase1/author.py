@@ -176,6 +176,9 @@ def main():
         body = f"<w:r><w:t>{text}</w:t></w:r>" if text else ""
         return f"<w:p>{style}{br}{body}</w:p>"
 
+    # One chapter only. The page break sits between two body paragraphs, so
+    # deleting it leaves a single page. A second "第X章" heading would still
+    # split the file and hide a missing break.
     document = (
         f'<w:document xmlns:w="{w}"><w:body>'
         + p(ZH_TITLE_1, heading=True)
@@ -183,7 +186,6 @@ def main():
         + "<w:tbl><w:tr><w:tc>" + p("物品") + "</w:tc><w:tc>" + p("状态") + "</w:tc></w:tr>"
         + "<w:tr><w:tc>" + p("茶") + "</w:tc><w:tc>" + p("已经凉了") + "</w:tc></w:tr></w:tbl>"
         + p("", break_page=True)
-        + p(ZH_TITLE_2, heading=True)
         + p(STEP)
         + "</w:body></w:document>"
     )

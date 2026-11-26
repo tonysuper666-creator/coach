@@ -89,15 +89,21 @@ class Ton1663Phase1SpecTest {
         imported("window.docx").use { opened ->
             val book = opened.book
             assertEquals("docx", book.format)
-            assertEquals(2, book.pages.size, "DOCX 有分页符时应按分页符切页，实际 ${preview(book)}")
+            assertEquals(2, book.pages.size, "分页符应把同一章的两段正文切成两页。样例没有第二章标题，删掉分页符就不能再凑出第二页，实际 ${preview(book)}")
             val first = book.pages[0].text
             val second = book.pages[1].text
-            assertTrue(first.contains(zhBody1), "分页符前的原文应变，实际：$first")
-            assertTrue(first.contains(footnote), "脚注应放在所在页末，实际：$first")
-            assertTrue(first.indexOf(footnote) > first.indexOf("白瓷杯"), "脚注应在引用之后")
+            assertTrue(first.contains(zhTitle1), "章名应留在分页符前，实际：$first")
+            assertTrue(first.contains(zhBody1), "分页符前的那段正文应在第 1 页，实际：$first")
+            assertFalse(first.contains(step), "分页符后的那段正文不应留在第 1 页，实际：$first")
             assertOrdered(first, listOf("物品", "状态"))
             assertOrdered(first, listOf("茶", "已经凉了"))
-            assertTrue(second.contains(step), "分页符后的正文应单独成页，实际：$second")
+            val lastCell = first.lastIndexOf("已经凉了")
+            val noteAt = first.indexOf(footnote)
+            assertTrue(lastCell >= 0 && noteAt > lastCell, "脚注应在该页最后一个表格单元格之后，实际：$first")
+            assertTrue(second.contains(step), "分页符后的那段正文应单独成页，实际：$second")
+            assertFalse(second.contains(zhBody1), "分页符前的正文不应跑到第 2 页，实际：$second")
+            assertFalse(second.contains(zhTitle1), "第 2 页不应再靠章名切开，实际：$second")
+            assertFalse(second.contains("已经凉了"), "表格应留在分页符前，实际：$second")
             assertFalse(second.contains(footnote), "脚注不应跑到下一页：$second")
             assertEquals("第 1 页", book.pageLabel(1))
             assertEquals("第 2 页", book.pageLabel(2))
@@ -166,9 +172,10 @@ class Ton1663Phase1SpecTest {
         imported("window.epub").use { opened ->
             val book = opened.book
             assertEquals("epub", book.format)
-            assertTrue(book.pages.isNotEmpty(), "EPUB 应能导入")
-            val joined = book.pages.joinToString("\n") { it.text }
-            assertTrue(joined.contains(cup) && joined.contains(step), "EPUB 正文应逐字保留，实际 ${preview(book)}")
+            assertEquals(1, book.pages.size, "短的单 spine EPUB 应恰好一页，不按章再拆，实际 ${preview(book)}")
+            val only = book.pages[0].text
+            assertTrue(only.contains(cup), "第 1 页应含第一句原文，实际：$only")
+            assertTrue(only.contains(step), "第 1 页应含第二句原文，实际：$only")
             assertEquals("第 1 页", book.pageLabel(1))
             opened.assertCitations()
         }

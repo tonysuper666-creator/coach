@@ -71,6 +71,7 @@
 * **编码。** 使用 UUIDv5，命名空间 `8de10572-23e3-43ea-bdb0-b45b39375efa`。名称为无 BOM 的 UTF-8 紧凑 JSON 数组。主键整数用无前导零的十进制字符串。文本保持原大小写和码点；双引号、反斜杠以及退格、制表、换行、换页、回车按 JSON 短转义，其余 U+0000–001F 用小写四位十六进制转义，其他字符原样编码。高亮的 `version` 在 v8 取书散列。例：同一题分别以 `["answer",书,课,模式]`、`["mistake",书,课,模式]` 和 `["card",书,课,模式]` 生成三个 ID。
 * **两个旧自增表。** `id` 保留同库内内容相同的多次操作；为区分两个旧库内恰好同号但内容不同的事实，再取不可变事实的摘要。摘要为下列有序数组按上述 JSON 编码后的 SHA-256 小写十六进制。整数同样转为字符串，SQL NULL 写作 JSON null，内嵌 JSON 文本按库存字符串编码。字段全部取自迁移前的行。
   * `turnDigest` 依次取 `thread_id, selection_id, selection_page, selection_start, selection_end, selection_text, section_location, action_kind, label, question_text, answer_text, citations_json, sent_blocks_json, elapsed_ms, created_at`。
+  * main 的 v9 增加了可重试的问题。对已有非空 `write_id` 的行，用下列固定数组计算 `turnDigest`：常量 `question-v9`、`thread_id, selection_id, question_text, created_at`。外层仍是 `ask_turn, book, id, turnDigest`。写入片段、失败、重试和完成始终更新这一个问题。保留回答、出处和状态；新机把未完成轮次作为可重试问题恢复，并生成本机写入令牌。两台机器分别取得的不同回答按并发文字处理。原 v8 行升级到 v9 后 `write_id` 为空，继续使用上一行的 v8 规则。
   * `historyDigest` 依次取 `lesson, mode, kind, text, revealed, understood, guessed, answered_day`。
   * 相同旧库的两份拷贝即使分别首次升级，也会为同一条事实生成同一个 ID。若两个独立旧库连旧行号和所有事实字段都相同，v8 无来源信息可区分，按一条历史事实恢复，保留两份迁移备份供核对。升级后新增的轮次和作答事件在创建事务中取得 UUIDv4 并持久化；恢复或再导出直接沿用这个 ID。其余行一律按表中自然键派生，新增业务对象的原生 id 在首次保存时固化。
 * **迁移与恢复共用映射。** 为每行保存原键、kind 和 recordId。还原到新机时恢复映射，旧自增主键在目标库可重新分配。重传同一基线按账号、kind、recordId 和业务内容去重；设备 ID、迁移时刻和本地自增序列不能制造第二个版本或再次计分。业务内容确有差异才按后文的并发规则合并。

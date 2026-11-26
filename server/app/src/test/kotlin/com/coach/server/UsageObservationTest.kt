@@ -20,6 +20,14 @@ import java.util.Properties
 import kotlin.test.*
 
 class UsageObservationTest {
+    @Test fun readerDisconnectAndExplicitCancelEachCountOnce() {
+        val statuses = mutableListOf<Int>()
+        ReaderHttpOutcome { statuses.add(it) }.apply { finish(499); finish(500) }
+        ReaderHttpOutcome { statuses.add(it) }.apply { abandoned = true; finish(200) }
+        ReaderHttpOutcome { statuses.add(it) }.apply { finish(200); finish(499) }
+        assertEquals(listOf(499, 499, 200), statuses)
+    }
+
     @Test fun addedScreensAreAcceptedAndRenderedInChinese() {
         val root = Files.createTempDirectory("coach-usage-screens-")
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY).also { ClientDatabase.Schema.create(it) }

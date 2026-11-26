@@ -27,6 +27,8 @@ import io.ktor.http.content.OutgoingContent
 import io.ktor.http.content.TextContent
 import io.ktor.client.statement.bodyAsText
 import io.ktor.client.statement.bodyAsBytes
+import io.ktor.http.fromHttpToGmtDate
+import io.ktor.util.date.GMTDate
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.ktor.http.encodeURLParameter
@@ -56,7 +58,26 @@ data class SourcePage(val docId: String, val pdfPage: Int, val bookPage: Int?, v
 
 /** 模拟考接口的一次回答：成功时 [body] 是服务端原样的 JSON；失败时 [error] 是服务端写的原因，连不上 Mac 时两者都是 null。 */
 /** [code] 是服务端给程序看的类别，只用来决定怎么提示，从不显示给人。 */
-class MockReply(val body: JsonObject?, val error: String?, val retryable: Boolean = false, val statusCode: Int? = null, val code: String? = null)
+class MockReply(val body: JsonObject?, val error: String?, val retryable: Boolean = false, val statusCode: Int? = null, val code: String? = null, val retryAfterMs: Long? = null)
+private fun HttpResponse.readerRetryDelay(body: JsonObject?): Long? {
+    val value = headers[HttpHeaders.RetryAfter]?.trim()
+    val seconds = value?.toLongOrNull() ?: (body?.get("retryAfterSec") as? JsonPrimitive)?.content?.toLongOrNull()
+    if (seconds != null && seconds >= 0) return seconds.coerceAtMost(Long.MAX_VALUE / 1000) * 1000
+    return value?.let { runCatching { (it.fromHttpToGmtDate().timestamp - GMTDate().timestamp).coerceAtLeast(0) }.getOrNull() }
+}
+
+/** Windows reader retries one explicit HTTP failure while the original context is still current. */
+suspend fun withReaderRetry(
+    stillCurrent: suspend () -> Boolean,
+    request: suspend () -> MockReply,
+): MockReply {
+    val reply = request()
+    if (reply.statusCode != 429 && reply.statusCode !in 500..599) return reply
+    val waitMs = reply.retryAfterMs ?: 1000L
+    kotlinx.coroutines.delay(waitMs)
+    return if (stillCurrent()) request() else reply
+}
+
 sealed interface UnifiedServerCapability {
     data class Supported(val accountScope: String?) : UnifiedServerCapability
     data class Unsupported(val accountScope: String?) : UnifiedServerCapability
@@ -159,10 +180,13 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             val status = response.status.value
             val code = parsed?.s("code")?.ifBlank { null }
             when {
+                status == 429 || status in 500..599 ->
+                    MockReply(null, "讲解服务暂时不可用，请稍后再试。", retryable = true, statusCode = status,
+                        code = "unavailable", retryAfterMs = response.readerRetryDelay(parsed))
                 parsed == null && status != 403 -> MockReply(null, "连不上 Coach 服务，可继续阅读或稍后重试。")
                 response.status.isSuccess() -> MockReply(parsed, null, statusCode = status)
                 // Older friend services return a quota sentence. Use the same service guidance on both clients.
-                status == 429 || code == "daily_quota" || code == "monthly_quota" ->
+                code == "daily_quota" || code == "monthly_quota" ->
                     MockReply(null, "讲解服务暂时不可用，请稍后再试。", retryable = true, statusCode = status, code = "unavailable")
                 else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "暂时无法确认，请稍后重试。", statusCode = status, code = code)
             }
@@ -469,6 +493,9 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             val status = response.status.value
             val code = parsed?.s("code")?.ifBlank { null }
             when {
+                path == "v1/library/collection/ask" && (status == 429 || status in 500..599) ->
+                    MockReply(null, "课程服务暂时繁忙，请稍后再试。", retryable = true, statusCode = status,
+                        code = "unavailable", retryAfterMs = response.readerRetryDelay(parsed))
                 parsed == null && status != 403 -> MockReply(null, "连不上学习服务，可继续本地阅读与练习。")
                 response.status.isSuccess() -> MockReply(parsed, null, statusCode = status)
                 code == "daily_quota" || code == "monthly_quota" ->

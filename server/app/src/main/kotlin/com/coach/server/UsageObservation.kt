@@ -28,6 +28,19 @@ private val usageLabels = mapOf(
     "scope" to "学习范围", "offline_pack" to "离线练习包", "journal" to "学习日志", "network" to "网络", "server" to "服务端", "unknown" to "其他操作")
 private fun JsonObject.usageLabel(key: String): String = getValue(key).jsonPrimitive.content.let { usageLabels[it] ?: "其他操作" }
 
+private val readerRoutes = setOf("/v1/library/explain", "/v1/library/collection/ask")
+internal val readerOutcome = AttributeKey<ReaderHttpOutcome>("reader-outcome")
+
+internal class ReaderHttpOutcome(private val record: (Int) -> Unit) :
+    kotlin.coroutines.AbstractCoroutineContextElement(Key) {
+    companion object Key : kotlin.coroutines.CoroutineContext.Key<ReaderHttpOutcome>
+    @Volatile var abandoned = false
+    private val recorded = java.util.concurrent.atomic.AtomicBoolean()
+    fun finish(status: Int) {
+        if (recorded.compareAndSet(false, true)) record(if (abandoned) 499 else status)
+    }
+}
+
 /** One owner for both listeners. Metadata only, separate from learning facts and backups. */
 class UsageObservation(private val logs: Path, private val state: Path,
                        val coverage: ActivityCoverage = ActivityCoverage(logs)) : AutoCloseable {
@@ -149,10 +162,27 @@ fun Application.observeUsage(observation: UsageObservation) {
         onCall { call ->
             val ticket = observation.coverage.begin("http")
             if (ticket == null) call.respondText("Service switching; retry", status = HttpStatusCode.ServiceUnavailable)
-            else { call.attributes.put(activityTicket, ticket); call.attributes.put(requestStart, System.nanoTime()) }
+            else {
+                call.attributes.put(activityTicket, ticket)
+                call.attributes.put(requestStart, System.nanoTime())
+                val route = call.request.path()
+                if (call.request.httpMethod.value == "POST" && route in readerRoutes) {
+                    // A peer close can race ResponseSent. Publish only the first terminal outcome.
+                    call.attributes.put(readerOutcome, ReaderHttpOutcome { status ->
+                        val elapsed = (System.nanoTime() - call.attributes[requestStart]) / 1_000_000
+                        observation.access(call.attributes.getOrNull(observedDevice), route, "POST", status,
+                            elapsed, call.attributes.getOrNull(responseReady))
+                        observation.coverage.end(ticket)
+                    })
+                }
+            }
         }
         onCallRespond { call, _ -> call.attributes.getOrNull(requestStart)?.let { call.attributes.put(responseReady, (System.nanoTime()-it)/1_000_000) } }
         on(ResponseSent) { call ->
+            call.attributes.getOrNull(readerOutcome)?.let { outcome ->
+                outcome.finish(call.response.status()?.value ?: 500)
+                return@on
+            }
             val elapsed = call.attributes.getOrNull(requestStart)?.let { (System.nanoTime()-it)/1_000_000 } ?: 0
             observation.access(call.attributes.getOrNull(observedDevice),usageRoute(call.request.path()),
                 call.request.httpMethod.value,call.response.status()?.value ?: 500,elapsed,call.attributes.getOrNull(responseReady))

@@ -13,7 +13,7 @@ from unittest.mock import patch, AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from api_budget import CreditLedger, Denied, atomic_json, micros
-from api_route import ApiRouter, CONFIG
+from api_route import ApiFailure, ApiRouter, CONFIG
 from api_routing import frames, KEY, NOW, make_png_b64
 from grant_fixture import fund
 from friend_spend_watch import publish
@@ -219,10 +219,11 @@ class FriendApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(interactive_req.fallback)
                 self.assertEqual(["claude-haiku-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"], seen)
 
-                # Verify both calls were billed to friend B (never leaked as owner-only).
+                # Two successful calls plus one conservatively accounted failed physical attempt.
                 day = next(iter(ledger.read()["friends"][B].values()))
-                self.assertEqual(2, day["calls"])
-                self.assertEqual(2, day["devices"]["pc"]["calls"])
+                self.assertEqual(3, day["calls"])
+                self.assertEqual(3, day["devices"]["pc"]["calls"])
+                self.assertEqual({}, day["reserved"])
 
                 # 3) Friend quota denial must NOT fall back to Haiku.
                 atomic_json(Path(temp) / "friends.json", {"defaults": {"daily_calls": 2}})
@@ -235,7 +236,32 @@ class FriendApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(3, len(seen))
                 cli.assert_not_called()
 
-    async def test_http_failure_and_cancellation_keep_both_reservations(self):
+    async def test_rate_limit_does_not_consume_last_friend_slot(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_FRIEND_CONFIG": temp + "/friends.json"}):
+            root = Path(temp)
+            fund(root)
+            atomic_json(root / "friends.json", {"defaults": {"daily_calls": 1}})
+            ledger = CreditLedger(root, lambda: NOW)
+            statuses = iter([429, 200])
+
+            def response(_):
+                return httpx.Response(next(statuses), content=frames("anthropic", model="claude-haiku-5-5"))
+
+            router = ApiRouter(ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(response)),
+                               keys={"anthropic": KEY}, retry_429_delays=())
+            def request():
+                return router.events("READER_SELECTION", "claude-haiku-5-5", "s", "u", 100, friend=A, device="pc")
+            with self.assertRaisesRegex(ApiFailure, "^api_http_429$"):
+                [event async for event in request()]
+            result = [event async for event in request()]
+            self.assertEqual("complete", result[-1]["kind"])
+            daily = next(iter(ledger.read()["friends"][A].values()))
+            self.assertEqual({}, daily["reserved"])
+            self.assertEqual(1, daily["calls"])
+            with self.assertRaisesRegex(Denied, "daily_quota"):
+                [event async for event in request()]
+
+    async def test_ambiguous_http_failure_debits_bound_and_unsent_cancel_releases(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_FRIEND_CONFIG": temp + "/missing"}):
             fund(Path(temp))
             ledger = CreditLedger(Path(temp), lambda: NOW)
@@ -249,8 +275,15 @@ class FriendApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("attempt", (await anext(events))["kind"])
             await events.aclose()
             data = ledger.read()
-            self.assertEqual(2, len(data["cycles"]["anthropic:2026-11"]["reserved"]))
-            self.assertEqual(2, len(next(iter(data["friends"][A].values()))["reserved"]))
+            self.assertEqual({}, data["cycles"]["anthropic:2026-11"]["reserved"])
+            month = data["months"]["2026-11"]["anthropic"]
+            self.assertEqual(1, month["calls"])
+            self.assertEqual(month["spent_microusd"], month["estimated_microusd"])
+            self.assertGreater(month["estimated_microusd"], 0)
+            daily = next(iter(data["friends"][A].values()))
+            self.assertEqual({}, daily["reserved"])
+            self.assertEqual(1, daily["calls"])
+            self.assertEqual(month["estimated_microusd"], daily["spent_microusd"])
 
     async def test_friend_vision_stays_anthropic_only_and_obeys_shared_guard(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_FRIEND_CONFIG": temp + "/friends.json"}):

@@ -135,10 +135,10 @@ function Find-TutorBodyRows($lines) {
 }
 
 # Clicks, drags, holds, and posted mouse messages never select on the ARM package.
-# The reader already takes keys. F2 selects the first body word on the open page.
+# F2 from SendKeys did not arrive. L does. S selects the first body word on the open page.
 function Select-TutorWord {
-    Write-Output "SELECTKEY F2"
-    Send-Keys '{F2}'
+    Write-Output "SELECTKEY S"
+    Send-Keys 's'
 }
 
 function Wait-TutorText([string]$name, [string[]]$labels, [int]$seconds, [int]$scroll = -2) {
@@ -174,7 +174,7 @@ function Focus-ReaderPage {
 }
 
 # 2.0 selection toolbar is a light pill: 「讲讲 / 拆句 / 举个例子 / 问… / 笔记」.
-# F2 selects the open page. A glyph click does not.
+# S selects the open page. A glyph click does not.
 function Open-SelectionAction([string]$name, [string]$action) {
     Focus-ReaderPage
     Select-TutorWord

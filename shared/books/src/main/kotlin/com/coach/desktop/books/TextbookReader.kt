@@ -1303,8 +1303,9 @@ internal fun TextbookReader(
                         switchView(!textView)
                         true
                     }
-                    // 字形上的点击在 ARM 安装包里到不了选区。F2 选中当前页第一段正文的一个词。
-                    !typingNow && !mod && !event.isAltPressed && textView && event.key == Key.F2 -> {
+                    // 字形上的点击在 ARM 安装包里到不了选区。S 和已经生效的 L 一样是普通字母键，
+                    // 选中当前页第一段正文的一个词。
+                    !typingNow && !mod && !event.isAltPressed && textView && event.key == Key.S -> {
                         val word = book.firstBodyWord(ui.page) ?: return@onPreviewKeyEvent false
                         textSelection = word
                         true

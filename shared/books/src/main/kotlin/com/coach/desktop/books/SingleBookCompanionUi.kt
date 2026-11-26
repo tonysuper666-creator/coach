@@ -82,7 +82,7 @@ internal fun SingleBookCompanionPanel(
     bottomContent: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
     currentPageOffset: Int = 0,
-    visiblePageRanges: List<IntRange> = emptyList(),
+    visiblePageRanges: List<IntRange>? = null,
     onOpenSectionMainline: ((Int) -> Unit)? = null,
     wholeOriginalPageVisible: Boolean = false,
 ) {
@@ -130,31 +130,38 @@ internal fun SingleBookCompanionPanel(
     val samePage = chapterGroup?.firstPage == currentPage && chapterGroup.lastPage == currentPage
     val sectionOnly = studyPreference.mode == BookStudyMode.READ_THROUGH &&
         chapterGroup?.sections?.singleOrNull()?.let { currentPage in it.firstPage..it.lastPage } == true
-    val pageOnly = readingExplanation && !wholeChapter && !samePage && !sectionOnly
-    val cachedPagePack = remember(packState, pageOnly, currentPage, currentPageOffset, visiblePageRanges, currentSection, studyPreference.mode) {
+    val screenBlocks = remember(book, currentPage, currentPageOffset, visiblePageRanges) {
+        visiblePageRanges?.let { selectScreenExplainBlocks(book, currentPage, currentPageOffset, it) }
+    }
+    // A single import page (or a single section) can still run to many screens.
+    val canChooseScreen = remember(chapterGroup, samePage, sectionOnly, screenBlocks) {
+        if (screenBlocks == null) !samePage && !sectionOnly
+        else !samePage || chapterGroup?.sections.orEmpty().any { lesson ->
+            lesson.blocks.any { it.isBodyParagraph && it !in screenBlocks }
+        }
+    }
+    val pageOnly = readingExplanation && !wholeChapter && canChooseScreen
+    val cachedPagePack = remember(packState, pageOnly, currentPage, currentPageOffset, screenBlocks, currentSection, studyPreference.mode) {
         val pack = (packState as? CompanionPackState.Ready)?.pack
         if (!pageOnly || studyPreference.mode != BookStudyMode.READ_THROUGH || pack == null) null
         else {
-            val onPagePoints = pack.keyPoints.filter { it.anchor?.pdfPage == currentPage }
-            val screenPoints = when {
-                visiblePageRanges.isNotEmpty() -> onPagePoints.filter { kp ->
-                    val a = kp.anchor ?: return@filter false
-                    val aEnd = maxOf(a.endUtf16, a.startUtf16 + 1)
-                    visiblePageRanges.any { r -> aEnd > r.first && a.startUtf16 <= r.last }
-                }.ifEmpty { onPagePoints }
-                currentPageOffset > 0 -> onPagePoints.filter { kp ->
-                    val a = kp.anchor ?: return@filter false
-                    maxOf(a.endUtf16, a.startUtf16 + 1) > currentPageOffset
-                }.ifEmpty { onPagePoints }
-                else -> onPagePoints
-            }
             val pageText = book.page(currentPage)?.text.orEmpty()
-            if (screenPoints.isEmpty()) null else pack.copy(
+            fun inScope(anchor: BookCompanionAnchor?): Boolean {
+                if (anchor == null || anchor.pdfPage != currentPage || anchor.endUtf16 <= currentPageOffset) return false
+                if (screenBlocks == null) return true
+                return anchor.startUtf16 < anchor.endUtf16 && anchor.quoteAnchor.isNotBlank() &&
+                    pageText.startsWith(anchor.quoteAnchor, anchor.startUtf16) &&
+                    screenBlocks.any { block -> anchor.startUtf16 >= block.start && anchor.endUtf16 <= block.end &&
+                        anchor.quoteAnchor.length <= block.end - anchor.startUtf16 }
+            }
+            val points = pack.keyPoints.filter { inScope(it.anchor) }
+            if (points.isEmpty()) null else pack.copy(
                 coreQuestion = currentSection?.title.orEmpty(),
-                keyPoints = screenPoints,
+                keyPoints = points,
                 jargonGlosses = pack.jargonGlosses.filter { gloss ->
-                    gloss.anchor?.pdfPage == currentPage ||
-                        (gloss.anchor == null && gloss.term.isNotBlank() && pageText.contains(gloss.term, ignoreCase = true))
+                    inScope(gloss.anchor) || (gloss.anchor == null && gloss.term.isNotBlank() &&
+                        (screenBlocks?.any { it.text.contains(gloss.term, ignoreCase = true) }
+                            ?: pageText.contains(gloss.term, ignoreCase = true)))
                 },
             )
         }
@@ -515,7 +522,7 @@ internal fun SingleBookCompanionPanel(
                 val endOffset = summarySection?.blocks?.lastOrNull()?.end?.minus(1)
                 if (readingExplanation && LocalReadingSectionSummary.current && summarySection != null && endOffset != null &&
                     currentPage == summarySection.lastPage && (wholeOriginalPageVisible || currentPageOffset >= endOffset ||
-                        visiblePageRanges.any { endOffset in it })) {
+                        visiblePageRanges.orEmpty().any { endOffset in it })) {
                     var dismissed by remember(book.id, summarySection.id) { mutableStateOf(false) }
                     if (!dismissed) {
                         val pack = (packState as? CompanionPackState.Ready)?.pack
@@ -559,7 +566,7 @@ internal fun SingleBookCompanionPanel(
                     } else chapterGroup?.chapterTitle
                     Text(explanationScope(first, last, title ?: book.title),
                         style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag("companion-explanation-scope"))
-                    if (!samePage && !sectionOnly && chapterGroup != null) {
+                    if (canChooseScreen && chapterGroup != null) {
                         V7TextButton({ wholeChapter = !wholeChapter }, modifier = Modifier.testTag("companion-change-scope")) {
                             Text(if (wholeChapter) "只讲这一页" else "讲整章")
                         }

@@ -227,6 +227,76 @@ class Ton1848CompanionFixesTest {
     }
 
     @Test
+    fun openingDrawerKeepsVisibleProseForExplanationAndDefaultQuestion() {
+        val root = Files.createTempDirectory("ton1885-reflow-")
+        try {
+            val caption = "Plate 7. Isolated synthetic caption."
+            val marker = "Visible sample starts here."
+            val filler = "Earlier observations fill the preceding screens. ".repeat(290)
+            val later = " Independent observations continue here.".repeat(180)
+            val content = "<!-- PDF 第 9 页 · 书第 1 页 -->\n\n$caption\n\n$filler$marker$later"
+            val (library, book) = importSyntheticBook(root, content, "reflow.md")
+            val page = book.pages.single()
+            val start = page.text.indexOf(marker)
+            assertTrue(start > 0)
+            assertEquals(9, page.number)
+            ExplainConsent(library.directory).allow(book.id)
+            library.saveReadSpot(book.id, page.number, start)
+            val sectionIndex = book.lessons.indexOfFirst { lesson ->
+                lesson.blocks.any { it.page == page.number && start in it.start until it.end }
+            }
+            val group = assertNotNull(ChapterCompanionGrouping.groupForSection(book, sectionIndex))
+            val old = book.sourceBlocks().first { it.text == caption }
+            val stale = BookCompanionKeyPoint("old", group.sections.first().id, "Wrong cached caption",
+                BookCompanionAnchor(old.page, old.id, old.start, old.end, old.text))
+            library.saveChapterCompanion(book.id, group.chapterId, BookCompanionPack(
+                bookId = book.id, chapterId = group.chapterId, chapterTitle = group.chapterTitle,
+                coreQuestion = "Old question", keyPoints = listOf(stale)))
+            val explainer = FakeCompanionExplainer(root.resolve("home"), library)
+            runSkikoComposeUiTest(size = Size(1920f, 1080f), density = Density(1f)) {
+                setContent {
+                    val focus = remember { FocusRequester() }
+                    CoachTheme(false) {
+                        CompositionLocalProvider(LocalReadingAiExplain provides true, LocalV7ReducedMotion provides true) {
+                            TextbookReader(
+                                ui = LibraryUi(book = book, screen = BookScreen.READER, page = page.number),
+                                library = library, support = UnconnectedBookLearningSupport, practiceSource = null,
+                                pageFocus = focus, onNoteSession = {}, onPage = {}, onBack = {}, onLearn = {},
+                                explainProvider = explainer,
+                            )
+                        }
+                    }
+                }
+                fun visibleRanges() = onAllNodes(androidx.compose.ui.test.SemanticsMatcher.keyIsDefined(BookPageSources))
+                    .fetchSemanticsNodes().flatMap { it.config[BookPageSources] }
+                waitUntil(timeoutMillis = 10_000) { visibleRanges().any { start in it.startUtf16 until it.endUtf16 } }
+                assertTrue(visibleRanges().none { old.start in it.startUtf16 until it.endUtf16 })
+                assertTrue(selectScreenExplainBlocks(book, page.number, visibleRanges = emptyList()).isEmpty())
+                onNodeWithTag("immersive-companion-toggle").performClick()
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("explain-text").fetchSemanticsNodes().isNotEmpty() }
+                waitForIdle()
+                val sent = explainer.lessonCalls.last()
+                assertTrue(explainer.lessonCalls.all { it.first().start == start })
+                assertTrue(sent.first().text.startsWith(marker))
+                assertTrue(sent.all { page.text.substring(it.start, it.end) == it.text })
+                BookLessonWire.withSource(BookLessonWire.request("1885", sent, page.number),
+                    ImportedBookWire(library).snapshot(sent))
+                val visible = visibleRanges()
+                assertTrue(sent.all { block -> (block.start until block.end).all { offset ->
+                    visible.any { offset in it.startUtf16 until it.endUtf16 }
+                } })
+                onNodeWithTag("explain-text").assertTextContains(marker.take(20), substring = true)
+                onNodeWithTag("companion-tab-ask").performClick()
+                onNodeWithText("引文 · " + shortQuote(sent.first().text)).assertExists()
+                onNodeWithTag("inline-followup-input").performTextInput("Explain this observation.")
+                onNodeWithTag("inline-followup-send").performClick()
+                waitUntil(timeoutMillis = 10_000) { explainer.selectionCalls.isNotEmpty() }
+                assertEquals(sent.first(), explainer.selectionCalls.single().second)
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test
     fun screenExplainSkipsLeadingImageCaptionAndPrioritizesCurrentScreenSection() {
         val root = Files.createTempDirectory("ton1848-screen-")
         try {

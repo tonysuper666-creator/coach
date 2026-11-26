@@ -172,6 +172,7 @@ fun Application.booklistAlignmentRoutes(
     @Suppress("UNUSED_PARAMETER") actor: LedgerActor,
     friends: FriendAccess? = null,
     aligner: BooklistSemanticAligner? = null,
+    sayings: ConceptSayingService? = null,
 ) {
     routing {
         post("/v1/library/booklist/align") {
@@ -211,6 +212,55 @@ fun Application.booklistAlignmentRoutes(
                 } catch (_: Exception) {
                     call.respondText(
                         buildJsonObject { put("error", "书单主题对齐暂时不可用，已保留本地结果。") }.toString(),
+                        ContentType.Application.Json,
+                        HttpStatusCode.BadGateway,
+                    )
+                }
+            }
+        }
+        post("/v1/library/concepts/sayings") {
+            call.withReaderConnection {
+                val service = sayings ?: return@withReaderConnection call.respondText(
+                    buildJsonObject { put("error", "概念对照服务暂未开启，请稍后重试。") }.toString(),
+                    ContentType.Application.Json,
+                    HttpStatusCode.ServiceUnavailable,
+                )
+                val friend = call.attributes.getOrNull(observedFriend)
+                val device = call.attributes[observedDevice]
+                try {
+                    if (friend != null && friends != null) {
+                        val quota = withContext(Dispatchers.IO) { friends.status(friend, device) }
+                        val callsRem = quota["callsRemaining"]?.jsonPrimitive?.longOrNull
+                        val tokensRem = quota["tokensRemaining"]?.jsonPrimitive?.longOrNull
+                        if ((callsRem != null && callsRem <= 0L) || (tokensRem != null && tokensRem <= 0L)) {
+                            throw FriendServiceError("daily_quota")
+                        }
+                    }
+                    val channel = call.receiveChannel()
+                    val bytes = ByteArray(262_145)
+                    var size = 0
+                    while (size < bytes.size) {
+                        val n = channel.readAvailable(bytes, size, bytes.size - size)
+                        if (n < 0) break
+                        size += n
+                    }
+                    if (size > 262_144) throw MockError(HttpStatusCode.PayloadTooLarge, "概念对照请求过大。")
+                    val input = LedgerJson.parseToJsonElement(bytes.decodeToString(0, size)).jsonObject
+                    val reply = service.generate(input, friend, device)
+                    call.respondText(reply.toString(), ContentType.Application.Json)
+                } catch (e: FriendServiceError) {
+                    call.respondText(e.body.toString(), ContentType.Application.Json, e.status)
+                } catch (e: MockError) {
+                    call.respondText(buildJsonObject { put("error", e.message ?: "概念对照请求无效。") }.toString(), ContentType.Application.Json, e.status)
+                } catch (e: IllegalArgumentException) {
+                    call.respondText(
+                        buildJsonObject { put("error", e.message ?: "概念对照请求无效。") }.toString(),
+                        ContentType.Application.Json,
+                        HttpStatusCode.BadRequest,
+                    )
+                } catch (_: Exception) {
+                    call.respondText(
+                        buildJsonObject { put("error", "各书说法暂时对不上，已保留本机结果。") }.toString(),
                         ContentType.Application.Json,
                         HttpStatusCode.BadGateway,
                     )

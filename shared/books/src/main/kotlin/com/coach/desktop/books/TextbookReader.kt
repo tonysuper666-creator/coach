@@ -118,7 +118,7 @@ internal fun TextbookReader(
     onRecordPageDwell: ((bookId: String, tocNodeId: String, page: Int, pagesTotal: Int, dwellMs: Long) -> Unit)? = null,
     onToggleChapterRead: ((bookId: String, tocNodeId: String, pagesTotal: Int, read: Boolean) -> Unit)? = null,
     onMuteConcept: ((conceptId: String) -> Unit)? = null,
-    onOpenCrossBookPage: ((bookId: String, page: Int, quoteAnchor: String?) -> Unit)? = null,
+    onOpenCrossBookPage: ((bookId: String, page: Int, quoteAnchor: String?, offsetUtf16: Int) -> Unit)? = null,
     hinge: Hinge? = LocalBookHinge.current,
     onExportNotes: ((Textbook, Int) -> Unit)? = null,
     courseContext: CourseReaderContext? = null,
@@ -671,6 +671,11 @@ internal fun TextbookReader(
     var localBooklistRev by remember(book.id) { mutableIntStateOf(0) }
     var chapterReadStates by remember(book.id) { mutableStateOf<Set<String>>(emptySet()) }
     var crossBookCards by remember(book.id) { mutableStateOf<List<CrossBookCompanionCard>>(emptyList()) }
+    var bookConceptNames by remember(book.id) { mutableStateOf<List<ConceptNameRef>>(emptyList()) }
+    var openedConceptId by remember(book.id) { mutableStateOf<String?>(null) }
+    var sayingsOpenTick by remember(book.id) { mutableIntStateOf(0) }
+    var conceptSayings by remember(book.id) { mutableStateOf<ConceptSayingsBoard?>(null) }
+    var checkingSayings by remember(book.id) { mutableStateOf(false) }
     val readingTracker = remember(book.id, book.structure?.editRevision, dwellThresholdMs) {
         val floor = if (dwellThresholdMs < ChapterReadPolicy.MIN_DWELL_MS) maxOf(dwellThresholdMs, 40L) else 15_000L
         PageReadingTracker(defaultMedianFloorMs = floor)
@@ -911,6 +916,33 @@ internal fun TextbookReader(
         }
         chapterReadStates = loaded.first
         crossBookCards = loaded.second
+    }
+    LaunchedEffect(book.id, ui.booklistRevision, localBooklistRev) {
+        bookConceptNames = withContext(Dispatchers.IO) { library.conceptNamesForBook(book.id) }
+    }
+    LaunchedEffect(openedConceptId, sayingsOpenTick, book.id, ui.booklistRevision, localBooklistRev) {
+        val id = openedConceptId
+        if (id == null) {
+            conceptSayings = null
+            checkingSayings = false
+            return@LaunchedEffect
+        }
+        val board = withContext(Dispatchers.IO) { library.conceptSayings(id, book.id) }
+        conceptSayings = board
+        if (board != null && board.pending && board.candidates.size >= 2) {
+            checkingSayings = true
+            val settled = settleConceptSayings(
+                board,
+                fetch = { explainer.alignConceptSayings(it) },
+                save = { ready, parsed -> withContext(Dispatchers.IO) { library.saveConceptSayings(ready, parsed) } },
+                reload = { withContext(Dispatchers.IO) { library.conceptSayings(id, book.id) } },
+                delayMillis = { delay(it) },
+            )
+            checkingSayings = false
+            conceptSayings = settled
+        } else {
+            checkingSayings = false
+        }
     }
     val practiceDraftNodeId = remember(book.id, currentChapterGroup?.chapterId) {
         currentChapterGroup?.chapterId ?: currentSection?.id ?: "p${ui.page}"
@@ -1843,17 +1875,36 @@ internal fun TextbookReader(
                                 else companionTab = ReaderCompanionTab.EXPLAIN
                             },
                             onInputFocusChanged = { practiceInputFocused = it },
-                            bottomContent = if (crossBookCards.isNotEmpty()) {
+                            bottomContent = if (crossBookCards.isNotEmpty() || conceptSayings != null || checkingSayings) {
                                 {
                                     CrossBookCompanionSection(
                                         cards = crossBookCards,
-                                        onJumpToBookPage = { targetBookId, targetPage, quote ->
-                                            if (onOpenCrossBookPage != null) {
-                                                onOpenCrossBookPage(targetBookId, targetPage, quote)
+                                        board = conceptSayings,
+                                        checking = checkingSayings,
+                                        onOpenConcept = { conceptId ->
+                                            openedConceptId = conceptId
+                                            sayingsOpenTick++
+                                            companionOpen = true
+                                            companionTab = ReaderCompanionTab.EXPLAIN
+                                        },
+                                        onJumpToBookPage = { targetBookId, targetPage, quote, offset ->
+                                            if (targetBookId == book.id) {
+                                                val pageObj = book.page(targetPage)
+                                                val passage = if (pageObj != null && !quote.isNullOrBlank()) {
+                                                    ConceptSayingLogic.passageIfExact(book.id, targetPage, pageObj.text, offset, quote)
+                                                } else null
+                                                if (passage != null) handleCitationJump(passage) else turnTo(targetPage)
+                                            } else if (onOpenCrossBookPage != null) {
+                                                onOpenCrossBookPage(targetBookId, targetPage, quote, offset)
                                             }
                                         },
                                         onMuteConcept = { conceptId ->
                                             crossBookCards = crossBookCards.filterNot { it.conceptId == conceptId }
+                                            if (openedConceptId == conceptId) {
+                                                openedConceptId = null
+                                                conceptSayings = null
+                                                checkingSayings = false
+                                            }
                                             if (onMuteConcept != null) {
                                                 onMuteConcept(conceptId)
                                             } else {
@@ -2079,7 +2130,7 @@ internal fun TextbookReader(
                     } else if (onJumpCollectionCitation != null) {
                         onJumpCollectionCitation(cit, readingAnchor)
                     } else {
-                        onOpenCrossBookPage?.invoke(cit.bookId, cit.page, cit.quoteAnchor)
+                        onOpenCrossBookPage?.invoke(cit.bookId, cit.page, cit.quoteAnchor, cit.startUtf16)
                     }
                 },
             )
@@ -2351,6 +2402,16 @@ internal fun TextbookReader(
                     startNoteFromSelection(learnableSelection)
                 },
                 onDismiss = { pdf.selection = null; textSelection = null },
+                onCompare = ConceptSayingLogic.matchConcept(learnableSelection.text, bookConceptNames)?.let { conceptId ->
+                    {
+                        openedConceptId = conceptId
+                        sayingsOpenTick++
+                        companionOpen = true
+                        companionTab = ReaderCompanionTab.EXPLAIN
+                        pdf.selection = null
+                        textSelection = null
+                    }
+                },
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = if (showHud) 54.dp else 14.dp),
             )
         }

@@ -2635,6 +2635,18 @@ internal class TextbookLibrary(
         ConceptStore.queryCompanionCardsForSection(db, currentBookId, currentChapterId, currentPageRange, activeBooklistId)
     }
 
+    @Synchronized fun conceptNamesForBook(bookId: String): List<ConceptNameRef> = database().use { db ->
+        ConceptStore.conceptNamesForBook(db, bookId)
+    }
+
+    @Synchronized fun conceptSayings(conceptId: String, anchorBookId: String): ConceptSayingsBoard? = database().use { db ->
+        ConceptStore.loadSayingsBoard(db, conceptId, anchorBookId)
+    }
+
+    @Synchronized fun saveConceptSayings(board: ConceptSayingsBoard, parsed: List<ParsedBookSaying>) = database().use { db ->
+        ConceptStore.saveConceptSayings(db, board, parsed)
+    }
+
     /** 读取全局「伴读讲解与提问」开关持久化状态；关闭时所有书单对齐均严禁发送正文到远端。 */
     @Synchronized fun isReadingAiExplainEnabled(): Boolean = database().use { db ->
         if (!BookSchemaMigration.tableExists(db, "reading_settings")) return@use true

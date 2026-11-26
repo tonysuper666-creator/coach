@@ -717,6 +717,23 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         }
     } catch (e: kotlinx.coroutines.CancellationException) { throw e }
       catch (_: Exception) { MockReply(null, "需要联网才能使用，已保留本地对齐结果。", retryable = true, code = "offline") }
+
+    /** 同一概念在各书里的一句话说法。批次未完成时正文里带 pending。 */
+    suspend fun alignConceptSayings(input: JsonObject): MockReply = try {
+        val response = http.post("$base/v1/library/concepts/sayings") {
+            timeout { requestTimeoutMillis = 120_000L; socketTimeoutMillis = 120_000L }
+            setBody(TextContent(input.toString(), ContentType.Application.Json))
+        }
+        val status = response.status.value
+        if (status == 401) MockReply(null, "授权已失效，请重新登录学习服务。", statusCode = 401)
+        else {
+            val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+            if (response.status.isSuccess() && parsed != null) MockReply(parsed, null, statusCode = status)
+            else MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "各书说法暂时对不上。", statusCode = status)
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+      catch (_: Exception) { MockReply(null, "需要联网才能核对各书说法，已保留本机结果。", retryable = true, code = "offline") }
+
     suspend fun cancelLibraryExplain(id: String) {
         runCatching { http.post("$base/v1/library/explain/cancel") {
             setBody(TextContent(buildJsonObject { put("requestId", id) }.toString(), ContentType.Application.Json)) } }

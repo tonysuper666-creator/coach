@@ -291,6 +291,11 @@ internal object ConceptStore {
                 }
                 if (hasAny) s.executeBatch()
             }
+            if (BookSchemaMigration.tableExists(db, "concept_sayings")) {
+                db.prepareStatement(
+                    "DELETE FROM concept_sayings WHERE concept_id NOT IN (SELECT concept_id FROM concept_entities)",
+                ).use { it.executeUpdate() }
+            }
             db.commit()
         } catch (failure: Throwable) {
             runCatching { db.rollback() }
@@ -659,5 +664,313 @@ internal object ConceptStore {
             )
             .distinctBy { it.conceptId }
             .take(maxCards.coerceIn(0, MAX_COMPANION_CARDS_PER_SECTION))
+    }
+
+    /** 说法对照表按使用时创建，不升库版本。对齐重写概念后顺手清掉已经不存在的概念行。 */
+    private fun ensureSayingsTable(db: Connection) {
+        db.createStatement().use { st ->
+            st.executeUpdate(
+                """CREATE TABLE IF NOT EXISTS concept_sayings (
+                    concept_id TEXT NOT NULL,
+                    input_hash TEXT NOT NULL,
+                    book_id TEXT NOT NULL,
+                    mention_id TEXT NOT NULL,
+                    book_title TEXT NOT NULL,
+                    statement TEXT NOT NULL,
+                    stance TEXT NOT NULL,
+                    page INTEGER NOT NULL,
+                    offset_utf16 INTEGER NOT NULL,
+                    quote_anchor TEXT NOT NULL,
+                    kept INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (concept_id, input_hash, book_id)
+                )""".trimIndent(),
+            )
+        }
+    }
+
+    fun conceptNamesForBook(db: Connection, bookId: String): List<ConceptNameRef> {
+        if (!BookSchemaMigration.tableExists(db, "concept_entities") ||
+            !BookSchemaMigration.tableExists(db, "concept_mentions")
+        ) return emptyList()
+        return db.prepareStatement(
+            """SELECT DISTINCT e.concept_id, e.canonical_name, e.aliases_json
+               FROM concept_entities e
+               INNER JOIN concept_mentions m ON m.concept_id = e.concept_id
+               WHERE m.book_id = ? AND e.muted = 0
+               ORDER BY e.canonical_name""".trimIndent(),
+        ).use { s ->
+            s.setString(1, bookId)
+            s.executeQuery().use { r ->
+                buildList {
+                    while (r.next()) {
+                        val name = r.getString(2).orEmpty().trim()
+                        if (name.isEmpty()) continue
+                        add(ConceptNameRef(r.getString(1), name, decodeAliases(r.getString(3))))
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 打开一个概念时并排看各书。当前这本书始终在列里。
+     * 其他书必须有置信度达标、未驳回的边，而且那一章已读、目录节点非空。
+     * 同一输入散列已经留过核对结果就直接用，不再请求。
+     */
+    fun loadSayingsBoard(db: Connection, conceptId: String, anchorBookId: String): ConceptSayingsBoard? {
+        if (!BookSchemaMigration.tableExists(db, "concept_entities") ||
+            !BookSchemaMigration.tableExists(db, "concept_mentions")
+        ) return null
+        ensureSayingsTable(db)
+        data class EntityRow(val name: String, val muted: Boolean)
+        val entity = db.prepareStatement(
+            "SELECT canonical_name, muted FROM concept_entities WHERE concept_id=?",
+        ).use { s ->
+            s.setString(1, conceptId)
+            s.executeQuery().use { r ->
+                if (!r.next()) null else EntityRow(r.getString(1).orEmpty().trim(), r.getInt(2) != 0)
+            }
+        } ?: return null
+        if (entity.muted || entity.name.isEmpty()) return null
+
+        data class RawMention(
+            val mentionId: String,
+            val bookId: String,
+            val tocNodeId: String?,
+            val page: Int,
+            val offsetUtf16: Int,
+            val quoteAnchor: String,
+            val role: ConceptMentionRole,
+            val claim: String,
+        )
+        val rawMentions = db.prepareStatement(
+            """SELECT mention_id, book_id, toc_node_id, page, offset_utf16, quote_anchor, mention_role, claim_summary
+               FROM concept_mentions WHERE concept_id=?""".trimIndent(),
+        ).use { s ->
+            s.setString(1, conceptId)
+            s.executeQuery().use { r ->
+                buildList {
+                    while (r.next()) {
+                        add(
+                            RawMention(
+                                mentionId = r.getString(1),
+                                bookId = r.getString(2),
+                                tocNodeId = r.getString(3),
+                                page = r.getInt(4),
+                                offsetUtf16 = r.getInt(5),
+                                quoteAnchor = r.getString(6).orEmpty(),
+                                role = ConceptMentionRole.fromWire(r.getString(7)),
+                                claim = r.getString(8).orEmpty(),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+        val pageTextCache = HashMap<Pair<String, Int>, String>()
+        fun pageText(bookId: String, page: Int): String = pageTextCache.getOrPut(bookId to page) {
+            db.prepareStatement("SELECT text FROM pages WHERE book=? AND page=?").use { q ->
+                q.setString(1, bookId)
+                q.setInt(2, page)
+                q.executeQuery().use { r -> if (r.next()) r.getString(1).orEmpty() else "" }
+            }
+        }
+        val mentions = rawMentions.mapNotNull { row ->
+            val verified = ConceptAnchorVerifier.verify(pageText(row.bookId, row.page), row.quoteAnchor, row.offsetUtf16)
+                ?: return@mapNotNull null
+            row.copy(offsetUtf16 = verified.offsetUtf16, quoteAnchor = verified.quoteAnchor)
+        }
+        val anchorMentions = mentions.filter { it.bookId == anchorBookId }
+        if (anchorMentions.isEmpty()) return null
+
+        data class LinkRow(val fromId: String, val toId: String, val relation: ConceptRelationType)
+        val links = if (!BookSchemaMigration.tableExists(db, "concept_links")) emptyList() else {
+            db.prepareStatement(
+                """SELECT from_mention_id, to_mention_id, relation_type
+                   FROM concept_links
+                   WHERE concept_id=? AND dismissed=0 AND confidence>=?""".trimIndent(),
+            ).use { s ->
+                s.setString(1, conceptId)
+                s.setDouble(2, MIN_COMPANION_CONFIDENCE)
+                s.executeQuery().use { r ->
+                    buildList {
+                        while (r.next()) {
+                            add(LinkRow(r.getString(1), r.getString(2), ConceptRelationType.fromWire(r.getString(3))))
+                        }
+                    }
+                }
+            }
+        }
+        val anchorIds = anchorMentions.map { it.mentionId }.toSet()
+        fun linked(mentionId: String): List<LinkRow> = links.filter { link ->
+            (link.fromId == mentionId && link.toId in anchorIds) ||
+                (link.toId == mentionId && link.fromId in anchorIds)
+        }
+        val readCache = HashMap<String, Set<String>>()
+        fun chapterRead(bookId: String, tocNodeId: String?): Boolean {
+            if (tocNodeId.isNullOrBlank()) return false
+            return tocNodeId in readCache.getOrPut(bookId) { BooklistProgressStore.readChapterIds(db, bookId) }
+        }
+        fun pick(rows: List<RawMention>): RawMention = rows.minWith(
+            compareBy<RawMention>({ if (it.role == ConceptMentionRole.PRIMARY_DEF) 0 else 1 }, { it.page }, { it.mentionId }),
+        )
+        val titleCache = HashMap<String, String>()
+        fun bookTitle(bookId: String): String = titleCache.getOrPut(bookId) {
+            db.prepareStatement("SELECT title FROM books WHERE id=?").use { q ->
+                q.setString(1, bookId)
+                q.executeQuery().use { r ->
+                    if (r.next()) r.getString(1).orEmpty().ifBlank { "未命名书籍" } else "未命名书籍"
+                }
+            }
+        }
+        val anchor = pick(anchorMentions)
+        val others = mentions
+            .filter { it.bookId != anchorBookId }
+            .groupBy { it.bookId }
+            .mapNotNull { (_, rows) ->
+                val qualified = rows.filter { linked(it.mentionId).isNotEmpty() && chapterRead(it.bookId, it.tocNodeId) }
+                qualified.takeIf { it.isNotEmpty() }?.let(::pick)
+            }
+        fun candidate(row: RawMention, anchorRow: Boolean): SayingCandidate {
+            val stance = if (anchorRow) {
+                SayingStance.SAME
+            } else {
+                linked(row.mentionId).maxByOrNull { it.relation.priority }?.relation
+                    ?.let(SayingStance::fromRelation) ?: SayingStance.ANGLE
+            }
+            return SayingCandidate(
+                bookId = row.bookId,
+                bookTitle = bookTitle(row.bookId),
+                mentionId = row.mentionId,
+                page = row.page,
+                offsetUtf16 = row.offsetUtf16,
+                quoteAnchor = row.quoteAnchor,
+                claimSummary = row.claim,
+                stance = stance,
+                anchor = anchorRow,
+            )
+        }
+        val candidates = (
+            listOf(candidate(anchor, true)) + others.map { candidate(it, false) }.sortedBy { it.bookTitle }
+            ).take(12)
+        val hash = ConceptSayingLogic.inputHash(conceptId, candidates)
+        val cached = db.prepareStatement(
+            """SELECT book_id, mention_id, book_title, statement, stance, page, offset_utf16, quote_anchor, kept
+               FROM concept_sayings WHERE concept_id=? AND input_hash=?""".trimIndent(),
+        ).use { s ->
+            s.setString(1, conceptId)
+            s.setString(2, hash)
+            s.executeQuery().use { r ->
+                buildList {
+                    while (r.next()) {
+                        add(
+                            StoredSaying(
+                                bookId = r.getString(1),
+                                mentionId = r.getString(2),
+                                bookTitle = r.getString(3).orEmpty(),
+                                statement = r.getString(4).orEmpty(),
+                                stance = SayingStance.fromWire(r.getString(5)),
+                                page = r.getInt(6),
+                                offsetUtf16 = r.getInt(7),
+                                quoteAnchor = r.getString(8).orEmpty(),
+                                kept = r.getInt(9) != 0,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+        val pending = cached.isEmpty() && candidates.size >= 2
+        val rows = if (cached.isNotEmpty()) {
+            val byBook = cached.associateBy { it.bookId }
+            candidates.map { c ->
+                val stored = byBook[c.bookId]
+                if (stored != null) stored.copy(kept = stored.kept || c.anchor)
+                else StoredSaying(
+                    bookId = c.bookId,
+                    mentionId = c.mentionId,
+                    bookTitle = c.bookTitle,
+                    statement = ConceptSayingLogic.oneLine(c.claimSummary.ifBlank { c.quoteAnchor }),
+                    stance = c.stance,
+                    page = c.page,
+                    offsetUtf16 = c.offsetUtf16,
+                    quoteAnchor = c.quoteAnchor,
+                    kept = c.anchor,
+                )
+            }
+        } else {
+            candidates.map { c ->
+                StoredSaying(
+                    bookId = c.bookId,
+                    mentionId = c.mentionId,
+                    bookTitle = c.bookTitle,
+                    statement = ConceptSayingLogic.oneLine(c.claimSummary.ifBlank { c.quoteAnchor }),
+                    stance = c.stance,
+                    page = c.page,
+                    offsetUtf16 = c.offsetUtf16,
+                    quoteAnchor = c.quoteAnchor,
+                    kept = true,
+                )
+            }
+        }
+        return ConceptSayingsBoard(
+            conceptId = conceptId,
+            conceptName = entity.name,
+            anchorBookId = anchorBookId,
+            inputHash = hash,
+            columns = ConceptSayingLogic.columnsFrom(anchorBookId, rows),
+            pending = pending,
+            candidates = candidates,
+        )
+    }
+
+    fun saveConceptSayings(
+        db: Connection,
+        board: ConceptSayingsBoard,
+        parsed: List<ParsedBookSaying>,
+        now: Long = System.currentTimeMillis(),
+    ) {
+        ensureSayingsTable(db)
+        val rows = ConceptSayingLogic.rows(board, parsed)
+        val prev = db.autoCommit
+        db.autoCommit = false
+        try {
+            db.prepareStatement("DELETE FROM concept_sayings WHERE concept_id=?").use { s ->
+                s.setString(1, board.conceptId)
+                s.executeUpdate()
+            }
+            if (rows.isNotEmpty()) {
+                db.prepareStatement(
+                    """INSERT INTO concept_sayings(
+                        concept_id, input_hash, book_id, mention_id, book_title, statement, stance,
+                        page, offset_utf16, quote_anchor, kept, updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""".trimIndent(),
+                ).use { s ->
+                    for (row in rows) {
+                        s.setString(1, board.conceptId)
+                        s.setString(2, board.inputHash)
+                        s.setString(3, row.bookId)
+                        s.setString(4, row.mentionId)
+                        s.setString(5, row.bookTitle)
+                        s.setString(6, row.statement)
+                        s.setString(7, row.stance.wire)
+                        s.setInt(8, row.page)
+                        s.setInt(9, row.offsetUtf16)
+                        s.setString(10, row.quoteAnchor)
+                        s.setInt(11, if (row.kept) 1 else 0)
+                        s.setLong(12, now)
+                        s.addBatch()
+                    }
+                    s.executeBatch()
+                }
+            }
+            db.commit()
+        } catch (failure: Throwable) {
+            runCatching { db.rollback() }
+            throw failure
+        } finally {
+            runCatching { db.autoCommit = prev }
+        }
     }
 }

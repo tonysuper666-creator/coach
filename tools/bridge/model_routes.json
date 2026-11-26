@@ -15,6 +15,7 @@
     "draft": "claude-haiku-5-5",
     "friend": "claude-sonnet-5-5",
     "friend_batch": "claude-haiku-5-5",
+    "concept_sayings": "claude-haiku-5-5",
     "review": "claude-opus-5-5",
     "review_openai": "gpt-6.2-astra",
     "review_upgrade": "gpt-6.2-astra"
@@ -64,6 +65,7 @@
     "practice_diagnose": "practice_grade",
     "practice_variant": "practice_grade",
     "literature_guide": "friend_batch",
+    "concept_sayings": "concept_sayings",
     "course_topic_map": "course_synthesis",
     "course_topic_reduce": "course_synthesis",
     "course_topic_math_repair": "course_synthesis",

@@ -285,6 +285,26 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         }
     }
 
+    open suspend fun alignConceptSayings(requestJson: JsonObject): JsonObject? {
+        val paired = identity ?: return null
+        val http = newHttp(paired)
+        return try {
+            val reply = http.alignConceptSayings(requestJson)
+            recordReplyConnectivity(paired.serverUrl, reply)
+            if (reply.statusCode == 401) {
+                markRevoked()
+                null
+            } else reply.body
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            CoachConnectivityRegistry.markOffline(paired.serverUrl)
+            null
+        } finally {
+            http.close()
+        }
+    }
+
     open suspend fun alignBooklistConcepts(requestJson: JsonObject): JsonObject? {
         val paired = identity ?: return null
         val http = newHttp(paired)

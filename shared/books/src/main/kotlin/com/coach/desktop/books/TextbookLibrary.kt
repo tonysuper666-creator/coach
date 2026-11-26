@@ -2031,12 +2031,7 @@ internal class TextbookLibrary(
             db.autoCommit = false
             try {
                 BookFtsStore.deleteBook(db, bookId)
-                if (BookSchemaMigration.tableExists(db, "literature_guides")) {
-                    db.prepareStatement("DELETE FROM literature_guides WHERE EXISTS (SELECT 1 FROM json_each(books) WHERE value=?)").use {
-                        it.setString(1, bookId)
-                        it.executeUpdate()
-                    }
-                }
+                if (BookSchemaMigration.tableExists(db, "literature_guides")) LiteratureGuideStore.forgetBook(db, bookId)
                 for (table in listOf(
                     "pages", "book_illustrations", "book_page_text_boxes", "book_native_sources",
                     "book_learning_paths", "book_ladders", "book_reader_views", "book_pdf_modes",

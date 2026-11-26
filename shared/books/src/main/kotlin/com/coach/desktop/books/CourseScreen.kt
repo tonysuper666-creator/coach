@@ -116,6 +116,9 @@ internal fun CourseScreen(
     onSetTopicStatus: (topicId: String, status: CourseTopicStatus) -> Unit,
     onUpdateExamProfile: (CourseExamProfile) -> Unit,
     onDismissNotice: () -> Unit = {},
+    intake: CourseIntakeReceipt? = null,
+    onChangeIntakeType: (key: String, role: CourseMaterialRole?) -> Unit = { _, _ -> },
+    onDismissIntake: () -> Unit = {},
     hasActiveMockExam: Boolean = false,
     onOpenMockExam: () -> Unit = {},
     onOpenLiteratureGuide: (() -> Unit)? = null,
@@ -283,13 +286,18 @@ internal fun CourseScreen(
             PageHeader(
                 kicker = when {
                     !isExam -> "课程学习"
-                    detail.hasSyllabusOrScope -> "课程备考 · L1 大纲/讲义优先"
+                    detail.hasSyllabusOrScope -> "课程备考 · 已有考纲"
                     else -> "课程备考"
                 },
                 title = detail.title,
                 deck = if (isExam) buildExamSummaryLine(detail) else buildRegularSummaryLine(detail, orderedExaminableTopics),
                 meta = buildCourseMetaLine(detail, orderedExaminableTopics),
             )
+
+            // Right under the header so what was just dropped is seen without scrolling.
+            if (intake != null && intake.items.isNotEmpty()) {
+                CourseIntakeReceiptCard(intake, busy = busy, onChangeType = onChangeIntakeType, onDismiss = onDismissIntake)
+            }
 
             if (onOpenLiteratureGuide != null) {
                 PaperButton(onOpenLiteratureGuide, modifier = Modifier.testTag("course-literature-guide")) {
@@ -329,6 +337,8 @@ internal fun CourseScreen(
                         )
                     }
                 }
+
+                CourseExamPointMap(detail, onRealign = onRealign, onPractice = onOpenTopic)
 
                 // Visible, editable record of the user's exam & syllabus answers
                 Row(

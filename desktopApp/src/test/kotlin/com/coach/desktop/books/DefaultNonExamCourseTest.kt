@@ -553,7 +553,9 @@ class DefaultNonExamCourseTest {
                 assertTrue(detail.isExam, "Course should be in exam mode")
                 assertFalse(detail.hasSyllabusOrScope, "Week-1 slides alone must not count as syllabus")
                 assertTrue(detail.excludedTopics.isEmpty(), "Without syllabus, zero chapters may be excluded; got ${detail.excludedTopics.map { it.title }}")
-                assertEquals(3, detail.examinableTopics.size, "All 3 chapters must remain scheduled; got ${detail.examinableTopics.map { it.weekLabel + ":" + it.title }}")
+                // Exam points (TON-1890) sit beside the schedule; count only the scheduled chapter/week topics.
+                val scheduled = detail.examinableTopics.filter { it.weekLabel != CourseExamPoints.LABEL }
+                assertEquals(3, scheduled.size, "All 3 chapters must remain scheduled; got ${detail.examinableTopics.map { it.weekLabel + ":" + it.title }}")
 
                 val allText = collectAllVisibleText()
                 assertTrue("按整本书安排，放进考纲后可以缩小范围" in allText, "Expected whole-book scope banner, got:\n$allText")

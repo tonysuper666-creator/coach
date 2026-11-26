@@ -23,12 +23,13 @@ internal enum class CourseMaterialRole(
     val displayOrder: Int,
     val labelZh: String,
 ) {
-    SYLLABUS("SYLLABUS", 1, 10, "课程大纲"),
-    LECTURE_SLIDES("LECTURE_SLIDES", 1, 11, "课堂讲义"),
-    TUTORIAL("TUTORIAL", 1, 12, "习题课"),
-    SOLUTION_KEY("SOLUTION_KEY", 1, 13, "官方答案"),
-    TRANSCRIPT("TRANSCRIPT", 1, 14, "课堂转写"),
-    CORE_TEXTBOOK("CORE_TEXTBOOK", 2, 20, "核心教材"),
+    SYLLABUS("SYLLABUS", 3, 30, "课程大纲"),
+    LECTURE_SLIDES("LECTURE_SLIDES", 2, 20, "课件"),
+    HANDOUT("HANDOUT", 3, 31, "讲义"),
+    TUTORIAL("TUTORIAL", 3, 32, "习题课"),
+    SOLUTION_KEY("SOLUTION_KEY", 3, 33, "官方答案"),
+    TRANSCRIPT("TRANSCRIPT", 3, 34, "课堂转写"),
+    CORE_TEXTBOOK("CORE_TEXTBOOK", 1, 10, "核心教材"),
     REQUIRED_READING("REQUIRED_READING", 3, 30, "延伸阅读"),
     USER_NOTES("USER_NOTES", 4, 40, "个人笔记");
 
@@ -40,6 +41,7 @@ internal enum class CourseMaterialRole(
         fun fromWire(value: String?): CourseMaterialRole = when (value?.trim()?.uppercase()) {
             "SYLLABUS", "HANDBOOK" -> SYLLABUS
             "LECTURE_SLIDES", "SLIDES", "LECTURE" -> LECTURE_SLIDES
+            "HANDOUT" -> HANDOUT
             "TUTORIAL", "WORKSHOP" -> TUTORIAL
             "SOLUTION_KEY", "KEY", "ANSWERS" -> SOLUTION_KEY
             "TRANSCRIPT", "RECORDING" -> TRANSCRIPT
@@ -75,6 +77,9 @@ internal enum class CourseMaterialRole(
             if (listOf("tutorial", "workshop", "problem set", "seminar", "习题课", "讨论课").any { it in combined }) {
                 return TUTORIAL
             }
+            val name = "$title ${sourceFilename.orEmpty()}".lowercase()
+            if (listOf("textbook", "教材", "课本").any { it in name }) return CORE_TEXTBOOK
+            if (fmt != "pptx" && listOf("handout", "lecture notes", "讲义").any { it in name }) return HANDOUT
             if (listOf("note", "notes", "summary", "review", "笔记", "精华", "复习整理", "错题整理").any { it in combined }) {
                 return USER_NOTES
             }
@@ -163,6 +168,7 @@ internal data class CourseMaterialEntry(
     val addedAt: Long,
     val ocrPendingCount: Int = 0,
     val needsVision: Boolean = false,
+    val sourceFilename: String? = null,
 )
 
 internal data class CourseTopicSourceLink(
@@ -285,6 +291,7 @@ internal data class CourseDetailSnapshot(
     val spoilerSanitizedCount: Int = 0,
     val alignedAt: Long = 0L,
     val countdownPlan: ExamCountdownPlan? = null,
+    val pastPaperTechniques: Map<String, List<ExamTechnique>> = emptyMap(),
 ) {
     val allTopics: List<CourseTopicEntry>
         get() = examinableTopics + pendingTopics + excludedTopics
@@ -378,6 +385,7 @@ internal object CourseJson {
     }
 
     fun encodeTopicPack(pack: CourseTopicPack): String = buildJsonObject {
+        put("authorityPolicy", "textbook-first")
         put("topicId", pack.topicId)
         put("summary", pack.summary)
         put("authorityNotice", pack.authorityNotice)
@@ -419,8 +427,9 @@ internal object CourseJson {
         put("citations", encodeCitations(pack.citations))
     }.toString()
 
-    fun decodeTopicPack(raw: String?): CourseTopicPack? {
+    fun decodeTopicPack(raw: String?, fromStorage: Boolean = false): CourseTopicPack? {
         val obj = parseObj(raw) ?: return null
+        if (fromStorage && obj.str("authorityPolicy") != "textbook-first") return null
         val topicId = obj.str("topicId")
         val summary = obj.str("summary")
         if (topicId.isBlank() && summary.isBlank()) return null

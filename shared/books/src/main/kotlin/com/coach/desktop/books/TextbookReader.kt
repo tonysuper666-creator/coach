@@ -527,7 +527,7 @@ internal fun TextbookReader(
     }
     var pageFocused by remember { mutableStateOf(false) }
     var tocOpen by remember(book.id) { mutableStateOf(false) }
-    val initialCompanionOpen = openPairing || (
+    val initialCompanionOpen = openPairing || courseContext?.weekLabel == CourseExamPoints.LABEL || (
         ui.source == null &&
             !(studyPreference.userLocked && studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) && (
             (resumeDraft?.companionOpen == true && resumeDraft.hasMeaningfulDraft()) ||

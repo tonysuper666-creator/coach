@@ -40,6 +40,7 @@ internal data class CourseAlignmentPlan(
     val materialUpdates: List<CourseMaterialLinkSpec> = emptyList(),
     val topics: List<CourseTopicPlan> = emptyList(),
     val spoilerSanitizedCount: Int = 0,
+    val includeExamPoints: Boolean = false,
 )
 
 internal data class AddCourseMaterialsResult(
@@ -178,6 +179,8 @@ internal object CourseStore {
         db: Connection,
         courseId: String,
         bookIds: List<String>,
+        /** Files the user explicitly corrected to a material type; the past-paper name gate no longer applies. */
+        trustedBookIds: Set<String> = emptySet(),
     ): AddCourseMaterialsResult {
         ensureReady(db)
         if (bookIds.isEmpty()) return AddCourseMaterialsResult(emptyList(), emptyList())
@@ -190,7 +193,7 @@ internal object CourseStore {
         }
         for (bookId in bookIds.distinct()) {
             val meta = loadBookMeta(db, bookId) ?: continue
-            if (CourseClientGates.isPastExamMaterial(meta.title, meta.sourceFilename)) {
+            if (bookId !in trustedBookIds && CourseClientGates.isPastExamMaterial(meta.title, meta.sourceFilename)) {
                 rejected += meta.title
                 continue
             }
@@ -562,7 +565,11 @@ internal object CourseStore {
             val touchedTopicIds = mutableSetOf<String>()
 
             val existingById = existingTopics.associateBy { it.topicId }
-            for (incoming in plan.topics) {
+            val points = if (plan.includeExamPoints) {
+                val excluded = plan.topics.filter { it.examStatus == CourseTopicStatus.EXCLUDED }.flatMap { it.sources }
+                CourseExamPoints.build(db, courseId, loadMaterials(db, courseId), excluded)
+            } else emptyList()
+            for (incoming in plan.topics + points) {
                 val matched = incoming.topicId?.let(existingById::get) ?: existingTopics.firstOrNull { ex ->
                     (ex.weekLabel == incoming.weekLabel && normalizeMatch(ex.title) == normalizeMatch(incoming.title)) ||
                         (incoming.weekNum != null && extractWeekNum(ex.weekLabel) == incoming.weekNum &&
@@ -798,31 +805,13 @@ internal object CourseStore {
         }
     }
 
-    fun loadCourseDetail(
-        db: Connection,
-        courseId: String,
-        clock: Clock = Clock.systemDefaultZone(),
-    ): CourseDetailSnapshot {
-        ensureReady(db)
-        val col = db.prepareStatement(
-            "SELECT title, metadata_json, exam_date, last_active_anchor_json, updated_at FROM collections WHERE id=?",
-        ).use { sql ->
-            sql.setString(1, courseId)
-            sql.executeQuery().use { rows ->
-                check(rows.next()) { "找不到课程记录（$courseId）。" }
-                Quad(
-                    rows.getString(1),
-                    CourseJson.decodeExamProfile(rows.getString(2), rows.getString(3)),
-                    CourseJson.decodeActiveAnchor(rows.getString(4)),
-                    rows.getLong(5),
-                )
-            }
-        }
-        val materials = db.prepareStatement(
+    private fun loadMaterials(db: Connection, courseId: String): List<CourseMaterialEntry> {
+        val filename = if ("source_filename" in BookSchemaMigration.tableColumns(db, "books")) "b.source_filename" else "NULL"
+        return db.prepareStatement(
             """SELECT cm.material_id, b.title, b.format, cm.role, cm.authority_rank, cm.week_num, cm.user_locked,
                       cm.added_at,
                       (SELECT COUNT(*) FROM pages p WHERE p.book=b.id),
-                      (SELECT COUNT(*) FROM pages p WHERE p.book=b.id AND p.ocr_pending=1)
+                      (SELECT COUNT(*) FROM pages p WHERE p.book=b.id AND p.ocr_pending=1), $filename
                FROM collection_materials cm
                JOIN books b ON b.id = cm.material_id
                WHERE cm.collection_id=?
@@ -848,6 +837,7 @@ internal object CourseStore {
                                 pageCount = pageCount,
                                 addedAt = rows.getLong(8),
                                 ocrPendingCount = pendingOcr,
+                                sourceFilename = rows.getString(11),
                                 needsVision = fmt == "pdf" && pendingOcr > 0 && pageCount <= MAX_HANDWRITTEN_VISION_PAGES,
                             ),
                         )
@@ -855,6 +845,29 @@ internal object CourseStore {
                 }
             }
         }.sortedWith(compareBy<CourseMaterialEntry>({ it.weekNum ?: 999 }, { it.role.displayOrder }, { it.title }))
+    }
+
+    fun loadCourseDetail(
+        db: Connection,
+        courseId: String,
+        clock: Clock = Clock.systemDefaultZone(),
+    ): CourseDetailSnapshot {
+        ensureReady(db)
+        val col = db.prepareStatement(
+            "SELECT title, metadata_json, exam_date, last_active_anchor_json, updated_at FROM collections WHERE id=?",
+        ).use { sql ->
+            sql.setString(1, courseId)
+            sql.executeQuery().use { rows ->
+                check(rows.next()) { "找不到课程记录（$courseId）。" }
+                Quad(
+                    rows.getString(1),
+                    CourseJson.decodeExamProfile(rows.getString(2), rows.getString(3)),
+                    CourseJson.decodeActiveAnchor(rows.getString(4)),
+                    rows.getLong(5),
+                )
+            }
+        }
+        val materials = loadMaterials(db, courseId)
 
         val frontMatterTopics = mutableSetOf<String>()
         val sourcesByTopic = db.prepareStatement(
@@ -912,7 +925,7 @@ internal object CourseStore {
                         val weekLabel = rows.getString(2)
                         val status = CourseTopicStatus.fromWire(rows.getString(5))
                         val packHash = rows.getString(9)
-                        val decodedPack = CourseJson.decodeTopicPack(rows.getString(8))
+                        val decodedPack = CourseJson.decodeTopicPack(rows.getString(8), fromStorage = true)
                             ?.takeIf { packHash.isNullOrBlank() || it.generatedFromHash.isBlank() || it.generatedFromHash == packHash }
                         val draft = CourseJson.decodePracticeDraft(rows.getString(10), tid)
                         val userLocked = rows.getInt(6) == 1
@@ -962,6 +975,7 @@ internal object CourseStore {
             activeAnchor = col.third,
             spoilerSanitizedCount = sanitizedNotes,
             alignedAt = col.fourth,
+            pastPaperTechniques = CoursePastPaper.load(db, courseId),
         )
         val plan = if (snapshot.isExam) {
             ExamCountdownPlanner.planForCourse(
@@ -1031,11 +1045,18 @@ internal object CourseStore {
                 }
             }
         }
-        val raw = parts.joinToString("|") + "||" + CourseJson.encodeExamProfile(profile)
+        val techniques = if (BookSchemaMigration.tableExists(db, "course_exam_techniques")) {
+            db.prepareStatement("SELECT DISTINCT technique FROM course_exam_techniques WHERE course_id=? AND topic_id=? ORDER BY technique").use { sql ->
+                sql.setString(1, courseId)
+                sql.setString(2, topicId)
+                sql.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
+            }
+        } else emptyList()
+        val raw = "textbook-first-v1|${techniques.joinToString(",")}|" + parts.joinToString("|") + "||" + CourseJson.encodeExamProfile(profile)
         return sha256(raw)
     }
 
-    private fun recomputeTopicPackHash(db: Connection, courseId: String, topicId: String, now: Long) {
+    fun recomputeTopicPackHash(db: Connection, courseId: String, topicId: String, now: Long) {
         val newHash = recomputeTopicSourcesHash(db, courseId, topicId)
         val prevHash = db.prepareStatement("SELECT pack_sources_hash FROM course_topics WHERE topic_id=?").use { sql ->
             sql.setString(1, topicId)

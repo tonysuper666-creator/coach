@@ -112,7 +112,7 @@ class CourseTopicPackCache(directory: Path) {
     }
 
     fun get(cacheScope: String, courseId: String, topicId: String, sourcesHash: String): JsonObject? {
-        val key = "$cacheScope|$courseId|$topicId|$sourcesHash"
+        val key = "textbook-first|$cacheScope|$courseId|$topicId|$sourcesHash"
         val raw = database().use { db ->
             db.prepareStatement("SELECT payload_json FROM course_topic_cache WHERE cache_key=?").use { sql ->
                 sql.setString(1, key)
@@ -123,7 +123,7 @@ class CourseTopicPackCache(directory: Path) {
     }
 
     fun put(cacheScope: String, courseId: String, topicId: String, sourcesHash: String, payload: JsonObject) {
-        val key = "$cacheScope|$courseId|$topicId|$sourcesHash"
+        val key = "textbook-first|$cacheScope|$courseId|$topicId|$sourcesHash"
         database().use { db ->
             db.prepareStatement(
                 """INSERT INTO course_topic_cache(cache_key, course_id, topic_id, sources_hash, payload_json, updated_at)
@@ -161,8 +161,8 @@ class CourseAlignmentPipeline(
             for (el in materials) {
                 val obj = el as? JsonObject ?: continue
                 val title = (obj["title"] as? JsonPrimitive)?.contentOrNull.orEmpty()
-                if (CourseQualityGates.isPastExamTitle(title)) continue
                 val role = (obj["role"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                if (role.equals("PAST_EXAM", ignoreCase = true) || CourseQualityGates.isPastExamTitle(title)) continue
                 val preview = (obj["previewText"] as? JsonPrimitive)?.contentOrNull.orEmpty()
                 val (cleanPreview, redactions) = if (role == "USER_NOTES") {
                     CourseQualityGates.sanitizeUserNote(preview)
@@ -183,6 +183,10 @@ class CourseAlignmentPipeline(
             }
         }
 
+        val teachingBookIds = cleanMaterials.mapNotNull { (it.jsonObject["bookId"] as? JsonPrimitive)?.contentOrNull }.toSet()
+        val chapters = (input["textbookChapters"] as? JsonArray).orEmpty().filter { chapter ->
+            ((chapter as? JsonObject)?.get("bookId") as? JsonPrimitive)?.contentOrNull in teachingBookIds
+        }
         val systemPrompt = """
             你是 LearningCoach 课程结构规划器。请根据课程大纲、讲义、习题课/答案、课堂转写、教材章节和笔记，输出按周组织的备考专题 JSON。
             严格规则：
@@ -196,7 +200,7 @@ class CourseAlignmentPipeline(
             put("courseId", courseId)
             put("courseTitle", courseTitle)
             put("materials", cleanMaterials)
-            input["textbookChapters"]?.let { put("textbookChapters", it) }
+            put("textbookChapters", JsonArray(chapters))
         }.toString()
 
         val reply = transport.alignCourse(
@@ -283,7 +287,7 @@ class CourseTopicSynthesisPipeline(
             val o = el as? JsonObject ?: return@mapNotNull null
             val bookTitle = (o["bookTitle"] as? JsonPrimitive)?.contentOrNull.orEmpty()
             val role = (o["role"] as? JsonPrimitive)?.contentOrNull ?: "LECTURE_SLIDES"
-            if (CourseQualityGates.isPastExamTitle(bookTitle)) return@mapNotNull null
+            if (role.equals("PAST_EXAM", ignoreCase = true) || CourseQualityGates.isPastExamTitle(bookTitle)) return@mapNotNull null
             val rawText = (o["text"] as? JsonPrimitive)?.contentOrNull.orEmpty()
             val (cleanText, hits) = if (role == "USER_NOTES") {
                 CourseQualityGates.sanitizeUserNote(rawText)
@@ -297,7 +301,12 @@ class CourseTopicSynthesisPipeline(
                 bookId = (o["bookId"] as? JsonPrimitive)?.contentOrNull.orEmpty(),
                 bookTitle = bookTitle,
                 role = role,
-                authorityRank = ((o["authorityRank"] as? JsonPrimitive)?.intOrNull ?: 2).coerceIn(1, 4),
+                authorityRank = when (role) {
+                    "CORE_TEXTBOOK" -> 1
+                    "LECTURE_SLIDES" -> 2
+                    "USER_NOTES" -> 4
+                    else -> 3
+                },
                 page = ((o["page"] as? JsonPrimitive)?.intOrNull ?: 1).coerceAtLeast(1),
                 startUtf16 = (o["startUtf16"] as? JsonPrimitive)?.intOrNull ?: 0,
                 text = cleanText,
@@ -380,6 +389,9 @@ class CourseTopicSynthesisPipeline(
             put("examDateTentative", examDateTentative)
             put("examFormatTentative", examFormatTentative)
             put("examFormat", examFormat)
+            val allowedTechniques = setOf("CALCULATION", "COMPARISON", "APPLICATION", "EXPLANATION", "RECALL")
+            put("examTechniques", JsonArray((input["examTechniques"] as? JsonArray).orEmpty()
+                .filter { (it as? JsonPrimitive)?.contentOrNull in allowedTechniques }.distinct()))
             put("mappedClaims", buildJsonArray { mapped.forEach { add(it.first) } })
             put("verifiedCitations", buildJsonArray { verifiedMapCitations.forEach { add(it.toJson()) } })
         }.toString()
@@ -387,9 +399,9 @@ class CourseTopicSynthesisPipeline(
         val reduceSystem = """
             你是 LearningCoach 课程总控合卷器。请基于已核验的 map 提取结果生成专题备考包 JSON。
             严格规则：
-            1) 权威顺序：L1（SYLLABUS/LECTURE_SLIDES/TUTORIAL/SOLUTION_KEY/TRANSCRIPT）> L2（CORE_TEXTBOOK）> L3（REQUIRED_READING）> L4（USER_NOTES）。
+            1) 权威顺序：L1（CORE_TEXTBOOK）> L2（LECTURE_SLIDES）> L3（HANDOUT/SYLLABUS/TUTORIAL/SOLUTION_KEY/TRANSCRIPT/REQUIRED_READING）> L4（USER_NOTES）。
             2) 若 L1 与 L2/L3 对同一机制、定义或重点范围讲法不同，必须在 discrepancies 明确标出，结论优先采信 L1。
-            3) 必须用全新原创措辞编写 practicePrompt（建议 300 词短论述），严禁连续照搬来源原文超过 8 个英文词或 12 个汉字。
+            3) 按 examTechniques 指定的考法（如有）用全新情境编写原创 practicePrompt（建议 300 词短论述），严禁连续照搬来源原文超过 8 个英文词或 12 个汉字。
             4) 若生成含算式的示例，必须附带 mathAssertions 数组 [{"expression":"...","expected":123.45}] 供独立复算核验。
             5) citations 只引用已提供的 verifiedCitations，不可编造页码或引号。
             输出 JSON 字段：summary, authorityNotice, examFocus, keyPoints, discrepancies, practicePrompt, mathAssertions, citations。
@@ -523,7 +535,7 @@ class CourseTopicSynthesisPipeline(
             .also { if (it.isNotBlank()) allFinalGeneratedProse += it }
         val baseAuthorityNotice = scrubField(
             ((activeReduced["authorityNotice"] as? JsonPrimitive)?.contentOrNull).orEmpty()
-                .ifBlank { "按 L1 大纲/讲义/转写 -> L2 核心教材 -> L3 延伸文献 -> L4 个人笔记顺序整理。" },
+                .ifBlank { "优先参考教材，其次是课件、讲义。" },
         ).also { if (it.isNotBlank()) allFinalGeneratedProse += it }
 
         val finalPromptObj = activeReduced["practicePrompt"] as? JsonObject

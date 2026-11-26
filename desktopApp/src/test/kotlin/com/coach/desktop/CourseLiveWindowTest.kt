@@ -43,6 +43,61 @@ import javax.swing.SwingUtilities
 class CourseLiveWindowTest {
 
     @Test
+    fun examMapOpensWeakestPointForWriting() {
+        assumeTrue(!GraphicsEnvironment.isHeadless())
+        val root = Files.createTempDirectory("coach-exam-map-window-")
+        val window = edt { ComposeWindow().apply { title = "Coach · 考点地图"; setSize(1280, 900) } }
+        try {
+            val library = TextbookLibrary(root.resolve("library"), lazyPdfExtras = false)
+            val names = listOf("Axial tilt", "Solar wind", "Lunar phase", "Transit depth", "Stellar parallax", "Orbital period", "Tidal locking")
+            val books = listOf("Textbook", "Slides").map { role ->
+                val file = root.resolve("$role.md")
+                Files.writeString(file, names.joinToString("\n\n") { "## $it\nA synthetic $role example of $it." })
+                library.stageBookImport(file).book
+            }
+            val (courseId, ordered) = library.withCourseDatabase { db ->
+                val (id, _) = CourseStore.createCourse(db, "天文学", CourseExamProfile(examEnabled = true), books.map { it.id })
+                val points = CourseAutoAligner.alignLocally(db, id).examinableTopics.filter { it.weekLabel == CourseExamPoints.LABEL }
+                assertEquals(names.toSet(), points.map { it.title }.toSet())
+                val ordered = names.map { name -> points.single { it.title == name } }
+                ordered.take(6).forEachIndexed { i, point ->
+                    MasteryStore.upsertConcept(db, ConceptMasteryRecord(point.topicId, id, books.first().id,
+                        point.topicId, point.title, pMastery = 0.12 + 0.14 * i, hasActiveTest = true))
+                }
+                id to ordered
+            }
+            val controller = TextbookController(library)
+            val offline = object : BookExplainer(library = library) {
+                override suspend fun load() { loaded = true }
+            }
+            runBlocking { controller.load(); controller.openCourse(courseId) }
+            edt {
+                window.setContent { WindowsTextbookHost(controller, bookExplainer = offline) { null } }
+                window.isVisible = true
+            }
+            waitFor("course overview map", window) { node(window, "course-exam-point-map") != null }
+            val visible = ordered.take(5).map { requireNotNull(node(window, "exam-map-${it.topicId}")).boundsInWindow }
+            assertTrue(visible.all { it.height > 0 && it.width > 0 })
+            assertTrue(visible.zipWithNext().all { (first, second) -> first.top < second.top })
+            assertNull(node(window, "exam-map-${ordered.last().topicId}"))
+            val weakest = ordered.first()
+            click(window, "exam-map-${weakest.topicId}")
+            waitFor("visible answer field", window) {
+                controller.state.value.activeCourseTopicId == weakest.topicId &&
+                    (node(window, "course-essay-input")?.boundsInWindow?.height ?: 0f) > 0f
+            }
+            setText(window, "course-essay-input", "Synthetic answer about axial tilt.")
+            waitFor("draft saved for selected point", window) {
+                library.courseDetail(courseId).allTopics.single { it.topicId == weakest.topicId }
+                    .practiceDraft?.text == "Synthetic answer about axial tilt."
+            }
+        } finally {
+            edt { window.dispose() }
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun textbookOnlyCourseOpensFirstChapterAndWrongAnswersAppearOnHome() {
         assumeTrue("Live ComposeWindow verification requires non-headless desktop display", !GraphicsEnvironment.isHeadless())
         val root = Files.createTempDirectory("coach-ton1849-live-window-")

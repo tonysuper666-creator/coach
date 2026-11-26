@@ -61,16 +61,7 @@ internal fun CourseCompanionPanel(
 ) {
     val colors = CoachTheme.colors
     val pack = courseContext.pack
-    val scope = rememberCoroutineScope()
-    val gradingHost = LocalPracticeGradingHost.current
-    var draftText by remember(courseContext.topicId, courseContext.resumeDraft?.topicId) {
-        mutableStateOf(courseContext.resumeDraft?.text.orEmpty())
-    }
-    var gradingInFlight by remember(courseContext.topicId) { mutableStateOf(false) }
-    var gradeResponse by remember(courseContext.topicId) { mutableStateOf<PracticeGradeDiagnoseResponse?>(null) }
-    var gradeError by remember(courseContext.topicId) { mutableStateOf<String?>(null) }
-    val wordTarget = pack?.practicePrompt?.wordTarget ?: 300
-
+    val practiceFirst = courseContext.weekLabel == CourseExamPoints.LABEL
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -93,7 +84,7 @@ internal fun CourseCompanionPanel(
                 Text(
                     courseContext.authorityNotice.ifBlank {
                         if (courseContext.examProfile.isExam) {
-                            "按 L1 大纲/讲义 -> L2 核心教材 -> L3 文献 -> L4 笔记顺序对照"
+                            "优先参考教材，其次是课件、讲义。"
                         } else {
                             "按当前材料顺序对照"
                         }
@@ -109,6 +100,8 @@ internal fun CourseCompanionPanel(
                 Text("更新合卷")
             }
         }
+
+        if (practiceFirst) CourseEssayPractice(courseContext, activeBookId, activePage, onJumpCitation, onSavePracticeDraft)
 
         if (courseContext.examProfile.isExam &&
             (courseContext.examProfile.examDateTentative || courseContext.examProfile.examFormatTentative)
@@ -254,192 +247,215 @@ internal fun CourseCompanionPanel(
             }
         }
 
-        // 300-word essay continuous practice workspace
-        PaperCard(Modifier.fillMaxWidth().testTag("course-essay-section")) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        "短论述练习",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                        color = colors.fgPrimary,
-                    )
-                    Text(
-                        CourseEssayWordCounter.progressLabel(draftText, wordTarget),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = colors.fgSecondary,
-                        modifier = Modifier.testTag("course-essay-wordcount"),
-                    )
-                }
+        if (!practiceFirst) CourseEssayPractice(courseContext, activeBookId, activePage, onJumpCitation, onSavePracticeDraft)
+
+        Spacer(Modifier.height(12.dp))
+    }
+}
+
+@Composable
+private fun CourseEssayPractice(
+    courseContext: CourseReaderContext,
+    activeBookId: String,
+    activePage: Int,
+    onJumpCitation: (CourseCitationRef) -> Unit,
+    onSavePracticeDraft: (CourseTopicPracticeDraft) -> Unit,
+) {
+    val colors = CoachTheme.colors
+    val pack = courseContext.pack
+    val scope = rememberCoroutineScope()
+    val gradingHost = LocalPracticeGradingHost.current
+    var draftText by remember(courseContext.topicId, courseContext.resumeDraft?.topicId) {
+        mutableStateOf(courseContext.resumeDraft?.text.orEmpty())
+    }
+    var gradingInFlight by remember(courseContext.topicId) { mutableStateOf(false) }
+    var gradeResponse by remember(courseContext.topicId) { mutableStateOf<PracticeGradeDiagnoseResponse?>(null) }
+    var gradeError by remember(courseContext.topicId) { mutableStateOf<String?>(null) }
+    val wordTarget = pack?.practicePrompt?.wordTarget ?: 300
+
+    // 300-word essay continuous practice workspace
+    PaperCard(Modifier.fillMaxWidth().testTag("course-essay-section")) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Text(
-                    pack?.practicePrompt?.stem
-                        ?: "请围绕「${courseContext.topicTitle}」写出核心论点、适用条件与关键差异对比（约 $wordTarget 词）。",
-                    style = MaterialTheme.typography.bodySmall,
+                    "短论述练习",
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
                     color = colors.fgPrimary,
                 )
-                OutlinedTextField(
-                    value = draftText,
-                    onValueChange = { updated ->
-                        draftText = updated
-                        onSavePracticeDraft(
-                            CourseTopicPracticeDraft(
-                                topicId = courseContext.topicId,
-                                text = updated,
-                                activeSourceBookId = activeBookId,
-                                activePage = activePage,
-                                companionOpen = true,
-                                updatedAt = System.currentTimeMillis(),
-                            ),
-                        )
-                    },
-                    placeholder = { Text("在此输入论述草稿，系统会在每次输入时自动保存以便重开后继续…") },
-                    minLines = 5,
-                    maxLines = 10,
-                    modifier = Modifier.fillMaxWidth().testTag("course-essay-input"),
+                Text(
+                    CourseEssayWordCounter.progressLabel(draftText, wordTarget),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = colors.fgSecondary,
+                    modifier = Modifier.testTag("course-essay-wordcount"),
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    PrimaryButton(
-                        onClick = {
-                            val host = gradingHost
-                            if (host == null) {
-                                gradeError = "请先连接学习服务后再提交批改，当前草稿已保存。"
-                                return@PrimaryButton
-                            }
-                            gradingInFlight = true
-                            gradeError = null
-                            scope.launch {
-                                try {
-                                    val req = withContext(Dispatchers.IO) {
-                                        PracticeGradingJson.buildCourseEssayRequest(
-                                            courseContext = courseContext,
-                                            activeBookId = activeBookId,
-                                            activePage = activePage,
-                                            draftText = draftText,
-                                            library = host.library,
-                                        )
-                                    }
-                                    when (val res = host.gradeAndDiagnose(req)) {
-                                        is PracticeGradeDiagnoseResult.Ready -> {
-                                            gradeResponse = res.response
-                                            val lib = host.library
-                                            if (lib != null) {
-                                                withContext(Dispatchers.IO) {
-                                                    val ratio = if (res.response.maxMarks > 0.0) {
-                                                        (res.response.totalAwarded / res.response.maxMarks).coerceIn(0.0, 1.0)
-                                                    } else {
-                                                        val items = res.response.rubricItems
-                                                        if (items.isEmpty()) 0.5 else items.map {
-                                                            when (it.verdict) {
-                                                                "FULL" -> 1.0
-                                                                "PARTIAL" -> 0.5
-                                                                else -> 0.0
-                                                            }
-                                                        }.average()
-                                                    }
-                                                    val errCls = res.response.diagnosis?.errorClass?.takeIf { it != MisconceptionErrorClass.NONE }
-                                                    lib.recordMasteryEvidence(
-                                                        bookId = activeBookId,
-                                                        tocNodeId = courseContext.topicId,
-                                                        page = activePage.coerceAtLeast(1),
-                                                        canonicalName = courseContext.topicTitle,
-                                                        signal = LearnerSignalType.RUBRIC_GRADE,
-                                                        scoreRatio = ratio,
-                                                        guessed = false,
-                                                        errorClass = errCls,
-                                                        collectionId = courseContext.courseId,
-                                                    )
-                                                }
-                                            }
-                                        }
-                                        is PracticeGradeDiagnoseResult.Failed -> {
-                                            gradeError = res.message
-                                        }
-                                    }
-                                } catch (c: CancellationException) {
-                                    throw c
-                                } catch (_: Exception) {
-                                    gradeError = "逐点批改暂时不可用，你的论述草稿已保存。"
-                                } finally {
-                                    gradingInFlight = false
-                                }
-                            }
-                        },
-                        enabled = draftText.isNotBlank() && !gradingInFlight,
-                        modifier = Modifier.testTag("course-essay-submit"),
-                    ) {
-                        Text(if (gradingInFlight) "批改中…" else "提交批改")
-                    }
-                }
-                if (gradingInFlight) {
-                    CoachLoadingDots(label = "正在对照课程原页逐点核对…")
-                }
-                gradeError?.let { err ->
-                    CoachErrorBanner(
-                        message = err,
-                        retryLabel = "重试",
-                        onRetry = { gradeError = null },
-                        modifier = Modifier.testTag("course-essay-grade-error"),
+            }
+            Text(
+                pack?.practicePrompt?.stem
+                    ?: "请围绕「${courseContext.topicTitle}」写出核心论点、适用条件与关键差异对比（约 $wordTarget 词）。",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgPrimary,
+            )
+            OutlinedTextField(
+                value = draftText,
+                onValueChange = { updated ->
+                    draftText = updated
+                    onSavePracticeDraft(
+                        CourseTopicPracticeDraft(
+                            topicId = courseContext.topicId,
+                            text = updated,
+                            activeSourceBookId = activeBookId,
+                            activePage = activePage,
+                            companionOpen = true,
+                            updatedAt = System.currentTimeMillis(),
+                        ),
                     )
-                }
-                gradeResponse?.let { resp ->
-                    val jumpToPage: (Int, String) -> Unit = { pg, quote ->
-                        val matchedSource = courseContext.orderedSources.firstOrNull { pg in it.startPage..it.endPage }
-                            ?: courseContext.orderedSources.firstOrNull()
-                        val targetBookId = matchedSource?.bookId ?: activeBookId
-                        val targetTitle = matchedSource?.bookTitle ?: courseContext.topicTitle
-                        onJumpCitation(
-                            CourseCitationRef(
-                                bookId = targetBookId,
-                                bookTitle = targetTitle,
-                                role = matchedSource?.role ?: CourseMaterialRole.CORE_TEXTBOOK,
-                                page = pg,
-                                startUtf16 = 0,
-                                endUtf16 = quote.length,
-                                quote = quote,
-                            ),
-                        )
-                    }
-                    RubricAnnotationSheet(
-                        studentDraft = draftText,
-                        response = resp,
-                        onJumpPage = jumpToPage,
-                    )
-                    resp.diagnosis?.takeIf { it.errorClass != MisconceptionErrorClass.NONE }?.let { diag ->
-                        MisconceptionFeedbackCard(
-                            diagnosis = diag,
-                            variant = resp.variant,
-                            onJumpPage = jumpToPage,
-                            onVariantMastered = { variant ->
-                                val lib = gradingHost?.library ?: return@MisconceptionFeedbackCard
-                                scope.launch(Dispatchers.IO) {
-                                    lib.recordMasteryEvidence(
-                                        bookId = activeBookId,
-                                        tocNodeId = courseContext.topicId,
-                                        page = variant.pdfPage.coerceAtLeast(1),
-                                        canonicalName = courseContext.topicTitle,
-                                        signal = LearnerSignalType.POST_QUIZ_T1,
-                                        scoreRatio = 1.0,
-                                        guessed = false,
-                                        errorClass = MisconceptionErrorClass.NONE,
-                                        conceptKeyOverride = variant.conceptKey.takeIf(String::isNotBlank),
-                                        collectionId = courseContext.courseId,
+                },
+                placeholder = { Text("在此输入论述草稿，系统会在每次输入时自动保存以便重开后继续…") },
+                minLines = 5,
+                maxLines = 10,
+                modifier = Modifier.fillMaxWidth().testTag("course-essay-input"),
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                PrimaryButton(
+                    onClick = {
+                        val host = gradingHost
+                        if (host == null) {
+                            gradeError = "请先连接学习服务后再提交批改，当前草稿已保存。"
+                            return@PrimaryButton
+                        }
+                        gradingInFlight = true
+                        gradeError = null
+                        scope.launch {
+                            try {
+                                val req = withContext(Dispatchers.IO) {
+                                    PracticeGradingJson.buildCourseEssayRequest(
+                                        courseContext = courseContext,
+                                        activeBookId = activeBookId,
+                                        activePage = activePage,
+                                        draftText = draftText,
+                                        library = host.library,
                                     )
                                 }
-                            },
-                        )
-                    }
+                                when (val res = host.gradeAndDiagnose(req)) {
+                                    is PracticeGradeDiagnoseResult.Ready -> {
+                                        gradeResponse = res.response
+                                        val lib = host.library
+                                        if (lib != null) {
+                                            withContext(Dispatchers.IO) {
+                                                val ratio = if (res.response.maxMarks > 0.0) {
+                                                    (res.response.totalAwarded / res.response.maxMarks).coerceIn(0.0, 1.0)
+                                                } else {
+                                                    val items = res.response.rubricItems
+                                                    if (items.isEmpty()) 0.5 else items.map {
+                                                        when (it.verdict) {
+                                                            "FULL" -> 1.0
+                                                            "PARTIAL" -> 0.5
+                                                            else -> 0.0
+                                                        }
+                                                    }.average()
+                                                }
+                                                val errCls = res.response.diagnosis?.errorClass?.takeIf { it != MisconceptionErrorClass.NONE }
+                                                lib.recordMasteryEvidence(
+                                                    bookId = activeBookId,
+                                                    tocNodeId = courseContext.topicId,
+                                                    page = activePage.coerceAtLeast(1),
+                                                    canonicalName = courseContext.topicTitle,
+                                                    signal = LearnerSignalType.RUBRIC_GRADE,
+                                                    scoreRatio = ratio,
+                                                    guessed = false,
+                                                    errorClass = errCls,
+                                                    collectionId = courseContext.courseId,
+                                                )
+                                            }
+                                        }
+                                    }
+                                    is PracticeGradeDiagnoseResult.Failed -> {
+                                        gradeError = res.message
+                                    }
+                                }
+                            } catch (c: CancellationException) {
+                                throw c
+                            } catch (_: Exception) {
+                                gradeError = "逐点批改暂时不可用，你的论述草稿已保存。"
+                            } finally {
+                                gradingInFlight = false
+                            }
+                        }
+                    },
+                    enabled = draftText.isNotBlank() && !gradingInFlight,
+                    modifier = Modifier.testTag("course-essay-submit"),
+                ) {
+                    Text(if (gradingInFlight) "批改中…" else "提交批改")
+                }
+            }
+            if (gradingInFlight) {
+                CoachLoadingDots(label = "正在对照课程原页逐点核对…")
+            }
+            gradeError?.let { err ->
+                CoachErrorBanner(
+                    message = err,
+                    retryLabel = "重试",
+                    onRetry = { gradeError = null },
+                    modifier = Modifier.testTag("course-essay-grade-error"),
+                )
+            }
+            gradeResponse?.let { resp ->
+                val jumpToPage: (Int, String) -> Unit = { pg, quote ->
+                    val matchedSource = courseContext.orderedSources.firstOrNull { pg in it.startPage..it.endPage }
+                        ?: courseContext.orderedSources.firstOrNull()
+                    val targetBookId = matchedSource?.bookId ?: activeBookId
+                    val targetTitle = matchedSource?.bookTitle ?: courseContext.topicTitle
+                    onJumpCitation(
+                        CourseCitationRef(
+                            bookId = targetBookId,
+                            bookTitle = targetTitle,
+                            role = matchedSource?.role ?: CourseMaterialRole.CORE_TEXTBOOK,
+                            page = pg,
+                            startUtf16 = 0,
+                            endUtf16 = quote.length,
+                            quote = quote,
+                        ),
+                    )
+                }
+                RubricAnnotationSheet(
+                    studentDraft = draftText,
+                    response = resp,
+                    onJumpPage = jumpToPage,
+                )
+                resp.diagnosis?.takeIf { it.errorClass != MisconceptionErrorClass.NONE }?.let { diag ->
+                    MisconceptionFeedbackCard(
+                        diagnosis = diag,
+                        variant = resp.variant,
+                        onJumpPage = jumpToPage,
+                        onVariantMastered = { variant ->
+                            val lib = gradingHost?.library ?: return@MisconceptionFeedbackCard
+                            scope.launch(Dispatchers.IO) {
+                                lib.recordMasteryEvidence(
+                                    bookId = activeBookId,
+                                    tocNodeId = courseContext.topicId,
+                                    page = variant.pdfPage.coerceAtLeast(1),
+                                    canonicalName = courseContext.topicTitle,
+                                    signal = LearnerSignalType.POST_QUIZ_T1,
+                                    scoreRatio = 1.0,
+                                    guessed = false,
+                                    errorClass = MisconceptionErrorClass.NONE,
+                                    conceptKeyOverride = variant.conceptKey.takeIf(String::isNotBlank),
+                                    collectionId = courseContext.courseId,
+                                )
+                            }
+                        },
+                    )
                 }
             }
         }
-
-        Spacer(Modifier.height(12.dp))
     }
 }
 

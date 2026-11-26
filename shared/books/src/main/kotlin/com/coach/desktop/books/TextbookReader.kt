@@ -2294,11 +2294,25 @@ internal fun TextbookReader(
         }
 
         // 7. 顶部浮动工具栏（44dp，默认隐藏，悬停/Tab 呼出）。
+        val frontMatterTitle = remember(navigationBook, readingAnchor, activeTocNode, textView,
+            pageUnrecognizedOriginal, paging.pages, paging.columns) {
+            if (activeTocNode != null) return@remember null
+            // An image-only cover may share a spread with the opening notice on the right.
+            val headerAnchor = if (textView && !pageUnrecognizedOriginal && book.page(readingAnchor.importPage)?.text.isNullOrBlank()) {
+                val first = paging.index
+                (first until first + paging.columns).asSequence()
+                    .flatMap { paging.pages.getOrNull(it)?.sources.orEmpty().asSequence() }
+                    .firstOrNull { it.endUtf16 > it.startUtf16 }
+                    ?.let { BookPageAnchor(it.importPage, it.startUtf16) } ?: readingAnchor
+            } else readingAnchor
+            BookBoundaries.unlistedFrontMatterTitle(navigationBook, headerAnchor)
+        }
         ImmersiveTopHud(
             visible = showHud,
             availableWidth = maxWidth,
             bookTitle = book.title,
-            sectionTitle = if (source != null) "出处 · ${source.title}" else activeTocNode?.title ?: effectiveChapterSpan?.title ?: currentSection?.title,
+            sectionTitle = if (source != null) "出处 · ${source.title}" else
+                activeTocNode?.title ?: frontMatterTitle ?: effectiveChapterSpan?.title ?: currentSection?.title,
             backLabel = when {
                 ui.canReturnToCitationOrigin -> "返回引用前的位置"
                 source != null && ui.review != null -> "返回复习"

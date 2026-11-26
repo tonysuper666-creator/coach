@@ -53,25 +53,27 @@ internal object BookMapStore {
         reconciled
     }.getOrNull()
 
-    fun save(library: TextbookLibrary, doc: BookMapDocument) {
+    fun save(library: TextbookLibrary, doc: BookMapDocument, expected: Textbook? = null) {
         runCatching {
             val encoded = BookMapWire.encodeDocument(doc)
             openDb(library.directory).use { db ->
-                db.prepareStatement(
-                    """INSERT INTO book_what_about_maps(book_id, skeleton_hash, map_json, pending_job_key, pending_revision, updated_at)
-                       VALUES(?, ?, ?, '', 0, ?)
-                       ON CONFLICT(book_id) DO UPDATE SET
-                           skeleton_hash = excluded.skeleton_hash,
-                           map_json = excluded.map_json,
-                           pending_job_key = '',
-                           pending_revision = 0,
-                           updated_at = excluded.updated_at""".trimIndent(),
-                ).use { ps ->
-                    ps.setString(1, doc.bookId)
-                    ps.setString(2, doc.skeletonHash)
-                    ps.setString(3, encoded)
-                    ps.setLong(4, System.currentTimeMillis())
-                    ps.executeUpdate()
+                db.cacheForStructure(expected) {
+                    db.prepareStatement(
+                        """INSERT INTO book_what_about_maps(book_id, skeleton_hash, map_json, pending_job_key, pending_revision, updated_at)
+                           VALUES(?, ?, ?, '', 0, ?)
+                           ON CONFLICT(book_id) DO UPDATE SET
+                               skeleton_hash = excluded.skeleton_hash,
+                               map_json = excluded.map_json,
+                               pending_job_key = '',
+                               pending_revision = 0,
+                               updated_at = excluded.updated_at""".trimIndent(),
+                    ).use { ps ->
+                        ps.setString(1, doc.bookId)
+                        ps.setString(2, doc.skeletonHash)
+                        ps.setString(3, encoded)
+                        ps.setLong(4, System.currentTimeMillis())
+                        ps.executeUpdate()
+                    }
                 }
             }
         }

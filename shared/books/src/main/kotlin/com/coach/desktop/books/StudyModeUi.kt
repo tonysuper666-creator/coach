@@ -462,6 +462,8 @@ internal fun ModeDistinctCompanionSurface(
     bookMapMeta: WholeBookMapMeta? = null,
     bookMapBatchLoading: Boolean = false,
     bookMapBatchStatus: String? = null,
+    bookMapAiAvailable: Boolean = false,
+    bookMapFetchBatch: (suspend (kotlinx.serialization.json.JsonObject) -> CourseServerCallResult)? = null,
     onRequestBookMapBatch: (() -> Unit)? = null,
     onRetryModePack: (() -> Unit)? = null,
 ) {
@@ -501,7 +503,7 @@ internal fun ModeDistinctCompanionSurface(
         onUpdateDraft = onUpdateDraft,
         onOpenAnchor = onOpenAnchor,
         onJumpPage = onJumpPage,
-        onRequestBookMapBatch = onRequestBookMapBatch,
+        onRequestBookMapBatch = if (bookMapFetchBatch == null) onRequestBookMapBatch else null,
         onRetryModePack = onRetryModePack,
         onDiagnosticAnswer = onDiagnosticAnswer,
     )
@@ -509,6 +511,18 @@ internal fun ModeDistinctCompanionSurface(
     when (preference.mode) {
         BookStudyMode.BOOK_MAP -> {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.testTag("mode-surface-BOOK_MAP")) {
+                if (bookMapFetchBatch != null && preference.detailLevel != ExplainDetailLevel.ORIGINAL_ONLY) {
+                    BookWhatAboutMapPanel(
+                        book = book,
+                        library = library,
+                        currentPage = currentPage,
+                        explainLang = preference.explainLang,
+                        aiAvailable = bookMapAiAvailable,
+                        fetchBatch = bookMapFetchBatch,
+                        onOpenAnchor = onOpenAnchor,
+                        onJumpPage = onJumpPage,
+                    )
+                }
                 PaperCard(
                     Modifier.fillMaxWidth(),
                     color = colors.surface2,
@@ -1040,14 +1054,14 @@ private fun LiveModeStatusAndExtraDeck(
     modeLoading: Boolean,
     modeError: String?,
     bookMapPack: BookMapOnePagerPack?,
-    bookMapMeta: WholeBookMapMeta?,
-    bookMapBatchLoading: Boolean,
+    bookMapMeta: WholeBookMapMeta? = null,
+    bookMapBatchLoading: Boolean = false,
     bookMapBatchStatus: String? = null,
     draft: ChapterPracticeDraft,
     onUpdateDraft: ((ChapterPracticeDraft) -> ChapterPracticeDraft) -> Unit,
     onOpenAnchor: (BookCompanionAnchor) -> Unit,
     onJumpPage: (Int) -> Unit,
-    onRequestBookMapBatch: (() -> Unit)?,
+    onRequestBookMapBatch: (() -> Unit)? = null,
     onRetryModePack: (() -> Unit)?,
     onDiagnosticAnswer: (BookLesson, Int, Practice, PracticeAnswer) -> Unit,
 ) {
@@ -1092,7 +1106,7 @@ private fun LiveModeStatusAndExtraDeck(
     when (preference.mode) {
         BookStudyMode.BOOK_MAP -> {
             val claims = bookMapPack?.coreClaims.orEmpty()
-            if (claims.isNotEmpty() || bookMapMeta != null || onRequestBookMapBatch != null) {
+            if (claims.isNotEmpty() || onRequestBookMapBatch != null) {
                 PaperCard(Modifier.fillMaxWidth().testTag("book-map-live-extras"), color = colors.surface2, contentPadding = PaddingValues(12.dp)) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (claims.isNotEmpty()) {
@@ -1125,24 +1139,7 @@ private fun LiveModeStatusAndExtraDeck(
                                 }
                             }
                         }
-                        if (bookMapMeta != null && (bookMapMeta.fastSkimOrder40Min.isNotEmpty() || bookMapMeta.clusters.isNotEmpty())) {
-                            Text("全书 ${bookMapMeta.chapterCount} 章航图与 40 分钟速览路线", style = MaterialTheme.typography.titleSmall, color = colors.fgPrimary)
-                            if (bookMapMeta.clusters.isNotEmpty()) {
-                                for (cl in bookMapMeta.clusters.take(4)) {
-                                    CoachCardMeta("${cl.title}（第 ${cl.chapterNums.joinToString("/")} 章）：${cl.themeSummary}")
-                                }
-                            }
-                            if (bookMapMeta.fastSkimOrder40Min.isNotEmpty()) {
-                                CoachCardMeta(
-                                    "推荐速览顺序：" + bookMapMeta.fastSkimOrder40Min.take(5).joinToString(" → ") { "第${it.chapterNum}章(${it.minutes}m)" },
-                                )
-                            }
-                            if (bookMapMeta.glossary.isNotEmpty()) {
-                                CoachCardMeta(
-                                    "核心双语术语：" + bookMapMeta.glossary.take(6).joinToString(" · ") { "${it.en}(${it.zh})" },
-                                )
-                            }
-                        } else if (onRequestBookMapBatch != null) {
+                        if (onRequestBookMapBatch != null) {
                             if (offline) {
                                 OfflineNeedsNetworkNotice(
                                     message = OfflineCopy.BOOK_MAP_OFFLINE,
@@ -1151,7 +1148,6 @@ private fun LiveModeStatusAndExtraDeck(
                             }
                             PaperButton(
                                 onClick = onRequestBookMapBatch,
-                                enabled = !bookMapBatchLoading,
                                 modifier = Modifier.testTag("book-map-batch-button"),
                             ) {
                                 Text(

@@ -207,8 +207,9 @@ internal object BookMapSkeleton {
     fun computeSkeletonHash(book: Textbook): String {
         val start = bodyStartPage(book)
         val spans = chapters(book)
+        val editRev = book.structure?.editRevision.orEmpty()
         val canonical = buildString {
-            append("v2|body=").append(start).append("|count=").append(spans.size)
+            append("v2|rev=").append(editRev).append("|body=").append(start).append("|count=").append(spans.size)
             for (span in spans) {
                 append('|').append(span.tocNodeId)
                     .append(':').append(span.title.trim())

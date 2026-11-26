@@ -12,6 +12,9 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.runSkikoComposeUiTest
+import com.coach.client.PairedCredentials
+import com.coach.desktop.DesktopConnectionSettings
+import com.coach.desktop.DesktopIdentity
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.LocalV7ReducedMotion
 import java.nio.file.Files
@@ -446,6 +449,138 @@ class BookMapWhatAboutTest {
                     runCatching { onNodeWithTag("book-map-v2-error").assertExists() }.isSuccess
                 }
                 onNodeWithText("当前生成额度紧张或已到上限，请稍后再试；已生成的地图不受影响。").assertIsDisplayed()
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun realTon1876StructureEditRearrangesSavedBookMapAndPersistsAcrossReload() {
+        val root = Files.createTempDirectory("book-map-ton1876-")
+        try {
+            val library = TextbookLibrary(root)
+            val original = makeMultiChapterBook("ton1876-book", "Real Skeleton Book", chapterCount = 3, includeFrontMatterPages = 2)
+            val built = BookMapWire.buildBatchRequest(original)
+            val doc = (BookMapWire.parseBatchResponse(original, fakeBatchResponseFor(built.payload), built.refMap) as BookMapBatchParseResult.Ready).document
+            BookMapStore.save(library, doc)
+
+            // 1. Real TON-1876 Rename via applyStructureEdit
+            val renamed = original.applyStructureEdit(StructureEdit.Rename("ch-2", "2 Moral Hazard Updated"))
+            val afterRename = BookMapStore.load(library, renamed)!!
+            assertEquals("2 Moral Hazard Updated", afterRename.chapters[1].title)
+            assertEquals(doc.chapters[1].points.size, afterRename.chapters[1].points.size)
+            assertTrue(afterRename.reconciledFromSkeleton)
+
+            // 2. Real TON-1876 MergeWithPrevious via applyStructureEdit
+            val merged = renamed.applyStructureEdit(StructureEdit.MergeWithPrevious("ch-2"))
+            val afterMerge = BookMapStore.load(library, merged)!!
+            assertEquals(2, afterMerge.chapters.size)
+            assertEquals(doc.chapters[0].points.size + doc.chapters[1].points.size, afterMerge.chapters[0].points.size)
+
+            // 3. Real TON-1876 Split via applyStructureEdit (split merged ch-1 at page 6)
+            val split = merged.applyStructureEdit(StructureEdit.Split("ch-1", page = 6, title = "2 Split Out Chapter"))
+            val afterSplit = BookMapStore.load(library, split)!!
+            assertEquals(3, afterSplit.chapters.size)
+            assertEquals("2 Split Out Chapter", afterSplit.chapters[1].title)
+            assertTrue(afterSplit.chapters[0].points.all { it.primaryAnchor!!.pdfPage in 3..5 })
+            assertTrue(afterSplit.chapters[1].points.all { it.primaryAnchor!!.pdfPage in 6..8 })
+
+            // 4. Real TON-1876 BodyStart via applyStructureEdit (move body start to page 6)
+            val bodyShifted = split.applyStructureEdit(StructureEdit.BodyStart(6))
+            val afterBodyShift = BookMapStore.load(library, bodyShifted)!!
+            assertEquals(6, afterBodyShift.bodyStartPage)
+            assertEquals(2, afterBodyShift.chapters.size)
+            assertTrue(afterBodyShift.chapters.all { it.firstPage >= 6 })
+
+            // Reloading from SQLite with same edited book returns persisted reconciled map unchanged
+            val reloaded = BookMapStore.load(library, bodyShifted)!!
+            assertEquals(afterBodyShift.skeletonHash, reloaded.skeletonHash)
+            assertEquals(afterBodyShift.chapters.size, reloaded.chapters.size)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun singleBookCompanionPanelWiresWhatAboutMapInBookMapMode() {
+        val root = Files.createTempDirectory("book-map-companion-wire-")
+        try {
+            val library = TextbookLibrary(root)
+            val book = makeMultiChapterBook("wire-book", "Wired Companion Book", chapterCount = 2, includeFrontMatterPages = 1)
+            val built = BookMapWire.buildBatchRequest(book)
+            val savedDoc = (BookMapWire.parseBatchResponse(book, fakeBatchResponseFor(built.payload), built.refMap) as BookMapBatchParseResult.Ready).document
+            BookMapStore.save(library, savedDoc)
+
+            val fakeExplainer = object : BookExplainer(DesktopConnectionSettings(home = root, environment = { null }), library) {
+                init {
+                    identity = DesktopIdentity("http://127.0.0.1:1", PairedCredentials("dev-test", "tok-test"))
+                    loaded = true
+                    revoked = false
+                }
+
+                override suspend fun load() {
+                    loaded = true
+                }
+
+                override suspend fun fetchChapterCompanion(
+                    requestJson: JsonObject,
+                    blocks: List<SourceBlock>,
+                ): ChapterCompanionFetchResult = ChapterCompanionFetchResult.Failed("skip", ExplainTrouble.Other)
+
+                override suspend fun fetchStudyModePack(
+                    bookId: String,
+                    mode: String,
+                    input: JsonObject,
+                    onProgress: (Int, Long?, String) -> Unit,
+                ): CourseServerCallResult = error("BOOK_MAP must not trigger streaming pack fetch")
+
+                override suspend fun fetchBookMapBatch(bookId: String, input: JsonObject): CourseServerCallResult =
+                    error("Saved map must load from local SQLite with zero server calls")
+            }
+
+            var openedAnchor: BookCompanionAnchor? = null
+            runSkikoComposeUiTest(size = Size(820f, 1000f)) {
+                var pref by mutableStateOf(
+                    BookStudyPreference(
+                        bookId = book.id,
+                        mode = BookStudyMode.BOOK_MAP,
+                        userLocked = true,
+                        detailLevel = ExplainDetailLevel.BRIEF,
+                        explainLang = ExplainLanguage.BILINGUAL,
+                    ),
+                )
+                setContent {
+                    CoachTheme(false) {
+                        CompositionLocalProvider(LocalReadingAiExplain provides true, LocalV7ReducedMotion provides true) {
+                            SingleBookCompanionPanel(
+                                book = book,
+                                currentPage = 2,
+                                currentSectionIndex = 0,
+                                explainer = fakeExplainer,
+                                library = library,
+                                draft = ChapterPracticeDraft(bookId = book.id, tocNodeId = "ch-1", page = 2),
+                                onDraftChange = {},
+                                onOpenAnchor = { openedAnchor = it },
+                                studyPreference = pref,
+                                onUpdateStudyPreference = { next, _ -> pref = next },
+                                onJumpPage = {},
+                                onCommitQuizAnswer = { _, _, _, _ -> },
+                                onAskAboutText = {},
+                                onOpenLogin = {},
+                            )
+                        }
+                    }
+                }
+                waitUntil(timeoutMillis = 5_000) {
+                    runCatching { onNodeWithTag("book-what-about-map").assertExists() }.isSuccess &&
+                        runCatching { onNodeWithTag("book-map-v2-point-0-0-anchor-0", useUnmergedTree = true).assertExists() }.isSuccess
+                }
+                onNodeWithTag("book-map-v2-point-0-0-anchor-0", useUnmergedTree = true).performClick()
+                val jumped = assertNotNull(openedAnchor)
+                val targetPage = assertNotNull(book.page(jumped.pdfPage))
+                assertTrue(jumped.startUtf16 in 0 until jumped.endUtf16)
+                assertEquals(jumped.quoteAnchor, targetPage.text.substring(jumped.startUtf16, jumped.endUtf16))
             }
         } finally {
             root.toFile().deleteRecursively()

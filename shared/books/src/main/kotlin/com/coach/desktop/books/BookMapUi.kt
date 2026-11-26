@@ -59,7 +59,8 @@ internal fun BookWhatAboutMapPanel(
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
-    val skeletonHash = remember(book.id, book.structure, book.tocNodes, book.correctedBodyPage, book.pages.size) {
+    val latestBook by rememberUpdatedState(book)
+    val skeletonHash = remember(book.id, book.structure?.editRevision, book.structure, book.tocNodes, book.correctedBodyPage, book.pages.size) {
         BookMapSkeleton.computeSkeletonHash(book)
     }
     var state by remember(book.id) { mutableStateOf<BookMapUiState>(BookMapUiState.Idle) }
@@ -166,11 +167,13 @@ internal fun BookWhatAboutMapPanel(
                             delay(pollDelayOverrideMs ?: parsed.retryAfterMs)
                         }
                         is BookMapBatchParseResult.Ready -> {
+                            val currentBook = latestBook
+                            val finalDoc = BookMapReconciler.reconcile(parsed.document, currentBook)
                             withContext(Dispatchers.IO) {
-                                BookMapStore.save(library, parsed.document)
+                                BookMapStore.save(library, finalDoc, expected = currentBook)
                             }
                             progressByChapter = withContext(Dispatchers.IO) { BookMapReadProgress.loadForBook(library, book.id) }
-                            state = BookMapUiState.Ready(parsed.document)
+                            state = BookMapUiState.Ready(finalDoc)
                             return@launch
                         }
                         is BookMapBatchParseResult.Invalid -> {

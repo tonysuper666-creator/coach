@@ -196,7 +196,7 @@ class BookMapBatchService(
                 is BookMapBatchChunkOutcome.Ready -> {
                     completedChunks += 1
                     servedModel = outcome.model
-                    ledger?.record(
+                    if (req.friend == null) ledger?.record(
                         TokenLedgerEntry(
                             bookId = req.bookId,
                             chapterId = "book-map-v2-chunk-$chunkIdx",

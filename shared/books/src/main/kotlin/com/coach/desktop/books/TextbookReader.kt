@@ -248,23 +248,8 @@ internal fun TextbookReader(
     var inlineDraft by remember(book.id) { mutableStateOf("") }
     var inlineRequest by remember(book.id) { mutableIntStateOf(0) }
     var lastInlineAction by remember(book.id) { mutableStateOf<Pair<SelectionExplainAction, String?>?>(null) }
-    LaunchedEffect(book.id) {
-        val restored = withContext(Dispatchers.IO) { runCatching { library.loadLatestAskThread(book.id) }.getOrNull() }
-        if (restored != null && inlineThread == null) {
-            val secIdx = guideController.sectionIndexForAnchor(restored.selection.page, restored.selection.start)
-                .takeIf { it >= 0 } ?: currentSectionIndex
-            val secCtx = guideController.contextForSection(secIdx) ?: restored.sectionLocation
-                .takeIf { it.isNotBlank() }
-                ?.let { ExplainSectionContext(it, null, null, emptyList()) }
-            inlineThread = InlineExplainThread(
-                selection = restored.selection,
-                context = secCtx,
-                turns = restored.turns,
-                askingOpen = false,
-                threadId = restored.threadId,
-            )
-        }
-    }
+    var editedAsk by remember(book.id) { mutableStateOf(false) }
+    val draftWriter = remember(book.id, library) { AskDraftWriter(library, book.id) }
     val currentGuideState = currentSection?.let { guideController.states[it.id] }
     val currentGuide = (currentGuideState as? SectionGuideState.Ready)?.guide
     val sectionHardPoints = remember(currentSection, currentGuide, allBookBlocks) {
@@ -324,6 +309,11 @@ internal fun TextbookReader(
         val label = if (action == SelectionExplainAction.ASK && !questionText.isNullOrBlank()) "问：${questionText.trim()}" else action.label
         val pending = existing.copy(loading = true, error = null, fallbackBlocks = emptyList(), askingOpen = true, pendingLabel = label)
         inlineThread = pending
+        if (library.todayCardEnabled && action == SelectionExplainAction.ASK && !questionText.isNullOrBlank()) {
+            editedAsk = true
+            draftWriter.edit(BookAskDraft(book.id, target.page, questionText, pending.threadId,
+                target.id, target.start, target.end, null))
+        }
         scope.launch {
             if (!explainer.loaded) explainer.load()
             val result = explainer.explainSelection(
@@ -335,7 +325,11 @@ internal fun TextbookReader(
             )
             if (inlineRequest != request || inlineThread?.selection?.id != target.id) return@launch
             val sent = ExplainWire.selectionBlocks(target, secCtx)
-            if (result is ExplainResult.Done && questionText != null && inlineDraft.trim() == questionText) inlineDraft = ""
+            if (result is ExplainResult.Done && questionText != null && inlineDraft.trim() == questionText) {
+                inlineDraft = ""
+                editedAsk = true
+                if (library.todayCardEnabled) draftWriter.edit(null)
+            }
             if (result is ExplainResult.Done) {
                 val persistedQuestion = if (action == SelectionExplainAction.ASK) questionText?.trim()?.takeIf { it.isNotEmpty() } else null
                 withContext(Dispatchers.IO) {
@@ -505,6 +499,49 @@ internal fun TextbookReader(
         if (onUpdateCollectionQaSession != null) onUpdateCollectionQaSession(collectionId, next)
         else localCollectionSessions[collectionId] = next
     }
+    LaunchedEffect(book.id) {
+        val (saved, restored) = withContext(Dispatchers.IO) {
+            val saved = if (library.todayCardEnabled) library.askDraft(book.id) else null
+            val thread = if (saved == null || saved.threadId != null) library.loadLatestAskThread(book.id, saved?.threadId) else null
+            saved to thread
+        }
+        if (!editedAsk && inlineThread == null) {
+            val selection = saved?.selection(book) ?: restored?.selection
+            if (selection != null) {
+                val idx = guideController.sectionIndexForAnchor(selection.page, selection.start)
+                val context = guideController.contextForSection(idx) ?: restored?.sectionLocation?.takeIf { it.isNotBlank() }
+                    ?.let { ExplainSectionContext(it, null, null, emptyList()) }
+                inlineThread = InlineExplainThread(selection, context,
+                    turns = restored?.turns.orEmpty(), askingOpen = saved != null,
+                    threadId = saved?.threadId ?: restored?.threadId ?: java.util.UUID.randomUUID().toString())
+            }
+            if (saved != null) {
+                inlineDraft = saved.text
+                activeAskCollection?.let { col ->
+                    val scope = if (saved.collectionId == col.id) CollectionAskScope.COLLECTION else CollectionAskScope.SECTION
+                    updateCollectionSession(col.id, sessionForCollection(col.id).copy(scope = scope))
+                }
+            }
+        }
+    }
+    fun changeAskDraft(text: String, collectionScope: CollectionAskScope? = null) {
+        editedAsk = true
+        inlineDraft = text
+        if (!library.todayCardEnabled) return
+        val col = activeAskCollection
+        val isCollection = col != null && (collectionScope ?: sessionForCollection(col.id).scope) == CollectionAskScope.COLLECTION
+        val block = if (isCollection) null else inlineThread?.selection ?: learnableSelection
+        val draft = if (text.isBlank()) null else BookAskDraft(book.id, block?.page ?: ui.page, text,
+            inlineThread?.threadId, block?.id, block?.start ?: 0, block?.end ?: 0, col?.id?.takeIf { isCollection })
+        draftWriter.edit(draft)
+    }
+    LaunchedEffect(inlineDraft, editedAsk) {
+        if (editedAsk) {
+            kotlinx.coroutines.delay(200)
+            withContext(Dispatchers.IO) { draftWriter.flush() }
+        }
+    }
+    DisposableEffect(draftWriter) { onDispose { draftWriter.flush() } }
     var askInputFocused by remember(book.id) { mutableStateOf(false) }
     var practiceInputFocused by remember(book.id) { mutableStateOf(false) }
     var explicitTocNodeId by remember(book.id) { mutableStateOf<String?>(null) }
@@ -1660,7 +1697,7 @@ internal fun TextbookReader(
                             },
                             onAskAboutText = { promptText ->
                                 companionTab = ReaderCompanionTab.ASK
-                                inlineDraft = promptText
+                                changeAskDraft(promptText)
                             },
                             onOpenLogin = {
                                 if (onRelogin != null) onRelogin(if (explainer.revoked) "授权已撤销，请重新登录。" else null)
@@ -1745,7 +1782,7 @@ internal fun TextbookReader(
                 res.fold(
                     onSuccess = { turn ->
                         if (inlineDraft.trim() == q && (turn.sentences.isNotEmpty() || turn.conflictCards.isNotEmpty())) {
-                            inlineDraft = ""
+                            changeAskDraft("")
                         }
                         updateCollectionSession(
                             col.id,
@@ -1782,11 +1819,12 @@ internal fun TextbookReader(
                 thread = inlineThread,
                 draft = inlineDraft,
                 compact = effectiveBottomSheet,
-                onDraftChange = { inlineDraft = it },
+                onDraftChange = { changeAskDraft(it) },
                 onPickPassage = { picked ->
                     val secIdx = guideController.sectionIndexForAnchor(picked.page, picked.start).takeIf { it >= 0 } ?: currentSectionIndex
                     val secCtx = guideController.contextForSection(secIdx)
                     inlineThread = InlineExplainThread(picked, secCtx, askingOpen = true)
+                    if (inlineDraft.isNotBlank()) changeAskDraft(inlineDraft)
                 },
                 onSubmitQuestion = {
                     if (isCollectionAsk) {
@@ -1812,13 +1850,19 @@ internal fun TextbookReader(
                     else companionTab = ReaderCompanionTab.EXPLAIN
                 },
                 onOpenCitation = { _, block -> handleCitationJump(BookPassage.from(book, block)) },
-                onClearSelection = { inlineThread = null; pdf.selection = null; textSelection = null },
+                onClearSelection = {
+                    inlineThread = null
+                    pdf.selection = null
+                    textSelection = null
+                    if (inlineDraft.isNotBlank()) changeAskDraft(inlineDraft)
+                },
                 onInputFocusChanged = { askInputFocused = it },
                 collectionScopeLabel = activeAskCollection?.scopeToggleLabel,
                 askScope = activeColSession.scope,
                 onSelectAskScope = { nextScope ->
                     activeAskCollection?.let { col ->
                         updateCollectionSession(col.id, sessionForCollection(col.id).copy(scope = nextScope, error = null))
+                        if (inlineDraft.isNotBlank()) changeAskDraft(inlineDraft, nextScope)
                     }
                 },
                 collectionTurns = activeColSession.turns,

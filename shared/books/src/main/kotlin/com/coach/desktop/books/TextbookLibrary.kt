@@ -59,6 +59,7 @@ internal class TextbookLibrary(
     val directory: Path, internal val clock: Clock = Clock.systemDefaultZone(), private val ocr: BookOcr = BundledBookOcr,
     private val streamPdfExtras: Boolean = false,
     internal val lazyPdfExtras: Boolean = false,
+    internal val todayCardEnabled: Boolean = windowsToday,
     private val extractBook: ((Path, String, String, BookOcr, BookImportControl) -> ExtractedBook)? = null,
 ) {
     private val reviewStore = TextbookReviewStore(
@@ -87,6 +88,9 @@ internal class TextbookLibrary(
                 BookPageModelStore.migrate(db)
                 BookNativeSourceStore.migrate(db)
                 BookStructureStore.migrate(db)
+                if (todayCardEnabled && BookSchemaMigration.readUserVersion(db) < BookSchemaMigration.V8_SCHEMA_VERSION) {
+                    restoreDiagnosticReviews(db, reviewStore) { id -> readBook(db, id) }
+                }
             },
             onPostCommit = { db ->
                 if (db != null) backfillReviews(db) else database().use(::backfillReviews)
@@ -1753,7 +1757,7 @@ internal class TextbookLibrary(
                 for (table in listOf(
                     "pages", "book_illustrations", "book_page_text_boxes", "book_native_sources",
                     "book_learning_paths", "book_ladders", "book_reader_views", "book_pdf_modes",
-                    "book_highlights", "book_notes", "book_ask_turns", "answers", "book_reviews", "book_structures", "book_section_cache", "book_body_start",
+                    "book_highlights", "book_notes", "book_ask_drafts", "book_ask_turns", "answers", "book_reviews", "book_structures", "book_section_cache", "book_body_start",
                     "book_open_session", "book_toc_nodes", "book_study_chunks", "book_bookmarks",
                     "book_page_aspects", "book_visual_pages",
                 )) {
@@ -2216,9 +2220,9 @@ internal class TextbookLibrary(
         }
     }
 
-    @Synchronized fun loadLatestAskThread(bookId: String): PersistedAskThread? = database().use { db ->
+    @Synchronized fun loadLatestAskThread(bookId: String, threadId: String? = null): PersistedAskThread? = database().use { db ->
         if (!BookSchemaMigration.tableExists(db, "book_ask_turns")) return@use null
-        val latestThreadId = db.prepareStatement(
+        val latestThreadId = threadId ?: db.prepareStatement(
             "SELECT thread_id FROM book_ask_turns WHERE book=? ORDER BY id DESC LIMIT 1",
         ).use { sql ->
             sql.setString(1, bookId)
@@ -2390,13 +2394,14 @@ internal class TextbookLibrary(
                     val now = clock.millis()
                     val correct = practice.independentlyCorrect(QuestionMode.CHOICE, answer)
                     val score = if (correct && !answer.guessed) 1.0 else 0.0
-                    val conceptKey = MasteryEngine.conceptKeyFor(bookId, lesson.id)
+                    val chapterId = lesson.id.substringBefore("#q")
+                    val conceptKey = MasteryEngine.conceptKeyFor(bookId, chapterId)
                     val fsrs = reviewStore.fsrsState(db, bookId, lessonKey, QuestionMode.CHOICE)
                     MasteryStore.recordEvidence(
                         db = db,
                         bookId = bookId,
-                        tocNodeId = lesson.id,
-                        page = lesson.firstPage,
+                        tocNodeId = chapterId,
+                        page = practice.sourcePage ?: lesson.firstPage,
                         canonicalName = lesson.title,
                         signal = if (isPretest) LearnerSignalType.PRETEST_T0 else LearnerSignalType.POST_QUIZ_T1,
                         scoreRatio = score,
@@ -2409,7 +2414,7 @@ internal class TextbookLibrary(
                         MasteryStore.recordLearningGainT0(
                             db = db,
                             bookId = bookId,
-                            chapterId = lesson.id,
+                            chapterId = chapterId,
                             conceptKey = conceptKey,
                             rawScore = score,
                             guessed = answer.guessed,
@@ -2419,7 +2424,7 @@ internal class TextbookLibrary(
                         MasteryStore.recordLearningGainT1(
                             db = db,
                             bookId = bookId,
-                            chapterId = lesson.id,
+                            chapterId = chapterId,
                             conceptKey = conceptKey,
                             rawScore = score,
                             guessed = answer.guessed,

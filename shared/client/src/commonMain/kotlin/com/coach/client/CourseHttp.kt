@@ -7,6 +7,7 @@ import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.HttpClientEngineConfig
 import io.ktor.client.engine.HttpClientEngineFactory
 import io.ktor.client.plugins.HttpRequestTimeoutException
+import io.ktor.client.plugins.ResponseException
 import com.coach.protocol.ReaderTimeoutPolicy
 import com.coach.domain.MainlineEssayIdentity
 import com.coach.domain.MainlineEssayDocument
@@ -233,6 +234,13 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             else -> ServerReachability.OFFLINE
         }
     } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+      catch (e: ResponseException) {
+        when (e.response.status.value) {
+            401 -> ServerReachability.UNAUTHORIZED
+            408 -> ServerReachability.OFFLINE
+            else -> ServerReachability.ONLINE
+        }
+      }
       catch (_: Exception) { ServerReachability.OFFLINE }
 
     /** Check this same server and device without sending any book text. Only 401 proves revocation. */

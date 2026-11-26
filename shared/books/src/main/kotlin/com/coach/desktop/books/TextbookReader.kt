@@ -192,7 +192,9 @@ internal fun TextbookReader(
         }
     }
     var editingJump by remember(book.id) { mutableStateOf(false) }
-    var jump by remember(book.id, ui.page) { mutableStateOf(ui.page.toString()) }
+    var jumpSession by remember(book.id) { mutableIntStateOf(0) }
+    // 不把 ui.page 放进 key：跳页过程中页码一变就会把正在敲的数字清掉。
+    var jump by remember(book.id) { mutableStateOf(ui.page.toString()) }
     var retry by remember { mutableIntStateOf(0) }
     var notesOpen by remember(book.id) { mutableStateOf(false) }
     var explainOpen by remember(book.id, openPairing) { mutableStateOf(openPairing) }
@@ -1442,6 +1444,7 @@ internal fun TextbookReader(
                     mod && !event.isAltPressed && event.key == Key.G -> {
                         hudVisible = true
                         editingJump = true
+                        jumpSession++
                         jump = ui.page.toString()
                         true
                     }
@@ -2573,9 +2576,14 @@ internal fun TextbookReader(
             canPrev = canPrev,
             canNext = canNext,
             editingJump = editingJump,
+            jumpSession = jumpSession,
             jumpText = jump,
             onJumpTextChange = { jump = it },
-            onStartEditJump = { editingJump = true; jump = readingAnchor.importPage.toString() },
+            onStartEditJump = {
+                editingJump = true
+                jumpSession++
+                jump = readingAnchor.importPage.toString()
+            },
             onCancelEditJump = { editingJump = false; jumpFocused = false; focusManager.clearFocus(); pageFocusTick++ },
             onJumpFocusChange = { jumpFocused = it },
             onSubmitJump = { target ->

@@ -2103,21 +2103,12 @@ internal fun TextbookReader(
             readerViewport(Modifier.fillMaxSize())
         }
 
-        val (currentSubPage, currentSubPageCount) = remember(textView, pageUnrecognizedOriginal, paging.pages, paging.anchor) {
-            if (!textView || pageUnrecognizedOriginal || paging.pages.isEmpty()) 1 to 1
-            else {
-                val targetPage = paging.anchor.importPage
-                val indices = paging.pages.indices.filter { idx ->
-                    val sheet = paging.pages[idx]
-                    sheet.anchor.importPage == targetPage || sheet.sources.any { it.importPage == targetPage }
-                }
-                if (indices.size <= 1) 1 to 1
-                else {
-                    val activeIdx = paging.pages.pageContaining(paging.anchor)
-                    val pos = indices.indexOf(activeIdx).let { if (it >= 0) it + 1 else 1 }
-                    pos to indices.size
-                }
-            }
+        val pagedBodyStart = if (readMode.isWindowsPaged()) book.bodyStart else null
+        val (currentSubPage, currentSubPageCount) = remember(
+            textView, pageUnrecognizedOriginal, paging.pages, paging.anchor, paging.columns, pagedBodyStart,
+        ) {
+            if (!textView || pageUnrecognizedOriginal) 1 to 1
+            else paging.pages.importPageScreenPosition(paging.anchor, paging.columns, pagedBodyStart)
         }
         val currentSubPageFraction = if (currentSubPageCount > 1) {
             (currentSubPage - 1).toFloat() / currentSubPageCount.toFloat()

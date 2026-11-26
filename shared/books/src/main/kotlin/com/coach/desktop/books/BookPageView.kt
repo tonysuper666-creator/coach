@@ -110,6 +110,29 @@ private class PageClipboard(private val delegate: Clipboard) : Clipboard by dele
 /** 阅读方式：翻页读 / 滚动读。 */
 internal enum class BookReadMode { Paged, Scroll }
 
+internal fun BookReadMode.isWindowsPaged(): Boolean =
+    this == BookReadMode.Paged && System.getProperty("os.name").orEmpty().startsWith("Windows")
+
+internal fun List<BookLaidPage>.importPageScreenPosition(
+    anchor: BookPageAnchor,
+    columns: Int,
+    bodyStart: BookPageAnchor?,
+): Pair<Int, Int> {
+    // The opening import page can contain both the preface and the first body spread.
+    val firstBodySheet = bodyStart?.takeIf {
+        it.importPage == anchor.importPage && it.offsetUtf16 > 0 && anchor.offsetUtf16 >= it.offsetUtf16
+    }?.let { pageContaining(it) }
+    val sheets = indices.filter { index ->
+        val sheet = this[index]
+        (firstBodySheet == null || index >= firstBodySheet) &&
+            (sheet.anchor.importPage == anchor.importPage || sheet.sources.any { it.importPage == anchor.importPage })
+    }
+    if (sheets.size <= 1) return 1 to 1
+    val sheetsPerScreen = if (firstBodySheet == null) 1 else columns.coerceAtLeast(1)
+    val position = sheets.indexOf(pageContaining(anchor)).coerceAtLeast(0)
+    return (position / sheetsPerScreen + 1) to ((sheets.size + sheetsPerScreen - 1) / sheetsPerScreen)
+}
+
 internal data class BookPaginationInputs(
     val pages: List<BookPage>, val width: Int, val height: Int, val typography: BookPageTypography,
     val tableRows: Map<BookIllustration, BookTableRows>,
@@ -117,6 +140,7 @@ internal data class BookPaginationInputs(
     val immersive: Boolean = false,
     val tocNodes: List<BookTocNode> = emptyList(),
     val openerExtraHeightPx: Int = 0,
+    val bodyStart: BookPageAnchor? = null,
 )
 
 @Stable
@@ -246,8 +270,7 @@ internal fun BookPageView(
     val clipboard = LocalClipboard.current
     val pageClipboard = remember(clipboard) { PageClipboard(clipboard) }
     val latestOnSelectText by rememberUpdatedState(onSelectText)
-    val windowsPaged = immersive && readMode == BookReadMode.Paged &&
-        System.getProperty("os.name").orEmpty().startsWith("Windows")
+    val windowsPaged = immersive && readMode.isWindowsPaged()
     // Reflowed PDF already has chapter and page navigation in the reader HUD.
     val topMargin = when {
         windowsPaged && book.format == "pdf" -> 0.dp
@@ -319,8 +342,9 @@ internal fun BookPageView(
                 layoutPages.sumOf { it.text.length.toLong() } > 32_768
         }
         val tocForLayout = if (pdf) emptyList() else book.tocNodes
+        val bodyStart = if (windowsPaged) book.bodyStart else null
         val inputs = BookPaginationInputs(layoutPages, widthPx, bodyHeight, typography, tableRows,
-            density, layoutDirection, fontResolver, pdf, immersive, tocForLayout, openerExtraHeightPx)
+            density, layoutDirection, fontResolver, pdf, immersive, tocForLayout, openerExtraHeightPx, bodyStart)
         val basePages = if (backgroundLayout) {
             var result by remember(state, inputs) {
                 mutableStateOf(state.completedPagination?.takeIf { it.first == inputs }?.second)
@@ -337,6 +361,7 @@ internal fun BookPageView(
                         maxPages = MAX_NEAR_LAYOUT_PAGES,
                         pdf = pdf,
                         tocNodes = tocForLayout,
+                        bodyStart = bodyStart,
                     ) { context.ensureActive() }
                 }
                 if (window.pages.isNotEmpty() && window.pages.size < layoutPages.size) {
@@ -348,6 +373,7 @@ internal fun BookPageView(
                                 window.pages, widthPx, bodyHeight, emptyMap(), tableRows, tocForLayout,
                                 forceAuthoritativeTocHeadings = window.authoritativeTocHeadings,
                                 openerExtraHeightPx = openerExtraHeightPx,
+                                bodyStart = bodyStart,
                             ) { context.ensureActive() }
                     }
                 }
@@ -359,6 +385,7 @@ internal fun BookPageView(
                         .layout(
                             layoutPages, widthPx, bodyHeight, emptyMap(), tableRows, tocForLayout,
                             openerExtraHeightPx = openerExtraHeightPx,
+                            bodyStart = bodyStart,
                         ) { context.ensureActive() }
                 }
                 state.completedPagination = inputs to laidOut
@@ -368,7 +395,8 @@ internal fun BookPageView(
             result
         } else remember(inputs) {
             BookPageLayouter(measurer, density, typography, pdf, immersive)
-                .layout(layoutPages, widthPx, bodyHeight, emptyMap(), tableRows, tocForLayout, openerExtraHeightPx = openerExtraHeightPx)
+                .layout(layoutPages, widthPx, bodyHeight, emptyMap(), tableRows, tocForLayout,
+                    openerExtraHeightPx = openerExtraHeightPx, bodyStart = bodyStart)
         }
         val pages = remember(basePages, highlights, typography.highlight) {
             basePages?.applyBookHighlights(highlights, typography.highlight)

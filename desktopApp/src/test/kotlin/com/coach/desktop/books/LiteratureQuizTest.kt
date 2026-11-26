@@ -109,6 +109,180 @@ class LiteratureQuizTest {
         }
     }
 
+    @Test fun repairReplyMissingItemsIsInvalidJsonAndEmptyArrayIsNot() {
+        val input = handInput()
+        val request = LiteratureQuiz.request(input)
+        val shape = request.json.getValue("replyShape").jsonPrimitive.content
+        assertTrue("items" in shape && "stem" in shape, shape)
+        val ocr = pageTextOcr()
+        val repairs = buildJsonObject {
+            put("repairs", buildJsonArray {
+                add(buildJsonObject { put("question", "样地里记录了什么？") })
+            })
+        }
+        val broken = LiteratureQuiz.verify(request.pool, repairs, ocr)
+        assertEquals("invalid_json", broken.failures.single().rule)
+        assertTrue(broken.items.isEmpty())
+        val gaps = LiteratureQuiz.resolve(input, broken, null).gaps.joinToString("\n")
+        assertNull(LiteratureQuiz.resolve(input, broken, null).saved)
+        assertTrue("invalid_json" in gaps && "没有保存" in gaps, gaps)
+        val empty = LiteratureQuiz.verify(
+            request.pool,
+            buildJsonObject { put("items", JsonArray(emptyList())) },
+            ocr,
+        )
+        assertTrue(empty.failures.none { it.rule == "invalid_json" })
+        val emptyGaps = LiteratureQuiz.resolve(input, empty, null).gaps.joinToString("\n")
+        assertTrue("invalid_json" !in emptyGaps && "没有保存" in emptyGaps, emptyGaps)
+        val repair = assertNotNull(LiteratureQuiz.repairRequest(input, empty))
+        val repairShape = repair.json.getValue("replyShape").jsonPrimitive.content
+        assertTrue("items" in repairShape && "stem" in repairShape, repairShape)
+    }
+
+    @Test fun evasiveWordingOnWrongOptionsIsAllowed() {
+        val pool = listOf(excerpt("Plot one contained flowering plants during the survey."))
+        val ocr = pageTextOcr()
+        val stem = "关于样地植物，哪一项更贴近正文记录？"
+        val allowed = LiteratureQuiz.verify(
+            pool,
+            choice(stem, wrongText = "材料只提到收藏策略。", wrongWhy = "原文没有提及这类论述。"),
+            ocr,
+        )
+        assertTrue(allowed.failures.isEmpty(), allowed.failures.joinToString { it.rule })
+        val stemHit = LiteratureQuiz.verify(pool, choice("原文没有提及这类论述，哪一项更贴近？"), ocr)
+        assertEquals("stem_substantive", stemHit.failures.single().rule)
+        val correctHit = LiteratureQuiz.verify(
+            pool,
+            choice(stem, correctText = "原文没有提及后续标准。"),
+            ocr,
+        )
+        assertEquals("option_substantive", correctHit.failures.single().rule)
+    }
+
+    @Test fun correctOptionComparisonMustAppearInTheSource() {
+        val unsupported = LiteratureQuiz.verify(
+            listOf(excerpt("Cataloguing the collection costs money and is an investment.")),
+            choice(
+                "登记和研究哪一件更要紧？",
+                correctText = "登记与研究同样是一项投资。",
+                correctWhy = "出处写了编目要花钱。",
+            ),
+            pageTextOcr(),
+        )
+        assertEquals("unsupported_claim", unsupported.failures.single().rule)
+        val supported = LiteratureQuiz.verify(
+            listOf(excerpt("登记与研究同样是一项投资，编目保存也要花钱。")),
+            choice(
+                "登记和研究哪一件更要紧？",
+                correctText = "登记与研究同样是一项投资。",
+                correctWhy = "与原文一致。",
+            ),
+            pageTextOcr(),
+        )
+        assertTrue(supported.failures.isEmpty(), supported.failures.joinToString { "${it.rule}:${it.detail}" })
+        val paraphrase = LiteratureQuiz.verify(
+            listOf(excerpt("Cataloguing the collection costs money and is an investment.")),
+            choice(correctText = "编目保存需要花钱。", correctWhy = "出处写了这项花费。"),
+            pageTextOcr(),
+        )
+        assertTrue(paraphrase.failures.isEmpty(), paraphrase.failures.joinToString { "${it.rule}:${it.detail}" })
+    }
+
+    @Test fun wrongOptionDenialMustNotContradictTheSource() {
+        val stem = "这里说的衰落用的是什么标准？"
+        val contradictory = LiteratureQuiz.verify(
+            listOf(excerpt("生长记录支持这一判断，评价也按后来博物馆的标准。")),
+            choice(
+                stem,
+                correctWhy = "记录相符。",
+                wrongText = "按后来博物馆的标准。",
+                wrongWhy = "原文没有这类论述。",
+            ),
+            pageTextOcr(),
+        )
+        assertEquals("contradicts_source", contradictory.failures.single().rule)
+        val absent = LiteratureQuiz.verify(
+            listOf(excerpt("Plot one contained flowering plants during the survey.")),
+            choice(stem, wrongText = "按后来博物馆的标准。", wrongWhy = "原文没有这类论述。"),
+            pageTextOcr(),
+        )
+        assertTrue(absent.failures.isEmpty(), absent.failures.joinToString { "${it.rule}:${it.detail}" })
+    }
+
+    @Test fun footerNotesStayOutOfThePoolAndFailVerification() {
+        val englishNote = "Earlier catalogues recorded the same plants (Hunter, 1989, p. 21)."
+        val chineseNote = "编目保存需要继续花钱，这是对将来的一项投资（亨特，1989 年第 21 页）。"
+        val body = "Plot one contained flowering plants during the survey."
+        val books = listOf(
+            regionBook("paper-a", listOf(body, englishNote, chineseNote)),
+            regionBook("paper-b", listOf("Sample two showed faster growth under the shade treatment.")),
+            regionBook("paper-c", listOf("Plot three recorded flowering stems across the open field.")),
+        )
+        val extracted = books.flatMap { LiteraturePassages.extractCandidates(it) }.map { it.anchor.quoteAnchor }
+        assertTrue(extracted.any { "(Hunter, 1989, p. 21)" in it }, extracted.joinToString("\n"))
+        assertTrue(extracted.any { "第 21 页" in it }, extracted.joinToString("\n"))
+        val input = LiteratureInput(books, questions)
+        val pool = LiteratureQuiz.request(input).pool.map { it.anchor.quoteAnchor }
+        assertTrue(pool.none { "(Hunter, 1989, p. 21)" in it || "第 21 页" in it }, pool.joinToString("\n"))
+        assertTrue(pool.any { "flowering plants" in it }, pool.joinToString("\n"))
+        val ocr = pageTextOcr()
+        val cited = LiteratureQuiz.verify(listOf(excerpt(englishNote)), choice(), ocr)
+        assertEquals("footer_note", cited.failures.single().rule)
+        val citedChinese = LiteratureQuiz.verify(listOf(excerpt(chineseNote)), choice(), ocr)
+        assertEquals("footer_note", citedChinese.failures.single().rule)
+    }
+
+    private fun handInput(): LiteratureInput = LiteratureInput(
+        listOf(
+            regionBook("paper-a", listOf("Plot one contained flowering plants during the survey.")),
+            regionBook("paper-b", listOf("Sample two showed faster growth under the shade treatment.")),
+            regionBook("paper-c", listOf("Plot three recorded flowering stems across the open field.")),
+        ),
+        questions,
+    )
+
+    private fun regionBook(id: String, sentences: List<String>): Textbook {
+        val text = sentences.joinToString("\n")
+        return Textbook(id, id, "pdf", listOf(BookPage(1, text, guideRegions = listOf(GuideRegion(text)))))
+    }
+
+    private fun excerpt(quote: String): GuideExcerpt {
+        val book = Textbook("hand", "Hand", "pdf", listOf(BookPage(1, quote)))
+        return GuideExcerpt(book, BookCompanionAnchor(1, "hand", 0, quote.length, quote), GuideRegion(quote))
+    }
+
+    private fun pageTextOcr() = CachingOcrVerifier { book, page -> book.page(page)?.text.orEmpty() }
+
+    private fun choice(
+        stem: String = "关于思考题1的第1个判断，哪一项更贴近正文记录？",
+        correctText: String = "生长记录支持这一判断。",
+        correctWhy: String = "正确项对应正文里的观察记录。",
+        wrongText: String = "样本观察与这一判断相反。",
+        wrongWhy: String = "此项把观察说成了相反结论。",
+    ): JsonObject = buildJsonObject {
+        put("items", buildJsonArray {
+            add(buildJsonObject {
+                put("questionIndex", 0)
+                put("stem", stem)
+                put("options", buildJsonArray {
+                    listOf(
+                        Triple(correctText, true, correctWhy),
+                        Triple(wrongText, false, wrongWhy),
+                        Triple("保管流程解释了这一判断。", false, "此项改写成保管流程。"),
+                        Triple("目录登记解释了这一判断。", false, "此项改写成目录登记。"),
+                    ).forEach { (text, correct, why) ->
+                        add(buildJsonObject {
+                            put("text", text)
+                            put("correct", correct)
+                            put("why", why)
+                            put("refs", buildJsonArray { add(JsonPrimitive(0)) })
+                        })
+                    }
+                })
+            })
+        })
+    }
+
     private fun quizJson(questionCount: Int, counts: List<Int>, nthOffset: Int = 0): JsonObject = buildJsonObject {
         put("items", buildJsonArray {
             for (question in 0 until questionCount) repeat(counts.getOrElse(question) { 0 }) { nth ->

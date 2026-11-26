@@ -58,6 +58,13 @@ internal object LiteratureQuiz {
     const val MAX_ITEMS = 15
     const val MIN_PER_QUESTION = 2
     private const val REQUEST_BYTE_BUDGET = 79_000
+    private const val REPLY_SHAPE =
+        """{"items":[{"questionIndex":0,"stem":"题干","options":[{"text":"选项","correct":true,"why":"为什么对","refs":[0]},{"text":"选项","correct":false,"why":"原文实际怎么说","refs":[1]},{"text":"选项","correct":false,"why":"原文实际怎么说","refs":[0]},{"text":"选项","correct":false,"why":"原文实际怎么说","refs":[1]}]}]}"""
+    private val comparisonClaim = Regex("""与.{1,16}同样|同样重要|更重要|相比|比起|而非|优于|不如|比.{1,12}更|equally|more important|rather than|in contrast""")
+    private val comparisonSource = Regex("""(?i)同样|相比|而非|whereas|unlike|rather than|equally|more important|in contrast|compared with|compared to""")
+    private val denial = Regex("""原文(?:并)?没有|并未(?:提及|讨论|论述|说明|记载)|没有这类|没提到|未提及|不存在这类|并无此类|does not (?:mention|discuss)|no such""")
+    private val authorYearPage = Regex("""\([A-Z][\p{L}'\-]+(?:\s+et\s+al\.?)?,\s*(?:1[5-9]\d{2}|20\d{2})\s*[,:;]\s*(?:pp?\.\s*)?\d+""")
+    private val cjkYearPage = Regex("""（[^）]{0,40}(?:1[5-9]\d{2}|20\d{2})[^）]{0,20}第\s*\d+\s*页""")
 
     private val metadataStem = Regex(
         """(?i)页眉|页脚|书目|参考文献|版权|jstor|下载于|作者是谁|哪一年|发表于哪|标题是什么|running\s*head|bibliography|page\s*header""",
@@ -101,11 +108,11 @@ internal object LiteratureQuiz {
         val ocrChecks = mutableListOf<GuideOcrCheck>()
         val rejected = mutableSetOf<String>()
         val refOutcomes = HashMap<Int, Pair<GuideExcerpt?, String>>()
-        if ((body["invalidQuiz"] as? JsonPrimitive)?.booleanOrNull == true) {
-            failures += QuizItemFailure(-1, "整套选择题", "invalid_json", "模型未返回有效 JSON")
+        if ((body["invalidQuiz"] as? JsonPrimitive)?.booleanOrNull == true || body["items"] !is JsonArray) {
+            failures += QuizItemFailure(-1, "整套选择题", "invalid_json", "模型回复缺少 items")
             return QuizVerification(emptyList(), failures, emptyList(), emptySet())
         }
-        val raw = (body["items"] as? JsonArray)?.mapNotNull { it as? JsonObject }.orEmpty()
+        val raw = (body["items"] as JsonArray).mapNotNull { it as? JsonObject }
         raw.forEachIndexed { ordinal, row ->
             val index = (row["questionIndex"] as? JsonPrimitive)?.intOrNull
             if (index == null) {
@@ -123,7 +130,16 @@ internal object LiteratureQuiz {
     fun resolve(input: LiteratureInput, first: QuizVerification, second: QuizVerification?): QuizResolution {
         val merged = if (second == null) first.items else first.items + second.items
         val trimmed = trim(input.questions.size, merged)
-        if (trimmed == null) return QuizResolution(null, gapLabels(input.questions, merged))
+        if (trimmed == null) {
+            val gaps = gapLabels(input.questions, merged).toMutableList()
+            val invalid = (first.failures + (second?.failures.orEmpty())).any { it.rule == "invalid_json" }
+            if (invalid) {
+                val tail = if (gaps.isEmpty()) "这套选择题没有保存。" else gaps.removeAt(gaps.lastIndex)
+                gaps += "模型回复缺少 items，记为 invalid_json。"
+                gaps += tail
+            }
+            return QuizResolution(null, gaps)
+        }
         val digest = LiteratureGuideStore.digest(input.request())
         return QuizResolution(LiteratureQuizSet(digest, input.questions, trimmed), emptyList())
     }
@@ -254,11 +270,14 @@ internal object LiteratureQuiz {
     }
 
     private fun select(input: LiteratureInput, indices: List<Int>, excluded: Set<String>): List<GuideExcerpt> {
+        val candidatesByBook = input.allCandidatesByBook.mapValues { (_, excerpts) ->
+            excerpts.filterNot { isFooterCitation(it.anchor.quoteAnchor) }
+        }
         val groups = indices.distinct().map { index ->
             LiteraturePassages.topAcrossBooksForQuestion(
                 books = input.books,
                 metas = input.paperMetas,
-                candidatesByBook = input.allCandidatesByBook,
+                candidatesByBook = candidatesByBook,
                 question = input.questions[index],
                 excludedQuotes = excluded,
                 limit = 30,
@@ -293,6 +312,7 @@ internal object LiteratureQuiz {
         buildJsonObject {
             put("kind", "literatureQuiz")
             put("mode", mode)
+            put("replyShape", REPLY_SHAPE)
             put("papers", input.papersJson())
             put("questions", JsonArray(input.questions.map(::JsonPrimitive)))
             if (repair != null) put("repair", repair)
@@ -335,8 +355,8 @@ internal object LiteratureQuiz {
                 why.length !in 4..160 -> return fail("why_length", "每个选项都要说明对或错的理由")
                 LiteraturePassages.hasLeakedRef(text) || LiteraturePassages.hasLeakedRef(why) ->
                     return fail("leaked_ref", "选项或理由写进了片段编号")
-                !LiteraturePassages.substantive(text) || !LiteraturePassages.substantive(why) ->
-                    return fail("option_substantive", "选项或理由没有正面说明")
+                correct && (!LiteraturePassages.substantive(text) || !LiteraturePassages.substantive(why)) ->
+                    return fail("option_substantive", "正确项不能使用回避句")
             }
             val refs = (option["refs"] as? JsonArray)?.map { (it as? JsonPrimitive)?.intOrNull } .orEmpty()
             if (refs.isEmpty() || refs.any { it == null }) return fail("refs", "每个选项至少要有一个候选句编号")
@@ -350,6 +370,13 @@ internal object LiteratureQuiz {
                     return fail("copied_quote", "自写文字复述了所引原句")
                 }
                 sources += excerpt
+            }
+            val quotes = sources.map { it.anchor.quoteAnchor }
+            if (correct && unsupportedClaim(text, why, quotes)) {
+                return fail("unsupported_claim", "正确项里有出处没有的判断")
+            }
+            if (!correct && contradictsQuote(text, why, quotes)) {
+                return fail("contradicts_source", "错项理由和所引原文相反")
             }
             built += QuizOption(text, correct, why, sources.distinctBy { it.book.id to it.anchor.pdfPage to it.anchor.startUtf16 })
         }
@@ -378,6 +405,9 @@ internal object LiteratureQuiz {
         if (!LiteraturePassages.bodySentence(anchor.quoteAnchor) || LiteraturePassages.isBibliographicFootnote(anchor.quoteAnchor)) {
             return (null to "not_body_sentence").also { refOutcomes[ref] = it }
         }
+        if (isFooterCitation(anchor.quoteAnchor)) {
+            return (null to "footer_note").also { refOutcomes[ref] = it }
+        }
         val ocrText = try {
             ocr.ocrPageText(excerpt.book, anchor.pdfPage)
         } catch (e: Exception) {
@@ -401,6 +431,30 @@ internal object LiteratureQuiz {
         refOutcomes[ref] = result
         return result
     }
+
+    private fun isFooterCitation(quote: String): Boolean =
+        authorYearPage.containsMatchIn(quote) || cjkYearPage.containsMatchIn(quote)
+
+    private fun unsupportedClaim(text: String, why: String, quotes: List<String>): Boolean {
+        val claim = "$text $why"
+        if (comparisonClaim.containsMatchIn(claim) && quotes.none { comparisonSource.containsMatchIn(it) }) return true
+        val quoteBlob = quotes.joinToString("\n")
+        if (hanCount(claim) < 8 || hanCount(quoteBlob) < 8) return false
+        val quoteTokens = LiteraturePassages.tokens(quoteBlob)
+        return claim.split(Regex("[。！？；;.!?]")).map { it.trim() }.any { clause ->
+            if (clause.length < 8) return@any false
+            val tokens = LiteraturePassages.tokens(clause)
+            tokens.size >= 4 && tokens.count { it in quoteTokens } * 2 < tokens.size
+        }
+    }
+
+    private fun contradictsQuote(optionText: String, why: String, quotes: List<String>): Boolean {
+        if (!denial.containsMatchIn(why)) return false
+        val quoteTokens = quotes.flatMap { LiteraturePassages.tokens(it) }.toSet()
+        return LiteraturePassages.tokens(optionText).count { it in quoteTokens } >= 2
+    }
+
+    private fun hanCount(text: String) = text.count { it.code in 0x3400..0x9fff }
 
     private fun copiesQuote(text: String, quote: String): Boolean {
         val normalized = LiteratureTextNorm.normalize(quote)

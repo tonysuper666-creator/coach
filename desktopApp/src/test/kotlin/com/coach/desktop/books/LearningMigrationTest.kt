@@ -2,8 +2,11 @@ package com.coach.desktop.books
 
 import com.coach.protocol.learning.LearningTable
 import com.coach.protocol.learning.learningTables
+import com.coach.protocol.learning.draftVersion
 
 import com.coach.client.CourseHttp
+import com.coach.client.PairedCredentials
+import com.coach.desktop.DesktopIdentity
 import com.coach.core.LedgerActor
 import com.coach.desktop.LearningProfiles
 import com.coach.desktop.books.exam.LocalExamStore
@@ -26,6 +29,7 @@ import java.sql.DriverManager
 import kotlin.test.*
 
 class LearningMigrationTest {
+    private class LostDraftReceipt : java.io.IOException()
     private val sample = "A synthetic chapter for the learning synchronization test."
     private val book = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(sample.encodeToByteArray()))
 
@@ -118,6 +122,34 @@ class LearningMigrationTest {
         } finally { dir.toFile().deleteRecursively() }
     }
 
+    @Test fun installingDraftVersionsRestartsAnOlderPartialSnapshotAndPreservesQueuedEdits() {
+        val dir = Files.createTempDirectory("draft-upgrade")
+        try {
+            val library = TextbookLibrary(dir)
+            importSample(dir)
+            library.withCourseDatabase { db ->
+                db.createStatement().use { it.execute(StudyModeStore.PREFERENCES_DDL) }
+                LearningJournal.install(db,learningTables.filterNot { it.exam })
+                db.createStatement().use { q ->
+                    q.executeUpdate("INSERT INTO learning_sync_meta VALUES ('stage_token','old'),('stage_after','1')")
+                    q.executeUpdate("INSERT INTO learning_sync_stage VALUES(1,'{}')")
+                }
+            }
+            fun queued() = library.withCourseDatabase { db -> db.createStatement().use {
+                it.executeQuery("SELECT COUNT(*) FROM learning_sync_outbox").use { r -> r.next(); r.getInt(1) }
+            } }
+            val pending = queued()
+            assertTrue(pending > 0)
+            LearningJournal.installLibrary(library)
+            assertEquals(pending,queued())
+            library.withCourseDatabase { db -> db.createStatement().use { q ->
+                assertTrue(q.executeQuery("SELECT 1 FROM learning_sync_meta WHERE key='restore_required' AND value='1'").use { it.next() })
+                assertFalse(q.executeQuery("SELECT 1 FROM learning_sync_meta WHERE key LIKE 'stage_%'").use { it.next() })
+                assertFalse(q.executeQuery("SELECT 1 FROM learning_sync_stage").use { it.next() })
+            } }
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
     @Test fun migrateRestoreAndIsolate() = runBlocking {
         val root = Files.createTempDirectory("learning-pullback")
         val job = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -151,7 +183,7 @@ class LearningMigrationTest {
                     .GET().build()
                 return HttpClient.newHttpClient().send(request,HttpResponse.BodyHandlers.ofString())
             }
-            suspend fun sync(dir: Path, token: String, pauseSnapshot: Boolean = false) {
+            suspend fun sync(dir: Path, token: String, pauseSnapshot: Boolean = false, loseDraftReceipt: Boolean = false) {
                 val c = sessions.getOrPut(dir to token) {
                     val response = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build().send(
                         HttpRequest.newBuilder(URI("$base/v1/public/sable")).timeout(java.time.Duration.ofSeconds(10))
@@ -166,7 +198,11 @@ class LearningMigrationTest {
                         override suspend fun snapshot(epoch: String, token: String?, after: Long) =
                             if (pauseSnapshot && token != null) null else http.learningSnapshot(epoch,token,after)
                         override suspend fun changes(epoch: String?, after: Long, stream: String) = http.learningChanges(epoch,after,stream)
-                        override suspend fun push(change: JsonObject) = http.pushLearningChange(change)
+                        override suspend fun push(change: JsonObject) = http.pushLearningChange(change).also { ack ->
+                            if (ack != null && loseDraftReceipt && change["kind"] == JsonPrimitive("ask_draft")) {
+                                throw LostDraftReceipt()
+                            }
+                        }
                     }
                     val profile = assertNotNull(http.learningProfile())
                     val scope = profile.getValue("scope").jsonPrimitive.content
@@ -256,6 +292,30 @@ class LearningMigrationTest {
             for (dir in listOf(a,b)) assertEquals(setOf("first offline edit","second offline edit"),
                 TextbookLibrary(dir).allNotes(book).map { it.note }.toSet())
 
+            val texts = listOf("first offline question\nwith a second line", "second offline question")
+            val initialDraft = assertNotNull(TextbookLibrary(a).askDraft(book))
+            assertEquals(initialDraft,TextbookLibrary(b).askDraft(book))
+            for ((dir,text) in listOf(a,b).zip(texts)) {
+                TextbookLibrary(dir).saveAskDraft(book,initialDraft.copy(text=text))
+            }
+            sync(a,tokens[0])
+            assertFailsWith<LostDraftReceipt> { sync(b,tokens[0],loseDraftReceipt=true) }
+            sync(b,tokens[0]); sync(a,tokens[0]); sync(b,tokens[0])
+            val versions = rows(a,draftVersion)
+            assertEquals(1,versions.size)
+            assertEquals(versions,rows(b,draftVersion))
+            sync(y,tokens[1])
+            assertTrue(rows(y,draftVersion).isEmpty())
+            val active = TextbookLibrary(a).askDraft(book)
+            assertEquals(active,TextbookLibrary(b).askDraft(book))
+            for (dir in listOf(a,b)) {
+                val notes = TextbookLibrary(dir).loadBookNotes(book,"Synthetic")
+                val recovered = notes.questions.single { it.lines.first().first == "找回的提问草稿" }.lines.single().second
+                assertEquals(texts.toSet(),setOf(assertNotNull(active).text,recovered))
+                assertContains(renderBookNotesMarkdown(notes),recovered)
+            }
+            println("Draft retry after committed push: A=1 active + 1 recovered; B=1 active + 1 recovered")
+
             BookBookmarkStore(a).remove(book,4)
             sync(a,tokens[0]); sync(b,tokens[0])
             assertTrue(BookBookmarkStore(b).list(book).none { it.page == 4 })
@@ -295,6 +355,7 @@ class LearningMigrationTest {
             sync(a,tokens[0])
             sync(replacement,tokens[0])
             assertEquals(BookBookmarkStore(a).list(book),BookBookmarkStore(replacement).list(book))
+            assertEquals(versions,rows(replacement,draftVersion))
             // The registry survives losing the per-account DB. A valid but older SQLite file must not roll it back.
             val newest = Files.copy(backup,root.resolve("new-checkpoint.sqlite"))
             val live = accountDir.resolve("learning.sqlite")
@@ -332,6 +393,38 @@ class LearningMigrationTest {
             assertEquals(restoredMark,BookBookmarkStore(a).list(book).single { it.page == 4 }.note)
         } finally {
             server.stop(0,1000); issuer.stop(0); actor.close(); job.cancel(); root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun onlyAValidProfileResponseCanBindTheLocalDirectory() = runBlocking {
+        val root = Files.createTempDirectory("learning-profile-response")
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val scope = "sable-" + "1".repeat(64)
+        val epoch = java.util.UUID.randomUUID().toString()
+        val profiles = LearningProfiles(root.resolve("library"))
+        val identity = DesktopIdentity("http://127.0.0.1:${server.address.port}", PairedCredentials("test-device", "test-token", "friend"))
+        val response = java.util.concurrent.atomic.AtomicReference("text/html" to "<html></html>")
+        server.createContext("/learning-sync/profile") { exchange ->
+            val (type, body) = response.get()
+            val bytes = body.encodeToByteArray()
+            exchange.responseHeaders.add("Content-Type", type)
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        try {
+            for (reply in listOf(response.get(), "application/json" to "{", "application/json" to """{"scope":"$scope","epoch":"invalid"}""")) {
+                response.set(reply)
+                assertNull(profiles.open(identity, true).scope)
+            }
+            response.set("application/json" to """{"scope":"$scope","epoch":"$epoch"}""")
+            val verified = profiles.open(identity, true)
+            assertEquals(scope, verified.scope)
+            assertEquals(epoch, verified.epoch)
+            assertEquals(verified, profiles.open(identity, false))
+        } finally {
+            server.stop(0)
+            root.toFile().deleteRecursively()
         }
     }
 

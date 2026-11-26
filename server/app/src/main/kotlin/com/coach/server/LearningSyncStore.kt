@@ -2,6 +2,7 @@ package com.coach.server
 
 import com.coach.store.sha256
 import com.coach.protocol.learning.learningTables
+import com.coach.protocol.learning.draftVersion
 import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
@@ -11,7 +12,7 @@ import kotlinx.serialization.json.*
 /** All storage paths are obtained from the authenticated Sable scope. Cursors belong to one database. */
 internal class LearningSyncStore(private val accounts: Path, private val backup: LearningBackup? = null,
                                  private val now: () -> Long = System::currentTimeMillis) {
-    private val tables = learningTables.associateBy { it.kind }
+    private val tables = (learningTables + draftVersion).associateBy { it.kind }
     private fun <T> transaction(scope: UnifiedBookScope, body: (Connection, String) -> T): T {
         require(scope.isSableAccount)
         val directory = privateFiles.directory(accounts.resolve(scope.scopeKey))
@@ -189,6 +190,7 @@ internal class LearningSyncStore(private val accounts: Path, private val backup:
                 recreating || current == null -> record(db,kind,id,after,round,writer)
                 round < currentRound || stored == null -> {
                     if (kind == "note" && after != null) recoverNote(after,writer)
+                    if (after != null) recoverDraft(db,kind,id,round,writer,after,before,null)
                 }
                 kind != "note" && after != null -> {
                     val merged = mergeFields(db,kind,id,round,stored,before,after,current.third,writer)
@@ -200,6 +202,14 @@ internal class LearningSyncStore(private val accounts: Path, private val backup:
                 stored == before -> record(db,kind,id,after,round,writer)
                 after == null -> {
                     if (kind == "note") recoverNote(stored,current.third)
+                    val field = LearningDraftRecovery.field(kind)
+                    if (field != null) {
+                        val author = db.prepareStatement("SELECT writer FROM sync_field_writers WHERE kind=? AND id=? AND round=? AND field=?").use { q ->
+                            q.setString(1,kind); q.setString(2,id); q.setLong(3,round); q.setString(4,field)
+                            q.executeQuery().use { if (it.next()) it.getString(1) else current.third }
+                        }
+                        recoverDraft(db,kind,id,round,author,stored,before,null)
+                    }
                     record(db,kind,id,null,round,writer)
                 }
                 kind == "note" -> {
@@ -224,6 +234,17 @@ internal class LearningSyncStore(private val accounts: Path, private val backup:
         buildJsonObject { put("scope",scope.scopeKey); put("epoch",epoch); put("seq",counter) }
     }
 
+    private fun recoverDraft(db: Connection, kind: String, id: String, round: Long, author: String,
+                             edited: JsonObject, before: JsonObject?, visible: JsonObject?) {
+        for (copy in LearningDraftRecovery.copies(kind,id,round,author,edited,before,visible)) {
+            val copyId = draftVersion.legacyId(copy)
+            val known = db.prepareStatement("SELECT 1 FROM sync_records WHERE kind=? AND id=?").use { q ->
+                q.setString(1,draftVersion.kind); q.setString(2,copyId); q.executeQuery().use { it.next() }
+            }
+            if (!known) record(db,draftVersion.kind,copyId,copy,1,author)
+        }
+    }
+
     private fun mergeFields(db: Connection, kind: String, id: String, round: Long, stored: JsonObject,
                             before: JsonObject?, after: JsonObject, previousWriter: String, writer: String): JsonObject {
         // Keep coupled coordinates, frozen papers and derived states internally consistent.
@@ -242,6 +263,10 @@ internal class LearningSyncStore(private val accounts: Path, private val backup:
                 val previous = stamps[field] ?: previousWriter
                 val changed = before == null || group.any { before[it] != after[it] }
                 val wins = changed && writer > previous
+                if (field == LearningDraftRecovery.field(kind) && stored[field] != after[field]) {
+                    if (wins) recoverDraft(db,kind,id,round,previous,stored,before,after)
+                    else recoverDraft(db,kind,id,round,writer,after,before,stored)
+                }
                 if (wins) group.forEach { merged[it] = after.getValue(it) }
                 if (wins || field !in stamps) {
                     q.setString(1,kind); q.setString(2,id); q.setLong(3,round); q.setString(4,field)

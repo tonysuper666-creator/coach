@@ -50,11 +50,13 @@ def read_counts(directory, end):
 
 
 def report(counts):
-    print("UTC-hour route 200 429 5xx abandoned failure-rate")
+    print("UTC-hour route 200 429 5xx abandoned unexplained-rate abandon-rate")
     def emit(period, route, values):
-        total = sum(values.values())
-        rate = f"{(total - values['200']) / total:.2%}" if total else "n/a"
-        print(period, route, *(values[key] for key in OUTCOMES), rate)
+        finished = values["200"] + values["429"] + values["5xx"]
+        attempts = finished + values["abandoned"]
+        unexplained = f"{(values['429'] + values['5xx']) / finished:.2%}" if finished else "n/a"
+        abandoned = f"{values['abandoned'] / attempts:.2%}" if attempts else "n/a"
+        print(period, route, *(values[key] for key in OUTCOMES), unexplained, abandoned)
 
     totals = defaultdict(Counter)
     for (hour, route), values in sorted(counts.items()):

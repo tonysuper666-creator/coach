@@ -16,6 +16,26 @@ import kotlinx.serialization.json.JsonObject
 import kotlin.test.*
 
 class ReaderRequestTimeoutTest {
+    @Test fun completeNdjsonStaysASuccessWhenTheProgressSinkThrows() = runBlocking {
+        val client = CourseHttp("http://127.0.0.1:1", "test", "test", "library", { MockEngine {
+            respond("""{"meta":{"sources":[{"anchor":"S1","docId":"b","pdfPage":1}],"elapsedMs":4}}
+                |{"delta":"Kept answer."}
+                |{"done":true}
+                |""".trimMargin(), headers = headersOf(HttpHeaders.ContentType, "application/x-ndjson"))
+        } })
+        try {
+            var sinks = 0
+            val reply = client.explainLibrary(JsonObject(emptyMap())) {
+                sinks += 1
+                error("progress sink failed")
+            }
+            assertEquals(1, sinks)
+            assertEquals(200, reply.statusCode)
+            assertNull(reply.error)
+            assertEquals("Kept answer.", (assertNotNull(reply.body)["text"] as kotlinx.serialization.json.JsonPrimitive).content)
+        } finally { client.close() }
+    }
+
     @Test fun eofBeforeDoneKeepsReceivedPrefixAndReturnsFailure() = runBlocking {
         val client = CourseHttp("http://127.0.0.1:1", "test", "test", "library", { MockEngine {
             respond("""{"meta":{"sources":[{"anchor":"S1"}]}}

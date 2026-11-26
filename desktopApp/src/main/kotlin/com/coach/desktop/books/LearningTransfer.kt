@@ -1,6 +1,7 @@
 package com.coach.desktop.books
 
 import com.coach.protocol.learning.LearningTable
+import com.coach.protocol.learning.draftVersion
 import com.coach.protocol.learning.learningTables
 
 import kotlinx.serialization.json.*
@@ -18,7 +19,7 @@ internal interface LearningRemote {
 
 /** Upload queued Windows learning records and commit incoming pages with the source database's cursor. */
 internal class LearningTransfer(private val path: Path, private val exam: Boolean) {
-    private val sources = learningTables.filter { it.exam == exam }.associateBy { it.kind }
+    private val sources = (learningTables + draftVersion).filter { it.exam == exam }.associateBy { it.kind }
 
     private fun <T> write(body: (Connection) -> T): T =
         DriverManager.getConnection("jdbc:sqlite:$path").use { db ->
@@ -349,7 +350,15 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
             val fields = row.toMutableMap()
             if (table.event && known != null) fields["id"] = known.single()
             if (table.kind == "ask_turn" && fields["answer_status"]?.jsonPrimitive?.content in setOf("failed","pending")) {
-                fields["write_id"] = JsonPrimitive(UUID.randomUUID().toString())
+                // A new device mints a token so it can retry. This device keeps the token it already
+                // holds; replacing it strands the writer that is still reading the answer.
+                val localId = (fields["id"] as? JsonPrimitive)?.content?.toLongOrNull()
+                val existing = if (localId == null) null else db.prepareStatement(
+                    "SELECT write_id FROM book_ask_turns WHERE id=?").use { q ->
+                    q.setLong(1, localId)
+                    q.executeQuery().use { r -> if (r.next()) r.getString(1) else null }
+                }
+                if (existing.isNullOrBlank()) fields["write_id"] = JsonPrimitive(UUID.randomUUID().toString())
             }
             val update = fields.keys.filterNot { it in pk }.joinToString(",") { "$it=excluded.$it" }
             val statement = "INSERT INTO ${table.name}(${fields.keys.joinToString(",")}) VALUES(" +

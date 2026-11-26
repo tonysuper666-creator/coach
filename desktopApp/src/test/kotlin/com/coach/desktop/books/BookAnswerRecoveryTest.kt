@@ -3,6 +3,7 @@ package com.coach.desktop.books
 import com.coach.client.PairedCredentials
 import com.coach.desktop.DesktopConnectionSettings
 import com.coach.desktop.DesktopIdentity
+import com.coach.desktop.books.exam.LocalExamStore
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -157,5 +158,107 @@ class BookAnswerRecoveryTest {
         library.finishBookQuestion(retry, final)
         assertEquals(final, library.loadLatestAskThread(book.id)!!.turns.single().explanation)
         assertFails { library.beginBookQuestion(book.id, "thread", block, "", FIRST, listOf(block), retry) }
+    }
+
+    @Test fun completeAnswerSurvivesEchoOfThePendingTurn() = runBlocking {
+        val root = folder.root.toPath()
+        val library = syncedLibrary(root.resolve("library"))
+        val book = library.importBook(Files.writeString(root.resolve("sample.txt"), "Two synthetic samples in a row."))
+        val block = book.lessons.first().blocks.first { !it.heading }
+        val turn = library.beginBookQuestion(book.id, "thread", block, "", FIRST, listOf(block))
+        val remote = PendingAskEcho(SYNC_EPOCH, SYNC_SCOPE)
+        LearningTransfer(library.directory.resolve("library.sqlite"), false).sync(SYNC_SCOPE, remote, SYNC_EPOCH) { true }
+        val echoed = assertNotNull(remote.ask, "the pending ask must be offered back as a sync change")
+        assertEquals("pending", echoed.getValue("body").jsonObject.getValue("answer_status").jsonPrimitive.content)
+        val kept = assertNotNull(library.lastUnfinishedQuestion(book.id, "thread"))
+        assertEquals(turn.writeId, kept.writeId, "echo of this device's pending ask must keep the in-flight write token")
+
+        val other = syncedLibrary(root.resolve("other"))
+        other.importBook(Files.writeString(root.resolve("other-sample.txt"), "Two synthetic samples in a row."))
+        LearningTransfer(other.directory.resolve("library.sqlite"), false).sync(SYNC_SCOPE, remote, SYNC_EPOCH) { true }
+        val restored = assertNotNull(other.lastUnfinishedQuestion(book.id, "thread"))
+        assertTrue(restored.writeId.isNotBlank())
+        assertNotEquals(turn.writeId, restored.writeId, "a device with no token still mints one for a restored unfinished ask")
+
+        val answerText = "The samples differ by order."
+        val stream = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        stream.createContext("/v1/library/explain") { call ->
+            call.use {
+                check(call.requestHeaders.getFirst("Accept").contains("application/x-ndjson"))
+                call.requestBody.readBytes()
+                call.responseHeaders.set("Content-Type", "application/x-ndjson")
+                call.sendResponseHeaders(200, 0)
+                call.responseBody.bufferedWriter(Charsets.UTF_8).use { body ->
+                    body.appendLine("""{"meta":{"sources":[{"anchor":"S1","docId":"${block.id}","pdfPage":${block.page}}],"elapsedMs":4}}""")
+                    body.appendLine("""{"delta":"$answerText"}""")
+                    body.appendLine("""{"done":true}""")
+                }
+            }
+        }
+        stream.start()
+        try {
+            val base = "http://127.0.0.1:${stream.address.port}"
+            val answer = withContext(BookAnswerProgress { library.saveBookQuestionProgress(turn, it) }) {
+                explainer(root, library, base).explainSelection("ask", block, question = FIRST)
+            }
+            val done = assertIs<ExplainResult.Done>(answer, answer.toString())
+            library.finishBookQuestion(turn, done.explanation)
+            val stored = assertNotNull(library.loadLatestAskThread(book.id)).turns.single()
+            assertEquals(answerText, stored.explanation.text)
+            assertEquals(block.id, stored.explanation.citations.single().blockId)
+            assertNull(library.lastUnfinishedQuestion(book.id, "thread"))
+        } finally { stream.stop(0) }
+    }
+
+    private fun syncedLibrary(dir: Path): TextbookLibrary {
+        val library = TextbookLibrary(dir)
+        LocalExamStore(library)
+        LearningJournal.installProfile(library)
+        library.withCourseDatabase { db ->
+            db.createStatement().use { sql ->
+                sql.executeUpdate(
+                    """INSERT OR REPLACE INTO learning_sync_meta(key,value) VALUES
+                    ('epoch','$SYNC_EPOCH'),('transport','$SYNC_EPOCH'),('snapshot_done','1'),('cursor','0')""",
+                )
+            }
+        }
+        return library
+    }
+}
+
+private const val SYNC_SCOPE = "sable-abababababababababababababababababababababababababababababababab"
+private const val SYNC_EPOCH = "11111111-1111-4111-8111-111111111111"
+
+/** Serves the device's own pending ask back once, the way the changes feed echoes a push. */
+private class PendingAskEcho(private val epoch: String, private val scope: String) : LearningRemote {
+    var ask: JsonObject? = null
+
+    override suspend fun snapshot(epoch: String, token: String?, after: Long): JsonObject? = null
+
+    override suspend fun push(change: JsonObject): JsonObject {
+        if (change["kind"]?.jsonPrimitive?.content == "ask_turn" && change["after"] is JsonObject) {
+            ask = buildJsonObject {
+                put("seq", 1)
+                put("kind", "ask_turn")
+                put("id", change.getValue("id"))
+                put("body", change.getValue("after"))
+                put("round", change.getValue("round"))
+                put("clock", change.getValue("clock"))
+            }
+        }
+        return buildJsonObject {
+            put("scope", scope)
+            put("epoch", epoch)
+            put("seq", change.getValue("seq"))
+        }
+    }
+
+    override suspend fun changes(epoch: String?, after: Long, stream: String): JsonObject = buildJsonObject {
+        put("scope", scope)
+        put("epoch", this@PendingAskEcho.epoch)
+        put("transportEpoch", this@PendingAskEcho.epoch)
+        put("backedThrough", 1_000_000)
+        val echoed = ask
+        put("changes", if (after == 0L && echoed != null) JsonArray(listOf(echoed)) else JsonArray(emptyList()))
     }
 }

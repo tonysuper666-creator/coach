@@ -94,9 +94,13 @@ provider's grant window have separate boundaries.
 To measure the reader service before and after a change, run
 `python3 tools/reader/failure_rates.py --logs "$COACH_LOG_DIR"` against its access-log
 directory. Pass `--end 2026-11-26T08:00:00Z` to replay a particular window. It reports
-HTTP attempts per UTC hour and over the trailing 24 hours. The denominator includes
-200, 429, 5xx and observed client abandonment (499). The latter three count as failures.
-Older logs did not distinguish abandoned calls. Empty samples show `n/a`.
+HTTP attempts per UTC hour and over the trailing 24 hours. `unexplained-rate` is
+the count of 429 and 5xx responses divided by the count of 200, 429 and 5xx
+responses. `abandon-rate` counts 499s over those responses plus 499s. The server
+records 499 for a peer disconnect or an explicit cancellation. Determining the
+reason for a disconnect or whether a reader saw a complete explanation requires
+client-side evidence. Older logs did not distinguish abandoned calls. Each rate
+shows `n/a` when its denominator is zero.
 
 ### Sharing one provider grant
 

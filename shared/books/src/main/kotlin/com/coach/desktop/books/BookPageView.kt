@@ -15,6 +15,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.selection.SelectionState
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -81,6 +82,7 @@ import kotlinx.coroutines.withContext
 
 private const val CROP_GAP = "coach.book.crop-gap"
 private const val PAGE_BODY = "coach.book.page-body"
+private const val SOURCE_OFFSET = "coach.book.source-offset"
 internal val BookPageSources = SemanticsPropertyKey<List<BookPageSlice>>("BookPageSources")
 
 /** Compose inserts a separator between selectable nodes; that separator is not source text. */
@@ -105,6 +107,23 @@ private class PageClipboard(private val delegate: Clipboard) : Clipboard by dele
         if (clean != null) delegate.setClipEntry(bookClipboardText(clean))
         else delegate.setClipEntry(clipEntry)
     }
+}
+
+/** SelectionContainer clips annotations along with the highlight, even for reversed drags. */
+private fun Textbook.highlightedPassage(parts: List<AnnotatedString>): SourceBlock? {
+    val selected = buildAnnotatedString { parts.forEach { append(it) } }
+    val offsets = selected.getStringAnnotations(SOURCE_OFFSET, 0, selected.length)
+    val first = offsets.firstOrNull()?.item ?: return null
+    val last = offsets.last().item
+    val pageNumber = first.substringBefore(':').toInt()
+    // The note format has one source page. Never silently quote a prefix of a selection.
+    if (last.substringBefore(':').toInt() != pageNumber) return null
+    val start = first.substringAfter(':').toInt()
+    val end = last.substringAfter(':').toInt() + 1
+    val source = page(pageNumber)?.text ?: return null
+    val quote = originalPagedBookSelection(selected)
+    if (end - start != quote.length || !source.startsWith(quote, start)) return null
+    return SourceBlock("${id}:p$pageNumber:$start", pageNumber, start, end, false, quote)
 }
 
 /** 阅读方式：翻页读 / 滚动读。 */
@@ -552,6 +571,7 @@ internal fun BookPageView(
             return if (marked) markerMarginPx else 0
         }
         fun sheetScale(index: Int) = sheetWidthPx.toFloat() / (sheetWidthPx + markerMargin(pages.getOrNull(index)))
+        val selection = remember(book.id) { SelectionState() }
         val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
         val drawSheet: @Composable (Int, Int, Modifier, State<(Long) -> Boolean>?) -> Unit = { index, side, sheetModifier, ignoreDown ->
             val page = pages.getOrNull(index)
@@ -565,6 +585,7 @@ internal fun BookPageView(
                     sheetWidthPx.toFloat(), measurer, typography, widthPx, ::sheetScale) ?: state.anchor
                 val cb = latestOnSelectText ?: return@rememberUpdatedState
                 when {
+                    windowsPaged && !g.isTouch && g.dragged -> cb(book.highlightedPassage(selection.selectedTexts))
                     g.longPressed || (!g.isTouch && g.dragged) -> {
                         val local = if (extraPx == 0) g else g.copy(down = g.down / scale, up = g.up / scale)
                         cb(page?.selectionForGesture(book, local, with(density) { inset.toPx() },
@@ -582,7 +603,7 @@ internal fun BookPageView(
                         BookSheet(book, page, typography, measurer, widthPx, inset, remaining, spread, side,
                             libraryDirectory, onOpenTableRow, { preview = it }, displayedPoints, onHardPointClick,
                             topMargin = if (page.opener) openerTopMargin else topMargin,
-                            lastColumn = isLast, rendered = rendered) { failed.add(it) }
+                            lastColumn = isLast, recordSourceOffsets = windowsPaged, rendered = rendered) { failed.add(it) }
                     }
                 }
             }
@@ -607,7 +628,7 @@ internal fun BookPageView(
             }
         }, contentAlignment = Alignment.Center) {
             CompositionLocalProvider(LocalClipboard provides pageClipboard) {
-                SelectionContainer {
+                SelectionContainer(selection) {
                     if (turnStyle == PageTurnStyle.None) {
                         Row(Modifier.fillMaxHeight().graphicsLayer { alpha = fade.value }) {
                             repeat(visibleColumns) { side ->
@@ -804,6 +825,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
     onHardPointClick: ((SectionHardPoint, SourceBlock) -> Unit)? = null,
     topMargin: Dp = 52.dp,
     lastColumn: Boolean = spread && side == 1,
+    recordSourceOffsets: Boolean = false,
     rendered: MutableMap<Int, TextLayoutResult>,
     onMissing: (BookIllustration) -> Unit) {
     val density = LocalDensity.current
@@ -827,9 +849,18 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
         val layout = remember(run, widthPx, typography) { measurer.measure(run.text, typography.body,
             placeholders = run.placeholders, constraints = Constraints(maxWidth = widthPx)) }
         val inline = remember(run.placeholders) { run.placeholders.associate { it.tag to InlineTextContent(it.item) {} } }
-        val selectable = remember(run) { buildAnnotatedString {
+        val selectable = remember(run, recordSourceOffsets) { buildAnnotatedString {
             append(run.text)
             addStringAnnotation(PAGE_BODY, "", 0, length)
+            if (recordSourceOffsets) {
+                var display = 0
+                for (slice in run.sources) {
+                    for (offset in slice.startUtf16 until slice.endUtf16) {
+                        addStringAnnotation(SOURCE_OFFSET, "${slice.importPage}:$offset", display, display + 1)
+                        display++
+                    }
+                }
+            }
             if (run.precedingCropText.isNotEmpty()) addStringAnnotation(CROP_GAP, run.precedingCropText, 0, 1)
         } }
         if (index == 0 && page.chapterNumber != null) DisableSelection {

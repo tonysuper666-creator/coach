@@ -1,6 +1,8 @@
 package com.coach.desktop
 
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.geometry.Size
@@ -105,6 +107,76 @@ An isolated specimen uses the same process on the second page.
             assertEquals(quote, book.page(note.pdfPage)!!.text.substring(note.start, note.end))
             assertEquals("合成选段批注", note.note)
             onNode(hasTestTag("reader-text") and hasText(quote, substring = true)).assertIsDisplayed()
+        }
+    }
+
+    @Test fun multiColumnNotePreservesTheHighlightedOccurrenceAfterReopen() {
+        org.junit.Assume.assumeTrue(System.getProperty("os.name").startsWith("Windows"))
+        val root = Files.createTempDirectory("window-selected-note-")
+        val quote = " 潮声 😀 "
+        val source = root.resolve("spread.md")
+        Files.writeString(source, (1..3).joinToString("\n") { page ->
+            "<!-- PDF 第 $page 页 · 书第 $page 页 -->\n# 第${page}章 河岸\n甲${quote}乙${quote}丙。"
+        })
+        val library = TextbookLibrary(root.resolve("library"))
+        val controller = TextbookController(library)
+        val size = Size(1920f, 1080f)
+        val density = Density(1.5f)
+        runSkikoComposeUiTest(size = size, density = density) {
+            setContent { WindowsTextbookHost(controller, learningSupport = UnconnectedBookLearningSupport) { source } }
+            waitTag("upload-textbook")
+            onNodeWithTag("upload-textbook").performClick()
+            ready(controller) { it.screen == BookScreen.READER && it.prompt == null }
+            waitTag("reader-text-right")
+            val text = onNode(hasTestTag("reader-text") and hasText(quote, substring = true))
+            val layouts = mutableListOf<TextLayoutResult>()
+            text.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+            val layout = layouts.single()
+            val start = layout.layoutInput.text.text.lastIndexOf(quote)
+            val first = layout.getBoundingBox(start)
+            val last = layout.getBoundingBox(start + quote.lastIndex)
+            val coords = text.fetchSemanticsNode().layoutInfo.coordinates
+            val down = coords.localToRoot(Offset(last.right - 0.1f, last.center.y))
+            val up = coords.localToRoot(Offset(first.left + 0.1f, first.center.y))
+            val before = onRoot().captureToImage().toPixelMap()
+            onRoot().performMouseInput { moveTo(down); press(); moveTo(up); release() }
+            waitTag("selection-action-note")
+            val after = onRoot().captureToImage().toPixelMap()
+            // Sample the highlight near the baseline of each cell, including both adjacent characters.
+            for (offset in start - 1..start + quote.length) {
+                val cell = layout.getBoundingBox(offset)
+                if (cell.width == 0f) continue // second UTF-16 unit of the emoji
+                val sample = coords.localToRoot(Offset(cell.center.x, cell.bottom - 2f))
+                val x = sample.x.toInt()
+                val y = sample.y.toInt()
+                assertEquals(offset in start until start + quote.length, before[x, y] != after[x, y], "highlight at $offset")
+            }
+            onNodeWithTag("selection-action-note").performClick()
+            waitTag("note-input")
+            onNodeWithText("原句：$quote").assertIsDisplayed()
+            onNodeWithTag("note-input").performTextInput("第二处")
+            onNodeWithTag("books-note-save").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { library.allNotes(controller.state.value.book!!.id).size == 1 }
+        }
+        val reopened = TextbookController(TextbookLibrary(library.directory))
+        runSkikoComposeUiTest(size = size, density = density) {
+            setContent { WindowsTextbookHost(reopened, learningSupport = UnconnectedBookLearningSupport) { null } }
+            ready(reopened) { it.book != null }
+            if (reopened.state.value.screen == BookScreen.HOME) onNodeWithTag("home-read").performClick()
+            ready(reopened) { it.screen == BookScreen.READER }
+            val book = reopened.state.value.book!!
+            val note = reopened.library.allNotes(book.id).single()
+            val expectedStart = book.page(1)!!.text.lastIndexOf(quote)
+            assertEquals(1, note.pdfPage)
+            assertEquals(expectedStart, note.start)
+            assertEquals(expectedStart + quote.length, note.end)
+            assertEquals(quote, note.quote)
+            assertEquals("第二处", note.note)
+            if (onAllNodesWithTag("immersive-companion-drawer").fetchSemanticsNodes().isEmpty())
+                onNodeWithTag("immersive-companion-toggle").performClick()
+            onNodeWithTag("companion-tab-notes").performClick()
+            waitTag("note-${note.id}")
+            onNodeWithText("我的原句：$quote").assertIsDisplayed()
         }
     }
 

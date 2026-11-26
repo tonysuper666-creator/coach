@@ -157,6 +157,22 @@ internal fun usageRoute(path: String): String {
     return "/unmatched"
 }
 
+/** The public listener shares the counters, without collecting identities or device activity. */
+internal fun Application.observePublicReaderCounts(record: (String, Int, Long) -> Unit) {
+    install(createApplicationPlugin("PublicReaderCounts") {
+        onCall { call ->
+            val route = call.request.path()
+            if (call.request.httpMethod.value == "POST" && route in readerRoutes) {
+                val start = System.nanoTime()
+                call.attributes.put(readerOutcome, ReaderHttpOutcome { status ->
+                    record(route, status, (System.nanoTime() - start) / 1_000_000)
+                })
+            }
+        }
+        on(ResponseSent) { call -> call.attributes.getOrNull(readerOutcome)?.finish(call.response.status()?.value ?: 500) }
+    })
+}
+
 fun Application.observeUsage(observation: UsageObservation) {
     install(createApplicationPlugin("UsageAccess") {
         onCall { call ->

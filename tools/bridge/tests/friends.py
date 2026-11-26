@@ -236,6 +236,25 @@ class FriendApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(3, len(seen))
                 cli.assert_not_called()
 
+    async def test_billing_and_overload_rejections_release_friend_reservation(self):
+        for status in (402, 529):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temp, patch.dict(
+                os.environ, {"COACH_FRIEND_CONFIG": temp + "/friends.json"}
+            ):
+                root = Path(temp)
+                fund(root)
+                ledger = CreditLedger(root, lambda: NOW)
+                router = ApiRouter(ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+                    lambda _: httpx.Response(status))), keys={"anthropic": KEY})
+                with self.assertRaisesRegex(ApiFailure, f"^api_http_{status}$"):
+                    [event async for event in router.events(
+                        "READER_SELECTION", "claude-haiku-5-5", "s", "u", 100, friend=A, device="pc")]
+                data = ledger.read()
+                month = data["months"]["2026-11"]["anthropic"]
+                self.assertEqual({"spent_microusd": 0, "reserved_microusd": 0, "calls": 0}, month)
+                daily = next(iter(data["friends"][A].values()))
+                self.assertEqual(({}, 0, 0), (daily["reserved"], daily["calls"], daily["spent_microusd"]))
+
     async def test_rate_limit_does_not_consume_last_friend_slot(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_FRIEND_CONFIG": temp + "/friends.json"}):
             root = Path(temp)

@@ -115,7 +115,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         history: List<FollowUpTurn> = emptyList(),
         requestId: String = UUID.randomUUID().toString().replace("-", ""),
     ): ExplainResult {
-        if (kind == "ask" && !question.isNullOrBlank()) {
+        if (kind == "ask" && !question.isNullOrBlank() && kotlinx.coroutines.currentCoroutineContext()[BookAnswerProgress] == null) {
             val bookId = chosen.id.substringBefore(":p").takeIf { it.isNotBlank() && it != chosen.id }
             if (bookId != null && library != null) {
                 withContext(Dispatchers.IO) { runCatching { library.saveLastQuestion(bookId, question) } }
@@ -309,9 +309,21 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
                 try { BookLessonWire.withSource(input, snapshot) }
                 catch (_: IllegalArgumentException) { return null to ExplainResult.Refused(BookLessonWire.TOO_LONG) }
             } else if (snapshot == null) input else JsonObject(input + ("localSource" to snapshot))
-            val reply = withReaderRetry({
-                identity == paired && withContext(Dispatchers.IO) { imports?.snapshot(context) } == snapshot
-            }) { http.explainLibrary(wire) }
+            suspend fun stillCurrent() = identity == paired && withContext(Dispatchers.IO) { imports?.snapshot(context) } == snapshot
+            val progress = kotlinx.coroutines.currentCoroutineContext()[BookAnswerProgress]?.takeIf { kind == "ask" }
+            var verifiedStream = false
+            val reply = withReaderRetry({ stillCurrent() }) {
+                if (progress == null) http.explainLibrary(wire) else http.explainLibrary(wire) { partial ->
+                    if (!verifiedStream) {
+                        check(stillCurrent())
+                        verifiedStream = true
+                    } else {
+                        check(identity == paired && withContext(Dispatchers.IO) { imports?.pageSnapshot(context) } == snapshot)
+                    }
+                    val checked = ExplainWire.parse(partial, context) as? ExplainResult.Done ?: error("Invalid answer sources")
+                    progress.received(checked.explanation.text)
+                }
+            }
             if (snapshot != null && withContext(Dispatchers.IO) { imports!!.snapshot(context) } != snapshot)
                 return null to ExplainResult.Refused("保存的原文已变化，请重新打开这本书后重试。")
             val body = reply.body

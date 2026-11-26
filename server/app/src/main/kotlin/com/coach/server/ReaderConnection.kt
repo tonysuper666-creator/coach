@@ -23,4 +23,12 @@ internal suspend fun <T> RoutingCall.withReaderConnection(block: suspend () -> T
 } catch (closed: ReaderPeerClosed) {
     attributes.getOrNull(readerOutcome)?.finish(499)
     throw closed
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (failure: Exception) {
+    // Keep the exception class and our code location. Messages can contain submitted book text.
+    val frame = failure.stackTrace.firstOrNull { it.className.startsWith("com.coach.") }
+    org.slf4j.LoggerFactory.getLogger("coach.reader").warn("Reader handler failed: {} at {}.{}:{}",
+        failure.javaClass.simpleName, frame?.className, frame?.methodName, frame?.lineNumber)
+    throw failure
 }

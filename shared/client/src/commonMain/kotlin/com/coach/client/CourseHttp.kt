@@ -168,27 +168,32 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
       catch (e: kotlinx.coroutines.CancellationException) { throw e }
       catch (_: Exception) { MockReply(null, "连不上 Coach 服务，阅读位置已保存。可返回做题或手动重试。") }
     /** 本机书架里的书：选中段加相邻原文块（带块编号）发给已连接的 Coach 服务，讲解只引用这些块编号。 */
-    suspend fun explainLibrary(input: JsonObject): MockReply = try {
-        val response = http.post("$base/v1/library/explain") {
+    suspend fun explainLibrary(input: JsonObject, onPartial: (suspend (JsonObject) -> Unit)? = null): MockReply = try {
+        http.preparePost("$base/v1/library/explain") {
             timeout { requestTimeoutMillis = ReaderTimeoutPolicy.CLIENT_REQUEST_MS; socketTimeoutMillis = ReaderTimeoutPolicy.CLIENT_REQUEST_MS }
+            if (onPartial != null) header(HttpHeaders.Accept, "application/x-ndjson")
             setBody(TextContent(input.toString(), ContentType.Application.Json))
-        }
-        if (response.status.value == 401) MockReply(null, "授权已失效，请重新登录 Coach 服务。", statusCode = 401)
-        else {
-            val text = response.bodyAsText()
-            val parsed = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull()
-            val status = response.status.value
-            val code = parsed?.s("code")?.ifBlank { null }
-            when {
-                status == 429 || status in 500..599 ->
-                    MockReply(null, "讲解服务暂时不可用，请稍后再试。", retryable = true, statusCode = status,
-                        code = "unavailable", retryAfterMs = response.readerRetryDelay(parsed))
-                parsed == null && status != 403 -> MockReply(null, "连不上 Coach 服务，可继续阅读或稍后重试。")
-                response.status.isSuccess() -> MockReply(parsed, null, statusCode = status)
-                // Older friend services return a quota sentence. Use the same service guidance on both clients.
-                code == "daily_quota" || code == "monthly_quota" ->
-                    MockReply(null, "讲解服务暂时不可用，请稍后再试。", retryable = true, statusCode = status, code = "unavailable")
-                else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "暂时无法确认，请稍后重试。", statusCode = status, code = code)
+        }.execute { response ->
+            if (response.status.value == 401) MockReply(null, "授权已失效，请重新登录 Coach 服务。", statusCode = 401)
+            else if (onPartial != null && response.status.isSuccess() &&
+                response.contentType()?.withoutParameters() == ContentType.parse("application/x-ndjson")) {
+                MockReply(readReaderAnswer(response.bodyAsChannel(), onPartial), null, statusCode = response.status.value)
+            } else {
+                val text = response.bodyAsText()
+                val parsed = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull()
+                val status = response.status.value
+                val code = parsed?.s("code")?.ifBlank { null }
+                when {
+                    status == 429 || status in 500..599 ->
+                        MockReply(null, "讲解服务暂时不可用，请稍后再试。", retryable = true, statusCode = status,
+                            code = "unavailable", retryAfterMs = response.readerRetryDelay(parsed))
+                    parsed == null && status != 403 -> MockReply(null, "连不上 Coach 服务，可继续阅读或稍后重试。")
+                    response.status.isSuccess() -> MockReply(parsed, null, statusCode = status)
+                    // Older friend services return a quota sentence. Use the same service guidance on both clients.
+                    code == "daily_quota" || code == "monthly_quota" ->
+                        MockReply(null, "讲解服务暂时不可用，请稍后再试。", retryable = true, statusCode = status, code = "unavailable")
+                    else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "暂时无法确认，请稍后重试。", statusCode = status, code = code)
+                }
             }
         }
     } catch (_: HttpRequestTimeoutException) { MockReply(null, "讲解请求等待超时。可继续阅读或手动重试。") }

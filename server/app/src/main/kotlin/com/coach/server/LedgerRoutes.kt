@@ -43,6 +43,7 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
 
 // Test seam: pause an individual connection at the point its nonempty frame is sent.
 internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService?, adminDevice: String, observation: UsageObservation?, friends: FriendAccess? = null, publicOnly: Boolean = false, unifiedBooks: UnifiedBookPipeline? = null, beforeLedgerFrame: suspend (String) -> Unit) {
+    installReaderAnswerStream()
     if (observation != null) observeUsage(observation)
     install(WebSockets) { pingPeriod = kotlin.time.Duration.parse("5s");timeout=kotlin.time.Duration.parse("15s");maxFrameSize=1_048_576 }
     intercept(ApplicationCallPipeline.Call) {

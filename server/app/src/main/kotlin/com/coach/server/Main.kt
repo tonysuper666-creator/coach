@@ -221,6 +221,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         practiceGradeRoutes(actor,friends=friends,service=practiceGradeService)
         collectionQaRoutes(actor,friends=friends,service=collectionQaService)
         courseMockRoutes(actor,friends=friends,service=courseMockService)
+        observePublicReaderCounts { route, status, elapsed -> observation.access(null, route, "POST", status, elapsed, null) }
         studyModeRoutes(actor,friends=friends,service=studyModeService,unifiedBooks=unifiedBooks)
     }.apply { engineConfig.apply { connectionGroupSize=1; workerGroupSize=1; callGroupSize=2 }; start(false) } }
     local.start(wait = false)

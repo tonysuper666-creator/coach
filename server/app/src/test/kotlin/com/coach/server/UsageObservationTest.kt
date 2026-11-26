@@ -7,6 +7,9 @@ import com.coach.core.LedgerActor
 import com.coach.domain.json
 import com.coach.store.LedgerStore
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.application.call
+import io.ktor.server.routing.*
+import io.ktor.server.response.respondText
 import io.ktor.server.netty.Netty
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -20,6 +23,30 @@ import java.util.Properties
 import kotlin.test.*
 
 class UsageObservationTest {
+    @Test fun publicReaderCountsOnlyTheTwoPostRoutes() = runBlocking {
+        val results = java.util.concurrent.LinkedBlockingQueue<Pair<String, Int>>()
+        val engine = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
+            observePublicReaderCounts { route, status, _ -> results.add(route to status) }
+            routing {
+                post("/v1/library/explain") { call.respondText("", status = io.ktor.http.HttpStatusCode.TooManyRequests) }
+                post("/v1/library/collection/ask") { call.respondText("") }
+                get("/v1/public/status") { call.respondText("") }
+            }
+        }.apply { start(false) }
+        try {
+            val base = "http://127.0.0.1:${engine.engine.resolvedConnectors().single().port}"
+            val client = HttpClient.newHttpClient()
+            for (route in listOf("/v1/library/explain", "/v1/library/collection/ask", "/v1/public/status")) {
+                val request = HttpRequest.newBuilder(URI(base + route))
+                if (route.endsWith("status")) request.GET() else request.POST(HttpRequest.BodyPublishers.noBody())
+                client.send(request.build(), HttpResponse.BodyHandlers.discarding())
+            }
+            assertEquals("/v1/library/explain" to 429, results.poll(3, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals("/v1/library/collection/ask" to 200, results.poll(3, java.util.concurrent.TimeUnit.SECONDS))
+            assertTrue(results.isEmpty())
+        } finally { engine.stopSuspend(0, 500) }
+    }
+
     @Test fun readerDisconnectAndExplicitCancelEachCountOnce() {
         val statuses = mutableListOf<Int>()
         ReaderHttpOutcome { statuses.add(it) }.apply { finish(499); finish(500) }

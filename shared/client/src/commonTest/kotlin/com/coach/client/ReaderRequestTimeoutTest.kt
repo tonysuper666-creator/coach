@@ -16,6 +16,21 @@ import kotlinx.serialization.json.JsonObject
 import kotlin.test.*
 
 class ReaderRequestTimeoutTest {
+    @Test fun eofBeforeDoneKeepsReceivedPrefixAndReturnsFailure() = runBlocking {
+        val client = CourseHttp("http://127.0.0.1:1", "test", "test", "library", { MockEngine {
+            respond("""{"meta":{"sources":[{"anchor":"S1"}]}}
+                |{"delta":"first part"}
+                |""".trimMargin(), headers = headersOf(HttpHeaders.ContentType, "application/x-ndjson"))
+        } })
+        try {
+            val received = mutableListOf<JsonObject>()
+            val reply = client.explainLibrary(JsonObject(emptyMap())) { received += it }
+            assertNull(reply.body)
+            assertNotNull(reply.error)
+            assertEquals("first part", (received.single()["text"] as kotlinx.serialization.json.JsonPrimitive).content)
+        } finally { client.close() }
+    }
+
     @Test fun readerRetriesOneHttpRejectionIncludingNonJsonErrors() = runBlocking {
         for (collection in listOf(false, true)) {
             for (status in listOf(429, 500, 503, 401, 403)) {

@@ -549,7 +549,9 @@ class ApiRouter:
                             async with client.stream("POST", ENDPOINTS[provider], headers=headers, json=payload, **stream_kwargs) as response:
                                 # An explicit request rejection incurred no generation. A 5xx
                                 # or an interrupted response may already have consumed tokens.
-                                if response.status_code in (400, 401, 403, 404, 413, 422, 429):
+                                if response.status_code in (400, 401, 402, 403, 404, 413, 422, 429) or (
+                                    provider == "anthropic" and response.status_code == 529
+                                ):
                                     possibly_billed = False
                                 if response.status_code == 429:
                                     # Never read an error message containing a key, source text or prompt.

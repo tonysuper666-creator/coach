@@ -63,9 +63,9 @@ The nominal Anthropic $200 and OpenAI $500 grants allow $190 and $475 respective
 The spend monitor reports a reservation that would cross this boundary to the
 main session for Li Zheng's decision before incurring paid usage. The limit
 applies across API keys.
-For streaming calls an explicit rejection (including HTTP 429) or cancellation before
+For streaming calls an explicit rejection (including 402, 429 and Anthropic 529) or cancellation before
 dispatch releases the reservation in both ledgers. After dispatch, a timeout, broken
-stream, 5xx or cancellation without verified terminal usage settles at the reserved
+stream, ambiguous 5xx or cancellation without verified terminal usage settles at the reserved
 upper bound. Monthly `estimated_microusd` is the estimated portion **included** in
 `spent_microusd`. Friend token counts also include these bounds. Do not use estimates
 as verified charges in an opening baseline. A crash before settlement leaves the
@@ -163,7 +163,7 @@ Reader resets its parser/body deadline; the original total deadline still applie
 Chat emits a new snapshot retaining any completed preceding part. Old callers that
 do not advertise reset support receive an explicit truncated terminal after partial
 output, rather than concatenated answers. Cancellation closes the API stream and
-retains its reservation.
+settles according to the dispatch and usage rules above.
 
 Request logs record `transport=api` or `transport=subscription`, the actual model
 in `served=`, and `ttft` in milliseconds. Use completed requests for production

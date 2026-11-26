@@ -3,6 +3,7 @@ package com.coach.desktop.books
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.coach.client.withReaderRetry
 import com.coach.client.CourseHttp
 import com.coach.client.MockReply
 import com.coach.client.UnifiedServerCapability
@@ -114,7 +115,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         history: List<FollowUpTurn> = emptyList(),
         requestId: String = UUID.randomUUID().toString().replace("-", ""),
     ): ExplainResult {
-        if (kind == "ask" && !question.isNullOrBlank()) {
+        if (kind == "ask" && !question.isNullOrBlank() && kotlinx.coroutines.currentCoroutineContext()[BookAnswerProgress] == null) {
             val bookId = chosen.id.substringBefore(":p").takeIf { it.isNotBlank() && it != chosen.id }
             if (bookId != null && library != null) {
                 withContext(Dispatchers.IO) { runCatching { library.saveLastQuestion(bookId, question) } }
@@ -211,8 +212,10 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         else PracticeGradeDiagnoseResult.Failed("批改结果格式无法解析，请稍后重试。")
     }
 
-    open suspend fun askCollection(input: JsonObject): CourseServerCallResult =
-        callCourseEndpoint { http -> http.askCollection(input) }
+    open suspend fun askCollection(input: JsonObject): CourseServerCallResult {
+        val paired = identity
+        return callCourseEndpoint { http -> withReaderRetry({ identity == paired }) { http.askCollection(input) } }
+    }
 
     open suspend fun generateCourseMock(input: JsonObject): CourseServerCallResult =
         callCourseEndpoint { http -> http.generateCourseMock(input) }
@@ -306,7 +309,21 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
                 try { BookLessonWire.withSource(input, snapshot) }
                 catch (_: IllegalArgumentException) { return null to ExplainResult.Refused(BookLessonWire.TOO_LONG) }
             } else if (snapshot == null) input else JsonObject(input + ("localSource" to snapshot))
-            val reply = http.explainLibrary(wire)
+            suspend fun stillCurrent() = identity == paired && withContext(Dispatchers.IO) { imports?.snapshot(context) } == snapshot
+            val progress = kotlinx.coroutines.currentCoroutineContext()[BookAnswerProgress]?.takeIf { kind == "ask" }
+            var verifiedStream = false
+            val reply = withReaderRetry({ stillCurrent() }) {
+                if (progress == null) http.explainLibrary(wire) else http.explainLibrary(wire) { partial ->
+                    if (!verifiedStream) {
+                        check(stillCurrent())
+                        verifiedStream = true
+                    } else {
+                        check(identity == paired && withContext(Dispatchers.IO) { imports?.pageSnapshot(context) } == snapshot)
+                    }
+                    val checked = ExplainWire.parse(partial, context) as? ExplainResult.Done ?: error("Invalid answer sources")
+                    progress.received(checked.explanation.text)
+                }
+            }
             if (snapshot != null && withContext(Dispatchers.IO) { imports!!.snapshot(context) } != snapshot)
                 return null to ExplainResult.Refused("保存的原文已变化，请重新打开这本书后重试。")
             val body = reply.body

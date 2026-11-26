@@ -110,7 +110,8 @@ class CreditLedger:
             # Use the larger record per month. Older key-specific cycle ids can
             # lack a month mapping; conservatively count them in addition.
             settled = settled_total(data, provider)
-            require(baseline <= settled)
+            estimated = sum(month.get(provider, {}).get("estimated_microusd", 0) for month in data["months"].values())
+            require(baseline <= settled - estimated)
             digest = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
             pin = self.state / f"grant-window-{provider}.json"
             if pin.exists():
@@ -148,6 +149,8 @@ class CreditLedger:
                 require(isinstance(providers, dict))
                 for summary in providers.values():
                     require(all(type(summary[k]) is int and summary[k] >= 0 for k in ("spent_microusd", "reserved_microusd", "calls")))
+                    estimate = summary.get("estimated_microusd", 0)
+                    require(type(estimate) is int and 0 <= estimate <= summary["spent_microusd"])
             require(isinstance(data.get("friends", {}), dict))
             for days in data.get("friends", {}).values():
                 require(isinstance(days, dict))
@@ -212,13 +215,17 @@ class CreditLedger:
             ceiling = cycle["limit"]
             used = max(cycle["spent"], summary["spent_microusd"])
             share, settled, period = self.allocation(provider, now, data)
-            remaining = min(ceiling - used, share - settled) - pending
+            before_holds = min(ceiling - used, share - settled)
+            remaining = before_holds - pending
             ceiling = min(ceiling, share)
             if maximum > remaining:
                 # A request can cross the boundary before the settled total reaches
                 # it. Leave a content-free signal for the existing spend monitor.
                 atomic_json(self.state / f"credit-guard-{month}-{provider}.json",
-                            {"maximum_microusd": maximum, "limit_microusd": ceiling})
+                            {"maximum_microusd": maximum, "limit_microusd": ceiling,
+                             "at_utc": int(now), "before_holds_microusd": before_holds,
+                             "reserved_microusd": pending,
+                             "cause": "pending_reservations" if maximum <= before_holds else "insufficient_allocation"})
                 atomic_json(self.state / f"grant-guard-{period}.json", {"period": period})
                 raise Denied("credit_limit_95_percent")
             token = secrets.token_hex(16)
@@ -246,7 +253,7 @@ class CreditLedger:
             self.save(data)
             return cycle_id, month, token
 
-    def settle(self, provider: str, reservation, actual: int, *, idempotent=False, usage=None):
+    def settle(self, provider: str, reservation, actual: int, *, idempotent=False, usage=None, rejected=False, estimated=False):
         with self.locked():
             data = self.read()
             cycle_id, month, token = reservation
@@ -257,12 +264,12 @@ class CreditLedger:
                 self.save(data)
                 return
             reserved = cycle["reserved"].pop(token)
-            if actual < 0:
+            if actual < 0 or (rejected and (estimated or actual != 0)) or (estimated and actual != reserved):
                 raise Denied("invalid_usage")
             for days in data.get("friends", {}).values():
                 for daily in days.values():
                     pending = daily["reserved"].pop(token, None)
-                    if pending is None:
+                    if pending is None or rejected:
                         continue
                     if usage is None or any(type(usage.get(k)) is not int or usage[k] < 0 for k in ("input_tokens", "output_tokens")):
                         raise Denied("invalid_usage")
@@ -279,7 +286,11 @@ class CreditLedger:
             summary = data["months"][month][provider]
             summary["reserved_microusd"] -= reserved
             summary["spent_microusd"] += actual
-            summary["calls"] += 1
+            if not rejected:
+                summary["calls"] += 1
+            if estimated:
+                # A conservative debit, separately identifiable for billing reconciliation.
+                summary["estimated_microusd"] = summary.get("estimated_microusd", 0) + actual
             # An unexpected price/usage change fails closed for subsequent calls.
             if actual > reserved:
                 cycle["limit"] = 0

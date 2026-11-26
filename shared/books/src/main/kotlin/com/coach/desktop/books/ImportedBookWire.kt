@@ -7,18 +7,26 @@ import java.security.MessageDigest
 /** A device-owned saved-page receipt, not a claim to a course's sources or learned scope.
  * Only hashes/coordinates accompany the already consented selection and neighbours. */
 internal class ImportedBookWire(private val library: TextbookLibrary) {
-    fun snapshot(blocks: List<SourceBlock>): JsonObject {
+    fun snapshot(blocks: List<SourceBlock>): JsonObject = snapshot(blocks, verifyFile = true)
+
+    /** The original file is fully hashed at stream start and completion. Between those checks
+     * validate consent and the saved pages without rereading a potentially large PDF per frame. */
+    fun pageSnapshot(blocks: List<SourceBlock>): JsonObject = snapshot(blocks, verifyFile = false)
+
+    private fun snapshot(blocks: List<SourceBlock>, verifyFile: Boolean): JsonObject {
         val id = blocks.map { it.id.substringBefore(":p") }.distinct().single()
         require(id.matches(Regex("[0-9a-f]{64}")) && ExplainConsent(library.directory).allowed(id))
         val requestedPages = blocks.map { it.page }.distinct()
         val meta = requireNotNull(library.bookSnapshotMeta(id, requestedPages))
         require(meta.format in BookFormats.supported)
-        val digest = MessageDigest.getInstance("SHA-256")
-        Files.newInputStream(library.directory.resolve("$id.${meta.format}")).use { input ->
-            val buffer = ByteArray(65536)
-            while (true) { val n = input.read(buffer); if (n < 0) break; digest.update(buffer, 0, n) }
+        if (verifyFile) {
+            val digest = MessageDigest.getInstance("SHA-256")
+            Files.newInputStream(library.directory.resolve("$id.${meta.format}")).use { input ->
+                val buffer = ByteArray(65536)
+                while (true) { val n = input.read(buffer); if (n < 0) break; digest.update(buffer, 0, n) }
+            }
+            require(hex(digest.digest()) == id)
         }
-        require(hex(digest.digest()) == id)
         for (block in blocks) {
             val page = requireNotNull(meta.pages[block.page])
             require(block.id == "$id:p${block.page}:${block.start}" && block.start >= 0 &&

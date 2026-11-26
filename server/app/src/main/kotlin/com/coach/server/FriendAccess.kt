@@ -38,9 +38,13 @@ internal fun friendPath(call: ApplicationCall): Boolean {
 }
 
 /** Fixed, human-readable errors; upstream bodies and diagnostics never cross this boundary. */
-internal class FriendServiceError(val code: String = "unavailable") : RuntimeException(code) {
+internal class FriendServiceError(val code: String = "unavailable", private val retryAfterSec: Int? = null) : RuntimeException(code) {
     val status get() = if (code in setOf("daily_quota", "monthly_quota")) HttpStatusCode.TooManyRequests else HttpStatusCode.ServiceUnavailable
-    val body get() = json("code" to code, "error" to "讲解服务暂时连不上，读书照常。")
+    val body get() = buildJsonObject {
+        put("code", code)
+        put("error", "讲解服务暂时连不上，读书照常。")
+        retryAfterSec?.takeIf { it > 0 }?.let { put("retryAfterSec", it) }
+    }
 }
 
 /** These stores never open the owner's catalog, ledger, source files or AI-call table. */

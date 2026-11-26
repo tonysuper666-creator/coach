@@ -52,7 +52,6 @@ def read_counts(directory, end):
 def report(counts):
     print("UTC-hour route 200 429 5xx abandoned unexplained-rate abandon-rate")
     def emit(period, route, values):
-        # 499 is the client closing before a response is committed. It is not "没讲成".
         finished = values["200"] + values["429"] + values["5xx"]
         attempts = finished + values["abandoned"]
         unexplained = f"{(values['429'] + values['5xx']) / finished:.2%}" if finished else "n/a"

@@ -95,11 +95,12 @@ To measure the reader service before and after a change, run
 `python3 tools/reader/failure_rates.py --logs "$COACH_LOG_DIR"` against its access-log
 directory. Pass `--end 2026-11-26T08:00:00Z` to replay a particular window. It reports
 HTTP attempts per UTC hour and over the trailing 24 hours. `unexplained-rate` is
-429 and 5xx over finished attempts (200, 429, 5xx). `abandon-rate` is client
-abandonment (499) over those finished attempts plus 499. A 499 means the client
-closed the connection before the server committed a response, which is a leave or
-a superseded call, not a failed explanation. Older logs did not distinguish
-abandoned calls. Empty samples show `n/a`.
+the count of 429 and 5xx responses divided by the count of 200, 429 and 5xx
+responses. `abandon-rate` counts 499s over those responses plus 499s. The server
+records 499 for a peer disconnect or an explicit cancellation. Determining the
+reason for a disconnect or whether a reader saw a complete explanation requires
+client-side evidence. Older logs did not distinguish abandoned calls. Each rate
+shows `n/a` when its denominator is zero.
 
 ### Sharing one provider grant
 

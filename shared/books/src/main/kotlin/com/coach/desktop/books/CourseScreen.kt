@@ -123,6 +123,7 @@ internal fun CourseScreen(
     onOpenMockExam: () -> Unit = {},
     onOpenLiteratureGuide: (() -> Unit)? = null,
     onOpenLiteratureComparison: (() -> Unit)? = null,
+    onGenerateExamDrills: (() -> Unit)? = null,
 ) {
     val colors = CoachTheme.colors
     val isExam = detail.isExam
@@ -348,7 +349,12 @@ internal fun CourseScreen(
                     }
                 }
 
-                CourseExamPointMap(detail, onRealign = onRealign, onPractice = onOpenTopic)
+                CourseExamPointMap(
+                    detail,
+                    onRealign = onRealign,
+                    onPractice = onOpenTopic,
+                    onGenerateExamDrills = onGenerateExamDrills,
+                )
 
                 // Visible, editable record of the user's exam & syllabus answers
                 Row(

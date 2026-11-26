@@ -233,6 +233,7 @@ internal data class CourseTopicPack(
     val citations: List<CourseCitationRef> = emptyList(),
     val generatedFromHash: String = "",
     val serverBacked: Boolean = false,
+    val drill: ExamPointDrill? = null,
 )
 
 internal data class CourseTopicPracticeDraft(
@@ -425,6 +426,7 @@ internal object CourseJson {
             })
         }
         put("citations", encodeCitations(pack.citations))
+        pack.drill?.let { put("drill", ExamPointDrillLocal.encode(it)) }
     }.toString()
 
     fun decodeTopicPack(raw: String?, fromStorage: Boolean = false): CourseTopicPack? {
@@ -475,6 +477,7 @@ internal object CourseJson {
             citations = decodeCitations(obj.arr("citations")),
             generatedFromHash = obj.str("generatedFromHash"),
             serverBacked = obj.bool("serverBacked", false),
+            drill = (obj["drill"] as? JsonObject)?.let { ExamPointDrillLocal.decode(it) },
         )
     }
 

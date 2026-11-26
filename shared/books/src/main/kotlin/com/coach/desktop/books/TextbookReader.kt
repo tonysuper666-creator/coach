@@ -195,6 +195,8 @@ internal fun TextbookReader(
     var markError by remember(book.id, ui.page) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     var textSelection by remember(book.id) { mutableStateOf<SourceBlock?>(null) }
+    // Home 选中的词要留住。翻页回调和随后的对焦点击都会把选区清掉，工具条还没画出来就没了。
+    var homeWordPinned by remember(book.id) { mutableStateOf(false) }
     LaunchedEffect(ui.page, textView, explainOpen) {
         if (explainOpen || !textView) textSelection = null
     }
@@ -1428,19 +1430,23 @@ internal fun TextbookReader(
                             }
                             return@onPreviewKeyEvent true
                         }
-                        // 点击、F2、S、↑ 在安装包里都没选中文字。Home 会到达这个阅读区并回到首页。
-                        // 选这本书第一页的正文词，页码和翻回后的页一致，翻页回调不会把选区清掉。
-                        if (!typingNow && textView && event.key == Key.MoveHome) {
-                            book.pages.firstOrNull()?.number?.let { first ->
-                                book.firstBodyWord(first)?.let { textSelection = it }
-                            }
-                        }
                         if (!typingNow && event.key == Key.Spacebar) {
                             turnLayout(if (event.isShiftPressed) ReaderTurn.Previous else ReaderTurn.Next)
                             return@onPreviewKeyEvent true
                         }
                         val turn = readerPagingTurn(event.key, typingNow)
-                        turn?.let(turnLayout) ?: return@onPreviewKeyEvent false
+                        // 点击、F2、S、↑ 都没选中。Home 能翻页，说明它进了这个阅读区。
+                        // 先钉住选区，再翻页，这样翻页回调和对焦点击都清不掉。
+                        val pinHome = !typingNow && textView && event.key == Key.MoveHome
+                        if (pinHome) {
+                            homeWordPinned = true
+                            textSelection = book.homeSelectionWord(book.pages.first().number)
+                        }
+                        if (turn == null) return@onPreviewKeyEvent false
+                        turnLayout(turn)
+                        if (pinHome) {
+                            textSelection = book.homeSelectionWord(paging.anchor.importPage)
+                        }
                         true
                     }
                     .focusable(),
@@ -1482,7 +1488,14 @@ internal fun TextbookReader(
                         book, paging, ranges, turnLayout, libraryDirectory = library.directory,
                         modifier = if (companionOpen) Modifier.align(Alignment.Center).widthIn(max = 720.dp) else Modifier.fillMaxSize(),
                         turnStyle = turnStyle, readMode = readMode, onOpenTableRow = openPassage,
-                        onSelectText = { textSelection = it },
+                        onSelectText = { next ->
+                            if (next == null && homeWordPinned) {
+                                // 对焦点击会当成空白单击，把刚选中的词清掉。Home 的词留着。
+                            } else {
+                                if (next != null) homeWordPinned = false
+                                textSelection = next
+                            }
+                        },
                         hardPoints = sectionHardPoints,
                         onHardPointClick = { hp, blk ->
                             activeHardPoint = hp to blk
@@ -1498,7 +1511,8 @@ internal fun TextbookReader(
                         },
                         onPosition = { number ->
                             if (paging.publishImportPage(number)) {
-                                if (textSelection?.page != number) textSelection = null
+                                if (homeWordPinned) textSelection = book.homeSelectionWord(number)
+                                else if (textSelection?.page != number) textSelection = null
                                 emitReaderPage(number)
                                 session.goToPage(number)
                             }
@@ -2127,7 +2141,7 @@ internal fun TextbookReader(
                 onNote = {
                     startNoteFromSelection(learnableSelection)
                 },
-                onDismiss = { pdf.selection = null; textSelection = null },
+                onDismiss = { homeWordPinned = false; pdf.selection = null; textSelection = null },
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = if (showHud) 54.dp else 14.dp),
             )
         }

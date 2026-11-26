@@ -210,3 +210,14 @@ internal fun Textbook.firstBodyWord(pageNumber: Int): SourceBlock? {
     val stop = block.start + end
     return SourceBlock("$id:p$pageNumber:$start", pageNumber, start, stop, false, stored.substring(start, stop))
 }
+
+/** Home 选词。正文词优先；这一页没有字母时仍给一个可见词，用来确认按键确实进了阅读器。 */
+internal fun Textbook.homeSelectionWord(pageNumber: Int): SourceBlock {
+    firstBodyWord(pageNumber)?.let { return it }
+    val stored = page(pageNumber)?.text.orEmpty()
+    val at = stored.indexOfFirst { it.isLetterOrDigit() }
+    if (at >= 0) {
+        return SourceBlock("$id:p$pageNumber:$at", pageNumber, at, at + 1, false, stored.substring(at, at + 1))
+    }
+    return SourceBlock("$id:p$pageNumber:home", pageNumber, 0, 0, false, "记")
+}

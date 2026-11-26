@@ -19,7 +19,8 @@ import httpx
 from api_budget import Denied, atomic_json
 from api_route import ApiFailure, cost, route, vendor
 
-TASKS = frozenset({"gen_mcq", "repair_mcq_sources", "blind_review",
+GUIDE_TASK = "literature_guide"
+TASKS = frozenset({GUIDE_TASK, "gen_mcq", "repair_mcq_sources", "blind_review",
                    "gen_constructed", "repair_constructed_sources", "review_constructed",
                    "BOOK_SECTION_BATCH", "BOOK_EXERCISE_HINTS", "BOOK_MATH_VERIFY", "BOOK_MATH_REPAIR",
                    "practice_grade", "practice_diagnose", "practice_variant", "course_mock_item"})
@@ -80,7 +81,7 @@ class BatchRouter:
         except (ValueError, KeyError, TypeError):
             raise Denied("batch_state_unreadable") from None
 
-    async def run(self, key, task, requested, system, prompt, max_tokens, attempt=0):
+    async def run(self, key, task, requested, system, prompt, max_tokens, attempt=0, *, friend=None, device=None):
         """Return a cached completion, defer, or request same-vendor CLI fallback.
 
         A key names one immutable job/task/format-attempt, not today's prompt.
@@ -113,7 +114,8 @@ class BatchRouter:
                         raise Denied("unsupported_batch_size")
                     provider = vendor(model)
                     maximum = cost(model, {"input_tokens": bound, "output_tokens": limit}, batch=True)
-                    state["reservation"] = self.router.ledger.reserve(provider, self.router.keys.get(provider, ""), maximum)
+                    state["reservation"] = self.router.ledger.reserve(provider, self.router.keys.get(provider, ""), maximum,
+                                                                    friend=friend, device=device, tokens=bound + limit)
                     atomic_json(path, state)
                     async with self.router.client_factory() as client:
                         submitting_http = True
@@ -129,6 +131,10 @@ class BatchRouter:
                     self.failed(path, state, "batch_submit_unavailable")
                     raise ApiFailure("batch_submit_unavailable") from None
                 except (ApiFailure, Denied, ValueError, KeyError, TypeError) as error:
+                    if task == GUIDE_TASK and isinstance(error, Denied) and "reservation" not in state:
+                        # No upstream submission. A later poll may proceed after the grant resets.
+                        path.unlink()
+                        raise
                     reason = "batch_submit_ambiguous" if str(error) == "batch_submit_ambiguous" else "batch_submit_unavailable"
                     self.failed(path, state, reason)
                     raise ApiFailure(reason) from None
@@ -258,7 +264,7 @@ class BatchRouter:
             usage["cached_tokens"] = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
         actual = cost(model, usage, batch=True)
         # Even an incomplete answer may have billable usage.
-        self.router.ledger.settle(provider, tuple(state["reservation"]), actual, idempotent=True)
+        self.router.ledger.settle(provider, tuple(state["reservation"]), actual, idempotent=True, usage=usage)
         if not finish or not text:
             raise ApiFailure("batch_incomplete")
         return {"text": text, "served_by": served, "transport": "api", "cost": actual,

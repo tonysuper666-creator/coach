@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
 import hmac
 import json
 import os
@@ -49,7 +50,7 @@ from api_route import (
     route as api_model, vendor as api_vendor,
 )
 from api_budget import Denied
-from api_batch import BatchRouter, BatchPending, TASKS as BATCH_TASKS
+from api_batch import BatchRouter, BatchPending, TASKS as BATCH_TASKS, GUIDE_TASK
 
 # ---------- 路径与配置（全部在 Coach 目录里） ----------
 
@@ -1389,11 +1390,19 @@ def build_req(body: dict, headers: Any) -> ReqCtx:
     traffic = "test" if tag == "test" else "user" if tag == "user" and trusted else "unknown"
     friend = headers.get("x-coach-friend")
     friend_device = headers.get("x-coach-friend-device")
+    guide = headers.get("x-coach-task") == GUIDE_TASK
+    if guide and not (background and model == "claude-haiku-5-5" and not body.get("stream")
+                      and not body.get("tools") and not spec_data.images
+                      and re.fullmatch(r"[a-f0-9]{64}", headers.get("x-coach-batch-key", ""))
+                      and headers.get("x-coach-format-attempt", "0") == "0"):
+        raise BridgeError(400, "文献导读需要 Haiku Batch", reason="unsupported_batch_task")
+    if guide:
+        fallback_enabled = False
     if friend is not None:
         if (not re.fullmatch(r"[a-f0-9]{64}", friend) or not isinstance(friend_device, str) or
                 not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", friend_device) or
-                headers.get("x-coach-task") != "READER_SELECTION" or mspec.backend != "claude" or
-                background or body.get("tools") or spec_data.json_mode):
+                (not guide and (headers.get("x-coach-task") != "READER_SELECTION" or background)) or
+                mspec.backend != "claude" or body.get("tools") or spec_data.json_mode):
             raise BridgeError(403, "朋友讲解通道不可用", reason="unavailable")
         fallback_enabled = False
     return ReqCtx(friend_id=friend, friend_device=friend_device, request_id=rid, model=model, spec=mspec, body=body, spec_data=spec_data,
@@ -1439,8 +1448,13 @@ API_BATCH = BatchRouter(API_ROUTER)
 async def dispatch_batch(req: ReqCtx, model: str, effort: str | None) -> Outcome:
     """Only durable background supply jobs opt in; interactive calls stay synchronous."""
     try:
-        result = await API_BATCH.run(req.batch_key, req.task, model, req.spec_data.system,
-                                     req.spec_data.prompt, req.body.get("max_tokens"), req.format_attempt)
+        key = req.batch_key
+        if req.task == GUIDE_TASK:
+            # Namespace the durable result by its authenticated audience, including on replay.
+            key = hashlib.sha256(f"{req.friend_id}:{req.friend_device}:{key}".encode()).hexdigest()
+        result = await API_BATCH.run(key, req.task, model, req.spec_data.system,
+                                     req.spec_data.prompt, req.body.get("max_tokens"), req.format_attempt,
+                                     friend=req.friend_id, device=req.friend_device)
         req.transport = result["transport"]
         req.physical_calls = result.get("physical_calls", 1)
         req.api_fallback = result.get("api_fallback")
@@ -1454,7 +1468,7 @@ async def dispatch_batch(req: ReqCtx, model: str, effort: str | None) -> Outcome
         reason = str(error) if isinstance(error, (ApiFailure, Denied)) else "batch_state_io"
         req.api_fallback = reason
         write_log(request_id=req.request_id, task=req.task, event="api_fallback", reason=reason)
-        if reason == "batch_submit_ambiguous":
+        if req.task == GUIDE_TASK or reason == "batch_submit_ambiguous":
             # A batch may already exist upstream: neither the cross-vendor API backup nor the
             # subscription CLI may generate this job a second time, in any mode.
             req.transport = "api"

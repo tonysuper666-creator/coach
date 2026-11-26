@@ -118,6 +118,7 @@ internal fun CourseScreen(
     onDismissNotice: () -> Unit = {},
     hasActiveMockExam: Boolean = false,
     onOpenMockExam: () -> Unit = {},
+    onOpenLiteratureGuide: (() -> Unit)? = null,
 ) {
     val colors = CoachTheme.colors
     val isExam = detail.isExam
@@ -289,6 +290,12 @@ internal fun CourseScreen(
                 deck = if (isExam) buildExamSummaryLine(detail) else buildRegularSummaryLine(detail, orderedExaminableTopics),
                 meta = buildCourseMetaLine(detail, orderedExaminableTopics),
             )
+
+            if (onOpenLiteratureGuide != null) {
+                PaperButton(onOpenLiteratureGuide, modifier = Modifier.testTag("course-literature-guide")) {
+                    Text("本周文献导读")
+                }
+            }
 
             if (isExam) {
                 Surface(

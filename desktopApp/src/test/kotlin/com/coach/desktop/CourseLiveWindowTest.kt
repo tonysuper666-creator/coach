@@ -11,6 +11,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.text.AnnotatedString
 import com.coach.desktop.books.*
+import kotlinx.serialization.json.*
 import kotlinx.coroutines.runBlocking
 import org.jetbrains.skiko.SkiaLayer
 import org.junit.Assert.assertEquals
@@ -410,6 +411,97 @@ class CourseLiveWindowTest {
             }
         } finally {
             root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun literatureGuideFromThreePdfsLight() = verifyLiteratureGuide(PaperColor.LIGHT)
+
+    @Test
+    fun literatureGuideFromThreePdfsDark() = verifyLiteratureGuide(PaperColor.DARK)
+
+    private fun verifyLiteratureGuide(paper: PaperColor) {
+        assumeTrue(System.getProperty("os.name").startsWith("Windows") && !GraphicsEnvironment.isHeadless())
+        val root = Files.createTempDirectory("coach-guide-window-")
+        val library = TextbookLibrary(root.resolve("library"), lazyPdfExtras = false)
+        val books = (1..3).map { library.importBook(LiteratureGuideFixture.pdf(root, it)) }
+        val course = library.withCourseDatabase { db ->
+            CourseStore.createCourse(db, "植物生态", CourseExamProfile(), books.map { it.id }).first
+        }
+        val controller = TextbookController(library)
+        ReadingSettings(library.directory).choosePaper(paper)
+        ReadingSettings(library.directory).chooseAiExplain(true)
+        val bridge = LiteratureGuideFixture.Bridge()
+        val explainer = object : BookExplainer(library = library) {
+            override suspend fun load() { loaded = true }
+            override suspend fun courseTopicPack(input: JsonObject) =
+                CourseServerCallResult(bridge.service.generate(input, "local", "synthetic", "desktop"), null)
+        }
+        val window = edt { ComposeWindow().apply {
+            title = "Coach · 文献导读"
+            setSize(1080, 780)
+            setContent { WindowsTextbookHost(controller, bookExplainer = explainer) { null } }
+            isVisible = true
+        } }
+        try {
+            waitFor("library loaded", window) { controller.state.value.catalog.size == books.size }
+            runBlocking { controller.openCourse(course) }
+            click(window, "course-literature-guide")
+            fun editAction(n: SemanticsNode): ((AnnotatedString) -> Boolean)? =
+                n.config.getOrNull(SemanticsActions.SetText)?.action ?: n.children.firstNotNullOfOrNull(::editAction)
+            waitFor("editable question field", window) {
+                edt { node(window, "guide-questions")?.let(::editAction) != null }
+            }
+            edt { assertTrue(editAction(node(window, "guide-questions")!!)!!.invoke(AnnotatedString("三个样地有什么差异？"))) }
+            waitFor("generate enabled", window) {
+                node(window, "guide-generate")?.config?.contains(SemanticsProperties.Disabled) == false
+            }
+            click(window, "guide-generate")
+            waitFor("one page", window) { node(window, "guide-tab-2") != null }
+            System.getenv("COACH_GUIDE_SHOTS")?.let { dir ->
+                edt {
+                    window.renderImmediately()
+                    requireNotNull(collectSkiaLayers(window).first().screenshot()).use { bitmap ->
+                        org.jetbrains.skia.Image.makeFromBitmap(bitmap).use { image ->
+                            requireNotNull(image.encodeToData()).use { png ->
+                                Files.write(Files.createDirectories(Path.of(dir)).resolve("guide-${paper.name}.png"), png.bytes)
+                            }
+                        }
+                    }
+                }
+            }
+            click(window, "guide-tab-2")
+            waitFor("answer buttons ready", window) {
+                node(window, "guide-option-1")?.config?.contains(SemanticsProperties.Disabled) == false
+            }
+            click(window, "guide-option-1")
+            waitFor("verified explanation", window) { node(window, "guide-reasons") != null }
+            click(window, "guide-tab-1")
+            val input = LiteratureInput(library.courseDetail(course).materials.map { library.book(it.bookId) },
+                listOf("三个样地有什么差异？"))
+            val result = LiteratureGuideFixture.reply(input.request())
+            val verified = input.verified(result)
+            assertEquals(10, verified.quiz.size)
+            assertEquals(3, verified.papers.size)
+            for (e in verified.stops.map { it.source } + verified.quiz.map { it.source }) {
+                val a = e.anchor
+                assertEquals(a.quoteAnchor, e.book.page(a.pdfPage)!!.text.substring(a.startUtf16, a.endUtf16))
+            }
+            val target = verified.stops.first().source
+            click(window, "guide-source-${target.anchor.pdfPage}")
+            waitFor("original PDF page", window) {
+                controller.state.value.screen == BookScreen.READER && controller.state.value.book?.id == target.book.id &&
+                    controller.state.value.page == target.anchor.pdfPage
+            }
+            runBlocking { controller.back() }
+            click(window, "guide-tab-2")
+            waitFor("saved choice after returning from the PDF", window) { node(window, "guide-reasons") != null }
+            assertTrue(library.reviews().any { it.practice.prompt == verified.quiz.first().item.stem })
+            assertEquals(2, bridge.keys.size)
+            assertEquals(1, bridge.keys.distinct().size)
+        } finally {
+            bridge.close()
+            edt { window.dispose() }
         }
     }
 

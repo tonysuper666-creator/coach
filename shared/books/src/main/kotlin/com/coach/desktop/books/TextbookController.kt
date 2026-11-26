@@ -2051,11 +2051,20 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
-    suspend fun jumpToMockSourcePage(courseId: String, bookId: String, page: Int, quote: String) = action {
+    suspend fun jumpToMockSourcePage(courseId: String, bookId: String, page: Int, quote: String,
+        exactAnchor: BookCompanionAnchor? = null) = action {
         val loaded = library.book(bookId)
         val clampedPage = page.coerceIn(1, loaded.pages.size.coerceAtLeast(1))
         val pageObj = loaded.page(clampedPage)
-        val passage = if (pageObj != null) {
+        val passage = if (exactAnchor != null) {
+            require(pageObj != null && page == clampedPage && page == exactAnchor.pdfPage) { "原页已变更，请重新打开导读。" }
+            // With a supplemental OCR transcript the PDF page may have no matching native text box.
+            library.saveTextView(bookId, false)
+            val start = exactAnchor.startUtf16
+            val end = exactAnchor.endUtf16
+            if (start in 0 until end && end <= pageObj.text.length && pageObj.text.substring(start, end) == quote)
+                BookPassage(bookId, page, start, end, quote) else null
+        } else if (pageObj != null) {
             SentenceCitationGate.locatePassageInPage(loaded.id, pageObj, quote, null)
         } else null
         val finalPage = passage?.page ?: clampedPage

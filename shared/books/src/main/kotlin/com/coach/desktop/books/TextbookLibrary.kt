@@ -1614,6 +1614,38 @@ internal class TextbookLibrary(
         return StagedBookImport(book(id), alreadyExisted = false)
     }
 
+    /** A scan can have a nonempty text layer containing only a running page number or broken glyphs.
+     * Keep this OCR transcript local to the guide so existing highlights retain their original offsets. */
+    fun literatureBook(bookId: String): Textbook {
+        val source = book(bookId)
+        require(source.format == "pdf" && source.indexState == "READY" && !source.hasPendingOcr) { "请等待 PDF 导入和扫描页识别完成。" }
+        val suspect = source.pages.filter { page ->
+            !page.ocr && (page.text.count(Char::isLetter) < 6 || '�' in page.text)
+        }.map { it.number }.toSet()
+        if (suspect.isEmpty()) return source
+        val file = original(bookId, "pdf").toFile()
+        val pages = BookPdfLoader.read(file) { pdf ->
+            source.pages.map { page ->
+                if (page.number !in suspect) page else {
+                    val recognized = recognizePdfPage(file, pdf, page.number, BookImportControl())
+                    page.copy(text = recognized, textLayout = null, ocr = true)
+                }
+            }
+        }
+        return source.copy(pages = pages, structure = null)
+    }
+
+    private fun recognizePdfPage(file: java.io.File, pdf: BookPdfDocument, page: Int, control: BookImportControl): String {
+        val bounds = pdf.getPage(page - 1).cropBox
+        require(bounds.width.isFinite() && bounds.height.isFinite() && bounds.width > 0 && bounds.height > 0) {
+            "这页 PDF 尺寸无效，请重新保存后再导入。"
+        }
+        val scale = minOf(bookOcrTargetDpi / 72f, bookOcrMaxSide / maxOf(bounds.width, bounds.height))
+        BookScanImages.checkSize(kotlin.math.ceil(bounds.width * scale).toInt(), kotlin.math.ceil(bounds.height * scale).toInt())
+        val image = OcrTiming.measure("page${page}.render") { renderBookPdfPage(file, pdf, page - 1, scale) }
+        return try { ocr.recognize(image, control) } finally { releaseBookBitmap(image) }
+    }
+
     fun resumeBookOcr(
         bookId: String,
         control: BookImportControl = BookImportControl(),
@@ -1664,16 +1696,7 @@ internal class TextbookLibrary(
                             )
                         }
                         val started = System.nanoTime()
-                        val bounds = pdf.getPage(pageNumber - 1).cropBox
-                        require(bounds.width.isFinite() && bounds.height.isFinite() && bounds.width > 0 && bounds.height > 0) {
-                            "这页 PDF 尺寸无效，请重新保存后导入。"
-                        }
-                        val scale = minOf(bookOcrTargetDpi / 72f, bookOcrMaxSide / maxOf(bounds.width, bounds.height))
-                        BookScanImages.checkSize(kotlin.math.ceil(bounds.width * scale).toInt(), kotlin.math.ceil(bounds.height * scale).toInt())
-                        val image = OcrTiming.measure("page$pageNumber.render") {
-                            renderBookPdfPage(file, pdf, pageNumber - 1, scale)
-                        }
-                        val recognized = try { ocr.recognize(image, control) } finally { releaseBookBitmap(image) }
+                        val recognized = recognizePdfPage(file, pdf, pageNumber, control)
                         estimator.record(((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L))
                         control.check()
                         updateRecognizedPage(initial.id, pageNumber, recognized)
@@ -1750,6 +1773,12 @@ internal class TextbookLibrary(
             db.autoCommit = false
             try {
                 BookFtsStore.deleteBook(db, bookId)
+                if (BookSchemaMigration.tableExists(db, "literature_guides")) {
+                    db.prepareStatement("DELETE FROM literature_guides WHERE EXISTS (SELECT 1 FROM json_each(books) WHERE value=?)").use {
+                        it.setString(1, bookId)
+                        it.executeUpdate()
+                    }
+                }
                 for (table in listOf(
                     "pages", "book_illustrations", "book_page_text_boxes", "book_native_sources",
                     "book_learning_paths", "book_ladders", "book_reader_views", "book_pdf_modes",
@@ -2369,11 +2398,12 @@ internal class TextbookLibrary(
         practice: Practice,
         answer: PracticeAnswer,
         isPretest: Boolean = false,
+        questionKey: String? = null,
     ) {
         val source = book(bookId)
-        val lessonKey = if (questionIndex == 0) lesson.id else "${lesson.id}#q${questionIndex + 1}"
+        val lessonKey = questionKey ?: if (questionIndex == 0) lesson.id else "${lesson.id}#q${questionIndex + 1}"
         val previous = this.answer(bookId, lessonKey, QuestionMode.CHOICE)
-        val storedLesson = if (questionIndex == 0) lesson else lesson.copy(id = lessonKey, title = "${lesson.title}（${questionIndex + 1}）")
+        val storedLesson = if (lessonKey == lesson.id) lesson else lesson.copy(id = lessonKey, title = "${lesson.title}（${questionIndex + 1}）")
         val ladder = nextLadderSession(source, storedLesson, QuestionMode.CHOICE, practice, answer, forceRecord = true)
         database().use { db ->
             db.autoCommit = false

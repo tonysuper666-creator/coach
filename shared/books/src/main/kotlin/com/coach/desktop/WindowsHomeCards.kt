@@ -308,6 +308,7 @@ internal fun HostSearchDialog(
     }
 
     LaunchedEffect(query, catalog) {
+        qaError = null
         val q = query.trim()
         bookMatches = if (q.isEmpty()) {
             emptyList()
@@ -371,6 +372,7 @@ internal fun HostSearchDialog(
                             ) {
                                 Text(
                                     when {
+                                        qaError?.trouble?.retry == true -> "重试"
                                         selectedCollection.record.id == CollectionQaVirtualCollections.READ_LIBRARY_ID ->
                                             "问「已读书目」"
                                         selectedCollection.record.kind == CollectionKind.BOOKLIST ->

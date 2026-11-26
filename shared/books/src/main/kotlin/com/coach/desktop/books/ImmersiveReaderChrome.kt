@@ -1207,7 +1207,10 @@ internal fun CompanionAskPane(
                         for ((index, entry) in thread.turns.withIndex()) {
                             Column(Modifier.fillMaxWidth().testTag("inline-explain-turn-$index"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(entry.label, style = MaterialTheme.typography.labelMedium, color = colors.actionPrimary)
-                                ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks, showReaderPage = true) { citation ->
+                                if (entry.explanation.citations.isEmpty()) {
+                                    Text(ReadableText.withoutCitationMarks(entry.explanation.text).ifBlank { "尚未收到回答" })
+                                    if (entry.explanation.text.isNotBlank()) Text("回答中断", style = MaterialTheme.typography.labelSmall)
+                                } else ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks, showReaderPage = true) { citation ->
                                     entry.sentBlocks.firstOrNull { it.id == citation.blockId }?.let { onOpenCitation(citation, it) }
                                 }
                             }
@@ -1218,7 +1221,7 @@ internal fun CompanionAskPane(
                                 thread.pendingLabel?.takeIf { it.isNotBlank() }?.let {
                                     Text(it, style = MaterialTheme.typography.labelMedium, color = colors.actionPrimary)
                                 }
-                                Text("正在整理…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("inline-explain-loading"))
+                                Text(thread.pendingText.takeIf { it.isNotBlank() }?.let(ReadableText::withoutCitationMarks) ?: "正在整理…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("inline-explain-loading"))
                             }
                         }
                         thread.error?.let { (message, trouble) ->

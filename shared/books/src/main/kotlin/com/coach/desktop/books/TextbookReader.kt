@@ -273,7 +273,7 @@ internal fun TextbookReader(
         }
     }
     fun runInlineSelection(target: SourceBlock, action: SelectionExplainAction, questionText: String? = null,
-        visibleContext: List<SourceBlock>? = null) {
+        visibleContext: List<SourceBlock>? = null, retry: BookQuestionAttempt? = null) {
         val request = ++inlineRequest
         val secIdx = guideController.sectionIndexForAnchor(target.page, target.start).takeIf { it >= 0 } ?: currentSectionIndex
         val section = guideController.contextForSection(secIdx)
@@ -309,9 +309,13 @@ internal fun TextbookReader(
             }
         }
         val existing = inlineThread?.takeIf { it.selection == target } ?: InlineExplainThread(target, secCtx)
-        val history = existing.turns.map { FollowUpTurn(it.label, ReadableText.withoutCitationMarks(it.explanation.text)) }
+        val previous = if (retry != null) existing.turns.dropLast(1) else existing.turns
+        val history = previous.map { FollowUpTurn(it.label, ReadableText.withoutCitationMarks(it.explanation.text)) }
         val label = if (action == SelectionExplainAction.ASK && !questionText.isNullOrBlank()) "问：${questionText.trim()}" else action.label
-        val pending = existing.copy(loading = true, error = null, fallbackBlocks = emptyList(), askingOpen = true, pendingLabel = label)
+        val sent = ExplainWire.selectionBlocks(target, secCtx)
+        val question = questionText?.trim()?.takeIf { action == SelectionExplainAction.ASK && it.isNotEmpty() }
+        var received = if (retry != null) existing.turns.lastOrNull()?.explanation?.text.orEmpty() else ""
+        val pending = existing.copy(turns = previous, pendingText = received, retryTurn = null, loading = true, error = null, fallbackBlocks = emptyList(), askingOpen = true, pendingLabel = label)
         inlineThread = pending
         if (library.todayCardEnabled && action == SelectionExplainAction.ASK && !questionText.isNullOrBlank()) {
             editedAsk = true
@@ -319,23 +323,46 @@ internal fun TextbookReader(
                 target.id, target.start, target.end, null))
         }
         scope.launch {
-            if (!explainer.loaded) explainer.load()
-            val result = explainer.explainSelection(
-                kind = action.kind,
-                chosen = target,
-                context = secCtx,
-                question = questionText,
-                history = history,
-            )
+            val attempt = try {
+                question?.let {
+                    withContext(Dispatchers.IO) {
+                        library.beginBookQuestion(book.id, pending.threadId, target, secCtx?.location.orEmpty(), it, sent, retry)
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                if (inlineRequest == request) inlineThread = existing.copy(loading = false, askingOpen = true,
+                    error = "问题没能存到这台电脑，请检查可用空间后重试。" to ExplainTrouble.Other)
+                return@launch
+            }
+            val result = try {
+                if (!explainer.loaded) explainer.load()
+                suspend fun ask() = explainer.explainSelection(action.kind, target, secCtx, questionText, history)
+                val answer = if (attempt == null) ask() else withContext(BookAnswerProgress { partial ->
+                    withContext(Dispatchers.IO) { library.saveBookQuestionProgress(attempt, partial) }
+                    received = partial
+                    if (inlineRequest == request && inlineThread?.selection == target) {
+                        inlineThread = pending.copy(pendingText = partial)
+                    }
+                }) { ask() }
+                if (attempt != null) withContext(Dispatchers.IO) {
+                    library.finishBookQuestion(attempt, (answer as? ExplainResult.Done)?.explanation)
+                }
+                answer
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // The committed pending row also covers a process kill before cleanup can run.
+                throw e
+            } catch (_: Exception) {
+                ExplainResult.Refused("这次回答中断了，问题已保留，可以重试。")
+            }
             if (inlineRequest != request || inlineThread?.selection?.id != target.id) return@launch
-            val sent = ExplainWire.selectionBlocks(target, secCtx)
             if (result is ExplainResult.Done && questionText != null && inlineDraft.trim() == questionText) {
                 inlineDraft = ""
                 editedAsk = true
                 if (library.todayCardEnabled) draftWriter.edit(null)
             }
-            if (result is ExplainResult.Done) {
-                val persistedQuestion = if (action == SelectionExplainAction.ASK) questionText?.trim()?.takeIf { it.isNotEmpty() } else null
+            if (result is ExplainResult.Done && attempt == null) {
                 withContext(Dispatchers.IO) {
                     runCatching {
                         library.saveAskTurn(
@@ -345,7 +372,7 @@ internal fun TextbookReader(
                             sectionLocation = secCtx?.location.orEmpty(),
                             actionKind = action.kind,
                             label = label,
-                            questionText = persistedQuestion,
+                            questionText = null,
                             explanation = result.explanation,
                             sentBlocks = sent,
                         )
@@ -354,13 +381,15 @@ internal fun TextbookReader(
             }
             inlineThread = when (result) {
                 is ExplainResult.Done -> pending.copy(
-                    turns = existing.turns + InlineExplainEntry(label, result.explanation, sent),
+                    turns = previous + InlineExplainEntry(label, result.explanation, sent),
                     loading = false,
                     error = null,
                     askingOpen = true,
                     pendingLabel = null,
                 )
                 is ExplainResult.Refused -> pending.copy(
+                    turns = if (attempt == null) previous else previous + InlineExplainEntry(label, Explanation(received, emptyList(), 0), sent),
+                    retryTurn = attempt,
                     loading = false,
                     error = result.message to result.trouble,
                     fallbackBlocks = (listOf(target) + sent).distinctBy { it.page },
@@ -505,10 +534,15 @@ internal fun TextbookReader(
         else localCollectionSessions[collectionId] = next
     }
     LaunchedEffect(book.id) {
-        val (saved, restored) = withContext(Dispatchers.IO) {
+        val (saved, restored, unfinished) = withContext(Dispatchers.IO) {
             val saved = if (library.todayCardEnabled) library.askDraft(book.id) else null
-            val thread = if (saved == null || saved.threadId != null) library.loadLatestAskThread(book.id, saved?.threadId) else null
-            saved to thread
+            val candidate = library.loadLatestAskThread(book.id, saved?.threadId)
+            val interrupted = candidate?.let { library.lastUnfinishedQuestion(book.id, it.threadId) }
+            // A process can die before the debounced draft writer attaches the new thread ID.
+            val matchesSentQuestion = interrupted != null && saved?.collectionId == null &&
+                saved?.text?.trim() == interrupted.question && saved.page == candidate?.selection?.page
+            val thread = candidate.takeIf { saved == null || saved.threadId != null || matchesSentQuestion }
+            Triple(saved, thread, interrupted.takeIf { thread != null })
         }
         if (!editedAsk && inlineThread == null) {
             val selection = saved?.selection(book) ?: restored?.selection
@@ -517,9 +551,12 @@ internal fun TextbookReader(
                 val context = guideController.contextForSection(idx) ?: restored?.sectionLocation?.takeIf { it.isNotBlank() }
                     ?.let { ExplainSectionContext(it, null, null, emptyList()) }
                 inlineThread = InlineExplainThread(selection, context,
-                    turns = restored?.turns.orEmpty(), askingOpen = saved != null,
+                    turns = restored?.turns.orEmpty(), askingOpen = saved != null || unfinished != null,
+                    retryTurn = unfinished,
+                    error = unfinished?.let { "上次回答中断了，可以重试或继续追问。" to ExplainTrouble.Other },
                     threadId = saved?.threadId ?: restored?.threadId ?: java.util.UUID.randomUUID().toString())
             }
+            if (unfinished != null) inlineDraft = unfinished.question
             if (saved != null) {
                 inlineDraft = saved.text
                 activeAskCollection?.let { col ->
@@ -1884,6 +1921,11 @@ internal fun TextbookReader(
                 },
                 onRetry = {
                     val target = visibleThread?.selection ?: return@CompanionAskPane
+                    val interrupted = visibleThread.retryTurn
+                    if (interrupted != null) {
+                        runInlineSelection(target, SelectionExplainAction.ASK, interrupted.question, retry = interrupted)
+                        return@CompanionAskPane
+                    }
                     val (act, q) = lastInlineAction ?: (SelectionExplainAction.EXPLAIN to null)
                     runInlineSelection(target, act, q)
                 },

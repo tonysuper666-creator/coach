@@ -121,6 +121,7 @@ internal fun CourseScreen(
     onDismissIntake: () -> Unit = {},
     hasActiveMockExam: Boolean = false,
     onOpenMockExam: () -> Unit = {},
+    onOpenLiteratureGuide: (() -> Unit)? = null,
 ) {
     val colors = CoachTheme.colors
     val isExam = detail.isExam
@@ -296,6 +297,12 @@ internal fun CourseScreen(
             // Right under the header so what was just dropped is seen without scrolling.
             if (intake != null && intake.items.isNotEmpty()) {
                 CourseIntakeReceiptCard(intake, busy = busy, onChangeType = onChangeIntakeType, onDismiss = onDismissIntake)
+            }
+
+            if (onOpenLiteratureGuide != null) {
+                PaperButton(onOpenLiteratureGuide, modifier = Modifier.testTag("course-literature-guide")) {
+                    Text("本周文献导读")
+                }
             }
 
             if (isExam) {

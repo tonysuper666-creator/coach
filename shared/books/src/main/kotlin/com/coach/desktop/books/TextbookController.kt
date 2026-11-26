@@ -2116,11 +2116,62 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
-    suspend fun jumpToMockSourcePage(courseId: String, bookId: String, page: Int, quote: String) = action {
+    /** Jump directly to a PDF page from the literature one-page guide (original PDF view, no sentence highlight). */
+    suspend fun jumpToLiteraturePage(courseId: String, bookId: String, page: Int) = action {
+        val loaded = library.book(bookId)
+        val clampedPage = page.coerceIn(1, loaded.pages.size.coerceAtLeast(1))
+        require(loaded.page(clampedPage) != null && page == clampedPage) { "原页已变更，请重新打开导读。" }
+        library.saveTextView(bookId, false)
+        val updatedBook = loaded.copy(readingPage = clampedPage)
+        library.save(updatedBook)
+        library.saveOpenSession(updatedBook.id, "READER")
+        val collections = library.collectionSummaries()
+        val detail = library.withCourseDatabase { db ->
+            CourseStore.saveActiveAnchor(
+                db,
+                CourseActiveAnchor(
+                    courseId = courseId,
+                    topicId = null,
+                    bookId = updatedBook.id,
+                    page = clampedPage,
+                    companionOpen = false,
+                ),
+            )
+            CourseStore.loadCourseDetail(db, courseId, library.clock)
+        }
+        mutable.update { cur ->
+            cur.copy(
+                book = updatedBook,
+                page = clampedPage,
+                screen = BookScreen.READER,
+                source = null,
+                prompt = null,
+                review = null,
+                pendingCourseJump = null,
+                keepAskTabOpen = false,
+                activeCourseId = courseId,
+                activeCourseTopicId = null,
+                activeCourseDetail = detail,
+                collections = collections,
+                catalog = library.catalog(),
+            )
+        }
+    }
+
+    suspend fun jumpToMockSourcePage(courseId: String, bookId: String, page: Int, quote: String,
+        exactAnchor: BookCompanionAnchor? = null) = action {
         val loaded = library.book(bookId)
         val clampedPage = page.coerceIn(1, loaded.pages.size.coerceAtLeast(1))
         val pageObj = loaded.page(clampedPage)
-        val passage = if (pageObj != null) {
+        val passage = if (exactAnchor != null) {
+            require(pageObj != null && page == clampedPage && page == exactAnchor.pdfPage) { "原页已变更，请重新打开导读。" }
+            // With a supplemental OCR transcript the PDF page may have no matching native text box.
+            library.saveTextView(bookId, false)
+            val start = exactAnchor.startUtf16
+            val end = exactAnchor.endUtf16
+            if (start in 0 until end && end <= pageObj.text.length && pageObj.text.substring(start, end) == quote)
+                BookPassage(bookId, page, start, end, quote) else null
+        } else if (pageObj != null) {
             SentenceCitationGate.locatePassageInPage(loaded.id, pageObj, quote, null)
         } else null
         val finalPage = passage?.page ?: clampedPage

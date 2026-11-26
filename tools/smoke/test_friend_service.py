@@ -16,11 +16,15 @@ def module(name, filename):
     return result
 
 
-service = module("friend_service", "friend-service.py")
 adapter = module("friend_bridge", "friend-service-bridge.py")
 
 
 class ServiceIsolationTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        global service
+        service = module("friend_service", "friend-service.py")
+
     def test_friend_api_keeps_existing_owner_ledger_and_accepts_unlimited_private_config(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(service.Path, "home", return_value=Path(temp).resolve()):
             state = Path(temp).resolve() / "Coach/state"
@@ -113,6 +117,24 @@ class BridgeBoundaryTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("response_format", json.loads(part["body"]))
         self.assertEqual(output, [])
 
+    async def test_literature_batch_preserves_only_the_scoped_friend_contract(self):
+        headers = {b"x-coach-task": b"literature_guide", b"x-coach-background": b"1",
+                   b"x-coach-format-attempt": b"0", b"x-coach-batch-key": b"f" * 64}
+        body = {"model": "claude-haiku-5-5", "stream": False}
+        received, output = await self.friend_request(headers, body)
+        self.assertEqual([], output)
+        forwarded = dict(received[0][0]["headers"])
+        for key in headers:
+            self.assertEqual(headers[key], forwarded[key])
+        self.assertEqual(b"off", forwarded[b"x-coach-fallback"])
+        for changed, payload in (({b"x-coach-format-attempt": b"1"}, {}), ({b"x-coach-background": b"off"}, {}),
+                                 ({b"x-coach-batch-key": b"f" * 63}, {}), ({b"x-coach-friend": b""}, {}),
+                                 ({}, {"model": "claude-sonnet-5-5"}), ({}, {"stream": True})):
+            with self.subTest(changed=changed, payload=payload):
+                received, output = await self.friend_request(headers | changed, body | payload)
+                self.assertFalse(received)
+                self.assertEqual(400, output[0]["status"])
+
     async def test_friend_api_allows_haiku_for_collection_qa_and_study_modes(self):
         received, output = await self.friend_request(body_change={"model": "claude-haiku-5-5"})
         self.assertEqual(len(received), 1)
@@ -153,6 +175,7 @@ class BridgeBoundaryTest(unittest.IsolatedAsyncioTestCase):
         account = SimpleNamespace(getpwuid=lambda uid: SimpleNamespace(pw_dir="/account-home"))
         with patch.dict(os.environ, {"HOME": "/isolated-home", "COACH_TRAFFIC": "test"}, clear=True), \
                 patch.object(adapter.sys, "platform", "darwin"), \
+                patch.object(adapter.os, "getuid", return_value=501, create=True), \
                 patch.dict(adapter.sys.modules, {"pwd": account}), \
                 patch.object(adapter.subprocess, "run", return_value=SimpleNamespace(
                     returncode=0, stdout=b"fixture-key\n")) as run:

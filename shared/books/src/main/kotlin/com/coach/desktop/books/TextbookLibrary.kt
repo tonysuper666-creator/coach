@@ -1716,6 +1716,194 @@ internal class TextbookLibrary(
         return StagedBookImport(book(id), alreadyExisted = false)
     }
 
+    private fun sourceFilename(bookId: String): String? = database().use { db ->
+        if (!BookSchemaMigration.tableColumns(db, "books").contains("source_filename")) return@use null
+        db.prepareStatement("SELECT source_filename FROM books WHERE id=?").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { r -> if (r.next()) r.getString(1) else null }
+        }
+    }
+
+    /** Pre-fill author, year, and HTML-decoded title from PDF metadata, source filename, and front pages. */
+    fun literaturePaperMeta(bookId: String): LiteraturePaperMeta {
+        val source = book(bookId)
+        val filename = sourceFilename(bookId)
+        val frontPages = source.pages.take(2).map { it.text }
+        val file = original(bookId, "pdf").toFile()
+        return if (source.format == "pdf" && file.isFile) {
+            runCatching {
+                BookPdfLoader.read(file) { pdf ->
+                    LiteratureMetadata.extract(pdf, source.id, source.title, filename, frontPages)
+                }
+            }.getOrElse { LiteratureMetadata.extract(null, source.id, source.title, filename, frontPages) }
+        } else {
+            LiteratureMetadata.extract(null, source.id, source.title, filename, frontPages)
+        }
+    }
+
+    private fun pageIsEnglishOnly(text: String?): Boolean {
+        if (text.isNullOrBlank()) return false
+        val latin = text.count { it in 'A'..'Z' || it in 'a'..'z' }
+        val han = text.count { it.code in 0x3400..0x9FFF }
+        return latin >= 20 && han < 3
+    }
+
+    /** Independent 300 dpi OCR verification of a single PDF page via the library's Tesseract engine.
+     * Detects blank or vector-only renders (e.g. missing scan image decoder) and reports OCR unavailable
+     * instead of letting valid citations fail with low similarity. */
+    fun ocrPdfPageForGuide(bookId: String, pdfPage: Int, control: BookImportControl = BookImportControl()): String {
+        val file = original(bookId, "pdf").toFile()
+        require(file.isFile) { "原 PDF 文件不存在，无法独立 OCR 核对引文。" }
+        val pageText = runCatching { book(bookId).page(pdfPage)?.text }.getOrNull()
+        val expectedLetters = pageText?.count(Char::isLetter) ?: 0
+        val englishOnly = pageIsEnglishOnly(pageText)
+        return BookPdfLoader.read(file) { pdf ->
+            require(pdfPage in 1..pdf.numberOfPages) { "PDF 页码超出范围：$pdfPage" }
+            val hasImages = pageHasImageXObjects(pdf, pdfPage)
+            val bounds = pdf.getPage(pdfPage - 1).cropBox
+            require(bounds.width.isFinite() && bounds.height.isFinite() && bounds.width > 0 && bounds.height > 0) {
+                "这页 PDF 尺寸无效，请重新保存后再导入。"
+            }
+            val scale = minOf(bookOcrTargetDpi / 72f, bookOcrMaxSide / maxOf(bounds.width, bounds.height))
+            BookScanImages.checkSize(kotlin.math.ceil(bounds.width * scale).toInt(), kotlin.math.ceil(bounds.height * scale).toInt())
+            val image = OcrTiming.measure("page${pdfPage}.render") { renderBookPdfPage(file, pdf, pdfPage - 1, scale) }
+            val text = try {
+                if (isPdfRasterBlank(image)) {
+                    throw LiteratureOcrUnavailableException("PDF 第 $pdfPage 页渲染结果为空白（扫描图层未正确解码），OCR 不可用。")
+                }
+                ocr.recognize(image, control, englishOnly = englishOnly, singleBlock = false)
+            } finally {
+                releaseBookBitmap(image)
+            }
+            val ocrLetters = text.count(Char::isLetter)
+            if (hasImages && expectedLetters >= 120 &&
+                (ocrLetters < 20 || (ocrLetters * 12 < expectedLetters && LiteraturePassages.countBodySentences(text) == 0))
+            ) {
+                throw LiteratureOcrUnavailableException(
+                    "PDF 第 $pdfPage 页仅识别出少量矢量文字或下载戳（OCR $ocrLetters 字 / 原层 $expectedLetters 字），扫描图层可能未渲染，OCR 不可用。",
+                )
+            }
+            text
+        }
+    }
+
+    /** Targeted 300 dpi single-block Tesseract OCR on the exact non-interleaved bounding crop of [quote]. */
+    fun ocrPdfQuoteCropForGuide(
+        bookId: String,
+        pdfPage: Int,
+        quote: String,
+        control: BookImportControl = BookImportControl(),
+    ): String? {
+        val file = original(bookId, "pdf").toFile()
+        if (!file.isFile) return null
+        val pageText = runCatching { book(bookId).page(pdfPage)?.text }.getOrNull()
+        val englishOnly = pageIsEnglishOnly(pageText) || pageIsEnglishOnly(quote)
+        return runCatching {
+            BookPdfLoader.read(file) { pdf ->
+                if (pdfPage !in 1..pdf.numberOfPages) return@read null
+                val rect = LiteraturePdfLayout.locateQuoteCropRect(pdf, pdfPage, quote) ?: return@read null
+                val bounds = pdf.getPage(pdfPage - 1).cropBox
+                val scale = minOf(bookOcrTargetDpi / 72f, bookOcrMaxSide / maxOf(bounds.width, bounds.height))
+                BookScanImages.checkSize(kotlin.math.ceil(bounds.width * scale).toInt(), kotlin.math.ceil(bounds.height * scale).toInt())
+                val full = OcrTiming.measure("page${pdfPage}.cropRender") { renderBookPdfPage(file, pdf, pdfPage - 1, scale) }
+                try {
+                    val left = (rect.left * full.width).toInt().coerceIn(0, full.width - 1)
+                    val top = (rect.top * full.height).toInt().coerceIn(0, full.height - 1)
+                    val right = (rect.right * full.width).toInt().coerceIn(left + 1, full.width)
+                    val bottom = (rect.bottom * full.height).toInt().coerceIn(top + 1, full.height)
+                    val w = right - left
+                    val h = bottom - top
+                    if (w < 16 || h < 12) return@read null
+                    val crop = cropBookBitmap(full, left, top, w, h)
+                    try {
+                        if (isPdfRasterBlank(crop)) return@read null
+                        ocr.recognize(crop, control, englishOnly = englishOnly, singleBlock = true)
+                    } finally {
+                        releaseBookBitmap(crop)
+                    }
+                } finally {
+                    releaseBookBitmap(full)
+                }
+            }
+        }.getOrNull()
+    }
+
+    private fun pageHasImageXObjects(pdf: BookPdfDocument, pdfPage: Int): Boolean = runCatching {
+        val resources = pdf.getPage(pdfPage - 1).resources ?: return@runCatching false
+        resources.xObjectNames.any { name -> runCatching { resources.isImageXObject(name) }.getOrDefault(false) }
+    }.getOrDefault(false)
+
+    private fun isPdfRasterBlank(bitmap: BookBitmap): Boolean {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w <= 0 || h <= 0) return true
+        val stepX = maxOf(1, w / 200)
+        val stepY = maxOf(1, h / 200)
+        var sampled = 0
+        var dark = 0
+        var y = 0
+        while (y < h) {
+            var x = 0
+            while (x < w) {
+                val rgb = bookBitmapPixel(bitmap, x, y)
+                val r = (rgb ushr 16) and 0xFF
+                val g = (rgb ushr 8) and 0xFF
+                val b = rgb and 0xFF
+                if (r < 235 || g < 235 || b < 235) dark++
+                sampled++
+                x += stepX
+            }
+            y += stepY
+        }
+        return sampled == 0 || dark * 2000 < sampled // < 0.05% ink pixels across the entire rendered page
+    }
+
+    /** A scan can have a nonempty text layer containing only a running page number or broken glyphs.
+     * Keep this OCR transcript local to the guide so existing highlights retain their original offsets. */
+    fun literatureBook(bookId: String): Textbook {
+        val source = book(bookId)
+        require(source.format == "pdf" && source.indexState == "READY" && !source.hasPendingOcr) { "请等待 PDF 导入和扫描页识别完成。" }
+        val filename = sourceFilename(bookId)
+        val file = original(bookId, "pdf").toFile()
+        val (pages, meta) = BookPdfLoader.read(file) { pdf ->
+            val extractedPages = source.pages.map { page ->
+                val physical = LiteraturePdfLayout.extract(pdf, page.number)
+                val layer = physical.joinToString("\n\n") { it.text }
+                val regions = when {
+                    layer.count(Char::isLetter) >= 6 -> physical
+                    else -> {
+                        val transcript = if (page.ocr) page.text else recognizePdfPage(file, pdf, page.number, BookImportControl())
+                        listOf(GuideRegion(transcript))
+                    }
+                }
+                val cleaned = regions.map { r ->
+                    r.copy(text = r.text.replace("\r\n", "\n").replace('\r', '\n'), printedPage = null)
+                }
+                page.copy(text = cleaned.joinToString("\n\n") { it.text }, textLayout = null, guideRegions = cleaned)
+            }
+            val extractedMeta = LiteratureMetadata.extract(
+                pdf = pdf,
+                bookId = source.id,
+                storedTitle = source.title,
+                sourceFilename = filename,
+                firstPagesText = extractedPages.take(2).map { it.text }.ifEmpty { source.pages.take(2).map { it.text } },
+            )
+            extractedPages to extractedMeta
+        }
+        return source.copy(pages = pages, literatureMeta = meta)
+    }
+
+    private fun recognizePdfPage(file: java.io.File, pdf: BookPdfDocument, page: Int, control: BookImportControl): String {
+        val bounds = pdf.getPage(page - 1).cropBox
+        require(bounds.width.isFinite() && bounds.height.isFinite() && bounds.width > 0 && bounds.height > 0) {
+            "这页 PDF 尺寸无效，请重新保存后再导入。"
+        }
+        val scale = minOf(bookOcrTargetDpi / 72f, bookOcrMaxSide / maxOf(bounds.width, bounds.height))
+        BookScanImages.checkSize(kotlin.math.ceil(bounds.width * scale).toInt(), kotlin.math.ceil(bounds.height * scale).toInt())
+        val image = OcrTiming.measure("page${page}.render") { renderBookPdfPage(file, pdf, page - 1, scale) }
+        return try { ocr.recognize(image, control) } finally { releaseBookBitmap(image) }
+    }
+
     fun resumeBookOcr(
         bookId: String,
         control: BookImportControl = BookImportControl(),
@@ -1766,16 +1954,7 @@ internal class TextbookLibrary(
                             )
                         }
                         val started = System.nanoTime()
-                        val bounds = pdf.getPage(pageNumber - 1).cropBox
-                        require(bounds.width.isFinite() && bounds.height.isFinite() && bounds.width > 0 && bounds.height > 0) {
-                            "这页 PDF 尺寸无效，请重新保存后导入。"
-                        }
-                        val scale = minOf(bookOcrTargetDpi / 72f, bookOcrMaxSide / maxOf(bounds.width, bounds.height))
-                        BookScanImages.checkSize(kotlin.math.ceil(bounds.width * scale).toInt(), kotlin.math.ceil(bounds.height * scale).toInt())
-                        val image = OcrTiming.measure("page$pageNumber.render") {
-                            renderBookPdfPage(file, pdf, pageNumber - 1, scale)
-                        }
-                        val recognized = try { ocr.recognize(image, control) } finally { releaseBookBitmap(image) }
+                        val recognized = recognizePdfPage(file, pdf, pageNumber, control)
                         estimator.record(((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L))
                         control.check()
                         updateRecognizedPage(initial.id, pageNumber, recognized)
@@ -1852,6 +2031,12 @@ internal class TextbookLibrary(
             db.autoCommit = false
             try {
                 BookFtsStore.deleteBook(db, bookId)
+                if (BookSchemaMigration.tableExists(db, "literature_guides")) {
+                    db.prepareStatement("DELETE FROM literature_guides WHERE EXISTS (SELECT 1 FROM json_each(books) WHERE value=?)").use {
+                        it.setString(1, bookId)
+                        it.executeUpdate()
+                    }
+                }
                 for (table in listOf(
                     "pages", "book_illustrations", "book_page_text_boxes", "book_native_sources",
                     "book_learning_paths", "book_ladders", "book_reader_views", "book_pdf_modes",
@@ -2471,11 +2656,12 @@ internal class TextbookLibrary(
         practice: Practice,
         answer: PracticeAnswer,
         isPretest: Boolean = false,
+        questionKey: String? = null,
     ) {
         val source = book(bookId)
-        val lessonKey = if (questionIndex == 0) lesson.id else "${lesson.id}#q${questionIndex + 1}"
+        val lessonKey = questionKey ?: if (questionIndex == 0) lesson.id else "${lesson.id}#q${questionIndex + 1}"
         val previous = this.answer(bookId, lessonKey, QuestionMode.CHOICE)
-        val storedLesson = if (questionIndex == 0) lesson else lesson.copy(id = lessonKey, title = "${lesson.title}（${questionIndex + 1}）")
+        val storedLesson = if (lessonKey == lesson.id) lesson else lesson.copy(id = lessonKey, title = "${lesson.title}（${questionIndex + 1}）")
         val ladder = nextLadderSession(source, storedLesson, QuestionMode.CHOICE, practice, answer, forceRecord = true)
         database().use { db ->
             db.autoCommit = false

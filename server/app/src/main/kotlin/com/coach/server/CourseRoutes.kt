@@ -29,6 +29,7 @@ internal fun Route.courseRoutes(
     alignPipeline: CourseAlignmentPipeline? = null,
     topicPipeline: CourseTopicSynthesisPipeline? = null,
     visionService: CourseVisionService? = null,
+    literatureGuide: LiteratureGuideService? = null,
 ) {
     val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -100,11 +101,6 @@ internal fun Route.courseRoutes(
             val diagnostics = friend?.let { FriendReaderDiagnostics() }
             var requestId = ""
             try {
-                val pipeline = topicPipeline ?: return@withReaderConnection call.respondText(
-                    buildJsonObject { put("error", "专题合成服务暂未开启，请稍后重试。") }.toString(),
-                    ContentType.Application.Json,
-                    HttpStatusCode.ServiceUnavailable,
-                )
                 val bodyBytes = call.receiveChannel().readRemaining(4L * 1024 * 1024 + 1).readByteArray()
                 if (bodyBytes.size > 4 * 1024 * 1024) {
                     throw MockError(HttpStatusCode.PayloadTooLarge, "本专题上传的原文片段过大，请缩小单次范围。")
@@ -128,14 +124,20 @@ internal fun Route.courseRoutes(
                 }
                 val cacheScope = friend?.let { "friend:${friendId(it)}" } ?: "owner:$device"
                 val bypassCache = (input["bypassCache"] as? JsonPrimitive)?.booleanOrNull == true
-                val body = pipeline.generateTopicPack(
+                val guide = (input["kind"] as? JsonPrimitive)?.content == "literatureGuide"
+                val body = if (guide) {
+                    val service = literatureGuide ?: throw MockError(HttpStatusCode.ServiceUnavailable, "文献导读暂未开启。")
+                    val result = service.generate(input, cacheScope, friend, device)
+                    if (!current()) throw MockError(HttpStatusCode.Conflict, "材料或设备授权已失效。")
+                    result
+                } else (topicPipeline ?: throw MockError(HttpStatusCode.ServiceUnavailable, "专题合成服务暂未开启，请稍后重试。")).generateTopicPack(
                     input = input,
                     cacheScope = cacheScope,
                     bypassCache = bypassCache,
                     currentCheck = current,
                 )
-                if (friend != null) withContext(Dispatchers.IO) {
-                    try { friends!!.record(friend, device, requestId, "complete", body, diagnostics) }
+                if (friend != null && (!guide || body["pending"] == null)) withContext(Dispatchers.IO) {
+                    try { friends!!.record(friend, device, requestId, "complete", body.takeUnless { guide }, diagnostics) }
                     catch (_: Exception) { throw FriendServiceError() }
                 }
                 call.respondText(body.toString(), ContentType.Application.Json)

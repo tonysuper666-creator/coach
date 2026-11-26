@@ -63,6 +63,7 @@
     "practice_grade": "practice_grade",
     "practice_diagnose": "practice_grade",
     "practice_variant": "practice_grade",
+    "literature_guide": "friend_batch",
     "course_topic_map": "course_synthesis",
     "course_topic_reduce": "course_synthesis",
     "course_topic_math_repair": "course_synthesis",

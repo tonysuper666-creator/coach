@@ -291,6 +291,28 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(200, response.status_code)
                     self.assertEqual("synthetic immediate answer", response.json()["choices"][0]["message"]["content"])
 
+    async def test_guide_submits_haiku_batch_and_never_falls_through_to_cli(self):
+        from api_batch import GUIDE_TASK
+        body = {"model": "claude-haiku-5-5", "messages": [{"role": "user", "content": "synthetic"}]}
+        headers = {"x-coach-task": GUIDE_TASK, "x-coach-background": "1", "x-coach-batch-key": self.key()}
+        with self.assertRaises(bridge.BridgeError):
+            bridge.build_req(dict(body, stream=True), headers)
+        request = bridge.build_req(body, headers)
+        with patch.object(bridge, "API_BATCH", self.router):
+            with self.assertRaises(BatchPending):
+                await bridge.dispatch_batch(request, request.model, None)
+        self.assertEqual("/v1/messages/batches", self.calls[0].url.path)
+        self.assertEqual(body["model"], json.loads(self.calls[0].content)["requests"][0]["params"]["model"])
+
+        friend = bridge.build_req(body, dict(headers, **{"x-coach-friend": "a" * 64, "x-coach-friend-device": "pc"}))
+        denied = AsyncMock(side_effect=Denied("credit_limit_95_percent"))
+        with patch.object(bridge.API_BATCH, "run", denied), patch.object(bridge, "write_log"), \
+                patch.object(bridge, "dispatch_cli", side_effect=AssertionError("guide fell through to CLI")):
+            result = await bridge.dispatch_batch(friend, friend.model, None)
+        self.assertEqual(("failed", "credit_limit_95_percent"), (result.status, result.reason))
+        self.assertEqual("a" * 64, denied.await_args.kwargs["friend"])
+        self.assertEqual("pc", denied.await_args.kwargs["device"])
+
     async def test_key_removed_while_pending_caches_subscription_and_preserves_reserve(self):
         await self.submit()
         self.now += 61

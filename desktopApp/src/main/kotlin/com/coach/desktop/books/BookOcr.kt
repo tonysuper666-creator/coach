@@ -68,6 +68,7 @@ internal object BundledBookOcr : BookOcr {
         X64("windows-x64", "libleptonica1870.dll", "libtesseract552.dll"),
         ARM64("windows-arm64", "libleptonica-1.87.0.dll", "libtesseract55.dll"),
     }
+    private data class NativeRuntime(val api: Api, val tessdata: String, val languages: String)
     private val engine by lazy {
         val arch = System.getProperty("os.arch").lowercase()
         require(System.getProperty("os.name").startsWith("Windows") &&
@@ -79,18 +80,40 @@ internal object BundledBookOcr : BookOcr {
     private val runtime by lazy { unpack() }
     // Retain the dependency handle for the entire process lifetime.
     private val leptonica by lazy { NativeLibrary.getInstance(runtime.resolve(engine.lept).toString()) }
-    private val api by lazy {
-        // Set before loading the engine/OpenMP runtime. Process-local; never changes Windows settings.
-        if (engine == Engine.X64) {
-            NativeLibrary.getInstance("kernel32").getFunction("SetEnvironmentVariableW")
-                .invokeInt(arrayOf(WString("OMP_THREAD_LIMIT"), WString("2")))
+    private val nativeRuntime: NativeRuntime by lazy {
+        val os = System.getProperty("os.name")
+        if (os.startsWith("Windows")) {
+            // Set before loading the engine/OpenMP runtime. Process-local; never changes Windows settings.
+            if (engine == Engine.X64) {
+                NativeLibrary.getInstance("kernel32").getFunction("SetEnvironmentVariableW")
+                    .invokeInt(arrayOf(WString("OMP_THREAD_LIMIT"), WString("2")))
+            }
+            leptonica
+            val loaded = Native.load(runtime.resolve(engine.tess).toString(), Api::class.java,
+                mapOf(Library.OPTION_STRING_ENCODING to "UTF-8"))
+            NativeRuntime(loaded, runtime.resolve("tessdata").toString(), "chi_sim+eng")
+        } else if (os.startsWith("Mac")) {
+            val lib = listOf("/opt/homebrew/lib/libtesseract.dylib", "/usr/local/lib/libtesseract.dylib")
+                .firstOrNull { Files.isRegularFile(Path.of(it)) }
+                ?: throw IllegalArgumentException("当前 Mac 未安装 Tesseract 共享库，无法执行本地 OCR。")
+            val tessdataDir = listOfNotNull(
+                System.getenv("TESSDATA_PREFIX")?.takeIf { it.isNotBlank() },
+                "/opt/homebrew/share/tessdata",
+                "/usr/local/share/tessdata",
+            ).firstOrNull { Files.isDirectory(Path.of(it)) }
+                ?: throw IllegalArgumentException("当前 Mac 未找到 tessdata 目录，无法执行本地 OCR。")
+            val hasChi = Files.isRegularFile(Path.of(tessdataDir, "chi_sim.traineddata"))
+            val loaded = Native.load(lib, Api::class.java, mapOf(Library.OPTION_STRING_ENCODING to "UTF-8"))
+            NativeRuntime(loaded, tessdataDir, if (hasChi) "chi_sim+eng" else "eng")
+        } else {
+            throw IllegalArgumentException("扫描文字识别目前支持 Windows 64 位，请在 Windows 上导入这份扫描材料。")
         }
-        leptonica
-        Native.load(runtime.resolve(engine.tess).toString(), Api::class.java,
-            mapOf(Library.OPTION_STRING_ENCODING to "UTF-8"))
     }
 
-    override fun recognize(image: BufferedImage, control: BookImportControl): String {
+    override fun recognize(image: BufferedImage, control: BookImportControl): String =
+        recognize(image, control, englishOnly = false, singleBlock = false)
+
+    override fun recognize(image: BufferedImage, control: BookImportControl, englishOnly: Boolean, singleBlock: Boolean): String {
         control.check()
         BookScanImages.checkSize(image.width, image.height)
         // Composite transparent PNGs onto white, then send a compact grayscale raster.
@@ -100,16 +123,18 @@ internal object BundledBookOcr : BookOcr {
             finally { g.dispose() }
         }
         try {
-            val bridge = try { api } catch (e: LinkageError) {
+            val loaded = try { nativeRuntime } catch (e: LinkageError) {
                 throw IllegalArgumentException("文字识别组件无法启动，请重新安装 LearningCoach 后重试。", e)
             }
+            val bridge = loaded.api
             val handle = bridge.TessBaseAPICreate()
+            val lang = if (englishOnly) "eng" else loaded.languages
             try {
-                require(bridge.TessBaseAPIInit2(handle, runtime.resolve("tessdata").toString(), "chi_sim+eng", 1) == 0) {
+                require(bridge.TessBaseAPIInit2(handle, loaded.tessdata, lang, 1) == 0) {
                     "文字识别模型无法读取，请重新安装 LearningCoach 后重试。"
                 }
                 control.check()
-                bridge.TessBaseAPISetPageSegMode(handle, 3)
+                bridge.TessBaseAPISetPageSegMode(handle, if (singleBlock) 6 else 3)
                 val bytes = (gray.raster.dataBuffer as java.awt.image.DataBufferByte).data
                 bridge.TessBaseAPISetImage(handle, bytes, gray.width, gray.height, 1, gray.width)
                 bridge.TessBaseAPISetSourceResolution(handle, 300)

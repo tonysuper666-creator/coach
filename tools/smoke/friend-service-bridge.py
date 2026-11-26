@@ -37,7 +37,7 @@ class SubscriptionOnly:
             body = json.loads(payload)
             if not isinstance(body, dict):
                 raise ValueError("Invalid request")
-            self.configure(body, headers)
+            keep_batch = self.configure(body, headers)
             if self.json_response_format and headers.get(b"x-coach-task") == b"READER_SELECTION":
                 body["response_format"] = {"type": "json_object"}
             payload = json.dumps(body).encode()
@@ -45,7 +45,9 @@ class SubscriptionOnly:
             await send({"type": "http.response.start", "status": 400, "headers": []})
             return await send({"type": "http.response.body", "body": b"Invalid request"})
         headers.update({b"content-length": str(len(payload)).encode(), b"x-coach-model-policy": b"exact",
-            b"x-coach-fallback": b"off", b"x-coach-background": b"off", b"x-coach-batch-key": b""})
+            b"x-coach-fallback": b"off"})
+        if not keep_batch:
+            headers.update({b"x-coach-background": b"off", b"x-coach-batch-key": b""})
         scope = scope | {"headers": list(headers.items())}
         delivered = False
         async def replay():
@@ -66,10 +68,18 @@ class FriendApiOnly(SubscriptionOnly):
     def configure(self, body, headers):
         if (body.get("model") not in {"claude-sonnet-5-5", "claude-haiku-5-5"} or
                 body.get("response_format") or body.get("tools") or
-                headers.get(b"x-coach-task") != b"READER_SELECTION" or
                 not re.fullmatch(rb"[a-f0-9]{64}", headers.get(b"x-coach-friend", b"")) or
                 not re.fullmatch(rb"[A-Za-z0-9_-]{1,128}", headers.get(b"x-coach-friend-device", b""))):
             raise ValueError("Explicit friend reader request required")
+        if headers.get(b"x-coach-task") == b"READER_SELECTION":
+            return False
+        if (headers.get(b"x-coach-task") == b"literature_guide" and
+                body["model"] == "claude-haiku-5-5" and body.get("stream", False) is False and
+                headers.get(b"x-coach-background") == b"1" and
+                headers.get(b"x-coach-format-attempt") == b"0" and
+                re.fullmatch(rb"[a-f0-9]{64}", headers.get(b"x-coach-batch-key", b""))):
+            return True
+        raise ValueError("Unsupported friend request")
 
 
 def existing_gift_key():

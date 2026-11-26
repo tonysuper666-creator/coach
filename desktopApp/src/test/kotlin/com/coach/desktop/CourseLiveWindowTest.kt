@@ -11,6 +11,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.text.AnnotatedString
 import com.coach.desktop.books.*
+import kotlinx.serialization.json.*
 import kotlinx.coroutines.runBlocking
 import org.jetbrains.skiko.SkiaLayer
 import org.junit.Assert.assertEquals
@@ -464,6 +465,155 @@ class CourseLiveWindowTest {
                 edt { window2.dispose() }
             }
         } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun literatureGuideFromThreePdfsLight() = verifyLiteratureGuide(PaperColor.LIGHT)
+
+    @Test
+    fun literatureGuideFromThreePdfsDark() = verifyLiteratureGuide(PaperColor.DARK)
+
+    @Test
+    fun literatureGuideFailedRepairReportsFailuresAndDoesNotPersist() {
+        assumeTrue(!GraphicsEnvironment.isHeadless())
+        val root = Files.createTempDirectory("coach-guide-window-fail-")
+        val library = TextbookLibrary(root.resolve("library"), lazyPdfExtras = false)
+        val books = (1..3).map { library.importBook(LiteratureGuideFixture.pdf(root, it)) }
+        val course = library.withCourseDatabase { db ->
+            CourseStore.createCourse(db, "失败补问测试", CourseExamProfile(), books.map { it.id }).first
+        }
+        val controller = TextbookController(library)
+        ReadingSettings(library.directory).chooseAiExplain(true)
+        val bridge = LiteratureGuideFixture.Bridge(firstPassUnanswerableIndex = 1, keepRepairUnanswerable = true)
+        val explainer = object : BookExplainer(library = library) {
+            override suspend fun load() { loaded = true }
+            override suspend fun courseTopicPack(input: JsonObject) =
+                CourseServerCallResult(bridge.service.generate(input, "local", "synthetic", "desktop"), null)
+        }
+        val window = edt { ComposeWindow().apply {
+            title = "Coach · 文献一页纸失败不存盘"
+            setSize(1080, 780)
+            setContent { WindowsTextbookHost(controller, bookExplainer = explainer) { null } }
+            isVisible = true
+        } }
+        try {
+            waitFor("library loaded", window) { controller.state.value.catalog.size == books.size }
+            runBlocking { controller.openCourse(course) }
+            click(window, "course-literature-guide")
+            fun editAction(n: SemanticsNode): ((AnnotatedString) -> Boolean)? =
+                n.config.getOrNull(SemanticsActions.SetText)?.action ?: n.children.firstNotNullOfOrNull(::editAction)
+            waitFor("question field ready", window) { edt { node(window, "guide-questions")?.let(::editAction) != null } }
+            edt { assertTrue(editAction(node(window, "guide-questions")!!)!!.invoke(AnnotatedString("第一题？\n第二题？"))) }
+            click(window, "guide-generate")
+            waitFor("per-item failures shown", window) { node(window, "guide-failures") != null }
+            assertNull(node(window, "guide-one-page"))
+            val failureText = text(window, "guide-failures")
+            assertTrue("Expected failed question listed, got: $failureText", "思考题 2" in failureText && "answerable_false" in failureText)
+            val litBooks = books.map { library.literatureBook(it.id) }
+            val key = LiteratureGuideStore.digest(LiteratureInput(litBooks, listOf("第一题？", "第二题？")).request())
+            assertNull(library.withCourseDatabase { LiteratureGuideStore.cached(it, course, key) })
+            assertEquals(3, bridge.keys.size)
+            assertEquals(2, bridge.keys.distinct().size)
+        } finally {
+            bridge.close()
+            edt { window.dispose() }
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    private fun verifyLiteratureGuide(paper: PaperColor) {
+        assumeTrue(!GraphicsEnvironment.isHeadless())
+        val root = Files.createTempDirectory("coach-guide-window-")
+        val library = TextbookLibrary(root.resolve("library"), lazyPdfExtras = false)
+        val books = listOf(
+            library.importBook(LiteratureGuideFixture.jstorWrongPageLabelsPdf(root)),
+            library.importBook(LiteratureGuideFixture.copyrightCoverPdf(root)),
+            library.importBook(LiteratureGuideFixture.facingAndMarginaliaPdf(root)),
+        )
+        val course = library.withCourseDatabase { db ->
+            CourseStore.createCourse(db, "历史文献", CourseExamProfile(), books.map { it.id }).first
+        }
+        val controller = TextbookController(library)
+        ReadingSettings(library.directory).choosePaper(paper)
+        ReadingSettings(library.directory).chooseAiExplain(true)
+        val repair = paper == PaperColor.DARK
+        val bridge = LiteratureGuideFixture.Bridge(
+            firstPassUnanswerableIndex = if (repair) 1 else null,
+            extraPaperOnFirstPass = true,
+        )
+        val explainer = object : BookExplainer(library = library) {
+            override suspend fun load() { loaded = true }
+            override suspend fun courseTopicPack(input: JsonObject) =
+                CourseServerCallResult(bridge.service.generate(input, "local", "synthetic", "desktop"), null)
+        }
+        val window = edt { ComposeWindow().apply {
+            title = "Coach · 文献一页纸"
+            setSize(1080, 780)
+            setContent { WindowsTextbookHost(controller, bookExplainer = explainer) { null } }
+            isVisible = true
+        } }
+        try {
+            waitFor("library loaded", window) { controller.state.value.catalog.size == books.size }
+            runBlocking { controller.openCourse(course) }
+            click(window, "course-literature-guide")
+            fun editAction(n: SemanticsNode): ((AnnotatedString) -> Boolean)? =
+                n.config.getOrNull(SemanticsActions.SetText)?.action ?: n.children.firstNotNullOfOrNull(::editAction)
+            waitFor("prefilled author metadata and question field", window) {
+                edt {
+                    node(window, "guide-questions")?.let(::editAction) != null &&
+                        node(window, "guide-meta-author-${books[0].id}") != null
+                }
+            }
+            edt {
+                assertTrue(
+                    editAction(node(window, "guide-questions")!!)!!
+                        .invoke(AnnotatedString("这几篇文献如何界定好奇与记录？\n机构档案如何维系来源可信度？")),
+                )
+            }
+            waitFor("generate enabled", window) {
+                node(window, "guide-generate")?.config?.contains(SemanticsProperties.Disabled) == false
+            }
+            click(window, "guide-generate")
+            waitFor("one-page guide rendered", window) { node(window, "guide-one-page") != null }
+            // First-Cut: NO stops tab, NO quiz tab, NO printed page label; only PDF page labels.
+            assertNull(node(window, "guide-tab-1"))
+            assertNull(node(window, "guide-tab-2"))
+            val renderedTexts = edt {
+                nodes(window).flatMap { it.config.getOrNull(SemanticsProperties.Text).orEmpty() }.map { it.text }
+            }
+            assertTrue("Expected PDF page label on one-page guide", renderedTexts.any { "PDF 第 2 页" in it })
+            assertTrue("Printed page must not be displayed in First-Cut", renderedTexts.none { "印刷第" in it || "印刷页码" in it })
+            System.getenv("COACH_GUIDE_SHOTS")?.let { dir ->
+                edt {
+                    window.renderImmediately()
+                    requireNotNull(collectSkiaLayers(window).first().screenshot()).use { bitmap ->
+                        org.jetbrains.skia.Image.makeFromBitmap(bitmap).use { image ->
+                            requireNotNull(image.encodeToData()).use { png ->
+                                Files.write(Files.createDirectories(Path.of(dir)).resolve("guide-${paper.name}.png"), png.bytes)
+                            }
+                        }
+                    }
+                }
+            }
+            click(window, "guide-source-2")
+            waitFor("jumped to exact PDF page 2 with no sentence highlight", window) {
+                val st = controller.state.value
+                st.screen == BookScreen.READER && st.page == 2 && st.pendingCourseJump == null
+            }
+            runBlocking { controller.back() }
+            waitFor("restored one-page guide after returning from PDF", window) { node(window, "guide-one-page") != null }
+            assertEquals(if (repair) 3 else 2, bridge.keys.size)
+            assertEquals(if (repair) 2 else 1, bridge.keys.distinct().size)
+            val diagLatest = library.directory.resolve("literature-diagnostics").resolve("latest.json")
+            assertTrue("Expected local diagnostic file", Files.isRegularFile(diagLatest))
+            val diagJson = Json.parseToJsonElement(Files.readString(diagLatest)).jsonObject
+            assertEquals("complete", diagJson["status"]?.jsonPrimitive?.content)
+            assertEquals(if (repair) 2 else 1, diagJson["calls"]?.jsonPrimitive?.int)
+        } finally {
+            bridge.close()
+            edt { window.dispose() }
             root.toFile().deleteRecursively()
         }
     }

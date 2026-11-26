@@ -148,6 +148,7 @@ internal fun LibraryHome(
     val booklists = remember(activeCollections) { activeCollections.filter { it.record.kind == CollectionKind.BOOKLIST } }
     val standaloneBooks = remember(ui.catalog) { ui.catalog.filter { it.showStandalone } }
     val isEmpty = ui.catalog.isEmpty() && activeCollections.isEmpty()
+    var libraryOpen by remember { mutableStateOf(false) }
 
     BoxWithConstraints(
         Modifier.fillMaxSize().padding(
@@ -164,7 +165,16 @@ internal fun LibraryHome(
                 .fillMaxHeight()
                 .testTag("shelf-sheet"),
         ) {
-            if (isEmpty) {
+            if (libraryOpen && library != null) {
+                MyLibraryScreen(
+                    library = library,
+                    onBack = { libraryOpen = false },
+                    onOpenBook = { id ->
+                        libraryOpen = false
+                        onOpenBook(id)
+                    },
+                )
+            } else if (isEmpty) {
                 // 空态首页：居中单栏，唯一主钮「导入文件」+ 3 张可点引导卡（加顶栏 ＋ / 设置，共 6 个零死路入口）。
                 Box(Modifier.fillMaxSize(), contentAlignment = if (showToday) Alignment.TopCenter else Alignment.Center) {
                     Column(
@@ -458,6 +468,21 @@ internal fun LibraryHome(
                 }
 
                 val collectionsAndReadingBlock: @Composable () -> Unit = {
+                    if (library != null && ui.catalog.isNotEmpty()) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "批注、问答和错题",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = colors.fgSecondary,
+                                modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                            )
+                            V7TextButton(
+                                onClick = { libraryOpen = true },
+                                modifier = Modifier.testTag("open-my-library"),
+                                ringInside = true,
+                            ) { Text("我的库") }
+                        }
+                    }
                     // 3. 课程卡片组
                     if (courses.isNotEmpty()) {
                         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s2)) {

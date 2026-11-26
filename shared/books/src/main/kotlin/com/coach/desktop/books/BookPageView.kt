@@ -532,17 +532,28 @@ internal fun BookPageView(
             val inset = if (isLast) rightInset + with(density) { extraPx.toDp() } else leftInset
             val rendered = remember(page) { mutableMapOf<Int, TextLayoutResult>() }
             val scale = sheetWidthPx.toFloat() / (sheetWidthPx + extraPx)
+            // A second click on the same spot selects the word. One click still clears.
+            val lastPlainClick = remember { PlainClickMemory() }
             val sheetSpot = rememberUpdatedState { g: ReadingPointerGesture ->
                 state.anchor = spotAnchor(pages, index, spread, side, g.down, g.up, g.dragged,
                     sheetWidthPx.toFloat(), measurer, typography, widthPx, ::sheetScale) ?: state.anchor
                 val cb = latestOnSelectText ?: return@rememberUpdatedState
+                val local = if (extraPx == 0) g else g.copy(down = g.down / scale, up = g.up / scale)
+                val insetPx = with(density) { inset.toPx() }
+                val topPx = if (page?.opener == true) openerTopMarginPx else topMarginPx
                 when {
-                    g.longPressed || (!g.isTouch && g.dragged) -> {
-                        val local = if (extraPx == 0) g else g.copy(down = g.down / scale, up = g.up / scale)
-                        cb(page?.selectionForGesture(book, local, with(density) { inset.toPx() },
-                            if (page.opener) openerTopMarginPx else topMarginPx, rendered))
+                    g.longPressed || (!g.isTouch && g.dragged) ->
+                        cb(page?.selectionForGesture(book, local, insetPx, topPx, rendered))
+                    !g.dragged -> {
+                        val now = System.currentTimeMillis()
+                        val second = now - lastPlainClick.at in 40..800 &&
+                            (local.down - Offset(lastPlainClick.x, lastPlainClick.y)).getDistance() < 24f
+                        lastPlainClick.at = now
+                        lastPlainClick.x = local.down.x
+                        lastPlainClick.y = local.down.y
+                        if (second) cb(page?.selectionAt(book, local.down, insetPx, topPx, rendered))
+                        else cb(null)
                     }
-                    !g.dragged -> cb(null)
                 }
             }
             Box(sheetModifier.background(paper).clipToBounds().readingSpot(sheetSpot, ignoreDown)
@@ -680,6 +691,8 @@ private fun BookPageViewport(
         }
     }
 }
+
+private class PlainClickMemory(var at: Long = 0L, var x: Float = 0f, var y: Float = 0f)
 
 private data class ReadingPointerGesture(
     val down: Offset,

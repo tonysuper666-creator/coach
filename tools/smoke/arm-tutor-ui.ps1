@@ -917,19 +917,56 @@ function Test-BlockAndCitation {
     Write-Output 'STEP4 explain visible'
 }
 
+function Get-LineCenterY($line) {
+    $sum = 0.0
+    $n = 0
+    foreach ($w in @($line.Words)) {
+        $rect = $w.BoundingRect
+        if (-not $rect) { continue }
+        $sum += [double]$rect.Y + ([double]$rect.Height / 2)
+        $n++
+    }
+    if ($n -eq 0) { return $null }
+    return [int]($sum / $n)
+}
+
 function Find-AnswerCite($lines, [int]$answerY) {
+    # chi_sim splits one citation chip. Run 45844270111 read 「出处1」 on its own
+    # line and 「第2页 · 第6段」 on the next, so a page read from the 出处 line
+    # alone is empty. The page still has to be 第N页 on that chip. A bare index
+    # after 出处 is not a page, and a page from another control does not count.
+    $rows = @($lines)
     $best = $null
-    foreach ($line in @($lines)) {
+    for ($i = 0; $i -lt $rows.Count; $i++) {
+        $line = $rows[$i]
         $compact = ($line.Text -replace '\s', '')
         if ($compact -notmatch '出处') { continue }
         $hit = Find-Text @($line) '出处'
         if (-not $hit) { continue }
-        $page = Get-CitePageNumber $line.Text
+        $joined = [string]$line.Text
+        $page = Get-CitePageNumber $joined
+        if (-not $page) {
+            $originY = Get-LineCenterY $line
+            if (-not $originY) { $originY = $hit.Y }
+            $cursorY = $originY
+            $last = [Math]::Min($i + 3, $rows.Count - 1)
+            for ($j = $i + 1; $j -le $last; $j++) {
+                $nextY = Get-LineCenterY $rows[$j]
+                if ($nextY -and ($nextY -lt ($cursorY - 6) -or ($nextY - $originY) -gt 72)) { break }
+                $piece = ($rows[$j].Text -replace '\s', '')
+                if ($piece -match '先输入问题|问这句|本节|已读书目|读书目|讲解|提问|批注|发送') { break }
+                if ($piece -notmatch '第|段|概率|“|”') { break }
+                $joined = $joined + $rows[$j].Text
+                $page = Get-CitePageNumber $joined
+                if ($nextY) { $cursorY = $nextY }
+                if ($page) { break }
+            }
+        }
         $score = 0
         if ($page) { $score += 10 }
         if ($hit.Y -ge ($answerY - 8)) { $score += 5 }
         if (-not $best -or $score -gt $best.Score -or ($score -eq $best.Score -and $hit.Y -gt $best.Hit.Y)) {
-            $best = [pscustomobject]@{ Hit = $hit; Page = $page; Text = $line.Text; Score = $score }
+            $best = [pscustomobject]@{ Hit = $hit; Page = $page; Text = $joined; Score = $score }
         }
     }
     return $best
@@ -1231,7 +1268,28 @@ function Test-Practice {
     }
     if (-not $tab) { throw '伴读里没有读前自测' }
     Click-At $tab.X $tab.Y | Out-Null
-    $stem = Wait-TutorText '06-question' @('Whichmethod', 'checksrecall') 30 -2
+    # The lesson step wheels this short sheet downward. The pretest then opens
+    # mid-card: the options are painted and 「Which method checks recall?」 sits
+    # just above them. Wheel back up until that stem is on screen, and stop at
+    # the module top so another wheel cannot push the stem off. The options
+    # alone are not this question.
+    $stem = $null
+    $deadline = (Get-Date).AddSeconds(30)
+    $scrolls = 0
+    do {
+        $frame = @(Read-TutorFrame '06-question')
+        foreach ($label in @('Whichmethod', 'checksrecall')) {
+            $stem = Find-Text $frame $label
+            if ($stem) { break }
+        }
+        if ($stem) { break }
+        $atTop = (Find-Text $frame '先猜一猜') -or (Find-Text $frame '不计错题') -or (Find-Text $frame '第1/')
+        if (-not $atTop -and $scrolls -lt 6) {
+            Scroll-TutorView 1
+            $scrolls++
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
     if (-not $stem) {
         $fail = Find-Text @(Read-TutorFrame '06-question-fail') '连不上'
         if ($fail) { throw '读前自测连不上（见 06-question）' }

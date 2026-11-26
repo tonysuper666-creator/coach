@@ -381,5 +381,27 @@ internal fun loadStoredBookNotes(
             }
         }
     }
-    return assembleBookNotesPage(bookId, title, notes, questions, mistakes, lessonFirstPages, toc)
+    val page = assembleBookNotesPage(bookId, title, notes, questions, mistakes, lessonFirstPages, toc)
+    if (!BookSchemaMigration.tableExists(db, "learning_draft_versions")) return page
+    val recovered = db.prepareStatement("""SELECT parent,generation,writer,slot,source,page,location,text
+        FROM learning_draft_versions WHERE book=? ORDER BY writer,parent,generation,slot""").use { q ->
+        q.setString(1,bookId)
+        q.executeQuery().use { r ->
+            buildList {
+                while (r.next()) {
+                    val label = when (r.getString("source")) {
+                        "ask_draft" -> "找回的提问草稿"
+                        "answer" -> "找回的作答草稿"
+                        else -> "找回的练习草稿"
+                    }
+                    val number = r.getInt("page").takeIf { it > 0 } ?:
+                        sourcePageForLesson(r.getString("location"),lessonFirstPages,toc)
+                    val id = listOf("draft",r.getString("parent"),r.getString("generation"),
+                        r.getString("writer"),r.getString("slot")).joinToString("/")
+                    add(BookNoteEntry(id, BookNoteKind.QUESTION, number, listOf(label to r.getString("text"))))
+                }
+            }
+        }
+    }
+    return page.copy(questions = page.questions + recovered)
 }

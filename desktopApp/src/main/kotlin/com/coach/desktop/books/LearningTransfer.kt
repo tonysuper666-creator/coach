@@ -1,6 +1,7 @@
 package com.coach.desktop.books
 
 import com.coach.protocol.learning.LearningTable
+import com.coach.protocol.learning.draftVersion
 import com.coach.protocol.learning.learningTables
 
 import kotlinx.serialization.json.*
@@ -18,7 +19,7 @@ internal interface LearningRemote {
 
 /** Upload queued Windows learning records and commit incoming pages with the source database's cursor. */
 internal class LearningTransfer(private val path: Path, private val exam: Boolean) {
-    private val sources = learningTables.filter { it.exam == exam }.associateBy { it.kind }
+    private val sources = (learningTables + draftVersion).filter { it.exam == exam }.associateBy { it.kind }
 
     private fun <T> write(body: (Connection) -> T): T =
         DriverManager.getConnection("jdbc:sqlite:$path").use { db ->

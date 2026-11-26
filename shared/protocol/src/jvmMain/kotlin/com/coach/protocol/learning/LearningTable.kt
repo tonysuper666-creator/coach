@@ -125,4 +125,6 @@ val learningTables = listOf(
         "book paper_id paper_json paper_hash"),
     LearningTable("local_exam_attempts", "exam_attempt", "id",
         "id owner book paper_id paper_json paper_hash started_at answers_json answers_seq submitted_at result_json timing duration_minutes deadline auto_submitted"),
+    LearningTable("exam_daily_state", "exam_daily", "course_id",
+        "course_id daily_minutes pins_json updated_at"),
 )

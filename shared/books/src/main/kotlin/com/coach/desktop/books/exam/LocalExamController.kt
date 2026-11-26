@@ -259,6 +259,41 @@ internal class LocalExamController(
         }
     }
 
+    suspend fun startFromQuestionBank(detail: CourseDetailSnapshot): Boolean {
+        if (!flush()) return false
+        return actions.withLock {
+            mutable.update {
+                it.copy(
+                    busy = true,
+                    generatingCourseMock = true,
+                    courseGenerationFailed = false,
+                    error = null,
+                    gradingError = null,
+                )
+            }
+            try {
+                withContext(Dispatchers.IO) {
+                    val scopeKey = courseMockScopeId(detail.courseId)
+                    val assembled = library.withCourseDatabase { db -> ExamBankMock.assemble(db, detail) }
+                    if (assembled.items.isEmpty()) error("题库里还没有能组卷的题。")
+                    val paper = LocalExamPaper(ExamBankMock.toPaper(scopeKey, detail, assembled))
+                    store.register(paper)
+                    val duration = detail.examProfile.durationMinutes.coerceIn(15, 240)
+                    val opened = store.start(scopeKey, paper.id, duration)
+                    refreshCourse(detail.courseId, detail.title, opened.str("mockId"))
+                }
+                true
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (failure: Exception) {
+                mutable.update { it.copy(error = failure.message ?: "题库里还没有能组卷的题。") }
+                false
+            } finally {
+                mutable.update { it.copy(busy = false, generatingCourseMock = false) }
+            }
+        }
+    }
+
     private fun buildCourseMockRequest(detail: CourseDetailSnapshot): JsonObject {
         val gapByTopic = detail.countdownPlan?.rankedTopics?.associateBy { it.topicId }.orEmpty()
         val bookCache = LinkedHashMap<String, Textbook>()

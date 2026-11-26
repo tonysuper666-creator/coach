@@ -272,7 +272,7 @@ internal class LearningSyncStore(private val accounts: Path, private val backup:
                             before: JsonObject?, after: JsonObject, previousWriter: String, writer: String): JsonObject {
         // Keep coupled coordinates, frozen papers and derived states internally consistent.
         val groups = when (kind) {
-            "card","mastery","read_spot","exam_paper","exam_attempt","ask_turn","review_event","evidence" -> listOf(after.keys)
+            "card","mastery","read_spot","exam_paper","exam_attempt","ask_turn","review_event","evidence","exam_daily" -> listOf(after.keys)
             else -> after.keys.map { setOf(it) }
         }
         val stamps = db.prepareStatement("SELECT field,writer FROM sync_field_writers WHERE kind=? AND id=? AND round=?").use { q ->

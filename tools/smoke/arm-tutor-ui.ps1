@@ -729,8 +729,24 @@ function Hover-TutorEdge([int]$windowY) {
     }
 }
 
+# The app keeps COACH_LIBRARY_DIR as the legacy root and writes the open book under
+# its sibling "<name>-learning-profiles/<session>/library.sqlite".
+function Resolve-InstalledLibrary([string]$Configured) {
+    $dir = Split-Path -Parent $Configured
+    $profiles = Join-Path (Split-Path -Parent $dir) ((Split-Path -Leaf $dir) + '-learning-profiles')
+    $hits = @()
+    if (Test-Path -LiteralPath $profiles) {
+        $hits = @(Get-ChildItem -LiteralPath $profiles -Filter library.sqlite -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Directory.Name -like 'local-*' })
+    }
+    if ($hits.Count -ge 1) {
+        return ($hits | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+    }
+    return $Configured
+}
+
 function Get-PersistedReaderPage {
-    $db = Join-Path $env:COACH_LIBRARY_DIR 'library.sqlite'
+    $db = Resolve-InstalledLibrary (Join-Path $env:COACH_LIBRARY_DIR 'library.sqlite')
     $py = Join-Path $OutDir 'read-page.py'
     if (-not (Test-Path -LiteralPath $py)) {
         Set-Content -LiteralPath $py -Encoding ASCII -Value "import sqlite3, sys`nrow = sqlite3.connect(sys.argv[1]).execute('select reading_page from books').fetchone()`nprint('' if row is None else row[0])`n"

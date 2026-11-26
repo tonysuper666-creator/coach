@@ -276,11 +276,17 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
             Click-CapturedControl 'empty-shelf-upload.png' 'installed-window-printwindow.png'
         }
         Submit-ScanFile $upload
-        $db = Join-Path $env:COACH_LIBRARY_DIR 'library.sqlite'
+        $configured = Join-Path $env:COACH_LIBRARY_DIR 'library.sqlite'
         $deadline = (Get-Date).AddSeconds(300)
         $recognized = $false
+        $announced = $false
         do {
             Start-Sleep -Seconds 3
+            $db = Resolve-InstalledLibrary $configured
+            if (-not $announced -and (Test-Path -LiteralPath $db)) {
+                Write-Output "LIBRARY $db"
+                $announced = $true
+            }
             & python (Join-Path $PSScriptRoot 'prism-ocr-check.py') $db $Fixture
             if ($LASTEXITCODE -eq 0) { $recognized = $true; break }
         } while ((Get-Date) -lt $deadline)
@@ -310,13 +316,22 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
             Write-Output 'INSTALLED_FRIEND_PATH_PASS 7/7 (runner loopback tutor)'
         }
     } finally {
+        $stopped = @{}
+        foreach ($proc in @($tutor, $window, $app)) {
+            if (-not $proc -or $stopped.ContainsKey([string]$proc.Id)) { continue }
+            $stopped[[string]$proc.Id] = $true
+            try {
+                if (-not $proc.HasExited) {
+                    $proc.Kill()
+                    [void]$proc.WaitForExit(5000)
+                }
+            } catch {
+                Write-Output "KILL pid=$($proc.Id) $($_.Exception.Message)"
+            }
+        }
         if ($tutor) {
-            if (-not $tutor.HasExited) { $tutor.Kill(); $tutor.WaitForExit() }
             $tutor.Dispose()
             Remove-Item -LiteralPath (Join-Path $tutorPrivate 'token') -ErrorAction SilentlyContinue
-        }
-        foreach ($proc in @($window, $app)) {
-            if ($proc -and -not $proc.HasExited) { $proc.Kill(); $proc.WaitForExit() }
         }
     }
 }

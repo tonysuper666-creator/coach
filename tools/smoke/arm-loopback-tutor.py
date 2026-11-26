@@ -17,6 +17,30 @@ def squash(value):
     return re.sub(r"\s+", " ", value).strip()
 
 
+def reader_database(configured: Path, digest: str) -> str:
+    """Open the library the app actually wrote.
+
+    COACH_LIBRARY_DIR stays the legacy root. A signed-in session stores the book in the
+    sibling "<name>-learning-profiles/<session>/library.sqlite", which does not exist yet
+    when this tutor process starts.
+    """
+    parent = configured.parent
+    profiles = parent.parent / f"{parent.name}-learning-profiles"
+    candidates = []
+    if profiles.is_dir():
+        candidates.extend(path for path in profiles.glob("*/library.sqlite") if path.is_file())
+    if configured.is_file():
+        candidates.append(configured)
+    for path in candidates:
+        try:
+            with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)) as db:
+                if db.execute("select 1 from books where id=?", (digest,)).fetchone():
+                    return f"{path.resolve().as_uri()}?mode=ro"
+        except sqlite3.Error:
+            continue
+    return f"{configured.resolve().as_uri()}?mode=ro"
+
+
 class Tutor(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -39,7 +63,7 @@ class Tutor(BaseHTTPRequestHandler):
         if not matched:
             raise ValueError("unexpected book")
         page, offset = map(int, matched.groups())
-        with closing(sqlite3.connect(self.server.database, uri=True)) as db:
+        with closing(sqlite3.connect(reader_database(self.server.library, self.server.digest), uri=True)) as db:
             row = db.execute("SELECT text FROM pages WHERE book=? AND page=? AND ocr=1",
                              (self.server.digest, page)).fetchone()
         if not row or not row[0].startswith(block["text"], offset):
@@ -186,7 +210,7 @@ if __name__ == "__main__":
     with ThreadingHTTPServer(("127.0.0.1", 0), Tutor) as server:
         digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
         server.digest = digest
-        server.database = database.resolve().as_uri() + "?mode=ro"
+        server.library = database.resolve()
         server.block = re.compile(digest + r":p([1-3]):([0-9]+)")
         server.token = secrets.token_hex(24)
         server.events = events

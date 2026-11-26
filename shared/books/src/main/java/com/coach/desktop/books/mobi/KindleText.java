@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CodingErrorAction;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.List;
@@ -16,6 +17,11 @@ public final class KindleText {
     private static final int MAX_TEXT = 32 * 1024 * 1024;
 
     public record Book(String title, List<String> documents, Map<Integer, byte[]> images) { }
+
+    /** Inspect the same first MOBI header the decoder uses without loading the whole book. */
+    public static boolean isKf8(Path path) throws IOException {
+        return MobiHeader.isKf8(path);
+    }
 
     public static Book read(byte[] bytes) throws IOException {
         PalmDatabase pdb = PalmDatabase.read(bytes);

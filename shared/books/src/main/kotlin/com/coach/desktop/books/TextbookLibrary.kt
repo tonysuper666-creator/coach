@@ -97,6 +97,7 @@ internal class TextbookLibrary(
             },
         )
         database().use(::installLibraryRecordTimes)
+        database().use(::ensurePageProblems)
     }
     private fun database(): Connection = DriverManager.getConnection("jdbc:sqlite:${directory.resolve("library.sqlite")}").apply {
         createStatement().use { it.execute("PRAGMA busy_timeout=5000") }
@@ -268,6 +269,7 @@ internal class TextbookLibrary(
                     if (pages.any { it.number == storedPage }) storedPage else pages.first().number,
                     lessonIdx, learning, promptSeen, questionMode, structure,
                     indexState = indexStateCol, correctedBodyPage = correctedBodyPage,
+                    damagedPages = damagedPageNumbers(db, id),
                 ).also { createdBook = it }
             }
         }
@@ -988,8 +990,8 @@ internal class TextbookLibrary(
 
     internal data class StagedBookImport(val book: Textbook, val alreadyExisted: Boolean)
 
-    fun importBook(source: Path, control: BookImportControl = BookImportControl()): Textbook {
-        val staged = stageBookImport(source, control)
+    fun importBook(source: Path, control: BookImportControl = BookImportControl(), password: String? = null): Textbook {
+        val staged = stageBookImport(source, control, password)
         if (!staged.book.hasPendingOcr) return staged.book
         return try {
             resumeBookOcr(staged.book.id, control)
@@ -1049,7 +1051,11 @@ internal class TextbookLibrary(
         return saveStagedBook(stage, id, format, extracted, nativeSources, control, source.fileName?.toString(), fileBytes)
     }
 
-    fun stageBookImport(source: Path, control: BookImportControl = BookImportControl()): StagedBookImport {
+    fun stageBookImport(
+        source: Path,
+        control: BookImportControl = BookImportControl(),
+        password: String? = null,
+    ): StagedBookImport {
         control.report(0, 0)
         require(Files.isRegularFile(source)) { "请选择一份教材文件，文件夹不能直接导入。" }
         require(Files.size(source) > 0) { "这份教材是空文件，请重新保存或下载后再导入。" }
@@ -1057,6 +1063,7 @@ internal class TextbookLibrary(
         val stage = directory.resolve(".import-${UUID.randomUUID()}")
         try {
             val (id, fileBytes) = stageCopyAndHash(source, control, stage)
+            maybeUnlockStagedPdf(stage, password)
             if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
             val format = BookFormats.detect(stage, source.fileName.toString())
             return stagePreparedNonTier0(source, stage, id, format, fileBytes, control)
@@ -1075,7 +1082,11 @@ internal class TextbookLibrary(
     internal fun initialBodyPage(pages: List<BookPage>, structure: BookStructure?): Int =
         BookBoundaries.bodyStart(pages, structure).importPage
 
-    fun stageBookImportTier0(source: Path, control: BookImportControl = BookImportControl()): StagedBookImport {
+    fun stageBookImportTier0(
+        source: Path,
+        control: BookImportControl = BookImportControl(),
+        password: String? = null,
+    ): StagedBookImport {
         control.report(0, 0)
         require(Files.isRegularFile(source)) { "请选择一份教材文件，文件夹不能直接导入。" }
         require(Files.size(source) > 0) { "这份教材是空文件，请重新保存或下载后再导入。" }
@@ -1083,6 +1094,7 @@ internal class TextbookLibrary(
         val stage = directory.resolve(".import-${UUID.randomUUID()}")
         try {
             val (id, fileBytes) = stageCopyAndHash(source, control, stage)
+            maybeUnlockStagedPdf(stage, password)
             if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
             val format = BookFormats.detect(stage, source.fileName.toString())
             if (format != "pdf" || extractBook != null) {
@@ -1107,7 +1119,14 @@ internal class TextbookLibrary(
                         val extractedMap = LinkedHashMap<Int, BookPage>()
                         fun extractPage(pageNum: Int): BookPage = extractedMap.getOrPut(pageNum) {
                             control.check()
-                            BookPage(pageNum, plainExtractor.extractPage(pdf, pageNum))
+                            try {
+                                BookPage(pageNum, plainExtractor.extractPage(pdf, pageNum))
+                            } catch (c: java.util.concurrent.CancellationException) {
+                                throw c
+                            } catch (_: Exception) {
+                                // A broken page must not reject the file. Tier 1 records it and continues.
+                                BookPage(pageNum, "")
+                            }
                         }
                         val tier0End = minOf(3, totalPages)
                         for (pageNum in 1..tier0End) extractPage(pageNum)
@@ -1196,13 +1215,13 @@ internal class TextbookLibrary(
                     },
                 )
             } catch (e: BookPdfPasswordException) {
-                throw IllegalArgumentException("这本 PDF 有密码保护，请取消密码后再导入。", e)
+                throw BookImportMessages.pdfOpenFailure(stage, e, passwordAttempted = !password.isNullOrEmpty())
             } catch (e: java.util.concurrent.CancellationException) {
                 throw e
             } catch (e: IllegalArgumentException) {
                 throw e
             } catch (e: Exception) {
-                if (!payloadReady) throw IllegalArgumentException("这份教材不完整或已损坏，请重新保存或下载后再导入。", e)
+                if (!payloadReady) throw BookImportMessages.pdfOpenFailure(stage, e, passwordAttempted = !password.isNullOrEmpty())
                 else throw e
             }
         } finally { Files.deleteIfExists(stage) }
@@ -1270,6 +1289,196 @@ internal class TextbookLibrary(
         }
     }
 
+    private data class Tier1Read(val page: BookPage, val lines: List<PageLineTypography>?, val damaged: Boolean)
+
+    private fun readTier1Page(
+        pdf: BookPdfDocument,
+        pageNum: Int,
+        existing: BookPage?,
+        preserveExisting: Boolean,
+        plainExtractor: ReusablePlainPdfTextExtractor?,
+    ): Tier1Read = try {
+        val (page, lines) = extractTier1Page(pdf, pageNum, existing, preserveExisting, plainExtractor)
+        Tier1Read(page, lines, damaged = false)
+    } catch (c: java.util.concurrent.CancellationException) {
+        throw c
+    } catch (_: Exception) {
+        Tier1Read(
+            BookPage(pageNum, "", illustrations = existing?.illustrations.orEmpty(), ocrPending = false),
+            null,
+            damaged = true,
+        )
+    }
+
+    private fun tier1UsesCheckpoint(pageCount: Int, bytes: Long) =
+        pageCount >= 200 || bytes > 32L * 1024 * 1024
+
+    private fun ensurePageProblems(db: Connection) {
+        db.createStatement().use { statement ->
+            statement.execute(
+                """CREATE TABLE IF NOT EXISTS book_page_problems(
+                    book TEXT NOT NULL, page INTEGER NOT NULL, message TEXT NOT NULL,
+                    PRIMARY KEY(book, page))""",
+            )
+        }
+    }
+
+    private fun damagedPageNumbers(db: Connection, bookId: String): List<Int> {
+        if (!BookSchemaMigration.tableExists(db, "book_page_problems")) return emptyList()
+        return db.prepareStatement("SELECT page FROM book_page_problems WHERE book=? ORDER BY page").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.getInt(1)) } }
+        }
+    }
+
+    private fun maybeUnlockStagedPdf(stage: Path, password: String?) {
+        if (password.isNullOrEmpty()) return
+        try {
+            unlockBookPdf(stage.toFile(), password)
+        } catch (e: BookPdfPasswordException) {
+            throw IllegalArgumentException(BookImportMessages.WRONG_PASSWORD, e)
+        } catch (e: Exception) {
+            val passwordRejected = e.cause is BookPdfPasswordException
+            if (passwordRejected) throw IllegalArgumentException(BookImportMessages.WRONG_PASSWORD, e)
+            throw BookImportMessages.pdfOpenFailure(stage, e, passwordAttempted = true)
+        }
+    }
+
+    private fun rememberPageProblems(db: Connection, bookId: String, problems: Map<Int, String>) {
+        if (problems.isEmpty()) return
+        ensurePageProblems(db)
+        db.prepareStatement(
+            """INSERT INTO book_page_problems(book,page,message) VALUES(?,?,?)
+               ON CONFLICT(book,page) DO UPDATE SET message=excluded.message""",
+        ).use { sql ->
+            for ((page, message) in problems) {
+                sql.setString(1, bookId)
+                sql.setInt(2, page)
+                sql.setString(3, message)
+                sql.addBatch()
+            }
+            sql.executeBatch()
+        }
+    }
+
+    private fun checkpointPages(bookId: String, pages: List<BookPage>, problems: Map<Int, String>) {
+        if (pages.isEmpty() && problems.isEmpty()) return
+        database().use { db ->
+            ensurePageProblems(db)
+            db.autoCommit = false
+            try {
+                db.prepareStatement(
+                    """INSERT INTO pages(book,page,text,ocr,ocr_pending,text_pending) VALUES(?,?,?,?,?,0)
+                       ON CONFLICT(book,page) DO UPDATE SET
+                       text=CASE WHEN pages.ocr=1 THEN pages.text ELSE excluded.text END,
+                       ocr_pending=CASE WHEN pages.ocr=1 THEN 0 ELSE excluded.ocr_pending END,
+                       text_pending=0""".trimIndent(),
+                ).use { sql ->
+                    for (page in pages) {
+                        sql.setString(1, bookId)
+                        sql.setInt(2, page.number)
+                        sql.setString(3, page.text)
+                        sql.setInt(4, if (page.ocr) 1 else 0)
+                        sql.setInt(5, if (page.ocrPending) 1 else 0)
+                        sql.addBatch()
+                    }
+                    sql.executeBatch()
+                }
+                rememberPageProblems(db, bookId, problems)
+                db.commit()
+            } catch (error: Throwable) {
+                db.rollback()
+                throw error
+            }
+        }
+    }
+
+    /**
+     * Large PDFs commit every 25 pending pages. A closed app reopens from that batch.
+     * Blank Tier 0 pages stay pending so scans can still be recognized; recorded problems do not.
+     */
+    private fun checkpointTier1Pages(
+        bookId: String,
+        file: java.io.File,
+        total: Int,
+        existingByPage: Map<Int, BookPage>,
+        needTypography: Boolean,
+        control: BookImportControl,
+        onProgress: (Int, Int) -> Unit,
+        typographyLines: MutableMap<Int, List<PageLineTypography>>,
+        damaged: MutableMap<Int, String>,
+    ): List<BookPage> {
+        data class Row(val text: String, val ocr: Boolean, val ocrPending: Boolean, val textPending: Boolean)
+        val rows = HashMap<Int, Row>()
+        val problems = HashSet<Int>()
+        database().use { db ->
+            ensurePageProblems(db)
+            db.prepareStatement("SELECT page, text, ocr, ocr_pending, text_pending FROM pages WHERE book=?").use { sql ->
+                sql.setString(1, bookId)
+                sql.executeQuery().use { rs ->
+                    while (rs.next()) {
+                        rows[rs.getInt(1)] = Row(
+                            rs.getString(2).orEmpty(),
+                            rs.getInt(3) != 0,
+                            rs.getInt(4) != 0,
+                            rs.getInt(5) != 0,
+                        )
+                    }
+                }
+            }
+            db.prepareStatement("SELECT page FROM book_page_problems WHERE book=?").use { sql ->
+                sql.setString(1, bookId)
+                sql.executeQuery().use { rs -> while (rs.next()) problems += rs.getInt(1) }
+            }
+        }
+        val pending = ArrayList<Int>()
+        var alreadyDone = 0
+        for (number in 1..total) {
+            val row = rows[number]
+            val needsWork = row == null || row.textPending ||
+                (row.text.isBlank() && !row.ocr && !row.ocrPending && number !in problems)
+            if (needsWork) pending += number else alreadyDone++
+        }
+        if (alreadyDone > 0) onProgress(alreadyDone, total)
+        val result = arrayOfNulls<BookPage>(total)
+        for (number in 1..total) {
+            if (number in pending) continue
+            val row = rows[number]
+            result[number - 1] = existingByPage[number] ?: BookPage(
+                number,
+                row?.text.orEmpty(),
+                ocr = row?.ocr == true,
+                ocrPending = row?.ocrPending == true,
+            )
+        }
+        var completed = alreadyDone
+        val pageProblem = "这一页读不出来"
+        for (batch in pending.chunked(25)) {
+            control.check()
+            val extracted = ArrayList<BookPage>(batch.size)
+            val batchDamaged = LinkedHashMap<Int, String>()
+            BookPdfLoader.readLarge(file) { pdf ->
+                val plainExtractor = if (!needTypography) ReusablePlainPdfTextExtractor() else null
+                for (pageNum in batch) {
+                    control.check()
+                    val read = readTier1Page(pdf, pageNum, existingByPage[pageNum], preserveExisting = false, plainExtractor)
+                    extracted += read.page
+                    if (read.lines != null) typographyLines[pageNum] = read.lines
+                    if (read.damaged) {
+                        batchDamaged[pageNum] = pageProblem
+                        damaged[pageNum] = pageProblem
+                    }
+                    completed++
+                    onProgress(completed, total)
+                }
+            }
+            control.check()
+            checkpointPages(bookId, extracted, batchDamaged)
+            for (page in extracted) result[page.number - 1] = page
+        }
+        return List(total) { index -> result[index] ?: BookPage(index + 1, "", ocrPending = false) }
+    }
+
     /** Tier 1 background full-text, typography, Stage A/B/C TOC, and FTS5 indexing without holding `@Synchronized`. */
     fun indexBookTier1(
         bookId: String,
@@ -1300,6 +1509,7 @@ internal class TextbookLibrary(
         val preserveExistingPages = isLegacyTocRebuild && (1..initialCount).all { p -> existingByPage[p] != null }
         val indexedPages = ArrayList<BookPage>(initialCount)
         val typographyLines = LinkedHashMap<Int, List<PageLineTypography>>()
+        val damaged = LinkedHashMap<Int, String>()
 
         if (preserveExistingPages && !needTypography) {
             for (pageNum in 1..initialCount) {
@@ -1307,6 +1517,10 @@ internal class TextbookLibrary(
                 indexedPages += existingByPage.getValue(pageNum)
             }
             onProgress(initialCount, initialCount)
+        } else if (tier1UsesCheckpoint(initialCount, file.length())) {
+            indexedPages += checkpointTier1Pages(
+                bookId, file, initialCount, existingByPage, needTypography, control, onProgress, typographyLines, damaged,
+            )
         } else {
             val workers = if (initialCount >= 40) bookPdfTier1Parallelism.coerceAtMost(initialCount) else 1
             if (workers > 1) {
@@ -1319,9 +1533,10 @@ internal class TextbookLibrary(
                 }
                 try {
                     val futures = slices.map { slice ->
-                        pool.submit(Callable<Pair<List<BookPage>, List<Pair<Int, List<PageLineTypography>>>>> {
+                        pool.submit(Callable<Triple<List<BookPage>, List<Pair<Int, List<PageLineTypography>>>, Map<Int, String>>> {
                             val localPages = ArrayList<BookPage>(slice.size)
                             val localTypo = ArrayList<Pair<Int, List<PageLineTypography>>>()
+                            val localDamaged = LinkedHashMap<Int, String>()
                             val doc = if (pdfBytes != null) BookPdfLoader.load(pdfBytes) else BookPdfLoader.load(file)
                             doc.use { pdf ->
                                 val plainExtractor = if (!needTypography) ReusablePlainPdfTextExtractor() else null
@@ -1330,26 +1545,25 @@ internal class TextbookLibrary(
                                     val existing = existingByPage[pageNum]
                                     val preserve = preserveExistingPages ||
                                         (isLegacyTocRebuild && existing != null && !existing.ocr && existing.text.isNotBlank())
-                                    val (page, lines) = extractTier1Page(pdf, pageNum, existing, preserve, plainExtractor)
-                                    localPages += page
-                                    if (lines != null) localTypo += pageNum to lines
-                                    val done = doneCount.incrementAndGet()
-                                    if (done % 10 == 0 || done == initialCount) {
-                                        onProgress(done, initialCount)
-                                    }
+                                    val read = readTier1Page(pdf, pageNum, existing, preserve, plainExtractor)
+                                    localPages += read.page
+                                    if (read.lines != null) localTypo += pageNum to read.lines
+                                    if (read.damaged) localDamaged[pageNum] = "这一页读不出来"
+                                    onProgress(doneCount.incrementAndGet(), initialCount)
                                 }
                             }
-                            localPages to localTypo
+                            Triple(localPages, localTypo, localDamaged)
                         })
                     }
                     for (f in futures) {
-                        val (pagesChunk, typoChunk) = try {
+                        val (pagesChunk, typoChunk, damagedChunk) = try {
                             f.get()
                         } catch (e: java.util.concurrent.ExecutionException) {
                             throw (e.cause ?: e)
                         }
                         indexedPages.addAll(pagesChunk)
                         for ((p, lines) in typoChunk) typographyLines[p] = lines
+                        damaged.putAll(damagedChunk)
                     }
                 } finally {
                     pool.shutdownNow()
@@ -1365,12 +1579,11 @@ internal class TextbookLibrary(
                             val existing = existingByPage[pageNum]
                             val preserve = preserveExistingPages ||
                                 (isLegacyTocRebuild && existing != null && !existing.ocr && existing.text.isNotBlank())
-                            val (page, lines) = extractTier1Page(pdf, pageNum, existing, preserve, plainExtractor)
-                            indexedPages += page
-                            if (lines != null) typographyLines[pageNum] = lines
-                            if (pageNum % 10 == 0 || pageNum == initialCount) {
-                                onProgress(pageNum, initialCount)
-                            }
+                            val read = readTier1Page(pdf, pageNum, existing, preserve, plainExtractor)
+                            indexedPages += read.page
+                            if (read.lines != null) typographyLines[pageNum] = read.lines
+                            if (read.damaged) damaged[pageNum] = "这一页读不出来"
+                            onProgress(pageNum, initialCount)
                         }
                     }
                 }
@@ -1410,6 +1623,7 @@ internal class TextbookLibrary(
                         }
                         sql.executeBatch()
                     }
+                    rememberPageProblems(db, bookId, damaged)
                 }
                 if (extractedAspects.isNotEmpty()) {
                     BookAspectStore.saveInTransaction(db, bookId, extractedAspects)
@@ -1954,7 +2168,27 @@ internal class TextbookLibrary(
                             )
                         }
                         val started = System.nanoTime()
-                        val recognized = recognizePdfPage(file, pdf, pageNumber, control)
+                        val recognized = try {
+                            recognizePdfPage(file, pdf, pageNumber, control)
+                        } catch (c: java.util.concurrent.CancellationException) {
+                            throw c
+                        } catch (_: Exception) {
+                            null
+                        }
+                        if (recognized == null) {
+                            markPageUnreadable(initial.id, pageNumber)
+                            completedInSession++
+                            onPageUpdated(book(initial.id), BookImportProgress(
+                                page = initialDone + completedInSession,
+                                total = totalPages,
+                                recognizing = true,
+                                bookId = initial.id,
+                                bookTitle = initial.title,
+                                completedOcr = completedInSession,
+                                totalOcr = pending.size,
+                            ))
+                            continue
+                        }
                         estimator.record(((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L))
                         control.check()
                         updateRecognizedPage(initial.id, pageNumber, recognized)
@@ -1982,6 +2216,27 @@ internal class TextbookLibrary(
             }
         }
         return book(initial.id)
+    }
+
+    @Synchronized private fun markPageUnreadable(bookId: String, pageNumber: Int) {
+        database().use { db ->
+            ensurePageProblems(db)
+            db.autoCommit = false
+            try {
+                db.prepareStatement(
+                    "UPDATE pages SET text='',ocr=0,ocr_pending=0,text_pending=0 WHERE book=? AND page=?",
+                ).use { sql ->
+                    sql.setString(1, bookId)
+                    sql.setInt(2, pageNumber)
+                    sql.executeUpdate()
+                }
+                rememberPageProblems(db, bookId, mapOf(pageNumber to "这一页读不出来"))
+                db.commit()
+            } catch (error: Exception) {
+                db.rollback()
+                throw error
+            }
+        }
     }
 
     @Synchronized fun updateRecognizedPage(bookId: String, pageNumber: Int, text: String) {
@@ -2038,7 +2293,7 @@ internal class TextbookLibrary(
                     "book_learning_paths", "book_ladders", "book_reader_views", "book_pdf_modes",
                     "book_highlights", "book_notes", "book_ask_drafts", "book_ask_turns", "answers", "book_reviews", "book_structures", "book_section_cache", "book_body_start",
                     "book_open_session", "book_toc_nodes", "book_study_chunks", "book_bookmarks",
-                    "book_page_aspects", "book_visual_pages",
+                    "book_page_aspects", "book_visual_pages", "book_page_problems",
                 )) {
                     val exists = db.createStatement().use { s -> s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='$table'").use { it.next() } }
                     if (exists) db.prepareStatement("DELETE FROM $table WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }
@@ -3425,13 +3680,14 @@ internal object TextbookExtraction {
         if (format == "pdf") pdf(path, title, ocr, control, stageOcrOnly = false, store = storePdfExtras)
         else extractContent(path, format, title, ocr, control, stageOcrOnly = false)
     } catch (e: BookPdfPasswordException) {
-        throw IllegalArgumentException("这本 PDF 有密码保护，请取消密码后再导入。", e)
+        throw BookImportMessages.pdfOpenFailure(path, e, passwordAttempted = false)
     } catch (e: java.util.concurrent.CancellationException) {
         throw e
     } catch (e: IllegalArgumentException) {
         throw e
     } catch (e: Exception) {
-        throw IllegalArgumentException("这份教材不完整或已损坏，请重新保存或下载后再导入。", e)
+        throw if (format == "pdf") BookImportMessages.pdfOpenFailure(path, e, passwordAttempted = false)
+        else IllegalArgumentException("这份教材不完整或已损坏，请重新保存或下载后再导入。", e)
     }
 
     fun extractForStaging(path: Path, format: String, title: String,
@@ -3441,13 +3697,14 @@ internal object TextbookExtraction {
         if (format == "pdf") pdf(path, title, BundledBookOcr, control, stageOcrOnly = true, store = storePdfExtras)
         else extractContent(path, format, title, BundledBookOcr, control, stageOcrOnly = true)
     } catch (e: BookPdfPasswordException) {
-        throw IllegalArgumentException("这本 PDF 有密码保护，请取消密码后再导入。", e)
+        throw BookImportMessages.pdfOpenFailure(path, e, passwordAttempted = false)
     } catch (e: java.util.concurrent.CancellationException) {
         throw e
     } catch (e: IllegalArgumentException) {
         throw e
     } catch (e: Exception) {
-        throw IllegalArgumentException("这份教材不完整或已损坏，请重新保存或下载后再导入。", e)
+        throw if (format == "pdf") BookImportMessages.pdfOpenFailure(path, e, passwordAttempted = false)
+        else IllegalArgumentException("这份教材不完整或已损坏，请重新保存或下载后再导入。", e)
     }
 
     private fun pdf(path: Path, title: String, ocr: BookOcr, control: BookImportControl,

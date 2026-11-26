@@ -239,7 +239,32 @@ internal object BookPdfLoader {
     }
 
     fun load(file: File): BookPdfDocument = Loader.loadPDF(file, mixedMemory)
+    fun load(file: File, password: String): BookPdfDocument = Loader.loadPDF(file, password, tempFileOnly)
     fun load(bytes: ByteArray): BookPdfDocument = Loader.loadPDF(bytes)
+
+    /** One document, spilled to disk. Used for 200+ page imports so the heap stays bounded. */
+    fun <T> readLarge(file: File, block: (BookPdfDocument) -> T): T =
+        Loader.loadPDF(file, tempFileOnly).use(block)
+}
+
+private val tempFileOnly = org.apache.pdfbox.io.MemoryUsageSetting.setupTempFileOnly().streamCache
+
+/** Rewrite [file] without its password. The password is not stored. */
+internal fun unlockBookPdf(file: File, password: String) {
+    val tmp = File(file.parentFile, "${file.name}.decrypted")
+    try {
+        Loader.loadPDF(file, password, tempFileOnly).use { doc ->
+            doc.isAllSecurityToBeRemoved = true
+            doc.save(tmp)
+        }
+        java.nio.file.Files.move(
+            tmp.toPath(),
+            file.toPath(),
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+        )
+    } finally {
+        if (tmp.exists()) runCatching { tmp.delete() }
+    }
 }
 
 internal fun newBookPdfRenderer(pdf: BookPdfDocument): BookPdfRenderer =

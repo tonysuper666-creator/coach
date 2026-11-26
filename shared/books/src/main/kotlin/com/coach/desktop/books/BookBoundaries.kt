@@ -4,6 +4,7 @@ package com.coach.desktop.books
 internal object BookBoundaries {
     private val gutenbergStartLine = Regex("""(?im)^\*{3}\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK\b[^\r\n]*$""")
     private val gutenbergEndLine = Regex("""(?im)^\*{3}\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK\b[^\r\n]*$""")
+    fun gutenbergEndOffset(page: String): Int? = gutenbergEndLine.find(page)?.range?.first
     private val gutenbergCreditLine = Regex(
         """(?i)^(?:Produced|Transcribed|Prepared|Scanned|Proofread)\s+by\b.*|^Online Distributed Proofreading\b.*|^Updated editions will replace\b.*""",
     )

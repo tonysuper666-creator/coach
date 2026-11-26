@@ -1008,8 +1008,10 @@ internal object BookTocWaterfall {
         var lastTitle: Int? = null
         var numberedChapterOwner: Int? = null
         for (page in pages) {
+            val endOfWork = BookBoundaries.gutenbergEndOffset(page.text)
+            val body = endOfWork?.let { page.text.substring(0, it) } ?: page.text
             val nestedHeadings = mutableSetOf<String>()
-            for (match in isolatedHanTitle.findAll(page.text)) {
+            for (match in isolatedHanTitle.findAll(body)) {
                 val group = match.groups[1] ?: continue
                 val title = group.value
                 if (title.all { it.code < 128 } || title in localNoteLabel) continue
@@ -1025,14 +1027,19 @@ internal object BookTocWaterfall {
                     }
                 } else {
                     val position = pageStart + group.range.first
-                    if (lastTitle != null && position - lastTitle < 400 || !titles.add(title)) return emptyList()
+                    if ((lastTitle != null && position - lastTitle < 400) || !titles.add(title)) return emptyList()
                     lastTitle = position
                 }
                 val kind = if (numbered) TocNodeKind.SECTION else TocNodeKind.CHAPTER
                 found += RawCandidate(title, if (numbered) 2 else 1, page.number, null,
                     HeadingSource.TEXT_LAYOUT, kind, group.range.first)
             }
-            if (BookText.explicitHeadings(page.text).any { it.value.trim() !in nestedHeadings }) return emptyList()
+            if (BookText.explicitHeadings(body).any { it.value.trim() !in nestedHeadings }) return emptyList()
+            if (endOfWork != null) {
+                found += RawCandidate("License", 1, page.number, null,
+                    HeadingSource.TEXT_LAYOUT, TocNodeKind.BACK_MATTER, endOfWork)
+                break
+            }
             pageStart += page.text.length
         }
         return if (titles.size >= 3) found else emptyList()

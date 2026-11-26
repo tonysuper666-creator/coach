@@ -14,12 +14,13 @@ class BookTocWaterfallTest {
         val pages = listOf(
             BookPage(1, "出版资料。"),
             BookPage(2, "引言。\n\n 渡口\n\n$prose\n\n 灯塔\n\n第一章潮声\n\n$prose\n\n注释\n\n$prose"),
-            BookPage(3, "沿岸的故事。\n\n 航线\n\n$prose"),
+            BookPage(3, "沿岸的故事。\n\n 航线\n\n$prose\n*** END OF THE PROJECT GUTENBERG EBOOK ***\nSection 1. License"),
         )
         val structure = BookStructurePlanner.plan(bookId, "短篇集", "txt", pages)
         val chapters = structure.tocNodes.filter { it.kind == TocNodeKind.CHAPTER }
         assertEquals(listOf("渡口", "灯塔", "航线"), chapters.map { it.title })
         assertEquals(chapters[1].id, structure.tocNodes.single { it.kind == TocNodeKind.SECTION }.parentId)
+        assertEquals(TocNodeKind.BACK_MATTER, structure.tocNodes.last().kind)
         assertEquals(BookPageAnchor(2, pages[1].text.indexOf("渡口")), BookBoundaries.bodyStart(pages, structure))
         for (node in chapters) {
             assertTrue(pages[node.startPage - 1].text.startsWith(node.title, node.startOffset))

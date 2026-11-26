@@ -226,6 +226,7 @@ class UnifiedBookPipeline internal constructor(
 
     private val initLock = Any()
     @Volatile private var initialized = false
+    private val accountLocks = ConcurrentHashMap<String, Mutex>()
     private val shaLocks = ConcurrentHashMap<String, Mutex>()
     private val quotaLock = Any()
     private val inFlightAccountBytes = HashMap<String, Long>()
@@ -234,6 +235,15 @@ class UnifiedBookPipeline internal constructor(
     private val workerStarted = AtomicBoolean(false)
     private val workerWake = Channel<Unit>(Channel.CONFLATED)
     @Volatile private var workerJob: Job? = null
+    @Volatile internal var accountDirDeleterForTest: ((Path) -> Boolean)? = null
+
+    /**
+     * Removes a friend account's private data and revokes its device credentials. Must throw when anything
+     * is left behind. Installed once via [installAccountDataFinalizer] so the HTTP route and the recovery
+     * job share it.
+     */
+    @Volatile internal var accountDataFinalizer: (suspend (friendName: String) -> Unit)? = null
+    @Volatile internal var beforeUploadCommitForTest: (suspend (UnifiedBookScope, String) -> Unit)? = null
 
     private fun ensureInitialized() {
         if (initialized) return
@@ -280,6 +290,16 @@ class UnifiedBookPipeline internal constructor(
                             sha256 TEXT NOT NULL,
                             created_at INTEGER NOT NULL,
                             PRIMARY KEY(scope_key, shelf_book_id)
+                        )""".trimIndent(),
+                    )
+                    sql.execute(
+                        """CREATE TABLE IF NOT EXISTS account_deletions(
+                            scope_key TEXT PRIMARY KEY,
+                            state TEXT NOT NULL CHECK(state IN ('DELETING','DELETED')),
+                            deletion_epoch INTEGER NOT NULL DEFAULT 1,
+                            friend_name TEXT,
+                            started_at INTEGER NOT NULL,
+                            updated_at INTEGER NOT NULL
                         )""".trimIndent(),
                     )
                     sql.execute(
@@ -450,7 +470,75 @@ class UnifiedBookPipeline internal constructor(
         }
     }
 
+    private fun accountLock(scopeKey: String): Mutex = accountLocks.computeIfAbsent(scopeKey) { Mutex() }
+
     private fun shaLock(sha256: String): Mutex = shaLocks.computeIfAbsent(sha256) { Mutex() }
+
+    private data class AccountDeletionRecord(val state: String, val epoch: Long)
+
+    private fun readAccountDeletion(db: Connection, scopeKey: String): AccountDeletionRecord? {
+        val hasTable = db.createStatement().use { s ->
+            s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_deletions'").use { it.next() }
+        }
+        if (!hasTable) return null
+        return db.prepareStatement(
+            "SELECT state, deletion_epoch FROM account_deletions WHERE scope_key=?",
+        ).use { sql ->
+            sql.setString(1, scopeKey)
+            sql.executeQuery().use { rs ->
+                if (rs.next()) AccountDeletionRecord(rs.getString(1), rs.getLong(2)) else null
+            }
+        }
+    }
+
+    private fun readAccountDeletionState(scopeKey: String): AccountDeletionRecord? {
+        if (!Files.isRegularFile(registryFile, LinkOption.NOFOLLOW_LINKS)) return null
+        return registryDb().use { db -> readAccountDeletion(db, scopeKey) }
+    }
+
+    private fun markAccountDeletingLocked(scopeKey: String, friendName: String? = null): Long {
+        ensureInitialized()
+        val now = config.clock()
+        return registryDb().use { db ->
+            db.autoCommit = false
+            try {
+                val existing = readAccountDeletion(db, scopeKey)
+                val nextEpoch = when {
+                    existing == null -> 1L
+                    existing.state == "DELETING" -> existing.epoch
+                    else -> existing.epoch + 1L
+                }
+                db.prepareStatement(
+                    """INSERT INTO account_deletions(scope_key, state, deletion_epoch, friend_name, started_at, updated_at)
+                       VALUES(?, 'DELETING', ?, ?, ?, ?)
+                       ON CONFLICT(scope_key) DO UPDATE SET
+                           state='DELETING',
+                           deletion_epoch=excluded.deletion_epoch,
+                           friend_name=COALESCE(excluded.friend_name, account_deletions.friend_name),
+                           started_at=CASE WHEN account_deletions.state='DELETING' THEN account_deletions.started_at ELSE excluded.started_at END,
+                           updated_at=excluded.updated_at""".trimIndent(),
+                ).use { sql ->
+                    sql.setString(1, scopeKey)
+                    sql.setLong(2, nextEpoch)
+                    sql.setString(3, friendName)
+                    sql.setLong(4, now)
+                    sql.setLong(5, now)
+                    sql.executeUpdate()
+                }
+                db.commit()
+                nextEpoch
+            } catch (e: Exception) {
+                db.rollback()
+                throw e
+            }
+        }
+    }
+
+    internal suspend fun beginAccountDeletion(scope: UnifiedBookScope, friendName: String? = null): Long = withContext(Dispatchers.IO) {
+        accountLock(scope.scopeKey).withLock {
+            markAccountDeletingLocked(scope.scopeKey, friendName)
+        }
+    }
 
     private fun blobPath(sha256: String): Path {
         require(sha256.matches(SHA256_PATTERN)) { "Invalid sha256" }
@@ -525,6 +613,8 @@ class UnifiedBookPipeline internal constructor(
     /**
      * Streams and verifies full file bytes before establishing any shelf record.
      * Client-supplied SHA-256 is treated strictly as an integrity cross-check, never as proof of possession.
+     * Acquires the per-account write gate before final commit so concurrent or completed account deletions
+     * reject stale in-flight uploads cleanly without resurrecting references or files.
      */
     internal suspend fun upload(
         scope: UnifiedBookScope,
@@ -533,6 +623,7 @@ class UnifiedBookPipeline internal constructor(
         declaredSha256: String?,
         declaredLength: Long?,
         bodyChannel: ByteReadChannel,
+        commitGuard: suspend () -> Boolean = { true },
     ): UnifiedShelfBook = withContext(Dispatchers.IO) {
         val format = formatRaw.trim().lowercase()
         if (format !in SUPPORTED_FORMATS) {
@@ -556,6 +647,11 @@ class UnifiedBookPipeline internal constructor(
         }
 
         ensureInitialized()
+        val initialDeletion = readAccountDeletionState(scope.scopeKey)
+        if (initialDeletion?.state == "DELETING") {
+            throw UnifiedBookError(HttpStatusCode.Unauthorized, "account_deleted", "该账号正在删除，无法上传。")
+        }
+        val startDeletionEpoch = initialDeletion?.epoch ?: 0L
         val tempFile = privateFiles.file(tmpDir.resolve(".upload-${UUID.randomUUID()}.part"))
         var reserved = 0L
         var bytesWritten = 0L
@@ -591,8 +687,18 @@ class UnifiedBookPipeline internal constructor(
                 throw UnifiedBookError(HttpStatusCode.BadRequest, "sha256_mismatch", "文件内容校验不一致，请重试上传。")
             }
 
-            shaLock(actualSha).withLock {
-                commitUploadedFile(scope, actualSha, format, title, bytesWritten, tempFile)
+            beforeUploadCommitForTest?.invoke(scope, actualSha)
+            accountLock(scope.scopeKey).withLock {
+                val currentDeletion = readAccountDeletionState(scope.scopeKey)
+                if (currentDeletion?.state == "DELETING" || (currentDeletion?.epoch ?: 0L) != startDeletionEpoch) {
+                    throw UnifiedBookError(HttpStatusCode.Unauthorized, "account_deleted", "该账号正在或已完成删除，无法上传。")
+                }
+                if (!commitGuard()) {
+                    throw UnifiedBookError(HttpStatusCode.Unauthorized, "unauthorized", "授权已失效，请重新登录学习服务。")
+                }
+                shaLock(actualSha).withLock {
+                    commitUploadedFile(scope, actualSha, format, title, bytesWritten, tempFile)
+                }
             }
         } finally {
             runCatching { Files.deleteIfExists(tempFile) }
@@ -1252,14 +1358,132 @@ class UnifiedBookPipeline internal constructor(
 
     /**
      * Deletes an entire account scope's shelf records, notes, Q&A, overrides, and active references.
-     * Shared blobs and shared processed artifacts are moved to trash (and purged when eligible) ONLY
-     * when zero accounts reference that SHA-256.
+     * Persists a durable `DELETING` gate under the per-account lock so concurrent or late uploads
+     * cannot commit references/blobs for the deleted account, verifies zero remaining references and
+     * complete account directory removal before marking `DELETED`, and moves shared blobs/artifacts to
+     * trash ONLY when zero accounts reference that SHA-256.
      */
     internal suspend fun deleteAccount(
         scope: UnifiedBookScope,
         purgeImmediately: Boolean = false,
     ): AccountDeleteResult = withContext(Dispatchers.IO) {
-        val entries = LinkedHashMap<String, String>() // shelfBookId -> sha256
+        val (removed, trashed) = accountLock(scope.scopeKey).withLock {
+            markAccountDeletingLocked(scope.scopeKey)
+            var totalRemoved = 0
+            var totalTrashed = 0
+            while (true) {
+                val entries = collectAccountEntries(scope)
+                if (entries.isEmpty()) break
+                var progressed = false
+                for ((shelfBookId, sha256) in entries) {
+                    if (!shelfBookId.matches(SHELF_BOOK_ID_PATTERN) || !sha256.matches(SHA256_PATTERN)) continue
+                    val wasTrashed = isTrashed(sha256)
+                    shaLock(sha256).withLock {
+                        val now = config.clock()
+                        registryDb().use { db ->
+                            db.prepareStatement(
+                                """INSERT OR IGNORE INTO pending_book_deletes(scope_key, shelf_book_id, sha256, created_at)
+                                   VALUES(?, ?, ?, ?)""".trimIndent(),
+                            ).use { sql ->
+                                sql.setString(1, scope.scopeKey)
+                                sql.setString(2, shelfBookId)
+                                sql.setString(3, sha256)
+                                sql.setLong(4, now)
+                                sql.executeUpdate()
+                            }
+                        }
+                        reconcilePendingDeleteLocked(scope.scopeKey, shelfBookId, sha256)
+                    }
+                    totalRemoved++
+                    progressed = true
+                    if (!wasTrashed && isTrashed(sha256)) totalTrashed++
+                }
+                if (!progressed) break
+            }
+
+            val remainingRefs = registryDb().use { db ->
+                val refs = db.prepareStatement("SELECT COUNT(*) FROM shared_blob_refs WHERE scope_key=?").use { sql ->
+                    sql.setString(1, scope.scopeKey)
+                    sql.executeQuery().use { rs -> if (rs.next()) rs.getInt(1) else 0 }
+                }
+                val pending = db.prepareStatement("SELECT COUNT(*) FROM pending_book_deletes WHERE scope_key=?").use { sql ->
+                    sql.setString(1, scope.scopeKey)
+                    sql.executeQuery().use { rs -> if (rs.next()) rs.getInt(1) else 0 }
+                }
+                refs + pending
+            }
+            if (remainingRefs > 0) {
+                throw UnifiedBookError(
+                    HttpStatusCode.ServiceUnavailable,
+                    "account_delete_incomplete",
+                    "账号记录尚未清理完毕，请稍后重试。",
+                )
+            }
+
+            val accountDir = accountsDir.resolve(scope.scopeKey)
+            if (Files.exists(accountDir)) {
+                val deleted = accountDirDeleterForTest?.invoke(accountDir) ?: accountDir.toFile().deleteRecursively()
+                if (!deleted || Files.exists(accountDir)) {
+                    throw UnifiedBookError(
+                        HttpStatusCode.ServiceUnavailable,
+                        "account_dir_cleanup_failed",
+                        "账号目录清理未完成，请稍后重试。",
+                    )
+                }
+            }
+
+            // Same retryable tail for the HTTP route and the startup/hourly recovery: wipe the account's
+            // private friend data and revoke its device credentials, and only then mark DELETED. Any
+            // failure keeps the DELETING gate (uploads stay blocked) and surfaces a retryable 503.
+            val friendName = registryDb().use { db ->
+                db.prepareStatement("SELECT friend_name FROM account_deletions WHERE scope_key=?").use { sql ->
+                    sql.setString(1, scope.scopeKey)
+                    sql.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else null }
+                }
+            }
+            if (friendName != null) {
+                val finalizer = accountDataFinalizer ?: throw UnifiedBookError(
+                    HttpStatusCode.ServiceUnavailable,
+                    "account_data_cleanup_failed",
+                    "账号数据清理未完成，请稍后重试。",
+                )
+                try {
+                    finalizer(friendName)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    throw UnifiedBookError(
+                        HttpStatusCode.ServiceUnavailable,
+                        "account_data_cleanup_failed",
+                        "账号数据清理未完成，请稍后重试。",
+                    )
+                }
+            }
+
+            val doneAt = config.clock()
+            registryDb().use { db ->
+                db.prepareStatement(
+                    "UPDATE account_deletions SET state='DELETED', updated_at=? WHERE scope_key=?",
+                ).use { sql ->
+                    sql.setLong(1, doneAt)
+                    sql.setString(2, scope.scopeKey)
+                    sql.executeUpdate()
+                }
+            }
+            totalRemoved to totalTrashed
+        }
+
+        val purged = if (purgeImmediately || config.trashRetentionMs == 0L) {
+            purgeExpiredTrash(0L)
+        } else 0
+        AccountDeleteResult(removedBooks = removed, trashedSharedBlobs = trashed, purgedSharedBlobs = purged)
+    }
+
+    internal fun accountDeletionStateForTest(scope: UnifiedBookScope): String? =
+        readAccountDeletionState(scope.scopeKey)?.state
+
+    private fun collectAccountEntries(scope: UnifiedBookScope): LinkedHashMap<String, String> {
+        val entries = LinkedHashMap<String, String>()
         val shelfFile = accountShelfFile(scope)
         if (Files.isRegularFile(shelfFile, LinkOption.NOFOLLOW_LINKS)) {
             runCatching {
@@ -1288,41 +1512,7 @@ class UnifiedBookPipeline internal constructor(
                 }
             }
         }
-
-        var removed = 0
-        var trashed = 0
-        for ((shelfBookId, sha256) in entries) {
-            if (!shelfBookId.matches(SHELF_BOOK_ID_PATTERN) || !sha256.matches(SHA256_PATTERN)) continue
-            val wasTrashed = isTrashed(sha256)
-            shaLock(sha256).withLock {
-                val now = config.clock()
-                registryDb().use { db ->
-                    db.prepareStatement(
-                        """INSERT OR IGNORE INTO pending_book_deletes(scope_key, shelf_book_id, sha256, created_at)
-                           VALUES(?, ?, ?, ?)""".trimIndent(),
-                    ).use { sql ->
-                        sql.setString(1, scope.scopeKey)
-                        sql.setString(2, shelfBookId)
-                        sql.setString(3, sha256)
-                        sql.setLong(4, now)
-                        sql.executeUpdate()
-                    }
-                }
-                reconcilePendingDeleteLocked(scope.scopeKey, shelfBookId, sha256)
-            }
-            removed++
-            if (!wasTrashed && isTrashed(sha256)) trashed++
-        }
-
-        val accountDir = accountsDir.resolve(scope.scopeKey)
-        if (Files.exists(accountDir)) {
-            accountDir.toFile().deleteRecursively()
-        }
-
-        val purged = if (purgeImmediately || config.trashRetentionMs == 0L) {
-            purgeExpiredTrash(0L)
-        } else 0
-        AccountDeleteResult(removedBooks = removed, trashedSharedBlobs = trashed, purgedSharedBlobs = purged)
+        return entries
     }
 
     internal fun sharedBlobCount(): Int = registryDb().use { db ->
@@ -1393,29 +1583,49 @@ class UnifiedBookPipeline internal constructor(
      */
     internal suspend fun deleteShelfBook(scope: UnifiedBookScope, shelfBookId: String): Boolean = withContext(Dispatchers.IO) {
         if (!shelfBookId.matches(SHELF_BOOK_ID_PATTERN)) return@withContext false
-        val initialSha = lookupShelfOrPendingSha(scope.scopeKey, shelfBookId) ?: return@withContext false
-        shaLock(initialSha).withLock {
-            val sha = lookupShelfOrPendingSha(scope.scopeKey, shelfBookId) ?: return@withLock false
-            val now = config.clock()
-            registryDb().use { db ->
-                db.prepareStatement(
-                    """INSERT OR IGNORE INTO pending_book_deletes(scope_key, shelf_book_id, sha256, created_at)
-                       VALUES(?, ?, ?, ?)""".trimIndent(),
-                ).use { sql ->
-                    sql.setString(1, scope.scopeKey)
-                    sql.setString(2, shelfBookId)
-                    sql.setString(3, sha)
-                    sql.setLong(4, now)
-                    sql.executeUpdate()
+        accountLock(scope.scopeKey).withLock {
+            val initialSha = lookupShelfOrPendingSha(scope.scopeKey, shelfBookId) ?: return@withLock false
+            shaLock(initialSha).withLock {
+                val sha = lookupShelfOrPendingSha(scope.scopeKey, shelfBookId) ?: return@withLock false
+                val now = config.clock()
+                registryDb().use { db ->
+                    db.prepareStatement(
+                        """INSERT OR IGNORE INTO pending_book_deletes(scope_key, shelf_book_id, sha256, created_at)
+                           VALUES(?, ?, ?, ?)""".trimIndent(),
+                    ).use { sql ->
+                        sql.setString(1, scope.scopeKey)
+                        sql.setString(2, shelfBookId)
+                        sql.setString(3, sha)
+                        sql.setLong(4, now)
+                        sql.executeUpdate()
+                    }
                 }
+                reconcilePendingDeleteLocked(scope.scopeKey, shelfBookId, sha)
+                true
             }
-            reconcilePendingDeleteLocked(scope.scopeKey, shelfBookId, sha)
-            true
         }
     }
 
     internal suspend fun reconcilePendingDeletes(): Int = withContext(Dispatchers.IO) {
         if (!Files.isRegularFile(registryFile)) return@withContext 0
+        val pendingAccounts = registryDb().use { db ->
+            val hasTable = db.createStatement().use { s ->
+                s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_deletions'").use { it.next() }
+            }
+            if (!hasTable) emptyList() else db.createStatement().use { sql ->
+                sql.executeQuery("SELECT scope_key FROM account_deletions WHERE state='DELETING'").use { rs ->
+                    buildList { while (rs.next()) add(rs.getString(1)) }
+                }
+            }
+        }
+        var reconciled = 0
+        for (scopeKey in pendingAccounts) {
+            if (!scopeKey.matches(UnifiedBookScope.SCOPE_KEY_PATTERN)) continue
+            runCatching {
+                deleteAccount(UnifiedBookScope(scopeKey, isSableAccount = scopeKey.startsWith("sable-")))
+                reconciled++
+            }
+        }
         val pending = registryDb().use { db ->
             db.createStatement().use { sql ->
                 sql.executeQuery(
@@ -1427,11 +1637,15 @@ class UnifiedBookPipeline internal constructor(
                 }
             }
         }
-        var reconciled = 0
         for ((scopeKey, shelfBookId, sha256) in pending) {
-            if (!sha256.matches(SHA256_PATTERN) || !shelfBookId.matches(SHELF_BOOK_ID_PATTERN)) continue
-            shaLock(sha256).withLock {
-                reconcilePendingDeleteLocked(scopeKey, shelfBookId, sha256)
+            if (!scopeKey.matches(UnifiedBookScope.SCOPE_KEY_PATTERN) ||
+                !sha256.matches(SHA256_PATTERN) ||
+                !shelfBookId.matches(SHELF_BOOK_ID_PATTERN)
+            ) continue
+            accountLock(scopeKey).withLock {
+                shaLock(sha256).withLock {
+                    reconcilePendingDeleteLocked(scopeKey, shelfBookId, sha256)
+                }
             }
             reconciled++
         }
@@ -1850,45 +2064,50 @@ class UnifiedBookPipeline internal constructor(
             throw UnifiedBookError(HttpStatusCode.BadRequest, "sha256_mismatch", "文件内容校验不一致。")
         }
 
-        shaLock(actualSha).withLock {
-            val existingId = existingShelfBookIdByShaReadOnly(scope, actualSha)
-            if (existingId != null) {
-                val existing = shelfBookStatus(scope, existingId)
-                if (existing != null) {
-                    return@withLock existing to true
-                }
+        accountLock(scope.scopeKey).withLock {
+            if (readAccountDeletionState(scope.scopeKey)?.state == "DELETING") {
+                throw UnifiedBookError(HttpStatusCode.Unauthorized, "account_deleted", "该账号正在删除，无法上传。")
             }
-            ensureInitialized()
-            val tempFile = privateFiles.file(tmpDir.resolve(".migrate-${UUID.randomUUID()}.part"))
-            var reserved = 0L
-            try {
-                reserved = reserveSpace(scope, fileSize, 0L)
-                val copyDigest = MessageDigest.getInstance("SHA-256")
-                var copied = 0L
-                Files.newInputStream(file).use { input ->
-                    Files.newOutputStream(tempFile).use { out ->
-                        val buffer = ByteArray(65_536)
-                        while (true) {
-                            val n = input.read(buffer)
-                            if (n < 0) break
-                            copied += n
-                            if (copied > config.maxFileBytes) {
-                                throw UnifiedBookError(HttpStatusCode.PayloadTooLarge, "file_too_large", "文件太大")
-                            }
-                            copyDigest.update(buffer, 0, n)
-                            out.write(buffer, 0, n)
-                        }
+            shaLock(actualSha).withLock {
+                val existingId = existingShelfBookIdByShaReadOnly(scope, actualSha)
+                if (existingId != null) {
+                    val existing = shelfBookStatus(scope, existingId)
+                    if (existing != null) {
+                        return@withLock existing to true
                     }
                 }
-                val copiedSha = copyDigest.digest().joinToString("") { "%02x".format(it) }
-                if (copied != fileSize || copiedSha != expectedSha) {
-                    throw UnifiedBookError(HttpStatusCode.BadRequest, "sha256_mismatch", "文件内容校验不一致。")
+                ensureInitialized()
+                val tempFile = privateFiles.file(tmpDir.resolve(".migrate-${UUID.randomUUID()}.part"))
+                var reserved = 0L
+                try {
+                    reserved = reserveSpace(scope, fileSize, 0L)
+                    val copyDigest = MessageDigest.getInstance("SHA-256")
+                    var copied = 0L
+                    Files.newInputStream(file).use { input ->
+                        Files.newOutputStream(tempFile).use { out ->
+                            val buffer = ByteArray(65_536)
+                            while (true) {
+                                val n = input.read(buffer)
+                                if (n < 0) break
+                                copied += n
+                                if (copied > config.maxFileBytes) {
+                                    throw UnifiedBookError(HttpStatusCode.PayloadTooLarge, "file_too_large", "文件太大")
+                                }
+                                copyDigest.update(buffer, 0, n)
+                                out.write(buffer, 0, n)
+                            }
+                        }
+                    }
+                    val copiedSha = copyDigest.digest().joinToString("") { "%02x".format(it) }
+                    if (copied != fileSize || copiedSha != expectedSha) {
+                        throw UnifiedBookError(HttpStatusCode.BadRequest, "sha256_mismatch", "文件内容校验不一致。")
+                    }
+                    val committed = commitUploadedFile(scope, actualSha, format, title, copied, tempFile)
+                    committed to false
+                } finally {
+                    runCatching { Files.deleteIfExists(tempFile) }
+                    releaseSpace(scope, reserved)
                 }
-                val committed = commitUploadedFile(scope, actualSha, format, title, copied, tempFile)
-                committed to false
-            } finally {
-                runCatching { Files.deleteIfExists(tempFile) }
-                releaseSpace(scope, reserved)
             }
         }
     }
@@ -2089,11 +2308,19 @@ class UnifiedBookPipeline internal constructor(
     }
 }
 
+internal fun UnifiedBookPipeline.installAccountDataFinalizer(actor: LedgerActor, friends: FriendAccess?) {
+    accountDataFinalizer = { friend ->
+        withContext(Dispatchers.IO) { friends?.deleteAccountData(friend) }
+        actor.execute { revokeFriend(friend) }
+    }
+}
+
 fun Application.unifiedBookRoutes(
     actor: LedgerActor,
     unifiedBooks: UnifiedBookPipeline? = null,
     friends: FriendAccess? = null,
 ) {
+    unifiedBooks?.installAccountDataFinalizer(actor, friends)
     if (unifiedBooks != null && unifiedBooks.enabled && unifiedBooks.config.autoProcess) {
         unifiedBooks.startWorkerIfNeeded(this)
         monitor.subscribe(ApplicationStopping) {
@@ -2124,6 +2351,10 @@ fun Application.unifiedBookRoutes(
                     declaredSha256 = declaredSha,
                     declaredLength = contentLength,
                     bodyChannel = call.receiveChannel(),
+                    commitGuard = {
+                        if (friend != null) actor.execute { authorize(device, bearer) && friendName(device) == friend }
+                        else actor.execute { authorize(device, bearer) }
+                    },
                 )
                 call.respondText(shelfBook.toJson().toString(), ContentType.Application.Json)
             } catch (e: UnifiedBookError) {
@@ -2281,20 +2512,26 @@ fun Application.unifiedBookRoutes(
                 return@delete call.respondText("Unauthorized", status = HttpStatusCode.Unauthorized)
             }
             val scope = UnifiedBookScope.fromCall(device, friend)
-            val summary = pipeline.deleteAccount(scope)
-            if (friend != null) {
-                withContext(Dispatchers.IO) { runCatching { friends?.deleteAccountData(friend) } }
-                actor.execute { revokeFriend(friend) }
+            try {
+                // Persist DELETING gate before cleanup so any in-flight upload for this scope is rejected at commit.
+                pipeline.beginAccountDeletion(scope, friend)
+                val summary = pipeline.deleteAccount(scope)
+                call.respondText(
+                    json(
+                        "deleted" to true,
+                        "removedBooks" to summary.removedBooks,
+                        "trashedSharedBlobs" to summary.trashedSharedBlobs,
+                        "purgedSharedBlobs" to summary.purgedSharedBlobs,
+                    ).toString(),
+                    ContentType.Application.Json,
+                )
+            } catch (e: UnifiedBookError) {
+                call.respondText(
+                    json("code" to e.code, "error" to e.message).toString(),
+                    ContentType.Application.Json,
+                    e.status,
+                )
             }
-            call.respondText(
-                json(
-                    "deleted" to true,
-                    "removedBooks" to summary.removedBooks,
-                    "trashedSharedBlobs" to summary.trashedSharedBlobs,
-                    "purgedSharedBlobs" to summary.purgedSharedBlobs,
-                ).toString(),
-                ContentType.Application.Json,
-            )
         }
     }
 }

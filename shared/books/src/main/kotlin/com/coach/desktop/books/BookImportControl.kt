@@ -85,6 +85,8 @@ internal fun formatImportProgressLabel(progress: BookImportProgress): String = w
 
 internal fun interface BookOcr {
     fun recognize(image: BookBitmap, control: BookImportControl): String
+    fun recognize(image: BookBitmap, control: BookImportControl, englishOnly: Boolean, singleBlock: Boolean): String =
+        recognize(image, control)
 }
 
 internal interface BookXmlVisitor {

@@ -56,10 +56,11 @@ if (-not $effectiveServerUrl -and $BridgeUrl.Trim()) {
     & (Join-Path $RepoRoot 'gradlew.bat') ':server:app:installDist' '--no-daemon'
     if ($LASTEXITCODE -ne 0) { throw "Failed to build :server:app:installDist" }
 
-    $serverBat = Join-Path $RepoRoot 'server\app\build\install\app\bin\app.bat'
-    if (-not (Test-Path -LiteralPath $serverBat)) {
-        throw "Server launcher not found: $serverBat"
+    $serverLibDir = Join-Path $RepoRoot 'server\app\build\install\app\lib'
+    if (-not (Test-Path -LiteralPath $serverLibDir)) {
+        throw "Server lib directory not found: $serverLibDir"
     }
+    $javaExe = if ($env:JAVA_HOME) { Join-Path $env:JAVA_HOME 'bin\java.exe' } else { 'java.exe' }
     $serverOutLog = Join-Path $resolvedWork 'server-stdout.log'
     $serverErrLog = Join-Path $resolvedWork 'server-stderr.log'
     $pidFile = Join-Path $resolvedWork 'server.pid'
@@ -81,7 +82,9 @@ if (-not $effectiveServerUrl -and $BridgeUrl.Trim()) {
         $env:COACH_TRAFFIC = 'test'
         $env:COACH_TOKEN_FILE = $effectiveTokenFile
         $env:COACH_DEVICE_ID = $DeviceId
-        $proc = Start-Process -FilePath $serverBat -PassThru -WindowStyle Hidden `
+        # Launch java directly with wildcard classpath to avoid Windows app.bat "input line too long".
+        $proc = Start-Process -FilePath $javaExe -ArgumentList @('-Dfile.encoding=UTF-8', '-cp', "$serverLibDir\*", 'com.coach.server.MainKt') `
+            -PassThru -WindowStyle Hidden `
             -RedirectStandardOutput $serverOutLog -RedirectStandardError $serverErrLog
         Set-Content -LiteralPath $pidFile -Value $proc.Id -Encoding Ascii
     } finally {

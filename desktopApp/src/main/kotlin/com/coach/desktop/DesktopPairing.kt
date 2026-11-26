@@ -4,6 +4,7 @@ import com.coach.client.DeviceAuthorizationException
 import com.coach.client.HttpLedgerTransport
 import com.coach.client.PairedCredentials
 import com.coach.client.PairingClient
+import com.coach.desktop.books.CoachConnectivityRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Dispatchers
@@ -60,16 +61,33 @@ internal class DesktopPairing(
         if (identity.credentials.role == "friend") {
             val client = PairingClient(identity.serverUrl)
             return try {
-                client.friendAuthorized(identity.credentials, startup).also { if (!it) store.clear(identity.serverUrl, identity.credentials, markRevoked = true) }
+                val ok = client.friendAuthorized(identity.credentials, startup)
+                CoachConnectivityRegistry.markOnline(identity.serverUrl)
+                if (!ok) store.clear(identity.serverUrl, identity.credentials, markRevoked = true)
+                ok
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { true }
+            catch (_: Exception) {
+                CoachConnectivityRegistry.markOffline(identity.serverUrl)
+                true
+            }
             finally { client.close() }
         }
         val transport = HttpLedgerTransport(identity.serverUrl, identity.credentials.deviceId, identity.credentials.token)
-        return try { transport.hello(null); true }
+        return try {
+            transport.hello(null)
+            CoachConnectivityRegistry.markOnline(identity.serverUrl)
+            true
+        }
         catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: DeviceAuthorizationException) { store.clear(identity.serverUrl, identity.credentials, markRevoked = true); false }
-        catch (_: Exception) { true }
+        catch (_: DeviceAuthorizationException) {
+            CoachConnectivityRegistry.markOnline(identity.serverUrl)
+            store.clear(identity.serverUrl, identity.credentials, markRevoked = true)
+            false
+        }
+        catch (_: Exception) {
+            CoachConnectivityRegistry.markOffline(identity.serverUrl)
+            true
+        }
         finally { transport.close() }
     }
 

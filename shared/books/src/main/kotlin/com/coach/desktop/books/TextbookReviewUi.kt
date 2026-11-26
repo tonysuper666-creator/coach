@@ -101,6 +101,7 @@ internal fun LocalBookReviewQuestion(
         }
     }
     val colors = CoachTheme.colors
+    val offline = LocalCoachConnectivity.current == CoachConnectivityStatus.OFFLINE
     val scope = rememberCoroutineScope()
     val gradingHost = LocalPracticeGradingHost.current
     var reviewGradeLoading by remember(review.book, review.lesson, review.mode) { mutableStateOf(false) }
@@ -111,7 +112,7 @@ internal fun LocalBookReviewQuestion(
     fun triggerReviewDiagnose(answerText: String, mode: String) {
         val host = gradingHost ?: return
         if (reviewGradeLoading) return
-        reviewGradeLoading = true
+        reviewGradeLoading = !offline
         reviewGradeError = null
         scope.launch {
             try {
@@ -140,19 +141,25 @@ internal fun LocalBookReviewQuestion(
                             }
                         }
                     }
-                    is PracticeGradeDiagnoseResult.Failed -> reviewGradeError = res.message
+                    is PracticeGradeDiagnoseResult.Failed -> {
+                        reviewGradeError = if (res.trouble == ExplainTrouble.Unreachable) {
+                            OfflineCopy.REVIEW_DIAGNOSE_OFFLINE
+                        } else {
+                            OfflineCopy.normalizeOfflineMessage(res.message)
+                        }
+                    }
                 }
             } catch (c: CancellationException) {
                 throw c
             } catch (_: Exception) {
-                reviewGradeError = "错因诊断暂时不可用，已保留当前复习进度。"
+                reviewGradeError = OfflineCopy.REVIEW_DIAGNOSE_OFFLINE
             } finally {
                 reviewGradeLoading = false
             }
         }
     }
 
-    LaunchedEffect(review.book, review.lesson, review.answer.revealed, review.answer.text, review.answer.understood) {
+    LaunchedEffect(review.book, review.lesson, review.answer.revealed, review.answer.text, review.answer.understood, offline) {
         val wrongChoice = review.mode == QuestionMode.CHOICE &&
             review.answer.revealed &&
             review.answer.text.isNotBlank() &&
@@ -160,7 +167,7 @@ internal fun LocalBookReviewQuestion(
         val missedShort = review.mode == QuestionMode.SHORT_ANSWER &&
             review.answer.revealed &&
             review.answer.understood == false
-        if ((wrongChoice || missedShort) && reviewGradeResponse == null && gradingHost != null) {
+        if ((wrongChoice || missedShort) && reviewGradeResponse == null && gradingHost != null && !offline) {
             triggerReviewDiagnose(review.answer.text, "DIAGNOSE_ONLY")
         }
     }
@@ -318,7 +325,15 @@ internal fun LocalBookReviewQuestion(
                                     },
                                     enabled = enabled && !reviewGradeLoading,
                                     modifier = Modifier.testTag("review-submit-grade"),
-                                ) { Text(if (reviewGradeLoading) "批改中…" else "提交批改") }
+                                ) {
+                                    Text(
+                                        when {
+                                            reviewGradeLoading -> "批改中…"
+                                            offline -> "提交批改（需要联网）"
+                                            else -> "提交批改"
+                                        },
+                                    )
+                                }
                             }
                         }
                     } else {

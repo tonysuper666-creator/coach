@@ -86,6 +86,7 @@ sealed interface UnifiedServerCapability {
     data object Unauthorized : UnifiedServerCapability
     data object Offline : UnifiedServerCapability
 }
+enum class ServerReachability { ONLINE, UNAUTHORIZED, OFFLINE }
 class MainlineEssayReply(val document: MainlineEssayDocument?, val error: String?, val retryable: Boolean = false)
 /** 题库里一道可以限时练的论述题。[fromMockPaper] 的题出自整套模拟卷，先练了那套卷就不再是生题。 */
 data class EssayPrompt(val id: String, val week: Int, val marks: Double, val wordTarget: Int, val stem: String, val pack: String, val fromMockPaper: Boolean)
@@ -96,8 +97,9 @@ data class EssayBankView(val prompts: List<EssayPrompt>, val weeks: List<Int>, v
  * 只读的课程查询：记录页要的冻结题与评分标准、资料页要的原文。全部要联网问 Mac；
  * 返回 null 的意思就是「这次拿不到」（离线、或 Mac 上的服务还没更新到有这个接口），界面照实说，不拿占位内容顶。
  */
-class CourseHttp internal constructor(baseUrl: String, private val deviceId: String, private val token: String, private val course: String, createEngine: () -> HttpClientEngine) {
-    constructor(baseUrl: String, deviceId: String, token: String, course: String) : this(baseUrl, deviceId, token, course, { createCoachHttpEngine() })
+class CourseHttp internal constructor(baseUrl: String, private val deviceId: String, private val token: String, private val course: String, createEngine: () -> HttpClientEngine, connectTimeoutMs: Long = 3_000L) {
+    constructor(baseUrl: String, deviceId: String, token: String, course: String) : this(baseUrl, deviceId, token, course, { createCoachHttpEngine() }, 3_000L)
+    constructor(baseUrl: String, deviceId: String, token: String, course: String, connectTimeoutMs: Long) : this(baseUrl, deviceId, token, course, { createCoachHttpEngine() }, connectTimeoutMs)
     private val base = baseUrl.trimEnd('/')
     // Only a digest of this paired account scope reaches SQLite; credentials never enter note data.
     fun readerState(sync: SyncEngine, week: Int): JsonObject = sync.readerState(course, week, "$base\u0000$deviceId\u0000$token")
@@ -108,7 +110,7 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         override fun create(block: HttpClientEngineConfig.() -> Unit) = createEngine()
     }) {
         followRedirects = false
-        install(HttpTimeout) { requestTimeoutMillis = 15_000; connectTimeoutMillis = 3_000 }
+        install(HttpTimeout) { requestTimeoutMillis = 15_000; connectTimeoutMillis = connectTimeoutMs }
         defaultRequest { header("Authorization", "Bearer $token"); header("X-Coach-Device", deviceId) }
     }
 
@@ -186,21 +188,50 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
                 val status = response.status.value
                 val code = parsed?.s("code")?.ifBlank { null }
                 when {
-                    status == 429 || status in 500..599 ->
+                    parsed == null && status != 403 && text.trimStart().startsWith("<") ->
+                        MockReply(null, "需要联网才能使用，读书和做题照常。", retryable = true, code = "offline")
+                    // Older friend services return a quota sentence. Use the same service guidance on both clients.
+                    status == 429 || code == "daily_quota" || code == "monthly_quota" ->
                         MockReply(null, "讲解服务暂时不可用，请稍后再试。", retryable = true, statusCode = status,
                             code = "unavailable", retryAfterMs = response.readerRetryDelay(parsed))
-                    parsed == null && status != 403 -> MockReply(null, "连不上 Coach 服务，可继续阅读或稍后重试。")
+                    status in 500..599 ->
+                        MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "讲解服务暂时不可用，请稍后再试。",
+                            retryable = true, statusCode = status, code = code ?: "unavailable",
+                            retryAfterMs = response.readerRetryDelay(parsed))
+                    parsed == null && status != 403 ->
+                        MockReply(null, "需要联网才能使用，读书和做题照常。", retryable = true, code = "offline")
                     response.status.isSuccess() -> MockReply(parsed, null, statusCode = status)
-                    // Older friend services return a quota sentence. Use the same service guidance on both clients.
-                    code == "daily_quota" || code == "monthly_quota" ->
-                        MockReply(null, "讲解服务暂时不可用，请稍后再试。", retryable = true, statusCode = status, code = "unavailable")
                     else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "暂时无法确认，请稍后重试。", statusCode = status, code = code)
                 }
             }
         }
-    } catch (_: HttpRequestTimeoutException) { MockReply(null, "讲解请求等待超时。可继续阅读或手动重试。") }
+    } catch (_: HttpRequestTimeoutException) { MockReply(null, "需要联网才能使用，读书和做题照常。", retryable = true, code = "offline") }
       catch (e: kotlinx.coroutines.CancellationException) { throw e }
-      catch (_: Exception) { MockReply(null, "连不上 Coach 服务，可继续阅读或稍后重试。") }
+      catch (_: Exception) { MockReply(null, "需要联网才能使用，读书和做题照常。", retryable = true, code = "offline") }
+
+    /** Lightweight reachability probe; distinguishes unreachable/gateway errors from live 401/2xx-4xx responses. */
+    suspend fun probeReachability(role: String, timeoutMs: Long = 1_500L): ServerReachability = try {
+        val path = if (role == "friend") "$base/v1/public/status" else "$base/v1/hello"
+        val response = http.get(path) {
+            timeout {
+                connectTimeoutMillis = timeoutMs
+                requestTimeoutMillis = timeoutMs
+                socketTimeoutMillis = timeoutMs
+            }
+        }
+        val status = response.status.value
+        when {
+            status == 401 -> ServerReachability.UNAUTHORIZED
+            status == 408 -> ServerReachability.OFFLINE
+            status in 200..499 -> ServerReachability.ONLINE
+            status >= 500 -> {
+                val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+                if (parsed != null) ServerReachability.ONLINE else ServerReachability.OFFLINE
+            }
+            else -> ServerReachability.OFFLINE
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+      catch (_: Exception) { ServerReachability.OFFLINE }
 
     /** Check this same server and device without sending any book text. Only 401 proves revocation. */
     suspend fun libraryAuthStatus(): Int? = try {
@@ -460,9 +491,9 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
                 else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "章节伴读暂时不可用，请稍后重试。", statusCode = status, code = code)
             }
         }
-    } catch (_: HttpRequestTimeoutException) { MockReply(null, "章节伴读等待超时，请重试。") }
+    } catch (_: HttpRequestTimeoutException) { MockReply(null, "需要联网才能使用，本地阅读与草稿已保留。", retryable = true, code = "offline") }
       catch (e: kotlinx.coroutines.CancellationException) { throw e }
-      catch (_: Exception) { MockReply(null, "连不上学习服务，本地阅读与草稿已保留。") }
+      catch (_: Exception) { MockReply(null, "需要联网才能使用，本地阅读与草稿已保留。", retryable = true, code = "offline") }
     suspend fun courseAlign(input: JsonObject): MockReply =
         postCourseEndpoint("v1/library/course/align", input, timeoutMs = 120_000L, timeoutMsg = "课程自动对齐超时，已先使用本地规则。")
 
@@ -558,11 +589,11 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             }
         }
     } catch (_: HttpRequestTimeoutException) {
-        MockReply(null, "学法首屏生成超时，可先查看离线结构。")
+        MockReply(null, "需要联网才能使用，可先查看本地章节结构。", retryable = true, code = "offline")
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
     } catch (_: Exception) {
-        MockReply(null, "连不上学习服务，可继续本地阅读与练习。")
+        MockReply(null, "需要联网才能使用，可先查看本地章节结构。", retryable = true, code = "offline")
     }
 
     /** 2.0-MODES-2: 整本书 24 章一页纸 Batch 管线（全书地图）。 */
@@ -605,11 +636,11 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             }
         }
     } catch (_: HttpRequestTimeoutException) {
-        MockReply(null, timeoutMsg)
+        MockReply(null, timeoutMsg, retryable = true, code = "offline")
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
     } catch (_: Exception) {
-        MockReply(null, "连不上学习服务，可继续本地阅读与练习。")
+        MockReply(null, "需要联网才能使用，读书和做题照常。", retryable = true, code = "offline")
     }
 
     /** 2.0-W2-D: 书单跨书概念两阶段语义对齐（阶段 2 远端语义裁决）。 */
@@ -626,7 +657,7 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             else MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "书单主题对齐暂时不可用。", statusCode = status)
         }
     } catch (e: kotlinx.coroutines.CancellationException) { throw e }
-      catch (_: Exception) { MockReply(null, "连不上学习服务，已保留本地对齐结果。") }
+      catch (_: Exception) { MockReply(null, "需要联网才能使用，已保留本地对齐结果。", retryable = true, code = "offline") }
     suspend fun cancelLibraryExplain(id: String) {
         runCatching { http.post("$base/v1/library/explain/cancel") {
             setBody(TextContent(buildJsonObject { put("requestId", id) }.toString(), ContentType.Application.Json)) } }

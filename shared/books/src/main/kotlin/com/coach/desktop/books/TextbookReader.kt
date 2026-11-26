@@ -1303,13 +1303,6 @@ internal fun TextbookReader(
                         switchView(!textView)
                         true
                     }
-                    // 字形上的点击、F2 和字母 S 在 ARM 安装包里都没选中文字。方向键到得了阅读区。
-                    // ↑ 不翻页，用来选中当前页第一段正文的一个词。
-                    !typingNow && !mod && !event.isAltPressed && textView && event.key == Key.DirectionUp -> {
-                        val word = book.firstBodyWord(ui.page) ?: return@onPreviewKeyEvent false
-                        textSelection = word
-                        true
-                    }
                     event.key == Key.Escape -> {
                         when {
                             searchOpen -> { searchOpen = false; searchFocused = false; true }
@@ -1434,6 +1427,13 @@ internal fun TextbookReader(
                                 }
                             }
                             return@onPreviewKeyEvent true
+                        }
+                        // 点击、F2、S、↑ 在安装包里都没选中文字。Home 会到达这个阅读区并回到首页。
+                        // 选这本书第一页的正文词，页码和翻回后的页一致，翻页回调不会把选区清掉。
+                        if (!typingNow && textView && event.key == Key.MoveHome) {
+                            book.pages.firstOrNull()?.number?.let { first ->
+                                book.firstBodyWord(first)?.let { textSelection = it }
+                            }
                         }
                         if (!typingNow && event.key == Key.Spacebar) {
                             turnLayout(if (event.isShiftPressed) ReaderTurn.Previous else ReaderTurn.Next)

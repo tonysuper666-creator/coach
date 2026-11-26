@@ -610,47 +610,65 @@ function Move-TutorByMickey([int]$tx, [int]$ty, [double]$scale, [int]$maxSteps) 
         $sent = [Arm.Drag]::Send(0x2001, $mx, $my)
         if ($sent -le 0) { break }
         $steps++
-        Start-Sleep -Milliseconds 20
+        Start-Sleep -Milliseconds 35
     }
     return $steps
 }
 
+function Send-TutorClientMove([IntPtr]$hwnd, [int]$screenX, [int]$screenY, [int]$buttons) {
+    $p = New-Object 'Arm.Drag+POINT'
+    $p.X = $screenX
+    $p.Y = $screenY
+    if (-not [Arm.Drag]::ScreenToClient($hwnd, [ref]$p)) { return $false }
+    # Queued, like a real move. SendMessage was delivered and Compose still saw a click.
+    return [bool][Arm.Drag]::PostMessage($hwnd, 0x0200, [IntPtr]$buttons, [Arm.Drag]::Pack($p.X, $p.Y))
+}
+
 function Send-TutorRelativeDrag([int]$sx1, [int]$sy1, [int]$sx2, [int]$sy2) {
-    $saved = $null
-    $savedSpeed = 0
+    # Click-At waits after SetCursorPos because Compose dispatches the press at the
+    # last point it processed. Absolute SendInput updated the cursor and still did
+    # not become a selection. Press with the same mouse_event, then walk with
+    # relative SendInput and a queued move so the button-down stream has positions.
+    [WD]::SetCursorPos($sx1 - 28, $sy1 + 18) | Out-Null
+    Start-Sleep -Milliseconds 80
+    [WD]::SetCursorPos($sx1, $sy1) | Out-Null
+    Start-Sleep -Milliseconds 250
+    $hwnd = [IntPtr]::Zero
+    $hit = ''
     try {
-        $saved = [ArmTouch]::GetMouse()
-        $savedSpeed = [ArmTouch]::GetSpeed()
-        $flat = [ArmTouch]::SetMouse(0, 0, 0)
-        $spd = [ArmTouch]::SetSpeed(10)
-        Write-Output "RELCFG flat=$flat speed=$spd was=$savedSpeed"
-        Start-Sleep -Milliseconds 40
+        $p = New-Object 'Arm.Drag+POINT'
+        $p.X = $sx1
+        $p.Y = $sy1
+        $hwnd = [Arm.Drag]::WindowFromPoint($p)
+        $cls = New-Object System.Text.StringBuilder 128
+        [void][Arm.Drag]::GetClassName($hwnd, $cls, $cls.Capacity)
+        $hit = "$($cls.ToString()) $hwnd"
     } catch {
-        Write-Output "RELCFG skip $($_.Exception.Message)"
+        $hit = "fail $($_.Exception.Message)"
     }
+    $at = Get-TutorCursor
+    Write-Host "DRAGHIT $hit at=$($at.X),$($at.Y) want=$sx1,$sy1"
+    $posted = 0
+    if ($hwnd -ne [IntPtr]::Zero) {
+        try { if (Send-TutorClientMove $hwnd $sx1 $sy1 0) { $posted++ } } catch { }
+    }
+    Start-Sleep -Milliseconds 80
+    [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
+    $steps = 0
     try {
-        $park = Send-ArmAbsolute $sx1 $sy1
-        Start-Sleep -Milliseconds 40
-        $scale = Measure-TutorMickey
-        if (-not $scale) { $scale = 1.0 }
-        [void](Send-ArmAbsolute $sx1 $sy1)
-        Start-Sleep -Milliseconds 40
-        $down = [Arm.Drag]::Send(0x0002, 0, 0)
-        $steps = 0
-        try {
-            Start-Sleep -Milliseconds 50
-            $steps = Move-TutorByMickey $sx2 $sy2 $scale 28
-        } finally {
-            $up = [Arm.Drag]::Send(0x0004, 0, 0)
+        Start-Sleep -Milliseconds 90
+        $steps = Move-TutorByMickey $sx2 $sy2 1.0 40
+        if ($hwnd -ne [IntPtr]::Zero) {
+            $cursor = Get-TutorCursor
+            try { if (Send-TutorClientMove $hwnd $cursor.X $cursor.Y 1) { $posted++ } } catch { }
+            try { if (Send-TutorClientMove $hwnd $sx2 $sy2 1) { $posted++ } } catch { }
         }
-        $end = Get-TutorCursor
-        Write-Output "RELDRAG park=$park scale=$scale down=$down steps=$steps up=$up end=$($end.X),$($end.Y) target=$sx2,$sy2"
+        Start-Sleep -Milliseconds 120
     } finally {
-        if ($saved -and @($saved).Count -ge 3) {
-            [void][ArmTouch]::SetMouse([int]$saved[0], [int]$saved[1], [int]$saved[2])
-        }
-        if ($savedSpeed -ge 1 -and $savedSpeed -le 20) { [void][ArmTouch]::SetSpeed([int]$savedSpeed) }
+        [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
     }
+    $end = Get-TutorCursor
+    Write-Output "RELDRAG steps=$steps posted=$posted end=$($end.X),$($end.Y) target=$sx2,$sy2"
 }
 
 function Drag-TutorLine([int]$x1, [int]$y1, [int]$x2, [int]$y2, [string]$how) {
@@ -799,15 +817,10 @@ function Open-SelectionToolbar([string]$name) {
         $x2 = [Math]::Min($pageR, [int]$row.X2 - 8)
         if (($x2 - $x1) -lt 70) { throw "Ink line is too short to drag ($name x=$x1..$x2)" }
         $y = [int]$row.Y
-        if ($drag -eq 1) {
-            $mid = [int](($x1 + $x2) / 2)
-            Write-Output "DRAG row $drag how=hold y=$y x=$mid"
-            Drag-TutorLine $mid $y $mid $y 'touch'
-        } else {
-            $how = if ($drag -eq 2) { 'touch' } else { 'relative' }
-            Write-Output "DRAG row $drag how=$how y=$y x=$x1..$x2"
-            Drag-TutorLine $x1 $y $x2 $y $how
-        }
+        # Windows paged selection reads SelectionContainer, which follows a mouse
+        # drag. The synthetic touch call returns success and the page does not change.
+        Write-Output "DRAG row $drag how=relative y=$y x=$x1..$x2"
+        Drag-TutorLine $x1 $y $x2 $y 'relative'
         foreach ($spin in 1..4) {
             Start-Sleep -Milliseconds 400
             $shot = @(Read-TutorFrame "$name-selected$drag-$spin")

@@ -3,6 +3,7 @@ package com.coach.desktop.books
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,7 +14,9 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
 import java.sql.Connection
+import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 internal enum class BookUploadState {
@@ -112,6 +115,44 @@ internal sealed interface UnifiedBookDeleteOutcome {
     data class Failed(val message: String, val retryable: Boolean = true) : UnifiedBookDeleteOutcome
 }
 
+internal data class RemoteShelfBook(
+    val shelfBookId: String,
+    val sha256: String,
+    val title: String,
+    val format: String,
+    val sizeBytes: Long,
+    val createdAt: Long = 0L,
+    val updatedAt: Long = 0L,
+    val jobState: BookUploadState = BookUploadState.QUEUED,
+    val progressPct: Int = 0,
+    val stageLabel: String = "",
+    val errorMessage: String? = null,
+    val processCount: Int = 0,
+) {
+    fun cardStatusLine(): String = when (jobState) {
+        BookUploadState.PROCESSING -> if (progressPct in 1..99) "正在整理 · $progressPct% · 点击下载阅读" else "正在整理 · 点击下载阅读"
+        BookUploadState.QUEUED, BookUploadState.RECEIVED -> "已排队整理 · 点击下载阅读"
+        BookUploadState.FAILED -> errorMessage?.takeIf { it.isNotBlank() }?.let { "$it · 点击下载阅读" } ?: "点击下载阅读"
+        else -> "云端书架 · 点击下载阅读"
+    }
+}
+
+internal sealed interface UnifiedBookListOutcome {
+    data class Ready(val books: List<RemoteShelfBook>) : UnifiedBookListOutcome
+    data object UnsupportedServer : UnifiedBookListOutcome
+    data object Offline : UnifiedBookListOutcome
+    data object Unauthorized : UnifiedBookListOutcome
+}
+
+internal sealed interface UnifiedBookDownloadOutcome {
+    data class Downloaded(val sha256: String, val sizeBytes: Long) : UnifiedBookDownloadOutcome
+    data object NotFound : UnifiedBookDownloadOutcome
+    data object UnsupportedServer : UnifiedBookDownloadOutcome
+    data object Offline : UnifiedBookDownloadOutcome
+    data object Unauthorized : UnifiedBookDownloadOutcome
+    data class Failed(val message: String) : UnifiedBookDownloadOutcome
+}
+
 /**
  * Immutable authenticated session snapshot pinned for an entire sync batch so an identity switch
  * mid-batch can never send an old account's queued book under the new account's credentials.
@@ -120,6 +161,7 @@ internal interface UnifiedBookRemoteSession {
     val sessionId: String
     val fallbackAccountKey: String
     suspend fun checkCapability(): UnifiedBookCapability
+
     suspend fun uploadBook(
         file: Path,
         format: String,
@@ -130,11 +172,29 @@ internal interface UnifiedBookRemoteSession {
 
     suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome
     suspend fun deleteBook(shelfBookId: String): UnifiedBookDeleteOutcome = UnifiedBookDeleteOutcome.UnsupportedServer
+    suspend fun listRemoteBooks(): UnifiedBookListOutcome = UnifiedBookListOutcome.UnsupportedServer
+    suspend fun downloadBookOriginal(
+        shelfBookId: String,
+        destination: Path,
+        expectedSha256: String,
+        onProgress: (Int) -> Unit = {},
+    ): UnifiedBookDownloadOutcome = UnifiedBookDownloadOutcome.UnsupportedServer
 }
 
 internal interface UnifiedBookRemoteClient {
     suspend fun activeAccountKey(): String?
     suspend fun checkCapability(): UnifiedBookCapability
+    suspend fun probeReachability(): CoachConnectivityStatus {
+        val session = openSession() ?: return CoachConnectivityStatus.UNKNOWN
+        return when (session.checkCapability()) {
+            is UnifiedBookCapability.Supported,
+            is UnifiedBookCapability.Unsupported,
+            UnifiedBookCapability.Unauthorized -> CoachConnectivityStatus.ONLINE
+            UnifiedBookCapability.Offline -> CoachConnectivityStatus.OFFLINE
+        }
+    }
+    fun connectivityFlow(): StateFlow<CoachConnectivityStatus>? = null
+
     suspend fun uploadBook(
         file: Path,
         format: String,
@@ -145,6 +205,13 @@ internal interface UnifiedBookRemoteClient {
 
     suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome
     suspend fun deleteBook(shelfBookId: String): UnifiedBookDeleteOutcome = UnifiedBookDeleteOutcome.UnsupportedServer
+    suspend fun listRemoteBooks(): UnifiedBookListOutcome = UnifiedBookListOutcome.UnsupportedServer
+    suspend fun downloadBookOriginal(
+        shelfBookId: String,
+        destination: Path,
+        expectedSha256: String,
+        onProgress: (Int) -> Unit = {},
+    ): UnifiedBookDownloadOutcome = UnifiedBookDownloadOutcome.UnsupportedServer
 
     /**
      * Captures a pinned session for one sync batch. Production implementations bind an immutable
@@ -167,6 +234,13 @@ internal interface UnifiedBookRemoteClient {
 
             override suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome = client.fetchStatus(shelfBookId)
             override suspend fun deleteBook(shelfBookId: String): UnifiedBookDeleteOutcome = client.deleteBook(shelfBookId)
+            override suspend fun listRemoteBooks(): UnifiedBookListOutcome = client.listRemoteBooks()
+            override suspend fun downloadBookOriginal(
+                shelfBookId: String,
+                destination: Path,
+                expectedSha256: String,
+                onProgress: (Int) -> Unit,
+            ): UnifiedBookDownloadOutcome = client.downloadBookOriginal(shelfBookId, destination, expectedSha256, onProgress)
         }
     }
 }
@@ -688,27 +762,74 @@ internal object BookUploadQueueStore {
     }
 }
 
+internal object UnifiedBookCloudBridge {
+    private val lock = Any()
+    private val coordinators = WeakHashMap<TextbookLibrary, UnifiedBookUploadCoordinator>()
+
+    fun register(library: TextbookLibrary, coordinator: UnifiedBookUploadCoordinator) {
+        synchronized(lock) { coordinators[library] = coordinator }
+    }
+
+    fun forLibrary(library: TextbookLibrary): UnifiedBookUploadCoordinator? =
+        synchronized(lock) { coordinators[library] }
+}
+
 /**
- * Coordinates the persistent per-account unified upload and unbind queue without ever blocking local reading.
+ * Coordinates the persistent per-account unified upload, unbind, and cloud shelf pullback queue
+ * without ever blocking local reading.
  * - Pins each sync batch to a single immutable [UnifiedBookRemoteSession] and cancels old batches on identity switch.
  * - Persists verified session->account bindings so rolling back to an older server preserves the pending book status.
  * - Clears stale server shelf IDs on 404 NotFound so user retries re-upload the local original file.
  * - Persists per-account `PENDING_DELETE` unbind tasks on delete/cancel and clears them only after server confirmation.
+ * - Discovers server-side shelf books on a fresh data directory and pulls back verified originals on demand.
  */
 internal class UnifiedBookUploadCoordinator(
     private val library: TextbookLibrary,
     private val remoteProvider: () -> UnifiedBookRemoteClient?,
 ) {
     private val syncLock = Mutex()
+    private val restoreLock = Mutex()
     private val mutableStatuses = MutableStateFlow<Map<String, BookUploadEntry>>(emptyMap())
     val statuses: StateFlow<Map<String, BookUploadEntry>> = mutableStatuses.asStateFlow()
+    private val mutableRemoteShelfBooks = MutableStateFlow<List<RemoteShelfBook>>(emptyList())
+    val remoteShelfBooks: StateFlow<List<RemoteShelfBook>> = mutableRemoteShelfBooks.asStateFlow()
+    private val mutableRestoringShelfBookId = MutableStateFlow<String?>(null)
+    val restoringShelfBookId: StateFlow<String?> = mutableRestoringShelfBookId.asStateFlow()
+    private val mutableRestoreProgressPct = MutableStateFlow(0)
+    val restoreProgressPct: StateFlow<Int> = mutableRestoreProgressPct.asStateFlow()
+    private val mutableRestoreError = MutableStateFlow<String?>(null)
+    val restoreError: StateFlow<String?> = mutableRestoreError.asStateFlow()
 
+    private val sessionStateLock = Any()
     private val sessionGeneration = AtomicLong(0L)
     @Volatile private var activeSessionId: String? = null
     @Volatile private var lastAccountKey: String? = null
     @Volatile private var activeBatchJob: Job? = null
+    @Volatile private var activeRestoreJob: Job? = null
+    @Volatile internal var beforeRestoreCommitForTest: (suspend (RemoteShelfBook, String) -> Unit)? = null
+
+    init {
+        UnifiedBookCloudBridge.register(library, this)
+    }
 
     internal fun currentAccountKey(): String? = lastAccountKey
+
+    internal suspend fun hasPendingSyncWork(): Boolean {
+        val accountKey = lastAccountKey ?: resolveInitiatingAccountKey() ?: return false
+        return withContext(Dispatchers.IO) {
+            library.syncTasksForAccount(accountKey).any { entry ->
+                !entry.paused && entry.state in setOf(
+                    BookUploadState.WAITING_NETWORK,
+                    BookUploadState.WAITING_SERVER,
+                    BookUploadState.UPLOADING,
+                    BookUploadState.RECEIVED,
+                    BookUploadState.QUEUED,
+                    BookUploadState.PROCESSING,
+                    BookUploadState.PENDING_DELETE,
+                )
+            }
+        }
+    }
 
     internal suspend fun resolveInitiatingAccountKey(): String? {
         lastAccountKey?.let { return it }
@@ -730,19 +851,31 @@ internal class UnifiedBookUploadCoordinator(
     }
 
     /**
-     * Cancels any in-flight sync batch belonging to a previous account/session and prevents
-     * late responses from that batch from mutating the new session's UI state.
+     * Cancels any in-flight sync batch or cloud restore belonging to a previous account/session and prevents
+     * late responses from mutating the new session's queue bindings or UI state.
      */
     fun onSessionChanged(newSessionId: String?) {
-        val changed = newSessionId != activeSessionId
-        sessionGeneration.incrementAndGet()
-        activeBatchJob?.cancel()
-        activeBatchJob = null
-        if (changed) {
-            activeSessionId = newSessionId
-            lastAccountKey = null
-            mutableStatuses.value = emptyMap()
+        val batchToCancel: Job?
+        val restoreToCancel: Job?
+        synchronized(sessionStateLock) {
+            val changed = newSessionId != activeSessionId
+            sessionGeneration.incrementAndGet()
+            batchToCancel = activeBatchJob
+            activeBatchJob = null
+            restoreToCancel = activeRestoreJob
+            activeRestoreJob = null
+            if (changed) {
+                activeSessionId = newSessionId
+                lastAccountKey = null
+                mutableStatuses.value = emptyMap()
+                mutableRemoteShelfBooks.value = emptyList()
+                mutableRestoringShelfBookId.value = null
+                mutableRestoreProgressPct.value = 0
+                mutableRestoreError.value = null
+            }
         }
+        batchToCancel?.cancel()
+        restoreToCancel?.cancel()
     }
 
     suspend fun enqueueBook(localBookId: String, fileSha256: String, format: String, title: String) {
@@ -798,28 +931,40 @@ internal class UnifiedBookUploadCoordinator(
         val remote = remoteProvider() ?: return
         val myGen = sessionGeneration.get()
         val session = remote.openSession() ?: run {
-            if (sessionGeneration.get() == myGen) {
-                activeSessionId = null
-                lastAccountKey = null
-                mutableStatuses.value = emptyMap()
+            synchronized(sessionStateLock) {
+                if (sessionGeneration.get() == myGen) {
+                    activeSessionId = null
+                    lastAccountKey = null
+                    mutableStatuses.value = emptyMap()
+                    mutableRemoteShelfBooks.value = emptyList()
+                }
             }
             return
         }
         val previousSession = activeSessionId
         if (previousSession != null && previousSession != session.sessionId) {
-            // Identity switched between syncs; bump generation and cancel any stale in-flight batch first.
+            // Identity switched between syncs; bump generation and cancel any stale in-flight batch/restore first.
             onSessionChanged(session.sessionId)
         }
         val batchGen = sessionGeneration.get()
         val batchJob = currentCoroutineContext()[Job]
         syncLock.withLock {
-            if (sessionGeneration.get() != batchGen) return@withLock
-            activeSessionId = session.sessionId
-            activeBatchJob = batchJob
+            val registered = synchronized(sessionStateLock) {
+                if (sessionGeneration.get() != batchGen) {
+                    false
+                } else {
+                    activeSessionId = session.sessionId
+                    activeBatchJob = batchJob
+                    true
+                }
+            }
+            if (!registered) return@withLock
             try {
                 runPinnedBatch(session, batchGen)
             } finally {
-                if (activeBatchJob === batchJob) activeBatchJob = null
+                synchronized(sessionStateLock) {
+                    if (activeBatchJob === batchJob) activeBatchJob = null
+                }
             }
         }
     }
@@ -865,9 +1010,14 @@ internal class UnifiedBookUploadCoordinator(
             if (session.fallbackAccountKey != resolvedAccountKey) {
                 library.rekeyUploadAccount(session.fallbackAccountKey, resolvedAccountKey)
             }
-            if (lastAccountKey != resolvedAccountKey) {
+            val shouldSwitch = synchronized(sessionStateLock) {
+                if (!isBatchCurrent()) return@synchronized null
+                val switched = lastAccountKey != resolvedAccountKey
+                if (switched) lastAccountKey = resolvedAccountKey
+                switched
+            } ?: return@withContext
+            if (shouldSwitch) {
                 library.switchUploadAccount(resolvedAccountKey)
-                lastAccountKey = resolvedAccountKey
             } else {
                 library.recoverInterruptedBookUploads()
             }
@@ -875,10 +1025,10 @@ internal class UnifiedBookUploadCoordinator(
         }
 
         val entries = withContext(Dispatchers.IO) { library.syncTasksForAccount(resolvedAccountKey) }
-        if (entries.isEmpty()) return
 
         when (capability) {
             UnifiedBookCapability.Offline -> {
+                if (entries.isEmpty()) return
                 withContext(Dispatchers.IO) {
                     if (!isBatchCurrent()) return@withContext
                     for (entry in entries) {
@@ -901,6 +1051,7 @@ internal class UnifiedBookUploadCoordinator(
             }
             UnifiedBookCapability.Unauthorized -> return
             is UnifiedBookCapability.Unsupported -> {
+                if (entries.isEmpty()) return
                 // Rolled-back or old server without unified upload: never fall back to legacy fragments.
                 withContext(Dispatchers.IO) {
                     if (!isBatchCurrent()) return@withContext
@@ -925,8 +1076,50 @@ internal class UnifiedBookUploadCoordinator(
             is UnifiedBookCapability.Supported -> Unit
         }
 
-        // Process pending unbinds first, then uploads and status polls sequentially using the single pinned session.
+        // Process pending unbinds first, then reconcile remote shelf, then uploads and status polls sequentially.
         val blockedUploadShas = HashSet<String>()
+        val pendingDeleteEntries = entries.filter { it.state == BookUploadState.PENDING_DELETE }
+        for (entry in pendingDeleteEntries) {
+            currentCoroutineContext().ensureActive()
+            if (!isBatchCurrent() || entry.paused) return
+            val shelfId = entry.serverShelfBookId
+            if (shelfId == null) {
+                withContext(Dispatchers.IO) {
+                    if (!isBatchCurrent()) return@withContext
+                    library.completePendingBookDelete(resolvedAccountKey, entry.localBookId, null)
+                    library.cleanupOrphanOriginalIfUnused(entry.localBookId, entry.format)
+                    publishForAccount(resolvedAccountKey, batchGen, session.sessionId)
+                }
+                continue
+            }
+            val deleteOutcome = session.deleteBook(shelfId)
+            if (!isBatchCurrent()) return
+            when (deleteOutcome) {
+                UnifiedBookDeleteOutcome.Deleted,
+                UnifiedBookDeleteOutcome.NotFound -> {
+                    withContext(Dispatchers.IO) {
+                        if (!isBatchCurrent()) return@withContext
+                        library.completePendingBookDelete(resolvedAccountKey, entry.localBookId, shelfId)
+                        library.cleanupOrphanOriginalIfUnused(entry.localBookId, entry.format)
+                        publishForAccount(resolvedAccountKey, batchGen, session.sessionId)
+                    }
+                }
+                UnifiedBookDeleteOutcome.UnsupportedServer,
+                UnifiedBookDeleteOutcome.Offline,
+                UnifiedBookDeleteOutcome.Unauthorized,
+                is UnifiedBookDeleteOutcome.Failed -> {
+                    blockedUploadShas += entry.fileSha256
+                }
+            }
+        }
+
+        // Reconcile server shelf books (enables fresh-device pullback and avoids redundant re-uploads).
+        reconcileRemoteShelf(session, resolvedAccountKey, batchGen, blockedUploadShas)
+        if (!isBatchCurrent()) return
+
+        val remainingEntries = withContext(Dispatchers.IO) {
+            library.syncTasksForAccount(resolvedAccountKey).filter { it.state != BookUploadState.PENDING_DELETE }
+        }
         val activeUploadStates = setOf(
             BookUploadState.WAITING_NETWORK,
             BookUploadState.WAITING_SERVER,
@@ -938,41 +1131,10 @@ internal class UnifiedBookUploadCoordinator(
             BookUploadState.QUEUED,
             BookUploadState.PROCESSING,
         )
-        for (entry in entries) {
+        for (entry in remainingEntries) {
             currentCoroutineContext().ensureActive()
             if (!isBatchCurrent() || entry.paused) return
             when {
-                entry.state == BookUploadState.PENDING_DELETE -> {
-                    val shelfId = entry.serverShelfBookId
-                    if (shelfId == null) {
-                        withContext(Dispatchers.IO) {
-                            if (!isBatchCurrent()) return@withContext
-                            library.completePendingBookDelete(resolvedAccountKey, entry.localBookId, null)
-                            library.cleanupOrphanOriginalIfUnused(entry.localBookId, entry.format)
-                            publishForAccount(resolvedAccountKey, batchGen, session.sessionId)
-                        }
-                        continue
-                    }
-                    val deleteOutcome = session.deleteBook(shelfId)
-                    if (!isBatchCurrent()) return
-                    when (deleteOutcome) {
-                        UnifiedBookDeleteOutcome.Deleted,
-                        UnifiedBookDeleteOutcome.NotFound -> {
-                            withContext(Dispatchers.IO) {
-                                if (!isBatchCurrent()) return@withContext
-                                library.completePendingBookDelete(resolvedAccountKey, entry.localBookId, shelfId)
-                                library.cleanupOrphanOriginalIfUnused(entry.localBookId, entry.format)
-                                publishForAccount(resolvedAccountKey, batchGen, session.sessionId)
-                            }
-                        }
-                        UnifiedBookDeleteOutcome.UnsupportedServer,
-                        UnifiedBookDeleteOutcome.Offline,
-                        UnifiedBookDeleteOutcome.Unauthorized,
-                        is UnifiedBookDeleteOutcome.Failed -> {
-                            blockedUploadShas += entry.fileSha256
-                        }
-                    }
-                }
                 entry.serverShelfBookId == null && entry.state in setOf(
                     BookUploadState.WAITING_NETWORK, BookUploadState.WAITING_SERVER, BookUploadState.UPLOADING,
                 ) -> {
@@ -1147,6 +1309,248 @@ internal class UnifiedBookUploadCoordinator(
                 }
             }
         }
+    }
+
+    private suspend fun reconcileRemoteShelf(
+        session: UnifiedBookRemoteSession,
+        accountKey: String,
+        batchGen: Long,
+        blockedShas: Set<String>,
+    ) {
+        val listOutcome = try {
+            session.listRemoteBooks()
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Exception) {
+            return
+        }
+        if (sessionGeneration.get() != batchGen || activeSessionId != session.sessionId) return
+        val remoteBooks = (listOutcome as? UnifiedBookListOutcome.Ready)?.books ?: return
+        val cloudOnly = withContext(Dispatchers.IO) {
+            if (sessionGeneration.get() != batchGen || activeSessionId != session.sessionId) return@withContext emptyList()
+            val localIds = library.catalog().mapTo(HashSet()) { it.id }
+            val pendingDeleteIds = library.syncTasksForAccount(accountKey)
+                .filter { it.state == BookUploadState.PENDING_DELETE }
+                .mapNotNullTo(HashSet()) { it.serverShelfBookId }
+            val missingLocally = mutableListOf<RemoteShelfBook>()
+            for (remote in remoteBooks) {
+                if (remote.shelfBookId in pendingDeleteIds || remote.sha256 in blockedShas) continue
+                if (remote.sha256 in localIds) {
+                    val existing = library.readUploadEntry(accountKey, remote.sha256)
+                    if (existing == null) {
+                        library.enqueueBookUpload(accountKey, remote.sha256, remote.sha256, remote.format, remote.title)
+                    }
+                    if (existing == null || existing.state != BookUploadState.PENDING_DELETE) {
+                        library.updateBookUploadState(
+                            accountKey = accountKey,
+                            localBookId = remote.sha256,
+                            state = remote.jobState,
+                            progressPct = remote.progressPct,
+                            stageLabel = remote.stageLabel,
+                            errorMessage = remote.errorMessage,
+                            serverShelfBookId = remote.shelfBookId,
+                        )
+                    }
+                } else {
+                    missingLocally += remote
+                }
+            }
+            publishForAccount(accountKey, batchGen, session.sessionId)
+            missingLocally
+        }
+        if (sessionGeneration.get() == batchGen && activeSessionId == session.sessionId) {
+            mutableRemoteShelfBooks.value = cloudOnly
+        }
+    }
+
+    /**
+     * Pulls a cloud-only shelf book's verified original file from the server, confirms SHA-256 byte identity,
+     * imports it into the local library, binds its server shelf ID strictly to the initiating account without
+     * re-uploading, and returns its local ID.
+     * Cleanup of temporary files and cloud-card state always executes under [NonCancellable] on cancellation.
+     */
+    suspend fun downloadAndImport(remote: RemoteShelfBook): String? = restoreLock.withLock {
+        val remoteClient = remoteProvider() ?: run {
+            mutableRestoreError.value = "请先登录学习服务后再下载原文件。"
+            return@withLock null
+        }
+        val session = remoteClient.openSession() ?: run {
+            mutableRestoreError.value = "请先登录学习服务后再下载原文件。"
+            return@withLock null
+        }
+        val fallbackBoundAccountKey = withContext(Dispatchers.IO) {
+            library.boundUploadAccountKey(session.fallbackAccountKey) ?: session.fallbackAccountKey
+        }
+        val currentJob = currentCoroutineContext()[Job]
+        val pinnedSessionId = session.sessionId
+        val myGen: Long
+        val initiatingAccountKey: String
+        val abortedBeforeStart = synchronized(sessionStateLock) {
+            if (activeSessionId != null && activeSessionId != pinnedSessionId) {
+                myGen = -1L
+                initiatingAccountKey = ""
+                true
+            } else {
+                if (activeSessionId == null) {
+                    activeSessionId = pinnedSessionId
+                }
+                myGen = sessionGeneration.get()
+                initiatingAccountKey = lastAccountKey ?: fallbackBoundAccountKey
+                false
+            }
+        }
+        if (abortedBeforeStart) return@withLock null
+
+        fun isRestoreCurrent(): Boolean =
+            sessionGeneration.get() == myGen && activeSessionId == pinnedSessionId
+
+        val alreadyLocal = withContext(Dispatchers.IO) {
+            library.catalog().any { it.id == remote.sha256 }
+        }
+        if (alreadyLocal) {
+            return@withLock synchronized(sessionStateLock) {
+                if (!isRestoreCurrent()) {
+                    null
+                } else {
+                    mutableRemoteShelfBooks.value = mutableRemoteShelfBooks.value.filterNot { it.shelfBookId == remote.shelfBookId }
+                    remote.sha256
+                }
+            }
+        }
+
+        val registered = synchronized(sessionStateLock) {
+            if (!isRestoreCurrent()) {
+                false
+            } else {
+                activeRestoreJob = currentJob
+                mutableRestoringShelfBookId.value = remote.shelfBookId
+                mutableRestoreProgressPct.value = 0
+                mutableRestoreError.value = null
+                true
+            }
+        }
+        if (!registered) return@withLock null
+
+        val ext = remote.format.trim().lowercase().takeIf { it.matches(Regex("[a-z0-9]{1,8}")) } ?: "bin"
+        val baseTitle = remote.title.trim()
+            .replace(Regex("""[\\/:*?"<>|\p{Cntrl}]+"""), "_")
+            .trim('.', ' ')
+            .take(80)
+            .ifBlank { "book" }
+        // Once the busy flag is registered, every suspension point (including temp-dir creation) must sit
+        // inside the try/finally that resets it; otherwise a cancel right after the card turns busy leaves
+        // it stuck. The directory is assigned inside the IO block so one created just before a cancel is
+        // still removed in finally.
+        var tempDir: Path? = null
+        try {
+            withContext(Dispatchers.IO) { tempDir = Files.createTempDirectory("coach-book-restore-") }
+            val tempFile = checkNotNull(tempDir).resolve("$baseTitle.$ext")
+            val outcome = session.downloadBookOriginal(remote.shelfBookId, tempFile, remote.sha256) { pct ->
+                if (isRestoreCurrent()) {
+                    mutableRestoreProgressPct.value = pct.coerceIn(0, 100)
+                }
+            }
+            if (!isRestoreCurrent()) return@withLock null
+            when (outcome) {
+                is UnifiedBookDownloadOutcome.Downloaded -> {
+                    val actualSha = withContext(Dispatchers.IO) { sha256File(tempFile) }
+                    if (!isRestoreCurrent()) return@withLock null
+                    if (actualSha != remote.sha256 || outcome.sha256 != remote.sha256) {
+                        if (isRestoreCurrent()) mutableRestoreError.value = "原文件校验不一致，请重试。"
+                        return@withLock null
+                    }
+                    beforeRestoreCommitForTest?.invoke(remote, initiatingAccountKey)
+                    currentCoroutineContext().ensureActive()
+                    withContext(Dispatchers.IO) {
+                        synchronized(sessionStateLock) {
+                            if (!isRestoreCurrent()) return@synchronized null
+                            val imported = library.importBook(tempFile)
+                            if (imported.id != remote.sha256) {
+                                mutableRestoreError.value = "导入后的文件校验不一致，请重试。"
+                                return@synchronized null
+                            }
+                            library.enqueueBookUpload(initiatingAccountKey, imported.id, remote.sha256, remote.format, remote.title)
+                            library.updateBookUploadState(
+                                accountKey = initiatingAccountKey,
+                                localBookId = imported.id,
+                                state = remote.jobState,
+                                progressPct = remote.progressPct,
+                                stageLabel = remote.stageLabel,
+                                errorMessage = remote.errorMessage,
+                                serverShelfBookId = remote.shelfBookId,
+                            )
+                            publishForAccount(initiatingAccountKey, myGen, pinnedSessionId)
+                            mutableRemoteShelfBooks.value = mutableRemoteShelfBooks.value.filterNot {
+                                it.shelfBookId == remote.shelfBookId || it.sha256 == remote.sha256
+                            }
+                            imported.id
+                        }
+                    }
+                }
+                UnifiedBookDownloadOutcome.NotFound -> {
+                    synchronized(sessionStateLock) {
+                        if (isRestoreCurrent()) {
+                            mutableRestoreError.value = "服务端书架中已找不到这本书。"
+                            mutableRemoteShelfBooks.value = mutableRemoteShelfBooks.value.filterNot { it.shelfBookId == remote.shelfBookId }
+                        }
+                    }
+                    null
+                }
+                UnifiedBookDownloadOutcome.Unauthorized -> {
+                    if (isRestoreCurrent()) mutableRestoreError.value = "授权已失效，请重新登录学习服务。"
+                    null
+                }
+                UnifiedBookDownloadOutcome.UnsupportedServer -> {
+                    if (isRestoreCurrent()) mutableRestoreError.value = "当前服务版本暂不支持拉回原文件。"
+                    null
+                }
+                UnifiedBookDownloadOutcome.Offline -> {
+                    if (isRestoreCurrent()) mutableRestoreError.value = "当前无法联网，请联网后再下载原文件。"
+                    null
+                }
+                is UnifiedBookDownloadOutcome.Failed -> {
+                    if (isRestoreCurrent()) mutableRestoreError.value = outcome.message
+                    null
+                }
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (e: Exception) {
+            if (isRestoreCurrent()) {
+                mutableRestoreError.value = e.message?.takeIf { it.isNotBlank() } ?: "拉回原文件失败，请重试。"
+            }
+            null
+        } finally {
+            try {
+                val createdDir = tempDir
+                if (createdDir != null) {
+                    withContext(NonCancellable + Dispatchers.IO) {
+                        runCatching { createdDir.toFile().deleteRecursively() }
+                    }
+                }
+            } finally {
+                synchronized(sessionStateLock) {
+                    if (activeRestoreJob === currentJob) activeRestoreJob = null
+                    if (mutableRestoringShelfBookId.value == remote.shelfBookId) {
+                        mutableRestoringShelfBookId.value = null
+                        mutableRestoreProgressPct.value = 0
+                    }
+                }
+            }
+        }
+    }
+
+    private fun sha256File(file: Path): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        Files.newInputStream(file).use { input ->
+            val buf = ByteArray(65_536)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                digest.update(buf, 0, n)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     private fun publishForAccount(accountKey: String, expectedGen: Long, expectedSessionId: String) {

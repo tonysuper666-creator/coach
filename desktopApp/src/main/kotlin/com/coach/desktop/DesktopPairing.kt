@@ -4,6 +4,7 @@ import com.coach.client.DeviceAuthorizationException
 import com.coach.client.HttpLedgerTransport
 import com.coach.client.PairedCredentials
 import com.coach.client.PairingClient
+import com.coach.desktop.books.CoachConnectivityRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Dispatchers
@@ -14,6 +15,8 @@ import kotlinx.coroutines.isActive
 /** Deliberately not a data class: credentials must never appear in generated toString output. */
 internal class DesktopIdentity(val serverUrl: String, val credentials: PairedCredentials)
 
+internal class StartupSession(val identity: DesktopIdentity?, val notice: String?)
+
 internal class DesktopPairing(
     private val settings: DesktopConnectionSettings,
     private val store: DesktopCredentials = DesktopCredentials(settings.clientDirectory),
@@ -21,6 +24,13 @@ internal class DesktopPairing(
     fun load(): DesktopIdentity? {
         val url = settings.serverUrl() ?: return null
         return (store.load(url) ?: settings.nativeCredentials(url))?.let { DesktopIdentity(url, it) }
+    }
+
+    /** Startup only: a moved packaged friend URL comes back as [StartupSession.notice] and no identity. */
+    fun loadForStartup(): StartupSession {
+        val notice = settings.retireMovedFriendUrl()
+        val identity = if (notice != null) null else load()
+        return StartupSession(identity, notice)
     }
 
     suspend fun pair(address: String, code: String, name: String): DesktopIdentity {
@@ -60,16 +70,33 @@ internal class DesktopPairing(
         if (identity.credentials.role == "friend") {
             val client = PairingClient(identity.serverUrl)
             return try {
-                client.friendAuthorized(identity.credentials, startup).also { if (!it) store.clear(identity.serverUrl, identity.credentials, markRevoked = true) }
+                val ok = client.friendAuthorized(identity.credentials, startup)
+                CoachConnectivityRegistry.markOnline(identity.serverUrl)
+                if (!ok) store.clear(identity.serverUrl, identity.credentials, markRevoked = true)
+                ok
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { true }
+            catch (_: Exception) {
+                CoachConnectivityRegistry.markOffline(identity.serverUrl)
+                true
+            }
             finally { client.close() }
         }
         val transport = HttpLedgerTransport(identity.serverUrl, identity.credentials.deviceId, identity.credentials.token)
-        return try { transport.hello(null); true }
+        return try {
+            transport.hello(null)
+            CoachConnectivityRegistry.markOnline(identity.serverUrl)
+            true
+        }
         catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: DeviceAuthorizationException) { store.clear(identity.serverUrl, identity.credentials, markRevoked = true); false }
-        catch (_: Exception) { true }
+        catch (_: DeviceAuthorizationException) {
+            CoachConnectivityRegistry.markOnline(identity.serverUrl)
+            store.clear(identity.serverUrl, identity.credentials, markRevoked = true)
+            false
+        }
+        catch (_: Exception) {
+            CoachConnectivityRegistry.markOffline(identity.serverUrl)
+            true
+        }
         finally { transport.close() }
     }
 

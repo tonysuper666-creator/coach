@@ -12,6 +12,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -139,15 +140,35 @@ internal fun LibraryHome(
 ) {
     val colors = CoachTheme.colors
     val scroll = rememberScrollState()
+    val scope = rememberCoroutineScope()
     val showToday = library?.todayCardEnabled ?: windowsToday
     val rightScroll = rememberScrollState()
     val density = LocalDensity.current
     var sheetOriginLeftDp by remember { mutableStateOf<Float?>(null) }
+    val cloudCoordinator = remember(library) { library?.let(UnifiedBookCloudBridge::forLibrary) }
+    val remoteBooks by (cloudCoordinator?.remoteShelfBooks?.collectAsState() ?: remember { mutableStateOf(emptyList()) })
+    val restoringShelfBookId by (cloudCoordinator?.restoringShelfBookId?.collectAsState() ?: remember { mutableStateOf<String?>(null) })
+    val restoreProgressPct by (cloudCoordinator?.restoreProgressPct?.collectAsState() ?: remember { mutableStateOf(0) })
+    val restoreError by (cloudCoordinator?.restoreError?.collectAsState() ?: remember { mutableStateOf<String?>(null) })
+    val hasActiveServerJobs = remember(ui.uploadStatuses) {
+        ui.uploadStatuses.values.any {
+            it.state in setOf(BookUploadState.RECEIVED, BookUploadState.QUEUED, BookUploadState.PROCESSING)
+        }
+    }
+    LaunchedEffect(cloudCoordinator, hasActiveServerJobs) {
+        if (cloudCoordinator != null && hasActiveServerJobs) {
+            while (true) {
+                kotlinx.coroutines.delay(2_000L)
+                runCatching { cloudCoordinator.syncOnce() }
+            }
+        }
+    }
     val activeCollections = remember(ui.collections) { ui.collections.filterNot { it.record.archived } }
     val courses = remember(activeCollections) { activeCollections.filter { it.record.kind == CollectionKind.COURSE } }
     val booklists = remember(activeCollections) { activeCollections.filter { it.record.kind == CollectionKind.BOOKLIST } }
     val standaloneBooks = remember(ui.catalog) { ui.catalog.filter { it.showStandalone } }
-    val isEmpty = ui.catalog.isEmpty() && activeCollections.isEmpty()
+    val isEmpty = ui.catalog.isEmpty() && activeCollections.isEmpty() && remoteBooks.isEmpty()
+    var libraryOpen by remember { mutableStateOf(false) }
 
     BoxWithConstraints(
         Modifier.fillMaxSize().padding(
@@ -164,7 +185,16 @@ internal fun LibraryHome(
                 .fillMaxHeight()
                 .testTag("shelf-sheet"),
         ) {
-            if (isEmpty) {
+            if (libraryOpen && library != null) {
+                MyLibraryScreen(
+                    library = library,
+                    onBack = { libraryOpen = false },
+                    onOpenBook = { id ->
+                        libraryOpen = false
+                        onOpenBook(id)
+                    },
+                )
+            } else if (isEmpty) {
                 // 空态首页：居中单栏，唯一主钮「导入文件」+ 3 张可点引导卡（加顶栏 ＋ / 设置，共 6 个零死路入口）。
                 Box(Modifier.fillMaxSize(), contentAlignment = if (showToday) Alignment.TopCenter else Alignment.Center) {
                     Column(
@@ -458,6 +488,21 @@ internal fun LibraryHome(
                 }
 
                 val collectionsAndReadingBlock: @Composable () -> Unit = {
+                    if (library != null && ui.catalog.isNotEmpty()) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "批注、问答和错题",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = colors.fgSecondary,
+                                modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                            )
+                            V7TextButton(
+                                onClick = { libraryOpen = true },
+                                modifier = Modifier.testTag("open-my-library"),
+                                ringInside = true,
+                            ) { Text("我的库") }
+                        }
+                    }
                     // 3. 课程卡片组
                     if (courses.isNotEmpty()) {
                         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s2)) {
@@ -478,9 +523,9 @@ internal fun LibraryHome(
                         }
                     }
 
-                    // 4. 阅读卡片组（书单 + 单书，课程内附带材料不散落占满首页）
+                    // 4. 阅读卡片组（书单 + 单书 + 云端待拉回原文件，课程内附带材料不散落占满首页）
                     val visibleBooks = if (standaloneBooks.isNotEmpty()) standaloneBooks else if (courses.isEmpty()) ui.catalog else emptyList()
-                    if (booklists.isNotEmpty() || visibleBooks.isNotEmpty()) {
+                    if (booklists.isNotEmpty() || visibleBooks.isNotEmpty() || remoteBooks.isNotEmpty()) {
                         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s2)) {
                             Text(
                                 "阅读",
@@ -488,6 +533,14 @@ internal fun LibraryHome(
                                 color = colors.fgSecondary,
                                 modifier = Modifier.padding(horizontal = 4.dp).testTag("home-section-reading"),
                             )
+                            restoreError?.takeIf { it.isNotBlank() }?.let { err ->
+                                Text(
+                                    err,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colors.dangerFg,
+                                    modifier = Modifier.padding(horizontal = 4.dp).testTag("cloud-restore-error"),
+                                )
+                            }
                             for (list in booklists) {
                                 HomeCollectionCard(
                                     summary = list,
@@ -506,6 +559,22 @@ internal fun LibraryHome(
                                     onRetryUpload = { onRetryUpload(item.id) },
                                     onCancelImport = onCancelImport,
                                     onClick = { onOpenBook(item.id) },
+                                )
+                            }
+                            for (remote in remoteBooks) {
+                                val restoringThis = restoringShelfBookId == remote.shelfBookId
+                                CloudShelfBookCard(
+                                    book = remote,
+                                    restoring = restoringThis,
+                                    restoreProgressPct = if (restoringThis) restoreProgressPct else 0,
+                                    enabled = !ui.busy && restoringShelfBookId == null,
+                                    onClick = {
+                                        val coord = cloudCoordinator ?: return@CloudShelfBookCard
+                                        scope.launch {
+                                            val localId = coord.downloadAndImport(remote)
+                                            if (localId != null) onOpenBook(localId)
+                                        }
+                                    },
                                 )
                             }
                         }
@@ -727,6 +796,50 @@ private fun HomeBookCard(
                 modifier = Modifier.fillMaxWidth()
                     .padding(start = 18.dp, end = 18.dp, bottom = 12.dp)
                     .testTag("book-import-progress"),
+            )
+        }
+    }
+}
+
+@Composable
+private fun CloudShelfBookCard(
+    book: RemoteShelfBook,
+    restoring: Boolean,
+    restoreProgressPct: Int,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val colors = CoachTheme.colors
+    val shape = RoundedCornerShape(CoachV7.Radius.m)
+    val statusText = if (restoring) {
+        if (restoreProgressPct in 1..99) "正在拉回原文件 · $restoreProgressPct%" else "正在拉回原文件"
+    } else {
+        book.cardStatusLine()
+    }
+    Column(
+        Modifier.fillMaxWidth()
+            .paperShadow("card", colors.dark)
+            .clip(shape)
+            .background(colors.surface2)
+            .border(1.dp, colors.borderSubtle, shape),
+    ) {
+        Column(
+            Modifier.fillMaxWidth()
+                .testTag("cloud-book-${book.shelfBookId}")
+                .shelfClick(enabled, onClick)
+                .padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                book.title,
+                style = MaterialTheme.typography.titleMedium,
+                color = colors.fgPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            CoachCardMeta(
+                "${book.format.uppercase()} · $statusText",
+                modifier = Modifier.testTag("cloud-book-status-${book.shelfBookId}"),
             )
         }
     }

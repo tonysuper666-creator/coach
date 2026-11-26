@@ -1,5 +1,7 @@
 package com.coach.client
 
+import io.ktor.client.request.parameter
+
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.HttpClientEngineConfig
@@ -18,6 +20,7 @@ import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.prepareGet
 import io.ktor.client.request.preparePost
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
@@ -27,12 +30,15 @@ import io.ktor.http.content.OutgoingContent
 import io.ktor.http.content.TextContent
 import io.ktor.client.statement.bodyAsText
 import io.ktor.client.statement.bodyAsBytes
+import io.ktor.http.fromHttpToGmtDate
+import io.ktor.util.date.GMTDate
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.ktor.http.encodeURLParameter
 import io.ktor.http.encodeURLPathPart
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.ByteWriteChannel
+import io.ktor.utils.io.readAvailable
 import io.ktor.utils.io.readUTF8Line
 import io.ktor.utils.io.writeFully
 import com.coach.domain.reviewqueue.QueueAvailability
@@ -56,13 +62,33 @@ data class SourcePage(val docId: String, val pdfPage: Int, val bookPage: Int?, v
 
 /** 模拟考接口的一次回答：成功时 [body] 是服务端原样的 JSON；失败时 [error] 是服务端写的原因，连不上 Mac 时两者都是 null。 */
 /** [code] 是服务端给程序看的类别，只用来决定怎么提示，从不显示给人。 */
-class MockReply(val body: JsonObject?, val error: String?, val retryable: Boolean = false, val statusCode: Int? = null, val code: String? = null)
+class MockReply(val body: JsonObject?, val error: String?, val retryable: Boolean = false, val statusCode: Int? = null, val code: String? = null, val retryAfterMs: Long? = null)
+private fun HttpResponse.readerRetryDelay(body: JsonObject?): Long? {
+    val value = headers[HttpHeaders.RetryAfter]?.trim()
+    val seconds = value?.toLongOrNull() ?: (body?.get("retryAfterSec") as? JsonPrimitive)?.content?.toLongOrNull()
+    if (seconds != null && seconds >= 0) return seconds.coerceAtMost(Long.MAX_VALUE / 1000) * 1000
+    return value?.let { runCatching { (it.fromHttpToGmtDate().timestamp - GMTDate().timestamp).coerceAtLeast(0) }.getOrNull() }
+}
+
+/** Windows reader retries one explicit HTTP failure while the original context is still current. */
+suspend fun withReaderRetry(
+    stillCurrent: suspend () -> Boolean,
+    request: suspend () -> MockReply,
+): MockReply {
+    val reply = request()
+    if (reply.statusCode != 429 && reply.statusCode !in 500..599) return reply
+    val waitMs = reply.retryAfterMs ?: 1000L
+    kotlinx.coroutines.delay(waitMs)
+    return if (stillCurrent()) request() else reply
+}
+
 sealed interface UnifiedServerCapability {
     data class Supported(val accountScope: String?) : UnifiedServerCapability
     data class Unsupported(val accountScope: String?) : UnifiedServerCapability
     data object Unauthorized : UnifiedServerCapability
     data object Offline : UnifiedServerCapability
 }
+enum class ServerReachability { ONLINE, UNAUTHORIZED, OFFLINE }
 class MainlineEssayReply(val document: MainlineEssayDocument?, val error: String?, val retryable: Boolean = false)
 /** 题库里一道可以限时练的论述题。[fromMockPaper] 的题出自整套模拟卷，先练了那套卷就不再是生题。 */
 data class EssayPrompt(val id: String, val week: Int, val marks: Double, val wordTarget: Int, val stem: String, val pack: String, val fromMockPaper: Boolean)
@@ -73,8 +99,9 @@ data class EssayBankView(val prompts: List<EssayPrompt>, val weeks: List<Int>, v
  * 只读的课程查询：记录页要的冻结题与评分标准、资料页要的原文。全部要联网问 Mac；
  * 返回 null 的意思就是「这次拿不到」（离线、或 Mac 上的服务还没更新到有这个接口），界面照实说，不拿占位内容顶。
  */
-class CourseHttp internal constructor(baseUrl: String, private val deviceId: String, private val token: String, private val course: String, createEngine: () -> HttpClientEngine) {
-    constructor(baseUrl: String, deviceId: String, token: String, course: String) : this(baseUrl, deviceId, token, course, { createCoachHttpEngine() })
+class CourseHttp internal constructor(baseUrl: String, private val deviceId: String, private val token: String, private val course: String, createEngine: () -> HttpClientEngine, connectTimeoutMs: Long = 3_000L) {
+    constructor(baseUrl: String, deviceId: String, token: String, course: String) : this(baseUrl, deviceId, token, course, { createCoachHttpEngine() }, 3_000L)
+    constructor(baseUrl: String, deviceId: String, token: String, course: String, connectTimeoutMs: Long) : this(baseUrl, deviceId, token, course, { createCoachHttpEngine() }, connectTimeoutMs)
     private val base = baseUrl.trimEnd('/')
     // Only a digest of this paired account scope reaches SQLite; credentials never enter note data.
     fun readerState(sync: SyncEngine, week: Int): JsonObject = sync.readerState(course, week, "$base\u0000$deviceId\u0000$token")
@@ -85,7 +112,7 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         override fun create(block: HttpClientEngineConfig.() -> Unit) = createEngine()
     }) {
         followRedirects = false
-        install(HttpTimeout) { requestTimeoutMillis = 15_000; connectTimeoutMillis = 3_000 }
+        install(HttpTimeout) { requestTimeoutMillis = 15_000; connectTimeoutMillis = connectTimeoutMs }
         defaultRequest { header("Authorization", "Bearer $token"); header("X-Coach-Device", deviceId) }
     }
 
@@ -147,35 +174,104 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
       catch (e: kotlinx.coroutines.CancellationException) { throw e }
       catch (_: Exception) { MockReply(null, "连不上 Coach 服务，阅读位置已保存。可返回做题或手动重试。") }
     /** 本机书架里的书：选中段加相邻原文块（带块编号）发给已连接的 Coach 服务，讲解只引用这些块编号。 */
-    suspend fun explainLibrary(input: JsonObject): MockReply = try {
-        val response = http.post("$base/v1/library/explain") {
+    suspend fun explainLibrary(input: JsonObject, onPartial: (suspend (JsonObject) -> Unit)? = null): MockReply = try {
+        http.preparePost("$base/v1/library/explain") {
             timeout { requestTimeoutMillis = ReaderTimeoutPolicy.CLIENT_REQUEST_MS; socketTimeoutMillis = ReaderTimeoutPolicy.CLIENT_REQUEST_MS }
+            if (onPartial != null) header(HttpHeaders.Accept, "application/x-ndjson")
             setBody(TextContent(input.toString(), ContentType.Application.Json))
-        }
-        if (response.status.value == 401) MockReply(null, "授权已失效，请重新登录 Coach 服务。", statusCode = 401)
-        else {
-            val text = response.bodyAsText()
-            val parsed = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull()
-            val status = response.status.value
-            val code = parsed?.s("code")?.ifBlank { null }
-            when {
-                parsed == null && status != 403 -> MockReply(null, "连不上 Coach 服务，可继续阅读或稍后重试。")
-                response.status.isSuccess() -> MockReply(parsed, null, statusCode = status)
-                // Older friend services return a quota sentence. Use the same service guidance on both clients.
-                status == 429 || code == "daily_quota" || code == "monthly_quota" ->
-                    MockReply(null, "讲解服务暂时不可用，请稍后再试。", retryable = true, statusCode = status, code = "unavailable")
-                else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "暂时无法确认，请稍后重试。", statusCode = status, code = code)
+        }.execute { response ->
+            if (response.status.value == 401) MockReply(null, "授权已失效，请重新登录 Coach 服务。", statusCode = 401)
+            else if (onPartial != null && response.status.isSuccess() &&
+                response.contentType()?.withoutParameters() == ContentType.parse("application/x-ndjson")) {
+                MockReply(readReaderAnswer(response.bodyAsChannel(), onPartial), null, statusCode = response.status.value)
+            } else {
+                val text = response.bodyAsText()
+                val parsed = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull()
+                val status = response.status.value
+                val code = parsed?.s("code")?.ifBlank { null }
+                when {
+                    parsed == null && status != 403 && text.trimStart().startsWith("<") ->
+                        MockReply(null, "需要联网才能使用，读书和做题照常。", retryable = true, code = "offline")
+                    // Older friend services return a quota sentence. Use the same service guidance on both clients.
+                    status == 429 || code == "daily_quota" || code == "monthly_quota" ->
+                        MockReply(null, "讲解服务暂时不可用，请稍后再试。", retryable = true, statusCode = status,
+                            code = "unavailable", retryAfterMs = response.readerRetryDelay(parsed))
+                    status in 500..599 ->
+                        MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "讲解服务暂时不可用，请稍后再试。",
+                            retryable = true, statusCode = status, code = code ?: "unavailable",
+                            retryAfterMs = response.readerRetryDelay(parsed))
+                    parsed == null && status != 403 ->
+                        MockReply(null, "需要联网才能使用，读书和做题照常。", retryable = true, code = "offline")
+                    response.status.isSuccess() -> MockReply(parsed, null, statusCode = status)
+                    else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "暂时无法确认，请稍后重试。", statusCode = status, code = code)
+                }
             }
         }
-    } catch (_: HttpRequestTimeoutException) { MockReply(null, "讲解请求等待超时。可继续阅读或手动重试。") }
+    } catch (_: HttpRequestTimeoutException) { MockReply(null, "需要联网才能使用，读书和做题照常。", retryable = true, code = "offline") }
       catch (e: kotlinx.coroutines.CancellationException) { throw e }
-      catch (_: Exception) { MockReply(null, "连不上 Coach 服务，可继续阅读或稍后重试。") }
+      catch (_: Exception) { MockReply(null, "需要联网才能使用，读书和做题照常。", retryable = true, code = "offline") }
+
+    /** Lightweight reachability probe; distinguishes unreachable/gateway errors from live 401/2xx-4xx responses. */
+    suspend fun probeReachability(role: String, timeoutMs: Long = 1_500L): ServerReachability = try {
+        val path = if (role == "friend") "$base/v1/public/status" else "$base/v1/hello"
+        val response = http.get(path) {
+            timeout {
+                connectTimeoutMillis = timeoutMs
+                requestTimeoutMillis = timeoutMs
+                socketTimeoutMillis = timeoutMs
+            }
+        }
+        val status = response.status.value
+        when {
+            status == 401 -> ServerReachability.UNAUTHORIZED
+            status == 408 -> ServerReachability.OFFLINE
+            status in 200..499 -> ServerReachability.ONLINE
+            status >= 500 -> {
+                val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+                if (parsed != null) ServerReachability.ONLINE else ServerReachability.OFFLINE
+            }
+            else -> ServerReachability.OFFLINE
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+      catch (_: Exception) { ServerReachability.OFFLINE }
 
     /** Check this same server and device without sending any book text. Only 401 proves revocation. */
     suspend fun libraryAuthStatus(): Int? = try {
         http.get("$base/v1/public/status").status.value
     } catch (e: kotlinx.coroutines.CancellationException) { throw e }
       catch (_: Exception) { null }
+
+    suspend fun learningProfile(): JsonObject? {
+        val reply = http.get("$base/learning-sync/profile")
+        return if (reply.status.isSuccess()) Json.parseToJsonElement(reply.bodyAsText()).jsonObject else null
+    }
+
+    suspend fun learningChanges(epoch: String?, after: Long, stream: String): JsonObject? {
+        val reply = http.get("$base/learning-sync/changes") {
+            parameter("stream",stream)
+            parameter("after", after)
+            epoch?.let { parameter("epoch", it) }
+        }
+        return if (reply.status.isSuccess()) Json.parseToJsonElement(reply.bodyAsText()).jsonObject else null
+    }
+
+    suspend fun learningSnapshot(epoch: String, token: String?, after: Long): JsonObject? {
+        val reply = http.get("$base/learning-sync/snapshot") {
+            parameter("epoch",epoch)
+            parameter("after",after)
+            token?.let { parameter("snapshotId",it) }
+        }
+        if (reply.status.value == 410) return buildJsonObject { put("expired",true) }
+        return if (reply.status.isSuccess()) Json.parseToJsonElement(reply.bodyAsText()).jsonObject else null
+    }
+
+    suspend fun pushLearningChange(operation: JsonObject): JsonObject? {
+        val reply = http.post("$base/learning-sync/push") {
+            contentType(ContentType.Application.Json)
+            setBody(operation.toString())
+        }
+        return if (reply.status.isSuccess()) Json.parseToJsonElement(reply.bodyAsText()).jsonObject else null
+    }
 
     /** Probe server capability for unified book upload (TON-1823). Never falls back to legacy fragments. */
     suspend fun unifiedBooksCapability(role: String): UnifiedServerCapability = try {
@@ -317,6 +413,98 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         MockReply(null, "等待联网", retryable = true, code = "offline")
     }
 
+    /** Streams the account's verified original book bytes from the server for cross-device pullback. */
+    suspend fun downloadUnifiedBookOriginal(
+        shelfBookId: String,
+        onChunk: suspend (buf: ByteArray, offset: Int, len: Int, serverSha256: String?, contentLength: Long?) -> Unit,
+    ): MockReply = try {
+        http.prepareGet("$base/v1/books/${shelfBookId.encodeURLPathPart()}/original") {
+            timeout { requestTimeoutMillis = 600_000L; socketTimeoutMillis = 120_000L }
+        }.execute { response ->
+            val status = response.status.value
+            when {
+                status == 401 -> MockReply(null, "授权已失效", statusCode = 401, code = "unauthorized")
+                status == 404 -> {
+                    val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+                    val code = parsed?.s("code")?.ifBlank { null } ?: "not_found"
+                    MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "书架中找不到这本书。", statusCode = 404, code = code)
+                }
+                response.status.isSuccess() -> {
+                    val sha = response.headers["X-Coach-Book-Sha256"]?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+                    val len = response.headers[HttpHeaders.ContentLength]?.trim()?.toLongOrNull()
+                    val channel = response.bodyAsChannel()
+                    val buf = ByteArray(65_536)
+                    var total = 0L
+                    while (true) {
+                        val n = channel.readAvailable(buf, 0, buf.size)
+                        if (n < 0) break
+                        if (n == 0) continue
+                        onChunk(buf, 0, n, sha, len)
+                        total += n
+                    }
+                    MockReply(
+                        buildJsonObject {
+                            if (sha != null) put("sha256", sha)
+                            put("sizeBytes", len ?: total)
+                        },
+                        null,
+                        statusCode = status,
+                    )
+                }
+                else -> {
+                    val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+                    MockReply(
+                        null,
+                        parsed?.s("error")?.ifBlank { null } ?: "下载原文件失败，请稍后重试。",
+                        retryable = status >= 500 || status == 408 || status == 429,
+                        statusCode = status,
+                        code = parsed?.s("code")?.ifBlank { null },
+                    )
+                }
+            }
+        }
+    } catch (_: HttpRequestTimeoutException) {
+        MockReply(null, "等待联网", retryable = true, code = "offline")
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        MockReply(null, "等待联网", retryable = true, code = "offline")
+    }
+
+    suspend fun unifiedBookArtifact(shelfBookId: String): MockReply = try {
+        val response = http.get("$base/v1/books/${shelfBookId.encodeURLPathPart()}/artifact")
+        val status = response.status.value
+        val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+        val code = parsed?.s("code")?.ifBlank { null }
+        when {
+            status == 401 -> MockReply(null, "授权已失效", statusCode = 401, code = "unauthorized")
+            status == 404 -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "书架中找不到这本书。", statusCode = 404, code = code ?: "not_found")
+            status == 409 -> MockReply(parsed, parsed?.s("error")?.ifBlank { null } ?: "这本书还在整理中。", retryable = true, statusCode = 409, code = code ?: "not_ready")
+            response.status.isSuccess() && parsed != null -> MockReply(parsed, null, statusCode = status)
+            else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "无法获取书籍结构。", retryable = status >= 500, statusCode = status, code = code)
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        MockReply(null, "等待联网", retryable = true, code = "offline")
+    }
+
+    suspend fun deleteUnifiedAccount(): MockReply = try {
+        val response = http.delete("$base/v1/account")
+        val status = response.status.value
+        val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+        when {
+            status == 401 -> MockReply(null, "授权已失效", statusCode = 401, code = "unauthorized")
+            status == 404 -> MockReply(null, "等待服务支持", statusCode = 404, code = "unsupported")
+            response.status.isSuccess() -> MockReply(parsed ?: buildJsonObject { put("deleted", true) }, null, statusCode = status)
+            else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "删号失败，请稍后重试。", retryable = status >= 500, statusCode = status)
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        MockReply(null, "等待联网", retryable = true, code = "offline")
+    }
+
     /** 2.0-W2-B: 按节并发批量生成单书章节伴读五模块（要点/读前自测/推导模板/选做练习/章末习题三级提示）。 */
     suspend fun companionChapter(input: JsonObject): MockReply = try {
         val response = http.post("$base/v1/library/companion/chapter") {
@@ -337,9 +525,9 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
                 else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "章节伴读暂时不可用，请稍后重试。", statusCode = status, code = code)
             }
         }
-    } catch (_: HttpRequestTimeoutException) { MockReply(null, "章节伴读等待超时，请重试。") }
+    } catch (_: HttpRequestTimeoutException) { MockReply(null, "需要联网才能使用，本地阅读与草稿已保留。", retryable = true, code = "offline") }
       catch (e: kotlinx.coroutines.CancellationException) { throw e }
-      catch (_: Exception) { MockReply(null, "连不上学习服务，本地阅读与草稿已保留。") }
+      catch (_: Exception) { MockReply(null, "需要联网才能使用，本地阅读与草稿已保留。", retryable = true, code = "offline") }
     suspend fun courseAlign(input: JsonObject): MockReply =
         postCourseEndpoint("v1/library/course/align", input, timeoutMs = 120_000L, timeoutMsg = "课程自动对齐超时，已先使用本地规则。")
 
@@ -435,11 +623,11 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             }
         }
     } catch (_: HttpRequestTimeoutException) {
-        MockReply(null, "学法首屏生成超时，可先查看离线结构。")
+        MockReply(null, "需要联网才能使用，可先查看本地章节结构。", retryable = true, code = "offline")
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
     } catch (_: Exception) {
-        MockReply(null, "连不上学习服务，可继续本地阅读与练习。")
+        MockReply(null, "需要联网才能使用，可先查看本地章节结构。", retryable = true, code = "offline")
     }
 
     /** 2.0-MODES-2: 整本书 24 章一页纸 Batch 管线（全书地图）。 */
@@ -469,6 +657,9 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             val status = response.status.value
             val code = parsed?.s("code")?.ifBlank { null }
             when {
+                path == "v1/library/collection/ask" && (status == 429 || status in 500..599) ->
+                    MockReply(null, "课程服务暂时繁忙，请稍后再试。", retryable = true, statusCode = status,
+                        code = "unavailable", retryAfterMs = response.readerRetryDelay(parsed))
                 parsed == null && status != 403 -> MockReply(null, "连不上学习服务，可继续本地阅读与练习。")
                 response.status.isSuccess() -> MockReply(parsed, null, statusCode = status)
                 code == "daily_quota" || code == "monthly_quota" ->
@@ -479,11 +670,11 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             }
         }
     } catch (_: HttpRequestTimeoutException) {
-        MockReply(null, timeoutMsg)
+        MockReply(null, timeoutMsg, retryable = true, code = "offline")
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
     } catch (_: Exception) {
-        MockReply(null, "连不上学习服务，可继续本地阅读与练习。")
+        MockReply(null, "需要联网才能使用，读书和做题照常。", retryable = true, code = "offline")
     }
 
     /** 2.0-W2-D: 书单跨书概念两阶段语义对齐（阶段 2 远端语义裁决）。 */
@@ -500,7 +691,7 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             else MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "书单主题对齐暂时不可用。", statusCode = status)
         }
     } catch (e: kotlinx.coroutines.CancellationException) { throw e }
-      catch (_: Exception) { MockReply(null, "连不上学习服务，已保留本地对齐结果。") }
+      catch (_: Exception) { MockReply(null, "需要联网才能使用，已保留本地对齐结果。", retryable = true, code = "offline") }
     suspend fun cancelLibraryExplain(id: String) {
         runCatching { http.post("$base/v1/library/explain/cancel") {
             setBody(TextContent(buildJsonObject { put("requestId", id) }.toString(), ContentType.Application.Json)) } }

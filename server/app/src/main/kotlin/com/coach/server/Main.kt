@@ -178,6 +178,8 @@ fun main(args: Array<String>): Unit = runBlocking {
     val sable = publicPort?.let { SableSessions(actor, data.resolveSibling("${data.fileName}-sable-credentials")) }
     val friends = FriendAccess(data.resolve("friends"), sableSessions = sable)
     val unifiedBooks = UnifiedBookPipeline(data.resolve("unified-books"), UnifiedBookConfig.fromEnv())
+    // Installed before the startup recovery so it finishes interrupted account deletions the same way the route does.
+    unifiedBooks.installAccountDataFinalizer(actor, friends)
     if (unifiedBooks.enabled) {
         runCatching { unifiedBooks.reconcilePendingDeletes() }
     }
@@ -221,6 +223,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         practiceGradeRoutes(actor,friends=friends,service=practiceGradeService)
         collectionQaRoutes(actor,friends=friends,service=collectionQaService)
         courseMockRoutes(actor,friends=friends,service=courseMockService)
+        observePublicReaderCounts { route, status, elapsed -> observation.access(null, route, "POST", status, elapsed, null) }
         studyModeRoutes(actor,friends=friends,service=studyModeService,unifiedBooks=unifiedBooks)
     }.apply { engineConfig.apply { connectionGroupSize=1; workerGroupSize=1; callGroupSize=2 }; start(false) } }
     local.start(wait = false)

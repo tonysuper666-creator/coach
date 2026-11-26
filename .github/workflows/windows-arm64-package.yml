@@ -16,6 +16,11 @@ on:
         type: choice
         options: ['true', 'false']
         default: 'true'
+      private_friend_url:
+        description: Release build — embed the private friend service origin from the COACH_FRIEND_URL secret (masked; artifact kept 1 day; smoke skipped)
+        type: choice
+        options: ['false', 'true']
+        default: 'false'
 
 permissions:
   contents: read
@@ -34,6 +39,7 @@ jobs:
       RELEASE_VERSION: ${{ inputs.version || '1.1.0' }}
       RELEASE_VERSION_CODE: ${{ inputs.version_code || '3' }}
       SABLE_LOGIN: ${{ inputs.sable_login || 'true' }}
+      PRIVATE_FRIEND_URL: ${{ inputs.private_friend_url || 'false' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -67,16 +73,25 @@ jobs:
         shell: bash
         env:
           COACH_HEAVY_HOST: local
+          COACH_FRIEND_URL: ${{ inputs.private_friend_url == 'true' && secrets.COACH_FRIEND_URL || '' }}
         run: |
+          friend_args=()
+          if [[ "$PRIVATE_FRIEND_URL" == true ]]; then
+            [[ -n "$COACH_FRIEND_URL" ]] || { echo "private_friend_url=true but the COACH_FRIEND_URL secret is empty" >&2; exit 1; }
+            friend_args=("-Pcoach.friendUrl=$COACH_FRIEND_URL")
+          fi
           tools/dev/heavy ./gradlew :desktopApp:verifyReleaseVersion :desktopApp:packageMsi \
             -Pcoach.release=true \
             -Pcoach.release.version="$RELEASE_VERSION" \
             -Pcoach.release.versionCode="$RELEASE_VERSION_CODE" \
             -Pcoach.sableLogin="$SABLE_LOGIN" \
+            "${friend_args[@]}" \
             --console=plain --max-workers=2
       - name: Audit MSI metadata, AA64 binaries, and OCR bundle
         id: prepare
         shell: powershell
+        env:
+          COACH_FRIEND_URL: ${{ inputs.private_friend_url == 'true' && secrets.COACH_FRIEND_URL || '' }}
         run: |
           $ErrorActionPreference = 'Stop'
           $version = $env:RELEASE_VERSION
@@ -120,7 +135,8 @@ jobs:
           $dest = Join-Path $candidateDir $msiName
           Copy-Item -LiteralPath $msiFull -Destination $dest
 
-          python tools/smoke/audit-arm64-msi.py --msi $dest --sable-login $sable --forbid-private-config --out candidate/audit.txt
+          $friendFlag = if ($env:PRIVATE_FRIEND_URL -eq 'true') { '--require-friend-url' } else { '--forbid-private-config' }
+          python tools/smoke/audit-arm64-msi.py --msi $dest --sable-login $sable $friendFlag --out candidate/audit.txt
           if ($LASTEXITCODE -ne 0) { throw "ARM64 MSI audit failed with exit $LASTEXITCODE" }
           $utf8 = New-Object System.Text.UTF8Encoding($false)
           $meta = "msi_product_version=$($props['ProductVersion'])`nmsi_upgrade_code=$($props['UpgradeCode'])`nmsi_allusers=$($props['ALLUSERS'])`n"
@@ -140,11 +156,13 @@ jobs:
         with:
           name: windows-arm64-package-candidate
           path: candidate/
-          retention-days: 7
+          retention-days: ${{ inputs.private_friend_url == 'true' && 1 || 7 }}
           if-no-files-found: error
 
   smoke:
     needs: package
+    # A release build embeds the private origin; its acceptance runs on winbox against the real service instead.
+    if: ${{ inputs.private_friend_url != 'true' }}
     runs-on: windows-11-arm
     timeout-minutes: 30
     env:

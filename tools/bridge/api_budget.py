@@ -9,7 +9,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
-import fcntl
 import hashlib
 import json
 import os
@@ -20,6 +19,10 @@ import socket
 import time
 
 MONTHLY_GRANTS = json.loads(Path(__file__).with_name("model_routes.json").read_text())["monthly_grants_usd"]
+
+
+# A disconnected stream may have been billed. Keep its bounded exposure through expiry.
+INTERRUPTED_USAGE_GRACE_SECONDS = 15 * 60
 
 
 class Denied(Exception):
@@ -53,16 +56,17 @@ def atomic_json(path: Path, value: dict | list):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = path.with_name(path.name + "." + secrets.token_hex(8) + ".tmp")
     try:
-        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as out:
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as out:
             json.dump(value, out, ensure_ascii=False, allow_nan=False)
             out.flush()
             os.fsync(out.fileno())
         os.replace(tmp, path)
-        fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        if os.name != "nt":
+            fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -110,7 +114,8 @@ class CreditLedger:
             # Use the larger record per month. Older key-specific cycle ids can
             # lack a month mapping; conservatively count them in addition.
             settled = settled_total(data, provider)
-            require(baseline <= settled)
+            estimated = sum(month.get(provider, {}).get("estimated_microusd", 0) for month in data["months"].values())
+            require(baseline <= settled - estimated)
             digest = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
             pin = self.state / f"grant-window-{provider}.json"
             if pin.exists():
@@ -129,7 +134,12 @@ class CreditLedger:
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = os.open(self.state / "api-spend.lock", os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX)
             yield
         finally:
             os.close(fd)
@@ -139,7 +149,7 @@ class CreditLedger:
         if not path.exists():
             return {"version": 1, "cycles": {}, "months": {}}
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
             require(data["version"] == 1 and isinstance(data["cycles"], dict) and isinstance(data["months"], dict))
             for cycle in data["cycles"].values():
                 require(isinstance(cycle["reserved"], dict))
@@ -148,6 +158,8 @@ class CreditLedger:
                 require(isinstance(providers, dict))
                 for summary in providers.values():
                     require(all(type(summary[k]) is int and summary[k] >= 0 for k in ("spent_microusd", "reserved_microusd", "calls")))
+                    estimate = summary.get("estimated_microusd", 0)
+                    require(type(estimate) is int and 0 <= estimate <= summary["spent_microusd"])
             require(isinstance(data.get("friends", {}), dict))
             for days in data.get("friends", {}).values():
                 require(isinstance(days, dict))
@@ -159,6 +171,12 @@ class CreditLedger:
                     for pending in daily["reserved"].values():
                         require(all(type(pending[k]) is int and pending[k] >= 0 for k in ("tokens", "microusd")))
                         require(isinstance(pending["device"], str))
+            for token, entry in data.get("interrupted_streams", {}).items():
+                cycle_id, month = entry["cycle"], entry["month"]
+                provider = cycle_id.split(":", 1)[0]
+                require(provider in data["months"][month] and cycle_id == f"{provider}:{month}")
+                require(token in data["cycles"][cycle_id]["reserved"])
+                require(all(type(entry[k]) is int and entry[k] >= 0 for k in ("expires_at", "input_tokens", "output_tokens")))
             return data
         except (OSError, ValueError, KeyError, AttributeError, TypeError):
             raise Denied("ledger_unreadable") from None
@@ -173,7 +191,7 @@ class CreditLedger:
     def friend_limits(self, friend):
         path = Path(os.environ.get("COACH_FRIEND_CONFIG", str(Path.home() / "Coach/config/friends.json")))
         try:
-            data = json.loads(path.read_text()) if path.exists() else {}
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
             defaults, friends = data.get("defaults", {}), data.get("friends", {})
             require(isinstance(defaults, dict) and isinstance(friends, dict))
             override = friends.get(friend, {})
@@ -187,6 +205,24 @@ class CreditLedger:
         except (OSError, ValueError, TypeError, AttributeError):
             raise Denied("friend_config_unreadable") from None
 
+    def erase_friend(self, friend: str, config: Path):
+        require(re.fullmatch(r"[0-9a-f]{64}", friend))
+        with self.locked():
+            data = self.read()
+            self._expire_interrupted(data, self.clock())
+            days = data.get("friends", {}).get(friend, {})
+            if any(day["reserved"] for day in days.values()):
+                raise Denied("account_has_pending_usage")
+            settings = json.loads(config.read_text(encoding="utf-8")) if config.exists() else {}
+            overrides = settings.get("friends", {})
+            require(isinstance(overrides, dict))
+            if friend in overrides:
+                del overrides[friend]
+                atomic_json(config, settings)
+            if friend in data.get("friends", {}):
+                del data["friends"][friend]
+                self.save(data)
+
     def reserve(self, provider: str, key: str, maximum: int, *, friend=None, device=None, tokens=0) -> tuple[str, str, str]:
         if not key:
             raise Denied("missing_key")
@@ -195,6 +231,7 @@ class CreditLedger:
         with self.locked():
             data = self.read()
             now = self.clock()
+            self._expire_interrupted(data, now)
             month = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m")
             limit = grant_limit_micros(provider)
             cycle_id = f"{provider}:{month}"
@@ -212,13 +249,17 @@ class CreditLedger:
             ceiling = cycle["limit"]
             used = max(cycle["spent"], summary["spent_microusd"])
             share, settled, period = self.allocation(provider, now, data)
-            remaining = min(ceiling - used, share - settled) - pending
+            before_holds = min(ceiling - used, share - settled)
+            remaining = before_holds - pending
             ceiling = min(ceiling, share)
             if maximum > remaining:
                 # A request can cross the boundary before the settled total reaches
                 # it. Leave a content-free signal for the existing spend monitor.
                 atomic_json(self.state / f"credit-guard-{month}-{provider}.json",
-                            {"maximum_microusd": maximum, "limit_microusd": ceiling})
+                            {"maximum_microusd": maximum, "limit_microusd": ceiling,
+                             "at_utc": int(now), "before_holds_microusd": before_holds,
+                             "reserved_microusd": pending,
+                             "cause": "pending_reservations" if maximum <= before_holds else "insufficient_allocation"})
                 atomic_json(self.state / f"grant-guard-{period}.json", {"period": period})
                 raise Denied("credit_limit_95_percent")
             token = secrets.token_hex(16)
@@ -246,41 +287,88 @@ class CreditLedger:
             self.save(data)
             return cycle_id, month, token
 
-    def settle(self, provider: str, reservation, actual: int, *, idempotent=False, usage=None):
+    def defer_interrupted(self, reservation, input_bound, output_bound):
+        """Only a closed stream with no usage receipt is eligible. Batch and legacy holds have no marker."""
+        cycle_id, month, token = reservation
         with self.locked():
             data = self.read()
-            cycle_id, month, token = reservation
-            cycle = data["cycles"][cycle_id]
-            if idempotent and token not in cycle["reserved"]:
-                # A Batch poll can replay after a crash following the ledger commit.
-                # Rewrite summaries too if their previous write was interrupted.
+            require(token in data["cycles"][cycle_id]["reserved"])
+            entries = data.setdefault("interrupted_streams", {})
+            entries.setdefault(token, {"cycle": cycle_id, "month": month,
+                                      "expires_at": int(self.clock()) + INTERRUPTED_USAGE_GRACE_SECONDS,
+                                      "input_tokens": input_bound, "output_tokens": output_bound})
+            self.save(data)
+
+    def _expire_interrupted(self, data, now):
+        entries = data.get("interrupted_streams", {})
+        expired = [token for token, entry in entries.items() if entry["expires_at"] <= now]
+        for token in expired:
+            entry = entries.pop(token)
+            cycle_id, month = entry["cycle"], entry["month"]
+            provider = cycle_id.split(":", 1)[0]
+            bound = data["cycles"][cycle_id]["reserved"][token]
+            self._apply_charge(data, provider, (cycle_id, month, token), bound,
+                               entry, rejected=False, estimate=bound)
+        if expired:
+            self.save(data)
+        return len(expired)
+
+    def expire_interrupted(self):
+        with self.locked():
+            return self._expire_interrupted(self.read(), self.clock())
+
+    def settle(self, provider: str, reservation, actual: int, *, idempotent=False, usage=None, rejected=False,
+               estimated=False, estimated_microusd=0):
+        with self.locked():
+            data = self.read()
+            cycle_id, _, token = reservation
+            reserved = data["cycles"][cycle_id]["reserved"]
+            if idempotent and token not in reserved:
+                # Retry a Batch summary write after the authoritative commit.
                 self.save(data)
                 return
-            reserved = cycle["reserved"].pop(token)
-            if actual < 0:
+            if estimated and actual != reserved[token]:
                 raise Denied("invalid_usage")
-            for days in data.get("friends", {}).values():
-                for daily in days.values():
-                    pending = daily["reserved"].pop(token, None)
-                    if pending is None:
-                        continue
-                    if usage is None or any(type(usage.get(k)) is not int or usage[k] < 0 for k in ("input_tokens", "output_tokens")):
-                        raise Denied("invalid_usage")
-                    daily["calls"] += 1
-                    daily["input_tokens"] += usage["input_tokens"]
-                    daily["output_tokens"] += usage["output_tokens"]
-                    daily["spent_microusd"] += actual
-                    device = daily["devices"].setdefault(pending["device"], {"calls": 0, "input_tokens": 0, "output_tokens": 0, "spent_microusd": 0})
-                    for k, v in (("calls", 1), ("input_tokens", usage["input_tokens"]), ("output_tokens", usage["output_tokens"]), ("spent_microusd", actual)):
-                        device[k] += v
-                    if usage["input_tokens"] + usage["output_tokens"] > pending["tokens"]:
-                        cycle["limit"] = 0
-            cycle["spent"] += actual
-            summary = data["months"][month][provider]
-            summary["reserved_microusd"] -= reserved
-            summary["spent_microusd"] += actual
-            summary["calls"] += 1
-            # An unexpected price/usage change fails closed for subsequent calls.
-            if actual > reserved:
-                cycle["limit"] = 0
+            estimate = actual if estimated else estimated_microusd
+            self._apply_charge(data, provider, reservation, actual, usage, rejected, estimate)
+            data.get("interrupted_streams", {}).pop(token, None)
             self.save(data)
+
+    @staticmethod
+    def _apply_charge(data, provider, reservation, actual, usage, rejected, estimate):
+        cycle_id, month, token = reservation
+        cycle = data["cycles"][cycle_id]
+        reserved = cycle["reserved"].pop(token)
+        if type(actual) is not int or type(estimate) is not int or not 0 <= estimate <= actual or (rejected and actual != 0):
+            raise Denied("invalid_usage")
+        for days in data.get("friends", {}).values():
+            for daily in days.values():
+                pending = daily["reserved"].pop(token, None)
+                if pending is None or rejected:
+                    continue
+                if usage is None or any(type(usage.get(k)) is not int or usage[k] < 0 for k in ("input_tokens", "output_tokens")):
+                    raise Denied("invalid_usage")
+                daily["calls"] += 1
+                daily["input_tokens"] += usage["input_tokens"]
+                daily["output_tokens"] += usage["output_tokens"]
+                daily["spent_microusd"] += actual
+                device = daily["devices"].setdefault(pending["device"], {"calls": 0, "input_tokens": 0, "output_tokens": 0, "spent_microusd": 0})
+                for k, v in (("calls", 1), ("input_tokens", usage["input_tokens"]), ("output_tokens", usage["output_tokens"]), ("spent_microusd", actual)):
+                    device[k] += v
+                if estimate:
+                    for account in (daily, device):
+                        account["estimated_microusd"] = account.get("estimated_microusd", 0) + estimate
+                if usage["input_tokens"] + usage["output_tokens"] > pending["tokens"]:
+                    cycle["limit"] = 0
+        cycle["spent"] += actual
+        summary = data["months"][month][provider]
+        summary["reserved_microusd"] -= reserved
+        summary["spent_microusd"] += actual
+        if not rejected:
+            summary["calls"] += 1
+        if estimate:
+            # A conservative debit, separately identifiable for billing reconciliation.
+            summary["estimated_microusd"] = summary.get("estimated_microusd", 0) + estimate
+        # An unexpected price/usage change fails closed for subsequent calls.
+        if actual > reserved:
+            cycle["limit"] = 0

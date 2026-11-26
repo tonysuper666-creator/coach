@@ -97,6 +97,22 @@ class AuditArm64MsiTest(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "LearningCoach.exe.*AMD64"):
                 audit.audit_extracted_root(tree, sable_login="true")
 
+    def test_requires_one_matching_friend_url_without_reporting_it(self) -> None:
+        origin = "https://friend.example.invalid"
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = build_synthetic_tree(Path(tmp))
+            cfg = tree / "LearningCoach" / "app" / "LearningCoach.cfg"
+            prefix = "java-options=-Dcoach.friendUrl="
+            for lines in ("", f"{prefix}https://other.example.invalid\n", f"{prefix}{origin}\n" * 2):
+                cfg.write_text(lines, encoding="utf-8")
+                with self.assertRaisesRegex(AssertionError, "does not match") as error:
+                    audit.audit_extracted_root(tree, friend_url=origin)
+                self.assertNotIn(".invalid", str(error.exception))
+            cfg.write_text(f"{prefix}{origin}\n", encoding="utf-8")
+            report = audit.audit_extracted_root(tree, friend_url=origin)
+            self.assertIn("friend_url_cfg_matches=true", report)
+            self.assertNotIn(origin, "\n".join(report))
+
     def test_rejects_x64_ocr_dll_or_archive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tree = build_synthetic_tree(Path(tmp), tess_machine=0x8664)

@@ -8,6 +8,8 @@ import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.util.Properties
 
+internal const val FRIEND_URL_MOVED_NOTICE = "服务地址换了，请重新登录一次"
+
 internal fun desktopServerUrl(address: String): String {
     val value = address.trim().trimEnd('/')
     val url = if ("://" in value) value else "http://$value"
@@ -57,6 +59,23 @@ internal class DesktopConnectionSettings(
 
     fun sableFriendUrl(): String = configuredFriendUrl()
         ?: throw com.coach.client.SableLoginError("请先在连接配置中设置 Coach 服务地址。")
+
+    /**
+     * 包里的朋友地址和已存的朋友地址不一致时，只作废朋友凭据，并改记新地址。
+     * 这样下次启动两边一样，不会反复要求登录。owner 的地址和凭据不动，本机书也不在这里。
+     * 显式的 COACH_URL 是隔离运行，不碰已存配对。
+     */
+    fun retireMovedFriendUrl(): String? {
+        if (!environment("COACH_URL").isNullOrBlank()) return null
+        val packaged = configuredFriendUrl() ?: return null
+        val saved = localConnection.savedAddress() ?: return null
+        if (saved == packaged) return null
+        val credentials = localConnection.load(saved) ?: return null
+        if (credentials.role != "friend") return null
+        localConnection.clear(saved, credentials, markRevoked = false)
+        localConnection.saveAddress(packaged)
+        return FRIEND_URL_MOVED_NOTICE
+    }
 
     fun serverUrl(): String? {
         environment("COACH_URL")?.takeIf(String::isNotBlank)?.let { return desktopServerUrl(it) }

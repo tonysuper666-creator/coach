@@ -100,6 +100,10 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
         } else {
             json("text" to text, "sources" to sources, "elapsedMs" to (System.nanoTime() - started) / 1_000_000)
         }
+        suspend fun cancelledReply(): JsonObject {
+            kotlin.coroutines.coroutineContext[ReaderHttpOutcome]?.abandoned = true
+            return reply("追问已取消。")
+        }
         val visible = pages.filter { it.learnerVisible && scope.permits(it.docId, it.pdfPage, it.learnerVisible) }
         val keepAllBlocks = lesson || sectionContext != null
         // The general lookup pack selects at most six hits. Whole-section requests preserve ALL their blocks.
@@ -109,7 +113,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
             SourcePack(pages)
         } else SourcePack.prepare("", visible)
         val key = key(device, course, id)
-        if (cancelled.remove(key) != null) return reply("追问已取消。")
+        if (cancelled.remove(key) != null) return cancelledReply()
         if (pack.browsable.isEmpty() || (requireSourceSelection && !pack.containsSelection(quote))) return reply("缺少可定位的课件或教材页依据，暂时无法确认。")
         val bodyProgressFactory: () -> ReaderBodyProgress = when {
             guide -> {
@@ -264,10 +268,13 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                             )
                         }
                     }
-                    if (request.cancelled.get()) { outcome = "cancelled"; return reply("追问已取消。") }
+                    if (request.cancelled.get()) { outcome = "cancelled"; return cancelledReply() }
                     if (friend != null && result is BridgeResult.Failure) {
                         diagnostics?.bridgeFailureStage = result.stage
-                        throw FriendServiceError(result.terminal?.reason?.takeIf { it in setOf("daily_quota", "monthly_quota") } ?: "unavailable")
+                        throw FriendServiceError(
+                            result.terminal?.reason?.takeIf { it in setOf("daily_quota", "monthly_quota") } ?: "unavailable",
+                            result.terminal?.retryAfterSec,
+                        )
                     }
                     if (result !is BridgeResult.Success) return reply("追问未完成，暂时无法确认。可返回阅读或手动重试。")
                     if (!sourcesCurrent()) return reply("原文已变化或当前不可见，暂时无法确认。")
@@ -344,7 +351,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                 }
             }
         } catch (e: ReaderFormat) {
-            if (request.cancelled.get()) { outcome = "cancelled"; return reply("追问已取消。") }
+            if (request.cancelled.get()) { outcome = "cancelled"; return cancelledReply() }
             diagnostics?.formatReason = e.reason
             diagnostics?.streamJsonError = e.streamError
             outcome = "format"
@@ -357,7 +364,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
             return reply(e.userText)
         } catch (e: CancellationException) { outcome = "disconnected"; throw e }
           catch (_: Exception) {
-              if (request.cancelled.get()) { outcome = "cancelled"; return reply("追问已取消。") }
+              if (request.cancelled.get()) { outcome = "cancelled"; return cancelledReply() }
               if (friend != null) throw FriendServiceError()
               return reply("依据读取或追问暂不可用，无法确认。可继续阅读。")
           }

@@ -1,5 +1,6 @@
 package com.coach.desktop.books
 
+import com.coach.desktop.books.mobi.KindleText
 import com.ibm.icu.text.CharsetDetector
 import java.io.FilterInputStream
 import java.io.InputStream
@@ -16,6 +17,10 @@ internal object BookFormats {
     val images = setOf("png", "jpg")
     val supported = images + setOf("pdf", "epub", "md", "txt", "docx", "pptx", "html", "mobi", "azw3", "rtf", "odt", "srt", "vtt")
     const val description = "PDF、电子书、Word、幻灯片、网页、文本和扫描图片"
+    private val zipSignatures = setOf("PK\u0003\u0004", "PK\u0005\u0006", "PK\u0007\u0008")
+    private val htmlOpening = Regex(
+        "(?is)^\\s*(?:<\\?xml\\b.*?\\?>\\s*)?(?:<!--.*?-->\\s*)*(?:<!doctype\\s+html\\b|<(?:html|head|body|article|main)(?=[\\s/>]))"
+    )
 
     fun detect(path: Path, filename: String): String = try {
         detectContent(path, filename)
@@ -32,7 +37,7 @@ internal object BookFormats {
         if (prefix.take(8).map { it.toInt() and 255 } == listOf(137, 80, 78, 71, 13, 10, 26, 10)) return "png"
         if (prefix.take(3).map { it.toInt() and 255 } == listOf(255, 216, 255)) return "jpg"
         if (ascii.startsWith("%PDF-")) return "pdf"
-        if (ascii.startsWith("PK")) return SafeBookArchive(path).use { zip ->
+        if (ascii.take(4) in zipSignatures) return SafeBookArchive(path).use { zip ->
             when {
                 zip.contains("word/document.xml") -> "docx"
                 zip.contains("ppt/presentation.xml") -> "pptx"
@@ -42,7 +47,7 @@ internal object BookFormats {
             }
         }
         if (ascii.startsWith("{\\rtf")) return "rtf"
-        if (ascii.length >= 68 && ascii.substring(60, 68) == "BOOKMOBI") return if (suffix == "azw3") "azw3" else "mobi"
+        if (ascii.length >= 68 && ascii.substring(60, 68) == "BOOKMOBI") return if (KindleText.isKf8(path)) "azw3" else "mobi"
         if (prefix.take(8).map { it.toInt() and 255 } == listOf(208, 207, 17, 224, 161, 177, 26, 225)) {
             throw IllegalArgumentException("这份 Office 文件可能已加密或使用旧版格式，请取消密码并另存为 Word（DOCX）或幻灯片（PPTX）。")
         }
@@ -53,9 +58,10 @@ internal object BookFormats {
         val text = try { BookText.decode(Files.readAllBytes(path)) } catch (e: IllegalArgumentException) {
             if (binarySuffix) throw IllegalArgumentException(damaged, e) else throw e
         }
+        if (htmlOpening.containsMatchIn(text)) return "html"
         if (suffix == "vtt" || text.trimStart('\uFEFF').startsWith("WEBVTT")) return "vtt"
         if (suffix == "srt") return "srt"
-        if (suffix in setOf("html", "htm") || Regex("(?is)^\\s*(?:<!--.*?-->\\s*)*(?:<!doctype\\s+html|<html\\b|<head\\b|<body\\b|<article\\b)").containsMatchIn(text)) return "html"
+        if (suffix in setOf("html", "htm")) return "html"
         require(!binarySuffix) { damaged }
         return if (suffix in setOf("md", "markdown")) "md" else "txt"
     }
@@ -103,6 +109,8 @@ internal object BookText {
             local
         }.mapIndexed { i, page -> page.copy(number = i + 1) }
     }
+
+    fun explicitHeadings(text: String) = heading.findAll(text)
 
     fun chapterTitle(text: String): String? = heading.find(text)?.value?.trim()?.trimStart('#')?.trim()?.take(150)
 }

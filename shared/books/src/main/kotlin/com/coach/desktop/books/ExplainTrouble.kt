@@ -32,7 +32,7 @@ internal enum class ExplainTrouble(val retry: Boolean) {
 
     companion object {
         const val UNPAIRED = "讲解服务还没配对，读书和做题照常。"
-        const val UNREACHABLE = "讲解服务暂时连不上，读书和做题照常。"
+        const val UNREACHABLE = OfflineCopy.EXPLAIN_OFFLINE
         /** 401 时的话，只指向这台电脑上真能用的入口：没放出 Sable 登录就只说配对码。 */
         const val REVOKED = "这台电脑的连接已停用，请用新的配对码重新配对。"
         const val REVOKED_LOGIN = "这台电脑的连接已停用。请重新登录，或使用新的配对码。"

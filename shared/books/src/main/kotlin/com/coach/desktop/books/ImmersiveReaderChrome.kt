@@ -584,6 +584,7 @@ internal fun ImmersiveTocDrawer(
     onToggleBookmark: (Int) -> Unit,
     onJumpToc: (BookTocNode) -> Unit,
     onSaveBodyStart: suspend (Int?) -> Unit,
+    onEditChapter: (suspend (StructureEdit) -> Unit)? = null,
     onReorganizeSections: (() -> Unit)?,
     onClose: () -> Unit,
     readChapterIds: Set<String> = emptySet(),
@@ -670,7 +671,7 @@ internal fun ImmersiveTocDrawer(
                 )
                 when (activeTab) {
                     ReaderLeftTab.TOC -> {
-                        TocStructureSummary(book, bodyStart, bodyStartCorrected, busy, onSaveBodyStart)
+                        TocStructureSummary(book, bodyStart, bodyStartCorrected, busy, onSaveBodyStart, currentChapterId, currentAnchor, onEditChapter)
                         if (entries.isEmpty()) {
                             Column(
                                 Modifier.weight(1f).fillMaxWidth().padding(20.dp).testTag("v7-directory-drawer"),
@@ -1025,6 +1026,7 @@ internal fun CompanionAskPane(
     onOpenCollectionCitation: (CollectionQaCitation) -> Unit = {},
 ) {
     val colors = CoachTheme.colors
+    val offline = LocalCoachConnectivity.current == CoachConnectivityStatus.OFFLINE
     var pickingParagraph by remember(book.id, pageBlocks) { mutableStateOf(false) }
     val quoteSource = thread?.selection ?: activeSelection
     val isCollectionMode = collectionScopeLabel != null && askScope == CollectionAskScope.COLLECTION
@@ -1141,7 +1143,7 @@ internal fun CompanionAskPane(
                         )
                         HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.6f))
                     }
-                    if (collectionLoading) {
+                    if (collectionLoading && !offline) {
                         Text(
                             "正在跨材料核对原页…",
                             style = MaterialTheme.typography.bodySmall,
@@ -1206,18 +1208,21 @@ internal fun CompanionAskPane(
                         for ((index, entry) in thread.turns.withIndex()) {
                             Column(Modifier.fillMaxWidth().testTag("inline-explain-turn-$index"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(entry.label, style = MaterialTheme.typography.labelMedium, color = colors.actionPrimary)
-                                ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks, showReaderPage = true) { citation ->
+                                if (entry.explanation.citations.isEmpty()) {
+                                    Text(ReadableText.withoutCitationMarks(entry.explanation.text).ifBlank { "尚未收到回答" })
+                                    if (entry.explanation.text.isNotBlank()) Text("回答中断", style = MaterialTheme.typography.labelSmall)
+                                } else ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks, showReaderPage = true) { citation ->
                                     entry.sentBlocks.firstOrNull { it.id == citation.blockId }?.let { onOpenCitation(citation, it) }
                                 }
                             }
                             HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.6f))
                         }
-                        if (thread.loading) {
+                        if (thread.loading && (!offline || thread.pendingText.isNotBlank())) {
                             Column(Modifier.fillMaxWidth().testTag("inline-explain-pending"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 thread.pendingLabel?.takeIf { it.isNotBlank() }?.let {
                                     Text(it, style = MaterialTheme.typography.labelMedium, color = colors.actionPrimary)
                                 }
-                                Text("正在整理…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("inline-explain-loading"))
+                                Text(thread.pendingText.takeIf { it.isNotBlank() }?.let(ReadableText::withoutCitationMarks) ?: "正在整理…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("inline-explain-loading"))
                             }
                         }
                         thread.error?.let { (message, trouble) ->
@@ -1234,7 +1239,7 @@ internal fun CompanionAskPane(
                                     modifier = Modifier.weight(1f).testTag("inline-explain-error"),
                                 )
                                 if (trouble.needsPairing) TextButton(onClick = onOpenLogin) { Text("重新登录", maxLines = 1, softWrap = false) }
-                                else TextButton(onClick = onRetry) { Text("重试", maxLines = 1, softWrap = false) }
+                                else TextButton(onClick = onRetry, modifier = Modifier.testTag("inline-explain-retry")) { Text("重试", maxLines = 1, softWrap = false) }
                             }
                         }
                     }
@@ -1275,6 +1280,12 @@ internal fun CompanionAskPane(
             Text("问题太长，请缩短后发送", style = MaterialTheme.typography.labelSmall, color = colors.fgSecondary)
         } else if (!isCollectionMode && draft.trim().length > BookPassageQuestion.MAX_QUESTION_LENGTH) {
             Text("问题太长，请缩短后发送", style = MaterialTheme.typography.labelSmall, color = colors.fgSecondary)
+        }
+        if (offline) {
+            OfflineNeedsNetworkNotice(
+                message = if (isCollectionMode) OfflineCopy.COLLECTION_ASK_OFFLINE else OfflineCopy.ASK_OFFLINE,
+                tag = "companion-ask-offline-notice",
+            )
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(

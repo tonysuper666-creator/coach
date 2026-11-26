@@ -25,12 +25,30 @@ internal fun bookSpread(widthDp: Float, columnDp: Float, mode: BookPageMode, was
     BookPageMode.Auto -> widthDp >= 2 * (columnDp + 112) + 48 - if (wasSpread) 24 else 0
 }
 
-/** 沉浸式纯读按最小可读栏宽（约 540dp/栏）自动分栏，且每栏不超过 720dp，占满整个可用阅读视口。 */
+/** 沉浸式纯读像一本摊开的书：最多两页对开，纸铺满阅读视口；每页行宽另由 [bookImmersiveTextDp] 封顶。 */
 internal fun bookImmersiveColumns(widthDp: Float, columnDp: Float, mode: BookPageMode, wasColumns: Int): Int {
     if (mode == BookPageMode.Single) return 1
     val twoColumnMin = if (mode == BookPageMode.Spread) 760f else (1080f - if (wasColumns > 1) 24f else 0f)
-    if (widthDp < twoColumnMin) return 1
-    return maxOf(2, kotlin.math.ceil(widthDp / 720f).toInt())
+    return if (widthDp < twoColumnMin) 1 else 2
+}
+
+/** 沉浸式每页最宽行宽；页再宽，多出来的都给页边。 */
+internal const val BOOK_IMMERSIVE_MAX_TEXT_DP = 720f
+
+/**
+ * 沉浸式每页文字行宽 = min(页宽 − 最小页边, 720dp)。[maxTextDp] 是换算到排版坐标里的 720dp：
+ * Windows 翻页读把整页按基线网格放大到视口，屏幕上的行宽要的是放大以后不超过 720dp。
+ */
+internal fun bookImmersiveTextDp(sheetDp: Float, minMarginsDp: Float, maxTextDp: Float = BOOK_IMMERSIVE_MAX_TEXT_DP): Float =
+    minOf(sheetDp - minMarginsDp, maxTextDp).coerceAtLeast(1f)
+
+/**
+ * 行宽封顶后多出来的宽度怎么分到两侧页边，返回 (外侧加宽, 书脊侧加宽)。
+ * 单页左右各一半；对开时外侧拿 2/3、书脊侧拿 1/3，两页书脊侧合起来和外侧一样宽，外侧不窄于书脊侧。
+ */
+internal fun bookImmersiveExtraMargins(extraDp: Float, spread: Boolean): Pair<Float, Float> {
+    val extra = extraDp.coerceAtLeast(0f)
+    return if (spread) Pair(extra * 2f / 3f, extra / 3f) else Pair(extra / 2f, extra / 2f)
 }
 
 internal data class BookPageTypography(
@@ -90,14 +108,15 @@ internal data class BookLaidPage(
     }
 }
 
+internal fun BookPlacedVisual.containsAnchor(anchor: BookPageAnchor): Boolean {
+    if (item.page != anchor.importPage) return false
+    if (anchor.visualOrder == null) return replacement?.let { anchor.offsetUtf16 in it.startUtf16 until it.endUtf16 } == true
+    return item.order == anchor.visualOrder && item.anchorOffset == anchor.offsetUtf16 &&
+        (anchor.tableStartY == null || band == null || anchor.tableStartY in band.startY until band.endY)
+}
+
 internal fun List<BookLaidPage>.pageContaining(anchor: BookPageAnchor): Int {
-    val visual = indexOfFirst { page -> page.visuals.any { block ->
-        val item = block.item
-        item.page == anchor.importPage && (if (anchor.visualOrder != null)
-            item.anchorOffset == anchor.offsetUtf16 && item.order == anchor.visualOrder &&
-                (anchor.tableStartY == null || block.band == null || anchor.tableStartY in block.band.startY until block.band.endY)
-        else block.replacement?.let { anchor.offsetUtf16 in it.startUtf16 until it.endUtf16 } == true)
-    } }
+    val visual = indexOfFirst { page -> page.visuals.any { it.containsAnchor(anchor) } }
     if (visual >= 0) return visual
     return indexOfFirst { page -> page.sources.any {
         it.importPage == anchor.importPage && anchor.offsetUtf16 in it.startUtf16 until it.endUtf16
@@ -142,6 +161,7 @@ internal fun planBookChapters(
     pdf: Boolean = false,
     tocNodes: List<BookTocNode> = emptyList(),
     forceAuthoritativeTocHeadings: Boolean = false,
+    bodyStart: BookPageAnchor? = null,
     checkCancelled: () -> Unit = {},
 ): BookChapterPlan {
     val source = pages.joinToString("") { it.text }
@@ -188,18 +208,25 @@ internal fun planBookChapters(
         }
         (base + indent) to title
     }).distinctBy { it.first }.sortedBy { it.first }
-    // Physical-page metadata belongs to the following heading. Keep its source
-    // coordinates, without manufacturing a separate preamble sheet for it.
+    val bodyBoundary = bodyStart?.let { anchor ->
+        starts.firstOrNull { (_, page) -> page.number == anchor.importPage && anchor.offsetUtf16 in page.text.indices }
+            ?.let { (base, page) -> base + safeBookBoundary(page.text, anchor.offsetUtf16) }
+    }
+    // Physical-page metadata belongs to the following heading unless the body
+    // explicitly starts later, between the metadata and the heading.
     val chapterStarts = headings.map { (heading, title) ->
         val base = starts.last { it.first <= heading }.first
         val prefix = source.substring(base, heading)
         val start = if (prefix.lineSequence().all { it.isBlank() || physicalPageMarkerRegex.matches(it.trim()) }) base else heading
-        Triple(start, heading, title)
+        Triple(bodyBoundary?.takeIf { it in start..heading } ?: start, heading, title)
     }.distinctBy { it.first }
     // Isolate Project Gutenberg boilerplate headers/footers on their own sheets so opening at bodyStart
     // never mixes English Gutenberg license boilerplate onto the first body page.
     val boilerplateBreaks = gutenbergBoilerplateBoundaries(source)
-    val boundaries = (listOf(0) + chapterStarts.map { it.first } + boilerplateBreaks + source.length).distinct().sorted()
+    // An EPUB landmark can start at prose on the same import page as the preface.
+    // Give that offset its own sheet while keeping the earlier source navigable.
+    val boundaries = (listOfNotNull(0, bodyBoundary) + chapterStarts.map { it.first } + boilerplateBreaks + source.length)
+        .distinct().sorted()
     val textChapters = if (source.isEmpty()) listOf(BookChapter(0, 0, null, 0)) else boundaries.zipWithNext { start, end ->
         val heading = chapterStarts.firstOrNull { it.first == start }
         BookChapter(start, end, heading?.third, heading?.second ?: start)
@@ -220,10 +247,11 @@ internal fun nearChapterLayoutPages(
     maxPages: Int = 64,
     pdf: Boolean = false,
     tocNodes: List<BookTocNode> = emptyList(),
+    bodyStart: BookPageAnchor? = null,
     checkCancelled: () -> Unit = {},
 ): BookNearLayoutWindow {
     if (pages.isEmpty()) return BookNearLayoutWindow(emptyList(), false)
-    val plan = planBookChapters(pages, pdf, tocNodes, checkCancelled = checkCancelled)
+    val plan = planBookChapters(pages, pdf, tocNodes, bodyStart = bodyStart, checkCancelled = checkCancelled)
     val anchorIndex = pages.indexOfFirst { it.number == anchor.importPage }.takeIf { it >= 0 }
         ?: pages.indexOfLast { it.number < anchor.importPage }.coerceAtLeast(0)
     val (anchorBase, anchorPage) = plan.starts[anchorIndex]
@@ -251,11 +279,13 @@ internal class BookPageLayouter(
         tocNodes: List<BookTocNode> = emptyList(),
         forceAuthoritativeTocHeadings: Boolean = false,
         openerExtraHeightPx: Int = 0,
+        bodyStart: BookPageAnchor? = null,
         checkCancelled: () -> Unit = {},
     ): List<BookLaidPage> {
         require(widthPx > 0 && bodyHeightPx > 0)
         if (pages.all { it.text.isEmpty() && it.illustrations.isEmpty() }) return emptyList()
-        val plan = planBookChapters(pages, pdf, tocNodes, forceAuthoritativeTocHeadings, checkCancelled)
+        val plan = planBookChapters(pages, pdf, tocNodes, forceAuthoritativeTocHeadings,
+            bodyStart = bodyStart, checkCancelled = checkCancelled)
         val source = plan.source
         val starts = plan.starts
         val leadingImages = plan.leadingImages
@@ -269,7 +299,7 @@ internal class BookPageLayouter(
             if (page.illustrations.isEmpty()) return@flatMap emptyList()
             val segments = BookIllustrationLayout.segment(page.text, page.illustrations, hideReplacedSourceText = true)
             val visible = segments.filterIsInstance<BookPageSegment.Text>()
-            segments.filterIsInstance<BookPageSegment.Illustration>().flatMap { segment ->
+            segments.filterIsInstance<BookPageSegment.Illustration>().flatMap visual@{ segment ->
                 val item = segment.illustration
                 val offset = BookIllustrationAnchors.snapToValidUtf16Boundary(page.text, item.anchorOffset)
                 val at = base + offset
@@ -289,12 +319,16 @@ internal class BookPageLayouter(
                     else null
                 val replacement = (cropEnd ?: captionEnd)?.takeIf { base + it <= chapters[owner].end }
                     ?.let { BookPageSlice(page.number, offset, it) }
+                // A replacement crossing a chapter or another anchor cannot occupy a
+                // single place in the reading flow. Keep its source paragraph visible.
+                if (item.sourceStart != null && item.kind != PageVisualKind.ILLUSTRATION && replacement == null)
+                    return@visual emptyList()
                 val marked = highlights[page.number].orEmpty().any { r ->
                     if (replacement == null) offset in r else r.first < replacement.endUtf16 && r.last >= offset
                 }
                 val event = VisualEvent(owner, at, item, replacement, marked)
                 val rows = if (item.kind == PageVisualKind.TABLE) {
-                    tableRows[item] ?: item.table?.takeIf { it.valid(item.height, page.text) }?.layout()
+                    tableRows[item] ?: item.table?.takeIf { it.valid(item.height, page.text) }?.layout(replacement?.endUtf16)
                 } else null
                 if (rows == null) listOf(event)
                 else tableEvents(event, rows, page.text, highlights[page.number].orEmpty(), widthPx, bodyHeightPx)

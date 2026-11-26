@@ -98,6 +98,20 @@ class LedgerTests(unittest.TestCase):
             with self.assertRaisesRegex(Denied, "95_percent"):
                 self.ledger.reserve(provider, KEY, 1)
 
+    def test_guard_receipt_distinguishes_pending_from_accounted_usage(self):
+        limit = micros(190)
+        hold = self.ledger.reserve("anthropic", KEY, limit)
+        receipt = self.root / "credit-guard-2026-11-anthropic.json"
+        for reason, pending in (("pending_reservations", limit), ("insufficient_allocation", 0)):
+            with self.assertRaisesRegex(Denied, "95_percent"):
+                self.ledger.reserve("anthropic", KEY, 1)
+            record = json.loads(receipt.read_text())
+            self.assertEqual(reason, record["cause"])
+            self.assertEqual(pending, record["reserved_microusd"])
+            self.assertNotIn(KEY, receipt.read_text())
+            if pending:
+                self.ledger.settle("anthropic", hold, limit)
+
     def test_key_change_does_not_reset_provider_budget(self):
         self.ledger.reserve("anthropic", KEY, micros(190))
         with self.assertRaises(Denied):
@@ -236,15 +250,31 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("api.anthropic.com", self.requests[0].url.host)
         self.assertEqual("api.openai.com", self.requests[1].url.host)
 
-    async def test_missing_usage_or_terminal_retains_full_reservation(self):
-        for provider, task, requested, served in (
-            ("anthropic", "TEACH", "claude-sonnet-5-5", "claude-sonnet-5-5"),
-            ("openai", "blind_review", "gpt-6.2-astra", "gpt-6.2-astra"),
-        ):
-            for terminal, usage in ((False, True), (True, False)):
+    async def test_missing_terminal_keeps_received_usage_and_incomplete_response_still_fails(self):
+        for provider, task, model in (("anthropic", "TEACH", "claude-sonnet-5-5"),
+                                      ("openai", "blind_review", "gpt-6.2-astra")):
+            with self.subTest(provider=provider):
+                with self.assertRaisesRegex(ApiFailure, "api_no_terminal"):
+                    await self.collect(self.router(frames(provider, terminal=False, model=model)), task, model)
+                month = self.ledger.read()["months"]["2026-11"][provider]
+                if provider == "anthropic":
+                    # The final usage delta arrived before the missing stop frame.
+                    self.assertEqual(cost(model, {"input_tokens": 100, "output_tokens": 20}), month["spent_microusd"])
+                    self.assertEqual(0, month.get("estimated_microusd", 0))
+                    self.assertEqual(0, month["reserved_microusd"])
+                else:
+                    # No usage was sent on this connection. The hold has a deadline.
+                    self.assertGreater(month["reserved_microusd"], 0)
+                    self.assertEqual(0, month["spent_microusd"])
+                    self.assertEqual(1, len(self.ledger.read()["interrupted_streams"]))
+
                 with self.assertRaises(ApiFailure):
-                    await self.collect(self.router(frames(provider, terminal, usage, model=served)), task, requested)
-            self.assertGreater(self.ledger.read()["months"]["2026-11"][provider]["reserved_microusd"], 0)
+                    await self.collect(self.router(frames(provider, usage=False, model=model)), task, model)
+                updated = self.ledger.read()["months"]["2026-11"][provider]
+                maximum = cost(model, {"input_tokens": 4096 + len("synthetic systemsynthetic prompt"), "output_tokens": 100})
+                self.assertEqual(month["reserved_microusd"], updated["reserved_microusd"])
+                self.assertEqual(maximum, updated["spent_microusd"] - month["spent_microusd"])
+                self.assertEqual(maximum, updated["estimated_microusd"])
 
     async def test_http_errors_never_expose_body(self):
         for status in (401, 402, 429, 500):
@@ -269,12 +299,35 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ApiFailure, "api_model_mismatch"):
             await self.collect(self.router(frames("anthropic", model="claude-haiku-5-5")))
 
-    async def test_cancellation_keeps_reservation(self):
+    async def test_cancellation_before_network_releases_reservation(self):
         events = self.router(frames("anthropic", model="claude-sonnet-5-5")).events("TEACH", "claude-sonnet-5-5", "s", "u", 100)
         self.assertEqual("attempt", (await anext(events))["kind"])
         await events.aclose()
-        self.assertGreater(self.ledger.read()["months"]["2026-11"]["anthropic"]["reserved_microusd"], 0)
+        self.assertEqual({"spent_microusd": 0, "reserved_microusd": 0, "calls": 0}, self.ledger.read()["months"]["2026-11"]["anthropic"])
         self.assertEqual([], self.requests)
+
+    async def test_read_timeout_and_disconnect_settle_upper_bound(self):
+        for failure in (httpx.ReadTimeout, httpx.ReadError):
+            with self.subTest(failure=failure):
+                def fail(_):
+                    raise failure("interrupted")
+                with self.assertRaisesRegex(ApiFailure, failure.__name__):
+                    await self.collect(self.router(handler=fail))
+                month = self.ledger.read()["months"]["2026-11"]["anthropic"]
+                self.assertEqual(0, month["reserved_microusd"])
+                self.assertGreater(month["estimated_microusd"], 0)
+                self.assertEqual(month["spent_microusd"], month["estimated_microusd"])
+
+    async def test_close_after_first_delta_accounts_for_sent_request(self):
+        events = self.router(frames("anthropic")).events("TEACH", "claude-sonnet-5-5", "s", "u", 100)
+        async for event in events:
+            if event["kind"] == "text":
+                break
+        await events.aclose()
+        month = self.ledger.read()["months"]["2026-11"]["anthropic"]
+        self.assertEqual(0, month["reserved_microusd"])
+        self.assertEqual(cost("claude-sonnet-5-5", {"input_tokens": 100, "output_tokens": 100}), month["spent_microusd"])
+        self.assertEqual(cost("claude-sonnet-5-5", {"input_tokens": 0, "output_tokens": 100}), month["estimated_microusd"])
 
     async def test_http_429_retries_within_same_reservation_and_recovers(self):
         slept = []
@@ -336,7 +389,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(60, ctx.exception.retry_after_sec)
         self.assertEqual(1, len(self.requests))
         self.assertEqual([], slept)
-        self.assertGreater(self.ledger.read()["months"]["2026-11"]["anthropic"]["reserved_microusd"], 0)
+        self.assertEqual({"spent_microusd": 0, "reserved_microusd": 0, "calls": 0}, self.ledger.read()["months"]["2026-11"]["anthropic"])
         # Bridge API_ONLY propagates retry_after_sec in x_coach without leaking any upstream body.
         req = bridge.build_req(
             {"model": "claude-sonnet-5-5", "max_tokens": 100, "messages": [{"role": "user", "content": "synthetic"}]},
@@ -673,7 +726,7 @@ class VisionRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual("api", req.transport)
         self.assertEqual([], self.requests)
 
-    async def test_vision_primary_failure_retains_anthropic_reservation_and_falls_back_to_openai_with_guard(self):
+    async def test_vision_primary_failure_debits_anthropic_bound_and_falls_back_to_openai_with_guard(self):
         def handler(request):
             if request.url.host == "api.anthropic.com":
                 return httpx.Response(500, content=b"upstream failure body")
@@ -694,8 +747,9 @@ class VisionRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(req.fallback)
         self.assertEqual(["api.anthropic.com", "api.openai.com"], [r.url.host for r in self.requests])
         months = self.ledger.read()["months"]["2026-11"]
-        # Failed Anthropic attempt retains its conservative reservation; OpenAI settled cleanly.
-        self.assertGreater(months["anthropic"]["reserved_microusd"], 0)
+        # Failed Anthropic attempt consumes its conservative bound; OpenAI settled cleanly.
+        self.assertEqual(0, months["anthropic"]["reserved_microusd"])
+        self.assertGreater(months["anthropic"]["estimated_microusd"], 0)
         self.assertEqual(0, months["openai"]["reserved_microusd"])
         self.assertEqual(1, months["openai"]["calls"])
         self.assertGreater(months["openai"]["spent_microusd"], 0)
@@ -904,7 +958,8 @@ class VisionRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("credit_limit_95_percent", xc["reason"])
             self.assertEqual(1, xc["physical_calls"])
             self.assertEqual(["api.anthropic.com"], seen)
-            self.assertGreater(ledger.read()["months"]["2026-11"]["anthropic"]["reserved_microusd"], 0)
+            self.assertEqual(0, ledger.read()["months"]["2026-11"]["anthropic"]["reserved_microusd"])
+            self.assertGreater(ledger.read()["months"]["2026-11"]["anthropic"]["estimated_microusd"], 0)
 
     async def test_minimal_effort_disables_anthropic_thinking_only_when_requested(self):
         seen_payloads = []

@@ -9,20 +9,32 @@ import com.coach.domain.str
 import com.coach.store.LedgerStore
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.pdmodel.PDPage
+import org.apache.pdfbox.pdmodel.PDPageContentStream
+import org.apache.pdfbox.pdmodel.font.PDType1Font
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.destination.PDPageFitDestination
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDDocumentOutline
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem
+import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -32,6 +44,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -42,6 +55,7 @@ class UnifiedBookPipelineTest {
     private class Harness(
         val config: UnifiedBookConfig = UnifiedBookConfig(enabled = true),
         val withCatalog: Boolean = false,
+        processor: UnifiedBookProcessor = DefaultUnifiedBookProcessor(),
     ) : AutoCloseable {
         val root: Path = Files.createTempDirectory("coach-unified-books-")
         val jobs = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -52,7 +66,7 @@ class UnifiedBookPipelineTest {
         val imports = ImportedBookSources(root.resolve("personal-imports"))
         val friends = FriendAccess(root.resolve("friends"), root.resolve("state"), root.resolve("friends.json"))
         val unifiedDir: Path = root.resolve("unified-books")
-        val unified = UnifiedBookPipeline(unifiedDir, config)
+        val unified = UnifiedBookPipeline(unifiedDir, config, processor)
         val readerDir: Path = Files.createDirectories(root.resolve("reader-catalog")).also { dir ->
             if (withCatalog) Files.writeString(dir.resolve("catalog.json"), """{"schema":1,"documents":[]}""")
         }
@@ -111,13 +125,31 @@ class UnifiedBookPipelineTest {
             )
         }
 
-        fun exchangeSable(sableToken: String): JsonObject {
+        fun requestBytes(
+            path: String,
+            credential: JsonObject? = null,
+            private: Boolean = false,
+        ): HttpResponse<ByteArray> {
+            val req = HttpRequest.newBuilder(URI("http://127.0.0.1:${port(private)}$path"))
+                .timeout(java.time.Duration.ofSeconds(15))
+            if (credential != null) {
+                req.header("X-Coach-Device", credential.str("deviceId"))
+                    .header("Authorization", "Bearer ${credential.str("token")}")
+            }
+            return client.send(req.GET().build(), HttpResponse.BodyHandlers.ofByteArray())
+        }
+
+        fun exchangeResponse(sableToken: String): HttpResponse<String> {
             val req = HttpRequest.newBuilder(URI("http://127.0.0.1:${port(false)}/v1/public/sable"))
                 .timeout(java.time.Duration.ofSeconds(10))
                 .header("Authorization", "Bearer $sableToken")
                 .POST(HttpRequest.BodyPublishers.noBody())
                 .build()
-            val res = client.send(req, HttpResponse.BodyHandlers.ofString())
+            return client.send(req, HttpResponse.BodyHandlers.ofString())
+        }
+
+        fun exchangeSable(sableToken: String): JsonObject {
+            val res = exchangeResponse(sableToken)
             assertEquals(200, res.statusCode(), res.body())
             return parse(res)
         }
@@ -236,7 +268,7 @@ class UnifiedBookPipelineTest {
 
     @Test
     fun twoAccountsConcurrentUploadDeduplicatesBlobAndJobWhileIsolatingShelvesAndDevices() = runBlocking {
-        Harness().use { h ->
+        Harness(UnifiedBookConfig(enabled = true, autoProcess = false)).use { h ->
             val alice1 = h.exchangeSable(TOK_ALPHA_1)
             val alice2 = h.exchangeSable(TOK_ALPHA_2)
             val bob = h.exchangeSable(TOK_BETA_1)
@@ -466,6 +498,402 @@ class UnifiedBookPipelineTest {
             assertEquals(0, p2.sharedJobCount(b1.sha256))
         } finally {
             root.toFile().deleteRecursively()
+        }
+    }
+
+    private fun buildSyntheticBookmarkedPdf(): ByteArray {
+        val out = ByteArrayOutputStream()
+        PDDocument().use { doc ->
+            val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+            val pageTexts = listOf(
+                "Copyright 2026 Synthetic Press. ISBN 0-000-00000-0. All rights reserved.",
+                "Chapter 1 Foundations of Supply and Demand\nMarkets coordinate incentives across buyers and sellers.",
+                "Chapter 2 Welfare Analysis\nConsumer surplus measures gains from trade above market price.",
+            )
+            val pages = pageTexts.map { text ->
+                val page = PDPage()
+                doc.addPage(page)
+                PDPageContentStream(doc, page).use { cs ->
+                    cs.beginText()
+                    cs.setFont(font, 12f)
+                    cs.newLineAtOffset(50f, 700f)
+                    for (line in text.lines()) {
+                        cs.showText(line)
+                        cs.newLineAtOffset(0f, -18f)
+                    }
+                    cs.endText()
+                }
+                page
+            }
+            val outline = PDDocumentOutline()
+            doc.documentCatalog.documentOutline = outline
+            fun addBookmark(title: String, pageIdx: Int) {
+                val dest = PDPageFitDestination().apply { page = pages[pageIdx] }
+                val item = PDOutlineItem().apply {
+                    this.title = title
+                    this.destination = dest
+                }
+                outline.addLast(item)
+            }
+            addBookmark("Copyright", 0)
+            addBookmark("Chapter 1 Foundations of Supply and Demand", 1)
+            addBookmark("Chapter 2 Welfare Analysis", 2)
+            doc.save(out)
+        }
+        return out.toByteArray()
+    }
+
+    @Test
+    fun serverProcessesSameBookOnlyOnceAcrossTwoAccountsAndExposesProgressAndSkeletonArtifact() = runBlocking {
+        val invocations = AtomicInteger(0)
+        val reached40 = CompletableDeferred<Unit>()
+        val allowFinish = CompletableDeferred<Unit>()
+        val delegate = DefaultUnifiedBookProcessor()
+        val gatedProcessor = UnifiedBookProcessor { blob, format, title, sha, parserVersion, report ->
+            invocations.incrementAndGet()
+            delegate.process(blob, format, title, sha, parserVersion) { pct, label ->
+                report(pct, label)
+                if (pct == 40) {
+                    reached40.complete(Unit)
+                    runBlocking { allowFinish.await() }
+                }
+            }
+        }
+
+        Harness(UnifiedBookConfig(enabled = true, autoProcess = true), processor = gatedProcessor).use { h ->
+            val alice = h.exchangeSable(TOK_ALPHA_1)
+            val bob = h.exchangeSable(TOK_BETA_1)
+            val pdfBytes = buildSyntheticBookmarkedPdf()
+            val expectedSha = sha256Hex(pdfBytes)
+
+            val uploadA = h.upload(alice, pdfBytes, format = "pdf", title = "Synthetic Economics", declaredSha = expectedSha)
+            assertEquals(200, uploadA.statusCode(), uploadA.body())
+            val shelfA = parse(uploadA).str("shelfBookId")
+
+            // While processing is paused at 40%, status reports exact factual progress without blocking reads.
+            reached40.await()
+            val midStatus = parse(h.request("/v1/books/$shelfA/status", credential = alice))
+            val midJob = midStatus["job"]!!.jsonObject
+            assertEquals("processing", midJob.str("state"))
+            assertEquals(40, midJob["progressPct"]!!.jsonPrimitive.int)
+            assertEquals(1, midJob["processCount"]!!.jsonPrimitive.int)
+            assertEquals(409, h.request("/v1/books/$shelfA/artifact", credential = alice).statusCode())
+
+            // Allow worker to complete skeleton artifact.
+            allowFinish.complete(Unit)
+            var ready = false
+            repeat(80) {
+                val st = parse(h.request("/v1/books/$shelfA/status", credential = alice))["job"]!!.jsonObject
+                if (st.str("state") == "ready") {
+                    ready = true
+                    return@repeat
+                }
+                delay(25)
+            }
+            assertTrue(ready, "Expected processing job to reach ready")
+            assertEquals(1, invocations.get())
+            assertEquals(1, h.unified.processCount(expectedSha))
+
+            // Artifact reflects TON-1821 PDF outline & skips copyright page to bodyStartPage = 2.
+            val artifactResA = h.request("/v1/books/$shelfA/artifact", credential = alice)
+            assertEquals(200, artifactResA.statusCode(), artifactResA.body())
+            val artifactJsonA = parse(artifactResA)["artifact"]!!.jsonObject
+            assertEquals("PDF_OUTLINE", artifactJsonA.str("source"))
+            assertEquals(3, artifactJsonA["pageCount"]!!.jsonPrimitive.int)
+            assertEquals(2, artifactJsonA["bodyStartPage"]!!.jsonPrimitive.int)
+            assertEquals(3, artifactJsonA["chapters"]!!.jsonArray.size)
+
+            // Account B uploads the exact same PDF: server reuses processed artifact without reprocessing (processCount stays 1).
+            val uploadB = h.upload(bob, pdfBytes, format = "pdf", title = "Bob Economics", declaredSha = expectedSha)
+            assertEquals(200, uploadB.statusCode(), uploadB.body())
+            val bodyB = parse(uploadB)
+            val shelfB = bodyB.str("shelfBookId")
+            assertNotEquals(shelfA, shelfB)
+            assertTrue(bodyB["deduplicated"]!!.jsonPrimitive.boolean)
+            val jobB = bodyB["job"]!!.jsonObject
+            assertEquals("ready", jobB.str("state"))
+            assertEquals(1, jobB["processCount"]!!.jsonPrimitive.int)
+            delay(150)
+            assertEquals(1, invocations.get(), "Second account upload must reuse processed artifact without reprocessing")
+            assertEquals(1, h.unified.processCount(expectedSha))
+
+            val artifactResB = h.request("/v1/books/$shelfB/artifact", credential = bob)
+            assertEquals(200, artifactResB.statusCode(), artifactResB.body())
+            assertEquals(1, parse(artifactResB)["job"]!!.jsonObject["processCount"]!!.jsonPrimitive.int)
+        }
+    }
+
+    @Test
+    fun accountIsolationBlocksCrossAccountAndForgedIdsOnOriginalAndArtifact() = runBlocking {
+        Harness(UnifiedBookConfig(enabled = true, autoProcess = false)).use { h ->
+            val alice1 = h.exchangeSable(TOK_ALPHA_1)
+            val alice2 = h.exchangeSable(TOK_ALPHA_2)
+            val bob = h.exchangeSable(TOK_BETA_1)
+            val carol = h.exchangeSable(TOK_GAMMA_1)
+            val pairedOnly = h.pairFriend("manual-friend-iso")
+
+            val bookBytes = "# Chapter 1\nSynthetic isolated book bytes for pullback and isolation checks.".toByteArray()
+            val expectedSha = sha256Hex(bookBytes)
+            val shelfA = parse(h.upload(alice1, bookBytes, format = "md", title = "Alice Secret")).str("shelfBookId")
+            assertTrue(h.unified.processNextJob("worker-iso"))
+
+            // Alice's second device (fresh deviceId, same Sable sub) pulls back exact bytes & artifact.
+            val origA2 = h.requestBytes("/v1/books/$shelfA/original", credential = alice2)
+            assertEquals(200, origA2.statusCode())
+            assertEquals(expectedSha, sha256Hex(origA2.body()))
+            assertEquals(expectedSha, origA2.headers().firstValue("X-Coach-Book-Sha256").orElse(""))
+            assertEquals(200, h.request("/v1/books/$shelfA/artifact", credential = alice2).statusCode())
+
+            // Unauthenticated -> 401.
+            assertEquals(401, h.requestBytes("/v1/books/$shelfA/original").statusCode())
+            assertEquals(401, h.request("/v1/books/$shelfA/artifact").statusCode())
+            assertEquals(401, h.request("/v1/account", "DELETE").statusCode())
+
+            // Bob, Carol, pairing-only device, and forged IDs cannot read Alice's original or artifact.
+            val forgedId = "sb_" + "f".repeat(24)
+            for (other in listOf(bob, carol, pairedOnly)) {
+                assertEquals(404, h.requestBytes("/v1/books/$shelfA/original", credential = other).statusCode())
+                assertEquals(404, h.request("/v1/books/$shelfA/artifact", credential = other).statusCode())
+                assertEquals(404, h.requestBytes("/v1/books/$forgedId/original", credential = other).statusCode())
+                assertEquals(404, h.requestBytes("/v1/books/$expectedSha/original", credential = other).statusCode())
+                assertEquals(404, h.requestBytes("/v1/books/../shared/blobs/$expectedSha.blob/original", credential = other).statusCode())
+            }
+
+            // Even after Bob uploads the exact same bytes, Bob STILL cannot use Alice's shelfBookId.
+            val shelfB = parse(h.upload(bob, bookBytes, format = "md", title = "Bob Copy")).str("shelfBookId")
+            assertEquals(404, h.requestBytes("/v1/books/$shelfA/original", credential = bob).statusCode())
+            assertEquals(404, h.request("/v1/books/$shelfA/artifact", credential = bob).statusCode())
+            assertEquals(200, h.requestBytes("/v1/books/$shelfB/original", credential = bob).statusCode())
+        }
+    }
+
+    @Test
+    fun accountDeletionCleansAccountRecordsAndOnlyTrashesUnreferencedSharedBlobsAndArtifacts() = runBlocking {
+        Harness(UnifiedBookConfig(enabled = true, autoProcess = false)).use { h ->
+            val alice = h.exchangeSable(TOK_ALPHA_1)
+            val bob = h.exchangeSable(TOK_BETA_1)
+
+            val sharedBytes = "# Chapter 1\nShared textbook bytes.".toByteArray()
+            val sharedSha = sha256Hex(sharedBytes)
+            val aliceOnlyBytes = "# Chapter 1\nAlice private monograph bytes.".toByteArray()
+            val aliceOnlySha = sha256Hex(aliceOnlyBytes)
+            val bobOnlyBytes = "# Chapter 1\nBob private notes bytes.".toByteArray()
+            val bobOnlySha = sha256Hex(bobOnlyBytes)
+
+            h.upload(alice, sharedBytes, format = "md", title = "Shared Book")
+            h.upload(alice, aliceOnlyBytes, format = "md", title = "Alice Private")
+            val shelfBShared = parse(h.upload(bob, sharedBytes, format = "md", title = "Bob Shared")).str("shelfBookId")
+            val shelfBOnly = parse(h.upload(bob, bobOnlyBytes, format = "md", title = "Bob Private")).str("shelfBookId")
+
+            while (h.unified.processNextJob("worker-del")) { /* drain all 3 jobs */ }
+            assertTrue(Files.isRegularFile(h.unified.artifactFilePath(sharedSha)))
+            assertTrue(Files.isRegularFile(h.unified.artifactFilePath(aliceOnlySha)))
+            assertTrue(Files.isRegularFile(h.unified.artifactFilePath(bobOnlySha)))
+
+            // Alice deletes her account: her directory & devices are wiped; Alice-only blob+artifact move to trash;
+            // Shared Book stays ACTIVE for Bob!
+            val delAlice = h.request("/v1/account", "DELETE", credential = alice)
+            assertEquals(200, delAlice.statusCode(), delAlice.body())
+            val delAliceBody = parse(delAlice)
+            assertTrue(delAliceBody["deleted"]!!.jsonPrimitive.boolean)
+            assertEquals(2, delAliceBody["removedBooks"]!!.jsonPrimitive.int)
+            assertEquals(1, delAliceBody["trashedSharedBlobs"]!!.jsonPrimitive.int)
+
+            // Alice's token is revoked immediately.
+            assertEquals(401, h.request("/v1/books", credential = alice).statusCode())
+            // Alice-only blob & processed artifact are trashed; shared blob & artifact remain active for Bob.
+            assertTrue(h.unified.isTrashed(aliceOnlySha))
+            assertFalse(Files.exists(h.unified.blobPathForVerify(aliceOnlySha)))
+            assertFalse(Files.exists(h.unified.artifactFilePath(aliceOnlySha)))
+            assertFalse(h.unified.isTrashed(sharedSha))
+            assertEquals(1, h.unified.sharedRefCount(sharedSha))
+            assertTrue(Files.isRegularFile(h.unified.artifactFilePath(sharedSha)))
+            assertEquals(200, h.requestBytes("/v1/books/$shelfBShared/original", credential = bob).statusCode())
+            assertEquals(200, h.request("/v1/books/$shelfBShared/artifact", credential = bob).statusCode())
+            assertEquals(200, h.requestBytes("/v1/books/$shelfBOnly/original", credential = bob).statusCode())
+
+            // Now Bob deletes his account: remaining refs hit 0 -> shared + bob-only blobs & artifacts move to trash.
+            val delBob = h.request("/v1/account", "DELETE", credential = bob)
+            assertEquals(200, delBob.statusCode(), delBob.body())
+            assertEquals(2, parse(delBob)["trashedSharedBlobs"]!!.jsonPrimitive.int)
+            assertTrue(h.unified.isTrashed(sharedSha))
+            assertTrue(h.unified.isTrashed(bobOnlySha))
+            assertFalse(Files.exists(h.unified.artifactFilePath(sharedSha)))
+            assertFalse(Files.exists(h.unified.artifactFilePath(bobOnlySha)))
+
+            // Purging expired trash removes all blobs, artifacts, jobs, and registry rows completely.
+            assertEquals(3, h.unified.purgeExpiredTrash(0L))
+            assertEquals(0, h.unified.sharedBlobCount())
+            assertEquals(0, h.unified.sharedJobCount(sharedSha))
+            assertEquals(0, h.unified.sharedJobCount(aliceOnlySha))
+            assertEquals(0, h.unified.sharedJobCount(bobOnlySha))
+        }
+    }
+
+    @Test
+    fun reuploadWithinTrashRetentionRestoresArtifactCleanly() = runBlocking {
+        Harness(UnifiedBookConfig(enabled = true, autoProcess = false)).use { h ->
+            val alice = h.exchangeSable(TOK_ALPHA_1)
+            val bob = h.exchangeSable(TOK_BETA_1)
+            val bytes = "# Chapter 1\nReupload after trash test.".toByteArray()
+            val sha = sha256Hex(bytes)
+
+            val shelfA = parse(h.upload(alice, bytes, format = "md", title = "Reupload Book")).str("shelfBookId")
+            assertTrue(h.unified.processNextJob("worker-reup"))
+            assertEquals(200, h.request("/v1/books/$shelfA/artifact", credential = alice).statusCode())
+
+            // Delete last ref -> trashed.
+            assertEquals(200, h.request("/v1/books/$shelfA", "DELETE", credential = alice).statusCode())
+            assertTrue(h.unified.isTrashed(sha))
+            assertFalse(Files.exists(h.unified.artifactFilePath(sha)))
+
+            // Re-upload by Bob within retention window restores active blob & artifact cleanly.
+            val shelfB = parse(h.upload(bob, bytes, format = "md", title = "Bob Reupload")).str("shelfBookId")
+            assertFalse(h.unified.isTrashed(sha))
+            assertEquals(200, h.request("/v1/books/$shelfB/artifact", credential = bob).statusCode())
+            assertEquals(1, h.unified.processCount(sha))
+        }
+    }
+
+    @Test
+    fun accountDeletionBlocksInFlightUploadCommitAndRetriesFailedDirCleanup() = runBlocking {
+        Harness(UnifiedBookConfig(enabled = true, autoProcess = false)).use { h ->
+            val alice = h.exchangeSable(TOK_ALPHA_1)
+            val bob = h.exchangeSable(TOK_BETA_1)
+            val carol = h.exchangeSable(TOK_GAMMA_1)
+
+            val sharedBytes = "# Chapter 1\nShared book kept for Bob after Alice deletes account.".toByteArray()
+            val lateBytes = "# Chapter 1\nLate in-flight upload that must never commit after delete.".toByteArray()
+            val lateSha = sha256Hex(lateBytes)
+            val carolBytes = "# Chapter 1\nCarol book for failed directory cleanup retry.".toByteArray()
+            val carolSha = sha256Hex(carolBytes)
+
+            assertEquals(200, h.upload(alice, sharedBytes, format = "md", title = "Shared A").statusCode())
+            val shelfBob = parse(h.upload(bob, sharedBytes, format = "md", title = "Shared B")).str("shelfBookId")
+
+            val aliceDeviceId = alice.str("deviceId")
+            val carolDeviceId = carol.str("deviceId")
+            val aliceScope = UnifiedBookScope.fromCall(aliceDeviceId, h.actor.execute { friendName(aliceDeviceId) })
+            val carolScope = UnifiedBookScope.fromCall(carolDeviceId, h.actor.execute { friendName(carolDeviceId) })
+
+            val reachedCommit = CompletableDeferred<Unit>()
+            val allowCommit = CompletableDeferred<Unit>()
+            h.unified.beforeUploadCommitForTest = { _, sha ->
+                if (sha == lateSha) {
+                    reachedCommit.complete(Unit)
+                    allowCommit.await()
+                }
+            }
+
+            // Start an upload for Alice that pauses right after streaming, before committing refs/blob.
+            val inFlightUpload = async(Dispatchers.IO) {
+                h.upload(alice, lateBytes, format = "md", title = "Late Upload", declaredSha = lateSha)
+            }
+            reachedCommit.await()
+
+            // Delete Alice's account while the upload is still in flight.
+            val delAlice = h.request("/v1/account", "DELETE", credential = alice)
+            assertEquals(200, delAlice.statusCode(), delAlice.body())
+            assertTrue(parse(delAlice)["deleted"]!!.jsonPrimitive.boolean)
+            assertFalse(Files.exists(h.unified.accountShelfFile(aliceScope).parent))
+
+            // Release the paused upload: commit must be rejected with 401 and leave zero refs/blobs/account dir.
+            allowCommit.complete(Unit)
+            val lateRes = inFlightUpload.await()
+            assertEquals(401, lateRes.statusCode(), lateRes.body())
+            assertEquals(0, h.unified.sharedRefCount(lateSha))
+            assertFalse(Files.exists(h.unified.blobPathForVerify(lateSha)))
+            assertFalse(Files.exists(h.unified.accountShelfFile(aliceScope).parent))
+            assertEquals(1, h.unified.sharedBlobCount())
+            val tmpEntries = Files.list(h.root.resolve("unified-books/shared/tmp")).use { it.toList() }
+            assertTrue(tmpEntries.isEmpty(), "Expected no residual upload temp files, found $tmpEntries")
+            assertEquals(200, h.requestBytes("/v1/books/$shelfBob/original", credential = bob).statusCode())
+
+            // Simulate directory cleanup failure on Carol's account deletion:
+            // must return 503 (NOT 200), remain DELETING (blocking uploads), and finish cleanly on retry.
+            h.unified.beforeUploadCommitForTest = null
+            assertEquals(200, h.upload(carol, carolBytes, format = "md", title = "Carol Book").statusCode())
+            h.unified.accountDirDeleterForTest = { false }
+            val failedDelete = h.request("/v1/account", "DELETE", credential = carol)
+            assertEquals(503, failedDelete.statusCode(), failedDelete.body())
+            assertEquals("account_dir_cleanup_failed", parse(failedDelete).str("code"))
+            assertEquals("DELETING", h.unified.accountDeletionStateForTest(carolScope))
+            assertTrue(Files.exists(h.unified.accountShelfFile(carolScope).parent))
+            assertTrue(h.unified.isTrashed(carolSha))
+
+            // While stuck in DELETING, new uploads for Carol are blocked with 401.
+            val blockedUpload = h.upload(carol, lateBytes, format = "md", title = "Blocked While Deleting")
+            assertEquals(401, blockedUpload.statusCode(), blockedUpload.body())
+            assertEquals("account_deleted", parse(blockedUpload).str("code"))
+            assertEquals(0, h.unified.sharedRefCount(lateSha))
+
+            // Once the directory can be removed, retry DELETE /v1/account succeeds and revokes Carol's session.
+            h.unified.accountDirDeleterForTest = null
+            val retryDelete = h.request("/v1/account", "DELETE", credential = carol)
+            assertEquals(200, retryDelete.statusCode(), retryDelete.body())
+            assertTrue(parse(retryDelete)["deleted"]!!.jsonPrimitive.boolean)
+            assertEquals("DELETED", h.unified.accountDeletionStateForTest(carolScope))
+            assertFalse(Files.exists(h.unified.accountShelfFile(carolScope).parent))
+            assertEquals(401, h.request("/v1/books", credential = carol).statusCode())
+        }
+    }
+
+    @Test
+    fun accountDeletionNeverReportsSuccessWhilePrivateDataRemainsAndRecoveryUsesSameTail() = runBlocking {
+        Harness(UnifiedBookConfig(enabled = true, autoProcess = false)).use { h ->
+            val dave = h.exchangeSable(TOK_GAMMA_1)
+            val daveDevice = dave.str("deviceId")
+            val daveFriend = checkNotNull(h.actor.execute { friendName(daveDevice) })
+            val otherDevice = h.exchangeSable(TOK_ALPHA_1).str("deviceId")
+            val mixedBackup = h.actor.execute { backup() }.resolve("coach.sqlite")
+            val daveScope = UnifiedBookScope.fromCall(daveDevice, daveFriend)
+            assertEquals(200, h.upload(dave, "# Chapter 1\nDave private book.".toByteArray(), format = "md", title = "Dave").statusCode())
+
+            // A private record (explain / import history) lives under the friend's own directory.
+            val privateRoot = h.root.resolve("friends").resolve(friendId(daveFriend))
+            val record = Files.createDirectories(privateRoot.resolve("explain")).resolve("record.json")
+            Files.writeString(record, "{}")
+
+            // 1) Private-data cleanup fails: must be 503, stay DELETING, keep the record and the credential.
+            val realFinalizer = checkNotNull(h.unified.accountDataFinalizer)
+            val epoch = h.unified.beginAccountDeletion(daveScope,daveFriend)
+            val windows = System.getProperty("os.name").lowercase().contains("win")
+            val held = if (windows) java.io.FileInputStream(record.toFile()) else null // java.io opens without FILE_SHARE_DELETE
+            if (!windows) h.unified.accountDataFinalizer = { throw java.io.IOException("simulated locked file") }
+            try {
+                val failed = h.request("/v1/account", "DELETE", credential = dave)
+                assertEquals(503, failed.statusCode(), failed.body())
+                assertEquals("account_data_cleanup_failed", parse(failed).str("code"))
+                assertEquals("DELETING", h.unified.accountDeletionStateForTest(daveScope))
+                assertEquals(409,h.exchangeResponse(TOK_GAMMA_1).statusCode())
+                assertTrue(Files.exists(record))
+            } finally {
+                held?.close()
+                h.unified.accountDataFinalizer = realFinalizer
+            }
+
+            // 2) Startup / hourly recovery runs the same tail: private data wiped, credential revoked, then DELETED.
+            h.unified.reconcilePendingDeletes()
+            assertEquals("DELETED", h.unified.accountDeletionStateForTest(daveScope))
+            assertFalse(Files.exists(privateRoot))
+            assertFalse(h.actor.execute { pairedDevices().any { it.id == daveDevice } })
+            java.sql.DriverManager.getConnection("jdbc:sqlite:$mixedBackup").use { saved ->
+                saved.prepareStatement("SELECT count(*) FROM devices JOIN sable_grants USING(device_id) WHERE device_id=?").use { q ->
+                    for ((id,expected) in listOf(daveDevice to 0,otherDevice to 1)) {
+                        q.setString(1,id)
+                        q.executeQuery().use { r -> assertTrue(r.next()); assertEquals(expected,r.getInt(1)) }
+                    }
+                }
+            }
+            assertEquals(401, h.request("/v1/books", credential = dave).statusCode())
+            val registeredAgain = h.exchangeSable(TOK_GAMMA_1)
+            val newBook = h.upload(registeredAgain, "New synthetic edition.".toByteArray(), format="md", title="New edition")
+            assertEquals(200,newBook.statusCode())
+            val shelfId = parse(newBook).str("shelfBookId")
+            assertEquals(0,h.unified.deleteAccount(daveScope,expectedDeletionEpoch=epoch).removedBooks)
+            val shelf = h.request("/v1/books",credential=registeredAgain)
+            assertEquals(200,shelf.statusCode())
+            assertTrue(shelf.body().contains(shelfId))
         }
     }
 }

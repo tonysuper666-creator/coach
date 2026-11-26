@@ -132,7 +132,10 @@ internal fun TextbookReader(
     onUpdateCollectionQaSession: ((String, CollectionQaSessionState) -> Unit)? = null,
     onJumpCollectionCitation: ((CollectionQaCitation, BookPageAnchor) -> Unit)? = null,
     onConsumeKeepAskTabOpen: () -> Unit = {},
+    onEditStructure: (suspend (Textbook, StructureEdit) -> Textbook)? = null,
     onBrowsePage: ((Int) -> Unit)? = null,
+    onLoadPdfVisuals: (suspend (String, Collection<Int>) -> Unit)? = null,
+    onImportReviewedBlocks: ((String) -> Unit)? = null,
 ) {
     val book = checkNotNull(ui.book)
     val page = book.page(ui.page)
@@ -209,6 +212,7 @@ internal fun TextbookReader(
     val explainer = remember(library, explainProvider) { explainProvider ?: BookExplainer(library = library) }
     val explainConsent = remember(library) { ExplainConsent(library.directory) }
     val aiEnabled = LocalReadingAiExplain.current
+    val isOffline = LocalCoachConnectivity.current == CoachConnectivityStatus.OFFLINE
     var studyPreference by remember(book.id, courseContext?.courseId, courseContext?.examProfile?.isExam) {
         mutableStateOf(
             StudyModeStore.loadOrResolve(
@@ -266,13 +270,13 @@ internal fun TextbookReader(
             onEnsureUnstructuredSectioned?.invoke()
         }
     }
-    LaunchedEffect(book.id, ui.page, autoGuide, explainer.identity, autoExplain, currentSectionIndex) {
+    LaunchedEffect(guideController, ui.page, autoGuide, explainer.identity, autoExplain, currentSectionIndex) {
         if (pageRole == BookPageRole.BODY && explainer.identity != null && autoExplain && autoGuide && currentSectionIndex >= 0) {
             guideController.prefetchForPage(ui.page, autoGuide = true, sectionIndexOverride = currentSectionIndex)
         }
     }
     fun runInlineSelection(target: SourceBlock, action: SelectionExplainAction, questionText: String? = null,
-        visibleContext: List<SourceBlock>? = null) {
+        visibleContext: List<SourceBlock>? = null, retry: BookQuestionAttempt? = null) {
         val request = ++inlineRequest
         val secIdx = guideController.sectionIndexForAnchor(target.page, target.start).takeIf { it >= 0 } ?: currentSectionIndex
         val section = guideController.contextForSection(secIdx)
@@ -308,33 +312,95 @@ internal fun TextbookReader(
             }
         }
         val existing = inlineThread?.takeIf { it.selection == target } ?: InlineExplainThread(target, secCtx)
-        val history = existing.turns.map { FollowUpTurn(it.label, ReadableText.withoutCitationMarks(it.explanation.text)) }
+        val previous = if (retry != null) existing.turns.dropLast(1) else existing.turns
+        val history = previous.map { FollowUpTurn(it.label, ReadableText.withoutCitationMarks(it.explanation.text)) }
         val label = if (action == SelectionExplainAction.ASK && !questionText.isNullOrBlank()) "问：${questionText.trim()}" else action.label
-        val pending = existing.copy(loading = true, error = null, fallbackBlocks = emptyList(), askingOpen = true, pendingLabel = label)
-        inlineThread = pending
+        val sent = ExplainWire.selectionBlocks(target, secCtx)
+        val question = questionText?.trim()?.takeIf { action == SelectionExplainAction.ASK && it.isNotEmpty() }
+        var received = if (retry != null) existing.turns.lastOrNull()?.explanation?.text.orEmpty() else ""
+        val pending = existing.copy(
+            turns = previous,
+            pendingText = received,
+            retryTurn = null,
+            loading = true,
+            error = null,
+            fallbackBlocks = emptyList(),
+            askingOpen = true,
+            pendingLabel = label,
+        )
+        val offlineMessage = if (action == SelectionExplainAction.ASK) OfflineCopy.ASK_OFFLINE else OfflineCopy.EXPLAIN_OFFLINE
+        val offlineFallback = (listOf(target) + sent).distinctBy { it.page }
+        inlineThread = if (isOffline) {
+            existing.copy(
+                turns = previous,
+                pendingText = received,
+                retryTurn = retry,
+                loading = false,
+                error = offlineMessage to ExplainTrouble.Unreachable,
+                fallbackBlocks = offlineFallback,
+                askingOpen = true,
+                pendingLabel = null,
+            )
+        } else {
+            pending
+        }
         if (library.todayCardEnabled && action == SelectionExplainAction.ASK && !questionText.isNullOrBlank()) {
             editedAsk = true
             draftWriter.edit(BookAskDraft(book.id, target.page, questionText, pending.threadId,
                 target.id, target.start, target.end, null))
         }
         scope.launch {
-            if (!explainer.loaded) explainer.load()
-            val result = explainer.explainSelection(
-                kind = action.kind,
-                chosen = target,
-                context = secCtx,
-                question = questionText,
-                history = history,
-            )
+            if (isOffline) {
+                val uploadClient = explainer.unifiedUploadClient()
+                if (uploadClient != null) {
+                    val live = withContext(Dispatchers.IO) {
+                        runCatching { uploadClient.probeReachability() }.getOrDefault(CoachConnectivityStatus.OFFLINE)
+                    }
+                    if (live == CoachConnectivityStatus.OFFLINE) return@launch
+                    if (inlineRequest != request || inlineThread?.selection?.id != target.id) return@launch
+                    inlineThread = pending
+                }
+            }
+            val attempt = try {
+                question?.let {
+                    withContext(Dispatchers.IO) {
+                        library.beginBookQuestion(book.id, pending.threadId, target, secCtx?.location.orEmpty(), it, sent, retry)
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                if (inlineRequest == request) inlineThread = existing.copy(loading = false, askingOpen = true,
+                    error = "问题没能存到这台电脑，请检查可用空间后重试。" to ExplainTrouble.Other)
+                return@launch
+            }
+            val result = try {
+                if (!explainer.loaded) explainer.load()
+                suspend fun ask() = explainer.explainSelection(action.kind, target, secCtx, questionText, history)
+                val answer = if (attempt == null) ask() else withContext(BookAnswerProgress { partial ->
+                    withContext(Dispatchers.IO) { library.saveBookQuestionProgress(attempt, partial) }
+                    received = partial
+                    if (inlineRequest == request && inlineThread?.selection == target) {
+                        inlineThread = pending.copy(pendingText = partial)
+                    }
+                }) { ask() }
+                if (attempt != null) withContext(Dispatchers.IO) {
+                    library.finishBookQuestion(attempt, (answer as? ExplainResult.Done)?.explanation)
+                }
+                answer
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // The committed pending row also covers a process kill before cleanup can run.
+                throw e
+            } catch (_: Exception) {
+                ExplainResult.Refused("这次回答中断了，问题已保留，可以重试。")
+            }
             if (inlineRequest != request || inlineThread?.selection?.id != target.id) return@launch
-            val sent = ExplainWire.selectionBlocks(target, secCtx)
             if (result is ExplainResult.Done && questionText != null && inlineDraft.trim() == questionText) {
                 inlineDraft = ""
                 editedAsk = true
                 if (library.todayCardEnabled) draftWriter.edit(null)
             }
-            if (result is ExplainResult.Done) {
-                val persistedQuestion = if (action == SelectionExplainAction.ASK) questionText?.trim()?.takeIf { it.isNotEmpty() } else null
+            if (result is ExplainResult.Done && attempt == null) {
                 withContext(Dispatchers.IO) {
                     runCatching {
                         library.saveAskTurn(
@@ -344,7 +410,7 @@ internal fun TextbookReader(
                             sectionLocation = secCtx?.location.orEmpty(),
                             actionKind = action.kind,
                             label = label,
-                            questionText = persistedQuestion,
+                            questionText = null,
                             explanation = result.explanation,
                             sentBlocks = sent,
                         )
@@ -353,13 +419,15 @@ internal fun TextbookReader(
             }
             inlineThread = when (result) {
                 is ExplainResult.Done -> pending.copy(
-                    turns = existing.turns + InlineExplainEntry(label, result.explanation, sent),
+                    turns = previous + InlineExplainEntry(label, result.explanation, sent),
                     loading = false,
                     error = null,
                     askingOpen = true,
                     pendingLabel = null,
                 )
                 is ExplainResult.Refused -> pending.copy(
+                    turns = if (attempt == null) previous else previous + InlineExplainEntry(label, Explanation(received, emptyList(), 0), sent),
+                    retryTurn = attempt,
                     loading = false,
                     error = result.message to result.trouble,
                     fallbackBlocks = (listOf(target) + sent).distinctBy { it.page },
@@ -504,10 +572,15 @@ internal fun TextbookReader(
         else localCollectionSessions[collectionId] = next
     }
     LaunchedEffect(book.id) {
-        val (saved, restored) = withContext(Dispatchers.IO) {
+        val (saved, restored, unfinished) = withContext(Dispatchers.IO) {
             val saved = if (library.todayCardEnabled) library.askDraft(book.id) else null
-            val thread = if (saved == null || saved.threadId != null) library.loadLatestAskThread(book.id, saved?.threadId) else null
-            saved to thread
+            val candidate = library.loadLatestAskThread(book.id, saved?.threadId)
+            val interrupted = candidate?.let { library.lastUnfinishedQuestion(book.id, it.threadId) }
+            // A process can die before the debounced draft writer attaches the new thread ID.
+            val matchesSentQuestion = interrupted != null && saved?.collectionId == null &&
+                saved?.text?.trim() == interrupted.question && saved.page == candidate?.selection?.page
+            val thread = candidate.takeIf { saved == null || saved.threadId != null || matchesSentQuestion }
+            Triple(saved, thread, interrupted.takeIf { thread != null })
         }
         if (!editedAsk && inlineThread == null) {
             val selection = saved?.selection(book) ?: restored?.selection
@@ -516,9 +589,12 @@ internal fun TextbookReader(
                 val context = guideController.contextForSection(idx) ?: restored?.sectionLocation?.takeIf { it.isNotBlank() }
                     ?.let { ExplainSectionContext(it, null, null, emptyList()) }
                 inlineThread = InlineExplainThread(selection, context,
-                    turns = restored?.turns.orEmpty(), askingOpen = saved != null,
+                    turns = restored?.turns.orEmpty(), askingOpen = saved != null || unfinished != null,
+                    retryTurn = unfinished,
+                    error = unfinished?.let { "上次回答中断了，可以重试或继续追问。" to ExplainTrouble.Other },
                     threadId = saved?.threadId ?: restored?.threadId ?: java.util.UUID.randomUUID().toString())
             }
+            if (unfinished != null) inlineDraft = unfinished.question
             if (saved != null) {
                 inlineDraft = saved.text
                 activeAskCollection?.let { col ->
@@ -581,7 +657,7 @@ internal fun TextbookReader(
     var localBooklistRev by remember(book.id) { mutableIntStateOf(0) }
     var chapterReadStates by remember(book.id) { mutableStateOf<Set<String>>(emptySet()) }
     var crossBookCards by remember(book.id) { mutableStateOf<List<CrossBookCompanionCard>>(emptyList()) }
-    val readingTracker = remember(book.id, dwellThresholdMs) {
+    val readingTracker = remember(book.id, book.structure?.editRevision, dwellThresholdMs) {
         val floor = if (dwellThresholdMs < ChapterReadPolicy.MIN_DWELL_MS) maxOf(dwellThresholdMs, 40L) else 15_000L
         PageReadingTracker(defaultMedianFloorMs = floor)
     }
@@ -589,11 +665,11 @@ internal fun TextbookReader(
     var activeWhisper by remember(book.id) { mutableStateOf<MarginWhisperCandidate?>(null) }
     var activeCheckpoint by remember(book.id) { mutableStateOf<EndOfSectionCheckpointData?>(null) }
     var lastTrackedPage by remember(book.id) { mutableStateOf<Int?>(null) }
-    var lastTrackedSection by remember(book.id) { mutableStateOf<BookLesson?>(null) }
+    var lastTrackedSection by remember(book.id, book.structure?.editRevision) { mutableStateOf<BookLesson?>(null) }
     var pendingNavigationIsJump by remember(book.id) { mutableStateOf(false) }
     var pendingDwellJump by remember(book.id) { mutableStateOf(false) }
     var lastDwellTrackedPage by remember(book.id) { mutableStateOf<Int?>(null) }
-    var lastDwellSpan by remember(book.id) { mutableStateOf<BookChapterSpan?>(null) }
+    var lastDwellSpan by remember(book.id, book.structure?.editRevision) { mutableStateOf<BookChapterSpan?>(null) }
     var lastDwellVisiblePages by remember(book.id) { mutableStateOf<Set<Int>>(emptySet()) }
     var lastDwellSampleAtMs by remember(book.id) { mutableLongStateOf(System.currentTimeMillis()) }
     val chapterDwellTracker = remember(book.id, dwellThresholdMs) {
@@ -1218,20 +1294,20 @@ internal fun TextbookReader(
             pendingNoteSelection = null
         }
     }
-    fun switchView(nextTextView: Boolean) {
+    fun switchView(nextTextView: Boolean, originalAnchor: BookPageAnchor = paging.anchor) {
         if (nextTextView == textView) return
         val touchPdf = originalPdf && originalPdfTouchEnabled
         if (!nextTextView) {
             // 文字 -> 原页：以当前 BookPageAnchor 为唯一真源，避免来回切时回弹旧页。
-            val targetPage = paging.anchor.importPage.takeIf { book.page(it) != null } ?: ui.page
+            val targetPage = originalAnchor.importPage.takeIf { book.page(it) != null } ?: ui.page
             val passage = passageJump?.takeIf {
-                touchPdf && it.page == paging.anchor.importPage && it.start == paging.anchor.offsetUtf16
+                touchPdf && it.page == targetPage && it.start == originalAnchor.offsetUtf16
             }
             if (passage != null) openPassage(passage)
             else {
                 if (touchPdf) passageJump = null
                 if (originalPdf) pdf.jump(targetPage)
-                paging.anchor = BookPageAnchor(targetPage, paging.anchor.offsetUtf16)
+                paging.anchor = BookPageAnchor(targetPage, originalAnchor.offsetUtf16)
                 if (paging.publishImportPage(targetPage)) onPage(targetPage)
             }
         } else {
@@ -1275,6 +1351,13 @@ internal fun TextbookReader(
     val onRelogin = LocalBookRelogin.current
     var readerOriginDp by remember { mutableStateOf<Pair<Float, Float>?>(null) }
     val typeMenuExtra: @Composable (() -> Unit) -> Unit = { close ->
+        if (originalPdf && onImportReviewedBlocks != null) {
+            DropdownMenuItem(
+                text = { Text("导入已核对的排版块") },
+                modifier = Modifier.testTag("import-reviewed-blocks"),
+                onClick = { close(); onImportReviewedBlocks(book.id) },
+            )
+        }
         if (pdfVisible) {
             for (scrolling in listOf(true, false)) {
                 val label = if (scrolling) "适宽连续" else "双页对开"
@@ -1553,6 +1636,10 @@ internal fun TextbookReader(
                         book, paging, ranges, turnLayout, libraryDirectory = library.directory,
                         modifier = if (companionOpen) Modifier.align(Alignment.Center).widthIn(max = 720.dp) else Modifier.fillMaxSize(),
                         turnStyle = turnStyle, readMode = readMode, onOpenTableRow = openPassage,
+                        onLoadPdfVisuals = if (originalPdf) onLoadPdfVisuals else null,
+                        onOpenOriginalBlock = if (originalPdf) { item ->
+                            switchView(false, BookPageAnchor(item.page, item.anchorOffset))
+                        } else null,
                         onSelectText = { textSelection = it },
                         hardPoints = sectionHardPoints,
                         onHardPointClick = { hp, blk ->
@@ -1787,8 +1874,38 @@ internal fun TextbookReader(
                 )
                 return
             }
-            updateCollectionSession(col.id, prev.copy(loading = true, error = null, fallbackPages = emptyList(), lastQuestion = q))
+            if (isOffline) {
+                updateCollectionSession(
+                    col.id,
+                    prev.copy(
+                        loading = false,
+                        error = OfflineCopy.COLLECTION_ASK_OFFLINE to ExplainTrouble.Unreachable,
+                        fallbackPages = emptyList(),
+                        lastQuestion = q,
+                    ),
+                )
+            } else {
+                updateCollectionSession(col.id, prev.copy(loading = true, error = null, fallbackPages = emptyList(), lastQuestion = q))
+            }
             scope.launch {
+                if (isOffline) {
+                    val uploadClient = explainer.unifiedUploadClient()
+                    if (uploadClient != null) {
+                        val live = withContext(Dispatchers.IO) {
+                            runCatching { uploadClient.probeReachability() }.getOrDefault(CoachConnectivityStatus.OFFLINE)
+                        }
+                        if (live == CoachConnectivityStatus.OFFLINE) return@launch
+                        updateCollectionSession(
+                            col.id,
+                            sessionForCollection(col.id).copy(
+                                loading = true,
+                                error = null,
+                                fallbackPages = emptyList(),
+                                lastQuestion = q,
+                            ),
+                        )
+                    }
+                }
                 val askNodeId = currentSection?.id ?: currentChapterSpan?.tocNodeId ?: "p${ui.page}"
                 val askName = currentSection?.title ?: currentChapterSpan?.title ?: "第 ${ui.page} 页"
                 withContext(Dispatchers.IO) {
@@ -1830,11 +1947,16 @@ internal fun TextbookReader(
                     },
                     onFailure = { err ->
                         val qaErr = err as? CollectionQaException
+                        val msg = when {
+                            qaErr?.trouble == ExplainTrouble.Unreachable -> OfflineCopy.COLLECTION_ASK_OFFLINE
+                            qaErr != null -> qaErr.message
+                            else -> err.message ?: "跨材料问答暂时不可用，请重试。"
+                        }
                         updateCollectionSession(
                             col.id,
                             latest.copy(
                                 loading = false,
-                                error = (qaErr?.message ?: err.message ?: "跨材料问答暂时不可用，请重试。") to (qaErr?.trouble ?: ExplainTrouble.Other),
+                                error = msg to (qaErr?.trouble ?: ExplainTrouble.Other),
                                 fallbackPages = qaErr?.fallbackPages.orEmpty(),
                             ),
                         )
@@ -1883,6 +2005,11 @@ internal fun TextbookReader(
                 },
                 onRetry = {
                     val target = visibleThread?.selection ?: return@CompanionAskPane
+                    val interrupted = visibleThread.retryTurn
+                    if (interrupted != null) {
+                        runInlineSelection(target, SelectionExplainAction.ASK, interrupted.question, retry = interrupted)
+                        return@CompanionAskPane
+                    }
                     val (act, q) = lastInlineAction ?: (SelectionExplainAction.EXPLAIN to null)
                     runInlineSelection(target, act, q)
                 },
@@ -2126,21 +2253,12 @@ internal fun TextbookReader(
             readerViewport(Modifier.fillMaxSize())
         }
 
-        val (currentSubPage, currentSubPageCount) = remember(textView, pageUnrecognizedOriginal, paging.pages, paging.anchor) {
-            if (!textView || pageUnrecognizedOriginal || paging.pages.isEmpty()) 1 to 1
-            else {
-                val targetPage = paging.anchor.importPage
-                val indices = paging.pages.indices.filter { idx ->
-                    val sheet = paging.pages[idx]
-                    sheet.anchor.importPage == targetPage || sheet.sources.any { it.importPage == targetPage }
-                }
-                if (indices.size <= 1) 1 to 1
-                else {
-                    val activeIdx = paging.pages.pageContaining(paging.anchor)
-                    val pos = indices.indexOf(activeIdx).let { if (it >= 0) it + 1 else 1 }
-                    pos to indices.size
-                }
-            }
+        val pagedBodyStart = if (readMode.isWindowsPaged()) book.bodyStart else null
+        val (currentSubPage, currentSubPageCount) = remember(
+            textView, pageUnrecognizedOriginal, paging.pages, paging.anchor, paging.columns, pagedBodyStart,
+        ) {
+            if (!textView || pageUnrecognizedOriginal) 1 to 1
+            else paging.pages.importPageScreenPosition(paging.anchor, paging.columns, pagedBodyStart)
         }
         val currentSubPageFraction = if (currentSubPageCount > 1) {
             (currentSubPage - 1).toFloat() / currentSubPageCount.toFloat()
@@ -2254,7 +2372,7 @@ internal fun TextbookReader(
             bodyStart = bodyStart,
             bodyStartCorrected = correctedBodyPage != null,
             bookmarks = bookmarks,
-            busy = ui.busy,
+            busy = ui.busy || book.indexState != "READY" || book.hasPendingOcr,
             onJumpPage = { target ->
                 pendingNavigationIsJump = true
                 pendingDwellJump = true
@@ -2273,10 +2391,15 @@ internal fun TextbookReader(
                 turnToAnchor(target.startPage, cleanOffset)
                 tocOpen = false
             },
+            onEditChapter = if (onEditStructure == null) null else { edit -> onEditStructure(book, edit) },
             onSaveBodyStart = { corrected ->
-                withContext(Dispatchers.IO) { library.saveBodyStart(book.id, corrected) }
+                val updated = if (onEditStructure != null) onEditStructure(book, StructureEdit.BodyStart(corrected))
+                    else withContext(Dispatchers.IO) {
+                        library.saveBodyStart(book.id, corrected)
+                        library.book(book.id)
+                    }
                 correctedBodyPage = corrected
-                val start = BookBoundaries.bodyStart(book.pages, book.structure, corrected)
+                val start = updated.bodyStart
                 pendingNavigationIsJump = true
                 pendingDwellJump = true
                 turnToAnchor(start.importPage, start.offsetUtf16, forceCommit = true)
@@ -2317,11 +2440,26 @@ internal fun TextbookReader(
         }
 
         // 7. 顶部浮动工具栏（44dp，默认隐藏，悬停/Tab 呼出）。
+        val frontMatterTitle = remember(navigationBook, readingAnchor, activeTocNode, textView,
+            pageUnrecognizedOriginal, paging.pages, paging.columns) {
+            if (activeTocNode != null) return@remember null
+            // An image-only cover may share a spread with the opening notice on the right.
+            val headerAnchor = if (textView && !pageUnrecognizedOriginal && book.page(readingAnchor.importPage)?.text.isNullOrBlank()) {
+                val first = paging.index
+                (first until first + paging.columns).asSequence()
+                    .flatMap { paging.pages.getOrNull(it)?.sources.orEmpty().asSequence() }
+                    .firstOrNull { it.endUtf16 > it.startUtf16 }
+                    ?.let { BookPageAnchor(it.importPage, it.startUtf16) } ?: readingAnchor
+            } else readingAnchor
+            BookBoundaries.unlistedFrontMatterTitle(navigationBook, headerAnchor)
+        }
         ImmersiveTopHud(
             visible = showHud,
             availableWidth = maxWidth,
             bookTitle = book.title,
-            sectionTitle = if (source != null) "出处 · ${source.title}" else activeTocNode?.title ?: effectiveChapterSpan?.title ?: currentSection?.title,
+            sectionTitle = if (source != null) "出处 · ${source.title}" else
+                activeTocNode?.let { BookBoundaries.headerTitleForNode(navigationBook, it) }
+                    ?: frontMatterTitle ?: effectiveChapterSpan?.title ?: currentSection?.title,
             backLabel = when {
                 ui.canReturnToCitationOrigin -> "返回引用前的位置"
                 source != null && ui.review != null -> "返回复习"

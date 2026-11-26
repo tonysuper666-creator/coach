@@ -11,6 +11,11 @@ import androidx.compose.ui.unit.Constraints
  * （和 [BookLaidPage.selection] 同一约定），所以显示偏移和原文偏移可以互相换算。
  */
 internal fun BookLaidPage.anchorAtY(yPx: Int, measurer: TextMeasurer, typography: BookPageTypography, widthPx: Int): BookPageAnchor {
+    visuals.firstOrNull { yPx >= it.topPx && yPx < it.topPx + it.heightPx }?.let { block ->
+        val slice = block.replacement
+        return if (slice != null) BookPageAnchor(slice.importPage, slice.startUtf16)
+        else BookPageAnchor(block.item.page, block.item.anchorOffset, block.item.order, block.band?.startY)
+    }
     val run = runs.lastOrNull { it.topPx <= yPx } ?: runs.firstOrNull() ?: return anchor
     if (run.sources.isEmpty()) return anchor
     val layout = measurer.measure(run.text, typography.body, placeholders = run.placeholders, constraints = Constraints(maxWidth = widthPx))
@@ -27,8 +32,9 @@ internal fun BookLaidPage.anchorAtY(yPx: Int, measurer: TextMeasurer, typography
     return BookPageAnchor(last.importPage, last.startUtf16)
 }
 
-/** 原文位置在本页里的纵向像素（页面坐标，从纸面顶算起）；锚点在图上或不在本页文字里时给 null。 */
+/** 本页原文或排版块锚点的纵向像素。 */
 internal fun BookLaidPage.yOfAnchor(anchor: BookPageAnchor, measurer: TextMeasurer, typography: BookPageTypography, widthPx: Int): Int? {
+    visuals.firstOrNull { it.containsAnchor(anchor) }?.let { return it.topPx }
     if (anchor.visualOrder != null) return null
     for (run in runs) {
         var at = 0

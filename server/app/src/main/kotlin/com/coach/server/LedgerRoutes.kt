@@ -43,6 +43,7 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
 
 // Test seam: pause an individual connection at the point its nonempty frame is sent.
 internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService?, adminDevice: String, observation: UsageObservation?, friends: FriendAccess? = null, publicOnly: Boolean = false, unifiedBooks: UnifiedBookPipeline? = null, beforeLedgerFrame: suspend (String) -> Unit) {
+    installReaderAnswerStream()
     if (observation != null) observeUsage(observation)
     install(WebSockets) { pingPeriod = kotlin.time.Duration.parse("5s");timeout=kotlin.time.Duration.parse("15s");maxFrameSize=1_048_576 }
     intercept(ApplicationCallPipeline.Call) {
@@ -81,6 +82,15 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             }
             call.attributes.put(observedDevice, identity.first)
             if (friend != null) call.attributes.put(observedFriend, friend)
+            val path = call.request.path()
+            if (unifiedBooks?.enabled == true && friend != null && com.coach.store.isSableFriend(friend) &&
+                (path.startsWith("/v1/library/") || path.startsWith("/api/books/") || path == "/v1/public/status")) {
+                try {
+                    unifiedBooks.withPrivateRequest(UnifiedBookScope.fromSableFriend(friend),{
+                        actor.execute { authorize(identity.first,checkNotNull(token)) && friendName(identity.first) == friend }
+                    }) { proceed() }
+                } catch (e: UnifiedBookError) { call.respond(e.status); finish() }
+            }
         }
     }
 
@@ -190,8 +200,9 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
                 return@post call.respond(HttpStatusCode.Unauthorized)
             }
             val sessions = friends?.sable ?: return@post call.respond(HttpStatusCode.ServiceUnavailable)
-            val credential = try { sessions.exchange(bearer.removePrefix("Bearer ")) }
+            val credential = try { sessions.exchange(bearer.removePrefix("Bearer "), unifiedBooks?.takeIf { it.enabled }) }
                 catch (_: SableUnavailable) { return@post call.respond(HttpStatusCode.ServiceUnavailable) }
+                catch (e: UnifiedBookError) { return@post call.respond(e.status) }
             if (credential == null) return@post call.respond(HttpStatusCode.Unauthorized)
             call.respondText(json("deviceId" to credential.deviceId, "token" to credential.token,
                 "role" to credential.role).toString(), ContentType.Application.Json)

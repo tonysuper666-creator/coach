@@ -96,6 +96,7 @@ internal class TextbookLibrary(
                 if (db != null) backfillReviews(db) else database().use(::backfillReviews)
             },
         )
+        database().use(::installLibraryRecordTimes)
     }
     private fun database(): Connection = DriverManager.getConnection("jdbc:sqlite:${directory.resolve("library.sqlite")}").apply {
         createStatement().use { it.execute("PRAGMA busy_timeout=5000") }
@@ -178,6 +179,26 @@ internal class TextbookLibrary(
 
     private fun book(db: Connection, id: String): Textbook {
         val loaded = readBook(db, id)
+        val legacyStart = loaded.correctedBodyPage
+        if (legacyStart != null && loaded.structure?.correctedStart != legacyStart &&
+            loaded.indexState == "READY" && !loaded.hasPendingOcr) {
+            val ownsTransaction = db.autoCommit
+            if (ownsTransaction) db.autoCommit = false
+            try {
+                val latest = readBook(db, id)
+                val savedPage = latest.correctedBodyPage
+                if (savedPage == null || latest.structure?.correctedStart == savedPage) return latest
+                val updated = latest.applyStructureEdit(StructureEdit.BodyStart(savedPage))
+                persistEditedStructure(db, latest, updated, moveToBody = false)
+                if (ownsTransaction) db.commit()
+                return updated
+            } catch (error: Exception) {
+                if (ownsTransaction) db.rollback()
+                throw error
+            } finally {
+                if (ownsTransaction) db.autoCommit = true
+            }
+        }
         val structure = loaded.structure ?: return loaded
         if (structure.version >= BookStructure.CURRENT_VERSION || loaded.indexState != "READY") return loaded
         if (loaded.format !in setOf("epub", "pdf")) return loaded
@@ -254,28 +275,64 @@ internal class TextbookLibrary(
     @Synchronized fun book(id: String): Textbook = database().use { book(it, id) }
 
     @Synchronized fun saveBodyStart(bookId: String, page: Int?) {
-        database().use { db ->
-            if (page != null) {
-                val valid = db.prepareStatement("SELECT 1 FROM pages WHERE book=? AND page=?").use { sql ->
-                    sql.setString(1, bookId)
-                    sql.setInt(2, page)
-                    sql.executeQuery().use { it.next() }
-                }
-                require(valid) { "请输入书内页码。" }
-            }
-            if (page == null) {
-                db.prepareStatement("DELETE FROM book_body_start WHERE book=?").use { sql ->
-                    sql.setString(1, bookId)
-                    sql.executeUpdate()
-                }
-            } else {
-                db.prepareStatement("INSERT OR REPLACE INTO book_body_start(book,page) VALUES(?,?)").use { sql ->
-                    sql.setString(1, bookId)
-                    sql.setInt(2, page)
-                    sql.executeUpdate()
+        editStructure(book(bookId), StructureEdit.BodyStart(page))
+    }
+
+    @Synchronized fun editStructure(expected: Textbook, edit: StructureEdit): Textbook = database().use { db ->
+        db.autoCommit = false
+        try {
+            val current = book(db, expected.id)
+            check(current.indexState == "READY" && !current.hasPendingOcr) { "等这本书整理好后再改。" }
+            check(current.structure?.editRevision == expected.structure?.editRevision &&
+                current.tocNodes == expected.tocNodes && current.correctedBodyPage == expected.correctedBodyPage
+            ) { "目录已经更新，请重新打开再改。" }
+            val updated = current.applyStructureEdit(edit)
+            val readingPage = persistEditedStructure(db, current, updated, moveToBody = edit is StructureEdit.BodyStart)
+            db.commit()
+            if (edit is StructureEdit.BodyStart) readSpotCache.remove(current.id)
+            updated.copy(readingPage = readingPage)
+        } catch (error: Exception) {
+            db.rollback()
+            throw error
+        }
+    }
+
+    private fun persistEditedStructure(db: Connection, current: Textbook, updated: Textbook, moveToBody: Boolean): Int {
+        BookStructureStore.saveStructure(db, current.id, checkNotNull(updated.structure))
+        BookStructureStore.clearGuides(db, current.id)
+        for (table in listOf("book_map_meta", "book_study_mode_packs")) {
+            if (BookSchemaMigration.tableExists(db, table)) {
+                db.prepareStatement("DELETE FROM $table WHERE book_id=?").use {
+                    it.setString(1, current.id)
+                    it.executeUpdate()
                 }
             }
         }
+        val page = updated.correctedBodyPage
+        val bodySql = if (page == null) "DELETE FROM book_body_start WHERE book=?"
+            else "INSERT OR REPLACE INTO book_body_start(book,page) VALUES(?,?)"
+        db.prepareStatement(bodySql).use {
+            it.setString(1, current.id)
+            if (page != null) it.setInt(2, page)
+            it.executeUpdate()
+        }
+        BooklistProgressStore.remapChapters(db, current, updated)
+        val readingPage = if (moveToBody) updated.bodyStart.importPage else current.readingPage
+        db.prepareStatement("UPDATE books SET lesson_index=?, reading_page=? WHERE id=?").use {
+            it.setInt(1, updated.lessonIndex)
+            it.setInt(2, readingPage)
+            it.setString(3, current.id)
+            it.executeUpdate()
+        }
+        if (moveToBody) {
+            db.prepareStatement("INSERT OR REPLACE INTO book_read_spots(book,page,offset_utf16) VALUES(?,?,?)").use {
+                it.setString(1, current.id)
+                it.setInt(2, readingPage)
+                it.setInt(3, updated.bodyStart.offsetUtf16)
+                it.executeUpdate()
+            }
+        }
+        return readingPage
     }
 
     @Synchronized fun loadStartupSnapshot(): StartupLoadSnapshot = database().use { db ->
@@ -884,14 +941,11 @@ internal class TextbookLibrary(
             }
             merged += incoming.filterNot { item -> existing.any { it.imageSha256 == item.contentSha256 && it.sourceRegion == item.sourceRegion } }
         }
-        val newFiles = merged.map { BookIllustrationAssets.imageFile(directory, bookId, it.contentSha256, it.extension) }
-            .distinct().filterNot(Files::exists)
         database().use { db ->
             db.autoCommit = false
+            val newFiles = mutableListOf<Path>()
             try {
                 db.createStatement().use { it.execute("CREATE TABLE IF NOT EXISTS book_pdf_visual_reviews(book TEXT NOT NULL,page INTEGER NOT NULL,image_sha TEXT NOT NULL,review TEXT NOT NULL,PRIMARY KEY(book,page,image_sha))") }
-                BookPageModelStore.saveInTransaction(db, directory, bookId, book.pages.associate { it.number to it.text },
-                    merged.sortedWith(compareBy({ it.page }, { it.anchorOffset })))
                 db.prepareStatement("INSERT OR REPLACE INTO book_pdf_visual_reviews(book,page,image_sha,review) VALUES(?,?,?,?)").use { sql ->
                     for (review in reviews) {
                         sql.setString(1, bookId); sql.setInt(2, review.selection.page); sql.setString(3, review.pngSha256)
@@ -899,9 +953,27 @@ internal class TextbookLibrary(
                     }
                     sql.executeBatch()
                 }
+                // The review rows reserve the writer. A lazy page visit can have completed
+                // during preview; keep its assets and let the caller retry the merge.
+                for (number in images.map { it.page }.distinct()) {
+                    val stored = BookIllustrationStore.loadByPage(db, bookId, number..number)[number].orEmpty()
+                    require(stored == book.page(number)?.illustrations) { "这一页的排版块刚刚更新，请重新导入。" }
+                    db.prepareStatement("SELECT text FROM pages WHERE book=? AND page=?").use { query ->
+                        query.setString(1, bookId)
+                        query.setInt(2, number)
+                        query.executeQuery().use { require(it.next() && it.getString(1) == book.page(number)?.text) { "页文字已变化，请重新核对。" } }
+                    }
+                }
+                newFiles += merged.map { BookIllustrationAssets.imageFile(directory, bookId, it.contentSha256, it.extension) }
+                    .distinct().filterNot(Files::exists)
+                BookPageModelStore.saveInTransaction(db, directory, bookId, book.pages.associate { it.number to it.text },
+                    merged.sortedWith(compareBy({ it.page }, { it.anchorOffset })))
                 control.check()
                 db.commit()
-            } catch (error: Exception) { db.rollback(); newFiles.forEach { Files.deleteIfExists(it) }; throw error }
+            } catch (error: Throwable) {
+                try { newFiles.forEach { Files.deleteIfExists(it) } } finally { db.rollback() }
+                throw error
+            }
         }
         return book(bookId)
     }
@@ -927,7 +999,7 @@ internal class TextbookLibrary(
         }
     }
 
-    private fun stageCopyAndHash(source: Path, control: BookImportControl, stage: Path): Triple<String, String, Long> {
+    private fun stageCopyAndHash(source: Path, control: BookImportControl, stage: Path): Pair<String, Long> {
         val digest = MessageDigest.getInstance("SHA-256")
         var bytesCopied = 0L
         Files.newInputStream(source).use { input ->
@@ -943,9 +1015,8 @@ internal class TextbookLibrary(
                 }
             }
         }
-        val format = BookFormats.detect(stage, source.fileName.toString())
         val id = digest.digest().joinToString("") { "%02x".format(it) }
-        return Triple(id, format, bytesCopied)
+        return id to bytesCopied
     }
 
     private fun stagePreparedNonTier0(
@@ -985,8 +1056,9 @@ internal class TextbookLibrary(
         require(Files.size(source) <= 256L * 1024 * 1024) { "请选择不超过 256 MB 的教材。" }
         val stage = directory.resolve(".import-${UUID.randomUUID()}")
         try {
-            val (id, format, fileBytes) = stageCopyAndHash(source, control, stage)
+            val (id, fileBytes) = stageCopyAndHash(source, control, stage)
             if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
+            val format = BookFormats.detect(stage, source.fileName.toString())
             return stagePreparedNonTier0(source, stage, id, format, fileBytes, control)
         } finally { Files.deleteIfExists(stage) }
     }
@@ -1010,8 +1082,9 @@ internal class TextbookLibrary(
         require(Files.size(source) <= 256L * 1024 * 1024) { "请选择不超过 256 MB 的教材。" }
         val stage = directory.resolve(".import-${UUID.randomUUID()}")
         try {
-            val (id, format, fileBytes) = stageCopyAndHash(source, control, stage)
+            val (id, fileBytes) = stageCopyAndHash(source, control, stage)
             if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
+            val format = BookFormats.detect(stage, source.fileName.toString())
             if (format != "pdf" || extractBook != null) {
                 return stagePreparedNonTier0(source, stage, id, format, fileBytes, control)
             }
@@ -1039,14 +1112,15 @@ internal class TextbookLibrary(
                         val tier0End = minOf(3, totalPages)
                         for (pageNum in 1..tier0End) extractPage(pageNum)
                         val outlineStructure = BookTocWaterfall.buildTier0Structure(id, bookTitle, totalPages, outline)
-                        val outlineChapterPage = BookBoundaries.firstChapter(outlineStructure.tocNodes)?.startPage
-                        val probeStart = outlineChapterPage ?: 1
+                        val firstChapter = BookBoundaries.firstChapter(outlineStructure.tocNodes)
+                        val probeStart = firstChapter?.startPage ?: 1
                         val nextChapterPage = outlineStructure.tocNodes.firstOrNull {
                             it.kind == TocNodeKind.CHAPTER && it.startPage > probeStart
                         }?.startPage
                         val probeEnd = minOf(probeStart + 31, totalPages, (nextChapterPage ?: totalPages + 1) - 1)
                         val initialPage = (probeStart..probeEnd).firstOrNull { p ->
-                            !BookBoundaries.looksLikeFrontMatter(extractPage(p).text)
+                            val bookmarkTitle = firstChapter?.takeIf { it.startPage == p }?.title
+                            !BookBoundaries.looksLikeFrontMatter(extractPage(p).text, bookmarkTitle)
                         } ?: probeStart
                         for (p in initialPage..minOf(initialPage + 2, totalPages)) extractPage(p)
                         payloadReady = true
@@ -1417,7 +1491,15 @@ internal class TextbookLibrary(
         return book(bookId)
     }
 
-    /** Tier 2 lazy per-page visual extraction (idempotent via `book_visual_pages`). Never holds `@Synchronized`. */
+    fun pdfIllustrationsForPages(bookId: String, pages: Collection<Int>): Map<Int, List<BookIllustration>> {
+        if (pages.isEmpty()) return emptyMap()
+        return database().use { db ->
+            val stored = BookIllustrationStore.loadByPage(db, bookId, pages.min()..pages.max())
+            pages.associateWith { stored[it].orEmpty() }
+        }
+    }
+
+    /** Tier 2 runs only on visible, text-ready PDF pages. Rendering happens outside the write transaction. */
     fun ensurePdfVisualsForPages(
         bookId: String,
         pageNumbers: Collection<Int>,
@@ -1425,94 +1507,98 @@ internal class TextbookLibrary(
     ): Boolean {
         val requested = pageNumbers.filter { it >= 1 }.distinct()
         if (requested.isEmpty()) return false
-        val prep = database().use { db ->
-            val fmt = db.prepareStatement("SELECT format FROM books WHERE id=?").use { sql ->
-                sql.setString(1, bookId)
-                sql.executeQuery().use { if (it.next()) it.getString(1) else null }
-            } ?: return@use null
-            if (fmt != "pdf") return@use null
-            val extractedSet = BookVisualPageStore.extractedPages(db, bookId)
-            val missing = requested.filter { it !in extractedSet }
-            if (missing.isEmpty()) return@use null
-            val readyPages = missing.mapNotNull { pageNum ->
-                db.prepareStatement("SELECT text, ocr, ocr_pending, text_pending FROM pages WHERE book=? AND page=?").use { sql ->
-                    sql.setString(1, bookId)
-                    sql.setInt(2, pageNum)
-                    sql.executeQuery().use { row ->
-                        if (!row.next()) null
-                        else {
-                            val ocrPending = row.getInt("ocr_pending") == 1
-                            val textPending = runCatching { row.getInt("text_pending") == 1 }.getOrDefault(false)
-                            if (ocrPending || textPending) null
-                            else BookPage(pageNum, row.getString("text"), ocr = row.getInt("ocr") == 1)
-                        }
-                    }
-                }
-            }
-            if (readyPages.isEmpty()) return@use null
-            val existingAssets = if (BookSchemaMigration.tableExists(db, "book_illustrations")) {
-                db.prepareStatement("SELECT DISTINCT image_sha256, extension FROM book_illustrations WHERE book=?").use { sql ->
-                    sql.setString(1, bookId)
-                    sql.executeQuery().use { rows ->
-                        buildList { while (rows.next()) add(rows.getString(1) to rows.getString(2)) }
-                    }
-                }
-            } else emptyList()
-            val existingCount = if (BookSchemaMigration.tableExists(db, "book_illustrations")) {
-                db.prepareStatement("SELECT COUNT(*) FROM book_illustrations WHERE book=?").use { sql ->
-                    sql.setString(1, bookId)
-                    sql.executeQuery().use { if (it.next()) it.getInt(1) else 0 }
-                }
-            } else 0
-            val existingBytes = existingAssets.sumOf { (sha, ext) ->
-                runCatching { Files.size(BookIllustrationAssets.imageFile(directory, bookId, sha, ext)) }.getOrDefault(0L)
-            }
-            Triple(readyPages, existingCount, existingBytes)
-        } ?: return false
-
-        val (readyPages, existingCount, existingBytes) = prep
-        val pdfFile = original(bookId, "pdf").toFile()
-        if (!pdfFile.isFile) return false
-        val accepted = BookPdfLoader.read(pdfFile) { pdf ->
-            val raw = importedPdfVisuals(pdf, readyPages, control)
-            var count = existingCount
-            var bytes = existingBytes
-            buildList {
-                for (item in raw) {
-                    if (count >= FormatBookImages.MAX_IMAGES || bytes + item.bytes.size > FormatBookImages.MAX_TOTAL) break
-                    count++
-                    bytes += item.bytes.size
-                    add(item)
+        val ready = database().use { db ->
+            db.prepareStatement("""SELECT p.text FROM pages p JOIN books b ON b.id=p.book
+                WHERE p.book=? AND p.page=? AND b.format='pdf' AND p.ocr=0 AND p.ocr_pending=0 AND p.text_pending=0
+                AND NOT EXISTS(SELECT 1 FROM book_visual_pages v
+                    WHERE v.book=p.book AND v.page=p.page AND v.layout_version >= 1)""").use { query ->
+                query.setString(1, bookId)
+                requested.mapNotNull { number ->
+                    query.setInt(2, number)
+                    query.executeQuery().use { if (it.next()) BookPage(number, it.getString(1)) else null }
                 }
             }
         }
-        val newFiles = accepted.map { BookIllustrationAssets.imageFile(directory, bookId, it.contentSha256, it.extension) }
-            .distinct().filterNot(Files::exists)
+        if (ready.isEmpty()) return false
+        val pdfFile = original(bookId, "pdf").toFile()
+        if (!pdfFile.isFile) return false
+        val crops = BookPdfLoader.read(pdfFile) { importedPdfVisuals(it, ready, control, includeLayoutCandidates = false) }
         database().use { db ->
             db.autoCommit = false
+            val newFiles = mutableListOf<Path>()
             try {
-                val stillExists = db.prepareStatement("SELECT 1 FROM books WHERE id=?").use { sql ->
-                    sql.setString(1, bookId)
-                    sql.executeQuery().use { it.next() }
+                // Acquire the SQLite writer before checking assets and quotas. An overlapping visit,
+                // a reviewed import, or a changed page between extraction and commit takes precedence.
+                val claimed = db.prepareStatement("""INSERT INTO book_visual_pages(book,page,extracted_at,layout_version)
+                    SELECT p.book,p.page,?,1 FROM pages p WHERE p.book=? AND p.page=? AND p.text=?
+                    AND p.ocr=0 AND p.ocr_pending=0 AND p.text_pending=0
+                    ON CONFLICT(book,page) DO UPDATE SET extracted_at=excluded.extracted_at,layout_version=excluded.layout_version
+                    WHERE book_visual_pages.layout_version < excluded.layout_version""").use { claim ->
+                    claim.setLong(1, System.currentTimeMillis())
+                    claim.setString(2, bookId)
+                    ready.filter { page ->
+                        control.check()
+                        claim.setInt(3, page.number)
+                        claim.setString(4, page.text)
+                        claim.executeUpdate() == 1
+                    }
                 }
-                if (!stillExists) {
-                    db.rollback()
-                    return false
+                val texts = claimed.associate { it.number to it.text }
+                // Earlier native tables stored row links but no replacement range. Only native
+                // extraction creates table_rows. User-reviewed assets have no such metadata.
+                db.prepareStatement("""DELETE FROM book_illustrations WHERE book=? AND page=?
+                    AND kind='TABLE' AND table_rows IS NOT NULL AND source_start IS NULL AND source_end IS NULL""").use { remove ->
+                    remove.setString(1, bookId)
+                    for (page in claimed) {
+                        remove.setInt(2, page.number)
+                        remove.addBatch()
+                    }
+                    remove.executeBatch()
                 }
-                if (accepted.isNotEmpty()) {
-                    BookIllustrationStore.saveInTransaction(
-                        db, directory, bookId, readyPages.associate { it.number to it.text }, accepted, ensureSchema = false,
-                    )
+                val stored = BookIllustrationStore.loadByPage(db, bookId, requested.min()..requested.max())
+                val fresh = crops.filter { item ->
+                    item.page in texts && stored[item.page].orEmpty().none { old ->
+                        val previous = old.sourceRegion
+                        val region = item.sourceRegion
+                        previous == null || region == null || PdfBookImages.intersects(previous, region)
+                    }
                 }
-                BookVisualPageStore.markExtracted(db, bookId, readyPages.map { it.number })
+                if (fresh.isNotEmpty()) {
+                    var count = 0
+                    var bytes = 0L
+                    db.prepareStatement("""SELECT image_sha256,extension,COUNT(*) FROM book_illustrations
+                        WHERE book=? GROUP BY image_sha256,extension""").use { sql ->
+                        sql.setString(1, bookId)
+                        sql.executeQuery().use { rows ->
+                            while (rows.next()) {
+                                count += rows.getInt(3)
+                                val path = BookIllustrationAssets.imageFile(directory, bookId, rows.getString(1), rows.getString(2))
+                                if (Files.isRegularFile(path)) bytes += Files.size(path)
+                            }
+                        }
+                    }
+                    val accepted = buildList {
+                        for (item in fresh) {
+                            if (count >= FormatBookImages.MAX_IMAGES || bytes + item.bytes.size > FormatBookImages.MAX_TOTAL) break
+                            add(item)
+                            count++
+                            bytes += item.bytes.size
+                        }
+                    }
+                    newFiles += accepted.map { BookIllustrationAssets.imageFile(directory, bookId, it.contentSha256, it.extension) }
+                        .distinct().filterNot(Files::exists)
+                    val nextOrdinal = stored.mapValues { (_, items) -> items.maxOf { it.order } + 1 }
+                    BookIllustrationStore.saveInTransaction(db, directory, bookId, texts, accepted,
+                        ensureSchema = false, appendOrdinals = nextOrdinal)
+                }
+                control.check()
                 db.commit()
+                return claimed.isNotEmpty()
             } catch (error: Throwable) {
-                db.rollback()
-                newFiles.forEach { Files.deleteIfExists(it) }
+                try { newFiles.forEach { Files.deleteIfExists(it) } } finally { db.rollback() }
                 throw error
             }
         }
-        return true
     }
 
     @Synchronized
@@ -1963,8 +2049,8 @@ internal class TextbookLibrary(
         BookStructureStore.loadGuide(db, bookId, sectionId)
     }
 
-    @Synchronized fun saveSectionGuide(bookId: String, sectionId: String, guide: CachedSectionGuide) = database().use { db ->
-        BookStructureStore.saveGuide(db, bookId, sectionId, guide)
+    @Synchronized fun saveSectionGuide(bookId: String, sectionId: String, guide: CachedSectionGuide, expected: Textbook? = null) = database().use { db ->
+        db.cacheForStructure(expected) { BookStructureStore.saveGuide(db, bookId, sectionId, guide) }
     }
 
     @Synchronized fun saveChapterPracticeDraft(bookId: String, tocNodeId: String, pagesTotal: Int, draft: ChapterPracticeDraft) = database().use { db ->
@@ -1983,8 +2069,8 @@ internal class TextbookLibrary(
         ChapterProgressStore.loadCachedPack(db, bookId, chapterId)
     }
 
-    @Synchronized fun saveChapterCompanion(bookId: String, chapterId: String, pack: BookCompanionPack) = database().use { db ->
-        ChapterProgressStore.saveCachedPack(db, bookId, chapterId, pack)
+    @Synchronized fun saveChapterCompanion(bookId: String, chapterId: String, pack: BookCompanionPack, expected: Textbook? = null) = database().use { db ->
+        db.cacheForStructure(expected) { ChapterProgressStore.saveCachedPack(db, bookId, chapterId, pack) }
     }
 
     @Synchronized fun recordPageDwell(

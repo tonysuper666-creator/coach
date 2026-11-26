@@ -43,7 +43,7 @@ internal fun ComposeUiTest.chooseReadingSize(size: ReadingSize) {
 }
 
 /**
- * TON-1784 沉浸阅读器按窗口分栏，每栏上限 720dp，两侧保留相同边距。
+ * 沉浸阅读器最多两页对开（TON-1671 裁决），纸铺满阅读视口，每页行宽上限 720dp，多出来的宽度给页边。
  * 用合成的一整段长文（导入时按文字块切成多页）核对：两种常见屏和窄窗口、Aa 小/中/大下
  * 栏宽与居中、逐页重建到最后一个字、翻页从版心开始，以及出处打开后落在被引的那一块。
  */
@@ -93,10 +93,14 @@ class ReaderMeasureUiTest {
         for (sheet in sheets) assertEquals(expectedWidth, sheet.width, 2f, "$label: immersive column width")
         visible().forEach { text ->
             val sheet = sheets.single { text.positionInRoot.x >= it.left && text.positionInRoot.x < it.right }
-            // TON-1854（#639）：沉浸式左右边距收到 min(4dp, 栏宽 0.8%)。
+            // TON-1854（#639）：沉浸式左右边距收到 min(4dp, 栏宽 0.8%)；TON-1671：行宽再封顶 720dp，多出来的给页边。
             val inset = minOf(4f * density, sheet.width * .008f)
-            assertEquals(sheet.width - 2f * inset, text.size.width.toFloat(), 2f, "$label: full text column")
-            assertEquals(sheet.left + inset, text.positionInRoot.x, 2f, "$label: text inset")
+            if (sheet.width - 2f * inset <= 720f * density) {
+                assertEquals(sheet.width - 2f * inset, text.size.width.toFloat(), 2f, "$label: full text column")
+                assertEquals(sheet.left + inset, text.positionInRoot.x, 2f, "$label: text inset")
+            } else {
+                assertTrue(text.size.width <= 720f * density + 2f, "$label: line capped at 720dp, was ${text.size.width / density}dp")
+            }
             val layouts = mutableListOf<TextLayoutResult>()
             text.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts)
             val laid = layouts.single()

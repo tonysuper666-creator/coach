@@ -120,6 +120,67 @@ class BookNavigationTest {
         }
     }
 
+    @Test fun splitInsideOneEpubPagePersistsItsParagraphAnchor() = withTempBook { epub, library ->
+        writeEpub(epub, """<nav epub:type="toc"><ol><li><a href="../body.xhtml#first">Chapter I</a></li></ol></nav>""")
+        val book = library.importBook(epub)
+        val chapter = book.tocNodes.single()
+        val block = book.sourceBlocks().last { it.page == chapter.startPage && !it.heading }
+        library.editStructure(book, StructureEdit.Split(chapter.id, block.page, "New chapter", block.start))
+        val reopened = TextbookLibrary(library.directory).book(book.id)
+        val added = reopened.tocNodes.last()
+        assertEquals(block.start, added.startOffset)
+        assertEquals(chapter.id, BookChapterResolver.chapterForPage(reopened, block.page, block.start - 1)?.tocNodeId)
+        assertEquals(added.id, BookChapterResolver.chapterForPage(reopened, block.page, block.start)?.tocNodeId)
+        assertEquals(block.id, reopened.lessons.last().blocks.first().id)
+    }
+
+    @OptIn(ExperimentalTestApi::class)
+    @Test fun editChapterInDrawer() = withTempBook { epub, library ->
+        writeEpub(epub, """
+            <nav epub:type="toc"><ol>
+                <li><a href="../body.xhtml#first">Chapter I</a></li>
+                <li><a href="../body.xhtml#second">Chapter II</a></li>
+            </ol></nav>
+        """.trimIndent())
+        val imported = library.importBook(epub)
+        val active = androidx.compose.runtime.mutableStateOf(imported)
+        for (dark in listOf(false, true)) {
+            runSkikoComposeUiTest(size = Size(420f, 720f), density = Density(1f)) {
+                setContent {
+                    val book = active.value
+                    CoachTheme(dark) {
+                        ImmersiveTocDrawer(true, 420.dp, book = book, currentPage = 2,
+                            currentAnchor = book.bodyStart, currentChapterId = book.tocNodes.last().id,
+                            bodyStart = book.bodyStart, bodyStartCorrected = false, bookmarks = emptyList(),
+                            busy = false, onJumpPage = {}, onJumpToc = {}, onToggleBookmark = {},
+                            onSaveBodyStart = {}, onEditChapter = { active.value = library.editStructure(book, it) },
+                            onReorganizeSections = null, onClose = {})
+                    }
+                }
+                onNodeWithTag("toc-edit-structure").performClick()
+                onNodeWithText("改章节").performClick()
+                onNodeWithTag("toc-chapter-name").performTextReplacement(if (dark) "Evening" else "Morning")
+                val directory = System.getenv("COACH_STRUCTURE_EVIDENCE")?.let(Path::of)
+                if (directory != null) {
+                    Files.createDirectories(directory)
+                    val theme = if (dark) "dark" else "light"
+                    ImageIO.write(onNodeWithTag("immersive-toc-drawer").captureToImage().toAwtImage(),
+                        "png", directory.resolve("editor-$theme.png").toFile())
+                }
+                onNodeWithText("保存章名").performClick()
+                waitForIdle()
+                assertEquals(if (dark) "Evening" else "Morning", library.book(imported.id).tocNodes.last().title)
+                if (dark) {
+                    onNodeWithTag("toc-edit-structure").performClick()
+                    onNodeWithText("改章节").performClick()
+                    onNodeWithText("并入上一章").performClick()
+                    waitForIdle()
+                    assertEquals(1, library.book(imported.id).tocNodes.size)
+                }
+            }
+        }
+    }
+
     private fun withTempBook(block: (Path, TextbookLibrary) -> Unit) {
         val root = Files.createTempDirectory("coach-native-navigation-")
         try {

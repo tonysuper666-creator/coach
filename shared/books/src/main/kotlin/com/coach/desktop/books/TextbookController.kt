@@ -1645,6 +1645,17 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         mutable.update { it.copy(ladder = next) }
     }
 
+    suspend fun editStructure(book: Textbook, edit: StructureEdit): Textbook = actions.withLock {
+        flushPendingSaves()
+        val updated = withContext(Dispatchers.IO) { library.editStructure(book, edit) }
+        val catalog = withContext(Dispatchers.IO) { library.catalog() }
+        mutable.update { state ->
+            if (state.book?.id != updated.id) state.copy(catalog = catalog)
+            else state.copy(book = updated, catalog = catalog, booklistRevision = state.booklistRevision + 1)
+        }
+        updated
+    }
+
     /** 显式「重新整理章节」：按新版结构识别重算并缓存本书的章节划分。 */
     suspend fun reorganizeSections() = action {
         val book = mutable.value.book ?: return@action

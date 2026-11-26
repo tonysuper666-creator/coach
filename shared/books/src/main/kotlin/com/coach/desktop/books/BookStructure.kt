@@ -8,6 +8,7 @@ import java.sql.Connection
 
 /** 结构来源按可信度由高到低排列。 */
 internal enum class HeadingSource {
+    MANUAL,
     PDF_OUTLINE,
     EPUB_TOC,
     WORD_STYLE,
@@ -79,6 +80,8 @@ internal data class BookStructure(
     val studyChunks: List<BookStudyChunk> = emptyList(),
     val confidence: Double = 1.0,
     val nativeBodyStart: BookPageAnchor? = null,
+    val correctedStart: Int? = null,
+    val editRevision: String? = null,
 ) {
     /** 无结构或低置信度长书尚未尝试过模型分节时为 true；一旦尝试或回退后按书缓存不再重复调用。 */
     val needsModelSectioning: Boolean
@@ -94,7 +97,7 @@ internal data class BookStructure(
         val blocks = precomputedBlocks ?: StudyCoachCourse.blocks(bookId, pages, snapSentences = true)
         val byId = HashMap<String, SourceBlock>(blocks.size * 2)
         for (block in blocks) byId[block.id] = block
-        val firstBodyAnchor = nativeBodyStart
+        val firstBodyAnchor = correctedStart?.let { BookPageAnchor(it) } ?: nativeBodyStart
             ?: BookBoundaries.openingNode(tocNodes)?.let { open ->
                 val hasPrecedingFrontMatter = tocNodes.any { node ->
                     node.kind == TocNodeKind.FRONT_MATTER &&
@@ -168,7 +171,15 @@ internal data class BookStructure(
 
     fun toLessons(): List<BookLesson> = resolvedLessons
 
-    fun pageRole(page: Int): BookPageRole = pageRoles[page] ?: BookPageRole.BODY
+    fun pageRole(page: Int): BookPageRole {
+        val detected = pageRoles[page] ?: BookPageRole.BODY
+        val start = correctedStart ?: return detected
+        return when {
+            page < start && detected == BookPageRole.BODY -> BookPageRole.FRONT_MATTER
+            page == start || page > start && detected == BookPageRole.FRONT_MATTER -> BookPageRole.BODY
+            else -> detected
+        }
+    }
 
     fun sectionIndexForPage(page: Int): Int =
         resolvedLessons.indexOfFirst { page in it.firstPage..it.lastPage }
@@ -756,6 +767,8 @@ internal object BookStructureStore {
         val json = buildJsonObject {
             put("version", structure.version)
             put("source", structure.source)
+            structure.correctedStart?.let { put("correctedStart", it) }
+            structure.editRevision?.let { put("editRevision", it) }
             put("confidence", structure.confidence)
             put("modelAttempted", structure.modelAttempted)
             structure.nativeBodyStart?.let {
@@ -850,6 +863,8 @@ internal object BookStructureStore {
                     }
                     BookStructure(
                         version = version,
+                        correctedStart = obj["correctedStart"]?.jsonPrimitive?.intOrNull,
+                        editRevision = obj["editRevision"]?.jsonPrimitive?.contentOrNull,
                         pageRoles = roles,
                         sections = sections,
                         source = source,

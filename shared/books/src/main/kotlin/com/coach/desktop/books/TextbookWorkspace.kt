@@ -550,6 +550,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 onJumpCourseCitation = { citation, origin ->
                                     run { controller.jumpToCourseCitation(citation, origin) }
                                 },
+                                onEditStructure = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true))
+                                    controller::editStructure else null,
                                 onCancelImport = controller::cancelImport,
                                 onReorganizeSections = { run { controller.reorganizeSections() } },
                                 onSaveSectionQuiz = { lesson, qIdx, practice, answer ->

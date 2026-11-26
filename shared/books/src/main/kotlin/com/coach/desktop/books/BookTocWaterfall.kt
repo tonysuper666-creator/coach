@@ -30,6 +30,9 @@ internal data class BookTocNode(
     val startOffset: Int = 0,
 )
 
+private val BookTocNode.usesSourceOffset: Boolean
+    get() = source == HeadingSource.EPUB_TOC || source == HeadingSource.MANUAL
+
 /**
  * AI/study chunk (`book_study_chunks`) mapped onto a canonical TOC leaf node.
  * Short sibling sections (<400 chars) may merge and >4000-char sections split cleanly at sentence boundaries.
@@ -618,6 +621,10 @@ internal object BookTocWaterfall {
             )
         }
 
+        return withEndPages(draft, totalPages)
+    }
+
+    internal fun withEndPages(draft: List<BookTocNode>, totalPages: Int): List<BookTocNode> {
         // Compute endPage for every node from the next peer/ancestor boundary.
         return draft.mapIndexed { i, node ->
             var nextBoundaryPage: Int? = null
@@ -635,7 +642,7 @@ internal object BookTocWaterfall {
             } else {
                 node.startPage
             }
-            node.copy(endPage = computedEnd.coerceIn(node.startPage, totalPages))
+            node.copy(ordinal = i, endPage = computedEnd.coerceIn(node.startPage, totalPages))
         }
     }
 
@@ -1177,7 +1184,7 @@ internal object BookTocWaterfall {
 
     // ---- Decoupled AI Study Chunks Builder (400-char merge + 4000-char sentence split) ----
 
-    private fun buildStudyChunks(
+    internal fun buildStudyChunks(
         bookId: String,
         bookTitle: String,
         pages: List<BookPage>,
@@ -1185,6 +1192,7 @@ internal object BookTocWaterfall {
         tocNodes: List<BookTocNode>,
         byPage: Map<Int, List<SourceBlock>>,
         nativeBodyStart: BookPageAnchor? = null,
+        edited: Boolean = false,
     ): Triple<List<BookStudyChunk>, List<BookSection>, List<BookLesson>> {
         val bodyPages = pageRoles.filterValues { it == BookPageRole.BODY }.keys
         val activePages = if (bodyPages.isNotEmpty()) bodyPages
@@ -1293,13 +1301,21 @@ internal object BookTocWaterfall {
                 blocks = mutableListOf(),
             ).also { rawGroups += it; currentGroup = it }
 
+            if (edited) {
+                val firstPage = activeBlocks.first().page
+                val preceding = bodyNodes.indexOfLast { it.startPage < firstPage && it.endPage >= firstPage }
+                if (preceding >= 0) {
+                    currentNodeIdx = preceding
+                    activateNode(bodyNodes[preceding])
+                }
+            }
             for (block in activeBlocks) {
                 if (block.page != lastPage) {
                     lastPage = block.page
                     // If a TOC node begins on this page without a verbatim matching heading block, still start it cleanly.
                     val pageNodes = nodesByPage[block.page].orEmpty()
                     for (node in pageNodes) {
-                        if (node.id in consumedNodes || node.source == HeadingSource.EPUB_TOC) continue
+                        if (node.id in consumedNodes || node.usesSourceOffset) continue
                         val appearsOnPage = byPage[block.page].orEmpty().any { b ->
                             titlesMatch(cleanTocTitle(b.text), node.title)
                         }
@@ -1311,14 +1327,14 @@ internal object BookTocWaterfall {
                 }
                 val pageNodes = nodesByPage[block.page].orEmpty()
                 val anchoredNodes = pageNodes.filter { node ->
-                    node.source == HeadingSource.EPUB_TOC && node.id !in consumedNodes && node.startOffset <= block.start
+                    node.usesSourceOffset && node.id !in consumedNodes && node.startOffset <= block.start
                 }
                 for (node in anchoredNodes.sortedBy { it.startOffset }) {
                     currentNodeIdx = bodyNodes.indexOf(node)
                     activateNode(node)
                 }
                 val matchedNode = pageNodes.firstOrNull { node ->
-                    node.source != HeadingSource.EPUB_TOC && node.id !in consumedNodes &&
+                    !node.usesSourceOffset && node.id !in consumedNodes &&
                         titlesMatch(cleanTocTitle(block.text), node.title)
                 }
                 if (matchedNode != null) {

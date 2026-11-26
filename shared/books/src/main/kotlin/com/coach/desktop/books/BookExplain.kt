@@ -415,7 +415,7 @@ internal fun BookExplainPanel(
             when (val result = explainer.explainSectionGuide(context, bookPages)) {
                 is SectionGuideResult.Done -> {
                     sectionStates[sectionId] = SectionGuideState.Ready(result.guide, context.sectionBlocks)
-                    withContext(Dispatchers.IO) { library?.saveSectionGuide(book.id, sectionId, result.guide.toCached()) }
+                    withContext(Dispatchers.IO) { library?.saveSectionGuide(book.id, sectionId, result.guide.toCached(), book) }
                 }
                 is SectionGuideResult.Refused -> {
                     sectionStates[sectionId] = SectionGuideState.Failed(result.message, result.trouble)

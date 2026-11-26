@@ -577,6 +577,7 @@ internal fun ImmersiveTocDrawer(
     onToggleBookmark: (Int) -> Unit,
     onJumpToc: (BookTocNode) -> Unit,
     onSaveBodyStart: suspend (Int?) -> Unit,
+    onEditChapter: (suspend (StructureEdit) -> Unit)? = null,
     onReorganizeSections: (() -> Unit)?,
     onClose: () -> Unit,
     readChapterIds: Set<String> = emptySet(),
@@ -663,7 +664,7 @@ internal fun ImmersiveTocDrawer(
                 )
                 when (activeTab) {
                     ReaderLeftTab.TOC -> {
-                        TocStructureSummary(book, bodyStart, bodyStartCorrected, busy, onSaveBodyStart)
+                        TocStructureSummary(book, bodyStart, bodyStartCorrected, busy, onSaveBodyStart, currentChapterId, currentAnchor, onEditChapter)
                         if (entries.isEmpty()) {
                             Column(
                                 Modifier.weight(1f).fillMaxWidth().padding(20.dp).testTag("v7-directory-drawer"),

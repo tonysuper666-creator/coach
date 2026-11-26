@@ -132,6 +132,7 @@ internal fun TextbookReader(
     onUpdateCollectionQaSession: ((String, CollectionQaSessionState) -> Unit)? = null,
     onJumpCollectionCitation: ((CollectionQaCitation, BookPageAnchor) -> Unit)? = null,
     onConsumeKeepAskTabOpen: () -> Unit = {},
+    onEditStructure: (suspend (Textbook, StructureEdit) -> Textbook)? = null,
     onBrowsePage: ((Int) -> Unit)? = null,
 ) {
     val book = checkNotNull(ui.book)
@@ -281,7 +282,7 @@ internal fun TextbookReader(
             onEnsureUnstructuredSectioned?.invoke()
         }
     }
-    LaunchedEffect(book.id, ui.page, autoGuide, explainer.identity, autoExplain, currentSectionIndex) {
+    LaunchedEffect(guideController, ui.page, autoGuide, explainer.identity, autoExplain, currentSectionIndex) {
         if (pageRole == BookPageRole.BODY && explainer.identity != null && autoExplain && autoGuide && currentSectionIndex >= 0) {
             guideController.prefetchForPage(ui.page, autoGuide = true, sectionIndexOverride = currentSectionIndex)
         }
@@ -540,7 +541,7 @@ internal fun TextbookReader(
     var localBooklistRev by remember(book.id) { mutableIntStateOf(0) }
     var chapterReadStates by remember(book.id) { mutableStateOf<Set<String>>(emptySet()) }
     var crossBookCards by remember(book.id) { mutableStateOf<List<CrossBookCompanionCard>>(emptyList()) }
-    val readingTracker = remember(book.id, dwellThresholdMs) {
+    val readingTracker = remember(book.id, book.structure?.editRevision, dwellThresholdMs) {
         val floor = if (dwellThresholdMs < ChapterReadPolicy.MIN_DWELL_MS) maxOf(dwellThresholdMs, 40L) else 15_000L
         PageReadingTracker(defaultMedianFloorMs = floor)
     }
@@ -548,11 +549,11 @@ internal fun TextbookReader(
     var activeWhisper by remember(book.id) { mutableStateOf<MarginWhisperCandidate?>(null) }
     var activeCheckpoint by remember(book.id) { mutableStateOf<EndOfSectionCheckpointData?>(null) }
     var lastTrackedPage by remember(book.id) { mutableStateOf<Int?>(null) }
-    var lastTrackedSection by remember(book.id) { mutableStateOf<BookLesson?>(null) }
+    var lastTrackedSection by remember(book.id, book.structure?.editRevision) { mutableStateOf<BookLesson?>(null) }
     var pendingNavigationIsJump by remember(book.id) { mutableStateOf(false) }
     var pendingDwellJump by remember(book.id) { mutableStateOf(false) }
     var lastDwellTrackedPage by remember(book.id) { mutableStateOf<Int?>(null) }
-    var lastDwellSpan by remember(book.id) { mutableStateOf<BookChapterSpan?>(null) }
+    var lastDwellSpan by remember(book.id, book.structure?.editRevision) { mutableStateOf<BookChapterSpan?>(null) }
     var lastDwellVisiblePages by remember(book.id) { mutableStateOf<Set<Int>>(emptySet()) }
     var lastDwellSampleAtMs by remember(book.id) { mutableLongStateOf(System.currentTimeMillis()) }
     val chapterDwellTracker = remember(book.id, dwellThresholdMs) {
@@ -2166,7 +2167,7 @@ internal fun TextbookReader(
             bodyStart = bodyStart,
             bodyStartCorrected = correctedBodyPage != null,
             bookmarks = bookmarks,
-            busy = ui.busy,
+            busy = ui.busy || book.indexState != "READY" || book.hasPendingOcr,
             onJumpPage = { target ->
                 pendingNavigationIsJump = true
                 pendingDwellJump = true
@@ -2185,10 +2186,15 @@ internal fun TextbookReader(
                 turnToAnchor(target.startPage, cleanOffset)
                 tocOpen = false
             },
+            onEditChapter = if (onEditStructure == null) null else { edit -> onEditStructure(book, edit) },
             onSaveBodyStart = { corrected ->
-                withContext(Dispatchers.IO) { library.saveBodyStart(book.id, corrected) }
+                val updated = if (onEditStructure != null) onEditStructure(book, StructureEdit.BodyStart(corrected))
+                    else withContext(Dispatchers.IO) {
+                        library.saveBodyStart(book.id, corrected)
+                        library.book(book.id)
+                    }
                 correctedBodyPage = corrected
-                val start = BookBoundaries.bodyStart(book.pages, book.structure, corrected)
+                val start = updated.bodyStart
                 pendingNavigationIsJump = true
                 pendingDwellJump = true
                 turnToAnchor(start.importPage, start.offsetUtf16, forceCommit = true)

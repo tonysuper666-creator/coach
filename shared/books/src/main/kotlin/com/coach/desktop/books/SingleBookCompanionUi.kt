@@ -90,41 +90,42 @@ internal fun SingleBookCompanionPanel(
     val originalOnly = studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY
     val aiEnabled = LocalReadingAiExplain.current && !originalOnly
     val scope = rememberCoroutineScope()
-    val chapterGroup = remember(book.id, book.lessons, currentSectionIndex) {
+    val edition = book.id to book.structure?.editRevision
+    val chapterGroup = remember(edition, book.lessons, currentSectionIndex) {
         ChapterCompanionGrouping.groupForSection(book, currentSectionIndex)
     }
     val currentSection = book.lessons.getOrNull(currentSectionIndex)
     val proseGroup = remember(book, chapterGroup) {
         chapterGroup?.let { ChapterCompanionGrouping.filterForCompanion(book, it) }
     }
-    val chapterNum = remember(book.id, chapterGroup?.chapterId, currentPage) {
+    val chapterNum = remember(edition, chapterGroup?.chapterId, currentPage) {
         chapterGroup?.let { StudyModeChapterNumbering.resolve(book, currentPage, it.firstPage).chapterNumber } ?: 0
     }
-    var packState by remember(book.id, chapterGroup?.chapterId) { mutableStateOf<CompanionPackState>(CompanionPackState.Idle) }
-    var fetchNonce by remember(book.id, chapterGroup?.chapterId) { mutableIntStateOf(0) }
-    var modePackJson by remember(book.id, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
+    var packState by remember(edition, chapterGroup?.chapterId) { mutableStateOf<CompanionPackState>(CompanionPackState.Idle) }
+    var fetchNonce by remember(edition, chapterGroup?.chapterId) { mutableIntStateOf(0) }
+    var modePackJson by remember(edition, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
         mutableStateOf<String?>(null)
     }
-    var modeStreamingChars by remember(book.id, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
+    var modeStreamingChars by remember(edition, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
         mutableIntStateOf(0)
     }
-    var modeStreamingText by remember(book.id, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
+    var modeStreamingText by remember(edition, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
         mutableStateOf("")
     }
-    var modeLoading by remember(book.id, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
+    var modeLoading by remember(edition, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
         mutableStateOf(false)
     }
-    var modeError by remember(book.id, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
+    var modeError by remember(edition, chapterGroup?.chapterId, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion) {
         mutableStateOf<String?>(null)
     }
-    var modeFetchNonce by remember(book.id, chapterGroup?.chapterId, studyPreference.mode) { mutableIntStateOf(0) }
-    var bookMapMeta by remember(book.id) { mutableStateOf<WholeBookMapMeta?>(null) }
-    var bookMapBatchBusy by remember(book.id) { mutableStateOf(false) }
-    var sectionMastery by remember(book.id, currentSection?.id, chapterGroup?.chapterId) { mutableStateOf<ConceptMasteryRecord?>(null) }
-    var gradeResponsesByQuestion by remember(book.id) { mutableStateOf<Map<String, PracticeGradeDiagnoseResponse>>(emptyMap()) }
+    var modeFetchNonce by remember(edition, chapterGroup?.chapterId, studyPreference.mode) { mutableIntStateOf(0) }
+    var bookMapMeta by remember(edition) { mutableStateOf<WholeBookMapMeta?>(null) }
+    var bookMapBatchBusy by remember(edition) { mutableStateOf(false) }
+    var sectionMastery by remember(edition, currentSection?.id, chapterGroup?.chapterId) { mutableStateOf<ConceptMasteryRecord?>(null) }
+    var gradeResponsesByQuestion by remember(edition) { mutableStateOf<Map<String, PracticeGradeDiagnoseResponse>>(emptyMap()) }
     val activeModule = CompanionModuleTab.fromWire(draft.activeModule)
-    var modeSourcePages by remember(book.id, chapterGroup?.chapterId, studyPreference) { mutableStateOf(emptyList<Int>()) }
-    var wholeChapter by remember(book.id, currentPage, studyPreference.mode) { mutableStateOf(false) }
+    var modeSourcePages by remember(edition, chapterGroup?.chapterId, studyPreference) { mutableStateOf(emptyList<Int>()) }
+    var wholeChapter by remember(edition, currentPage, studyPreference.mode) { mutableStateOf(false) }
     val readingExplanation = !originalOnly && (studyPreference.mode == BookStudyMode.BOOK_MAP ||
         (studyPreference.mode == BookStudyMode.READ_THROUGH && activeModule == CompanionModuleTab.KEY_POINTS))
     val samePage = chapterGroup?.firstPage == currentPage && chapterGroup.lastPage == currentPage
@@ -161,11 +162,11 @@ internal fun SingleBookCompanionPanel(
     }
     val scroll = rememberScrollState()
 
-    LaunchedEffect(book.id, modePackJson) {
+    LaunchedEffect(edition, modePackJson) {
         bookMapMeta = withContext(Dispatchers.IO) { StudyModeStore.loadBookMapMeta(library, book.id) }
     }
 
-    LaunchedEffect(book.id, chapterGroup?.chapterId, chapterNum, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion, explainer.loaded, explainer.identity, aiEnabled, modeFetchNonce) {
+    LaunchedEffect(edition, chapterGroup?.chapterId, chapterNum, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion, explainer.loaded, explainer.identity, aiEnabled, modeFetchNonce) {
         val group = chapterGroup ?: return@LaunchedEffect
         val fallbackAny = studyPreference.detailLevel == ExplainDetailLevel.DETAILED &&
             studyPreference.explainLang == ExplainLanguage.BILINGUAL &&
@@ -236,6 +237,7 @@ internal fun SingleBookCompanionPanel(
                         explainLang = studyPreference.explainLang,
                         inquiryQuestion = studyPreference.inquiryQuestion,
                         packJson = jsonStr,
+                        expected = book,
                     )
                 }
                 modePackJson = jsonStr
@@ -270,6 +272,7 @@ internal fun SingleBookCompanionPanel(
                             library = library,
                             bookId = book.id,
                             batchJson = body,
+                            expected = book,
                             detailLevel = studyPreference.detailLevel,
                             explainLang = studyPreference.explainLang,
                         )
@@ -289,7 +292,7 @@ internal fun SingleBookCompanionPanel(
         }
     }
 
-    LaunchedEffect(book.id, currentSection?.id, chapterGroup?.chapterId, draft.pretestSubmitted.size, draft.practiceSubmitted.size) {
+    LaunchedEffect(edition, currentSection?.id, chapterGroup?.chapterId, draft.pretestSubmitted.size, draft.practiceSubmitted.size) {
         sectionMastery = withContext(Dispatchers.IO) {
             val all = library.conceptMasteryForBook(book.id)
             val secId = currentSection?.id
@@ -301,7 +304,7 @@ internal fun SingleBookCompanionPanel(
 
     LaunchedEffect(explainer, aiEnabled) { if (aiEnabled && !explainer.loaded) explainer.load() }
 
-    LaunchedEffect(book.id, chapterGroup?.chapterId, explainer.loaded, explainer.identity, aiEnabled, fetchNonce, pageOnly) {
+    LaunchedEffect(edition, chapterGroup?.chapterId, explainer.loaded, explainer.identity, aiEnabled, fetchNonce, pageOnly) {
         val group = chapterGroup ?: return@LaunchedEffect
         val cached = withContext(Dispatchers.IO) { library.cachedChapterCompanion(book.id, group.chapterId) }
         val staleCaptionCache = cached != null && ChapterCompanionGrouping.hasStaleLeadingCaption(book, group, cached)
@@ -322,7 +325,7 @@ internal fun SingleBookCompanionPanel(
         }
         if (!aiEnabled || explainer.identity == null) {
             if (sanitizedCached != null) {
-                withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, sanitizedCached) }
+                withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, sanitizedCached, book) }
                 packState = CompanionPackState.Ready(sanitizedCached)
             } else {
                 packState = CompanionPackState.Idle
@@ -332,7 +335,7 @@ internal fun SingleBookCompanionPanel(
         packState = CompanionPackState.Loading
         suspend fun fallbackToSanitizedOrFailed(message: String, trouble: ExplainTrouble) {
             if (sanitizedCached != null) {
-                withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, sanitizedCached) }
+                withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, sanitizedCached, book) }
                 packState = CompanionPackState.Ready(sanitizedCached)
             } else {
                 packState = CompanionPackState.Failed(message, trouble)
@@ -355,7 +358,7 @@ internal fun SingleBookCompanionPanel(
                         when (val restRes = explainer.fetchChapterCompanion(restWire, restBlocks)) {
                             is ChapterCompanionFetchResult.Ready -> {
                                 val merged = ChapterCompanionProgressive.merge(firstRes.pack, restRes.pack)
-                                withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, merged) }
+                                withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, merged, book) }
                                 packState = CompanionPackState.Ready(merged, expanding = false)
                             }
                             is ChapterCompanionFetchResult.Failed -> {
@@ -372,7 +375,7 @@ internal fun SingleBookCompanionPanel(
                 val blocks = ChapterCompanionGrouping.wireBlocks(companionGroup)
                 when (val res = explainer.fetchChapterCompanion(wire, blocks)) {
                     is ChapterCompanionFetchResult.Ready -> {
-                        withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, res.pack) }
+                        withContext(Dispatchers.IO) { library.saveChapterCompanion(book.id, group.chapterId, res.pack, book) }
                         packState = CompanionPackState.Ready(res.pack, expanding = false)
                     }
                     is ChapterCompanionFetchResult.Failed -> {
@@ -516,7 +519,7 @@ internal fun SingleBookCompanionPanel(
                 if (readingExplanation && LocalReadingSectionSummary.current && summarySection != null && endOffset != null &&
                     currentPage == summarySection.lastPage && (wholeOriginalPageVisible || currentPageOffset >= endOffset ||
                         visiblePageRanges.any { endOffset in it })) {
-                    var dismissed by remember(book.id, summarySection.id) { mutableStateOf(false) }
+                    var dismissed by remember(edition, summarySection.id) { mutableStateOf(false) }
                     if (!dismissed) {
                         val pack = (packState as? CompanionPackState.Ready)?.pack
                         val questions = pack?.optionalPractice.orEmpty().withIndex().filter { (_, quiz) ->
@@ -690,7 +693,7 @@ internal fun SingleBookCompanionPanel(
                         }
                     }
                     is CompanionPackState.Failed -> {
-                        val pages = remember(book.id, chapterGroup) {
+                        val pages = remember(edition, chapterGroup) {
                             ChapterCompanionGrouping.wireBlocks(ChapterCompanionGrouping.filterForCompanion(book, chapterGroup)).distinctBy { it.page }
                         }
                         RetrievedPageLinks(pages, { "第 ${it.page} 页" }, { onJumpPage(it.page) })

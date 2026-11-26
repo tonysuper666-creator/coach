@@ -92,7 +92,7 @@ internal object BookBoundaries {
         correctedPage: Int? = null,
     ): BookPageAnchor {
         val first = pages.firstOrNull()?.number ?: 1
-        correctedPage?.takeIf { target -> pages.any { it.number == target } }?.let { return BookPageAnchor(it) }
+        (correctedPage ?: structure?.correctedStart)?.takeIf { target -> pages.any { it.number == target } }?.let { return BookPageAnchor(it) }
         structure?.nativeBodyStart?.let { target ->
             val targetPage = pages.firstOrNull { it.number == target.importPage }
             if (targetPage != null) {
@@ -179,6 +179,7 @@ internal object BookBoundaries {
         offset: Int = 0,
         preferredNodeId: String? = null,
     ): BookChapterSpan? {
+        if (book.correctedBodyPage?.let { page < it } == true) return null
         val pageText = book.page(page)?.text
         val node = activeTocNode(book.tocNodes, page, offset, preferredNodeId, pageText)
         if (node != null && node.kind in setOf(TocNodeKind.FRONT_MATTER, TocNodeKind.BACK_MATTER)) {
@@ -204,6 +205,7 @@ internal object BookBoundaries {
     fun runningHeaderTitle(book: Textbook, page: BookLaidPage, preferredNodeId: String? = null): String {
         val anchor = page.anchor
         val pageText = book.page(anchor.importPage)?.text
+        if (book.correctedBodyPage?.let { anchor.importPage < it } == true) return ""
         val node = activeTocNode(book.tocNodes, anchor.importPage, anchor.offsetUtf16, preferredNodeId, pageText)
         if (node != null) return node.title
         val cleanPageTitle = page.title?.takeUnless(::looksLikeBoilerplateHeader)

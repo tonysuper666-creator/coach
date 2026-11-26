@@ -226,6 +226,9 @@ interface StudyModeBatchTransport {
         friend: String?,
         device: String?,
     ): StudyModeTransportReply = complete(task, jobKey, systemPrompt, userPrompt, maxTokens, useBatchApi, friend, device)
+
+    /** Optional dedicated Haiku 5.5 Batch transport for 2.1 whole-book maps (`TON-1889`). */
+    fun bookMapV2Transport(): BookMapBatchTransport? = null
 }
 
 class HaikuStudyModeStreamTransport(
@@ -304,6 +307,8 @@ class HaikuStudyModeStreamTransport(
 class HaikuStudyModeBatchTransport(
     private val bridge: BridgeClient,
 ) : StudyModeBatchTransport {
+    override fun bookMapV2Transport(): BookMapBatchTransport = HaikuBookMapBatchTransport(bridge)
+
     private fun completeOnce(
         task: String,
         jobKey: String,
@@ -1539,7 +1544,20 @@ class StudyModePackService(
     private val ledger: BookTokenLedger? = null,
     private val cache: StudyModePackCache? = null,
     private val sympy: SympySubprocessEngine = SympySubprocessEngine(),
+    private val bookMapV2Service: BookMapBatchService? = batchTransport.bookMapV2Transport()?.let { BookMapBatchService(it, ledger) },
 ) {
+    suspend fun generateBookMapV2(
+        bookId: String,
+        input: JsonObject,
+        cacheScope: String = "owner:local",
+        friend: String? = null,
+        device: String = "owner",
+    ): JsonObject {
+        val v2 = bookMapV2Service ?: throw IllegalStateException("全书地图批处理服务暂未开启。")
+        val req = BookMapBatchService.parseRequest(bookId, input, friend, device)
+        return v2.generate(req, cacheScope = cacheScope)
+    }
+
     fun generateModePack(
         req: StudyModeRequest,
         sink: StudyModeEventSink? = null,
@@ -2503,10 +2521,15 @@ fun Application.studyModeRoutes(
                     }
                     val input = LedgerJson.parseToJsonElement(bodyBytes.decodeToString()).jsonObject
                     requestId = input["requestId"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                    val req = StudyModeRequestParser.parseBatchRequest(bookId, input, friend, device)
                     val cacheScope = friend?.let { "friend:${friendId(it)}" } ?: "owner:$device"
-                    val result = activeService.generateBookMapBatch(req, cacheScope = cacheScope)
-                    if (friend != null && friends != null) {
+                    val isV2 = input["formatVersion"]?.jsonPrimitive?.intOrNull == 2
+                    val result = if (isV2) {
+                        activeService.generateBookMapV2(bookId, input, cacheScope = cacheScope, friend = friend, device = device)
+                    } else {
+                        val req = StudyModeRequestParser.parseBatchRequest(bookId, input, friend, device)
+                        activeService.generateBookMapBatch(req, cacheScope = cacheScope)
+                    }
+                    if (friend != null && friends != null && result["pending"]?.jsonPrimitive?.booleanOrNull != true) {
                         withContext(Dispatchers.IO) {
                             try {
                                 friends.record(friend, device, requestId, "complete", result, diagnostics)
@@ -2518,6 +2541,12 @@ fun Application.studyModeRoutes(
                     call.respondText(result.toString(), ContentType.Application.Json)
                 } catch (e: CancellationException) {
                     throw e
+                } catch (e: BookMapQuotaExceededException) {
+                    call.respondText(
+                        buildJsonObject { put("error", e.message ?: "生成额度已达上限，请稍后再试。"); put("code", "monthly_quota") }.toString(),
+                        ContentType.Application.Json,
+                        HttpStatusCode.TooManyRequests,
+                    )
                 } catch (e: FriendServiceError) {
                     if (friend != null) {
                         withContext(Dispatchers.IO) { runCatching { friends?.record(friend, device, requestId, e.code, diagnostics = diagnostics) } }
@@ -2529,8 +2558,9 @@ fun Application.studyModeRoutes(
                     call.respondText(buildJsonObject { put("error", e.message ?: "全书地图参数不完整。") }.toString(), ContentType.Application.Json, HttpStatusCode.BadRequest)
                 } catch (_: kotlinx.serialization.SerializationException) {
                     call.respondText(buildJsonObject { put("error", "JSON 格式错误。") }.toString(), ContentType.Application.Json, HttpStatusCode.BadRequest)
-                } catch (e: Exception) {
-                    call.respondText(buildJsonObject { put("error", e.message ?: "全书地图生成失败。") }.toString(), ContentType.Application.Json, HttpStatusCode.BadGateway)
+                } catch (_: Exception) {
+                    // Never echo raw exception messages to avoid leaking book prose into responses or logs.
+                    call.respondText(buildJsonObject { put("error", "全书地图生成失败，请稍后重试。") }.toString(), ContentType.Application.Json, HttpStatusCode.BadGateway)
                 }
             }
         }

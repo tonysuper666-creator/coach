@@ -309,6 +309,7 @@ internal fun BookBitmap.asBookImageBitmap(): ImageBitmap {
     return skia.asComposeImageBitmap()
 }
 internal fun decodeBookBitmap(file: File): BookBitmap? = ImageIO.read(file)
+internal fun bookGuideCrop(image: BookBitmap, left: Int, width: Int): BookBitmap = image.getSubimage(left, 0, width, image.height)
 internal fun releaseBookBitmap(bitmap: BookBitmap) = bitmap.flush()
 
 private const val BITMAP_CACHE_MAGIC = 0x43424D31

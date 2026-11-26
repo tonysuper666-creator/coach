@@ -3,47 +3,76 @@ package com.coach.desktop.books
 import kotlinx.serialization.json.*
 
 internal data class GuideExcerpt(val book: Textbook, val section: BookLesson, val anchor: BookCompanionAnchor, val region: GuideRegion)
+internal data class GuideAnswerSentence(val text: String, val source: GuideExcerpt)
 internal data class GuidePaper(val keyword: String, val claim: String, val source: GuideExcerpt)
 internal data class GuideStop(val title: String, val source: GuideExcerpt)
 internal data class GuideQuiz(val item: BookCompanionQuiz, val source: GuideExcerpt)
 internal data class LiteratureGuide(
     val question: String, val thread: String, val papers: List<GuidePaper>, val stops: List<GuideStop>,
-    val answers: List<Pair<String, String>>, val quiz: List<GuideQuiz>,
+    val answers: List<Pair<String, List<GuideAnswerSentence>>>, val quiz: List<GuideQuiz>,
 )
 
-internal class LiteratureInput(val books: List<Textbook>, val questions: List<String>, val revision: Int = 0) {
+internal class LiteratureInput(val books: List<Textbook>, val questions: List<String>, val revision: Int = 0,
+    val annotations: Map<String, LiteratureCitation> = emptyMap(),
+) {
     init {
         require(books.size in 3..5 && books.distinctBy { it.id }.size == books.size)
         require(questions.size in 1..7 && questions.all { it.isNotBlank() && it.length <= 400 })
         require(books.none { it.hasPendingOcr }) { "扫描页正在识别，完成后再生成导读。" }
     }
 
-    private val sections = books.flatMap { LiteraturePassages.ranked(it, questions, revision) }
-
-    var excerpts = sections.flatMap { it.take(12) }
-        private set
-
-    init {
-        var limit = 12
-        while (limit > 1 && request().toString().toByteArray().size > 79000) {
-            limit--
-            excerpts = sections.flatMap { it.take(limit) }
-        }
-        require(request().toString().toByteArray().size <= 79000) { "这些文献的小节过多，请分组生成。" }
+    private val documents = buildJsonArray {
+        books.forEach { book -> add(buildJsonObject {
+            put("bookId", book.id)
+            put("title", book.title)
+            put("author", (annotations[book.id]?.author ?: book.guideCitation.author)?.let(::JsonPrimitive) ?: JsonNull)
+            book.guideCitation.sourceLabel?.let { put("sourceLabel", it) }
+            put("year", (annotations[book.id]?.year ?: book.guideCitation.year)?.let(::JsonPrimitive) ?: JsonNull)
+        }) }
     }
 
-    fun request() = buildJsonObject {
+    private fun block(ref: Int, e: GuideExcerpt) = buildJsonObject {
+        put("ref", ref)
+        put("bookId", e.book.id)
+        put("sectionId", e.section.id)
+        put("section", e.section.title)
+        put("page", e.anchor.pdfPage)
+        put("text", e.anchor.quoteAnchor)
+    }
+
+    private fun payload(blocks: JsonArray) = buildJsonObject {
         put("kind", "literatureGuide")
-        put("selectionVersion", 2)
+        put("selectionVersion", 3)
         put("revision", revision)
         put("questions", JsonArray(questions.map(::JsonPrimitive)))
-        put("blocks", buildJsonArray {
-            excerpts.forEachIndexed { ref, e -> add(buildJsonObject {
-                put("ref", ref); put("bookId", e.book.id); put("title", e.book.title)
-                put("sectionId", e.section.id); put("section", e.section.title); put("page", e.anchor.pdfPage); put("text", e.anchor.quoteAnchor)
-            }) }
-        })
+        put("documents", documents)
+        put("blocks", blocks)
     }
+
+    val excerpts = buildList {
+        val overhead = payload(JsonArray(emptyList())).toString().toByteArray().size
+        val quota = (79000 - overhead) / books.size
+        for (book in books) {
+            val sections = LiteraturePassages.ranked(book, questions, revision)
+            val first = size
+            var remaining = quota
+            for (rank in 0 until sections.maxOf { it.size }) {
+                for (section in sections) {
+                    if (size - first >= 64) break
+                    val excerpt = section.getOrNull(rank) ?: continue
+                    val cost = block(size, excerpt).toString().toByteArray().size + 1
+                    if (cost > remaining) {
+                        require(rank > 0) { "文献分节超过单篇预算，请缩小范围。" }
+                        continue
+                    }
+                    add(excerpt)
+                    remaining -= cost
+                }
+            }
+        }
+    }
+
+    fun request() = payload(JsonArray(excerpts.mapIndexed(::block)))
 
     fun verified(body: JsonObject): LiteratureGuide {
         fun JsonObject.label(key: String, limit: Int) = getValue(key).jsonPrimitive.content.also {
@@ -67,9 +96,20 @@ internal class LiteratureInput(val books: List<Textbook>, val questions: List<St
         val answers = body.getValue("answers").jsonArray
         require(answers.size == questions.size)
         val pairs = questions.zip(answers).map { (q, row) ->
-            val sentences = row.jsonArray.map { it.jsonPrimitive.content }
-            require(sentences.size == 2 && sentences.all { it.isNotBlank() && it.length <= 100 && LiteraturePassages.substantive(it) })
-            q to sentences.joinToString(" ")
+            val sentences = row.jsonArray.map { value ->
+                val sentence = value.jsonObject
+                val source = sentence.source()
+                val answer = sentence.label("answer", 100)
+                val support = sentence.label("evidence", 650)
+                require(LiteraturePassages.affirmativeAnswer(answer))
+                val phrase = support.count { it.code in 0x3400..0x9fff } >= 5 ||
+                    Regex("""\p{L}{2,}""").findAll(support).take(3).count() == 3
+                require(phrase && source.region.containsSentence(support) &&
+                    GuideRegion(source.anchor.quoteAnchor, null).containsSentence(support))
+                GuideAnswerSentence(answer, source)
+            }
+            require(sentences.size == 2)
+            q to sentences
         }
         val items = rows("quiz")
         require(items.size in 10..15)

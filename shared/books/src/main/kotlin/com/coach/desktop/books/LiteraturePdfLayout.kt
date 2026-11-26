@@ -2,12 +2,23 @@ package com.coach.desktop.books
 
 import java.io.StringWriter
 import java.text.Normalizer
-import kotlin.math.abs
 
 /** Each region is read down one column of the original PDF, independently of the saved reader text. */
 internal data class GuideRegion(val text: String, val printedPage: String?, val sourceOrder: String = text) {
     private val continuous by lazy { normalized(sourceOrder) }
-    fun containsSentence(quote: String) = normalized(quote) in continuous
+    fun containsSentence(quote: String): Boolean {
+        val needle = normalized(quote)
+        if (needle.isEmpty()) return false
+        var at = continuous.indexOf(needle)
+        fun latin(c: Char?) = c != null && c.code < 0x3000 && c.isLetterOrDigit()
+        while (at >= 0) {
+            val embeddedStart = latin(needle.first()) && latin(continuous.getOrNull(at - 1))
+            val embeddedEnd = latin(needle.last()) && latin(continuous.getOrNull(at + needle.length))
+            if (!embeddedStart && !embeddedEnd) return true
+            at = continuous.indexOf(needle, at + 1)
+        }
+        return false
+    }
 
     private fun normalized(s: String) = s.replace(ligature) { Normalizer.normalize(it.value, Normalizer.Form.NFKC) }
         .replace(lineHyphen, "").replace(whitespace, " ").trim()
@@ -20,112 +31,98 @@ internal data class GuideRegion(val text: String, val printedPage: String?, val 
 }
 
 internal object LiteraturePdfLayout {
-    private data class Word(val text: String, val x: Float, val right: Float, val y: Float, val height: Float)
-    private data class Row(val y: Float, val words: MutableList<Word> = mutableListOf())
-    private val folio = Regex("""(?i)^(?:p(?:age)?\.?\s*)?(\d{1,4}|[ivxlcdm]{1,6})$""")
+    // Find a vertical gap on the rendered sheet. Test for text on the same
+    // scanlines on both sides so outer margins and indents do not create columns.
+    fun read(image: BookBitmap, ocr: BookOcr, control: BookImportControl, hint: Float?): List<GuideRegion> {
+        val step = maxOf(1, image.width / 520)
+        val bins = image.width / step
+        if (bins < 4) return emptyList()
+        val ink = IntArray(bins)
+        val rows = mutableListOf<Pair<Int, IntRange>>()
+        for (y in 0 until image.height step maxOf(1, image.height / 650)) {
+            var left = bins
+            var right = -1
+            for (i in 0 until bins) {
+                val pixel = bookBitmapPixel(image, i * step, y)
+                val light = ((pixel ushr 16 and 255) + (pixel ushr 8 and 255) + (pixel and 255)) / 3
+                if (light < 140) { ink[i]++; left = minOf(i, left); right = i }
+            }
+            if (right > left) rows += y to (left..right)
+        }
+        val margin = maxOf(3, bins / 14)
+        val radius = maxOf(1, bins / 140)
+        val cut = (margin until bins - margin).mapNotNull { i ->
+            val crossing = rows.filter { (_, span) -> span.first < i - margin && span.last > i + margin }
+            val support = crossing.size
+            if (hint == null && crossing.zipWithNext().count { (a,b) -> b.first - a.first > image.height / 320 } < 2) return@mapNotNull null
+            if (support < 4) return@mapNotNull null
+            val density = (i-radius..i+radius).sumOf { ink[it] }.toDouble() / (2 * radius + 1)
+            if (density > support * 0.08) return@mapNotNull null
+            val left = (0 until i-radius).maxOf { ink[it] }
+            val right = (i+radius+1 until bins).maxOf { ink[it] }
+            if (left < 2 || right < 2) return@mapNotNull null
+            val target = hint ?: 0.5f
+            i to (support / (1 + density) / (1 + 4 * kotlin.math.abs(i.toDouble() / bins - target)))
+        }.maxByOrNull { it.second }?.first?.times(step)
+        // If the physical sheet is a spread or the text positions show two columns,
+        // never trust a transcript assembled across the unresolved gutter.
+        if (cut == null && (hint != null || image.width > image.height * 1.15f)) return emptyList()
+        val limits = listOfNotNull(0, cut, image.width)
+        return limits.zipWithNext().mapNotNull { (left, right) ->
+            val region = if (cut == null) image else bookGuideCrop(image, left, right - left)
+            val raw = try { ocr.recognize(region, control) } finally { if (region !== image) releaseBookBitmap(region) }
+            val text = raw.replace("\r\n", "\n").replace('\r', '\n').trim()
+            text.takeIf(String::isNotBlank)?.let { GuideRegion(it, LiteratureFolios.visible(it)) }
+        }
+    }
 
-    fun extract(pdf: BookPdfDocument, page: Int): List<GuideRegion> {
-        val words = mutableListOf<Word>()
+    /** Read numeric text at the physical sheet edges, never the PDF page-label dictionary. */
+    fun marginFolio(pdf: BookPdfDocument, page: Int): String? {
+        val sheet = pdf.getPage(page - 1)
+        val height = if (sheet.rotation % 180 == 0) sheet.cropBox.height else sheet.cropBox.width
+        val rows = sortedMapOf<Int, MutableList<BookPdfTextPosition>>()
         val stripper = object : BookPdfStripper() {
             override fun writeString(text: String, textPositions: List<BookPdfTextPosition>) {
-                var start = 0f
-                var end = 0f
-                var y = 0f
-                var height = 0f
-                val token = StringBuilder()
-                fun flush() {
-                    if (token.isNotBlank()) words += Word(token.toString(), start, end, y, height)
-                    token.clear()
-                }
                 for (glyph in textPositions) {
-                    val x = glyph.xDirAdj
-                    if (glyph.unicode.isNullOrBlank()) { flush(); continue }
-                    if (token.isNotEmpty() && x - end > glyph.widthOfSpace.coerceAtLeast(1f) * 0.6f) flush()
-                    if (token.isEmpty()) { start = x; y = glyph.yDirAdj; height = glyph.heightDir }
-                    token.append(glyph.unicode)
-                    end = x + glyph.widthDirAdj
-                }
-                flush()
-            }
-        }
-        stripper.startPage = page
-        stripper.endPage = page
-        stripper.sortByPosition = true
-        stripper.writeText(pdf, StringWriter())
-        if (words.isEmpty()) return emptyList()
-        val rect = pdf.getPage(page - 1).cropBox
-        val width = if (pdf.getPage(page - 1).rotation % 180 == 0) rect.width else rect.height
-        val rows = mutableListOf<Row>()
-        for (w in words.sortedBy { it.y }) {
-            val row = rows.lastOrNull()?.takeIf { abs(it.y - w.y) <= maxOf(1.5f, w.height * 0.35f) }
-                ?: Row(w.y).also(rows::add)
-            row.words += w
-        }
-        rows.forEach { it.words.sortBy(Word::x) }
-        // A gutter separates runs on many of the same baselines. Headers spanning the page may cross it.
-        // Measure vertical whitespace as well as aligned baselines: marginal notes and facing
-        // pages often have different line spacing. Occasional running titles can span the gutter.
-        val bodyHeight = words.map { it.height }.sorted()[words.size / 2]
-        val gutter = (12..88).map { width * it / 100f }.mapNotNull { cut ->
-            val halfGap = maxOf(6f, width * 0.012f)
-            val left = words.filter { it.right <= cut - halfGap }
-            val right = words.filter { it.x >= cut + halfGap }
-            if (left.size < 3 || right.size < 3) return@mapNotNull null
-            val overlapTop = maxOf(left.minOf { it.y }, right.minOf { it.y })
-            val overlapBottom = minOf(left.maxOf { it.y }, right.maxOf { it.y })
-            if (overlapBottom - overlapTop < bodyHeight * 2) return@mapNotNull null
-            val overlapping = rows.filter { it.y in (overlapTop - bodyHeight)..(overlapBottom + bodyHeight) }
-            val support = minOf(overlapping.count { row -> row.words.any { it.right < cut } },
-                overlapping.count { row -> row.words.any { it.x > cut } })
-            val crosses = overlapping.count { row -> row.words.any { it.right > cut - halfGap && it.x < cut + halfGap } }
-            if (support < 3 || support <= crosses * 5) return@mapNotNull null
-            val clearance = overlapping.map { row ->
-                row.words.minOf { maxOf(it.x - cut, cut - it.right) }.coerceIn(0f, width * 0.12f)
-            }.average()
-            cut to (clearance * (support - crosses))
-        }.maxByOrNull { it.second }?.first
-        val columns = if (gutter == null) listOf(words) else words.partition { (it.x + it.right) / 2 < gutter }.toList()
-        return columns.mapIndexedNotNull { index, column ->
-            val members = column.toHashSet()
-            val lines = rows.mapNotNull { row -> row.words.filter { it in members }.takeIf { it.isNotEmpty() } }
-            if (lines.isEmpty()) return@mapIndexedNotNull null
-            val edgeLines = (lines.take(2) + lines.takeLast(2))
-            val label = edgeLines.firstNotNullOfOrNull { line ->
-                folio.matchEntire(line.joinToString(" ") { it.text })?.groupValues?.get(1)
-            } ?: edgeLines.firstNotNullOfOrNull { line ->
-                val candidates = listOf(line.first() to line.getOrNull(1), line.last() to line.getOrNull(line.lastIndex - 1))
-                candidates.firstOrNull { (w, neighbor) ->
-                    folio.matches(w.text) && neighbor != null &&
-                        maxOf(neighbor.x - w.right, w.x - neighbor.right) > bodyHeight * 2
-                }?.first?.text
-            }
-            val text = buildString {
-                var previousY: Float? = null
-                for (line in lines) {
-                    val y = line.first().y
-                    val size = line.map { it.height }.sorted()[line.size / 2]
-                    if (size < bodyHeight * 0.80f) { append("\n\n"); continue }
-                    if (previousY != null && y - previousY > bodyHeight * 2.7f) append('\n')
-                    line.forEachIndexed { i, w ->
-                        if (i > 0 && (w.x - line[i - 1].right > size * 0.10f ||
-                                w.text.first().isLetterOrDigit() && line[i - 1].text.last().isLetterOrDigit() &&
-                                w.x > line[i - 1].right + 0.5f)) append(' ')
-                        append(if (w.text.any { it in '\uFB00'..'\uFB06' }) Normalizer.normalize(w.text, Normalizer.Form.NFKC) else w.text)
+                    val y = glyph.yDirAdj
+                    if (y < height * 0.12f || y > height * 0.88f) {
+                        rows.getOrPut((y / 3).toInt()) { mutableListOf() }.add(glyph)
                     }
-                    append('\n')
-                    previousY = y
                 }
-            }.trim()
-            if (text.isBlank()) return@mapIndexedNotNull null
-            // Ask PDFBox for the original region a second time. It resolves its own word
-            // and line breaks; a string manufactured by our sampling layout cannot pass alone.
-            val reference = object : BookPdfStripper() {
-                override fun processTextPosition(position: BookPdfTextPosition) {
-                    val center = position.xDirAdj + position.widthDirAdj / 2
-                    if (gutter == null || (center < gutter) == (index == 0)) super.processTextPosition(position)
+            }
+        }.apply { startPage = page; endPage = page; sortByPosition = true }
+        stripper.writeText(pdf, StringWriter())
+        val lines = rows.values.map { row -> buildString {
+            var right = -1f
+            for (glyph in row.sortedBy { it.xDirAdj }) {
+                if (right >= 0 && glyph.xDirAdj - right > 1f) append(' ')
+                append(glyph.unicode.orEmpty())
+                right = glyph.xDirAdj + glyph.widthDirAdj
+            }
+        } }
+        return LiteratureFolios.visible(lines.joinToString("\n"))
+    }
+
+    /** Geometry only flags ambiguous spreads. All citation text comes from rendered pixels. */
+    fun gutterHint(pdf: BookPdfDocument, page: Int): Float? {
+        val lines = mutableMapOf<Int, MutableList<Pair<Float, Float>>>()
+        val stripper = object : BookPdfStripper() {
+            override fun writeString(text: String, textPositions: List<BookPdfTextPosition>) {
+                for (glyph in textPositions) if (!glyph.unicode.isNullOrBlank()) {
+                    lines.getOrPut((glyph.yDirAdj / 4).toInt()) { mutableListOf() }
+                        .add(glyph.xDirAdj to glyph.xDirAdj + glyph.widthDirAdj)
                 }
-            }.apply { startPage = page; endPage = page; sortByPosition = true }.getText(pdf)
-            GuideRegion(text, label, reference)
-        }
+            }
+        }.apply { startPage = page; endPage = page; sortByPosition = true }
+        stripper.writeText(pdf, StringWriter())
+        val sheet = pdf.getPage(page - 1)
+        val width = if (sheet.rotation % 180 == 0) sheet.cropBox.width else sheet.cropBox.height
+        val gaps = lines.values.map { row -> row.sortedBy { it.first }.zipWithNext().mapNotNull { (a,b) ->
+            if (b.first - a.second > width * 0.035f) a.second..b.first else null
+        } }
+        val votes = (15..85).associateWith { x -> gaps.count { row -> row.any { x * width / 100 in it } } }
+        val best = votes.values.maxOrNull() ?: return null
+        if (best < maxOf(3, lines.size / 4)) return null
+        return votes.filterValues { it == best }.keys.average().toFloat() / 100f
     }
 }

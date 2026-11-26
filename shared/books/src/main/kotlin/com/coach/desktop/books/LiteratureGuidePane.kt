@@ -1,5 +1,6 @@
 package com.coach.desktop.books
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -23,6 +24,8 @@ internal fun LiteratureGuidePane(
     val scope = rememberCoroutineScope()
     var selected by remember(detail.courseId) { mutableStateOf(materials.takeIf { it.size in 3..5 }?.map { it.bookId }.orEmpty()) }
     var questions by remember(detail.courseId) { mutableStateOf("") }
+    var editingLabels by remember(detail.courseId) { mutableStateOf(false) }
+    val labels = remember(detail.courseId) { mutableStateMapOf<String, LiteratureCitation>() }
     var guide by remember(detail.courseId) { mutableStateOf<LiteratureGuide?>(null) }
     var busy by remember { mutableStateOf(true) }
     var notice by remember { mutableStateOf("") }
@@ -32,13 +35,14 @@ internal fun LiteratureGuidePane(
     suspend fun open(ids: List<String>, prompts: List<String>, generate: Boolean) {
         try {
             val books = withContext(Dispatchers.IO) { ids.map(library::literatureBook) }
-            var input = withContext(Dispatchers.Default) { LiteratureInput(books, prompts) }
+            val annotations = labels.filterKeys { it in ids }.filterValues { it.author != null || it.year != null }
+            var input = withContext(Dispatchers.Default) { LiteratureInput(books, prompts, annotations = annotations) }
             val key = LiteratureGuideStore.digest(input.request())
             suspend fun nextRevision(rejected: Int? = null) = withContext(Dispatchers.IO) {
                 library.withCourseDatabase { LiteratureGuideStore.revision(it, detail.courseId, key, rejected) }
             }
             val revision = nextRevision()
-            if (revision != 0) input = withContext(Dispatchers.Default) { LiteratureInput(books, prompts, revision) }
+            if (revision != 0) input = withContext(Dispatchers.Default) { LiteratureInput(books, prompts, revision, annotations) }
             val cached = withContext(Dispatchers.IO) {
                 library.withCourseDatabase { LiteratureGuideStore.cached(it, detail.courseId, key, revision) }
             }
@@ -52,7 +56,7 @@ internal fun LiteratureGuidePane(
                     return
                 }
                 val next = nextRevision(revision)
-                input = withContext(Dispatchers.Default) { LiteratureInput(books, prompts, next) }
+                input = withContext(Dispatchers.Default) { LiteratureInput(books, prompts, next, annotations) }
             }
             if (!generate) return
             check(enabled && ids.all(consent::allowed)) { "请先在阅读设置中开启 AI 讲解。" }
@@ -73,7 +77,7 @@ internal fun LiteratureGuidePane(
                     if (verified == null) {
                         val next = nextRevision(input.revision)
                         check(!repaired) { "重选正文后仍缺少可核对的答案，请检查文献或调整思考题。" }
-                        input = withContext(Dispatchers.Default) { LiteratureInput(books, prompts, next) }
+                        input = withContext(Dispatchers.Default) { LiteratureInput(books, prompts, next, annotations) }
                         submission = input.request()
                         repaired = true
                         notice = "上一份导读缺少正文依据，正在重选片段。"
@@ -100,6 +104,7 @@ internal fun LiteratureGuidePane(
                 library.withCourseDatabase { LiteratureGuideStore.latest(it, detail.courseId) }
             }
             if (last != null && last.books.all { id -> materials.any { it.bookId == id } }) {
+                labels.putAll(last.annotations)
                 selected = last.books
                 questions = last.questions.joinToString("\n")
                 open(last.books, last.questions, false)
@@ -116,22 +121,37 @@ internal fun LiteratureGuidePane(
             if (current == null) {
                 Text("本周文献导读", style = MaterialTheme.typography.headlineSmall)
                 Text("选 3–5 篇 PDF。生成时会将选中文献的片段和思考题发送给学习服务。")
+                V7TextButton({ editingLabels = !editingLabels }, enabled = !busy) {
+                    Text(if (editingLabels) "收起作者与年份" else "补充作者与年份")
+                }
                 materials.forEach { m ->
                     Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                         Checkbox(m.bookId in selected, { add ->
                             selected = if (add) selected + m.bookId else selected - m.bookId
                         }, enabled = !busy && (m.bookId in selected || selected.size < 5))
-                        Text(m.title)
+                        Text(org.jsoup.parser.Parser.unescapeEntities(m.title, false))
+                    }
+                    if (editingLabels && m.bookId in selected) {
+                        val label = labels[m.bookId] ?: LiteratureCitation(null, null)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(label.author.orEmpty(), { value ->
+                                labels[m.bookId] = label.copy(author = value.take(160).takeIf(String::isNotBlank))
+                            }, Modifier.weight(2f), enabled = !busy, singleLine = true, label = { Text("作者（留空自动读取）") })
+                            OutlinedTextField(label.year.orEmpty(), { value ->
+                                if (value.length <= 4 && value.all(Char::isDigit)) labels[m.bookId] = label.copy(year = value.ifBlank { null })
+                            }, Modifier.weight(1f), enabled = !busy, singleLine = true, label = { Text("出版年份") })
+                        }
                     }
                 }
                 OutlinedTextField(questions, { questions = it }, enabled = !busy, modifier = Modifier.fillMaxWidth().testTag("guide-questions"),
                     label = { Text("老师的思考题，每行一题") })
+                val validYears = selected.all { labels[it]?.year?.length in listOf(null, 4) }
                 val prompts = questions.lines().map(String::trim).filter(String::isNotEmpty)
                 PrimaryButton({
                     busy = true
                     notice = "正在核对材料…"
                     scope.launch { open(selected, prompts, true) }
-                }, modifier = Modifier.testTag("guide-generate"), enabled = !busy && selected.size in 3..5 && prompts.size in 1..7 && prompts.all { it.length <= 400 }) {
+                }, modifier = Modifier.testTag("guide-generate"), enabled = !busy && validYears && selected.size in 3..5 && prompts.size in 1..7 && prompts.all { it.length <= 400 }) {
                     Text("生成或打开导读")
                 }
                 if (prompts.size > 7) Text("每个思考题至少配两道自测题，一次最多放 7 个思考题。")
@@ -163,7 +183,10 @@ internal fun LiteratureGuidePane(
                         Text(current.thread, style = MaterialTheme.typography.titleMedium)
                         current.answers.forEach { (q, answer) ->
                             Text(q, style = MaterialTheme.typography.titleSmall)
-                            Text(answer)
+                            answer.forEach { sentence ->
+                                Text(sentence.text, Modifier.clickable { onSource(sentence.source) },
+                                    style = MaterialTheme.typography.bodyMedium)
+                            }
                         }
                     }
                     1 -> current.stops.groupBy { it.source.book.title to it.source.book.id }.forEach { (paper, stops) ->

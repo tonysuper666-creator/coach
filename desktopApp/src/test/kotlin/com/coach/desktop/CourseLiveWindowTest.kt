@@ -486,7 +486,12 @@ class CourseLiveWindowTest {
             assertEquals(3, verified.papers.size)
             for (e in verified.stops.map { it.source } + verified.quiz.map { it.source }) {
                 val a = e.anchor
-                assertEquals(a.quoteAnchor, e.book.page(a.pdfPage)!!.text.substring(a.startUtf16, a.endUtf16))
+                val stored = library.book(e.book.id)
+                val page = stored.page(a.pdfPage)!!
+                assertEquals(a.quoteAnchor, page.text.substring(a.startUtf16, a.endUtf16))
+                val layer = requireNotNull(library.pdfTextLayer(stored, page))
+                val range = com.coach.domain.reader.ReaderTextRange(a.startUtf16, a.endUtf16)
+                assertTrue(PdfTextSelection.boxesForVerifiedRange(layer, page.text, range).isNotEmpty())
             }
             val target = verified.stops.first().source
             val label = "PDF 第 " + target.anchor.pdfPage + " 页 · 印刷第 " + (147 + target.anchor.pdfPage) + " 页"

@@ -4,7 +4,7 @@ import java.sql.Connection
 import java.security.MessageDigest
 import kotlinx.serialization.json.*
 
-internal data class GuideSelection(val books: List<String>, val questions: List<String>)
+internal data class GuideSelection(val books: List<String>, val questions: List<String>, val annotations: Map<String, LiteratureCitation>)
 
 internal object LiteratureGuideStore {
     private fun prepare(db: Connection) {
@@ -22,7 +22,17 @@ internal object LiteratureGuideStore {
             it.setString(1, course)
             it.executeQuery().use { rows ->
                 fun strings(i: Int) = Json.parseToJsonElement(rows.getString(i)).jsonArray.map { p -> p.jsonPrimitive.content }
-                if (rows.next()) GuideSelection(strings(1), strings(2)) else null
+                if (!rows.next()) return null
+                val annotations = mutableMapOf<String, LiteratureCitation>()
+                val books = Json.parseToJsonElement(rows.getString(1)).jsonArray.map { entry ->
+                    if (entry is JsonObject) {
+                        val id = entry.getValue("id").jsonPrimitive.content
+                        annotations[id] = LiteratureCitation(entry["author"]?.jsonPrimitive?.contentOrNull,
+                            entry["year"]?.jsonPrimitive?.contentOrNull)
+                        id
+                    } else entry.jsonPrimitive.content
+                }
+                GuideSelection(books, strings(2), annotations)
             }
         }
     }
@@ -58,10 +68,19 @@ internal object LiteratureGuideStore {
     fun save(db: Connection, course: String, key: String, input: LiteratureInput, result: JsonObject?) {
         prepare(db)
         db.prepareStatement("""INSERT INTO literature_guides(course,digest,books,questions,result,last_opened) VALUES(?,?,?,?,?,?)
-            ON CONFLICT(course,digest) DO UPDATE SET last_opened=excluded.last_opened, result=COALESCE(excluded.result,result) WHERE revision=?""").use {
+            ON CONFLICT(course,digest) DO UPDATE SET last_opened=excluded.last_opened, books=excluded.books, result=COALESCE(excluded.result,result) WHERE revision=?""").use {
             it.setString(1, course)
             it.setString(2, key)
-            it.setString(3, JsonArray(input.books.map { b -> JsonPrimitive(b.id) }).toString())
+            it.setString(3, buildJsonArray {
+                input.books.forEach { book ->
+                    val label = input.annotations[book.id]
+                    if (label == null) add(book.id) else add(buildJsonObject {
+                        put("id", book.id)
+                        label.author?.let { put("author", it) }
+                        label.year?.let { put("year", it) }
+                    })
+                }
+            }.toString())
             it.setString(4, JsonArray(input.questions.map(::JsonPrimitive)).toString())
             it.setString(5, result?.toString())
             it.setLong(6, System.currentTimeMillis())

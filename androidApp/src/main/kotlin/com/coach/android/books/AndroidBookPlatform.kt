@@ -100,6 +100,7 @@ internal fun decodeBookBitmap(file: File): BookBitmap? {
     BookScanImages.checkSize(bounds.outWidth, bounds.outHeight)
     return BitmapFactory.decodeFile(file.path)
 }
+internal fun bookGuideCrop(image: BookBitmap, left: Int, width: Int): BookBitmap = Bitmap.createBitmap(image, left, 0, width, image.height)
 internal fun releaseBookBitmap(bitmap: BookBitmap) = bitmap.recycle()
 internal fun bookBitmapCropPng(bitmap: BookBitmap, left: Int, top: Int, width: Int, height: Int): ByteArray {
     val crop = Bitmap.createBitmap(bitmap, left, top, width, height)

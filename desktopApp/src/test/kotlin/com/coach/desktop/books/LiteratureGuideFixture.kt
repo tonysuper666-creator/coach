@@ -91,7 +91,13 @@ internal object LiteratureGuideFixture {
                 }) }
             })
             put("answers", buildJsonArray {
-                input.getValue("questions").jsonArray.forEach { add(buildJsonArray { add("样地不同。"); add("应逐项比较。") }) }
+                input.getValue("questions").jsonArray.forEach { add(buildJsonArray {
+                    listOf("样地不同。", "应逐项比较。").forEachIndexed { i, answer -> add(buildJsonObject {
+                        put("answer", answer)
+                        put("ref", blocks[i].getValue("ref"))
+                        put("evidence", blocks[i].getValue("text"))
+                    }) }
+                }) }
             })
             put("quiz", buildJsonArray {
                 repeat(10) { i -> add(buildJsonObject {

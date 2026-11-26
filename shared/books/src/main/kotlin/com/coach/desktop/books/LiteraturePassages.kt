@@ -8,6 +8,8 @@ import kotlin.math.abs
 internal object LiteraturePassages {
     private val publisher = Regex("""(?i)jstor|downloaded from|terms (?:and conditions|of use)|all rights reserved|copyright|https?://|doi[.:/]|stable url|accessed[: ]|©|下载于|版权所有""")
     private val note = Regex("""^(?:\[\d+]|\d+[.)]?|[*†‡])\s+\S""")
+    private val referenceLine = Regex("""(?i)^(?:ibid\.|op\.\s*cit\.|see (?:also )?.{2,60},\s*(?:pp?\.|\d{4})|(?:[\p{Lu}][\p{L}’'-]+,\s*(?:[\p{Lu}]\.\s*)+)|.{2,90},\s*(?:vol\.|pp\.)\s*\d)|\(\d{4}\)[,.]?\s*(?:pp?\.\s*)?\d+[-–]\d+""")
+    private val licence = Regex("""(?i)copyright (?:licen[cs]ing|notice|act)|course (?:pack|materials?|reader)|licensed (?:copy|for use)|copyright holder|digital copy|electronic reserve|educational use only""")
     private val bibliography = Regex("""(?i)^(?:references|bibliography|works cited|endnotes|notes and references|参考文献|尾注)\s*[:：]?$""")
     private val heading = Regex("""(?i)^(?:abstract|introduction|background|discussion|method(?:s|ology)?|results?|conclusions?|summary|引言|导言|摘要|背景|方法|结果|讨论|结论|小结|(?:[IVX]+\.|\d+(?:\.\d+)*[.)])\s+\p{L}.{1,80})$""")
     private val end = Regex("""[.!?。！？][”’"')\]]*$""")
@@ -22,10 +24,17 @@ internal object LiteraturePassages {
         Regex("(?i)如何|怎样|证据|依据|how|evidence") to Regex("(?i)通过|说明|表明|evidence|by means of|demonstrat|showed"),
     )
     private val metadataQuestion = Regex("(?i)页眉|下载戳|书目信息|页脚|download stamp|page header")
+    fun affirmativeAnswer(text: String): Boolean {
+        // A valid reference is mandatory even when none of these explicit abstentions occurs.
+        val abstentions = listOf("未直接说明", "未直接提及", "无法直接验证", "无法验证", "材料中没有",
+            "原文中没有", "片段中没有", "材料没有", "证据不足", "未能回答", "没有足够信息")
+        return substantive(text) && abstentions.none(text::contains)
+    }
+
     fun contentQuestion(text: String) = substantive(text) && !metadataQuestion.containsMatchIn(text)
     fun substantive(text: String) = !missing.containsMatchIn(text)
     fun bodySentence(s: String): Boolean = s.length in 6..650 && end.containsMatchIn(s) &&
-        !publisher.containsMatchIn(s) && !note.containsMatchIn(s) &&
+        !publisher.containsMatchIn(s) && !referenceLine.containsMatchIn(s) && !note.containsMatchIn(s) &&
         s.dropWhile { it in "“‘\\\"'([" }.firstOrNull()?.isLowerCase() != true &&
         (s.count { it.code in 0x3400..0x9fff } >= 5 || Regex("""\p{L}{2,}""").findAll(s).take(4).count() >= 4)
 
@@ -50,10 +59,16 @@ internal object LiteraturePassages {
         var title: String? = null
         var backMatter = false
         for (page in book.pages) {
-            if (page.number == 1 && Regex("""(?im)^(?:stable url|reviewed work|source|published by)\s*:""").findAll(page.text).count() >= 2) continue
+            val printed = page.guideRegions.joinToString("\n") { it.text }
+            val reader = LiteratureReaderText(page.text)
+            if (reader.interleaved(page.guideRegions)) continue
+            if (page.number <= 3 && licence.containsMatchIn(printed) &&
+                (publisher.containsMatchIn(printed) || licence.findAll(printed).take(2).count() == 2)) continue
+            if (page.number == 1 && Regex("""(?im)^(?:stable url|reviewed work|source|published by)\s*:""").findAll(printed).count() >= 2) continue
             book.tocNodes.lastOrNull { it.startPage == page.number && it.source in setOf(HeadingSource.PDF_OUTLINE, HeadingSource.TOC_PAGE) &&
-                it.kind in setOf(TocNodeKind.CHAPTER, TocNodeKind.SECTION, TocNodeKind.SUBSECTION) }?.let { title = it.title }
-            var base = 0
+                it.kind in setOf(TocNodeKind.CHAPTER, TocNodeKind.SECTION, TocNodeKind.SUBSECTION) &&
+                edgeKey(it.title) !in edges && !referenceLine.containsMatchIn(it.title) &&
+                printed.lineSequence().any { line -> line.trim().equals(it.title.trim(), ignoreCase = true) } }?.let { title = it.title }
             for (region in page.guideRegions) {
                 var start = -1
                 var finish = 0
@@ -66,7 +81,13 @@ internal object LiteraturePassages {
                     while (b != BreakIterator.DONE) {
                         val raw = paragraph.substring(a, b)
                         val quote = raw.trim()
-                        if (bodySentence(quote) && region.containsSentence(quote)) passages += Passage(page, region, base + start + a + raw.indexOf(quote), quote, title)
+                        if (bodySentence(quote)) reader.locate(quote)?.let { range ->
+                            if (page.guideHighlightCoverage?.let { it.nextClearBit(range.first) <= range.last } == true) return@let
+                            val original = page.text.substring(range)
+                            if (region.containsSentence(original) && bodySentence(original)) {
+                                passages += Passage(page, region, range.first, original, title)
+                            }
+                        }
                         a = b
                         b = iterator.next()
                     }
@@ -78,15 +99,20 @@ internal object LiteraturePassages {
                 for ((index, raw) in lines.withIndex()) {
                     val line = raw.trim()
                     val isEdge = index < 3 || index >= lines.size - 3
-                    val isHeading = (heading.matches(line) && !end.containsMatchIn(line)) || (line.length in 4..70 && !end.containsMatchIn(line) &&
+                    val isHeading = !footnotes && !isEdge && edgeKey(line) !in edges && !referenceLine.containsMatchIn(line) && (line.length in 4..70 && !end.containsMatchIn(line) &&
                         lines.getOrNull(index - 1).isNullOrBlank() && lines.getOrNull(index + 1).isNullOrBlank() &&
                         line.split(' ').all { it.firstOrNull()?.isUpperCase() == true || it in listOf("of","the","in","and","a","to") })
+                    val marginTitle = isEdge && line.length in 3..90 && !end.containsMatchIn(line) &&
+                        !heading.matches(line) && line.split(' ').filter(String::isNotBlank).all { word ->
+                            word.first().isUpperCase() || word.all(Char::isDigit) || word in setOf("of", "the", "in", "and")
+                        }
                     when {
                         backMatter -> break
-                        line.isBlank() || folio.matches(line) || publisher.containsMatchIn(line) ||
-                            isEdge && edgeKey(line) in edges && (!end.containsMatchIn(line) || line.length < 45) -> finishParagraph()
                         bibliography.matches(line) -> { finishParagraph(); backMatter = true }
-                        isHeading -> { finishParagraph(); title = line }
+                        line.isBlank() || marginTitle || folio.matches(line) || publisher.containsMatchIn(line) ||
+                            isEdge && edgeKey(line) in edges && (!end.containsMatchIn(line) || line.length < 45) -> finishParagraph()
+                        referenceLine.containsMatchIn(line) -> { finishParagraph(); footnotes = true }
+                        !footnotes && (isHeading || heading.matches(line) && !end.containsMatchIn(line) && edgeKey(line) !in edges) -> { finishParagraph(); title = line }
                         note.containsMatchIn(line) -> { finishParagraph(); footnotes = true }
                         !footnotes -> {
                             if (start < 0) start = offset
@@ -96,11 +122,10 @@ internal object LiteraturePassages {
                     offset += raw.length + 1
                 }
                 finishParagraph()
-                base += region.text.length + 2
             }
         }
         require(passages.isNotEmpty()) { "《" + book.title + "》没有可核对的正文句，请检查原件版面或文字识别。" }
-        val hasSections = passages.map { it.title }.distinct().size >= 2
+        val hasSections = passages.map { it.title }.distinct().size in 2..8
         val stageCount = (3 + passages.size / 65).coerceAtMost(8).coerceAtMost(passages.size)
         val cuts = if (hasSections) emptyList() else (1 until stageCount).map { i ->
             val target = passages.size * i / stageCount

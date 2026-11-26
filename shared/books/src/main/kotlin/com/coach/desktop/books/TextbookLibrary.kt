@@ -1620,31 +1620,56 @@ internal class TextbookLibrary(
         val source = book(bookId)
         require(source.format == "pdf" && source.indexState == "READY" && !source.hasPendingOcr) { "请等待 PDF 导入和扫描页识别完成。" }
         val file = original(bookId, "pdf").toFile()
-        val pages = BookPdfLoader.read(file) { pdf ->
-            val labels = pdf.documentCatalog.pageLabels?.labelsByPageIndices
-            source.pages.map { page ->
-                val physical = LiteraturePdfLayout.extract(pdf, page.number)
-                val layer = physical.joinToString("\n\n") { it.text }
-                val regions = when {
-                    layer.count(Char::isLetter) >= 6 && '�' !in layer -> physical
-                    else -> {
-                        // Bundled OCR uses automatic page segmentation (columns and blocks).
-                        val transcript = if (page.ocr) page.text else recognizePdfPage(file, pdf, page.number, BookImportControl())
-                        listOf(GuideRegion(transcript, physical.firstOrNull()?.printedPage))
-                    }
-                }
-                val pageFolio = regions.mapNotNull { it.printedPage }.distinct().singleOrNull()
-                    ?: labels?.getOrNull(page.number - 1)
-                val labeled = regions.map { r ->
-                    r.copy(text = r.text.replace("\r\n", "\n").replace('\r', '\n'), printedPage = r.printedPage ?: pageFolio)
-                }
-                page.copy(text = labeled.joinToString("\n\n") { it.text }, textLayout = null, guideRegions = labeled)
+        val filename = database().use { db ->
+            db.prepareStatement("SELECT source_filename FROM books WHERE id=?").use { sql ->
+                sql.setString(1, bookId)
+                sql.executeQuery().use { rows -> if (rows.next()) rows.getString(1) else null }
             }
         }
-        return source.copy(pages = pages)
+        val stamp = file.lastModified()
+        synchronized(guideCache) {
+            guideCache[bookId]?.takeIf { it.first == stamp }?.let { (_, saved) ->
+                return source.copy(title = saved.title, guideCitation = saved.guideCitation,
+                    pages = source.pages.zip(saved.pages) { current, prior -> current.copy(guideRegions = prior.guideRegions, guideHighlightCoverage = prior.guideHighlightCoverage) })
+            }
+        }
+        return BookPdfLoader.read(file) { pdf ->
+            val title = org.jsoup.parser.Parser.unescapeEntities(source.title, false)
+            val citation = LiteratureCitation.from(filename, pdf.documentInformation.author, title)
+            val pages = source.pages.map { page ->
+                val hint = LiteraturePdfLayout.gutterHint(pdf, page.number)
+                val regions = withOcrImage(file, pdf, page.number) { image ->
+                    LiteraturePdfLayout.read(image, literatureOcr(ocr), BookImportControl(), hint)
+                }
+                val physical = if (regions.size == 1 && regions.single().printedPage == null)
+                    LiteraturePdfLayout.marginFolio(pdf, page.number) else null
+                val coverage = java.util.BitSet(page.text.length)
+                val layer = pdfTextLayer(source, page)
+                if (layer != null && layer.text == page.text) {
+                    page.text.forEachIndexed { i, c -> if (c.isWhitespace()) coverage.set(i) }
+                    layer.spans.forEach { span ->
+                        if (span.geometry.displayBoxes().isNotEmpty()) coverage.set(span.range.startUtf16, span.range.endUtf16)
+                    }
+                }
+                page.copy(guideRegions = regions.map { it.copy(printedPage = it.printedPage ?: physical) },
+                    guideHighlightCoverage = coverage)
+            }
+            source.copy(title = title, guideCitation = citation,
+                pages = LiteratureFolios.resolve(pages, pdf.documentCatalog.pageLabels?.labelsByPageIndices))
+        }.also { book ->
+            synchronized(guideCache) {
+                guideCache[bookId] = stamp to book
+                if (guideCache.size > 5) guideCache.remove(guideCache.keys.first())
+            }
+        }
     }
 
-    private fun recognizePdfPage(file: java.io.File, pdf: BookPdfDocument, page: Int, control: BookImportControl): String {
+    private val guideCache = LinkedHashMap<String, Pair<Long, Textbook>>(8, 0.75f, true)
+
+    private fun recognizePdfPage(file: java.io.File, pdf: BookPdfDocument, page: Int, control: BookImportControl): String =
+        withOcrImage(file, pdf, page) { image -> ocr.recognize(image, control) }
+
+    private fun <T> withOcrImage(file: java.io.File, pdf: BookPdfDocument, page: Int, read: (BookBitmap) -> T): T {
         val bounds = pdf.getPage(page - 1).cropBox
         require(bounds.width.isFinite() && bounds.height.isFinite() && bounds.width > 0 && bounds.height > 0) {
             "这页 PDF 尺寸无效，请重新保存后再导入。"
@@ -1652,7 +1677,7 @@ internal class TextbookLibrary(
         val scale = minOf(bookOcrTargetDpi / 72f, bookOcrMaxSide / maxOf(bounds.width, bounds.height))
         BookScanImages.checkSize(kotlin.math.ceil(bounds.width * scale).toInt(), kotlin.math.ceil(bounds.height * scale).toInt())
         val image = OcrTiming.measure("page${page}.render") { renderBookPdfPage(file, pdf, page - 1, scale) }
-        return try { ocr.recognize(image, control) } finally { releaseBookBitmap(image) }
+        return try { read(image) } finally { releaseBookBitmap(image) }
     }
 
     fun resumeBookOcr(

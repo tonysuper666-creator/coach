@@ -33,6 +33,8 @@ internal object BookScanImages {
     }
 }
 
+internal fun literatureOcr(configured: BookOcr) = configured
+
 internal object BundledBookOcr : BookOcr {
     private const val PAGE_TIMEOUT_MS = 90_000L
     private const val POLL_INTERVAL_MS = 500L

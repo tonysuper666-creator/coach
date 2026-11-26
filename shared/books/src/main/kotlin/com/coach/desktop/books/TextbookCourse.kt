@@ -16,6 +16,7 @@ internal data class BookPage(
     val illustrations: List<BookIllustration> = emptyList(), val textLayout: PageTextLayout? = null,
     val ocrPending: Boolean = false,
     val guideRegions: List<GuideRegion> = emptyList(),
+    val guideHighlightCoverage: java.util.BitSet? = null,
 )
 internal data class SourceBlock(val id: String, val page: Int, val start: Int, val end: Int, val heading: Boolean, val text: String)
 
@@ -45,6 +46,7 @@ internal data class Textbook(
     val structure: BookStructure? = null,
     val indexState: String = "READY",
     val correctedBodyPage: Int? = null,
+    val guideCitation: LiteratureCitation = LiteratureCitation(null, null),
 ) {
     val tocNodes: List<BookTocNode> get() = structure?.tocNodes.orEmpty()
     val bodyStart: BookPageAnchor by lazy { BookBoundaries.bodyStart(pages, structure, correctedBodyPage) }

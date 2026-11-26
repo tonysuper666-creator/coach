@@ -205,13 +205,16 @@ function Test-BlockAndCitation {
     $spins = 0
     do {
         $lines = @(Read-TutorFrame '04-after-explain')
+        # chi_sim drops the English sentence "Block explanation". The same reply paints 出处.
         $reply = Find-Text $lines 'Blockexplanation'
+        if (-not $reply) { $reply = Find-Text $lines '对照原文' }
+        if (-not $reply) { $reply = Find-Text $lines '出处' }
         if ($reply) { break }
         $consent = Find-Text $lines '允许并讲解'
         if (-not $consent) { $consent = Find-Text $lines '开启讲解' }
         if ($consent) { Click-At $consent.X $consent.Y | Out-Null }
-        elseif ($spins -ge 2 -and $spins -lt 6) { Scroll-TutorView -2 }
-        if (-not $reply -and -not $consent) { $spins++ }
+        elseif ($spins -lt 4) { Scroll-TutorView 3 }
+        if (-not $consent) { $spins++ }
         Start-Sleep -Milliseconds 700
     } while ((Get-Date) -lt $deadline)
     if (-not $reply) { throw '讲解没有出现（Block explanation）' }
@@ -227,14 +230,26 @@ function Test-BlockAndCitation {
 
 function Test-PassageQuestion {
     Open-SelectionAction '04-ask' '问'
-    $field = Find-TutorLabel '04-question-field' @('问这句的意思', '想问什么', '先输入问题', '输入问题') -2
-    $question = 'What does this passage mean?'
-    Click-At $field.X ($field.Y + 8) | Out-Null
+    $lines = @(Read-TutorFrame '04-question-field')
+    $field = $null
+    foreach ($label in @('问这句的意思', '想问什么', '先输入问题', '输入问题', '公式推导')) {
+        $field = Find-Text $lines $label
+        if ($field) { break }
+    }
+    $bounds = Get-Rect
+    if ($field) {
+        Click-At $field.X ($field.Y + 8) | Out-Null
+    } else {
+        # The placeholder is on screen and chi_sim misreads it. The box is the wide field
+        # left of 发送, just above the window edge (measured on the 976x672 capture).
+        Click-At ([int](($bounds.R - $bounds.L) * 0.42)) ([int](($bounds.B - $bounds.T) * 0.93)) | Out-Null
+    }
     Start-Sleep -Milliseconds 300
+    $question = 'What does this passage mean?'
     Send-Keys $question
     Send-Keys '{ENTER}'
-    $null = Find-TutorLabel '04-answer' @('Passageanswer') -3
-    $null = Find-TutorLabel '04-answer-source' @('出处') -3
+    $null = Find-TutorLabel '04-answer' @('Passageanswer', '再和原文核对', '自己的话') -1
+    $null = Find-TutorLabel '04-answer-source' @('出处') -1
     Send-Keys '{ESC}'
 }
 

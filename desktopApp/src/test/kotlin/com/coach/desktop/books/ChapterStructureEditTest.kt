@@ -8,6 +8,35 @@ import java.util.concurrent.TimeUnit
 import kotlin.test.*
 
 class ChapterStructureEditTest {
+    @Test fun renamedChapterOwnsTheHeaderAboveNestedSectionsAfterReopening() {
+        val root = Files.createTempDirectory("coach-chapter-header-")
+        try {
+            val file = root.resolve("sample.md")
+            Files.writeString(file, (1..6).joinToString("\u000c") { "A sample paragraph for physical page $it." })
+            val library = TextbookLibrary(root.resolve("library"))
+            val imported = library.importBook(file)
+            val outline = listOf("Chapter 1 First", "1.1 Section", "1.1.1 Detail", "Chapter 2 Second", "2.1 Sibling", "Index")
+                .mapIndexed { index, title -> BookOutlineItem(title, 1, index + 1, HeadingSource.PDF_OUTLINE) }
+            val book = library.saveBookStructure(imported.id, BookStructurePlanner.plan(imported.id, imported.title,
+                imported.format, imported.pages, outline))
+            fun headers(book: Textbook) = book.pages.map { page ->
+                val laid = BookLaidPage(listOf(BookPageSlice(page.number, 0, page.text.length)), 0, null, null,
+                    false, androidx.compose.ui.text.AnnotatedString(page.text), emptyList(), 0, 1)
+                BookBoundaries.runningHeaderTitle(book, laid)
+            }
+            val original = headers(book)
+            assertEquals(outline.map { it.title }, original)
+            val renamed = library.editStructure(book, StructureEdit.Rename(book.chapterSpans.first().tocNodeId, "Revised"))
+            val expected = List(3) { "Revised" } + original.drop(3)
+            for (copy in listOf(renamed, TextbookLibrary(library.directory).book(book.id))) {
+                assertEquals(expected, headers(copy))
+                assertEquals(TocNodeKind.SUBSECTION, BookBoundaries.activeTocNode(copy.tocNodes, 3)?.kind)
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
     @Test fun editsKeepSourcePagesAndRebuildChaptersLessonsCachesAndDwellTogether() {
         val root = Files.createTempDirectory("coach-structure-edit-")
         try {

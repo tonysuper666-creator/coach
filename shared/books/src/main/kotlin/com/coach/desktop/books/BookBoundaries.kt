@@ -202,12 +202,25 @@ internal object BookBoundaries {
         return false
     }
 
+    /** Keep the section selected in the TOC while honoring a reader's chapter title in the header. */
+    fun headerTitleForNode(book: Textbook, node: BookTocNode): String {
+        if (book.structure?.source != HeadingSource.MANUAL.name) return node.title
+        var ancestor = node
+        while (ancestor.kind == TocNodeKind.SECTION || ancestor.kind == TocNodeKind.SUBSECTION) {
+            val parent = book.tocNodes.firstOrNull { it.id == ancestor.parentId } ?: break
+            if (parent.level >= ancestor.level) break
+            ancestor = parent
+        }
+        return if (ancestor.kind == TocNodeKind.CHAPTER && ancestor.source == HeadingSource.MANUAL) ancestor.title
+            else node.title
+    }
+
     fun runningHeaderTitle(book: Textbook, page: BookLaidPage, preferredNodeId: String? = null): String {
         val anchor = page.anchor
         val pageText = book.page(anchor.importPage)?.text
         if (book.correctedBodyPage?.let { anchor.importPage < it } == true) return ""
         val node = activeTocNode(book.tocNodes, anchor.importPage, anchor.offsetUtf16, preferredNodeId, pageText)
-        if (node != null) return node.title
+        if (node != null) return headerTitleForNode(book, node)
         val cleanPageTitle = page.title?.takeUnless(::looksLikeBoilerplateHeader)
         return cleanPageTitle.orEmpty()
     }

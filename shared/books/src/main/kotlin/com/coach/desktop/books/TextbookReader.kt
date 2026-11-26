@@ -2239,7 +2239,9 @@ internal fun TextbookReader(
             visible = showHud,
             availableWidth = maxWidth,
             bookTitle = book.title,
-            sectionTitle = if (source != null) "出处 · ${source.title}" else activeTocNode?.title ?: effectiveChapterSpan?.title ?: currentSection?.title,
+            sectionTitle = if (source != null) "出处 · ${source.title}" else
+                activeTocNode?.let { BookBoundaries.headerTitleForNode(navigationBook, it) }
+                    ?: effectiveChapterSpan?.title ?: currentSection?.title,
             backLabel = when {
                 ui.canReturnToCitationOrigin -> "返回引用前的位置"
                 source != null && ui.review != null -> "返回复习"

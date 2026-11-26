@@ -63,13 +63,24 @@ The nominal Anthropic $200 and OpenAI $500 grants allow $190 and $475 respective
 The spend monitor reports a reservation that would cross this boundary to the
 main session for Li Zheng's decision before incurring paid usage. The limit
 applies across API keys.
-For streaming calls an explicit rejection (including 402, 429 and Anthropic 529) or cancellation before
-dispatch releases the reservation in both ledgers. After dispatch, a timeout, broken
-stream, ambiguous 5xx or cancellation without verified terminal usage settles at the reserved
-upper bound. Monthly `estimated_microusd` is the estimated portion **included** in
-`spent_microusd`. Friend token counts also include these bounds. Do not use estimates
-as verified charges in an opening baseline. A crash before settlement leaves the
-reservation intact. Never expire old reservations or pending Batch jobs by age.
+For streaming calls an explicit rejection (including 402, 429 and Anthropic 529) or
+cancellation before dispatch releases the reservation in both ledgers. When a stream
+closes after provider usage has arrived, the bridge prices the latest cumulative
+counters once. A priced final usage receipt settles at its reported cost even when
+the client missed the last frame. Before final usage, the input count from Anthropic
+is known, and the bridge bounds any unconfirmed output up to the requested limit.
+The monthly report includes the unconfirmed portion in both `estimated_microusd` and
+`spent_microusd`. Subtract the former from the latter to see the confirmed portion.
+Friend token limits include the unconfirmed bounds.
+
+When a dispatched stream is interrupted without a usage receipt, the bridge marks
+that hold with a 15-minute UTC deadline. The bridge checks deadlines once a minute
+and before admitting another request. Expiry closes both the provider and friend
+hold in one ledger commit, recording the upper bound as estimated spend. An expired
+hold cannot reopen grant headroom for potentially billed work. Ambiguous gateway
+errors and invalid receipts settle conservatively. Opening baselines exclude
+estimates. Legacy holds, pending Batch jobs and crashes before an interruption
+was recorded still require upstream reconciliation.
 
 On a denied reservation the monthly credit-guard receipt captures the amount requested,
 pending total, and headroom before pending holds. Its cause is `pending_reservations`

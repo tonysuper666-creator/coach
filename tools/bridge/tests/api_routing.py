@@ -250,18 +250,31 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("api.anthropic.com", self.requests[0].url.host)
         self.assertEqual("api.openai.com", self.requests[1].url.host)
 
-    async def test_missing_usage_or_terminal_debits_full_bound(self):
-        for provider, task, requested, served in (
-            ("anthropic", "TEACH", "claude-sonnet-5-5", "claude-sonnet-5-5"),
-            ("openai", "blind_review", "gpt-6.2-astra", "gpt-6.2-astra"),
-        ):
-            for terminal, usage in ((False, True), (True, False)):
+    async def test_missing_terminal_keeps_received_usage_and_incomplete_response_still_fails(self):
+        for provider, task, model in (("anthropic", "TEACH", "claude-sonnet-5-5"),
+                                      ("openai", "blind_review", "gpt-6.2-astra")):
+            with self.subTest(provider=provider):
+                with self.assertRaisesRegex(ApiFailure, "api_no_terminal"):
+                    await self.collect(self.router(frames(provider, terminal=False, model=model)), task, model)
+                month = self.ledger.read()["months"]["2026-11"][provider]
+                if provider == "anthropic":
+                    # The final usage delta arrived before the missing stop frame.
+                    self.assertEqual(cost(model, {"input_tokens": 100, "output_tokens": 20}), month["spent_microusd"])
+                    self.assertEqual(0, month.get("estimated_microusd", 0))
+                    self.assertEqual(0, month["reserved_microusd"])
+                else:
+                    # No usage was sent on this connection. The hold has a deadline.
+                    self.assertGreater(month["reserved_microusd"], 0)
+                    self.assertEqual(0, month["spent_microusd"])
+                    self.assertEqual(1, len(self.ledger.read()["interrupted_streams"]))
+
                 with self.assertRaises(ApiFailure):
-                    await self.collect(self.router(frames(provider, terminal, usage, model=served)), task, requested)
-            month = self.ledger.read()["months"]["2026-11"][provider]
-            self.assertEqual(0, month["reserved_microusd"])
-            self.assertGreater(month["estimated_microusd"], 0)
-            self.assertEqual(month["estimated_microusd"], month["spent_microusd"])
+                    await self.collect(self.router(frames(provider, usage=False, model=model)), task, model)
+                updated = self.ledger.read()["months"]["2026-11"][provider]
+                maximum = cost(model, {"input_tokens": 4096 + len("synthetic systemsynthetic prompt"), "output_tokens": 100})
+                self.assertEqual(month["reserved_microusd"], updated["reserved_microusd"])
+                self.assertEqual(maximum, updated["spent_microusd"] - month["spent_microusd"])
+                self.assertEqual(maximum, updated["estimated_microusd"])
 
     async def test_http_errors_never_expose_body(self):
         for status in (401, 402, 429, 500):
@@ -313,8 +326,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         await events.aclose()
         month = self.ledger.read()["months"]["2026-11"]["anthropic"]
         self.assertEqual(0, month["reserved_microusd"])
-        self.assertEqual(cost("claude-sonnet-5-5", {"input_tokens": 4098, "output_tokens": 100}), month["spent_microusd"])
-        self.assertEqual(month["spent_microusd"], month["estimated_microusd"])
+        self.assertEqual(cost("claude-sonnet-5-5", {"input_tokens": 100, "output_tokens": 100}), month["spent_microusd"])
+        self.assertEqual(cost("claude-sonnet-5-5", {"input_tokens": 0, "output_tokens": 100}), month["estimated_microusd"])
 
     async def test_http_429_retries_within_same_reservation_and_recovers(self):
         slept = []

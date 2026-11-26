@@ -27,9 +27,13 @@ internal fun DesktopPairingGate(settings: DesktopConnectionSettings, content: @C
     val scope = rememberCoroutineScope()
     LaunchedEffect(pairing) {
         try {
-            val loaded = withContext(Dispatchers.IO) { settings.serverUrl() to pairing.load() }
-            address = loaded.first.orEmpty()
-            identity = loaded.second
+            val loaded = withContext(Dispatchers.IO) {
+                val opened = pairing.loadForStartup()
+                settings.serverUrl().orEmpty() to opened
+            }
+            address = loaded.first
+            identity = loaded.second.identity
+            loaded.second.notice?.let { error = it }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) { error = "无法读取连接信息，请检查 Coach 文件夹的访问权限，或重新输入服务地址和配对码。" }
         finally { initialized = true }

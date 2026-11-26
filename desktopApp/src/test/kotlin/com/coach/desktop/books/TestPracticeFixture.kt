@@ -51,9 +51,9 @@ internal fun testPracticeFixture(book: Textbook, lesson: BookLesson, mode: Quest
 }
 
 /**
- * 2.0 宽窗里原页按版面并排两页（originalPdfSheets），文字视图按宽度排多栏（bookImmersiveColumns），
+ * 2.0 宽窗里原页按版面并排两页（originalPdfSheets），文字视图宽窗两页对开（bookImmersiveColumns，最多两页），
  * 小测试书在默认测试窗里一屏就放下，「上一页 / 下一页」会整组跳或直接禁用。要逐页点按钮的测试放进这个
- * 竖窄窗：宽度放不下两页原页，也放不下两栏文字，一屏只显示一页。
+ * 竖窄窗：宽度放不下两页原页，也放不下两页文字，一屏只显示一页。
  */
 internal val SinglePageReaderWindow = Modifier.size(600.dp, 760.dp)
 

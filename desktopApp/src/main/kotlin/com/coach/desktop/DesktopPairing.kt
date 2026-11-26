@@ -14,6 +14,8 @@ import kotlinx.coroutines.isActive
 /** Deliberately not a data class: credentials must never appear in generated toString output. */
 internal class DesktopIdentity(val serverUrl: String, val credentials: PairedCredentials)
 
+internal class StartupSession(val identity: DesktopIdentity?, val notice: String?)
+
 internal class DesktopPairing(
     private val settings: DesktopConnectionSettings,
     private val store: DesktopCredentials = DesktopCredentials(settings.clientDirectory),
@@ -21,6 +23,13 @@ internal class DesktopPairing(
     fun load(): DesktopIdentity? {
         val url = settings.serverUrl() ?: return null
         return (store.load(url) ?: settings.nativeCredentials(url))?.let { DesktopIdentity(url, it) }
+    }
+
+    /** Startup only: a moved packaged friend URL comes back as [StartupSession.notice] and no identity. */
+    fun loadForStartup(): StartupSession {
+        val notice = settings.retireMovedFriendUrl()
+        val identity = if (notice != null) null else load()
+        return StartupSession(identity, notice)
     }
 
     suspend fun pair(address: String, code: String, name: String): DesktopIdentity {

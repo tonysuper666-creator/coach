@@ -382,7 +382,7 @@ class ImmersiveReaderV2Test {
     }
 
     @Test
-    fun pureReadWideTextFillsViewportAcross720DpColumnsWithSingleLayer() {
+    fun pureReadWideTextShowsTwoFacingPagesWith720DpLinesAndSingleLayer() {
         val dir = Files.createTempDirectory("coach-v2-pure-wide-text")
         try {
             val mdFile = dir.resolve("long-book.md")
@@ -425,24 +425,34 @@ class ImmersiveReaderV2Test {
                         turnRect.width >= readerRect.width - 4f,
                         "$label: book-page-turn width ${turnRect.width} must match reader-page width ${readerRect.width} for 1-layer pure read",
                     )
-                    val sheets = listOf("book-sheet-0", "book-sheet-1", "book-sheet-2").map { tag ->
+                    // TON-1671 裁决：沉浸文字最多两页对开，纸铺满阅读视口，每页行宽 ≤720dp，多出来的给页边。
+                    // TON-1851 文字模式「正文占窗口 ≥90%」门槛不再适用于文字阅读器，正文占比只记录。
+                    assertTrue(onAllNodesWithTag("book-sheet-2").fetchSemanticsNodes().isEmpty(), "$label: at most two facing pages")
+                    val sheets = listOf("book-sheet-0", "book-sheet-1").map { tag ->
                         onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
                     }
-                    sheets.forEachIndexed { idx, rect ->
-                        assertTrue(rect.width / densityVal <= 720.5f, "$label sheet-$idx exceeds 720dp: ${rect.width / densityVal}")
+                    assertEquals(readerRect.width, sheets.sumOf { it.width.toDouble() }.toFloat(), 4f, "$label: paper fills the viewport")
+                    val texts = listOf("reader-text", "reader-text-right").map { onNodeWithTag(it).fetchSemanticsNode().boundsInRoot }
+                    texts.forEachIndexed { idx, rect ->
+                        assertTrue(rect.width / densityVal <= 720.5f, "$label text-$idx line width exceeds 720dp: ${rect.width / densityVal}")
+                        assertTrue(rect.width / densityVal >= 718f, "$label text-$idx should use the full 720dp line: ${rect.width / densityVal}")
+                        val sheet = sheets[idx]
+                        val outer = if (idx == 0) rect.left - sheet.left else sheet.right - rect.right
+                        val spine = if (idx == 0) sheet.right - rect.right else rect.left - sheet.left
+                        assertTrue(outer >= spine - 1f, "$label page-$idx outer margin $outer narrower than spine side $spine")
                     }
-                    val textArea = listOf("reader-text", "reader-text-right", "reader-text-col-2")
+                    val textArea = listOf("reader-text", "reader-text-right")
                         .flatMap { onAllNodesWithTag(it).fetchSemanticsNodes() }
                         .sumOf { n -> (n.boundsInRoot.width * n.boundsInRoot.height).toDouble() }
                     val ratio = textArea / (widthPx * heightPx)
-                    assertTrue(ratio >= 0.90, "$label pure-read text body ratio $ratio must be >= 0.90")
+                    println("PURE_READ_WIDE_TEXT_RATIO $label ratio=${"%.4f".format(ratio)}")
 
                     val beforeText = onNodeWithTag("reader-text").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().text
                     onNodeWithTag("reader-page").performSemanticsAction(SemanticsActions.RequestFocus)
                     onNodeWithTag("reader-page").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.DirectionRight) }
                     waitForIdle()
                     val afterText = onNodeWithTag("reader-text").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().text
-                    assertNotEquals(beforeText, afterText, "$label: DirectionRight should advance 3-column spread")
+                    assertNotEquals(beforeText, afterText, "$label: DirectionRight should advance the spread")
                     onNodeWithTag("reader-page").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.DirectionLeft) }
                     waitForIdle()
                     val backText = onNodeWithTag("reader-text").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().text
@@ -499,19 +509,19 @@ class ImmersiveReaderV2Test {
                         turnRect.width >= readerRect.width - 4f,
                         "$label: book-page-turn width ${turnRect.width} must match reader-page width ${readerRect.width} (1 layer)",
                     )
-                    for (idx in 0 until expectedCols) {
-                        val rect = onNodeWithTag("book-sheet-$idx").fetchSemanticsNode().boundsInRoot
-                        if (expectedCols > 1) {
-                            assertTrue(rect.width / densityVal <= 720.5f, "$label sheet-$idx exceeds 720dp: ${rect.width / densityVal}")
-                        }
+                    assertTrue(onAllNodesWithTag("book-sheet-$expectedCols").fetchSemanticsNodes().isEmpty(), "$label: $expectedCols page(s)")
+                    onNodeWithTag("book-sheet-${expectedCols - 1}").assertExists()
+                    val textTags = listOf("reader-text", "reader-text-right").take(expectedCols)
+                    // TON-1671 裁决：每页行宽 ≤720dp；TON-1851 文字正文占窗口的门槛不再适用于文字阅读器，占比只记录。
+                    for (tag in textTags) {
+                        val rect = onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
+                        assertTrue(rect.width / densityVal <= 720.5f, "$label $tag line width exceeds 720dp: ${rect.width / densityVal}")
                     }
-                    val textTags = listOf("reader-text", "reader-text-right", "reader-text-col-2").take(expectedCols)
                     val textArea = textTags
                         .flatMap { onAllNodesWithTag(it).fetchSemanticsNodes() }
                         .sumOf { n -> (n.boundsInRoot.width * n.boundsInRoot.height).toDouble() }
                     val clientRatio = textArea / (sz.width * sz.height)
                     println("LAPTOP_TEXT_CLIENT_RATIO $label cols=$expectedCols ratio=${"%.4f".format(clientRatio)}")
-                    assertTrue(clientRatio >= 0.92, "$label pure-read text client ratio $clientRatio must be >= 0.92")
                 }
             }
         } finally {

@@ -12,8 +12,8 @@ from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from api_budget import CreditLedger, Denied, atomic_json, micros
-from api_route import ApiFailure, ApiRouter, CONFIG
+from api_budget import CreditLedger, Denied, INTERRUPTED_USAGE_GRACE_SECONDS, atomic_json, micros
+from api_route import ApiFailure, ApiRouter, CONFIG, cost
 from api_routing import frames, KEY, NOW, make_png_b64
 from grant_fixture import fund
 from friend_spend_watch import publish
@@ -235,6 +235,78 @@ class FriendApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual("daily_quota", denied_res.reason)
                 self.assertEqual(3, len(seen))
                 cli.assert_not_called()
+
+    async def disconnect_after_text(self, ledger, receipts):
+        """Cancel the production SSE body while it is yielding text to the downstream client."""
+        model = "claude-haiku-5-5"
+        frames = [{"type": "message_start", "message": {"model": model, "usage": receipts}},
+                  {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "synthetic answer"}}]
+        body = "".join("data: " + json.dumps(frame) + "\n\n" for frame in frames)
+        router = ApiRouter(ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, content=body))), keys={"anthropic": KEY})
+        req = bridge.build_req({"model": model, "stream": True, "max_tokens": 100,
+                                "messages": [{"role": "user", "content": "synthetic question"}]},
+                               {"x-coach-task": "READER_SELECTION", "x-coach-friend": A, "x-coach-friend-device": "pc"})
+        with patch.object(bridge, "API_ROUTER", router), patch.object(bridge, "write_log") as audit:
+            events = bridge.routed_events(req, model, None)
+            response = bridge.live_stream(req, "synthetic", NOW, [], events, True)
+            stream = response.body_iterator
+            async for chunk in stream:
+                if "synthetic answer" in chunk:
+                    break
+            else:
+                self.fail("missing SSE text frame")
+            with self.assertRaises(asyncio.CancelledError):
+                await stream.athrow(asyncio.CancelledError())
+            self.assertEqual("client_gone", audit.call_args.kwargs["reason"])
+
+    async def test_client_gone_bills_reported_tokens_and_bounds_only_unconfirmed_output(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_FRIEND_CONFIG": temp + "/missing"}):
+            root = Path(temp)
+            fund(root)
+            ledger = CreditLedger(root, lambda: NOW)
+            await self.disconnect_after_text(ledger, {"input_tokens": 90, "cache_read_input_tokens": 10, "output_tokens": 7})
+            data = ledger.read()
+            summary = data["months"]["2026-11"]["anthropic"]
+            observed = cost("claude-haiku-5-5", {"input_tokens": 100, "cached_tokens": 10, "output_tokens": 7})
+            bounded = cost("claude-haiku-5-5", {"input_tokens": 100, "cached_tokens": 10, "output_tokens": 100})
+            self.assertEqual(observed, summary["spent_microusd"] - summary["estimated_microusd"])
+            self.assertEqual(bounded, summary["spent_microusd"])
+            self.assertEqual({}, data["cycles"]["anthropic:2026-11"]["reserved"])
+            daily = next(iter(data["friends"][A].values()))
+            self.assertEqual({}, daily["reserved"])
+            self.assertEqual(bounded - observed, daily["estimated_microusd"])
+            self.assertEqual(bounded - observed, daily["devices"]["pc"]["estimated_microusd"])
+            self.assertEqual((1, 100, 100, bounded), tuple(daily[k] for k in ("calls", "input_tokens", "output_tokens", "spent_microusd")))
+
+    async def test_client_gone_without_usage_expires_only_its_own_hold_after_restart(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_FRIEND_CONFIG": temp + "/missing"}):
+            root = Path(temp)
+            fund(root)
+            now = NOW
+            ledger = CreditLedger(root, lambda: now)
+            legacy = ledger.reserve("anthropic", KEY, 73)
+            await self.disconnect_after_text(ledger, {})
+            before = ledger.read()
+            token, marker = next(iter(before["interrupted_streams"].items()))
+            self.assertEqual(NOW + INTERRUPTED_USAGE_GRACE_SECONDS, marker["expires_at"])
+            bound = before["cycles"][legacy[0]]["reserved"][token]
+            now = marker["expires_at"] - 1
+            restarted = CreditLedger(root, lambda: now)
+            self.assertEqual(0, restarted.expire_interrupted())
+            now += 1
+            # The first admission after restart also sweeps while holding the ledger lock.
+            fresh = restarted.reserve("anthropic", KEY, 19)
+            self.assertEqual(0, restarted.expire_interrupted())
+            data = restarted.read()
+            self.assertEqual({}, data["interrupted_streams"])
+            self.assertEqual({legacy[2]: 73, fresh[2]: 19}, data["cycles"][legacy[0]]["reserved"])
+            summary = data["months"]["2026-11"]["anthropic"]
+            self.assertEqual((92, bound, bound, 1), tuple(summary[k] for k in ("reserved_microusd", "spent_microusd", "estimated_microusd", "calls")))
+            daily = next(iter(data["friends"][A].values()))
+            self.assertEqual({}, daily["reserved"])
+            self.assertEqual(bound, daily["devices"]["pc"]["spent_microusd"])
+            self.assertEqual(1, daily["calls"])
 
     async def test_billing_and_overload_rejections_release_friend_reservation(self):
         for status in (402, 529):

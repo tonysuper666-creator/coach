@@ -337,15 +337,26 @@ internal fun BookPageView(
             mode == BookPageMode.Spread -> minOf((maxWidth - 48.dp) / 2, column + 112.dp)
             else -> minOf(maxWidth / 2, column + 112.dp)
         }
-        val leftInset = if (immersive) minOf(4.dp, sheetWidth * 0.008f) else 64.dp
+        // leftInset 是外侧页边（对开时左页的左边、右页的右边），rightInset 是书脊一侧。
+        val minLeftInset = if (immersive) minOf(4.dp, sheetWidth * 0.008f) else 64.dp
         // Facing columns share a gutter. Keep the full outer margin for corner drags.
-        val rightInset = when {
+        val minRightInset = when {
             immersive && !windowsPaged && hardPointGutter -> 48.dp
-            windowsPaged && spread -> minOf(2.dp, leftInset)
-            immersive -> leftInset
+            windowsPaged && spread -> minOf(2.dp, minLeftInset)
+            immersive -> minLeftInset
             spread -> 48.dp
             else -> 64.dp
         }
+        // 沉浸式行宽封顶 720dp，多出来的宽度全给页边，外侧不窄于书脊侧。
+        val (outerExtra, spineExtra) = if (!immersive) Pair(0f, 0f) else {
+            val minMargins = (minLeftInset + minRightInset).value
+            // maxWidth 是基线网格里的宽度，viewportWidth 是屏幕上的宽度，两者之比就是网格放大倍数的倒数。
+            val gridPerScreen = if (viewportWidth.value > 0f) maxWidth.value / viewportWidth.value else 1f
+            val text = bookImmersiveTextDp(sheetWidth.value, minMargins, BOOK_IMMERSIVE_MAX_TEXT_DP * gridPerScreen)
+            bookImmersiveExtraMargins(sheetWidth.value - minMargins - text, spread)
+        }
+        val leftInset = minLeftInset + outerExtra.dp
+        val rightInset = minRightInset + spineExtra.dp
         val widthPx = with(density) { (sheetWidth - leftInset - rightInset).roundToPx().coerceAtLeast(1) }
         val bodyHeight = with(density) { (maxHeight - if (immersive) topMargin else 116.dp).roundToPx().coerceAtLeast(1) }
         val failed = remember(book.id, libraryDirectory) { mutableStateListOf<BookIllustration>() }

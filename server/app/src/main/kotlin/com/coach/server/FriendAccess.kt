@@ -62,7 +62,9 @@ class FriendAccess(private val directory: Path,
         val id = friendId(name)
         stores.remove(id)
         val root = directory.resolve(id)
-        if (Files.exists(root)) root.toFile().deleteRecursively()
+        if (Files.exists(root) && (!root.toFile().deleteRecursively() || Files.exists(root))) {
+            throw java.io.IOException("friend account data was not fully removed")
+        }
     }
     internal fun status(name: String, device: String? = null): JsonObject {
         try {

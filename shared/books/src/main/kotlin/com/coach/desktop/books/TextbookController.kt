@@ -2233,15 +2233,36 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             }
             item.role != null -> {
                 val bookId = checkNotNull(item.bookId)
-                library.withCourseDatabase { db -> CourseStore.removeMaterialFromCourse(db, courseId, bookId) }
-                if (item.newlyStaged) {
+                // Read the paper from the library's own copy first: the dropped file may have been moved or renamed since.
+                val readable = library.withCourseDatabase { db -> CourseIntake.bookFormat(db, bookId) }
+                    ?.let { library.originalFileIfExists(bookId, it) }
+                    ?: path.takeIf { java.nio.file.Files.isRegularFile(it) }
+                if (readable == null) {
+                    mutable.update { it.copy(courseNotice = "找不到 ${item.fileName} 的可读副本，材料先留在课程里。") }
+                    return@action
+                }
+                val (paper, stillUsed) = library.withCourseDatabase { db ->
+                    val link = CourseIntake.captureLink(db, courseId, bookId)
+                    CourseStore.removeMaterialFromCourse(db, courseId, bookId)
+                    CourseAutoAligner.alignLocally(db, courseId)
+                    val paper = CourseIntake.importPaper(db, courseId, readable, key).copy(fileName = item.fileName)
+                    if (paper.paperKey == null) {
+                        // Nothing was extracted: put the material back exactly as it was.
+                        link?.let { CourseIntake.restoreLink(db, it) }
+                        CourseAutoAligner.alignLocally(db, courseId)
+                    }
+                    paper to CourseIntake.isLinkedAnywhere(db, bookId)
+                }
+                if (paper.paperKey == null) {
+                    mutable.update { it.copy(courseNotice = "${item.fileName} 没能当往年题拆解（${paper.note ?: "读不出文字"}），材料先留在课程里。") }
+                    return@action
+                }
+                // Only this course lets go of it; a copy another course or booklist still uses stays on the shelf.
+                if (item.newlyStaged && !stillUsed) {
                     library.deleteBook(bookId, accountKey)
                     deletedBook = true
                 }
-                updatedItem = library.withCourseDatabase { db ->
-                    CourseAutoAligner.alignLocally(db, courseId)
-                    CourseIntake.importPaper(db, courseId, path, key)
-                }
+                updatedItem = paper
             }
             role != null -> {
                 if (!java.nio.file.Files.isRegularFile(path)) {

@@ -74,6 +74,43 @@ internal object CourseIntake {
         )
     }
 
+    fun bookFormat(db: Connection, bookId: String): String? =
+        db.prepareStatement("SELECT format FROM books WHERE id=?").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { if (it.next()) it.getString(1) else null }
+        }
+
+    /** A course's link to one material, column for column, so a failed type change can put it back unchanged. */
+    class MaterialLink internal constructor(internal val columns: List<String>, internal val values: List<Any?>)
+
+    fun captureLink(db: Connection, courseId: String, bookId: String): MaterialLink? =
+        db.prepareStatement("SELECT * FROM collection_materials WHERE collection_id=? AND material_id=?").use { sql ->
+            sql.setString(1, courseId)
+            sql.setString(2, bookId)
+            sql.executeQuery().use { rows ->
+                if (!rows.next()) return@use null
+                val meta = rows.metaData
+                val columns = (1..meta.columnCount).map(meta::getColumnName)
+                MaterialLink(columns, columns.indices.map { rows.getObject(it + 1) })
+            }
+        }
+
+    fun restoreLink(db: Connection, link: MaterialLink) {
+        val names = link.columns.joinToString(",") { "\"$it\"" }
+        val marks = link.columns.joinToString(",") { "?" }
+        db.prepareStatement("INSERT OR REPLACE INTO collection_materials($names) VALUES($marks)").use { sql ->
+            link.values.forEachIndexed { i, value -> sql.setObject(i + 1, value) }
+            sql.executeUpdate()
+        }
+    }
+
+    /** Whether any course or booklist still lists this book. */
+    fun isLinkedAnywhere(db: Connection, bookId: String): Boolean =
+        db.prepareStatement("SELECT 1 FROM collection_materials WHERE material_id=? LIMIT 1").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { it.next() }
+        }
+
     fun summary(items: List<CourseIntakeItem>, isExam: Boolean): String? {
         val materials = items.count { it.role != null }
         val papers = items.filter { it.role == null }

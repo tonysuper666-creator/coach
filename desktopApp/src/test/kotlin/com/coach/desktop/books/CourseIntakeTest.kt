@@ -114,4 +114,37 @@ class CourseIntakeTest {
             root.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun failedPastPaperCorrectionKeepsTheMaterialWhereItWas() {
+        val root = Files.createTempDirectory("course-intake-fail-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"), lazyPdfExtras = false)
+            // No textbook or slides yet, so there are no exam points to map a past paper onto.
+            val courseId = library.withCourseDatabase { db ->
+                CourseStore.createCourse(db, "空课程", CourseExamProfile(examEnabled = true), emptyList()).first
+            }
+            val quiz = root.resolve("Week 2 quiz.md").also { Files.writeString(it, "## Axial tilt\n1. Compare Axial tilt.") }
+            val controller = TextbookController(library)
+            runBlocking {
+                controller.load()
+                controller.openCourse(courseId)
+                controller.addMaterialsToCourse(courseId, listOf(quiz)).join()
+            }
+            val item = assertNotNull(controller.state.value.courseIntake).items.single()
+            val bookId = assertNotNull(item.bookId)
+            val before = library.courseDetail(courseId).materials.single { it.bookId == bookId }
+
+            runBlocking { controller.changeCourseIntakeType(courseId, item.key, null) }
+
+            val after = library.courseDetail(courseId).materials.single { it.bookId == bookId }
+            assertEquals(before.role, after.role)
+            assertEquals(before.weekNum, after.weekNum)
+            assertTrue(library.catalog().any { it.id == bookId }, "library copy kept")
+            assertEquals(item, controller.state.value.courseIntake?.items?.single(), "receipt still shows it as a material")
+            assertTrue(controller.state.value.courseNotice.orEmpty().contains("材料先留在课程里"))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
 }

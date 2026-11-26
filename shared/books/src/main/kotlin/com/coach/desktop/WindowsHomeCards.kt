@@ -622,7 +622,9 @@ internal fun HostSettings(
     val abbreviated = displayPath != fullPath
     var showFullPath by remember(fullPath) { mutableStateOf(false) }
     var copied by remember(fullPath) { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
+    val incidents = LocalIncidentFolderActions.current
 
     AlertDialog(
         onDismissRequest = onClose,
@@ -716,10 +718,54 @@ internal fun HostSettings(
                         }
                     }
                 }
+                if (incidents != null) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            "问题记录只留在这台电脑。只有你点发送，才会交出去。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.fgSecondary,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            V7TextButton(
+                                onClick = incidents.openFolder,
+                                modifier = Modifier.testTag("settings-incident-open"),
+                                ringInside = true,
+                            ) {
+                                Text("打开记录文件夹", style = MaterialTheme.typography.labelSmall, color = colors.fgSecondary)
+                            }
+                            V7TextButton(
+                                onClick = { confirmClear = true },
+                                modifier = Modifier.testTag("settings-incident-clear"),
+                                ringInside = true,
+                            ) {
+                                Text("清空记录", style = MaterialTheme.typography.labelSmall, color = colors.fgSecondary)
+                            }
+                        }
+                    }
+                }
             }
         },
         confirmButton = {
             PaperButton(onClose, modifier = Modifier.testTag("close-settings")) { Text("知道了") }
         },
     )
+    if (confirmClear && incidents != null) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("清空问题记录？") },
+            text = { Text("这台电脑上的问题记录会删掉，不会发给任何人。") },
+            confirmButton = {
+                TextButton(
+                    {
+                        incidents.clearRecords()
+                        confirmClear = false
+                    },
+                    Modifier.testTag("settings-incident-clear-confirm"),
+                ) { Text("清空记录") }
+            },
+            dismissButton = {
+                TextButton({ confirmClear = false }, Modifier.testTag("settings-incident-clear-cancel")) { Text("取消") }
+            },
+        )
+    }
 }

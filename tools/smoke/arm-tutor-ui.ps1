@@ -286,6 +286,13 @@ function Test-WholeLesson {
     }
     Start-Sleep -Milliseconds 800
     $opened = @(Read-TutorFrame '05-companion')
+    # The question step leaves the drawer on 提问. The chapter lesson is the 讲解 tab.
+    $explainTab = Find-Text $opened '讲解'
+    if ($explainTab) {
+        Click-At $explainTab.X $explainTab.Y | Out-Null
+        Start-Sleep -Milliseconds 800
+        $opened = @(Read-TutorFrame '05-companion-tab')
+    }
     $wider = Find-Text $opened '讲整章'
     if ($wider) { Click-At $wider.X $wider.Y | Out-Null }
     # The pack's core question sits under the module header. On a short bottom sheet

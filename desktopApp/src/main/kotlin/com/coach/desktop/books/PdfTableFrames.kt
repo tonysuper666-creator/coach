@@ -104,6 +104,24 @@ internal class PdfTableFrames(page: PDPage, private val control: BookImportContr
         }
         return result
     }
+
+    /** Horizontal rules that actually share both edges. A shared title may cover several grids. */
+    fun ruledPanels(titleY: Double, titleLeft: Double, limitY: Double): List<Frame> {
+        if (unsupported) return emptyList()
+        val bars = rules.filter { it.horizontal && it.fixed > titleY && it.fixed < limitY }
+            .distinct().sortedBy { it.fixed }
+        if (bars.size !in 3..96) return emptyList()
+        val first = bars.firstOrNull { abs(it.start - titleLeft) <= 16 && it.fixed - titleY <= 34 } ?: return emptyList()
+        val tops = bars.filter { abs(it.fixed - first.fixed) <= 1 }
+        val panels = tops.mapNotNull { top ->
+            val ys = bars.filter { abs(it.start - top.start) <= 1 && abs(it.end - top.end) <= 1 }
+                .map { it.fixed }.distinct()
+            if (ys.size >= 3 && ys[1] - ys[0] in 2f..48f) Frame(top.start, top.end, ys) else null
+        }.sortedBy { it.left }
+        return panels.takeIf { it.size == tops.size && it.any { f -> abs(f.left - first.start) <= 1 } &&
+            it.zipWithNext().all { (a,b) -> b.left - a.right in 0f..72f } }.orEmpty()
+    }
+
     override fun getCurrentPoint(): Point2D = point
     override fun endPath() {
         pending.clear()

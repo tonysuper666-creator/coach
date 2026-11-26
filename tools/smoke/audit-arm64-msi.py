@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+import re
 import struct
 import subprocess
 import sys
@@ -43,6 +44,7 @@ def audit_extracted_root(
     root: Path,
     sable_login: str | None = None,
     forbid_private_config: bool = False,
+    friend_url: str | None = None,
 ) -> list[str]:
     root = root.resolve()
     if not root.is_dir():
@@ -82,6 +84,11 @@ def audit_extracted_root(
             raise AssertionError(f"Missing {expected_opt!r} in app/LearningCoach.cfg")
     if forbid_private_config and "-Dcoach.friendUrl=" in cfg_text:
         raise AssertionError("Unexpected private -Dcoach.friendUrl in public build app/LearningCoach.cfg")
+    if friend_url is not None:
+        prefix = "java-options=-Dcoach.friendUrl="
+        actual = [line for line in cfg_text.splitlines() if line.startswith(prefix)]
+        if actual != [prefix + friend_url]:
+            raise AssertionError("Embedded friend service origin does not match the release configuration")
 
     app_dir = app_root / "app"
     jars = sorted(app_dir.glob("*.jar"))
@@ -148,7 +155,7 @@ def audit_extracted_root(
     if not ocr_checked:
         raise AssertionError("ocr/windows-arm64.zip not found in packaged app jars")
 
-    return [
+    report = [
         f"standalone_pe_aa64={len(pe_files)}/{len(pe_files)}",
         "LearningCoach.exe=AA64",
         "runtime/bin/server/jvm.dll=AA64",
@@ -159,6 +166,9 @@ def audit_extracted_root(
         "ocr_x64_absent=true",
         f"sable_login_cfg={sable_login if sable_login is not None else 'unchecked'}",
     ]
+    if friend_url is not None:
+        report.append("friend_url_cfg_matches=true")
+    return report
 
 
 def extract_msi(msi_path: Path, target_dir: Path) -> None:
@@ -178,9 +188,16 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--msi", type=Path, help="Path to LearningCoach ARM64 MSI to extract and audit")
     group.add_argument("--extracted", type=Path, help="Path to an already-extracted MSI directory")
     parser.add_argument("--sable-login", choices=("true", "false"), help="Require -Dcoach.sableLogin=<val> in LearningCoach.cfg")
-    parser.add_argument("--forbid-private-config", action="store_true", help="Fail if private -Dcoach.friendUrl= is embedded")
+    friend_config = parser.add_mutually_exclusive_group()
+    friend_config.add_argument("--forbid-private-config", action="store_true", help="Fail if private -Dcoach.friendUrl= is embedded")
+    friend_config.add_argument("--require-friend-url", action="store_true", help="Verify the embedded origin matches the COACH_FRIEND_URL environment variable")
     parser.add_argument("--out", type=Path, help="Write audit summary lines to this UTF-8 file")
     args = parser.parse_args(argv)
+    friend_url = None
+    if args.require_friend_url:
+        friend_url = os.environ.get("COACH_FRIEND_URL", "")
+        if not re.fullmatch(r"https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?", friend_url):
+            parser.error("COACH_FRIEND_URL must contain a single valid HTTPS origin")
 
     lines: list[str] = []
     if args.msi:
@@ -200,9 +217,9 @@ def main(argv: list[str] | None = None) -> int:
             extract_dir = Path(tmp) / "extract"
             extract_dir.mkdir(parents=True, exist_ok=True)
             extract_msi(msi_path, extract_dir)
-            lines.extend(audit_extracted_root(extract_dir, args.sable_login, args.forbid_private_config))
+            lines.extend(audit_extracted_root(extract_dir, args.sable_login, args.forbid_private_config, friend_url))
     else:
-        lines.extend(audit_extracted_root(args.extracted, args.sable_login, args.forbid_private_config))
+        lines.extend(audit_extracted_root(args.extracted, args.sable_login, args.forbid_private_config, friend_url))
 
     report = "\n".join(lines) + "\n"
     sys.stdout.write(report)

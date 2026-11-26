@@ -16,6 +16,13 @@ import com.coach.desktop.books.AnswerDrafts
 import com.coach.desktop.books.LocalBookRelogin
 import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
+import com.coach.desktop.books.LearningJournal
+import com.coach.desktop.books.LearningMigrationBackup
+import com.coach.desktop.books.LearningRemote
+import com.coach.desktop.books.LearningTransfer
+import com.coach.client.CourseHttp
+import kotlinx.serialization.json.JsonObject
+import kotlinx.coroutines.isActive
 import com.coach.desktop.books.TextbookLoginScreen
 import com.coach.desktop.books.rememberAnswerDrafts
 import com.coach.ui.CoachTheme
@@ -130,6 +137,7 @@ internal fun WindowsTextbookGate(
         }
         CompositionLocalProvider(LocalBookRelogin provides onRelogin) {
             key(paired.credentials.deviceId, paired.credentials.token) {
+                RememberDesktopLedgerRecovery(settings, paired)
                 content(paired)
             }
         }
@@ -178,18 +186,10 @@ internal fun runWindowsTextbooks() {
     val initialBounds = windowsInitialWindowBounds()
     val settings = DesktopConnectionSettings()
     application {
-        val controller = remember { TextbookController(TextbookLibrary(directory, streamPdfExtras = true, lazyPdfExtras = true)) }
-        val drafts = rememberAnswerDrafts(controller)
-        val exams = rememberLocalExamController(controller.library)
         val scope = rememberCoroutineScope()
-        val saveDrafts: suspend () -> Boolean = remember(drafts, exams, controller) {
-            {
-                controller.flushPendingSaves()
-                drafts.flush() && exams.flush()
-            }
-        }
-        val closeGuard = remember(saveDrafts, scope) {
-            TextbookCloseGuard(saveDrafts, scope, ::exitApplication)
+        var saveDrafts by remember { mutableStateOf<suspend () -> Boolean>({ true }) }
+        val closeGuard = remember(scope) {
+            TextbookCloseGuard({ saveDrafts() }, scope, ::exitApplication)
         }
         Window(onCloseRequest = closeGuard::requestClose, title = "LearningCoach", icon = AppIcon.window(),
             state = rememberWindowState(
@@ -197,37 +197,62 @@ internal fun runWindowsTextbooks() {
                 position = WindowPosition.Absolute(initialBounds.x.dp, initialBounds.y.dp),
             )) {
             WindowsReadingMinimum(window)
-            WindowsTextbookGate(settings) {
-                WindowsTextbookHost(
-                    controller = controller,
-                    drafts = drafts,
-                    exams = exams,
-                    chooseBooks = {
-                        withContext(Dispatchers.Swing) {
-                            val dialog = FileDialog(window, "导入文件 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)
-                            dialog.isMultipleMode = true
-                            try {
-                                dialog.isVisible = true
-                                dialog.files.map { it.toPath() }
-                            } finally { dialog.dispose() }
+            WindowsTextbookGate(settings) { identity ->
+                val profiles = remember(directory) { LearningProfiles(directory) }
+                val profile = if (LearningJournal.enabled || profiles.hasProfiles) {
+                    val selected by produceState<LearningProfile?>(null,identity) {
+                        while (isActive) {
+                            value = profiles.open(identity,LearningJournal.enabled)
+                            if (!LearningJournal.enabled || value?.scope != null || identity.credentials.role != "friend") break
+                            delay(30_000)
                         }
-                    },
-                    chooseBook = {
-                        withContext(Dispatchers.Swing) {
-                            val dialog = FileDialog(window, "导入文件 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)
-                            try {
-                                dialog.isVisible = true
-                                dialog.file?.let { Path.of(dialog.directory, it) }
-                            } finally { dialog.dispose() }
+                    }
+                    selected ?: return@WindowsTextbookGate
+                } else LearningProfile(directory,null)
+                key(profile.directory) {
+                    val controller = remember { windowsBookController(profile.directory) }
+                    val drafts = rememberAnswerDrafts(controller)
+                    val exams = rememberLocalExamController(controller.library)
+                    DisposableEffect(controller,drafts,exams) {
+                        saveDrafts = {
+                            controller.flushPendingSaves()
+                            drafts.flush() && exams.flush()
                         }
-                    },
-                )
+                        onDispose { saveDrafts = { true } }
+                    }
+                    LearningSyncEffect(identity,profile)
+                    WindowsTextbookHost(
+                        controller = controller,
+                        drafts = drafts,
+                        exams = exams,
+                        chooseReviewedBlocks = { pickReviewedBlocks(window) },
+                        chooseBooks = {
+                            withContext(Dispatchers.Swing) {
+                                val dialog = FileDialog(window, "导入文件 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)
+                                dialog.isMultipleMode = true
+                                try {
+                                    dialog.isVisible = true
+                                    dialog.files.map { it.toPath() }
+                                } finally { dialog.dispose() }
+                            }
+                        },
+                        chooseBook = {
+                            withContext(Dispatchers.Swing) {
+                                val dialog = FileDialog(window, "导入文件 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)
+                                try {
+                                    dialog.isVisible = true
+                                    dialog.file?.let { Path.of(dialog.directory, it) }
+                                } finally { dialog.dispose() }
+                            }
+                        },
+                    )
+                    WindowsUpdatePrompt(save = {
+                        controller.state.first { !it.busy }
+                        saveDrafts()
+                    }, close = ::exitApplication)
+                }
             }
             TextbookCloseWarning(closeGuard)
-            WindowsUpdatePrompt(save = {
-                controller.state.first { !it.busy }
-                saveDrafts()
-            }, close = ::exitApplication)
             LaunchedEffect(window) { VerifyHooks.captures(window) }
             LaunchedEffect(Unit) {
                 System.getProperty("coach.autoExitSeconds")?.toLongOrNull()?.let { delay(it * 1000); closeGuard.requestClose() }
@@ -275,6 +300,52 @@ internal fun TextbookCloseWarning(guard: TextbookCloseGuard) {
 /** Production host content with an owned library for offscreen tests. */
 @Composable
 internal fun WindowsTextbooksContent(directory: Path, chooseBook: suspend () -> Path?) {
-    val controller = remember(directory) { TextbookController(TextbookLibrary(directory, streamPdfExtras = true, lazyPdfExtras = true)) }
-    WindowsTextbookHost(controller, chooseBook = chooseBook)
+    val controller = remember(directory) { windowsBookController(directory) }
+    WindowsTextbookHost(controller, chooseReviewedBlocks = { pickReviewedBlocks(null) }, chooseBook = chooseBook)
+}
+
+private suspend fun pickReviewedBlocks(owner: java.awt.Frame?): List<Path> = withContext(Dispatchers.Swing) {
+    val dialog = FileDialog(owner, "选择已核对的排版块（*.review.json）", FileDialog.LOAD)
+    try {
+        dialog.file = "*.review.json"
+        dialog.isMultipleMode = true
+        dialog.isVisible = true
+        dialog.files.map { it.toPath() }
+    } finally {
+        dialog.dispose()
+    }
+}
+
+private fun windowsBookController(directory: Path): TextbookController {
+    if (LearningJournal.enabled) LearningMigrationBackup.prepare(directory)
+    val library = TextbookLibrary(directory, streamPdfExtras = true, lazyPdfExtras = true)
+    if (LearningJournal.enabled) LearningJournal.installProfile(library)
+    return TextbookController(library)
+}
+
+@Composable
+private fun LearningSyncEffect(identity: DesktopIdentity, profile: LearningProfile) {
+    profile.scope?.takeIf { LearningJournal.enabled }?.let { account ->
+        LaunchedEffect(identity,profile) {
+            val credentials = identity.credentials
+            val http = CourseHttp(identity.serverUrl,credentials.deviceId,credentials.token,"library")
+            val remote = object : LearningRemote {
+                override suspend fun snapshot(epoch: String, token: String?, after: Long) = http.learningSnapshot(epoch,token,after)
+                override suspend fun changes(epoch: String?, after: Long, stream: String) = http.learningChanges(epoch,after,stream)
+                override suspend fun push(change: JsonObject) = http.pushLearningChange(change)
+            }
+            try {
+                while (isActive) {
+                    try {
+                        withContext(Dispatchers.IO) {
+                            LearningTransfer(profile.directory.resolve("library.sqlite"),false).sync(account,remote,profile.epoch) { isActive }
+                            LearningTransfer(profile.directory.resolve("exams.sqlite"),true).sync(account,remote,profile.epoch) { isActive }
+                        }
+                    } catch (cancel: CancellationException) { throw cancel }
+                    catch (_: Exception) { /* Durable outbox and cursor survive transient failures. */ }
+                    delay(15_000)
+                }
+            } finally { http.close() }
+        }
+    }
 }

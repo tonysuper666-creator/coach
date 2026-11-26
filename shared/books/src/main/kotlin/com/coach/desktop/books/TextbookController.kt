@@ -12,10 +12,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.nio.file.Path
+import java.nio.file.Files
 import java.util.concurrent.ConcurrentHashMap
 
 internal enum class BookScreen { HOME, COURSE, COURSE_MOCK, BOOKLIST, READER, LEARNING, REVIEWS, REVIEWING }
@@ -1142,16 +1144,53 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         return job
     }
 
-    suspend fun ensureVisualsForPages(bookId: String, pageNumbers: Collection<Int>) {
-        val updated = withContext(Dispatchers.IO) {
-            if (library.ensurePdfVisualsForPages(bookId, pageNumbers)) {
-                runCatching { library.book(bookId) }.getOrNull()
-            } else null
-        } ?: return
+    suspend fun importReviewedBlocks(bookId: String, files: List<Path>) = action {
+        if (mutable.value.book?.id != bookId) return@action
+        require(files.size in 1..128) { "请每次选择 1 到 128 个已核对的排版块。" }
+        val reviews = files.map { file ->
+            require(Files.isRegularFile(file)) { "请选择从版面复核工具导出的排版块文件。" }
+            val bytes = Files.newInputStream(file).use { it.readNBytes(8193) }
+            require(bytes.size in 1..8192) { "排版块文件大小不符，请重新导出。" }
+            PdfVisualReviewCodec.decode(bytes.decodeToString())
+        }
+        val saved = library.addReviewedPdfVisuals(bookId, reviews)
+        val changed = reviews.map { it.selection.page }.toSet()
         mutable.update { current ->
-            if (current.book?.id == updated.id) {
-                current.copy(book = updated.copy(readingPage = current.book.readingPage))
-            } else current
+            val book = current.book ?: return@update current
+            if (book.id != bookId) return@update current
+            current.copy(
+                book = book.copy(pages = book.pages.map { page ->
+                    if (page.number in changed) page.copy(illustrations = saved.page(page.number)!!.illustrations) else page
+                }),
+                importNotice = BookImportNotice(System.nanoTime(), "${changed.size} 页已载入 ${reviews.size} 个核对过的排版块。"),
+            )
+        }
+    }
+
+    suspend fun ensureVisualsForPages(bookId: String, pageNumbers: Collection<Int>) {
+        val before = mutable.value.book?.takeIf { it.id == bookId } ?: return
+        val visuals = try {
+            withContext(Dispatchers.IO) {
+                library.ensurePdfVisualsForPages(bookId, pageNumbers, BookImportControl(cancelledExternally = { !isActive }))
+                // A previous view can leave after commit but before publishing its result.
+                library.pdfIllustrationsForPages(bookId, pageNumbers)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Optional page assets can be retried on the next visit. Keep the text readable.
+            return
+        }
+        if (visuals.isEmpty()) return
+        mutable.update { current ->
+            val book = current.book ?: return@update current
+            if (book.id != bookId) return@update current
+            val pages = book.pages.map { page ->
+                val items = visuals[page.number]
+                if (items == null || page.illustrations == items || page.illustrations != before.page(page.number)?.illustrations) page
+                else page.copy(illustrations = items)
+            }
+            if (pages == book.pages) current else current.copy(book = book.copy(pages = pages))
         }
     }
 

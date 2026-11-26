@@ -126,11 +126,15 @@ internal data class UnifiedBookScope(
     companion object {
         internal val SCOPE_KEY_PATTERN = Regex("(?:sable|device)-[0-9a-f]{64}")
 
+        fun fromSableFriend(name: String): UnifiedBookScope {
+            require(isSableFriend(name))
+            return UnifiedBookScope("sable-" + name.substringAfterLast(':'), isSableAccount = true)
+        }
+
         fun fromCall(deviceId: String, friendName: String?): UnifiedBookScope {
             require(deviceId.isNotBlank()) { "Missing device id" }
             return if (friendName != null && isSableFriend(friendName)) {
-                val subHash = friendName.substringAfterLast(':')
-                UnifiedBookScope("sable-$subHash", isSableAccount = true)
+                fromSableFriend(friendName)
             } else {
                 val deviceHash = sha256(deviceId.toByteArray(Charsets.UTF_8))
                 UnifiedBookScope("device-$deviceHash", isSableAccount = false)
@@ -212,6 +216,10 @@ class UnifiedBookPipeline internal constructor(
     internal val rootDir: Path get() = root
     internal val blobsDirPath: Path get() = blobsDir
     internal val accountsDirPath: Path get() = accountsDir
+    internal fun learningBackup(): LearningBackup {
+        ensureInitialized()
+        return LearningBackup(registryFile)
+    }
     internal val registryFilePath: Path get() = registryFile
 
     private val sharedDir get() = root.resolve("shared")
@@ -227,6 +235,7 @@ class UnifiedBookPipeline internal constructor(
     private val initLock = Any()
     @Volatile private var initialized = false
     private val accountLocks = ConcurrentHashMap<String, Mutex>()
+    private val privateRequests = ConcurrentHashMap<String, Int>()
     private val shaLocks = ConcurrentHashMap<String, Mutex>()
     private val quotaLock = Any()
     private val inFlightAccountBytes = HashMap<String, Long>()
@@ -261,6 +270,8 @@ class UnifiedBookPipeline internal constructor(
             DriverManager.getConnection("jdbc:sqlite:$registryFile").use { db ->
                 db.createStatement().use { sql ->
                     sql.execute("PRAGMA busy_timeout=5000")
+                    sql.execute("""CREATE TABLE IF NOT EXISTS learning_checkpoints(scope_key TEXT PRIMARY KEY,
+                        epoch TEXT NOT NULL,seq INTEGER NOT NULL,receipts INTEGER NOT NULL,digest TEXT)""")
                     sql.execute(
                         """CREATE TABLE IF NOT EXISTS shared_blobs(
                             sha256 TEXT PRIMARY KEY,
@@ -470,7 +481,25 @@ class UnifiedBookPipeline internal constructor(
         }
     }
 
+    internal suspend fun <T> withActiveAccount(scope: UnifiedBookScope, action: suspend () -> T): T =
+        accountLock(scope.scopeKey).withLock {
+            if (readAccountDeletionState(scope.scopeKey)?.state == "DELETING") {
+                throw UnifiedBookError(HttpStatusCode.Conflict, "account_deleting", "Account deletion is in progress")
+            }
+            action()
+        }
+
     private fun accountLock(scopeKey: String): Mutex = accountLocks.computeIfAbsent(scopeKey) { Mutex() }
+
+    /** Reader and Bridge requests can run together. Deletion retries after their final writes finish. */
+    internal suspend fun <T> withPrivateRequest(scope: UnifiedBookScope, authorized: suspend () -> Boolean, run: suspend () -> T): T {
+        withActiveAccount(scope) {
+            if (!authorized()) throw UnifiedBookError(HttpStatusCode.Unauthorized,"revoked","Account credential expired")
+            privateRequests.merge(scope.scopeKey,1,Int::plus)
+        }
+        try { return run() }
+        finally { privateRequests.compute(scope.scopeKey) { _, count -> count?.minus(1)?.takeIf { it > 0 } } }
+    }
 
     private fun shaLock(sha256: String): Mutex = shaLocks.computeIfAbsent(sha256) { Mutex() }
 
@@ -534,8 +563,10 @@ class UnifiedBookPipeline internal constructor(
         }
     }
 
-    internal suspend fun beginAccountDeletion(scope: UnifiedBookScope, friendName: String? = null): Long = withContext(Dispatchers.IO) {
+    internal suspend fun beginAccountDeletion(scope: UnifiedBookScope, friendName: String? = null,
+        authorized: suspend () -> Boolean = { true }): Long = withContext(Dispatchers.IO) {
         accountLock(scope.scopeKey).withLock {
+            if (!authorized()) throw UnifiedBookError(HttpStatusCode.Unauthorized,"unauthorized","Authorization expired")
             markAccountDeletingLocked(scope.scopeKey, friendName)
         }
     }
@@ -1366,9 +1397,17 @@ class UnifiedBookPipeline internal constructor(
     internal suspend fun deleteAccount(
         scope: UnifiedBookScope,
         purgeImmediately: Boolean = false,
+        expectedDeletionEpoch: Long? = null,
     ): AccountDeleteResult = withContext(Dispatchers.IO) {
         val (removed, trashed) = accountLock(scope.scopeKey).withLock {
-            markAccountDeletingLocked(scope.scopeKey)
+            if (expectedDeletionEpoch == null) {
+                markAccountDeletingLocked(scope.scopeKey)
+            } else if (readAccountDeletionState(scope.scopeKey) != AccountDeletionRecord("DELETING",expectedDeletionEpoch)) {
+                return@withContext AccountDeleteResult(0,0,0)
+            }
+            if (privateRequests.containsKey(scope.scopeKey)) {
+                throw UnifiedBookError(HttpStatusCode.ServiceUnavailable,"account_data_cleanup_pending","Account requests are still finishing")
+            }
             var totalRemoved = 0
             var totalTrashed = 0
             while (true) {
@@ -1462,6 +1501,9 @@ class UnifiedBookPipeline internal constructor(
 
             val doneAt = config.clock()
             registryDb().use { db ->
+                db.prepareStatement("DELETE FROM learning_checkpoints WHERE scope_key=?").use { q ->
+                    q.setString(1,scope.scopeKey); q.executeUpdate()
+                }
                 db.prepareStatement(
                     "UPDATE account_deletions SET state='DELETED', updated_at=? WHERE scope_key=?",
                 ).use { sql ->
@@ -1613,16 +1655,16 @@ class UnifiedBookPipeline internal constructor(
                 s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_deletions'").use { it.next() }
             }
             if (!hasTable) emptyList() else db.createStatement().use { sql ->
-                sql.executeQuery("SELECT scope_key FROM account_deletions WHERE state='DELETING'").use { rs ->
-                    buildList { while (rs.next()) add(rs.getString(1)) }
+                sql.executeQuery("SELECT scope_key,deletion_epoch FROM account_deletions WHERE state='DELETING'").use { rs ->
+                    buildList { while (rs.next()) add(rs.getString(1) to rs.getLong(2)) }
                 }
             }
         }
         var reconciled = 0
-        for (scopeKey in pendingAccounts) {
+        for ((scopeKey,epoch) in pendingAccounts) {
             if (!scopeKey.matches(UnifiedBookScope.SCOPE_KEY_PATTERN)) continue
             runCatching {
-                deleteAccount(UnifiedBookScope(scopeKey, isSableAccount = scopeKey.startsWith("sable-")))
+                deleteAccount(UnifiedBookScope(scopeKey, isSableAccount = scopeKey.startsWith("sable-")), expectedDeletionEpoch = epoch)
                 reconciled++
             }
         }
@@ -2311,7 +2353,8 @@ class UnifiedBookPipeline internal constructor(
 internal fun UnifiedBookPipeline.installAccountDataFinalizer(actor: LedgerActor, friends: FriendAccess?) {
     accountDataFinalizer = { friend ->
         withContext(Dispatchers.IO) { friends?.deleteAccountData(friend) }
-        actor.execute { revokeFriend(friend) }
+        val devices = actor.execute { eraseSableCredentials(friend) }
+        friends?.sable?.forget(devices)
     }
 }
 
@@ -2319,8 +2362,10 @@ fun Application.unifiedBookRoutes(
     actor: LedgerActor,
     unifiedBooks: UnifiedBookPipeline? = null,
     friends: FriendAccess? = null,
+    learningSync: Boolean = System.getenv("COACH_LEARNING_SYNC") == "1",
 ) {
     unifiedBooks?.installAccountDataFinalizer(actor, friends)
+    if (learningSync && unifiedBooks?.enabled == true) learningSyncRoutes(actor, unifiedBooks)
     if (unifiedBooks != null && unifiedBooks.enabled && unifiedBooks.config.autoProcess) {
         unifiedBooks.startWorkerIfNeeded(this)
         monitor.subscribe(ApplicationStopping) {
@@ -2514,8 +2559,10 @@ fun Application.unifiedBookRoutes(
             val scope = UnifiedBookScope.fromCall(device, friend)
             try {
                 // Persist DELETING gate before cleanup so any in-flight upload for this scope is rejected at commit.
-                pipeline.beginAccountDeletion(scope, friend)
-                val summary = pipeline.deleteAccount(scope)
+                val epoch = pipeline.beginAccountDeletion(scope, friend) {
+                    actor.execute { authorize(device,bearer) && friendName(device) == friend }
+                }
+                val summary = pipeline.deleteAccount(scope,expectedDeletionEpoch = epoch)
                 call.respondText(
                     json(
                         "deleted" to true,

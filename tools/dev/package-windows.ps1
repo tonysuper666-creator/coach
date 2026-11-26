@@ -57,6 +57,11 @@
     GRADLE_OPTS alone is not enough: it configures the Gradle client JVM while
     the build runs in a forked daemon, which silently keeps the old home.
 
+.PARAMETER UseReleaseFriendUrl
+    Embed the private HTTPS origin from the single-line file
+    %USERPROFILE%\Coach\config\release-friend-url.txt. The file and its value
+    are used only for this build, independently of the selected UserHome.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File tools/dev/package-windows.ps1
 #>
@@ -69,7 +74,8 @@ param(
     [string]$Version,
     [string]$VersionCode,
     [string]$ChannelFile,
-    [string]$UserHome
+    [string]$UserHome,
+    [switch]$UseReleaseFriendUrl
 )
 
 $ErrorActionPreference = 'Stop'
@@ -90,6 +96,16 @@ if (-not $Version) { $Version = $property['coach.release.version'] }
 if (-not $VersionCode) { $VersionCode = $property['coach.release.versionCode'] }
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Release version must be major.minor.patch: $Version" }
 if ($VersionCode -notmatch '^\d+$') { throw "Release versionCode must be an integer: $VersionCode" }
+$releaseFriendUrl = $null
+if ($UseReleaseFriendUrl) {
+    $friendFile = Join-Path $env:USERPROFILE 'Coach\config\release-friend-url.txt'
+    if (-not (Test-Path -LiteralPath $friendFile -PathType Leaf)) { throw 'Missing private friend service release file.' }
+    $lines = @(Get-Content -LiteralPath $friendFile -Encoding UTF8)
+    if ($lines.Count -ne 1 -or $lines[0].Trim() -notmatch '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$') {
+        throw 'Expected one valid HTTPS origin in the friend service release file.'
+    }
+    $releaseFriendUrl = $lines[0].Trim()
+}
 & git -C $root fetch --tags origin
 if ($LASTEXITCODE -ne 0) { throw 'Cannot sync published release tags; no package built.' }
 
@@ -141,9 +157,12 @@ try {
     }
 
     $previousPriority = (Get-Process -Id $PID).PriorityClass
+    $friendProperty = 'ORG_GRADLE_PROJECT_coach.friendUrl'
+    $friendBefore = [Environment]::GetEnvironmentVariable($friendProperty, 'Process')
     Push-Location $root
     try {
         (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
+        if ($UseReleaseFriendUrl) { [Environment]::SetEnvironmentVariable($friendProperty, $releaseFriendUrl, 'Process') }
         # --no-daemon: the build JVM may be told to read another home, and a reused
         # daemon would keep the previous one.
         $showSable = -not $NoSableLogin
@@ -153,6 +172,7 @@ try {
             :desktopApp:verifyReleaseVersion ":desktopApp:$Task"
         $code = $LASTEXITCODE
     } finally {
+        if ($UseReleaseFriendUrl) { [Environment]::SetEnvironmentVariable($friendProperty, $friendBefore, 'Process') }
         Pop-Location
         (Get-Process -Id $PID).PriorityClass = $previousPriority
     }

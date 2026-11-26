@@ -25,7 +25,7 @@ internal enum class ChapterReadState {
 
 internal object ChapterReadPolicy {
     /** 单页真实停留门槛：8 秒；快速翻过/滑过（<8s）不计入已停留页。 */
-    const val MIN_DWELL_MS: Long = 8_000L
+    const val MIN_DWELL_MS: Long = com.coach.domain.mastery.MasteryReplay.MIN_DWELL_MS
 
     /** 章节自动转为 READ 的不重复停留页比例门槛：70%。 */
     const val READ_RATIO_THRESHOLD: Double = 0.70

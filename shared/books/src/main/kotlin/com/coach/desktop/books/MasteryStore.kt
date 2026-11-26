@@ -4,6 +4,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import java.sql.Connection
@@ -167,8 +169,20 @@ internal object MasteryStore {
             fsrsStability = fsrsStability,
             nowMs = nowMs,
         )
-        upsertConcept(db, updated)
         val eventId = "ev-${UUID.randomUUID().toString().replace("-", "").take(16)}"
+        withLearningFact(db,"mastery",{
+            buildJsonObject {
+                put("algorithm","mastery-v1")
+                put("event",eventId)
+                put("time",nowMs)
+                put("signal",signal.name)
+                put("guessed",guessed)
+                put("duration",durationMs.coerceAtLeast(0))
+                scoreRatio?.let { put("score",it.coerceIn(0.0,1.0)) }
+                fsrsStability?.let { put("stability",it) }
+                errorClass?.let { put("error",it.name) }
+            }
+        }) { upsertConcept(db, updated) }
         db.prepareStatement(
             """INSERT INTO learner_evidence_events(
                 event_id, concept_key, book_id, page, signal_type, score_ratio,

@@ -74,6 +74,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     onOpenCollection: (CollectionSummary) -> Unit = {},
     onPickCourseFiles: (suspend () -> List<Path>)? = null,
     onPickBooklistFiles: (suspend () -> List<Path>)? = null,
+    chooseReviewedBlocks: (suspend () -> List<Path>)? = null,
     explainProvider: BookExplainer? = null,
     chooseBook: suspend () -> Path?) {
     val explainer = remember(controller.library, explainProvider) { explainProvider ?: BookExplainer(library = controller.library) }
@@ -598,6 +599,13 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 hinge = hinge,
                                 onExportNotes = onExportNotes,
                                 onNoteSession = { noteReader = it },
+                                onLoadPdfVisuals = if (controller.library.lazyPdfExtras) controller::ensureVisualsForPages else null,
+                                onImportReviewedBlocks = chooseReviewedBlocks?.let { choose ->
+                                    { bookId -> run {
+                                        val files = choose()
+                                        if (files.isNotEmpty()) controller.importReviewedBlocks(bookId, files)
+                                    } }
+                                },
                                 onBrowsePage = { page ->
                                     run { controller.page(page, commitProgress = false) }
                                 },

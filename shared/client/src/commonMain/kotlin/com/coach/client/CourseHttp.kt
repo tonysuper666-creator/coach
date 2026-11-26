@@ -243,7 +243,13 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
 
     suspend fun learningProfile(): JsonObject? {
         val reply = http.get("$base/learning-sync/profile")
-        return if (reply.status.isSuccess()) Json.parseToJsonElement(reply.bodyAsText()).jsonObject else null
+        if (!reply.status.isSuccess() || reply.contentType()?.withoutParameters() != ContentType.Application.Json) return null
+        val body = reply.bodyAsText()
+        return try {
+            Json.parseToJsonElement(body) as? JsonObject
+        } catch (_: kotlinx.serialization.SerializationException) {
+            null
+        }
     }
 
     suspend fun learningChanges(epoch: String?, after: Long, stream: String): JsonObject? {

@@ -9,7 +9,8 @@ import java.sql.Connection
 import java.util.UUID
 
 internal object LearningJournal {
-    val enabled get() = System.getenv("COACH_LEARNING_SYNC") == "1"
+    val enabled get() = System.getenv("COACH_LEARNING_SYNC")?.let { it == "1" }
+        ?: java.lang.Boolean.getBoolean("coach.learningSync")
 
     fun installProfile(library: TextbookLibrary) {
         installLibrary(library)

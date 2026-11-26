@@ -39,6 +39,8 @@ internal sealed interface NotesFileSave {
     data class Saved(val fileName: String) : NotesFileSave
     data object Cancelled : NotesFileSave
     data class Failed(val message: String) : NotesFileSave
+    /** 保存框已经在开，这次点击不再开第二个。 */
+    data object Busy : NotesFileSave
 }
 
 private const val ANSWER_SUMMARY_LIMIT = 180
@@ -127,6 +129,9 @@ internal data class StoredMistakeRow(
     val understood: Boolean?,
     val guessed: Boolean,
     val completed: Boolean,
+    val sources: Int = 0,
+    val firstUnderstood: Boolean? = null,
+    val firstGuessed: Boolean = false,
 )
 
 internal fun assembleBookNotesPage(
@@ -167,7 +172,7 @@ internal fun assembleBookNotesPage(
         val mine = notesOneLine(row.answerText).ifBlank { notesOneLine(row.wrongText) }.ifBlank { "（没有记下我的答案）" }
         val correct = notesOneLine(row.solution).ifBlank { "（没有单独记下正解）" }
         val stem = notesOneLine(row.prompt).ifBlank { "（题干未记下）" }
-        val state = if (row.guessed || row.understood == false) "不确定" else "错题"
+        val state = if (row.markedUncertain()) "不确定" else "错题"
         val page = sourcePageForLesson(row.lesson, lessonFirstPages, tocStartPages)
         BookNoteEntry(
             "mistake-${row.lesson}-${row.mode}",
@@ -180,18 +185,26 @@ internal fun assembleBookNotesPage(
     return BookNotesPage(bookId, notesOneLine(title).ifBlank { "未命名的书" }, annotations, asks, wrong)
 }
 
+/**
+ * 首次作答的「还需复习」和猜答写在 sources 与第一条历史里，复习行的 understood/guessed 列当时仍是空的。
+ * 后来答对并完成的题，completed 会改成 1；来源位是或上去的，不能再用来把已掌握的题算进来。
+ */
 internal fun isWrongOrUncertain(row: StoredMistakeRow): Boolean {
+    if (row.completed) return false
+    if (row.markedUncertain()) return true
     val mine = row.answerText.ifBlank { row.wrongText }.trim()
     val choiceWrong = row.mode == QuestionMode.CHOICE.name && mine.isNotEmpty() &&
         row.solution.isNotBlank() && mine != row.solution.trim()
-    val masteredChoice = row.completed && !row.guessed && row.mode == QuestionMode.CHOICE.name &&
-        mine.isNotEmpty() && row.solution.isNotBlank() && mine == row.solution.trim()
-    val masteredShort = row.completed && !row.guessed && row.mode == QuestionMode.SHORT_ANSWER.name && row.understood == true
-    if (masteredChoice || masteredShort) return false
-    if (row.guessed) return true
-    if (row.understood == false) return true
     if (choiceWrong) return true
-    return row.mode == QuestionMode.CHOICE.name && mine.isNotEmpty() && !row.completed
+    return row.mode == QuestionMode.CHOICE.name && mine.isNotEmpty()
+}
+
+private fun StoredMistakeRow.markedUncertain(): Boolean {
+    if (guessed || firstGuessed) return true
+    if (understood == false || firstUnderstood == false) return true
+    if ((sources and LocalReviewSource.GUESSED.bit) != 0) return true
+    if ((sources and LocalReviewSource.SELF_CHECK.bit) != 0) return true
+    return false
 }
 
 private val noteOrder = compareBy<BookNoteEntry>({ it.page ?: Int.MAX_VALUE }, { it.id })
@@ -322,15 +335,30 @@ internal fun loadStoredBookNotes(
         }
     }
     val mistakes = if (!BookSchemaMigration.tableExists(db, "book_reviews")) emptyList() else {
-        db.prepareStatement(
-            """SELECT lesson, mode, prompt, solution, wrong_text, answer_text, revealed, understood, guessed, completed
-               FROM book_reviews WHERE book=? ORDER BY lesson, mode""".trimIndent(),
-        ).use { sql ->
+        val withHistory = BookSchemaMigration.tableExists(db, "book_review_history")
+        val mistakeSql = if (withHistory) {
+            """SELECT r.lesson, r.mode, r.prompt, r.solution, r.wrong_text, r.answer_text,
+                      r.revealed, r.understood, r.guessed, r.completed, r.sources,
+                      (SELECT h.understood FROM book_review_history h
+                        WHERE h.book=r.book AND h.lesson=r.lesson AND h.mode=r.mode
+                        ORDER BY h.rowid LIMIT 1),
+                      (SELECT h.guessed FROM book_review_history h
+                        WHERE h.book=r.book AND h.lesson=r.lesson AND h.mode=r.mode
+                        ORDER BY h.rowid LIMIT 1)
+               FROM book_reviews r WHERE r.book=? ORDER BY r.lesson, r.mode"""
+        } else {
+            """SELECT lesson, mode, prompt, solution, wrong_text, answer_text,
+                      revealed, understood, guessed, completed, sources
+               FROM book_reviews WHERE book=? ORDER BY lesson, mode"""
+        }
+        db.prepareStatement(mistakeSql.trimIndent()).use { sql ->
             sql.setString(1, bookId)
             sql.executeQuery().use { rows ->
                 buildList {
                     while (rows.next()) {
                         val understoodRaw = rows.getObject(8)
+                        val firstUnderstoodRaw = if (withHistory) rows.getObject(12) else null
+                        val firstGuessedRaw = if (withHistory) rows.getObject(13) else null
                         add(
                             StoredMistakeRow(
                                 lesson = rows.getString(1),
@@ -343,6 +371,9 @@ internal fun loadStoredBookNotes(
                                 understood = if (understoodRaw == null) null else rows.getInt(8) != 0,
                                 guessed = rows.getInt(9) != 0,
                                 completed = rows.getInt(10) != 0,
+                                sources = rows.getInt(11),
+                                firstUnderstood = if (firstUnderstoodRaw == null) null else rows.getInt(12) != 0,
+                                firstGuessed = firstGuessedRaw != null && rows.getInt(13) != 0,
                             ),
                         )
                     }

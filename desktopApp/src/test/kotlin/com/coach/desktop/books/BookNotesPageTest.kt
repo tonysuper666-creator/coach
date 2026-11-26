@@ -9,6 +9,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.runSkikoComposeUiTest
 import androidx.compose.ui.text.AnnotatedString
 import com.coach.ui.CoachTheme
+import com.coach.domain.fsrs.FsrsRating
 import java.nio.file.Files
 import java.sql.DriverManager
 import kotlin.test.Test
@@ -200,6 +201,90 @@ class BookNotesPageTest {
         assertTrue(text.contains("原句"))
         assertTrue(text.contains("批注"))
         assertEquals(renderBookNotesMarkdown(page), text)
+    }
+
+    @Test fun firstSelfCheckAndGuessStayUntilMastered() {
+        val root = Files.createTempDirectory("book-notes-self-check-")
+        val library = TextbookLibrary(root.resolve("library"))
+        val book = library.importBook(syntheticTextbook(root.resolve("synthetic")))
+        val lessons = book.lessons
+        assertTrue(lessons.size >= 3, "合成书至少要有三节")
+        val reviewLesson = lessons[0]
+        val guessedLesson = lessons[1]
+        val masteredLesson = lessons[2]
+        library.saveAnswer(
+            book.id, reviewLesson.id, QuestionMode.SHORT_ANSWER,
+            PracticeAnswer("还要再看一遍", revealed = true, understood = false),
+        )
+        library.saveAnswer(
+            book.id, guessedLesson.id, QuestionMode.SHORT_ANSWER,
+            PracticeAnswer("这句我是猜的", revealed = true, understood = true, guessed = true),
+        )
+        library.saveAnswer(
+            book.id, masteredLesson.id, QuestionMode.SHORT_ANSWER,
+            PracticeAnswer("这节能讲清楚", revealed = true, understood = true),
+        )
+        val pages = lessons.associate { it.id to it.firstPage }
+        val loaded = library.loadBookNotes(book.id, book.title, pages)
+        assertEquals(2, loaded.mistakes.size)
+        assertEquals(reviewLesson.firstPage, loaded.mistakes.single { it.lines.any { line -> line.second == "还要再看一遍" } }.page)
+        assertEquals(1, reviewLesson.firstPage)
+        val markdown = renderBookNotesMarkdown(loaded)
+        assertTrue(markdown.contains("还要再看一遍"))
+        assertTrue(markdown.contains("这句我是猜的"))
+        assertTrue(markdown.contains("状态：不确定"))
+        assertFalse(markdown.contains("这节能讲清楚"))
+        assertFalse(markdown.contains("Photosynthesis is the process"), markdown)
+        val card = library.review(book.id, reviewLesson.id, QuestionMode.SHORT_ANSWER)
+        library.saveReviewRating(card, FsrsRating.GOOD, PracticeAnswer("还要再看一遍", revealed = true, understood = true))
+        val after = renderBookNotesMarkdown(library.loadBookNotes(book.id, book.title, pages))
+        assertFalse(after.contains("还要再看一遍"), after)
+        assertTrue(after.contains("这句我是猜的"))
+    }
+
+    @Test fun twoHundredStoredItemsIncludeFirstSelfCheck() {
+        val root = Files.createTempDirectory("book-notes-two-hundred-")
+        val library = TextbookLibrary(root.resolve("library"))
+        val book = library.importBook(syntheticTextbook(root.resolve("synthetic")))
+        val lesson = book.lessons.first()
+        library.saveAnswer(
+            book.id, lesson.id, QuestionMode.SHORT_ANSWER,
+            PracticeAnswer("第 1 页还要复习", revealed = true, understood = false),
+        )
+        DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+            db.prepareStatement(
+                """INSERT INTO book_notes(book,id,version,page,start,end,quote,note,text_sha256,revision,last_mutation_id,deleted)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,0)""",
+            ).use { sql ->
+                repeat(199) { index ->
+                    sql.setString(1, book.id)
+                    sql.setString(2, "n$index")
+                    sql.setString(3, "v1")
+                    sql.setInt(4, (index % 40) + 1)
+                    sql.setInt(5, index)
+                    sql.setInt(6, index + 1)
+                    sql.setString(7, "句 $index")
+                    sql.setString(8, "注 $index")
+                    sql.setString(9, "sha")
+                    sql.setInt(10, 1)
+                    sql.setString(11, "m$index")
+                    sql.executeUpdate()
+                }
+            }
+        }
+        val started = System.nanoTime()
+        val loaded = library.loadBookNotes(book.id, book.title, mapOf(lesson.id to lesson.firstPage))
+        val markdown = renderBookNotesMarkdown(loaded)
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000
+        assertEquals(200, loaded.itemCount)
+        assertEquals(199, loaded.annotations.size)
+        assertEquals(1, loaded.mistakes.size)
+        assertEquals(lesson.firstPage, loaded.mistakes.single().page)
+        assertTrue(markdown.contains("共 200 条"))
+        assertTrue(markdown.contains("第 1 页还要复习"))
+        assertTrue(markdown.contains("注 198"))
+        assertFalse(markdown.contains("Photosynthesis is the process"), markdown)
+        assertTrue(elapsedMs < 1000, "200 条打开用了 ${elapsedMs}ms")
     }
 
     private fun assertNotNullCopied(value: String?): String = checkNotNull(value) { "没有复制到剪贴板" }

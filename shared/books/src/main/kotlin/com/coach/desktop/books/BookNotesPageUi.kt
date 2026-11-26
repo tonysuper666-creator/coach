@@ -22,7 +22,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,8 +49,8 @@ import com.coach.ui.v7.CoachLoadingDots
 import com.coach.ui.v7.PaperCard
 import com.coach.ui.v7.V7TextButton
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 
 @Composable
 internal fun BookNotesPageOverlay(
@@ -85,8 +84,8 @@ internal fun BookNotesPageOverlay(
         return
     }
     val clipboard = LocalClipboardManager.current
-    val scope = rememberCoroutineScope()
     val markdown = remember(ready) { renderBookNotesMarkdown(ready) }
+    val saving = remember(bookId) { AtomicBoolean(false) }
     BookNotesPageView(
         page = ready,
         status = status,
@@ -97,15 +96,17 @@ internal fun BookNotesPageOverlay(
             status = "已复制 ${ready.itemCount} 条"
         },
         onExport = {
-            scope.launch {
-                status = "正在保存…"
-                val result = bookSaveNotesMarkdown(notesExportFileName(ready.title), markdown)
+            if (!saving.compareAndSet(false, true)) return@BookNotesPageView
+            bookSaveNotesMarkdown(notesExportFileName(ready.title), markdown) { result ->
+                saving.set(false)
                 status = when (result) {
+                    NotesFileSave.Busy -> return@bookSaveNotesMarkdown
                     NotesFileSave.Cancelled -> "没有保存"
                     is NotesFileSave.Failed -> result.message
                     is NotesFileSave.Saved -> "已保存 ${result.fileName}。用记事本打开时中文应可读。"
                 }
             }
+            if (saving.get()) status = "正在保存…"
         },
     )
 }

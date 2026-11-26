@@ -43,6 +43,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * LearningCoach 2.0 书单主视图（`BooklistScreen`，居中单栏 <= 720dp，全屏唯一 PrimaryButton）：
@@ -81,6 +82,7 @@ internal fun BooklistScreen(
     var moreMenuOpen by remember(collection.record.id) { mutableStateOf(false) }
     var notesStatus by remember(collection.record.id) { mutableStateOf<String?>(null) }
     var notesBusy by remember(collection.record.id) { mutableStateOf(false) }
+    val notesExportGate = remember(collection.record.id) { AtomicBoolean(false) }
     val notesScope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
 
@@ -193,6 +195,7 @@ internal fun BooklistScreen(
                                 text = { Text("导出书单笔记", style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary) },
                                 enabled = !notesBusy && memberBooks.isNotEmpty(),
                                 onClick = {
+                                    if (!notesExportGate.compareAndSet(false, true)) return@DropdownMenuItem
                                     moreMenuOpen = false
                                     notesScope.launch {
                                         notesBusy = true
@@ -200,15 +203,28 @@ internal fun BooklistScreen(
                                         val export = withContext(Dispatchers.IO) {
                                             loadBooklistNotes(library, collection.record.title, memberBooks)
                                         }
-                                        notesBusy = false
                                         if (export == null) {
+                                            notesBusy = false
+                                            notesExportGate.set(false)
                                             notesStatus = "书单笔记没有整理出来。"
-                                        } else {
-                                            when (val saved = bookSaveNotesMarkdown(notesExportFileName(collection.record.title), export.markdown)) {
-                                                NotesFileSave.Cancelled -> notesStatus = "没有保存"
-                                                is NotesFileSave.Failed -> notesStatus = saved.message
-                                                is NotesFileSave.Saved -> notesStatus = "已保存 ${saved.fileName}，共 ${export.itemCount} 条。用记事本打开时中文应可读。"
+                                            return@launch
+                                        }
+                                        val scheduled = bookSaveNotesMarkdown(
+                                            notesExportFileName(collection.record.title),
+                                            export.markdown,
+                                        ) { saved ->
+                                            notesBusy = false
+                                            notesExportGate.set(false)
+                                            notesStatus = when (saved) {
+                                                NotesFileSave.Busy -> return@bookSaveNotesMarkdown
+                                                NotesFileSave.Cancelled -> "没有保存"
+                                                is NotesFileSave.Failed -> saved.message
+                                                is NotesFileSave.Saved -> "已保存 ${saved.fileName}，共 ${export.itemCount} 条。用记事本打开时中文应可读。"
                                             }
+                                        }
+                                        if (!scheduled) {
+                                            notesBusy = false
+                                            notesExportGate.set(false)
                                         }
                                     }
                                 },

@@ -406,7 +406,35 @@ internal fun bookClipboardSelection(entry: ClipEntry?): AnnotatedString? {
 @OptIn(ExperimentalComposeUiApi::class)
 internal fun bookClipboardText(text: String) = ClipEntry(StringSelection(text))
 
-internal fun bookSaveNotesMarkdown(suggestedFileName: String, markdown: String): NotesFileSave {
+private val notesExportDialogOpen = java.util.concurrent.atomic.AtomicBoolean(false)
+
+/**
+ * 保存框放到下一个 AWT 事件里开。若在 Compose 点击回调里直接打开，模态框会把同一次点击再派发一遍，出现两个保存框。
+ * 返回 false 表示这次没有排上（已经有一个框）。
+ */
+internal fun bookSaveNotesMarkdown(
+    suggestedFileName: String,
+    markdown: String,
+    onResult: (NotesFileSave) -> Unit,
+): Boolean {
+    if (!notesExportDialogOpen.compareAndSet(false, true)) {
+        onResult(NotesFileSave.Busy)
+        return false
+    }
+    java.awt.EventQueue.invokeLater {
+        val result = try {
+            showNotesSaveDialog(suggestedFileName, markdown)
+        } catch (_: Exception) {
+            NotesFileSave.Failed("没有写成文件")
+        } finally {
+            notesExportDialogOpen.set(false)
+        }
+        onResult(result)
+    }
+    return true
+}
+
+private fun showNotesSaveDialog(suggestedFileName: String, markdown: String): NotesFileSave {
     val dialog = java.awt.FileDialog(null as java.awt.Frame?, "导出笔记", java.awt.FileDialog.SAVE)
     dialog.file = suggestedFileName
     dialog.isVisible = true

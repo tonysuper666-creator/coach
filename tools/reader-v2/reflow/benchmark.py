@@ -73,14 +73,18 @@ def run(args) -> None:
     output.mkdir(parents=True, exist_ok=True)
     (output / "classes").mkdir(exist_ok=True)
     started = time.perf_counter()
-    subprocess.run(["javac", "-cp", args.pdfbox_classpath, "-d", str(output / "classes"), str(HERE / "PdfReflowProbe.java")], check=True)
+    subprocess.run(["javac", "-encoding", "UTF-8", "-cp", args.pdfbox_classpath, "-d", str(output / "classes"), str(HERE / "PdfReflowProbe.java")], check=True)
     compiled = time.perf_counter() - started
     cp = str(output / "classes") + os.pathsep + args.pdfbox_classpath
     started = time.perf_counter()
     with (output / "ac-private.jsonl").open("w", encoding="utf-8") as out, (output / "ac-private.log").open("w", encoding="utf-8") as log:
-        subprocess.run(["java", "-cp", cp, "PdfReflowProbe", str(pdf), args.pages], stdout=out, stderr=log, check=True)
+        # The child inherits a file handle, not Python's text encoder. Windows
+        # can select the console code page even when file.encoding is UTF-8.
+        subprocess.run(["java", "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8",
+                        "-cp", cp, "PdfReflowProbe", str(pdf), args.pages], stdout=out, stderr=log, check=True)
     wall = time.perf_counter() - started
-    ac = [json.loads(line) for line in (output / "ac-private.jsonl").read_text(encoding="utf-8").splitlines()]
+    with (output / "ac-private.jsonl").open(encoding="utf-8") as stream:
+        ac = [json.loads(line) for line in stream]
     btime = {}
     if args.models_dir:
         os.environ["HF_HUB_OFFLINE"] = "1"

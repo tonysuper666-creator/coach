@@ -369,6 +369,12 @@ internal object BookSchemaMigration {
             PRIMARY KEY(account_key, server_shelf_book_id)
         )""".trimIndent(),
         "CREATE INDEX IF NOT EXISTS idx_book_pending_deletes_account ON book_pending_deletes(account_key, created_at)",
+        """CREATE TABLE IF NOT EXISTS exam_daily_state(
+            course_id TEXT PRIMARY KEY,
+            daily_minutes INTEGER NOT NULL,
+            pins_json TEXT NOT NULL DEFAULT '[]',
+            updated_at INTEGER NOT NULL
+        )""".trimIndent(),
     )
 
     private val V2_TABLES = listOf(
@@ -461,6 +467,7 @@ internal object BookSchemaMigration {
 
     private val REQUIRED_V7_TABLES = REQUIRED_V6_TABLES + setOf(
         "book_pending_deletes",
+        "exam_daily_state",
     )
 
     fun upgradeAndMigrate(

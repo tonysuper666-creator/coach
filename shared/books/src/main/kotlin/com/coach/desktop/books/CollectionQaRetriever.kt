@@ -936,7 +936,7 @@ internal object CollectionQaRetriever {
                         val title = rows.getString(2)
                         val format = rows.getString(3)
                         val role = CourseMaterialRole.fromWire(rows.getString(4))
-                        val rank = rows.getInt(5).coerceIn(1, 4)
+                        val rank = if (collectionKind == CollectionKind.COURSE) role.authorityRank else rows.getInt(5).coerceIn(1, 4)
                         val weekNum = rows.getObject(6)?.let { (it as Number).toInt() }
                             ?: weekFileRegex.find(title)?.let { m ->
                                 (m.groupValues[1].ifBlank { m.groupValues[2] }).toIntOrNull()
@@ -1035,7 +1035,8 @@ internal object CollectionQaRetriever {
         val wkPrefix = weekNum?.let { "第${it}周" }.orEmpty()
         return when (role) {
             CourseMaterialRole.SYLLABUS -> "课程手册"
-            CourseMaterialRole.LECTURE_SLIDES -> if (wkPrefix.isNotEmpty()) "${wkPrefix}讲义" else title.take(12)
+            CourseMaterialRole.LECTURE_SLIDES -> if (wkPrefix.isNotEmpty()) "${wkPrefix}课件" else title.take(12)
+            CourseMaterialRole.HANDOUT -> "${wkPrefix}讲义"
             CourseMaterialRole.TUTORIAL -> if (wkPrefix.isNotEmpty()) "${wkPrefix}习题" else title.take(12)
             CourseMaterialRole.SOLUTION_KEY -> if (wkPrefix.isNotEmpty()) "${wkPrefix}解答" else title.take(12)
             CourseMaterialRole.TRANSCRIPT -> if (wkPrefix.isNotEmpty()) "${wkPrefix}录音" else "课堂录音"

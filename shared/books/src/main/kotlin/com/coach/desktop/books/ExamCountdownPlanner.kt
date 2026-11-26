@@ -57,6 +57,7 @@ internal data class TopicCountdownGap(
     val estimatedMinutes: Int = 35,
     val scheduledDayOffset: Int? = null,
     val cardMetaLine: String = "",
+    val hasPracticeEvidence: Boolean = false,
 )
 
 internal data class DailySprintSlot(
@@ -240,6 +241,7 @@ internal object ExamCountdownPlanner {
                 hasRecentMockLoss = hasMockLoss,
                 missedMockPages = missedPages,
                 estimatedMinutes = clampedEst,
+                hasPracticeEvidence = !unseen || matchingFsrs.isNotEmpty(),
             ) to topic.ord
         }
 
@@ -428,6 +430,10 @@ internal object ExamCountdownPlanner {
                 rec.conceptKey.endsWith(":${topic.topicId}")
         }
         if (direct.isNotEmpty()) return direct
+        if (topic.weekLabel == CourseExamPoints.LABEL) {
+            val name = CourseExamPoints.normalize(topic.title)
+            return concepts.filter { it.bookId in topicBookIds && CourseExamPoints.normalize(it.canonicalName) == name }
+        }
         return concepts.filter { rec ->
             rec.bookId in topicBookIds &&
                 (rec.collectionId == null || rec.collectionId == topic.collectionId)

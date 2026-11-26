@@ -55,9 +55,10 @@ internal object CourseAutoAligner {
                     title = mat.title,
                     format = mat.format,
                     previewText = preview,
+                    sourceFilename = mat.sourceFilename,
                     pageCount = mat.pageCount,
                 )
-                val inferredWeek = mat.weekNum ?: CourseMaterialRole.inferWeekNumber(mat.title, null, preview)
+                val inferredWeek = mat.weekNum ?: CourseMaterialRole.inferWeekNumber(mat.title, mat.sourceFilename, preview)
                 CourseMaterialLinkSpec(mat.bookId, inferredRole, inferredWeek, false, idx)
             }
         }
@@ -283,6 +284,7 @@ internal object CourseAutoAligner {
             courseId = courseId,
             plan = CourseAlignmentPlan(
                 materialUpdates = resolvedMaterials,
+                includeExamPoints = current.isExam,
                 topics = topics,
             ),
         )
@@ -301,7 +303,7 @@ internal object CourseAutoAligner {
         val sourceTexts = mutableListOf<String>()
         for (src in orderedSources) {
             val pages = pagesByBook[src.bookId].orEmpty()
-            val windowPages = pages.filter { it.number in src.startPage..src.endPage }.ifEmpty { pages }
+            val windowPages = pages.filter { it.number in src.startPage..src.endPage }
             sourceTexts += windowPages.joinToString("\n") { it.text }
             val firstPage = windowPages.firstOrNull { it.text.isNotBlank() } ?: continue
             val rawQuote = firstAnchorLine(firstPage.text)
@@ -330,34 +332,9 @@ internal object CourseAutoAligner {
                 citations = srcCits,
             )
         }
-        val hasL1 = orderedSources.any { it.authorityRank == 1 }
-        val hasL2 = orderedSources.any { it.authorityRank == 2 }
-        val discrepancies = if (hasL1 && hasL2) {
-            val l1 = orderedSources.first { it.authorityRank == 1 }
-            val l2 = orderedSources.first { it.authorityRank == 2 }
-            listOf(
-                CourseDiscrepancyItem(
-                    point = "讲义优先于教材细枝末节",
-                    authoritativeView = if (detail.isExam) {
-                        "L1 ${l1.role.labelZh}《${l1.bookTitle}》代表本课考核口径与课堂重点。"
-                    } else {
-                        "${l1.role.labelZh}《${l1.bookTitle}》代表课堂主线与核心重点。"
-                    },
-                    secondaryView = "核心教材《${l2.bookTitle}》（第 ${l2.startPage}–${l2.endPage} 页）提供背景推导与扩展案例。",
-                    advice = if (detail.isExam) {
-                        "作答结论优先对齐讲义和官方答案，教材细节仅作辅助论证。"
-                    } else {
-                        "阅读时先对照讲义主线，再结合教材扩展理解。"
-                    },
-                    citations = citations.filter { it.bookId == l1.bookId || it.bookId == l2.bookId }.take(2),
-                ),
-            )
-        } else {
-            emptyList()
-        }
         val tentativeNotice = if (detail.isExam) {
             buildString {
-                append("以课堂大纲与 L1 讲义为准")
+                append("优先参考教材，其次是课件、讲义")
                 if (detail.examProfile.examDateTentative || detail.examProfile.examFormatTentative) {
                     append(" · 考试日期与题型标注为暂定")
                 }
@@ -365,8 +342,17 @@ internal object CourseAutoAligner {
         } else {
             "按当前材料顺序整理"
         }
-        val promptStem = if (detail.isExam) {
-            "结合「${topic.title}」的权威讲义与核心概念，用自己的话阐释其核心机制、适用前提，并对比课堂强调与教材拓展之间的关键边界（建议 300 词左右）。"
+        val technique = detail.pastPaperTechniques[topic.topicId]?.firstOrNull()
+        val promptStem = if (technique != null) {
+            when (technique) {
+                ExamTechnique.CALCULATION -> "为「${topic.title}」设计一组简单数据，列出计算步骤，并解释结果。"
+                ExamTechnique.COMPARISON -> "为「${topic.title}」构造两个条件不同的例子，比较结果并解释原因。"
+                ExamTechnique.APPLICATION -> "在一个新情境中运用「${topic.title}」，说明适用条件。"
+                ExamTechnique.EXPLANATION -> "用自己的话解释「${topic.title}」，再举例说明它如何起作用。"
+                ExamTechnique.RECALL -> "写出「${topic.title}」的定义与一个可用来识别它的特征。"
+            }
+        } else if (detail.isExam) {
+            "结合「${topic.title}」的教材和课件，用自己的话阐释其核心机制、适用前提，并对比课堂强调与教材拓展之间的关键边界（建议 300 词左右）。"
         } else {
             "结合「${topic.title}」的核心概念，用自己的话阐释主要思路与适用前提（建议 300 词左右）。"
         }
@@ -379,7 +365,7 @@ internal object CourseAutoAligner {
         return CourseTopicPack(
             topicId = topic.topicId,
             summary = if (detail.isExam) {
-                "本专题共关联 ${orderedSources.size} 份课程材料，已按 L1 大纲/讲义 → L2 教材 → L3 文献 → L4 笔记排好阅读顺序。"
+                "本专题共关联 ${orderedSources.size} 份课程材料，已按教材、课件、讲义的优先级排列。"
             } else {
                 "本章共关联 ${orderedSources.size} 份材料，已按阅读顺序排好。"
             },
@@ -394,7 +380,7 @@ internal object CourseAutoAligner {
                 "论述与概念辨析（暂定）"
             },
             keyPoints = keyPoints,
-            discrepancies = discrepancies,
+            discrepancies = CourseExamPoints.discrepancies(topic, pagesByBook),
             practicePrompt = CoursePracticePrompt(
                 promptId = "${topic.topicId}-offline-essay",
                 kind = "ESSAY",
@@ -518,7 +504,7 @@ internal object CourseAutoAligner {
         val existingByBook = existing.materials.associateBy { it.bookId }
         val profileObj = body["examProfile"] as? JsonObject
         val profile = profileObj?.let { p ->
-            CourseExamProfile(
+            existing.examProfile.copy(
                 examDate = (p["examDate"] as? JsonPrimitive)?.contentOrNull.orEmpty().ifBlank { existing.examProfile.examDate },
                 examDateTentative = (p["examDateTentative"] as? JsonPrimitive)?.booleanOrNull ?: existing.examProfile.examDateTentative,
                 examFormat = (p["examFormat"] as? JsonPrimitive)?.contentOrNull.orEmpty().ifBlank { existing.examProfile.examFormat },
@@ -550,13 +536,13 @@ internal object CourseAutoAligner {
                 val s = sEl as? JsonObject ?: return@mapNotNull null
                 val bookId = (s["bookId"] as? JsonPrimitive)?.contentOrNull.orEmpty()
                 if (bookId.isBlank()) return@mapNotNull null
-                val mat = existingByBook[bookId]
+                val mat = existingByBook[bookId] ?: return@mapNotNull null
                 CourseTopicLinkPlan(
                     bookId = bookId,
                     tocNodeId = (s["tocNodeId"] as? JsonPrimitive)?.contentOrNull,
                     startPage = ((s["startPage"] as? JsonPrimitive)?.intOrNull ?: 1).coerceAtLeast(1),
-                    endPage = ((s["endPage"] as? JsonPrimitive)?.intOrNull ?: mat?.pageCount ?: 1).coerceAtLeast(1),
-                    role = CourseMaterialRole.fromWire((s["role"] as? JsonPrimitive)?.contentOrNull ?: mat?.role?.wire),
+                    endPage = ((s["endPage"] as? JsonPrimitive)?.intOrNull ?: mat.pageCount).coerceAtLeast(1),
+                    role = mat.role,
                     scopeNote = (s["scopeNote"] as? JsonPrimitive)?.contentOrNull.orEmpty(),
                 )
             }
@@ -577,6 +563,7 @@ internal object CourseAutoAligner {
             materialUpdates = updates,
             topics = topics,
             spoilerSanitizedCount = sanitized,
+            includeExamPoints = existing.isExam,
         )
     }
 
@@ -589,7 +576,6 @@ internal object CourseAutoAligner {
             for (src in topic.sources) {
                 val pages = pagesByBook[src.bookId].orEmpty()
                     .filter { it.number in src.startPage..src.endPage }
-                    .ifEmpty { pagesByBook[src.bookId].orEmpty() }
                 for (p in pages.take(20)) {
                     val raw = p.text
                     val text = if (src.role == CourseMaterialRole.USER_NOTES) {
@@ -619,6 +605,7 @@ internal object CourseAutoAligner {
             put("examDateTentative", detail.examProfile.examDateTentative)
             put("examFormatTentative", detail.examProfile.examFormatTentative)
             put("examFormat", detail.examProfile.examFormat)
+            put("examTechniques", buildJsonArray { detail.pastPaperTechniques[topic.topicId].orEmpty().forEach { add(JsonPrimitive(it.name)) } })
             put("blocks", blocks)
         }
     }

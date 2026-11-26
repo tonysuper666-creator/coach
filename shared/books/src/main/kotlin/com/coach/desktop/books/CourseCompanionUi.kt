@@ -93,7 +93,7 @@ internal fun CourseCompanionPanel(
                 Text(
                     courseContext.authorityNotice.ifBlank {
                         if (courseContext.examProfile.isExam) {
-                            "按 L1 大纲/讲义 -> L2 核心教材 -> L3 文献 -> L4 笔记顺序对照"
+                            "优先参考教材，其次是课件、讲义。"
                         } else {
                             "按当前材料顺序对照"
                         }

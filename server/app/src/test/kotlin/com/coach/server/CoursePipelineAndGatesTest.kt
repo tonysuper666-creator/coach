@@ -127,6 +127,7 @@ class CoursePipelineAndGatesTest {
                     batchKey: String,
                     maxTokens: Int,
                 ): CourseAlignReply {
+                    assertFalse(userPrompt.contains("synthetic-held-out-stem"))
                     assertFalse(userPrompt.contains("2022 Past Exam"), "Gate 1 must drop spoiler notes before prompt")
                     return CourseAlignReply(
                         text = buildJsonObject {
@@ -160,7 +161,16 @@ class CoursePipelineAndGatesTest {
                 buildJsonObject {
                     put("courseId", "course-econ-1")
                     put("courseTitle", "Applied Microeconomics")
+                    put("textbookChapters", buildJsonArray {
+                        add(buildJsonObject { put("bookId", "held-out"); put("title", "synthetic-held-out-stem") })
+                    })
                     put("materials", buildJsonArray {
+                        add(buildJsonObject {
+                            put("bookId", "held-out")
+                            put("title", "Untitled.pdf")
+                            put("role", "PAST_EXAM")
+                            put("previewText", "synthetic-held-out-stem")
+                        })
                         add(buildJsonObject {
                             put("bookId", "past-1")
                             put("title", "Past-Exam-Paper-2022.pdf")
@@ -665,6 +675,9 @@ class CoursePipelineAndGatesTest {
             ): BatchTransportReply {
                 seenMaxTokens[task] = maxTokens
                 if (task == "course_topic_map") {
+                    val mapBlocks = Json.parseToJsonElement(userPrompt).jsonObject["blocks"]!!.jsonArray
+                    assertTrue(mapBlocks.all { it.jsonObject["authorityRank"]?.jsonPrimitive?.content == "1" })
+                    assertFalse(userPrompt.contains("synthetic-held-out-stem"))
                     val cur = inFlight.incrementAndGet()
                     peakInFlight.accumulateAndGet(cur, ::maxOf)
                     kotlinx.coroutines.delay(40)
@@ -679,6 +692,12 @@ class CoursePipelineAndGatesTest {
         }
         val pipe = CourseTopicSynthesisPipeline(transport, maxMapConcurrency = 2)
         val blocks = buildJsonArray {
+            add(buildJsonObject {
+                put("bookId", "held-out")
+                put("bookTitle", "Untitled")
+                put("role", "PAST_EXAM")
+                put("text", "synthetic-held-out-stem")
+            })
             for (i in 1..24) {
                 add(buildJsonObject {
                     put("bookId", "bk-1")

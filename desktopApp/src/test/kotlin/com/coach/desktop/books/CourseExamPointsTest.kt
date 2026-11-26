@@ -61,7 +61,13 @@ class CourseExamPointsTest {
                     val extension = if (role == "Slides") "pptx" else "pdf"
                     val file = directory.resolve("Course-$index-$role.$extension")
                     val orderedTerms = terms.drop(roleIndex) + terms.take(roleIndex)
-                    val lines = orderedTerms.map { "$it: A synthetic $role example for practice." }
+                    val lines = orderedTerms.map { name ->
+                        when (role) {
+                            "Textbook" -> "$name: A synthetic textbook definition."
+                            "Slides" -> "Week 3 discussion applies ${name.uppercase()} in a new example."
+                            else -> "An independent worked example illustrates $name."
+                        }
+                    }
                     if (role == "Slides") writeSlides(file, lines) else writePdf(file, lines)
                     library.stageBookImport(file).book.id
                 }
@@ -78,7 +84,7 @@ class CourseExamPointsTest {
                         assertEquals(roles, point.sources.map { it.role })
                         for (source in point.sources) {
                             assertEquals(source.startPage, source.endPage)
-                            assertTrue(CourseStore.loadPagesForBook(db, source.bookId).single { it.number == source.startPage }.text.contains(point.title))
+                            assertTrue(CourseStore.loadPagesForBook(db, source.bookId).single { it.number == source.startPage }.text.contains(point.title, ignoreCase = true))
                         }
                     }
                     repeat(2) { assertEquals(10, CoursePastPaper.import(db, courseId, paper)) }

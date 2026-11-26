@@ -323,6 +323,7 @@ sourceSets.getByName("main").java.srcDir("../shared/books/src/main/java")
 // Counts-only structure baseline. Test sources can see internal book types, and this
 // task is absent from the shipped application jar.
 kotlin.sourceSets.getByName("test").kotlin.srcDir(rootProject.file("tools/reader-v2/structure-audit/src"))
+kotlin.sourceSets.getByName("test").kotlin.srcDir(rootProject.file("tools/reader-v2/book-map-verify/src"))
 tasks.register<JavaExec>("structureAudit") {
     group = "verification"
     description = "Import local books on the Windows path and write structure counts. The report stays outside the checkout."
@@ -331,7 +332,6 @@ tasks.register<JavaExec>("structureAudit") {
     mainClass.set("com.coach.desktop.books.StructureAuditMain")
     jvmArgs("-Xmx4g", "-Dfile.encoding=UTF-8")
 }
-
 // Held-out coverage. Paths are properties so Windows quoting stays intact.
 // The report is refused inside a git checkout and contains no question text.
 tasks.register<JavaExec>("examCoverage") {
@@ -371,4 +371,13 @@ tasks.register<JavaExec>("prepareBookStanceCorpus") {
         listOf(flag, value)
     }.flatten()
     args(stanceArgs)
+}
+
+tasks.register<JavaExec>("bookMapVerify") {
+    group = "verification"
+    description = "Prepare an isolated 10-book library for TON-1889 acceptance and audit map anchor highlight hits (counts only)."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets.getByName("test").runtimeClasspath
+    mainClass.set("com.coach.desktop.books.BookMapVerifyMain")
+    jvmArgs("-Xmx4g", "-Dfile.encoding=UTF-8")
 }

@@ -242,6 +242,7 @@ internal fun BookWhatAboutMapView(
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
+    val offline = LocalCoachConnectivity.current == CoachConnectivityStatus.OFFLINE
     val cardShape = RoundedCornerShape(CoachV7.Radius.s)
     var filter by remember(book.id) { mutableStateOf(BookMapFilter.ALL) }
     val spans = remember(book.id, book.structure, book.tocNodes, book.correctedBodyPage) { BookMapSkeleton.chapters(book) }
@@ -369,11 +370,17 @@ internal fun BookWhatAboutMapView(
         // State banners (generating / offline / failed / skeleton reconciled)
         when (state) {
             BookMapUiState.Idle -> {
+                if (offline) {
+                    OfflineNeedsNetworkNotice(
+                        message = OfflineCopy.BOOK_MAP_OFFLINE,
+                        tag = "book-map-v2-offline-notice",
+                    )
+                }
                 PaperButton(
                     onClick = onGenerateAll,
                     modifier = Modifier.fillMaxWidth().testTag("book-map-v2-generate"),
                 ) {
-                    Text("生成这本书的地图")
+                    Text(if (offline) "生成这本书的地图（需要联网）" else "生成这本书的地图")
                 }
             }
 

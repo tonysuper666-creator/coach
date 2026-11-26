@@ -198,11 +198,11 @@ internal fun TextbookReader(
     // Home 选中的词要留住。翻页回调和随后的对焦点击都会把选区清掉，工具条还没画出来就没了。
     var homeWordPinned by remember(book.id) { mutableStateOf(false) }
     LaunchedEffect(ui.page, textView, explainOpen) {
-        // 请求记在组合外面：Home 翻页会把阅读器拆掉重组，组合里刚写下的选区会丢。
-        if (HomeSelectRequest.bookId == book.id && textView && !explainOpen) {
-            textSelection = book.homeSelectionWord(ui.page)
+        val armed = HomeSelectRequest.bookId == book.id && HomeSelectRequest.block != null
+        if (armed && textView && !explainOpen) {
+            textSelection = HomeSelectRequest.block
             homeWordPinned = true
-        } else if (explainOpen || !textView) {
+        } else if (!armed && (explainOpen || !textView)) {
             textSelection = null
         }
     }
@@ -212,7 +212,11 @@ internal fun TextbookReader(
         SourceBlock("${book.id}:p${selected.page}:${range.startUtf16}", selected.page, range.startUtf16, range.endUtf16,
             false, stored.substring(range.startUtf16, range.endUtf16))
     }?.takeIf { it.text.isNotBlank() }
-    val chosen = (if (textView) textSelection else pdfChosen)?.takeIf { it.text.isNotBlank() }
+    // Home 的词记在组合外面。翻页会把阅读器里的 textSelection 清掉，工具条却要留在下一帧。
+    val armedHomeWord = HomeSelectRequest.block
+        ?.takeIf { HomeSelectRequest.bookId == book.id && it.text.isNotBlank() }
+    val chosen = (if (textView) (armedHomeWord ?: textSelection) else (armedHomeWord ?: pdfChosen))
+        ?.takeIf { it.text.isNotBlank() }
     val learnableSelection = chosen?.takeIf { it.text.trim().length <= 4_000 }
     val explainer = remember(library, explainProvider) { explainProvider ?: BookExplainer(library = library) }
     val explainConsent = remember(library) { ExplainConsent(library.directory) }
@@ -1441,25 +1445,28 @@ internal fun TextbookReader(
                             return@onPreviewKeyEvent true
                         }
                         val turn = readerPagingTurn(event.key, typingNow)
-                        // 点击、F2、S、↑ 都没选中。Home 能翻页，说明它进了这个阅读区。
-                        // 请求放在组合外面，翻页把阅读器拆掉重组之后，新的一帧仍能把词选上。
+                        // 点击、F2、S、↑ 都没选中。Home 能翻到第 1 页，说明这一键进了阅读区。
+                        // 词先写到组合外面，再翻页。翻页清掉的是组合里的选区，外面这份还在。
                         val pinHome = !typingNow && event.key == Key.MoveHome
-                        if (pinHome) HomeSelectRequest.bookId = book.id
-                        if (pinHome && textView) {
+                        if (pinHome) {
+                            val word = book.homeSelectionWord(book.pages.first().number)
+                            HomeSelectRequest.arm(book.id, word)
                             homeWordPinned = true
-                            textSelection = book.homeSelectionWord(book.pages.first().number)
+                            if (textView) textSelection = word
                         }
                         if (turn == null) return@onPreviewKeyEvent false
                         turnLayout(turn)
                         if (pinHome) {
-                            textSelection = book.homeSelectionWord(paging.anchor.importPage)
+                            val word = book.homeSelectionWord(paging.anchor.importPage)
+                            HomeSelectRequest.arm(book.id, word)
+                            if (textView) textSelection = word
                         }
                         true
                     }
                     .focusable(),
             ) {
                 if (textView && !pageUnrecognizedOriginal) {
-                    val ranges = remember(book.pages, source, practiceSource, ui.page, quoteAnchor, located, aspectOk, marks, passageJump, textSelection) {
+                    val ranges = remember(book.pages, source, practiceSource, ui.page, quoteAnchor, located, aspectOk, marks, passageJump, textSelection, armedHomeWord) {
                         val result = mutableMapOf<Int, List<IntRange>>()
                         if (practiceSource == null) {
                             source?.blocks.orEmpty().groupBy { it.page }.forEach { (number, blocks) ->
@@ -1486,7 +1493,11 @@ internal fun TextbookReader(
                             if (number != null && range != null) result[number] = listOf(range)
                         }
                         passageJump?.let { result[it.page] = result[it.page].orEmpty() + listOf(it.start until it.end) }
-                        textSelection?.let { result[it.page] = result[it.page].orEmpty() + listOf(it.start until it.end) }
+                        listOfNotNull(textSelection, armedHomeWord).distinct().forEach { selected ->
+                            if (selected.end > selected.start) {
+                                result[selected.page] = result[selected.page].orEmpty() + listOf(selected.start until selected.end)
+                            }
+                        }
                         if (marks.isNotEmpty()) result[ui.page] = result[ui.page].orEmpty() +
                             marks.map { it.startUtf16 until it.endUtf16 }
                         result
@@ -2141,16 +2152,21 @@ internal fun TextbookReader(
                     }
                 },
                 onAction = { action ->
+                    val sel = learnableSelection
                     companionOpen = true
                     companionTab = ReaderCompanionTab.ASK
-                    runInlineSelection(learnableSelection, action)
+                    runInlineSelection(sel, action)
+                    if (HomeSelectRequest.bookId == book.id) HomeSelectRequest.clear()
+                    homeWordPinned = false
                 },
                 onNote = {
                     startNoteFromSelection(learnableSelection)
+                    if (HomeSelectRequest.bookId == book.id) HomeSelectRequest.clear()
+                    homeWordPinned = false
                 },
                 onDismiss = {
                     homeWordPinned = false
-                    if (HomeSelectRequest.bookId == book.id) HomeSelectRequest.bookId = null
+                    if (HomeSelectRequest.bookId == book.id) HomeSelectRequest.clear()
                     pdf.selection = null
                     textSelection = null
                 },
@@ -2412,9 +2428,20 @@ internal fun TextbookReader(
     }
 }
 
-/** Home 的选词请求。翻页会拆掉阅读器重组，组合里的选区会丢，这个请求还在。 */
+/** Home 的选词。翻页会拆掉阅读器里的选区，这一份在组合外面，下一帧直接拿来画工具条。 */
 internal object HomeSelectRequest {
-    var bookId: String? = null
+    @Volatile var bookId: String? = null
+    @Volatile var block: SourceBlock? = null
+
+    fun arm(id: String, word: SourceBlock) {
+        block = word
+        bookId = id
+    }
+
+    fun clear() {
+        bookId = null
+        block = null
+    }
 }
 
 /** 键盘翻页的去向。 */

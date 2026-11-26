@@ -3,6 +3,8 @@ package com.coach.desktop.books
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -80,6 +82,55 @@ class ReaderSelectKeyTest {
                 assertTrue(onAllNodesWithTag("selection-action-explain").fetchSemanticsNodes().isNotEmpty())
             }
         } finally {
+            HomeSelectRequest.clear()
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun homeWordStaysWhenTheReaderIsRecreated() {
+        val root = Files.createTempDirectory("coach-select-key-recreate-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val book = library.importBook(root.resolve("Reading.txt").also {
+                Files.writeString(it, "Memory and understanding starts with active recall rather than rereading.")
+            })
+            HomeSelectRequest.clear()
+            runSkikoComposeUiTest(size = Size(960f, 720f), density = Density(1f)) {
+                val generation = mutableIntStateOf(0)
+                setContent {
+                    val focus = remember { FocusRequester() }
+                    CoachTheme(dark = false) {
+                        CompositionLocalProvider(LocalReadingAutoGuide provides false) {
+                            key(generation.intValue) {
+                                Box(Modifier.fillMaxSize()) {
+                                    TextbookReader(
+                                        ui = LibraryUi(library.catalog(), book, screen = BookScreen.READER, page = 1),
+                                        library = library,
+                                        support = UnconnectedBookLearningSupport,
+                                        practiceSource = null,
+                                        pageFocus = focus,
+                                        onNoteSession = {},
+                                        onPage = {},
+                                        onBack = {},
+                                        onLearn = {},
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("reader-page").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("reader-page").performKeyInput { pressKey(Key.MoveHome) }
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("selection-explain-toolbar").fetchSemanticsNodes().isNotEmpty()
+                }
+                generation.intValue = generation.intValue + 1
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("selection-explain-toolbar").fetchSemanticsNodes().isNotEmpty()
+                }
+            }
+        } finally {
+            HomeSelectRequest.clear()
             root.toFile().deleteRecursively()
         }
     }

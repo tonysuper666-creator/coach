@@ -72,6 +72,29 @@ function Save-OwnWindow([string]$name, [IntPtr]$handle = $script:Win) {
     } finally { $bmp.Dispose() }
 }
 
+function Invoke-NamedControl([string]$name) {
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($script:Win)
+    $condition = New-Object System.Windows.Automation.PropertyCondition ([System.Windows.Automation.AutomationElement]::NameProperty), $name
+    $nodes = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
+    foreach ($node in @($nodes)) {
+        $target = $node
+        for ($hop = 0; $hop -lt 5 -and $target; $hop++) {
+            $pattern = $null
+            try { $pattern = $target.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern) } catch { $pattern = $null }
+            if ($pattern) { $pattern.Invoke(); return $true }
+            $target = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($target)
+        }
+        $bounds = $node.Current.BoundingRectangle
+        if ($bounds.Width -gt 1 -and $bounds.Height -gt 1) {
+            $win = Get-Rect
+            $x = [int]($bounds.X + ($bounds.Width / 2) - $win.L)
+            $y = [int]($bounds.Y + ($bounds.Height / 2) - $win.T)
+            if ($x -gt 0 -and $y -gt 0) { Click-At $x $y | Out-Null; return $true }
+        }
+    }
+    return $false
+}
+
 function Click-CapturedControl([string]$template, [string]$shot, [switch]$VerifyOnly, [int]$ScrollNotches = 0) {
     if ($Winbox) {
         $point = Find-WinboxControl $template ([IO.Path]::GetFileNameWithoutExtension($shot)) $ScrollNotches
@@ -123,6 +146,44 @@ function Submit-ScanFile([string]$title) {
     Write-Output "Installed file picker opened for $([IO.Path]::GetFileName($Fixture))"
     if (-not (Choose-File $title $Fixture)) { throw $script:ChooseFileWhy }
 }
+function Enable-ArmDragAgent([string]$ExePath, [string]$LibraryDir) {
+    # The agent jar is never committed: build it from the .java next to this script.
+    $srcDir = Join-Path $PSScriptRoot 'arm-drag-agent'
+    $buildDir = Join-Path ([IO.Path]::GetTempPath()) 'coach-arm-drag-agent'
+    $jar = Join-Path $buildDir 'arm-drag-agent.jar'
+    if (-not (Test-Path -LiteralPath $jar)) {
+        $homes = @($env:JAVA_HOME, $env:JAVA_HOME_17_ARM64, $env:JAVA_HOME_21_ARM64, $env:JAVA_HOME_17_X64) | Where-Object { $_ }
+        $bins = @($homes | ForEach-Object { Join-Path $_ 'bin' })
+        function Find-JdkTool([string]$name) {
+            foreach ($b in $bins) { $p = Join-Path $b "$name.exe"; if (Test-Path -LiteralPath $p) { return [pscustomobject]@{ Source = $p } } }
+            Get-Command $name -ErrorAction SilentlyContinue
+        }
+        $javac = Find-JdkTool 'javac'
+        $jarTool = Find-JdkTool 'jar'
+        if (-not $javac -or -not $jarTool) { throw 'javac/jar not on PATH; cannot build the drag agent' }
+        $classes = Join-Path $buildDir 'classes'
+        New-Item -ItemType Directory -Force $classes | Out-Null
+        & $javac.Source --release 17 -d $classes (Join-Path $srcDir 'ArmDragAgent.java')
+        if ($LASTEXITCODE -ne 0) { throw "javac failed: $LASTEXITCODE" }
+        & $jarTool.Source cfm $jar (Join-Path $srcDir 'manifest.mf') -C $classes .
+        if ($LASTEXITCODE -ne 0) { throw "jar failed: $LASTEXITCODE" }
+    }
+    $jar = (Resolve-Path -LiteralPath $jar).Path
+    if ($jar.Contains(' ')) { throw "Drag agent path cannot contain spaces: $jar" }
+    $cfg = Join-Path (Split-Path -Parent $ExePath) 'app\LearningCoach.cfg'
+    if (-not (Test-Path -LiteralPath $cfg)) { throw "Launcher cfg missing: $cfg" }
+    $option = 'java-options=-javaagent:' + ($jar -replace '\\', '/')
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $text = [IO.File]::ReadAllText($cfg)
+    if ($text -notlike "*${option}*") {
+        if (-not $text.EndsWith("`n")) { $text += "`n" }
+        [IO.File]::WriteAllText($cfg, $text + $option + "`n", $utf8)
+    }
+    $env:COACH_DRAG_PORT_FILE = Join-Path $LibraryDir 'drag-port'
+    if (Test-Path -LiteralPath $env:COACH_DRAG_PORT_FILE) { Remove-Item -LiteralPath $env:COACH_DRAG_PORT_FILE -Force }
+    Write-Output "DRAGAGENT $option"
+}
+
 function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
     New-Item -ItemType Directory -Force $OutDir | Out-Null
     $OutDir = (Resolve-Path $OutDir).Path
@@ -158,9 +219,14 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
             $env:COACH_DEVICE_ID = 'arm-smoke'
             $env:COACH_TOKEN_FILE = Join-Path $tutorPrivate 'token'
         }
+        if (-not $Winbox) { Enable-ArmDragAgent $exe $env:COACH_LIBRARY_DIR }
         $app = if ($Winbox) { Start-Process -FilePath $exe -PassThru } else { [ArmSmokeDesktop]::Start($exe, '', $TestDesktop) }
         $deadline = (Get-Date).AddSeconds(300)
         do {
+            if ($app.HasExited) {
+                $still = @(Get-CimInstance Win32_Process -Filter "Name='LearningCoach.exe'" -ErrorAction SilentlyContinue)
+                if ($still.Count -eq 0) { throw "Installed app exited $($app.ExitCode) before the window appeared" }
+            }
             Start-Sleep -Milliseconds 500
             $candidates = Get-CimInstance Win32_Process -Filter "Name='LearningCoach.exe' AND (ProcessId=$($app.Id) OR ParentProcessId=$($app.Id))" |
                 Where-Object ExecutablePath -eq $exe
@@ -168,31 +234,78 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
                 Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -eq 'LearningCoach' } | Select-Object -First 1
         } while (-not $window -and (Get-Date) -lt $deadline)
         if (-not $window) { throw 'Installed app window did not appear' }
+        if (-not $Winbox) {
+            $agentDeadline = (Get-Date).AddSeconds(20)
+            while (-not (Test-Path -LiteralPath $env:COACH_DRAG_PORT_FILE) -and (Get-Date) -lt $agentDeadline) {
+                Start-Sleep -Milliseconds 200
+            }
+            if (-not (Test-Path -LiteralPath $env:COACH_DRAG_PORT_FILE)) {
+                $agentError = Join-Path $env:COACH_LIBRARY_DIR 'drag-agent-error.txt'
+                $why = if (Test-Path -LiteralPath $agentError) { (Get-Content -Raw -LiteralPath $agentError).Trim() } else { 'port file was not written' }
+                throw "Drag agent did not start: $why"
+            }
+            Write-Output "DRAGAGENT port=$((Get-Content -Raw -LiteralPath $env:COACH_DRAG_PORT_FILE).Trim())"
+        }
         $script:AppPid = $window.Id
         $script:Win = $window.MainWindowHandle
         Save-OwnWindow 'installed-window-printwindow.png'
         Write-Output 'Captured installed app window via PrintWindow; image requires visual review.'
 
-        $upload = -join ([char[]](0x4e0a,0x4f20,0x6559,0x6750))
+        # 2.0 empty shelf (TON-1790): the dialog title starts with 「导入文件」.
+        # The dark primary pill uses that word, but ARM UI Automation often omits Compose
+        # and the on-device OCR misreads white-on-black. The card 「单读一本书」 calls the
+        # same import action and is readable. 1.1.1's 「上传教材」 is gone.
+        $upload = -join ([char[]](0x5bfc,0x5165,0x6587,0x4ef6))
+        $singleBook = -join ([char[]](0x5355,0x8bfb,0x4e00,0x672c,0x4e66))
         $invoked = $false
-        try {
-            $root = [System.Windows.Automation.AutomationElement]::FromHandle($script:Win)
-            $condition = New-Object System.Windows.Automation.PropertyCondition ([System.Windows.Automation.AutomationElement]::NameProperty), $upload
-            $button = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
-            if ($button) {
-                $pattern = $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-                if ($pattern) { $pattern.Invoke(); $invoked = $true }
+        foreach ($name in @($upload, $singleBook)) {
+            if ($invoked) { break }
+            try {
+                if (Invoke-NamedControl $name) { Write-Output "Opened import via UI Automation: $name"; $invoked = $true }
+            } catch { Write-Output "UI Automation unavailable: $($_.Exception.Message)" }
+        }
+        if (-not $invoked) {
+            foreach ($name in @($upload, $singleBook)) {
+                if ($invoked) { break }
+                try {
+                    $hit = Find-TutorLabel 'installed-upload' @($name)
+                    Click-At $hit.X $hit.Y | Out-Null
+                    Write-Output "Opened import via visible label: $name"
+                    $invoked = $true
+                } catch { Write-Output "Upload label was not read: $($_.Exception.Message)" }
             }
-        } catch { Write-Output "UI Automation unavailable: $($_.Exception.Message)" }
+        }
+        if (-not $invoked) {
+            # The first PrintWindow can land before the empty shelf paints. OCR above
+            # already waited; take a new frame and look for the black import pill.
+            foreach ($try in 1..4) {
+                Save-OwnWindow 'shelf-for-pill.png'
+                $pill = Find-DarkImportPill 'shelf-for-pill'
+                if ($pill) {
+                    Click-At $pill.X $pill.Y | Out-Null
+                    Write-Output "Opened import via the dark pill $($pill.X),$($pill.Y) try=$try"
+                    $invoked = $true
+                    break
+                }
+                Write-Output "DARKPILL miss try=$try"
+                Start-Sleep -Milliseconds 400
+            }
+        }
         if (-not $invoked) {
             Click-CapturedControl 'empty-shelf-upload.png' 'installed-window-printwindow.png'
         }
         Submit-ScanFile $upload
-        $db = Join-Path $env:COACH_LIBRARY_DIR 'library.sqlite'
+        $configured = Join-Path $env:COACH_LIBRARY_DIR 'library.sqlite'
         $deadline = (Get-Date).AddSeconds(300)
         $recognized = $false
+        $announced = $false
         do {
             Start-Sleep -Seconds 3
+            $db = Resolve-InstalledLibrary $configured
+            if (-not $announced -and (Test-Path -LiteralPath $db)) {
+                Write-Output "LIBRARY $db"
+                $announced = $true
+            }
             & python (Join-Path $PSScriptRoot 'prism-ocr-check.py') $db $Fixture
             if ($LASTEXITCODE -eq 0) { $recognized = $true; break }
         } while ((Get-Date) -lt $deadline)
@@ -200,17 +313,23 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
         Write-Output 'INSTALLED_SCAN_IMPORT_PASS'
         Save-OwnWindow 'after-import-printwindow.png'
         if ([IO.Path]::GetExtension($Fixture) -eq '.pdf') {
-            Click-CapturedControl 'shelf-read-first.png' 'after-import-printwindow.png'
-            Click-CapturedControl 'reader-defer-study.png' 'reader-first-open.png'
+            # 2.0 launchImport opens the reader itself (prompt = null). The shelf cards
+            # 「先读」 and 「暂不开启」 are not on this screen.
+            Write-Output 'INSTALLED_READER_OPEN'
+            Focus-ReaderPage
             Start-Sleep -Seconds 1
             Save-OwnWindow 'reader-before.png'
-            # The reflow reader can lay out several screenfuls per source page.
+            # Click the reader's own 文字 control. A recognized scan stays on the original page.
+            Switch-ReaderToText
+            # The reflow reader can lay out several screenfuls per source page, and the
+            # arrow keys turn a page only while the page surface has focus.
             # Stop as soon as the book's persisted physical page changes to 2.
-            foreach ($turn in 1..8) {
+            foreach ($turn in 1..16) {
                 Send-Keys '{RIGHT}'
                 Start-Sleep -Milliseconds 900
                 & python (Join-Path $PSScriptRoot 'prism-ocr-check.py') $db $Fixture --reading-page 2
                 if ($LASTEXITCODE -eq 0) { break }
+                if ($turn % 4 -eq 0) { Focus-ReaderPage }
             }
             Save-OwnWindow 'reader-after.png'
             if ($LASTEXITCODE -ne 0) { throw 'Installed reader did not persist page 2' }
@@ -218,13 +337,22 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
             Write-Output 'INSTALLED_FRIEND_PATH_PASS 7/7 (runner loopback tutor)'
         }
     } finally {
+        $stopped = @{}
+        foreach ($proc in @($tutor, $window, $app)) {
+            if (-not $proc -or $stopped.ContainsKey([string]$proc.Id)) { continue }
+            $stopped[[string]$proc.Id] = $true
+            try {
+                if (-not $proc.HasExited) {
+                    $proc.Kill()
+                    [void]$proc.WaitForExit(5000)
+                }
+            } catch {
+                Write-Output "KILL pid=$($proc.Id) $($_.Exception.Message)"
+            }
+        }
         if ($tutor) {
-            if (-not $tutor.HasExited) { $tutor.Kill(); $tutor.WaitForExit() }
             $tutor.Dispose()
             Remove-Item -LiteralPath (Join-Path $tutorPrivate 'token') -ErrorAction SilentlyContinue
-        }
-        foreach ($proc in @($window, $app)) {
-            if ($proc -and -not $proc.HasExited) { $proc.Kill(); $proc.WaitForExit() }
         }
     }
 }

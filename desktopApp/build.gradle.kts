@@ -125,7 +125,12 @@ compose.desktop {
             packageName = "LearningCoach"
             packageVersion = releaseVersion
             vendor = "LearningCoach"
-            modules("java.sql")
+            // The ARM installed-app smoke appends -javaagent after install and needs java.instrument
+            // in the bundled runtime. Only the Windows ARM64 build without the private friend URL
+            // (the smoke candidate) includes it; x64 and the private ARM64 release keep the default set.
+            val smokeAgent = System.getProperty("os.arch") == "aarch64" &&
+                providers.gradleProperty("coach.friendUrl").orNull.isNullOrBlank()
+            if (smokeAgent) modules("java.sql", "java.instrument") else modules("java.sql")
             windows {
                 // Same artwork as Window(icon = AppIcon.window()); the ICO carries 16..256 so the
                 // installer, exe, Start menu shortcut and taskbar pick a pre-rendered size instead

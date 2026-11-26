@@ -903,8 +903,9 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
         for ((i, source) in run.sources.withIndex()) {
             if (i > 0 || (index > 0 && page.runs[index - 1].sources.last().importPage != source.importPage)) {
                 val y = with(density) { layout.getLineTop(layout.getLineForOffset(offset.coerceAtMost(run.text.lastIndex))).toDp() }
+                // A sheet can open on a page boundary; the first line's top may round to -1px.
                 DisableSelection { Text(source.importPage.toString(), Modifier.padding(start = if (spread && side == 1) inset + column + 10.dp else 12.dp,
-                    top = topMargin + top + y).width(36.dp), color = colors.fgSecondary,
+                    top = (topMargin + top + y).coerceAtLeast(0.dp)).width(36.dp), color = colors.fgSecondary,
                     style = MaterialTheme.typography.labelSmall, fontFamily = LocalV7Fonts.current.numbers) }
             }
             offset += source.endUtf16 - source.startUtf16
@@ -930,7 +931,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
                     lineTopPx = lastMarkerTopPx + minGapPx
                 }
                 lastMarkerTopPx = lineTopPx
-                val topDp = topMargin + with(density) { lineTopPx.toDp() }
+                val topDp = (topMargin + with(density) { lineTopPx.toDp() }).coerceAtLeast(0.dp)
                 Box(
                     Modifier
                         .padding(start = markerX, top = topDp)

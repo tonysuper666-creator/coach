@@ -669,11 +669,21 @@ fun Application.collectionQaRoutes(
     routing {
         post("/v1/library/collection/ask") {
             call.withReaderConnection {
-                val activeService = service ?: return@withReaderConnection call.respondText(
-                    buildJsonObject { put("error", "跨材料问答服务暂未开启，请稍后重试。") }.toString(),
-                    ContentType.Application.Json,
-                    HttpStatusCode.ServiceUnavailable,
-                )
+                var noted = false
+                fun note(code: String?) {
+                    if (noted) return
+                    noted = true
+                    if (code == null) return
+                    call.application.attributes.getOrNull(reliabilityCounts)?.outcome("ask", call.request.header("X-Coach-Version"), code)
+                }
+                val activeService = service ?: run {
+                    note("other")
+                    return@withReaderConnection call.respondText(
+                        buildJsonObject { put("error", "跨材料问答服务暂未开启，请稍后重试。") }.toString(),
+                        ContentType.Application.Json,
+                        HttpStatusCode.ServiceUnavailable,
+                    )
+                }
                 val friend = call.attributes.getOrNull(observedFriend)
                 val device = call.attributes[observedDevice]
                 val bearer = call.request.header("Authorization")?.removePrefix("Bearer ").orEmpty()
@@ -713,6 +723,7 @@ fun Application.collectionQaRoutes(
                             catch (_: Exception) { throw FriendServiceError() }
                         }
                     }
+                    note("ok")
                     call.respondText(reply.toString(), ContentType.Application.Json)
                 } catch (e: CancellationException) {
                     throw e
@@ -723,6 +734,7 @@ fun Application.collectionQaRoutes(
                         }
                     }
                     e.retryAfterSec?.let { call.response.header(HttpHeaders.RetryAfter, it.toString()) }
+                    note("quota")
                     call.respondText(
                         buildJsonObject {
                             put("code", "rate_limited")
@@ -738,20 +750,24 @@ fun Application.collectionQaRoutes(
                             runCatching { friends.record(friend, device, requestId, e.code) }
                         }
                     }
+                    note(reliabilityCodeForFriend(e.code))
                     call.respondText(e.body.toString(), ContentType.Application.Json, e.status)
                 } catch (e: MockError) {
+                    note(reliabilityCodeForMock(e.status, e.message))
                     call.respondText(
                         buildJsonObject { put("error", e.message ?: "跨材料问答请求无效。") }.toString(),
                         ContentType.Application.Json,
                         e.status,
                     )
                 } catch (e: IllegalArgumentException) {
+                    note(null)
                     call.respondText(
                         buildJsonObject { put("error", e.message ?: "跨材料问答参数不完整。") }.toString(),
                         ContentType.Application.Json,
                         HttpStatusCode.BadRequest,
                     )
                 } catch (_: Exception) {
+                    note("other")
                     call.respondText(
                         buildJsonObject { put("error", "跨材料问答暂时不可用，请稍后重试。") }.toString(),
                         ContentType.Application.Json,

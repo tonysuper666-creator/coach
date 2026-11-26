@@ -51,6 +51,7 @@ class PairingClient(private val baseUrl: String) {
             if (startup) header("X-Coach-Startup", "1")
             header("X-Coach-Device", credentials.deviceId)
             header(HttpHeaders.Authorization, "Bearer ${credentials.token}")
+            coachVersionHeader()
         }
         return response.status != HttpStatusCode.Unauthorized
     }

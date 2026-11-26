@@ -40,7 +40,10 @@ class HttpLedgerTransport(baseUrl: String, private val deviceId: String,
         install(WebSockets) { pingIntervalMillis=5000 }
         install(HttpTimeout) { requestTimeoutMillis=10000;connectTimeoutMillis=3000;socketTimeoutMillis=10000 }
         expectSuccess=true
-        defaultRequest { header("Authorization","Bearer $token");header("X-Coach-Device",deviceId) }
+        defaultRequest {
+            header("Authorization","Bearer $token"); header("X-Coach-Device",deviceId)
+            coachVersionOrNull()?.let { header("X-Coach-Version", it) }
+        }
     }
     override suspend fun hello(epoch: String?): Hello = try {
         LedgerJson.decodeFromString(client.get("$baseUrl/v1/hello") { if(epoch!=null) parameter("epoch",epoch) }.bodyAsText())

@@ -156,6 +156,14 @@ fun Application.libraryExplainRoutes(
             val friend = call.attributes.getOrNull(observedFriend)
             val diagnostics = friend?.let { FriendReaderDiagnostics() }
             var requestId = ""
+            var requestKind: String? = null
+            var noted = false
+            fun note(code: String?) {
+                if (noted) return
+                noted = true
+                if (code == null) return
+                call.application.attributes.getOrNull(reliabilityCounts)?.outcome(requestKind, call.request.header("X-Coach-Version"), code)
+            }
             try {
                 val channel = call.receiveChannel()
                 val bytes = ByteArray(131_073)
@@ -167,6 +175,11 @@ fun Application.libraryExplainRoutes(
                 }
                 if (size > 131_072) throw MockError(HttpStatusCode.PayloadTooLarge, "选中的原文过长，请缩短后重试。")
                 val input = LedgerJson.parseToJsonElement(bytes.decodeToString(0, size)).jsonObject
+                requestKind = when (input.str("kind")) {
+                    "ask" -> "ask"
+                    "explain", "example", "rephrase", "split", "lesson" -> "explain"
+                    else -> null
+                }
                 val parsed = libraryExplainRequest(input)
                 requestId = input.str("requestId")
                 if (friend != null && (!parsed.isLocalBook || input["localSource"] == null))
@@ -212,17 +225,22 @@ fun Application.libraryExplainRoutes(
                     try { friends!!.record(friend, call.attributes[observedDevice], requestId, "complete", body, diagnostics) }
                     catch (_: Exception) { throw FriendServiceError() }
                 }
+                note(classifyReaderText((body["text"] as? JsonPrimitive)?.contentOrNull.orEmpty()))
                 call.respondText(body.toString(), ContentType.Application.Json)
             } catch (e: FriendServiceError) {
                 if (friend != null) withContext(Dispatchers.IO) {
                     runCatching { friends?.record(friend, call.attributes[observedDevice], requestId, e.code, diagnostics = diagnostics) }
                 }
+                note(reliabilityCodeForFriend(e.code))
                 call.respondText(e.body.toString(), ContentType.Application.Json, e.status)
             } catch (e: MockError) {
+                note(reliabilityCodeForMock(e.status, e.message))
                 call.respondText(json("error" to e.message).toString(), ContentType.Application.Json, e.status)
             } catch (e: IllegalArgumentException) {
+                note(null)
                 call.respondText(json("error" to "选中追问格式不对。").toString(), ContentType.Application.Json, HttpStatusCode.BadRequest)
             } catch (e: kotlinx.serialization.SerializationException) {
+                note(null)
                 call.respondText(json("error" to "选中追问格式不对。").toString(), ContentType.Application.Json, HttpStatusCode.BadRequest)
             }
         } }

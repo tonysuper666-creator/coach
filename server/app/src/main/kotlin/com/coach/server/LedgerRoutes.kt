@@ -82,6 +82,7 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             }
             call.attributes.put(observedDevice, identity.first)
             if (friend != null) call.attributes.put(observedFriend, friend)
+            call.application.attributes.getOrNull(reliabilityCounts)?.touch(call.request.header("X-Coach-Version"), identity.first)
             val path = call.request.path()
             if (unifiedBooks?.enabled == true && friend != null && com.coach.store.isSableFriend(friend) &&
                 (path.startsWith("/v1/library/") || path.startsWith("/api/books/") || path == "/v1/public/status")) {
@@ -513,7 +514,7 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
                     "tutor.next", "tutor.test" -> chat?.nextStep(message.str("threadId"),message.str("courseId"),message.str("pack"),message.str("t") == "tutor.test",receivedAt=receivedAt)
                     "tutor.settings" -> chat?.configureTutor(message.str("threadId"),message.str("courseId"),
                         message["groupSize"]?.jsonPrimitive?.int, message["mode"]?.jsonPrimitive?.content?.let { TeachingMode.valueOf(it) })
-                    "tutor.explain" -> chat?.explain(message.str("threadId"),message.str("courseId"),TeachingMode.valueOf(message.str("mode")),message.str("pack"),receivedAt)
+                    "tutor.explain" -> chat?.explain(message.str("threadId"),message.str("courseId"),TeachingMode.valueOf(message.str("mode")),message.str("pack"),receivedAt, device)
                     "tutor.answer" -> chat?.submitGroup(message.str("threadId"),message.str("courseId"),message.str("groupId"),
                         (message["answers"] as? JsonObject).orEmpty().mapValues { it.value.jsonPrimitive.content },device,message.str("submissionId"))
                     "client.ttft" -> chat?.reportClientTtft(device,message.str("courseId"),message.str("threadId"),

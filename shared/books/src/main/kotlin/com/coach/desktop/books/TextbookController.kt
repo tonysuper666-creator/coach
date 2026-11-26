@@ -216,8 +216,10 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         try { withContext(Dispatchers.IO) { block() } }
         catch (cancel: CancellationException) { throw cancel }
         catch (failure: Exception) {
-            mutable.update { it.copy(error = failure.message.takeIf { failure is IllegalArgumentException && ReadableText.readsAsChinese(it) }
-                ?: "暂时无法读取或保存教材，请确认文件完整、未加密，然后重试。") }
+            val message = failure.message.takeIf { failure is IllegalArgumentException && ReadableText.readsAsChinese(it) }
+                ?: "暂时无法读取或保存教材，请确认文件完整、未加密，然后重试。"
+            if (BookImportMessages.isRecordedImportFailure(message)) IncidentHooks.importFailed(message)
+            mutable.update { it.copy(error = message) }
         } finally {
             val after = mutable.value
             if (!citationNavigation && (before.screen != after.screen || before.book?.id != after.book?.id)) {
@@ -1056,6 +1058,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     ) = withContext(NonCancellable) {
         val message = failure.message.takeIf { failure is IllegalArgumentException && ReadableText.readsAsChinese(it) }
             ?: "暂时无法读取或保存教材，请确认文件完整、未加密，然后重试。"
+        if (message != BookImportMessages.PASSWORD) IncidentHooks.importFailed(message)
         val passwordPath = sourcePath?.toString()?.takeIf { BookImportMessages.asksForPassword(message) }
         val shouldDelete = bookId != null && deleteIfNoOcrYet &&
             runCatching { library.book(bookId).pages.none { it.ocr } }.getOrDefault(false)

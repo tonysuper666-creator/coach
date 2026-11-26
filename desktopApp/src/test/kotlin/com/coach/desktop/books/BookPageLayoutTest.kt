@@ -267,7 +267,7 @@ class BookPageLayoutTest {
         assertEquals(sources.joinToString("") { it.text }, pages.joinToString("") { originalBookSelection(it.text) })
     }
 
-    @Test fun deferredCropsFillWithLaterTextButInlineBlocksKeepTheirReadingOrder() = runSkikoComposeUiTest(density = Density(1f)) {
+    @Test fun deferredVisualsOfEveryKindKeepTheirReadingOrder() = runSkikoComposeUiTest(density = Density(1f)) {
         val before = "短句接续。".repeat(11)
         val covered = "原框😀内的文字"
         val after = "后文𠮷，接着读。".repeat(110)
@@ -293,8 +293,10 @@ class BookPageLayoutTest {
             assertEquals(1, pages.indexOfFirst { it.visuals.isNotEmpty() }, kind.name)
             assertTrue(placed.heightPx + placed.captionGapPx + placed.captionHeightPx <= 390 * .85f)
             val firstEnd = pages.first().runs.last().sources.last().endUtf16
-            if (kind == PageVisualKind.TABLE || kind == PageVisualKind.FORMULA) assertEquals(before.length, firstEnd)
-            else assertTrue(firstEnd > before.length + covered.length, "Following text fills the gap for $kind: firstEnd=$firstEnd anchor=${before.length} runs=${pages.first().runs.map { it.sources }}")
+            // Text after the anchor never appears on a sheet before its visual (TON-1671).
+            assertEquals(before.length, firstEnd, kind.name)
+            val visualSheet = pages[1]
+            assertTrue(visualSheet.runs.all { run -> run.topPx >= placed.topPx + placed.heightPx }, kind.name)
             val rendered = pages.flatMap { it.runs }.joinToString("") { originalBookSelection(it.text) }
             assertEquals(if (kind == PageVisualKind.ILLUSTRATION) raw else before + after, rendered)
             if (kind != PageVisualKind.ILLUSTRATION) assertEquals(1, pages.pageContaining(BookPageAnchor(41, before.length + 2)))

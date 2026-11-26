@@ -401,11 +401,10 @@ internal class BookPageLayouter(
             var next = 0
             var start = 0
             var firstSheet = true
-            val pending = ArrayDeque<VisualEvent>()
             var lastSheetGlobalStart = chapter.start
-            while (start < raw.length || next < events.size || pending.isNotEmpty()) {
+            while (start < raw.length || next < events.size) {
                 checkCancelled()
-                if (!firstSheet && result.isNotEmpty() && next >= events.size && pending.isEmpty() &&
+                if (!firstSheet && result.isNotEmpty() && next >= events.size &&
                     raw.substring(start).lineSequence().all { it.isBlank() || orphanHashLineRegex.matches(it.trim()) }
                 ) {
                     val prev = result.last()
@@ -430,17 +429,13 @@ internal class BookPageLayouter(
                     y += box.totalHeight
                     return true
                 }
-                while (pending.isNotEmpty() && place(pending.first())) pending.removeFirst()
                 while (true) {
                     val event = events.getOrNull(next)
                     if (event != null && event.at <= chapter.start + start) {
                         if (event.band?.let { it.startY > it.headerBottom } == true && (runs.isNotEmpty() || visuals.isNotEmpty())) break
-                        if (pending.isNotEmpty() || !place(event)) {
-                            if (event.inline || (pending.isNotEmpty() &&
-                                    (pending.sumOf { boxFor(it, sheetHeightPx).totalHeight } +
-                                        boxFor(event, sheetHeightPx).totalHeight > sheetHeightPx))) break
-                            pending.addLast(event)
-                        }
+                        // Figures stay in reading order: one that does not fit ends the sheet,
+                        // and the text after its anchor follows it on the next sheet.
+                        if (!place(event)) break
                         next++
                         event.replacement?.let { start = maxOf(start, event.at - chapter.start + it.endUtf16 - it.startUtf16) }
                         continue
@@ -459,7 +454,7 @@ internal class BookPageLayouter(
                 }
                 val sources = (runs.singleOrNull()?.takeIf { it.text.length == start - sheetStart }?.sources ?:
                     slices(chapter.start + sheetStart, chapter.start + start)).ifEmpty {
-                    val item = (visuals.firstOrNull()?.item ?: events.getOrNull(next)?.item ?: pending.first().item)
+                    val item = (visuals.firstOrNull()?.item ?: events[next].item)
                     listOf(BookPageSlice(item.page, item.anchorOffset, item.anchorOffset))
                 }
                 val fullRun = runs.singleOrNull()?.takeIf { it.text.length == start - sheetStart }

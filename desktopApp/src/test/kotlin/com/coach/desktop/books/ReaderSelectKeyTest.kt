@@ -24,7 +24,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * S selects the open page when a pointer click never reaches the glyphs.
+ * Up selects the open page when a pointer click never reaches the glyphs.
  * The word has to sit inside a body paragraph so an explain request can cite it.
  */
 @OptIn(ExperimentalTestApi::class)
@@ -44,7 +44,7 @@ class ReaderSelectKeyTest {
         assertNull(Textbook("blank", "阅读", "txt", listOf(BookPage(1, " \n\t"))).firstBodyWord(1))
     }
 
-    @Test fun sRaisesTheSelectionToolbarForTheOpenPage() {
+    @Test fun upRaisesTheSelectionToolbarForTheOpenPage() {
         val root = Files.createTempDirectory("coach-select-key-")
         try {
             val library = TextbookLibrary(root.resolve("library"))
@@ -73,7 +73,7 @@ class ReaderSelectKeyTest {
                     }
                 }
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("reader-page").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithTag("reader-page").performKeyInput { pressKey(Key.S) }
+                onNodeWithTag("reader-page").performKeyInput { pressKey(Key.DirectionUp) }
                 waitUntil(timeoutMillis = 10_000) {
                     onAllNodesWithTag("selection-explain-toolbar").fetchSemanticsNodes().isNotEmpty()
                 }

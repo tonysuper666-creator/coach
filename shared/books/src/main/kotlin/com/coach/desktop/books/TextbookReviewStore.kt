@@ -179,7 +179,7 @@ internal class TextbookReviewStore(
 
     private fun sources(mode: QuestionMode, practice: Practice, answer: PracticeAnswer): Int {
         var bits = if (answer.guessed) LocalReviewSource.GUESSED.bit else 0
-        if (mode == QuestionMode.CHOICE && answer.text != practice.answer) bits = bits or LocalReviewSource.WRONG.bit
+        if (mode == QuestionMode.CHOICE && answer.text != practice.answer && (!answer.guessed || answer.text in practice.options)) bits = bits or LocalReviewSource.WRONG.bit
         if (mode == QuestionMode.SHORT_ANSWER && answer.understood == false) bits = bits or LocalReviewSource.SELF_CHECK.bit
         return bits
     }
@@ -194,7 +194,7 @@ internal class TextbookReviewStore(
         val streak = if (correct) (old?.confidentStreak ?: 0) + 1 else 0
         val next = schedule(db, old, book.id, lesson.id, mode, correct)
         db.prepareStatement("""INSERT INTO book_reviews(book,lesson,mode,book_title,lesson_title,prompt,reference,
-            solution,options,wrong_text,completed,sources,due_day,streak) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            solution,options,wrong_text,completed,sources,due_day,streak,source_page) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(book,lesson,mode) DO UPDATE SET
             answer_text=CASE WHEN book_reviews.completed=1 AND excluded.completed=0 THEN '' ELSE book_reviews.answer_text END,
             revealed=CASE WHEN book_reviews.completed=1 AND excluded.completed=0 THEN 0 ELSE book_reviews.revealed END,
@@ -207,7 +207,8 @@ internal class TextbookReviewStore(
             s.setString(7, practice.reference); s.setString(8, practice.answer)
             s.setString(9, Json.encodeToString(practice.options)); s.setString(10, answer.text)
             s.setInt(11, if (correct) 1 else 0); s.setInt(12, sources(mode, old?.practice ?: practice, answer))
-            s.setLong(13, next.dueDay); s.setInt(14, streak); s.executeUpdate()
+            s.setLong(13, next.dueDay); s.setInt(14, streak)
+            s.setObject(15, practice.sourcePage); s.executeUpdate()
         }
         append(db, book.id, lesson.id, mode, answer, if (migrated) "MIGRATED" else "LESSON", if (migrated) null else today())
     }
@@ -244,7 +245,8 @@ internal class TextbookReviewStore(
         val overdue = due <= today()
         val bits = r.getInt("sources") or if (overdue) LocalReviewSource.DUE.bit else 0
         return LocalBookReview(book, lesson, mode, r.getString("book_title"), r.getString("lesson_title"),
-            Practice(r.getString("prompt"), r.getString("reference"), r.getString("solution"), Json.decodeFromString(r.getString("options"))),
+            Practice(r.getString("prompt"), r.getString("reference"), r.getString("solution"), Json.decodeFromString(r.getString("options")),
+                r.getInt("source_page").takeUnless { r.wasNull() }),
             r.getString("wrong_text"), if (completed && overdue) PracticeAnswer() else r.answer("answer_text"),
             completed && !overdue, LocalReviewSource.entries.filter { bits and it.bit != 0 }.toSet(), due,
             history(db, book, lesson, mode), r.getInt("streak"))

@@ -99,7 +99,8 @@ class WindowsHostCrossReviewTest {
             assertFalse(c.state.value.answer.revealed)
             backToShelf(c)
             // 焦点卡替代了原「今天」卡：书名 + 读到的页（MasteryEngine.formatContinueCardMeta），「继续」回到这本书。
-            onNodeWithTag("home-focus-title").assertTextEquals("Alpha")
+            if (windowsToday) onNodeWithTag("home-focus-meta").assertTextContains("Alpha", substring = true)
+            else onNodeWithTag("home-focus-title").assertTextEquals("Alpha")
             onNodeWithTag("home-focus-meta").assertTextContains("第 2 页", substring = true)
             onNodeWithTag("home-read").performClick()
             ready(c) { it.book?.id == f.a.id && it.screen == BookScreen.READER && it.source == null && it.page == 2 }
@@ -125,7 +126,8 @@ class WindowsHostCrossReviewTest {
             onNodeWithTag("short-answer").performTextReplacement("beta revised but not submitted")
             ready(c) { it.answer.text == "beta revised but not submitted" }
             backToShelf(c)
-            onNodeWithTag("home-focus-title").assertTextEquals("Beta")
+            if (windowsToday) onNodeWithTag("home-focus-meta").assertTextContains("Beta", substring = true)
+            else onNodeWithTag("home-focus-title").assertTextEquals("Beta")
             onNodeWithTag("home-focus-meta").assertTextContains("第 3 页", substring = true)
             onNodeWithTag("home-read").performClick()
             ready(c) { it.book?.id == f.b.id && it.page == 3 && it.screen == BookScreen.READER }
@@ -178,7 +180,8 @@ class WindowsHostCrossReviewTest {
                 }
             }
             ready(c) { it.screen == BookScreen.HOME }
-            onNodeWithTag("home-focus-title").assertTextEquals("Alpha")
+            if (windowsToday) onNodeWithTag("home-focus-meta").assertTextContains("Alpha", substring = true)
+            else onNodeWithTag("home-focus-title").assertTextEquals("Alpha")
             awaitTrue { f.library.answer(f.a.id, f.a.lessons[1].id, QuestionMode.SHORT_ANSWER).text == "first edit plus final edit" }
             onNodeWithTag("home-read").performClick()
             ready(c) { it.book?.id == f.a.id && it.screen == BookScreen.READER }

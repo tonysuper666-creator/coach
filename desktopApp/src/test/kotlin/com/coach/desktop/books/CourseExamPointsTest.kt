@@ -46,6 +46,21 @@ class CourseExamPointsTest {
     }
 
     @Test
+    fun textbookDefinitionStaysWhenSlidesNeverNameIt() {
+        val pages = listOf(
+            ExamTeachingPage("tb", 1, CourseMaterialRole.CORE_TEXTBOOK, "Demand elasticity: Buyers respond to price."),
+            ExamTeachingPage("tb", 2, CourseMaterialRole.CORE_TEXTBOOK, "Quality weight: A year of life scaled by health."),
+            ExamTeachingPage("slides", 1, CourseMaterialRole.LECTURE_SLIDES, "Week 2 discussion applies DEMAND ELASTICITY in a new example."),
+            ExamTeachingPage("slides", 2, CourseMaterialRole.LECTURE_SLIDES, "Opening remark for this week."),
+        )
+        val identified = CourseExamPoints.identifyFromPages("course", pages)
+        assertEquals(setOf("Demand elasticity", "Quality weight"), identified.map { it.title }.toSet())
+        val legacy = identified.filter { it.sources.distinctBy { source -> source.bookId }.size >= 2 }.map { it.title }
+        assertEquals(listOf("Demand elasticity"), legacy)
+        assertEquals(1, identified.single { it.title == "Quality weight" }.sources.size)
+    }
+
+    @Test
     fun twoCoursesKeepDistinctPageLinksAndOnlyDerivedExamTechniques() {
         val directory = Files.createTempDirectory("course-exam-points")
         try {

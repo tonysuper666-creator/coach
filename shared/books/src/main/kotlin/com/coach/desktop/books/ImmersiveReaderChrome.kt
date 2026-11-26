@@ -54,8 +54,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -425,6 +427,7 @@ internal fun ImmersiveBottomScrubber(
     canPrev: Boolean,
     canNext: Boolean,
     editingJump: Boolean,
+    jumpSession: Int,
     jumpText: String,
     onJumpTextChange: (String) -> Unit,
     onStartEditJump: () -> Unit,
@@ -519,9 +522,18 @@ internal fun ImmersiveBottomScrubber(
                 } else {
                     val jumpFocus = remember { FocusRequester() }
                     val fieldShape = RoundedCornerShape(CoachV7.Radius.s)
+                    // 草稿留在输入框这一层。阅读器整页重组慢，连敲的数字若等父状态回来再画，会丢位（154 收成 15）。
+                    // jumpSession 只在打开或再次 Ctrl+G 时变，用来重新种入当前页；敲字过程中不把父状态回写进来。
+                    var draft by remember(jumpSession) {
+                        mutableStateOf(TextFieldValue(jumpText, TextRange(jumpText.length)))
+                    }
                     BasicTextField(
-                        value = jumpText,
-                        onValueChange = { onJumpTextChange(it.filter(Char::isDigit).take(5)) },
+                        value = draft,
+                        onValueChange = { next ->
+                            val filtered = next.text.filter(Char::isDigit).take(5)
+                            draft = if (filtered == next.text) next else TextFieldValue(filtered, TextRange(filtered.length))
+                            onJumpTextChange(filtered)
+                        },
                         singleLine = true,
                         textStyle = MaterialTheme.typography.labelMedium.copy(
                             color = colors.fgPrimary,
@@ -531,7 +543,7 @@ internal fun ImmersiveBottomScrubber(
                         cursorBrush = SolidColor(colors.fgPrimary),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
                         keyboardActions = KeyboardActions(onGo = {
-                            jumpText.toIntOrNull()?.let(onSubmitJump)
+                            draft.text.toIntOrNull()?.let(onSubmitJump)
                         }),
                         modifier = Modifier
                             .width(64.dp)
@@ -542,7 +554,7 @@ internal fun ImmersiveBottomScrubber(
                             .onFocusChanged { onJumpFocusChange(it.isFocused) }
                             .onPreviewKeyEvent { event ->
                                 if (event.type == KeyEventType.KeyDown && event.key == Key.Enter) {
-                                    jumpText.toIntOrNull()?.let(onSubmitJump); true
+                                    draft.text.toIntOrNull()?.let(onSubmitJump); true
                                 } else if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
                                     onCancelEditJump(); true
                                 } else false
@@ -551,8 +563,8 @@ internal fun ImmersiveBottomScrubber(
                             .testTag("page-jump"),
                     )
                     V7TextButton(
-                        onClick = { jumpText.toIntOrNull()?.let(onSubmitJump) },
-                        enabled = jumpText.toIntOrNull()?.let { it in 1..lastPage } == true,
+                        onClick = { draft.text.toIntOrNull()?.let(onSubmitJump) },
+                        enabled = draft.text.toIntOrNull()?.let { it in 1..lastPage } == true,
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                         modifier = Modifier.testTag("page-jump-go"),
                         ringInside = true,

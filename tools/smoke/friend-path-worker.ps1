@@ -787,6 +787,78 @@ function Resolve-Step7AfterCloseVerdict([string]$CitePage, [string]$NowPage) {
     if ($NowPage -ne $CitePage) { return "收起伴读后页码不是出处写的第 $CitePage 页（现在第 $NowPage 页，见 7-card.png）" }
     return $null
 }
+# 第 7 步要点的是「解析出页码的那一行」，不是屏幕上最靠下的「出处」。
+# 同一抽屉里可以同时有第 154 页和第 153 页两行；页码取第一次解析的数字，重试也只重找这一页。
+function Find-CiteLineForPage($lines, [string]$page) {
+    if (-not $page) { return $null }
+    $want = [regex]::Escape($page)
+    $hits = @($lines | Where-Object {
+        $c = $_.Text -replace '\s', ''
+        $c -match '出处' -and $c -match "第$want[页頁贞貞虫]"
+    })
+    if (-not $hits.Count) { return $null }
+    return $hits[-1]
+}
+function Get-LineClick($line) {
+    if (-not $line) { return $null }
+    $b = Get-LineBox $line
+    if ($b.X2 -lt $b.X1) { return $null }
+    [pscustomobject]@{ X = [int](($b.X1 + $b.X2) / 2); Y = [int]$b.Y; X1 = $b.X1; X2 = $b.X2; Y1 = $b.Y1; Y2 = $b.Y2 }
+}
+# 伴读三个页签在同一行。OCR 会把它们拆成三行，正文里也会出现「讲解」。
+# 只认同一行里从左到右是「讲解 → 提问 → 批注」的那一组，返回其中 $label 的框。
+function Find-CompanionTabLabel($lines, [string]$label, [int]$tol = 18) {
+    $order = @('讲解', '提问', '批注')
+    if ($label -notin $order) { return $null }
+    $cands = New-Object System.Collections.ArrayList
+    foreach ($l in @($lines)) {
+        $compact = $l.Text -replace '\s', ''
+        if (-not $compact) { continue }
+        $present = @($order | Where-Object { $compact.Contains($_) })
+        if (-not $present.Count) { continue }
+        if ($compact.Length -gt 8 -and $present.Count -lt 2) { continue }
+        foreach ($name in $present) {
+            $hit = Find-Text @($l) $name
+            if (-not $hit) { continue }
+            [void]$cands.Add([pscustomobject]@{ Label = $name; X = $hit.X; Y = $hit.Y; X1 = $hit.X1; X2 = $hit.X2; Y1 = $hit.Y1; Y2 = $hit.Y2 })
+            if ($present.Count -eq 1) { break }
+        }
+    }
+    foreach ($seed in @($cands | Where-Object { $_.Label -eq '讲解' })) {
+        $row = @($cands | Where-Object { [Math]::Abs($_.Y - $seed.Y) -le $tol })
+        $explain = @($row | Where-Object { $_.Label -eq '讲解' } | Sort-Object X | Select-Object -First 1)
+        if (-not $explain.Count) { continue }
+        $ask = @($row | Where-Object { $_.Label -eq '提问' -and $_.X -gt $explain[0].X } | Sort-Object X | Select-Object -First 1)
+        if (-not $ask.Count) { continue }
+        $notes = @($row | Where-Object { $_.Label -eq '批注' -and $_.X -gt $ask[0].X } | Sort-Object X | Select-Object -First 1)
+        if (-not $notes.Count) { continue }
+        return @($row | Where-Object { $_.Label -eq $label } | Sort-Object X | Select-Object -First 1)[0]
+    }
+    return $null
+}
+# 跳页框里的数字紧挨在「前往」左边。认不出返回 $null（调用方仍可提交，交给页码断言）。
+# 读到截断数字时调用方不得按回车。
+function Get-JumpFieldText($lines) {
+    $go = Find-Text $lines '前往'
+    if (-not $go) { return $null }
+    $best = $null
+    foreach ($l in @($lines)) {
+        $compact = $l.Text -replace '\s', ''
+        if ($compact -match '^(\d{1,5})前往$') { return $Matches[1] }
+        if ($compact -notmatch '^\d{1,5}$') { continue }
+        $box = Get-LineBox $l
+        $sameRow = [Math]::Abs($box.Y - $go.Y) -le 24
+        $leftOfGo = $box.X2 -le ($go.X1 + 8)
+        $near = ($go.X1 - $box.X2) -le 96
+        if ($sameRow -and $leftOfGo -and $near -and $box.X2 -gt $box.X1) {
+            if (-not $best -or $box.X2 -gt $best.Right) {
+                $best = [pscustomobject]@{ Text = $compact; Right = $box.X2 }
+            }
+        }
+    }
+    if ($best) { return $best.Text }
+    return $null
+}
 
 $env:JAVA_HOME = 'C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot'; $env:GRADLE_USER_HOME = 'D:\agent\gradle-home'; $env:Path = "$env:JAVA_HOME\bin;$env:Path"
 $lib = Join-Path $OutDir 'bookshelf'; $client = Join-Path $OutDir 'client'
@@ -1105,8 +1177,27 @@ try {
     Send-Keys '^g'; Start-Sleep -Milliseconds 900
     $opened = [bool](Await-Text 4 'goto' @('前往') 10)
     if (-not $opened) { Fail 4 'Ctrl+G 没展开跳页框（读不到「前往」，见 4-goto.png）' }
-    Send-Keys '^a'; Send-Keys "$physPage"; Start-Sleep -Milliseconds 500
-    $null = Shot 4 'goto-typed'
+    # 一次把「154」送进父状态会丢位（框里只剩 15，回车就跳到目录页）。逐位敲，敲完先认框里的数字。
+    # 认成别的数就整段重敲，最多 3 次；三次都是错的数就不按回车。这一帧没认出数字才提交，交给下面的页码断言。
+    $typedSeen = $null
+    $typedOk = $false
+    foreach ($attempt in 1..3) {
+        Send-Keys '^a'
+        Start-Sleep -Milliseconds 150
+        Send-Keys '{BACKSPACE}'
+        Start-Sleep -Milliseconds 120
+        foreach ($ch in [string]$physPage.ToCharArray()) {
+            Send-Keys "$ch"
+            Start-Sleep -Milliseconds 160
+        }
+        Start-Sleep -Milliseconds 300
+        $typedLines = Shot 4 $(if ($attempt -eq 1) { 'goto-typed' } else { "goto-typed$attempt" })
+        $typedSeen = Get-JumpFieldText $typedLines
+        if ($typedSeen -eq "$physPage") { $typedOk = $true; break }
+        if ($typedSeen) { Note "跳页框读到 $typedSeen，要的是 $physPage，整段重敲" }
+        else { Note "跳页框里的数字这一帧没认出来（第 $attempt 次），提交后交给页码断言"; break }
+    }
+    if ($typedSeen -and -not $typedOk) { Fail 4 "跳页框三次都没敲成 $physPage（最后读到 $typedSeen，见 4-goto-typed*.png）" }
     Send-Keys '{ENTER}'; Start-Sleep -Seconds 1
     $pageNow = $null
     foreach ($try in 1..6) {
@@ -1523,26 +1614,30 @@ try {
         $citeLine = Find-CiteLine $script:Last
         $citePage = Get-CitePageNumber $(if ($citeLine) { $citeLine.Text } else { '' })
         # 四路交锁时这一下也会被吞：点完底栏还停在第 33 页（11-21 04:46 L3 就这样）。
-        # #577 对这同一颗「出处」的处理是——认出点的还是那颗出处才重点，最多 3 次；
-        # 页号一对上就不再点（再点会把跳转切回去）。这里沿用，落点每次按新一帧重定位。
+        # 点的必须是解析出 $citePage 的那一行。同一帧里更靠下的另一行「出处」可能是别的页
+        # （第 154 页上面、第 153 页下面），按最靠下的「出处」点就会跳错，页码却仍按第一次的数字核对。
+        # 重试只重找同一页码的那一行，不改 $citePage，也不改去点别的出处。最多 3 次。
         # 出处那行解析不出页码时一下都不点：没有目标页，点了也无从核对（过去会跳过整段断言，见 20:05 评审）。
         $c7 = $null
         if ($citePage) {
             foreach ($try in 1..3) {
-                $pressed = Click-At $cite.X $cite.Y -BeforePress {
-                    [bool](Find-Text (Shot 7 'cite-guard') '出处')
+                $pageLine = Find-CiteLineForPage $script:Last $citePage
+                if (-not $pageLine) {
+                    Note "第 $try 次这一帧没有写着第 $citePage 页的「出处」，不再改点别的出处"
+                    break
                 }
-                if (-not $pressed) { Note "第 $try 次按下前那一帧已经没有「出处」了，不再点" }
+                $citeLine = $pageLine
+                $pt = Get-LineClick $pageLine
+                $pressed = Click-At $pt.X $pt.Y -BeforePress {
+                    [bool](Find-CiteLineForPage (Shot 7 'cite-guard') $citePage)
+                }
+                if (-not $pressed) { Note "第 $try 次按下前那一帧已经没有第 $citePage 页的「出处」了，不再点" }
                 Start-Sleep -Seconds 2
                 Hover $midX $hoverY; Start-Sleep -Milliseconds 800
                 $null = Shot 7 $(if ($try -eq 1) { 'cite' } else { "cite$try" })
                 $c7 = Get-HudCounter $script:LastPng
                 if (-not $pressed -or -not $c7 -or "$($c7.Cur)" -eq "$citePage") { break }
-                $again = @(Find-All $script:Last '出处') | Select-Object -Last 1
-                if (-not $again) { break }
-                $citeLine = Find-CiteLine $script:Last
-                Note "第 $try 次点「出处」后停在第 $($c7.Cur) 页，出处写的是第 $citePage 页，重定位再点"
-                $cite = $again
+                Note "第 $try 次点第 $citePage 页的「出处」后停在第 $($c7.Cur) 页，按同一页码重定位再点"
             }
         }
         # 抽屉半屏高，常常正好压住底栏：点完读不出页号是常态，不算没跳页，关掉抽屉再认一次。
@@ -1652,21 +1747,36 @@ try {
         }
         if (-not $tab) { Fail 5 '点开顶栏「伴读」后抽屉头里仍读不到「讲解 / 提问 / 批注」页签（见 5-explain-tab*.png）' }
         # 抽屉会记住上次停的页签（第 7 步在「提问」上留过草稿），所以必须显式点回「讲解」。
-        # 「提问」这颗字比「讲解」稳，拿它当锚：三个页签等宽、左边距 12dp，往左退 30px 落在「讲解」中间；
-        # 「讲解」自己读出来了就按它的框点。
-        $tabY = [int]$tab.Y
-        $ex = Find-Text $lines '讲解'
-        if ($ex -and [Math]::Abs($ex.Y - $tabY) -le 24) { $tabX = [int]$ex.X }
-        else { $tabX = [int]$tab.X1 - 30 }
-        Click-At $tabX $tabY; Start-Sleep -Seconds 1
-        $lines = Shot 5 'explain-tab-on'
-        # 提问页的输入框还在，说明这一下没切过去：按同一条页签行再往左挪几像素补一次。
-        if (Has $lines @('问这句的意思')) {
-            Note '步骤5 第一次点「讲解」页签还停在「提问」，往左补点一次'
-            Click-At ([Math]::Max(16, $tabX - 10)) $tabY; Start-Sleep -Seconds 1
-            $lines = Shot 5 'explain-tab-on2'
+        # 正文和提问线程里也有「讲解」「讲的是」，不能拿它们当页签。只点同一行里
+        # 「讲解 / 提问 / 批注」从左到右排齐的那颗「讲解」。
+        # 提问框还在（「问这句的意思」）时，第一下常常只是让输入框失焦：先在同一落点再点一次，
+        # 仍没切走才按新一帧的坐标往左挪一点。认不出页签行就停，不拿旧坐标猜。
+        $askPlaceholder = '问这句的意思'
+        $switched = $false
+        foreach ($try in 1..3) {
+            $hit = Find-CompanionTabLabel $lines '讲解'
+            if (-not $hit) { Fail 5 '抽屉头里读到了页签字，但没认成同一行的「讲解 / 提问 / 批注」（见 5-explain-tab*.png）' }
+            $tabX = [int]$hit.X; $tabY = [int]$hit.Y
+            Note "步骤5 第 $try 次点「讲解」页签 ($tabX,$tabY)"
+            Click-At $tabX $tabY
+            Start-Sleep -Seconds 1
+            $lines = Shot 5 $(if ($try -eq 1) { 'explain-tab-on' } else { "explain-tab-on$try" })
+            if (-not (Has $lines @($askPlaceholder))) { $switched = $true; break }
+            Note '步骤5 点完仍停在「提问」，同一落点再点一次'
+            Click-At $tabX $tabY
+            Start-Sleep -Seconds 1
+            $lines = Shot 5 "explain-tab-retry$try"
+            if (-not (Has $lines @($askPlaceholder))) { $switched = $true; break }
+            $again = Find-CompanionTabLabel $lines '讲解'
+            if (-not $again) { Fail 5 '点了「讲解」仍停在「提问」，新一帧也没再认到页签行（见 5-explain-tab*.png）' }
+            $tabX = [Math]::Max(16, [int]$again.X - 8); $tabY = [int]$again.Y
+            Note "步骤5 同一落点仍停在「提问」，按新帧往左补点 ($tabX,$tabY)"
+            Click-At $tabX $tabY
+            Start-Sleep -Seconds 1
+            $lines = Shot 5 "explain-tab-nudge$try"
+            if (-not (Has $lines @($askPlaceholder))) { $switched = $true; break }
         }
-        if (Has $lines @('问这句的意思')) { Fail 5 '点了抽屉里的「讲解」页签，内容还停在「提问」（见 5-explain-tab-on*.png）' }
+        if (-not $switched) { Fail 5 '点了抽屉里的「讲解」页签，内容还停在「提问」（见 5-explain-tab-on*.png）' }
         Note '步骤5 已切到伴读抽屉的「讲解」页签'
         # 讲解页的内容由「本章伴读包」驱动，六种状态并存，边等边认：
         #   就绪：标题「本章要点 · <本章>」+ 若干「N. 要点」+ 每条后面「原文第 N 页」锚点；

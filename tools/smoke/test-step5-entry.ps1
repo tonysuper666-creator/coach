@@ -19,7 +19,10 @@
 #    带「再试一次」就先重放一次，第二次还拒就带着原话失败，不干等满 150 秒；
 #  - 追问找标题时见过「思考」就不再往回滚（那会把刚追加的回答推出视野）；
 #  - 第 2 步要见到首页书卡才算过：阅读器底栏读出页号、退回首页却没读到「读到第 / 上次停在」就明确失败；
-#  - 第 7 步出处那行解析不出页码时直接失败，不许跳过跳页断言后还 Pass 7。
+#  - 第 7 步出处那行解析不出页码时直接失败，不许跳过跳页断言后还 Pass 7；
+#  - 同一帧有两行出处时，要点解析出页码的那一行，不点更靠下的另一页；
+#  - 「讲解」页签只认和「提问」「批注」同一行的那颗，正文里的「讲解」不算；
+#  - 跳页框的数字只认紧挨在「前往」左边的那一串，读到截断数字就不是目标页。
 # 函数体从 friend-path-worker.ps1 里按原文截取，屏幕与输入都换成本文件的假实现。
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -492,6 +495,51 @@ $drawerMisread = @((New-Line '出处2·第153贞·第12段“' 480 600 320 26))
 Check 'step7-cite-page-tolerates-hidpi-ocr-misread' ((Get-CitePageNumber (Find-CiteLine $drawerMisread).Text) -eq '153') "got=$(Get-CitePageNumber (Find-CiteLine $drawerMisread).Text)"
 Check 'step7-cite-page-tolerates-chong-ocr-misread' ((Get-CitePageNumber '出处3·第153虫·第4段') -eq '153') "got=$(Get-CitePageNumber '出处3·第153虫·第4段')"
 Check 'step7-reports-the-ocr-text-when-page-missing' ((Resolve-Step7PageVerdict '' '150' '出处 · 见上文') -match '见上文') "why=$(Resolve-Step7PageVerdict '' '150' '出处 · 见上文')"
+
+# 41. 两行出处时，点的是解析出的那一页，不是更靠下的另一行。15 不得匹配 154。
+$twoCites = @(
+    (New-Line '出处1·第154页·第3段' 900 420 280 24),
+    (New-Line '出处2·第153页·第12段' 900 460 280 24)
+)
+$line154 = Find-CiteLineForPage $twoCites '154'
+$line153 = Find-CiteLineForPage $twoCites '153'
+$click154 = Get-LineClick $line154
+Check 'cite-click-uses-parsed-page-line' (($line154.Text -match '第154页') -and ($click154.Y -eq 432)) "y=$($click154.Y) text=$($line154.Text)"
+Check 'cite-click-does-not-use-lower-other-page' (($line153.Text -match '第153页') -and ($click154.Y -ne (Get-LineClick $line153).Y)) "y154=$($click154.Y) y153=$((Get-LineClick $line153).Y)"
+Check 'cite-page-15-does-not-match-154' (-not (Find-CiteLineForPage $twoCites '15')) "found=$(Find-CiteLineForPage $twoCites '15')"
+Check 'cite-page-retry-keeps-original-page' ((Find-CiteLineForPage $twoCites '154').Text -match '第154页') "text=$((Find-CiteLineForPage $twoCites '154').Text)"
+
+# 42. 「讲解」必须和「提问」「批注」同一行。正文里的「讲解」和提问线程里的「讲的是」不能当页签。
+$tabRow = @(
+    (New-Line '讲解' 1600 78 48 22),
+    (New-Line '提问' 1664 80 48 22),
+    (New-Line '批注' 1728 79 48 22),
+    (New-Line '本节讲解见原文' 400 240 180 24),
+    (New-Line '讲的是：第 153-155 页' 1620 180 240 24),
+    (New-Line '问这句的意思、公式推导或例子' 1620 420 280 24)
+)
+$tabHit = Find-CompanionTabLabel $tabRow '讲解'
+Check 'explain-tab-is-the-row-with-three-labels' ([bool]$tabHit -and $tabHit.X -eq 1624 -and $tabHit.Y -eq 89) "x=$($tabHit.X) y=$($tabHit.Y)"
+Check 'explain-tab-ignores-body-when-row-missing' (-not (Find-CompanionTabLabel @($tabRow[3], $tabRow[4]) '讲解')) 'body line was treated as the tab'
+$fused = @((New-Line '讲解提问批注' 1600 80 180 22))
+Check 'explain-tab-ignores-one-fused-token' (-not (Find-CompanionTabLabel $fused '讲解')) 'fused token was treated as three tabs'
+
+# 43. 跳页框：只认「前往」左边的数字。154 才是目标，15 是截断，框外的页码不算。
+$jumpFull = @(
+    (New-Line '154' 700 500 36 20),
+    (New-Line '前往' 760 500 40 20),
+    (New-Line '第 33 页' 200 500 80 20)
+)
+$jumpShort = @(
+    (New-Line '15' 700 500 24 20),
+    (New-Line '前往' 760 500 40 20)
+)
+$jumpUnread = @((New-Line '前往' 760 500 40 20))
+$jumpMerged = @((New-Line '154前往' 700 500 80 20))
+Check 'jump-field-reads-digits-left-of-go' ((Get-JumpFieldText $jumpFull) -eq '154') "got=$(Get-JumpFieldText $jumpFull)"
+Check 'jump-field-reports-truncated-digits' ((Get-JumpFieldText $jumpShort) -eq '15') "got=$(Get-JumpFieldText $jumpShort)"
+Check 'jump-field-null-when-digits-unread' (-not (Get-JumpFieldText $jumpUnread)) "got=$(Get-JumpFieldText $jumpUnread)"
+Check 'jump-field-reads-merged-go-token' ((Get-JumpFieldText $jumpMerged) -eq '154') "got=$(Get-JumpFieldText $jumpMerged)"
 
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"

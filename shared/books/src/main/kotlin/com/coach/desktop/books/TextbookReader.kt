@@ -445,6 +445,7 @@ internal fun TextbookReader(
     val focusManager = LocalFocusManager.current
     var jumpFocused by remember { mutableStateOf(false) }
     var searchOpen by remember(book.id) { mutableStateOf(false) }
+    var notesPageOpen by remember(book.id) { mutableStateOf(false) }
     var searchFocused by remember(book.id) { mutableStateOf(false) }
     var searchFocusTick by remember(book.id) { mutableIntStateOf(0) }
     var searchQuery by remember(book.id) { mutableStateOf("") }
@@ -1254,6 +1255,19 @@ internal fun TextbookReader(
             .testTag("textbook-reader")
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                if (notesPageOpen) {
+                    if (event.key == Key.Escape) {
+                        notesPageOpen = false
+                        return@onPreviewKeyEvent true
+                    }
+                    val turnsPage = event.key in setOf(
+                        Key.DirectionLeft, Key.DirectionRight, Key.PageUp, Key.PageDown,
+                        Key.MoveHome, Key.MoveEnd, Key.Spacebar,
+                    )
+                    if (turnsPage && !event.isCtrlPressed && !event.isAltPressed && !event.isMetaPressed) {
+                        return@onPreviewKeyEvent true
+                    }
+                }
                 val mod = event.isCtrlPressed || event.isMetaPressed
                 val typingNow = typing || askInputFocused
                 when {
@@ -1397,6 +1411,10 @@ internal fun TextbookReader(
                     .onFocusChanged { pageFocused = it.isFocused }
                     .onPreviewKeyEvent { event ->
                         if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        if (notesPageOpen) {
+                            if (event.key == Key.Escape) notesPageOpen = false
+                            return@onPreviewKeyEvent true
+                        }
                         if (event.isCtrlPressed || event.isAltPressed || event.isMetaPressed) return@onPreviewKeyEvent false
                         val typingNow = typing || askInputFocused
                         if (!typingNow && learnableSelection != null && event.key == Key.Enter) {
@@ -1859,6 +1877,9 @@ internal fun TextbookReader(
                         }, modifier = Modifier.testTag("books-note-new")) { Text("＋ 写批注") }
                     }
                     Spacer(Modifier.weight(1f))
+                    V7TextButton({ notesPageOpen = true }, enabled = !ui.busy, modifier = Modifier.testTag("book-notes-open-tab")) {
+                        Text("这本书的笔记")
+                    }
                     if (onExportNotes != null) {
                         V7TextButton({ onExportNotes(book, ui.page) }, enabled = !ui.busy, modifier = Modifier.testTag("book-export-notes")) {
                             Text("导出笔记")
@@ -2266,6 +2287,7 @@ internal fun TextbookReader(
                 if (hudPinned) hudVisible = true
             },
             onLearn = onLearn,
+            onOpenBookNotes = { notesPageOpen = true },
             typeControl = {
                 val control = LocalDeskTypeControl.current
                 if (control != null) control(typeMenuExtra)
@@ -2374,6 +2396,27 @@ internal fun TextbookReader(
                     .border(1.dp, colors.borderSubtle, RoundedCornerShape(CoachV7.Radius.btn))
                     .padding(horizontal = 12.dp, vertical = 6.dp)
                     .testTag("source-anchor-status"),
+            )
+        }
+
+        if (notesPageOpen) {
+            BookNotesPageOverlay(
+                bookId = book.id,
+                bookTitle = book.title,
+                library = library,
+                lessonFirstPages = {
+                    book.lessons.associate { lesson -> lesson.id to lesson.firstPage }
+                },
+                onBack = { notesPageOpen = false },
+                onJump = { target ->
+                    notesPageOpen = false
+                    if (book.page(target) != null) {
+                        pendingNavigationIsJump = true
+                        pendingDwellJump = true
+                        endOrHomeBrowseActive = false
+                        turnTo(target)
+                    }
+                },
             )
         }
     }

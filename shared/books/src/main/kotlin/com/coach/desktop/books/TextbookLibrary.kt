@@ -664,6 +664,18 @@ internal class TextbookLibrary(
         }
     }
 
+    /**
+     * 笔记页用的轻查询：只读批注、提问和错题行，不读页正文，也不读讲解多送的原文。
+     * 200 条应在一次打开里完成。
+     */
+    @Synchronized fun loadBookNotes(
+        bookId: String,
+        title: String,
+        lessonFirstPages: Map<String, Int> = emptyMap(),
+    ): BookNotesPage = database().use { db ->
+        loadStoredBookNotes(db, bookId, title, lessonFirstPages)
+    }
+
     /** Load persisted reader notes for [bookId] in reading order. */
     @Synchronized fun allNotes(bookId: String): List<BookNoteRecord> = database().use { db ->
         db.prepareStatement(

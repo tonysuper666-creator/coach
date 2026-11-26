@@ -21,22 +21,67 @@
 
 ## 稳定 ID 与迁移
 
-下游引用用二元组 `(kind, recordId)`，限定于当前账号。导出时保留两项。书引用为原文件 SHA-256（桌面导入已有），课程使用持久化 collection ID。一个书散列可以被多个账号引用。凭散列不能读学习记录或领书。
+### 旧库归哪个账号
 
-* 对独立创建的对象，新建时生成 UUIDv4 并随行持久化。按自然键唯一的对象（如每书一个阅读位置、每题一张卡）取 UUIDv5。命名空间固定为 `8de10572-23e3-43ea-bdb0-b45b39375efa`，输入为 UTF-8 紧凑 JSON 字符串数组，如 `["card","<书散列>","<lesson>","CHOICE"]`。按数组顺序，无空白，文本按原码点、仅转义 JSON 必需字符。数字键先转十进制字符串。禁止用页码、标题或显示序号单独充当 ID。
-* 旧有业务 ID（note、topic、event、concept、attempt 等）作为该类型自然键的一个分量；书内 ID 再带书散列。高亮使用书、版本及原选区；课程来源使用 topic、书及页段。对旧自增 turn/history 行，首次升级时在同库事务固化一次来源库 UUID，再以来源库 UUID、表名、旧整数 ID 派生。迁移后的克隆继承行映射，独立安装领取不同写设备 ID。两个迁移前独立的旧库无法凭自增键判定同一作答，保留两份比猜测去重安全。
-* 每个源库新增记录映射及操作队列。记录含 kind、recordId、创建/修改 UTC 毫秒、最后写入设备、因果版本及可空删除时间。原始已知时间照搬，旧行时间缺失用迁移时刻并记 `timeSource=migration`，学习日期仍可为空。保留 `book_notes.revision` 与 `last_mutation_id` 支持编辑器本地乐观锁。旧表、字段、接口本阶段删除清单为空；现有读取者仍需它们。
-* 从已配置的登录身份建立每账号独立数据目录。历史数据没有行级账号时，只迁移有可验证绑定的来源；无归属的旧库继续本地可读，在用户明确选定旧库归属前不上传。换号先取消旧会话的传输并关闭旧库，回包带会话代次，旧回包不得写新目录。配对身份维持其设备范围，不能领取 Sable 的跨机备份。
-* 升级先用 SQLite 一致性备份保留原库，停写建立账号归属与基线，对 library、exams 分别事务建映射、索引、初始队列及完成标记。新写与排队在源库同一事务内完成；跨库进度在两个库各自提交后标记。崩溃后只重跑未完成的事务。旧已删除批注种下墓碑。比较升级前后逐类主键、条数和字段摘要并跑 foreign_key_check、integrity_check；全部通过才切换到新目录。失败继续从旧副本读，保留未上传编辑。
+以同一旧数据目录的 `library.sqlite` 和 `exams.sqlite` 为迁移单位。开启学习同步后，在首次迁移的写锁内取得当前已认证的 Sable 账号 X、该目录所用过的已验证 Sable 身份集合，以及所有书的非空 `books.import_account_key` 去重集合。登录身份按服务器返回的稳定账号键去重；临时 session key 只按已保存的 `book_upload_account_bindings` 映射解析。无法解析的非空键按归属未定处理。卷的 `owner='learner'` 仅用来筛选学习者作答，不能证明归属。
 
-TON-1891 使用的固定键如下。表中每一列参数各占 UUIDv5 输入数组的一个字符串，首项为 kind。新建问答在首次本地保存时生成 UUIDv4，此后沿用；同一条旧问答一旦完成映射，就沿用迁移生成的 UUIDv5。导出器从记录映射读 ID，显示文字不参与计算。
-
-| kind | 现有记录的参数顺序 |
+| 已有证据 | 对八类旧数据的动作 |
 |---|---|
-| `note` | 书散列、书内批注 id |
-| `highlight` | 书散列、版本、页、start、end；现有高亮没有独立版本时以书散列作版本 |
-| `ask_turn` | 来源库 UUID、固定表名 book_ask_turns、旧自增 id |
-| `mistake` / `card` | 书散列、lesson、mode；分别引用错题快照和对应的复习卡 |
+| 已登录 X，目录仅有 X 一个已验证身份，所有书键为空或解析为 X | 自动把两个库的八类学习数据整体绑定到 X，包括无书键的课程、考点、掌握度、模考卷及学习者作答。即使每本书的键都为空也执行。把绑定和迁移批次持久化，完成校验后用 X 的队列上传。 |
+| 登录记录出现第二个账号、任一书键指向其他账号，或有未解析的非空键 | 保持旧库可读，两个库均不入上传队列。展示已知归属和待认领项的分类条数。用户登录目标账号，选中可归其所有的书、课程或独立卷及关联学习数据，确认后才在本地事务记录所选条目和账号。明确属于别人的条目不能改派；含跨账号引用的组保持待处理，取消选择不写绑定。 |
+| 尚未登录 Sable 或只有设备配对 | 继续本机读写；在取得 Sable 身份后重新判定。 |
+
+恢复未完成迁移时重用已保存的绑定，重新核验会话和源库书键，出现新冲突就暂停该批次。切换账号先取消旧传输、关闭旧账号目录，再打开新目录；回包校验会话代次。所有权已确定的旧记录不会因再次登录而重新认领。
+
+### 八类数据的记录键
+
+引用为当前账号范围内的 `(kind, recordId)`。下表给出**所有迁移来源**，同时是 TON-1891 的引用契约。每个源表占一行，首项固定为 kind，后续项从左至右取原库列值。书字段使用原文件 SHA-256 小写十六进制；`books.id` 就是这个值。模考卷按旧库的冻结身份 `(book,paper_id)` 引用，导入时校验 `paper_hash`；同键异卷保全两份并报告冲突，再给另一卷分配新 paper_id、重连对应的作答。其他可变内容、排序和设备身份均不参与自然键。
+
+| 旧表 | kind | kind 之后的参数（依次） |
+|---|---|---|
+| `books` | `book_progress` | `id` |
+| `book_read_spots` | `read_spot` | `book` |
+| `book_chapter_progress` | `chapter_progress` | `book_id, toc_node_id` |
+| `book_learning_paths` | `learning_path` | `book` |
+| `book_ladders` | `ladder` | `book` |
+| `book_study_preferences` | `study_preference` | `book_id` |
+| `book_notes` | `note` | `book, id` |
+| `book_highlights` | `highlight` | `book, version, page, start, end` |
+| `book_bookmarks` | `bookmark` | `book, page` |
+| `book_ask_turns` | `ask_turn` | `book, id, turnDigest` |
+| `book_ask_drafts` | `ask_draft` | `book` |
+| `answers` | `answer` | `book, lesson, mode` |
+| `book_reviews` | `mistake` | `book, lesson, mode` |
+| `book_review_history` | `review_event` | `book, id, historyDigest` |
+| `concept_entities` | `concept` | `concept_id` |
+| `concept_mentions` | `concept_mention` | `mention_id` |
+| `concept_links` | `concept_link` | `link_id` |
+| `concept_mastery_ledger` | `mastery` | `concept_key` |
+| `learner_evidence_events` | `evidence` | `event_id` |
+| `learning_gain_cohorts` | `gain_cohort` | `cohort_id` |
+| `margin_whisper_audit` | `whisper` | `whisper_id` |
+| `book_fsrs_cards` | `card` | `book, lesson, mode` |
+| `collections` | `collection` | `id` |
+| `collection_materials` | `collection_material` | `collection_id, material_id` |
+| `course_topics` | `course_topic` | `topic_id` |
+| `course_topic_sources` | `topic_source` | `topic_id, book_id, start_page, end_page` |
+| `local_exam_papers` | `exam_paper` | `book, paper_id` |
+| `local_exam_attempts` | `exam_attempt` | `id` |
+
+* **编码。** 使用 UUIDv5，命名空间 `8de10572-23e3-43ea-bdb0-b45b39375efa`。名称为无 BOM 的 UTF-8 紧凑 JSON 数组。主键整数用无前导零的十进制字符串。文本保持原大小写和码点；双引号、反斜杠以及退格、制表、换行、换页、回车按 JSON 短转义，其余 U+0000–001F 用小写四位十六进制转义，其他字符原样编码。高亮的 `version` 在 v8 取书散列。例：同一题分别以 `["answer",书,课,模式]`、`["mistake",书,课,模式]` 和 `["card",书,课,模式]` 生成三个 ID。
+* **两个旧自增表。** `id` 保留同库内内容相同的多次操作；为区分两个旧库内恰好同号但内容不同的事实，再取不可变事实的摘要。摘要为下列有序数组按上述 JSON 编码后的 SHA-256 小写十六进制。整数同样转为字符串，SQL NULL 写作 JSON null，内嵌 JSON 文本按库存字符串编码。字段全部取自迁移前的行。
+  * `turnDigest` 依次取 `thread_id, selection_id, selection_page, selection_start, selection_end, selection_text, section_location, action_kind, label, question_text, answer_text, citations_json, sent_blocks_json, elapsed_ms, created_at`。
+  * `historyDigest` 依次取 `lesson, mode, kind, text, revealed, understood, guessed, answered_day`。
+  * 相同旧库的两份拷贝即使分别首次升级，也会为同一条事实生成同一个 ID。若两个独立旧库连旧行号和所有事实字段都相同，v8 无来源信息可区分，按一条历史事实恢复，保留两份迁移备份供核对。升级后新增的轮次和作答事件在创建事务中取得 UUIDv4 并持久化；恢复或再导出直接沿用这个 ID。其余行一律按表中自然键派生，新增业务对象的原生 id 在首次保存时固化。
+* **迁移与恢复共用映射。** 为每行保存原键、kind 和 recordId。还原到新机时恢复映射，旧自增主键在目标库可重新分配。重传同一基线按账号、kind、recordId 和业务内容去重；设备 ID、迁移时刻和本地自增序列不能制造第二个版本或再次计分。业务内容确有差异才按后文的并发规则合并。
+
+固定样例可供迁移器和导出器交叉验证。书键为连续 64 个小写 `a`、lesson 为 `L1`、mode 为 `CHOICE` 时，`answer` 应得 `e3567cb8-d31b-579c-85f6-495d6f9b3ac1`，`mistake` 应得 `239c9f9f-8edd-5de1-9742-3d4d7cb3dfc9`，`card` 应得 `c2dd5e69-a37a-58d7-bc1f-e2bab35f1ff3`。
+
+### 何时切换
+
+每个源库新增记录映射及操作队列。记录含创建/修改 UTC 毫秒、最后写入设备、因果版本及可空删除时间。原始已知时间照搬，旧行时间缺失用迁移时刻并记 `timeSource=migration`，学习日期仍可为空。保留 `book_notes.revision` 与 `last_mutation_id` 支持编辑器本地乐观锁。旧表、字段、接口本阶段删除清单为空。
+
+停写后先用 SQLite 一致性备份保留两个原库，分别事务建映射、索引、基线队列及完成标记。新写与排队在源库同一事务内完成；两个库均已提交、当前会话仍与绑定相符，才允许发送。崩溃后只重跑未完成的事务。旧已删除批注种下墓碑。比较升级前后逐类主键、条数和业务字段摘要并跑 foreign_key_check、integrity_check；全部通过才切换到新目录。失败继续从旧副本读，保留未上传编辑。
 
 ## 写入、重传与拉取
 
@@ -78,6 +123,7 @@ Hermes 复用经鉴权的 `UnifiedBookScope.fromCall` 推导账号。设备注�
 
 1. 用测试服务、账号 X 的 A/B 两个独立数据目录，从真实保存入口创建上表八类数据。A 写、B 拉，再断网同时编辑同一条批注、同一张卡和同一页进度；交换重连顺序，比较两端逐字段结果，包含两份原文、回看前页及同日两次评分。
 2. A 删、B 拉；模拟掉回执、进程在提交后退出、跨库分页中断后重启；以原 opId 重传。推进时钟跨过 90 天，令 B 带未传文字重新上线；分别核对可见条数、墓碑、恢复副本和原 ID。开关关闭时须能离线保存且零网络请求。
-3. 空目录 C 只用同账号登录。先恢复目录元数据和书架关联，再从 TON-1894 获取有权限的书。逐表输出 A/C 的可见数、墓碑数及按稳定 ID 排序的内容摘要；核到问答出处、错题历史、FSRS 全状态、未交卷草稿。恢复前中断再启动，目录仍可用。上述大小样本不能充当换机结果。
+3. 在同步功能出现前的 v8 书库和配套考卷库写入八类学习数据，每张映射表至少一行。复制到 A/B 后分别首次升级，设备 ID 和迁移时刻不同。对「仅登录 X、书键全空」和「仅登录 X、书键为空或 X」各跑一轮。两机上送后，用空目录 C 登录 X，逐表比对旧库与 C 的活跃数、墓碑数、稳定键及业务字段摘要，覆盖课程、掌握度、问答出处、FSRS 和未交卷草稿；A/B 重复的旧历史只计一次，同题草稿、错题和卡各有独立 ID。先恢复目录元数据，再从 TON-1894 获取有权限的书。恢复中断重启后继续核对。
+   再分别设置第二个已登录身份、唯一非空书键为 Y、书键同时含 X/Y、未解析键、仅设备配对。自动上传均为零，两库仍可读。多账号场景下取消认领仍为零；明确确认后只上传确认范围，Y 的已绑定条目继续归 Y。
 4. 测试身份 X/Y 使用同一合成书并故意使用相同记录 ID。对列表、单条、分页、快照、写入、分块及撤销分别断言授权边界和 Y 数据摘要。切换本机账号时注入上一账号的迟到回包。删除 X、尝试恢复旧备份、重放旧写队列、同主体重注册，核 X 学习表及副本归零，Y 内容完整。
 5. 设计合入后通知 TON-1891 固定引用格式。实施从最新 main 切，改书库冲突文件前检查对应 2.0.4 PR。测试服务先开；生产切换、迁移与开关由主会话执行。

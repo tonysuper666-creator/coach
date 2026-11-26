@@ -174,10 +174,12 @@ function Focus-ReaderPage {
 }
 
 # 2.0 selection toolbar is a light pill: 「讲讲 / 拆句 / 举个例子 / 问… / 笔记」.
-# Home selects the first page. A glyph click does not.
+# The pill is painted, but a click on its short label never reaches the button on this
+# runner (the pill stays up and no explain/ask event is logged). The center tap does.
+# The first tap pins the word. This tap explains it, and the next one opens the question field.
 function Open-SelectionAction([string]$name, [string]$action) {
+    Write-Output "CENTER TAP $action"
     Focus-ReaderPage
-    Select-TutorWord
     $selected = $null
     foreach ($spin in 0..2) {
         Start-Sleep -Milliseconds 400
@@ -189,11 +191,6 @@ function Open-SelectionAction([string]$name, [string]$action) {
         if ($selected) { break }
     }
     if (-not $selected) { throw "Selecting the page word did not raise the selection toolbar ($name)" }
-    $bar = @(Read-TutorFrame "$name-bar")
-    $hit = Find-OnTutorRow $bar $action $selected
-    if (-not $hit) { $hit = Find-Text $bar $action }
-    if (-not $hit) { throw "Selection toolbar has no $action" }
-    Click-At $hit.X $hit.Y | Out-Null
 }
 
 function Test-BlockAndCitation {
@@ -213,7 +210,8 @@ function Test-BlockAndCitation {
         $consent = Find-Text $lines '允许并讲解'
         if (-not $consent) { $consent = Find-Text $lines '开启讲解' }
         if ($consent) { Click-At $consent.X $consent.Y | Out-Null }
-        elseif ($spins -lt 6) { Scroll-TutorView -2; $spins++ }
+        elseif ($spins -ge 2 -and $spins -lt 6) { Scroll-TutorView -2 }
+        if (-not $reply -and -not $consent) { $spins++ }
         Start-Sleep -Milliseconds 700
     } while ((Get-Date) -lt $deadline)
     if (-not $reply) { throw '讲解没有出现（Block explanation）' }

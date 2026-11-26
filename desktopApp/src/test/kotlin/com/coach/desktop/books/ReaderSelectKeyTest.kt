@@ -46,6 +46,14 @@ class ReaderSelectKeyTest {
         assertNull(Textbook("blank", "阅读", "txt", listOf(BookPage(1, " \n\t"))).firstBodyWord(1))
     }
 
+    @Test fun pinnedCenterTapExplainsThenAsks() {
+        assertEquals(PinnedCenterTap.Ignore, pinnedCenterTap(pinned = false, companionOpen = false, explainStarted = false))
+        assertEquals(PinnedCenterTap.Ignore, pinnedCenterTap(pinned = true, companionOpen = true, explainStarted = false))
+        assertEquals(PinnedCenterTap.Explain, pinnedCenterTap(pinned = true, companionOpen = false, explainStarted = false))
+        assertEquals(PinnedCenterTap.AskField, pinnedCenterTap(pinned = true, companionOpen = false, explainStarted = true))
+        assertEquals(PinnedCenterTap.Ignore, pinnedCenterTap(pinned = true, companionOpen = true, explainStarted = true))
+    }
+
     @Test fun homeRaisesTheSelectionToolbarForTheOpenPage() {
         val root = Files.createTempDirectory("coach-select-key-")
         try {

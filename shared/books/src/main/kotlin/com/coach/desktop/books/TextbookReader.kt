@@ -1372,6 +1372,15 @@ internal fun TextbookReader(
         val bottomDrawerHeight = (rootHeight * 0.50f).coerceIn(220.dp, (rootHeight - 160.dp).coerceAtLeast(220.dp))
 
         val currentSelectionActive by rememberUpdatedState(learnableSelection != null)
+        val pinnedWord by rememberUpdatedState(homeWordPinned)
+        val companionShowing by rememberUpdatedState(companionOpen)
+        val explainStarted by rememberUpdatedState(inlineThread != null)
+        val onPinnedCenterTap by rememberUpdatedState<(SelectionExplainAction) -> Unit> { action ->
+            val sel = learnableSelection ?: return@rememberUpdatedState
+            companionOpen = true
+            companionTab = ReaderCompanionTab.ASK
+            runInlineSelection(sel, action)
+        }
         val pageSurface: @Composable (Modifier) -> Unit = { boxModifier ->
             Box(
                 boxModifier
@@ -1391,11 +1400,12 @@ internal fun TextbookReader(
                                 } else if (!change.pressed && change.previousPressed) {
                                     val p = start
                                     start = null
-                                    if (p != null && !hadSelectionOnDown && !change.isConsumed &&
+                                    val centerTap = p != null && !change.isConsumed &&
                                         change.uptimeMillis - downTime < 500 &&
                                         (change.position - p).getDistance() < 12f &&
                                         p.x in size.width * .3f..size.width * .7f &&
-                                        p.y in size.height * .25f..size.height * .75f) {
+                                        p.y in size.height * .25f..size.height * .75f
+                                    if (centerTap && !hadSelectionOnDown) {
                                         // 安装包上 Home 能把视口带回第 1 页，但进不了阅读区的按键回调，工具条出不来。
                                         // 这一下中心点击会到达这里（顶栏因此开合）。用它把当前页的词留下。
                                         val word = book.homeSelectionWord(ui.page)
@@ -1404,6 +1414,14 @@ internal fun TextbookReader(
                                         if (textView) textSelection = word
                                         hudVisible = !(hudVisible || hoverHudVisible)
                                         if (hudVisible) hudRevealedByTap = true else markHudDismissed()
+                                    } else if (centerTap && hadSelectionOnDown) {
+                                        // 工具条已经画出来，但点「讲讲 / 问…」到不了按钮，讲解事件不会记。
+                                        // 词还钉着、伴读关着时，下一下中心点击改走讲解，再下一下打开提问框。
+                                        when (pinnedCenterTap(pinnedWord, companionShowing, explainStarted)) {
+                                            PinnedCenterTap.Explain -> onPinnedCenterTap(SelectionExplainAction.EXPLAIN)
+                                            PinnedCenterTap.AskField -> onPinnedCenterTap(SelectionExplainAction.ASK)
+                                            PinnedCenterTap.Ignore -> Unit
+                                        }
                                     }
                                 }
                             }
@@ -2448,6 +2466,17 @@ internal object HomeSelectRequest {
         bookId = null
         block = null
     }
+}
+
+/**
+ * 词已经由中心点击钉住、伴读抽屉还关着时，下一下来做什么。
+ * 抽屉开着就不再抢这一下，避免把正在看的讲解关掉。
+ */
+internal enum class PinnedCenterTap { Explain, AskField, Ignore }
+
+internal fun pinnedCenterTap(pinned: Boolean, companionOpen: Boolean, explainStarted: Boolean): PinnedCenterTap {
+    if (!pinned || companionOpen) return PinnedCenterTap.Ignore
+    return if (explainStarted) PinnedCenterTap.AskField else PinnedCenterTap.Explain
 }
 
 /** 键盘翻页的去向。 */

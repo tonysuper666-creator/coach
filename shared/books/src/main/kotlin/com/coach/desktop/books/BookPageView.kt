@@ -219,11 +219,31 @@ internal class BookPagingState(initial: BookPageAnchor) {
     val canNext get() = scrollEdges?.second?.invoke() ?: (index + columns < pages.size)
     /** 滚动读时由视图登记：上一页/下一页键改成往前/往后滚一屏（留 10% 重叠）；翻页读时为 null。 */
     var screenScroller: ((forward: Boolean) -> Unit)? = null
+    /**
+     * 逐页翻过的路：每次上一页/下一页记下「从哪组来、到了哪个锚点」。翻到下一组后读区高度可能变
+     * （节末检查卡出现、收起），整章会按新高度重排；反方向翻回时按重排后的页表减栏数会落到前一组。
+     * 锚点没被别处改过时，反向翻页直接回到来时那一组的首页锚点（TON-1905）。
+     */
+    private class TurnStep(val turn: ReaderTurn, val from: BookPageAnchor, val to: BookPageAnchor)
+    private val turnTrail = ArrayDeque<TurnStep>()
     fun move(turn: ReaderTurn): BookPageAnchor? {
         if (pages.isEmpty()) return null
         val scroller = screenScroller
         if (scroller != null && (turn == ReaderTurn.Next || turn == ReaderTurn.Previous)) {
+            turnTrail.clear()
             scroller(turn == ReaderTurn.Next)
+            return anchor
+        }
+        // 锚点被跳转、点选、书签等别处改过，之前那条路不再算数。
+        if (turnTrail.lastOrNull()?.to != anchor) turnTrail.clear()
+        val reverse = when (turn) {
+            ReaderTurn.Previous -> ReaderTurn.Next
+            ReaderTurn.Next -> ReaderTurn.Previous
+            else -> null
+        }
+        if (reverse == null) turnTrail.clear()
+        else if (turnTrail.lastOrNull()?.turn == reverse) {
+            anchor = turnTrail.removeLast().from
             return anchor
         }
         val current = index
@@ -235,10 +255,17 @@ internal class BookPagingState(initial: BookPageAnchor) {
         }
         // 没有实际翻页（到了边界，或首/末页键落在当前页）：保留读者明确定位过的那一句，不要换成页首。
         if (target == current) return anchor
+        val from = pages[current].anchor
         anchor = pages[target].anchor
+        if (reverse != null) {
+            turnTrail.addLast(TurnStep(turn, from, anchor))
+            if (turnTrail.size > MAX_TURN_TRAIL) turnTrail.removeFirst()
+        }
         return anchor
     }
 }
+
+private const val MAX_TURN_TRAIL = 64
 
 /** 长书先从当前章首排到所在位置之后这么多导入页，整本排完再无缝替换（TON-1724）；无章标题的超大单章上限 64 页。 */
 private const val NEAR_LAYOUT_PAGES = 2

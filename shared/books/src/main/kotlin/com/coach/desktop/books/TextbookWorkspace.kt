@@ -642,8 +642,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 onMuteConcept = { conceptId ->
                                     controller.setConceptMuted(conceptId, true)
                                 },
-                                onOpenCrossBookPage = { targetBookId, targetPage, _ ->
-                                    run { controller.openBook(targetBookId, targetPage) }
+                                onOpenCrossBookPage = { targetBookId, targetPage, quote, offset ->
+                                    run { controller.openBookAtQuote(targetBookId, targetPage, quote.orEmpty(), offset) }
                                 },
                                 collectionQaSessions = collectionQaSessions,
                                 onUpdateCollectionQaSession = { colId, next -> collectionQaSessions[colId] = next },

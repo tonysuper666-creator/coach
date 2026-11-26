@@ -954,6 +954,7 @@ internal fun ImmersiveSelectionPill(
     onAction: (SelectionExplainAction) -> Unit,
     onNote: () -> Unit,
     onDismiss: () -> Unit,
+    onCompare: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
@@ -986,6 +987,15 @@ internal fun ImmersiveSelectionPill(
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
             ) {
                 Text(action.label, style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary, maxLines = 1, softWrap = false)
+            }
+        }
+        if (onCompare != null) {
+            V7TextButton(
+                onClick = onCompare,
+                modifier = Modifier.testTag("selection-action-other-books"),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+            ) {
+                Text("其他书", style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary, maxLines = 1, softWrap = false)
             }
         }
         V7TextButton(

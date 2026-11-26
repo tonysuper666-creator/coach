@@ -1313,6 +1313,20 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
+    /**
+     * 切到另一本书的这一页。原文仍在该页上才高亮那一句；对不上就只翻到这一页，不去标别的句子。
+     */
+    suspend fun openBookAtQuote(bookId: String, page: Int, quote: String, offsetUtf16: Int) {
+        openBook(bookId, page)
+        action(citationNavigation = true) {
+            val loaded = mutable.value.book?.takeIf { it.id == bookId } ?: return@action
+            val pageObj = loaded.page(page)
+            val passage = if (pageObj == null) null
+            else ConceptSayingLogic.passageIfExact(loaded.id, page, pageObj.text, offsetUtf16, quote)
+            mutable.update { it.copy(pendingCourseJump = passage) }
+        }
+    }
+
     private fun persist(book: Textbook) {
         library.save(book)
         val latest = library.book(book.id)

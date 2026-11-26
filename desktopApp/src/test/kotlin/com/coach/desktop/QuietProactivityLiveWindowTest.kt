@@ -172,7 +172,9 @@ class QuietProactivityLiveWindowTest {
                     node(window, "home-focus-card") != null && node(window, "home-read") != null
                 }
                 val homeMeta = nodeText(node(window, "home-focus-meta"))
-                assertTrue("Home meta must show NeedScore basis, was: $homeMeta", "图形移动方向" in homeMeta)
+                if (com.coach.desktop.books.windowsToday) {
+                    assertTrue("Continue must show the bookmark: $homeMeta", "第 ${controller.state.value.book!!.readingPage} 页" in homeMeta)
+                } else assertTrue("Home meta must show NeedScore basis, was: $homeMeta", "图形移动方向" in homeMeta)
 
                 // Open book at sec1.firstPage to begin reading trajectory
                 runBlocking { controller.openBook(book.id, sec1.firstPage) }

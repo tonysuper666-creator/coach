@@ -51,35 +51,37 @@ internal fun selectScreenExplainBlocks(
     book: Textbook,
     page: Int,
     anchorOffsetUtf16: Int = 0,
-    visibleRanges: List<IntRange> = emptyList(),
+    visibleRanges: List<IntRange>? = null,
 ): List<SourceBlock> {
     val allOnPage = book.sourceBlocks().filter { it.page == page }
     val bodyOnPage = allOnPage.filter { it.isBodyParagraph }
     if (bodyOnPage.isEmpty()) return emptyList()
 
-    val screenCandidates = when {
-        visibleRanges.isNotEmpty() -> {
-            val overlapping = bodyOnPage.filter { block ->
-                visibleRanges.any { range -> block.end > range.first && block.start <= range.last }
-            }
-            if (overlapping.isNotEmpty()) {
-                if (anchorOffsetUtf16 > 0) overlapping.filter { it.end > anchorOffsetUtf16 }.ifEmpty { overlapping }
-                else overlapping
-            } else if (anchorOffsetUtf16 > 0) {
-                bodyOnPage.filter { it.end > anchorOffsetUtf16 }.ifEmpty { bodyOnPage }
-            } else bodyOnPage
+    // A laid sheet also covers text replaced by illustrations. Only its rendered text
+    // runs are eligible. Merge adjacent column slices before clipping a paragraph.
+    val ranges = visibleRanges?.sortedBy { it.first }?.fold(mutableListOf<IntRange>()) { merged, range ->
+        val last = merged.lastOrNull()
+        if (!range.isEmpty()) {
+            if (last != null && range.first <= last.last + 1) {
+                merged[merged.lastIndex] = last.first..maxOf(last.last, range.last)
+            } else merged.add(range)
         }
-        anchorOffsetUtf16 > 0 -> bodyOnPage.filter { it.end > anchorOffsetUtf16 }.ifEmpty { bodyOnPage }
-        else -> bodyOnPage
+        merged
     }
-
-    val captionSet = pageIllustrationCaptions(book, page)
-    val hasFollowingProse = screenCandidates.any { !isLeadingImageCaptionBlock(it, captionSet) }
-    val hasPrecedingHeading = allOnPage.any { it.heading && it.start < (screenCandidates.lastOrNull()?.start ?: 0) }
-    val filtered = if (screenCandidates.size >= 2 && hasFollowingProse &&
-        (isLeadingImageCaptionBlock(screenCandidates.first(), captionSet) || hasPrecedingHeading)) {
-        screenCandidates.dropWhile { isLeadingImageCaptionBlock(it, captionSet) }.ifEmpty { screenCandidates }
-    } else screenCandidates
+    val pageText = book.page(page)?.text ?: return emptyList()
+    val screenCandidates = if (ranges == null) {
+        bodyOnPage.filter { it.end > anchorOffsetUtf16 }
+    } else bodyOnPage.flatMap { block ->
+        ranges.mapNotNull { range ->
+            val start = maxOf(block.start, range.first, anchorOffsetUtf16)
+            val end = minOf(block.end, range.last + 1, pageText.length)
+            if (start >= end) return@mapNotNull null
+            val text = pageText.substring(start, end)
+            if (text.isBlank()) null else block.copy(id = "${book.id}:p$page:$start", start = start, end = end, text = text)
+        }
+    }
+    val captions = pageIllustrationCaptions(book, page)
+    val filtered = screenCandidates.dropWhile { isLeadingImageCaptionBlock(it, captions) }.ifEmpty { screenCandidates }
 
     val bounded = ArrayList<SourceBlock>(minOf(filtered.size, 128))
     var chars = 0L
@@ -92,12 +94,19 @@ internal fun selectScreenExplainBlocks(
     return bounded
 }
 
+/** Source intervals painted as text in the current columns, in reading order. */
+internal fun BookPagingState.visibleProseSlices(): List<BookPageSlice> {
+    val first = index
+    return (0 until columns).mapNotNull { pages.getOrNull(first + it) }
+        .flatMap { sheet -> sheet.runs.flatMap { it.sources } }
+}
+
 internal fun pageExplainCacheKey(page: Int, blocks: List<SourceBlock>): String {
     val digest = MessageDigest.getInstance("SHA-256")
     blocks.forEach { b ->
         digest.update(b.id.toByteArray(Charsets.UTF_8))
         digest.update(':'.code.toByte())
-        digest.update(b.text.length.toString().toByteArray(Charsets.UTF_8))
+        digest.update(b.text.toByteArray(Charsets.UTF_8))
         digest.update('\n'.code.toByte())
     }
     val hash = digest.digest().joinToString("") { "%02x".format(it) }.take(16)
@@ -130,7 +139,7 @@ internal fun PageExplanation(
     onOpen: (SourceBlock) -> Unit,
     onLogin: () -> Unit,
     currentPageOffset: Int = 0,
-    visibleRanges: List<IntRange> = emptyList(),
+    visibleRanges: List<IntRange>? = null,
     library: TextbookLibrary? = null,
 ) {
     val blocks = remember(book, page, currentPageOffset, visibleRanges) {
@@ -161,7 +170,7 @@ internal fun PageExplanation(
                         citations = res.explanation.citations.map { CachedCitation(it.anchor, it.blockId, it.page) },
                         recap = "",
                     )
-                    withContext(Dispatchers.IO) { runCatching { library.saveSectionGuide(book.id, cacheKey, toCache) } }
+                    withContext(Dispatchers.IO) { runCatching { library.saveSectionGuide(book.id, cacheKey, toCache, book) } }
                 }
                 value = res
             }

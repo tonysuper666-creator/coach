@@ -122,6 +122,33 @@ class SharedGrantTests(unittest.TestCase):
             self.ledger(1).reserve("anthropic", KEY, 1)
         self.assertEqual(before, self.ledger(1).read())
 
+    def test_expiry_commits_even_on_denial_after_rollover_and_keeps_grant_guard(self):
+        ledger = self.ledger(0)
+        share = self.plan["ledgers"][0]["limit_microusd"]
+        reservation = ledger.reserve("anthropic", KEY, share)
+        ledger.defer_interrupted(reservation, 100, 30)
+        self.now += 3600  # December, same grant window.
+        with self.assertRaisesRegex(Denied, "credit_limit_95_percent"):
+            self.ledger(0).reserve("anthropic", KEY, 1)
+        data = ledger.read()
+        self.assertEqual({}, data["interrupted_streams"])
+        self.assertEqual({}, data["cycles"][reservation[0]]["reserved"])
+        month = data["months"]["2026-11"]["anthropic"]
+        self.assertEqual((share, share, 1, 0), tuple(month[k] for k in
+                         ("spent_microusd", "estimated_microusd", "calls", "reserved_microusd")))
+        self.assertEqual(0, ledger.expire_interrupted())
+
+    def test_estimated_settlement_cannot_be_excluded_as_verified_opening_spend(self):
+        ledger = self.ledger(0)
+        hold = ledger.reserve("anthropic", KEY, 200)
+        ledger.settle("anthropic", hold, 200, estimated=True)
+        self.now = self.plan["end_utc"]
+        self.plan.update(start_utc=self.now, end_utc=self.now + 86400)
+        self.plan["ledgers"][0]["prior_settled_microusd"] = 200
+        atomic_json(self.states[0] / "grant-allocation-anthropic.json", self.plan)
+        with self.assertRaisesRegex(Denied, "grant_allocation_unavailable"):
+            ledger.reserve("anthropic", KEY, 1)
+
     def test_next_verified_window_excludes_only_prior_settlement(self):
         old = self.ledger(0).reserve("anthropic", KEY, 123)
         self.ledger(0).settle("anthropic", old, 120)

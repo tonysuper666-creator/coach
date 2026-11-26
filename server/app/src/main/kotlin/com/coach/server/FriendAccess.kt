@@ -18,6 +18,8 @@ internal fun friendId(name: String) = sha256(name.toByteArray(Charsets.UTF_8))
 private val friendStudyModeRegex = Regex("""/api/books/[^/]+/modes/[^/]+""")
 private val friendBookMapBatchRegex = Regex("""/api/books/[^/]+/book-map/batch""")
 private val unifiedBookStatusRegex = Regex("""/v1/books/sb_[0-9a-f]{24}/status""")
+private val unifiedBookOriginalRegex = Regex("""/v1/books/sb_[0-9a-f]{24}/original""")
+private val unifiedBookArtifactRegex = Regex("""/v1/books/sb_[0-9a-f]{24}/artifact""")
 private val unifiedBookItemRegex = Regex("""/v1/books/sb_[0-9a-f]{24}""")
 
 internal fun friendPath(call: ApplicationCall): Boolean {
@@ -30,17 +32,22 @@ internal fun friendPath(call: ApplicationCall): Boolean {
         HttpMethod.Post to "/v1/library/companion/chapter",
         HttpMethod.Post to "/v1/library/collection/ask",
         HttpMethod.Post to "/v1/books/upload",
-        HttpMethod.Get to "/v1/books" -> true
+        HttpMethod.Get to "/v1/books",
+        HttpMethod.Delete to "/v1/account" -> true
         else -> (method == HttpMethod.Post && (friendStudyModeRegex.matches(path) || friendBookMapBatchRegex.matches(path))) ||
-            (method == HttpMethod.Get && unifiedBookStatusRegex.matches(path)) ||
+            (method == HttpMethod.Get && (unifiedBookStatusRegex.matches(path) || unifiedBookOriginalRegex.matches(path) || unifiedBookArtifactRegex.matches(path))) ||
             (method == HttpMethod.Delete && unifiedBookItemRegex.matches(path))
     }
 }
 
 /** Fixed, human-readable errors; upstream bodies and diagnostics never cross this boundary. */
-internal class FriendServiceError(val code: String = "unavailable") : RuntimeException(code) {
+internal class FriendServiceError(val code: String = "unavailable", private val retryAfterSec: Int? = null) : RuntimeException(code) {
     val status get() = if (code in setOf("daily_quota", "monthly_quota")) HttpStatusCode.TooManyRequests else HttpStatusCode.ServiceUnavailable
-    val body get() = json("code" to code, "error" to "讲解服务暂时连不上，读书照常。")
+    val body get() = buildJsonObject {
+        put("code", code)
+        put("error", "讲解服务暂时连不上，读书照常。")
+        retryAfterSec?.takeIf { it > 0 }?.let { put("retryAfterSec", it) }
+    }
 }
 
 /** These stores never open the owner's catalog, ledger, source files or AI-call table. */
@@ -51,6 +58,12 @@ class FriendAccess(private val directory: Path,
     internal var sable: SableSessions? = sableSessions
     private val stores = ConcurrentHashMap<String, ImportedBookSources>()
     internal fun imports(name: String) = stores.computeIfAbsent(friendId(name)) { ImportedBookSources(directory.resolve(it).resolve("imports")) }
+    @Synchronized internal fun deleteAccountData(name: String) {
+        val id = friendId(name)
+        stores.remove(id)
+        val root = directory.resolve(id)
+        if (Files.exists(root)) root.toFile().deleteRecursively()
+    }
     internal fun status(name: String, device: String? = null): JsonObject {
         try {
             val settings = if (Files.exists(config)) LedgerJson.parseToJsonElement(Files.readString(config)).jsonObject else json()

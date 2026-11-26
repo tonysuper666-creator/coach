@@ -71,7 +71,8 @@ internal object BookSchemaMigration {
 
     /** TON-1833: persistent per-account remote unbind (`PENDING_DELETE`), `book_pending_deletes`, and `books.import_account_key`. */
     const val V7_SCHEMA_VERSION = 7
-    const val CURRENT_SCHEMA_VERSION = V7_SCHEMA_VERSION
+    const val V8_SCHEMA_VERSION = 8
+    const val CURRENT_SCHEMA_VERSION = 9
     const val V1_BACKUP_FILENAME = "library.sqlite.v1.bak"
     const val V2_BACKUP_FILENAME = "library.sqlite.v2.bak"
     const val V3_BACKUP_FILENAME = "library.sqlite.v3.bak"
@@ -493,18 +494,23 @@ internal object BookSchemaMigration {
                     currentVersion < V4_SCHEMA_VERSION -> directory.resolve(V3_BACKUP_FILENAME)
                     currentVersion < V5_SCHEMA_VERSION -> directory.resolve(V4_BACKUP_FILENAME)
                     currentVersion < V6_SCHEMA_VERSION -> directory.resolve(V5_BACKUP_FILENAME)
-                    else -> directory.resolve(V6_BACKUP_FILENAME)
+                    currentVersion < V7_SCHEMA_VERSION -> directory.resolve(V6_BACKUP_FILENAME)
+                    currentVersion < V8_SCHEMA_VERSION -> directory.resolve("library.sqlite.v7.bak")
+                    else -> directory.resolve("library.sqlite.v8.bak")
                 }
                 if (upgradingExisting) {
                     runCatching { probe.createStatement().use { it.execute("PRAGMA wal_checkpoint(TRUNCATE)") } }
                 }
                 schemaComplete = currentVersion >= CURRENT_SCHEMA_VERSION &&
                     REQUIRED_V7_TABLES.all { it in existingTables } &&
+                    "book_ask_drafts" in existingTables &&
+                    tableColumns(probe, "book_ask_turns").containsAll(listOf("answer_status", "write_id")) &&
                     "show_standalone" in tableColumns(probe, "books") &&
                     "import_account_key" in tableColumns(probe, "books") &&
                     "week_num" in tableColumns(probe, "collection_materials") &&
                     "index_state" in tableColumns(probe, "books") &&
                     "text_pending" in tableColumns(probe, "pages") &&
+                    "source_page" in tableColumns(probe, "book_reviews") &&
                     "due_day" in tableColumns(probe, "book_reviews") &&
                     "guessed" in tableColumns(probe, "answers")
                 if (schemaComplete) {
@@ -550,7 +556,14 @@ internal object BookSchemaMigration {
                     }
                     db.createStatement().use { sql ->
                         for (ddl in V6_TABLES) sql.execute(ddl)
+                        sql.execute("""CREATE TABLE IF NOT EXISTS book_ask_drafts(
+                            book TEXT PRIMARY KEY, page INTEGER NOT NULL, question TEXT NOT NULL,
+                            thread_id TEXT, block_id TEXT, block_start INTEGER, block_end INTEGER,
+                            collection_id TEXT, updated_at INTEGER NOT NULL)""")
                     }
+                    ensureColumn(db, "book_ask_turns", "answer_status",
+                        "TEXT NOT NULL DEFAULT 'complete' CHECK(answer_status IN ('pending','failed','complete'))")
+                    ensureColumn(db, "book_ask_turns", "write_id", "TEXT")
                     upgradeUploadQueueToV6(db)
                     db.createStatement().use { sql ->
                         for (ddl in V7_TABLES) sql.execute(ddl)
@@ -562,6 +575,7 @@ internal object BookSchemaMigration {
                                WHERE state='PENDING_DELETE' AND server_shelf_book_id IS NOT NULL""".trimIndent(),
                         )
                     }
+                    ensureColumn(db, "book_reviews", "source_page", "INTEGER")
                     BookFtsStore.migrate(db)
                     onInTransaction(db)
                     if (upgradingFromV1 || addedIndexState) {

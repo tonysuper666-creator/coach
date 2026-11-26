@@ -56,16 +56,47 @@ context sizes/prices go to subscriptions. The bridge requests default service ti
 no tools, no explicit prompt-cache writes and no regional/Fast mode.
 
 Atomic, fsynced `api-credit-ledger.json` is authoritative. Calendar summaries
-`api-spend-YYYY-MM.json` report `spent_microusd`, `reserved_microusd`, and completed
+`api-spend-YYYY-MM.json` report `spent_microusd`, `reserved_microusd`, and accounted
 `calls` per provider. One dollar is 1,000,000 microdollars. Coach reserves at most
 95% of each configured monthly API grant, including all unresolved reservations.
 The nominal Anthropic $200 and OpenAI $500 grants allow $190 and $475 respectively.
 The spend monitor reports a reservation that would cross this boundary to the
 main session for Li Zheng's decision before incurring paid usage. The limit
 applies across API keys.
+For streaming calls an explicit rejection (including 402, 429 and Anthropic 529) or
+cancellation before dispatch releases the reservation in both ledgers. When a stream
+closes after provider usage has arrived, the bridge prices the latest cumulative
+counters once. A priced final usage receipt settles at its reported cost even when
+the client missed the last frame. Before final usage, the input count from Anthropic
+is known, and the bridge bounds any unconfirmed output up to the requested limit.
+The monthly report includes the unconfirmed portion in both `estimated_microusd` and
+`spent_microusd`. Subtract the former from the latter to see the confirmed portion.
+Friend token limits include the unconfirmed bounds.
+
+When a dispatched stream is interrupted without a usage receipt, the bridge marks
+that hold with a 15-minute UTC deadline. The bridge checks deadlines once a minute
+and before admitting another request. Expiry closes both the provider and friend
+hold in one ledger commit, recording the upper bound as estimated spend. An expired
+hold cannot reopen grant headroom for potentially billed work. Ambiguous gateway
+errors and invalid receipts settle conservatively. Opening baselines exclude
+estimates. Legacy holds, pending Batch jobs and crashes before an interruption
+was recorded still require upstream reconciliation.
+
+On a denied reservation the monthly credit-guard receipt captures the amount requested,
+pending total, and headroom before pending holds. Its cause is `pending_reservations`
+when the request would have fit without those holds, and `insufficient_allocation`
+otherwise. This describes local admission at that instant. Older receipts lack these fields.
+
 Unresolved reservations from all prior months (including old ledger records)
 continue to consume headroom until settled. UTC monthly reporting and the
 provider's grant window have separate boundaries.
+
+To measure the reader service before and after a change, run
+`python3 tools/reader/failure_rates.py --logs "$COACH_LOG_DIR"` against its access-log
+directory. Pass `--end 2026-11-26T08:00:00Z` to replay a particular window. It reports
+HTTP attempts per UTC hour and over the trailing 24 hours. The denominator includes
+200, 429, 5xx and observed client abandonment (499). The latter three count as failures.
+Older logs did not distinguish abandoned calls. Empty samples show `n/a`.
 
 ### Sharing one provider grant
 
@@ -122,9 +153,7 @@ the ledger, friend accounting, pending batches and lock-zero records.
    allocation pins and receiver receipts. Resume paid forwarding only with a
    verified bounded allocation covering every live writer.
 
-Complete, model-matching usage settles the reservation at configured price;
-timeouts, HTTP errors, cancellation, missing usage and stream interruption retain
-the full bound across restarts. Unexpected over-bound usage closes the local month.
+Complete, model-matching usage settles the reservation at the configured price. Unexpected over-bound usage closes the local month.
 Do not delete a ledger to restore headroom. Log monthly progress as spent plus
 unresolved reservations; neither is the account's authoritative remaining balance.
 
@@ -145,7 +174,7 @@ Reader resets its parser/body deadline; the original total deadline still applie
 Chat emits a new snapshot retaining any completed preceding part. Old callers that
 do not advertise reset support receive an explicit truncated terminal after partial
 output, rather than concatenated answers. Cancellation closes the API stream and
-retains its reservation.
+settles according to the dispatch and usage rules above.
 
 Request logs record `transport=api` or `transport=subscription`, the actual model
 in `served=`, and `ttft` in milliseconds. Use completed requests for production

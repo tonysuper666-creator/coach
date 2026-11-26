@@ -190,6 +190,7 @@ internal fun ImmersiveTopHud(
     typeControl: @Composable () -> Unit,
     modeControl: (@Composable () -> Unit)? = null,
     onMoreMenuDismiss: () -> Unit = {},
+    onOpenBookNotes: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
@@ -316,6 +317,12 @@ internal fun ImmersiveTopHud(
                             enabled = !busy,
                             onClick = { moreMenuOpen = false; onToggleSearch() },
                             modifier = Modifier.testTag("book-search-toggle"),
+                        )
+                        DropdownMenuItem(
+                            text = { Text("这本书的笔记", style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary) },
+                            enabled = !busy,
+                            onClick = { moreMenuOpen = false; onOpenBookNotes() },
+                            modifier = Modifier.testTag("book-notes-open"),
                         )
                         Box(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) { typeControl() }
                         DropdownMenuItem(
@@ -577,6 +584,7 @@ internal fun ImmersiveTocDrawer(
     onToggleBookmark: (Int) -> Unit,
     onJumpToc: (BookTocNode) -> Unit,
     onSaveBodyStart: suspend (Int?) -> Unit,
+    onEditChapter: (suspend (StructureEdit) -> Unit)? = null,
     onReorganizeSections: (() -> Unit)?,
     onClose: () -> Unit,
     readChapterIds: Set<String> = emptySet(),
@@ -663,7 +671,7 @@ internal fun ImmersiveTocDrawer(
                 )
                 when (activeTab) {
                     ReaderLeftTab.TOC -> {
-                        TocStructureSummary(book, bodyStart, bodyStartCorrected, busy, onSaveBodyStart)
+                        TocStructureSummary(book, bodyStart, bodyStartCorrected, busy, onSaveBodyStart, currentChapterId, currentAnchor, onEditChapter)
                         if (entries.isEmpty()) {
                             Column(
                                 Modifier.weight(1f).fillMaxWidth().padding(20.dp).testTag("v7-directory-drawer"),
@@ -1022,7 +1030,7 @@ internal fun CompanionAskPane(
     val quoteSource = thread?.selection ?: activeSelection
     val isCollectionMode = collectionScopeLabel != null && askScope == CollectionAskScope.COLLECTION
     val isLoadingNow = if (isCollectionMode) collectionLoading else (thread?.loading == true)
-    val canSendNow = draft.isNotBlank()
+    val canSendNow = draft.isNotBlank() && (isCollectionMode || quoteSource != null || pageBlocks.isNotEmpty())
     val askFocus = remember { FocusRequester() }
     LaunchedEffect(askScope, quoteSource?.id) {
         withFrameNanos { }
@@ -1082,7 +1090,8 @@ internal fun CompanionAskPane(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    currentSection?.let { "围绕「${it.title}」提问，或先选中一段原文。" }
+                    pageBlocks.firstOrNull()?.let { "引文 · ${shortQuote(it.text)}" }
+                        ?: currentSection?.let { "围绕「${it.title}」提问，或先选中一段原文。" }
                         ?: "选中一段原文，或直接就当前页提问。",
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.fgSecondary,
@@ -1198,7 +1207,10 @@ internal fun CompanionAskPane(
                         for ((index, entry) in thread.turns.withIndex()) {
                             Column(Modifier.fillMaxWidth().testTag("inline-explain-turn-$index"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(entry.label, style = MaterialTheme.typography.labelMedium, color = colors.actionPrimary)
-                                ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks, showReaderPage = true) { citation ->
+                                if (entry.explanation.citations.isEmpty()) {
+                                    Text(ReadableText.withoutCitationMarks(entry.explanation.text).ifBlank { "尚未收到回答" })
+                                    if (entry.explanation.text.isNotBlank()) Text("回答中断", style = MaterialTheme.typography.labelSmall)
+                                } else ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks, showReaderPage = true) { citation ->
                                     entry.sentBlocks.firstOrNull { it.id == citation.blockId }?.let { onOpenCitation(citation, it) }
                                 }
                             }
@@ -1209,7 +1221,7 @@ internal fun CompanionAskPane(
                                 thread.pendingLabel?.takeIf { it.isNotBlank() }?.let {
                                     Text(it, style = MaterialTheme.typography.labelMedium, color = colors.actionPrimary)
                                 }
-                                Text("正在整理…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("inline-explain-loading"))
+                                Text(thread.pendingText.takeIf { it.isNotBlank() }?.let(ReadableText::withoutCitationMarks) ?: "正在整理…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("inline-explain-loading"))
                             }
                         }
                         thread.error?.let { (message, trouble) ->

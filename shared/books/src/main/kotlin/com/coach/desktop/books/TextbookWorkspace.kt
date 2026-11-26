@@ -231,7 +231,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
             spans += Triple(block, cursor, cursor + block.text.length)
             cursor += block.text.length
         }
-        val hits = Regex(Regex.escape(practice.reference)).findAll(lesson.text).toList()
+        val hits = if (practice.reference.isBlank()) emptyList() else Regex(Regex.escape(practice.reference)).findAll(lesson.text).toList()
         val anchor = when (hits.size) {
             1 -> {
                 // 依据可能跨多个正文块；只有命中覆盖的块同属一页时，页锚点才是确定的。
@@ -249,9 +249,10 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
             0 -> PracticeSource(null, null, "无法确认原句：未找到本题依据所在的位置。")
             else -> PracticeSource(null, null, "无法确认原句：本题依据出现多次。")
         }
-        practiceSource = anchor
+        val sourcePage = practice.sourcePage?.takeIf { book.page(it) != null }
+        practiceSource = if (sourcePage != null && anchor.page != sourcePage) PracticeSource(sourcePage, null, null) else anchor
         sourceOrigin = SourceFocus.PRACTICE
-        run { controller.source(); anchor.page?.let { controller.page(it) } }
+        run { controller.source(); (sourcePage ?: anchor.page)?.let { controller.page(it) } }
     }
     // 外壳（WindowsTextbookHost）已经按系统或 coach.windows.theme 选好明暗；正文沿用同一个选择，
     // 不再让内层按系统重选，否则外壳浅、正文深。
@@ -388,6 +389,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             hinge = hinge,
                             onExportNotes = onExportNotes,
                             onOpenBook = { id -> run { controller.openBook(id) } },
+                            onOpenAskDraft = { draft -> run { controller.openBook(draft.book, draft.page, askDraft = draft) } },
                             onOpenReviews = { run { if (drafts.flush()) controller.showReviews() } },
                             onNewCourse = onNewCourse,
                             onNewBooklist = onNewBooklist,
@@ -561,6 +563,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 onJumpCourseCitation = { citation, origin ->
                                     run { controller.jumpToCourseCitation(citation, origin) }
                                 },
+                                onEditStructure = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true))
+                                    controller::editStructure else null,
                                 onCancelImport = controller::cancelImport,
                                 onReorganizeSections = { run { controller.reorganizeSections() } },
                                 onSaveSectionQuiz = { lesson, qIdx, practice, answer ->

@@ -16,6 +16,9 @@ dependencies {
     implementation(libs.ktor.netty)
     implementation(libs.ktor.websockets)
     implementation(libs.coroutines.core)
+    implementation("org.apache.pdfbox:pdfbox:3.0.8")
+    implementation("org.jsoup:jsoup:1.24.1")
+    implementation("org.apache.poi:poi-ooxml:5.5.1")
     runtimeOnly("org.slf4j:slf4j-simple:2.0.17")
 }
 application { mainClass = "com.coach.server.MainKt" }

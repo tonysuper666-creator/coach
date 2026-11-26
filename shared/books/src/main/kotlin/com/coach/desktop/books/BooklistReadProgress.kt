@@ -85,7 +85,7 @@ internal object BookChapterResolver {
             .ifEmpty { toc.filter { it.kind == TocNodeKind.SECTION } }
         if (chapterNodes.isNotEmpty()) {
             val ordered = chapterNodes.sortedWith(compareBy(BookTocNode::startPage, BookTocNode::startOffset, BookTocNode::ordinal))
-            return ordered.mapIndexed { index, node ->
+            return ordered.mapIndexedNotNull { index, node ->
                 val next = ordered.getOrNull(index + 1)
                 val dividerAfter = toc.firstOrNull {
                     (it.kind == TocNodeKind.PART || it.kind == TocNodeKind.APPENDIX || it.kind == TocNodeKind.BACK_MATTER) &&
@@ -106,7 +106,9 @@ internal object BookChapterResolver {
                         start.page == next.startPage && start.start < next.startOffset
                     afterStart && beforeNext && start.page <= end
                 }
-                BookChapterSpan(node.id, node.title, node.startPage, end, sections, node.startOffset)
+                val first = maxOf(node.startPage, book.correctedBodyPage ?: node.startPage)
+                if (first > end) return@mapIndexedNotNull null
+                BookChapterSpan(node.id, node.title, first, end, sections, if (first == node.startPage) node.startOffset else 0)
             }
         }
         if (book.structure != null && toc.isEmpty()) {
@@ -325,6 +327,42 @@ internal object BooklistProgressStore {
                 }
                 out
             }
+        }
+    }
+
+    fun remapChapters(db: Connection, old: Textbook, updated: Textbook) {
+        val records = loadForBook(db, old.id)
+        if (records.isEmpty()) return
+        val originals = old.chapterSpans
+        val byId = originals.associateBy { it.tocNodeId }
+        val sql = """INSERT INTO book_chapter_progress(book_id,toc_node_id,pages_total,pages_dwelled,
+            dwelled_pages_json,read_state,manual_override,updated_at) VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(book_id,toc_node_id) DO UPDATE SET pages_total=excluded.pages_total,
+            pages_dwelled=excluded.pages_dwelled,dwelled_pages_json=excluded.dwelled_pages_json,
+            read_state=excluded.read_state,manual_override=excluded.manual_override"""
+        db.prepareStatement(sql).use { stmt ->
+            for (span in updated.chapterSpans) {
+                val oldSpan = byId[span.tocNodeId]
+                if (oldSpan?.firstPage == span.firstPage && oldSpan.lastPage == span.lastPage) continue
+                val range = span.firstPage..span.lastPage
+                val overlaps = originals.filter { it.firstPage <= span.lastPage && it.lastPage >= span.firstPage }
+                val evidence = overlaps.mapNotNull { records[it.tocNodeId] }
+                if (evidence.isEmpty()) continue
+                val pages = evidence.flatMap { it.dwelledPages }.filter { it in range }.toSet()
+                val manual = evidence.first().readState.takeIf { state ->
+                    overlaps.size == evidence.size && evidence.all { it.manualOverride && it.readState == state }
+                }
+                stmt.setString(1, old.id)
+                stmt.setString(2, span.tocNodeId)
+                stmt.setInt(3, span.pagesTotal)
+                stmt.setInt(4, pages.size)
+                stmt.setString(5, encodePages(pages))
+                stmt.setString(6, (manual ?: ChapterReadPolicy.computeReadState(pages.size, span.pagesTotal)).name)
+                stmt.setInt(7, if (manual != null) 1 else 0)
+                stmt.setLong(8, System.currentTimeMillis())
+                stmt.addBatch()
+            }
+            stmt.executeBatch()
         }
     }
 

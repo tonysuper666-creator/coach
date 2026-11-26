@@ -160,7 +160,7 @@ internal class SectionGuideController(
                 when (val result = explainer.explainSectionGuide(ctx, bookPages)) {
                     is SectionGuideResult.Done -> {
                         states[section.id] = SectionGuideState.Ready(result.guide, section.blocks)
-                        withContext(Dispatchers.IO) { library?.saveSectionGuide(book.id, section.id, result.guide.toCached()) }
+                        withContext(Dispatchers.IO) { library?.saveSectionGuide(book.id, section.id, result.guide.toCached(), book) }
                         if (prefetchNext) ensureSection(index + 1, prefetchNext = false)
                     }
                     is SectionGuideResult.Refused -> {
@@ -340,6 +340,8 @@ internal data class InlineExplainThread(
     val fallbackBlocks: List<SourceBlock> = emptyList(),
     val threadId: String = java.util.UUID.randomUUID().toString(),
     val pendingLabel: String? = null,
+    val pendingText: String = "",
+    val retryTurn: BookQuestionAttempt? = null,
 )
 
 internal data class InlineExplainEntry(
@@ -396,7 +398,10 @@ internal fun InlineSelectionExplainCard(
             for ((index, entry) in thread.turns.withIndex()) {
                 Column(Modifier.fillMaxWidth().testTag("inline-explain-turn-$index"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(entry.label, style = MaterialTheme.typography.labelMedium, color = v7Pine())
-                    ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks) { citation ->
+                    if (entry.explanation.citations.isEmpty()) {
+                        Text(ReadableText.withoutCitationMarks(entry.explanation.text).ifBlank { "尚未收到回答" })
+                        if (entry.explanation.text.isNotBlank()) Text("回答中断", style = MaterialTheme.typography.labelSmall)
+                    } else ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks) { citation ->
                         entry.sentBlocks.firstOrNull { it.id == citation.blockId }?.let { onOpenCitation(citation, it) }
                     }
                 }
@@ -406,7 +411,7 @@ internal fun InlineSelectionExplainCard(
                     thread.pendingLabel?.takeIf { it.isNotBlank() }?.let {
                         Text(it, style = MaterialTheme.typography.labelMedium, color = v7Pine())
                     }
-                    Text("思考中…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary,
+                    Text(thread.pendingText.takeIf { it.isNotBlank() }?.let(ReadableText::withoutCitationMarks) ?: "思考中…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary,
                         modifier = Modifier.testTag("inline-explain-loading"))
                 }
             }

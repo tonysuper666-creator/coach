@@ -554,6 +554,24 @@ class LibraryExplainTest {
         override fun close() { engine.stop(100, 1000); runBlocking { actor.close() }; jobs.cancel(); stub.close(); dir.toFile().deleteRecursively() }
     }
 
+    @Test fun verifiedRouteStreamsCitationsAndCompletesOnWindowsWire() = runBlocking {
+        Harness().use { h ->
+            h.reply()
+            val port = h.engine.engine.resolvedConnectors().single().port
+            val http = com.coach.client.CourseHttp("http://127.0.0.1:$port", "phone", "synthetic-private-token-32-characters", "library")
+            try {
+                val input = request("Synthetic selected", blocks("0123abcd:p12:0" to "Synthetic selected"))
+                val fragments = mutableListOf<JsonObject>()
+                val result = http.explainLibrary(input) { fragments += it }
+                assertEquals(200, result.statusCode)
+                assertEquals(1, h.stub.requests)
+                assertTrue(fragments.isNotEmpty(), "negotiated route must deliver progress")
+                assertEquals(result.body, fragments.last())
+                assertEquals("0123abcd:p12:0", fragments.first().getValue("sources").jsonArray.single().jsonObject.str("docId"))
+            } finally { http.close() }
+        }
+    }
+
     @Test fun registeredLearnedSelectionReachesModelWithoutClientOrServerNeighbours() = runBlocking {
         Harness().use { h ->
             h.reply()

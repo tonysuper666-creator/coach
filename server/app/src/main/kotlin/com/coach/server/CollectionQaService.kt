@@ -361,7 +361,7 @@ class CollectionQaService(
             You are LearningCoach's whole-course grounded Q&A synthesis engine (NO external tools).
             Answer the student's question completely and accurately in plain Simplified Chinese using ONLY the provided evidence blocks [B1]..[Bk].
             Strict Rules:
-            1. Read EVERY line of ALL provided blocks [B1]..[Bk] carefully (including page bottoms, footnotes, figure notes, and timestamped transcript lines). Answer ALL sub-questions explicitly.
+            1. Read EVERY line of ALL provided blocks [B1]..[Bk] carefully (including page bottoms, footnotes, figure notes, and timestamped transcript lines). Answer ALL sub-questions explicitly. When comparing books in a booklist, cite a relevant block from each book being compared when the supplied evidence supports it.
             2. Break your answer into 2 to 4 factual sentences (`sentences` array). EVERY sentence MUST cite one `blockId` (e.g. "B1") and copy an EXACT character-for-character contiguous ASCII/Chinese substring `quoteAnchor` (4 to 7 consecutive words copied verbatim from that block without ellipses `...`, without brackets, without ligature edits, and preferring clean prose without subscript spacing noise).
             3. Cross-Material / Lecture Discrepancy Rule: Compare ALL blocks [B1]..[Bk] on the exact concept, formula, sign/direction, upper-bound applicability, empirical cause, authorship citation, or lecturer transcript self-correction that the student's question asks about.
                - If `Pre-indexed Discrepancy Candidates` are supplied below, verify whether any candidate directly applies to the asked question. Return matching ids in `matchedDiscrepancyIds`.

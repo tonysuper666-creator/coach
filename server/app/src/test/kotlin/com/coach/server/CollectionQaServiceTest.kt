@@ -40,6 +40,41 @@ import kotlin.test.assertTrue
 class CollectionQaServiceTest {
 
     @Test
+    fun readBooklistAnswerResolvesTwoIndependentPageCitations() = runBlocking {
+        val pages = listOf("Green shutters keep the room cool.", "Copper louvers direct the breeze.")
+        val transport = object : CollectionQaTransport {
+            override suspend fun ask(systemPrompt: String, userPrompt: String, friend: String?, device: String?,
+                                     maxTokens: Int): CollectionQaTransportReply {
+                pages.forEach { assertTrue(it in userPrompt) }
+                val response = buildJsonObject {
+                    put("sentences", buildJsonArray {
+                        pages.forEachIndexed { index, page ->
+                            add(json("claim" to page, "blockId" to "B${index + 1}", "quoteAnchor" to page))
+                        }
+                    })
+                }
+                return CollectionQaTransportReply(response.toString(), "fixture", 10, 10, 1, 2)
+            }
+        }
+        val request = buildJsonObject {
+            put("collectionId", "read-library")
+            put("collectionKind", "BOOKLIST")
+            put("question", "这两本书分别怎样给房间降温？")
+            put("blocks", buildJsonArray {
+                pages.forEachIndexed { index, page ->
+                    add(json("blockId" to "B${index + 1}", "bookId" to "book-$index", "docLabel" to "书 $index",
+                        "page" to index + 3, "text" to page))
+                }
+            })
+        }
+        val sentences = CollectionQaService(transport).ask(request)["sentences"]!!.jsonArray
+        assertEquals(listOf("book-0" to 3, "book-1" to 4), sentences.map {
+            assertTrue(it.jsonObject.getValue("verifiedOnSourcePage").jsonPrimitive.boolean)
+            it.jsonObject.str("bookId") to it.jsonObject.getValue("page").jsonPrimitive.int
+        })
+    }
+
+    @Test
     fun citationGateHandlesLigaturesExtractorMathSpacingAndStripsFabricatedQuotes() {
         // NFKC + ligature + em-dash + cross-extractor math spacing trimming
         val rawPage = "The ﬁrm offers partial insurance where Ω 3 is strictly preferred−and consumer utility rises with income."

@@ -1229,6 +1229,16 @@ def production_source(headers: Any) -> bool:
         return False
 
 
+async def expire_interrupted_streams(ledger):
+    while True:
+        try:
+            if (ledger.state / "api-credit-ledger.json").is_file():
+                await asyncio.to_thread(ledger.expire_interrupted)
+        except (Denied, OSError):
+            write_log(event="interrupted_usage_expiry_failed")
+        await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     if USER_ONLY:
@@ -1236,9 +1246,12 @@ async def lifespan(_: FastAPI):
     for d in (WORK_DIR, TMP_DIR, CLAUDE_CWD, AGY_CWD, CODEX_CWD, LOG_FILE.parent, STATE_DIR):
         d.mkdir(parents=True, exist_ok=True)
     render_sandbox_profile()
+    expiry = asyncio.create_task(expire_interrupted_streams(API_ROUTER.ledger))
     try:
         yield
     finally:
+        expiry.cancel()
+        await asyncio.gather(expiry, return_exceptions=True)
         for proc in list(CHILDREN):        # 退出时不留下 CLi 子进程
             kill_group(proc)
 

@@ -1193,7 +1193,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         }
     }
 
-    suspend fun openBook(id: String, targetPage: Int? = null) {
+    suspend fun openBook(id: String, targetPage: Int? = null, askDraft: BookAskDraft? = null) {
         var selectedPendingId: String? = null
         action {
             val loaded = library.book(id)
@@ -1211,7 +1211,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             val pathSaved = library.learningPath(book.id) != null
             val ladder = library.ladder(book.id)
             val draft = library.latestChapterPracticeDraft(book.id)
-            val resumePage = if (targetPage == null && draft != null && draft.hasMeaningfulDraft() && book.page(draft.page) != null) {
+            val resumePage = if (!library.todayCardEnabled && targetPage == null && draft != null && draft.hasMeaningfulDraft() && book.page(draft.page) != null) {
                 draft.page
             } else book.readingPage
             val activeBook = if (resumePage != book.readingPage) book.copy(readingPage = resumePage) else book
@@ -1225,6 +1225,10 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     prompt = null,
                     source = null,
                     page = activeBook.readingPage,
+                    keepAskTabOpen = askDraft != null,
+                    activeBooklistId = if (askDraft == null) current.activeBooklistId else collections.firstOrNull {
+                        it.record.kind == CollectionKind.BOOKLIST && it.record.id == askDraft.collectionId
+                    }?.record?.id,
                     review = null,
                     reviews = reviews,
                     todayQueue = todayQueue,
@@ -1257,6 +1261,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val draft = library.latestChapterPracticeDraft(book.id)
         val focusRec = library.topHomeRecommendation(book.id)
         val resumePage = when {
+            library.todayCardEnabled -> book.readingPage
             draft != null && draft.hasMeaningfulDraft() && book.page(draft.page) != null -> draft.page
             focusRec != null && focusRec.bookId == book.id && book.page(focusRec.targetPage) != null -> focusRec.targetPage
             else -> book.readingPage
@@ -1405,7 +1410,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val lesson = mutable.value.review?.let { review ->
             book.lessons.find { it.id == review.lesson || it.id == review.lesson.substringBefore("#q") }
         } ?: book.lessons.getOrNull(book.lessonIndex) ?: return@action
-        mutable.update { it.copy(screen = BookScreen.READER, source = lesson, page = lesson.firstPage, prompt = null) }
+        val page = mutable.value.review?.practice?.sourcePage?.takeIf { book.page(it) != null } ?: lesson.firstPage
+        mutable.update { it.copy(screen = BookScreen.READER, source = lesson, page = page, prompt = null) }
     }
 
     /** A verified citation can arrive after the reader has changed books or lessons. */
@@ -1471,6 +1477,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             mutable.update {
                 it.copy(
                     screen = BookScreen.HOME,
+                    reviews = library.reviews(),
+                    todayQueue = library.reviewQueue(),
                     activeBooklistId = null,
                     collections = library.collectionSummaries(),
                     review = null,
@@ -1643,6 +1651,17 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val next = QuestionLadder.closeRecap(mutable.value.ladder)
         library.saveLadder(book.id, next)
         mutable.update { it.copy(ladder = next) }
+    }
+
+    suspend fun editStructure(book: Textbook, edit: StructureEdit): Textbook = actions.withLock {
+        flushPendingSaves()
+        val updated = withContext(Dispatchers.IO) { library.editStructure(book, edit) }
+        val catalog = withContext(Dispatchers.IO) { library.catalog() }
+        mutable.update { state ->
+            if (state.book?.id != updated.id) state.copy(catalog = catalog)
+            else state.copy(book = updated, catalog = catalog, booklistRevision = state.booklistRevision + 1)
+        }
+        updated
     }
 
     /** 显式「重新整理章节」：按新版结构识别重算并缓存本书的章节划分。 */

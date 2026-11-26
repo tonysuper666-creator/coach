@@ -100,6 +100,8 @@ class TodayReviewAndSettingsScreenshotTest {
                 ),
             )
             library.attachMaterial(CollectionMaterialRecord("list-demo", book.id, role = "LIST_BOOK", ordinal = 0))
+            if (windowsToday) library.saveAskDraft(book.id,
+                BookAskDraft(book.id, book.readingPage, "这两个概念有什么区别？", null, null, 0, 0, null))
             val lessons = book.lessons.filter { it.text.isNotBlank() }.take(3)
             for (l in lessons) {
                 library.saveAnswer(book.id, l.id, QuestionMode.SHORT_ANSWER, PracticeAnswer("上次不太确定", true, false))
@@ -120,6 +122,9 @@ class TodayReviewAndSettingsScreenshotTest {
                 onNodeWithTag("home-focus-card").assertIsDisplayed()
                 onNodeWithTag("home-read").assertTextContains("继续")
                 onNodeWithTag("home-review-start").assertTextContains("开始复习")
+                if (windowsToday) {
+                    waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("today-question").fetchSemanticsNodes().isNotEmpty() }
+                }
                 shot("02-daily-home-$mode")
 
                 onNodeWithTag("home-review-start").performClick()

@@ -115,9 +115,11 @@ class SingleColumnHomeAndImportTest {
                 onNodeWithTag("host-search").assertIsDisplayed()
                 onNodeWithTag("home-focus-card").assertIsDisplayed()
                 onNodeWithTag("home-read").assertTextContains("继续")
-                onNodeWithTag("home-review-done").assertTextContains("还没有要复习的。做错的题会在这里出现。")
+                if (windowsToday) onNodeWithTag("home-review-card").assertDoesNotExist()
+                else onNodeWithTag("home-review-done").assertTextContains("还没有要复习的。做错的题会在这里出现。")
                 onNodeWithText("信息与激励").assertExists()
             }
+            runBlocking { c.awaitBooklistAlignment() }
         } finally {
             root.toFile().deleteRecursively()
         }

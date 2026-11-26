@@ -833,4 +833,42 @@ class UnifiedBookPipelineTest {
             assertEquals(401, h.request("/v1/books", credential = carol).statusCode())
         }
     }
+
+    @Test
+    fun accountDeletionNeverReportsSuccessWhilePrivateDataRemainsAndRecoveryUsesSameTail() = runBlocking {
+        Harness(UnifiedBookConfig(enabled = true, autoProcess = false)).use { h ->
+            val dave = h.exchangeSable(TOK_GAMMA_1)
+            val daveDevice = dave.str("deviceId")
+            val daveFriend = checkNotNull(h.actor.execute { friendName(daveDevice) })
+            val daveScope = UnifiedBookScope.fromCall(daveDevice, daveFriend)
+            assertEquals(200, h.upload(dave, "# Chapter 1\nDave private book.".toByteArray(), format = "md", title = "Dave").statusCode())
+
+            // A private record (explain / import history) lives under the friend's own directory.
+            val privateRoot = h.root.resolve("friends").resolve(friendId(daveFriend))
+            val record = Files.createDirectories(privateRoot.resolve("explain")).resolve("record.json")
+            Files.writeString(record, "{}")
+
+            // 1) Private-data cleanup fails: must be 503, stay DELETING, keep the record and the credential.
+            val realFinalizer = checkNotNull(h.unified.accountDataFinalizer)
+            val windows = System.getProperty("os.name").lowercase().contains("win")
+            val held = if (windows) java.io.FileInputStream(record.toFile()) else null // java.io opens without FILE_SHARE_DELETE
+            if (!windows) h.unified.accountDataFinalizer = { throw java.io.IOException("simulated locked file") }
+            try {
+                val failed = h.request("/v1/account", "DELETE", credential = dave)
+                assertEquals(503, failed.statusCode(), failed.body())
+                assertEquals("account_data_cleanup_failed", parse(failed).str("code"))
+                assertEquals("DELETING", h.unified.accountDeletionStateForTest(daveScope))
+                assertTrue(Files.exists(record))
+            } finally {
+                held?.close()
+                h.unified.accountDataFinalizer = realFinalizer
+            }
+
+            // 2) Startup / hourly recovery runs the same tail: private data wiped, credential revoked, then DELETED.
+            h.unified.reconcilePendingDeletes()
+            assertEquals("DELETED", h.unified.accountDeletionStateForTest(daveScope))
+            assertFalse(Files.exists(privateRoot))
+            assertEquals(401, h.request("/v1/books", credential = dave).statusCode())
+        }
+    }
 }

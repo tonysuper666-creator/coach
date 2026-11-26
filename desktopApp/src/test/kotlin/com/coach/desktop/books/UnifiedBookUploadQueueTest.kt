@@ -30,11 +30,13 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.jsonObject
@@ -45,6 +47,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicInteger
 import java.security.MessageDigest
 import java.time.Clock
 import java.time.Instant
@@ -1101,6 +1104,86 @@ class UnifiedBookUploadQueueTest {
             assertNull(coordinator.restoringShelfBookId.value)
             assertTrue(coordinator.remoteShelfBooks.value.isEmpty())
             assertEquals(remoteBook.shelfBookId, lib.readUploadEntry("sable-alpha", expectedSha)?.serverShelfBookId)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun cancellingRestoreTheMomentCardTurnsBusyStillResetsCloudCard() = runBlocking {
+        val root = Files.createTempDirectory("coach-restore-cancel-early-")
+        try {
+            val lib = TextbookLibrary(root.resolve("library"))
+            val fullBytes = "# Chapter 1\nSynthetic book for immediate restore cancellation.\n".toByteArray()
+            val expectedSha = MessageDigest.getInstance("SHA-256").digest(fullBytes).joinToString("") { "%02x".format(it) }
+            val remoteBook = RemoteShelfBook(
+                shelfBookId = "sb_cancel_00000000000002",
+                sha256 = expectedSha,
+                title = "Early Cancel Book",
+                format = "md",
+                sizeBytes = fullBytes.size.toLong(),
+                createdAt = 1L,
+                updatedAt = 2L,
+                jobState = BookUploadState.READY,
+                progressPct = 100,
+                stageLabel = "整理完成",
+            )
+            val downloadCalls = AtomicInteger(0)
+            val remote = object : UnifiedBookRemoteClient {
+                override suspend fun activeAccountKey(): String = "sable-alpha"
+                override suspend fun checkCapability(): UnifiedBookCapability = UnifiedBookCapability.Supported("sable-alpha")
+                override suspend fun uploadBook(
+                    file: Path,
+                    format: String,
+                    title: String,
+                    sha256: String,
+                    onProgress: (Int) -> Unit,
+                ): UnifiedBookUploadOutcome = UnifiedBookUploadOutcome.Failed("unused")
+
+                override suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome =
+                    UnifiedBookStatusOutcome.Ready(BookUploadState.READY, 100, "整理完成")
+
+                override suspend fun deleteBook(shelfBookId: String): UnifiedBookDeleteOutcome =
+                    UnifiedBookDeleteOutcome.Deleted
+
+                override suspend fun listRemoteBooks(): UnifiedBookListOutcome =
+                    UnifiedBookListOutcome.Ready(listOf(remoteBook))
+
+                override suspend fun downloadBookOriginal(
+                    shelfBookId: String,
+                    destination: Path,
+                    expectedSha256: String,
+                    onProgress: (Int) -> Unit,
+                ): UnifiedBookDownloadOutcome {
+                    downloadCalls.incrementAndGet()
+                    Files.write(destination, fullBytes)
+                    onProgress(100)
+                    return UnifiedBookDownloadOutcome.Downloaded(expectedSha, fullBytes.size.toLong())
+                }
+            }
+            val coordinator = UnifiedBookUploadCoordinator(lib) { remote }
+            coordinator.syncOnce()
+
+            // Leave the shelf the instant the card turns busy: before the temp directory exists or any download starts.
+            val shelfJob = launch(Dispatchers.Default, start = CoroutineStart.LAZY) {
+                coordinator.downloadAndImport(remoteBook)
+            }
+            val watcher = launch(Dispatchers.Unconfined) {
+                coordinator.restoringShelfBookId.first { it == remoteBook.shelfBookId }
+                shelfJob.cancel()
+            }
+            shelfJob.start()
+            shelfJob.join()
+            watcher.cancel()
+
+            assertEquals(0, downloadCalls.get(), "Cancel must land before the download starts")
+            assertNull(coordinator.restoringShelfBookId.value, "Card must not stay busy after an immediate cancel")
+            assertEquals(0, coordinator.restoreProgressPct.value)
+
+            // The card is clickable again and the retry succeeds.
+            assertEquals(expectedSha, coordinator.downloadAndImport(remoteBook))
+            assertEquals(1, downloadCalls.get())
+            assertNull(coordinator.restoringShelfBookId.value)
         } finally {
             root.toFile().deleteRecursively()
         }

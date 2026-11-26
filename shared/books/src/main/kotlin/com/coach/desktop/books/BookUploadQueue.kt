@@ -1402,15 +1402,20 @@ internal class UnifiedBookUploadCoordinator(
         }
         if (!registered) return@withLock null
 
-        val tempDir = withContext(Dispatchers.IO) { Files.createTempDirectory("coach-book-restore-") }
         val ext = remote.format.trim().lowercase().takeIf { it.matches(Regex("[a-z0-9]{1,8}")) } ?: "bin"
         val baseTitle = remote.title.trim()
             .replace(Regex("""[\\/:*?"<>|\p{Cntrl}]+"""), "_")
             .trim('.', ' ')
             .take(80)
             .ifBlank { "book" }
-        val tempFile = tempDir.resolve("$baseTitle.$ext")
+        // Once the busy flag is registered, every suspension point (including temp-dir creation) must sit
+        // inside the try/finally that resets it; otherwise a cancel right after the card turns busy leaves
+        // it stuck. The directory is assigned inside the IO block so one created just before a cancel is
+        // still removed in finally.
+        var tempDir: Path? = null
         try {
+            withContext(Dispatchers.IO) { tempDir = Files.createTempDirectory("coach-book-restore-") }
+            val tempFile = checkNotNull(tempDir).resolve("$baseTitle.$ext")
             val outcome = session.downloadBookOriginal(remote.shelfBookId, tempFile, remote.sha256) { pct ->
                 if (isRestoreCurrent()) {
                     mutableRestoreProgressPct.value = pct.coerceIn(0, 100)
@@ -1488,9 +1493,11 @@ internal class UnifiedBookUploadCoordinator(
             null
         } finally {
             try {
-                withContext(NonCancellable + Dispatchers.IO) {
-                    runCatching { Files.deleteIfExists(tempFile) }
-                    runCatching { tempDir.toFile().deleteRecursively() }
+                val createdDir = tempDir
+                if (createdDir != null) {
+                    withContext(NonCancellable + Dispatchers.IO) {
+                        runCatching { createdDir.toFile().deleteRecursively() }
+                    }
                 }
             } finally {
                 synchronized(sessionStateLock) {

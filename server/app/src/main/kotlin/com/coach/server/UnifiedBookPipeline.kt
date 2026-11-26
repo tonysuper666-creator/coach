@@ -236,6 +236,13 @@ class UnifiedBookPipeline internal constructor(
     private val workerWake = Channel<Unit>(Channel.CONFLATED)
     @Volatile private var workerJob: Job? = null
     @Volatile internal var accountDirDeleterForTest: ((Path) -> Boolean)? = null
+
+    /**
+     * Removes a friend account's private data and revokes its device credentials. Must throw when anything
+     * is left behind. Installed once via [installAccountDataFinalizer] so the HTTP route and the recovery
+     * job share it.
+     */
+    @Volatile internal var accountDataFinalizer: (suspend (friendName: String) -> Unit)? = null
     @Volatile internal var beforeUploadCommitForTest: (suspend (UnifiedBookScope, String) -> Unit)? = null
 
     private fun ensureInitialized() {
@@ -290,6 +297,7 @@ class UnifiedBookPipeline internal constructor(
                             scope_key TEXT PRIMARY KEY,
                             state TEXT NOT NULL CHECK(state IN ('DELETING','DELETED')),
                             deletion_epoch INTEGER NOT NULL DEFAULT 1,
+                            friend_name TEXT,
                             started_at INTEGER NOT NULL,
                             updated_at INTEGER NOT NULL
                         )""".trimIndent(),
@@ -488,7 +496,7 @@ class UnifiedBookPipeline internal constructor(
         return registryDb().use { db -> readAccountDeletion(db, scopeKey) }
     }
 
-    private fun markAccountDeletingLocked(scopeKey: String): Long {
+    private fun markAccountDeletingLocked(scopeKey: String, friendName: String? = null): Long {
         ensureInitialized()
         val now = config.clock()
         return registryDb().use { db ->
@@ -501,18 +509,20 @@ class UnifiedBookPipeline internal constructor(
                     else -> existing.epoch + 1L
                 }
                 db.prepareStatement(
-                    """INSERT INTO account_deletions(scope_key, state, deletion_epoch, started_at, updated_at)
-                       VALUES(?, 'DELETING', ?, ?, ?)
+                    """INSERT INTO account_deletions(scope_key, state, deletion_epoch, friend_name, started_at, updated_at)
+                       VALUES(?, 'DELETING', ?, ?, ?, ?)
                        ON CONFLICT(scope_key) DO UPDATE SET
                            state='DELETING',
                            deletion_epoch=excluded.deletion_epoch,
+                           friend_name=COALESCE(excluded.friend_name, account_deletions.friend_name),
                            started_at=CASE WHEN account_deletions.state='DELETING' THEN account_deletions.started_at ELSE excluded.started_at END,
                            updated_at=excluded.updated_at""".trimIndent(),
                 ).use { sql ->
                     sql.setString(1, scopeKey)
                     sql.setLong(2, nextEpoch)
-                    sql.setLong(3, now)
+                    sql.setString(3, friendName)
                     sql.setLong(4, now)
+                    sql.setLong(5, now)
                     sql.executeUpdate()
                 }
                 db.commit()
@@ -524,9 +534,9 @@ class UnifiedBookPipeline internal constructor(
         }
     }
 
-    internal suspend fun beginAccountDeletion(scope: UnifiedBookScope): Long = withContext(Dispatchers.IO) {
+    internal suspend fun beginAccountDeletion(scope: UnifiedBookScope, friendName: String? = null): Long = withContext(Dispatchers.IO) {
         accountLock(scope.scopeKey).withLock {
-            markAccountDeletingLocked(scope.scopeKey)
+            markAccountDeletingLocked(scope.scopeKey, friendName)
         }
     }
 
@@ -1356,7 +1366,6 @@ class UnifiedBookPipeline internal constructor(
     internal suspend fun deleteAccount(
         scope: UnifiedBookScope,
         purgeImmediately: Boolean = false,
-        onCleanupVerified: suspend () -> Unit = {},
     ): AccountDeleteResult = withContext(Dispatchers.IO) {
         val (removed, trashed) = accountLock(scope.scopeKey).withLock {
             markAccountDeletingLocked(scope.scopeKey)
@@ -1423,7 +1432,33 @@ class UnifiedBookPipeline internal constructor(
                 }
             }
 
-            onCleanupVerified()
+            // Same retryable tail for the HTTP route and the startup/hourly recovery: wipe the account's
+            // private friend data and revoke its device credentials, and only then mark DELETED. Any
+            // failure keeps the DELETING gate (uploads stay blocked) and surfaces a retryable 503.
+            val friendName = registryDb().use { db ->
+                db.prepareStatement("SELECT friend_name FROM account_deletions WHERE scope_key=?").use { sql ->
+                    sql.setString(1, scope.scopeKey)
+                    sql.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else null }
+                }
+            }
+            if (friendName != null) {
+                val finalizer = accountDataFinalizer ?: throw UnifiedBookError(
+                    HttpStatusCode.ServiceUnavailable,
+                    "account_data_cleanup_failed",
+                    "账号数据清理未完成，请稍后重试。",
+                )
+                try {
+                    finalizer(friendName)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    throw UnifiedBookError(
+                        HttpStatusCode.ServiceUnavailable,
+                        "account_data_cleanup_failed",
+                        "账号数据清理未完成，请稍后重试。",
+                    )
+                }
+            }
 
             val doneAt = config.clock()
             registryDb().use { db ->
@@ -2273,11 +2308,19 @@ class UnifiedBookPipeline internal constructor(
     }
 }
 
+internal fun UnifiedBookPipeline.installAccountDataFinalizer(actor: LedgerActor, friends: FriendAccess?) {
+    accountDataFinalizer = { friend ->
+        withContext(Dispatchers.IO) { friends?.deleteAccountData(friend) }
+        actor.execute { revokeFriend(friend) }
+    }
+}
+
 fun Application.unifiedBookRoutes(
     actor: LedgerActor,
     unifiedBooks: UnifiedBookPipeline? = null,
     friends: FriendAccess? = null,
 ) {
+    unifiedBooks?.installAccountDataFinalizer(actor, friends)
     if (unifiedBooks != null && unifiedBooks.enabled && unifiedBooks.config.autoProcess) {
         unifiedBooks.startWorkerIfNeeded(this)
         monitor.subscribe(ApplicationStopping) {
@@ -2471,13 +2514,8 @@ fun Application.unifiedBookRoutes(
             val scope = UnifiedBookScope.fromCall(device, friend)
             try {
                 // Persist DELETING gate before cleanup so any in-flight upload for this scope is rejected at commit.
-                pipeline.beginAccountDeletion(scope)
-                val summary = pipeline.deleteAccount(scope) {
-                    if (friend != null) {
-                        withContext(Dispatchers.IO) { runCatching { friends?.deleteAccountData(friend) } }
-                        actor.execute { revokeFriend(friend) }
-                    }
-                }
+                pipeline.beginAccountDeletion(scope, friend)
+                val summary = pipeline.deleteAccount(scope)
                 call.respondText(
                     json(
                         "deleted" to true,

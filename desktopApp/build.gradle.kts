@@ -289,3 +289,15 @@ tasks.test {
 // The local textbook workspace is also compiled into the Android host.
 kotlin.sourceSets.getByName("main").kotlin.srcDir("../shared/books/src/main/kotlin")
 sourceSets.getByName("main").java.srcDir("../shared/books/src/main/java")
+
+// Counts-only structure baseline. Test sources can see internal book types, and this
+// task is absent from the shipped application jar.
+kotlin.sourceSets.getByName("test").kotlin.srcDir(rootProject.file("tools/reader-v2/structure-audit/src"))
+tasks.register<JavaExec>("structureAudit") {
+    group = "verification"
+    description = "Import local books on the Windows path and write structure counts. The report stays outside the checkout."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets.getByName("test").runtimeClasspath
+    mainClass.set("com.coach.desktop.books.StructureAuditMain")
+    jvmArgs("-Xmx4g", "-Dfile.encoding=UTF-8")
+}

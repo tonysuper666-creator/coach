@@ -4,6 +4,7 @@ import com.coach.store.sha256
 import com.coach.protocol.learning.learningTables
 import com.coach.protocol.learning.draftVersion
 import java.nio.file.Path
+import java.nio.file.Files
 import java.sql.Connection
 import java.sql.DriverManager
 import java.util.UUID
@@ -13,7 +14,7 @@ import kotlinx.serialization.json.*
 internal class LearningSyncStore(private val accounts: Path, private val backup: LearningBackup? = null,
                                  private val now: () -> Long = System::currentTimeMillis) {
     private val tables = (learningTables + draftVersion).associateBy { it.kind }
-    private fun <T> transaction(scope: UnifiedBookScope, body: (Connection, String) -> T): T {
+    private fun <T> transaction(scope: UnifiedBookScope, upload: Boolean = false, body: (Connection, String) -> T): T {
         require(scope.isSableAccount)
         val directory = privateFiles.directory(accounts.resolve(scope.scopeKey))
         val file = directory.resolve("learning.sqlite")
@@ -23,8 +24,15 @@ internal class LearningSyncStore(private val accounts: Path, private val backup:
             db.createStatement().use { sql ->
                 sql.execute("PRAGMA busy_timeout=5000")
                 backup?.attach(db)
+                val parts = directory.resolve("learning-parts.sqlite")
+                val hasParts = upload || Files.exists(parts)
+                if (hasParts) {
+                    privateFiles.file(parts)
+                    db.prepareStatement("ATTACH DATABASE ? AS parts").use { it.setString(1,parts.toString()); it.execute() }
+                }
                 sql.execute("BEGIN IMMEDIATE")
                 try {
+                    if (hasParts) LearningChunks.install(db,now())
                     sql.execute("CREATE TABLE IF NOT EXISTS sync_meta(epoch TEXT NOT NULL)")
                     sql.execute("""CREATE TABLE IF NOT EXISTS sync_receipts(
                         device TEXT NOT NULL, stream TEXT NOT NULL, counter INTEGER NOT NULL,
@@ -67,12 +75,12 @@ internal class LearningSyncStore(private val accounts: Path, private val backup:
         buildJsonObject { put("scope",scope.scopeKey); put("epoch",epoch); put("transportEpoch",transport(db)) }
     }
 
-    fun snapshot(scope: UnifiedBookScope, expected: String, token: String?, after: Long) = transaction(scope) { db, epoch ->
+    fun snapshot(scope: UnifiedBookScope, expected: String, token: String?, after: Long, chunks: Boolean = false) = transaction(scope) { db, epoch ->
         if (expected != epoch) throw LearningConflict()
-        JsonObject(LearningSnapshots.page(db,scope.scopeKey,epoch,token,after,now()) + ("transportEpoch" to JsonPrimitive(transport(db))))
+        JsonObject(LearningSnapshots.page(db,scope.scopeKey,epoch,token,after,now(),chunks) + ("transportEpoch" to JsonPrimitive(transport(db))))
     }
 
-    fun changes(scope: UnifiedBookScope, expectedEpoch: String?, after: Long, device: String, stream: String): JsonObject = transaction(scope) { db, epoch ->
+    fun changes(scope: UnifiedBookScope, expectedEpoch: String?, after: Long, device: String, stream: String, chunks: Boolean = false): JsonObject = transaction(scope) { db, epoch ->
         if ((after != 0L || expectedEpoch != null) && expectedEpoch != epoch) throw LearningConflict()
         require(UUID.fromString(stream).toString() == stream)
         val high = db.createStatement().use { it.executeQuery("SELECT coalesce(max(seq),0) FROM sync_records").use { r -> r.next(); r.getLong(1) } }
@@ -95,14 +103,15 @@ internal class LearningSyncStore(private val accounts: Path, private val backup:
                     var emitted = 0
                     while (r.next()) {
                         val body = r.getString(4)
-                        bytes += body?.length ?: 0
-                        if (emitted > 0 && bytes > 1_000_000) break
-                        emitted++
-                        add(buildJsonObject {
+                        val item = buildJsonObject {
                             put("seq",r.getLong(1)); put("kind",r.getString(2)); put("id",r.getString(3))
                             put("body",body?.let(Json::parseToJsonElement) ?: JsonNull); put("round",r.getLong(5))
                             put("clock",r.getString(6).substringBefore('/').toLong())
-                        })
+                        }
+                        bytes += item.toString().encodeToByteArray().size
+                        if (emitted > 0 && bytes > 1_000_000) break
+                        add(if (chunks) LearningChunks.manifest(item) else item)
+                        emitted++
                     }
                 }
             }
@@ -128,7 +137,21 @@ internal class LearningSyncStore(private val accounts: Path, private val backup:
         }
     }
 
-    fun push(scope: UnifiedBookScope, device: String, request: JsonObject) = transaction(scope) { db, epoch ->
+    fun part(scope: UnifiedBookScope, expectedEpoch: String, expectedTransport: String, token: String?, seq: Long, offset: Int) =
+        transaction(scope) { db, epoch ->
+            if (expectedEpoch != epoch || expectedTransport != transport(db)) throw LearningConflict()
+            LearningChunks.read(db,token,seq,offset,now())
+        }
+
+    fun push(scope: UnifiedBookScope, device: String, request: JsonObject): JsonObject =
+        transaction(scope, upload = "chunk" in request) { db, epoch ->
+            if ("chunk" !in request) return@transaction applyPush(db,epoch,scope,device,request)
+            require(request["chunk"] == JsonPrimitive(1))
+            if (request["epoch"] != JsonPrimitive(epoch) || request["transportEpoch"] != JsonPrimitive(transport(db))) throw LearningConflict()
+            LearningChunks.receive(db,device,scope.scopeKey,request,now()) { op -> applyPush(db,epoch,scope,device,op) }
+        }
+
+    private fun applyPush(db: Connection, epoch: String, scope: UnifiedBookScope, device: String, request: JsonObject): JsonObject {
         if (request["epoch"]?.jsonPrimitive?.content != epoch) throw LearningConflict()
         if ((request["transportEpoch"]?.jsonPrimitive?.content ?: epoch) != transport(db)) throw LearningConflict()
         require(request.getValue("protocol").jsonPrimitive.int == 1)
@@ -231,7 +254,7 @@ internal class LearningSyncStore(private val accounts: Path, private val backup:
                 q.setString(1,device); q.setString(2,stream); q.setLong(3,counter); q.setString(4,digest); q.executeUpdate()
             }
         }
-        buildJsonObject { put("scope",scope.scopeKey); put("epoch",epoch); put("seq",counter) }
+        return buildJsonObject { put("scope",scope.scopeKey); put("epoch",epoch); put("seq",counter) }
     }
 
     private fun recoverDraft(db: Connection, kind: String, id: String, round: Long, author: String,

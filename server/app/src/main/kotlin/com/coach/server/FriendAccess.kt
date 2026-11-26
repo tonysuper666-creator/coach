@@ -26,7 +26,7 @@ internal fun friendPath(call: ApplicationCall): Boolean {
     val method = call.request.httpMethod
     val path = call.request.path()
     if (path.contains("..") || path.contains('%')) return false
-    if (path in setOf("/learning-sync/profile", "/learning-sync/changes", "/learning-sync/record", "/learning-sync/push", "/learning-sync/snapshot")) {
+    if (path in setOf("/learning-sync/profile", "/learning-sync/changes", "/learning-sync/record", "/learning-sync/push", "/learning-sync/snapshot", "/learning-sync/chunk")) {
         return call.application.attributes.getOrNull(learningSyncActive) == true &&
             (if (path.endsWith("/push")) method == HttpMethod.Post else method == HttpMethod.Get)
     }

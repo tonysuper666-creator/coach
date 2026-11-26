@@ -20,7 +20,7 @@ internal object LearningSnapshots {
         db.createStatement().use { it.executeUpdate("DELETE FROM sync_snapshot_rows WHERE token NOT IN (SELECT token FROM sync_snapshots)") }
     }
 
-    fun page(db: Connection, scope: String, epoch: String, token: String?, after: Long, now: Long): JsonObject {
+    fun page(db: Connection, scope: String, epoch: String, token: String?, after: Long, now: Long, chunks: Boolean = false): JsonObject {
         require(after >= 0 && (token != null || after == 0L))
         expire(db,now)
         val key = token ?: freeze(db,now)
@@ -43,7 +43,7 @@ internal object LearningSnapshots {
                                 val item = page.getString(2)
                                 bytes += item.encodeToByteArray().size
                                 if (emitted == 64 || (emitted > 0 && bytes > 1_000_000)) { done = false; break }
-                                add(Json.parseToJsonElement(item))
+                                add(if (chunks) LearningChunks.snapshotItem(page.getLong(1),item) else Json.parseToJsonElement(item))
                                 emitted++
                                 last = page.getLong(1)
                             }

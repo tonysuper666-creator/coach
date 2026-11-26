@@ -204,7 +204,14 @@ class ConceptSayingsTest {
             ),
         )
         var saves = 0
-        val failed = settleConceptSayings(board, fetch = { null }, save = { _, _ -> saves++ }, reload = { board.copy(pending = false) }, delayMillis = {})
+        val failed = settleConceptSayings(
+            board,
+            fetch = { null },
+            save = { _, _ -> saves++ },
+            reload = { board.copy(pending = false) },
+            delayMillis = {},
+            remoteAllowed = true,
+        )
         assertEquals(0, saves)
         assertTrue(failed.pending)
 
@@ -228,10 +235,65 @@ class ConceptSayingsTest {
             },
             reload = { board.copy(pending = false) },
             delayMillis = { waited -> assertTrue(waited in 1_000L..20_000L) },
+            remoteAllowed = true,
         )
         assertEquals(2, calls)
         assertEquals(1, saves)
         assertFalse(settled.pending)
+    }
+
+    @Test fun aiExplainOffSendsZeroSayingRequests() = runBlocking {
+        val root = Files.createTempDirectory("coach-sayings-aioff-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val bookA = library.importBook(write(root, "book-a.md", chapter("Alpha theory says private signals raise the premium.")))
+            val bookB = library.importBook(write(root, "book-b.md", chapter("Beta evidence says informed buyers push the premium down.")))
+            val conceptId = "concept-aioff"
+            val chapterA = BookChapterResolver.chapters(bookA).first()
+            val chapterB = BookChapterResolver.chapters(bookB).first()
+            library.setChapterManualReadState(bookA.id, chapterA.tocNodeId, chapterA.pagesTotal, true)
+            library.setChapterManualReadState(bookB.id, chapterB.tocNodeId, chapterB.pagesTotal, true)
+            library.upsertCollection(MaterialCollectionRecord("list-aioff", CollectionKind.BOOKLIST, "synthetic aioff"))
+            library.saveAlignedConcepts(
+                "list-aioff",
+                listOf(ConceptEntityRecord(conceptId, "list-aioff", "premium signal")),
+                listOf(
+                    mention(bookA, conceptId, "m-a", chapterA.tocNodeId, "Alpha theory says private signals raise the premium.", "甲书抬高保费。"),
+                    mention(bookB, conceptId, "m-b", chapterB.tocNodeId, "Beta evidence says informed buyers push the premium down.", "乙书压低保费。"),
+                ),
+                listOf(link("list-aioff", conceptId, "m-a", "m-b", ConceptRelationType.OPPOSING_VIEW, 0.92)),
+            )
+            val board = library.conceptSayings(conceptId, bookA.id)
+            assertNotNull(board)
+            assertTrue(board.pending)
+            assertEquals(2, board.columns.size)
+            ReadingSettings(library.directory).chooseAiExplain(false)
+            assertFalse(library.isReadingAiExplainEnabled())
+
+            var calls = 0
+            val fetch: suspend (JsonObject) -> JsonObject? = {
+                calls++
+                null
+            }
+            val save: suspend (ConceptSayingsBoard, List<ParsedBookSaying>) -> Unit = { _, _ -> calls += 100 }
+            for (uiEnabled in listOf(false, true)) {
+                val remoteAllowed = uiEnabled && library.isReadingAiExplainEnabled()
+                assertFalse(ConceptSayingLogic.mayRequestConceptSayings(board, remoteAllowed))
+                val shown = settleConceptSayings(
+                    board,
+                    fetch = fetch,
+                    save = save,
+                    reload = { board.copy(pending = false) },
+                    delayMillis = { calls += 100 },
+                    remoteAllowed = remoteAllowed,
+                )
+                assertEquals(board.columns.map { it.bookId to it.stance.label to it.statement }, shown.columns.map { it.bookId to it.stance.label to it.statement })
+                assertTrue(shown.pending)
+            }
+            assertEquals(0, calls)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
     }
 
     private fun candidate(

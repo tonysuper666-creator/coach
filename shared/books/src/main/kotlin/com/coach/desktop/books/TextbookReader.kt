@@ -920,16 +920,21 @@ internal fun TextbookReader(
     LaunchedEffect(book.id, ui.booklistRevision, localBooklistRev) {
         bookConceptNames = withContext(Dispatchers.IO) { library.conceptNamesForBook(book.id) }
     }
-    LaunchedEffect(openedConceptId, sayingsOpenTick, book.id, ui.booklistRevision, localBooklistRev) {
+    LaunchedEffect(openedConceptId, sayingsOpenTick, book.id, ui.booklistRevision, localBooklistRev, aiEnabled) {
         val id = openedConceptId
         if (id == null) {
             conceptSayings = null
             checkingSayings = false
             return@LaunchedEffect
         }
-        val board = withContext(Dispatchers.IO) { library.conceptSayings(id, book.id) }
+        val loaded = withContext(Dispatchers.IO) {
+            library.conceptSayings(id, book.id) to library.isReadingAiExplainEnabled()
+        }
+        val board = loaded.first
+        // 与书单对齐同一条：界面开关或本机「伴读讲解与提问」任一关闭，正文都不发到远端。
+        val remoteAllowed = aiEnabled && loaded.second
         conceptSayings = board
-        if (board != null && board.pending && board.candidates.size >= 2) {
+        if (board != null && ConceptSayingLogic.mayRequestConceptSayings(board, remoteAllowed)) {
             checkingSayings = true
             val settled = settleConceptSayings(
                 board,
@@ -937,6 +942,7 @@ internal fun TextbookReader(
                 save = { ready, parsed -> withContext(Dispatchers.IO) { library.saveConceptSayings(ready, parsed) } },
                 reload = { withContext(Dispatchers.IO) { library.conceptSayings(id, book.id) } },
                 delayMillis = { delay(it) },
+                remoteAllowed = remoteAllowed,
             )
             checkingSayings = false
             conceptSayings = settled

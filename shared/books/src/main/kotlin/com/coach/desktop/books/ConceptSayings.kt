@@ -266,6 +266,10 @@ internal object ConceptSayingLogic {
         return cut
     }
 
+    /** 伴读讲解关闭，或本机已经核对过、或没有第二本书时，不把原文发去远端。 */
+    fun mayRequestConceptSayings(board: ConceptSayingsBoard?, aiExplainEnabled: Boolean): Boolean =
+        aiExplainEnabled && board != null && board.pending && board.candidates.size >= 2
+
     private fun normalize(raw: String): String =
         raw.trim().lowercase().replace(Regex("\\s+"), " ")
 
@@ -277,6 +281,7 @@ internal object ConceptSayingLogic {
 
 /**
  * 打开概念时：本机已有同一输入散列就直接用；否则请 Haiku 批次核对，核对完写入本机。
+ * 伴读讲解关闭时不发请求，只留下本机已有的说法和标签。
  * 批次还在排队就过一会儿用同一请求再问，桥上的批次键不变，不会另开一单。
  */
 internal suspend fun settleConceptSayings(
@@ -285,9 +290,10 @@ internal suspend fun settleConceptSayings(
     save: suspend (ConceptSayingsBoard, List<ParsedBookSaying>) -> Unit,
     reload: suspend () -> ConceptSayingsBoard?,
     delayMillis: suspend (Long) -> Unit,
+    remoteAllowed: Boolean,
     maxPolls: Int = 4,
 ): ConceptSayingsBoard {
-    if (!board.pending || board.candidates.size < 2) return board
+    if (!ConceptSayingLogic.mayRequestConceptSayings(board, remoteAllowed)) return board
     val request = board.toRequest()
     var polls = 0
     while (polls < maxPolls) {

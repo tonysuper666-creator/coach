@@ -134,6 +134,63 @@ function Find-TutorBodyRows($lines) {
     return @($rows | Sort-Object Width -Descending)
 }
 
+# OCR glues the two pages of a spread into one row, so a drag from that box crosses the
+# gutter and selects nothing. Measure the dark glyphs in one column instead.
+function Find-InkRowsInBand([Drawing.Bitmap]$bmp, [double]$x0f, [double]$x1f) {
+    $w = $bmp.Width
+    $h = $bmp.Height
+    $x0 = [int]($w * $x0f)
+    $x1 = [int]($w * $x1f)
+    $y0 = [int]($h * 0.16)
+    $y1 = [int]($h * 0.80)
+    $hits = @()
+    for ($y = $y0; $y -lt $y1; $y += 2) {
+        $dark = 0
+        $first = -1
+        $last = -1
+        for ($x = $x0; $x -lt $x1; $x += 2) {
+            $c = $bmp.GetPixel($x, $y)
+            if ($c.R -lt 90 -and $c.G -lt 90 -and $c.B -lt 90) {
+                $dark++
+                if ($first -lt 0) { $first = $x }
+                $last = $x
+            }
+        }
+        # A real glyph line is dense. A few dark specks across the column are not a line.
+        if ($dark -ge 14 -and ($last - $first) -ge 100) {
+            $hits += ,([pscustomobject]@{ Y = $y; Dark = $dark; X1 = $first; X2 = $last })
+        }
+    }
+    $buckets = @()
+    foreach ($hit in @($hits)) {
+        $hitIndex = -1
+        for ($i = 0; $i -lt @($buckets).Count; $i++) {
+            if ([Math]::Abs([int]$buckets[$i].Y - [int]$hit.Y) -le 6) { $hitIndex = $i; break }
+        }
+        if ($hitIndex -lt 0) {
+            $buckets += ,([pscustomobject]@{ Y = [int]$hit.Y; Peak = $hit })
+        } elseif ([int]$hit.Dark -gt [int]$buckets[$hitIndex].Peak.Dark) {
+            $buckets[$hitIndex].Peak = $hit
+        }
+    }
+    $rows = foreach ($bucket in @($buckets)) {
+        $peak = $bucket.Peak
+        [pscustomobject]@{ X1 = [int]$peak.X1; X2 = [int]$peak.X2; Y = [int]$peak.Y; Dark = [int]$peak.Dark; Width = ([int]$peak.X2 - [int]$peak.X1) }
+    }
+    return @($rows | Sort-Object Dark -Descending)
+}
+
+function Find-LeftInkRows([string]$name) {
+    $path = Join-Path $OutDir "$name.png"
+    if (-not (Test-Path -LiteralPath $path)) { return @() }
+    $bmp = [Drawing.Bitmap]::new($path)
+    try {
+        $left = @(Find-InkRowsInBand $bmp 0.16 0.44)
+        if (@($left).Count -ge 1) { return $left }
+        return @(Find-InkRowsInBand $bmp 0.56 0.84)
+    } finally { $bmp.Dispose() }
+}
+
 # The installed MSI has no smoke driver. A drag has to be a real pointer gesture:
 # SetCursorPos while the button is down does not deliver WM_MOUSEMOVE, so Compose
 # treats it as a click and clears the selection. Absolute moves use the virtual
@@ -199,31 +256,126 @@ function Move-TutorPointer([int]$screenX, [int]$screenY, [bool]$absoluteOk) {
     return Post-MoveAt $screenX $screenY
 }
 
-# Window-relative, same coordinate space as Click-At. Logs the cursor that Windows
-# actually reported so a missed selection can be told from a missed toolbar.
-function Drag-TutorLine([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
+# mouse_event moves the cursor on this runner and still does not deliver WM_MOUSEMOVE
+# (runs 45770791380 and 45773285745). Java Robot uses SendInput, which is the stream
+# AWT turns into a drag. If that is refused, post the moves while the OS button is down.
+if (-not ('Arm.Drag' -as [type])) {
+    Add-Type -Namespace Arm -Name Drag -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)]
+public struct POINT { public int X; public int Y; }
+[StructLayout(LayoutKind.Sequential)]
+public struct MOUSEINPUT {
+    public int dx;
+    public int dy;
+    public int mouseData;
+    public int dwFlags;
+    public int time;
+    public IntPtr dwExtraInfo;
+}
+[StructLayout(LayoutKind.Explicit)]
+public struct INPUT {
+    [FieldOffset(0)] public int type;
+    [FieldOffset(8)] public MOUSEINPUT mi;
+}
+[DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+[DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h, ref POINT p);
+[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
+[DllImport("user32.dll", SetLastError=true)] public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+[DllImport("user32.dll", SetLastError=true)] public static extern uint SendInput(uint nInputs, INPUT[] inputs, int cbSize);
+public static int Send(int flags, int dx, int dy) {
+    INPUT[] inputs = new INPUT[1];
+    inputs[0].type = 0;
+    inputs[0].mi.dx = dx;
+    inputs[0].mi.dy = dy;
+    inputs[0].mi.mouseData = 0;
+    inputs[0].mi.dwFlags = flags;
+    inputs[0].mi.time = 0;
+    inputs[0].mi.dwExtraInfo = IntPtr.Zero;
+    uint sent = SendInput(1, inputs, System.Runtime.InteropServices.Marshal.SizeOf(typeof(INPUT)));
+    if (sent == 0) return -System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+    return (int)sent;
+}
+public static IntPtr Pack(int x, int y) {
+    return (IntPtr)(((y & 0xFFFF) << 16) | (x & 0xFFFF));
+}
+'@
+}
+
+function Send-ArmAbsolute([int]$screenX, [int]$screenY) {
+    $vx = [ArmMouse]::GetSystemMetrics(76)
+    $vy = [ArmMouse]::GetSystemMetrics(77)
+    $vw = [ArmMouse]::GetSystemMetrics(78)
+    $vh = [ArmMouse]::GetSystemMetrics(79)
+    if ($vw -lt 2 -or $vh -lt 2) { return -1 }
+    $ax = [int](($screenX - $vx) * 65535.0 / ($vw - 1))
+    $ay = [int](($screenY - $vy) * 65535.0 / ($vh - 1))
+    if ($ax -lt 0) { $ax = 0 } elseif ($ax -gt 65535) { $ax = 65535 }
+    if ($ay -lt 0) { $ay = 0 } elseif ($ay -gt 65535) { $ay = 65535 }
+    return [Arm.Drag]::Send(0xC001, $ax, $ay)
+}
+
+function Drag-TutorLine([int]$x1, [int]$y1, [int]$x2, [int]$y2, [string]$how) {
     Invoke-ForegroundStep -InjectsInput -Action {
         $r = Get-Rect
         $sx1 = $r.L + $x1; $sy1 = $r.T + $y1
         $sx2 = $r.L + $x2; $sy2 = $r.T + $y2
-        $probe = Post-MoveAt $sx1 $sy1
-        Write-Output "DRAG start=$($probe.X),$($probe.Y) target=$sx1,$sy1"
-        Start-Sleep -Milliseconds 80
-        [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
-        $logged = New-Object System.Collections.Generic.List[string]
-        try {
-            $steps = 10
-            for ($i = 1; $i -le $steps; $i++) {
-                $x = [int]($sx1 + ($sx2 - $sx1) * $i / $steps)
-                $y = [int]($sy1 + ($sy2 - $sy1) * $i / $steps)
-                $pt = Post-MoveAt $x $y
-                [void]$logged.Add("$($pt.X),$($pt.Y)")
-                Start-Sleep -Milliseconds 40
+        if ($how -eq 'send') {
+            $park = Send-ArmAbsolute $sx1 $sy1
+            Start-Sleep -Milliseconds 50
+            if ($park -le 0) {
+                Write-Output "SENDINPUT park=$park; posting the drag instead"
+                $how = 'message'
+            } else {
+                $down = [Arm.Drag]::Send(0x0002, 0, 0)
+                $move = 0
+                try {
+                    foreach ($i in 1..12) {
+                        $x = [int]($sx1 + ($sx2 - $sx1) * $i / 12)
+                        $y = [int]($sy1 + ($sy2 - $sy1) * $i / 12)
+                        $move = Send-ArmAbsolute $x $y
+                        Start-Sleep -Milliseconds 18
+                    }
+                } finally {
+                    $up = [Arm.Drag]::Send(0x0004, 0, 0)
+                }
+                $end = Get-TutorCursor
+                Write-Output "SENDINPUT park=$park down=$down move=$move up=$up end=$($end.X),$($end.Y) target=$sx2,$sy2"
+                if ($down -gt 0 -and $move -gt 0 -and $up -gt 0) { return }
+                Write-Output "SENDINPUT incomplete; posting the drag instead"
             }
+        }
+        [void](Send-AbsoluteMove $sx1 $sy1)
+        $origin = New-Object Arm.Drag+POINT
+        $origin.X = $sx1
+        $origin.Y = $sy1
+        $hwnd = [Arm.Drag]::WindowFromPoint($origin)
+        $cls = New-Object System.Text.StringBuilder 128
+        if ($hwnd -ne [IntPtr]::Zero) { [void][Arm.Drag]::GetClassName($hwnd, $cls, $cls.Capacity) }
+        [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
+        $posted = 0
+        try {
+            Start-Sleep -Milliseconds 40
+            foreach ($i in 1..12) {
+                $x = [int]($sx1 + ($sx2 - $sx1) * $i / 12)
+                $y = [int]($sy1 + ($sy2 - $sy1) * $i / 12)
+                [void][WD]::SetCursorPos($x, $y)
+                $client = New-Object Arm.Drag+POINT
+                $client.X = $x
+                $client.Y = $y
+                if ($hwnd -ne [IntPtr]::Zero) { [void][Arm.Drag]::ScreenToClient($hwnd, [ref]$client) }
+                if ([Arm.Drag]::PostMessage($hwnd, 0x0200, [IntPtr]1, [Arm.Drag]::Pack($client.X, $client.Y))) { $posted++ }
+                Start-Sleep -Milliseconds 18
+            }
+            $end = New-Object Arm.Drag+POINT
+            $end.X = $sx2
+            $end.Y = $sy2
+            if ($hwnd -ne [IntPtr]::Zero) { [void][Arm.Drag]::ScreenToClient($hwnd, [ref]$end) }
+            [void][Arm.Drag]::PostMessage($hwnd, 0x0202, [IntPtr]::Zero, [Arm.Drag]::Pack($end.X, $end.Y))
+            Start-Sleep -Milliseconds 60
         } finally {
             [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
         }
-        Write-Output ("DRAG path " + ($logged -join ' '))
+        Write-Output "DRAGMSG $($cls.ToString()) $hwnd posted=$posted"
     }
 }
 
@@ -348,18 +500,22 @@ function Test-ToolbarUp($lines) {
 function Open-SelectionToolbar([string]$name) {
     $raised = $null
     foreach ($drag in 1..3) {
-        $frame = @(Read-TutorFrame "$name-body$drag")
-        $rows = @(Find-TutorBodyRows $frame)
+        [void]@(Read-TutorFrame "$name-body$drag")
+        $rows = @(Find-LeftInkRows "$name-body$drag")
         if (@($rows).Count -lt 1) { throw "No body line to drag in $name-body$drag" }
         $row = $rows[[Math]::Min($drag - 1, @($rows).Count - 1)]
+        $bounds = Get-Rect
+        $width = [int]($bounds.R - $bounds.L)
+        $onRight = [int]$row.X1 -gt ($width * 0.50)
+        $pageL = [int]($width * $(if ($onRight) { 0.56 } else { 0.16 }))
+        $pageR = [int]($width * $(if ($onRight) { 0.84 } else { 0.44 }))
+        $x1 = [Math]::Max($pageL, [int]$row.X1 + 8)
+        $x2 = [Math]::Min($pageR, [int]$row.X2 - 8)
+        if (($x2 - $x1) -lt 70) { throw "Ink line is too short to drag ($name x=$x1..$x2)" }
         $y = [int]$row.Y
-        if ($drag -eq 3) { $y = [int]$row.Y - 4 }
-        # Stay inside the text. A down in the left 14% is the page-turn edge.
-        $span = [int]$row.X2 - [int]$row.X1
-        $x1 = [int]$row.X1 + [int]($span * 0.22)
-        $x2 = [int]$row.X2 - [int]($span * 0.22)
-        Write-Output "DRAG row $drag y=$y x=$x1..$x2"
-        Drag-TutorLine $x1 $y $x2 $y
+        $how = if ($drag -lt 3) { 'send' } else { 'message' }
+        Write-Output "DRAG row $drag how=$how y=$y x=$x1..$x2"
+        Drag-TutorLine $x1 $y $x2 $y $how
         foreach ($spin in 1..4) {
             Start-Sleep -Milliseconds 400
             $shot = @(Read-TutorFrame "$name-selected$drag-$spin")

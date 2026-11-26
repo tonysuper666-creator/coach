@@ -126,11 +126,15 @@ internal data class UnifiedBookScope(
     companion object {
         internal val SCOPE_KEY_PATTERN = Regex("(?:sable|device)-[0-9a-f]{64}")
 
+        fun fromSableFriend(name: String): UnifiedBookScope {
+            require(isSableFriend(name))
+            return UnifiedBookScope("sable-" + name.substringAfterLast(':'), isSableAccount = true)
+        }
+
         fun fromCall(deviceId: String, friendName: String?): UnifiedBookScope {
             require(deviceId.isNotBlank()) { "Missing device id" }
             return if (friendName != null && isSableFriend(friendName)) {
-                val subHash = friendName.substringAfterLast(':')
-                UnifiedBookScope("sable-$subHash", isSableAccount = true)
+                fromSableFriend(friendName)
             } else {
                 val deviceHash = sha256(deviceId.toByteArray(Charsets.UTF_8))
                 UnifiedBookScope("device-$deviceHash", isSableAccount = false)
@@ -470,6 +474,14 @@ class UnifiedBookPipeline internal constructor(
         }
     }
 
+    internal suspend fun <T> withActiveAccount(scope: UnifiedBookScope, action: suspend () -> T): T =
+        accountLock(scope.scopeKey).withLock {
+            if (readAccountDeletionState(scope.scopeKey)?.state == "DELETING") {
+                throw UnifiedBookError(HttpStatusCode.Conflict, "account_deleting", "Account deletion is in progress")
+            }
+            action()
+        }
+
     private fun accountLock(scopeKey: String): Mutex = accountLocks.computeIfAbsent(scopeKey) { Mutex() }
 
     private fun shaLock(sha256: String): Mutex = shaLocks.computeIfAbsent(sha256) { Mutex() }
@@ -534,8 +546,10 @@ class UnifiedBookPipeline internal constructor(
         }
     }
 
-    internal suspend fun beginAccountDeletion(scope: UnifiedBookScope, friendName: String? = null): Long = withContext(Dispatchers.IO) {
+    internal suspend fun beginAccountDeletion(scope: UnifiedBookScope, friendName: String? = null,
+        authorized: suspend () -> Boolean = { true }): Long = withContext(Dispatchers.IO) {
         accountLock(scope.scopeKey).withLock {
+            if (!authorized()) throw UnifiedBookError(HttpStatusCode.Unauthorized,"unauthorized","Authorization expired")
             markAccountDeletingLocked(scope.scopeKey, friendName)
         }
     }
@@ -1366,9 +1380,14 @@ class UnifiedBookPipeline internal constructor(
     internal suspend fun deleteAccount(
         scope: UnifiedBookScope,
         purgeImmediately: Boolean = false,
+        expectedDeletionEpoch: Long? = null,
     ): AccountDeleteResult = withContext(Dispatchers.IO) {
         val (removed, trashed) = accountLock(scope.scopeKey).withLock {
-            markAccountDeletingLocked(scope.scopeKey)
+            if (expectedDeletionEpoch == null) {
+                markAccountDeletingLocked(scope.scopeKey)
+            } else if (readAccountDeletionState(scope.scopeKey) != AccountDeletionRecord("DELETING",expectedDeletionEpoch)) {
+                return@withContext AccountDeleteResult(0,0,0)
+            }
             var totalRemoved = 0
             var totalTrashed = 0
             while (true) {
@@ -1613,16 +1632,16 @@ class UnifiedBookPipeline internal constructor(
                 s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_deletions'").use { it.next() }
             }
             if (!hasTable) emptyList() else db.createStatement().use { sql ->
-                sql.executeQuery("SELECT scope_key FROM account_deletions WHERE state='DELETING'").use { rs ->
-                    buildList { while (rs.next()) add(rs.getString(1)) }
+                sql.executeQuery("SELECT scope_key,deletion_epoch FROM account_deletions WHERE state='DELETING'").use { rs ->
+                    buildList { while (rs.next()) add(rs.getString(1) to rs.getLong(2)) }
                 }
             }
         }
         var reconciled = 0
-        for (scopeKey in pendingAccounts) {
+        for ((scopeKey,epoch) in pendingAccounts) {
             if (!scopeKey.matches(UnifiedBookScope.SCOPE_KEY_PATTERN)) continue
             runCatching {
-                deleteAccount(UnifiedBookScope(scopeKey, isSableAccount = scopeKey.startsWith("sable-")))
+                deleteAccount(UnifiedBookScope(scopeKey, isSableAccount = scopeKey.startsWith("sable-")), expectedDeletionEpoch = epoch)
                 reconciled++
             }
         }
@@ -2319,8 +2338,10 @@ fun Application.unifiedBookRoutes(
     actor: LedgerActor,
     unifiedBooks: UnifiedBookPipeline? = null,
     friends: FriendAccess? = null,
+    learningSync: Boolean = System.getenv("COACH_LEARNING_SYNC") == "1",
 ) {
     unifiedBooks?.installAccountDataFinalizer(actor, friends)
+    if (learningSync && unifiedBooks?.enabled == true) learningSyncRoutes(actor, unifiedBooks)
     if (unifiedBooks != null && unifiedBooks.enabled && unifiedBooks.config.autoProcess) {
         unifiedBooks.startWorkerIfNeeded(this)
         monitor.subscribe(ApplicationStopping) {
@@ -2514,8 +2535,10 @@ fun Application.unifiedBookRoutes(
             val scope = UnifiedBookScope.fromCall(device, friend)
             try {
                 // Persist DELETING gate before cleanup so any in-flight upload for this scope is rejected at commit.
-                pipeline.beginAccountDeletion(scope, friend)
-                val summary = pipeline.deleteAccount(scope)
+                val epoch = pipeline.beginAccountDeletion(scope, friend) {
+                    actor.execute { authorize(device,bearer) && friendName(device) == friend }
+                }
+                val summary = pipeline.deleteAccount(scope,expectedDeletionEpoch = epoch)
                 call.respondText(
                     json(
                         "deleted" to true,

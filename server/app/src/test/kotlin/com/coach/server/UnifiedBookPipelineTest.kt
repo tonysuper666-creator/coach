@@ -139,13 +139,17 @@ class UnifiedBookPipelineTest {
             return client.send(req.GET().build(), HttpResponse.BodyHandlers.ofByteArray())
         }
 
-        fun exchangeSable(sableToken: String): JsonObject {
+        fun exchangeResponse(sableToken: String): HttpResponse<String> {
             val req = HttpRequest.newBuilder(URI("http://127.0.0.1:${port(false)}/v1/public/sable"))
                 .timeout(java.time.Duration.ofSeconds(10))
                 .header("Authorization", "Bearer $sableToken")
                 .POST(HttpRequest.BodyPublishers.noBody())
                 .build()
-            val res = client.send(req, HttpResponse.BodyHandlers.ofString())
+            return client.send(req, HttpResponse.BodyHandlers.ofString())
+        }
+
+        fun exchangeSable(sableToken: String): JsonObject {
+            val res = exchangeResponse(sableToken)
             assertEquals(200, res.statusCode(), res.body())
             return parse(res)
         }
@@ -850,6 +854,7 @@ class UnifiedBookPipelineTest {
 
             // 1) Private-data cleanup fails: must be 503, stay DELETING, keep the record and the credential.
             val realFinalizer = checkNotNull(h.unified.accountDataFinalizer)
+            val epoch = h.unified.beginAccountDeletion(daveScope,daveFriend)
             val windows = System.getProperty("os.name").lowercase().contains("win")
             val held = if (windows) java.io.FileInputStream(record.toFile()) else null // java.io opens without FILE_SHARE_DELETE
             if (!windows) h.unified.accountDataFinalizer = { throw java.io.IOException("simulated locked file") }
@@ -858,6 +863,7 @@ class UnifiedBookPipelineTest {
                 assertEquals(503, failed.statusCode(), failed.body())
                 assertEquals("account_data_cleanup_failed", parse(failed).str("code"))
                 assertEquals("DELETING", h.unified.accountDeletionStateForTest(daveScope))
+                assertEquals(409,h.exchangeResponse(TOK_GAMMA_1).statusCode())
                 assertTrue(Files.exists(record))
             } finally {
                 held?.close()
@@ -869,6 +875,14 @@ class UnifiedBookPipelineTest {
             assertEquals("DELETED", h.unified.accountDeletionStateForTest(daveScope))
             assertFalse(Files.exists(privateRoot))
             assertEquals(401, h.request("/v1/books", credential = dave).statusCode())
+            val registeredAgain = h.exchangeSable(TOK_GAMMA_1)
+            val newBook = h.upload(registeredAgain, "New synthetic edition.".toByteArray(), format="md", title="New edition")
+            assertEquals(200,newBook.statusCode())
+            val shelfId = parse(newBook).str("shelfBookId")
+            assertEquals(0,h.unified.deleteAccount(daveScope,expectedDeletionEpoch=epoch).removedBooks)
+            val shelf = h.request("/v1/books",credential=registeredAgain)
+            assertEquals(200,shelf.statusCode())
+            assertTrue(shelf.body().contains(shelfId))
         }
     }
 }

@@ -191,8 +191,9 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
                 return@post call.respond(HttpStatusCode.Unauthorized)
             }
             val sessions = friends?.sable ?: return@post call.respond(HttpStatusCode.ServiceUnavailable)
-            val credential = try { sessions.exchange(bearer.removePrefix("Bearer ")) }
+            val credential = try { sessions.exchange(bearer.removePrefix("Bearer "), unifiedBooks?.takeIf { it.enabled }) }
                 catch (_: SableUnavailable) { return@post call.respond(HttpStatusCode.ServiceUnavailable) }
+                catch (e: UnifiedBookError) { return@post call.respond(e.status) }
             if (credential == null) return@post call.respond(HttpStatusCode.Unauthorized)
             call.respondText(json("deviceId" to credential.deviceId, "token" to credential.token,
                 "role" to credential.role).toString(), ContentType.Application.Json)

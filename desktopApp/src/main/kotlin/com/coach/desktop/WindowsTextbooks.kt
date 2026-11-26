@@ -82,14 +82,17 @@ internal fun WindowsTextbookGate(
 
     LaunchedEffect(pairing) {
         try {
-            val (address, saved, wasRevoked) = withContext(Dispatchers.IO) {
+            val (address, session, wasRevoked) = withContext(Dispatchers.IO) {
+                val opened = pairing.loadForStartup()
                 val url = if (hasBuiltIn) "" else settings.serverUrl().orEmpty()
-                Triple(url, pairing.load(), runCatching { pairing.wasRevoked() }.getOrDefault(false))
+                Triple(url, opened, runCatching { pairing.wasRevoked() }.getOrDefault(false))
             }
             defaultAddress = address
-            identity = saved
-            if (saved == null && wasRevoked) {
-                revokedReason = if (sable) "授权已撤销，请重新登录。" else "这台电脑的连接已停用，请重新配对。"
+            identity = session.identity
+            revokedReason = when {
+                session.notice != null -> session.notice
+                session.identity == null && wasRevoked -> if (sable) "授权已撤销，请重新登录。" else "这台电脑的连接已停用，请重新配对。"
+                else -> null
             }
         } catch (cancelled: CancellationException) {
             throw cancelled

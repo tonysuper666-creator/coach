@@ -22,7 +22,10 @@ class MathHttp(baseUrl: String, deviceId: String, token: String) {
     private val http = HttpClient(CIO) {
         followRedirects = false
         install(HttpTimeout) { requestTimeoutMillis = 15_000; connectTimeoutMillis = 3_000 }
-        defaultRequest { header("Authorization", "Bearer $token"); header("X-Coach-Device", deviceId) }
+        defaultRequest {
+            header("Authorization", "Bearer $token"); header("X-Coach-Device", deviceId)
+            coachVersionOrNull()?.let { header("X-Coach-Version", it) }
+        }
     }
 
     suspend fun render(tex: String, display: Boolean): RenderedMath? = try {

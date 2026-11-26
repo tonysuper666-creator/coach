@@ -17,6 +17,18 @@ internal object BookImportMessages {
 
     fun asksForPassword(message: String?): Boolean = message != null && "密码保护" in message
 
+    /** A password prompt is still an open import. A wrong password, a damaged file, or a refused format is a failure. */
+    fun isRecordedImportFailure(message: String): Boolean = when {
+        message == PASSWORD -> false
+        message.startsWith(WRONG_PASSWORD) || message.startsWith(NOT_PDF) || message.startsWith(TRUNCATED) -> true
+        message.startsWith("这份教材不完整或已损坏") -> true
+        message.startsWith("这个压缩包里没有可读的教材") -> true
+        message.startsWith("这份 Office 文件可能已加密") -> true
+        message.startsWith("无法确认这份文本的编码") -> true
+        message.startsWith("请使用 PDF、电子书") -> true
+        else -> false
+    }
+
     fun pdfOpenFailure(file: Path, error: Exception, passwordAttempted: Boolean): IllegalArgumentException {
         if (error is BookPdfPasswordException || error.cause is BookPdfPasswordException) {
             val message = if (passwordAttempted) WRONG_PASSWORD else PASSWORD

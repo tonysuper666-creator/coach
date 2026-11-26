@@ -114,7 +114,10 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     }) {
         followRedirects = false
         install(HttpTimeout) { requestTimeoutMillis = 15_000; connectTimeoutMillis = connectTimeoutMs }
-        defaultRequest { header("Authorization", "Bearer $token"); header("X-Coach-Device", deviceId) }
+        defaultRequest {
+            header("Authorization", "Bearer $token"); header("X-Coach-Device", deviceId)
+            coachVersionOrNull()?.let { header("X-Coach-Version", it) }
+        }
     }
 
     private suspend fun getObject(path: String): JsonObject? = try {

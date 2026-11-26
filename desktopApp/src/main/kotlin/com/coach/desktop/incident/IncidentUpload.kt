@@ -16,6 +16,11 @@ internal object IncidentUpload {
             .timeout(Duration.ofSeconds(20))
             .header("X-Coach-Device", identity.credentials.deviceId)
             .header("Authorization", "Bearer ${identity.credentials.token}")
+            .apply {
+                val version = System.getProperty("coach.app.version")?.takeIf { it.isNotBlank() }
+                    ?: System.getProperty("jpackage.app-version")?.takeIf { it.isNotBlank() }
+                if (version != null && version.matches(Regex("[0-9A-Za-z][0-9A-Za-z._+-]{0,31}"))) header("X-Coach-Version", version)
+            }
             .header("Content-Type", "text/plain; charset=utf-8")
             .POST(HttpRequest.BodyPublishers.ofString(body, Charsets.UTF_8))
             .build()

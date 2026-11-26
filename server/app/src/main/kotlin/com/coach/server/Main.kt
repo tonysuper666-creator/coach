@@ -24,6 +24,10 @@ import java.util.Base64
 fun main(args: Array<String>): Unit = runBlocking {
     val managed = System.getenv("COACH_MANAGE_SERVICES") == "1"
     val data = Path.of(System.getenv("COACH_DATA_DIR") ?: File(System.getProperty("user.home"),"Coach/data").path)
+    if (args.firstOrNull() == "version-rates") {
+        println(ReliabilityCounts(data.resolve("reliability")).render())
+        return@runBlocking
+    }
     if (args.firstOrNull() in setOf("pair-code", "devices", "revoke", "revoke-friend", "sable-users", "disable-sable", "books-inventory", "books-migrate", "books-verify")) {
         pairingCommand(args, data)
         return@runBlocking
@@ -57,6 +61,8 @@ fun main(args: Array<String>): Unit = runBlocking {
     val tokenLedger = BookTokenLedger(data.resolve("companion"))
     // 导师流式链路：Ktor ↔ 桥副本 8791 ↔ WS（M1-01）
     val chat = ChatService(actor, this, ledgerChanged={ pushes.emit(it) }, allowSourceLookup = System.getenv("COACH_SOURCE_LOOKUP") == "true", tokenLedger = tokenLedger)
+    val counts = ReliabilityCounts(data.resolve("reliability"))
+    chat.reliability = counts
     actor.execute { recoverSuspension() }
     chat.tutor.recoverInterruptedReplies()
     val supplyWorker = chat.startSupplyWorker()
@@ -213,7 +219,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         actor.execute { pairedDevices() }
     }
     val incidentDir = data.resolve("incident-reports")
-    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation,friends,unifiedBooks=unifiedBooks); incidentReportRoutes(incidentDir); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); libraryExplainRoutes(actor,chat.reader,reader,imports,friends,companionPipeline,tokenLedger,courseAlignPipeline,courseTopicPipeline,courseVisionService,unifiedBooks,literatureGuide,literatureComparison,examPointDrillPipeline); unifiedBookRoutes(actor,unifiedBooks,friends); unifiedBookMigrationRoutes(unifiedBookMigration,unifiedBooks,adminDevice=device); booklistAlignmentRoutes(actor,friends,booklistAligner,conceptSayings); practiceGradeRoutes(actor,friends,practiceGradeService); collectionQaRoutes(actor,friends,collectionQaService); courseMockRoutes(actor,friends,courseMockService); studyModeRoutes(actor,reader,friends,studyModeService,unifiedBooks); readerRoutes(actor,pushes,reader,mainline) }
+    val module: Application.() -> Unit = { attributes.put(reliabilityCounts, counts); ledgerRoutes(actor,pushes,chat,device,observation,friends,unifiedBooks=unifiedBooks); incidentReportRoutes(incidentDir); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); libraryExplainRoutes(actor,chat.reader,reader,imports,friends,companionPipeline,tokenLedger,courseAlignPipeline,courseTopicPipeline,courseVisionService,unifiedBooks,literatureGuide,literatureComparison,examPointDrillPipeline); unifiedBookRoutes(actor,unifiedBooks,friends); unifiedBookMigrationRoutes(unifiedBookMigration,unifiedBooks,adminDevice=device); booklistAlignmentRoutes(actor,friends,booklistAligner,conceptSayings); practiceGradeRoutes(actor,friends,practiceGradeService); collectionQaRoutes(actor,friends,collectionQaService); courseMockRoutes(actor,friends,courseMockService); studyModeRoutes(actor,reader,friends,studyModeService,unifiedBooks); readerRoutes(actor,pushes,reader,mainline) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")
@@ -234,6 +240,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         }
     }
     val public = publicPort?.let { p -> embeddedServer(Netty, host = "127.0.0.1", port = p) {
+        attributes.put(reliabilityCounts, counts)
         ledgerRoutes(actor,pushes,adminDevice=device,friends=friends,publicOnly=true,unifiedBooks=unifiedBooks)
         incidentReportRoutes(incidentDir)
         libraryExplainRoutes(actor,chat.reader,friends=friends,companionPipeline=companionPipeline,tokenLedger=tokenLedger,courseAlignPipeline=courseAlignPipeline,courseTopicPipeline=courseTopicPipeline,courseVisionService=courseVisionService,unifiedBooks=unifiedBooks,literatureGuide=literatureGuide,literatureComparison=literatureComparison,examPointDrills=examPointDrillPipeline)

@@ -241,7 +241,7 @@ object ExamPointDrillGate {
             }
             val verdicts = history.map { vote ->
                 checked += 1
-                val reason = choiceVerdict(draft, vote, byPage, byBook, textbookIds)
+                val reason = checkerChoiceReason(draft, vote, byPage, byBook, textbookIds)
                 if (reason == null) agreed += 1
                 reason
             }
@@ -303,8 +303,7 @@ object ExamPointDrillGate {
             var ok = aligned
             for (index in essay.paragraphs.indices) {
                 val vote = if (aligned) round[index] else null
-                val verdict = vote?.supported == true &&
-                    verifiedSupport(vote.citation, byPage, byBook, textbookIds) != null
+                val verdict = vote != null && checkerEssaySupportOk(vote, byPage, byBook, textbookIds)
                 count(verdict)
                 if (!verdict) ok = false
             }
@@ -315,7 +314,7 @@ object ExamPointDrillGate {
         return null to true
     }
 
-    private fun localChoiceFailure(
+    internal fun localChoiceFailure(
         draft: ChoiceDraft,
         byPage: Map<Pair<String, Int>, List<CourseMaterialTextBlock>>,
         byBook: Map<String, List<CourseMaterialTextBlock>>,
@@ -351,7 +350,7 @@ object ExamPointDrillGate {
         return null
     }
 
-    private fun choiceVerdict(
+    internal fun checkerChoiceReason(
         draft: ChoiceDraft,
         vote: SupportVote,
         byPage: Map<Pair<String, Int>, List<CourseMaterialTextBlock>>,
@@ -360,9 +359,21 @@ object ExamPointDrillGate {
     ): String? {
         val key = draft.options.single { it.correct }.letter
         if (!vote.letter.equals(key, ignoreCase = true)) return "answer_mismatch"
-        if (verifiedSupport(vote.citation, byPage, byBook, textbookIds) == null) return "source_mismatch"
-        return null
+        if (verifiedSupport(vote.citation, byPage, byBook, textbookIds) != null) return null
+        // The checker named the wrong book, but the quote is already in the textbook.
+        if (textbookHasQuote(vote.citation, byBook, textbookIds)) return null
+        return "source_mismatch"
     }
+
+    internal fun checkerEssaySupportOk(
+        vote: SupportVote,
+        byPage: Map<Pair<String, Int>, List<CourseMaterialTextBlock>>,
+        byBook: Map<String, List<CourseMaterialTextBlock>>,
+        textbookIds: Set<String>,
+    ): Boolean = vote.supported == true && (
+        verifiedSupport(vote.citation, byPage, byBook, textbookIds) != null ||
+            textbookHasQuote(vote.citation, byBook, textbookIds)
+        )
 
     private fun verifiedSupport(
         raw: JsonObject?,
@@ -374,6 +385,19 @@ object ExamPointDrillGate {
         val verified = CourseQualityGates.verifyCitation(raw, byPage, byBook) ?: return null
         if (textbookIds.isNotEmpty() && verified.bookId !in textbookIds) return null
         return verified
+    }
+
+    private fun textbookHasQuote(
+        raw: JsonObject?,
+        byBook: Map<String, List<CourseMaterialTextBlock>>,
+        textbookIds: Set<String>,
+    ): Boolean {
+        if (raw == null || textbookIds.isEmpty()) return false
+        val quote = raw.str("quote").trim()
+        if (quote.length < 12) return false
+        return textbookIds.flatMap { byBook[it].orEmpty() }.any { block ->
+            block.text.contains(quote) || Utf16AnchorVerifier.findNormalizedUtf16Span(block.text, quote) != null
+        }
     }
 
     private fun storedChoice(
@@ -478,7 +502,9 @@ class ExamPointDrillPipeline(
         val indexes = citationIndex(kept)
         val sourceTexts = kept.map { it.text }
         val textbookIds = kept.filter { it.role == "CORE_TEXTBOOK" }.map { it.bookId }.toSet()
-        val failedIds = drafts.filter { localChoiceNeedsRewrite(it, indexes, textbookIds, sourceTexts) }.map { it.id }
+        val failedIds = drafts.filter {
+            ExamPointDrillGate.localChoiceFailure(it, indexes.byPage, indexes.byBook, textbookIds, sourceTexts) != null
+        }.map { it.id }
         val essayNeedsRewrite = essayWanted && essayLocalNeedsRewrite(essay, indexes, textbookIds, sourceTexts)
         if (failedIds.isNotEmpty() || essayNeedsRewrite) {
             val repair = generator.generateSection(
@@ -497,7 +523,9 @@ class ExamPointDrillPipeline(
                 if (essayNeedsRewrite) essay = ExamPointDrillGate.parseEssay(repaired) ?: essay
             }
         }
-        val ready = drafts.filterNot { localChoiceNeedsRewrite(it, indexes, textbookIds, sourceTexts) }
+        val ready = drafts.filter {
+            ExamPointDrillGate.localChoiceFailure(it, indexes.byPage, indexes.byBook, textbookIds, sourceTexts) == null
+        }
         val essayReady = essay?.takeUnless { essayLocalNeedsRewrite(it, indexes, textbookIds, sourceTexts) }
         val votes = linkedMapOf<String, MutableList<SupportVote>>()
         val essayVotes = mutableListOf<List<SupportVote>>()
@@ -549,7 +577,7 @@ class ExamPointDrillPipeline(
         systemPrompt = """
             你看不到标准答案，也不要猜测出题人的意图。只根据材料独立作答。
             每道单选给出 letter，并在 support 里抄一处逐字支持该选项的原句（bookId、page、quote）。
-            有教材时 support 必须来自 CORE_TEXTBOOK。
+            有教材时 support 必须来自 CORE_TEXTBOOK。同一句两边都有时，bookId 填教材。
             论述提纲的每个要点按顺序给出：有原句支撑则 supported 为 true 并附 support，否则 supported 为 false。
             只输出 JSON：{"answers":[{"id":"...","letter":"A","support":{"bookId":"...","page":1,"quote":"..."}}],"essay":[{"supported":true,"support":{"bookId":"...","page":1,"quote":"..."}}]}
         """.trimIndent(),
@@ -562,17 +590,6 @@ class ExamPointDrillPipeline(
         batchKey = batchKey,
         maxTokens = ExamPointDrillLimits.MAX_TOKENS,
     )
-
-    private fun localChoiceNeedsRewrite(
-        draft: ChoiceDraft,
-        indexes: CitationIndex,
-        textbookIds: Set<String>,
-        sourceTexts: List<String>,
-    ): Boolean =
-        draft.stem.isBlank() || draft.options.size != 4 || draft.options.map { it.letter } != listOf("A", "B", "C", "D") ||
-            draft.options.count { it.correct } != 1 || draft.options.any { it.text.isBlank() || it.reason.isBlank() } ||
-            !CourseQualityGates.auditZeroOverlap(listOf(draft.stem), sourceTexts).passed ||
-            draft.options.any { verifiedSupport(it.citation, indexes.byPage, indexes.byBook, textbookIds) == null }
 
     private fun essayLocalNeedsRewrite(
         essay: EssayDraft?,
@@ -593,10 +610,9 @@ class ExamPointDrillPipeline(
         indexes: CitationIndex,
         textbookIds: Set<String>,
     ): Boolean {
-        if (vote?.letter == null) return true
-        val key = draft.options.single { it.correct }.letter
-        if (!vote.letter.equals(key, ignoreCase = true)) return true
-        return verifiedSupport(vote.citation, indexes.byPage, indexes.byBook, textbookIds) == null
+        return ExamPointDrillGate.checkerChoiceReason(
+            draft, vote ?: SupportVote(), indexes.byPage, indexes.byBook, textbookIds,
+        ) != null
     }
 
     private fun essayRoundAgrees(
@@ -605,8 +621,7 @@ class ExamPointDrillPipeline(
         indexes: CitationIndex,
         textbookIds: Set<String>,
     ): Boolean = essay.paragraphs.size == round.size && essay.paragraphs.indices.all { index ->
-        val vote = round[index]
-        vote.supported == true && verifiedSupport(vote.citation, indexes.byPage, indexes.byBook, textbookIds) != null
+        ExamPointDrillGate.checkerEssaySupportOk(round[index], indexes.byPage, indexes.byBook, textbookIds)
     }
 
     private fun verifiedSupport(

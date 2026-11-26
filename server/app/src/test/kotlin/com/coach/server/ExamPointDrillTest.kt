@@ -223,6 +223,37 @@ class ExamPointDrillTest {
     }
 
     @Test
+    fun checkerQuoteInTheTextbookIsKeptWhenTheBookIdIsWrong() = runBlocking {
+        val gen = script(haiku) { choicesJson(listOf("c1" to "A"), bookId = "tb") }
+        val check = script(gpt) { votes(listOf("c1" to "A"), bookId = "slides") }
+        val blocks = buildJsonArray {
+            add(block("tb", "CORE_TEXTBOOK", textbook, "Textbook"))
+            add(block("slides", "LECTURE_SLIDES", "A classroom example of a price ceiling.", "Slides"))
+        }
+        val body = ExamPointDrillPipeline(gen, check).generate(input(choiceOnly = true, blocks = blocks))
+        assertEquals(1, body.arr("choices").size)
+        assertEquals(2, body.int("missingChoices"))
+        assertEquals("tb", option(body, 0, 0).obj("citation").str("bookId"))
+        assertEquals(1, check.prompts.size)
+        assertFalse(body.toString().contains("A classroom example"))
+    }
+
+    @Test
+    fun slideOnlyCheckerQuoteIsStillDiscarded() = runBlocking {
+        val slide = "A classroom example of a price ceiling stays on the slide."
+        val gen = script(haiku) { choicesJson(listOf("c1" to "A"), bookId = "tb") }
+        val check = script(gpt) { votes(listOf("c1" to "A"), bookId = "slides", quote = slide) }
+        val blocks = buildJsonArray {
+            add(block("tb", "CORE_TEXTBOOK", textbook, "Textbook"))
+            add(block("slides", "LECTURE_SLIDES", slide, "Slides"))
+        }
+        val body = ExamPointDrillPipeline(gen, check).generate(input(choiceOnly = true, blocks = blocks))
+        assertEquals(0, body.arr("choices").size)
+        assertEquals(1, body.obj("discards").int("source_mismatch"))
+        assertEquals(2, check.prompts.size)
+    }
+
+    @Test
     fun fencedJsonStillParses() = runBlocking {
         val gen = script(haiku) { "```json\n${choicesJson(listOf("c1" to "A", "c2" to "B", "c3" to "C"))}\n```" }
         val check = script(gpt) { votes(listOf("c1" to "A", "c2" to "B", "c3" to "C")) }
@@ -310,6 +341,7 @@ class ExamPointDrillTest {
         letters: List<Pair<String, String>>,
         bookId: String = "tb",
         essaySupported: List<Boolean>? = null,
+        quote: String = this.quote,
     ) = buildJsonObject {
         put("answers", buildJsonArray {
             for ((id, letter) in letters) {

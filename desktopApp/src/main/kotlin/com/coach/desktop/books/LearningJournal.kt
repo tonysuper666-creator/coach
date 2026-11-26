@@ -1,6 +1,7 @@
 package com.coach.desktop.books
 
 import com.coach.protocol.learning.LearningTable
+import com.coach.protocol.learning.draftVersion
 import com.coach.protocol.learning.learningTables
 import com.coach.desktop.books.exam.LocalExamStore
 
@@ -23,7 +24,7 @@ internal object LearningJournal {
 
     fun installLibrary(library: TextbookLibrary) = library.withCourseDatabase { db ->
         db.createStatement().use { it.execute(StudyModeStore.PREFERENCES_DDL.trimIndent()) }
-        install(db, learningTables.filterNot { it.exam })
+        install(db, learningTables.filterNot { it.exam } + draftVersion)
     }
 
     /** Called after source schema migration. SQLite's writer lock covers both seeding and installing triggers. */
@@ -69,12 +70,30 @@ internal object LearningJournal {
                     keys_json TEXT NOT NULL,PRIMARY KEY(kind,id))""")
                 var migrated = false
                 for (table in tables) {
+                    if (table == draftVersion) {
+                        sql.execute("""CREATE TABLE IF NOT EXISTS learning_draft_versions(
+                            parent TEXT NOT NULL,generation INTEGER NOT NULL,writer TEXT NOT NULL,slot TEXT NOT NULL,
+                            source TEXT NOT NULL,book TEXT,page INTEGER,location TEXT NOT NULL,text TEXT NOT NULL,
+                            PRIMARY KEY(parent,generation,writer,slot))""")
+                        sql.execute("CREATE INDEX IF NOT EXISTS draft_versions_book ON learning_draft_versions(book)")
+                        sql.execute("""CREATE TRIGGER IF NOT EXISTS learning_sync_remove_book_drafts AFTER DELETE ON books
+                            BEGIN DELETE FROM learning_draft_versions WHERE book=OLD.id; END""")
+                        sql.execute("""CREATE TRIGGER IF NOT EXISTS learning_sync_remove_topic_drafts AFTER DELETE ON course_topics
+                            BEGIN DELETE FROM learning_draft_versions WHERE source='course_topic' AND location=OLD.topic_id; END""")
+                    }
                     val installed = db.prepareStatement("SELECT 1 FROM learning_sync_sources WHERE kind=?").use {
                         it.setString(1, table.kind)
                         it.executeQuery().use { rows -> rows.next() }
                     }
                     if (!installed) {
                         installSource(db, table)
+                        if (table == draftVersion) {
+                            // An older client may have advanced its cursor past an unknown recovery kind.
+                            sql.execute("""INSERT OR REPLACE INTO learning_sync_meta SELECT 'restore_required','1'
+                                WHERE EXISTS(SELECT 1 FROM learning_sync_meta WHERE key IN ('cursor','stage_token'))""")
+                            sql.execute("DELETE FROM learning_sync_stage")
+                            sql.execute("DELETE FROM learning_sync_meta WHERE key IN ('stage_token','stage_after','stage_count','stage_hash')")
+                        }
                         migrated = true
                     }
                     if (table.kind == "mastery") {

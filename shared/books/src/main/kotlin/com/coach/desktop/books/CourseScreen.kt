@@ -122,6 +122,7 @@ internal fun CourseScreen(
     hasActiveMockExam: Boolean = false,
     onOpenMockExam: () -> Unit = {},
     onOpenLiteratureGuide: (() -> Unit)? = null,
+    onOpenLiteratureComparison: (() -> Unit)? = null,
 ) {
     val colors = CoachTheme.colors
     val isExam = detail.isExam
@@ -299,9 +300,18 @@ internal fun CourseScreen(
                 CourseIntakeReceiptCard(intake, busy = busy, onChangeType = onChangeIntakeType, onDismiss = onDismissIntake)
             }
 
-            if (onOpenLiteratureGuide != null) {
-                PaperButton(onOpenLiteratureGuide, modifier = Modifier.testTag("course-literature-guide")) {
-                    Text("本周文献导读")
+            if (onOpenLiteratureGuide != null || onOpenLiteratureComparison != null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (onOpenLiteratureGuide != null) {
+                        PaperButton(onOpenLiteratureGuide, modifier = Modifier.testTag("course-literature-guide")) {
+                            Text("本周文献导读")
+                        }
+                    }
+                    if (onOpenLiteratureComparison != null) {
+                        PaperButton(onOpenLiteratureComparison, modifier = Modifier.testTag("course-literature-comparison")) {
+                            Text("文献对比")
+                        }
+                    }
                 }
             }
 

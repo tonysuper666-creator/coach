@@ -221,6 +221,9 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
     open suspend fun courseVision(input: JsonObject): CourseServerCallResult =
         callCourseEndpoint { http -> http.courseVision(input) }
 
+    open suspend fun generateChapterOpenQuestion(input: JsonObject): CourseServerCallResult =
+        callCourseEndpoint { http -> http.generateChapterOpenQuestion(input) }
+
     open suspend fun gradeAndDiagnosePractice(input: JsonObject): PracticeGradeDiagnoseResult {
         val res = callCourseEndpoint { http -> http.gradeAndDiagnosePractice(input) }
         val body = res.body ?: return PracticeGradeDiagnoseResult.Failed(

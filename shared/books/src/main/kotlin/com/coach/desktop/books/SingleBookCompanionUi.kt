@@ -874,6 +874,28 @@ internal fun SingleBookCompanionPanel(
                     }
                 }
                 }
+                if (!originalOnly) {
+                    ChapterOpenQuestionCard(
+                        bookId = book.id,
+                        chapterId = chapterGroup.chapterId,
+                        chapterTitle = chapterGroup.chapterTitle,
+                        blocks = ChapterCompanionGrouping.wireBlocks(proseGroup ?: chapterGroup),
+                        draft = draft,
+                        explainer = explainer,
+                        aiEnabled = aiEnabled,
+                        onDraftChange = { next ->
+                            updateDraft {
+                                it.copy(
+                                    openQuestionJson = next.openQuestionJson,
+                                    openAttemptsJson = next.openAttemptsJson,
+                                    openAnswerDraft = next.openAnswerDraft,
+                                )
+                            }
+                        },
+                        onOpenAnchor = onOpenAnchor,
+                        onOpenLogin = onOpenLogin,
+                    )
+                }
                 bottomContent?.invoke()
             }
             if (scroll.maxValue > 0) {

@@ -150,6 +150,9 @@ internal data class ChapterPracticeDraft(
     val practiceGuessed: Map<String, Boolean> = emptyMap(),
     val practiceSubmitted: Set<String> = emptySet(),
     val exerciseHintLevels: Map<String, Int> = emptyMap(),
+    val openQuestionJson: String = "",
+    val openAttemptsJson: String = "",
+    val openAnswerDraft: String = "",
     val updatedAt: Long = 0L,
 ) {
     fun hasMeaningfulDraft(): Boolean =
@@ -159,6 +162,9 @@ internal data class ChapterPracticeDraft(
             practiceTextDrafts.values.any { it.isNotBlank() } ||
             practiceSubmitted.isNotEmpty() ||
             exerciseHintLevels.values.any { it > 0 } ||
+            openQuestionJson.isNotBlank() ||
+            openAnswerDraft.isNotBlank() ||
+            openAttemptsJson.isNotBlank() ||
             (companionOpen && activeModule != CompanionModuleTab.KEY_POINTS.name)
 }
 
@@ -352,6 +358,9 @@ internal object CompanionJson {
         put("practiceGuessed", buildJsonObject { d.practiceGuessed.forEach { (k, v) -> put(k, v) } })
         put("practiceSubmitted", buildJsonArray { d.practiceSubmitted.forEach { add(JsonPrimitive(it)) } })
         put("exerciseHintLevels", buildJsonObject { d.exerciseHintLevels.forEach { (k, v) -> put(k, v) } })
+        if (d.openQuestionJson.isNotBlank()) put("openQuestionJson", d.openQuestionJson)
+        if (d.openAttemptsJson.isNotBlank()) put("openAttemptsJson", d.openAttemptsJson)
+        if (d.openAnswerDraft.isNotBlank()) put("openAnswerDraft", d.openAnswerDraft)
         put("updatedAt", d.updatedAt)
     }
 
@@ -387,6 +396,9 @@ internal object CompanionJson {
             practiceGuessed = boolMap("practiceGuessed"),
             practiceSubmitted = o.strList("practiceSubmitted").toSet(),
             exerciseHintLevels = intMap("exerciseHintLevels"),
+            openQuestionJson = o.str("openQuestionJson"),
+            openAttemptsJson = o.str("openAttemptsJson"),
+            openAnswerDraft = o.str("openAnswerDraft"),
             updatedAt = o["updatedAt"]?.jsonPrimitive?.longOrNull ?: 0L,
         )
     }

@@ -566,6 +566,15 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     suspend fun gradeAndDiagnosePractice(input: JsonObject): MockReply =
         postCourseEndpoint("v1/library/practice/grade-and-diagnose", input, timeoutMs = 180_000L, timeoutMsg = "逐点批改等待超时，你的草稿已保留。")
 
+    /** TON-1910: one open question for a chapter. Generated once, then stored on the device. */
+    suspend fun generateChapterOpenQuestion(input: JsonObject): MockReply =
+        postCourseEndpoint(
+            "v1/library/practice/chapter-open-question",
+            input,
+            timeoutMs = 180_000L,
+            timeoutMsg = "这一章的开放题需要联网。读过的内容还在。",
+        )
+
     /** 2.0-AI-3: 整门课与已读书目跨材料逐句核验问答与分歧直指。 */
     suspend fun askCollection(input: JsonObject): MockReply =
         postCourseEndpoint("v1/library/collection/ask", input, timeoutMs = 120_000L, timeoutMsg = "跨材料问答等待超时，请重试。")

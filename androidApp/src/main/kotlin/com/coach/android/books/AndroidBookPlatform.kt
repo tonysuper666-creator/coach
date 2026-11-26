@@ -50,9 +50,12 @@ private class BoundedPdfResourceCache : com.tom_roush.pdfbox.pdmodel.DefaultReso
 }
 
 internal object BookPdfLoader {
-    fun load(file: File): BookPdfDocument {
+    fun load(file: File): BookPdfDocument = open(file, null)
+    fun load(file: File, password: String): BookPdfDocument = open(file, password)
+    private fun open(file: File, password: String?): BookPdfDocument {
         val scratch = com.tom_roush.pdfbox.io.MemoryUsageSetting.setupTempFileOnly().setTempDir(file.parentFile)
-        return BookPdfDocument.load(file, scratch).apply { resourceCache = BoundedPdfResourceCache() }
+        val doc = if (password == null) BookPdfDocument.load(file, scratch) else BookPdfDocument.load(file, password, scratch)
+        return doc.apply { resourceCache = BoundedPdfResourceCache() }
     }
     // Text layers, page aspect lookup and bitmap prefetch may run at the same time.
     // Hold one file-backed parser at a time on the Android app heap.
@@ -69,6 +72,20 @@ internal object BookPdfLoader {
     fun evict(file: File) = Unit
     fun clearCache() = Unit
     fun load(bytes: ByteArray): BookPdfDocument = BookPdfDocument.load(bytes)
+    fun <T> readLarge(file: File, block: (BookPdfDocument) -> T): T = read(file, block)
+}
+
+internal fun unlockBookPdf(file: File, password: String) {
+    val tmp = File(file.parentFile, "${file.name}.decrypted")
+    try {
+        BookPdfLoader.load(file, password).use { doc ->
+            doc.isAllSecurityToBeRemoved = true
+            doc.save(tmp)
+        }
+        java.nio.file.Files.move(tmp.toPath(), file.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    } finally {
+        if (tmp.exists()) runCatching { tmp.delete() }
+    }
 }
 
 internal fun readCachedPageBitmap(file: Path): BookBitmap? = null

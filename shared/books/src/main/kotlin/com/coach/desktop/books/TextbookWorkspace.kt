@@ -37,6 +37,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.progressBarRangeInfo
@@ -80,6 +81,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     val explainer = remember(controller.library, explainProvider) { explainProvider ?: BookExplainer(library = controller.library) }
     val collectionQaSessions = remember { mutableStateMapOf<String, CollectionQaSessionState>() }
     var guideCourse by remember { mutableStateOf<String?>(null) }
+    var comparisonCourse by remember { mutableStateOf<String?>(null) }
     val aiEnabled = LocalReadingAiExplain.current
     val currentAiEnabled by rememberUpdatedState(aiEnabled)
     val booklistJudge = remember(explainer) {
@@ -288,6 +290,25 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             )
                         }
                     }
+                    if (ui.importing == null) {
+                        ui.indexing?.let { indexing ->
+                            BookImportProgressBar(
+                                progress = BookImportProgress(indexing.page, indexing.total),
+                                onCancel = controller::cancelImport,
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                                    .testTag("book-import-progress"),
+                            )
+                        }
+                    }
+                    val damagedPages = ui.book?.damagedPages.orEmpty()
+                    if (ui.screen == BookScreen.READER && damagedPages.isNotEmpty()) {
+                        Text(
+                            BookImportMessages.damagedPages(damagedPages),
+                            Modifier.padding(horizontal = 16.dp, vertical = 4.dp).testTag("damaged-pages"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = v7Alert(),
+                        )
+                    }
                     ui.error?.let { error ->
                         ShellErrorRow(
                             message = error,
@@ -306,6 +327,28 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 .padding(horizontal = CoachV7.Space.s6, vertical = CoachV7.Space.s2)
                                 .testTag("book-error-banner"),
                         )
+                    }
+                    if (ui.passwordPromptPath != null) {
+                        var pdfPassword by remember(ui.passwordPromptPath, ui.error) { mutableStateOf("") }
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            OutlinedTextField(
+                                value = pdfPassword,
+                                onValueChange = { pdfPassword = it },
+                                modifier = Modifier.weight(1f).testTag("pdf-password"),
+                                label = { Text("打开密码") },
+                                singleLine = true,
+                                visualTransformation = PasswordVisualTransformation(),
+                            )
+                            Button(
+                                onClick = { controller.submitPdfPassword(pdfPassword) },
+                                enabled = pdfPassword.isNotEmpty() && ui.importing == null,
+                                modifier = Modifier.testTag("pdf-password-submit"),
+                            ) { Text("导入") }
+                        }
                     }
                     val book = ui.book
                     val existingGradingHost = LocalPracticeGradingHost.current
@@ -401,7 +444,12 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         )
                         ui.screen == BookScreen.COURSE && ui.activeCourseDetail != null -> {
                             val detail = checkNotNull(ui.activeCourseDetail)
-                            if (guideCourse == detail.courseId) {
+                            if (comparisonCourse == detail.courseId) {
+                                LiteratureComparisonPane(detail, controller.library, explainer,
+                                    onBack = { comparisonCourse = null }) { source ->
+                                    run { controller.jumpToLiteraturePage(detail.courseId, source.book.id, source.anchor.pdfPage) }
+                                }
+                            } else if (guideCourse == detail.courseId) {
                                 LiteratureGuidePane(detail, controller.library, explainer,
                                     onBack = { guideCourse = null }) { source ->
                                     run { controller.jumpToLiteraturePage(detail.courseId, source.book.id, source.anchor.pdfPage) }
@@ -411,7 +459,10 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 busy = ui.busy || ui.courseBusy,
                                 notice = ui.courseNotice,
                                 onOpenLiteratureGuide = if (!originalPdfTouchEnabled) {
-                                    { guideCourse = detail.courseId }
+                                    { comparisonCourse = null; guideCourse = detail.courseId }
+                                } else null,
+                                onOpenLiteratureComparison = if (!originalPdfTouchEnabled) {
+                                    { guideCourse = null; comparisonCourse = detail.courseId }
                                 } else null,
                                 onBack = { run { controller.back() } },
                                 onOpenTopic = { topic -> run { controller.openCourseTopic(detail.courseId, topic.topicId, explainer) } },
@@ -795,6 +846,7 @@ private val userActionKeywords = listOf(
     "额度", "停用", "撤销", "配对", "重新登录", "权限", "未授权",
     "另一个窗口", "计时已结束", "无法确认这次作答",
     "限制了文字提取", "请使用", "以内", "超过", "过多", "换用", "损坏",
+    "密码保护", "不是 PDF",
     "请一次拖入", "空文件", "不能直接导入", "超出", "没有这一节", "还没有可用练习",
     "没有可提取", "已不在书架", "先恢复或交卷", "还在准备中", "不能覆盖", "可以计时",
     "快照校验失败", "找不到这本教材",

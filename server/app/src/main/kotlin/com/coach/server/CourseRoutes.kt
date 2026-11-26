@@ -30,6 +30,7 @@ internal fun Route.courseRoutes(
     topicPipeline: CourseTopicSynthesisPipeline? = null,
     visionService: CourseVisionService? = null,
     literatureGuide: LiteratureGuideService? = null,
+    literatureComparison: LiteratureComparisonService? = null,
 ) {
     val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -124,20 +125,32 @@ internal fun Route.courseRoutes(
                 }
                 val cacheScope = friend?.let { "friend:${friendId(it)}" } ?: "owner:$device"
                 val bypassCache = (input["bypassCache"] as? JsonPrimitive)?.booleanOrNull == true
-                val guide = (input["kind"] as? JsonPrimitive)?.content == "literatureGuide"
-                val body = if (guide) {
-                    val service = literatureGuide ?: throw MockError(HttpStatusCode.ServiceUnavailable, "文献导读暂未开启。")
-                    val result = service.generate(input, cacheScope, friend, device)
-                    if (!current()) throw MockError(HttpStatusCode.Conflict, "材料或设备授权已失效。")
-                    result
-                } else (topicPipeline ?: throw MockError(HttpStatusCode.ServiceUnavailable, "专题合成服务暂未开启，请稍后重试。")).generateTopicPack(
-                    input = input,
-                    cacheScope = cacheScope,
-                    bypassCache = bypassCache,
-                    currentCheck = current,
-                )
-                if (friend != null && (!guide || body["pending"] == null)) withContext(Dispatchers.IO) {
-                    try { friends!!.record(friend, device, requestId, "complete", body.takeUnless { guide }, diagnostics) }
+                val kind = (input["kind"] as? JsonPrimitive)?.content
+                val guide = kind == "literatureGuide"
+                val comparison = kind == "literatureComparison"
+                val body = when {
+                    guide -> {
+                        val service = literatureGuide ?: throw MockError(HttpStatusCode.ServiceUnavailable, "文献导读暂未开启。")
+                        val result = service.generate(input, cacheScope, friend, device)
+                        if (!current()) throw MockError(HttpStatusCode.Conflict, "材料或设备授权已失效。")
+                        result
+                    }
+                    comparison -> {
+                        val service = literatureComparison ?: throw MockError(HttpStatusCode.ServiceUnavailable, "文献对比暂未开启。")
+                        val result = service.generate(input, cacheScope, friend, device)
+                        if (!current()) throw MockError(HttpStatusCode.Conflict, "材料或设备授权已失效。")
+                        result
+                    }
+                    else -> (topicPipeline ?: throw MockError(HttpStatusCode.ServiceUnavailable, "专题合成服务暂未开启，请稍后重试。")).generateTopicPack(
+                        input = input,
+                        cacheScope = cacheScope,
+                        bypassCache = bypassCache,
+                        currentCheck = current,
+                    )
+                }
+                val grounded = guide || comparison
+                if (friend != null && (!grounded || body["pending"] == null)) withContext(Dispatchers.IO) {
+                    try { friends!!.record(friend, device, requestId, "complete", body.takeUnless { grounded }, diagnostics) }
                     catch (_: Exception) { throw FriendServiceError() }
                 }
                 call.respondText(body.toString(), ContentType.Application.Json)

@@ -44,6 +44,8 @@ internal data class LibraryUi(
     /** 首次从 SQLite 载入目录和上次会话完成前为 false，避免重开时先闪现「书架还是空的」。 */
     val initialized: Boolean = false,
     val indexing: BookIndexProgress? = null,
+    /** Path of a PDF that asked for an open password. The password itself is never stored. */
+    val passwordPromptPath: String? = null,
     /** 一次拖入多份文件时，在底部展示单行询问条（建课程 / 建书单 / 分开单放）。 */
     val pendingMultiDrop: PendingMultiDrop? = null,
     /** 最近一次单文件导入直达正文首页的耗时（毫秒），供性能回归核验（<3000ms）。 */
@@ -188,7 +190,17 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             }
         }
     }
-    fun cancelImport() { activeImport?.cancel() }
+    fun cancelImport() {
+        val running = activeImport
+        if (running != null) running.cancel()
+        else indexingControls.values.forEach { it.cancel() }
+    }
+
+    fun submitPdfPassword(password: String) {
+        val raw = mutable.value.passwordPromptPath ?: return
+        if (password.isEmpty()) return
+        launchImport(Path.of(raw), password = password)
+    }
     fun dismissImportNotice(id: Long) {
         mutable.update { if (it.importNotice?.id == id) it.copy(importNotice = null) else it }
     }
@@ -711,7 +723,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         else importBook(paths.single())
     }
 
-    fun launchImport(path: Path, onStaged: () -> Unit = {}): Job {
+    fun launchImport(path: Path, onStaged: () -> Unit = {}, password: String? = null): Job {
         if (activeImport != null) {
             onStaged()
             mutable.update { it.copy(error = "上一本教材还在准备中，请稍候或先取消后再导入。") }
@@ -737,12 +749,12 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 if (initiatingAccountKey == null) {
                     initiatingAccountKey = runCatching { uploadCoordinator.resolveInitiatingAccountKey() }.getOrNull()
                 }
-                mutable.update { it.copy(error = null, importing = BookImportProgress(0, 0)) }
+                mutable.update { it.copy(error = null, importing = BookImportProgress(0, 0), passwordPromptPath = null) }
                 val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
                 val result = if (useTier0) {
-                    library.stageBookImportTier0(path, control)
+                    library.stageBookImportTier0(path, control, password)
                 } else {
-                    library.stageBookImport(path, control)
+                    library.stageBookImport(path, control, password)
                 }
                 staged = result
                 releaseOnce()
@@ -900,7 +912,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 throw cancel
             } catch (failure: Exception) {
                 releaseOnce()
-                handleFailedImport(staged?.book?.id, staged?.alreadyExisted == false, failure, initiatingAccountKey)
+                handleFailedImport(staged?.book?.id, staged?.alreadyExisted == false, failure, initiatingAccountKey, path)
             } finally {
                 releaseOnce()
                 if (activeImport === control) {
@@ -1040,9 +1052,11 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         deleteIfNoOcrYet: Boolean,
         failure: Exception,
         initiatingAccountKey: String?,
+        sourcePath: Path? = null,
     ) = withContext(NonCancellable) {
         val message = failure.message.takeIf { failure is IllegalArgumentException && ReadableText.readsAsChinese(it) }
             ?: "暂时无法读取或保存教材，请确认文件完整、未加密，然后重试。"
+        val passwordPath = sourcePath?.toString()?.takeIf { BookImportMessages.asksForPassword(message) }
         val shouldDelete = bookId != null && deleteIfNoOcrYet &&
             runCatching { library.book(bookId).pages.none { it.ocr } }.getOrDefault(false)
         if (shouldDelete) {
@@ -1076,6 +1090,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 focusRecommendation = if (removedOpen) fallbackRec else current.focusRecommendation,
                 lastBookQuestion = if (removedOpen) fallbackLastQ else current.lastBookQuestion,
                 error = message,
+                passwordPromptPath = passwordPath,
             )
         }
     }
@@ -1105,6 +1120,9 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     mutable.update { it.copy(indexing = BookIndexProgress(bookId, page, total)) }
                 }
                 val catalog = library.catalog()
+                val damagedNotice = indexed.damagedPages.takeIf { it.isNotEmpty() }?.let {
+                    BookImportNotice(System.nanoTime(), BookImportMessages.damagedPages(it))
+                }
                 mutable.update { current ->
                     val openBook = current.book
                     val refreshed = if (openBook?.id == indexed.id) indexed.copy(readingPage = openBook.readingPage) else openBook
@@ -1112,6 +1130,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         catalog = catalog,
                         book = refreshed,
                         indexing = if (current.indexing?.bookId == bookId) null else current.indexing,
+                        importNotice = damagedNotice ?: current.importNotice,
                     )
                 }
                 if (indexed.hasPendingOcr) {

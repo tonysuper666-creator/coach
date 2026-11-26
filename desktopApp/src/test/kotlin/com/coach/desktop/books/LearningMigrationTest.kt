@@ -151,7 +151,7 @@ class LearningMigrationTest {
                     .GET().build()
                 return HttpClient.newHttpClient().send(request,HttpResponse.BodyHandlers.ofString())
             }
-            suspend fun sync(dir: Path, token: String) {
+            suspend fun sync(dir: Path, token: String, pauseSnapshot: Boolean = false) {
                 val c = sessions.getOrPut(dir to token) {
                     val response = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build().send(
                         HttpRequest.newBuilder(URI("$base/v1/public/sable")).timeout(java.time.Duration.ofSeconds(10))
@@ -163,7 +163,9 @@ class LearningMigrationTest {
                 val http = CourseHttp(base,c.getValue("deviceId").jsonPrimitive.content,c.getValue("token").jsonPrimitive.content,"library")
                 try {
                     val remote = object : LearningRemote {
-                        override suspend fun changes(epoch: String?, after: Long) = http.learningChanges(epoch,after)
+                        override suspend fun snapshot(epoch: String, token: String?, after: Long) =
+                            if (pauseSnapshot && token != null) null else http.learningSnapshot(epoch,token,after)
+                        override suspend fun changes(epoch: String?, after: Long, stream: String) = http.learningChanges(epoch,after,stream)
                         override suspend fun push(change: JsonObject) = http.pushLearningChange(change)
                     }
                     val profile = assertNotNull(http.learningProfile())
@@ -201,6 +203,50 @@ class LearningMigrationTest {
             assertEquals(1,rows(b,learningTables.single { it.kind=="exam_attempt" }).size)
             println("Restored rows: " + learningTables.joinToString { "${it.kind}=${rows(b,it).size}" })
             sync(a,tokens[0])
+            fun changePage(dir: Path, page: Int) = TextbookLibrary(dir).withCourseDatabase { db ->
+                db.prepareStatement("UPDATE books SET reading_page=? WHERE id=?").use {
+                    it.setInt(1,page); it.setString(2,book); assertEquals(1,it.executeUpdate())
+                }
+            }
+            changePage(a,10)
+            changePage(b,20)
+            BookBookmarkStore(b).add(book,9)
+            sync(a,tokens[0]); sync(b,tokens[0])
+            BookBookmarkStore(a).add(book,11)
+            sync(a,tokens[0]); sync(b,tokens[0])
+            val progress = learningTables.single { it.kind == "book_progress" }
+            assertEquals(rows(a,progress),rows(b,progress))
+            for (dir in listOf(a,b)) assertEquals(setOf(4,9,11),BookBookmarkStore(dir).list(book).map { it.page }.toSet())
+            for (dir in listOf(a,b)) {
+                val library = TextbookLibrary(dir)
+                library.saveReviewRating(library.allReviews(book).single(),com.coach.domain.fsrs.FsrsRating.GOOD,
+                    PracticeAnswer("C",revealed=true,understood=true))
+            }
+            sync(b,tokens[0]); sync(a,tokens[0]); sync(b,tokens[0]); sync(a,tokens[0])
+            for (kind in listOf("card","mistake","mastery","evidence","review_event")) {
+                val table = learningTables.single { it.kind == kind }
+                assertEquals(rows(a,table),rows(b,table),kind)
+            }
+            TextbookLibrary(b).withCourseDatabase { db -> db.createStatement().use { q ->
+                q.executeQuery("SELECT reps,last_review_day,stability,difficulty FROM book_fsrs_cards").use { r ->
+                    assertTrue(r.next())
+                    val day = r.getLong(2)
+                    val expected = (1..2).fold(com.coach.domain.fsrs.Fsrs5.newCard(17)) { state,_ ->
+                        com.coach.domain.fsrs.Fsrs5.review(state,com.coach.domain.fsrs.FsrsRating.GOOD,day)
+                    }
+                    assertEquals(2,r.getInt(1))
+                    assertEquals(expected.stability!!,r.getDouble(3),1e-10)
+                    assertEquals(expected.difficulty!!,r.getDouble(4),1e-10)
+                }
+                q.executeQuery("SELECT COUNT(*) FROM learner_evidence_events WHERE signal_type='POST_QUIZ_T1'").use {
+                    assertTrue(it.next()); assertEquals(2,it.getInt(1))
+                }
+                q.executeQuery("SELECT p_mastery FROM concept_mastery_ledger WHERE has_active_test=1").use {
+                    assertTrue(it.next())
+                    val expected = 1 / (1 + (0.85 / 0.15) * kotlin.math.exp(-2 * 1.15))
+                    assertEquals(expected,it.getDouble(1),1e-10)
+                }
+            } }
             for ((dir,note) in listOf(a to "first offline edit",b to "second offline edit")) {
                 val library = TextbookLibrary(dir)
                 val prior = library.allNotes(book).single()
@@ -212,35 +258,78 @@ class LearningMigrationTest {
 
             BookBookmarkStore(a).remove(book,4)
             sync(a,tokens[0]); sync(b,tokens[0])
-            assertTrue(BookBookmarkStore(b).list(book).isEmpty())
+            assertTrue(BookBookmarkStore(b).list(book).none { it.page == 4 })
             val markId = learningTables.single { it.kind == "bookmark" }.legacyId(buildJsonObject { put("book",book); put("page",4) })
             val tombstone = Json.parseToJsonElement(lookup(a,tokens[0],"bookmark",markId).body()).jsonObject
             assertEquals(JsonNull,tombstone["body"])
             assertEquals(1,tombstone.getValue("round").jsonPrimitive.int)
             assertEquals(404,lookup(y,tokens[1],"bookmark",markId).statusCode())
-            BookBookmarkStore(b).add(book,4,"again")
-            sync(b,tokens[0]); sync(a,tokens[0])
-            assertEquals("again",BookBookmarkStore(a).list(book).single().note)
+            BookBookmarkStore(a).add(book,4,"A again")
+            BookBookmarkStore(b).add(book,4,"B again")
+            sync(b,tokens[0]); sync(a,tokens[0]); sync(b,tokens[0])
+            val restoredMark = BookBookmarkStore(b).list(book).single { it.page == 4 }.note
+            assertTrue(restoredMark in setOf("A again","B again"))
+            assertEquals(restoredMark,BookBookmarkStore(a).list(book).single { it.page == 4 }.note)
             assertEquals(2,Json.parseToJsonElement(lookup(a,tokens[0],"bookmark",markId).body()).jsonObject.getValue("round").jsonPrimitive.int)
 
             // The same natural key is a distinct record under a second authenticated account.
             BookBookmarkStore(y).add(book,4,"account Y")
             sync(y,tokens[1]); sync(a,tokens[0])
             assertEquals("account Y",BookBookmarkStore(y).list(book).single().note)
-            assertEquals("again",BookBookmarkStore(a).list(book).single().note)
+            assertEquals(restoredMark,BookBookmarkStore(a).list(book).single { it.page == 4 }.note)
 
+            val replacement = root.resolve("interrupted-snapshot")
+            prepare(replacement,false)
+            for (page in 100..171) BookBookmarkStore(a).add(book,page)
+            sync(a,tokens[0])
+            val accountDir = root.resolve("books/accounts").resolve("sable-" + com.coach.store.sableFriendName("synthetic-0").substringAfterLast(':'))
+            val backup = accountDir.resolve("learning-backups/latest.sqlite")
+            val oldCopy = Files.copy(backup,root.resolve("old-checkpoint.sqlite"))
+            sync(replacement,tokens[0],pauseSnapshot=true)
+            assertTrue(BookBookmarkStore(replacement).list(book).isEmpty())
+            TextbookLibrary(replacement).withCourseDatabase { db -> db.createStatement().use { q ->
+                q.executeQuery("SELECT COUNT(*) FROM learning_sync_stage").use { r -> assertTrue(r.next()); assertTrue(r.getInt(1)>0) }
+            } }
+            BookBookmarkStore(a).remove(book,100)
+            BookBookmarkStore(a).add(book,175)
+            sync(a,tokens[0])
+            sync(replacement,tokens[0])
+            assertEquals(BookBookmarkStore(a).list(book),BookBookmarkStore(replacement).list(book))
+            // The registry survives losing the per-account DB. A valid but older SQLite file must not roll it back.
+            val newest = Files.copy(backup,root.resolve("new-checkpoint.sqlite"))
+            val live = accountDir.resolve("learning.sqlite")
+            Files.move(live,root.resolve("simulated-disk-loss.sqlite"))
+            Files.copy(oldCopy,backup,java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            assertEquals(503,lookup(a,tokens[0],"bookmark",markId).statusCode())
+            assertFalse(Files.exists(live))
+            Files.copy(newest,backup,java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            assertEquals(200,lookup(a,tokens[0],"bookmark",markId).statusCode())
+            assertTrue(Files.isRegularFile(live))
+            BookBookmarkStore(a).add(book,177)
+            sync(a,tokens[0]); sync(b,tokens[0])
+            assertTrue(BookBookmarkStore(b).list(book).any { it.page == 177 })
+            TextbookLibrary(a).withCourseDatabase { db -> db.createStatement().use { q ->
+                q.executeQuery("SELECT count(DISTINCT value) FROM learning_sync_meta WHERE key IN ('epoch','transport')").use { r ->
+                    assertTrue(r.next()); assertEquals(2,r.getInt(1))
+                }
+            } }
             val cred = sessions.getValue(a to tokens[0])
             val removal = HttpRequest.newBuilder(URI("$base/v1/account"))
                 .header("Authorization","Bearer " + cred.getValue("token").jsonPrimitive.content)
                 .header("X-Coach-Device",cred.getValue("deviceId").jsonPrimitive.content).DELETE().build()
             assertEquals(200,HttpClient.newHttpClient().send(removal,HttpResponse.BodyHandlers.discarding()).statusCode())
             assertEquals(401,lookup(b,tokens[0],"bookmark",markId).statusCode())
+            assertFalse(Files.exists(backup))
             val registeredAgain = root.resolve("new-registration")
             prepare(registeredAgain,false)
             sync(registeredAgain,tokens[0])
             assertEquals(404,lookup(registeredAgain,tokens[0],"bookmark",markId).statusCode())
+            Files.move(live,root.resolve("new-generation.sqlite"))
+            Files.copy(newest,live)
+            assertEquals(503,lookup(registeredAgain,tokens[0],"bookmark",markId).statusCode())
+            Files.move(root.resolve("new-generation.sqlite"),live,java.nio.file.StandardCopyOption.REPLACE_EXISTING)
             assertEquals(200,lookup(y,tokens[1],"bookmark",markId).statusCode())
-            assertEquals("again",BookBookmarkStore(a).list(book).single().note)
+            assertEquals(restoredMark,BookBookmarkStore(a).list(book).single { it.page == 4 }.note)
         } finally {
             server.stop(0,1000); issuer.stop(0); actor.close(); job.cancel(); root.toFile().deleteRecursively()
         }
@@ -280,6 +369,15 @@ class LearningMigrationTest {
                 assertEquals(selected,LearningProfiles(dir).select(session,null,true))
                 assertTrue(Files.isRegularFile(selected.directory.resolve("exams.sqlite")))
                 val newGeneration = LearningProfiles(dir).select(session,x,false,secondEpoch)
+                for (file in listOf("library.sqlite","exams.sqlite")) {
+                    DriverManager.getConnection("jdbc:sqlite:${dir.resolve(file)}").use { db -> db.createStatement().use { q ->
+                        q.executeQuery("SELECT count(*) FROM sqlite_master WHERE name GLOB 'learning_sync_*'").use { r ->
+                            assertTrue(r.next()); assertEquals(0,r.getInt(1))
+                        }
+                        q.executeQuery("SELECT singleton FROM local_learning_retired").use { assertTrue(it.next()) }
+                    } }
+                }
+                assertTrue(BookBookmarkStore(dir).list(book).any { it.page == 4 })
                 assertNotEquals(selected.directory,newGeneration.directory)
                 assertFalse(Files.exists(newGeneration.directory.resolve("exams.sqlite")))
                 assertNull(LearningProfiles(dir).select(session,x,false,firstEpoch).scope)

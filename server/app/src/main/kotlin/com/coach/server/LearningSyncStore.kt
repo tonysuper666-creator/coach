@@ -9,15 +9,19 @@ import java.util.UUID
 import kotlinx.serialization.json.*
 
 /** All storage paths are obtained from the authenticated Sable scope. Cursors belong to one database. */
-internal class LearningSyncStore(private val accounts: Path) {
+internal class LearningSyncStore(private val accounts: Path, private val backup: LearningBackup? = null,
+                                 private val now: () -> Long = System::currentTimeMillis) {
     private val tables = learningTables.associateBy { it.kind }
     private fun <T> transaction(scope: UnifiedBookScope, body: (Connection, String) -> T): T {
         require(scope.isSableAccount)
         val directory = privateFiles.directory(accounts.resolve(scope.scopeKey))
-        val file = privateFiles.file(directory.resolve("learning.sqlite"))
+        val file = directory.resolve("learning.sqlite")
+        backup?.recoverMissing(file,scope.scopeKey)
+        privateFiles.file(file)
         return DriverManager.getConnection("jdbc:sqlite:$file").use { db ->
             db.createStatement().use { sql ->
                 sql.execute("PRAGMA busy_timeout=5000")
+                backup?.attach(db)
                 sql.execute("BEGIN IMMEDIATE")
                 try {
                     sql.execute("CREATE TABLE IF NOT EXISTS sync_meta(epoch TEXT NOT NULL)")
@@ -28,12 +32,22 @@ internal class LearningSyncStore(private val accounts: Path) {
                         kind TEXT NOT NULL,id TEXT NOT NULL,body TEXT,round INTEGER NOT NULL,writer TEXT NOT NULL)""")
                     sql.execute("""CREATE TABLE IF NOT EXISTS sync_records(kind TEXT NOT NULL,id TEXT NOT NULL,
                         seq INTEGER NOT NULL,body TEXT,round INTEGER NOT NULL,writer TEXT NOT NULL,PRIMARY KEY(kind,id))""")
+                    sql.execute("CREATE UNIQUE INDEX IF NOT EXISTS sync_records_seq ON sync_records(seq)")
+                    LearningFactReplay.install(db)
+                    LearningSnapshots.install(db)
+                    LearningRetention.install(db,now())
+                    sql.execute("""CREATE TABLE IF NOT EXISTS sync_field_writers(kind TEXT,id TEXT,round INTEGER,
+                        field TEXT,writer TEXT NOT NULL,PRIMARY KEY(kind,id,round,field))""")
                     val epoch = sql.executeQuery("SELECT epoch FROM sync_meta").use { rows ->
                         if (rows.next()) rows.getString(1) else null
                     } ?: UUID.randomUUID().toString().also { epoch ->
                         db.prepareStatement("INSERT INTO sync_meta VALUES(?)").use { it.setString(1, epoch); it.executeUpdate() }
                     }
+                    sql.execute("CREATE TABLE IF NOT EXISTS sync_transport(singleton INTEGER PRIMARY KEY,epoch TEXT NOT NULL)")
+                    sql.execute("INSERT OR IGNORE INTO sync_transport SELECT 1,epoch FROM sync_meta")
+                    backup?.verify(db,scope.scopeKey)
                     val result = body(db, epoch)
+                    backup?.advance(db,scope.scopeKey)
                     sql.execute("COMMIT")
                     result
                 } catch (failure: Throwable) {
@@ -44,12 +58,34 @@ internal class LearningSyncStore(private val accounts: Path) {
         }
     }
 
-    fun profile(scope: UnifiedBookScope) = transaction(scope) { _, epoch ->
-        buildJsonObject { put("scope",scope.scopeKey); put("epoch",epoch) }
+    private fun transport(db: Connection) = db.createStatement().use { q ->
+        q.executeQuery("SELECT epoch FROM sync_transport WHERE singleton=1").use { r -> check(r.next()); r.getString(1) }
     }
 
-    fun changes(scope: UnifiedBookScope, expectedEpoch: String?, after: Long): JsonObject = transaction(scope) { db, epoch ->
+    fun profile(scope: UnifiedBookScope) = transaction(scope) { db, epoch ->
+        buildJsonObject { put("scope",scope.scopeKey); put("epoch",epoch); put("transportEpoch",transport(db)) }
+    }
+
+    fun snapshot(scope: UnifiedBookScope, expected: String, token: String?, after: Long) = transaction(scope) { db, epoch ->
+        if (expected != epoch) throw LearningConflict()
+        JsonObject(LearningSnapshots.page(db,scope.scopeKey,epoch,token,after,now()) + ("transportEpoch" to JsonPrimitive(transport(db))))
+    }
+
+    fun changes(scope: UnifiedBookScope, expectedEpoch: String?, after: Long, device: String, stream: String): JsonObject = transaction(scope) { db, epoch ->
         if ((after != 0L || expectedEpoch != null) && expectedEpoch != epoch) throw LearningConflict()
+        require(UUID.fromString(stream).toString() == stream)
+        val high = db.createStatement().use { it.executeQuery("SELECT coalesce(max(seq),0) FROM sync_records").use { r -> r.next(); r.getLong(1) } }
+        require(after in 0..high)
+        val floor = LearningRetention.observe(db,device,stream,after,now())
+        val received = db.prepareStatement("SELECT coalesce(max(counter),0) FROM sync_receipts WHERE stream=?").use { q ->
+            q.setString(1,stream)
+            q.executeQuery().use { r -> r.next(); r.getLong(1) }
+        }
+        if (after < floor) return@transaction buildJsonObject {
+            put("scope",scope.scopeKey); put("epoch",epoch); put("backedThrough",received)
+            put("transportEpoch",transport(db))
+            put("changes",JsonArray(emptyList())); put("snapshotRequired",true)
+        }
         val changes = buildJsonArray {
             db.prepareStatement("SELECT seq,kind,id,body,round,writer FROM sync_changes WHERE seq>? ORDER BY seq LIMIT 64").use { q ->
                 q.setLong(1, after)
@@ -70,8 +106,8 @@ internal class LearningSyncStore(private val accounts: Path) {
                 }
             }
         }
-        buildJsonObject { put("scope",scope.scopeKey); put("epoch",epoch); put("changes",changes) }
-    }
+        buildJsonObject { put("scope",scope.scopeKey); put("epoch",epoch); put("changes",changes); put("backedThrough",received); put("transportEpoch",transport(db)) }
+    }.also { backup?.publish(accounts.resolve(scope.scopeKey).resolve("learning.sqlite"),scope.scopeKey) }
 
     fun lookup(scope: UnifiedBookScope, kind: String, id: String) = transaction(scope) { db, epoch ->
         require(kind in tables && UUID.fromString(id).toString() == id)
@@ -93,6 +129,7 @@ internal class LearningSyncStore(private val accounts: Path) {
 
     fun push(scope: UnifiedBookScope, device: String, request: JsonObject) = transaction(scope) { db, epoch ->
         if (request["epoch"]?.jsonPrimitive?.content != epoch) throw LearningConflict()
+        if ((request["transportEpoch"]?.jsonPrimitive?.content ?: epoch) != transport(db)) throw LearningConflict()
         require(request.getValue("protocol").jsonPrimitive.int == 1)
         val clock = request.getValue("clock").jsonPrimitive.long.also { require(it in 1 until Long.MAX_VALUE) }
         val stream = UUID.fromString(request.getValue("stream").jsonPrimitive.content).toString()
@@ -113,7 +150,8 @@ internal class LearningSyncStore(private val accounts: Path) {
         }
         val before = payload("before")
         val after = payload("after")
-        val digest = sha256(request.toString().toByteArray(Charsets.UTF_8))
+        // Retransmission after exact-water recovery keeps the original operation identity and digest.
+        val digest = sha256(JsonObject(request - "transportEpoch").toString().toByteArray(Charsets.UTF_8))
         val receipt = db.prepareStatement("SELECT digest FROM sync_receipts WHERE stream=? AND counter=?").use { q ->
             q.setString(1,stream); q.setLong(2,counter)
             q.executeQuery().use { if (it.next()) it.getString(1) else null }
@@ -141,9 +179,22 @@ internal class LearningSyncStore(private val accounts: Path) {
                 record(db,kind,table.legacyId(copy),copy,1,author)
             }
             when {
+                kind in setOf("card","mastery") && request["fact"] != null && after != null &&
+                    (current == null || recreating || (round == currentRound && stored != null)) -> {
+                    val display = if (stored != null && current.third > writer) stored else after
+                    val replayed = LearningFactReplay.apply(db,kind,id,round,writer,stored ?: before,display,
+                        after.getValue("updated_at").jsonPrimitive.long,request.getValue("fact").jsonObject)
+                    record(db,kind,id,replayed,round,maxOf(writer,current?.third.orEmpty()))
+                }
                 recreating || current == null -> record(db,kind,id,after,round,writer)
                 round < currentRound || stored == null -> {
                     if (kind == "note" && after != null) recoverNote(after,writer)
+                }
+                kind != "note" && after != null -> {
+                    val merged = mergeFields(db,kind,id,round,stored,before,after,current.third,writer)
+                    if (stored != after || writer > current.third) {
+                        record(db,kind,id,merged,round,maxOf(current.third,writer))
+                    }
                 }
                 stored == after -> Unit
                 stored == before -> record(db,kind,id,after,round,writer)
@@ -165,8 +216,6 @@ internal class LearningSyncStore(private val accounts: Path) {
                     })
                     record(db,kind,id,merged,round,maxOf(writer,current.third))
                 }
-                kind == "read_spot" -> if (writer > current.third) record(db,kind,id,after,round,writer)
-                else -> throw LearningConflict()
             }
             db.prepareStatement("INSERT INTO sync_receipts VALUES(?,?,?,?)").use { q ->
                 q.setString(1,device); q.setString(2,stream); q.setLong(3,counter); q.setString(4,digest); q.executeUpdate()
@@ -175,13 +224,44 @@ internal class LearningSyncStore(private val accounts: Path) {
         buildJsonObject { put("scope",scope.scopeKey); put("epoch",epoch); put("seq",counter) }
     }
 
+    private fun mergeFields(db: Connection, kind: String, id: String, round: Long, stored: JsonObject,
+                            before: JsonObject?, after: JsonObject, previousWriter: String, writer: String): JsonObject {
+        // Keep coupled coordinates, frozen papers and derived states internally consistent.
+        val groups = when (kind) {
+            "card","mastery","read_spot","exam_paper","exam_attempt","ask_turn","review_event","evidence" -> listOf(after.keys)
+            else -> after.keys.map { setOf(it) }
+        }
+        val stamps = db.prepareStatement("SELECT field,writer FROM sync_field_writers WHERE kind=? AND id=? AND round=?").use { q ->
+            q.setString(1,kind); q.setString(2,id); q.setLong(3,round)
+            q.executeQuery().use { r -> buildMap { while (r.next()) put(r.getString(1),r.getString(2)) } }
+        }
+        val merged = stored.toMutableMap()
+        db.prepareStatement("INSERT OR REPLACE INTO sync_field_writers VALUES(?,?,?,?,?)").use { q ->
+            for (group in groups) {
+                val field = if (group.size == 1) group.single() else "@row"
+                val previous = stamps[field] ?: previousWriter
+                val changed = before == null || group.any { before[it] != after[it] }
+                val wins = changed && writer > previous
+                if (wins) group.forEach { merged[it] = after.getValue(it) }
+                if (wins || field !in stamps) {
+                    q.setString(1,kind); q.setString(2,id); q.setLong(3,round); q.setString(4,field)
+                    q.setString(5,if (wins) writer else previous)
+                    q.addBatch()
+                }
+            }
+            q.executeBatch()
+        }
+        return JsonObject(merged)
+    }
+
     private fun record(db: Connection, kind: String, id: String, row: JsonObject?, round: Long, writer: String) {
-        db.prepareStatement("INSERT INTO sync_changes(kind,id,body,round,writer) VALUES(?,?,?,?,?)").use { q ->
+        db.prepareStatement("INSERT INTO sync_changes(kind,id,body,round,writer,committed_at) VALUES(?,?,?,?,?,?)").use { q ->
             q.setString(1,kind)
             q.setString(2,id)
             q.setString(3,row?.toString())
             q.setLong(4,round)
             q.setString(5,writer)
+            q.setLong(6,now())
             q.executeUpdate()
         }
         db.prepareStatement("""INSERT INTO sync_records(kind,id,seq,body,round,writer) VALUES(?,?,last_insert_rowid(),?,?,?)

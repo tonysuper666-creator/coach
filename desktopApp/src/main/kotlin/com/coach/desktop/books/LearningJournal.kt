@@ -31,6 +31,10 @@ internal object LearningJournal {
         db.createStatement().use { sql ->
             sql.execute("BEGIN IMMEDIATE")
             try {
+                if (BookSchemaMigration.tableExists(db,"local_learning_retired")) {
+                    sql.execute("COMMIT")
+                    return
+                }
                 sql.execute("""CREATE TABLE IF NOT EXISTS learning_sync_sources(
                     kind TEXT PRIMARY KEY, stream_id TEXT NOT NULL)""")
                 sql.execute("""CREATE TABLE IF NOT EXISTS learning_sync_events(
@@ -41,6 +45,14 @@ internal object LearningJournal {
                     before_json TEXT, after_json TEXT, baseline INTEGER NOT NULL DEFAULT 0,
                     clock INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL DEFAULT (unixepoch('subsec')*1000))""")
                 sql.execute("CREATE TABLE IF NOT EXISTS learning_sync_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                BookSchemaMigration.ensureColumn(db,"learning_sync_outbox","fact","TEXT")
+                BookSchemaMigration.ensureColumn(db,"learning_sync_outbox","acknowledged","INTEGER NOT NULL DEFAULT 0")
+                sql.execute("CREATE TABLE IF NOT EXISTS learning_sync_fact_context(kind TEXT PRIMARY KEY, fact TEXT NOT NULL)")
+                sql.execute("""CREATE TABLE IF NOT EXISTS learning_sync_stage(seq INTEGER PRIMARY KEY,item TEXT NOT NULL)""")
+                sql.execute("""CREATE TRIGGER IF NOT EXISTS learning_sync_capture_fact AFTER INSERT ON learning_sync_outbox
+                    WHEN EXISTS(SELECT 1 FROM learning_sync_fact_context WHERE kind=NEW.kind) BEGIN
+                    UPDATE learning_sync_outbox SET fact=(SELECT fact FROM learning_sync_fact_context WHERE kind=NEW.kind)
+                    WHERE seq=NEW.seq; END""")
                 sql.execute("""CREATE TRIGGER IF NOT EXISTS learning_sync_tick AFTER INSERT ON learning_sync_outbox BEGIN
                     INSERT INTO learning_sync_meta VALUES('clock','1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1;
                     UPDATE learning_sync_outbox SET clock=(SELECT value FROM learning_sync_meta WHERE key='clock') WHERE seq=NEW.seq;
@@ -63,6 +75,14 @@ internal object LearningJournal {
                     if (!installed) {
                         installSource(db, table)
                         migrated = true
+                    }
+                    if (table.kind == "mastery") {
+                        fun payload(prefix: String) = "json_object(" + table.columns.joinToString(",") { "'$it',$prefix.$it" } + ")"
+                        val before = payload("OLD")
+                        val after = payload("NEW")
+                        sql.execute("""CREATE TRIGGER IF NOT EXISTS learning_sync_equal_mastery AFTER UPDATE ON ${table.name}
+                            WHEN EXISTS(SELECT 1 FROM learning_sync_fact_context WHERE kind='mastery') AND $before=$after BEGIN
+                            INSERT INTO learning_sync_outbox(kind,before_json,after_json) VALUES('mastery',$before,$after); END""")
                     }
                 }
                 if (migrated) {

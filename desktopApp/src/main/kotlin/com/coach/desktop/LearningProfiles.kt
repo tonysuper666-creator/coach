@@ -63,6 +63,16 @@ internal class LearningProfiles(private val legacy: Path) {
                                 return LearningProfile(profiles.resolve("unverified-$session"),null)
                             }
                             if (previous != null) {
+                                val oldDirectory = db.prepareStatement("""SELECT p.original,g.rotated,d.session FROM profiles p
+                                    JOIN generations g USING(scope) LEFT JOIN profile_directories d USING(scope) WHERE p.scope=?""").use { q ->
+                                    q.setString(1,verified)
+                                    q.executeQuery().use { r -> if (!r.next()) null else when {
+                                        r.getInt(1) != 0 -> legacy
+                                        r.getInt(2) != 0 -> profiles.resolve("$verified-$previous")
+                                        else -> profiles.resolve(r.getString(3) ?: verified)
+                                    } }
+                                }
+                                oldDirectory?.let { retireLearningDirectory(db,it,verified,previous) }
                                 db.prepareStatement("INSERT INTO retired_epochs VALUES(?,?)").use {
                                     it.setString(1,verified); it.setString(2,previous); it.executeUpdate()
                                 }

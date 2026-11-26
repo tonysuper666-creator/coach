@@ -330,7 +330,8 @@ private fun LearningSyncEffect(identity: DesktopIdentity, profile: LearningProfi
             val credentials = identity.credentials
             val http = CourseHttp(identity.serverUrl,credentials.deviceId,credentials.token,"library")
             val remote = object : LearningRemote {
-                override suspend fun changes(epoch: String?, after: Long) = http.learningChanges(epoch,after)
+                override suspend fun snapshot(epoch: String, token: String?, after: Long) = http.learningSnapshot(epoch,token,after)
+                override suspend fun changes(epoch: String?, after: Long, stream: String) = http.learningChanges(epoch,after,stream)
                 override suspend fun push(change: JsonObject) = http.pushLearningChange(change)
             }
             try {

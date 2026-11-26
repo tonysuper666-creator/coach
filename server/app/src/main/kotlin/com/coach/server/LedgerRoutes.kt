@@ -82,6 +82,15 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             }
             call.attributes.put(observedDevice, identity.first)
             if (friend != null) call.attributes.put(observedFriend, friend)
+            val path = call.request.path()
+            if (unifiedBooks?.enabled == true && friend != null && com.coach.store.isSableFriend(friend) &&
+                (path.startsWith("/v1/library/") || path.startsWith("/api/books/") || path == "/v1/public/status")) {
+                try {
+                    unifiedBooks.withPrivateRequest(UnifiedBookScope.fromSableFriend(friend),{
+                        actor.execute { authorize(identity.first,checkNotNull(token)) && friendName(identity.first) == friend }
+                    }) { proceed() }
+                } catch (e: UnifiedBookError) { call.respond(e.status); finish() }
+            }
         }
     }
 

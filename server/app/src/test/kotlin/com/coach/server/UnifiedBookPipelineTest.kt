@@ -844,6 +844,8 @@ class UnifiedBookPipelineTest {
             val dave = h.exchangeSable(TOK_GAMMA_1)
             val daveDevice = dave.str("deviceId")
             val daveFriend = checkNotNull(h.actor.execute { friendName(daveDevice) })
+            val otherDevice = h.exchangeSable(TOK_ALPHA_1).str("deviceId")
+            val mixedBackup = h.actor.execute { backup() }.resolve("coach.sqlite")
             val daveScope = UnifiedBookScope.fromCall(daveDevice, daveFriend)
             assertEquals(200, h.upload(dave, "# Chapter 1\nDave private book.".toByteArray(), format = "md", title = "Dave").statusCode())
 
@@ -874,6 +876,15 @@ class UnifiedBookPipelineTest {
             h.unified.reconcilePendingDeletes()
             assertEquals("DELETED", h.unified.accountDeletionStateForTest(daveScope))
             assertFalse(Files.exists(privateRoot))
+            assertFalse(h.actor.execute { pairedDevices().any { it.id == daveDevice } })
+            java.sql.DriverManager.getConnection("jdbc:sqlite:$mixedBackup").use { saved ->
+                saved.prepareStatement("SELECT count(*) FROM devices JOIN sable_grants USING(device_id) WHERE device_id=?").use { q ->
+                    for ((id,expected) in listOf(daveDevice to 0,otherDevice to 1)) {
+                        q.setString(1,id)
+                        q.executeQuery().use { r -> assertTrue(r.next()); assertEquals(expected,r.getInt(1)) }
+                    }
+                }
+            }
             assertEquals(401, h.request("/v1/books", credential = dave).statusCode())
             val registeredAgain = h.exchangeSable(TOK_GAMMA_1)
             val newBook = h.upload(registeredAgain, "New synthetic edition.".toByteArray(), format="md", title="New edition")

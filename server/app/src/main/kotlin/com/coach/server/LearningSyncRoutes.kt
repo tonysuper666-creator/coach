@@ -13,7 +13,7 @@ internal val learningSyncActive = io.ktor.util.AttributeKey<Boolean>("learning-s
 
 internal fun Application.learningSyncRoutes(actor: LedgerActor, books: UnifiedBookPipeline) {
     attributes.put(learningSyncActive,true)
-    val store = LearningSyncStore(books.accountsDirPath)
+    val store = LearningSyncStore(books.accountsDirPath,books.learningBackup())
     suspend fun ApplicationCall.withAccount(block: (UnifiedBookScope, String) -> JsonObject) {
         val device = attributes[observedDevice]
         val friend = attributes.getOrNull(observedFriend)
@@ -30,10 +30,14 @@ internal fun Application.learningSyncRoutes(actor: LedgerActor, books: UnifiedBo
             response.header(HttpHeaders.CacheControl,"no-store")
             if (result == null) respond(HttpStatusCode.Unauthorized)
             else respondText(result.toString(),ContentType.Application.Json)
+        } catch (_: LearningRecoveryRequired) {
+            respond(HttpStatusCode.ServiceUnavailable)
         } catch (_: LearningConflict) {
             respond(HttpStatusCode.Conflict)
         } catch (_: LearningRecordMissing) {
             respond(HttpStatusCode.NotFound)
+        } catch (_: LearningSnapshotExpired) {
+            respond(HttpStatusCode.Gone)
         } catch (e: UnifiedBookError) {
             respond(e.status)
         } catch (_: IllegalArgumentException) {
@@ -43,6 +47,11 @@ internal fun Application.learningSyncRoutes(actor: LedgerActor, books: UnifiedBo
         }
     }
     routing {
+        get("/learning-sync/snapshot") {
+            val params = call.request.queryParameters
+            call.withAccount { scope, _ -> store.snapshot(scope,requireNotNull(params["epoch"]),params["snapshotId"],
+                requireNotNull(params["after"]?.toLongOrNull())) }
+        }
         get("/learning-sync/profile") {
             call.withAccount { scope, _ -> store.profile(scope) }
         }
@@ -53,7 +62,7 @@ internal fun Application.learningSyncRoutes(actor: LedgerActor, books: UnifiedBo
         get("/learning-sync/changes") {
             val cursor = call.request.queryParameters["after"]?.toLongOrNull() ?: 0
             val epoch = call.request.queryParameters["epoch"]
-            call.withAccount { scope, _ -> store.changes(scope, epoch, cursor.also { require(it >= 0) }) }
+            call.withAccount { scope, device -> store.changes(scope, epoch, cursor,device,requireNotNull(call.request.queryParameters["stream"])) }
         }
         post("/learning-sync/push") {
             val channel = call.receiveChannel()

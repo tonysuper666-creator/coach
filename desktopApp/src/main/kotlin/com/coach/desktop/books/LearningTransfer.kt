@@ -11,7 +11,8 @@ import java.sql.PreparedStatement
 import java.util.UUID
 
 internal interface LearningRemote {
-    suspend fun changes(epoch: String?, after: Long): JsonObject?
+    suspend fun snapshot(epoch: String, token: String?, after: Long): JsonObject?
+    suspend fun changes(epoch: String?, after: Long, stream: String): JsonObject?
     suspend fun push(change: JsonObject): JsonObject?
 }
 
@@ -61,7 +62,7 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
 
     private fun next(db: Connection, epoch: String): JsonObject? = db.createStatement().use { sql ->
         sql.executeQuery("""SELECT o.*,s.stream_id FROM learning_sync_outbox o JOIN learning_sync_sources s USING(kind)
-            ORDER BY seq LIMIT 1""").use { r ->
+            WHERE acknowledged=0 ORDER BY seq LIMIT 1""").use { r ->
             if (!r.next()) return null
             val table = sources.getValue(r.getString("kind"))
             val old = r.getString("before_json")?.let { Json.parseToJsonElement(it).jsonObject }
@@ -78,6 +79,7 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
                 put("epoch",epoch); put("seq",r.getLong("seq"))
                 put("clock",r.getLong("clock")); put("time",r.getLong("created_at")); put("protocol",1)
                 put("before",wire(old)); put("after",after)
+                r.getString("fact")?.let { put("fact",Json.parseToJsonElement(it)) }
                 put("round",if (deleted && wire(old) == JsonNull && after != JsonNull) previousRound + 1 else previousRound)
             }
         }
@@ -90,27 +92,38 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
             val owner = meta(db,"owner")
             if (owner != null && owner != scope) return@write null
             save(db,"owner",scope)
-            meta(db,"epoch") to (meta(db,"cursor")?.toLong() ?: 0)
+            val stream = db.createStatement().use { it.executeQuery("SELECT stream_id FROM learning_sync_sources LIMIT 1").use { rows ->
+                check(rows.next())
+                rows.getString(1)
+            } }
+            Triple(meta(db,"epoch"),meta(db,"cursor")?.toLong() ?: 0,stream)
         } ?: return
         if (profileEpoch != null && state.first != null && profileEpoch != state.first) return
-        val first = remote.changes(state.first ?: profileEpoch,state.second) ?: return
+        val first = remote.changes(state.first ?: profileEpoch,state.second,state.third) ?: return
         if (!current() || first["scope"]?.jsonPrimitive?.content != scope) return
         val epoch = first.getValue("epoch").jsonPrimitive.content
+        val transport = first.getValue("transportEpoch").jsonPrimitive.content
         if ((state.first != null && state.first != epoch) || (profileEpoch != null && profileEpoch != epoch)) return
         val bound = write { db ->
             val existing = meta(db,"epoch")
             if (existing != null && existing != epoch) return@write false
+            if ((meta(db,"transport") ?: epoch) != transport) {
+                clearStage(db)
+                save(db,"restore_required","1")
+            }
+            save(db,"transport",transport)
             save(db,"epoch",epoch)
             true
         }
         if (!bound) return
+        var uploaded = false
         while (current()) {
             val operation = write { db -> next(db,epoch) } ?: break
-            val ack = remote.push(operation) ?: return
+            val ack = remote.push(JsonObject(operation + ("transportEpoch" to JsonPrimitive(transport)))) ?: return
             if (!current() || ack["scope"]?.jsonPrimitive?.content != scope || ack["epoch"]?.jsonPrimitive?.content != epoch ||
                 ack["seq"] != operation["seq"]) return
             write { db ->
-                db.prepareStatement("DELETE FROM learning_sync_outbox WHERE seq=?").use { q ->
+                db.prepareStatement("UPDATE learning_sync_outbox SET acknowledged=1 WHERE seq=? AND acknowledged=0").use { q ->
                     q.setLong(1,operation.getValue("seq").jsonPrimitive.long)
                     if (q.executeUpdate() == 1) {
                         setVersion(db,operation.getValue("kind").jsonPrimitive.content,operation.getValue("id").jsonPrimitive.content,
@@ -118,12 +131,28 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
                     }
                 }
                 save(db,"epoch",epoch)
+                if (meta(db,"stage_token") != null) clearStage(db)
             }
+            uploaded = true
         }
         var cursor = state.second
-        var page = first
+        val checkpoint = if (uploaded) remote.changes(epoch,cursor,state.third) ?: return else first
+        if (!current() || checkpoint["scope"]?.jsonPrimitive?.content != scope || checkpoint["epoch"]?.jsonPrimitive?.content != epoch ||
+            checkpoint["transportEpoch"]?.jsonPrimitive?.content != transport) return
+        val backed = checkpoint.getValue("backedThrough").jsonPrimitive.long
+        write { db ->
+            db.prepareStatement("DELETE FROM learning_sync_outbox WHERE acknowledged=1 AND seq<=?").use { q ->
+                q.setLong(1,backed); q.executeUpdate()
+            }
+        }
+        val needsSnapshot = checkpoint["snapshotRequired"]?.jsonPrimitive?.booleanOrNull == true ||
+            write { meta(it,"restore_required") } == "1" ||
+            (cursor == 0L && write { meta(it,"snapshot_done") } == null)
+        if (needsSnapshot) cursor = restore(scope,epoch,remote,cursor,current) ?: return
+        var page = if (needsSnapshot) remote.changes(epoch,cursor,state.third) ?: return else checkpoint
         while (current()) {
-            if (page["scope"]?.jsonPrimitive?.content != scope || page["epoch"]?.jsonPrimitive?.content != epoch) return
+            if (page["scope"]?.jsonPrimitive?.content != scope || page["epoch"]?.jsonPrimitive?.content != epoch ||
+                page["transportEpoch"]?.jsonPrimitive?.content != transport || page["snapshotRequired"]?.jsonPrimitive?.booleanOrNull == true) return
             val changes = page.getValue("changes").jsonArray
             val applied = write { db ->
                 if (!current() || (meta(db,"cursor")?.toLong() ?: 0L) != cursor) return@write false
@@ -153,8 +182,83 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
                 true
             }
             if (!applied || changes.isEmpty()) return
-            page = remote.changes(epoch,cursor) ?: return
+            page = remote.changes(epoch,cursor,state.third) ?: return
         }
+    }
+
+    private fun clearStage(db: Connection) = db.createStatement().use { q ->
+        q.executeUpdate("DELETE FROM learning_sync_stage")
+        q.executeUpdate("DELETE FROM learning_sync_meta WHERE key IN ('stage_token','stage_after','stage_count','stage_hash')")
+    }
+
+    /** Stage pages durably. Publish the cursor and business rows only after the entire manifest matches. */
+    private suspend fun restore(scope: String, epoch: String, remote: LearningRemote, start: Long, current: () -> Boolean): Long? {
+        while (current()) {
+            val (token,after) = write { meta(it,"stage_token") to (meta(it,"stage_after")?.toLong() ?: 0L) }
+            val page = remote.snapshot(epoch,token,after) ?: return null
+            if (!current()) return null
+            if (page["expired"]?.jsonPrimitive?.booleanOrNull == true) {
+                write { if (meta(it,"stage_token") == token) clearStage(it) }
+                return null
+            }
+            require(page["scope"]?.jsonPrimitive?.content == scope && page["epoch"]?.jsonPrimitive?.content == epoch)
+            val lease = page.getValue("token").jsonPrimitive.content
+            require(token == null || token == lease)
+            val water = page.getValue("water").jsonPrimitive.long
+            val done = page.getValue("done").jsonPrimitive.boolean
+            val applied = write { db ->
+                if (meta(db,"transport") != page["transportEpoch"]?.jsonPrimitive?.content) return@write false
+                if (!current() || (meta(db,"cursor")?.toLong() ?: 0L) != start || meta(db,"stage_token") != token ||
+                    (meta(db,"stage_after")?.toLong() ?: 0L) != after) return@write false
+                if (db.createStatement().use { it.executeQuery("SELECT 1 FROM learning_sync_outbox LIMIT 1").use { r -> r.next() } }) {
+                    clearStage(db)
+                    return@write false
+                }
+                var count = meta(db,"stage_count")?.toLong() ?: 0L
+                var hash = meta(db,"stage_hash").orEmpty()
+                var last = after
+                for (item in page.getValue("items").jsonArray) {
+                    val seq = item.jsonObject.getValue("seq").jsonPrimitive.long
+                    require(seq > last && seq <= water)
+                    last = seq
+                    val raw = item.toString()
+                    hash = com.coach.protocol.learning.snapshotDigest(hash,raw)
+                    count++
+                    if (item.jsonObject.getValue("kind").jsonPrimitive.content in sources) {
+                        db.prepareStatement("INSERT INTO learning_sync_stage VALUES(?,?)").use { q ->
+                            q.setLong(1,seq); q.setString(2,raw); q.executeUpdate()
+                        }
+                    }
+                }
+                require(last == page.getValue("next").jsonPrimitive.long && (done || last > after))
+                if (done) {
+                    if (count != page.getValue("count").jsonPrimitive.long || hash != page.getValue("digest").jsonPrimitive.content) {
+                        clearStage(db)
+                        return@write false
+                    }
+                    db.createStatement().use { q ->
+                        q.executeUpdate("""INSERT OR REPLACE INTO learning_sync_inbox
+                            SELECT json_extract(item,'$.kind'),json_extract(item,'$.id'),item FROM learning_sync_stage ORDER BY seq""")
+                        val observed = q.executeQuery("SELECT coalesce(max(json_extract(item,'$.clock')),0) FROM learning_sync_stage").use { r -> r.next(); r.getLong(1) }
+                        save(db,"clock",maxOf(observed,meta(db,"clock")?.toLong() ?: 0).toString())
+                        save(db,"applying","1")
+                        drainInbox(db)
+                        q.executeUpdate("DELETE FROM learning_sync_meta WHERE key='applying'")
+                    }
+                    save(db,"cursor",water.toString())
+                    save(db,"snapshot_done","1")
+                    save(db,"restore_required","0")
+                    clearStage(db)
+                } else {
+                    save(db,"stage_token",lease); save(db,"stage_after",last.toString())
+                    save(db,"stage_count",count.toString()); save(db,"stage_hash",hash)
+                }
+                true
+            }
+            if (!applied) return null
+            if (done) return water
+        }
+        return null
     }
 
     /** A course material or concept may arrive before its collection or the local book original. */

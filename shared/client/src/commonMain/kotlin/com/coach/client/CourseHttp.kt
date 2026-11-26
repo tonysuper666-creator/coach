@@ -246,11 +246,22 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         return if (reply.status.isSuccess()) Json.parseToJsonElement(reply.bodyAsText()).jsonObject else null
     }
 
-    suspend fun learningChanges(epoch: String?, after: Long): JsonObject? {
+    suspend fun learningChanges(epoch: String?, after: Long, stream: String): JsonObject? {
         val reply = http.get("$base/learning-sync/changes") {
+            parameter("stream",stream)
             parameter("after", after)
             epoch?.let { parameter("epoch", it) }
         }
+        return if (reply.status.isSuccess()) Json.parseToJsonElement(reply.bodyAsText()).jsonObject else null
+    }
+
+    suspend fun learningSnapshot(epoch: String, token: String?, after: Long): JsonObject? {
+        val reply = http.get("$base/learning-sync/snapshot") {
+            parameter("epoch",epoch)
+            parameter("after",after)
+            token?.let { parameter("snapshotId",it) }
+        }
+        if (reply.status.value == 410) return buildJsonObject { put("expired",true) }
         return if (reply.status.isSuccess()) Json.parseToJsonElement(reply.bodyAsText()).jsonObject else null
     }
 

@@ -26,7 +26,7 @@ internal fun friendPath(call: ApplicationCall): Boolean {
     val method = call.request.httpMethod
     val path = call.request.path()
     if (path.contains("..") || path.contains('%')) return false
-    if (path in setOf("/learning-sync/profile", "/learning-sync/changes", "/learning-sync/record", "/learning-sync/push")) {
+    if (path in setOf("/learning-sync/profile", "/learning-sync/changes", "/learning-sync/record", "/learning-sync/push", "/learning-sync/snapshot")) {
         return call.application.attributes.getOrNull(learningSyncActive) == true &&
             (if (path.endsWith("/push")) method == HttpMethod.Post else method == HttpMethod.Get)
     }
@@ -64,6 +64,25 @@ class FriendAccess(private val directory: Path,
     internal fun imports(name: String) = stores.computeIfAbsent(friendId(name)) { ImportedBookSources(directory.resolve(it).resolve("imports")) }
     @Synchronized internal fun deleteAccountData(name: String) {
         val id = friendId(name)
+        fun hasOverride(file: Path): Boolean {
+            if (Files.notExists(file)) return false
+            val entries = LedgerJson.parseToJsonElement(Files.readString(file)).jsonObject["friends"] ?: return false
+            return id in entries.jsonObject
+        }
+        if (hasOverride(state.resolve("api-credit-ledger.json")) || hasOverride(config)) {
+            val serviceRoot = System.getenv("COACH_SERVICE_ROOT") ?: throw java.io.IOException("missing Bridge installation")
+            val python = System.getenv("COACH_PYTHON") ?: throw java.io.IOException("missing Bridge interpreter")
+            val script = Path.of(serviceRoot).resolve("tools/bridge/erase_friend_usage.py")
+            val process = ProcessBuilder(python,script.toString(),state.toAbsolutePath().toString(),config.toAbsolutePath().toString(),id)
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD).start()
+            try {
+                if (!process.waitFor(30,java.util.concurrent.TimeUnit.SECONDS) || process.exitValue() != 0) {
+                    throw java.io.IOException("Bridge usage cleanup pending")
+                }
+            } finally {
+                if (process.isAlive) process.destroyForcibly().waitFor()
+            }
+        }
         stores.remove(id)
         val root = directory.resolve(id)
         if (Files.exists(root) && (!root.toFile().deleteRecursively() || Files.exists(root))) {

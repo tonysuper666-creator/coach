@@ -111,42 +111,6 @@ internal fun BookLaidPage.selectionAt(
     if (point.x > insetPx + lastLayout.size.width + 8f) return null
     if (localY > lastRun.topPx + lastLayout.size.height + 48f) return null
     val anchor = textPositionAt(point.x - insetPx, localY, rendered) ?: return null
-    return wordAt(book, anchor)
-}
-
-/**
- * 鼠标点在某一行文字自己的布局坐标上。正文 [Text] 会先消费这一下，纸面手势拿不到，
- * 所以选词直接用这一行的局部坐标，不经整页换算。
- */
-internal fun BookTextRun.selectionAtLocal(
-    book: Textbook,
-    local: Offset,
-    layout: TextLayoutResult,
-): SourceBlock? {
-    if (sources.isEmpty() || text.isEmpty()) return null
-    if (local.x < -8f || local.y < -8f) return null
-    if (local.x > layout.size.width + 8f || local.y > layout.size.height + 8f) return null
-    val display = layout.getOffsetForPosition(
-        Offset(
-            local.x.coerceIn(0f, layout.size.width.toFloat()),
-            local.y.coerceIn(0f, (layout.size.height - 1).coerceAtLeast(0).toFloat()),
-        ),
-    ).coerceIn(0, text.length)
-    var at = 0
-    var anchor: BookPageAnchor? = null
-    for (slice in sources) {
-        val length = slice.endUtf16 - slice.startUtf16
-        if (display <= at + length) {
-            anchor = BookPageAnchor(slice.importPage, slice.startUtf16 + (display - at).coerceAtLeast(0))
-            break
-        }
-        at += length
-    }
-    val resolved = anchor ?: BookPageAnchor(sources.last().importPage, sources.last().endUtf16)
-    return wordAt(book, resolved)
-}
-
-private fun wordAt(book: Textbook, anchor: BookPageAnchor): SourceBlock? {
     val stored = book.page(anchor.importPage)?.text ?: return null
     if (stored.isEmpty()) return null
     var offset = anchor.offsetUtf16.coerceIn(0, stored.lastIndex)
@@ -180,44 +144,4 @@ private fun wordAt(book: Textbook, anchor: BookPageAnchor): SourceBlock? {
     }
     val text = stored.substring(start, end)
     return SourceBlock("${book.id}:p${anchor.importPage}:$start", anchor.importPage, start, end, false, text)
-}
-
-/**
- * 当前页第一段正文里的一个词。安装包上的点击到不了字形，阅读器仍认键盘，
- * 所以选词不依赖指针落点。选出的词落在这段正文里面，讲解请求才能对上原文。
- */
-internal fun Textbook.firstBodyWord(pageNumber: Int): SourceBlock? {
-    val stored = page(pageNumber)?.text ?: return null
-    if (stored.isEmpty()) return null
-    val block = sourceBlocks().firstOrNull { candidate ->
-        candidate.page == pageNumber && candidate.isBodyParagraph &&
-            candidate.start >= 0 && candidate.end <= stored.length && candidate.end > candidate.start &&
-            stored.substring(candidate.start, candidate.end) == candidate.text &&
-            candidate.text.any { it.isLetterOrDigit() }
-    }
-    val origin = if (block != null) {
-        block.start + block.text.indexOfFirst { it.isLetterOrDigit() }
-    } else {
-        stored.indexOfFirst { it.isLetterOrDigit() }.takeIf { it >= 0 } ?: return null
-    }
-    val word = wordAt(this, BookPageAnchor(pageNumber, origin)) ?: return null
-    if (block == null || word.text in block.text) return word
-    val local = block.text.indexOfFirst { it.isLetterOrDigit() }
-    var end = local
-    while (end < block.text.length && block.text[end].isLetterOrDigit()) end++
-    if (end <= local) return null
-    val start = block.start + local
-    val stop = block.start + end
-    return SourceBlock("$id:p$pageNumber:$start", pageNumber, start, stop, false, stored.substring(start, stop))
-}
-
-/** Home 选词。正文词优先；这一页没有字母时仍给一个可见词，用来确认按键确实进了阅读器。 */
-internal fun Textbook.homeSelectionWord(pageNumber: Int): SourceBlock {
-    firstBodyWord(pageNumber)?.let { return it }
-    val stored = page(pageNumber)?.text.orEmpty()
-    val at = stored.indexOfFirst { it.isLetterOrDigit() }
-    if (at >= 0) {
-        return SourceBlock("$id:p$pageNumber:$at", pageNumber, at, at + 1, false, stored.substring(at, at + 1))
-    }
-    return SourceBlock("$id:p$pageNumber:home", pageNumber, 0, 0, false, "记")
 }

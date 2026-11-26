@@ -134,11 +134,137 @@ function Find-TutorBodyRows($lines) {
     return @($rows | Sort-Object Width -Descending)
 }
 
-# Clicks, F2, S, and Up never selected on the installed app.
-# Home reaches this reader and turns to the first page. That turn selects the word.
-function Select-TutorWord {
-    Write-Output "SELECTKEY HOME"
-    Send-Keys '{HOME}'
+# The installed MSI has no smoke driver. A drag has to be a real pointer gesture:
+# SetCursorPos while the button is down does not deliver WM_MOUSEMOVE, so Compose
+# treats it as a click and clears the selection. Absolute moves use the virtual
+# screen; if that mapping misses, a one-pixel relative nudge forces the move at
+# the corrected pixel. Product selection stays the main-branch mouse drag.
+if (-not ('ArmMouse' -as [type])) {
+    Add-Type @'
+using System.Runtime.InteropServices;
+public static class ArmMouse {
+    [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
+}
+'@
+}
+
+function Get-TutorCursor {
+    $pt = New-Object WD+POINT
+    [void][WD]::GetCursorPos([ref]$pt)
+    return $pt
+}
+
+function Send-AbsoluteMove([int]$screenX, [int]$screenY) {
+    $vx = [ArmMouse]::GetSystemMetrics(76)
+    $vy = [ArmMouse]::GetSystemMetrics(77)
+    $vw = [ArmMouse]::GetSystemMetrics(78)
+    $vh = [ArmMouse]::GetSystemMetrics(79)
+    if ($vw -lt 2 -or $vh -lt 2) { throw "virtual screen is ${vw}x${vh}" }
+    $ax = [int](($screenX - $vx) * 65535.0 / ($vw - 1))
+    $ay = [int](($screenY - $vy) * 65535.0 / ($vh - 1))
+    if ($ax -lt 0) { $ax = 0 } elseif ($ax -gt 65535) { $ax = 65535 }
+    if ($ay -lt 0) { $ay = 0 } elseif ($ay -gt 65535) { $ay = 65535 }
+    [WD]::mouse_event(0xC001, $ax, $ay, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 30
+    return Get-TutorCursor
+}
+
+function Nudge-Onto([int]$screenX, [int]$screenY) {
+    [void][WD]::SetCursorPos($screenX - 1, $screenY)
+    [WD]::mouse_event(0x0001, 1, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 30
+    return Get-TutorCursor
+}
+
+function Move-TutorPointer([int]$screenX, [int]$screenY, [bool]$absoluteOk) {
+    $pt = $null
+    if ($absoluteOk) { $pt = Send-AbsoluteMove $screenX $screenY }
+    if (-not $absoluteOk -or -not $pt -or [Math]::Abs($pt.X - $screenX) -gt 4 -or [Math]::Abs($pt.Y - $screenY) -gt 4) {
+        $pt = Nudge-Onto $screenX $screenY
+    }
+    return $pt
+}
+
+# Window-relative, same coordinate space as Click-At. Logs the cursor that Windows
+# actually reported so a missed selection can be told from a missed toolbar.
+function Drag-TutorLine([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
+    Invoke-ForegroundStep -InjectsInput -Action {
+        $r = Get-Rect
+        $sx1 = $r.L + $x1; $sy1 = $r.T + $y1
+        $sx2 = $r.L + $x2; $sy2 = $r.T + $y2
+        $probe = Send-AbsoluteMove $sx1 $sy1
+        $absoluteOk = ([Math]::Abs($probe.X - $sx1) -le 4 -and [Math]::Abs($probe.Y - $sy1) -le 4)
+        if (-not $absoluteOk) { $probe = Nudge-Onto $sx1 $sy1 }
+        Write-Output "DRAG absOk=$absoluteOk start=$($probe.X),$($probe.Y) target=$sx1,$sy1"
+        Start-Sleep -Milliseconds 80
+        [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
+        $logged = New-Object System.Collections.Generic.List[string]
+        try {
+            $steps = 16
+            for ($i = 1; $i -le $steps; $i++) {
+                $x = [int]($sx1 + ($sx2 - $sx1) * $i / $steps)
+                $y = [int]($sy1 + ($sy2 - $sy1) * $i / $steps)
+                $pt = Move-TutorPointer $x $y $absoluteOk
+                [void]$logged.Add("$($pt.X),$($pt.Y)")
+                Start-Sleep -Milliseconds 70
+            }
+        } finally {
+            [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
+        }
+        Write-Output ("DRAG path " + ($logged -join ' '))
+    }
+}
+
+function Hover-TutorEdge([int]$windowY) {
+    $rect = Get-Rect
+    $x = [int]($rect.L + (($rect.R - $rect.L) / 2))
+    $y = [int]($rect.T + $windowY)
+    Invoke-ForegroundStep -InjectsInput -Action {
+        $away = Move-TutorPointer $x ($y + 28) $true
+        Start-Sleep -Milliseconds 90
+        $landed = Move-TutorPointer $x $y $true
+        Write-Output "HOVER $windowY -> $($landed.X),$($landed.Y) via $($away.X),$($away.Y)"
+    }
+}
+
+function Get-PersistedReaderPage {
+    $db = Join-Path $env:COACH_LIBRARY_DIR 'library.sqlite'
+    $py = Join-Path $OutDir 'read-page.py'
+    if (-not (Test-Path -LiteralPath $py)) {
+        Set-Content -LiteralPath $py -Encoding ASCII -Value "import sqlite3, sys`nrow = sqlite3.connect(sys.argv[1]).execute('select reading_page from books').fetchone()`nprint('' if row is None else row[0])`n"
+    }
+    $raw = & python $py $db
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $text = "$raw".Trim()
+    if ($text -match '^\d+$') { return $text }
+    return $null
+}
+
+function Get-CitePageNumber([string]$CiteText) {
+    $m = [regex]::Match(($CiteText -replace '\s', ''), '第(\d+)[页頁贞貞虫]')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return $null
+}
+
+function Get-TutorShownPage([string]$name) {
+    $rect = Get-Rect
+    $height = [int]($rect.B - $rect.T)
+    Hover-TutorEdge ([int]($height - 18))
+    Start-Sleep -Milliseconds 400
+    $lines = @(Read-TutorFrame $name)
+    $floor = [int]($height * 0.72)
+    $parts = foreach ($line in $lines) {
+        $low = $false
+        foreach ($word in @($line.Words)) {
+            if ($word.BoundingRect -and [double]$word.BoundingRect.Y -ge $floor) { $low = $true; break }
+        }
+        if ($low) { $line.Text }
+    }
+    $compact = (($parts -join '') -replace '\s', '')
+    $m = [regex]::Match($compact, '第(\d{1,4})/')
+    if (-not $m.Success) { $m = [regex]::Match($compact, '第(\d{1,4})页') }
+    if ($m.Success) { return $m.Groups[1].Value }
+    return $null
 }
 
 function Wait-TutorText([string]$name, [string[]]$labels, [int]$seconds, [int]$scroll = -2) {
@@ -173,41 +299,82 @@ function Focus-ReaderPage {
     Start-Sleep -Milliseconds 300
 }
 
-# 2.0 selection toolbar is a light pill: 「讲讲 / 拆句 / 举个例子 / 问… / 笔记」.
-# The pill is painted, but a click on its short label never reaches the button on this
-# runner (the pill stays up and no explain/ask event is logged). The center tap does.
-# The first tap pins the word. This tap explains it, and the next one opens the question field.
-function Open-SelectionAction([string]$name, [string]$action) {
-    Write-Output "CENTER TAP $action"
-    Focus-ReaderPage
-    $selected = $null
-    foreach ($spin in 0..2) {
-        Start-Sleep -Milliseconds 400
-        $frame = @(Read-TutorFrame "$name-selected")
-        foreach ($label in @('举个例子', '笔记', '拆句', '讲讲')) {
-            $selected = Find-Text $frame $label
-            if ($selected) { break }
-        }
-        if ($selected) { break }
+# 2.0 selection toolbar is 「讲讲 / 拆句 / 举个例子 / 问… / 笔记」.
+# It sits at 14dp until the pointer enters the top edge, then drops to 54dp with the HUD.
+# Locate 讲讲 only after that move, or the click lands on the page and clears the selection.
+function Find-ToolbarAction($lines, [string]$action) {
+    $direct = Find-Text $lines $action
+    if ($direct) { return $direct }
+    $ref = $null
+    foreach ($label in @('拆句', '举个例子', '笔记', '讲讲')) {
+        $ref = Find-Text $lines $label
+        if ($ref) { break }
     }
-    if (-not $selected) { throw "Selecting the page word did not raise the selection toolbar ($name)" }
+    if (-not $ref) { return $null }
+    $best = $null
+    foreach ($line in $lines) {
+        foreach ($word in @($line.Words)) {
+            $rect = $word.BoundingRect
+            if (-not $rect) { continue }
+            $cx = [double]$rect.X + ([double]$rect.Width / 2)
+            $cy = [double]$rect.Y + ([double]$rect.Height / 2)
+            if ([Math]::Abs($cy - $ref.Y) -gt 18) { continue }
+            if ($cx -ge ($ref.X1 - 8)) { continue }
+            if (-not $best -or $cx -lt $best.X) { $best = [pscustomobject]@{ X = [int]$cx; Y = [int]$cy } }
+        }
+    }
+    return $best
+}
+
+function Test-ToolbarUp($lines) {
+    foreach ($label in @('举个例子', '笔记', '拆句', '讲讲')) {
+        if (Find-Text $lines $label) { return $true }
+    }
+    return $false
+}
+
+function Open-SelectionToolbar([string]$name) {
+    $raised = $null
+    foreach ($drag in 1..3) {
+        $frame = @(Read-TutorFrame "$name-body$drag")
+        $rows = @(Find-TutorBodyRows $frame)
+        if (@($rows).Count -lt 1) { throw "No body line to drag in $name-body$drag" }
+        $row = $rows[[Math]::Min($drag - 1, @($rows).Count - 1)]
+        $y = [int]$row.Y
+        if ($drag -eq 3) { $y = [int]$row.Y - 4 }
+        Write-Output "DRAG row $drag y=$y x=$($row.X1)..$($row.X2)"
+        Drag-TutorLine ([int]($row.X1 + 6)) $y ([int]($row.X2 - 6)) $y
+        foreach ($spin in 1..4) {
+            Start-Sleep -Milliseconds 400
+            $shot = @(Read-TutorFrame "$name-selected$drag-$spin")
+            if (Test-ToolbarUp $shot) { $raised = $shot; break }
+        }
+        if ($raised) { break }
+    }
+    if (-not $raised) { throw "Dragging a line did not raise the selection toolbar ($name)" }
+    # Pin the HUD first. The pill moves down with it; a click aimed at the old frame misses.
+    Hover-TutorEdge 10
+    Start-Sleep -Milliseconds 500
+    $pinned = @(Read-TutorFrame "$name-pinned")
+    $button = Find-ToolbarAction $pinned '讲讲'
+    if (-not $button) { throw "选择工具条上没有「讲讲」($name-pinned)" }
+    Click-At $button.X $button.Y | Out-Null
+    Write-Output "CLICK 讲讲 $($button.X),$($button.Y)"
 }
 
 function Test-BlockAndCitation {
-    Focus-ReaderPage
-    Send-Keys '{HOME}'
-    Start-Sleep -Milliseconds 800
     # 2.0 dropped the per-book consent wall. 「讲讲」 explains immediately unless a
-    # consent label is actually on screen.
-    Open-SelectionAction '04' '讲讲'
+    # consent label is actually on screen. Do not click 出处 here: that link belongs
+    # to the answer, after the question.
+    Open-SelectionToolbar '04'
     $reply = $null
     $deadline = (Get-Date).AddSeconds(30)
     $spins = 0
     do {
         $lines = @(Read-TutorFrame '04-after-explain')
-        # chi_sim drops the English sentence "Block explanation". The same reply paints 出处.
         $reply = Find-Text $lines 'Blockexplanation'
         if (-not $reply) { $reply = Find-Text $lines '对照原文' }
+        if (-not $reply) { $reply = Find-Text $lines '独立回答' }
         if (-not $reply) { $reply = Find-Text $lines '出处' }
         if ($reply) { break }
         $consent = Find-Text $lines '允许并讲解'
@@ -218,18 +385,109 @@ function Test-BlockAndCitation {
         Start-Sleep -Milliseconds 700
     } while ((Get-Date) -lt $deadline)
     if (-not $reply) { throw '讲解没有出现（Block explanation）' }
-    Select-TutorLabel '07-citation' @('出处') -2
-    # 2.0 hides the old 「看文字」 toggle inside the more menu. The citation row itself
-    # is the proof: it stays on screen, or the jump leaves the explanation up.
-    Start-Sleep -Milliseconds 600
-    $after = @(Read-TutorFrame '07-original')
-    $still = (Find-Text $after '出处') -or (Find-Text $after 'Blockexplanation') -or (Find-Text $after '看文字')
-    if (-not $still) { throw '点了出处之后讲解不见了' }
-    Send-Keys '{ESC}'
+    Write-Output 'STEP4 explain visible'
+}
+
+function Find-AnswerCite($lines, [int]$answerY) {
+    $best = $null
+    foreach ($line in @($lines)) {
+        $compact = ($line.Text -replace '\s', '')
+        if ($compact -notmatch '出处') { continue }
+        $hit = Find-Text @($line) '出处'
+        if (-not $hit) { continue }
+        $page = Get-CitePageNumber $line.Text
+        $score = 0
+        if ($page) { $score += 10 }
+        if ($hit.Y -ge ($answerY - 8)) { $score += 5 }
+        if (-not $best -or $score -gt $best.Score -or ($score -eq $best.Score -and $hit.Y -gt $best.Hit.Y)) {
+            $best = [pscustomobject]@{ Hit = $hit; Page = $page; Text = $line.Text; Score = $score }
+        }
+    }
+    return $best
+}
+
+function Close-TutorDrawer {
+    $rect = Get-Rect
+    $winH = [int]($rect.B - $rect.T)
+    foreach ($try in 1..4) {
+        Hover-TutorEdge 12
+        Start-Sleep -Milliseconds 300
+        $lines = @(Read-TutorFrame "07-close$try")
+        $drawer = (Find-Text $lines '提问') -or (Find-Text $lines '批注') -or (Find-Text $lines '引文')
+        if (-not $drawer) { return }
+        $fold = Find-Text $lines '收起'
+        if ($fold -and $fold.Y -lt [int]($winH * 0.25)) {
+            Click-At $fold.X $fold.Y | Out-Null
+        } else {
+            $tab = Find-Text $lines '讲解'
+            if ($tab) { Click-At $tab.X $tab.Y | Out-Null; Start-Sleep -Milliseconds 500 }
+            Send-Keys 'l'
+        }
+        Start-Sleep -Milliseconds 800
+    }
+    $left = @(Read-TutorFrame '07-close-left')
+    if ((Find-Text $left '提问') -or (Find-Text $left '引文')) {
+        throw '收起伴读后抽屉还在（见 07-close-left）'
+    }
+}
+
+function Assert-CitationPage([string]$citePage, [string]$citeText, [string]$beforePage) {
+    if (-not $citePage) {
+        $said = ($citeText -replace '\s', '')
+        if (-not $said) { $said = '这一帧没读到出处那一行' }
+        throw "回答的「出处」没解析出页码（读到：$said）"
+    }
+    $shown = $null
+    $persisted = $null
+    $notice = $false
+    foreach ($try in 1..3) {
+        Start-Sleep -Milliseconds 700
+        $frame = @(Read-TutorFrame $(if ($try -eq 1) { '07-cite' } else { "07-cite$try" }))
+        foreach ($label in @('无法确认原句', '无法确认', '正在加载')) {
+            if (Find-Text $frame $label) {
+                $notice = $true
+                Write-Output "CITATION_NOTICE $label try=$try"
+                break
+            }
+        }
+        $persisted = Get-PersistedReaderPage
+        $shown = Get-TutorShownPage "07-bar$try"
+        Write-Output "STEP7 open try=$try cite=$citePage shown=$shown persisted=$persisted before=$beforePage notice=$notice"
+        if ($shown -and $shown -ne $citePage) {
+            throw "点了出处没停在第 $citePage 页（底栏第 $shown 页，见 07-cite）"
+        }
+        if ($persisted -and $persisted -ne $citePage) {
+            throw "点了出处没停在第 $citePage 页（阅读位置第 $persisted 页，见 07-cite）"
+        }
+        $landed = ($shown -eq $citePage) -or ($persisted -eq $citePage)
+        $moved = $beforePage -and $persisted -and ($beforePage -ne $persisted)
+        # This fixture is a scan with no PDF text layer. A real jump onto the
+        # page that was already open switches to the original and says it cannot
+        # mark the sentence. Staying on the same page with no notice means the
+        # click did not run.
+        if ($landed -and ($moved -or $notice -or ($beforePage -and $beforePage -ne $citePage))) { break }
+    }
+    if ($beforePage -eq $citePage -and -not $notice -and $persisted -eq $citePage) {
+        throw "出处写的就是当前第 $citePage 页，但点击后没有进入原页（见 07-cite）"
+    }
+    Close-TutorDrawer
+    $persisted = Get-PersistedReaderPage
+    $shown = $null
+    foreach ($try in 1..4) {
+        $shown = Get-TutorShownPage "07-card$try"
+        if ($shown) { break }
+    }
+    Write-Output "STEP7 closed cite=$citePage shown=$shown persisted=$persisted"
+    if ($persisted -ne $citePage) {
+        throw "收起伴读后阅读位置不是出处写的第 $citePage 页（现在第 $persisted 页，见 07-card）"
+    }
+    if (-not $shown) { throw "收起伴读后底栏读不到页号，没法确认还停在第 $citePage 页（见 07-card）" }
+    if ($shown -ne $citePage) {
+        throw "收起伴读后底栏不是出处写的第 $citePage 页（现在第 $shown 页，见 07-card）"
+    }
 }
 
 function Test-PassageQuestion {
-    Open-SelectionAction '04-ask' '问'
     $lines = @(Read-TutorFrame '04-question-field')
     $field = $null
     foreach ($label in @('问这句的意思', '想问什么', '先输入问题', '输入问题', '公式推导')) {
@@ -239,36 +497,50 @@ function Test-PassageQuestion {
     $bounds = Get-Rect
     if ($field) {
         Click-At $field.X ($field.Y + 8) | Out-Null
+        Write-Output 'ASKFIELD ocr'
     } else {
         # The placeholder is on screen and chi_sim misreads it. The box is the wide field
         # left of 发送, just above the window edge (measured on the 976x672 capture).
         Click-At ([int](($bounds.R - $bounds.L) * 0.42)) ([int](($bounds.B - $bounds.T) * 0.93)) | Out-Null
+        Write-Output 'ASKFIELD measured'
     }
     Start-Sleep -Milliseconds 300
     $question = 'What does this passage mean?'
     Send-Keys $question
     Send-Keys '{ENTER}'
-    # chi_sim turns "Passage answer. 可以用自己的话解释…" into one unreadable line.
-    # The loopback records kind=ask only for this exact question.
+    # The loopback answer is 「这段先用自己的话讲，再和原文核对。」.
+    # kind=ask in the event log is not enough: this sentence has to be on screen.
     $answer = $null
-    $deadline = (Get-Date).AddSeconds(20)
-    $eventPath = Join-Path $OutDir 'tutor-events.jsonl'
+    $deadline = (Get-Date).AddSeconds(25)
+    $scrolls = 0
     do {
         $shot = @(Read-TutorFrame '04-answer')
-        foreach ($label in @('Passageanswer', '再和原文核对', '自己的话')) {
+        foreach ($label in @('自己的话', '再和原文核对')) {
             $answer = Find-Text $shot $label
             if ($answer) { break }
         }
         if ($answer) { break }
-        if ((Test-Path -LiteralPath $eventPath) -and (Select-String -LiteralPath $eventPath -Pattern '"kind": "ask"' -Quiet)) {
-            $answer = $true
-            break
-        }
+        if ($scrolls -lt 6) { Scroll-TutorView -2; $scrolls++ }
         Start-Sleep -Milliseconds 500
     } while ((Get-Date) -lt $deadline)
-    if (-not $answer) { throw "Missing 'Passageanswer / 再和原文核对 / 自己的话' in 04-answer" }
-    $null = Find-TutorLabel '04-answer-source' @('出处') -1
-    Send-Keys '{ESC}'
+    if (-not $answer) { throw '本题回答没有出现在屏幕上（要看到「自己的话」或「再和原文核对」，见 04-answer）' }
+    Write-Output 'STEP4 answer visible'
+    $cite = $null
+    foreach ($pass in 1..4) {
+        $frame = @(Read-TutorFrame "07-answer-cite$pass")
+        $cite = Find-AnswerCite $frame $answer.Y
+        if ($cite -and $cite.Page -and $cite.Hit.Y -ge ($answer.Y - 8)) { break }
+        Scroll-TutorView -2
+        Start-Sleep -Milliseconds 400
+    }
+    if (-not $cite -or -not $cite.Page -or $cite.Hit.Y -lt ($answer.Y - 8)) {
+        $said = if ($cite) { $cite.Text } else { '没有读到出处' }
+        throw "回答下面没有带页码的「出处」（读到：$said，见 07-answer-cite）"
+    }
+    Write-Output "STEP7 cite-line $($cite.Text)"
+    $beforePage = Get-PersistedReaderPage
+    Click-At $cite.Hit.X $cite.Hit.Y | Out-Null
+    Assert-CitationPage $cite.Page $cite.Text $beforePage
 }
 
 function Test-WholeLesson {

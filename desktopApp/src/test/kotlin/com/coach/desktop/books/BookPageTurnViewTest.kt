@@ -290,40 +290,6 @@ class BookPageTurnViewTest {
         assertTrue(state.index < before, "clicking non-text left margin should still turn back: $before -> ${state.index}")
     }
 
-    @Test fun mouseClickOnReaderTextSelectsTheWordUnderThePointer() = runSkikoComposeUiTest(
-        size = Size(900f, 900f),
-        density = Density(1f),
-    ) {
-        val pages = listOf(BookPage(1, "Memory and understanding starts with active recall rather than rereading."))
-        val testBook = Textbook("click-word", "阅读", "pdf", pages)
-        val state = BookPagingState(BookPageAnchor(1))
-        var selected by mutableStateOf<SourceBlock?>(null)
-        setContent {
-            CoachTheme(false) {
-                androidx.compose.material3.Surface(color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
-                    Box(Modifier.fillMaxSize()) {
-                        BookPageView(
-                            book = testBook,
-                            state = state,
-                            highlights = emptyMap(),
-                            onTurn = { state.move(it) },
-                            turnStyle = PageTurnStyle.None,
-                            onSelectText = { selected = it },
-                            immersive = true,
-                        )
-                    }
-                }
-            }
-        }
-        waitUntil(timeoutMillis = 10_000) { state.pages.isNotEmpty() }
-        waitForIdle()
-        onNodeWithTag("reader-text").performMouseInput { click(Offset(width * 0.35f, 8f)) }
-        mainClock.advanceTimeBy(300); waitForIdle()
-        val chosen = assertNotNull(selected, "a mouse click on the glyphs must select the word under the pointer")
-        assertTrue(chosen.text.isNotBlank())
-        assertTrue(pages[0].text.contains(chosen.text), "selected word must come from the page text: ${chosen.text}")
-    }
-
     @Test fun backgroundLayoutLongBookKeepsCompletedPaginationOnHighlightUpdates() = runSkikoComposeUiTest(
         size = Size(1280f, 800f),
         density = Density(1f),

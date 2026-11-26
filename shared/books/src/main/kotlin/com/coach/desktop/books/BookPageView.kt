@@ -264,9 +264,6 @@ internal fun BookPageView(
     } else null
     val paperBg = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
     var pointerActive by remember(state) { mutableStateOf(false) }
-    // The line grid is drawn scaled up from the top-left. A click on a glyph can land
-    // outside that smaller layout box, so the full-size page maps the point back through zoom.
-    val pageHit = remember(book.id) { ViewportWordHit() }
     BookPageViewport(
         modifier
             .fillMaxSize()
@@ -280,9 +277,8 @@ internal fun BookPageView(
                     }
                 }
             }
-            .viewportWordClick(pageHit)
             .testTag("book-page-layout"),
-        linePitchPx, topMargin, onZoom = { pageHit.zoom = it },
+        linePitchPx, topMargin,
     ) { maxWidth, maxHeight, viewportWidth ->
         val column = with(density) { (body.fontSize * (if (immersive) 38 else 33)).toDp() }
         val scrolling = readMode == BookReadMode.Scroll
@@ -505,8 +501,7 @@ internal fun BookPageView(
                                     pages.take(index + 1).count { it.chapter == page.chapter }
                                 BookSheet(book, page, typography, measurer, widthPx, leftInset, remaining, false, 0,
                                     libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
-                                    topMargin = if (page.opener) openerTopMargin else topMargin, rendered = rendered,
-                                    onMouseClickWord = { latestOnSelectText?.invoke(it) }) { failed.add(it) }
+                                    topMargin = if (page.opener) openerTopMargin else topMargin, rendered = rendered) { failed.add(it) }
                             }
                         }
                     }
@@ -537,28 +532,16 @@ internal fun BookPageView(
             val inset = if (isLast) rightInset + with(density) { extraPx.toDp() } else leftInset
             val rendered = remember(page) { mutableMapOf<Int, TextLayoutResult>() }
             val scale = sheetWidthPx.toFloat() / (sheetWidthPx + extraPx)
-            if (index == first) {
-                val hitInset = with(density) { inset.toPx() }
-                val hitTop = if (page?.opener == true) openerTopMarginPx else topMarginPx
-                SideEffect {
-                    pageHit.onClick = click@{ local ->
-                        val word = page?.selectionAt(book, local, hitInset, hitTop, rendered) ?: return@click false
-                        latestOnSelectText?.invoke(word)
-                        true
-                    }
-                }
-            }
             val sheetSpot = rememberUpdatedState { g: ReadingPointerGesture ->
                 state.anchor = spotAnchor(pages, index, spread, side, g.down, g.up, g.dragged,
                     sheetWidthPx.toFloat(), measurer, typography, widthPx, ::sheetScale) ?: state.anchor
                 val cb = latestOnSelectText ?: return@rememberUpdatedState
-                val local = if (extraPx == 0) g else g.copy(down = g.down / scale, up = g.up / scale)
-                val insetPx = with(density) { inset.toPx() }
-                val topPx = if (page?.opener == true) openerTopMarginPx else topMarginPx
                 when {
-                    g.longPressed || (!g.isTouch && g.dragged) ->
-                        cb(page?.selectionForGesture(book, local, insetPx, topPx, rendered))
-                    // 点在字上的那一下由正文自己收下并选词。这里只清纸面空白处的单击。
+                    g.longPressed || (!g.isTouch && g.dragged) -> {
+                        val local = if (extraPx == 0) g else g.copy(down = g.down / scale, up = g.up / scale)
+                        cb(page?.selectionForGesture(book, local, with(density) { inset.toPx() },
+                            if (page.opener) openerTopMarginPx else topMarginPx, rendered))
+                    }
                     !g.dragged -> cb(null)
                 }
             }
@@ -571,8 +554,7 @@ internal fun BookPageView(
                         BookSheet(book, page, typography, measurer, widthPx, inset, remaining, spread, side,
                             libraryDirectory, onOpenTableRow, { preview = it }, displayedPoints, onHardPointClick,
                             topMargin = if (page.opener) openerTopMargin else topMargin,
-                            lastColumn = isLast, rendered = rendered,
-                            onMouseClickWord = { latestOnSelectText?.invoke(it) }) { failed.add(it) }
+                            lastColumn = isLast, rendered = rendered) { failed.add(it) }
                     }
                 }
             }
@@ -663,28 +645,6 @@ private fun Modifier.fitMarkerMargin(extraPx: Int): Modifier = if (extraPx == 0)
     }
 }
 
-private class ViewportWordHit(var zoom: Float = 1f, var onClick: ((Offset) -> Boolean)? = null)
-
-/** A still mouse click anywhere on the scaled page selects the word under the visual point. */
-private fun Modifier.viewportWordClick(hit: ViewportWordHit): Modifier = pointerInput(hit) {
-    awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = false)
-        val touch = down.type == PointerType.Touch
-        var last = down.position
-        while (true) {
-            val event = awaitPointerEvent()
-            val change = event.changes.firstOrNull { it.id == down.id } ?: return@awaitEachGesture
-            last = change.position
-            if (!change.pressed) {
-                val still = (last - down.position).getDistance() <= viewConfiguration.touchSlop
-                val zoom = hit.zoom.coerceAtLeast(0.01f)
-                if (!touch && still && hit.onClick?.invoke(down.position / zoom) == true) change.consume()
-                break
-            }
-        }
-    }
-}
-
 /** Fit whole baselines under the header and above the progress line. Keep the physical
  * viewport width for column breakpoints and scale the glyphs and pointer targets together. */
 @Composable
@@ -692,7 +652,6 @@ private fun BookPageViewport(
     modifier: Modifier,
     linePitchPx: Int?,
     topMargin: Dp,
-    onZoom: (Float) -> Unit = {},
     content: @Composable BoxScope.(width: Dp, height: Dp, viewportWidth: Dp) -> Unit,
 ) {
     BoxWithConstraints(modifier) {
@@ -700,7 +659,6 @@ private fun BookPageViewport(
         val reservedPx = with(density) { topMargin.roundToPx() + 2.dp.roundToPx() }
         val rows = if (linePitchPx != null) (constraints.maxHeight - reservedPx) / linePitchPx else 0
         if (linePitchPx == null || rows < 8 || !constraints.hasBoundedHeight || !constraints.hasBoundedWidth) {
-            SideEffect { onZoom(1f) }
             content(maxWidth, maxHeight, maxWidth)
             return@BoxWithConstraints
         }
@@ -708,7 +666,6 @@ private fun BookPageViewport(
         val zoom = constraints.maxHeight.toFloat() / gridHeight
         val gridWidth = (constraints.maxWidth / zoom).roundToInt().coerceAtLeast(1)
         val viewportWidth = maxWidth
-        SideEffect { onZoom(zoom) }
         Box(Modifier.layout { measurable, bounds ->
             val page = measurable.measure(Constraints.fixed(gridWidth, gridHeight))
             layout(bounds.maxWidth, bounds.maxHeight) {
@@ -748,33 +705,7 @@ private fun BookLaidPage.selectionForGesture(
         }
     } else null
     gesture.dragged -> selectionBetween(book, gesture.down, gesture.up, insetPx, topMarginPx, rendered)
-    // A still mouse hold selects the word, same as a touch long-press. A drag keeps the span.
-    gesture.longPressed -> selectionAt(book, gesture.down, insetPx, topMarginPx, rendered)
     else -> null
-}
-
-/**
- * 鼠标点在字上时，正文先于这里消费掉这一下，并直接选中那个词。
- * 纸面空白处的单击仍然清选区。拖选和触屏长按还走这里。
- */
-private fun Modifier.mouseClickSelectsWord(
-    onClick: State<(Offset) -> Boolean>,
-): Modifier = pointerInput(Unit) {
-    awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = false)
-        val touch = down.type == PointerType.Touch
-        var last = down.position
-        while (true) {
-            val event = awaitPointerEvent()
-            val change = event.changes.firstOrNull { it.id == down.id } ?: return@awaitEachGesture
-            last = change.position
-            if (!change.pressed) {
-                val still = (last - down.position).getDistance() <= viewConfiguration.touchSlop
-                if (!touch && still && onClick.value(down.position)) change.consume()
-                break
-            }
-        }
-    }
 }
 
 /**
@@ -846,7 +777,6 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
     topMargin: Dp = 52.dp,
     lastColumn: Boolean = spread && side == 1,
     rendered: MutableMap<Int, TextLayoutResult>,
-    onMouseClickWord: ((SourceBlock) -> Unit)? = null,
     onMissing: (BookIllustration) -> Unit) {
     val density = LocalDensity.current
     val colors = CoachTheme.colors
@@ -881,17 +811,9 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
             Text(number, Modifier.padding(start = inset, top = numberTop),
                 style = typography.number, color = colors.fgSecondary)
         }
-        val clickWord = rememberUpdatedState { local: Offset ->
-            val layout = rendered[run.topPx] ?: return@rememberUpdatedState false
-            val word = run.selectionAtLocal(book, local, layout) ?: return@rememberUpdatedState false
-            val listener = onMouseClickWord ?: return@rememberUpdatedState false
-            listener(word)
-            true
-        }
         Text(selectable, style = typography.body, inlineContent = inline,
             onTextLayout = { rendered[run.topPx] = it },
             modifier = Modifier.padding(start = inset, top = topMargin + top).width(column)
-                .mouseClickSelectsWord(clickWord)
                 .semantics {
                     this[BookPageSources] = run.sources
                     // Expose original heading/citation ranges, as the reader did before

@@ -159,7 +159,9 @@ class Tutor(BaseHTTPRequestHandler):
                         "选项B：Copy without reading 选项C：Skip every test 选项D：Count pages "
                         "答案：A 解析：Practice feedback. 先尝试回忆，再对照原文。")
             elif kind == "ask" and req.get("question") == "What does this passage mean?":
-                text = "Passage answer. 可以用自己的话解释，再和原文核对。"
+                # Short enough that chi_sim can read it under the citation. The smoke
+                # must see this sentence; the ask event is not the pass condition.
+                text = "这段先用自己的话讲，再和原文核对。"
             elif kind == "lesson":
                 text = "Lesson overview. 先阅读原文，再用回忆检查理解。"
             elif kind == "guide":

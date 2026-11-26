@@ -127,6 +127,19 @@ internal fun inspectBookRaster(bytes: ByteArray): BookRaster {
 internal fun bookClipboardSelection(entry: ClipEntry?): AnnotatedString? = null
 internal fun bookClipboardText(text: String) = ClipEntry(ClipData.newPlainText("教材原文", text))
 
+internal fun bookSaveNotesMarkdown(
+    suggestedFileName: String,
+    markdown: String,
+    onResult: (NotesFileSave) -> Unit,
+): Boolean {
+    if (suggestedFileName.isEmpty() && markdown.isEmpty()) {
+        onResult(NotesFileSave.Cancelled)
+        return false
+    }
+    onResult(NotesFileSave.Failed("这台设备请先复制"))
+    return true
+}
+
 @Composable
 internal fun BookScrollbar(scroll: ScrollState, modifier: Modifier) {
     val total = scroll.maxValue

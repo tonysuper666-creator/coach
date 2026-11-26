@@ -1,6 +1,8 @@
 # Keep text files LF in the repository; agents on Windows were committing CRLF
 # and turning small changes into whole-file rewrites (PR 280).
 * text=auto eol=lf
+# Phase-1 import fixtures are exact bytes (GB18030, UTF-16, Big5, zip, PalmDB).
+desktopApp/src/test/resources/books/ton1663-phase1/bytes/** binary
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf

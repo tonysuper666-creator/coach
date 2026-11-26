@@ -60,7 +60,8 @@ internal fun ReadingMethodPanel(
     LaunchedEffect(book.id, chapter?.chapterId, draftReady) {
         if (!draftReady) return@LaunchedEffect
         val signals = withContext(Dispatchers.IO) {
-            runCatching { ReadingMethodSignalsReader.fromBook(book) }.getOrDefault(ReadingMethodSignals())
+            val sourceName = runCatching { library.sourceFilename(book.id) }.getOrNull()
+            runCatching { ReadingMethodSignalsReader.fromBook(book, sourceName = sourceName) }.getOrDefault(ReadingMethodSignals())
         }
         var raw = latestDraft.value.readingMethodJson
         if (raw.isBlank() && latestState.value == null) {

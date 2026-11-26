@@ -47,6 +47,9 @@ import com.coach.ui.v7.V7TextButton
  * - Click 1 opens popover; Click 2 selects mode (total <= 2 clicks from Home or Reader).
  * - Preserves 100% of reading page, UTF-16 anchor, highlights, notes, and drafts.
  */
+internal fun studyModeTriggerLabel(title: String, compact: Boolean, noun: String, badge: String): String =
+    if (compact) "$noun：$title ▾" else "$badge ▾"
+
 @Composable
 internal fun StudyModeSelectorButton(
     preference: BookStudyPreference,
@@ -54,6 +57,7 @@ internal fun StudyModeSelectorButton(
     compact: Boolean = false,
     tag: String = "study-mode-trigger",
     modifier: Modifier = Modifier,
+    noun: String = "学法",
 ) {
     val colors = CoachTheme.colors
     var expanded by remember { mutableStateOf(false) }
@@ -79,7 +83,12 @@ internal fun StudyModeSelectorButton(
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Text(
-                if (compact) "学法：${effectiveMode.displayTitle(preference.examMode)} ▾" else "${displayPref.compactBadgeText()} ▾",
+                studyModeTriggerLabel(
+                    effectiveMode.displayTitle(preference.examMode),
+                    compact,
+                    noun,
+                    displayPref.compactBadgeText(),
+                ),
                 style = MaterialTheme.typography.labelMedium,
                 color = colors.fgPrimary,
                 fontWeight = FontWeight.Medium,

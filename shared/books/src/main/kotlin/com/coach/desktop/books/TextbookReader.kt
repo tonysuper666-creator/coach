@@ -2619,6 +2619,7 @@ internal fun TextbookReader(
                 {
                     StudyModeSelectorButton(
                         preference = studyPreference,
+                        noun = "伴读",
                         onUpdatePreference = { nextPref, modeSwitched ->
                             studyPreference = StudyModeStore.save(library, nextPref)
                             if (nextPref.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) {

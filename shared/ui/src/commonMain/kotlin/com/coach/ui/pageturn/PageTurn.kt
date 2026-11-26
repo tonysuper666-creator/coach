@@ -8,6 +8,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -25,6 +26,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -49,8 +56,8 @@ import kotlin.math.abs
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
-/** 翻页效果。「卷页」（纸张卷曲）达标前不放进选项。 */
-enum class PageTurnStyle { Flip, Slide, None }
+/** 翻页效果：翻转（绕书脊转）、卷页（拖着页角把纸掀起来）、滑动、无。 */
+enum class PageTurnStyle { Flip, Curl, Slide, None }
 
 /**
  * 翻页状态：现在翻到哪、正在翻哪一页。位置 = 左边第一页的下标（双页时总是偶数）。
@@ -87,6 +94,16 @@ class PageTurnState(val pageCount: Int, initialPosition: Int = 0, private val al
 
     private val instant get() = reduced || style == PageTurnStyle.None
 
+    /**
+     * 卷页时被拖着的页角在哪（翻起页坐标，按页宽、页高归一，见 PageCurlMath）；
+     * null = 不是手拖的（键盘、点页边、滚轮），页角走默认弧线。
+     */
+    var curlAnchor by mutableStateOf<Offset?>(null)
+        private set
+    /** 卷页拖的是上角还是下角。 */
+    var curlTop by mutableStateOf(false)
+        private set
+
     /** 0..1，当前翻起的页翻到哪了。 */
     val progress: Float get() = progressAnim.value
 
@@ -98,7 +115,7 @@ class PageTurnState(val pageCount: Int, initialPosition: Int = 0, private val al
         if (turning) return false
         if (step(position, forward) == null) return false
         if (durationMs <= 0) { commitStep(forward); return true }
-        this.forward = forward; turning = true
+        this.forward = forward; turning = true; curlAnchor = null; curlTop = false
         val mine = epoch
         try {
             progressAnim.snapTo(0f)
@@ -129,7 +146,7 @@ class PageTurnState(val pageCount: Int, initialPosition: Int = 0, private val al
                 riffle = leaves - i
                 // 第 i 张从沿途的第 i 个位置翻起，最后一张从离目标一步处翻到目标
                 riffleAt = norm(from + (target - from) * i / leaves)
-                forward = fwd; turning = true
+                forward = fwd; turning = true; curlAnchor = null; curlTop = false
                 progressAnim.snapTo(0f)
                 progressAnim.animateTo(1f, tween(RIFFLE_MS, easing = LinearOutSlowInEasing))
             }
@@ -159,10 +176,21 @@ class PageTurnState(val pageCount: Int, initialPosition: Int = 0, private val al
 
     internal suspend fun beginDrag(fwd: Boolean): Boolean {
         if (instant || turning || step(position, fwd) == null) return false
-        forward = fwd; turning = true; dragging = true; progressAnim.snapTo(0f); return true
+        forward = fwd; turning = true; dragging = true; curlAnchor = null; curlTop = false
+        progressAnim.snapTo(0f); return true
     }
 
     internal suspend fun dragTo(p: Float) { if (dragging) progressAnim.snapTo(p) }
+
+    /** 卷页拖动：页角跟着手走（[anchor] 归一坐标），[p] 是由页角位置换出来的进度。 */
+    internal suspend fun dragCurl(p: Float, anchor: Offset, top: Boolean) {
+        if (!dragging) return
+        curlAnchor = anchor; curlTop = top
+        progressAnim.snapTo(p)
+    }
+
+    /** 往回翻时，被倒着卷回来的那一张所在的位置（上一个位置）。 */
+    internal fun previousOf(p: Int): Int = step(p, false) ?: p
 
     /** 手势被取消（布局切换、窗口失焦、手势协程被撤）：回弹，不留 turning。 */
     internal fun abortDrag() {
@@ -276,7 +304,17 @@ fun PageTurnView(
                     var swiped = false
                     var moved = false
                     var upConsumed = false
-                    var lastX = down.position.x
+                    var lastPos = down.position
+                    // 卷页：页角跟着手在平面上走。翻起页坐标的原点在书脊上沿。
+                    val curl = state.style == PageTurnStyle.Curl && cols <= 2
+                    val leafW = w / cols
+                    val curlTopCorner = down.position.y < h / 2f
+                    fun curlPointer(at: Offset): Offset {
+                        val start = Offset(if (fwd) leafW else -leafW, if (curlTopCorner) 0f else h)
+                        // 单页往回翻：上一页从屏幕外卷回来，横向走两倍才跟得上手
+                        val k = if (cols == 1 && !fwd) 2f else 1f
+                        return Offset(start.x + (at.x - down.position.x) * k, start.y + (at.y - down.position.y))
+                    }
                     try {
                         while (true) {
                             val ev = awaitPointerEvent()
@@ -294,7 +332,7 @@ fun PageTurnView(
                             }
                             if (!dragging && !swiped && c.isConsumed) return@awaitEachGesture
                             tracker.addPosition(c.uptimeMillis, c.position)
-                            lastX = c.position.x
+                            lastPos = c.position
                             val dx = c.position.x - down.position.x
                             val dy = c.position.y - down.position.y
                             if (!moved && (c.position - down.position).getDistance() > viewConfiguration.touchSlop) {
@@ -315,11 +353,18 @@ fun PageTurnView(
                             }
                             if (dragging) {
                                 c.consume()
-                                val p = dragProgress(down.position.x, c.position.x, fwd, w * travelFactor)
-                                scope.launch { state.dragTo(p) }
+                                if (curl) {
+                                    val q = curlPointer(c.position)
+                                    val p = curlDragProgress(q.x, leafW, fwd)
+                                    scope.launch { state.dragCurl(p, Offset(q.x / leafW, q.y / h), curlTopCorner) }
+                                } else {
+                                    val p = dragProgress(down.position.x, c.position.x, fwd, w * travelFactor)
+                                    scope.launch { state.dragTo(p) }
+                                }
                             }
                         }
-                        val p = dragProgress(down.position.x, lastX, fwd, w * travelFactor)
+                        val p = if (curl) curlDragProgress(curlPointer(lastPos).x, leafW, fwd)
+                            else dragProgress(down.position.x, lastPos.x, fwd, w * travelFactor)
                         val vx = tracker.calculateVelocity().x
                         val complete = shouldCompleteTurn(p, if (fwd) -vx else vx)
                         when {
@@ -338,11 +383,17 @@ fun PageTurnView(
         val pos = state.shownPosition
         val n = state.pageCount
         val fwd = state.forward
-        val t = state.progress
         val turning = state.turning
         val c = state.columns
 
-        if (style == PageTurnStyle.Slide || (style == PageTurnStyle.Flip && c > 2)) {
+        if (style == PageTurnStyle.Curl && turning && c <= 2) {
+            // 卷页只在绘制阶段读进度，跟手拖动不触发重组
+            CurlLayers(state, if (fwd) pos else state.previousOf(pos), c, n, pageW, paper, shadow, showThrough, page)
+            return@Box
+        }
+        val t = state.progress
+
+        if (style == PageTurnStyle.Slide || (style != PageTurnStyle.None && c > 2)) {
             val sgn = if (fwd) -1f else 1f
             val step = if (turning) (if (fwd) pos + c else pos - c) else pos
             Box(Modifier.fillMaxSize().graphicsLayer { translationX = if (turning) sgn * t * widthPx else 0f }) {
@@ -400,6 +451,85 @@ fun PageTurnView(
                 Box(Modifier.align(onSide).width(pageW).fillMaxHeight().background(Brush.horizontalGradient(colors)))
             }
         }
+    }
+}
+
+/**
+ * 卷页的几层，从下往上：翻完后露出的页、留在原处的那部分纸、书脊阴影、掀起处投在下一页上的影、
+ * 翻过来的那片纸（背面）。[base] 是被卷起那张所在的位置：往前翻是当前位置，往回翻是上一个位置、进度倒着用。
+ */
+@Composable
+private fun BoxScope.CurlLayers(
+    state: PageTurnState, base: Int, c: Int, n: Int, pageW: Dp,
+    paper: Color, shadow: Color, showThrough: Boolean, page: @Composable (Int) -> Unit,
+) {
+    val double = c == 2
+    val leafSide = if (double) Alignment.CenterEnd else Alignment.CenterStart
+    val frontIdx = if (double) base + 1 else base
+    val backIdx = if (double) base + 2 else base
+    val minReach = with(LocalDensity.current) { 24.dp.toPx() }
+    fun foldProgress() = if (state.forward) state.progress else 1f - state.progress
+    fun fold(size: Size): CurlFold {
+        val pt = curlPointAt(foldProgress(), size.width, size.height, state.curlTop, state.curlAnchor)
+        return curlFold(pt, size.width, size.height, state.curlTop)
+    }
+
+    if (double) {
+        PageBox(base, n, pageW, paper, Alignment.CenterStart, page)
+        PageBox(base + 3, n, pageW, paper, Alignment.CenterEnd, page)
+    } else {
+        PageBox(base + 1, n, pageW, paper, Alignment.CenterStart, page)
+    }
+    // 留在原处的那部分纸
+    Box(Modifier.align(leafSide).width(pageW).fillMaxHeight().drawWithContent {
+        val g = fold(size)
+        if (g.front.size >= 3) clipPath(g.front.toPath()) { this@drawWithContent.drawContent() }
+    }.background(paper)) {
+        if (frontIdx in 0 until n) page(frontIdx)
+    }
+    if (double) Box(
+        Modifier.align(Alignment.Center).width(28.dp).fillMaxHeight()
+            .background(Brush.horizontalGradient(listOf(Color.Transparent, shadow.copy(alpha = 0.16f), Color.Transparent)))
+    )
+    // 纸掀起来的地方，下一页靠折线处压着一道影
+    Box(Modifier.align(leafSide).width(pageW).fillMaxHeight().drawBehind {
+        val g = fold(size)
+        if (g.depth <= 0f || g.removed.size < 3) return@drawBehind
+        val reach = g.depth.coerceIn(minReach, size.width * 0.3f)
+        val a = 0.30f * (g.depth / minReach).coerceAtMost(1f)
+        clipPath(g.removed.toPath()) {
+            drawRect(Brush.linearGradient(listOf(shadow.copy(alpha = a), Color.Transparent), start = g.mid, end = g.mid + g.normal * reach))
+        }
+    })
+    // 翻过来的那片纸：背面内容沿折线镜像，靠折线处暗一点、往外渐亮，像纸在折痕处弯过来
+    Box(Modifier.align(leafSide).width(pageW).fillMaxHeight().drawWithContent {
+        val g = fold(size)
+        if (g.flap.size < 3) return@drawWithContent
+        val p = foldProgress()
+        // 双页：背面是下一张的左页，落地时要和静止的样子一样，所以越翻越清楚；单页：同一张纸的反面，字隐约透出
+        val wash = if (double) (if (showThrough) 0.5f else 1f) * (1f - p) else if (showThrough) 0.82f else 1f
+        val reach = g.depth.coerceIn(minReach, size.width * 0.45f)
+        clipPath(g.flap.toPath()) {
+            withTransform({ transform(curlBackMatrix(g.mid, g.normal, size.width, otherPage = double)) }) {
+                this@drawWithContent.drawContent()
+                if (wash > 0f) drawRect(paper.copy(alpha = wash))
+            }
+            drawRect(Brush.linearGradient(
+                0f to shadow.copy(alpha = 0.18f), 0.35f to shadow.copy(alpha = 0.04f), 1f to Color.Transparent,
+                start = g.mid, end = g.mid - g.normal * reach,
+            ))
+        }
+    }.background(paper)) {
+        if (backIdx in 0 until n) page(backIdx)
+    }
+}
+
+private fun List<Offset>.toPath(): Path {
+    val pts = this
+    return Path().apply {
+        moveTo(pts[0].x, pts[0].y)
+        for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
+        close()
     }
 }
 

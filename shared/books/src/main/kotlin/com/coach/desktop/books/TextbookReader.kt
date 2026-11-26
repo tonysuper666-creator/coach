@@ -271,17 +271,20 @@ internal fun TextbookReader(
             guideController.prefetchForPage(ui.page, autoGuide = true, sectionIndexOverride = currentSectionIndex)
         }
     }
-    fun runInlineSelection(target: SourceBlock, action: SelectionExplainAction, questionText: String? = null) {
+    fun runInlineSelection(target: SourceBlock, action: SelectionExplainAction, questionText: String? = null,
+        visibleContext: List<SourceBlock>? = null) {
         val request = ++inlineRequest
         val secIdx = guideController.sectionIndexForAnchor(target.page, target.start).takeIf { it >= 0 } ?: currentSectionIndex
-        val secCtx = guideController.contextForSection(secIdx)
+        val section = guideController.contextForSection(secIdx)
+        val secCtx = if (visibleContext != null) section?.copy(sectionBlocks = visibleContext)
+            else inlineThread?.takeIf { it.selection == target }?.context ?: section
         if (action == SelectionExplainAction.ASK && questionText == null) {
-            inlineThread = (inlineThread?.takeIf { it.selection.id == target.id }
+            inlineThread = (inlineThread?.takeIf { it.selection == target }
                 ?: InlineExplainThread(target, secCtx)).copy(askingOpen = true, loading = false, error = null)
             return
         }
         if (!aiEnabled) {
-            val existing = inlineThread?.takeIf { it.selection.id == target.id } ?: InlineExplainThread(target, secCtx)
+            val existing = inlineThread?.takeIf { it.selection == target } ?: InlineExplainThread(target, secCtx)
             inlineThread = existing.copy(
                 loading = false,
                 error = ("已在设置中关闭伴读讲解与提问，可在设置中重新开启。" to ExplainTrouble.Other),
@@ -304,7 +307,7 @@ internal fun TextbookReader(
                 )
             }
         }
-        val existing = inlineThread?.takeIf { it.selection.id == target.id } ?: InlineExplainThread(target, secCtx)
+        val existing = inlineThread?.takeIf { it.selection == target } ?: InlineExplainThread(target, secCtx)
         val history = existing.turns.map { FollowUpTurn(it.label, ReadableText.withoutCitationMarks(it.explanation.text)) }
         val label = if (action == SelectionExplainAction.ASK && !questionText.isNullOrBlank()) "问：${questionText.trim()}" else action.label
         val pending = existing.copy(loading = true, error = null, fallbackBlocks = emptyList(), askingOpen = true, pendingLabel = label)
@@ -858,6 +861,26 @@ internal fun TextbookReader(
             practiceInputFocused = false
         }
     }
+    fun openReadingCompanion() {
+        if (companionOpen) return
+        if (textView && !pageUnrecognizedOriginal) {
+            // Resolve the passage against the wide layout before opening the narrower drawer.
+            // An import-page bookmark can point at a heading omitted by the typesetter.
+            val slices = paging.visibleProseSlices()
+            val pageNumbers = (listOf(readingAnchor.importPage) + slices.map { it.importPage }).distinct()
+            for (number in pageNumbers) {
+                val ranges = slices.filter { it.importPage == number }.map { it.startUtf16 until it.endUtf16 }
+                val offset = if (number == readingAnchor.importPage) readingAnchor.offsetUtf16 else 0
+                val blocks = selectScreenExplainBlocks(book, number, offset, ranges)
+                val first = blocks.firstOrNull() ?: selectScreenExplainBlocks(book, number, 0, ranges).firstOrNull()
+                if (first != null) {
+                    paging.anchor = BookPageAnchor(first.page, first.start)
+                    break
+                }
+            }
+        }
+        companionOpen = true
+    }
     fun closeCompanion() {
         companionOpen = false
         explainOpen = false
@@ -1156,7 +1179,7 @@ internal fun TextbookReader(
     }
     LaunchedEffect(explainOpen) {
         if (explainOpen) {
-            companionOpen = true
+            openReadingCompanion()
             companionTab = ReaderCompanionTab.EXPLAIN
         }
     }
@@ -1347,7 +1370,7 @@ internal fun TextbookReader(
                         true
                     }
                     !typingNow && !mod && (event.key == Key.L || event.key == Key.RightBracket) -> {
-                        if (companionOpen) closeCompanion() else companionOpen = true
+                        if (companionOpen) closeCompanion() else openReadingCompanion()
                         true
                     }
                     !typingNow && !mod && event.key == Key.V && hasOriginal -> {
@@ -1587,6 +1610,12 @@ internal fun TextbookReader(
             if (effectiveSideOverlay) closeCompanion()
         }
 
+        val visibleScreenSlices = remember(textView, pageUnrecognizedOriginal, paging.pages,
+            readingAnchor, paging.columns, paragraphPage.number) {
+            if (!textView || pageUnrecognizedOriginal) null
+            else paging.visibleProseSlices().filter { it.importPage == paragraphPage.number }
+                .map { it.startUtf16 until it.endUtf16 }
+        }
         val explainTabContent: @Composable () -> Unit = {
             Column(Modifier.fillMaxSize()) {
                 if (companionOpen) {
@@ -1657,16 +1686,6 @@ internal fun TextbookReader(
                             },
                         )
                     } else {
-                        val visibleScreenSlices = remember(
-                            textView, pageUnrecognizedOriginal, paging.pages, paging.anchor, paging.spread, paragraphPage.number,
-                        ) {
-                            if (!textView || pageUnrecognizedOriginal || paging.pages.isEmpty()) emptyList()
-                            else (0 until paging.columns)
-                                .mapNotNull { paging.pages.getOrNull(paging.index + it) }
-                                .flatMap { it.sources }
-                                .filter { it.importPage == paragraphPage.number && it.endUtf16 > it.startUtf16 }
-                                .map { it.startUtf16 until it.endUtf16 }
-                        }
                         SingleBookCompanionPanel(
                             book = book,
                             onOpenSectionMainline = onOpenSectionMainline,
@@ -1751,9 +1770,6 @@ internal fun TextbookReader(
             }
         }
 
-        val currentPageBodyBlocks = remember(allBookBlocks, paragraphPage.number) {
-            allBookBlocks.filter { it.page == paragraphPage.number && it.isBodyParagraph }
-        }
         val activeColSession = activeAskCollection?.let { sessionForCollection(it.id) } ?: CollectionQaSessionState()
         fun submitCollectionQuestion(rawQuestion: String) {
             val col = activeAskCollection ?: return
@@ -1828,13 +1844,21 @@ internal fun TextbookReader(
         }
         val askTabContent: @Composable () -> Unit = {
             val isCollectionAsk = activeAskCollection != null && activeColSession.scope == CollectionAskScope.COLLECTION
+            val currentPageBodyBlocks = remember(book, paragraphPage.number, readingAnchor, visibleScreenSlices) {
+                selectScreenExplainBlocks(book, paragraphPage.number, readingAnchor.offsetUtf16, visibleScreenSlices)
+            }
+            val visibleThread = inlineThread?.takeIf { thread ->
+                thread.askingOpen || visibleScreenSlices == null || visibleScreenSlices.any { range ->
+                    thread.selection.page == paragraphPage.number && thread.selection.start in range
+                }
+            }
             CompanionAskPane(
                 book = book,
                 allBlocks = allBookBlocks,
                 pageBlocks = currentPageBodyBlocks,
                 activeSelection = learnableSelection,
                 currentSection = currentSection,
-                thread = inlineThread,
+                thread = visibleThread,
                 draft = inlineDraft,
                 compact = effectiveBottomSheet,
                 onDraftChange = { changeAskDraft(it) },
@@ -1849,17 +1873,16 @@ internal fun TextbookReader(
                         submitCollectionQuestion(inlineDraft)
                     } else {
                         val q = inlineDraft.trim()
-                        val target = inlineThread?.selection ?: learnableSelection
+                        val target = visibleThread?.selection ?: learnableSelection
                             ?: currentPageBodyBlocks.firstOrNull()
-                            ?: currentSection?.blocks?.firstOrNull { !it.heading && it.text.isNotBlank() }
-                            ?: allBookBlocks.firstOrNull { it.page == ui.page && it.text.isNotBlank() }
                         if (target != null && BookPassageQuestion.accepts(q)) {
-                            runInlineSelection(target, SelectionExplainAction.ASK, q)
+                            runInlineSelection(target, SelectionExplainAction.ASK, q,
+                                currentPageBodyBlocks.takeIf { visibleThread == null && learnableSelection == null })
                         }
                     }
                 },
                 onRetry = {
-                    val target = inlineThread?.selection ?: return@CompanionAskPane
+                    val target = visibleThread?.selection ?: return@CompanionAskPane
                     val (act, q) = lastInlineAction ?: (SelectionExplainAction.EXPLAIN to null)
                     runInlineSelection(target, act, q)
                 },
@@ -1968,7 +1991,7 @@ internal fun TextbookReader(
                     MarginWhisperStrip(
                         whisper = whisper,
                         onExpandCompanion = {
-                            companionOpen = true
+                            openReadingCompanion()
                             companionTab = ReaderCompanionTab.EXPLAIN
                         },
                         onJumpAnchorPage = { target -> turnTo(target) },
@@ -2294,11 +2317,25 @@ internal fun TextbookReader(
         }
 
         // 7. 顶部浮动工具栏（44dp，默认隐藏，悬停/Tab 呼出）。
+        val frontMatterTitle = remember(navigationBook, readingAnchor, activeTocNode, textView,
+            pageUnrecognizedOriginal, paging.pages, paging.columns) {
+            if (activeTocNode != null) return@remember null
+            // An image-only cover may share a spread with the opening notice on the right.
+            val headerAnchor = if (textView && !pageUnrecognizedOriginal && book.page(readingAnchor.importPage)?.text.isNullOrBlank()) {
+                val first = paging.index
+                (first until first + paging.columns).asSequence()
+                    .flatMap { paging.pages.getOrNull(it)?.sources.orEmpty().asSequence() }
+                    .firstOrNull { it.endUtf16 > it.startUtf16 }
+                    ?.let { BookPageAnchor(it.importPage, it.startUtf16) } ?: readingAnchor
+            } else readingAnchor
+            BookBoundaries.unlistedFrontMatterTitle(navigationBook, headerAnchor)
+        }
         ImmersiveTopHud(
             visible = showHud,
             availableWidth = maxWidth,
             bookTitle = book.title,
-            sectionTitle = if (source != null) "出处 · ${source.title}" else activeTocNode?.title ?: effectiveChapterSpan?.title ?: currentSection?.title,
+            sectionTitle = if (source != null) "出处 · ${source.title}" else
+                activeTocNode?.title ?: frontMatterTitle ?: effectiveChapterSpan?.title ?: currentSection?.title,
             backLabel = when {
                 ui.canReturnToCitationOrigin -> "返回引用前的位置"
                 source != null && ui.review != null -> "返回复习"
@@ -2324,7 +2361,7 @@ internal fun TextbookReader(
             },
             onToggleBookmark = { toggleBookmark(ui.page) },
             onToggleCompanion = {
-                if (companionOpen) closeCompanion() else companionOpen = true
+                if (companionOpen) closeCompanion() else openReadingCompanion()
             },
             onTogglePinHud = {
                 hudPinned = !hudPinned
@@ -2347,7 +2384,7 @@ internal fun TextbookReader(
                                 activeCheckpoint = null
                                 closeCompanion()
                             } else if (modeSwitched) {
-                                companionOpen = true
+                                openReadingCompanion()
                                 companionTab = ReaderCompanionTab.EXPLAIN
                             }
                         },

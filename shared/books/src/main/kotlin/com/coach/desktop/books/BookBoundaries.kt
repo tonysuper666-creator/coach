@@ -201,13 +201,30 @@ internal object BookBoundaries {
         return false
     }
 
+    /** A publisher's opening notice can share an imported page with the first real TOC entry. */
+    fun unlistedFrontMatterTitle(book: Textbook, anchor: BookPageAnchor): String? {
+        val page = book.page(anchor.importPage) ?: return null
+        val heading = page.text.lineSequence().map { it.trim().trimStart('#').trim() }.firstOrNull { it.isNotEmpty() }
+            ?: return null
+        if (heading.startsWith("The Project Gutenberg eBook of ", ignoreCase = true)) {
+            val separator = gutenbergStartLine.find(page.text)
+            if (separator != null && anchor.offsetUtf16 <= separator.range.last) return "授权页"
+        }
+        val role = book.structure?.pageRole(page.number)
+        if (nonBodyHeading.matches(heading)) return heading
+        if (role == BookPageRole.FRONT_MATTER && heading.length <= 100 &&
+            BookTocWaterfall.classifyOutlineLabel(heading).kind == TocNodeKind.FRONT_MATTER
+        ) return heading
+        return if (role == BookPageRole.COPYRIGHT) "版权页" else null
+    }
+
     fun runningHeaderTitle(book: Textbook, page: BookLaidPage, preferredNodeId: String? = null): String {
         val anchor = page.anchor
         val pageText = book.page(anchor.importPage)?.text
         val node = activeTocNode(book.tocNodes, anchor.importPage, anchor.offsetUtf16, preferredNodeId, pageText)
         if (node != null) return node.title
         val cleanPageTitle = page.title?.takeUnless(::looksLikeBoilerplateHeader)
-        return cleanPageTitle.orEmpty()
+        return unlistedFrontMatterTitle(book, anchor) ?: cleanPageTitle.orEmpty()
     }
 
     private val nonBodyHeading = Regex(

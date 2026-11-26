@@ -1029,7 +1029,7 @@ internal fun CompanionAskPane(
     val quoteSource = thread?.selection ?: activeSelection
     val isCollectionMode = collectionScopeLabel != null && askScope == CollectionAskScope.COLLECTION
     val isLoadingNow = if (isCollectionMode) collectionLoading else (thread?.loading == true)
-    val canSendNow = draft.isNotBlank()
+    val canSendNow = draft.isNotBlank() && (isCollectionMode || quoteSource != null || pageBlocks.isNotEmpty())
     val askFocus = remember { FocusRequester() }
     LaunchedEffect(askScope, quoteSource?.id) {
         withFrameNanos { }
@@ -1089,7 +1089,8 @@ internal fun CompanionAskPane(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    currentSection?.let { "围绕「${it.title}」提问，或先选中一段原文。" }
+                    pageBlocks.firstOrNull()?.let { "引文 · ${shortQuote(it.text)}" }
+                        ?: currentSection?.let { "围绕「${it.title}」提问，或先选中一段原文。" }
                         ?: "选中一段原文，或直接就当前页提问。",
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.fgSecondary,

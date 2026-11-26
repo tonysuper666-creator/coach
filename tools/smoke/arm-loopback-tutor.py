@@ -151,14 +151,49 @@ class Tutor(BaseHTTPRequestHandler):
         book = path[len(prefix):path.index(marker)]
         return book == self.server.digest
 
-    def do_GET(self):
-        # The reader treats a missing friend status as offline and will not send the
-        # selection. 2xx-4xx on this probe is enough to keep explain and ask online.
+    def _log_probe(self, status):
         path = self.path.split("?", 1)[0]
-        if path not in ("/v1/public/status", "/v1/hello"):
+        try:
+            with self.server.events.open("a", encoding="utf-8") as log:
+                log.write(json.dumps({
+                    "kind": "probe", "method": self.command, "path": path, "status": status,
+                }, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+    def do_GET(self):
+        # Isolated COACH_TOKEN_FILE credentials are role owner. Every few seconds the
+        # desktop decodes GET /v1/hello as a Hello and, on a decode failure, marks the
+        # loopback offline. The ask sheet then shows the offline notice and the thread
+        # collapses to the citation line, so the answer sentence never paints.
+        # A friend probe reads unifiedBooks on /v1/public/status. Either body keeps
+        # the reader online; a bare {"ok":true} does not survive Hello decoding.
+        path = self.path.split("?", 1)[0]
+        if path == "/v1/hello":
+            body = {
+                "epoch": "arm-smoke",
+                "lastSeq": 0,
+                "backedUpThroughSeq": 0,
+                "lastSeqBefore": 0,
+                "protocol": 1,
+                "serverTime": 0,
+                "agentRunsSupported": False,
+                "unifiedBooksSupported": True,
+            }
+        elif path == "/v1/public/status":
+            body = {
+                "ok": True,
+                "online": True,
+                "unifiedBooks": True,
+                "unifiedBooksSupported": True,
+                "accountScope": "arm-smoke",
+            }
+        else:
+            self._log_probe(404)
             self.send_error(404)
             return
-        encoded = b'{"ok":true}'
+        encoded = json.dumps(body).encode()
+        self._log_probe(200)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))

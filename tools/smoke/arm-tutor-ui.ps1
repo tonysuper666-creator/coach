@@ -1039,9 +1039,13 @@ function Test-PassageQuestion {
     Send-Keys '{ENTER}'
     # The loopback answer is 「这段先用自己的话讲，再和原文核对。」.
     # kind=ask in the event log is not enough: this sentence has to be on screen.
+    # The sentence is painted above its citation. A one-line thread shows only the
+    # citation, and wheeling the page (or downward) never brings the sentence in.
+    # Wait for the reply to land, then wheel the thread strip upward.
     $answer = $null
     $deadline = (Get-Date).AddSeconds(25)
     $scrolls = 0
+    $askedAt = Get-Date
     do {
         $shot = @(Read-TutorFrame '04-answer')
         foreach ($label in @('自己的话', '再和原文核对')) {
@@ -1049,7 +1053,14 @@ function Test-PassageQuestion {
             if ($answer) { break }
         }
         if ($answer) { break }
-        if ($scrolls -lt 6) { Scroll-TutorView -2; $scrolls++ }
+        $waited = ((Get-Date) - $askedAt).TotalSeconds
+        if ($scrolls -lt 6 -and $waited -ge 2) {
+            $citeLine = Find-Text $shot '出处'
+            $at = Get-Rect
+            $y = if ($citeLine) { [int]$citeLine.Y } else { [int](($at.B - $at.T) * 0.62) }
+            Scroll-At ([int](($at.R - $at.L) * 0.50)) $y 2
+            $scrolls++
+        }
         Start-Sleep -Milliseconds 500
     } while ((Get-Date) -lt $deadline)
     if (-not $answer) { throw '本题回答没有出现在屏幕上（要看到「自己的话」或「再和原文核对」，见 04-answer）' }
@@ -1057,9 +1068,15 @@ function Test-PassageQuestion {
     $cite = $null
     foreach ($pass in 1..4) {
         $frame = @(Read-TutorFrame "07-answer-cite$pass")
+        foreach ($label in @('自己的话', '再和原文核对')) {
+            $again = Find-Text $frame $label
+            if ($again) { $answer = $again; break }
+        }
         $cite = Find-AnswerCite $frame $answer.Y
         if ($cite -and $cite.Page -and $cite.Hit.Y -ge ($answer.Y - 8)) { break }
-        Scroll-TutorView -2
+        # The citation is the line under the sentence. Wheel that strip downward.
+        $at = Get-Rect
+        Scroll-At ([int](($at.R - $at.L) * 0.50)) ([int]$answer.Y) -2
         Start-Sleep -Milliseconds 400
     }
     if (-not $cite -or -not $cite.Page -or $cite.Hit.Y -lt ($answer.Y - 8)) {

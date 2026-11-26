@@ -77,7 +77,7 @@ class FriendApiOnly(SubscriptionOnly):
             raise ValueError("Explicit friend reader request required")
         if headers.get(b"x-coach-task") == b"READER_SELECTION":
             return False
-        if (headers.get(b"x-coach-task") == b"literature_guide" and
+        if (headers.get(b"x-coach-task") in {b"literature_guide", b"literature_quiz"} and
                 body["model"] == "claude-haiku-5-5" and body.get("stream", False) is False and
                 headers.get(b"x-coach-background") == b"1" and
                 headers.get(b"x-coach-format-attempt") == b"0" and

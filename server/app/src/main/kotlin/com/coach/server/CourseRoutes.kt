@@ -32,6 +32,7 @@ internal fun Route.courseRoutes(
     literatureGuide: LiteratureGuideService? = null,
     literatureComparison: LiteratureComparisonService? = null,
     examPointDrills: ExamPointDrillPipeline? = null,
+    literatureQuiz: LiteratureQuizService? = null,
 ) {
     val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -129,6 +130,7 @@ internal fun Route.courseRoutes(
                 val kind = (input["kind"] as? JsonPrimitive)?.content
                 val guide = kind == "literatureGuide"
                 val comparison = kind == "literatureComparison"
+                val quiz = kind == "literatureQuiz"
                 val body = when {
                     guide -> {
                         val service = literatureGuide ?: throw MockError(HttpStatusCode.ServiceUnavailable, "文献导读暂未开启。")
@@ -142,6 +144,12 @@ internal fun Route.courseRoutes(
                         if (!current()) throw MockError(HttpStatusCode.Conflict, "材料或设备授权已失效。")
                         result
                     }
+                    quiz -> {
+                        val service = literatureQuiz ?: throw MockError(HttpStatusCode.ServiceUnavailable, "文献选择题暂未开启。")
+                        val result = service.generate(input, cacheScope, friend, device)
+                        if (!current()) throw MockError(HttpStatusCode.Conflict, "材料或设备授权已失效。")
+                        result
+                    }
                     else -> (topicPipeline ?: throw MockError(HttpStatusCode.ServiceUnavailable, "专题合成服务暂未开启，请稍后重试。")).generateTopicPack(
                         input = input,
                         cacheScope = cacheScope,
@@ -151,9 +159,9 @@ internal fun Route.courseRoutes(
                         device = device,
                     )
                 }
-                val grounded = guide || comparison
-                if (friend != null && (!grounded || body["pending"] == null)) withContext(Dispatchers.IO) {
-                    try { friends!!.record(friend, device, requestId, "complete", body.takeUnless { grounded }, diagnostics) }
+                val withheld = guide || comparison || quiz
+                if (friend != null && (!withheld || body["pending"] == null)) withContext(Dispatchers.IO) {
+                    try { friends!!.record(friend, device, requestId, "complete", body.takeUnless { withheld }, diagnostics) }
                     catch (_: Exception) { throw FriendServiceError() }
                 }
                 call.respondText(body.toString(), ContentType.Application.Json)

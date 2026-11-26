@@ -360,6 +360,13 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         return callCourseEndpoint { http -> withBusyRetry(stillCurrent = { identity == paired }) { http.examPointDrill(input) } }
     }
 
+    /**
+     * Literature quizzes share the topic-pack endpoint, but must not dispatch through [courseTopicPack].
+     * Window tests override that method; calling it here would count a quiz as another one-pager request.
+     */
+    open suspend fun literatureQuiz(input: JsonObject): CourseServerCallResult =
+        callCourseEndpoint { http -> http.courseTopicPack(input) }
+
     open suspend fun courseVision(input: JsonObject): CourseServerCallResult =
         callCourseEndpoint { http -> http.courseVision(input) }
 

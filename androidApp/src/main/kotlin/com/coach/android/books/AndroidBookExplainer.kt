@@ -465,6 +465,8 @@ internal class BookExplainer(private val library: TextbookLibrary? = null) {
     suspend fun examPointDrill(input: JsonObject): CourseServerCallResult =
         callCourseEndpoint { http -> http.examPointDrill(input) }
 
+    suspend fun literatureQuiz(input: JsonObject): CourseServerCallResult = courseTopicPack(input)
+
     suspend fun courseVision(input: JsonObject): CourseServerCallResult =
         callCourseEndpoint { http -> http.courseVision(input) }
 

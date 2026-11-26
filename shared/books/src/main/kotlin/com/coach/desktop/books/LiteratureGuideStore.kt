@@ -60,6 +60,14 @@ internal object LiteratureGuideStore {
      * but keep the questions the user wrote.
      */
     fun forgetBook(db: Connection, bookId: String) {
+        val digests = mutableListOf<String>()
+        db.prepareStatement(
+            "SELECT digest FROM literature_guides WHERE EXISTS (SELECT 1 FROM json_each(books) WHERE value=?)",
+        ).use {
+            it.setString(1, bookId)
+            it.executeQuery().use { rows -> while (rows.next()) digests += rows.getString(1) }
+        }
+        LiteratureQuizStore.dropDigests(db, digests)
         db.prepareStatement(
             """UPDATE literature_guides
                SET books=(SELECT json_group_array(value) FROM json_each(literature_guides.books) WHERE value<>?), result=NULL

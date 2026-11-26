@@ -75,6 +75,7 @@
     "course_essay_check": "course_essay_check",
     "literature_guide": "friend_batch",
     "literature_comparison": "friend_batch",
+    "literature_quiz": "friend_batch",
     "concept_sayings": "concept_sayings",
     "course_topic_map": "course_synthesis",
     "course_topic_reduce": "course_synthesis",

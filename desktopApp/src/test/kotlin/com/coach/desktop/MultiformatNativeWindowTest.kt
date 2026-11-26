@@ -85,6 +85,7 @@ class MultiformatNativeWindowTest {
                     val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
                     setBounds(screen.x + 20, screen.y + 20, minOf(1600, screen.width - 40), minOf(950, screen.height - 150))
                     setContent { WindowsTextbookHost(controller, bookExplainer = explainer) { null } }
+                    isAlwaysOnTop = true
                     isVisible = true
                 } }
                 var sourceFile = files.first()
@@ -116,6 +117,7 @@ class MultiformatNativeWindowTest {
                     val robot = Robot().apply { autoDelay = 40 }
                     for ((index, file) in files.withIndex()) {
                         NativeWindowForeground.action {
+                            NativeWindowForeground.activate(window)
                             edt { sourceFile = file; source.toFront() }
                             NativeWindowForeground.activate(source)
                             val from = edt { source.contentPane.locationOnScreen.apply { translate(80, 12) } }
@@ -124,6 +126,7 @@ class MultiformatNativeWindowTest {
                             robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
                             try {
                                 repeat(30) { step -> robot.mouseMove(from.x + (to.x - from.x) * (step + 1) / 30, from.y + (to.y - from.y) * (step + 1) / 30) }
+                                robot.delay(180)
                             } finally { robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK) }
                         }
                         waitFor("native drop ${file.fileName}; ${controller.state.value.error}") {
@@ -146,7 +149,11 @@ class MultiformatNativeWindowTest {
                         waitFor("local synthetic reply") { edt { requests.size == index + 1 } && node(window, "explain-citation") != null }
                         val block = edt { requests.last() }
                         val location = if (book.format == "pptx") book.pageLabel(block.page) else "阅读器第 ${block.page} 页"
-                        val citation = edt { node(window, "explain-citation")!!.config[SemanticsProperties.Text].joinToString("") { it.text } }
+                        val citation = edt {
+                            walk(checkNotNull(node(window, "explain-citation")))
+                                .flatMap { it.config.getOrNull(SemanticsProperties.Text).orEmpty() }
+                                .joinToString("") { it.text }
+                        }
                         assertContains(citation, location)
                         shot(window, dark, "${file.fileName}-reply")
                         assertFalse(sourceHighlighted(window, block))
@@ -165,8 +172,9 @@ class MultiformatNativeWindowTest {
         }
     }
 
+    private fun walk(node: SemanticsNode): List<SemanticsNode> = listOf(node) + node.children.flatMap(::walk)
+
     private fun nodes(window: ComposeWindow): List<SemanticsNode> {
-        fun walk(node: SemanticsNode): List<SemanticsNode> = listOf(node) + node.children.flatMap(::walk)
         val owners = window.semanticsOwners + ownedDialogs(window).flatMap { it.semanticsOwners }
         return owners.flatMap { walk(it.unmergedRootSemanticsNode) }
     }

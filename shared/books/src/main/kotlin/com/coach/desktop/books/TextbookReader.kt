@@ -1396,6 +1396,12 @@ internal fun TextbookReader(
                                         (change.position - p).getDistance() < 12f &&
                                         p.x in size.width * .3f..size.width * .7f &&
                                         p.y in size.height * .25f..size.height * .75f) {
+                                        // 安装包上 Home 能把视口带回第 1 页，但进不了阅读区的按键回调，工具条出不来。
+                                        // 这一下中心点击会到达这里（顶栏因此开合）。用它把当前页的词留下。
+                                        val word = book.homeSelectionWord(ui.page)
+                                        HomeSelectRequest.arm(book.id, word)
+                                        homeWordPinned = true
+                                        if (textView) textSelection = word
                                         hudVisible = !(hudVisible || hoverHudVisible)
                                         if (hudVisible) hudRevealedByTap = true else markHudDismissed()
                                     }

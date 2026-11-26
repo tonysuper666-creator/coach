@@ -90,14 +90,15 @@ internal data class BookLaidPage(
     }
 }
 
+internal fun BookPlacedVisual.containsAnchor(anchor: BookPageAnchor): Boolean {
+    if (item.page != anchor.importPage) return false
+    if (anchor.visualOrder == null) return replacement?.let { anchor.offsetUtf16 in it.startUtf16 until it.endUtf16 } == true
+    return item.order == anchor.visualOrder && item.anchorOffset == anchor.offsetUtf16 &&
+        (anchor.tableStartY == null || band == null || anchor.tableStartY in band.startY until band.endY)
+}
+
 internal fun List<BookLaidPage>.pageContaining(anchor: BookPageAnchor): Int {
-    val visual = indexOfFirst { page -> page.visuals.any { block ->
-        val item = block.item
-        item.page == anchor.importPage && (if (anchor.visualOrder != null)
-            item.anchorOffset == anchor.offsetUtf16 && item.order == anchor.visualOrder &&
-                (anchor.tableStartY == null || block.band == null || anchor.tableStartY in block.band.startY until block.band.endY)
-        else block.replacement?.let { anchor.offsetUtf16 in it.startUtf16 until it.endUtf16 } == true)
-    } }
+    val visual = indexOfFirst { page -> page.visuals.any { it.containsAnchor(anchor) } }
     if (visual >= 0) return visual
     return indexOfFirst { page -> page.sources.any {
         it.importPage == anchor.importPage && anchor.offsetUtf16 in it.startUtf16 until it.endUtf16

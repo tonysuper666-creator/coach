@@ -2032,6 +2032,7 @@ internal class TextbookLibrary(
             try {
                 BookFtsStore.deleteBook(db, bookId)
                 if (BookSchemaMigration.tableExists(db, "literature_guides")) LiteratureGuideStore.forgetBook(db, bookId)
+                if (BookSchemaMigration.tableExists(db, "literature_comparisons")) LiteratureComparisonStore.forgetBook(db, bookId)
                 for (table in listOf(
                     "pages", "book_illustrations", "book_page_text_boxes", "book_native_sources",
                     "book_learning_paths", "book_ladders", "book_reader_views", "book_pdf_modes",

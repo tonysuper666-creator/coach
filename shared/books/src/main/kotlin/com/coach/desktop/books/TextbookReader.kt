@@ -212,6 +212,7 @@ internal fun TextbookReader(
     val explainer = remember(library, explainProvider) { explainProvider ?: BookExplainer(library = library) }
     val explainConsent = remember(library) { ExplainConsent(library.directory) }
     val aiEnabled = LocalReadingAiExplain.current
+    val isOffline = LocalCoachConnectivity.current == CoachConnectivityStatus.OFFLINE
     var studyPreference by remember(book.id, courseContext?.courseId, courseContext?.examProfile?.isExam) {
         mutableStateOf(
             StudyModeStore.loadOrResolve(
@@ -317,14 +318,49 @@ internal fun TextbookReader(
         val sent = ExplainWire.selectionBlocks(target, secCtx)
         val question = questionText?.trim()?.takeIf { action == SelectionExplainAction.ASK && it.isNotEmpty() }
         var received = if (retry != null) existing.turns.lastOrNull()?.explanation?.text.orEmpty() else ""
-        val pending = existing.copy(turns = previous, pendingText = received, retryTurn = null, loading = true, error = null, fallbackBlocks = emptyList(), askingOpen = true, pendingLabel = label)
-        inlineThread = pending
+        val pending = existing.copy(
+            turns = previous,
+            pendingText = received,
+            retryTurn = null,
+            loading = true,
+            error = null,
+            fallbackBlocks = emptyList(),
+            askingOpen = true,
+            pendingLabel = label,
+        )
+        val offlineMessage = if (action == SelectionExplainAction.ASK) OfflineCopy.ASK_OFFLINE else OfflineCopy.EXPLAIN_OFFLINE
+        val offlineFallback = (listOf(target) + sent).distinctBy { it.page }
+        inlineThread = if (isOffline) {
+            existing.copy(
+                turns = previous,
+                pendingText = received,
+                retryTurn = retry,
+                loading = false,
+                error = offlineMessage to ExplainTrouble.Unreachable,
+                fallbackBlocks = offlineFallback,
+                askingOpen = true,
+                pendingLabel = null,
+            )
+        } else {
+            pending
+        }
         if (library.todayCardEnabled && action == SelectionExplainAction.ASK && !questionText.isNullOrBlank()) {
             editedAsk = true
             draftWriter.edit(BookAskDraft(book.id, target.page, questionText, pending.threadId,
                 target.id, target.start, target.end, null))
         }
         scope.launch {
+            if (isOffline) {
+                val uploadClient = explainer.unifiedUploadClient()
+                if (uploadClient != null) {
+                    val live = withContext(Dispatchers.IO) {
+                        runCatching { uploadClient.probeReachability() }.getOrDefault(CoachConnectivityStatus.OFFLINE)
+                    }
+                    if (live == CoachConnectivityStatus.OFFLINE) return@launch
+                    if (inlineRequest != request || inlineThread?.selection?.id != target.id) return@launch
+                    inlineThread = pending
+                }
+            }
             val attempt = try {
                 question?.let {
                     withContext(Dispatchers.IO) {
@@ -1838,8 +1874,38 @@ internal fun TextbookReader(
                 )
                 return
             }
-            updateCollectionSession(col.id, prev.copy(loading = true, error = null, fallbackPages = emptyList(), lastQuestion = q))
+            if (isOffline) {
+                updateCollectionSession(
+                    col.id,
+                    prev.copy(
+                        loading = false,
+                        error = OfflineCopy.COLLECTION_ASK_OFFLINE to ExplainTrouble.Unreachable,
+                        fallbackPages = emptyList(),
+                        lastQuestion = q,
+                    ),
+                )
+            } else {
+                updateCollectionSession(col.id, prev.copy(loading = true, error = null, fallbackPages = emptyList(), lastQuestion = q))
+            }
             scope.launch {
+                if (isOffline) {
+                    val uploadClient = explainer.unifiedUploadClient()
+                    if (uploadClient != null) {
+                        val live = withContext(Dispatchers.IO) {
+                            runCatching { uploadClient.probeReachability() }.getOrDefault(CoachConnectivityStatus.OFFLINE)
+                        }
+                        if (live == CoachConnectivityStatus.OFFLINE) return@launch
+                        updateCollectionSession(
+                            col.id,
+                            sessionForCollection(col.id).copy(
+                                loading = true,
+                                error = null,
+                                fallbackPages = emptyList(),
+                                lastQuestion = q,
+                            ),
+                        )
+                    }
+                }
                 val askNodeId = currentSection?.id ?: currentChapterSpan?.tocNodeId ?: "p${ui.page}"
                 val askName = currentSection?.title ?: currentChapterSpan?.title ?: "第 ${ui.page} 页"
                 withContext(Dispatchers.IO) {
@@ -1881,11 +1947,16 @@ internal fun TextbookReader(
                     },
                     onFailure = { err ->
                         val qaErr = err as? CollectionQaException
+                        val msg = when {
+                            qaErr?.trouble == ExplainTrouble.Unreachable -> OfflineCopy.COLLECTION_ASK_OFFLINE
+                            qaErr != null -> qaErr.message
+                            else -> err.message ?: "跨材料问答暂时不可用，请重试。"
+                        }
                         updateCollectionSession(
                             col.id,
                             latest.copy(
                                 loading = false,
-                                error = (qaErr?.message ?: err.message ?: "跨材料问答暂时不可用，请重试。") to (qaErr?.trouble ?: ExplainTrouble.Other),
+                                error = msg to (qaErr?.trouble ?: ExplainTrouble.Other),
                                 fallbackPages = qaErr?.fallbackPages.orEmpty(),
                             ),
                         )

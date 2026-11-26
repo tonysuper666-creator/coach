@@ -130,6 +130,7 @@ internal fun WindowsTextbookGate(
         }
         CompositionLocalProvider(LocalBookRelogin provides onRelogin) {
             key(paired.credentials.deviceId, paired.credentials.token) {
+                RememberDesktopLedgerRecovery(settings, paired)
                 content(paired)
             }
         }

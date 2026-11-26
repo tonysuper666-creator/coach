@@ -26,10 +26,14 @@ import com.coach.desktop.books.BookExplainer
 import com.coach.desktop.books.BookFormats
 import com.coach.desktop.books.BookImportToast
 import com.coach.desktop.books.BookScreen
+import com.coach.desktop.books.CoachConnectivityStatus
 import com.coach.desktop.books.CollectionKind
 import com.coach.desktop.books.CollectionSummary
 import com.coach.desktop.books.ExplainConsent
+import com.coach.desktop.books.HostOfflineBadge
 import com.coach.desktop.books.LocalBookHinge
+import com.coach.desktop.books.LocalCoachConnectivity
+import com.coach.desktop.books.LocalConnectivityPollMs
 import com.coach.desktop.books.LocalImportNoticeHandled
 import com.coach.desktop.books.LocalReadingFont
 import com.coach.desktop.books.ReadingSettings
@@ -98,6 +102,30 @@ internal fun WindowsTextbookHost(
     val scope = rememberCoroutineScope()
     val book = ui.book
     val hostExplainer = remember(controller.library, bookExplainer) { bookExplainer ?: BookExplainer(library = controller.library) }
+    val pollMs = LocalConnectivityPollMs.current
+    val connectivityClient = remember(controller, hostExplainer, hostExplainer.identity) {
+        controller.unifiedUploadClient ?: hostExplainer.unifiedUploadClient()
+    }
+    val registryFlow = remember(connectivityClient, hostExplainer.identity) {
+        connectivityClient?.connectivityFlow()
+    }
+    val registryStatus by (registryFlow?.collectAsState() ?: remember { mutableStateOf(CoachConnectivityStatus.UNKNOWN) })
+    var probedConnectivity by remember(connectivityClient) { mutableStateOf(CoachConnectivityStatus.UNKNOWN) }
+    val connectivity = if (registryStatus != CoachConnectivityStatus.UNKNOWN) registryStatus else probedConnectivity
+    LaunchedEffect(controller, connectivityClient, pollMs) {
+        val activeClient = connectivityClient ?: return@LaunchedEffect
+        while (true) {
+            val probed = runCatching { activeClient.probeReachability() }.getOrDefault(CoachConnectivityStatus.UNKNOWN)
+            val wasOffline = probedConnectivity == CoachConnectivityStatus.OFFLINE || registryStatus == CoachConnectivityStatus.OFFLINE
+            probedConnectivity = probed
+            if (probed == CoachConnectivityStatus.ONLINE &&
+                (wasOffline || controller.uploadCoordinator.hasPendingSyncWork())
+            ) {
+                runCatching { controller.syncBookUploads().join() }
+            }
+            delay(pollMs)
+        }
+    }
 
     val pickMultiple: suspend () -> List<Path> = remember(chooseBooks, chooseBook) {
         {
@@ -152,6 +180,7 @@ internal fun WindowsTextbookHost(
         val preferredScale = preferences.size.scale
         SideEffect { if (textScale.value != preferredScale) textScale.value = preferredScale }
         val colors = com.coach.ui.theme.CoachTheme.colors
+        CompositionLocalProvider(LocalCoachConnectivity provides connectivity) {
         Surface(
             Modifier.fillMaxSize()
                 .onPreviewKeyEvent { event ->
@@ -262,12 +291,14 @@ internal fun WindowsTextbookHost(
                         com.coach.desktop.books.LocalReadingSectionSummary provides preferences.sectionSummary,
                         com.coach.desktop.books.LocalReadingAiExplain provides preferences.aiExplain,
                         LocalBookHinge provides hinge,
+                        LocalCoachConnectivity provides connectivity,
                     ) {
                         if (hostTabletop != null) {
                             Column(Modifier.fillMaxSize()) {
                                 Column(Modifier.height(hostTabletop.topDp.dp).fillMaxWidth().testTag("book-host-tabletop-content")) {
                                     HostTopBar(
                                         showSearch = !isEmptyLibrary,
+                                        offline = connectivity == CoachConnectivityStatus.OFFLINE,
                                         onSearch = { searchOpen = true },
                                         onImport = ::importFromPicker,
                                         onNewCourse = { creatingKind = CollectionKind.COURSE },
@@ -298,6 +329,7 @@ internal fun WindowsTextbookHost(
                                 if (!deskPage) {
                                     HostTopBar(
                                         showSearch = !isEmptyLibrary,
+                                        offline = connectivity == CoachConnectivityStatus.OFFLINE,
                                         onSearch = { searchOpen = true },
                                         onImport = ::importFromPicker,
                                         onNewCourse = { creatingKind = CollectionKind.COURSE },
@@ -374,6 +406,7 @@ internal fun WindowsTextbookHost(
                 )
             }
         }
+        }
     }
 }
 
@@ -383,6 +416,7 @@ private val HostBarHeight = 48.dp
 @Composable
 private fun HostTopBar(
     showSearch: Boolean,
+    offline: Boolean = false,
     onSearch: () -> Unit,
     onImport: () -> Unit,
     onNewCourse: () -> Unit,
@@ -402,6 +436,10 @@ private fun HostTopBar(
             color = colors.fgPrimary,
             modifier = Modifier.testTag("host-brand"),
         )
+        if (offline) {
+            Spacer(Modifier.width(10.dp))
+            HostOfflineBadge()
+        }
         Spacer(Modifier.weight(1f))
         Row(
             horizontalArrangement = Arrangement.spacedBy(4.dp),

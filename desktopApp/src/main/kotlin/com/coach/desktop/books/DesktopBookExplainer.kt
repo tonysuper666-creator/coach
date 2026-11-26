@@ -6,12 +6,14 @@ import androidx.compose.runtime.setValue
 import com.coach.client.withReaderRetry
 import com.coach.client.CourseHttp
 import com.coach.client.MockReply
+import com.coach.client.ServerReachability
 import com.coach.client.UnifiedServerCapability
 import com.coach.desktop.DesktopConnectionSettings
 import com.coach.desktop.DesktopIdentity
 import com.coach.desktop.DesktopPairing
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import java.nio.file.Files
@@ -68,16 +70,33 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
     }
 
     suspend fun sable(open: suspend (String, String) -> Unit) {
-        identity = pairing.sable(open)
+        val signedIn = pairing.sable(open)
+        identity = signedIn
         revoked = false
+        CoachConnectivityRegistry.markOnline(signedIn.serverUrl)
     }
 
     open suspend fun pair(address: String, code: String): Boolean = try {
-        identity = withContext(Dispatchers.IO) { pairing.pair(address, code, "Windows 电脑") }
+        val signedIn = withContext(Dispatchers.IO) { pairing.pair(address, code, "Windows 电脑") }
+        identity = signedIn
         revoked = false
+        CoachConnectivityRegistry.markOnline(signedIn.serverUrl)
         true
     } catch (cancelled: CancellationException) { throw cancelled }
     catch (_: Exception) { false }
+
+    private fun newHttp(paired: DesktopIdentity): CourseHttp {
+        val timeoutMs = if (CoachConnectivityRegistry.isOffline(paired.serverUrl)) 1_200L else 3_000L
+        return CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library", timeoutMs)
+    }
+
+    private fun recordReplyConnectivity(serverUrl: String, reply: MockReply) {
+        if (reply.statusCode == null || reply.code == "offline") {
+            CoachConnectivityRegistry.markOffline(serverUrl)
+        } else {
+            CoachConnectivityRegistry.markOnline(serverUrl)
+        }
+    }
 
     private companion object {
         /** 原文页、答后讲解、选段提问各有一个 explainer；谁先碰到 401，其他的读到同一份凭据时也算停用。 */
@@ -155,7 +174,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         } else {
             ChapterCompanionFetchResult.Failed(ExplainTrouble.UNPAIRED, ExplainTrouble.Unpaired)
         }
-        val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library")
+        val http = newHttp(paired)
         return try {
             val snapshot = if (blocks.isNotEmpty()) {
                 withContext(Dispatchers.IO) { runCatching { imports?.snapshot(blocks) }.getOrNull() }
@@ -163,6 +182,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
             } else null
             val wire = if (snapshot != null) JsonObject(requestJson + ("localSource" to snapshot)) else requestJson
             val reply = http.companionChapter(wire)
+            recordReplyConnectivity(paired.serverUrl, reply)
             if (snapshot != null && withContext(Dispatchers.IO) { runCatching { imports?.snapshot(blocks) }.getOrNull() } != snapshot) {
                 return ChapterCompanionFetchResult.Failed("保存的原文已变化，请重新打开这本书后重试。")
             }
@@ -238,9 +258,10 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         } else {
             CourseServerCallResult(null, ExplainTrouble.UNPAIRED, ExplainTrouble.Unpaired)
         }
-        val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library")
+        val http = newHttp(paired)
         return try {
             val reply = block(http)
+            recordReplyConnectivity(paired.serverUrl, reply)
             val body = reply.body
             val isRevoked = reply.statusCode == 401 ||
                 (reply.statusCode == 403 && http.libraryAuthStatus() == 401)
@@ -257,7 +278,8 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            CourseServerCallResult(null, "连不上学习服务，已保留本地数据与草稿。")
+            CoachConnectivityRegistry.markOffline(paired.serverUrl)
+            CourseServerCallResult(null, OfflineCopy.EXPLAIN_OFFLINE, ExplainTrouble.Unreachable)
         } finally {
             http.close()
         }
@@ -265,9 +287,10 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
 
     open suspend fun alignBooklistConcepts(requestJson: JsonObject): JsonObject? {
         val paired = identity ?: return null
-        val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library")
+        val http = newHttp(paired)
         return try {
             val reply = http.alignBooklistConcepts(requestJson)
+            recordReplyConnectivity(paired.serverUrl, reply)
             if (reply.statusCode == 401) {
                 markRevoked()
                 null
@@ -275,6 +298,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
+            CoachConnectivityRegistry.markOffline(paired.serverUrl)
             null
         } finally {
             http.close()
@@ -299,7 +323,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         } else {
             ExplainResult.Refused(ExplainTrouble.UNPAIRED, ExplainTrouble.Unpaired)
         }
-        val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library")
+        val http = newHttp(paired)
         return try {
             val snapshot = withContext(Dispatchers.IO) { imports?.snapshot(context) }
             val kind = input["kind"]?.jsonPrimitive?.contentOrNull
@@ -324,6 +348,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
                     progress.received(checked.explanation.text)
                 }
             }
+            recordReplyConnectivity(paired.serverUrl, reply)
             if (snapshot != null && withContext(Dispatchers.IO) { imports!!.snapshot(context) } != snapshot)
                 return null to ExplainResult.Refused("保存的原文已变化，请重新打开这本书后重试。")
             val body = reply.body
@@ -378,22 +403,32 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
 
             override suspend fun checkCapability(): UnifiedBookCapability {
                 ensurePinned()
-                val http = CourseHttp(pinned.serverUrl, pinned.credentials.deviceId, pinned.credentials.token, "library")
+                val http = newHttp(pinned)
                 return try {
                     val cap = http.unifiedBooksCapability(pinned.credentials.role)
                     ensurePinned()
                     when (cap) {
-                        is UnifiedServerCapability.Supported -> UnifiedBookCapability.Supported(
-                            cap.accountScope ?: fallbackAccountKey,
-                        )
-                        is UnifiedServerCapability.Unsupported -> UnifiedBookCapability.Unsupported(
-                            cap.accountScope ?: fallbackAccountKey,
-                        )
+                        is UnifiedServerCapability.Supported -> {
+                            CoachConnectivityRegistry.markOnline(pinned.serverUrl)
+                            UnifiedBookCapability.Supported(
+                                cap.accountScope ?: fallbackAccountKey,
+                            )
+                        }
+                        is UnifiedServerCapability.Unsupported -> {
+                            CoachConnectivityRegistry.markOnline(pinned.serverUrl)
+                            UnifiedBookCapability.Unsupported(
+                                cap.accountScope ?: fallbackAccountKey,
+                            )
+                        }
                         UnifiedServerCapability.Unauthorized -> {
+                            CoachConnectivityRegistry.markOnline(pinned.serverUrl)
                             markRevoked()
                             UnifiedBookCapability.Unauthorized
                         }
-                        UnifiedServerCapability.Offline -> UnifiedBookCapability.Offline
+                        UnifiedServerCapability.Offline -> {
+                            CoachConnectivityRegistry.markOffline(pinned.serverUrl)
+                            UnifiedBookCapability.Offline
+                        }
                     }
                 } finally {
                     http.close()
@@ -413,7 +448,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
                 if (totalBytes <= 0L) {
                     return UnifiedBookUploadOutcome.Failed("这份教材是空文件，无法上传", retryable = false)
                 }
-                val http = CourseHttp(pinned.serverUrl, pinned.credentials.deviceId, pinned.credentials.token, "library")
+                val http = newHttp(pinned)
                 return try {
                     val reply = http.uploadUnifiedBook(totalBytes, format, title, sha256) { writeChunk ->
                         withContext(Dispatchers.IO) {
@@ -436,6 +471,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
                             }
                         }
                     }
+                    recordReplyConnectivity(pinned.serverUrl, reply)
                     ensurePinned()
                     val body = reply.body
                     when {
@@ -469,9 +505,10 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
 
             override suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome {
                 ensurePinned()
-                val http = CourseHttp(pinned.serverUrl, pinned.credentials.deviceId, pinned.credentials.token, "library")
+                val http = newHttp(pinned)
                 return try {
                     val reply = http.unifiedBookStatus(shelfBookId)
+                    recordReplyConnectivity(pinned.serverUrl, reply)
                     ensurePinned()
                     val body = reply.body
                     when {
@@ -500,9 +537,10 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
 
             override suspend fun deleteBook(shelfBookId: String): UnifiedBookDeleteOutcome {
                 ensurePinned()
-                val http = CourseHttp(pinned.serverUrl, pinned.credentials.deviceId, pinned.credentials.token, "library")
+                val http = newHttp(pinned)
                 return try {
                     val reply = http.deleteUnifiedBook(shelfBookId)
+                    recordReplyConnectivity(pinned.serverUrl, reply)
                     ensurePinned()
                     when {
                         reply.statusCode == 401 -> {
@@ -663,6 +701,33 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
 
         override suspend fun checkCapability(): UnifiedBookCapability =
             openSession()?.checkCapability() ?: UnifiedBookCapability.Unauthorized
+
+        override fun connectivityFlow(): StateFlow<CoachConnectivityStatus>? =
+            identity?.serverUrl?.let { CoachConnectivityRegistry.flowFor(it) }
+
+        override suspend fun probeReachability(): CoachConnectivityStatus {
+            val paired = currentIdentity() ?: return CoachConnectivityStatus.UNKNOWN
+            val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library", 1_500L)
+            return try {
+                when (http.probeReachability(paired.credentials.role, 1_500L)) {
+                    ServerReachability.ONLINE -> {
+                        CoachConnectivityRegistry.markOnline(paired.serverUrl)
+                        CoachConnectivityStatus.ONLINE
+                    }
+                    ServerReachability.UNAUTHORIZED -> {
+                        CoachConnectivityRegistry.markOnline(paired.serverUrl)
+                        markRevoked()
+                        CoachConnectivityStatus.ONLINE
+                    }
+                    ServerReachability.OFFLINE -> {
+                        CoachConnectivityRegistry.markOffline(paired.serverUrl)
+                        CoachConnectivityStatus.OFFLINE
+                    }
+                }
+            } finally {
+                http.close()
+            }
+        }
 
         override suspend fun uploadBook(
             file: Path,

@@ -1026,6 +1026,7 @@ internal fun CompanionAskPane(
     onOpenCollectionCitation: (CollectionQaCitation) -> Unit = {},
 ) {
     val colors = CoachTheme.colors
+    val offline = LocalCoachConnectivity.current == CoachConnectivityStatus.OFFLINE
     var pickingParagraph by remember(book.id, pageBlocks) { mutableStateOf(false) }
     val quoteSource = thread?.selection ?: activeSelection
     val isCollectionMode = collectionScopeLabel != null && askScope == CollectionAskScope.COLLECTION
@@ -1142,7 +1143,7 @@ internal fun CompanionAskPane(
                         )
                         HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.6f))
                     }
-                    if (collectionLoading) {
+                    if (collectionLoading && !offline) {
                         Text(
                             "正在跨材料核对原页…",
                             style = MaterialTheme.typography.bodySmall,
@@ -1216,7 +1217,7 @@ internal fun CompanionAskPane(
                             }
                             HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.6f))
                         }
-                        if (thread.loading) {
+                        if (thread.loading && (!offline || thread.pendingText.isNotBlank())) {
                             Column(Modifier.fillMaxWidth().testTag("inline-explain-pending"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 thread.pendingLabel?.takeIf { it.isNotBlank() }?.let {
                                     Text(it, style = MaterialTheme.typography.labelMedium, color = colors.actionPrimary)
@@ -1238,7 +1239,7 @@ internal fun CompanionAskPane(
                                     modifier = Modifier.weight(1f).testTag("inline-explain-error"),
                                 )
                                 if (trouble.needsPairing) TextButton(onClick = onOpenLogin) { Text("重新登录", maxLines = 1, softWrap = false) }
-                                else TextButton(onClick = onRetry) { Text("重试", maxLines = 1, softWrap = false) }
+                                else TextButton(onClick = onRetry, modifier = Modifier.testTag("inline-explain-retry")) { Text("重试", maxLines = 1, softWrap = false) }
                             }
                         }
                     }
@@ -1279,6 +1280,12 @@ internal fun CompanionAskPane(
             Text("问题太长，请缩短后发送", style = MaterialTheme.typography.labelSmall, color = colors.fgSecondary)
         } else if (!isCollectionMode && draft.trim().length > BookPassageQuestion.MAX_QUESTION_LENGTH) {
             Text("问题太长，请缩短后发送", style = MaterialTheme.typography.labelSmall, color = colors.fgSecondary)
+        }
+        if (offline) {
+            OfflineNeedsNetworkNotice(
+                message = if (isCollectionMode) OfflineCopy.COLLECTION_ASK_OFFLINE else OfflineCopy.ASK_OFFLINE,
+                tag = "companion-ask-offline-notice",
+            )
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(

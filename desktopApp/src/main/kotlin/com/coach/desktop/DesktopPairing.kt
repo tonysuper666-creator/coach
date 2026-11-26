@@ -4,6 +4,7 @@ import com.coach.client.DeviceAuthorizationException
 import com.coach.client.HttpLedgerTransport
 import com.coach.client.PairedCredentials
 import com.coach.client.PairingClient
+import com.coach.client.reachedCoachHttpStatus
 import com.coach.desktop.books.CoachConnectivityRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -75,8 +76,10 @@ internal class DesktopPairing(
                 if (!ok) store.clear(identity.serverUrl, identity.credentials, markRevoked = true)
                 ok
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) {
-                CoachConnectivityRegistry.markOffline(identity.serverUrl)
+            catch (error: Exception) {
+                // A reached HTTP status is not an offline client. Only a failed connection is.
+                if (reachedCoachHttpStatus(error)) CoachConnectivityRegistry.markOnline(identity.serverUrl)
+                else CoachConnectivityRegistry.markOffline(identity.serverUrl)
                 true
             }
             finally { client.close() }
@@ -93,8 +96,10 @@ internal class DesktopPairing(
             store.clear(identity.serverUrl, identity.credentials, markRevoked = true)
             false
         }
-        catch (_: Exception) {
-            CoachConnectivityRegistry.markOffline(identity.serverUrl)
+        catch (error: Exception) {
+            // hello() turns 401 into DeviceAuthorizationException. Any other HTTP status reached the server.
+            if (reachedCoachHttpStatus(error)) CoachConnectivityRegistry.markOnline(identity.serverUrl)
+            else CoachConnectivityRegistry.markOffline(identity.serverUrl)
             true
         }
         finally { transport.close() }

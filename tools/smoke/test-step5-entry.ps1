@@ -21,7 +21,7 @@
 #  - 第 2 步要见到首页书卡才算过：阅读器底栏读出页号、退回首页却没读到「读到第 / 上次停在」就明确失败；
 #  - 第 7 步出处那行解析不出页码时直接失败，不许跳过跳页断言后还 Pass 7；
 #  - 同一帧有两行出处时，要点解析出页码的那一行，不点更靠下的另一页；
-#  - 「讲解」页签只认和「提问」「批注」同一行的那颗，正文里的「讲解」不算；
+#  - 「讲解」页签认抽屉顶和「批注」同一行的那颗；选中的「提问」被漏识时仍算，正文里的「讲解」不算；
 #  - 跳页框的数字只认紧挨在「前往」左边的那一串，读到截断数字就不是目标页。
 # 函数体从 friend-path-worker.ps1 里按原文截取，屏幕与输入都换成本文件的假实现。
 $ErrorActionPreference = 'Stop'
@@ -540,6 +540,50 @@ Check 'jump-field-reads-digits-left-of-go' ((Get-JumpFieldText $jumpFull) -eq '1
 Check 'jump-field-reports-truncated-digits' ((Get-JumpFieldText $jumpShort) -eq '15') "got=$(Get-JumpFieldText $jumpShort)"
 Check 'jump-field-null-when-digits-unread' (-not (Get-JumpFieldText $jumpUnread)) "got=$(Get-JumpFieldText $jumpUnread)"
 Check 'jump-field-reads-merged-go-token' ((Get-JumpFieldText $jumpMerged) -eq '154') "got=$(Get-JumpFieldText $jumpMerged)"
+
+# 44. 整数页码要先收成字符串再逐位发送。直接在整数上拆字符会在第一位发出去之前失败。
+$script:sentKeys = New-Object System.Collections.ArrayList
+function Send-Keys([string]$keys) { [void]$script:sentKeys.Add($keys) }
+Send-PageDigits ([int]154)
+$sent = @($script:sentKeys) -join ','
+Check 'page-digits-send-1-then-5-then-4' ($sent -eq '1,5,4') "sent=$sent"
+
+# 45. 选中的「提问」被漏识时，落点仍是抽屉顶的「讲解」。长句里的「提问」、提问框和更靠下的正文「讲解」都不能抢走。
+$missedAsk = @(
+    (New-Line '讲解' 200 700 48 22),
+    (New-Line '批注' 280 700 48 22),
+    (New-Line '讲解' 1600 78 48 22),
+    (New-Line '学法：逐节精读' 1664 79 140 22),
+    (New-Line '批注' 1820 78 48 22),
+    (New-Line '收起伴读' 1900 78 80 22),
+    (New-Line '需要联网才能提问，已输入的问题已保留' 1600 200 360 24),
+    (New-Line '问这句的意思、公式推导或例子' 1600 420 280 24),
+    (New-Line '本节讲解' 400 640 80 24)
+)
+$missedHit = Find-CompanionTabLabel $missedAsk '讲解'
+Check 'explain-tab-at-drawer-top-when-ask-label-missed' ([bool]$missedHit -and $missedHit.X -eq 1624 -and $missedHit.Y -eq 89) "x=$($missedHit.X) y=$($missedHit.Y)"
+$askOutside = @(
+    (New-Line '讲解' 1600 78 48 22),
+    (New-Line '批注' 1664 78 48 22),
+    (New-Line '提问' 1800 78 48 22)
+)
+Check 'explain-tab-skips-row-when-ask-is-not-between' (-not (Find-CompanionTabLabel $askOutside '讲解')) 'ask label outside the row was accepted'
+
+# 46. 自动走查写入的临时身份必须带上角色。缺角色时客户端会按 owner 加载。
+$pairSrc = Get-Content -LiteralPath (Join-Path $repo 'tools/smoke/friend-service-winbox.ps1') -Raw -Encoding UTF8
+$fnStart = $pairSrc.IndexOf('function Format-PairedCredentials')
+$fnEnd = $pairSrc.IndexOf('# end Format-PairedCredentials', $fnStart)
+if ($fnStart -lt 0 -or $fnEnd -lt 0) { throw 'friend-service-winbox.ps1: Format-PairedCredentials not found' }
+. ([scriptblock]::Create($pairSrc.Substring($fnStart, $fnEnd - $fnStart)))
+$friendCred = Format-PairedCredentials 'http://127.0.0.1:9' 'device' ('a' * 43) 'friend'
+$friendLines = @($friendCred -split "`n" | Where-Object { $_ -ne '' })
+Check 'paired-credentials-write-friend-role' ($friendLines -contains 'role=friend') 'role line missing'
+Check 'paired-credentials-keep-server-device-token' (($friendLines.Count -eq 4) -and ($friendLines[0] -like 'server=*') -and ($friendLines[1] -like 'deviceId=*') -and ($friendLines[2] -like 'token=*')) 'credential lines changed'
+$ownerCred = Format-PairedCredentials 'http://127.0.0.1:9' 'device' ('b' * 43) 'owner'
+Check 'paired-credentials-write-owner-role' ((@($ownerCred -split "`n") -contains 'role=owner')) 'owner role missing'
+$rejected = $false
+try { Format-PairedCredentials 'http://127.0.0.1:9' 'device' ('c' * 43) '' } catch { $rejected = $true }
+Check 'paired-credentials-reject-blank-role' $rejected 'blank role was written'
 
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"

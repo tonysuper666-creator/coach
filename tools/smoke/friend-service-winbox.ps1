@@ -1,5 +1,10 @@
 # Called by friend-service.py pair --winbox. A fresh code arrives on stdin only.
 # No UI, book consent, learned state or quiz admission is changed.
+function Format-PairedCredentials([string]$Server, [string]$DeviceId, [string]$Token, [string]$Role) {
+    if ($Role -notin @('owner', 'friend')) { throw 'Pairing role required' }
+    "server=$Server`ndeviceId=$DeviceId`ntoken=$Token`nrole=$Role`n"
+}
+# end Format-PairedCredentials
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 try {
@@ -74,7 +79,7 @@ try {
         $private = Call-Service '/v1/hello'
         if ($private.status -ne 404) { throw 'Friend private path must be hidden' }
     }
-    Save-Private "$client/pairing/credentials.properties" ("server=$($inputConfig.url)`ndeviceId=$($paired.body.deviceId)`ntoken=$($paired.body.token)`n")
+    Save-Private "$client/pairing/credentials.properties" (Format-PairedCredentials $inputConfig.url $paired.body.deviceId $paired.body.token $paired.body.role)
     Save-Private "$client/pairing/server-url" $inputConfig.url
     $receipt = @{passed=$true; unauthenticated=401; paired=200; replay=401; authenticated=200;
         friendRole=($paired.body.role -eq 'friend'); privatePathHidden=($inputConfig.role -eq 'friend');

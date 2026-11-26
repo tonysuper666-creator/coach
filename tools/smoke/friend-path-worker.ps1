@@ -805,8 +805,9 @@ function Get-LineClick($line) {
     if ($b.X2 -lt $b.X1) { return $null }
     [pscustomobject]@{ X = [int](($b.X1 + $b.X2) / 2); Y = [int]$b.Y; X1 = $b.X1; X2 = $b.X2; Y1 = $b.Y1; Y2 = $b.Y2 }
 }
-# 伴读三个页签在同一行。OCR 会把它们拆成三行，正文里也会出现「讲解」。
-# 只认同一行里从左到右是「讲解 → 提问 → 批注」的那一组，返回其中 $label 的框。
+# 伴读页签在抽屉顶同一行。OCR 会把它们拆开，选中的「提问」有时整颗认丢，正文里也会出现「讲解」。
+# 认最靠上的一行：左边是短「讲解」，右边同一行有「批注」。认得到「提问」时它必须夹在两者中间；
+# 认不到就不挡这一行。长句里的「提问」和正文「讲解」都不是页签。
 function Find-CompanionTabLabel($lines, [string]$label, [int]$tol = 18) {
     $order = @('讲解', '提问', '批注')
     if ($label -notin $order) { return $null }
@@ -824,15 +825,20 @@ function Find-CompanionTabLabel($lines, [string]$label, [int]$tol = 18) {
             if ($present.Count -eq 1) { break }
         }
     }
-    foreach ($seed in @($cands | Where-Object { $_.Label -eq '讲解' })) {
+    $seeds = @($cands | Where-Object { $_.Label -eq '讲解' } | Sort-Object Y, X)
+    foreach ($seed in $seeds) {
         $row = @($cands | Where-Object { [Math]::Abs($_.Y - $seed.Y) -le $tol })
         $explain = @($row | Where-Object { $_.Label -eq '讲解' } | Sort-Object X | Select-Object -First 1)
         if (-not $explain.Count) { continue }
-        $ask = @($row | Where-Object { $_.Label -eq '提问' -and $_.X -gt $explain[0].X } | Sort-Object X | Select-Object -First 1)
-        if (-not $ask.Count) { continue }
-        $notes = @($row | Where-Object { $_.Label -eq '批注' -and $_.X -gt $ask[0].X } | Sort-Object X | Select-Object -First 1)
+        $notes = @($row | Where-Object { $_.Label -eq '批注' -and $_.X -gt $explain[0].X } | Sort-Object X | Select-Object -First 1)
         if (-not $notes.Count) { continue }
-        return @($row | Where-Object { $_.Label -eq $label } | Sort-Object X | Select-Object -First 1)[0]
+        $asks = @($row | Where-Object { $_.Label -eq '提问' })
+        if ($asks.Count) {
+            $between = @($asks | Where-Object { $_.X -gt $explain[0].X -and $_.X -lt $notes[0].X })
+            if (-not $between.Count) { continue }
+        }
+        $picked = @($row | Where-Object { $_.Label -eq $label } | Sort-Object X | Select-Object -First 1)
+        if ($picked.Count) { return $picked[0] }
     }
     return $null
 }
@@ -858,6 +864,13 @@ function Get-JumpFieldText($lines) {
     }
     if ($best) { return $best.Text }
     return $null
+}
+# 跳页框逐位送数字。先把页码收成字符串再拆开：直接在整数上调 ToCharArray 会在第一位发出去之前就失败。
+function Send-PageDigits([int]$page) {
+    foreach ($ch in ([string]$page).ToCharArray()) {
+        Send-Keys "$ch"
+        Start-Sleep -Milliseconds 160
+    }
 }
 
 $env:JAVA_HOME = 'C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot'; $env:GRADLE_USER_HOME = 'D:\agent\gradle-home'; $env:Path = "$env:JAVA_HOME\bin;$env:Path"
@@ -1186,10 +1199,7 @@ try {
         Start-Sleep -Milliseconds 150
         Send-Keys '{BACKSPACE}'
         Start-Sleep -Milliseconds 120
-        foreach ($ch in [string]$physPage.ToCharArray()) {
-            Send-Keys "$ch"
-            Start-Sleep -Milliseconds 160
-        }
+        Send-PageDigits $physPage
         Start-Sleep -Milliseconds 300
         $typedLines = Shot 4 $(if ($attempt -eq 1) { 'goto-typed' } else { "goto-typed$attempt" })
         $typedSeen = Get-JumpFieldText $typedLines
@@ -1747,15 +1757,15 @@ try {
         }
         if (-not $tab) { Fail 5 '点开顶栏「伴读」后抽屉头里仍读不到「讲解 / 提问 / 批注」页签（见 5-explain-tab*.png）' }
         # 抽屉会记住上次停的页签（第 7 步在「提问」上留过草稿），所以必须显式点回「讲解」。
-        # 正文和提问线程里也有「讲解」「讲的是」，不能拿它们当页签。只点同一行里
-        # 「讲解 / 提问 / 批注」从左到右排齐的那颗「讲解」。
+        # 正文和提问线程里也有「讲解」「讲的是」，不能拿它们当页签。点抽屉顶那一行的「讲解」：
+        # 同一行右边有「批注」。选中的「提问」被漏识时这一行仍然算数。
         # 提问框还在（「问这句的意思」）时，第一下常常只是让输入框失焦：先在同一落点再点一次，
         # 仍没切走才按新一帧的坐标往左挪一点。认不出页签行就停，不拿旧坐标猜。
         $askPlaceholder = '问这句的意思'
         $switched = $false
         foreach ($try in 1..3) {
             $hit = Find-CompanionTabLabel $lines '讲解'
-            if (-not $hit) { Fail 5 '抽屉头里读到了页签字，但没认成同一行的「讲解 / 提问 / 批注」（见 5-explain-tab*.png）' }
+            if (-not $hit) { Fail 5 '抽屉头里读到了页签字，但没在抽屉顶认到和「批注」同一行的「讲解」（见 5-explain-tab*.png）' }
             $tabX = [int]$hit.X; $tabY = [int]$hit.Y
             Note "步骤5 第 $try 次点「讲解」页签 ($tabX,$tabY)"
             Click-At $tabX $tabY
@@ -1768,7 +1778,7 @@ try {
             $lines = Shot 5 "explain-tab-retry$try"
             if (-not (Has $lines @($askPlaceholder))) { $switched = $true; break }
             $again = Find-CompanionTabLabel $lines '讲解'
-            if (-not $again) { Fail 5 '点了「讲解」仍停在「提问」，新一帧也没再认到页签行（见 5-explain-tab*.png）' }
+            if (-not $again) { Fail 5 '点了「讲解」仍停在「提问」，新一帧也没再认到抽屉顶的「讲解」（见 5-explain-tab*.png）' }
             $tabX = [Math]::Max(16, [int]$again.X - 8); $tabY = [int]$again.Y
             Note "步骤5 同一落点仍停在「提问」，按新帧往左补点 ($tabX,$tabY)"
             Click-At $tabX $tabY

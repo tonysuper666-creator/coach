@@ -264,6 +264,9 @@ internal fun BookPageView(
     } else null
     val paperBg = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
     var pointerActive by remember(state) { mutableStateOf(false) }
+    // The line grid is drawn scaled up from the top-left. A click on a glyph can land
+    // outside that smaller layout box, so the full-size page maps the point back through zoom.
+    val pageHit = remember(book.id) { ViewportWordHit() }
     BookPageViewport(
         modifier
             .fillMaxSize()
@@ -277,8 +280,9 @@ internal fun BookPageView(
                     }
                 }
             }
+            .viewportWordClick(pageHit)
             .testTag("book-page-layout"),
-        linePitchPx, topMargin,
+        linePitchPx, topMargin, onZoom = { pageHit.zoom = it },
     ) { maxWidth, maxHeight, viewportWidth ->
         val column = with(density) { (body.fontSize * (if (immersive) 38 else 33)).toDp() }
         val scrolling = readMode == BookReadMode.Scroll
@@ -533,6 +537,17 @@ internal fun BookPageView(
             val inset = if (isLast) rightInset + with(density) { extraPx.toDp() } else leftInset
             val rendered = remember(page) { mutableMapOf<Int, TextLayoutResult>() }
             val scale = sheetWidthPx.toFloat() / (sheetWidthPx + extraPx)
+            if (index == first) {
+                val hitInset = with(density) { inset.toPx() }
+                val hitTop = if (page?.opener == true) openerTopMarginPx else topMarginPx
+                SideEffect {
+                    pageHit.onClick = click@{ local ->
+                        val word = page?.selectionAt(book, local, hitInset, hitTop, rendered) ?: return@click false
+                        latestOnSelectText?.invoke(word)
+                        true
+                    }
+                }
+            }
             val sheetSpot = rememberUpdatedState { g: ReadingPointerGesture ->
                 state.anchor = spotAnchor(pages, index, spread, side, g.down, g.up, g.dragged,
                     sheetWidthPx.toFloat(), measurer, typography, widthPx, ::sheetScale) ?: state.anchor
@@ -648,6 +663,28 @@ private fun Modifier.fitMarkerMargin(extraPx: Int): Modifier = if (extraPx == 0)
     }
 }
 
+private class ViewportWordHit(var zoom: Float = 1f, var onClick: ((Offset) -> Boolean)? = null)
+
+/** A still mouse click anywhere on the scaled page selects the word under the visual point. */
+private fun Modifier.viewportWordClick(hit: ViewportWordHit): Modifier = pointerInput(hit) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        val touch = down.type == PointerType.Touch
+        var last = down.position
+        while (true) {
+            val event = awaitPointerEvent()
+            val change = event.changes.firstOrNull { it.id == down.id } ?: return@awaitEachGesture
+            last = change.position
+            if (!change.pressed) {
+                val still = (last - down.position).getDistance() <= viewConfiguration.touchSlop
+                val zoom = hit.zoom.coerceAtLeast(0.01f)
+                if (!touch && still && hit.onClick?.invoke(down.position / zoom) == true) change.consume()
+                break
+            }
+        }
+    }
+}
+
 /** Fit whole baselines under the header and above the progress line. Keep the physical
  * viewport width for column breakpoints and scale the glyphs and pointer targets together. */
 @Composable
@@ -655,6 +692,7 @@ private fun BookPageViewport(
     modifier: Modifier,
     linePitchPx: Int?,
     topMargin: Dp,
+    onZoom: (Float) -> Unit = {},
     content: @Composable BoxScope.(width: Dp, height: Dp, viewportWidth: Dp) -> Unit,
 ) {
     BoxWithConstraints(modifier) {
@@ -662,6 +700,7 @@ private fun BookPageViewport(
         val reservedPx = with(density) { topMargin.roundToPx() + 2.dp.roundToPx() }
         val rows = if (linePitchPx != null) (constraints.maxHeight - reservedPx) / linePitchPx else 0
         if (linePitchPx == null || rows < 8 || !constraints.hasBoundedHeight || !constraints.hasBoundedWidth) {
+            SideEffect { onZoom(1f) }
             content(maxWidth, maxHeight, maxWidth)
             return@BoxWithConstraints
         }
@@ -669,6 +708,7 @@ private fun BookPageViewport(
         val zoom = constraints.maxHeight.toFloat() / gridHeight
         val gridWidth = (constraints.maxWidth / zoom).roundToInt().coerceAtLeast(1)
         val viewportWidth = maxWidth
+        SideEffect { onZoom(zoom) }
         Box(Modifier.layout { measurable, bounds ->
             val page = measurable.measure(Constraints.fixed(gridWidth, gridHeight))
             layout(bounds.maxWidth, bounds.maxHeight) {

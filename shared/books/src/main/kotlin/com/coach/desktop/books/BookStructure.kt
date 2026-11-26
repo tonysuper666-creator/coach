@@ -14,6 +14,7 @@ internal enum class HeadingSource {
     WORD_STYLE,
     TOC_PAGE,
     HEADING_RULE,
+    TEXT_LAYOUT,
     TYPOGRAPHY,
     MODEL_HAIKU,
     FALLBACK_LENGTH,

@@ -234,7 +234,7 @@ internal object BookBoundaries {
         RegexOption.IGNORE_CASE,
     )
 
-    fun looksLikeFrontMatter(text: String): Boolean {
+    fun looksLikeFrontMatter(text: String, chapterTitle: String? = null): Boolean {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return true
         val lines = trimmed.lineSequence().map { it.trim().trimStart('#').trim() }.filter(String::isNotEmpty).toList()
@@ -242,6 +242,7 @@ internal object BookBoundaries {
         if (nonBodyHeading.matches(lines.first()) || ExplainClassifier.copyrightMarkerCount(trimmed) >= 2) return true
         val lower = trimmed.lowercase()
         if (trimmed.length < 1500 && listOf("isbn", "copyright", "all rights reserved", "版权所有", "图书在版编目").any { it in lower }) return true
+        if (chapterTitle != null && lines.any { it.equals(chapterTitle, ignoreCase = true) }) return false
         return lines.size <= 4 && trimmed.length < 140 && lines.none { chapterHeading.containsMatchIn(it) } &&
             '。' !in trimmed && trimmed.count { it == '.' } <= 1
     }

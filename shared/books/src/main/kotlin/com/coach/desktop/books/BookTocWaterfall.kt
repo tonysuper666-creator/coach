@@ -31,7 +31,7 @@ internal data class BookTocNode(
 )
 
 private val BookTocNode.usesSourceOffset: Boolean
-    get() = source == HeadingSource.EPUB_TOC || source == HeadingSource.MANUAL
+    get() = source == HeadingSource.EPUB_TOC || source == HeadingSource.MANUAL || source == HeadingSource.TEXT_LAYOUT
 
 /**
  * AI/study chunk (`book_study_chunks`) mapped onto a canonical TOC leaf node.
@@ -993,6 +993,51 @@ internal object BookTocWaterfall {
         }
     }
 
+    // In prose collections the unnumbered works can contain numbered chapters of their own.
+    // Require isolated titles separated by sustained prose; dense lists and verse are ambiguous.
+    private val isolatedHanTitle = Regex(
+        """(?:\A|\n[\t \p{Zs}]*\n)[\t \p{Zs}]*([\p{IsHan}a-zA-Z]{1,24})[\t \p{Zs}]*(?=\n[\t \p{Zs}]*\n|\n?\z)""",
+    )
+    private val subdivisionNumber = Regex("""[零〇一二三四五六七八九十百千两兩]+""")
+    private val localNoteLabel = setOf("注", "注释", "注釋", "注解", "註", "註釋", "附注", "附註")
+
+    private fun textCollectionHeadings(pages: List<BookPage>): List<RawCandidate> {
+        val found = mutableListOf<RawCandidate>()
+        val titles = mutableSetOf<String>()
+        var pageStart = 0
+        var lastTitle: Int? = null
+        var numberedChapterOwner: Int? = null
+        for (page in pages) {
+            val nestedHeadings = mutableSetOf<String>()
+            for (match in isolatedHanTitle.findAll(page.text)) {
+                val group = match.groups[1] ?: continue
+                val title = group.value
+                if (title.all { it.code < 128 } || title in localNoteLabel) continue
+                val label = classifyOutlineLabel(title)
+                if (label.kind != TocNodeKind.CHAPTER || label.isScaffoldNoise) continue
+                val numbered = label.numberLabel != null || subdivisionNumber.matches(title)
+                if (numbered) {
+                    if (titles.isEmpty()) return emptyList()
+                    if (!subdivisionNumber.matches(title)) {
+                        if (numberedChapterOwner != null && numberedChapterOwner != titles.size) return emptyList()
+                        numberedChapterOwner = titles.size
+                        nestedHeadings += title
+                    }
+                } else {
+                    val position = pageStart + group.range.first
+                    if (lastTitle != null && position - lastTitle < 400 || !titles.add(title)) return emptyList()
+                    lastTitle = position
+                }
+                val kind = if (numbered) TocNodeKind.SECTION else TocNodeKind.CHAPTER
+                found += RawCandidate(title, if (numbered) 2 else 1, page.number, null,
+                    HeadingSource.TEXT_LAYOUT, kind, group.range.first)
+            }
+            if (BookText.explicitHeadings(page.text).any { it.value.trim() !in nestedHeadings }) return emptyList()
+            pageStart += page.text.length
+        }
+        return if (titles.size >= 3) found else emptyList()
+    }
+
     private fun runStageC(
         bookId: String,
         pages: List<BookPage>,
@@ -1003,6 +1048,12 @@ internal object BookTocWaterfall {
         totalPages: Int,
         format: String,
     ): StageCResult {
+        if (format == "txt") {
+            val headings = textCollectionHeadings(pages)
+            if (headings.isNotEmpty()) {
+                return StageCResult(buildCanonicalNodes(bookId, totalPages, headings, 0.9), HeadingSource.TEXT_LAYOUT, 0.9)
+            }
+        }
         val bodyPages = pages.filter { (pageRoles[it.number] ?: BookPageRole.BODY) == BookPageRole.BODY }
         val activePages = if (bodyPages.isNotEmpty()) bodyPages else pages
         if (activePages.isEmpty()) return StageCResult(emptyList(), HeadingSource.FALLBACK_LENGTH, 0.0)

@@ -1095,14 +1095,15 @@ internal class TextbookLibrary(
                         val tier0End = minOf(3, totalPages)
                         for (pageNum in 1..tier0End) extractPage(pageNum)
                         val outlineStructure = BookTocWaterfall.buildTier0Structure(id, bookTitle, totalPages, outline)
-                        val outlineChapterPage = BookBoundaries.firstChapter(outlineStructure.tocNodes)?.startPage
-                        val probeStart = outlineChapterPage ?: 1
+                        val firstChapter = BookBoundaries.firstChapter(outlineStructure.tocNodes)
+                        val probeStart = firstChapter?.startPage ?: 1
                         val nextChapterPage = outlineStructure.tocNodes.firstOrNull {
                             it.kind == TocNodeKind.CHAPTER && it.startPage > probeStart
                         }?.startPage
                         val probeEnd = minOf(probeStart + 31, totalPages, (nextChapterPage ?: totalPages + 1) - 1)
                         val initialPage = (probeStart..probeEnd).firstOrNull { p ->
-                            !BookBoundaries.looksLikeFrontMatter(extractPage(p).text)
+                            val bookmarkTitle = firstChapter?.takeIf { it.startPage == p }?.title
+                            !BookBoundaries.looksLikeFrontMatter(extractPage(p).text, bookmarkTitle)
                         } ?: probeStart
                         for (p in initialPage..minOf(initialPage + 2, totalPages)) extractPage(p)
                         payloadReady = true

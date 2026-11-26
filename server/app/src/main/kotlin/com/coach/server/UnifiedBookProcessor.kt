@@ -2,11 +2,13 @@ package com.coach.server
 
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.io.MemoryUsageSetting
 import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException
 import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem
 import org.apache.pdfbox.text.PDFTextStripper
 import org.apache.poi.xwpf.usermodel.XWPFDocument
@@ -59,6 +61,7 @@ internal data class UnifiedBookArtifact(
     val source: String,
     val chapters: List<UnifiedBookChapter>,
     val pageRoles: Map<Int, String>,
+    val skippedPages: List<Int> = emptyList(),
     val totalChars: Long,
     val contentFingerprint: String,
 ) {
@@ -73,6 +76,7 @@ internal data class UnifiedBookArtifact(
         put("totalChars", totalChars)
         put("contentFingerprint", contentFingerprint)
         put("chapters", JsonArray(chapters.map { it.toJson() }))
+        put("skippedPages", JsonArray(skippedPages.map { JsonPrimitive(it) }))
         put(
             "pageRoles",
             buildJsonObject {
@@ -84,7 +88,7 @@ internal data class UnifiedBookArtifact(
     }
 
     companion object {
-        const val SCHEMA_VERSION = 2
+        const val SCHEMA_VERSION = 3
     }
 }
 
@@ -129,7 +133,8 @@ internal class DefaultUnifiedBookProcessor : UnifiedBookProcessor {
         val pages = extracted.pages.ifEmpty { listOf(RawPage(1, "")) }
 
         reportProgress(40, "正在整理目录与正文骨架")
-        val pageRoles = classifyPageRoles(pages)
+        val pageRoles = classifyPageRoles(pages).toMutableMap()
+        for (page in extracted.skippedPages) pageRoles[page] = "DAMAGED"
         val (source, outlineItems) = resolveOutline(pages, extracted.outline)
         val chapters = buildChapters(pages.size, outlineItems, source, title)
         val bodyStartPage = resolveBodyStartPage(pages, pageRoles, chapters, extracted.explicitBodyStartPage)
@@ -143,6 +148,10 @@ internal class DefaultUnifiedBookProcessor : UnifiedBookProcessor {
             digest.update(page.text.toByteArray(StandardCharsets.UTF_8))
             digest.update(0)
         }
+        for (page in extracted.skippedPages) {
+            digest.update("skipped:$page".toByteArray(StandardCharsets.UTF_8))
+            digest.update(0)
+        }
         val contentFingerprint = digest.digest().joinToString("") { "%02x".format(it) }
 
         return UnifiedBookArtifact(
@@ -154,6 +163,7 @@ internal class DefaultUnifiedBookProcessor : UnifiedBookProcessor {
             source = source,
             chapters = chapters,
             pageRoles = pageRoles,
+            skippedPages = extracted.skippedPages,
             totalChars = totalChars,
             contentFingerprint = contentFingerprint,
         )
@@ -163,24 +173,82 @@ internal class DefaultUnifiedBookProcessor : UnifiedBookProcessor {
         val pages: List<RawPage>,
         val outline: List<RawOutlineItem>,
         val explicitBodyStartPage: Int? = null,
+        val skippedPages: List<Int> = emptyList(),
     )
 
+    /**
+     * A page that cannot be read is recorded and skipped.
+     * The document is closed and opened again after that page, so the failure does not blank the pages after it.
+     */
     private fun extractPdf(file: Path): ExtractedBookContent {
-        val mem = MemoryUsageSetting.setupMixed(16L * 1024L * 1024L).streamCache
-        Loader.loadPDF(file.toFile(), mem).use { pdf ->
+        try {
+            return readPdf(file)
+        } catch (error: IllegalArgumentException) {
+            throw error
+        } catch (error: Exception) {
+            throw pdfOpenFailure(file, error)
+        }
+    }
+
+    private fun readPdf(file: Path): ExtractedBookContent {
+        val memory = MemoryUsageSetting.setupTempFileOnly().streamCache
+        var pdf = Loader.loadPDF(file.toFile(), memory)
+        try {
             val totalPages = pdf.numberOfPages
             require(totalPages in 1..MAX_PDF_PAGES) { "这本 PDF 的页数暂不支持。" }
-            val outline = extractPdfOutline(pdf)
-            val stripper = PDFTextStripper().apply { sortByPosition = true }
+            val outline = runCatching { extractPdfOutline(pdf) }.getOrElse { emptyList() }
             val pages = ArrayList<RawPage>(totalPages)
-            for (pageNum in 1..totalPages) {
-                stripper.startPage = pageNum
-                stripper.endPage = pageNum
-                val text = runCatching { stripper.getText(pdf) }.getOrDefault("").trim()
-                pages += RawPage(pageNum, text)
+            val skipped = ArrayList<Int>()
+            var pageNum = 1
+            while (pageNum <= totalPages) {
+                try {
+                    pages += RawPage(pageNum, pageText(pdf, pageNum))
+                    pageNum++
+                } catch (_: Exception) {
+                    skipped += pageNum
+                    pages += RawPage(pageNum, "")
+                    pageNum++
+                    pdf.close()
+                    if (pageNum <= totalPages) pdf = Loader.loadPDF(file.toFile(), memory)
+                }
             }
-            return ExtractedBookContent(pages = pages, outline = outline)
+            return ExtractedBookContent(pages = pages, outline = outline, skippedPages = skipped)
+        } finally {
+            runCatching { pdf.close() }
         }
+    }
+
+    private fun pageText(pdf: PDDocument, pageNum: Int): String {
+        val stripper = PDFTextStripper().apply {
+            sortByPosition = true
+            startPage = pageNum
+            endPage = pageNum
+        }
+        return stripper.getText(pdf).trim()
+    }
+
+    private fun pdfOpenFailure(file: Path, error: Exception): IllegalArgumentException {
+        if (causedByPassword(error)) {
+            return IllegalArgumentException("这本 PDF 有密码保护。请在本机去掉密码后再上传。", error)
+        }
+        val header = runCatching {
+            Files.newInputStream(file).use { it.readNBytes(5) }.toString(Charsets.ISO_8859_1)
+        }.getOrDefault("")
+        val message = if (header.startsWith("%PDF")) {
+            "这份 PDF 下到一半就断了，文件已损坏。请换一份完整的文件再导入。"
+        } else {
+            "这不是 PDF 文件。请换一份 PDF 再导入。"
+        }
+        return IllegalArgumentException(message, error)
+    }
+
+    private fun causedByPassword(error: Throwable?): Boolean {
+        var current = error
+        while (current != null) {
+            if (current is InvalidPasswordException) return true
+            current = current.cause
+        }
+        return false
     }
 
     /** Exact TON-1821 PDF bookmark walk with cycle guard (`BookPdfOutline.kt`). */

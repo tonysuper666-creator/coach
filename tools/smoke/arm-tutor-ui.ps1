@@ -314,33 +314,245 @@ function Send-ArmAbsolute([int]$screenX, [int]$screenY) {
     return [Arm.Drag]::Send(0xC001, $ax, $ay)
 }
 
+# Run 45781907707: absolute SendInput put the cursor on the left-page glyphs and
+# Compose still treated the gesture as a click. The reader already selects from a
+# touch long-press (hold still, then drag). Inject that. A relative SendInput
+# stroke is the fallback when injection is refused; absolute moves are not used
+# while the button is down.
+if (-not ('ArmTouch' -as [type])) {
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class ArmTouch {
+    public const uint Down = 0x00016006;
+    public const uint Update = 0x00026006;
+    public const uint Up = 0x00046002;
+    static bool ready;
+    static uint frame;
+    [StructLayout(LayoutKind.Explicit, Size = 144)]
+    public struct CONTACT {
+        [FieldOffset(0)] public uint pointerType;
+        [FieldOffset(4)] public uint pointerId;
+        [FieldOffset(8)] public uint frameId;
+        [FieldOffset(12)] public uint pointerFlags;
+        [FieldOffset(16)] public IntPtr sourceDevice;
+        [FieldOffset(24)] public IntPtr hwndTarget;
+        [FieldOffset(32)] public int ptPixelLocationX;
+        [FieldOffset(36)] public int ptPixelLocationY;
+        [FieldOffset(40)] public int ptHimetricLocationX;
+        [FieldOffset(44)] public int ptHimetricLocationY;
+        [FieldOffset(48)] public int ptPixelLocationRawX;
+        [FieldOffset(52)] public int ptPixelLocationRawY;
+        [FieldOffset(56)] public int ptHimetricLocationRawX;
+        [FieldOffset(60)] public int ptHimetricLocationRawY;
+        [FieldOffset(64)] public uint dwTime;
+        [FieldOffset(68)] public uint historyCount;
+        [FieldOffset(72)] public int InputData;
+        [FieldOffset(76)] public uint dwKeyStates;
+        [FieldOffset(80)] public ulong PerformanceCount;
+        [FieldOffset(88)] public int ButtonChangeType;
+        [FieldOffset(96)] public uint touchFlags;
+        [FieldOffset(100)] public uint touchMask;
+        [FieldOffset(104)] public int rcLeft;
+        [FieldOffset(108)] public int rcTop;
+        [FieldOffset(112)] public int rcRight;
+        [FieldOffset(116)] public int rcBottom;
+        [FieldOffset(120)] public int rawLeft;
+        [FieldOffset(124)] public int rawTop;
+        [FieldOffset(128)] public int rawRight;
+        [FieldOffset(132)] public int rawBottom;
+        [FieldOffset(136)] public uint orientation;
+        [FieldOffset(140)] public uint pressure;
+    }
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool InitializeTouchInjection(uint maxCount, uint dwMode);
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool InjectTouchInput(uint count, [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)] CONTACT[] contacts);
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
+    public static extern bool SpiInt(uint action, uint param, ref int value, uint ini);
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
+    public static extern bool SpiArr(uint action, uint param, int[] value, uint ini);
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
+    public static extern bool SpiPtr(uint action, uint param, IntPtr value, uint ini);
+    public static int Bytes() { return Marshal.SizeOf(typeof(CONTACT)); }
+    public static int Init() {
+        if (ready) return 1;
+        if (!InitializeTouchInjection(1, 3)) return -Marshal.GetLastWin32Error();
+        ready = true;
+        return 1;
+    }
+    public static int Send(uint flags, int x, int y, int buttonChange) {
+        CONTACT[] contacts = new CONTACT[1];
+        frame++;
+        contacts[0].pointerType = 2;
+        contacts[0].pointerId = 1;
+        contacts[0].frameId = frame;
+        contacts[0].pointerFlags = flags;
+        contacts[0].ptPixelLocationX = x;
+        contacts[0].ptPixelLocationY = y;
+        contacts[0].ptPixelLocationRawX = x;
+        contacts[0].ptPixelLocationRawY = y;
+        contacts[0].ButtonChangeType = buttonChange;
+        contacts[0].touchMask = 7;
+        contacts[0].rcLeft = x - 2;
+        contacts[0].rcTop = y - 2;
+        contacts[0].rcRight = x + 2;
+        contacts[0].rcBottom = y + 2;
+        contacts[0].rawLeft = x - 2;
+        contacts[0].rawTop = y - 2;
+        contacts[0].rawRight = x + 2;
+        contacts[0].rawBottom = y + 2;
+        contacts[0].orientation = 90;
+        contacts[0].pressure = 512;
+        if (!InjectTouchInput(1, contacts)) return -Marshal.GetLastWin32Error();
+        return 1;
+    }
+    public static int[] GetMouse() {
+        int[] v = new int[3];
+        if (!SpiArr(0x0003, 0, v, 0)) return null;
+        return v;
+    }
+    public static int SetMouse(int a, int b, int c) {
+        int[] v = new int[3];
+        v[0] = a; v[1] = b; v[2] = c;
+        if (!SpiArr(0x0004, 0, v, 0)) return -Marshal.GetLastWin32Error();
+        return 1;
+    }
+    public static int GetSpeed() {
+        int speed = 0;
+        if (!SpiInt(0x0070, 0, ref speed, 0)) return -Marshal.GetLastWin32Error();
+        return speed;
+    }
+    public static int SetSpeed(int speed) {
+        if (!SpiPtr(0x0071, (uint)speed, IntPtr.Zero, 0)) return -Marshal.GetLastWin32Error();
+        return 1;
+    }
+}
+'@
+}
+
+function Send-TutorTouchDrag([int]$sx1, [int]$sy1, [int]$sx2, [int]$sy2) {
+    $size = 0
+    $ready = 0
+    try {
+        $size = [ArmTouch]::Bytes()
+        $ready = [ArmTouch]::Init()
+    } catch {
+        Write-Output "TOUCHINIT fail $($_.Exception.Message)"
+        return $false
+    }
+    Write-Output "TOUCHINIT size=$size ptr=$([IntPtr]::Size) ready=$ready"
+    if ([IntPtr]::Size -ne 8 -or $size -ne 144 -or $ready -le 0) { return $false }
+    $down = [ArmTouch]::Send([ArmTouch]::Down, $sx1, $sy1, 1)
+    $hold = 0
+    $move = 0
+    $up = 0
+    try {
+        if ($down -gt 0) {
+            foreach ($i in 1..4) {
+                Start-Sleep -Milliseconds 180
+                $hold = [ArmTouch]::Send([ArmTouch]::Update, $sx1, $sy1, 0)
+                if ($hold -le 0) { break }
+            }
+            if ($hold -gt 0) {
+                foreach ($i in 1..12) {
+                    $x = [int]($sx1 + ($sx2 - $sx1) * $i / 12)
+                    $y = [int]($sy1 + ($sy2 - $sy1) * $i / 12)
+                    $move = [ArmTouch]::Send([ArmTouch]::Update, $x, $y, 0)
+                    if ($move -le 0) { break }
+                    Start-Sleep -Milliseconds 28
+                }
+            }
+        }
+    } finally {
+        if ($down -gt 0) { $up = [ArmTouch]::Send([ArmTouch]::Up, $sx2, $sy2, 2) }
+    }
+    Write-Output "TOUCHDRAG down=$down hold=$hold move=$move up=$up"
+    return ($down -gt 0 -and $hold -gt 0 -and $move -gt 0 -and $up -gt 0)
+}
+
+function Measure-TutorMickey {
+    $origin = Get-TutorCursor
+    $sent = [Arm.Drag]::Send(0x0001, 8, 0)
+    Start-Sleep -Milliseconds 40
+    $now = Get-TutorCursor
+    $dx = $now.X - $origin.X
+    [void](Send-ArmAbsolute $origin.X $origin.Y)
+    Start-Sleep -Milliseconds 40
+    if ($sent -le 0 -or $dx -eq 0) { return $null }
+    return [double]($dx / 8.0)
+}
+
+function Move-TutorByMickey([int]$tx, [int]$ty, [double]$scale, [int]$maxSteps) {
+    $steps = 0
+    if ($scale -le 0) { $scale = 1.0 }
+    while ($steps -lt $maxSteps) {
+        $c = Get-TutorCursor
+        $dx = $tx - $c.X
+        $dy = $ty - $c.Y
+        if ([Math]::Abs($dx) -le 2 -and [Math]::Abs($dy) -le 2) { break }
+        $px = $dx
+        $py = $dy
+        if ($px -gt 16) { $px = 16 } elseif ($px -lt -16) { $px = -16 }
+        if ($py -gt 16) { $py = 16 } elseif ($py -lt -16) { $py = -16 }
+        $mx = [int][Math]::Round($px / $scale)
+        $my = [int][Math]::Round($py / $scale)
+        if ($mx -eq 0 -and $dx -ne 0) { $mx = $(if ($dx -gt 0) { 1 } else { -1 }) }
+        if ($my -eq 0 -and $dy -ne 0) { $my = $(if ($dy -gt 0) { 1 } else { -1 }) }
+        $sent = [Arm.Drag]::Send(0x2001, $mx, $my)
+        if ($sent -le 0) { break }
+        $steps++
+        Start-Sleep -Milliseconds 20
+    }
+    return $steps
+}
+
+function Send-TutorRelativeDrag([int]$sx1, [int]$sy1, [int]$sx2, [int]$sy2) {
+    $saved = $null
+    $savedSpeed = 0
+    try {
+        $saved = [ArmTouch]::GetMouse()
+        $savedSpeed = [ArmTouch]::GetSpeed()
+        $flat = [ArmTouch]::SetMouse(0, 0, 0)
+        $spd = [ArmTouch]::SetSpeed(10)
+        Write-Output "RELCFG flat=$flat speed=$spd was=$savedSpeed"
+        Start-Sleep -Milliseconds 40
+    } catch {
+        Write-Output "RELCFG skip $($_.Exception.Message)"
+    }
+    try {
+        $park = Send-ArmAbsolute $sx1 $sy1
+        Start-Sleep -Milliseconds 40
+        $scale = Measure-TutorMickey
+        if (-not $scale) { $scale = 1.0 }
+        [void](Send-ArmAbsolute $sx1 $sy1)
+        Start-Sleep -Milliseconds 40
+        $down = [Arm.Drag]::Send(0x0002, 0, 0)
+        $steps = 0
+        try {
+            Start-Sleep -Milliseconds 50
+            $steps = Move-TutorByMickey $sx2 $sy2 $scale 28
+        } finally {
+            $up = [Arm.Drag]::Send(0x0004, 0, 0)
+        }
+        $end = Get-TutorCursor
+        Write-Output "RELDRAG park=$park scale=$scale down=$down steps=$steps up=$up end=$($end.X),$($end.Y) target=$sx2,$sy2"
+    } finally {
+        if ($saved -and @($saved).Count -ge 3) {
+            [void][ArmTouch]::SetMouse([int]$saved[0], [int]$saved[1], [int]$saved[2])
+        }
+        if ($savedSpeed -ge 1 -and $savedSpeed -le 20) { [void][ArmTouch]::SetSpeed([int]$savedSpeed) }
+    }
+}
+
 function Drag-TutorLine([int]$x1, [int]$y1, [int]$x2, [int]$y2, [string]$how) {
-    # Run 45777218529: SendInput moved the cursor onto the left-page glyphs and the
-    # toolbar still stayed down. Compose drops a primary-button event unless an earlier
-    # press set its button flag. mouse_event is that press (the click path already
-    # works). The move has to be SendInput, which is what actually reaches the cursor.
     Invoke-ForegroundStep -InjectsInput -Action {
         $r = Get-Rect
         $sx1 = $r.L + $x1; $sy1 = $r.T + $y1
         $sx2 = $r.L + $x2; $sy2 = $r.T + $y2
-        $park = Send-ArmAbsolute $sx1 $sy1
-        if ($park -le 0) { [void](Send-AbsoluteMove $sx1 $sy1) }
-        Start-Sleep -Milliseconds 60
-        [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
-        $move = 0
-        try {
-            Start-Sleep -Milliseconds 80
-            foreach ($i in 1..16) {
-                $x = [int]($sx1 + ($sx2 - $sx1) * $i / 16)
-                $y = [int]($sy1 + ($sy2 - $sy1) * $i / 16)
-                $move = Send-ArmAbsolute $x $y
-                Start-Sleep -Milliseconds 24
-            }
-        } finally {
-            [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
-        }
-        $end = Get-TutorCursor
-        Write-Output "DRAGMIX how=$how park=$park move=$move end=$($end.X),$($end.Y) target=$sx2,$sy2"
+        $touched = $false
+        if ($how -ne 'relative') { $touched = Send-TutorTouchDrag $sx1 $sy1 $sx2 $sy2 }
+        if (-not $touched) { Send-TutorRelativeDrag $sx1 $sy1 $sx2 $sy2 }
     }
 }
 
@@ -478,7 +690,7 @@ function Open-SelectionToolbar([string]$name) {
         $x2 = [Math]::Min($pageR, [int]$row.X2 - 8)
         if (($x2 - $x1) -lt 70) { throw "Ink line is too short to drag ($name x=$x1..$x2)" }
         $y = [int]$row.Y
-        $how = if ($drag -lt 3) { 'send' } else { 'message' }
+        $how = if ($drag -lt 3) { 'touch' } else { 'relative' }
         Write-Output "DRAG row $drag how=$how y=$y x=$x1..$x2"
         Drag-TutorLine $x1 $y $x2 $y $how
         foreach ($spin in 1..4) {

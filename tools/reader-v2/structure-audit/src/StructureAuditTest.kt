@@ -138,24 +138,80 @@ class StructureAuditTest {
     }
 
     @Test
-    fun headerExpectationUsesTheOutlineItemOfTheSameKind() {
+    fun headerExpectationIsTheOpenSourceEntryAndItsParents() {
         val adjusted = StructureAuditMain.adjustOutline(listOf(
             item("1 Why markets fail here", 32),
             item("1.1 Detail of the topic", 40, level = 2),
             item("Index", 90),
         ))
         assertEquals(
-            "1.1 Detail of the topic",
-            StructureAuditMain.expectedHeaderTitle(adjusted, 50, TocNodeKind.SECTION),
+            listOf("1.1 Detail of the topic", "1 Why markets fail here"),
+            StructureAuditMain.expectedHeaderTitles(adjusted, 50),
         )
-        assertEquals(
-            "1 Why markets fail here",
-            StructureAuditMain.expectedHeaderTitle(adjusted, 50, TocNodeKind.CHAPTER),
-        )
-        assertEquals("Index", StructureAuditMain.expectedHeaderTitle(adjusted, 90, TocNodeKind.BACK_MATTER))
+        assertEquals(listOf("Index"), StructureAuditMain.expectedHeaderTitles(adjusted, 90))
         val later = StructureAuditMain.adjustOutline(listOf(item("Index", 31, offset = 1360)))
-        assertEquals(null, StructureAuditMain.expectedHeaderTitle(later, 31, TocNodeKind.BACK_MATTER, 0))
-        assertEquals("Index", StructureAuditMain.expectedHeaderTitle(later, 31, TocNodeKind.BACK_MATTER, 1360))
+        assertEquals(emptyList<String>(), StructureAuditMain.expectedHeaderTitles(later, 31, 0))
+        assertEquals(listOf("Index"), StructureAuditMain.expectedHeaderTitles(later, 31, 1360))
+    }
+
+    private fun node(id: String, ordinal: Int, title: String, start: Int, end: Int, kind: TocNodeKind = TocNodeKind.CHAPTER) =
+        BookTocNode(id, null, ordinal, 1, kind, null, title, start, end, source = HeadingSource.PDF_OUTLINE)
+
+    /** The reader's page-start header for these nodes, as [BookBoundaries.runningHeaderTitle] resolves it. */
+    private fun readerHeader(nodes: List<BookTocNode>): (Int) -> String =
+        { page -> BookBoundaries.activeTocNode(nodes, page, 0)?.title.orEmpty() }
+
+    @Test
+    fun missingChapterProbeCountsTheStaleHeaderOnTheSecondPage() {
+        val source = StructureAuditMain.adjustOutline(listOf(
+            item("Chapter 1 Opening", 1),
+            item("Chapter 2 Later", 2),
+        ))
+        val missed = listOf(node("ch1", 0, "Chapter 1 Opening", 1, 2))
+        assertEquals(1, StructureAuditMain.scoreHeaders(source, listOf(1, 2), readerHeader(missed)))
+        val complete = listOf(
+            node("ch1", 0, "Chapter 1 Opening", 1, 1),
+            node("ch2", 1, "Chapter 2 Later", 2, 2),
+        )
+        assertEquals(0, StructureAuditMain.scoreHeaders(source, listOf(1, 2), readerHeader(complete)))
+    }
+
+    @Test
+    fun aPageThatOpensOnTheGutenbergEndLineBelongsToTheBackMatter() {
+        val pages = listOf(
+            BookPage(1, "Chapter 1 Opening\nMade-up text."),
+            BookPage(2, "*** END OF THE PROJECT GUTENBERG EBOOK EXAMPLE ***\n\nMade-up notice.\n\nLICENSE HEADING\n"),
+        )
+        val source = StructureAuditMain.backMatterFromGutenbergEnd(
+            StructureAuditMain.adjustOutline(listOf(
+                epub("Chapter 1 Opening", 1),
+                BookOutlineItem("LICENSE HEADING", 1, 2, HeadingSource.EPUB_TOC, 66),
+            )),
+            pages,
+        )
+        assertEquals(listOf("LICENSE HEADING"), StructureAuditMain.expectedHeaderTitles(source, 2))
+        val reader = listOf(
+            node("ch1", 0, "Chapter 1 Opening", 1, 1),
+            node("lic", 1, "LICENSE HEADING", 2, 2, TocNodeKind.BACK_MATTER),
+        )
+        assertEquals(1, StructureAuditMain.scoreHeaders(source, listOf(2)) { "Chapter 1 Opening" })
+        assertEquals(0, StructureAuditMain.scoreHeaders(source, listOf(1, 2)) { page -> if (page == 1) reader[0].title else reader[1].title })
+    }
+
+    @Test
+    fun aMissedIndexLeavesTheLastChapterHeaderWrong() {
+        val source = StructureAuditMain.adjustOutline(listOf(
+            item("1 Why markets fail here", 3),
+            item("1.1 Detail of the topic", 4, level = 2),
+            item("Index", 9),
+        ))
+        val missed = listOf(
+            node("ch1", 0, "1 Why markets fail here", 3, 9),
+            node("s11", 1, "1.1 Detail of the topic", 4, 9, TocNodeKind.SECTION),
+        )
+        // Page 5 may show the section or its chapter; page 9 must not keep the section.
+        assertEquals(0, StructureAuditMain.scoreHeaders(source, listOf(3, 5), readerHeader(missed)))
+        assertEquals(1, StructureAuditMain.scoreHeaders(source, listOf(9), readerHeader(missed)))
     }
 
     @Test

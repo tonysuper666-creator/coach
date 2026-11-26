@@ -137,15 +137,68 @@ object StructureAuditMain {
         }
     }
 
-    internal fun expectedHeaderTitle(
+    /**
+     * Titles a correct header may show at `(page, offset)`, read from the source outline alone:
+     * the last entry that has started, then each shallower entry still open above it.
+     * The software's own nodes are not consulted, so a header left on an earlier chapter
+     * because the software missed the next one is still counted wrong.
+     */
+    internal fun expectedHeaderTitles(
         adjusted: List<AdjustedOutline>,
         page: Int,
-        kind: TocNodeKind,
         offset: Int = 0,
-    ): String? =
-        adjusted.filter { row ->
-            row.kind == kind && (row.item.page < page || (row.item.page == page && row.item.startOffset <= offset))
-        }.maxWithOrNull(compareBy({ it.item.page }, { it.item.startOffset }))?.title
+    ): List<String> {
+        val started = adjusted.withIndex().filter { (_, row) ->
+            row.item.page < page || (row.item.page == page && row.item.startOffset <= offset)
+        }.sortedWith(compareBy({ it.value.item.page }, { it.value.item.startOffset }, { it.index }))
+        val chain = ArrayList<String>()
+        var level = Int.MAX_VALUE
+        for ((_, row) in started.asReversed()) {
+            if (row.item.level < level) {
+                chain += row.title
+                level = row.item.level
+            }
+        }
+        return chain
+    }
+
+    private val gutenbergEnd = Regex("""(?im)^\*{3}\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK\b[^\r\n]*$""")
+
+    /**
+     * In the source text the work ends at the Gutenberg END line, so the first back-matter entry
+     * after it opens there rather than at its own later heading. Read from the page text, not from software nodes.
+     */
+    internal fun backMatterFromGutenbergEnd(adjusted: List<AdjustedOutline>, pages: List<BookPage>): List<AdjustedOutline> {
+        val endPage = pages.firstOrNull { gutenbergEnd.containsMatchIn(it.text) } ?: return adjusted
+        val endOffset = gutenbergEnd.find(endPage.text)!!.range.first
+        val target = adjusted.indexOfFirst { row ->
+            row.kind == TocNodeKind.BACK_MATTER &&
+                (row.item.page > endPage.number || (row.item.page == endPage.number && row.item.startOffset >= endOffset))
+        }
+        if (target < 0) return adjusted
+        val opensLater = adjusted.any { row ->
+            row !== adjusted[target] && row.kind != TocNodeKind.BACK_MATTER &&
+                (row.item.page > endPage.number || (row.item.page == endPage.number && row.item.startOffset >= endOffset)) &&
+                (row.item.page < adjusted[target].item.page ||
+                    (row.item.page == adjusted[target].item.page && row.item.startOffset < adjusted[target].item.startOffset))
+        }
+        if (opensLater) return adjusted
+        return adjusted.mapIndexed { index, row ->
+            if (index != target) row
+            else row.copy(item = row.item.copy(page = endPage.number, startOffset = endOffset))
+        }
+    }
+
+    /** One count per sampled page: wrong when the shown header is not an open source entry at that page start. */
+    internal fun scoreHeaders(
+        adjusted: List<AdjustedOutline>,
+        pages: List<Int>,
+        headerAt: (Int) -> String,
+    ): Int = pages.count { page ->
+        val header = BookTocWaterfall.cleanTocTitle(headerAt(page))
+        val expected = expectedHeaderTitles(adjusted, page, 0).map(BookTocWaterfall::cleanTocTitle)
+        if (expected.isEmpty()) header.isNotEmpty() else header !in expected
+    }
 
     private fun shallowBand(items: List<BookOutlineItem>): NativeOutline? {
         if (items.isEmpty()) return null
@@ -373,7 +426,7 @@ object StructureAuditMain {
         heightPx = 0,
     )
 
-    /** Page-start header from [BookBoundaries.runningHeaderTitle], compared with the outline item of that same kind. */
+    /** Page-start header from [BookBoundaries.runningHeaderTitle], compared with the source outline at that page start. */
     private fun headerMismatches(
         book: Textbook,
         outline: List<BookOutlineItem>,
@@ -381,25 +434,17 @@ object StructureAuditMain {
         contentStart: Int?,
     ): HeaderScore {
         if (outline.isEmpty()) return HeaderScore(0, null, emptyMap())
-        val adjusted = adjustOutline(outline)
+        val adjusted = backMatterFromGutenbergEnd(adjustOutline(outline), book.pages)
         val lastPage = book.pages.lastOrNull()?.number ?: return HeaderScore(0, null, emptyMap())
         val start = (contentStart ?: adjusted.firstOrNull()?.item?.page ?: 1).coerceIn(1, lastPage)
         val chosen = samplePages(start, lastPage, sampleCount)
-        var wrong = 0
         val kinds = LinkedHashMap<String, Int>()
         for (page in chosen) {
-            val header = BookBoundaries.runningHeaderTitle(book, laidAt(page))
             val node = BookBoundaries.activeTocNode(book.tocNodes, page, 0, null, book.page(page)?.text)
             val kindName = node?.kind?.name ?: "NONE"
             kinds[kindName] = (kinds[kindName] ?: 0) + 1
-            val expected = node?.let { expectedHeaderTitle(adjusted, it.startPage, it.kind, it.startOffset) }
-            val mismatch = when {
-                expected == null && header.isEmpty() -> false
-                expected == null -> true
-                else -> BookTocWaterfall.cleanTocTitle(header) != BookTocWaterfall.cleanTocTitle(expected)
-            }
-            if (mismatch) wrong++
         }
+        val wrong = scoreHeaders(adjusted, chosen) { page -> BookBoundaries.runningHeaderTitle(book, laidAt(page)) }
         return HeaderScore(chosen.size, wrong, kinds)
     }
 

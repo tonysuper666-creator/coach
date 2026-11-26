@@ -12,7 +12,7 @@
 - `nativeBodyStart`：首章之前的导言页。没有导言时就是第一章。章前的无编号条目（序、版权、题记）不算正文。
 - `softwareBodyStart`：`BookBoundaries.bodyStart`。`softwareFirstChapter` 是软件目录里第一条 `CHAPTER` 的页。两列分开，不把早于首章的导言算错。
 - `firstOpenPage`：tier-1 之前保存的阅读页。
-- `headerWrong`：有首章时从首章抽到最后一页，否则从正文起抽，最多 10 页。每页用阅读器的 `runningHeaderTitle`（页首锚点），对照原大纲里同一种节点（章、节、篇或书末）的标题。对不上才算错。没有大纲时为 null。`headerKinds` 只记这几页各是哪种节点，不写标题。导言页不进这次抽样。
+- `headerWrong`：有首章时从首章抽到最后一页，否则从正文起抽，最多 10 页。每页用阅读器的 `runningHeaderTitle`（页首锚点），对照原大纲在这一页页首已开始的最近一条，以及它上层仍开着的条目（比如节和它所在的章），不看软件选了哪个节点。页眉是其中任何一个就算对；软件漏了章、页眉停在上一章，也算错。以 Gutenberg END 行开头的页归书末。没有大纲时为 null。`headerKinds` 只记这几页软件各落在哪种节点，不参与判错，也不写标题。导言页不进这次抽样。
 - `softwareChapters`：导入后目录里 `CHAPTER` 节点数，对应界面「共 N 章」。
 - `softwareTocNodes`：全部目录节点。章数正常但节点几百个时，看这个数。
 - `tocBodyMixed`：目录标题像整段正文（很长、带句号的中文，或又长又多句点的英文）。

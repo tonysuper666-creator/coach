@@ -56,12 +56,15 @@ internal object BookFormats {
         val damaged = "这份 ${suffix.uppercase(Locale.ROOT)} 文件不完整或已损坏，请重新保存或下载后再导入。"
         require(Files.size(path) <= 32L * 1024 * 1024) { "文本教材请控制在 32 MB 以内。" }
         val text = try { BookText.decode(Files.readAllBytes(path)) } catch (e: IllegalArgumentException) {
+            if (suffix == "pdf") throw IllegalArgumentException(BookImportMessages.NOT_PDF, e)
             if (binarySuffix) throw IllegalArgumentException(damaged, e) else throw e
         }
         if (htmlOpening.containsMatchIn(text)) return "html"
         if (suffix == "vtt" || text.trimStart('\uFEFF').startsWith("WEBVTT")) return "vtt"
         if (suffix == "srt") return "srt"
         if (suffix in setOf("html", "htm")) return "html"
+        // A .pdf name that is not a PDF header, and not another real format such as HTML, is not a truncated download.
+        if (suffix == "pdf") throw IllegalArgumentException(BookImportMessages.NOT_PDF)
         require(!binarySuffix) { damaged }
         return if (suffix in setOf("md", "markdown")) "md" else "txt"
     }

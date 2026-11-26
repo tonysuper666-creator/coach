@@ -46,6 +46,8 @@ internal data class Textbook(
     val indexState: String = "READY",
     val correctedBodyPage: Int? = null,
     val literatureMeta: LiteraturePaperMeta? = null,
+    /** Pages whose content stream could not be read. The rest of the book stays open. */
+    val damagedPages: List<Int> = emptyList(),
 ) {
     val tocNodes: List<BookTocNode> get() = structure?.tocNodes.orEmpty()
     val bodyStart: BookPageAnchor by lazy { BookBoundaries.bodyStart(pages, structure, correctedBodyPage) }

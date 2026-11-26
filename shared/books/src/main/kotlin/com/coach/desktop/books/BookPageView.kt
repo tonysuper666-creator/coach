@@ -931,7 +931,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
                     lineTopPx = lastMarkerTopPx + minGapPx
                 }
                 lastMarkerTopPx = lineTopPx
-                val topDp = topMargin + with(density) { lineTopPx.toDp() }
+                val topDp = (topMargin + with(density) { lineTopPx.toDp() }).coerceAtLeast(0.dp)
                 Box(
                     Modifier
                         .padding(start = markerX, top = topDp)

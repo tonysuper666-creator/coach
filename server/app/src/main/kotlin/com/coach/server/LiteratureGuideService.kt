@@ -75,6 +75,6 @@ class LiteratureGuideService(private val bridge: BridgeClient) {
 - 若 needThread 为 true，返回 "thread":"一句话串起所有文献"；
 - 若 missingBookIds 非空，返回 "papers":[{"bookId":"...","keyword":"关键词","claim":"一句话概括","ref":0}]（仅包含缺失的 bookId，ref 必须属于该 bookId）；
 - 若 failedQuestions 非空，返回 "answers":[{"questionIndex":原题号,"answerable":true,"sentences":[{"text":"第一句","refs":[0]},{"text":"第二句","refs":[1]}]}]。
-每句答案必须紧凑（尽量 30 字以内）并带至少 1 个来自本次 blocks 的直接证据 ref；仅当本次片段仍无直接依据时才标 "answerable":false、"sentences":[]。"""
+每题必须恰好 2 句（sentences 数组长度严格为 2，不要多写第 3 句，也不能少于 2 句），每句尽量 30 字以内并带至少 1 个来自本次 blocks 的直接证据 ref；仅当本次片段仍无直接依据时才标 "answerable":false、"sentences":[]。"""
     }
 }

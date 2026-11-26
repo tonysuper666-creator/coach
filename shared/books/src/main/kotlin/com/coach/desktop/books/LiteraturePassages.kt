@@ -12,7 +12,9 @@ internal object LiteraturePassages {
         """(?i)copyright|all rights reserved|terms (?:and conditions|of use)|downloaded from|coursepack|course pack|course materials?|course reading|reproduced (?:under|with|by) permission|licensing agency|\bcla\b|\bisbn\b|\bissn\b|doi[.:/]|published by|permission of the publisher|fair dealing|fair use|unauthori[sz]ed|reading list|extract from|under licen[cs]e|university library|©|版权|课程资料|仅供.{0,8}(?:学习|教学|课程)""",
     )
     private val jstorCoverHeader = Regex("""(?im)^(?:stable url|reviewed work|source|published by)\s*:""")
-    private val note = Regex("""^(?:\[\d+]|\d+[.)]?|[*†‡])\s+\S""")
+    private val coursepackCoverHeader = Regex("""(?im)^(?:book\s+title|book\s+author(?:\(s\))?|pub\.?\s*year|isbn|publisher|course\s+code|reading\s+list)\s*:""")
+    private val note = Regex("""^(?:\[\d{1,3}]|\d{1,3}[.)]|[*†‡])\s+\S""")
+    private val bottomBareNote = Regex("""^\d{1,3}\s+[A-Z\p{IsHan}]""")
     private val bibliography = Regex("""(?i)^(?:references|bibliography|works cited|endnotes|notes and references|参考文献|尾注)\s*[:：]?$""")
     private val heading = Regex("""(?i)^(?:abstract|introduction|background|discussion|method(?:s|ology)?|results?|conclusions?|summary|引言|导言|摘要|背景|方法|结果|讨论|结论|小结|(?:[IVX]+\.|\d+(?:\.\d+)*[.)])\s+\p{L}.{1,80})$""")
     private val end = Regex("""[.!?。！？][”’"')\]]*$""")
@@ -65,6 +67,21 @@ internal object LiteraturePassages {
         s.dropWhile { it in "“‘\"'([" }.firstOrNull()?.isLowerCase() != true &&
         (s.count { it.code in 0x3400..0x9fff } >= 5 || Regex("""\p{L}{2,}""").findAll(s).take(4).count() >= 4)
 
+    fun countBodySentences(text: String): Int {
+        if (text.isBlank()) return 0
+        val iterator = BreakIterator.getSentenceInstance(Locale.ROOT).apply { setText(text) }
+        var count = 0
+        var a = iterator.first()
+        var b = iterator.next()
+        while (b != BreakIterator.DONE) {
+            val quote = text.substring(a, b).trim()
+            if (bodySentence(quote)) count++
+            a = b
+            b = iterator.next()
+        }
+        return count
+    }
+
     private fun edgeKey(s: String) = s.trim().lowercase().replace(Regex("""\d+"""), "#")
 
     internal fun tokens(s: String): Set<String> = buildSet {
@@ -93,7 +110,9 @@ internal object LiteraturePassages {
         val candidates = mutableListOf<Candidate>()
         var backMatter = false
         for (page in book.pages) {
-            if (page.number == 1 && jstorCoverHeader.findAll(page.text).count() >= 2) continue
+            if (page.number == 1 && (jstorCoverHeader.findAll(page.text).count() >= 2 ||
+                    coursepackCoverHeader.findAll(page.text).count() >= 2)
+            ) continue
             val pageCandidates = mutableListOf<Candidate>()
             var base = 0
             for (region in page.guideRegions) {
@@ -140,7 +159,10 @@ internal object LiteraturePassages {
                             (isEdge && edgeKey(line) in edges && (!end.containsMatchIn(line) || line.length < 45)) -> finishParagraph()
                         bibliography.matches(line) -> { finishParagraph(); backMatter = true }
                         isHeading -> finishParagraph()
-                        note.containsMatchIn(line) -> { finishParagraph(); footnotes = true }
+                        note.containsMatchIn(line) || (index >= lines.size / 2 && bottomBareNote.containsMatchIn(line)) -> {
+                            finishParagraph()
+                            footnotes = true
+                        }
                         !footnotes -> {
                             if (start < 0) start = offset
                             finish = offset + raw.length
@@ -151,9 +173,10 @@ internal object LiteraturePassages {
                 finishParagraph()
                 base += region.text.length + 2
             }
-            // Drop coursepack cover / copyright notice pages: >= 2 copyright term hits and < 3 body sentences.
+            // Drop coursepack cover / copyright notice pages: >= 2 copyright term hits and < 3 body sentences
+            // (or heavy copyright notice cover on page 1 with >= 4 copyright hits and <= 6 sentences).
             val copyrightHits = copyrightPageTerm.findAll(page.text).count()
-            if (copyrightHits >= 2 && pageCandidates.size < 3) continue
+            if (copyrightHits >= 2 && (pageCandidates.size < 3 || (page.number == 1 && copyrightHits >= 4 && pageCandidates.size <= 6))) continue
             candidates += pageCandidates
         }
         require(candidates.isNotEmpty()) { "《${book.title}》没有可核对的正文句，请检查原件版面或文字识别。" }

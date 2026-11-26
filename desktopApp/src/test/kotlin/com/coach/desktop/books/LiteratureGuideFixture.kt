@@ -5,14 +5,26 @@ import com.coach.ai.BridgeConfig
 import com.coach.server.LiteratureGuideService
 import com.sun.net.httpserver.HttpServer
 import kotlinx.serialization.json.*
+import org.apache.pdfbox.cos.COSName
 import org.apache.pdfbox.pdmodel.*
 import org.apache.pdfbox.pdmodel.common.PDPageLabelRange
 import org.apache.pdfbox.pdmodel.common.PDPageLabels
+import org.apache.pdfbox.pdmodel.common.PDRectangle
 import org.apache.pdfbox.pdmodel.font.PDType1Font
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts
+import org.apache.pdfbox.pdmodel.graphics.color.PDDeviceGray
+import org.apache.pdfbox.pdmodel.graphics.image.CCITTFactory
+import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject
+import java.awt.Color
+import java.awt.Font
+import java.awt.image.BufferedImage
+import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
+import java.nio.ByteBuffer
 import java.nio.file.Path
 import java.util.concurrent.CopyOnWriteArrayList
+import javax.imageio.ImageIO
+import javax.imageio.stream.MemoryCacheImageOutputStream
 
 internal object LiteratureGuideFixture {
     fun pdf(
@@ -187,6 +199,173 @@ internal object LiteratureGuideFixture {
                 line(720f, "Curiosity operated as a central epistemic category inside the early society.")
                 line(700f, "Members evaluated singular specimens through collective witnessing at weekly meetings.")
                 line(680f, "Consequently written minutes linked each curious object to trusted testimony.")
+            }
+            pdf.save(path.toFile())
+        }
+        return path
+    }
+
+    /** Synthetic PDF with a real JBIG2-encoded (MMR/T.6) scanned image page. */
+    fun jbig2ScannedPdf(root: Path, sentence: String, name: String = "Scanned_2002_Jbig2.pdf"): Path {
+        val width = 1600
+        val height = 400
+        val img = BufferedImage(width, height, BufferedImage.TYPE_BYTE_BINARY)
+        img.createGraphics().let { g ->
+            try {
+                g.color = Color.WHITE
+                g.fillRect(0, 0, width, height)
+                g.color = Color.BLACK
+                g.font = Font("Serif", Font.PLAIN, 40)
+                g.drawString(sentence, 60, 200)
+            } finally { g.dispose() }
+        }
+        val path = root.resolve(name)
+        PDDocument().use { pdf ->
+            val t6Strip = CCITTFactory.createFromImage(pdf, img).cosObject.createRawInputStream().use { it.readAllBytes() }
+            val jbig2Bytes = wrapT6AsJbig2(width, height, t6Strip)
+            val page = PDPage(PDRectangle(width * 72f / 300f, height * 72f / 300f))
+            pdf.addPage(page)
+            val xobj = PDImageXObject(pdf, jbig2Bytes.inputStream(), COSName.JBIG2_DECODE, width, height, 1, PDDeviceGray.INSTANCE)
+            PDPageContentStream(pdf, page).use { stream ->
+                stream.drawImage(xobj, 0f, 0f, page.mediaBox.width, page.mediaBox.height)
+            }
+            pdf.save(path.toFile())
+        }
+        return path
+    }
+
+    /** Synthetic PDF with a real JPEG 2000 (JPXDecode) scanned image page. */
+    fun jpeg2000ScannedPdf(root: Path, sentence: String, name: String = "Scanned_1989_Jpx.pdf"): Path {
+        ImageIO.scanForPlugins()
+        val width = 1600
+        val height = 400
+        val img = BufferedImage(width, height, BufferedImage.TYPE_BYTE_GRAY)
+        img.createGraphics().let { g ->
+            try {
+                g.color = Color.WHITE
+                g.fillRect(0, 0, width, height)
+                g.color = Color.BLACK
+                g.font = Font("Serif", Font.PLAIN, 40)
+                g.drawString(sentence, 60, 200)
+            } finally { g.dispose() }
+        }
+        val writer = ImageIO.getImageWritersByFormatName("JPEG2000").next()
+        val jp2Bytes = ByteArrayOutputStream().use { out ->
+            MemoryCacheImageOutputStream(out).use { ios ->
+                writer.output = ios
+                writer.write(img)
+            }
+            writer.dispose()
+            out.toByteArray()
+        }
+        val path = root.resolve(name)
+        PDDocument().use { pdf ->
+            val page = PDPage(PDRectangle(width * 72f / 300f, height * 72f / 300f))
+            pdf.addPage(page)
+            val xobj = PDImageXObject(pdf, jp2Bytes.inputStream(), COSName.JPX_DECODE, width, height, 8, PDDeviceGray.INSTANCE)
+            PDPageContentStream(pdf, page).use { stream ->
+                stream.drawImage(xobj, 0f, 0f, page.mediaBox.width, page.mediaBox.height)
+            }
+            pdf.save(path.toFile())
+        }
+        return path
+    }
+
+    /** Wrap raw CCITT T.6 bytes into a PDF-embedded JBIG2 stream (no file header, sequential org). */
+    private fun wrapT6AsJbig2(width: Int, height: Int, t6Data: ByteArray): ByteArray {
+        val out = ByteArrayOutputStream()
+        fun writeSeg(segNum: Int, type: Int, page: Int, data: ByteArray) {
+            val hdr = ByteBuffer.allocate(11)
+            hdr.putInt(segNum)
+            hdr.put(type.toByte())
+            hdr.put(0.toByte()) // 0 referred segments
+            hdr.put(page.toByte())
+            hdr.putInt(data.size)
+            out.write(hdr.array())
+            out.write(data)
+        }
+        // Segment 0: Page Information (type 48), 19 bytes.
+        val pageInfo = ByteBuffer.allocate(19).apply {
+            putInt(width)
+            putInt(height)
+            putInt(0) // x-res
+            putInt(0) // y-res
+            put(0x01.toByte()) // lossless, default pixel 0
+            putShort(0) // no striping
+        }.array()
+        writeSeg(0, 48, 1, pageInfo)
+        // Segment 1: Immediate Lossless Generic Region (type 39), 18-byte header + MMR(T.6) data.
+        val regionData = ByteBuffer.allocate(18 + t6Data.size).apply {
+            putInt(width)
+            putInt(height)
+            putInt(0) // x
+            putInt(0) // y
+            put(0.toByte()) // external combination = OR
+            put(0x01.toByte()) // MMR = 1
+            put(t6Data)
+        }.array()
+        writeSeg(1, 39, 1, regionData)
+        // Segment 2: End of Page (type 49), 0 bytes.
+        writeSeg(2, 49, 1, ByteArray(0))
+        return out.toByteArray()
+    }
+
+    /** Synthetic PDF with CropBox smaller than MediaBox (including 180-deg rotated page), plus uncropped edge sliver. */
+    fun croppedFacingScanPdf(root: Path, name: String = "Hunter-Between-Cabinet-1989.pdf"): Path {
+        val path = root.resolve(name)
+        PDDocument().use { pdf ->
+            val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+            // Page 1 (rot 0): CropBox [0, 189, 424.2, 841.44] inside MediaBox [0, 0, 595.2, 841.44].
+            val p1 = PDPage(PDRectangle(595.2f, 841.44f)).apply {
+                cropBox = PDRectangle(0f, 189f, 424.2f, 652.44f)
+            }
+            pdf.addPage(p1)
+            PDPageContentStream(pdf, p1).use { stream ->
+                fun line(x: Float, y: Float, text: String) {
+                    stream.beginText(); stream.setFont(font, 11f); stream.newLineAtOffset(x, y); stream.showText(text); stream.endText()
+                }
+                // Main page lines inside CropBox (x = 40..390)
+                line(40f, 760f, "The repository sought to build a universal collection of nature.")
+                line(40f, 745f, "However voluntary Fellows could not sustain routine curation.")
+                line(40f, 730f, "Therefore institutional ambition exceeded practical management.")
+                // Cropped-out facing-page sliver outside CropBox (x = 460..585) with offset baselines!
+                line(460f, 753f, "truncated facing left")
+                line(460f, 738f, "sliver words that")
+                line(460f, 723f, "interleave if unclipped.")
+            }
+            // Page 2 (rot 180): same CropBox/MediaBox geometry as Hunter 1989 odd pages!
+            val p2 = PDPage(PDRectangle(595.2f, 841.44f)).apply {
+                cropBox = PDRectangle(0f, 189f, 424.2f, 652.44f)
+                rotation = 180
+            }
+            pdf.addPage(p2)
+            PDPageContentStream(pdf, p2).use { stream ->
+                fun line(x: Float, y: Float, text: String) {
+                    stream.beginText(); stream.setFont(font, 11f); stream.newLineAtOffset(x, y); stream.showText(text); stream.endText()
+                }
+                line(40f, 760f, "Rotated visible page preserved authentic arguments about custody.")
+                line(40f, 745f, "Curators documented each specimen carefully inside the register.")
+                // Cropped-out facing sliver outside CropBox (x > 424.2)
+                line(465f, 752f, "hidden rotated sliver")
+                line(465f, 737f, "must never leak.")
+            }
+            // Page 3 (uncropped): full main column + narrow clipped facing-page sliver inside MediaBox!
+            val p3 = PDPage(PDRectangle(595.2f, 841.44f))
+            pdf.addPage(p3)
+            PDPageContentStream(pdf, p3).use { stream ->
+                fun line(x: Float, y: Float, text: String) {
+                    stream.beginText(); stream.setFont(font, 11f); stream.newLineAtOffset(x, y); stream.showText(text); stream.endText()
+                }
+                line(45f, 760f, "Uncropped main column explains why catalogues outlived specimens.")
+                line(45f, 745f, "Printed inventories stabilized knowledge across changing keepers.")
+                line(45f, 730f, "Subsequent curators relied on written records for verification.")
+                line(45f, 715f, "Physical deterioration threatened uncatalogued natural rarities.")
+                line(45f, 700f, "Consequently paper documentation became the primary archive.")
+                // Narrow edge sliver touching right page edge (x = 490..590, < 48% of main column width)
+                line(490f, 752f, "edge sliver one")
+                line(490f, 737f, "edge sliver two")
+                line(490f, 722f, "edge sliver three.")
+                line(490f, 707f, "edge sliver four.")
             }
             pdf.save(path.toFile())
         }

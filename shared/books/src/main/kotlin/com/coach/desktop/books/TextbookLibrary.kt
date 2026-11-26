@@ -1714,14 +1714,71 @@ internal class TextbookLibrary(
         }
     }
 
-    /** Independent 300 dpi OCR verification of a single PDF page via the library's Tesseract engine. */
+    /** Independent 300 dpi OCR verification of a single PDF page via the library's Tesseract engine.
+     * Detects blank or vector-only renders (e.g. missing scan image decoder) and reports OCR unavailable
+     * instead of letting valid citations fail with low similarity. */
     fun ocrPdfPageForGuide(bookId: String, pdfPage: Int, control: BookImportControl = BookImportControl()): String {
         val file = original(bookId, "pdf").toFile()
         require(file.isFile) { "原 PDF 文件不存在，无法独立 OCR 核对引文。" }
+        val expectedLetters = runCatching { book(bookId).page(pdfPage)?.text?.count(Char::isLetter) ?: 0 }.getOrDefault(0)
         return BookPdfLoader.read(file) { pdf ->
             require(pdfPage in 1..pdf.numberOfPages) { "PDF 页码超出范围：$pdfPage" }
-            recognizePdfPage(file, pdf, pdfPage, control)
+            val hasImages = pageHasImageXObjects(pdf, pdfPage)
+            val bounds = pdf.getPage(pdfPage - 1).cropBox
+            require(bounds.width.isFinite() && bounds.height.isFinite() && bounds.width > 0 && bounds.height > 0) {
+                "这页 PDF 尺寸无效，请重新保存后再导入。"
+            }
+            val scale = minOf(bookOcrTargetDpi / 72f, bookOcrMaxSide / maxOf(bounds.width, bounds.height))
+            BookScanImages.checkSize(kotlin.math.ceil(bounds.width * scale).toInt(), kotlin.math.ceil(bounds.height * scale).toInt())
+            val image = OcrTiming.measure("page${pdfPage}.render") { renderBookPdfPage(file, pdf, pdfPage - 1, scale) }
+            val text = try {
+                if (isPdfRasterBlank(image)) {
+                    throw LiteratureOcrUnavailableException("PDF 第 $pdfPage 页渲染结果为空白（扫描图层未正确解码），OCR 不可用。")
+                }
+                ocr.recognize(image, control)
+            } finally {
+                releaseBookBitmap(image)
+            }
+            val ocrLetters = text.count(Char::isLetter)
+            if (hasImages && expectedLetters >= 120 &&
+                (ocrLetters < 20 || (ocrLetters * 12 < expectedLetters && LiteraturePassages.countBodySentences(text) == 0))
+            ) {
+                throw LiteratureOcrUnavailableException(
+                    "PDF 第 $pdfPage 页仅识别出少量矢量文字或下载戳（OCR $ocrLetters 字 / 原层 $expectedLetters 字），扫描图层可能未渲染，OCR 不可用。",
+                )
+            }
+            text
         }
+    }
+
+    private fun pageHasImageXObjects(pdf: BookPdfDocument, pdfPage: Int): Boolean = runCatching {
+        val resources = pdf.getPage(pdfPage - 1).resources ?: return@runCatching false
+        resources.xObjectNames.any { name -> runCatching { resources.isImageXObject(name) }.getOrDefault(false) }
+    }.getOrDefault(false)
+
+    private fun isPdfRasterBlank(bitmap: BookBitmap): Boolean {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w <= 0 || h <= 0) return true
+        val stepX = maxOf(1, w / 200)
+        val stepY = maxOf(1, h / 200)
+        var sampled = 0
+        var dark = 0
+        var y = 0
+        while (y < h) {
+            var x = 0
+            while (x < w) {
+                val rgb = bookBitmapPixel(bitmap, x, y)
+                val r = (rgb ushr 16) and 0xFF
+                val g = (rgb ushr 8) and 0xFF
+                val b = rgb and 0xFF
+                if (r < 235 || g < 235 || b < 235) dark++
+                sampled++
+                x += stepX
+            }
+            y += stepY
+        }
+        return sampled == 0 || dark * 2000 < sampled // < 0.05% ink pixels across the entire rendered page
     }
 
     /** A scan can have a nonempty text layer containing only a running page number or broken glyphs.

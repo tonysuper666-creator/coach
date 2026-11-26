@@ -60,6 +60,8 @@ internal data class GuideVerification(
     }
 }
 
+internal class LiteratureOcrUnavailableException(message: String, cause: Throwable? = null) : IllegalStateException(message, cause)
+
 internal fun interface LiteratureOcrVerifier {
     fun ocrPageText(book: Textbook, pdfPage: Int): String
 }
@@ -485,43 +487,54 @@ internal class LiteratureInput(
                     continue
                 }
                 val rawSentences = (row["sentences"] as? JsonArray)?.mapNotNull { it as? JsonObject }
-                if (rawSentences == null || rawSentences.size != 2) {
-                    failures += GuideItemFailure("answer:$qIdx", label, "sentence_count", "答案句数应为 2，实际为 ${rawSentences?.size ?: 0}")
+                if (rawSentences == null || rawSentences.size < 2) {
+                    failures += GuideItemFailure("answer:$qIdx", label, "sentence_count", "答案句数不足 2 句，实际为 ${rawSentences?.size ?: 0}")
                     continue
                 }
-                var itemFailure: GuideItemFailure? = null
+                var firstFailure: GuideItemFailure? = null
                 val builtSentences = mutableListOf<GuideAnswerSentence>()
                 for ((sIdx, sObj) in rawSentences.withIndex()) {
+                    if (builtSentences.size >= 2) break
                     val text = (sObj["text"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
                     if (text.isBlank() || text.length > 100) {
-                        itemFailure = GuideItemFailure("answer:$qIdx", label, "invalid_sentence", "第 ${sIdx + 1} 句为空或超过 100 字")
-                        break
+                        if (firstFailure == null) {
+                            firstFailure = GuideItemFailure("answer:$qIdx", label, "invalid_sentence", "第 ${sIdx + 1} 句为空或超过 100 字")
+                        }
+                        continue
                     }
                     if (!LiteraturePassages.substantive(text)) {
-                        itemFailure = GuideItemFailure("answer:$qIdx", label, "fallback_unanswerable", "第 ${sIdx + 1} 句命中兜底「无法回答」规则")
-                        break
+                        if (firstFailure == null) {
+                            firstFailure = GuideItemFailure("answer:$qIdx", label, "fallback_unanswerable", "第 ${sIdx + 1} 句命中兜底「无法回答」规则")
+                        }
+                        continue
                     }
                     val refs = extractRefs(sObj)
                     if (refs.isEmpty()) {
-                        itemFailure = GuideItemFailure("answer:$qIdx", label, "missing_ref", "第 ${sIdx + 1} 句缺少证据 ref")
-                        break
+                        if (firstFailure == null) {
+                            firstFailure = GuideItemFailure("answer:$qIdx", label, "missing_ref", "第 ${sIdx + 1} 句缺少证据 ref")
+                        }
+                        continue
                     }
                     val sources = mutableListOf<GuideExcerpt>()
+                    var refFailed = false
                     for (ref in refs) {
                         val (src, reason) = checkRef(ref)
                         if (src == null) {
-                            itemFailure = GuideItemFailure("answer:$qIdx", label, reason.substringBefore(':'), "第 ${sIdx + 1} 句 $reason")
+                            if (firstFailure == null) {
+                                firstFailure = GuideItemFailure("answer:$qIdx", label, reason.substringBefore(':'), "第 ${sIdx + 1} 句 $reason")
+                            }
+                            refFailed = true
                             break
                         }
                         sources += src
                     }
-                    if (itemFailure != null) break
+                    if (refFailed) continue
                     builtSentences += GuideAnswerSentence(text, sources.distinctBy { "${it.book.id}#${it.anchor.pdfPage}#${it.anchor.startUtf16}" })
                 }
-                if (itemFailure != null) {
-                    failures += itemFailure
+                if (builtSentences.size < 2) {
+                    failures += firstFailure ?: GuideItemFailure("answer:$qIdx", label, "sentence_count", "通过核验的答案句不足 2 句（仅 ${builtSentences.size} 句）")
                 } else {
-                    verifiedAnswers[qIdx] = GuideAnswer(questions[qIdx], builtSentences)
+                    verifiedAnswers[qIdx] = GuideAnswer(questions[qIdx], builtSentences.take(2))
                 }
             }
         }

@@ -323,4 +323,171 @@ class LiteratureGuideTest {
         assertTrue(pass1.failures.any { it.rule == "ocr_similarity_low" })
         assertTrue(pass1.rejectedQuotes.isNotEmpty())
     }
+
+    @Test fun jbig2AndJpeg2000DecodersRenderScannedPagesAndBlankRenderReportsOcrUnavailable() {
+        javax.imageio.ImageIO.scanForPlugins()
+        assertTrue(javax.imageio.ImageIO.getImageReadersByFormatName("JBIG2").hasNext(), "JBIG2 ImageIO reader must be registered")
+        assertTrue(javax.imageio.ImageIO.getImageReadersByFormatName("JPEG2000").hasNext(), "JPEG 2000 ImageIO reader must be registered")
+
+        val root = Files.createTempDirectory("coach-guide-codecs-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val jbig2Sentence = "Curiosity operated as a central category in early science."
+            val jpxSentence = "Provenance records preserved custody across generations."
+
+            val jbig2Pdf = LiteratureGuideFixture.jbig2ScannedPdf(root, jbig2Sentence)
+            val jpxPdf = LiteratureGuideFixture.jpeg2000ScannedPdf(root, jpxSentence)
+            val jbig2Book = library.importBook(jbig2Pdf)
+            val jpxBook = library.importBook(jpxPdf)
+
+            // Real 300 dpi render + real Tesseract OCR on JBIG2 and JPEG 2000 scanned PDFs!
+            val jbig2Ocr = library.ocrPdfPageForGuide(jbig2Book.id, 1)
+            val jbig2Sim = LiteratureTextNorm.bestContiguousSimilarity(jbig2Sentence, jbig2Ocr)
+            assertTrue(jbig2Sim >= LiteratureTextNorm.OCR_SIMILARITY_THRESHOLD, "JBIG2 OCR similarity too low: $jbig2Sim (ocr=$jbig2Ocr)")
+
+            val jpxOcr = library.ocrPdfPageForGuide(jpxBook.id, 1)
+            val jpxSim = LiteratureTextNorm.bestContiguousSimilarity(jpxSentence, jpxOcr)
+            assertTrue(jpxSim >= LiteratureTextNorm.OCR_SIMILARITY_THRESHOLD, "JPEG 2000 OCR similarity too low: $jpxSim (ocr=$jpxOcr)")
+
+            // Blank PDF page must throw LiteratureOcrUnavailableException and be recorded as ocr_unavailable (not ocr_similarity_low).
+            val blankPath = root.resolve("blank.pdf")
+            org.apache.pdfbox.pdmodel.PDDocument().use { pdf ->
+                pdf.addPage(org.apache.pdfbox.pdmodel.PDPage())
+                pdf.save(blankPath.toFile())
+            }
+            val blankLibrary = TextbookLibrary(root.resolve("blank-lib"), ocr = BookOcr { _, _ -> "unused" })
+            val blankBook = blankLibrary.importBook(blankPath)
+            assertFailsWith<LiteratureOcrUnavailableException> {
+                blankLibrary.ocrPdfPageForGuide(blankBook.id, 1)
+            }
+            val unavailableCheck = input.verify(body) { _, _ ->
+                throw LiteratureOcrUnavailableException("PDF 第 1 页渲染结果为空白，OCR 不可用。")
+            }
+            assertTrue(unavailableCheck.failures.isNotEmpty())
+            assertTrue(unavailableCheck.failures.all { it.rule == "ocr_unavailable" })
+            assertTrue(unavailableCheck.rejectedQuotes.isEmpty(), "OCR unavailable must not reject valid quotes")
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun croppedFacingPageScanAndRotatedPagesExcludeFacingSliverAtCandidateStage() {
+        val root = Files.createTempDirectory("coach-guide-cropbox-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val imported = library.importBook(LiteratureGuideFixture.croppedFacingScanPdf(root))
+            val lit = library.literatureBook(imported.id)
+            val candidates = LiteraturePassages.extractCandidates(lit)
+            val quotes = candidates.map { it.anchor.quoteAnchor }
+
+            // Facing-page slivers outside CropBox (both rot=0 and rot=180) and uncropped edge slivers MUST be excluded!
+            assertTrue(quotes.none { "sliver" in it || "interleave" in it || "truncated facing" in it || "hidden rotated" in it },
+                "Facing-page sliver leaked into candidates: $quotes")
+            // Clean body sentences from all 3 pages MUST survive!
+            assertTrue(quotes.any { "universal collection of nature" in it })
+            assertTrue(quotes.any { "authentic arguments about custody" in it })
+            assertTrue(quotes.any { "catalogues outlived specimens" in it })
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun answerWithMoreThanTwoSentencesKeepsFirstTwoVerifiedSentences() {
+        val req = input.request()
+        val base = LiteratureGuideFixture.reply(req)
+        val threeAndFiveAnswers = buildJsonArray {
+            // Q0: 3 valid sentences -> keeps first 2.
+            add(buildJsonObject {
+                put("questionIndex", 0)
+                put("answerable", true)
+                put("sentences", buildJsonArray {
+                    add(buildJsonObject { put("text", "第一句有效实答。"); put("refs", buildJsonArray { add(0) }) })
+                    add(buildJsonObject { put("text", "第二句有效实答。"); put("refs", buildJsonArray { add(1) }) })
+                    add(buildJsonObject { put("text", "第三句多余补充。"); put("refs", buildJsonArray { add(2) }) })
+                })
+            })
+            // Q1: 5 sentences where sentence 2 fails fallback regex -> takes first 2 verified sentences (1 & 3).
+            add(buildJsonObject {
+                put("questionIndex", 1)
+                put("answerable", true)
+                put("sentences", buildJsonArray {
+                    add(buildJsonObject { put("text", "第一句有证据的结论。"); put("refs", buildJsonArray { add(0) }) })
+                    add(buildJsonObject { put("text", "片段未涉及这部分内容。"); put("refs", buildJsonArray { add(1) }) })
+                    add(buildJsonObject { put("text", "第三句有证据的补充。"); put("refs", buildJsonArray { add(2) }) })
+                    add(buildJsonObject { put("text", "第四句多余补充。"); put("refs", buildJsonArray { add(0) }) })
+                    add(buildJsonObject { put("text", "第五句多余补充。"); put("refs", buildJsonArray { add(1) }) })
+                })
+            })
+        }
+        val checked = input.verify(JsonObject(base + ("answers" to threeAndFiveAnswers)), exactOcr)
+        val guide = assertNotNull(checked.toComplete(books, input.questions), "Expected pass, failures=${checked.failures}")
+        assertEquals(2, guide.answers[0].sentences.size)
+        assertEquals(listOf("第一句有效实答。", "第二句有效实答。"), guide.answers[0].sentences.map { it.text })
+        assertEquals(2, guide.answers[1].sentences.size)
+        assertEquals(listOf("第一句有证据的结论。", "第三句有证据的补充。"), guide.answers[1].sentences.map { it.text })
+    }
+
+    @Test fun metadataExtractsMultilineCoverPlainHeaderSlugAuthorAndConsensusYear() {
+        // 1) Multiline coursepack cover (like Hunter 1989)
+        val coverText = """
+            Book title:
+            Establishing the new archive: experiments in collection
+            Book author(s):
+            Mercer, E
+            ISBN: 9780000000000
+            Pub. year: 1989
+        """.trimIndent()
+        val m1 = LiteratureMetadata.extract(
+            pdf = null,
+            bookId = "b1",
+            storedTitle = "Mercer-Between-Cabinet-1989-pp10-40",
+            sourceFilename = "Mercer-Between-Cabinet-1989-pp10-40.pdf",
+            firstPagesText = listOf(coverText),
+        )
+        assertEquals("Mercer, E", m1.author)
+        assertEquals("1989", m1.year)
+        assertTrue("Establishing the new archive" in m1.title, "Unexpected title: ${m1.title}")
+
+        // 2) Plain header author above university affiliation + HTML entities (like Marples 2019)
+        val articleText = """
+            Scientific administration in the early century
+            Clara Vance
+            University of Bristol
+            Abstract
+            This study examines administrative practices.
+        """.trimIndent()
+        val m2 = LiteratureMetadata.extract(
+            pdf = null,
+            bookId = "b2",
+            storedTitle = "Scientific administration: reinterpreting the archive&#x2019;s records",
+            sourceFilename = "Vance-Scientific-Administration-2019.pdf",
+            firstPagesText = listOf(articleText),
+        )
+        assertEquals("Clara Vance", m2.author)
+        assertEquals("2019", m2.year)
+        assertTrue("archive’s" in m2.title, "Expected decoded HTML entity in title: ${m2.title}")
+
+        // 3) Reference article with earlier publisher launch year 2004 vs consensus article/filename year 2006 (like ODNB)
+        val refText = """
+            Dictionary of Historical Biography
+            (In Progress)
+            William Editor (editor in chief)
+            Published: 23 September 2004 - Online ISSN: 0000-0000
+            REFERENCE ARTICLE
+            Founder members of the experimental guild
+            Thomas Ashford
+            Published in print: 2006
+            Downloaded 2026.
+        """.trimIndent()
+        val m3 = LiteratureMetadata.extract(
+            pdf = null,
+            bookId = "b3",
+            storedTitle = "Ashford-Founder-Members-2006",
+            sourceFilename = "Ashford-Founder-Members-2006.pdf",
+            firstPagesText = listOf(refText),
+        )
+        assertEquals("Thomas Ashford", m3.author)
+        assertEquals("2006", m3.year, "Consensus year between filename and page (2006) must override launch year 2004")
+        assertEquals("Founder members of the experimental guild", m3.title)
+    }
 }

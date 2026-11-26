@@ -181,12 +181,16 @@ internal object ChapterOpenJson {
             }
             put("rubricCriteria", buildJsonArray {
                 points.forEach { point ->
+                    val host = blocks.firstOrNull { it.id == point.blockId && point.quoteAnchor in it.text }
+                        ?: blocks.firstOrNull { !it.heading && point.quoteAnchor in it.text }
+                    val sentence = host?.let { ChapterOpenGate.sentenceAround(it.text, point.quoteAnchor) }.orEmpty()
                     add(buildJsonObject {
                         put("cid", point.id)
                         put("slotLabel", point.claim)
                         put("maxMarks", 1)
                         put("pdfPage", point.page)
                         put("quoteAnchor", point.quoteAnchor)
+                        if (sentence.isNotBlank()) put("sourceExcerpt", sentence)
                     })
                 }
             })

@@ -1123,6 +1123,17 @@ class PracticeGradeAndDiagnoseService(
             }
         }
 
+        if (request.mode.trim().equals("CHAPTER_OPEN", ignoreCase = true)) {
+            append("Chapter-open judging, which overrides the shared FULL/PARTIAL wording for this call:\n")
+            append("Each criterion's courseDefinitionExcerpt is the sentence that point hangs on. ")
+            append("Judge the student's meaning against that sentence, not against shared words. ")
+            append("FULL means their own wording covers the sentence, even when none of its words appear. ")
+            append("PARTIAL means only part of that sentence is covered. ")
+            append("ZERO means the point is missing, wrong, or about something else. ")
+            append("Do not mark a correct paraphrase PARTIAL for using different words. ")
+            append("Do not mark an off-topic answer FULL. ")
+            append("feedbackNoteZh is one reason of at most 42 Chinese characters.\n\n")
+        }
         append("Student Written Answer (quote verbatim substrings ONLY from inside <<< >>>):\n")
         append("<<<\n${request.studentAnswer}\n>>>\n")
     }
@@ -1458,7 +1469,9 @@ class PracticeGradeAndDiagnoseService(
     ): List<GradedRubricItemResult> {
         val judgements = ChapterOpenGate.judge(
             answer = request.studentAnswer,
-            points = request.rubricCriteria.map { ChapterOpenPointRef(it.cid, it.slotLabel) },
+            points = request.rubricCriteria.map {
+                ChapterOpenPointRef(it.cid, it.slotLabel, it.sourceExcerpt.trim())
+            },
             drafts = items.map { ChapterOpenDraft(it.cid, it.verdict.name, it.feedbackNoteZh) },
         ).associateBy { it.id }
         return items.map { item ->
@@ -1476,7 +1489,6 @@ class PracticeGradeAndDiagnoseService(
                 awardedMarks = awarded,
                 feedbackNoteZh = note,
                 missCause = if (verdict == PracticeRubricVerdict.ZERO) judged.missCause else "",
-                studentQuoteVerified = if (verdict == PracticeRubricVerdict.ZERO) item.studentQuoteVerified else item.studentQuoteVerified,
             )
         }
     }

@@ -1,17 +1,21 @@
 package com.coach.domain.grade
 
 /**
- * Chapter open-question gates (TON-1910).
+ * Chapter open-question gates (TON-1910, scoring updated in TON-1919).
  *
  * A scoring point cites a location in the chapter. The claim is what the student
  * should be able to say, and must not be a copied stretch of the chapter.
- * Grading may only downgrade a model verdict: an off-topic answer cannot stay
- * at FULL (答到). A second try keeps the earlier attempt and rejudges only the
- * points that were missed.
+ * When the point carries the sentence it hangs on, the model judges that meaning:
+ * a correct paraphrase stays 答到, and local word overlap only blocks a short
+ * answer that shares nothing with the sentence or the claim. Without that
+ * sentence, grading may only downgrade a model verdict, and an off-topic answer
+ * cannot stay at FULL. A second try keeps the earlier attempt and rejudges only
+ * the points that were missed.
  */
 data class ChapterOpenPointRef(
     val id: String,
     val claim: String,
+    val sourceSentence: String = "",
 )
 
 data class ChapterOpenDraft(
@@ -182,7 +186,9 @@ object ChapterOpenGate {
                 "PARTIAL" -> "PARTIAL"
                 else -> "ZERO"
             }
-            val verdict = when {
+            val verdict = if (point.sourceSentence.isNotBlank()) {
+                meaningVerdict(point, answer, model)
+            } else when {
                 isOffTopic(point.claim, answer) -> "ZERO"
                 model == "FULL" && !allowsHit(point.claim, answer) -> "PARTIAL"
                 else -> model
@@ -214,6 +220,48 @@ object ChapterOpenGate {
         val shared = claimTokens.intersect(contentTokens(answer))
         if (shared.size < 2) return false
         return shared.size.toDouble() / claimTokens.size >= 0.34
+    }
+
+    /**
+     * The sentence a scoring point hangs on. [anchor] must occur in [pageText].
+     * Empty when the anchor is missing, so callers can leave the lexical gate in place.
+     */
+    fun sentenceAround(pageText: String, anchor: String): String {
+        if (pageText.isBlank() || anchor.isBlank()) return ""
+        val start = pageText.indexOf(anchor)
+        if (start < 0) return ""
+        val breaks = setOf('。', '！', '？', '\n', '!', '?')
+        var left = start
+        while (left > 0 && pageText[left - 1] !in breaks) left--
+        var right = start + anchor.length
+        while (right < pageText.length && pageText[right] !in breaks) right++
+        if (right < pageText.length && pageText[right] in breaks && pageText[right] != '\n') right++
+        return pageText.substring(left, right).trim().take(180)
+    }
+
+    /**
+     * A credited answer is obviously off-topic only when it shares no content
+     * with the claim or the hanging sentence and is too short to be a rewording.
+     * A longer paraphrase is left to the model.
+     */
+    fun obviouslyOffTopic(claim: String, sourceSentence: String, answer: String): Boolean {
+        if (answer.isBlank()) return true
+        if (!isOffTopic(claim, answer)) return false
+        if (sourceSentence.isNotBlank() && !isOffTopic(sourceSentence, answer)) return false
+        return !longAttempt(answer)
+    }
+
+    private fun meaningVerdict(point: ChapterOpenPointRef, answer: String, model: String): String {
+        if (answer.isBlank()) return "ZERO"
+        if (model != "ZERO" && obviouslyOffTopic(point.claim, point.sourceSentence, answer)) return "ZERO"
+        return model
+    }
+
+    private fun longAttempt(answer: String): Boolean {
+        val han = answer.count { it.code in 0x4E00..0x9FFF }
+        if (han >= 12) return true
+        val words = answer.split(Regex("[^A-Za-z0-9]+")).count { it.length >= 3 }
+        return words >= 6
     }
 
     private fun missCause(

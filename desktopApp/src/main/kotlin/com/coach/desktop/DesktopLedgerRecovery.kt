@@ -18,12 +18,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -38,10 +38,11 @@ internal data class ExistingLedgerRecoveryInfo(
 )
 
 /**
- * Inspects an existing client `ledger.sqlite` without creating it so Windows bookshelf sessions
- * can drain queued offline commands automatically once connectivity returns.
+ * Inspects an existing client `ledger.sqlite` without creating it. Only unacknowledged commands
+ * written by [deviceId] count: rows another pairing left behind stay queued and untouched.
+ * Returns null when this pairing has nothing to recover.
  */
-internal fun inspectExistingLedgerQueue(ledgerPath: Path): ExistingLedgerRecoveryInfo? {
+internal fun inspectExistingLedgerQueue(ledgerPath: Path, deviceId: String): ExistingLedgerRecoveryInfo? {
     if (!Files.isRegularFile(ledgerPath)) return null
     return runCatching {
         DriverManager.getConnection("jdbc:sqlite:${ledgerPath.toAbsolutePath()}").use { conn ->
@@ -49,8 +50,9 @@ internal fun inspectExistingLedgerQueue(ledgerPath: Path): ExistingLedgerRecover
             if ("outbox" !in tables) return null
             val courses = linkedSetOf<String>()
             var hasUnackedOutbox = false
-            conn.createStatement().use { st ->
-                st.executeQuery("SELECT payload_bytes FROM outbox WHERE ack_seq IS NULL").use { rs ->
+            conn.prepareStatement("SELECT payload_bytes FROM outbox WHERE ack_seq IS NULL AND device_id=?").use { st ->
+                st.setString(1, deviceId)
+                st.executeQuery().use { rs ->
                     while (rs.next()) {
                         hasUnackedOutbox = true
                         val payload = rs.getString(1)
@@ -58,29 +60,16 @@ internal fun inspectExistingLedgerQueue(ledgerPath: Path): ExistingLedgerRecover
                         body?.courseId?.takeIf { it.isNotBlank() }?.let(courses::add)
                     }
                 }
-                if ("replica" in tables) {
-                    st.executeQuery("SELECT DISTINCT course_id FROM replica").use { rs ->
-                        while (rs.next()) rs.getString(1)?.takeIf { it.isNotBlank() }?.let(courses::add)
-                    }
-                }
-                if ("projection_cache" in tables) {
-                    st.executeQuery("SELECT DISTINCT course_id FROM projection_cache").use { rs ->
-                        while (rs.next()) rs.getString(1)?.takeIf { it.isNotBlank() }?.let(courses::add)
-                    }
-                }
-                if ("offline_packs" in tables) {
-                    st.executeQuery("SELECT DISTINCT course_id FROM offline_packs").use { rs ->
-                        while (rs.next()) rs.getString(1)?.takeIf { it.isNotBlank() }?.let(courses::add)
-                    }
-                }
+            }
+            if (!hasUnackedOutbox) return null
+            conn.createStatement().use { st ->
                 if ("sync_meta" in tables) {
                     st.executeQuery("SELECT key FROM sync_meta WHERE key LIKE 'cursor:%'").use { rs ->
                         while (rs.next()) rs.getString(1).removePrefix("cursor:").takeIf { it.isNotBlank() }?.let(courses::add)
                     }
                 }
             }
-            if (!hasUnackedOutbox && courses.isEmpty()) null
-            else ExistingLedgerRecoveryInfo(courses.toList(), hasUnackedOutbox)
+            ExistingLedgerRecoveryInfo(courses.toList(), hasUnackedOutbox)
         }
     }.getOrNull()
 }
@@ -96,8 +85,11 @@ private fun existingTableNames(conn: Connection): Set<String> {
 }
 
 /**
- * Owns background [SyncEngine] recovery when a Windows bookshelf identity has an existing
- * `ledger.sqlite` on disk, draining queued learning commands without requiring a restart.
+ * Drains this pairing's queued learning commands from an existing `ledger.sqlite` while the
+ * Windows bookshelf is open, without a restart. Scope (TON-1888):
+ * - only an owner pairing has a ledger on the server; friend (Sable) identities never touch it;
+ * - only commands written by the current device are uploaded; other pairings' rows stay queued;
+ * - it uploads and stops; live ledger sync stays with the course session.
  */
 internal class DesktopLedgerQueueRecovery(
     private val settings: DesktopConnectionSettings,
@@ -107,63 +99,61 @@ internal class DesktopLedgerQueueRecovery(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var driver: JdbcSqliteDriver? = null
     private var transport: HttpLedgerTransport? = null
-    private var sync: SyncEngine? = null
-    private var syncJob: Job? = null
 
     fun start() {
+        if (identity.credentials.role != "owner") return
         val ledgerPath = settings.clientDirectory.resolve("ledger.sqlite")
+        val deviceId = identity.credentials.deviceId
+        val interval = pollMs.coerceIn(100L, 2_000L)
         scope.launch {
-            val info = awaitExistingLedger(ledgerPath) ?: return@launch
-            val sqliteDriver = JdbcSqliteDriver(
-                "jdbc:sqlite:${ledgerPath.toAbsolutePath()}",
-                Properties(),
-                ClientDatabase.Schema,
-            )
-            val ledgerTransport = HttpLedgerTransport(
-                identity.serverUrl,
-                identity.credentials.deviceId,
-                identity.credentials.token,
-            )
-            val engine = SyncEngine(
-                db = ClientDatabase(sqliteDriver),
-                deviceId = identity.credentials.deviceId,
-                transport = ledgerTransport,
-                courses = info.courses,
-                newId = { UUID.randomUUID().toString() },
-                hash = { bytes ->
-                    MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
-                },
-                agentRunId = settings.agentRunId,
-            )
-            synchronized(this@DesktopLedgerQueueRecovery) {
-                if (!scope.isActive) {
-                    runCatching { ledgerTransport.close() }
-                    runCatching { sqliteDriver.close() }
-                    return@launch
-                }
-                driver = sqliteDriver
-                transport = ledgerTransport
-                sync = engine
-                syncJob = engine.start(scope)
-            }
-            scope.launch {
+            var engine: SyncEngine? = null
+            var engineCourses: List<String> = emptyList()
+            val wake = Channel<Unit>(Channel.CONFLATED)
+            launch {
                 CoachConnectivityRegistry.flowFor(identity.serverUrl).collectLatest { status ->
-                    if (status == CoachConnectivityStatus.ONLINE) {
-                        runCatching { engine.syncOnce() }
-                    }
+                    if (status == CoachConnectivityStatus.ONLINE) wake.trySend(Unit)
                 }
+            }
+            while (isActive) {
+                val info = inspectExistingLedgerQueue(ledgerPath, deviceId)
+                if (info != null) {
+                    if (engine == null || info.courses != engineCourses) {
+                        engine = openEngine(ledgerPath, info.courses) ?: return@launch
+                        engineCourses = info.courses
+                    }
+                    try { engine.syncOnce() }
+                    catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { }
+                }
+                withTimeoutOrNull(interval) { wake.receive() }
             }
         }
     }
 
-    private suspend fun awaitExistingLedger(ledgerPath: Path): ExistingLedgerRecoveryInfo? {
-        val checkIntervalMs = pollMs.coerceIn(100L, 2_000L)
-        while (scope.isActive) {
-            val found = withContext(Dispatchers.IO) { inspectExistingLedgerQueue(ledgerPath) }
-            if (found != null) return found
-            delay(checkIntervalMs)
-        }
-        return null
+    private fun openEngine(ledgerPath: Path, courses: List<String>): SyncEngine? = synchronized(this) {
+        if (!scope.isActive) return null
+        val sqliteDriver = driver ?: JdbcSqliteDriver(
+            "jdbc:sqlite:${ledgerPath.toAbsolutePath()}",
+            Properties(),
+            ClientDatabase.Schema,
+        ).also { driver = it }
+        val ledgerTransport = transport ?: HttpLedgerTransport(
+            identity.serverUrl,
+            identity.credentials.deviceId,
+            identity.credentials.token,
+        ).also { transport = it }
+        SyncEngine(
+            db = ClientDatabase(sqliteDriver),
+            deviceId = identity.credentials.deviceId,
+            transport = ledgerTransport,
+            courses = courses,
+            newId = { UUID.randomUUID().toString() },
+            hash = { bytes ->
+                MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+            },
+            agentRunId = settings.agentRunId,
+            uploadOwnCommandsOnly = true,
+        )
     }
 
     override fun close() {
@@ -172,10 +162,8 @@ internal class DesktopLedgerQueueRecovery(
         synchronized(this) {
             currentTransport = transport
             currentDriver = driver
-            sync = null
-            syncJob = null
+            scope.cancel()
         }
-        scope.cancel()
         runCatching { currentTransport?.close() }
         runBlocking { scope.coroutineContext[Job]?.join() }
         runCatching { currentDriver?.close() }

@@ -111,7 +111,7 @@ class OfflineModeAcceptanceTest {
         return "http://127.0.0.1:$port"
     }
 
-    private fun isolatedSettings(home: Path, serverUrl: String): DesktopConnectionSettings {
+    private fun isolatedSettings(home: Path, serverUrl: String, role: String = "friend"): DesktopConnectionSettings {
         val settings = DesktopConnectionSettings(
             home = home,
             environment = { null },
@@ -120,7 +120,7 @@ class OfflineModeAcceptanceTest {
         )
         val creds = DesktopCredentials(settings.clientDirectory)
         creds.saveAddress(serverUrl)
-        creds.save(serverUrl, PairedCredentials("offline-pc", "t".repeat(43), "friend"))
+        creds.save(serverUrl, PairedCredentials("offline-pc", "t".repeat(43), role))
         return settings
     }
 
@@ -714,7 +714,8 @@ class OfflineModeAcceptanceTest {
         try {
             ControllableCoachServer().use { server ->
                 val home = Files.createDirectories(root.resolve("home"))
-                val settings = isolatedSettings(home, server.url)
+                // The ledger belongs to an owner pairing; friend (Sable) identities never sync it.
+                val settings = isolatedSettings(home, server.url, role = "owner")
                 val libDir = home.resolve("books")
                 val library = TextbookLibrary(libDir, todayCardEnabled = false)
                 val book = library.importBook(writeMultiChapterMarkdown(root))

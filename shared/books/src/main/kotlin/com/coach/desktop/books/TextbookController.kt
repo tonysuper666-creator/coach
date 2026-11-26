@@ -2297,15 +2297,16 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     CourseStore.removeMaterialFromCourse(db, courseId, bookId)
                     CourseAutoAligner.alignLocally(db, courseId)
                     val paper = CourseIntake.importPaper(db, courseId, readable, key).copy(fileName = item.fileName)
-                    if (paper.paperKey == null) {
+                    // Success means techniques were actually extracted; a scan with no text still has a file hash.
+                    if (paper.techniqueCount == 0) {
                         // Nothing was extracted: put the material back exactly as it was.
                         link?.let { CourseIntake.restoreLink(db, it) }
                         CourseAutoAligner.alignLocally(db, courseId)
                     }
                     paper to CourseIntake.isLinkedAnywhere(db, bookId)
                 }
-                if (paper.paperKey == null) {
-                    mutable.update { it.copy(courseNotice = "${item.fileName} 没能当往年题拆解（${paper.note ?: "读不出文字"}），材料先留在课程里。") }
+                if (paper.techniqueCount == 0) {
+                    mutable.update { it.copy(courseNotice = "${item.fileName} 没能当往年题拆解（${paper.note ?: "没提取到考法"}），材料先留在课程里。") }
                     return@action
                 }
                 // Only this course lets go of it; a copy another course or booklist still uses stays on the shelf.

@@ -671,13 +671,47 @@ function Send-TutorRelativeDrag([int]$sx1, [int]$sy1, [int]$sx2, [int]$sy2) {
     Write-Output "RELDRAG steps=$steps posted=$posted end=$($end.X),$($end.Y) target=$sx2,$sy2"
 }
 
+function Send-TutorAgent([string]$Command) {
+    $portFile = $env:COACH_DRAG_PORT_FILE
+    if (-not $portFile -or -not (Test-Path -LiteralPath $portFile)) { return 'ERR agent-port-missing' }
+    $port = 0
+    $raw = (Get-Content -Raw -LiteralPath $portFile).Trim()
+    if (-not [int]::TryParse($raw, [ref]$port)) { return "ERR bad-port $raw" }
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $client.Connect('127.0.0.1', $port)
+        $stream = $client.GetStream()
+        $stream.ReadTimeout = 8000
+        $stream.WriteTimeout = 8000
+        $bytes = [Text.Encoding]::ASCII.GetBytes("$Command`n")
+        $stream.Write($bytes, 0, $bytes.Length)
+        $reader = New-Object System.IO.StreamReader($stream, [Text.Encoding]::ASCII)
+        $line = $reader.ReadLine()
+        if (-not $line) { return 'ERR empty-reply' }
+        return $line
+    } catch {
+        return "ERR $($_.Exception.Message)"
+    } finally {
+        $client.Close()
+    }
+}
+
 function Drag-TutorLine([int]$x1, [int]$y1, [int]$x2, [int]$y2, [string]$how) {
+    # Cursor injection lands on SunAwtCanvas and Compose still sees a click.
+    # On the ARM runner the agent posts MouseEvents to the listener a real drag uses.
     Invoke-ForegroundStep -InjectsInput -Action {
         $r = Get-Rect
         $sx1 = $r.L + $x1; $sy1 = $r.T + $y1
         $sx2 = $r.L + $x2; $sy2 = $r.T + $y2
+        $portFile = $env:COACH_DRAG_PORT_FILE
+        if ($portFile -and (Test-Path -LiteralPath $portFile)) {
+            $reply = Send-TutorAgent "DRAG $sx1 $sy1 $sx2 $sy2"
+            Write-Host "AGENTDRAG $how $reply"
+            if ($reply -notlike 'OK*') { throw "Selection drag was not delivered ($reply)" }
+            return
+        }
         $touched = $false
-        if ($how -ne 'relative') { $touched = [bool](Send-TutorTouchDrag $sx1 $sy1 $sx2 $sy2) }
+        if ($how -ne 'relative' -and $how -ne 'awt') { $touched = [bool](Send-TutorTouchDrag $sx1 $sy1 $sx2 $sy2) }
         Write-Host "TOUCHUSED $touched"
         if (-not $touched) { Send-TutorRelativeDrag $sx1 $sy1 $sx2 $sy2 }
     }
@@ -817,10 +851,12 @@ function Open-SelectionToolbar([string]$name) {
         $x2 = [Math]::Min($pageR, [int]$row.X2 - 8)
         if (($x2 - $x1) -lt 70) { throw "Ink line is too short to drag ($name x=$x1..$x2)" }
         $y = [int]$row.Y
-        # Windows paged selection reads SelectionContainer, which follows a mouse
-        # drag. The synthetic touch call returns success and the page does not change.
-        Write-Output "DRAG row $drag how=relative y=$y x=$x1..$x2"
-        Drag-TutorLine $x1 $y $x2 $y 'relative'
+        # Windows paged selection reads SelectionContainer from an AWT mouse drag.
+        Write-Output "DRAG row $drag how=awt y=$y x=$x1..$x2"
+        if ($drag -eq 1 -and $env:COACH_DRAG_PORT_FILE -and (Test-Path -LiteralPath $env:COACH_DRAG_PORT_FILE)) {
+            Write-Host (Send-TutorAgent 'PING')
+        }
+        Drag-TutorLine $x1 $y $x2 $y 'awt'
         foreach ($spin in 1..4) {
             Start-Sleep -Milliseconds 400
             $shot = @(Read-TutorFrame "$name-selected$drag-$spin")

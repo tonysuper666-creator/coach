@@ -146,6 +146,25 @@ function Submit-ScanFile([string]$title) {
     Write-Output "Installed file picker opened for $([IO.Path]::GetFileName($Fixture))"
     if (-not (Choose-File $title $Fixture)) { throw $script:ChooseFileWhy }
 }
+function Enable-ArmDragAgent([string]$ExePath, [string]$LibraryDir) {
+    $jar = Join-Path $PSScriptRoot 'arm-drag-agent.jar'
+    if (-not (Test-Path -LiteralPath $jar)) { throw "Drag agent jar missing: $jar" }
+    $jar = (Resolve-Path -LiteralPath $jar).Path
+    if ($jar.Contains(' ')) { throw "Drag agent path cannot contain spaces: $jar" }
+    $cfg = Join-Path (Split-Path -Parent $ExePath) 'app\LearningCoach.cfg'
+    if (-not (Test-Path -LiteralPath $cfg)) { throw "Launcher cfg missing: $cfg" }
+    $option = 'java-options=-javaagent:' + ($jar -replace '\\', '/')
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $text = [IO.File]::ReadAllText($cfg)
+    if ($text -notlike "*${option}*") {
+        if (-not $text.EndsWith("`n")) { $text += "`n" }
+        [IO.File]::WriteAllText($cfg, $text + $option + "`n", $utf8)
+    }
+    $env:COACH_DRAG_PORT_FILE = Join-Path $LibraryDir 'drag-port'
+    if (Test-Path -LiteralPath $env:COACH_DRAG_PORT_FILE) { Remove-Item -LiteralPath $env:COACH_DRAG_PORT_FILE -Force }
+    Write-Output "DRAGAGENT $option"
+}
+
 function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
     New-Item -ItemType Directory -Force $OutDir | Out-Null
     $OutDir = (Resolve-Path $OutDir).Path
@@ -181,9 +200,14 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
             $env:COACH_DEVICE_ID = 'arm-smoke'
             $env:COACH_TOKEN_FILE = Join-Path $tutorPrivate 'token'
         }
+        if (-not $Winbox) { Enable-ArmDragAgent $exe $env:COACH_LIBRARY_DIR }
         $app = if ($Winbox) { Start-Process -FilePath $exe -PassThru } else { [ArmSmokeDesktop]::Start($exe, '', $TestDesktop) }
         $deadline = (Get-Date).AddSeconds(300)
         do {
+            if ($app.HasExited) {
+                $still = @(Get-CimInstance Win32_Process -Filter "Name='LearningCoach.exe'" -ErrorAction SilentlyContinue)
+                if ($still.Count -eq 0) { throw "Installed app exited $($app.ExitCode) before the window appeared" }
+            }
             Start-Sleep -Milliseconds 500
             $candidates = Get-CimInstance Win32_Process -Filter "Name='LearningCoach.exe' AND (ProcessId=$($app.Id) OR ParentProcessId=$($app.Id))" |
                 Where-Object ExecutablePath -eq $exe
@@ -191,6 +215,18 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
                 Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -eq 'LearningCoach' } | Select-Object -First 1
         } while (-not $window -and (Get-Date) -lt $deadline)
         if (-not $window) { throw 'Installed app window did not appear' }
+        if (-not $Winbox) {
+            $agentDeadline = (Get-Date).AddSeconds(20)
+            while (-not (Test-Path -LiteralPath $env:COACH_DRAG_PORT_FILE) -and (Get-Date) -lt $agentDeadline) {
+                Start-Sleep -Milliseconds 200
+            }
+            if (-not (Test-Path -LiteralPath $env:COACH_DRAG_PORT_FILE)) {
+                $agentError = Join-Path $env:COACH_LIBRARY_DIR 'drag-agent-error.txt'
+                $why = if (Test-Path -LiteralPath $agentError) { (Get-Content -Raw -LiteralPath $agentError).Trim() } else { 'port file was not written' }
+                throw "Drag agent did not start: $why"
+            }
+            Write-Output "DRAGAGENT port=$((Get-Content -Raw -LiteralPath $env:COACH_DRAG_PORT_FILE).Trim())"
+        }
         $script:AppPid = $window.Id
         $script:Win = $window.MainWindowHandle
         Save-OwnWindow 'installed-window-printwindow.png'

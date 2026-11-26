@@ -118,7 +118,10 @@ compose.desktop {
             packageName = "LearningCoach"
             packageVersion = releaseVersion
             vendor = "LearningCoach"
-            modules("java.sql")
+            // java.instrument lets the ARM smoke append -javaagent after install.
+            // The agent posts an AWT drag into the installed app. A normal launch
+            // never loads it. OS cursor drags reach the canvas and still do not select.
+            modules("java.sql", "java.instrument")
             windows {
                 // Same artwork as Window(icon = AppIcon.window()); the ICO carries 16..256 so the
                 // installer, exe, Start menu shortcut and taskbar pick a pre-rendered size instead

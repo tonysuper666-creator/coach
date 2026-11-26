@@ -170,7 +170,7 @@ internal fun PageExplanation(
                         citations = res.explanation.citations.map { CachedCitation(it.anchor, it.blockId, it.page) },
                         recap = "",
                     )
-                    withContext(Dispatchers.IO) { runCatching { library.saveSectionGuide(book.id, cacheKey, toCache) } }
+                    withContext(Dispatchers.IO) { runCatching { library.saveSectionGuide(book.id, cacheKey, toCache, book) } }
                 }
                 value = res
             }

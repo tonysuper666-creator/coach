@@ -49,7 +49,7 @@ internal data class Textbook(
     val bodyStart: BookPageAnchor by lazy { BookBoundaries.bodyStart(pages, structure, correctedBodyPage) }
     val chapterSpans: List<BookChapterSpan> by lazy { BookChapterResolver.resolve(this) }
     val lessons: List<BookLesson> by lazy {
-        structure?.toLessons()?.takeIf { it.isNotEmpty() } ?: StudyCoachCourse.plan(id, title, pages)
+        structure?.toLessons()?.takeIf { it.isNotEmpty() || structure.editRevision != null } ?: StudyCoachCourse.plan(id, title, pages)
     }
     val hasPendingOcr: Boolean get() = pages.any { it.ocrPending }
     private val cachedSourceBlocks: List<SourceBlock> by lazy {
@@ -68,8 +68,10 @@ internal data class Textbook(
             val range = CourseTranscriptParser.pageTimeRangeLabel(pages.firstOrNull { it.number == number }?.text)
             if (range != null) return "第 $number 段（$range）"
         }
-        val chapter = if (format in setOf("txt", "mobi", "azw3")) pages.asSequence().takeWhile { it.number <= number }
-            .mapNotNull { BookText.chapterTitle(it.text) }.lastOrNull() else null
+        val chapter = if (format !in setOf("txt", "mobi", "azw3")) null
+        else if (structure?.source == HeadingSource.MANUAL.name) BookChapterResolver.chapterForPage(this, number)?.title
+        else pages.asSequence().takeWhile { it.number <= number }
+            .mapNotNull { BookText.chapterTitle(it.text) }.lastOrNull()
         return "第 $number 页" + (chapter?.let { "（$it）" } ?: "")
     }
 }

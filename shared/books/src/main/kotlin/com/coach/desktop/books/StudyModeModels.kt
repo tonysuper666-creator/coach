@@ -625,24 +625,27 @@ internal object StudyModeStore {
         explainLang: ExplainLanguage = ExplainLanguage.BILINGUAL,
         inquiryQuestion: String = "",
         packJson: String,
+        expected: Textbook? = null,
     ) {
         runCatching {
             openDb(library.directory).use { db ->
-                db.prepareStatement(
-                    """INSERT INTO book_study_mode_packs(book_id, chapter_num, study_mode, detail_level, explain_lang, inquiry_key, pack_json, updated_at)
-                       VALUES(?,?,?,?,?,?,?,?)
-                       ON CONFLICT(book_id, chapter_num, study_mode, detail_level, explain_lang, inquiry_key) DO UPDATE SET
-                       pack_json=excluded.pack_json, updated_at=excluded.updated_at""".trimIndent(),
-                ).use { s ->
-                    s.setString(1, bookId)
-                    s.setInt(2, chapterNum)
-                    s.setString(3, mode.name)
-                    s.setString(4, detailLevel.name)
-                    s.setString(5, explainLang.name)
-                    s.setString(6, if (mode == BookStudyMode.QUESTION_DRIVEN) inquiryKey(inquiryQuestion) else "")
-                    s.setString(7, packJson)
-                    s.setLong(8, System.currentTimeMillis())
-                    s.executeUpdate()
+                db.cacheForStructure(expected) {
+                    db.prepareStatement(
+                        """INSERT INTO book_study_mode_packs(book_id, chapter_num, study_mode, detail_level, explain_lang, inquiry_key, pack_json, updated_at)
+                           VALUES(?,?,?,?,?,?,?,?)
+                           ON CONFLICT(book_id, chapter_num, study_mode, detail_level, explain_lang, inquiry_key) DO UPDATE SET
+                           pack_json=excluded.pack_json, updated_at=excluded.updated_at""".trimIndent(),
+                    ).use { s ->
+                        s.setString(1, bookId)
+                        s.setInt(2, chapterNum)
+                        s.setString(3, mode.name)
+                        s.setString(4, detailLevel.name)
+                        s.setString(5, explainLang.name)
+                        s.setString(6, if (mode == BookStudyMode.QUESTION_DRIVEN) inquiryKey(inquiryQuestion) else "")
+                        s.setString(7, packJson)
+                        s.setLong(8, System.currentTimeMillis())
+                        s.executeUpdate()
+                    }
                 }
             }
         }
@@ -1324,18 +1327,21 @@ internal object StudyModeStore {
         batchJson: JsonObject,
         detailLevel: ExplainDetailLevel = ExplainDetailLevel.BRIEF,
         explainLang: ExplainLanguage = ExplainLanguage.BILINGUAL,
+        expected: Textbook? = null,
     ) {
         runCatching {
             openDb(library.directory).use { db ->
-                db.prepareStatement(
-                    """INSERT INTO book_map_meta(book_id, graph_json, updated_at)
-                       VALUES(?,?,?)
-                       ON CONFLICT(book_id) DO UPDATE SET graph_json=excluded.graph_json, updated_at=excluded.updated_at""",
-                ).use { s ->
-                    s.setString(1, bookId)
-                    s.setString(2, batchJson.toString())
-                    s.setLong(3, System.currentTimeMillis())
-                    s.executeUpdate()
+                db.cacheForStructure(expected) {
+                    db.prepareStatement(
+                        """INSERT INTO book_map_meta(book_id, graph_json, updated_at)
+                           VALUES(?,?,?)
+                           ON CONFLICT(book_id) DO UPDATE SET graph_json=excluded.graph_json, updated_at=excluded.updated_at""",
+                    ).use { s ->
+                        s.setString(1, bookId)
+                        s.setString(2, batchJson.toString())
+                        s.setLong(3, System.currentTimeMillis())
+                        s.executeUpdate()
+                    }
                 }
             }
             (batchJson["chapters"] as? JsonArray).orEmpty().forEach { el ->
@@ -1350,6 +1356,7 @@ internal object StudyModeStore {
                     explainLang = explainLang,
                     inquiryQuestion = "",
                     packJson = chObj.toString(),
+                    expected = expected,
                 )
             }
         }

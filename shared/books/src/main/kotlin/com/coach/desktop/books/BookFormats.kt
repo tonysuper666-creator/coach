@@ -104,6 +104,8 @@ internal object BookText {
         }.mapIndexed { i, page -> page.copy(number = i + 1) }
     }
 
+    fun explicitHeadings(text: String) = heading.findAll(text)
+
     fun chapterTitle(text: String): String? = heading.find(text)?.value?.trim()?.trimStart('#')?.trim()?.take(150)
 }
 

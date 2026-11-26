@@ -9,7 +9,8 @@ import java.sql.Types
 
 /**
  * 跨书的「我的库」。
- * 只读已经落盘的批注、高亮、问答和错题，不读页正文，也不读讲解多送出去的原文。
+ * 只读已经落盘的批注、高亮、问答、错题、对比表、综述提纲和概念并排。
+ * 不把页正文和讲解多送出去的原文放进库。核对出处时只看这一句还在不在原页上。
  * 记录 ID 在本地和云的格式规范合入前走 [libraryRecordIds]（现为 legacy-v1）。换规范时只换这个对象。
  */
 internal interface LibraryRecordIdScheme {
@@ -31,6 +32,9 @@ internal enum class LibraryKind(val label: String) {
     HIGHLIGHT("高亮"),
     QUESTION("问答"),
     MISTAKE("错题"),
+    COMPARISON("对比"),
+    OUTLINE("提纲"),
+    SAYING("说法"),
 }
 
 internal data class LibraryRecord(
@@ -68,9 +72,12 @@ internal fun openLibraryCorpus(directory: Path): Connection =
         createStatement().use { it.execute("PRAGMA busy_timeout=5000") }
     }
 
-/** 把阅读位置写到这本书的原页，好让随后打开的阅读器落在那一句附近。页不在书里则不动。 */
+/** 把阅读位置写到这本书的原页，好让随后打开的阅读器落在那一句附近。页不在书里则不动。原句还在才记下高亮。 */
 internal fun stageLibraryJump(library: TextbookLibrary, record: LibraryRecord): Boolean {
-    val page = record.page?.takeIf { it > 0 } ?: return false
+    val page = record.page?.takeIf { it > 0 } ?: run {
+        library.consumeQuoteJump(record.bookId)
+        return false
+    }
     val offset = record.startUtf16?.takeIf { it >= 0 } ?: 0
     val moved = openLibraryCorpus(library.directory).use { db ->
         db.prepareStatement(
@@ -83,8 +90,18 @@ internal fun stageLibraryJump(library: TextbookLibrary, record: LibraryRecord): 
             sql.executeUpdate() == 1
         }
     }
-    if (!moved) return false
+    if (!moved) {
+        library.consumeQuoteJump(record.bookId)
+        return false
+    }
     library.saveReadSpot(record.bookId, page, offset)
+    val end = record.endUtf16
+    val quote = record.quote
+    if (end != null && end > offset && quote.isNotBlank()) {
+        library.stageQuoteJump(BookPassage(record.bookId, page, offset, end, quote))
+    } else {
+        library.consumeQuoteJump(record.bookId)
+    }
     return true
 }
 
@@ -232,6 +249,7 @@ private fun collectRecords(db: Connection): List<DesiredRecord> {
     loadHighlights(db, books, ids, ::add)
     loadQuestions(db, books, ids, ::add)
     loadMistakes(db, books, toc, times, ids, ::add)
+    collectStudyRecords(db, books, ids).forEach(::add)
     return out
 }
 
@@ -396,7 +414,7 @@ private fun loadMistakes(
     }
 }
 
-private fun record(
+internal fun record(
     ids: LibraryRecordIdScheme,
     kind: LibraryKind,
     rawId: String,
@@ -428,7 +446,7 @@ private fun record(
     )
 }
 
-private fun bullet(vararg pairs: Pair<String, String>): String = buildString {
+internal fun bullet(vararg pairs: Pair<String, String>): String = buildString {
     for ((label, text) in pairs) {
         val line = notesOneLine(text)
         if (line.isEmpty()) continue

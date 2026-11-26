@@ -26,6 +26,12 @@ internal object LiteratureGuideFixture {
                     it.showText(if (partialLayer && page == 1) "2" else
                         "Plot $index contained flowering plants. Sample ${page + 1} showed faster growth in shade.")
                     it.endText()
+                    if (!partialLayer) {
+                        it.beginText()
+                        it.newLineAtOffset(280f, 40f)
+                        it.showText((148 + page).toString())
+                        it.endText()
+                    }
                 }
             }
             pdf.save(path.toFile())
@@ -34,7 +40,7 @@ internal object LiteratureGuideFixture {
     }
 
     /** Isolated Bridge double: one pending poll followed by a model response derived from the wire payload. */
-    class Bridge : AutoCloseable {
+    class Bridge(private val rejectFirst: Boolean = false) : AutoCloseable {
         val keys = CopyOnWriteArrayList<String>()
         private val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             createContext("/") { exchange ->
@@ -48,7 +54,10 @@ internal object LiteratureGuideFixture {
                     else buildJsonObject {
                         val user = request.getValue("messages").jsonArray.last().jsonObject.getValue("content").jsonPrimitive.content
                         put("choices", buildJsonArray { add(buildJsonObject {
-                            put("message", buildJsonObject { put("content", reply(Json.parseToJsonElement(user).jsonObject).toString()) })
+                            val answer = reply(Json.parseToJsonElement(user).jsonObject)
+                            val insufficient = buildJsonArray { add(buildJsonArray { add("片段未涉及。"); add("无法回答。") }) }
+                            val result = if (rejectFirst && keys.size == 2) JsonObject(answer + ("answers" to insufficient)) else answer
+                            put("message", buildJsonObject { put("content", result.toString()) })
                         }) })
                         put("x_coach", buildJsonObject {
                             put("status", "complete"); put("served_by", BridgeClient.HAIKU)

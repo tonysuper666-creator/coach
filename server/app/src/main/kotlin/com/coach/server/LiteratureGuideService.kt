@@ -52,6 +52,7 @@ class LiteratureGuideService(private val bridge: BridgeClient) {
 "quiz":[{"questionIndex":0,"stem":"原创选择题","options":["选项一","二","三","四"],"correct":0,
 "reasons":["第一项为何对或错","第二项理由","第三项理由","第四项理由"],"ref":0}]}。
 papers 每篇一项；stops 必须覆盖每一个不同的 (bookId,sectionId)，按小节顺序挑出各节最值得停读的一句，引用该节；无小标题时按论证阶段划分。
+用正文的论点、依据及其关系回答问题。题目不得考页眉、书目信息或材料完整性。证据不足时返回 {"invalidGuide":true}，让客户端重选材料。
 answers 与思考题逐一同序，每题两句，各句尽量在 30 字以内。quiz 共 10–15 道单选题，每个思考题至少两道。
 questionIndex 和 correct 从 0 起算。每题理由和答案都必须有该页证据。"""
     }

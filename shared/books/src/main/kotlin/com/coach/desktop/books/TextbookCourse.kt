@@ -15,6 +15,7 @@ internal data class BookPage(
     val number: Int, val text: String, val ocr: Boolean = false,
     val illustrations: List<BookIllustration> = emptyList(), val textLayout: PageTextLayout? = null,
     val ocrPending: Boolean = false,
+    val guideRegions: List<GuideRegion> = emptyList(),
 )
 internal data class SourceBlock(val id: String, val page: Int, val start: Int, val end: Int, val heading: Boolean, val text: String)
 

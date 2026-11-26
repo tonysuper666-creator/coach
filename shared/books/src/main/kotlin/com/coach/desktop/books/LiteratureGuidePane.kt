@@ -31,39 +31,53 @@ internal fun LiteratureGuidePane(
 
     suspend fun open(ids: List<String>, prompts: List<String>, generate: Boolean) {
         try {
-            val input = withContext(Dispatchers.IO) { LiteratureInput(ids.map(library::literatureBook), prompts) }
-            val request = input.request()
-            val key = LiteratureGuideStore.digest(request)
+            val books = withContext(Dispatchers.IO) { ids.map(library::literatureBook) }
+            var input = withContext(Dispatchers.Default) { LiteratureInput(books, prompts) }
+            val key = LiteratureGuideStore.digest(input.request())
+            suspend fun nextRevision(rejected: Int? = null) = withContext(Dispatchers.IO) {
+                library.withCourseDatabase { LiteratureGuideStore.revision(it, detail.courseId, key, rejected) }
+            }
+            val revision = nextRevision()
+            if (revision != 0) input = withContext(Dispatchers.Default) { LiteratureInput(books, prompts, revision) }
             val cached = withContext(Dispatchers.IO) {
-                library.withCourseDatabase { LiteratureGuideStore.cached(it, detail.courseId, key) }
+                library.withCourseDatabase { LiteratureGuideStore.cached(it, detail.courseId, key, revision) }
             }
             if (cached != null) {
-                guide = input.verified(cached)
-                if (generate) withContext(Dispatchers.IO) {
-                    library.withCourseDatabase { LiteratureGuideStore.save(it, detail.courseId, key, input, null) }
+                val checked = runCatching { input.verified(cached) }.getOrNull()
+                if (checked != null) {
+                    guide = checked
+                    if (generate) withContext(Dispatchers.IO) {
+                        library.withCourseDatabase { LiteratureGuideStore.save(it, detail.courseId, key, input, null) }
+                    }
+                    return
                 }
-                return
+                val next = nextRevision(revision)
+                input = withContext(Dispatchers.Default) { LiteratureInput(books, prompts, next) }
             }
             if (!generate) return
             check(enabled && ids.all(consent::allowed)) { "请先在阅读设置中开启 AI 讲解。" }
             explainer.load()
             val paired = explainer.identity
-            val revision = withContext(Dispatchers.IO) {
-                library.withCourseDatabase {
-                    LiteratureGuideStore.save(it, detail.courseId, key, input, null)
-                    LiteratureGuideStore.revision(it, detail.courseId, key)
-                }
+            withContext(Dispatchers.IO) {
+                library.withCourseDatabase { LiteratureGuideStore.save(it, detail.courseId, key, input, null) }
             }
-            val submission = JsonObject(request + ("revision" to JsonPrimitive(revision)))
+            var repaired = false
+            var submission = input.request()
             while (true) {
                 check(explainer.identity == paired) { "连接已更换，请重新打开导读。" }
                 check(ids.all(consent::allowed)) { "AI 讲解已关闭。" }
                 val response = explainer.courseTopicPack(submission)
                 val result = response.body ?: error(response.error ?: "连接失败，请重试。")
                 if ((result["pending"] as? JsonPrimitive)?.booleanOrNull != true) {
-                    val verified = runCatching { input.verified(result) }.getOrElse {
-                        library.withCourseDatabase { LiteratureGuideStore.revision(it, detail.courseId, key, advance = true) }
-                        error("导读未通过出处或题目覆盖核对，请重新生成。")
+                    val verified = runCatching { input.verified(result) }.getOrNull()
+                    if (verified == null) {
+                        val next = nextRevision(input.revision)
+                        check(!repaired) { "重选正文后仍缺少可核对的答案，请检查文献或调整思考题。" }
+                        input = withContext(Dispatchers.Default) { LiteratureInput(books, prompts, next) }
+                        submission = input.request()
+                        repaired = true
+                        notice = "上一份导读缺少正文依据，正在重选片段。"
+                        continue
                     }
                     withContext(Dispatchers.IO) {
                         library.withCourseDatabase { LiteratureGuideStore.save(it, detail.courseId, key, input, result) }
@@ -169,7 +183,8 @@ internal fun LiteratureGuidePane(
 @Composable
 private fun GuideSource(source: GuideExcerpt, onSource: (GuideExcerpt) -> Unit) {
     V7TextButton({ onSource(source) }, modifier = Modifier.testTag("guide-source-${source.anchor.pdfPage}")) {
-        Text("第 ${source.anchor.pdfPage} 页　“${source.anchor.quoteAnchor}”", style = MaterialTheme.typography.bodySmall)
+        val printed = source.region.printedPage?.let { "印刷第 $it 页" } ?: "印刷页码未标出"
+        Text("PDF 第 ${source.anchor.pdfPage} 页 · $printed　“${source.anchor.quoteAnchor}”", style = MaterialTheme.typography.bodySmall)
     }
 }
 

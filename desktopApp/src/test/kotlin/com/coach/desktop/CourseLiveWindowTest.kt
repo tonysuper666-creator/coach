@@ -431,7 +431,8 @@ class CourseLiveWindowTest {
         val controller = TextbookController(library)
         ReadingSettings(library.directory).choosePaper(paper)
         ReadingSettings(library.directory).chooseAiExplain(true)
-        val bridge = LiteratureGuideFixture.Bridge()
+        val repair = paper == PaperColor.DARK
+        val bridge = LiteratureGuideFixture.Bridge(rejectFirst = repair)
         val explainer = object : BookExplainer(library = library) {
             override suspend fun load() { loaded = true }
             override suspend fun courseTopicPack(input: JsonObject) =
@@ -477,8 +478,8 @@ class CourseLiveWindowTest {
             click(window, "guide-option-1")
             waitFor("verified explanation", window) { node(window, "guide-reasons") != null }
             click(window, "guide-tab-1")
-            val input = LiteratureInput(library.courseDetail(course).materials.map { library.book(it.bookId) },
-                listOf("三个样地有什么差异？"))
+            val input = LiteratureInput(library.courseDetail(course).materials.map { library.literatureBook(it.bookId) },
+                listOf("三个样地有什么差异？"), revision = if (repair) 1 else 0)
             val result = LiteratureGuideFixture.reply(input.request())
             val verified = input.verified(result)
             assertEquals(10, verified.quiz.size)
@@ -488,6 +489,10 @@ class CourseLiveWindowTest {
                 assertEquals(a.quoteAnchor, e.book.page(a.pdfPage)!!.text.substring(a.startUtf16, a.endUtf16))
             }
             val target = verified.stops.first().source
+            val label = "PDF 第 " + target.anchor.pdfPage + " 页 · 印刷第 " + (147 + target.anchor.pdfPage) + " 页"
+            waitFor("both PDF and printed page labels", window) {
+                nodes(window).any { n -> n.config.getOrNull(SemanticsProperties.Text).orEmpty().any { label in it.text } }
+            }
             click(window, "guide-source-${target.anchor.pdfPage}")
             waitFor("original PDF page", window) {
                 controller.state.value.screen == BookScreen.READER && controller.state.value.book?.id == target.book.id &&
@@ -497,8 +502,8 @@ class CourseLiveWindowTest {
             click(window, "guide-tab-2")
             waitFor("saved choice after returning from the PDF", window) { node(window, "guide-reasons") != null }
             assertTrue(library.reviews().any { it.practice.prompt == verified.quiz.first().item.stem })
-            assertEquals(2, bridge.keys.size)
-            assertEquals(1, bridge.keys.distinct().size)
+            assertEquals(if (repair) 3 else 2, bridge.keys.size)
+            assertEquals(if (repair) 2 else 1, bridge.keys.distinct().size)
         } finally {
             bridge.close()
             edt { window.dispose() }

@@ -1619,20 +1619,29 @@ internal class TextbookLibrary(
     fun literatureBook(bookId: String): Textbook {
         val source = book(bookId)
         require(source.format == "pdf" && source.indexState == "READY" && !source.hasPendingOcr) { "请等待 PDF 导入和扫描页识别完成。" }
-        val suspect = source.pages.filter { page ->
-            !page.ocr && (page.text.count(Char::isLetter) < 6 || '�' in page.text)
-        }.map { it.number }.toSet()
-        if (suspect.isEmpty()) return source
         val file = original(bookId, "pdf").toFile()
         val pages = BookPdfLoader.read(file) { pdf ->
+            val labels = pdf.documentCatalog.pageLabels?.labelsByPageIndices
             source.pages.map { page ->
-                if (page.number !in suspect) page else {
-                    val recognized = recognizePdfPage(file, pdf, page.number, BookImportControl())
-                    page.copy(text = recognized, textLayout = null, ocr = true)
+                val physical = LiteraturePdfLayout.extract(pdf, page.number)
+                val layer = physical.joinToString("\n\n") { it.text }
+                val regions = when {
+                    layer.count(Char::isLetter) >= 6 && '�' !in layer -> physical
+                    else -> {
+                        // Bundled OCR uses automatic page segmentation (columns and blocks).
+                        val transcript = if (page.ocr) page.text else recognizePdfPage(file, pdf, page.number, BookImportControl())
+                        listOf(GuideRegion(transcript, physical.firstOrNull()?.printedPage))
+                    }
                 }
+                val pageFolio = regions.mapNotNull { it.printedPage }.distinct().singleOrNull()
+                    ?: labels?.getOrNull(page.number - 1)
+                val labeled = regions.map { r ->
+                    r.copy(text = r.text.replace("\r\n", "\n").replace('\r', '\n'), printedPage = r.printedPage ?: pageFolio)
+                }
+                page.copy(text = labeled.joinToString("\n\n") { it.text }, textLayout = null, guideRegions = labeled)
             }
         }
-        return source.copy(pages = pages, structure = null)
+        return source.copy(pages = pages)
     }
 
     private fun recognizePdfPage(file: java.io.File, pdf: BookPdfDocument, page: Int, control: BookImportControl): String {

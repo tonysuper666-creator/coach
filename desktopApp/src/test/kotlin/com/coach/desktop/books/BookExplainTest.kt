@@ -30,8 +30,11 @@ class BookExplainTest {
         assertEquals(3, done.citations.single().page)
         val refused = buildJsonObject { put("text", "追问未完成，暂时无法确认。"); put("sources", JsonArray(emptyList())) }
         val noSources = assertIs<ExplainResult.Refused>(ExplainWire.parse(refused, sent))
-        assertContains(noSources.message, "这一句书里没有更多可依据的内容")
-        assertContains(noSources.message, "这段话在说什么？")
+        assertEquals("追问未完成，暂时无法确认。", noSources.message)
+        val blank = buildJsonObject { put("text", "  "); put("sources", JsonArray(emptyList())) }
+        val blankRefusal = assertIs<ExplainResult.Refused>(ExplainWire.parse(blank, sent))
+        assertContains(blankRefusal.message, "这一句书里没有更多可依据的内容")
+        assertContains(blankRefusal.message, "这段话在说什么？")
         val foreign = buildJsonObject {
             put("text", "编造。【S1】")
             put("sources", buildJsonArray { add(buildJsonObject { put("anchor", "S1"); put("docId", "$book:p9:9"); put("pdfPage", 9) }) })

@@ -984,7 +984,7 @@ internal class TextbookLibrary(
         }
     }
 
-    private fun stageCopyAndHash(source: Path, control: BookImportControl, stage: Path): Triple<String, String, Long> {
+    private fun stageCopyAndHash(source: Path, control: BookImportControl, stage: Path): Pair<String, Long> {
         val digest = MessageDigest.getInstance("SHA-256")
         var bytesCopied = 0L
         Files.newInputStream(source).use { input ->
@@ -1000,9 +1000,8 @@ internal class TextbookLibrary(
                 }
             }
         }
-        val format = BookFormats.detect(stage, source.fileName.toString())
         val id = digest.digest().joinToString("") { "%02x".format(it) }
-        return Triple(id, format, bytesCopied)
+        return id to bytesCopied
     }
 
     private fun stagePreparedNonTier0(
@@ -1042,8 +1041,9 @@ internal class TextbookLibrary(
         require(Files.size(source) <= 256L * 1024 * 1024) { "请选择不超过 256 MB 的教材。" }
         val stage = directory.resolve(".import-${UUID.randomUUID()}")
         try {
-            val (id, format, fileBytes) = stageCopyAndHash(source, control, stage)
+            val (id, fileBytes) = stageCopyAndHash(source, control, stage)
             if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
+            val format = BookFormats.detect(stage, source.fileName.toString())
             return stagePreparedNonTier0(source, stage, id, format, fileBytes, control)
         } finally { Files.deleteIfExists(stage) }
     }
@@ -1067,8 +1067,9 @@ internal class TextbookLibrary(
         require(Files.size(source) <= 256L * 1024 * 1024) { "请选择不超过 256 MB 的教材。" }
         val stage = directory.resolve(".import-${UUID.randomUUID()}")
         try {
-            val (id, format, fileBytes) = stageCopyAndHash(source, control, stage)
+            val (id, fileBytes) = stageCopyAndHash(source, control, stage)
             if (catalog().any { it.id == id }) return StagedBookImport(book(id), alreadyExisted = true)
+            val format = BookFormats.detect(stage, source.fileName.toString())
             if (format != "pdf" || extractBook != null) {
                 return stagePreparedNonTier0(source, stage, id, format, fileBytes, control)
             }

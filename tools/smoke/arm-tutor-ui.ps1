@@ -845,6 +845,159 @@ function Focus-ReaderPage {
     Start-Sleep -Milliseconds 300
 }
 
+function Test-ReaderTextView {
+    $db = Resolve-InstalledLibrary (Join-Path $env:COACH_LIBRARY_DIR 'library.sqlite')
+    $py = Join-Path $OutDir 'read-view.py'
+    if (-not (Test-Path -LiteralPath $py)) {
+        Set-Content -LiteralPath $py -Encoding ASCII -Value "import sqlite3, sys`nrow = sqlite3.connect(sys.argv[1]).execute('select text_view from book_reader_views').fetchone()`nprint('' if row is None else row[0])`n"
+    }
+    $raw = & python $py $db
+    return ("$raw".Trim() -eq '1')
+}
+
+function Find-HighestText($lines, [string]$needle) {
+    $best = $null
+    foreach ($line in @($lines)) {
+        $hit = Find-Text @($line) $needle
+        if ($hit -and (-not $best -or $hit.Y -lt $best.Y)) { $best = $hit }
+    }
+    return $best
+}
+
+function Find-TextBeside($lines, [string]$needle, $ref) {
+    if (-not $ref) { return $null }
+    foreach ($line in @($lines)) {
+        $hit = Find-Text @($line) $needle
+        if ($hit -and [Math]::Abs($hit.Y - $ref.Y) -le 18 -and $hit.X -gt ($ref.X + 8)) { return $hit }
+    }
+    return $null
+}
+
+# OCR a captured window. Coordinates stay in that bitmap.
+function Read-PngLines([string]$png) {
+    if ($Winbox) { return @(Read-Screen $png) }
+    $src = [Drawing.Bitmap]::new($png)
+    $bmp = [Drawing.Bitmap]::new($src.Width * 3, $src.Height * 3, [Drawing.Imaging.PixelFormat]::Format24bppRgb)
+    try {
+        $g = [Drawing.Graphics]::FromImage($bmp)
+        try {
+            $g.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $g.PixelOffsetMode = [Drawing.Drawing2D.PixelOffsetMode]::Half
+            $g.DrawImage($src, 0, 0, $bmp.Width, $bmp.Height)
+        } finally { $g.Dispose() }
+        $file = Join-Path $tutorPrivate 'screen.bmp'
+        $bmp.Save($file, [Drawing.Imaging.ImageFormat]::Bmp)
+    } finally { $bmp.Dispose(); $src.Dispose() }
+    $json = & python (Join-Path $PSScriptRoot 'arm-screen-text.py') $file $tutorPrivate
+    if ($LASTEXITCODE -ne 0) { throw 'Window text recognition failed' }
+    $rows = $json | ConvertFrom-Json
+    foreach ($group in ($rows | Group-Object -Property { $_[0] -join '-' })) {
+        $words = foreach ($w in $group.Group) {
+            [pscustomobject]@{Text=$w[1]; BoundingRect=[pscustomobject]@{X=$w[2]/3; Y=$w[3]/3; Width=$w[4]/3; Height=$w[5]/3}}
+        }
+        [pscustomobject]@{Text=(($words | ForEach-Object Text) -join ''); Words=@($words)}
+    }
+}
+
+function Get-AppMenuWindows {
+    $script:ViewMenus = New-Object System.Collections.Generic.List[IntPtr]
+    [WD]::EnumWindows({ param($x, $l)
+        $p = 0
+        [WD]::GetWindowThreadProcessId($x, [ref]$p) | Out-Null
+        if ($p -eq $script:AppPid -and [WD]::IsWindowVisible($x) -and $x -ne $script:Win -and -not [WD]::IsCloaked($x)) {
+            $rect = New-Object WD+RECT
+            if ([WD]::GetWindowRect($x, [ref]$rect)) {
+                $w = $rect.R - $rect.L; $h = $rect.B - $rect.T
+                if ($w -ge 80 -and $w -le 480 -and $h -ge 40 -and $h -le 480) { $script:ViewMenus.Add($x) }
+            }
+        }
+        return $true }, [IntPtr]::Zero) | Out-Null
+    return @($script:ViewMenus)
+}
+
+# ⋯ sits 50px in from the window's right edge and 54px down on the 976x672 runner
+# (title bar, then the 44px bar). 伴读's glyph centre is 64px left of those dots.
+function Get-MoreMenuPoint($hud) {
+    $rect = Get-Rect
+    $point = [pscustomobject]@{ X = [int](($rect.R - $rect.L) - 50); Y = 54 }
+    $companion = $null
+    foreach ($line in @($hud)) {
+        if (($line.Text -replace '\s','') -eq '伴读') { $companion = Find-Text @($line) '伴读'; break }
+    }
+    if (-not $companion) { $companion = Find-HighestText $hud '伴读' }
+    if ($companion) {
+        $beside = [pscustomobject]@{ X = [int]($companion.X + 64); Y = [int]$companion.Y }
+        Write-Host "VIEW more beside 伴读 $($beside.X),$($beside.Y) fallback $($point.X),$($point.Y)"
+        return @($beside, $point)
+    }
+    Write-Host "VIEW more at $($point.X),$($point.Y)"
+    return @($point)
+}
+
+function Find-ViewTextPoint([string]$name, $more) {
+    $frames = @()
+    $main = @(Read-TutorFrame $name)
+    $frames += ,([pscustomobject]@{ Lines = $main; Dx = 0; Dy = 0 })
+    $mainRect = Get-Rect
+    foreach ($popup in @(Get-AppMenuWindows)) {
+        $shot = "$name-popup.png"
+        Save-OwnWindow $shot $popup
+        $popupRect = New-Object WD+RECT
+        [void][WD]::GetWindowRect($popup, [ref]$popupRect)
+        $frames += ,([pscustomobject]@{
+            Lines = @(Read-PngLines (Join-Path $OutDir $shot))
+            Dx = [int]($popupRect.L - $mainRect.L)
+            Dy = [int]($popupRect.T - $mainRect.T)
+        })
+        Write-Host "VIEW popup $name origin $($popupRect.L - $mainRect.L),$($popupRect.T - $mainRect.T)"
+    }
+    foreach ($frame in $frames) {
+        $original = Find-HighestText $frame.Lines '原页'
+        if (-not $original) { continue }
+        $text = Find-TextBeside $frame.Lines '文字' $original
+        if (-not $text) {
+            $text = [pscustomobject]@{ X = [int]($original.X + 48); Y = [int]$original.Y }
+            Write-Host "VIEW text beside 原页 $($text.X),$($text.Y)"
+        }
+        return [pscustomobject]@{ X = [int]($text.X + $frame.Dx); Y = [int]($text.Y + $frame.Dy) }
+    }
+    return $null
+}
+
+# The scan stays on the original page. Smoke needs the text view, so open the
+# reader's own ⋯ menu and click 文字. Do not switch the view from product code.
+function Switch-ReaderToText {
+    if (Test-ReaderTextView) { Write-Output 'VIEW text already'; return }
+    $switched = $false
+    foreach ($try in 1..3) {
+        Hover-TutorEdge 10
+        Start-Sleep -Milliseconds 450
+        $hud = @(Read-TutorFrame "view-hud$try")
+        $points = @(Get-MoreMenuPoint $hud)
+        $text = $null
+        foreach ($more in $points) {
+            Click-At $more.X $more.Y | Out-Null
+            Start-Sleep -Milliseconds 500
+            $text = Find-ViewTextPoint "view-menu$try" $more
+            if ($text) { break }
+            Click-At $more.X $more.Y | Out-Null
+        }
+        if (-not $text) {
+            Write-Output "VIEW menu missed 文字 try=$try"
+            continue
+        }
+        Click-At $text.X $text.Y | Out-Null
+        foreach ($wait in 1..8) {
+            Start-Sleep -Milliseconds 300
+            if (Test-ReaderTextView) { $switched = $true; break }
+        }
+        if ($switched) { break }
+        Write-Output "VIEW click did not persist text_view try=$try at $($text.X),$($text.Y)"
+    }
+    if (-not $switched) { throw '没有点到阅读器里的「文字」，仍停在原页（见 view-menu）' }
+    Write-Output 'VIEW text'
+}
+
 # 2.0 selection toolbar is 「讲讲 / 拆句 / 举个例子 / 问… / 笔记」.
 # It sits at 14dp until the pointer enters the top edge, then drops to 54dp with the HUD.
 # Locate 讲讲 only after that move, or the click lands on the page and clears the selection.
@@ -1380,5 +1533,6 @@ function Test-InstalledTutor {
     foreach ($kind in @('explain','ask','lesson','practice')) {
         if ($kind -notin $events.kind) { throw "Missing loopback request: $kind" }
     }
-    Write-Output 'INSTALLED_LOOPBACK_UI_PASS steps=4,5,6,7'
+    # Step 4 is an in-process AWT drag into the installed app, not a Windows cursor drag.
+    Write-Output 'INSTALLED_LOOPBACK_UI_PASS steps=4(awt-injected),5,6,7'
 }

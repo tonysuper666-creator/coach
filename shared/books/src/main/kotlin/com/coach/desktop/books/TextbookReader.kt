@@ -102,14 +102,6 @@ internal fun locateCitedPdfRange(page: PdfPageText, text: String, range: IntRang
     return CitedPdfLocation(com.coach.desktop.reader.PageBoxes(displayWidth, displayHeight, rects), located)
 }
 
-/**
- * A recognized scan reads as reflowed text on desktop. The saved view choice wins.
- * Touch-first PDF reading stays on the original page.
- */
-private fun Textbook.reflowWhenOcrReady(page: BookPage, originalPdf: Boolean): Boolean =
-    page.ocr && !(originalPdf && originalPdfTouchEnabled) &&
-        (!originalPdf || pages.none { !it.ocr && it.text.isNotBlank() })
-
 @Composable
 internal fun TextbookReader(
     ui: LibraryUi, library: TextbookLibrary, support: BookLearningSupport, practiceSource: PracticeSource?,
@@ -159,7 +151,8 @@ internal fun TextbookReader(
         // A scanned cover is common in a digital PDF. Show its physical page first
         // instead of typesetting every chapter just to display that cover.
         mutableStateOf(!hasOriginal || (library.preferredTextView(book.id)
-            ?: book.reflowWhenOcrReady(page, originalPdf)))
+            ?: (page.ocr && !(originalPdf && originalPdfTouchEnabled) &&
+                (!originalPdf || book.pages.none { !it.ocr && it.text.isNotBlank() }))))
     }
     var viewSaveRevision by remember(library, book.id) { mutableIntStateOf(0) }
     var viewSaveError by remember(library, book.id) { mutableStateOf(false) }
@@ -486,18 +479,6 @@ internal fun TextbookReader(
     }
     LaunchedEffect(book.id, ui.page, source) {
         if (page.ocr && source != null) textView = true
-    }
-    // Import opens the reader before recognition finishes. The first frame remembers the
-    // original page, and a later OCR result does not recompute that. Once the scan is
-    // recognized and the reader has no saved view choice, follow the same reflow default.
-    val recognizedPages = book.pages.count { it.ocr }
-    LaunchedEffect(book.id, recognizedPages) {
-        if (textView || library.preferredTextView(book.id) != null) return@LaunchedEffect
-        if (!book.reflowWhenOcrReady(page, originalPdf)) return@LaunchedEffect
-        val target = pdf.page.takeIf { book.page(it) != null } ?: ui.page
-        if (paging.anchor.importPage != target) paging.anchor = BookPageAnchor(target)
-        if (paging.publishImportPage(target)) onPage(target)
-        textView = true
     }
     var asking by remember(book.id, ui.page) { mutableStateOf(false) }
     // A laid-out sheet can start on the previous imported page. Its bookmark

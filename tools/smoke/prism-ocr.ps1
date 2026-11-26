@@ -300,6 +300,8 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
             Focus-ReaderPage
             Start-Sleep -Seconds 1
             Save-OwnWindow 'reader-before.png'
+            # Click the reader's own 文字 control. A recognized scan stays on the original page.
+            Switch-ReaderToText
             # The reflow reader can lay out several screenfuls per source page, and the
             # arrow keys turn a page only while the page surface has focus.
             # Stop as soon as the book's persisted physical page changes to 2.

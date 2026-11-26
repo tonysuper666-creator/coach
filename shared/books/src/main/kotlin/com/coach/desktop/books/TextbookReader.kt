@@ -923,14 +923,21 @@ internal fun TextbookReader(
             ?: ChapterPracticeDraft(bookId = book.id, tocNodeId = practiceDraftNodeId, page = ui.page)
         mutableStateOf(restored)
     }
+    var practiceDraftReady by remember(book.id, currentChapterGroup?.chapterId) {
+        mutableStateOf(exactResumeDraft != null)
+    }
     LaunchedEffect(book.id, currentChapterGroup?.chapterId) {
-        if (exactResumeDraft != null) return@LaunchedEffect
+        if (exactResumeDraft != null) {
+            practiceDraftReady = true
+            return@LaunchedEffect
+        }
         val shown = practiceDraft
         val stored = withContext(Dispatchers.IO) {
             runCatching { library.loadChapterPracticeDraft(book.id, practiceDraftNodeId) }.getOrNull()
-        } ?: return@LaunchedEffect
-        // 读回来之前人已经动过草稿，就以人手上的为准。
-        if (practiceDraft === shown) practiceDraft = stored
+        }
+        // 读回来之前人已经动过草稿，就以人手上的为准。没有存盘时也要放行，否则学法永远写不进去。
+        if (stored != null && practiceDraft === shown) practiceDraft = stored
+        practiceDraftReady = true
     }
     fun persistPracticeDraft(updated: ChapterPracticeDraft) {
         practiceDraft = updated
@@ -1788,6 +1795,24 @@ internal fun TextbookReader(
                             },
                         )
                     } else {
+                        Column(Modifier.fillMaxSize()) {
+                            ReadingMethodPanel(
+                                book = book,
+                                chapter = currentChapterGroup,
+                                draft = practiceDraft,
+                                draftReady = practiceDraftReady,
+                                library = library,
+                                onDraftChange = { persistPracticeDraft(it) },
+                                onJumpPage = { target ->
+                                    pendingNavigationIsJump = true
+                                    pendingDwellJump = true
+                                    turnTo(target)
+                                },
+                                onCommitChoice = { sec, qIdx, prac, ans ->
+                                    (onSaveSectionPretest ?: onSaveSectionQuiz)?.invoke(sec, qIdx, prac, ans)
+                                },
+                            )
+                            Box(Modifier.weight(1f).fillMaxWidth()) {
                         SingleBookCompanionPanel(
                             book = book,
                             onOpenSectionMainline = onOpenSectionMainline,
@@ -1867,6 +1892,8 @@ internal fun TextbookReader(
                                 }
                             } else null,
                         )
+                            }
+                        }
                     }
                 }
             }

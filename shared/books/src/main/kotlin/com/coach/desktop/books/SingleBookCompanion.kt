@@ -154,6 +154,8 @@ internal data class ChapterPracticeDraft(
     val openAttemptsJson: String = "",
     val openAnswerDraft: String = "",
     val updatedAt: Long = 0L,
+    /** 读前/读中/读后的选择和三套进度。空字符串不写入 JSON，避免只打开书就被当成「继续」。 */
+    val readingMethodJson: String = "",
 ) {
     fun hasMeaningfulDraft(): Boolean =
         pretestSelections.isNotEmpty() ||
@@ -165,7 +167,8 @@ internal data class ChapterPracticeDraft(
             openQuestionJson.isNotBlank() ||
             openAnswerDraft.isNotBlank() ||
             openAttemptsJson.isNotBlank() ||
-            (companionOpen && activeModule != CompanionModuleTab.KEY_POINTS.name)
+            (companionOpen && activeModule != CompanionModuleTab.KEY_POINTS.name) ||
+            ReadingMethodBookState.hasProgress(readingMethodJson)
 }
 
 internal object CompanionJson {
@@ -362,6 +365,8 @@ internal object CompanionJson {
         if (d.openAttemptsJson.isNotBlank()) put("openAttemptsJson", d.openAttemptsJson)
         if (d.openAnswerDraft.isNotBlank()) put("openAnswerDraft", d.openAnswerDraft)
         put("updatedAt", d.updatedAt)
+        val readingMethod = runCatching { parser.parseToJsonElement(d.readingMethodJson) }.getOrNull() as? JsonObject
+        if (readingMethod != null) put("readingMethod", readingMethod)
     }
 
     fun decodeDraft(raw: String): ChapterPracticeDraft {
@@ -400,6 +405,7 @@ internal object CompanionJson {
             openAttemptsJson = o.str("openAttemptsJson"),
             openAnswerDraft = o.str("openAnswerDraft"),
             updatedAt = o["updatedAt"]?.jsonPrimitive?.longOrNull ?: 0L,
+            readingMethodJson = (o["readingMethod"] as? JsonObject)?.toString().orEmpty(),
         )
     }
 }
@@ -466,6 +472,23 @@ internal object ChapterProgressStore {
                     if (fallback == null) fallback = decoded
                 }
                 fallback
+            }
+        }
+    }
+
+    /** 换章时把同一本书上已经记住的学法带过去。没有就返回 null，不新造一条学习记录。 */
+    fun latestReadingMethodJson(db: Connection, bookId: String): String? {
+        if (!BookSchemaMigration.tableExists(db, "book_chapter_progress")) return null
+        return db.prepareStatement(
+            """SELECT practice_draft_json FROM book_chapter_progress
+               WHERE book_id=? AND practice_draft_json LIKE ?
+               ORDER BY updated_at DESC LIMIT 1""".trimIndent(),
+        ).use { s ->
+            s.setString(1, bookId)
+            s.setString(2, "%\"readingMethod\"%")
+            s.executeQuery().use { r ->
+                if (!r.next()) return@use null
+                decodeDraft(r.getString(1))?.readingMethodJson?.ifBlank { null }
             }
         }
     }

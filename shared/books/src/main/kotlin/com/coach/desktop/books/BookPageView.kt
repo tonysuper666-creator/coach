@@ -705,6 +705,8 @@ private fun BookLaidPage.selectionForGesture(
         }
     } else null
     gesture.dragged -> selectionBetween(book, gesture.down, gesture.up, insetPx, topMarginPx, rendered)
+    // A still mouse hold selects the word, same as a touch long-press. A drag keeps the span.
+    gesture.longPressed -> selectionAt(book, gesture.down, insetPx, topMarginPx, rendered)
     else -> null
 }
 

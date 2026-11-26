@@ -134,62 +134,20 @@ function Find-TutorBodyRows($lines) {
     return @($rows | Sort-Object Width -Descending)
 }
 
-# This runner delivers clicks, and it does not deliver a drag. SetCursorPos, absolute
-# mouse_event, and relative mouse_event all left the glyphs unselected: Compose keeps
-# the pointer where the last mouse-move message put it, and these moves never arrive.
-# Post the move to the window under the glyph so the press and the release differ.
-function Send-TutorMouse([IntPtr]$hwnd, [int]$msg, [int]$wParam, [int]$x, [int]$y) {
-    $packed = [int]((($y -band 0xFFFF) -shl 16) -bor ($x -band 0xFFFF))
-    [Arm.Msg]::SendMessage($hwnd, $msg, [IntPtr]$wParam, [IntPtr]$packed) | Out-Null
-}
-
-function Drag-TutorLine([int]$x1, [int]$y1, [int]$x2, [int]$y2 = -1) {
-    if ($x2 -lt $x1) { $swap = $x1; $x1 = $x2; $x2 = $swap }
-    if ($y2 -lt 0) { $y2 = $y1 }
-    $y1 = [Math]::Max(8, $y1)
-    $y2 = [Math]::Max(8, $y2)
-    Write-Output "DRAG $x1,$y1 -> $x2,$y2"
-    if (-not ('Arm.Msg' -as [type])) {
-        Add-Type -Namespace Arm -Name Msg -MemberDefinition '[StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; } [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p); [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h, ref POINT p); [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l); [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);'
-    }
+# Clicks land on this runner. Pointer motion does not: SetCursorPos, both kinds of
+# mouse_event, and posted mouse messages to SunAwtCanvas all left the page unselected.
+# A still hold is the click path plus time, and the reader selects the word under it.
+function Hold-TutorWord([int]$x, [int]$y) {
+    $y = [Math]::Max(8, $y)
+    Write-Output "HOLD $x,$y"
     Invoke-ForegroundStep -InjectsInput -Action {
         $r = Get-Rect
-        $origin = New-Object Arm.Msg+POINT
-        $origin.X = $r.L + $x1
-        $origin.Y = $r.T + $y1
-        $hwnd = [Arm.Msg]::WindowFromPoint($origin)
-        if ($hwnd -eq [IntPtr]::Zero) { throw "WindowFromPoint missed $x1,$y1" }
-        $cls = New-Object System.Text.StringBuilder 128
-        [void][Arm.Msg]::GetClassName($hwnd, $cls, $cls.Capacity)
-        function Convert-Client([int]$x, [int]$y) {
-            $p = New-Object Arm.Msg+POINT
-            $p.X = $r.L + $x
-            $p.Y = $r.T + $y
-            [void][Arm.Msg]::ScreenToClient($hwnd, [ref]$p)
-            return ,([pscustomobject]@{ X = $p.X; Y = $p.Y })
-        }
-        $start = Convert-Client $x1 $y1
-        $end = Convert-Client $x2 $y2
-        Write-Output "DRAGMSG $($cls.ToString()) $hwnd $($start.X),$($start.Y) -> $($end.X),$($end.Y)"
+        [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null
+        Start-Sleep -Milliseconds 180
         Assert-OurForeground
-        [WD]::SetCursorPos($r.L + $x1, $r.T + $y1) | Out-Null
-        Send-TutorMouse $hwnd 0x0200 0 $start.X $start.Y
-        Start-Sleep -Milliseconds 60
-        Send-TutorMouse $hwnd 0x0201 1 $start.X $start.Y
-        try {
-            $steps = 8
-            foreach ($i in 1..$steps) {
-                Start-Sleep -Milliseconds 30
-                $sx = [int]($x1 + (($x2 - $x1) * $i / $steps))
-                $sy = [int]($y1 + (($y2 - $y1) * $i / $steps))
-                $at = Convert-Client $sx $sy
-                [WD]::SetCursorPos($r.L + $sx, $r.T + $sy) | Out-Null
-                Send-TutorMouse $hwnd 0x0200 1 $at.X $at.Y
-            }
-            Start-Sleep -Milliseconds 40
-        } finally {
-            [WD]::SetCursorPos($r.L + $x2, $r.T + $y2) | Out-Null
-            Send-TutorMouse $hwnd 0x0202 0 $end.X $end.Y
+        [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
+        try { Start-Sleep -Milliseconds 1000 } finally {
+            [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
         }
     }
 }
@@ -227,39 +185,31 @@ function Focus-ReaderPage {
 }
 
 # 2.0 selection toolbar is a light pill: 「讲讲 / 拆句 / 举个例子 / 问… / 笔记」.
-# Drag one glyph row. A centre click is not used here: it toggles the reader HUD.
+# Hold a glyph. A short centre click toggles the reader HUD, so this press stays down.
 function Open-SelectionAction([string]$name, [string]$action) {
     $lines = @(Read-TutorFrame "$name-reader")
     $rows = @(Find-TutorBodyRows $lines)
     if (-not $rows) { throw "No selectable body line in $name" }
     $bounds = Get-Rect
     $width = [int]($bounds.R - $bounds.L)
-    # A mouse-down in the outer 14% belongs to page turn. Keep the gesture on the glyphs.
+    # A mouse-down in the outer 14% belongs to page turn. Keep the press on the glyphs.
     $innerL = [int]($width * 0.22)
     $innerR = [int]($width * 0.78)
     $selected = $null
-    $tries = 0
     foreach ($row in ($rows | Select-Object -First 3)) {
         $x1 = [Math]::Max($innerL, [int]$row.X1 + 8)
         $x2 = [Math]::Min($innerR, [int]$row.X2 - 8)
         if (($x2 - $x1) -lt 80) { $x1 = $innerL; $x2 = $innerR }
-        # The second pass slopes down across the next line, so a few pixels of vertical
-        # error still crosses ink.
-        foreach ($dy in @(0, 28)) {
-            $tries++
-            if ($tries -gt 4) { break }
-            Drag-TutorLine $x1 ([int]$row.Y) $x2 ([int]($row.Y + $dy))
-            Start-Sleep -Milliseconds 400
-            $frame = @(Read-TutorFrame "$name-selected")
-            foreach ($label in @('举个例子', '笔记', '拆句', '讲讲')) {
-                $selected = Find-Text $frame $label
-                if ($selected) { break }
-            }
+        Hold-TutorWord ([int](($x1 + $x2) / 2)) ([int]$row.Y)
+        Start-Sleep -Milliseconds 400
+        $frame = @(Read-TutorFrame "$name-selected")
+        foreach ($label in @('举个例子', '笔记', '拆句', '讲讲')) {
+            $selected = Find-Text $frame $label
             if ($selected) { break }
         }
-        if ($selected -or $tries -gt 4) { break }
+        if ($selected) { break }
     }
-    if (-not $selected) { throw "Dragging a line did not raise the selection toolbar ($name)" }
+    if (-not $selected) { throw "Holding a word did not raise the selection toolbar ($name)" }
     $bar = @(Read-TutorFrame "$name-bar")
     $hit = Find-OnTutorRow $bar $action $selected
     if (-not $hit) { $hit = Find-Text $bar $action }
@@ -413,17 +363,18 @@ function Test-Practice {
     if (-not $opt) { throw '读前自测没有选项 Recall before checking' }
     Click-At $opt.X $opt.Y | Out-Null
     Start-Sleep -Milliseconds 400
-    # Wheel the right side of the sheet. The centre of the sheet is an option row,
-    # and parking the pointer there paints a different option as if it were selected.
+    # The multiple-choice action is 「核对」, a black pill. OCR drops it. Wheel the
+    # sheet body (a point on the page scrollbar does not move this sheet) until the
+    # pill is in the capture, then click that.
     $submit = $null
     foreach ($pass in 1..4) {
         $shot = if ($pass -eq 1) { '06-selected' } else { "06-selected-$pass" }
         $frame = @(Read-TutorFrame $shot)
-        $submit = Find-Text $frame '提交'
+        $submit = Find-Text $frame '核对'
+        if (-not $submit) { $submit = Find-Text $frame '提交' }
         if (-not $submit) { $submit = Find-SubmitPill $shot }
         if ($submit) { break }
-        $bounds = Get-Rect
-        Scroll-At ([int](($bounds.R - $bounds.L) * 0.92)) ([int](($bounds.B - $bounds.T) * 0.62)) -2
+        Scroll-TutorView -3
     }
     if (-not $submit) { throw '读前自测没有提交' }
     Click-At $submit.X $submit.Y | Out-Null

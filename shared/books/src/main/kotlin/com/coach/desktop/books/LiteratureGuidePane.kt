@@ -163,6 +163,11 @@ internal fun LiteratureGuidePane(
                 questions = last.questions.joinToString("\n")
                 last.metas.forEach { (id, meta) -> paperMetas[id] = meta }
                 open(last.books, last.questions, paperMetas.toMap(), generate = false)
+            } else if (last != null) {
+                // Some of the chosen files left the course; keep what the user wrote and the files still here.
+                if (questions.isBlank()) questions = last.questions.joinToString("\n")
+                last.books.filter { id -> materials.any { it.bookId == id } }.takeIf { it.isNotEmpty() }?.let { selected = it }
+                last.metas.forEach { (id, meta) -> paperMetas[id] = meta }
             }
         } finally {
             busy = false

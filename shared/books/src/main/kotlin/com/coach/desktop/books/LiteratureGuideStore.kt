@@ -55,6 +55,22 @@ internal object LiteratureGuideStore {
         }
     }
 
+    /**
+     * A book left the library: take it out of every saved selection and drop the finished page built on it,
+     * but keep the questions the user wrote.
+     */
+    fun forgetBook(db: Connection, bookId: String) {
+        db.prepareStatement(
+            """UPDATE literature_guides
+               SET books=(SELECT json_group_array(value) FROM json_each(literature_guides.books) WHERE value<>?), result=NULL
+               WHERE EXISTS (SELECT 1 FROM json_each(books) WHERE value=?)""",
+        ).use {
+            it.setString(1, bookId)
+            it.setString(2, bookId)
+            it.executeUpdate()
+        }
+    }
+
     /** Record selection metadata without marking a guide as complete (never writes a partial result). */
     fun saveSelection(db: Connection, course: String, key: String, input: LiteratureInput) {
         prepare(db)

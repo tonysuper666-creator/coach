@@ -1,87 +1,218 @@
 package com.coach.desktop
 
-import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.*
-import com.coach.ui.CoachTheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
+import com.coach.desktop.books.BookScreen
+import com.coach.ui.v7.V7TextButton
+import coach.design.tokens.CoachV7
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.nio.file.Files
 import java.nio.file.Path
 
-@Composable
-internal fun WindowsUpdatePrompt(save: suspend () -> Boolean, close: () -> Unit) {
-    var channel by remember { mutableStateOf<WindowsUpdate?>(null) }
-    var release by remember { mutableStateOf<WindowsRelease?>(null) }
-    var transfer by remember { mutableStateOf<Job?>(null) }
-    var message by remember { mutableStateOf("") }
-    val scope = rememberCoroutineScope()
-    LaunchedEffect(Unit) {
-        try {
-            val result = withContext(Dispatchers.IO) {
-                WindowsUpdate.installed()?.let { it to it.check() }
-            } ?: return@LaunchedEffect
-            channel = result.first
-            release = result.second
-        } catch (cancel: CancellationException) {
-            throw cancel
-        } catch (_: Exception) {
-            // Offline and invalid manifests leave normal startup untouched.
-        }
+/** Reading and answering stay quiet. Home, course shelves and the review list may show one line. */
+internal fun updateWouldInterrupt(screen: BookScreen): Boolean = when (screen) {
+    BookScreen.READER, BookScreen.LEARNING, BookScreen.REVIEWING, BookScreen.COURSE_MOCK -> true
+    else -> false
+}
+
+/** One line, and only when nobody is reading or answering. Never a dialog. */
+internal fun shouldShowUpdateLine(idle: Boolean, ready: Boolean, failed: Boolean, deferred: Boolean): Boolean =
+    idle && !deferred && (ready || failed)
+
+internal class UpdateSession(
+    private val libraryDir: Path,
+    private val updatesDir: Path,
+    private val save: suspend () -> Boolean,
+    private val close: () -> Unit,
+    private val scope: CoroutineScope,
+    private val launch: (Path) -> Boolean,
+) {
+    var ready by mutableStateOf<WindowsRelease?>(null)
+        private set
+    var staged by mutableStateOf<Path?>(null)
+        private set
+    var message by mutableStateOf("")
+        private set
+    var deferred by mutableStateOf(false)
+        private set
+    var busy by mutableStateOf(false)
+        private set
+    var rollbackStatus by mutableStateOf("")
+        private set
+    var rollbackBusy by mutableStateOf(false)
+        private set
+
+    fun offer(release: WindowsRelease, msi: Path) {
+        ready = release
+        staged = msi
+        message = ""
     }
 
-    val update = channel ?: return
-    val available = release ?: return
-    fun dismiss() {
-        transfer?.cancel()
-        release = null
+    fun fail(text: String) {
+        ready = null
+        staged = null
+        message = text
+    }
+
+    fun defer() {
+        deferred = true
     }
 
     fun install() {
-        if (transfer != null) return
-        message = "正在下载并校验安装包…"
-        transfer = scope.launch {
+        val release = ready ?: return
+        val msi = staged ?: return
+        if (busy) return
+        busy = true
+        scope.launch {
             try {
-                val msi = withContext(Dispatchers.IO) {
-                    update.download(available, Path.of(System.getProperty("java.io.tmpdir"), "LearningCoach-updates"))
-                }
+                WindowsRollback.captureBeforeInstall(libraryDir, release.version)
                 message = "正在保存学习进度…"
                 if (!save()) {
-                    message = "学习进度还没有保存。可以继续学习，或重试更新。"
+                    message = UPDATE_NOT_SAVED
                     return@launch
                 }
                 currentCoroutineContext().ensureActive()
-                val installer = Path.of(System.getenv("SystemRoot"), "System32", "msiexec.exe")
-                ProcessBuilder(installer.toString(), "/i", msi.toString(), "/passive", "/norestart").start()
-                release = null
+                if (!launch(msi)) {
+                    message = UPDATE_INSTALLER
+                    return@launch
+                }
+                WindowsRollback.retainInstallers(updatesDir, msi, release.version, runningAppVersion())
+                ready = null
                 close()
             } catch (cancel: CancellationException) {
                 throw cancel
-            } catch (_: Exception) {
-                message = "更新未能开始。可以继续使用当前版本，或重试更新。"
+            } catch (error: Exception) {
+                fail(updateFailureMessage(error))
             } finally {
-                transfer = null
+                busy = false
             }
         }
     }
 
-    CoachTheme(windowsThemeOverride(System.getProperty("coach.windows.theme")) ?: isSystemInDarkTheme()) {
-        AlertDialog(
-            onDismissRequest = ::dismiss,
-            title = { Text("有新版本") },
-            text = { Text(message.ifEmpty { "LearningCoach ${available.version} 已可安装。更新前会保存学习进度。" }) },
-            confirmButton = {
-                if (transfer == null) TextButton(onClick = ::install) {
-                    Text(if (message.isEmpty()) "立即更新" else "重试更新")
-                }
-            },
-            dismissButton = { TextButton(onClick = ::dismiss) { Text(if (transfer == null) "继续学习" else "取消更新") } },
+    fun rollback() {
+        if (rollbackBusy) return
+        rollbackBusy = true
+        rollbackStatus = ""
+        scope.launch {
+            val status = try {
+                if (!save()) UPDATE_NOT_SAVED
+                else withContext(Dispatchers.IO) { WindowsRollback.rollback(libraryDir, updatesDir, launch = launch) }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (_: Exception) {
+                ROLLBACK_FAILED
+            }
+            rollbackBusy = false
+            if (status.isEmpty()) close() else rollbackStatus = status
+        }
+    }
+
+    suspend fun fetchPrevious(update: WindowsUpdate) {
+        if (Files.isRegularFile(updatesDir.resolve("previous.msi"))) return
+        val manifest = withContext(Dispatchers.IO) { update.readManifest() }
+        val previous = update.previousRelease(manifest) ?: return
+        val stagedFile = withContext(Dispatchers.IO) { update.download(previous, updatesDir) }
+        WindowsRollback.acceptPrevious(updatesDir, stagedFile, previous.version)
+    }
+}
+
+@Composable
+internal fun rememberWindowsUpdateSession(
+    libraryDir: Path,
+    save: suspend () -> Boolean,
+    close: () -> Unit,
+    updatesDir: Path = windowsUpdatesDirectory(),
+    launch: (Path) -> Boolean = ::startWindowsInstaller,
+): UpdateSession {
+    val scope = rememberCoroutineScope()
+    val session = remember(libraryDir, updatesDir) {
+        UpdateSession(libraryDir, updatesDir, save, close, scope, launch)
+    }
+    LaunchedEffect(session) {
+        val update = WindowsUpdate.installed() ?: return@LaunchedEffect
+        try {
+            val release = withContext(Dispatchers.IO) { update.check() }
+            if (release != null) {
+                val msi = withContext(Dispatchers.IO) { update.download(release, updatesDir) }
+                session.offer(release, msi)
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Exception) {
+            session.fail(updateFailureMessage(error))
+        }
+        try {
+            session.fetchPrevious(update)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Exception) {
+            // The previous package is optional. The current version keeps running.
+        }
+    }
+    return session
+}
+
+@Composable
+internal fun BoxScope.UpdateBanner(session: UpdateSession, idle: Boolean) {
+    val release = session.ready
+    val failed = session.message.isNotEmpty() && release == null
+    val installing = session.busy && session.message.isNotEmpty()
+    if (!shouldShowUpdateLine(idle, release != null || installing, failed, session.deferred)) return
+    val colors = com.coach.ui.theme.CoachTheme.colors
+    val line = when {
+        session.message.isNotEmpty() -> session.message
+        release != null -> "新版本 ${release.version} 已经下好了。"
+        else -> return
+    }
+    val shape = RoundedCornerShape(CoachV7.Radius.btn)
+    Row(
+        Modifier.align(Alignment.TopCenter)
+            .padding(top = 12.dp, start = 16.dp, end = 16.dp)
+            .clip(shape)
+            .background(colors.surface1)
+            .border(1.dp, colors.borderSubtle, shape)
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .testTag("update-banner"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            line,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.fgPrimary,
+            modifier = Modifier.testTag("update-banner-text"),
         )
+        if (release != null && !session.busy) {
+            V7TextButton(session::install, Modifier.testTag("update-now"), ringInside = true) { Text("现在更新") }
+            V7TextButton(session::defer, Modifier.testTag("update-later"), ringInside = true) { Text("下次打开再更") }
+        }
     }
 }

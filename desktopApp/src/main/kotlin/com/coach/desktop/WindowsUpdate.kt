@@ -21,6 +21,53 @@ import javax.net.ssl.HttpsURLConnection
 
 internal data class WindowsRelease(val version: String, val file: String, val size: Long, val sha256: String)
 
+internal enum class UpdateFailure { INTERRUPTED, CHECKSUM, SPACE }
+
+internal class UpdateFailed(val failure: UpdateFailure, message: String) : IllegalStateException(message)
+
+internal const val UPDATE_INTERRUPTED = "下载中断了，没有更换版本。可以继续使用现在这个版本。"
+internal const val UPDATE_CHECKSUM = "安装包校验没有通过，没有更换版本。可以继续使用现在这个版本。"
+internal const val UPDATE_SPACE = "磁盘空间不够，没有更换版本。可以继续使用现在这个版本。"
+internal const val UPDATE_FAILED = "更新没有完成，没有更换版本。可以继续使用现在这个版本。"
+internal const val UPDATE_NOT_SAVED = "学习进度还没有保存。可以继续学习，或重试更新。"
+internal const val UPDATE_INSTALLER = "更新没有开始，没有更换版本。可以继续使用现在这个版本。"
+
+internal fun updateFailureMessage(error: Throwable): String = when (error) {
+    is UpdateFailed -> error.message ?: UPDATE_FAILED
+    is java.util.concurrent.CancellationException -> UPDATE_INTERRUPTED
+    else -> UPDATE_FAILED
+}
+
+internal fun runningAppVersion(): String =
+    System.getProperty("jpackage.app-version")?.takeIf { it.isNotBlank() }
+        ?: System.getProperty("coach.app.version")?.takeIf { it.isNotBlank() }
+        ?: "dev"
+
+/** Verified installers live here so a temp cleanup cannot take the previous package with it. */
+internal fun windowsUpdatesDirectory(
+    localAppData: String? = System.getenv("LOCALAPPDATA"),
+    temp: String = System.getProperty("java.io.tmpdir"),
+): Path {
+    val rooted = localAppData?.takeIf { it.isNotBlank() }?.let { Path.of(it, "LearningCoach", "updates") }
+    return rooted ?: Path.of(temp, "LearningCoach-updates")
+}
+
+internal fun usableSpace(directory: Path): Long =
+    runCatching { Files.getFileStore(directory).usableSpace }.getOrDefault(Long.MAX_VALUE)
+
+/** Same msiexec invocation the updater already uses. No new signature check. */
+internal fun startWindowsInstaller(msi: Path): Boolean {
+    val root = System.getenv("SystemRoot") ?: return false
+    val installer = Path.of(root, "System32", "msiexec.exe")
+    if (!Files.isRegularFile(installer)) return false
+    return try {
+        ProcessBuilder(installer.toString(), "/i", msi.toString(), "/passive", "/norestart").start()
+        true
+    } catch (_: Exception) {
+        false
+    }
+}
+
 internal interface UpdateKernel32 : StdCallLibrary {
     fun GetCurrentProcess(): Pointer
     fun IsWow64Process2(process: Pointer, processMachine: ShortByReference, nativeMachine: ShortByReference): Boolean
@@ -80,6 +127,24 @@ internal class WindowsUpdate(private val manifest: URI, private val installed: S
         return WindowsRelease(version, file, size, hash)
     }
 
+    /** One older package listed beside the latest, verified the same way. Absent means no rollback download. */
+    internal fun previousRelease(json: String): WindowsRelease? {
+        val listed = Json.parseToJsonElement(json).jsonObject["previous"]?.jsonArray?.map { it.jsonObject } ?: return null
+        val data = listed.singleOrNull { it.getValue("arch").jsonPrimitive.content == arch } ?: return null
+        fun field(name: String) = data.getValue(name).jsonPrimitive.content
+        val version = field("version")
+        val previousNumber = versionNumber(version) ?: return null
+        val installedNumber = versionNumber(installed) ?: return null
+        if (previousNumber >= installedNumber) return null
+        val file = field("file")
+        require(file.matches(Regex("""[A-Za-z0-9][A-Za-z0-9._-]{0,180}\.msi""")))
+        val size = field("size").toLong()
+        require(size in 1..(2L shl 30))
+        val hash = field("sha256").lowercase()
+        require(hash.matches(Regex("[a-f0-9]{64}")))
+        return WindowsRelease(version, file, size, hash)
+    }
+
     private fun <T> read(uri: URI, body: (InputStream) -> T): T {
         val connection = uri.toURL().openConnection() as HttpsURLConnection
         try {
@@ -94,10 +159,12 @@ internal class WindowsUpdate(private val manifest: URI, private val installed: S
         }
     }
 
-    fun check(): WindowsRelease? = read(manifest) { stream ->
+    fun check(): WindowsRelease? = candidate(readManifest())
+
+    internal fun readManifest(): String = read(manifest) { stream ->
         val bytes = stream.readNBytes(16385)
         require(bytes.size <= 16384)
-        candidate(bytes.toString(Charsets.UTF_8))
+        bytes.toString(Charsets.UTF_8)
     }
 
     suspend fun download(release: WindowsRelease, directory: Path): Path {
@@ -107,14 +174,21 @@ internal class WindowsUpdate(private val manifest: URI, private val installed: S
         }
     }
 
-    internal fun stage(release: WindowsRelease, directory: Path, stream: InputStream, checkActive: () -> Unit): Path {
+    internal fun stage(
+        release: WindowsRelease,
+        directory: Path,
+        stream: InputStream,
+        freeBytes: () -> Long = { usableSpace(directory) },
+        checkActive: () -> Unit,
+    ): Path {
         Files.createDirectories(directory)
+        if (freeBytes() < release.size) throw UpdateFailed(UpdateFailure.SPACE, UPDATE_SPACE)
         val partial = Files.createTempFile(directory, "download-", ".part")
         try {
             val input = BufferedInputStream(stream)
             input.mark(8)
             val magic = byteArrayOf(-48, -49, 17, -32, -95, -79, 26, -31) // MSI compound file header
-            require(input.readNBytes(8).contentEquals(magic))
+            if (!input.readNBytes(8).contentEquals(magic)) throw UpdateFailed(UpdateFailure.CHECKSUM, UPDATE_CHECKSUM)
             input.reset()
             val digest = MessageDigest.getInstance("SHA-256")
             val buffer = ByteArray(64 * 1024)
@@ -125,12 +199,14 @@ internal class WindowsUpdate(private val manifest: URI, private val installed: S
                     val n = input.read(buffer)
                     if (n < 0) break
                     size += n
-                    require(size <= release.size)
+                    if (size > release.size) throw UpdateFailed(UpdateFailure.CHECKSUM, UPDATE_CHECKSUM)
                     digest.update(buffer, 0, n)
                     output.write(buffer, 0, n)
                 }
             }
-            require(size == release.size && digest.digest().joinToString("") { "%02x".format(it) } == release.sha256)
+            if (size != release.size) throw UpdateFailed(UpdateFailure.INTERRUPTED, UPDATE_INTERRUPTED)
+            val actual = digest.digest().joinToString("") { "%02x".format(it) }
+            if (actual != release.sha256) throw UpdateFailed(UpdateFailure.CHECKSUM, UPDATE_CHECKSUM)
             checkActive()
             // Retain a verified source for Windows Installer repair. Partial transfers are never reused.
             return Files.move(partial, directory.resolve(release.sha256 + ".msi"), StandardCopyOption.REPLACE_EXISTING)

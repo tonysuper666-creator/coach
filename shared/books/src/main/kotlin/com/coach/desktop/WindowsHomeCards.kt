@@ -612,6 +612,9 @@ internal fun HostSettings(
     directory: Path,
     onPersonalCourse: (() -> Unit)? = null,
     preferences: com.coach.desktop.books.ReadingSettings? = null,
+    onRollback: (() -> Unit)? = null,
+    rollbackStatus: String = "",
+    rollbackBusy: Boolean = false,
     onClose: () -> Unit,
 ) {
     val colors = CoachTheme.colors
@@ -714,6 +717,22 @@ internal fun HostSettings(
                                 color = colors.fgTertiary,
                                 fontFamily = LocalV7Fonts.current.numbers,
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp).testTag("settings-library-full-path"),
+                            )
+                        }
+                    }
+                    if (onRollback != null) {
+                        V7TextButton(
+                            onClick = onRollback,
+                            enabled = !rollbackBusy,
+                            modifier = Modifier.testTag("settings-rollback"),
+                            ringInside = true,
+                        ) { Text("回到上一版") }
+                        if (rollbackStatus.isNotEmpty()) {
+                            Text(
+                                rollbackStatus,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.fgSecondary,
+                                modifier = Modifier.testTag("settings-rollback-status"),
                             )
                         }
                     }

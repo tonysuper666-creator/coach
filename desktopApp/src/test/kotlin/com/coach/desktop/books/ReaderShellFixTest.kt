@@ -137,6 +137,9 @@ class ReaderShellFixTest {
                 loaded = true
             }
 
+            // This in-process explainer serves its own replies without an HTTP listener.
+            override fun unifiedUploadClient(): UnifiedBookRemoteClient? = null
+
             override suspend fun explainSelection(
                 kind: String,
                 chosen: SourceBlock,

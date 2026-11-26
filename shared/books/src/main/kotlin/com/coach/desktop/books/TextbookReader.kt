@@ -617,6 +617,18 @@ internal fun TextbookReader(
             inlineThread?.threadId, block?.id, block?.start ?: 0, block?.end ?: 0, col?.id?.takeIf { isCollection })
         draftWriter.edit(draft)
     }
+    fun openSelectionAction(target: SourceBlock, action: SelectionExplainAction) {
+        companionOpen = true
+        companionTab = ReaderCompanionTab.ASK
+        runInlineSelection(target, action)
+        activeAskCollection?.let { collection ->
+            val session = sessionForCollection(collection.id)
+            if (session.scope == CollectionAskScope.COLLECTION) {
+                updateCollectionSession(collection.id, session.copy(scope = CollectionAskScope.SECTION))
+                if (inlineDraft.isNotBlank()) changeAskDraft(inlineDraft, CollectionAskScope.SECTION)
+            }
+        }
+    }
     LaunchedEffect(inlineDraft, editedAsk) {
         if (editedAsk) {
             kotlinx.coroutines.delay(200)
@@ -1517,7 +1529,10 @@ internal fun TextbookReader(
         val reserveHudSpace = hudVisible || hudPinned || editingJump || searchOpen
         val showHud = reserveHudSpace || hoverHudVisible
         val sideDrawerWidth = companionSideWidth(rootWidth.value)
-        val bottomDrawerHeight = (rootHeight * 0.50f).coerceIn(220.dp, (rootHeight - 160.dp).coerceAtLeast(220.dp))
+        // Leave space above the question composer for the answer and its clickable references.
+        val preferredDrawerHeight = if (companionTab == ReaderCompanionTab.ASK) 340.dp else 220.dp
+        val bottomDrawerHeight = maxOf(rootHeight * 0.50f, preferredDrawerHeight)
+            .coerceAtMost((rootHeight - 160.dp).coerceAtLeast(220.dp))
 
         val currentSelectionActive by rememberUpdatedState(learnableSelection != null)
         val pageSurface: @Composable (Modifier) -> Unit = { boxModifier ->
@@ -1564,9 +1579,7 @@ internal fun TextbookReader(
                         if (event.isCtrlPressed || event.isAltPressed || event.isMetaPressed) return@onPreviewKeyEvent false
                         val typingNow = typing || askInputFocused
                         if (!typingNow && learnableSelection != null && event.key == Key.Enter) {
-                            companionOpen = true
-                            companionTab = ReaderCompanionTab.ASK
-                            runInlineSelection(learnableSelection, SelectionExplainAction.EXPLAIN)
+                            openSelectionAction(learnableSelection, SelectionExplainAction.EXPLAIN)
                             return@onPreviewKeyEvent true
                         }
                         if (pdfScrolling && !typingNow && event.key in setOf(
@@ -1740,8 +1753,7 @@ internal fun TextbookReader(
                             V7TextButton({
                                 val blk = chosenHp.second
                                 activeHardPoint = null
-                                companionTab = ReaderCompanionTab.ASK
-                                runInlineSelection(blk, SelectionExplainAction.ASK)
+                                openSelectionAction(blk, SelectionExplainAction.ASK)
                             }) { Text("继续追问") }
                             if (hasOriginal) {
                                 V7TextButton({ handleCitationJump(BookPassage.from(book, chosenHp.second)) }) { Text("定位原文") }
@@ -2321,11 +2333,7 @@ internal fun TextbookReader(
                         finally { savingMark = false }
                     }
                 },
-                onAction = { action ->
-                    companionOpen = true
-                    companionTab = ReaderCompanionTab.ASK
-                    runInlineSelection(learnableSelection, action)
-                },
+                onAction = { action -> openSelectionAction(learnableSelection, action) },
                 onNote = {
                     startNoteFromSelection(learnableSelection)
                 },

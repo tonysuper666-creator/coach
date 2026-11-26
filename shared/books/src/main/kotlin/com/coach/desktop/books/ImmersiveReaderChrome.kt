@@ -1140,7 +1140,7 @@ internal fun CompanionAskPane(
             if (listScroll.maxValue > 0) listScroll.scrollTo(listScroll.maxValue)
         }
 
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        Box(Modifier.weight(1f).fillMaxWidth().testTag("companion-answer-history")) {
             Column(
                 Modifier.fillMaxSize().verticalScroll(listScroll).padding(end = if (listScroll.maxValue > 0) 14.dp else 0.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),

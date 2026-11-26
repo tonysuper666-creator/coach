@@ -463,6 +463,9 @@ internal class BookExplainer(private val library: TextbookLibrary? = null) {
     suspend fun courseVision(input: JsonObject): CourseServerCallResult =
         callCourseEndpoint { http -> http.courseVision(input) }
 
+    suspend fun generateChapterOpenQuestion(input: JsonObject): CourseServerCallResult =
+        callCourseEndpoint { http -> http.generateChapterOpenQuestion(input) }
+
     suspend fun gradeAndDiagnosePractice(input: JsonObject): PracticeGradeDiagnoseResult {
         val res = callCourseEndpoint { http -> http.gradeAndDiagnosePractice(input) }
         val body = res.body ?: return PracticeGradeDiagnoseResult.Failed(

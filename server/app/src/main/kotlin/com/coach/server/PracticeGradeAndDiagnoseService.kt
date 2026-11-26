@@ -4,6 +4,12 @@ import com.coach.ai.AnalyticalNumericKey
 import com.coach.ai.BridgeClient
 import com.coach.ai.BridgeResult
 import com.coach.ai.ChatRequest
+import com.coach.domain.grade.ChapterOpenAcceptedPoint
+import com.coach.domain.grade.ChapterOpenDraft
+import com.coach.domain.grade.ChapterOpenGate
+import com.coach.domain.grade.ChapterOpenPointRef
+import com.coach.domain.grade.ChapterOpenRawPoint
+import com.coach.domain.grade.ChapterOpenSourceBlock
 import com.coach.domain.grade.NumericValue
 import com.coach.store.sha256
 import kotlinx.coroutines.Dispatchers
@@ -57,6 +63,31 @@ object PracticeGradeLimits {
     const val TASK_GRADE: String = "practice_grade"
     const val TASK_DIAGNOSE: String = "practice_diagnose"
     const val TASK_VARIANT: String = "practice_variant"
+    const val TASK_CHAPTER_OPEN: String = "chapter_open_question"
+}
+
+internal data class PracticeCallPlan(
+    val useBatch: Boolean,
+    val model: String,
+    val task: String,
+)
+
+/** Owner chapter-open generation is Haiku 5.5 Batch. Other practice calls keep their existing model. */
+internal fun planPracticeCall(
+    task: String,
+    friend: String?,
+    backgroundBatch: Boolean,
+    defaultModel: String,
+): PracticeCallPlan {
+    val chapterOpen = task == PracticeGradeLimits.TASK_CHAPTER_OPEN
+    val useBatch = (backgroundBatch || chapterOpen) && friend == null
+    val model = when {
+        chapterOpen -> BridgeClient.HAIKU
+        friend != null -> BridgeClient.CLAUDE
+        else -> defaultModel
+    }
+    val targetTask = if (friend != null) "READER_SELECTION" else task
+    return PracticeCallPlan(useBatch = useBatch, model = model, task = targetTask)
 }
 
 enum class PracticeRubricVerdict {
@@ -131,6 +162,7 @@ data class PracticeGradeAndDiagnoseRequest(
     val referenceExclusionTexts: List<String> = emptyList(),
     val mcqCorrectOption: String = "",
     val mcqSelectedOption: String = "",
+    val retryPointIds: List<String> = emptyList(),
 )
 
 data class ServerNumericFactResult(
@@ -170,6 +202,7 @@ data class GradedRubricItemResult(
     val pdfPage: Int,
     val quoteAnchor: String,
     val anchorVerified: Boolean,
+    val missCause: String = "",
 ) {
     fun toJson(): JsonObject = buildJsonObject {
         put("cid", cid)
@@ -186,6 +219,7 @@ data class GradedRubricItemResult(
         put("pdfPage", pdfPage)
         put("quoteAnchor", quoteAnchor)
         put("anchorVerified", anchorVerified)
+        if (missCause.isNotBlank()) put("missCause", missCause)
     }
 }
 
@@ -564,9 +598,10 @@ class HaikuPinnedBridgeTransport(
     ): BatchTransportReply = withContext(Dispatchers.IO) {
         val started = System.nanoTime()
         val effectiveLimit = maxOf(maxTokens, defaultMaxTokens).coerceAtMost(16_000)
-        val useBatch = backgroundBatch && friend == null
-        val targetTask = if (friend != null) "READER_SELECTION" else task
-        val targetModel = if (friend != null) BridgeClient.CLAUDE else model
+        val plan = planPracticeCall(task, friend, backgroundBatch, model)
+        val useBatch = plan.useBatch
+        val targetTask = plan.task
+        val targetModel = plan.model
         val client = if (useBatch) bridge.forBatchJob("practice", batchKey) else bridge
         val request = ChatRequest(
             task = targetTask,
@@ -693,6 +728,17 @@ class PracticeGradeAndDiagnoseService(
         val recordOwnerLedger = friend == null
 
         val mode = request.mode.trim().uppercase().ifBlank { "GRADE_AND_DIAGNOSE" }
+        val gradeRequest = if (mode == "CHAPTER_OPEN" && request.retryPointIds.isNotEmpty()) {
+            val want = request.retryPointIds.toSet()
+            request.copy(
+                rubricCriteria = request.rubricCriteria.filter { it.cid in want },
+                generateVariant = false,
+            )
+        } else if (mode == "CHAPTER_OPEN") {
+            request.copy(generateVariant = false)
+        } else {
+            request
+        }
         val sourceBlocks = buildSourceBlocks(request.bookId, request.sourcePages)
         val rawPagesMap = request.sourcePages.associate { it.pdfPage to it.text }
         val sourceCorpus = request.sourcePages.joinToString("\n\n") { it.text }
@@ -713,8 +759,8 @@ class PracticeGradeAndDiagnoseService(
         var rewrittenBlocked = 0
         var rubricItems: List<GradedRubricItemResult> = emptyList()
 
-        if (mode in setOf("GRADE_AND_DIAGNOSE", "GRADE_ONLY") && request.rubricCriteria.isNotEmpty()) {
-            val gradeUserPrompt = buildGradingPrompt(request, numericFacts)
+        if (mode in setOf("GRADE_AND_DIAGNOSE", "GRADE_ONLY", "CHAPTER_OPEN") && gradeRequest.rubricCriteria.isNotEmpty()) {
+            val gradeUserPrompt = buildGradingPrompt(gradeRequest, numericFacts)
             val gradeKey = "pg-${sha256("${request.bookId}|${request.questionId}|$gradeUserPrompt".toByteArray(Charsets.UTF_8)).take(16)}"
             val gradeReply = effectiveTransport.generateSection(
                 systemPrompt = GRADER_SYSTEM,
@@ -733,7 +779,7 @@ class PracticeGradeAndDiagnoseService(
                     append("Malformed grader output to convert into strictly valid JSON:\n")
                     append(gradeReply.text.take(8_000))
                     append("\n\nExpected criterion IDs: ")
-                    append(request.rubricCriteria.joinToString(", ") { it.cid })
+                    append(gradeRequest.rubricCriteria.joinToString(", ") { it.cid })
                 }
                 val jsonRepairKey = "pjr-${sha256("${request.bookId}|${request.questionId}|$jsonRepairPrompt".toByteArray(Charsets.UTF_8)).take(16)}"
                 val jsonRepairReply = runCatching {
@@ -755,7 +801,7 @@ class PracticeGradeAndDiagnoseService(
             val byCid = parsedItems.associateBy { it.cid }
             val evaluated = mutableListOf<GradedRubricItemResult>()
 
-            for (crit in request.rubricCriteria) {
+            for (crit in gradeRequest.rubricCriteria) {
                 val rawItem = byCid[crit.cid]
                 val rawVerdict = rawItem?.verdict ?: PracticeRubricVerdict.ZERO
                 val maxMarks = crit.maxMarks.coerceAtLeast(0.0)
@@ -853,6 +899,9 @@ class PracticeGradeAndDiagnoseService(
                 )
             }
             rubricItems = evaluated
+            if (mode == "CHAPTER_OPEN") {
+                rubricItems = applyChapterOpenGate(request, rubricItems)
+            }
         }
 
         val hasRubricDefect = rubricItems.any { it.verdict != PracticeRubricVerdict.FULL }
@@ -862,7 +911,7 @@ class PracticeGradeAndDiagnoseService(
             request.mcqSelectedOption.trim() != request.mcqCorrectOption.trim()
         val shouldDiagnose = when (mode) {
             "DIAGNOSE_ONLY" -> true
-            "GRADE_ONLY" -> false
+            "GRADE_ONLY", "CHAPTER_OPEN" -> false
             "VARIANT_ONLY" -> false
             else -> rubricItems.isEmpty() || hasRubricDefect || hasNumericDefect || hasWrongMcq
         }
@@ -893,7 +942,7 @@ class PracticeGradeAndDiagnoseService(
 
         var variant: IsomorphicVariantResult? = null
         val targetErrorClass = diagnosis?.errorClass ?: PracticeMisconceptionClass.CONCEPT_CONFUSION
-        val shouldGenerateVariant = request.generateVariant &&
+        val shouldGenerateVariant = mode != "CHAPTER_OPEN" && request.generateVariant &&
             (mode == "VARIANT_ONLY" || (diagnosis != null && diagnosis.errorClass != PracticeMisconceptionClass.NONE))
 
         if (shouldGenerateVariant && request.sourcePages.isNotEmpty()) {
@@ -1402,7 +1451,118 @@ class PracticeGradeAndDiagnoseService(
             ),
         )
     }
+
+    private fun applyChapterOpenGate(
+        request: PracticeGradeAndDiagnoseRequest,
+        items: List<GradedRubricItemResult>,
+    ): List<GradedRubricItemResult> {
+        val judgements = ChapterOpenGate.judge(
+            answer = request.studentAnswer,
+            points = request.rubricCriteria.map { ChapterOpenPointRef(it.cid, it.slotLabel) },
+            drafts = items.map { ChapterOpenDraft(it.cid, it.verdict.name, it.feedbackNoteZh) },
+        ).associateBy { it.id }
+        return items.map { item ->
+            val judged = judgements[item.cid] ?: return@map item
+            val verdict = PracticeRubricVerdict.parse(judged.verdict)
+            val note = NoRewriteOutputGuard.enforce(judged.reason, verdict, item.pdfPage).sanitizedNoteZh
+            val awarded = when (verdict) {
+                PracticeRubricVerdict.ZERO -> 0.0
+                PracticeRubricVerdict.PARTIAL ->
+                    if (item.maxMarks > 0.0) minOf(item.awardedMarks, item.maxMarks * 0.5) else 0.0
+                PracticeRubricVerdict.FULL -> item.awardedMarks
+            }
+            item.copy(
+                verdict = verdict,
+                awardedMarks = awarded,
+                feedbackNoteZh = note,
+                missCause = if (verdict == PracticeRubricVerdict.ZERO) judged.missCause else "",
+                studentQuoteVerified = if (verdict == PracticeRubricVerdict.ZERO) item.studentQuoteVerified else item.studentQuoteVerified,
+            )
+        }
+    }
+
+    suspend fun generateChapterOpen(
+        bookId: String,
+        chapterId: String,
+        blocks: List<ChapterOpenSourceBlock>,
+        friend: String? = null,
+        device: String? = null,
+    ): ChapterOpenPack {
+        val usable = blocks
+            .filter { it.id.isNotBlank() && it.page > 0 && it.text.isNotBlank() }
+            .take(12)
+            .map { it.copy(text = it.text.take(900)) }
+        require(usable.isNotEmpty()) { "这一章没有可用于出题的正文。" }
+        val active = if (friend != null) FriendScopedBatchTransport(transport, friend, device.orEmpty()) else transport
+        val first = requestChapterOpen(active, bookId, chapterId, usable, repairNote = "")
+        if (first.stem.isNotBlank() && first.points.size >= ChapterOpenGate.MIN_POINTS) {
+            return first.copy(points = first.points.take(ChapterOpenGate.MAX_POINTS))
+        }
+        val second = requestChapterOpen(
+            active,
+            bookId,
+            chapterId,
+            usable,
+            repairNote = "The previous points were dropped because a claim copied the chapter or the quote was not an exact substring. Write new claims in your own words.",
+        )
+        require(second.stem.isNotBlank() && second.points.size >= ChapterOpenGate.MIN_POINTS) {
+            "这一章没能整理出足够的得分点，请稍后再试。"
+        }
+        return second.copy(points = second.points.take(ChapterOpenGate.MAX_POINTS))
+    }
+
+    private suspend fun requestChapterOpen(
+        active: BatchAiTransport,
+        bookId: String,
+        chapterId: String,
+        blocks: List<ChapterOpenSourceBlock>,
+        repairNote: String,
+    ): ChapterOpenPack {
+        val user = buildString {
+            if (repairNote.isNotBlank()) append(repairNote).append("\n\n")
+            append("Chapter blocks. Cite a blockId and copy a short quoteAnchor from that block. ")
+            append("The claim must say what the student should explain, and must not contain 12 consecutive characters from the block.\n")
+            for (block in blocks) {
+                append("[${block.id} p.${block.page}]\n")
+                append(block.text)
+                append("\n\n")
+            }
+            append("Return JSON only: {\"stem\":\"...\",\"points\":[{\"id\":\"P1\",\"claim\":\"...\",\"blockId\":\"${blocks.first().id}\",\"quoteAnchor\":\"exact substring\"}]}\n")
+            append("Provide 4 to 6 points.")
+        }
+        val key = "co-${sha256("$bookId|$chapterId|$repairNote|$user".toByteArray(Charsets.UTF_8)).take(16)}"
+        val reply = active.generateSection(
+            systemPrompt = CHAPTER_OPEN_SYSTEM,
+            userPrompt = user,
+            task = PracticeGradeLimits.TASK_CHAPTER_OPEN,
+            batchKey = key,
+            maxTokens = PracticeGradeLimits.BATCH_MAX_TOKENS,
+        )
+        val obj = extractJsonObject(reply.text)
+        val stem = (obj?.get("stem") as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+        val raw = (obj?.get("points") as? JsonArray).orEmpty().mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            fun s(k: String) = (o[k] as? JsonPrimitive)?.contentOrNull.orEmpty()
+            ChapterOpenRawPoint(id = s("id"), claim = s("claim"), blockId = s("blockId"), quoteAnchor = s("quoteAnchor"))
+        }
+        return ChapterOpenPack(stem = stem, points = ChapterOpenGate.acceptPoints(raw, blocks))
+    }
 }
+
+data class ChapterOpenPack(
+    val stem: String,
+    val points: List<ChapterOpenAcceptedPoint>,
+)
+
+private const val CHAPTER_OPEN_SYSTEM: String = """
+You write one open question for a chapter the student has just read.
+Rules:
+1. One question that asks the student to explain the chapter in their own words.
+2. Four to six scoring points. Each point's claim is what a good answer would say, written freshly. Do not paste 12 or more consecutive characters from any block into a claim.
+3. Each point cites one blockId and a quoteAnchor of 4 to 18 characters copied exactly from that block, used only as a location.
+4. Do not write a model answer, and do not include a rewrite field.
+Output one JSON object only.
+"""
 
 object PracticeGradeRequestParser {
     fun parse(input: JsonObject): PracticeGradeAndDiagnoseRequest {
@@ -1477,6 +1637,9 @@ object PracticeGradeRequestParser {
             referenceExclusionTexts = exclusionTexts,
             mcqCorrectOption = input.s("mcqCorrectOption").trim(),
             mcqSelectedOption = input.s("mcqSelectedOption").trim(),
+            retryPointIds = (input["retryPointIds"] as? JsonArray).orEmpty().mapNotNull {
+                (it as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
+            }.distinct().take(ChapterOpenGate.MAX_POINTS),
         )
     }
 

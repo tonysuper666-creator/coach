@@ -67,6 +67,16 @@ class ExamCoverageTest {
         val name = HeldOutDecomposer.focus("Explain how Demand Elasticity changes a price. SECRET_STEM_ONLY")
         assertEquals("Demand Elasticity", name)
         assertFalse(name.contains("SECRET"))
+        val fromVerb = HeldOutDecomposer.focus("Question 1. Explain Demand Elasticity for a luxury good.")
+        assertEquals("Demand Elasticity", fromVerb)
+        val taught = ExamCoverage.evaluate(
+            listOf("Question 1. Explain Demand Elasticity for a luxury good."),
+            identified = listOf("Demand elasticity"),
+            bank = listOf(CoverageBankPoint("Demand elasticity", choices = 2, essay = false)),
+            textbook = "Demand elasticity: Buyers respond to price.",
+        )
+        assertEquals(1, taught.covered)
+        assertEquals(emptyList(), taught.uncovered)
         val fromDoc = HeldOutDecomposer.questionsFromDocument(
             """
             ## Question 1

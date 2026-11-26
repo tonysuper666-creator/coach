@@ -213,11 +213,18 @@ internal object HeldOutDecomposer {
     fun focus(stem: String): String {
         pointLine.find(stem)?.let { return clean(it.groupValues[1]) }
         val body = stem.replace(numberPrefix, "").trim()
-        val titled = capitalRun.findAll(body).map { it.value.trim() }.maxByOrNull { it.length }
-        if (titled != null && titled.length in 8..80) return clean(titled)
+        // Question stems open with Explain/Discuss/…. Those words are not the point name.
+        val titled = capitalRun.findAll(body)
+            .map { stripLeadingSkip(it.value) }
+            .filter { it.length in 8..80 }
+            .maxByOrNull { it.length }
+        if (titled != null) return clean(titled)
         val words = CourseExamPoints.normalize(body).split(' ').filter { it.length >= 4 && it !in skip }
         return clean(words.take(3).joinToString(" "))
     }
+
+    private fun stripLeadingSkip(run: String): String =
+        run.trim().split(Regex("""\s+""")).dropWhile { it.lowercase() in skip }.joinToString(" ")
 
     private fun clean(raw: String): String = raw.trim().trim('.', ',', ';', ':', '。', '，').take(80)
 }

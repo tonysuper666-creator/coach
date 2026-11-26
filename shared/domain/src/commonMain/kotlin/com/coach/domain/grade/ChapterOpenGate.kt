@@ -8,9 +8,10 @@ package com.coach.domain.grade
  * When the point carries the sentence it hangs on, the model judges that meaning:
  * a correct paraphrase stays 答到, and local word overlap only blocks a short
  * answer that shares nothing with the sentence or the claim. Without that
- * sentence, grading may only downgrade a model verdict, and an off-topic answer
- * cannot stay at FULL. A second try keeps the earlier attempt and rejudges only
- * the points that were missed.
+ * sentence, an off-topic answer cannot stay at FULL, and a paraphrase the model
+ * marked FULL stays FULL. A point the answer never mentions is 没读到. 混淆了别的概念
+ * is only when the answer uses another point's wording in place of this one.
+ * A second try keeps the earlier attempt and rejudges only the points that were missed.
  */
 data class ChapterOpenPointRef(
     val id: String,
@@ -190,7 +191,6 @@ object ChapterOpenGate {
                 meaningVerdict(point, answer, model)
             } else when {
                 isOffTopic(point.claim, answer) -> "ZERO"
-                model == "FULL" && !allowsHit(point.claim, answer) -> "PARTIAL"
                 else -> model
             }
             val cause = if (verdict == "ZERO") missCause(point, points, answer) else ""
@@ -269,20 +269,34 @@ object ChapterOpenGate {
         points: List<ChapterOpenPointRef>,
         answer: String,
     ): String {
-        val mine = sharedCount(point.claim, answer)
-        val bestOther = points
-            .filter { it.id != point.id }
-            .maxOfOrNull { sharedCount(it.claim, answer) } ?: 0
+        val spansHere = fourSpans(point.claim).any { it in answer }
+        val distinctive = distinctiveShared(point, points, answer)
+        val otherSpan = points.any { other ->
+            other.id != point.id && fourSpans(other.claim).any { span ->
+                span in answer && span !in hanRun(point.claim)
+            }
+        }
         return when {
-            mine == 0 && fourSpans(point.claim).none { it in answer } -> NOT_READ
-            bestOther > mine && bestOther >= 2 -> CONCEPT_CONFUSION
-            mine <= 1 -> UNCLEAR_EXPRESSION
+            !spansHere && distinctive.isEmpty() -> NOT_READ
+            otherSpan && !spansHere && distinctive.size < 2 -> CONCEPT_CONFUSION
+            !spansHere && distinctive.size <= 1 -> UNCLEAR_EXPRESSION
             else -> READ_NOT_UNDERSTOOD
         }
     }
 
-    private fun sharedCount(claim: String, answer: String): Int =
-        contentTokens(claim).intersect(contentTokens(answer)).size
+    private fun distinctiveShared(
+        point: ChapterOpenPointRef,
+        points: List<ChapterOpenPointRef>,
+        answer: String,
+    ): Set<String> {
+        val others = points.asSequence()
+            .filter { it.id != point.id }
+            .flatMap { contentTokens(it.claim).asSequence() }
+            .toSet()
+        return contentTokens(point.claim).intersect(contentTokens(answer)) - others
+    }
+
+    private fun hanRun(text: String): String = text.filter { it.code in 0x4E00..0x9FFF }
 
     private fun fourSpans(claim: String): List<String> {
         val han = claim.filter { it.code in 0x4E00..0x9FFF }

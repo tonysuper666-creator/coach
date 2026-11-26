@@ -699,7 +699,7 @@ class BridgeClient(
             "BOOK_STRUCTURE_DETECT", "BOOK_MATH_VERIFY", "BOOK_MATH_REPAIR",
             "gen_mcq", "repair_mcq_sources", "gen_constructed", "repair_constructed_sources", "course_mock_item",
             "grade_constructed", "grade_essay", "repair_grade", "repair_essay", "JOURNAL_SUMMARY",
-            "practice_grade", "practice_diagnose", "practice_variant",
+            "practice_grade", "practice_diagnose", "practice_variant", "chapter_open_question",
             "course_topic_map", "course_topic_reduce", "course_topic_math_repair",
             "booklist_concept_align",
             "course_vision_ocr",

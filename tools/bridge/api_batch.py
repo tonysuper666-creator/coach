@@ -24,7 +24,7 @@ TASKS = frozenset({GUIDE_TASK, "concept_sayings", "gen_mcq", "repair_mcq_sources
                    "gen_constructed", "repair_constructed_sources", "review_constructed",
                    "BOOK_SECTION_BATCH", "BOOK_EXERCISE_HINTS", "BOOK_MATH_VERIFY", "BOOK_MATH_REPAIR",
                    "practice_grade", "practice_diagnose", "practice_variant", "course_mock_item",
-                   "exam_point_drill"})
+                   "exam_point_drill", "chapter_open_question"})
 ROOTS = {"anthropic": "https://api.anthropic.com/v1", "openai": "https://api.openai.com/v1"}
 
 

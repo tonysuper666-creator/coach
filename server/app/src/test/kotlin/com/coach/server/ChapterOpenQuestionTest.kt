@@ -1,9 +1,11 @@
 package com.coach.server
 
 import com.coach.ai.BridgeClient
+import com.coach.domain.grade.ChapterOpenDraft
 import com.coach.domain.grade.ChapterOpenGate
 import com.coach.domain.grade.ChapterOpenHistory
 import com.coach.domain.grade.ChapterOpenJudgement
+import com.coach.domain.grade.ChapterOpenPointRef
 import com.coach.domain.grade.ChapterOpenSourceBlock
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonArray
@@ -237,9 +239,9 @@ class ChapterOpenQuestionTest {
         assertFalse(ChapterOpenGate.allowsHit(partialClaim, partialAnswer))
         val partial = svc.process(gradeRequest("潮", "甲", listOf(partialClaim, claim(100), claim(101), claim(102)), partialAnswer))
         val partialItem = partial.rubricItems.first { it.cid == "P1" }
-        assertEquals(PracticeRubricVerdict.PARTIAL, partialItem.verdict)
-        assertEquals(0.5, partialItem.awardedMarks, 1e-6)
-        report += "潮-甲 partial P1 ${ChapterOpenGate.verdictLabel(partialItem.verdict.name)}"
+        assertEquals(PracticeRubricVerdict.FULL, partialItem.verdict)
+        assertEquals(1.0, partialItem.awardedMarks, 1e-6)
+        report += "潮-甲 paraphrase P1 ${ChapterOpenGate.verdictLabel(partialItem.verdict.name)}"
 
         val text = report.joinToString("\n")
         println("CHAPTER_OPEN_SAMPLE\n$text")
@@ -247,6 +249,47 @@ class ChapterOpenQuestionTest {
         if (!out.isNullOrBlank()) Files.writeString(Path.of(out), text)
         assertTrue(report.none { it.contains(" off ") && it.contains("答到") && !it.contains("没答到") })
     }
+
+    @Test
+    fun ownWordsStayFullAndAnOmittedPointIsNotConfusion() {
+        val paraphrase = ChapterOpenGate.judge(
+            answer = "松柏外加樟楠",
+            points = listOf(ChapterOpenPointRef("P1", "松柏枫槐柳榕樟楠")),
+            drafts = listOf(ChapterOpenDraft("P1", "FULL", "这一点答到了。")),
+        )
+        assertEquals("FULL", paraphrase.single().verdict)
+        assertEquals("", paraphrase.single().missCause)
+
+        val points = listOf(
+            ChapterOpenPointRef("P1", "港口入夜改道仍可识别"),
+            ChapterOpenPointRef("P2", "灯塔入夜仍留在原处"),
+            ChapterOpenPointRef("P3", "入夜航标改用新色标记"),
+        )
+        val covered = "港口入夜会改道，但仍能识别。灯塔入夜留在原处。"
+        assertTrue(ChapterOpenGate.contentTokens(points[2].claim).intersect(ChapterOpenGate.contentTokens(covered)).isNotEmpty())
+        val omitted = causeOf(points, covered, "P3")
+        assertEquals("ZERO", omitted.verdict)
+        assertEquals(ChapterOpenGate.NOT_READ, omitted.missCause)
+
+        val swapped = causeOf(points, "航标仍留在原处", "P3")
+        assertEquals(ChapterOpenGate.CONCEPT_CONFUSION, swapped.missCause)
+
+        val unclear = causeOf(points, "只提到航标", "P3")
+        assertEquals(ChapterOpenGate.UNCLEAR_EXPRESSION, unclear.missCause)
+
+        val touched = causeOf(points, "入夜航标改用新色但是方向说反了", "P3")
+        assertEquals(ChapterOpenGate.READ_NOT_UNDERSTOOD, touched.missCause)
+    }
+
+    private fun causeOf(
+        points: List<ChapterOpenPointRef>,
+        answer: String,
+        id: String,
+    ): ChapterOpenJudgement = ChapterOpenGate.judge(
+        answer = answer,
+        points = points,
+        drafts = points.map { ChapterOpenDraft(it.id, "ZERO", "模型没给分。") },
+    ).first { it.id == id }
 
     private fun claim(index: Int): String = buildString {
         val base = 0x5B00 + index * 8

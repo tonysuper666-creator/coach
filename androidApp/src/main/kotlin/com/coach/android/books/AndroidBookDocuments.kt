@@ -28,12 +28,13 @@ internal object PdfWarmup {
     }
 }
 
-internal fun importedPdfVisuals(pdf: BookPdfDocument, pages: List<BookPage>, control: BookImportControl): List<ExtractedIllustration> {
+internal fun importedPdfVisuals(pdf: BookPdfDocument, pages: List<BookPage>, control: BookImportControl,
+    includeLayoutCandidates: Boolean = true): List<ExtractedIllustration> {
     val output = mutableListOf<ExtractedIllustration>()
     var bytes = 0L
     for (page in pages) {
         control.report(page.number, pdf.numberOfPages)
-        for (image in PdfBookImages.extract(pdf, page, emptyList(), control)) {
+        for (image in PdfBookImages.extract(pdf, page, emptyList(), control, includeLayoutCandidates)) {
             if (output.size >= FormatBookImages.MAX_IMAGES || bytes + image.bytes.size > FormatBookImages.MAX_TOTAL) return output
             output += image
             bytes += image.bytes.size

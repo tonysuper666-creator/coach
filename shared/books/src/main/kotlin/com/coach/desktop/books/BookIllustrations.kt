@@ -422,19 +422,20 @@ internal object BookIllustrationStore {
         pageTexts: Map<Int, String>,
         illustrations: List<ExtractedIllustration>,
         ensureSchema: Boolean = true,
+        appendOrdinals: Map<Int, Int>? = null,
     ): List<BookIllustration> {
         require(BookIllustrationAssets.isValidSha256(bookId)) { "非法的教材编号。" }
         if (illustrations.isEmpty()) return emptyList()
         BookIllustrationAnchors.requireValidForPages(pageTexts, illustrations)
         if (ensureSchema) migrate(db)
         val createdFiles = BookIllustrationAssets.writeUnique(libraryDirectory, bookId, illustrations)
-        val pageOrdinals = HashMap<Int, Int>()
+        val pageOrdinals = appendOrdinals.orEmpty().toMutableMap()
         val persisted = mutableListOf<BookIllustration>()
         try {
             // A supplied page payload replaces that page's entire visual set. This lets a
             // verified/manual crop set supersede automatic supplemental crops atomically.
             // Unmentioned pages and content-addressed files remain intact, including on rollback.
-            db.prepareStatement("DELETE FROM $TABLE WHERE book=? AND page=?").use { sql ->
+            if (appendOrdinals == null) db.prepareStatement("DELETE FROM $TABLE WHERE book=? AND page=?").use { sql ->
                 for (page in illustrations.map { it.page }.distinct()) {
                     sql.setString(1, bookId); sql.setInt(2, page); sql.addBatch()
                 }
@@ -499,7 +500,7 @@ internal object BookIllustrationStore {
         }
     }
 
-    fun loadByPage(db: Connection, bookId: String): Map<Int, List<BookIllustration>> {
+    fun loadByPage(db: Connection, bookId: String, pages: IntRange? = null): Map<Int, List<BookIllustration>> {
         if (!BookIllustrationAssets.isValidSha256(bookId) || !tableExists(db)) return emptyMap()
         val columns = tableColumns(db)
         val hasExtended = setOf("kind", "source_start", "source_end", "region_x", "region_y", "region_w", "region_h")
@@ -511,8 +512,13 @@ internal object BookIllustrationStore {
         }
         val grouped = LinkedHashMap<Int, MutableList<BookIllustration>>()
         val tableColumn = if ("table_rows" in columns) ",table_rows" else ""
-        db.prepareStatement("SELECT $selectCols$tableColumn FROM $TABLE WHERE book=? ORDER BY page,ordinal").use { sql ->
+        val pageFilter = if (pages == null) "" else " AND page BETWEEN ? AND ?"
+        db.prepareStatement("SELECT $selectCols$tableColumn FROM $TABLE WHERE book=?$pageFilter ORDER BY page,ordinal").use { sql ->
             sql.setString(1, bookId)
+            if (pages != null) {
+                sql.setInt(2, pages.first)
+                sql.setInt(3, pages.last)
+            }
             sql.executeQuery().use { rows ->
                 while (rows.next()) {
                     val hash = rows.getString("image_sha256")

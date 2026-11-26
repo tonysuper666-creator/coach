@@ -14,16 +14,16 @@ internal object PdfBookImages {
     private data class Candidate(val box: ReaderRect, val caption: Caption?, val bitmap: Boolean)
 
     fun extract(document: BookPdfDocument, page: BookPage, enclosed: List<ExtractedIllustration>,
-        control: BookImportControl): List<ExtractedIllustration> {
+        control: BookImportControl, includeVectorCandidates: Boolean = true): List<ExtractedIllustration> {
         control.check()
         if (page.ocr || page.text.isBlank()) return enclosed
-        return try { supported(document, page, enclosed, control) }
+        return try { supported(document, page, enclosed, control, includeVectorCandidates) }
         catch (e: CancellationException) { throw e }
         catch (_: Exception) { enclosed } // Unsupported supplements cannot break readable books.
     }
 
     private fun supported(document: BookPdfDocument, page: BookPage, enclosed: List<ExtractedIllustration>,
-        control: BookImportControl): List<ExtractedIllustration> {
+        control: BookImportControl, includeVectorCandidates: Boolean): List<ExtractedIllustration> {
         val physical = document.getPage(page.number - 1)
         val crop = physical.cropBox
         if (Math.floorMod(physical.rotation, 360) != 0 || !crop.width.isFinite() || !crop.height.isFinite() ||
@@ -53,7 +53,7 @@ internal object PdfBookImages {
             .map { Candidate(it, caption(it), true) }.toMutableList()
         // A nearby numbered caption is required for unboxed vector art; rules, underlines
         // and page furniture are not automatically promoted to illustrations.
-        for (path in connected(graphics.paths)) {
+        for (path in if (includeVectorCandidates) connected(graphics.paths) else emptyList()) {
             val region = normalize(path) ?: continue
             if (path.width < 40 || path.height < 25 || !sane(region, crop.width, crop.height)) continue
             val label = caption(region) ?: continue

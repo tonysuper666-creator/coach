@@ -316,14 +316,25 @@ class BookPageLayoutTest {
         // 1128x828 @ 150% (~738dp client) & 980dp window: single full-bleed column, no 720dp nesting box
         assertEquals(1, bookImmersiveColumns(738f, 684f, BookPageMode.Auto, 1))
         assertEquals(1, bookImmersiveColumns(980f, 684f, BookPageMode.Auto, 1))
-        // 1536x864 @ 125% (~1213dp), 1920x1080 @ 150% (~1266dp), 1366x768 @ 100% (~1350dp): 2 columns <= 720dp each
-        for (w in listOf(1080f, 1213f, 1266f, 1350f, 1440f)) {
+        // 1536x864 @ 125% (~1213dp), 1920x1080 @ 150% (~1266dp), 1366x768 @ 100% (~1350dp),
+        // 2560x1440 @ 150% (~1706dp), 1920dp and 2880dp: two facing pages, each line <= 720dp (TON-1671 ruling)
+        for (w in listOf(1080f, 1213f, 1266f, 1350f, 1440f, 1706f, 1920f, 2880f)) {
             val cols = bookImmersiveColumns(w, 684f, BookPageMode.Auto, 1)
-            assertEquals(2, cols, "widthDp=$w should use 2 columns")
-            assertTrue(w / cols <= 720.01f, "widthDp=$w column width ${w / cols} exceeds 720dp")
+            assertEquals(2, cols, "widthDp=$w should use 2 facing pages")
+            val sheet = w / cols
+            val text = bookImmersiveTextDp(sheet, 6f)
+            assertTrue(text <= 720.01f, "widthDp=$w line width $text exceeds 720dp")
+            val (outer, spine) = bookImmersiveExtraMargins(sheet - 6f - text, spread = true)
+            assertEquals(sheet, 6f + text + outer + spine, 0.01f, "widthDp=$w extra width goes to the margins")
+            assertTrue(outer >= spine, "widthDp=$w outer margin $outer narrower than spine side $spine")
         }
-        // 1920dp wide screens: 3 columns <= 720dp each
-        assertEquals(3, bookImmersiveColumns(1920f, 684f, BookPageMode.Auto, 1))
+        assertEquals(2, bookImmersiveColumns(1706f, 684f, BookPageMode.Spread, 2))
+        assertEquals(2, bookImmersiveColumns(2880f, 684f, BookPageMode.Spread, 1))
+        assertEquals(1, bookImmersiveColumns(750f, 684f, BookPageMode.Spread, 1))
+        assertEquals(2, bookImmersiveColumns(760f, 684f, BookPageMode.Spread, 1))
+        // A single page caps the line the same way and centres it.
+        assertEquals(720f, bookImmersiveTextDp(1000f, 8f), 0.01f)
+        assertEquals(Pair(136f, 136f), bookImmersiveExtraMargins(272f, spread = false))
         // Hysteresis keeps 2 columns slightly below 1080dp when shrinking
         assertEquals(2, bookImmersiveColumns(1060f, 684f, BookPageMode.Auto, 2))
         assertEquals(1, bookImmersiveColumns(1050f, 684f, BookPageMode.Auto, 2))

@@ -198,7 +198,13 @@ internal fun TextbookReader(
     // Home 选中的词要留住。翻页回调和随后的对焦点击都会把选区清掉，工具条还没画出来就没了。
     var homeWordPinned by remember(book.id) { mutableStateOf(false) }
     LaunchedEffect(ui.page, textView, explainOpen) {
-        if (explainOpen || !textView) textSelection = null
+        // 请求记在组合外面：Home 翻页会把阅读器拆掉重组，组合里刚写下的选区会丢。
+        if (HomeSelectRequest.bookId == book.id && textView && !explainOpen) {
+            textSelection = book.homeSelectionWord(ui.page)
+            homeWordPinned = true
+        } else if (explainOpen || !textView) {
+            textSelection = null
+        }
     }
     val pdfChosen = pdf.selection?.let { selected ->
         val range = selected.range
@@ -1436,9 +1442,10 @@ internal fun TextbookReader(
                         }
                         val turn = readerPagingTurn(event.key, typingNow)
                         // 点击、F2、S、↑ 都没选中。Home 能翻页，说明它进了这个阅读区。
-                        // 先钉住选区，再翻页，这样翻页回调和对焦点击都清不掉。
-                        val pinHome = !typingNow && textView && event.key == Key.MoveHome
-                        if (pinHome) {
+                        // 请求放在组合外面，翻页把阅读器拆掉重组之后，新的一帧仍能把词选上。
+                        val pinHome = !typingNow && event.key == Key.MoveHome
+                        if (pinHome) HomeSelectRequest.bookId = book.id
+                        if (pinHome && textView) {
                             homeWordPinned = true
                             textSelection = book.homeSelectionWord(book.pages.first().number)
                         }
@@ -2141,7 +2148,12 @@ internal fun TextbookReader(
                 onNote = {
                     startNoteFromSelection(learnableSelection)
                 },
-                onDismiss = { homeWordPinned = false; pdf.selection = null; textSelection = null },
+                onDismiss = {
+                    homeWordPinned = false
+                    if (HomeSelectRequest.bookId == book.id) HomeSelectRequest.bookId = null
+                    pdf.selection = null
+                    textSelection = null
+                },
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = if (showHud) 54.dp else 14.dp),
             )
         }
@@ -2398,6 +2410,11 @@ internal fun TextbookReader(
             )
         }
     }
+}
+
+/** Home 的选词请求。翻页会拆掉阅读器重组，组合里的选区会丢，这个请求还在。 */
+internal object HomeSelectRequest {
+    var bookId: String? = null
 }
 
 /** 键盘翻页的去向。 */

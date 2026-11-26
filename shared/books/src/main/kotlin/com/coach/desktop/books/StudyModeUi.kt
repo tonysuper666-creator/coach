@@ -442,6 +442,7 @@ internal fun ModeDistinctCompanionSurface(
     draft: ChapterPracticeDraft,
     onUpdateDraft: ((ChapterPracticeDraft) -> ChapterPracticeDraft) -> Unit,
     onUpdateInquiry: (String) -> Unit,
+    onDiagnosticAnswer: (BookLesson, Int, Practice, PracticeAnswer) -> Unit = { _, _, _, _ -> },
     onJumpPage: (Int) -> Unit,
     onOpenAnchor: (BookCompanionAnchor) -> Unit,
     modePackJson: String? = null,
@@ -491,6 +492,7 @@ internal fun ModeDistinctCompanionSurface(
         onJumpPage = onJumpPage,
         onRequestBookMapBatch = onRequestBookMapBatch,
         onRetryModePack = onRetryModePack,
+        onDiagnosticAnswer = onDiagnosticAnswer,
     )
 
     when (preference.mode) {
@@ -711,6 +713,9 @@ internal fun ModeDistinctCompanionSurface(
                         }
                 } else {
                     quizzes.forEachIndexed { idx, q ->
+                        fun commit(option: String?) {
+                            if (library.todayCardEnabled) DiagnosticReview.fromQuiz(chapterGroup, q)?.commit(option, onDiagnosticAnswer)
+                        }
                         val chosen = draft.pretestSelections[q.id]
                         val submitted = q.id in draft.pretestSubmitted
                         val passed = submitted && chosen == q.correctOption && draft.pretestGuessed[q.id] != true
@@ -733,6 +738,7 @@ internal fun ModeDistinctCompanionSurface(
                                             .clip(RoundedCornerShape(CoachV7.Radius.s))
                                             .background(if (isSel) colors.actionPrimary.copy(alpha = 0.12f) else Color.Transparent)
                                             .clickable {
+                                                commit(opt)
                                                 onUpdateDraft {
                                                     it.copy(
                                                         pretestSelections = it.pretestSelections + (q.id to opt),
@@ -754,6 +760,7 @@ internal fun ModeDistinctCompanionSurface(
                                         .clip(RoundedCornerShape(CoachV7.Radius.s))
                                         .background(if (isUnsure) colors.actionPrimary.copy(alpha = 0.10f) else Color.Transparent)
                                         .clickable {
+                                            commit(null)
                                             onUpdateDraft {
                                                 it.copy(
                                                     pretestSelections = it.pretestSelections - q.id,
@@ -1010,6 +1017,7 @@ private fun LiveModeStatusAndExtraDeck(
     onJumpPage: (Int) -> Unit,
     onRequestBookMapBatch: (() -> Unit)?,
     onRetryModePack: (() -> Unit)?,
+    onDiagnosticAnswer: (BookLesson, Int, Practice, PracticeAnswer) -> Unit,
 ) {
     val colors = CoachTheme.colors
     if (preference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY) {
@@ -1163,6 +1171,11 @@ private fun LiveModeStatusAndExtraDeck(
                             val matchedSec = remember(g.gateId, g.sectionTitle, g.missJumpPdfPage, chapterGroup) {
                                 resolveMatchingSectionForGate(g, chapterGroup)
                             }
+                            val targetPage = g.missJumpPdfPage.takeIf { it in chapterGroup.firstPage..chapterGroup.lastPage }
+                                ?: matchedSec?.firstPage ?: chapterGroup.firstPage
+                            fun commit(option: String?) {
+                                if (library.todayCardEnabled) DiagnosticReview.fromGate(chapterGroup, chapterNumber, g)?.commit(option, onDiagnosticAnswer)
+                            }
                             val skipKey = if (matchedSec != null) "skip-${matchedSec.id}" else "skip-gate-$chapterNumber-${g.gateId}"
                             val selectedIdx = draft.pretestSelections[gateKey]?.toIntOrNull()
                             val isUnsure = draft.pretestGuessed[gateKey] == true && gateKey in draft.pretestSubmitted
@@ -1182,6 +1195,7 @@ private fun LiveModeStatusAndExtraDeck(
                                             .clip(RoundedCornerShape(CoachV7.Radius.s))
                                             .background(if (isSel) colors.actionPrimary.copy(alpha = 0.12f) else Color.Transparent)
                                             .clickable(role = Role.RadioButton) {
+                                                commit(optText)
                                                 onUpdateDraft { d ->
                                                     val nextSubmitted = if (oIdx == g.correctIndex) {
                                                         d.pretestSubmitted + gateKey + skipKey
@@ -1208,6 +1222,7 @@ private fun LiveModeStatusAndExtraDeck(
                                         .clip(RoundedCornerShape(CoachV7.Radius.s))
                                         .background(if (isUnsure) colors.actionPrimary.copy(alpha = 0.10f) else Color.Transparent)
                                         .clickable(role = Role.RadioButton) {
+                                            commit(null)
                                             onUpdateDraft { d ->
                                                 d.copy(
                                                     pretestSelections = d.pretestSelections - gateKey,
@@ -1224,9 +1239,6 @@ private fun LiveModeStatusAndExtraDeck(
                                     CoachCardMeta("✓ 已掌握（$jumpLabel）：${g.passSkipNote}")
                                 } else if (missed) {
                                     CoachCardMeta("纠偏：${g.missRemediation}")
-                                    val targetPage = g.missJumpPdfPage.takeIf { it in chapterGroup.firstPage..chapterGroup.lastPage }
-                                        ?: matchedSec?.firstPage
-                                        ?: chapterGroup.firstPage.coerceAtLeast(1)
                                     V7TextButton(onClick = { onOpenAnchor(BookCompanionAnchor(targetPage, g.quoteAnchor, 0, 0, g.quoteAnchor)) }) {
                                         Text("答错/待补直达 p.$targetPage 补读原段")
                                     }

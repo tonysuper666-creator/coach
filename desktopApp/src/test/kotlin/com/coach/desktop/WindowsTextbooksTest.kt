@@ -139,7 +139,8 @@ An isolated specimen uses the same process on the second page.
             runSkikoComposeUiTest(size = Size(1440f, 900f), density = Density(1f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
                 ready(controller) { it.book != null }
-                onNodeWithTag("home-focus-title").assertTextEquals(book.title)
+                if (windowsToday) onNodeWithTag("home-focus-meta").assertTextContains(book.title, substring = true)
+                else onNodeWithTag("home-focus-title").assertTextEquals(book.title)
                 onNodeWithTag("home-read").performClick()
                 ready(controller) { it.screen == BookScreen.READER }
                 assertEquals(book.id, controller.state.value.book!!.id)

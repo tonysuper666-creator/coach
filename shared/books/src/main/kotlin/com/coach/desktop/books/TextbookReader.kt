@@ -134,6 +134,8 @@ internal fun TextbookReader(
     onConsumeKeepAskTabOpen: () -> Unit = {},
     onEditStructure: (suspend (Textbook, StructureEdit) -> Textbook)? = null,
     onBrowsePage: ((Int) -> Unit)? = null,
+    onLoadPdfVisuals: (suspend (String, Collection<Int>) -> Unit)? = null,
+    onImportReviewedBlocks: ((String) -> Unit)? = null,
 ) {
     val book = checkNotNull(ui.book)
     val page = book.page(ui.page)
@@ -1256,20 +1258,20 @@ internal fun TextbookReader(
             pendingNoteSelection = null
         }
     }
-    fun switchView(nextTextView: Boolean) {
+    fun switchView(nextTextView: Boolean, originalAnchor: BookPageAnchor = paging.anchor) {
         if (nextTextView == textView) return
         val touchPdf = originalPdf && originalPdfTouchEnabled
         if (!nextTextView) {
             // 文字 -> 原页：以当前 BookPageAnchor 为唯一真源，避免来回切时回弹旧页。
-            val targetPage = paging.anchor.importPage.takeIf { book.page(it) != null } ?: ui.page
+            val targetPage = originalAnchor.importPage.takeIf { book.page(it) != null } ?: ui.page
             val passage = passageJump?.takeIf {
-                touchPdf && it.page == paging.anchor.importPage && it.start == paging.anchor.offsetUtf16
+                touchPdf && it.page == targetPage && it.start == originalAnchor.offsetUtf16
             }
             if (passage != null) openPassage(passage)
             else {
                 if (touchPdf) passageJump = null
                 if (originalPdf) pdf.jump(targetPage)
-                paging.anchor = BookPageAnchor(targetPage, paging.anchor.offsetUtf16)
+                paging.anchor = BookPageAnchor(targetPage, originalAnchor.offsetUtf16)
                 if (paging.publishImportPage(targetPage)) onPage(targetPage)
             }
         } else {
@@ -1313,6 +1315,13 @@ internal fun TextbookReader(
     val onRelogin = LocalBookRelogin.current
     var readerOriginDp by remember { mutableStateOf<Pair<Float, Float>?>(null) }
     val typeMenuExtra: @Composable (() -> Unit) -> Unit = { close ->
+        if (originalPdf && onImportReviewedBlocks != null) {
+            DropdownMenuItem(
+                text = { Text("导入已核对的排版块") },
+                modifier = Modifier.testTag("import-reviewed-blocks"),
+                onClick = { close(); onImportReviewedBlocks(book.id) },
+            )
+        }
         if (pdfVisible) {
             for (scrolling in listOf(true, false)) {
                 val label = if (scrolling) "适宽连续" else "双页对开"
@@ -1591,6 +1600,10 @@ internal fun TextbookReader(
                         book, paging, ranges, turnLayout, libraryDirectory = library.directory,
                         modifier = if (companionOpen) Modifier.align(Alignment.Center).widthIn(max = 720.dp) else Modifier.fillMaxSize(),
                         turnStyle = turnStyle, readMode = readMode, onOpenTableRow = openPassage,
+                        onLoadPdfVisuals = if (originalPdf) onLoadPdfVisuals else null,
+                        onOpenOriginalBlock = if (originalPdf) { item ->
+                            switchView(false, BookPageAnchor(item.page, item.anchorOffset))
+                        } else null,
                         onSelectText = { textSelection = it },
                         hardPoints = sectionHardPoints,
                         onHardPointClick = { hp, blk ->

@@ -112,6 +112,62 @@ class PdfPrintedTablesTest {
         }
     }
 
+    @Test fun oldBodyOnlyTableIsReplacedOnceWithItsTitleAndRowCitations() {
+        val root = Files.createTempDirectory("caption-upgrade-")
+        try {
+            val path = root.resolve("table.pdf")
+            fixture().use { it.save(path.toFile()) }
+            val dir = root.resolve("library")
+            val library = TextbookLibrary(dir, streamPdfExtras = true, lazyPdfExtras = true)
+            val book = library.indexBookTier1(library.stageBookImportTier0(path).book.id)
+            val page = book.pages.single()
+            val legacy = fixture().use { PdfPrintedTables.extract(it, page, BookImportControl()).single() }
+            DriverManager.getConnection("jdbc:sqlite:" + dir.resolve("library.sqlite")).use { db ->
+                BookIllustrationStore.saveInTransaction(db, dir, book.id, mapOf(1 to page.text), listOf(legacy))
+                db.createStatement().use { it.execute("ALTER TABLE book_visual_pages DROP COLUMN layout_version") }
+                db.prepareStatement("INSERT INTO book_visual_pages(book,page,extracted_at) VALUES(?,1,0)").use {
+                    it.setString(1, book.id)
+                    it.executeUpdate()
+                }
+            }
+            val reopened = TextbookLibrary(dir, streamPdfExtras = true, lazyPdfExtras = true)
+            assertTrue(reopened.ensurePdfVisualsForPages(book.id, listOf(1)))
+            assertFalse(reopened.ensurePdfVisualsForPages(book.id, listOf(1)))
+            val updated = reopened.book(book.id).pages.single()
+            assertEquals(page.text, updated.text)
+            val block = updated.illustrations.single()
+            val start = assertNotNull(block.sourceStart)
+            val end = assertNotNull(block.sourceEnd)
+            assertTrue(page.text.substring(start, end).startsWith("Table 1. Quantities"))
+            assertTrue(page.text.substring(start, end).endsWith("Repeated Item 3"))
+            assertEquals(legacy.table!!.rows.map { it.source }, block.table!!.rows.map { it.source })
+            assertEquals(end, block.table.layout(end).rows.last().sourceEndUtf16)
+            assertTrue(block.table.headerTopPx > 0)
+            val visible = BookIllustrationLayout.segment(page.text, listOf(block), hideReplacedSourceText = true)
+                .filterIsInstance<BookPageSegment.Text>()
+            assertEquals(page.text.removeRange(start,end), visible.joinToString("") { page.text.substring(it.startOffset,it.endOffset) })
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun legacyRowEncodingRetainsTheOriginalHeaderHitArea() {
+        val bytes = java.nio.ByteBuffer.allocate(48).apply {
+            putInt(1)
+            putFloat(36f)
+            putFloat(27f)
+            for (i in 0..2) {
+                putInt((i + 1) * 20)
+                putInt(i * 6)
+                putInt(i * 6 + 5)
+            }
+        }.array()
+        val table = assertNotNull(ImportedTable.decode(bytes, 60))
+        assertEquals(0, table.headerTopPx)
+        assertEquals(60, table.dataBottomPx)
+        assertEquals(table, ImportedTable.decode(table.encode(), 60))
+    }
+
     @Test fun invalidGeometryAndSourceOffsetsCannotBecomeRows() {
         val text = "a😀bcde"
         val table = ImportedTable(listOf(

@@ -425,6 +425,7 @@ internal object BookSchemaMigration {
             book TEXT NOT NULL,
             page INTEGER NOT NULL,
             extracted_at INTEGER NOT NULL,
+            layout_version INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(book, page)
         )""".trimIndent(),
         "CREATE INDEX IF NOT EXISTS idx_pages_book_pending ON pages(book, ocr_pending, page)",
@@ -511,6 +512,7 @@ internal object BookSchemaMigration {
                     "index_state" in tableColumns(probe, "books") &&
                     "text_pending" in tableColumns(probe, "pages") &&
                     "source_page" in tableColumns(probe, "book_reviews") &&
+                    "layout_version" in tableColumns(probe, "book_visual_pages") &&
                     "due_day" in tableColumns(probe, "book_reviews") &&
                     "guessed" in tableColumns(probe, "answers")
                 if (schemaComplete) {
@@ -544,6 +546,7 @@ internal object BookSchemaMigration {
                     db.createStatement().use { sql ->
                         for (ddl in V2_TABLES) sql.execute(ddl)
                     }
+                    ensureColumn(db, "book_visual_pages", "layout_version", "INTEGER NOT NULL DEFAULT 0")
                     upgradeCollectionsToV3(db)
                     db.createStatement().use { sql ->
                         for (ddl in V3_TABLES) sql.execute(ddl)

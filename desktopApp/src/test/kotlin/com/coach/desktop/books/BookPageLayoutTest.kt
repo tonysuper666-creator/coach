@@ -11,6 +11,47 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class BookPageLayoutTest {
+    @Test fun scrollReadingLineCanFindASecondDisplayOnTheSameSheet() = runSkikoComposeUiTest(density = Density(1f)) {
+        val text = "First equation. Interlude. Second equation. After."
+        val blocks = listOf("First equation.", "Second equation.").mapIndexed { order, eq ->
+            val at = text.indexOf(eq)
+            BookIllustration(1, at, "a".repeat(64), "png", 280, 30, order = order, kind = PageVisualKind.FORMULA,
+                sourceStart = at, sourceEnd = at + eq.length, sourceRegion = com.coach.domain.reader.ReaderRect(.1, .1 + .3 * order, .5, .1))
+        }
+        var positions = emptyList<Int?>()
+        setContent { CoachTheme {
+            val type = BookPageTypography(MaterialTheme.typography.bodyLarge, SpanStyle(), SpanStyle(), 40.sp, 32.sp, 12.sp, 32.sp)
+            val measurer = rememberTextMeasurer()
+            val pages = BookPageLayouter(measurer, LocalDensity.current, type).layout(listOf(BookPage(1, text, illustrations = blocks)), 450, 900)
+            val sheet = pages.single()
+            val second = sheet.visuals.last()
+            val explicit = BookPageAnchor(1, second.item.anchorOffset, second.item.order)
+            val citation = BookPageAnchor(1, second.item.anchorOffset + 2)
+            val underLine = sheet.anchorAtY(second.topPx + 1, measurer, type, 450)
+            positions = listOf(second.topPx) + listOf(explicit, citation, underLine).map { sheet.yOfAnchor(it, measurer, type, 450) }
+        } }
+        waitForIdle()
+        assertTrue(positions.first()!! > 0)
+        assertEquals(1, positions.distinct().size)
+    }
+
+    @Test fun conflictingReplacementKeepsTheTextAndTheOtherVisualAnchor() = runSkikoComposeUiTest(density = Density(1f)) {
+        val text = "Before the heading, value and footnote. After."
+        val start = text.indexOf("heading")
+        val table = BookIllustration(1, start, "a".repeat(64), "png", 240, 170, kind = PageVisualKind.TABLE,
+            sourceRegion = com.coach.domain.reader.ReaderRect(.1, .1, .5, .3), sourceStart = start, sourceEnd = text.indexOf(" After"))
+        val figure = BookIllustration(1, text.indexOf("value"), "b".repeat(64), "png", 80, 60, order = 1)
+        var sheets = emptyList<BookLaidPage>()
+        setContent { CoachTheme {
+            val layouter = BookPageLayouter(rememberTextMeasurer(), LocalDensity.current, BookPageTypography(
+                MaterialTheme.typography.bodyLarge, SpanStyle(), SpanStyle(), 40.sp, 32.sp, 12.sp, 32.sp))
+            sheets = layouter.layout(listOf(BookPage(1, text, illustrations = listOf(table, figure))), 310, 390)
+        } }
+        waitForIdle()
+        assertEquals(listOf(figure), sheets.flatMap { it.visuals }.map { it.item })
+        assertEquals(text, sheets.flatMap { it.runs }.joinToString("") { originalBookSelection(it.text) })
+    }
+
     @Test fun ordinaryTableUsesSavedRowsAndRepeatsItsHeader() = runSkikoComposeUiTest(density = Density(1f)) {
         val text = "列\n甲😀\n乙\n丙\n丁"
         val table = ImportedTable(listOf(

@@ -87,6 +87,7 @@ internal fun WindowsTextbookHost(
     releasePickedBook: (Path) -> Unit = {},
     chooseBooks: (suspend () -> List<Path>)? = null,
     bookExplainer: BookExplainer? = null,
+    chooseReviewedBlocks: (suspend () -> List<Path>)? = null,
     chooseBook: suspend () -> Path?,
 ) {
     var settings by rememberSaveable { mutableStateOf(false) }
@@ -245,6 +246,7 @@ internal fun WindowsTextbookHost(
                                 }
                             },
                             onPickCourseFiles = pickMultiple,
+                            chooseReviewedBlocks = chooseReviewedBlocks,
                             onPickBooklistFiles = pickMultiple,
                             explainProvider = hostExplainer,
                             chooseBook = chooseBook,

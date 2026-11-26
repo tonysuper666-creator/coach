@@ -202,6 +202,7 @@ internal fun runWindowsTextbooks() {
                     controller = controller,
                     drafts = drafts,
                     exams = exams,
+                    chooseReviewedBlocks = { pickReviewedBlocks(window) },
                     chooseBooks = {
                         withContext(Dispatchers.Swing) {
                             val dialog = FileDialog(window, "导入文件 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)
@@ -276,5 +277,17 @@ internal fun TextbookCloseWarning(guard: TextbookCloseGuard) {
 @Composable
 internal fun WindowsTextbooksContent(directory: Path, chooseBook: suspend () -> Path?) {
     val controller = remember(directory) { TextbookController(TextbookLibrary(directory, streamPdfExtras = true, lazyPdfExtras = true)) }
-    WindowsTextbookHost(controller, chooseBook = chooseBook)
+    WindowsTextbookHost(controller, chooseReviewedBlocks = { pickReviewedBlocks(null) }, chooseBook = chooseBook)
+}
+
+private suspend fun pickReviewedBlocks(owner: java.awt.Frame?): List<Path> = withContext(Dispatchers.Swing) {
+    val dialog = FileDialog(owner, "选择已核对的排版块（*.review.json）", FileDialog.LOAD)
+    try {
+        dialog.file = "*.review.json"
+        dialog.isMultipleMode = true
+        dialog.isVisible = true
+        dialog.files.map { it.toPath() }
+    } finally {
+        dialog.dispose()
+    }
 }

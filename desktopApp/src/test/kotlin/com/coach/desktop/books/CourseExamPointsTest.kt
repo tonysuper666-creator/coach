@@ -50,6 +50,9 @@ class CourseExamPointsTest {
         val directory = Files.createTempDirectory("course-exam-points")
         try {
             val library = TextbookLibrary(directory, lazyPdfExtras = false)
+            val fixtureDirectory = System.getenv("COACH_TON1890_FIXTURES")?.takeIf { it.isNotBlank() }?.let {
+                Files.createTempDirectory(Files.createDirectories(Path.of(it)), "synthetic-courses-")
+            } ?: directory
             val courses = listOf(
                 listOf("Tidal locking", "Lunar phase", "Axial tilt", "Solar wind", "Stellar parallax",
                     "Event horizon", "Orbital period", "Escape velocity", "Light curve", "Transit depth"),
@@ -59,7 +62,7 @@ class CourseExamPointsTest {
             for ((index, terms) in courses.withIndex()) {
                 val ids = listOf("Textbook", "Slides", "Handout").mapIndexed { roleIndex, role ->
                     val extension = if (role == "Slides") "pptx" else "pdf"
-                    val file = directory.resolve("Course-$index-$role.$extension")
+                    val file = fixtureDirectory.resolve("Course-$index-$role.$extension")
                     val orderedTerms = terms.drop(roleIndex) + terms.take(roleIndex)
                     val lines = orderedTerms.map { name ->
                         when (role) {
@@ -72,7 +75,7 @@ class CourseExamPointsTest {
                     library.stageBookImport(file).book.id
                 }
                 val marker = "Reserved synthetic question wording $index"
-                val paper = directory.resolve("Past-Paper-$index.pdf")
+                val paper = fixtureDirectory.resolve("Past-Paper-$index.pdf")
                 writePdf(paper, terms.mapIndexed { i, name -> "${i + 1}. Compare $name. $marker." })
                 library.withCourseDatabase { db ->
                     val (courseId, _) = CourseStore.createCourse(db, "Synthetic course $index", CourseExamProfile(examEnabled = true), ids)

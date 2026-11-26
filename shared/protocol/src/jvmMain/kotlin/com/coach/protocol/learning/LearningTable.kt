@@ -64,6 +64,10 @@ class LearningTable internal constructor(
     }
 }
 
+// Recovery rows have no pre-sync source. Their IDs identify one author's edit of one text slot.
+val draftVersion = LearningTable("learning_draft_versions", "draft_version", "parent generation writer slot",
+    "parent generation writer slot source book page location text")
+
 val learningTables = listOf(
     LearningTable("books", "book_progress", "id",
         "id title format reading_page lesson_index learning prompt_seen mode touched material_kind show_standalone"),

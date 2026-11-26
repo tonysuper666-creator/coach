@@ -7,7 +7,7 @@ import java.security.MessageDigest
 import java.sql.DriverManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.JsonPrimitive
 
 internal data class LearningProfile(val directory: Path, val scope: String?, val epoch: String? = null)
 
@@ -25,7 +25,12 @@ internal class LearningProfiles(private val legacy: Path) {
         val http = CourseHttp(identity.serverUrl,credential.deviceId,credential.token,"library")
         try {
             val profile = http.learningProfile() ?: return@withContext select(session,null,false)
-            select(session,profile.getValue("scope").jsonPrimitive.content,false,profile.getValue("epoch").jsonPrimitive.content)
+            val scope = (profile["scope"] as? JsonPrimitive)?.content
+            val epoch = (profile["epoch"] as? JsonPrimitive)?.content
+            if (scope == null || !scope.matches(scopePattern) || epoch == null || !validEpoch(epoch)) {
+                return@withContext select(session,null,false)
+            }
+            select(session,scope,false,epoch)
         } catch (cancel: kotlinx.coroutines.CancellationException) {
             throw cancel
         } catch (_: java.io.IOException) {
@@ -35,8 +40,8 @@ internal class LearningProfiles(private val legacy: Path) {
 
     internal fun select(session: String, verified: String?, allowCached: Boolean, epoch: String? = null): LearningProfile {
         require(session.matches(Regex("local-[0-9a-f]{64}")))
-        require(verified == null || verified.matches(Regex("sable-[0-9a-f]{64}")))
-        require(epoch == null || java.util.UUID.fromString(epoch).toString() == epoch)
+        require(verified == null || verified.matches(scopePattern))
+        require(epoch == null || validEpoch(epoch))
         Files.createDirectories(profiles)
         return DriverManager.getConnection("jdbc:sqlite:${profiles.resolve("profiles.sqlite")}").use { db ->
             db.createStatement().use { sql ->
@@ -166,6 +171,15 @@ internal class LearningProfiles(private val legacy: Path) {
                 }
                 true
             }
+        }
+    }
+
+    private companion object {
+        val scopePattern = Regex("sable-[0-9a-f]{64}")
+        fun validEpoch(epoch: String) = try {
+            java.util.UUID.fromString(epoch).toString() == epoch
+        } catch (_: IllegalArgumentException) {
+            false
         }
     }
 }

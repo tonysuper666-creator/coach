@@ -112,6 +112,9 @@ require(coachSableLogin == null || coachSableLogin == "true" || coachSableLogin 
 compose.desktop {
     application {
         mainClass = "com.coach.desktop.MainKt"
+        if (System.getProperty("os.name").startsWith("Windows") && providers.gradleProperty("coach.release").orNull == "true") {
+            jvmArgs("-Dcoach.learningSync=true")
+        }
         if (coachFriendUrl.isNotEmpty()) jvmArgs("-Dcoach.friendUrl=$coachFriendUrl")
         if (coachCourse.isNotEmpty()) jvmArgs("-Dcoach.course=$coachCourse")
         if (coachSableLogin != null) jvmArgs("-Dcoach.sableLogin=$coachSableLogin")

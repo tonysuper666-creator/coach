@@ -9,30 +9,47 @@ import com.coach.store.tutorSourceAllowed
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.OutgoingContent
 import io.ktor.server.application.Application
+import io.ktor.server.application.ApplicationStopping
 import io.ktor.server.request.header
 import io.ktor.server.request.receiveChannel
+import io.ktor.server.response.header
+import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
 import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.ByteWriteChannel
 import io.ktor.utils.io.readAvailable
+import io.ktor.utils.io.writeFully
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import java.net.URLDecoder
+import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
@@ -41,6 +58,7 @@ import java.sql.Connection
 import java.sql.DriverManager
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 internal data class UnifiedBookConfig(
     val enabled: Boolean = false,
@@ -50,6 +68,7 @@ internal data class UnifiedBookConfig(
     val minFreeDiskBytes: Long = DEFAULT_MIN_FREE_DISK_BYTES,
     val leaseDurationMs: Long = DEFAULT_LEASE_DURATION_MS,
     val trashRetentionMs: Long = DEFAULT_TRASH_RETENTION_MS,
+    val autoProcess: Boolean = true,
     val usableSpaceProvider: (Path) -> Long = { path -> Files.getFileStore(path).usableSpace },
     val clock: () -> Long = System::currentTimeMillis,
 ) {
@@ -63,7 +82,7 @@ internal data class UnifiedBookConfig(
     }
 
     companion object {
-        const val DEFAULT_PARSER_VERSION = "v1-queued"
+        const val DEFAULT_PARSER_VERSION = "v2-skeleton"
         const val DEFAULT_MAX_FILE_BYTES = 256L * 1024L * 1024L
         const val DEFAULT_ACCOUNT_QUOTA_BYTES = 2L * 1024L * 1024L * 1024L
         const val DEFAULT_MIN_FREE_DISK_BYTES = 512L * 1024L * 1024L
@@ -128,6 +147,7 @@ internal data class UnifiedProcessingJob(
     val stageLabel: String,
     val errorMessage: String?,
     val publishedVersion: String?,
+    val processCount: Int = 0,
 ) {
     fun toJson(): JsonObject = buildJsonObject {
         put("sha256", sha256)
@@ -135,6 +155,7 @@ internal data class UnifiedProcessingJob(
         put("state", state)
         put("progressPct", progressPct)
         put("stageLabel", stageLabel)
+        put("processCount", processCount)
         if (errorMessage == null) put("error", JsonNull) else put("error", errorMessage)
         if (publishedVersion == null) put("publishedVersion", JsonNull) else put("publishedVersion", publishedVersion)
     }
@@ -172,15 +193,21 @@ internal class UnifiedBookError(
 
 /**
  * Unified server-side book intake, shared content-addressed storage, per-account shelf isolation,
- * and lease-based processing job queue (TON-1823 PR A; remote unbinding is tracked in TON-1833).
- *
- * PR A intentionally stops at `queued` and never marks books `ready` until TON-1821's shared parser lands.
+ * lease-based skeleton processing worker, original-file pullback, and crash-safe delete/account cleanup.
  */
 class UnifiedBookPipeline internal constructor(
     private val root: Path,
     internal val config: UnifiedBookConfig = UnifiedBookConfig(),
+    private val processor: UnifiedBookProcessor = DefaultUnifiedBookProcessor(),
 ) {
+    constructor(root: Path, enabled: Boolean, autoProcess: Boolean = true) : this(
+        root = root,
+        config = UnifiedBookConfig(enabled = enabled, autoProcess = autoProcess),
+    )
+
     val enabled: Boolean get() = config.enabled
+
+    fun processCountForSha(sha256: String): Int = processCount(sha256)
 
     internal val rootDir: Path get() = root
     internal val blobsDirPath: Path get() = blobsDir
@@ -204,6 +231,9 @@ class UnifiedBookPipeline internal constructor(
     private val inFlightAccountBytes = HashMap<String, Long>()
     private var totalInFlightBytes = 0L
     private val random = SecureRandom()
+    private val workerStarted = AtomicBoolean(false)
+    private val workerWake = Channel<Unit>(Channel.CONFLATED)
+    @Volatile private var workerJob: Job? = null
 
     private fun ensureInitialized() {
         if (initialized) return
@@ -263,15 +293,37 @@ class UnifiedBookPipeline internal constructor(
                             lease_owner TEXT,
                             lease_expires_at INTEGER,
                             published_version TEXT,
+                            process_count INTEGER NOT NULL DEFAULT 0,
                             created_at INTEGER NOT NULL,
                             updated_at INTEGER NOT NULL,
                             PRIMARY KEY(sha256, parser_version)
                         )""".trimIndent(),
                     )
+                    migrateProcessingJobsIfNeeded(db)
                     sql.execute("CREATE INDEX IF NOT EXISTS idx_processing_jobs_state ON processing_jobs(state, lease_expires_at)")
                 }
             }
             initialized = true
+        }
+    }
+
+    private fun migrateProcessingJobsIfNeeded(db: Connection) {
+        val hasProcessCount = db.createStatement().use { sql ->
+            sql.executeQuery("PRAGMA table_info(processing_jobs)").use { rs ->
+                var found = false
+                while (rs.next()) {
+                    if (rs.getString(2) == "process_count") {
+                        found = true
+                        break
+                    }
+                }
+                found
+            }
+        }
+        if (!hasProcessCount) {
+            db.createStatement().use { sql ->
+                sql.execute("ALTER TABLE processing_jobs ADD COLUMN process_count INTEGER NOT NULL DEFAULT 0")
+            }
         }
     }
 
@@ -567,6 +619,12 @@ class UnifiedBookPipeline internal constructor(
             moveAtomically(tempFile, finalBlob)
             privateFiles.file(finalBlob)
         }
+        val activeArtifactsRoot = artifactsDir.resolve(sha256)
+        val trashedArtifactsRoot = trashArtifactsDir(sha256)
+        if (!Files.exists(activeArtifactsRoot) && Files.exists(trashedArtifactsRoot)) {
+            privateFiles.directory(artifactsDir)
+            runCatching { moveAtomically(trashedArtifactsRoot, activeArtifactsRoot) }
+        }
 
         val shelfBookId: String
         val createdAt: Long
@@ -665,12 +723,12 @@ class UnifiedBookPipeline internal constructor(
                     sql.setString(3, sha256)
                     sql.executeUpdate()
                 }
-                // PR A stops at queued and never marks books ready until TON-1821 parser is connected.
+                // Insert initial queued job only if this (sha256, parser_version) has not been queued/processed yet.
                 db.prepareStatement(
                     """INSERT OR IGNORE INTO processing_jobs(
                            sha256, parser_version, state, progress_pct, stage_label,
-                           error_message, lease_owner, lease_expires_at, published_version, created_at, updated_at
-                       ) VALUES(?, ?, 'queued', 0, '已排队，等待整理', NULL, NULL, NULL, NULL, ?, ?)""".trimIndent(),
+                           error_message, lease_owner, lease_expires_at, published_version, process_count, created_at, updated_at
+                       ) VALUES(?, ?, 'queued', 0, '已排队，等待整理', NULL, NULL, NULL, NULL, 0, ?, ?)""".trimIndent(),
                 ).use { sql ->
                     sql.setString(1, sha256)
                     sql.setString(2, config.parserVersion)
@@ -678,7 +736,24 @@ class UnifiedBookPipeline internal constructor(
                     sql.setLong(4, now)
                     sql.executeUpdate()
                 }
-                job = checkNotNull(readJob(db, sha256, config.parserVersion))
+                val currentJob = checkNotNull(readJob(db, sha256, config.parserVersion))
+                if (currentJob.state == "ready" && !Files.isRegularFile(artifactFilePath(sha256, config.parserVersion))) {
+                    db.prepareStatement(
+                        """UPDATE processing_jobs
+                           SET state='queued', progress_pct=0, stage_label='已排队，等待整理',
+                               error_message=NULL, lease_owner=NULL, lease_expires_at=NULL,
+                               published_version=NULL, updated_at=?
+                           WHERE sha256=? AND parser_version=?""".trimIndent(),
+                    ).use { sql ->
+                        sql.setLong(1, now)
+                        sql.setString(2, sha256)
+                        sql.setString(3, config.parserVersion)
+                        sql.executeUpdate()
+                    }
+                    job = checkNotNull(readJob(db, sha256, config.parserVersion))
+                } else {
+                    job = currentJob
+                }
                 db.commit()
             } catch (e: Exception) {
                 db.rollback()
@@ -689,6 +764,9 @@ class UnifiedBookPipeline internal constructor(
         runCatching {
             val trashedArtifacts = trashArtifactsDir(sha256)
             if (Files.exists(trashedArtifacts)) trashedArtifacts.toFile().deleteRecursively()
+        }
+        if (config.autoProcess && job.state == "queued") {
+            wakeWorker()
         }
 
         return UnifiedShelfBook(
@@ -818,8 +896,8 @@ class UnifiedBookPipeline internal constructor(
     }
 
     /**
-     * Lease-based job claim for future TON-1821 parser workers: claims either a `queued` job
-     * or a `processing` job whose lease has expired.
+     * Lease-based job claim for server-side skeleton processing workers: claims either a `queued` job
+     * or a `processing` job whose lease has expired, restricted strictly to active referenced blobs.
      */
     internal fun claimNextJob(workerId: String): UnifiedProcessingJob? {
         require(workerId.isNotBlank())
@@ -829,11 +907,15 @@ class UnifiedBookPipeline internal constructor(
             db.autoCommit = false
             try {
                 val candidate = db.prepareStatement(
-                    """SELECT sha256, parser_version FROM processing_jobs
-                       WHERE state='queued' OR (state='processing' AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
-                       ORDER BY updated_at ASC LIMIT 1""".trimIndent(),
+                    """SELECT j.sha256, j.parser_version FROM processing_jobs j
+                       JOIN shared_blobs b ON b.sha256 = j.sha256
+                       WHERE b.state='ACTIVE' AND b.ref_count > 0
+                         AND j.parser_version=?
+                         AND (j.state='queued' OR (j.state='processing' AND (j.lease_expires_at IS NULL OR j.lease_expires_at <= ?)))
+                       ORDER BY j.updated_at ASC LIMIT 1""".trimIndent(),
                 ).use { sql ->
-                    sql.setLong(1, now)
+                    sql.setString(1, config.parserVersion)
+                    sql.setLong(2, now)
                     sql.executeQuery().use { rs ->
                         if (rs.next()) rs.getString(1) to rs.getString(2) else null
                     }
@@ -843,7 +925,11 @@ class UnifiedBookPipeline internal constructor(
                 }
                 db.prepareStatement(
                     """UPDATE processing_jobs
-                       SET state='processing', lease_owner=?, lease_expires_at=?, updated_at=?
+                       SET state='processing', lease_owner=?, lease_expires_at=?,
+                           progress_pct=CASE WHEN progress_pct < 5 THEN 5 ELSE progress_pct END,
+                           stage_label=CASE WHEN stage_label='' OR state='queued' THEN '正在整理' ELSE stage_label END,
+                           process_count=process_count + 1,
+                           updated_at=?
                        WHERE sha256=? AND parser_version=?""".trimIndent(),
                 ).use { sql ->
                     sql.setString(1, workerId)
@@ -861,6 +947,382 @@ class UnifiedBookPipeline internal constructor(
                 throw e
             }
         }
+    }
+
+    internal fun wakeWorker() {
+        workerWake.trySend(Unit)
+    }
+
+    internal fun startWorkerIfNeeded(scope: CoroutineScope) {
+        if (!enabled || !config.autoProcess) return
+        if (!workerStarted.compareAndSet(false, true)) return
+        workerJob = scope.launch(Dispatchers.IO) {
+            try {
+                while (isActive) {
+                    var processedAny = false
+                    while (isActive) {
+                        val ran = try {
+                            processNextJob("worker-bg")
+                        } catch (cancel: CancellationException) {
+                            throw cancel
+                        } catch (_: Exception) {
+                            false
+                        }
+                        if (!ran) break
+                        processedAny = true
+                    }
+                    if (!processedAny) {
+                        withTimeoutOrNull(10_000L) { workerWake.receive() }
+                    }
+                }
+            } finally {
+                workerStarted.set(false)
+            }
+        }
+        wakeWorker()
+    }
+
+    internal fun stopWorker() {
+        workerJob?.cancel()
+        workerJob = null
+        workerStarted.set(false)
+    }
+
+    internal suspend fun processNextJob(workerId: String = "worker-1"): Boolean = withContext(Dispatchers.IO) {
+        val claimed = claimNextJob(workerId) ?: return@withContext false
+        val sha256 = claimed.sha256
+        val parserVersion = claimed.parserVersion
+        val blobMeta = shaLock(sha256).withLock {
+            val file = blobPath(sha256)
+            if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) return@withLock null
+            registryDb().use { db ->
+                val refs = countRefs(db, sha256)
+                if (refs <= 0) return@use null
+                db.prepareStatement(
+                    "SELECT format FROM shared_blobs WHERE sha256=? AND state='ACTIVE'",
+                ).use { sql ->
+                    sql.setString(1, sha256)
+                    sql.executeQuery().use { rs ->
+                        if (rs.next()) rs.getString(1) to file else null
+                    }
+                }
+            }
+        }
+        if (blobMeta == null) {
+            markJobAbandonedIfUnreferenced(sha256, parserVersion, workerId)
+            return@withContext true
+        }
+        val (format, blobFile) = blobMeta
+        var tempArtifact: Path? = null
+        try {
+            val artifact = processor.process(
+                blobFile = blobFile,
+                format = format,
+                title = sha256.take(12),
+                sha256 = sha256,
+                parserVersion = parserVersion,
+            ) { pct, label ->
+                updateJobProgress(sha256, parserVersion, workerId, pct, label)
+            }
+            val staged = privateFiles.file(artifactsDir.resolve(".artifact-${UUID.randomUUID()}.json"))
+            tempArtifact = staged
+            Files.writeString(staged, artifact.toJson().toString(), StandardCharsets.UTF_8)
+            privateFiles.file(staged)
+
+            shaLock(sha256).withLock {
+                val active = registryDb().use { db ->
+                    val isActiveBlob = db.prepareStatement(
+                        "SELECT 1 FROM shared_blobs WHERE sha256=? AND state='ACTIVE'",
+                    ).use { sql ->
+                        sql.setString(1, sha256)
+                        sql.executeQuery().use { it.next() }
+                    }
+                    isActiveBlob && countRefs(db, sha256) > 0
+                }
+                if (!active || !Files.isRegularFile(blobPath(sha256), LinkOption.NOFOLLOW_LINKS)) {
+                    runCatching { Files.deleteIfExists(staged) }
+                    return@withLock
+                }
+                val targetDir = privateFiles.directory(artifactDir(sha256, parserVersion))
+                val targetFile = targetDir.resolve(SKELETON_ARTIFACT_FILENAME)
+                moveAtomically(staged, targetFile)
+                privateFiles.file(targetFile)
+
+                val doneAt = config.clock()
+                registryDb().use { db ->
+                    db.prepareStatement(
+                        """UPDATE processing_jobs
+                           SET state='ready', progress_pct=100, stage_label='整理完成',
+                               error_message=NULL, published_version=?, lease_owner=NULL, lease_expires_at=NULL, updated_at=?
+                           WHERE sha256=? AND parser_version=? AND lease_owner=?""".trimIndent(),
+                    ).use { sql ->
+                        sql.setString(1, parserVersion)
+                        sql.setLong(2, doneAt)
+                        sql.setString(3, sha256)
+                        sql.setString(4, parserVersion)
+                        sql.setString(5, workerId)
+                        sql.executeUpdate()
+                    }
+                }
+            }
+            true
+        } catch (cancel: CancellationException) {
+            tempArtifact?.let { runCatching { Files.deleteIfExists(it) } }
+            throw cancel
+        } catch (e: Exception) {
+            tempArtifact?.let { runCatching { Files.deleteIfExists(it) } }
+            val failedAt = config.clock()
+            val safeMsg = when (e) {
+                is IllegalArgumentException -> e.message?.take(120)?.takeIf { it.isNotBlank() } ?: "文件内容无法整理，请检查后重试。"
+                else -> "整理失败，请稍后重试。"
+            }
+            registryDb().use { db ->
+                db.prepareStatement(
+                    """UPDATE processing_jobs
+                       SET state='failed', error_message=?, lease_owner=NULL, lease_expires_at=NULL, updated_at=?
+                       WHERE sha256=? AND parser_version=? AND lease_owner=?""".trimIndent(),
+                ).use { sql ->
+                    sql.setString(1, safeMsg)
+                    sql.setLong(2, failedAt)
+                    sql.setString(3, sha256)
+                    sql.setString(4, parserVersion)
+                    sql.setString(5, workerId)
+                    sql.executeUpdate()
+                }
+            }
+            true
+        }
+    }
+
+    private fun updateJobProgress(
+        sha256: String,
+        parserVersion: String,
+        workerId: String,
+        progressPct: Int,
+        stageLabel: String,
+    ) {
+        val now = config.clock()
+        val leaseUntil = now + config.leaseDurationMs
+        registryDb().use { db ->
+            db.prepareStatement(
+                """UPDATE processing_jobs
+                   SET progress_pct=?, stage_label=?, lease_expires_at=?, updated_at=?
+                   WHERE sha256=? AND parser_version=? AND state='processing' AND lease_owner=?""".trimIndent(),
+            ).use { sql ->
+                sql.setInt(1, progressPct.coerceIn(0, 99))
+                sql.setString(2, stageLabel)
+                sql.setLong(3, leaseUntil)
+                sql.setLong(4, now)
+                sql.setString(5, sha256)
+                sql.setString(6, parserVersion)
+                sql.setString(7, workerId)
+                sql.executeUpdate()
+            }
+        }
+    }
+
+    private fun markJobAbandonedIfUnreferenced(sha256: String, parserVersion: String, workerId: String) {
+        val now = config.clock()
+        registryDb().use { db ->
+            db.prepareStatement(
+                """UPDATE processing_jobs
+                   SET state='queued', lease_owner=NULL, lease_expires_at=NULL, updated_at=?
+                   WHERE sha256=? AND parser_version=? AND lease_owner=?""".trimIndent(),
+            ).use { sql ->
+                sql.setLong(1, now)
+                sql.setString(2, sha256)
+                sql.setString(3, parserVersion)
+                sql.setString(4, workerId)
+                sql.executeUpdate()
+            }
+        }
+    }
+
+    internal fun processCount(sha256: String, parserVersion: String = config.parserVersion): Int {
+        if (!sha256.matches(SHA256_PATTERN) || !Files.isRegularFile(registryFile)) return 0
+        return registryDb().use { db ->
+            db.prepareStatement("SELECT process_count FROM processing_jobs WHERE sha256=? AND parser_version=?").use { sql ->
+                sql.setString(1, sha256)
+                sql.setString(2, parserVersion)
+                sql.executeQuery().use { rs -> if (rs.next()) rs.getInt(1) else 0 }
+            }
+        }
+    }
+
+    internal fun artifactFilePath(sha256: String, parserVersion: String = config.parserVersion): Path =
+        artifactDir(sha256, parserVersion).resolve(SKELETON_ARTIFACT_FILENAME)
+
+    internal data class DownloadableOriginal(
+        val shelfBookId: String,
+        val sha256: String,
+        val title: String,
+        val format: String,
+        val sizeBytes: Long,
+        val blobFile: Path,
+    )
+
+    internal fun resolveDownloadableOriginal(scope: UnifiedBookScope, shelfBookId: String): DownloadableOriginal? {
+        if (!shelfBookId.matches(SHELF_BOOK_ID_PATTERN)) return null
+        val shelfFile = accountShelfFile(scope)
+        if (!Files.isRegularFile(shelfFile, LinkOption.NOFOLLOW_LINKS)) return null
+        val row = accountShelfDb(scope).use { accountDb ->
+            accountDb.prepareStatement(
+                "SELECT shelf_book_id, sha256, title, format, size_bytes, created_at, updated_at FROM shelf_books WHERE shelf_book_id=?",
+            ).use { sql ->
+                sql.setString(1, shelfBookId)
+                sql.executeQuery().use { rs ->
+                    if (!rs.next()) null else ShelfRow(
+                        shelfBookId = rs.getString(1),
+                        sha256 = rs.getString(2),
+                        title = rs.getString(3),
+                        format = rs.getString(4),
+                        sizeBytes = rs.getLong(5),
+                        createdAt = rs.getLong(6),
+                        updatedAt = rs.getLong(7),
+                    )
+                }
+            }
+        } ?: return null
+        val blobFile = blobPath(row.sha256)
+        if (!Files.isRegularFile(blobFile, LinkOption.NOFOLLOW_LINKS)) return null
+        val activeRef = registryDb().use { db ->
+            db.prepareStatement(
+                """SELECT 1 FROM shared_blobs b
+                   JOIN shared_blob_refs r ON r.sha256 = b.sha256
+                   WHERE b.sha256=? AND b.state='ACTIVE' AND r.scope_key=? AND r.shelf_book_id=?""".trimIndent(),
+            ).use { sql ->
+                sql.setString(1, row.sha256)
+                sql.setString(2, scope.scopeKey)
+                sql.setString(3, row.shelfBookId)
+                sql.executeQuery().use { it.next() }
+            }
+        }
+        if (!activeRef) return null
+        val diskSize = runCatching { Files.size(blobFile) }.getOrNull() ?: return null
+        return DownloadableOriginal(
+            shelfBookId = row.shelfBookId,
+            sha256 = row.sha256,
+            title = row.title,
+            format = row.format,
+            sizeBytes = diskSize,
+            blobFile = blobFile,
+        )
+    }
+
+    internal sealed interface ArtifactLookupResult {
+        data object NotFound : ArtifactLookupResult
+        data class NotReady(val book: UnifiedShelfBook) : ArtifactLookupResult
+        data class Ready(val book: UnifiedShelfBook, val artifactJson: JsonObject) : ArtifactLookupResult
+    }
+
+    internal fun readProcessedArtifact(scope: UnifiedBookScope, shelfBookId: String): ArtifactLookupResult {
+        val book = shelfBookStatus(scope, shelfBookId) ?: return ArtifactLookupResult.NotFound
+        val activeRef = registryDb().use { db ->
+            db.prepareStatement(
+                """SELECT 1 FROM shared_blobs b
+                   JOIN shared_blob_refs r ON r.sha256 = b.sha256
+                   WHERE b.sha256=? AND b.state='ACTIVE' AND r.scope_key=? AND r.shelf_book_id=?""".trimIndent(),
+            ).use { sql ->
+                sql.setString(1, book.sha256)
+                sql.setString(2, scope.scopeKey)
+                sql.setString(3, book.shelfBookId)
+                sql.executeQuery().use { it.next() }
+            }
+        }
+        if (!activeRef) return ArtifactLookupResult.NotFound
+        val version = book.job.publishedVersion
+        if (book.job.state != "ready" || version.isNullOrBlank()) {
+            return ArtifactLookupResult.NotReady(book)
+        }
+        val file = artifactFilePath(book.sha256, version)
+        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
+            return ArtifactLookupResult.NotReady(book)
+        }
+        val parsed = runCatching {
+            LedgerJson.parseToJsonElement(Files.readString(file, StandardCharsets.UTF_8)).jsonObject
+        }.getOrNull() ?: return ArtifactLookupResult.NotReady(book)
+        return ArtifactLookupResult.Ready(book, parsed)
+    }
+
+    internal data class AccountDeleteResult(
+        val removedBooks: Int,
+        val trashedSharedBlobs: Int,
+        val purgedSharedBlobs: Int,
+    )
+
+    /**
+     * Deletes an entire account scope's shelf records, notes, Q&A, overrides, and active references.
+     * Shared blobs and shared processed artifacts are moved to trash (and purged when eligible) ONLY
+     * when zero accounts reference that SHA-256.
+     */
+    internal suspend fun deleteAccount(
+        scope: UnifiedBookScope,
+        purgeImmediately: Boolean = false,
+    ): AccountDeleteResult = withContext(Dispatchers.IO) {
+        val entries = LinkedHashMap<String, String>() // shelfBookId -> sha256
+        val shelfFile = accountShelfFile(scope)
+        if (Files.isRegularFile(shelfFile, LinkOption.NOFOLLOW_LINKS)) {
+            runCatching {
+                openReadOnly(shelfFile).use { db ->
+                    db.createStatement().use { sql ->
+                        sql.executeQuery("SELECT shelf_book_id, sha256 FROM shelf_books").use { rs ->
+                            while (rs.next()) entries[rs.getString(1)] = rs.getString(2)
+                        }
+                    }
+                }
+            }
+        }
+        if (Files.isRegularFile(registryFile, LinkOption.NOFOLLOW_LINKS)) {
+            registryDb().use { db ->
+                db.prepareStatement("SELECT shelf_book_id, sha256 FROM shared_blob_refs WHERE scope_key=?").use { sql ->
+                    sql.setString(1, scope.scopeKey)
+                    sql.executeQuery().use { rs ->
+                        while (rs.next()) entries.putIfAbsent(rs.getString(1), rs.getString(2))
+                    }
+                }
+                db.prepareStatement("SELECT shelf_book_id, sha256 FROM pending_book_deletes WHERE scope_key=?").use { sql ->
+                    sql.setString(1, scope.scopeKey)
+                    sql.executeQuery().use { rs ->
+                        while (rs.next()) entries.putIfAbsent(rs.getString(1), rs.getString(2))
+                    }
+                }
+            }
+        }
+
+        var removed = 0
+        var trashed = 0
+        for ((shelfBookId, sha256) in entries) {
+            if (!shelfBookId.matches(SHELF_BOOK_ID_PATTERN) || !sha256.matches(SHA256_PATTERN)) continue
+            val wasTrashed = isTrashed(sha256)
+            shaLock(sha256).withLock {
+                val now = config.clock()
+                registryDb().use { db ->
+                    db.prepareStatement(
+                        """INSERT OR IGNORE INTO pending_book_deletes(scope_key, shelf_book_id, sha256, created_at)
+                           VALUES(?, ?, ?, ?)""".trimIndent(),
+                    ).use { sql ->
+                        sql.setString(1, scope.scopeKey)
+                        sql.setString(2, shelfBookId)
+                        sql.setString(3, sha256)
+                        sql.setLong(4, now)
+                        sql.executeUpdate()
+                    }
+                }
+                reconcilePendingDeleteLocked(scope.scopeKey, shelfBookId, sha256)
+            }
+            removed++
+            if (!wasTrashed && isTrashed(sha256)) trashed++
+        }
+
+        val accountDir = accountsDir.resolve(scope.scopeKey)
+        if (Files.exists(accountDir)) {
+            accountDir.toFile().deleteRecursively()
+        }
+
+        val purged = if (purgeImmediately || config.trashRetentionMs == 0L) {
+            purgeExpiredTrash(0L)
+        } else 0
+        AccountDeleteResult(removedBooks = removed, trashedSharedBlobs = trashed, purgedSharedBlobs = purged)
     }
 
     internal fun sharedBlobCount(): Int = registryDb().use { db ->
@@ -1554,7 +2016,7 @@ class UnifiedBookPipeline internal constructor(
 
     private fun readJob(db: Connection, sha256: String, parserVersion: String): UnifiedProcessingJob? =
         db.prepareStatement(
-            """SELECT sha256, parser_version, state, progress_pct, stage_label, error_message, published_version
+            """SELECT sha256, parser_version, state, progress_pct, stage_label, error_message, published_version, process_count
                FROM processing_jobs WHERE sha256=? AND parser_version=?""".trimIndent(),
         ).use { sql ->
             sql.setString(1, sha256)
@@ -1568,6 +2030,7 @@ class UnifiedBookPipeline internal constructor(
                     stageLabel = rs.getString(5),
                     errorMessage = rs.getString(6),
                     publishedVersion = rs.getString(7),
+                    processCount = rs.getInt(8),
                 )
             }
         }
@@ -1597,6 +2060,7 @@ class UnifiedBookPipeline internal constructor(
     )
 
     companion object {
+        internal const val SKELETON_ARTIFACT_FILENAME = "skeleton.json"
         internal val SHA256_PATTERN = Regex("[0-9a-f]{64}")
         internal val SHELF_BOOK_ID_PATTERN = Regex("sb_[0-9a-f]{24}")
         internal val SUPPORTED_FORMATS = setOf(
@@ -1630,6 +2094,12 @@ fun Application.unifiedBookRoutes(
     unifiedBooks: UnifiedBookPipeline? = null,
     friends: FriendAccess? = null,
 ) {
+    if (unifiedBooks != null && unifiedBooks.enabled && unifiedBooks.config.autoProcess) {
+        unifiedBooks.startWorkerIfNeeded(this)
+        monitor.subscribe(ApplicationStopping) {
+            unifiedBooks.stopWorker()
+        }
+    }
     routing {
         post("/v1/books/upload") {
             val pipeline = unifiedBooks?.takeIf { it.enabled }
@@ -1694,6 +2164,88 @@ fun Application.unifiedBookRoutes(
             call.respondText(status.toJson().toString(), ContentType.Application.Json)
         }
 
+        get("/v1/books/{id}/original") {
+            val pipeline = unifiedBooks?.takeIf { it.enabled }
+                ?: return@get call.respondText("", status = HttpStatusCode.NotFound)
+            val device = call.attributes[observedDevice]
+            val friend = call.attributes.getOrNull(observedFriend)
+            val bearer = call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ").orEmpty()
+            if (friend != null && !actor.execute { authorize(device, bearer) && friendName(device) == friend }) {
+                return@get call.respondText("Unauthorized", status = HttpStatusCode.Unauthorized)
+            }
+            val scope = UnifiedBookScope.fromCall(device, friend)
+            val shelfBookId = call.parameters["id"].orEmpty()
+            val original = withContext(Dispatchers.IO) { pipeline.resolveDownloadableOriginal(scope, shelfBookId) }
+                ?: return@get call.respondText(
+                    json("code" to "not_found", "error" to "书架中找不到这本书。").toString(),
+                    ContentType.Application.Json,
+                    HttpStatusCode.NotFound,
+                )
+            call.response.header(HttpHeaders.CacheControl, "no-store")
+            call.response.header("X-Coach-Book-Sha256", original.sha256)
+            call.response.header("X-Coach-Book-Format", original.format)
+            call.response.header("X-Coach-Book-Title", URLEncoder.encode(original.title, StandardCharsets.UTF_8))
+            call.respond(
+                object : OutgoingContent.WriteChannelContent() {
+                    override val contentType: ContentType = ContentType.Application.OctetStream
+                    override val contentLength: Long = original.sizeBytes
+                    override val status: HttpStatusCode = HttpStatusCode.OK
+                    override suspend fun writeTo(channel: ByteWriteChannel) {
+                        withContext(Dispatchers.IO) {
+                            Files.newInputStream(original.blobFile).use { input ->
+                                val buf = ByteArray(65_536)
+                                while (true) {
+                                    val n = input.read(buf)
+                                    if (n < 0) break
+                                    channel.writeFully(buf, 0, n)
+                                }
+                            }
+                        }
+                    }
+                },
+            )
+        }
+
+        get("/v1/books/{id}/artifact") {
+            val pipeline = unifiedBooks?.takeIf { it.enabled }
+                ?: return@get call.respondText("", status = HttpStatusCode.NotFound)
+            val device = call.attributes[observedDevice]
+            val friend = call.attributes.getOrNull(observedFriend)
+            val bearer = call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ").orEmpty()
+            if (friend != null && !actor.execute { authorize(device, bearer) && friendName(device) == friend }) {
+                return@get call.respondText("Unauthorized", status = HttpStatusCode.Unauthorized)
+            }
+            val scope = UnifiedBookScope.fromCall(device, friend)
+            val shelfBookId = call.parameters["id"].orEmpty()
+            when (val result = withContext(Dispatchers.IO) { pipeline.readProcessedArtifact(scope, shelfBookId) }) {
+                UnifiedBookPipeline.ArtifactLookupResult.NotFound -> call.respondText(
+                    json("code" to "not_found", "error" to "书架中找不到这本书。").toString(),
+                    ContentType.Application.Json,
+                    HttpStatusCode.NotFound,
+                )
+                is UnifiedBookPipeline.ArtifactLookupResult.NotReady -> call.respondText(
+                    json(
+                        "code" to "not_ready",
+                        "error" to "这本书还在整理中，请稍后再试。",
+                        "job" to result.book.job.toJson(),
+                    ).toString(),
+                    ContentType.Application.Json,
+                    HttpStatusCode.Conflict,
+                )
+                is UnifiedBookPipeline.ArtifactLookupResult.Ready -> call.respondText(
+                    json(
+                        "shelfBookId" to result.book.shelfBookId,
+                        "sha256" to result.book.sha256,
+                        "title" to result.book.title,
+                        "format" to result.book.format,
+                        "job" to result.book.job.toJson(),
+                        "artifact" to result.artifactJson,
+                    ).toString(),
+                    ContentType.Application.Json,
+                )
+            }
+        }
+
         delete("/v1/books/{id}") {
             val pipeline = unifiedBooks?.takeIf { it.enabled }
                 ?: return@delete call.respondText("", status = HttpStatusCode.NotFound)
@@ -1715,6 +2267,32 @@ fun Application.unifiedBookRoutes(
             }
             call.respondText(
                 json("deleted" to true, "shelfBookId" to shelfBookId).toString(),
+                ContentType.Application.Json,
+            )
+        }
+
+        delete("/v1/account") {
+            val pipeline = unifiedBooks?.takeIf { it.enabled }
+                ?: return@delete call.respondText("", status = HttpStatusCode.NotFound)
+            val device = call.attributes[observedDevice]
+            val friend = call.attributes.getOrNull(observedFriend)
+            val bearer = call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ").orEmpty()
+            if (friend != null && !actor.execute { authorize(device, bearer) && friendName(device) == friend }) {
+                return@delete call.respondText("Unauthorized", status = HttpStatusCode.Unauthorized)
+            }
+            val scope = UnifiedBookScope.fromCall(device, friend)
+            val summary = pipeline.deleteAccount(scope)
+            if (friend != null) {
+                withContext(Dispatchers.IO) { runCatching { friends?.deleteAccountData(friend) } }
+                actor.execute { revokeFriend(friend) }
+            }
+            call.respondText(
+                json(
+                    "deleted" to true,
+                    "removedBooks" to summary.removedBooks,
+                    "trashedSharedBlobs" to summary.trashedSharedBlobs,
+                    "purgedSharedBlobs" to summary.purgedSharedBlobs,
+                ).toString(),
                 ContentType.Application.Json,
             )
         }

@@ -13,13 +13,39 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.runSkikoComposeUiTest
 import androidx.compose.ui.unit.Density
+import com.coach.client.PairedCredentials
+import com.coach.core.LedgerActor
+import com.coach.desktop.DesktopIdentity
+import com.coach.domain.LedgerJson
+import com.coach.domain.str
+import com.coach.server.FriendAccess
+import com.coach.server.SableSessions
+import com.coach.server.UnifiedBookPipeline
+import com.coach.server.ledgerRoutes
+import com.coach.server.unifiedBookRoutes
+import com.coach.store.LedgerStore
 import com.coach.ui.CoachTheme
+import com.sun.net.httpserver.HttpServer
+import io.ktor.server.engine.embeddedServer
+import io.ktor.server.netty.Netty
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.jsonObject
+import java.net.InetSocketAddress
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -789,6 +815,200 @@ class UnifiedBookUploadQueueTest {
             assertEquals(BookUploadState.PENDING_DELETE, resumedLib.readUploadEntry("sable-alpha", reStaged.id)?.state)
             assertEquals(BookUploadState.QUEUED, resumedLib.readUploadEntry("sable-beta", reStaged.id)?.state)
         } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun freshComputerLoginShowsServerShelfPullsBackOriginalWithExactShaAndOpensReader() {
+        val root = Files.createTempDirectory("coach-fresh-pc-pullback-").toRealPath()
+        val serverScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val serverDir = root.resolve("server")
+        val store = LedgerStore(serverDir).also { it.enroll("desktop", "owner-token-fresh-pc-test-123456") }
+        val actor = LedgerActor(serverScope, store)
+        val tokAlpha1 = "fresh-pc-sable-token-alpha-01"
+        val tokAlpha2 = "fresh-pc-sable-token-alpha-02"
+        val tokBeta1 = "fresh-pc-sable-token-beta-001"
+        val fakeSable = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
+            createContext("/api/coach/whoami") { ex ->
+                ex.requestBody.use { it.readAllBytes() }
+                val bearer = ex.requestHeaders.getFirst("Authorization")
+                val (code, body) = when (bearer) {
+                    "Bearer $tokAlpha1" -> 200 to """{"sub":"sub-pullback-alpha","username":"alice","display_name":"Alice"}"""
+                    "Bearer $tokAlpha2" -> 200 to """{"sub":"sub-pullback-alpha","username":"alice-pc2","display_name":"Alice"}"""
+                    "Bearer $tokBeta1" -> 200 to """{"sub":"sub-pullback-beta","username":"bob","display_name":"Bob"}"""
+                    else -> 401 to "{}"
+                }
+                val bytes = body.toByteArray()
+                ex.sendResponseHeaders(code, bytes.size.toLong())
+                ex.responseBody.use { it.write(bytes) }
+            }
+            start()
+        }
+        val sableOrigin = URI("http://127.0.0.1:${fakeSable.address.port}")
+        val friends = FriendAccess(
+            serverDir.resolve("friends"),
+            serverDir.resolve("state"),
+            serverDir.resolve("friends.json"),
+            sableSessions = SableSessions(actor, serverDir.resolve("keys"), sableOrigin),
+        )
+        val unified = UnifiedBookPipeline(serverDir.resolve("unified-books"), enabled = true, autoProcess = true)
+        val server = serverScope.embeddedServer(Netty, host = "127.0.0.1", port = 0) {
+            ledgerRoutes(actor, MutableSharedFlow(extraBufferCapacity = 8), friends = friends, publicOnly = true, unifiedBooks = unified)
+            unifiedBookRoutes(actor, unified, friends)
+        }.apply { start(false) }
+
+        fun sha256Of(path: Path): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            digest.update(Files.readAllBytes(path))
+            return digest.digest().joinToString("") { "%02x".format(it) }
+        }
+
+        val httpClient = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_1_1)
+            .connectTimeout(java.time.Duration.ofSeconds(5))
+            .build()
+
+        suspend fun exchange(port: Int, sableToken: String): DesktopIdentity = kotlinx.coroutines.withContext(Dispatchers.IO) {
+            val res = httpClient.send(
+                HttpRequest.newBuilder(URI("http://127.0.0.1:$port/v1/public/sable"))
+                    .timeout(java.time.Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer $sableToken")
+                    .POST(HttpRequest.BodyPublishers.noBody())
+                    .build(),
+                HttpResponse.BodyHandlers.ofString(),
+            )
+            assertEquals(200, res.statusCode(), res.body())
+            val obj = LedgerJson.parseToJsonElement(res.body()).jsonObject
+            DesktopIdentity(
+                serverUrl = "http://127.0.0.1:$port",
+                credentials = PairedCredentials(obj.str("deviceId"), obj.str("token"), obj.str("role")),
+            )
+        }
+
+        fun pinnedExplainer(id: DesktopIdentity, lib: TextbookLibrary): BookExplainer =
+            object : BookExplainer(library = lib) {
+                init {
+                    identity = id
+                    loaded = true
+                }
+                override suspend fun load() {
+                    loaded = true
+                }
+            }
+
+        try {
+            val port = runBlocking { server.engine.resolvedConnectors().single().port }
+            val (alphaPc1, alphaPc2, betaPc) = runBlocking {
+                Triple(exchange(port, tokAlpha1), exchange(port, tokAlpha2), exchange(port, tokBeta1))
+            }
+
+            // Computer 1: import a synthetic book locally and upload to server.
+            val sourceFile = createSampleTxt(
+                root,
+                "micro-notes.md",
+                "# Chapter 1 Incentives\n\nSynthetic textbook content for fresh computer pullback verification.\n",
+            )
+            val originalSha = sha256Of(sourceFile)
+            val lib1 = TextbookLibrary(root.resolve("pc1-library"))
+            val explainer1 = pinnedExplainer(alphaPc1, lib1)
+            val controller1 = TextbookController(lib1).apply { unifiedUploadClient = explainer1.unifiedUploadClient() }
+            val shelfBookId = runBlocking {
+                controller1.importBook(sourceFile)
+                val book1 = assertNotNull(controller1.state.value.book)
+                assertEquals(originalSha, book1.id)
+                controller1.uploadCoordinator.enqueueBook(book1.id, book1.id, book1.format, book1.title)
+                controller1.uploadCoordinator.syncOnce()
+
+                // Wait for server background worker to finish processing once.
+                var serverReady = false
+                repeat(80) {
+                    controller1.uploadCoordinator.syncOnce()
+                    val entry = controller1.uploadCoordinator.statuses.value[originalSha]
+                    if (entry?.state == BookUploadState.READY) {
+                        serverReady = true
+                        return@repeat
+                    }
+                    delay(25)
+                }
+                assertTrue(serverReady, "Expected server worker to mark uploaded book READY")
+                assertEquals(1, unified.processCountForSha(originalSha))
+                assertNotNull(controller1.uploadCoordinator.statuses.value[originalSha]?.serverShelfBookId)
+            }
+
+            // Computer 2: brand-new empty data directory logged into the SAME Sable account (different deviceId).
+            val lib2 = TextbookLibrary(root.resolve("pc2-library"))
+            assertTrue(lib2.catalog().isEmpty())
+            val explainer2 = pinnedExplainer(alphaPc2, lib2)
+            val controller2 = TextbookController(lib2).apply { unifiedUploadClient = explainer2.unifiedUploadClient() }
+            runBlocking {
+                controller2.load()
+                controller2.uploadCoordinator.syncOnce()
+            }
+
+            val remoteList = controller2.uploadCoordinator.remoteShelfBooks.value
+            assertEquals(1, remoteList.size, "Fresh computer must see the account's server shelf books")
+            assertEquals(shelfBookId, remoteList.single().shelfBookId)
+            assertEquals(originalSha, remoteList.single().sha256)
+
+            // Shelf UI shows the cloud book (not empty state), and clicking it pulls the original back and opens it.
+            val openedOnPc2 = CompletableDeferred<String>()
+            runSkikoComposeUiTest(Size(1280f, 900f), Density(1f)) {
+                setContent {
+                    CoachTheme {
+                        Surface(Modifier.fillMaxSize()) {
+                            LibraryHome(
+                                ui = controller2.state.value,
+                                onImport = {},
+                                onSelect = {},
+                                onRead = {},
+                                onOpenBook = { id ->
+                                    openedOnPc2.complete(id)
+                                },
+                                library = lib2,
+                            )
+                        }
+                    }
+                }
+                onNodeWithTag("cloud-book-$shelfBookId").assertIsDisplayed().performClick()
+                waitUntil(timeoutMillis = 15_000L) { openedOnPc2.isCompleted }
+            }
+            runBlocking {
+                val pulledBookId = openedOnPc2.await()
+                assertEquals(originalSha, pulledBookId)
+                controller2.openBook(pulledBookId)
+            }
+
+            // Pulled-back original file exists locally on Computer 2 with exact matching SHA-256.
+            val restoredOriginal = assertNotNull(lib2.originalFileIfPresent(originalSha, "md"))
+            assertEquals(originalSha, sha256Of(restoredOriginal))
+            assertEquals(BookScreen.READER, controller2.state.value.screen)
+            assertEquals(originalSha, controller2.state.value.book?.id)
+            assertTrue(controller2.uploadCoordinator.remoteShelfBooks.value.isEmpty())
+
+            // Re-syncing on Computer 2 reuses the existing server binding and never reprocesses.
+            runBlocking {
+                controller2.uploadCoordinator.syncOnce()
+            }
+            assertEquals(shelfBookId, controller2.uploadCoordinator.statuses.value[originalSha]?.serverShelfBookId)
+            assertEquals(1, unified.processCountForSha(originalSha))
+
+            // Computer 3 (different Sable account Beta): sees zero books from Alpha.
+            val lib3 = TextbookLibrary(root.resolve("pc3-library"))
+            val explainer3 = pinnedExplainer(betaPc, lib3)
+            val controller3 = TextbookController(lib3).apply { unifiedUploadClient = explainer3.unifiedUploadClient() }
+            runBlocking {
+                controller3.uploadCoordinator.syncOnce()
+            }
+            assertTrue(controller3.uploadCoordinator.remoteShelfBooks.value.isEmpty())
+        } finally {
+            runBlocking {
+                server.stopSuspend(0, 500)
+                actor.close()
+            }
+            fakeSable.stop(0)
+            serverScope.cancel()
             root.toFile().deleteRecursively()
         }
     }

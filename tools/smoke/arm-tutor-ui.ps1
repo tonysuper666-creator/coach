@@ -718,6 +718,45 @@ function Test-WholeLesson {
 # 「提交」 is a short black pill. On the ARM runner the OCR reads the card titles
 # and drops both the white word and, on the later sheet, 「这题是猜的」. The pill is
 # the only short near-black run in the lower right of the window capture.
+# The empty-shelf import control is a short black pill. ARM OCR reads the light cards
+# and misses the white word on that pill (run 45779598059 still showed 导入文件).
+function Find-DarkImportPill([string]$name) {
+    $path = Join-Path $OutDir "$name.png"
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    $bmp = [Drawing.Bitmap]::new($path)
+    try {
+        $w = $bmp.Width
+        $h = $bmp.Height
+        $hits = @()
+        for ($y = [int]($h * 0.40); $y -lt [int]($h * 0.82); $y += 2) {
+            $run = 0
+            $runStart = 0
+            for ($x = [int]($w * 0.25); $x -lt [int]($w * 0.75); $x++) {
+                $c = $bmp.GetPixel($x, $y)
+                if ($c.R -lt 50 -and $c.G -lt 50 -and $c.B -lt 50) {
+                    if ($run -eq 0) { $runStart = $x }
+                    $run++
+                } else {
+                    if ($run -ge 60 -and $run -le 180) {
+                        $hits += ,([pscustomobject]@{ X = [int]($runStart + ($run / 2)); Y = $y })
+                    }
+                    $run = 0
+                }
+            }
+        }
+        if (@($hits).Count -lt 6) { return $null }
+        $xs = @($hits | ForEach-Object { $_.X })
+        $xmin = ($xs | Measure-Object -Minimum).Minimum
+        $xmax = ($xs | Measure-Object -Maximum).Maximum
+        if (($xmax - $xmin) -gt 40) { return $null }
+        $ys = @($hits | ForEach-Object { $_.Y })
+        return [pscustomobject]@{
+            X = [int](($xs | Measure-Object -Average).Average)
+            Y = [int](($ys | Measure-Object -Average).Average)
+        }
+    } finally { $bmp.Dispose() }
+}
+
 function Find-SubmitPill([string]$name) {
     $path = Join-Path $OutDir "$name.png"
     if (-not (Test-Path $path)) { return $null }

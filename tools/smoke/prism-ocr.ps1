@@ -221,6 +221,14 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
             }
         }
         if (-not $invoked) {
+            $pill = Find-DarkImportPill 'installed-window-printwindow'
+            if ($pill) {
+                Click-At $pill.X $pill.Y | Out-Null
+                Write-Output "Opened import via the dark pill $($pill.X),$($pill.Y)"
+                $invoked = $true
+            }
+        }
+        if (-not $invoked) {
             Click-CapturedControl 'empty-shelf-upload.png' 'installed-window-printwindow.png'
         }
         Submit-ScanFile $upload

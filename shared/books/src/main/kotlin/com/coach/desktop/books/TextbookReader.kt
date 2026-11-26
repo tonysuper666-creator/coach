@@ -1903,22 +1903,29 @@ internal fun TextbookReader(
                 updateCollectionSession(col.id, prev.copy(loading = true, error = null, fallbackPages = emptyList(), lastQuestion = q))
             }
             scope.launch {
+                // The upload probe only tells us the last server check failed. The user already
+                // pressed send, so the explainer still gets the question. A local or recovered
+                // explainer can answer; an unreachable server keeps the offline message below.
+                var keepOfflineMessage = false
                 if (isOffline) {
                     val uploadClient = explainer.unifiedUploadClient()
                     if (uploadClient != null) {
                         val live = withContext(Dispatchers.IO) {
                             runCatching { uploadClient.probeReachability() }.getOrDefault(CoachConnectivityStatus.OFFLINE)
                         }
-                        if (live == CoachConnectivityStatus.OFFLINE) return@launch
-                        updateCollectionSession(
-                            col.id,
-                            sessionForCollection(col.id).copy(
-                                loading = true,
-                                error = null,
-                                fallbackPages = emptyList(),
-                                lastQuestion = q,
-                            ),
-                        )
+                        if (live == CoachConnectivityStatus.OFFLINE) {
+                            keepOfflineMessage = true
+                        } else {
+                            updateCollectionSession(
+                                col.id,
+                                sessionForCollection(col.id).copy(
+                                    loading = true,
+                                    error = null,
+                                    fallbackPages = emptyList(),
+                                    lastQuestion = q,
+                                ),
+                            )
+                        }
                     }
                 }
                 val askNodeId = currentSection?.id ?: currentChapterSpan?.tocNodeId ?: "p${ui.page}"
@@ -1962,16 +1969,22 @@ internal fun TextbookReader(
                     },
                     onFailure = { err ->
                         val qaErr = err as? CollectionQaException
+                        val unreachable = qaErr?.trouble == ExplainTrouble.Unreachable
                         val msg = when {
-                            qaErr?.trouble == ExplainTrouble.Unreachable -> OfflineCopy.COLLECTION_ASK_OFFLINE
+                            unreachable -> OfflineCopy.COLLECTION_ASK_OFFLINE
                             qaErr != null -> qaErr.message
+                            keepOfflineMessage -> OfflineCopy.COLLECTION_ASK_OFFLINE
                             else -> err.message ?: "跨材料问答暂时不可用，请重试。"
+                        }
+                        val trouble = when {
+                            unreachable || (keepOfflineMessage && qaErr == null) -> ExplainTrouble.Unreachable
+                            else -> qaErr?.trouble ?: ExplainTrouble.Other
                         }
                         updateCollectionSession(
                             col.id,
                             latest.copy(
                                 loading = false,
-                                error = msg to (qaErr?.trouble ?: ExplainTrouble.Other),
+                                error = msg to trouble,
                                 fallbackPages = qaErr?.fallbackPages.orEmpty(),
                             ),
                         )

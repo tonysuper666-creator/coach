@@ -406,6 +406,25 @@ internal fun bookClipboardSelection(entry: ClipEntry?): AnnotatedString? {
 @OptIn(ExperimentalComposeUiApi::class)
 internal fun bookClipboardText(text: String) = ClipEntry(StringSelection(text))
 
+internal fun bookSaveNotesMarkdown(suggestedFileName: String, markdown: String): NotesFileSave {
+    val dialog = java.awt.FileDialog(null as java.awt.Frame?, "导出笔记", java.awt.FileDialog.SAVE)
+    dialog.file = suggestedFileName
+    dialog.isVisible = true
+    val chosenName = dialog.file ?: return NotesFileSave.Cancelled
+    val directory = dialog.directory ?: return NotesFileSave.Cancelled
+    val path = java.nio.file.Path.of(directory, chosenName)
+    val parent = path.parent ?: return NotesFileSave.Failed("保存位置无效")
+    if (generateSequence(parent) { it.parent }.any { java.nio.file.Files.exists(it.resolve(".git")) }) {
+        return NotesFileSave.Failed("请选 Git 仓库以外的文件夹")
+    }
+    return try {
+        java.nio.file.Files.write(path, notesMarkdownUtf8Bytes(markdown))
+        NotesFileSave.Saved(path.fileName.toString())
+    } catch (_: Exception) {
+        NotesFileSave.Failed("没有写成文件")
+    }
+}
+
 @Composable
 internal fun BookScrollbar(scroll: ScrollState, modifier: Modifier) =
     V7Scrollbar(rememberScrollbarAdapter(scroll), modifier)

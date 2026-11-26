@@ -22,8 +22,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -77,6 +79,10 @@ internal fun BooklistScreen(
     var mutedExpanded by remember(collection.record.id) { mutableStateOf(false) }
     var addDialogOpen by remember(collection.record.id) { mutableStateOf(false) }
     var moreMenuOpen by remember(collection.record.id) { mutableStateOf(false) }
+    var notesStatus by remember(collection.record.id) { mutableStateOf<String?>(null) }
+    var notesBusy by remember(collection.record.id) { mutableStateOf(false) }
+    val notesScope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
 
     LaunchedEffect(collection.record.id, collection.materialIds, revision, aligning) {
         val loaded = withContext(Dispatchers.IO) {
@@ -161,6 +167,53 @@ internal fun BooklistScreen(
                                 },
                                 modifier = Modifier.testTag("booklist-realign"),
                             )
+                            DropdownMenuItem(
+                                text = { Text("复制书单笔记", style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary) },
+                                enabled = !notesBusy && memberBooks.isNotEmpty(),
+                                onClick = {
+                                    moreMenuOpen = false
+                                    notesScope.launch {
+                                        notesBusy = true
+                                        notesStatus = "正在整理书单笔记…"
+                                        val export = withContext(Dispatchers.IO) {
+                                            loadBooklistNotes(library, collection.record.title, memberBooks)
+                                        }
+                                        notesBusy = false
+                                        if (export == null) {
+                                            notesStatus = "书单笔记没有整理出来。"
+                                        } else {
+                                            clipboard.setText(AnnotatedString(export.markdown))
+                                            notesStatus = "已复制 ${export.itemCount} 条"
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.testTag("booklist-notes-copy"),
+                            )
+                            DropdownMenuItem(
+                                text = { Text("导出书单笔记", style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary) },
+                                enabled = !notesBusy && memberBooks.isNotEmpty(),
+                                onClick = {
+                                    moreMenuOpen = false
+                                    notesScope.launch {
+                                        notesBusy = true
+                                        notesStatus = "正在整理书单笔记…"
+                                        val export = withContext(Dispatchers.IO) {
+                                            loadBooklistNotes(library, collection.record.title, memberBooks)
+                                        }
+                                        notesBusy = false
+                                        if (export == null) {
+                                            notesStatus = "书单笔记没有整理出来。"
+                                        } else {
+                                            when (val saved = bookSaveNotesMarkdown(notesExportFileName(collection.record.title), export.markdown)) {
+                                                NotesFileSave.Cancelled -> notesStatus = "没有保存"
+                                                is NotesFileSave.Failed -> notesStatus = saved.message
+                                                is NotesFileSave.Saved -> notesStatus = "已保存 ${saved.fileName}，共 ${export.itemCount} 条。用记事本打开时中文应可读。"
+                                            }
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.testTag("booklist-notes-export"),
+                            )
                         }
                     }
                 }
@@ -191,6 +244,9 @@ internal fun BooklistScreen(
                                 append(" · ${concepts.active.size} 个共同主题")
                             }
                             CoachCardMeta(meta, Modifier.testTag("booklist-meta"))
+                            notesStatus?.let { line ->
+                                Text(line, style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("booklist-notes-status"))
+                            }
                         }
                         if (continueBook != null) {
                             PrimaryButton(

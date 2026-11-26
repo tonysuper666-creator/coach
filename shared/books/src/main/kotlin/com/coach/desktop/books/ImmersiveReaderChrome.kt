@@ -190,6 +190,7 @@ internal fun ImmersiveTopHud(
     typeControl: @Composable () -> Unit,
     modeControl: (@Composable () -> Unit)? = null,
     onMoreMenuDismiss: () -> Unit = {},
+    onOpenBookNotes: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
@@ -316,6 +317,12 @@ internal fun ImmersiveTopHud(
                             enabled = !busy,
                             onClick = { moreMenuOpen = false; onToggleSearch() },
                             modifier = Modifier.testTag("book-search-toggle"),
+                        )
+                        DropdownMenuItem(
+                            text = { Text("这本书的笔记", style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary) },
+                            enabled = !busy,
+                            onClick = { moreMenuOpen = false; onOpenBookNotes() },
+                            modifier = Modifier.testTag("book-notes-open"),
                         )
                         Box(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) { typeControl() }
                         DropdownMenuItem(

@@ -48,7 +48,7 @@ class ReaderR2FixesTest {
         waitForIdle()
     }
 
-    private fun writeGutenbergCopiedParagraphEpub(path: Path) {
+    private fun writeGutenbergCopiedParagraphEpub(path: Path, withCover: Boolean = false) {
         ZipOutputStream(Files.newOutputStream(path)).use { zip ->
             fun add(name: String, content: String) {
                 zip.putNextEntry(ZipEntry(name))
@@ -81,7 +81,10 @@ class ReaderR2FixesTest {
                 </package>
                 """.trimIndent(),
             )
-            add("OEBPS/wrap0000.xhtml", "<html xmlns='http://www.w3.org/1999/xhtml'><body><div/></body></html>")
+            val cover = if (withCover) {
+                "<svg xmlns='http://www.w3.org/2000/svg' width='400' height='600'><rect width='400' height='600' fill='navy'/></svg>"
+            } else "<div/>"
+            add("OEBPS/wrap0000.xhtml", "<html xmlns='http://www.w3.org/1999/xhtml'><body>$cover</body></html>")
             val copiedSentence = "S城南头有三间老屋，院里种着两棵高大的槐树，夏夜里常能听见蝉鸣，如今"
             val introParagraphs = (1..12).joinToString("\n") { idx ->
                 "<p id='p$idx'>    序言第${idx}段讲述早年求学与写作的合成背景，每段都有充足的汉字长度以便自然分页排版。</p>"
@@ -321,6 +324,42 @@ class ReaderR2FixesTest {
             pdf.save(path.toFile())
         }
         return path
+    }
+
+    @Test
+    fun turningBackToOpeningNoticeThenJumpingToPrefaceUpdatesHeader() {
+        val root = Files.createTempDirectory("coach-front-header-")
+        try {
+            val epub = root.resolve("synthetic.epub")
+            writeGutenbergCopiedParagraphEpub(epub, withCover = true)
+            val controller = TextbookController(TextbookLibrary(root.resolve("lib")))
+            runSkikoComposeUiTest(size = Size(1920f, 1080f), density = Density(1.5f)) {
+                setContent { Box(Modifier.fillMaxSize()) { WindowsTextbookHost(controller, chooseBook = { null }) } }
+                waitUntil(timeoutMillis = 10_000) { controller.state.value.initialized }
+                runBlocking { controller.importBook(epub) }
+                waitReaderReady(controller)
+                waitUntil(timeoutMillis = 30_000) {
+                    onAllNodesWithTag("book-sheet-0").fetchSemanticsNodes().isNotEmpty()
+                }
+                val previous = onNodeWithTag("previous-page")
+                for (turn in 1..20) {
+                    if (nodeText("reader-page-number").startsWith("第 1 /")) break
+                    previous.performClick()
+                    waitForIdle()
+                }
+                waitUntil(timeoutMillis = 15_000) {
+                    onAllNodesWithText("Gutenberg", substring = true).fetchSemanticsNodes().isNotEmpty()
+                }
+                assertEquals(1, controller.state.value.page)
+                assertTrue(nodeText("immersive-title").endsWith(" · 授权页"))
+                onNodeWithTag("v7-directory-toggle").performClick()
+                onNodeWithTag("toc-item-0").performClick()
+                waitForIdle()
+                assertTrue(nodeText("immersive-title").endsWith(" · 《合成短篇集》自序"))
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
     }
 
     @Test

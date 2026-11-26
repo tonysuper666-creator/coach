@@ -4,6 +4,7 @@ package com.coach.desktop.books
 internal object BookBoundaries {
     private val gutenbergStartLine = Regex("""(?im)^\*{3}\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK\b[^\r\n]*$""")
     private val gutenbergEndLine = Regex("""(?im)^\*{3}\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK\b[^\r\n]*$""")
+    fun gutenbergEndOffset(page: String): Int? = gutenbergEndLine.find(page)?.range?.first
     private val gutenbergCreditLine = Regex(
         """(?i)^(?:Produced|Transcribed|Prepared|Scanned|Proofread)\s+by\b.*|^Online Distributed Proofreading\b.*|^Updated editions will replace\b.*""",
     )
@@ -92,7 +93,7 @@ internal object BookBoundaries {
         correctedPage: Int? = null,
     ): BookPageAnchor {
         val first = pages.firstOrNull()?.number ?: 1
-        correctedPage?.takeIf { target -> pages.any { it.number == target } }?.let { return BookPageAnchor(it) }
+        (correctedPage ?: structure?.correctedStart)?.takeIf { target -> pages.any { it.number == target } }?.let { return BookPageAnchor(it) }
         structure?.nativeBodyStart?.let { target ->
             val targetPage = pages.firstOrNull { it.number == target.importPage }
             if (targetPage != null) {
@@ -179,6 +180,7 @@ internal object BookBoundaries {
         offset: Int = 0,
         preferredNodeId: String? = null,
     ): BookChapterSpan? {
+        if (book.correctedBodyPage?.let { page < it } == true) return null
         val pageText = book.page(page)?.text
         val node = activeTocNode(book.tocNodes, page, offset, preferredNodeId, pageText)
         if (node != null && node.kind in setOf(TocNodeKind.FRONT_MATTER, TocNodeKind.BACK_MATTER)) {
@@ -201,13 +203,44 @@ internal object BookBoundaries {
         return false
     }
 
+    /** Keep the section selected in the TOC while honoring a reader's chapter title in the header. */
+    fun headerTitleForNode(book: Textbook, node: BookTocNode): String {
+        if (book.structure?.source != HeadingSource.MANUAL.name) return node.title
+        var ancestor = node
+        while (ancestor.kind == TocNodeKind.SECTION || ancestor.kind == TocNodeKind.SUBSECTION) {
+            val parent = book.tocNodes.firstOrNull { it.id == ancestor.parentId } ?: break
+            if (parent.level >= ancestor.level) break
+            ancestor = parent
+        }
+        return if (ancestor.kind == TocNodeKind.CHAPTER && ancestor.source == HeadingSource.MANUAL) ancestor.title
+            else node.title
+    }
+
+    /** A publisher's opening notice can share an imported page with the first real TOC entry. */
+    fun unlistedFrontMatterTitle(book: Textbook, anchor: BookPageAnchor): String? {
+        val page = book.page(anchor.importPage) ?: return null
+        val heading = page.text.lineSequence().map { it.trim().trimStart('#').trim() }.firstOrNull { it.isNotEmpty() }
+            ?: return null
+        if (heading.startsWith("The Project Gutenberg eBook of ", ignoreCase = true)) {
+            val separator = gutenbergStartLine.find(page.text)
+            if (separator != null && anchor.offsetUtf16 <= separator.range.last) return "授权页"
+        }
+        val role = book.structure?.pageRole(page.number)
+        if (nonBodyHeading.matches(heading)) return heading
+        if (role == BookPageRole.FRONT_MATTER && heading.length <= 100 &&
+            BookTocWaterfall.classifyOutlineLabel(heading).kind == TocNodeKind.FRONT_MATTER
+        ) return heading
+        return if (role == BookPageRole.COPYRIGHT) "版权页" else null
+    }
+
     fun runningHeaderTitle(book: Textbook, page: BookLaidPage, preferredNodeId: String? = null): String {
         val anchor = page.anchor
         val pageText = book.page(anchor.importPage)?.text
+        if (book.correctedBodyPage?.let { anchor.importPage < it } == true) return ""
         val node = activeTocNode(book.tocNodes, anchor.importPage, anchor.offsetUtf16, preferredNodeId, pageText)
-        if (node != null) return node.title
+        if (node != null) return headerTitleForNode(book, node)
         val cleanPageTitle = page.title?.takeUnless(::looksLikeBoilerplateHeader)
-        return cleanPageTitle.orEmpty()
+        return unlistedFrontMatterTitle(book, anchor) ?: cleanPageTitle.orEmpty()
     }
 
     private val nonBodyHeading = Regex(
@@ -219,7 +252,7 @@ internal object BookBoundaries {
         RegexOption.IGNORE_CASE,
     )
 
-    fun looksLikeFrontMatter(text: String): Boolean {
+    fun looksLikeFrontMatter(text: String, chapterTitle: String? = null): Boolean {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return true
         val lines = trimmed.lineSequence().map { it.trim().trimStart('#').trim() }.filter(String::isNotEmpty).toList()
@@ -227,6 +260,7 @@ internal object BookBoundaries {
         if (nonBodyHeading.matches(lines.first()) || ExplainClassifier.copyrightMarkerCount(trimmed) >= 2) return true
         val lower = trimmed.lowercase()
         if (trimmed.length < 1500 && listOf("isbn", "copyright", "all rights reserved", "版权所有", "图书在版编目").any { it in lower }) return true
+        if (chapterTitle != null && lines.any { it.equals(chapterTitle, ignoreCase = true) }) return false
         return lines.size <= 4 && trimmed.length < 140 && lines.none { chapterHeading.containsMatchIn(it) } &&
             '。' !in trimmed && trimmed.count { it == '.' } <= 1
     }

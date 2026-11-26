@@ -29,10 +29,9 @@ import javax.swing.SwingUtilities;
  * and Compose still treats the gesture as a click, so the selection toolbar
  * never appears. This invokes the mouse listeners on the canvas the scene
  * mediator registered. Dispatching through the component lets the input method
- * eat the drag before those listeners run. Selection text is published as the
- * gesture proceeds, and the page reads it on release, so the events are handed
- * over one at a time and the EDT is free between them. The agent stays idle
- * unless COACH_DRAG_PORT_FILE is set, and it listens on loopback.
+ * eat the drag before those listeners run. The whole gesture stays on one EDT
+ * turn so a real cursor move cannot split the press from the drag. The agent
+ * stays idle unless COACH_DRAG_PORT_FILE is set, and it listens on loopback.
  */
 public final class ArmDragAgent {
     private static Component dragTarget;
@@ -93,34 +92,28 @@ public final class ArmDragAgent {
         int x2 = Integer.parseInt(parts[3]);
         int y2 = Integer.parseInt(parts[4]);
         String[] reply = new String[1];
-        SwingUtilities.invokeAndWait(() -> reply[0] = prepareDrag(x1, y1, x2, y2));
-        if (reply[0].startsWith("ERR")) return reply[0];
+        SwingUtilities.invokeAndWait(() -> reply[0] = runDrag(x1, y1, x2, y2));
+        return reply[0];
+    }
+
+    private static String runDrag(int screenX1, int screenY1, int screenX2, int screenY2) {
+        String prepared = prepareDrag(screenX1, screenY1, screenX2, screenY2);
+        if (prepared.startsWith("ERR")) return prepared;
         StringBuilder errors = new StringBuilder();
         long when = System.currentTimeMillis();
-        deliver(MouseEvent.MOUSE_MOVED, dragX0, dragY0, 0, MouseEvent.NOBUTTON, when, errors);
-        pause();
-        deliver(MouseEvent.MOUSE_PRESSED, dragX0, dragY0,
+        deliverOnEdt(MouseEvent.MOUSE_MOVED, dragX0, dragY0, 0, MouseEvent.NOBUTTON, when, errors);
+        deliverOnEdt(MouseEvent.MOUSE_PRESSED, dragX0, dragY0,
             InputEvent.BUTTON1_DOWN_MASK, MouseEvent.BUTTON1, when + 16, errors);
-        pause();
         int steps = 8;
         for (int i = 1; i <= steps; i++) {
             int x = dragX0 + (dragX1 - dragX0) * i / steps;
             int y = dragY0 + (dragY1 - dragY0) * i / steps;
-            deliver(MouseEvent.MOUSE_DRAGGED, x, y,
+            deliverOnEdt(MouseEvent.MOUSE_DRAGGED, x, y,
                 InputEvent.BUTTON1_DOWN_MASK, MouseEvent.NOBUTTON, when + 16L + i * 16L, errors);
-            pause();
         }
-        deliver(MouseEvent.MOUSE_RELEASED, dragX1, dragY1, 0, MouseEvent.BUTTON1, when + 200, errors);
+        deliverOnEdt(MouseEvent.MOUSE_RELEASED, dragX1, dragY1, 0, MouseEvent.BUTTON1, when + 200, errors);
         if (errors.length() > 0) return "ERR " + errors.toString().trim();
-        return "OK direct " + reply[0];
-    }
-
-    private static void pause() {
-        try {
-            Thread.sleep(80);
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-        }
+        return "OK direct " + prepared;
     }
 
     private static String describeTargets() throws Exception {
@@ -178,19 +171,17 @@ public final class ArmDragAgent {
         }
     }
 
-    private static void deliver(int id, int x, int y, int modifiers, int button, long when, StringBuilder errors)
-        throws Exception {
-        String[] failure = new String[1];
-        SwingUtilities.invokeAndWait(() -> failure[0] = deliverOnEdt(id, x, y, modifiers, button, when));
-        if (failure[0] != null) errors.append(failure[0]).append(' ');
-    }
-
     // Press must carry BUTTON1 before any dragged event. The scene filter drops a
     // button-down move until a primary press has been seen. Listeners are called
     // directly so a heavyweight canvas cannot swallow the event in dispatchEvent.
-    private static String deliverOnEdt(int id, int x, int y, int modifiers, int button, long when) {
+    // Caller is already on the EDT. Do not hop again, or a queued cursor move lands
+    // between the press and the drag.
+    private static void deliverOnEdt(int id, int x, int y, int modifiers, int button, long when, StringBuilder errors) {
         Component target = dragTarget;
-        if (target == null) return "no-target";
+        if (target == null) {
+            errors.append("no-target ");
+            return;
+        }
         try {
             Point origin = target.getLocationOnScreen();
             int clicks = (id == MouseEvent.MOUSE_PRESSED || id == MouseEvent.MOUSE_RELEASED) ? 1 : 0;
@@ -207,9 +198,8 @@ public final class ArmDragAgent {
                     else if (id == MouseEvent.MOUSE_RELEASED) listener.mouseReleased(event);
                 }
             }
-            return null;
         } catch (Throwable thrown) {
-            return thrown.getClass().getSimpleName() + ":" + thrown.getMessage();
+            errors.append(thrown.getClass().getSimpleName()).append(':').append(thrown.getMessage()).append(' ');
         }
     }
 

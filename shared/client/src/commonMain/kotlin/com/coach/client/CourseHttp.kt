@@ -260,8 +260,9 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         }
     }
 
-    suspend fun learningChanges(epoch: String?, after: Long, stream: String): JsonObject? {
+    suspend fun learningChanges(epoch: String?, after: Long, stream: String, chunks: Boolean = false): JsonObject? {
         val reply = http.get("$base/learning-sync/changes") {
+            if (chunks) parameter("chunks",1)
             parameter("stream",stream)
             parameter("after", after)
             epoch?.let { parameter("epoch", it) }
@@ -269,13 +270,23 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         return if (reply.status.isSuccess()) Json.parseToJsonElement(reply.bodyAsText()).jsonObject else null
     }
 
-    suspend fun learningSnapshot(epoch: String, token: String?, after: Long): JsonObject? {
+    suspend fun learningSnapshot(epoch: String, token: String?, after: Long, chunks: Boolean = false): JsonObject? {
         val reply = http.get("$base/learning-sync/snapshot") {
+            if (chunks) parameter("chunks",1)
             parameter("epoch",epoch)
             parameter("after",after)
             token?.let { parameter("snapshotId",it) }
         }
         if (reply.status.value == 410) return buildJsonObject { put("expired",true) }
+        return if (reply.status.isSuccess()) Json.parseToJsonElement(reply.bodyAsText()).jsonObject else null
+    }
+
+    suspend fun learningChunk(epoch: String, transport: String, snapshot: String?, seq: Long, offset: Int): JsonObject? {
+        val reply = http.get("$base/learning-sync/chunk") {
+            parameter("epoch",epoch); parameter("transportEpoch",transport)
+            parameter("seq",seq); parameter("offset",offset)
+            snapshot?.let { parameter("snapshotId",it) }
+        }
         return if (reply.status.isSuccess()) Json.parseToJsonElement(reply.bodyAsText()).jsonObject else null
     }
 

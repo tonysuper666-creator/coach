@@ -18,10 +18,9 @@ import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
 import com.coach.desktop.books.LearningJournal
 import com.coach.desktop.books.LearningMigrationBackup
-import com.coach.desktop.books.LearningRemote
+import com.coach.desktop.books.HttpLearningRemote
 import com.coach.desktop.books.LearningTransfer
 import com.coach.client.CourseHttp
-import kotlinx.serialization.json.JsonObject
 import kotlinx.coroutines.isActive
 import com.coach.desktop.books.TextbookLoginScreen
 import com.coach.desktop.books.rememberAnswerDrafts
@@ -329,11 +328,7 @@ private fun LearningSyncEffect(identity: DesktopIdentity, profile: LearningProfi
         LaunchedEffect(identity,profile) {
             val credentials = identity.credentials
             val http = CourseHttp(identity.serverUrl,credentials.deviceId,credentials.token,"library")
-            val remote = object : LearningRemote {
-                override suspend fun snapshot(epoch: String, token: String?, after: Long) = http.learningSnapshot(epoch,token,after)
-                override suspend fun changes(epoch: String?, after: Long, stream: String) = http.learningChanges(epoch,after,stream)
-                override suspend fun push(change: JsonObject) = http.pushLearningChange(change)
-            }
+            val remote = HttpLearningRemote(http)
             try {
                 while (isActive) {
                     try {

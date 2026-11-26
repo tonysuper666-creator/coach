@@ -51,6 +51,8 @@ internal object LearningJournal {
                 BookSchemaMigration.ensureColumn(db,"learning_sync_outbox","acknowledged","INTEGER NOT NULL DEFAULT 0")
                 sql.execute("CREATE TABLE IF NOT EXISTS learning_sync_fact_context(kind TEXT PRIMARY KEY, fact TEXT NOT NULL)")
                 sql.execute("""CREATE TABLE IF NOT EXISTS learning_sync_stage(seq INTEGER PRIMARY KEY,item TEXT NOT NULL)""")
+                sql.execute("""CREATE TABLE IF NOT EXISTS learning_sync_parts(digest TEXT NOT NULL,offset INTEGER NOT NULL,
+                    data BLOB NOT NULL,touched INTEGER NOT NULL,PRIMARY KEY(digest,offset))""")
                 sql.execute("""CREATE TRIGGER IF NOT EXISTS learning_sync_capture_fact AFTER INSERT ON learning_sync_outbox
                     WHEN EXISTS(SELECT 1 FROM learning_sync_fact_context WHERE kind=NEW.kind) BEGIN
                     UPDATE learning_sync_outbox SET fact=(SELECT fact FROM learning_sync_fact_context WHERE kind=NEW.kind)

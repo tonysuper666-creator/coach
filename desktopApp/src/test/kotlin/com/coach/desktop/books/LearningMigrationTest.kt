@@ -150,7 +150,7 @@ class LearningMigrationTest {
         } finally { dir.toFile().deleteRecursively() }
     }
 
-    @Test fun migrateRestoreAndIsolate() = runBlocking {
+    private fun withService(test: suspend (Path, String, List<String>) -> Unit) = runBlocking {
         val root = Files.createTempDirectory("learning-pullback")
         val job = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val store = LedgerStore(root.resolve("service"))
@@ -174,6 +174,23 @@ class LearningMigrationTest {
         }.apply { start(false) }
         try {
             val base = "http://127.0.0.1:${server.engine.resolvedConnectors().single().port}"
+            test(root,base,tokens)
+        } finally {
+            server.stop(0,1000); issuer.stop(0); actor.close(); job.cancel(); root.toFile().deleteRecursively()
+        }
+    }
+
+    private fun login(base: String, token: String): JsonObject {
+        val response = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build().send(
+            HttpRequest.newBuilder(URI("$base/v1/public/sable")).timeout(java.time.Duration.ofSeconds(10))
+                .header("Authorization","Bearer $token").POST(HttpRequest.BodyPublishers.noBody()).build(),
+            HttpResponse.BodyHandlers.ofString())
+        assertEquals(200,response.statusCode())
+        return Json.parseToJsonElement(response.body()).jsonObject
+    }
+
+    @Test fun migrateRestoreAndIsolate() {
+        withService { root,base,tokens ->
             val sessions = mutableMapOf<Pair<Path,String>,JsonObject>()
             fun lookup(dir: Path, token: String, kind: String, id: String): HttpResponse<String> {
                 val credential = sessions.getValue(dir to token)
@@ -184,17 +201,10 @@ class LearningMigrationTest {
                 return HttpClient.newHttpClient().send(request,HttpResponse.BodyHandlers.ofString())
             }
             suspend fun sync(dir: Path, token: String, pauseSnapshot: Boolean = false, loseDraftReceipt: Boolean = false) {
-                val c = sessions.getOrPut(dir to token) {
-                    val response = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build().send(
-                        HttpRequest.newBuilder(URI("$base/v1/public/sable")).timeout(java.time.Duration.ofSeconds(10))
-                            .header("Authorization","Bearer $token").POST(HttpRequest.BodyPublishers.noBody()).build(),
-                        HttpResponse.BodyHandlers.ofString())
-                    assertEquals(200,response.statusCode())
-                    Json.parseToJsonElement(response.body()).jsonObject
-                }
+                val c = sessions.getOrPut(dir to token) { login(base,token) }
                 val http = CourseHttp(base,c.getValue("deviceId").jsonPrimitive.content,c.getValue("token").jsonPrimitive.content,"library")
                 try {
-                    val remote = object : LearningRemote {
+                    val remote = object : LearningRemote by HttpLearningRemote(http) {
                         override suspend fun snapshot(epoch: String, token: String?, after: Long) =
                             if (pauseSnapshot && token != null) null else http.learningSnapshot(epoch,token,after)
                         override suspend fun changes(epoch: String?, after: Long, stream: String) = http.learningChanges(epoch,after,stream)
@@ -391,9 +401,100 @@ class LearningMigrationTest {
             Files.move(root.resolve("new-generation.sqlite"),live,java.nio.file.StandardCopyOption.REPLACE_EXISTING)
             assertEquals(200,lookup(y,tokens[1],"bookmark",markId).statusCode())
             assertEquals(restoredMark,BookBookmarkStore(a).list(book).single { it.page == 4 }.note)
-        } finally {
-            server.stop(0,1000); issuer.stop(0); actor.close(); job.cancel(); root.toFile().deleteRecursively()
         }
+    }
+
+    @Test fun largeRecordResumesUploadDeltaAndEmptySnapshot() = withService { root,base,tokens ->
+        val a = root.resolve("A")
+        val b = root.resolve("B")
+        prepare(a,false); prepare(b,false)
+        val chunk = com.coach.protocol.learning.LEARNING_CHUNK_BYTES
+        val text = "窗🙂\n".repeat(525_000)
+        val expected = text.encodeToByteArray()
+        assertTrue(expected.size > 4 * 1024 * 1024)
+        fun client(token: String): CourseHttp {
+            val device = login(base,token)
+            return CourseHttp(base,device.getValue("deviceId").jsonPrimitive.content,device.getValue("token").jsonPrimitive.content,"library")
+        }
+        val x = client(tokens[0])
+        val y = client(tokens[0])
+        val other = client(tokens[1])
+        try {
+            val profile = assertNotNull(x.learningProfile())
+            val scope = profile.getValue("scope").jsonPrimitive.content
+            val epoch = profile.getValue("epoch").jsonPrimitive.content
+            val transport = profile.getValue("transportEpoch").jsonPrimitive.content
+            suspend fun sync(dir: Path, remote: LearningRemote) =
+                LearningTransfer(dir.resolve("library.sqlite"),false).sync(scope,remote,epoch) { true }
+            val first = HttpLearningRemote(x)
+            val second = HttpLearningRemote(y)
+            sync(a,first)
+            TextbookLibrary(a).withCourseDatabase { db ->
+                db.prepareStatement("""INSERT INTO book_ask_turns(book,thread_id,selection_id,selection_page,
+                    selection_start,selection_end,selection_text,label,answer_text,created_at)
+                    VALUES(?,'synthetic-thread','selection',1,0,1,'x','synthetic',?,1)""").use {
+                    it.setString(1,book); it.setString(2,text); it.executeUpdate()
+                }
+            }
+            var interruptFirst = true
+            var loseFinal = true
+            val sent = mutableListOf<Int>()
+            val uploading = object : LearningRemote by first {
+                override suspend fun push(change: JsonObject): JsonObject? {
+                    val ack = first.push(change) ?: return null
+                    val offset = change["offset"]?.jsonPrimitive?.int ?: return ack
+                    sent.add(offset)
+                    if (interruptFirst) { interruptFirst=false; throw java.io.EOFException() }
+                    if (offset == chunk) assertEquals(ack,first.push(change))
+                    if ("seq" in ack && loseFinal) { loseFinal=false; throw java.io.EOFException() }
+                    return ack
+                }
+            }
+            assertFailsWith<java.io.EOFException> { sync(a,uploading) }
+            assertEquals(listOf(0),sent)
+            val stream = java.util.UUID.randomUUID().toString()
+            assertTrue(assertNotNull(y.learningChanges(epoch,0,stream)).getValue("changes").jsonArray.isEmpty())
+            assertFailsWith<java.io.EOFException> { sync(a,uploading) }
+            assertEquals(sent.indices.map { it*chunk },sent)
+            val count = sent.size
+            val published = assertNotNull(y.learningChanges(epoch,0,stream,chunks=true)).getValue("changes").jsonArray.single().jsonObject
+            assertEquals(JsonNull,published["body"])
+            val seq = published.getValue("seq").jsonPrimitive.long
+            assertNull(other.learningChunk(epoch,transport,null,seq,0))
+            suspend fun interruptedDownload(dir: Path, remote: LearningRemote, expectSnapshot: Boolean) {
+                val requests = mutableListOf<Int>()
+                var cut = true
+                val downloading = object : LearningRemote by remote {
+                    override suspend fun part(epoch: String, transport: String, snapshot: String?, seq: Long, offset: Int): JsonObject? {
+                        assertEquals(expectSnapshot,snapshot != null)
+                        if (offset == chunk && cut) { cut=false; throw java.io.EOFException() }
+                        requests.add(offset)
+                        return remote.part(epoch,transport,snapshot,seq,offset)
+                    }
+                }
+                assertFailsWith<java.io.EOFException> { sync(dir,downloading) }
+                assertEquals(listOf(0),requests)
+                if (expectSnapshot) TextbookLibrary(dir).withCourseDatabase { db -> db.createStatement().use { q ->
+                    assertFalse(q.executeQuery("SELECT 1 FROM book_ask_turns").use { it.next() })
+                } }
+                sync(dir,downloading)
+                assertEquals(requests.indices.map { it*chunk },requests)
+                assertTrue(requests.size>1)
+            }
+            interruptedDownload(a,uploading,false)
+            assertEquals(count,sent.size,"already committed upload must receive its receipt at the probe")
+            interruptedDownload(b,second,true)
+            sync(b,second)
+            for (dir in listOf(a,b)) TextbookLibrary(dir).withCourseDatabase { db -> db.createStatement().use { q ->
+                q.executeQuery("SELECT answer_text FROM book_ask_turns").use { r ->
+                    assertTrue(r.next()); assertContentEquals(expected,r.getString(1).encodeToByteArray()); assertFalse(r.next())
+                }
+                for (table in listOf("learning_sync_outbox","learning_sync_parts")) {
+                    assertFalse(q.executeQuery("SELECT 1 FROM $table").use { it.next() })
+                }
+            } }
+            println("Chunk recovery: ${expected.size} UTF-8 bytes, $count upload parts, 1 identical row in each directory")
+        } finally { other.close(); y.close(); x.close() }
     }
 
     @Test fun onlyAValidProfileResponseCanBindTheLocalDirectory() = runBlocking {

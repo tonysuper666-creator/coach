@@ -231,6 +231,8 @@ private const val SYNC_EPOCH = "11111111-1111-4111-8111-111111111111"
 
 /** Serves the device's own pending ask back once, the way the changes feed echoes a push. */
 private class PendingAskEcho(private val epoch: String, private val scope: String) : LearningRemote {
+    override suspend fun part(epoch: String, transport: String, snapshot: String?, seq: Long, offset: Int): JsonObject? =
+        error("No chunked records in the echo fixture")
     var ask: JsonObject? = null
 
     override suspend fun snapshot(epoch: String, token: String?, after: Long): JsonObject? = null

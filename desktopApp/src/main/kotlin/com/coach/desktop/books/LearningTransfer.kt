@@ -12,9 +12,18 @@ import java.sql.PreparedStatement
 import java.util.UUID
 
 internal interface LearningRemote {
+    suspend fun part(epoch: String, transport: String, snapshot: String?, seq: Long, offset: Int): JsonObject?
     suspend fun snapshot(epoch: String, token: String?, after: Long): JsonObject?
     suspend fun changes(epoch: String?, after: Long, stream: String): JsonObject?
     suspend fun push(change: JsonObject): JsonObject?
+}
+
+internal class HttpLearningRemote(private val http: com.coach.client.CourseHttp) : LearningRemote {
+    override suspend fun part(epoch: String, transport: String, snapshot: String?, seq: Long, offset: Int) =
+        http.learningChunk(epoch,transport,snapshot,seq,offset)
+    override suspend fun snapshot(epoch: String, token: String?, after: Long) = http.learningSnapshot(epoch,token,after,chunks=true)
+    override suspend fun changes(epoch: String?, after: Long, stream: String) = http.learningChanges(epoch,after,stream,chunks=true)
+    override suspend fun push(change: JsonObject) = http.pushLearningChange(change)
 }
 
 /** Upload queued Windows learning records and commit incoming pages with the source database's cursor. */
@@ -93,6 +102,9 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
             val owner = meta(db,"owner")
             if (owner != null && owner != scope) return@write null
             save(db,"owner",scope)
+            db.prepareStatement("DELETE FROM learning_sync_parts WHERE touched<?").use {
+                it.setLong(1,System.currentTimeMillis()-com.coach.protocol.learning.LEARNING_CHUNK_TTL_MS); it.executeUpdate()
+            }
             val stream = db.createStatement().use { it.executeQuery("SELECT stream_id FROM learning_sync_sources LIMIT 1").use { rows ->
                 check(rows.next())
                 rows.getString(1)
@@ -120,7 +132,7 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
         var uploaded = false
         while (current()) {
             val operation = write { db -> next(db,epoch) } ?: break
-            val ack = remote.push(JsonObject(operation + ("transportEpoch" to JsonPrimitive(transport)))) ?: return
+            val ack = LearningChunkTransfer.push(operation,scope,transport,remote,current) ?: return
             if (!current() || ack["scope"]?.jsonPrimitive?.content != scope || ack["epoch"]?.jsonPrimitive?.content != epoch ||
                 ack["seq"] != operation["seq"]) return
             write { db ->
@@ -149,12 +161,13 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
         val needsSnapshot = checkpoint["snapshotRequired"]?.jsonPrimitive?.booleanOrNull == true ||
             write { meta(it,"restore_required") } == "1" ||
             (cursor == 0L && write { meta(it,"snapshot_done") } == null)
-        if (needsSnapshot) cursor = restore(scope,epoch,remote,cursor,current) ?: return
+        if (needsSnapshot) cursor = restore(scope,epoch,transport,remote,cursor,current) ?: return
         var page = if (needsSnapshot) remote.changes(epoch,cursor,state.third) ?: return else checkpoint
         while (current()) {
             if (page["scope"]?.jsonPrimitive?.content != scope || page["epoch"]?.jsonPrimitive?.content != epoch ||
                 page["transportEpoch"]?.jsonPrimitive?.content != transport || page["snapshotRequired"]?.jsonPrimitive?.booleanOrNull == true) return
-            val changes = page.getValue("changes").jsonArray
+            val wire = page.getValue("changes").jsonArray
+            val changes = LearningChunkTransfer.readPage(path,wire,epoch,transport,null,remote,current) ?: return
             val applied = write { db ->
                 if (!current() || (meta(db,"cursor")?.toLong() ?: 0L) != cursor) return@write false
                 db.createStatement().use { sql ->
@@ -180,6 +193,7 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
                 save(db,"clock",clock.toString())
                 db.createStatement().use { it.executeUpdate("DELETE FROM learning_sync_meta WHERE key='applying'") }
                 save(db,"cursor",cursor.toString()); save(db,"epoch",epoch)
+                LearningChunkTransfer.applied(db,wire)
                 true
             }
             if (!applied || changes.isEmpty()) return
@@ -193,7 +207,7 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
     }
 
     /** Stage pages durably. Publish the cursor and business rows only after the entire manifest matches. */
-    private suspend fun restore(scope: String, epoch: String, remote: LearningRemote, start: Long, current: () -> Boolean): Long? {
+    private suspend fun restore(scope: String, epoch: String, transport: String, remote: LearningRemote, start: Long, current: () -> Boolean): Long? {
         while (current()) {
             val (token,after) = write { meta(it,"stage_token") to (meta(it,"stage_after")?.toLong() ?: 0L) }
             val page = remote.snapshot(epoch,token,after) ?: return null
@@ -203,10 +217,13 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
                 return null
             }
             require(page["scope"]?.jsonPrimitive?.content == scope && page["epoch"]?.jsonPrimitive?.content == epoch)
+            if (page["transportEpoch"] != JsonPrimitive(transport)) return null
             val lease = page.getValue("token").jsonPrimitive.content
             require(token == null || token == lease)
             val water = page.getValue("water").jsonPrimitive.long
             val done = page.getValue("done").jsonPrimitive.boolean
+            val wire = page.getValue("items").jsonArray
+            val items = LearningChunkTransfer.readPage(path,wire,epoch,transport,lease,remote,current) ?: return null
             val applied = write { db ->
                 if (meta(db,"transport") != page["transportEpoch"]?.jsonPrimitive?.content) return@write false
                 if (!current() || (meta(db,"cursor")?.toLong() ?: 0L) != start || meta(db,"stage_token") != token ||
@@ -218,7 +235,7 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
                 var count = meta(db,"stage_count")?.toLong() ?: 0L
                 var hash = meta(db,"stage_hash").orEmpty()
                 var last = after
-                for (item in page.getValue("items").jsonArray) {
+                for (item in items) {
                     val seq = item.jsonObject.getValue("seq").jsonPrimitive.long
                     require(seq > last && seq <= water)
                     last = seq
@@ -254,6 +271,7 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
                     save(db,"stage_token",lease); save(db,"stage_after",last.toString())
                     save(db,"stage_count",count.toString()); save(db,"stage_hash",hash)
                 }
+                LearningChunkTransfer.applied(db,wire)
                 true
             }
             if (!applied) return null

@@ -50,7 +50,12 @@ internal fun Application.learningSyncRoutes(actor: LedgerActor, books: UnifiedBo
         get("/learning-sync/snapshot") {
             val params = call.request.queryParameters
             call.withAccount { scope, _ -> store.snapshot(scope,requireNotNull(params["epoch"]),params["snapshotId"],
-                requireNotNull(params["after"]?.toLongOrNull())) }
+                requireNotNull(params["after"]?.toLongOrNull()),params["chunks"]=="1") }
+        }
+        get("/learning-sync/chunk") {
+            val params = call.request.queryParameters
+            call.withAccount { scope, _ -> store.part(scope,requireNotNull(params["epoch"]),requireNotNull(params["transportEpoch"]),
+                params["snapshotId"],requireNotNull(params["seq"]?.toLongOrNull()),requireNotNull(params["offset"]?.toIntOrNull())) }
         }
         get("/learning-sync/profile") {
             call.withAccount { scope, _ -> store.profile(scope) }
@@ -62,7 +67,8 @@ internal fun Application.learningSyncRoutes(actor: LedgerActor, books: UnifiedBo
         get("/learning-sync/changes") {
             val cursor = call.request.queryParameters["after"]?.toLongOrNull() ?: 0
             val epoch = call.request.queryParameters["epoch"]
-            call.withAccount { scope, device -> store.changes(scope, epoch, cursor,device,requireNotNull(call.request.queryParameters["stream"])) }
+            call.withAccount { scope, device -> store.changes(scope, epoch, cursor,device,requireNotNull(call.request.queryParameters["stream"]),
+                call.request.queryParameters["chunks"]=="1") }
         }
         post("/learning-sync/push") {
             val channel = call.receiveChannel()

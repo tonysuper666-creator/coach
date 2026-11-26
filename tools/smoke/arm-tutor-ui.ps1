@@ -315,67 +315,32 @@ function Send-ArmAbsolute([int]$screenX, [int]$screenY) {
 }
 
 function Drag-TutorLine([int]$x1, [int]$y1, [int]$x2, [int]$y2, [string]$how) {
+    # Run 45777218529: SendInput moved the cursor onto the left-page glyphs and the
+    # toolbar still stayed down. Compose drops a primary-button event unless an earlier
+    # press set its button flag. mouse_event is that press (the click path already
+    # works). The move has to be SendInput, which is what actually reaches the cursor.
     Invoke-ForegroundStep -InjectsInput -Action {
         $r = Get-Rect
         $sx1 = $r.L + $x1; $sy1 = $r.T + $y1
         $sx2 = $r.L + $x2; $sy2 = $r.T + $y2
-        if ($how -eq 'send') {
-            $park = Send-ArmAbsolute $sx1 $sy1
-            Start-Sleep -Milliseconds 50
-            if ($park -le 0) {
-                Write-Output "SENDINPUT park=$park; posting the drag instead"
-                $how = 'message'
-            } else {
-                $down = [Arm.Drag]::Send(0x0002, 0, 0)
-                $move = 0
-                try {
-                    foreach ($i in 1..12) {
-                        $x = [int]($sx1 + ($sx2 - $sx1) * $i / 12)
-                        $y = [int]($sy1 + ($sy2 - $sy1) * $i / 12)
-                        $move = Send-ArmAbsolute $x $y
-                        Start-Sleep -Milliseconds 18
-                    }
-                } finally {
-                    $up = [Arm.Drag]::Send(0x0004, 0, 0)
-                }
-                $end = Get-TutorCursor
-                Write-Output "SENDINPUT park=$park down=$down move=$move up=$up end=$($end.X),$($end.Y) target=$sx2,$sy2"
-                if ($down -gt 0 -and $move -gt 0 -and $up -gt 0) { return }
-                Write-Output "SENDINPUT incomplete; posting the drag instead"
-            }
-        }
-        [void](Send-AbsoluteMove $sx1 $sy1)
-        $origin = New-Object Arm.Drag+POINT
-        $origin.X = $sx1
-        $origin.Y = $sy1
-        $hwnd = [Arm.Drag]::WindowFromPoint($origin)
-        $cls = New-Object System.Text.StringBuilder 128
-        if ($hwnd -ne [IntPtr]::Zero) { [void][Arm.Drag]::GetClassName($hwnd, $cls, $cls.Capacity) }
+        $park = Send-ArmAbsolute $sx1 $sy1
+        if ($park -le 0) { [void](Send-AbsoluteMove $sx1 $sy1) }
+        Start-Sleep -Milliseconds 60
         [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
-        $posted = 0
+        $move = 0
         try {
-            Start-Sleep -Milliseconds 40
-            foreach ($i in 1..12) {
-                $x = [int]($sx1 + ($sx2 - $sx1) * $i / 12)
-                $y = [int]($sy1 + ($sy2 - $sy1) * $i / 12)
-                [void][WD]::SetCursorPos($x, $y)
-                $client = New-Object Arm.Drag+POINT
-                $client.X = $x
-                $client.Y = $y
-                if ($hwnd -ne [IntPtr]::Zero) { [void][Arm.Drag]::ScreenToClient($hwnd, [ref]$client) }
-                if ([Arm.Drag]::PostMessage($hwnd, 0x0200, [IntPtr]1, [Arm.Drag]::Pack($client.X, $client.Y))) { $posted++ }
-                Start-Sleep -Milliseconds 18
+            Start-Sleep -Milliseconds 80
+            foreach ($i in 1..16) {
+                $x = [int]($sx1 + ($sx2 - $sx1) * $i / 16)
+                $y = [int]($sy1 + ($sy2 - $sy1) * $i / 16)
+                $move = Send-ArmAbsolute $x $y
+                Start-Sleep -Milliseconds 24
             }
-            $end = New-Object Arm.Drag+POINT
-            $end.X = $sx2
-            $end.Y = $sy2
-            if ($hwnd -ne [IntPtr]::Zero) { [void][Arm.Drag]::ScreenToClient($hwnd, [ref]$end) }
-            [void][Arm.Drag]::PostMessage($hwnd, 0x0202, [IntPtr]::Zero, [Arm.Drag]::Pack($end.X, $end.Y))
-            Start-Sleep -Milliseconds 60
         } finally {
             [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
         }
-        Write-Output "DRAGMSG $($cls.ToString()) $hwnd posted=$posted"
+        $end = Get-TutorCursor
+        Write-Output "DRAGMIX how=$how park=$park move=$move end=$($end.X),$($end.Y) target=$sx2,$sy2"
     }
 }
 

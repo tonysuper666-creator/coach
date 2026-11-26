@@ -158,6 +158,7 @@ internal fun CourseScreen(
     onDismissIntake: () -> Unit = {},
     hasActiveMockExam: Boolean = false,
     onOpenMockExam: () -> Unit = {},
+    onOpenSectionFollow: (() -> Unit)? = null,
     onOpenLiteratureGuide: (() -> Unit)? = null,
     onOpenLiteratureComparison: (() -> Unit)? = null,
     onOpenLiteratureFollow: (() -> Unit)? = null,
@@ -344,7 +345,7 @@ internal fun CourseScreen(
                 CourseIntakeReceiptCard(intake, busy = busy, onChangeType = onChangeIntakeType, onDismiss = onDismissIntake)
             }
 
-            if (onOpenLiteratureGuide != null || onOpenLiteratureComparison != null || onOpenLiteratureFollow != null) {
+            if (onOpenLiteratureGuide != null || onOpenLiteratureComparison != null || onOpenLiteratureFollow != null || onOpenSectionFollow != null) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (onOpenLiteratureGuide != null) {
                         PaperButton(onOpenLiteratureGuide, modifier = Modifier.testTag("course-literature-guide")) {
@@ -354,6 +355,11 @@ internal fun CourseScreen(
                     if (onOpenLiteratureFollow != null) {
                         PaperButton(onOpenLiteratureFollow, modifier = Modifier.testTag("course-literature-follow")) {
                             Text("逐站跟读")
+                        }
+                    }
+                    if (onOpenSectionFollow != null) {
+                        PaperButton(onOpenSectionFollow, modifier = Modifier.testTag("course-section-follow")) {
+                            Text("按小节跟读")
                         }
                     }
                     if (onOpenLiteratureComparison != null) {

@@ -91,6 +91,8 @@ internal data class LibraryUi(
     val keepAskTabOpen: Boolean = false,
     /** TON-1823 PR A：单行真实上传与服务端整理状态（按当前账号隔离，绝不阻塞本地阅读）。 */
     val uploadStatuses: Map<String, BookUploadEntry> = emptyMap(),
+    /** Follow-route quote highlight. Stays after the reader consumes [pendingCourseJump]. */
+    val literatureQuoteHighlight: BookPassage? = null,
 )
 
 internal class TextbookController(val library: TextbookLibrary, var structureProvider: BookStructureProvider? = null) {
@@ -2309,6 +2311,55 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 prompt = null,
                 review = null,
                 pendingCourseJump = null,
+                keepAskTabOpen = false,
+                activeCourseId = courseId,
+                activeCourseTopicId = null,
+                activeCourseDetail = detail,
+                collections = collections,
+                catalog = library.catalog(),
+            )
+        }
+    }
+
+    suspend fun jumpToLiteratureQuote(courseId: String, source: GuideExcerpt) =
+        jumpToLiteratureQuote(courseId, source.book.id, source.anchor.pdfPage, source.anchor.quoteAnchor)
+
+    /** Jump to the reader page and highlight [quote] when it remaps onto the stored page text. */
+    suspend fun jumpToLiteratureQuote(courseId: String, bookId: String, page: Int, quote: String) = action {
+        val loaded = library.book(bookId)
+        val clampedPage = page.coerceIn(1, loaded.pages.size.coerceAtLeast(1))
+        val pageObj = requireNotNull(loaded.page(clampedPage)) { "原页已变更，请重新打开导读。" }
+        require(page == clampedPage) { "原页已变更，请重新打开导读。" }
+        val passage = LiteratureQuoteMap.toPassage(bookId, pageObj, quote)
+        val finalPage = passage?.page ?: clampedPage
+        library.saveTextView(bookId, false)
+        val updatedBook = loaded.copy(readingPage = finalPage)
+        library.save(updatedBook)
+        library.saveOpenSession(updatedBook.id, "READER")
+        val collections = library.collectionSummaries()
+        val detail = library.withCourseDatabase { db ->
+            CourseStore.saveActiveAnchor(
+                db,
+                CourseActiveAnchor(
+                    courseId = courseId,
+                    topicId = null,
+                    bookId = updatedBook.id,
+                    page = finalPage,
+                    companionOpen = false,
+                ),
+            )
+            CourseStore.loadCourseDetail(db, courseId, library.clock)
+        }
+        mutable.update { cur ->
+            cur.copy(
+                book = updatedBook,
+                page = finalPage,
+                screen = BookScreen.READER,
+                source = null,
+                prompt = null,
+                review = null,
+                pendingCourseJump = passage,
+                literatureQuoteHighlight = passage,
                 keepAskTabOpen = false,
                 activeCourseId = courseId,
                 activeCourseTopicId = null,

@@ -2150,6 +2150,28 @@ internal class TextbookLibrary(
         return source.copy(pages = pages, literatureMeta = meta)
     }
 
+    /**
+     * Printed page numbers for the follow route.
+     * Read from the PDF before [literatureBook] wipes [GuideRegion.printedPage], so the one-pager stays unchanged.
+     */
+    fun literaturePageNumbers(bookId: String): List<Int?> {
+        val source = book(bookId)
+        require(source.format == "pdf") { "只有 PDF 能核对印刷页码。" }
+        val file = original(bookId, "pdf").toFile()
+        return BookPdfLoader.read(file) { pdf ->
+            val labels = bookPdfPageLabels(pdf)
+            val count = pdf.numberOfPages
+            val folios = MutableList(count) { emptyList<Int>() }
+            for (page in source.pages) {
+                val index = page.number - 1
+                if (index !in 0 until count) continue
+                folios[index] = LiteraturePdfLayout.extract(pdf, page.number)
+                    .mapNotNull { LiteraturePrintedPages.parseFolio(it.printedPage) }
+            }
+            LiteraturePrintedPages.resolve(folios, List(count) { labels.getOrNull(it) })
+        }
+    }
+
     private fun recognizePdfPage(file: java.io.File, pdf: BookPdfDocument, page: Int, control: BookImportControl): String {
         val bounds = pdf.getPage(page - 1).cropBox
         require(bounds.width.isFinite() && bounds.height.isFinite() && bounds.width > 0 && bounds.height > 0) {

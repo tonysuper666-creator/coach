@@ -160,7 +160,7 @@ internal class SectionGuideController(
                 when (val result = explainer.explainSectionGuide(ctx, bookPages)) {
                     is SectionGuideResult.Done -> {
                         states[section.id] = SectionGuideState.Ready(result.guide, section.blocks)
-                        withContext(Dispatchers.IO) { library?.saveSectionGuide(book.id, section.id, result.guide.toCached()) }
+                        withContext(Dispatchers.IO) { library?.saveSectionGuide(book.id, section.id, result.guide.toCached(), book) }
                         if (prefetchNext) ensureSection(index + 1, prefetchNext = false)
                     }
                     is SectionGuideResult.Refused -> {

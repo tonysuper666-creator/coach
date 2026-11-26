@@ -151,6 +151,20 @@ class Tutor(BaseHTTPRequestHandler):
         book = path[len(prefix):path.index(marker)]
         return book == self.server.digest
 
+    def do_GET(self):
+        # The reader treats a missing friend status as offline and will not send the
+        # selection. 2xx-4xx on this probe is enough to keep explain and ask online.
+        path = self.path.split("?", 1)[0]
+        if path not in ("/v1/public/status", "/v1/hello"):
+            self.send_error(404)
+            return
+        encoded = b'{"ok":true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
     def do_POST(self):
         mode = self._study_mode()
         if self.path not in ("/v1/library/explain", "/v1/library/companion/chapter") and not mode:

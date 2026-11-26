@@ -329,6 +329,11 @@ public static class ArmTouch {
     public const uint Up = 0x00040002;
     static bool ready;
     static uint frame;
+    static int backend;
+    static uint useId;
+    static bool picked;
+    static IntPtr device;
+    public static string Trace = "";
     [StructLayout(LayoutKind.Explicit, Size = 144)]
     public struct CONTACT {
         [FieldOffset(0)] public uint pointerType;
@@ -364,10 +369,44 @@ public static class ArmTouch {
         [FieldOffset(136)] public uint orientation;
         [FieldOffset(140)] public uint pressure;
     }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PInfo {
+        public uint pointerType;
+        public uint pointerId;
+        public uint frameId;
+        public uint pointerFlags;
+        public IntPtr sourceDevice;
+        public IntPtr hwndTarget;
+        public int x1, y1, x2, y2, x3, y3, x4, y4;
+        public uint dwTime;
+        public uint historyCount;
+        public int InputData;
+        public uint dwKeyStates;
+        public ulong PerformanceCount;
+        public int ButtonChangeType;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct TInfo {
+        public PInfo pointerInfo;
+        public uint touchFlags;
+        public uint touchMask;
+        public int l, t, r, b, rl, rt, rr, rb;
+        public uint orientation;
+        public uint pressure;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct TypeInfo {
+        public uint type;
+        public TInfo touch;
+    }
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool InitializeTouchInjection(uint maxCount, uint dwMode);
     [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool InjectTouchInput(uint count, [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)] CONTACT[] contacts);
+    public static extern bool InjectTouchInput(uint count, IntPtr contacts);
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr CreateSyntheticPointerDevice(uint pointerType, uint maxCount, uint mode);
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool InjectSyntheticPointerInput(IntPtr device, IntPtr pointerInfo, uint count);
     [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
     public static extern bool SpiInt(uint action, uint param, ref int value, uint ini);
     [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
@@ -375,37 +414,95 @@ public static class ArmTouch {
     [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
     public static extern bool SpiPtr(uint action, uint param, IntPtr value, uint ini);
     public static int Bytes() { return Marshal.SizeOf(typeof(CONTACT)); }
+    public static string Layout() {
+        return "pinfo=" + Marshal.SizeOf(typeof(PInfo))
+            + " tinfo=" + Marshal.SizeOf(typeof(TInfo))
+            + " typeinfo=" + Marshal.SizeOf(typeof(TypeInfo))
+            + " touchoff=" + Marshal.OffsetOf(typeof(TypeInfo), "touch").ToInt32()
+            + " flagoff=" + Marshal.OffsetOf(typeof(TInfo), "touchFlags").ToInt32();
+    }
     public static int Init() {
         if (ready) return 1;
-        if (!InitializeTouchInjection(1, 3)) return -Marshal.GetLastWin32Error();
+        if (!InitializeTouchInjection(10, 3)) return -Marshal.GetLastWin32Error();
         ready = true;
         return 1;
     }
-    public static int Send(uint flags, int x, int y, int buttonChange) {
-        CONTACT[] contacts = new CONTACT[1];
+    static CONTACT Make(uint flags, int x, int y, uint id, int buttonChange) {
         frame++;
-        contacts[0].pointerType = 2;
-        contacts[0].pointerId = 1;
-        contacts[0].frameId = frame;
-        contacts[0].pointerFlags = flags;
-        contacts[0].ptPixelLocationX = x;
-        contacts[0].ptPixelLocationY = y;
-        contacts[0].ptPixelLocationRawX = x;
-        contacts[0].ptPixelLocationRawY = y;
-        contacts[0].ButtonChangeType = buttonChange;
-        contacts[0].touchMask = 7;
-        contacts[0].rcLeft = x - 2;
-        contacts[0].rcTop = y - 2;
-        contacts[0].rcRight = x + 2;
-        contacts[0].rcBottom = y + 2;
-        contacts[0].rawLeft = x - 2;
-        contacts[0].rawTop = y - 2;
-        contacts[0].rawRight = x + 2;
-        contacts[0].rawBottom = y + 2;
-        contacts[0].orientation = 90;
-        contacts[0].pressure = 512;
-        if (!InjectTouchInput(1, contacts)) return -Marshal.GetLastWin32Error();
-        return 1;
+        CONTACT c = new CONTACT();
+        c.pointerType = 2;
+        c.pointerId = id;
+        c.frameId = frame;
+        c.pointerFlags = flags;
+        c.ptPixelLocationX = x;
+        c.ptPixelLocationY = y;
+        c.ptPixelLocationRawX = x;
+        c.ptPixelLocationRawY = y;
+        c.ButtonChangeType = buttonChange;
+        c.touchMask = 7;
+        c.rcLeft = x - 2;
+        c.rcTop = y - 2;
+        c.rcRight = x + 2;
+        c.rcBottom = y + 2;
+        c.rawLeft = x - 2;
+        c.rawTop = y - 2;
+        c.rawRight = x + 2;
+        c.rawBottom = y + 2;
+        c.orientation = 90;
+        c.pressure = 512;
+        return c;
+    }
+    static int Legacy(CONTACT c) {
+        int bytes = Marshal.SizeOf(typeof(CONTACT));
+        IntPtr mem = Marshal.AllocHGlobal(bytes);
+        try {
+            Marshal.Copy(new byte[bytes], 0, mem, bytes);
+            Marshal.StructureToPtr(c, mem, false);
+            if (!InjectTouchInput(1, mem)) return -Marshal.GetLastWin32Error();
+            return 1;
+        } finally {
+            Marshal.FreeHGlobal(mem);
+        }
+    }
+    static int Synth(CONTACT c) {
+        if (device == IntPtr.Zero) {
+            device = CreateSyntheticPointerDevice(2, 10, 3);
+            if (device == IntPtr.Zero) return -Marshal.GetLastWin32Error();
+        }
+        if ((c.pointerFlags & 0x00010000) != 0) c.pointerFlags |= 0x00002000;
+        int n = Marshal.SizeOf(typeof(CONTACT));
+        IntPtr mem = Marshal.AllocHGlobal(8 + n);
+        try {
+            Marshal.Copy(new byte[8 + n], 0, mem, 8 + n);
+            Marshal.WriteInt32(mem, 0, 2);
+            Marshal.StructureToPtr(c, new IntPtr(mem.ToInt64() + 8), false);
+            if (!InjectSyntheticPointerInput(device, mem, 1)) return -Marshal.GetLastWin32Error();
+            return 1;
+        } finally {
+            Marshal.FreeHGlobal(mem);
+        }
+    }
+    public static int Send(uint flags, int x, int y, int buttonChange) {
+        Trace = "";
+        if (!picked && (flags & 0x00010000) != 0) {
+            int legacy0 = Legacy(Make(flags, x, y, 0, buttonChange));
+            Trace = "L0=" + legacy0;
+            if (legacy0 > 0) { picked = true; backend = 1; useId = 0; return 1; }
+            int synth0 = Synth(Make(flags, x, y, 0, buttonChange));
+            Trace += " S0=" + synth0;
+            if (synth0 > 0) { picked = true; backend = 2; useId = 0; return 1; }
+            int legacy1 = Legacy(Make(flags, x, y, 1, buttonChange));
+            Trace += " L1=" + legacy1;
+            if (legacy1 > 0) { picked = true; backend = 1; useId = 1; return 1; }
+            int synth1 = Synth(Make(flags, x, y, 1, buttonChange));
+            Trace += " S1=" + synth1;
+            if (synth1 > 0) { picked = true; backend = 2; useId = 1; return 1; }
+            return synth1;
+        }
+        CONTACT contact = Make(flags, x, y, picked ? useId : 0, buttonChange);
+        int result = backend == 2 ? Synth(contact) : Legacy(contact);
+        Trace = (backend == 2 ? "S" : "L") + (picked ? useId.ToString() : "?") + "=" + result;
+        return result;
     }
     public static int[] GetMouse() {
         int[] v = new int[3];
@@ -441,12 +538,15 @@ function Send-TutorTouchDrag([int]$sx1, [int]$sy1, [int]$sx2, [int]$sy2) {
         Write-Host "TOUCHINIT fail $($_.Exception.Message)"
         return $false
     }
-    Write-Host "TOUCHINIT size=$size ptr=$([IntPtr]::Size) ready=$ready"
+    Write-Host "TOUCHINIT size=$size ptr=$([IntPtr]::Size) ready=$ready layout=$([ArmTouch]::Layout())"
     if ([IntPtr]::Size -ne 8 -or $size -ne 144 -or $ready -le 0) { return $false }
     $down = [ArmTouch]::Send([ArmTouch]::Down, $sx1, $sy1, 0)
+    $downTrace = [ArmTouch]::Trace
     $hold = 0
     $move = 0
     $up = 0
+    $ux = $sx1
+    $uy = $sy1
     $still = ($sx1 -eq $sx2 -and $sy1 -eq $sy2)
     try {
         if ($down -gt 0) {
@@ -463,14 +563,19 @@ function Send-TutorTouchDrag([int]$sx1, [int]$sy1, [int]$sx2, [int]$sy2) {
                     $y = [int]($sy1 + ($sy2 - $sy1) * $i / 12)
                     $move = [ArmTouch]::Send([ArmTouch]::Update, $x, $y, 0)
                     if ($move -le 0) { break }
+                    $ux = $x
+                    $uy = $y
                     Start-Sleep -Milliseconds 28
                 }
             }
         }
     } finally {
-        if ($down -gt 0) { $up = [ArmTouch]::Send([ArmTouch]::Up, $sx2, $sy2, 0) }
+        if ($down -gt 0) {
+            # UP must repeat the last UPDATE pixel or the injection returns 87.
+            $up = [ArmTouch]::Send([ArmTouch]::Up, $ux, $uy, 0)
+        }
     }
-    Write-Host "TOUCHDRAG down=$down hold=$hold move=$move up=$up still=$still"
+    Write-Host "TOUCHDRAG down=$down hold=$hold move=$move up=$up still=$still trace=$downTrace holdtrace=$([ArmTouch]::Trace)"
     return ($down -gt 0 -and $hold -gt 0 -and $move -gt 0 -and $up -gt 0)
 }
 

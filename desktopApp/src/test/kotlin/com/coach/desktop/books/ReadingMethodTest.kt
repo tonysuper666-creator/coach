@@ -207,6 +207,175 @@ class ReadingMethodTest {
         assertTrue(slides.lecture)
     }
 
+    @Test
+    fun titleThatMerelyContainsProblemIsNotAnExercise() {
+        val page = BookPage(
+            1,
+            "The problem of value\na = b + c\nd = e + f\ng = h + i\nk = m + n\n",
+        )
+        val nodes = (1..12).map { n ->
+            BookTocNode(
+                "c$n", null, n, 1, TocNodeKind.CHAPTER, "$n", "The problem of chapter $n",
+                1, 1, source = HeadingSource.EPUB_TOC,
+            )
+        }
+        val book = Textbook(
+            id = "ricardo-shape",
+            title = "On Value",
+            format = "epub",
+            pages = listOf(page),
+            structure = BookStructure(
+                pageRoles = emptyMap(),
+                sections = emptyList(),
+                source = HeadingSource.EPUB_TOC.name,
+                tocNodes = nodes,
+                nativeBodyStart = BookPageAnchor(1),
+            ),
+        )
+        val signals = ReadingMethodSignalsReader.fromBook(book)
+        assertEquals(0, signals.exerciseSections)
+        assertTrue(signals.formulaMarks >= 4)
+        val choice = ReadingMethodSelector.choose(signals)
+        assertEquals(ReadingMethod.DURING, choice.method)
+        assertEquals(
+            "这本有公式，但没有章末题。全书 12 章，读到一节停下来用自己的话说。",
+            choice.reason,
+        )
+    }
+
+    @Test
+    fun treatiseReasonCitesHowTheBookIsBuilt() {
+        val nodes = (1..12).map { n ->
+            BookTocNode(
+                "c$n", null, n, 1, TocNodeKind.CHAPTER, "$n", "Chapter $n",
+                n, n, source = HeadingSource.EPUB_TOC,
+            )
+        }
+        val book = Textbook(
+            id = "treatise",
+            title = "An Inquiry into the Nature of Wages",
+            format = "epub",
+            pages = (1..12).map { BookPage(it, "A point is argued on this page.") },
+            structure = BookStructure(
+                pageRoles = emptyMap(),
+                sections = emptyList(),
+                source = HeadingSource.EPUB_TOC.name,
+                tocNodes = nodes,
+            ),
+        )
+        val choice = ReadingMethodSelector.choose(ReadingMethodSignalsReader.fromBook(book))
+        assertEquals(ReadingMethod.DURING, choice.method)
+        assertEquals(
+            "全书 12 章，每章一个论点，没有章末题。读到一节就停下来，用自己的话说。",
+            choice.reason,
+        )
+    }
+
+    @Test
+    fun storiesCiteHowManyPiecesAndDoNotUseTheGenericReason() {
+        val nodes = (1..8).map { n ->
+            BookTocNode(
+                "c$n", null, n, 1, TocNodeKind.CHAPTER, null, "篇$n",
+                n, n, source = HeadingSource.MANUAL,
+            )
+        }
+        val book = Textbook(
+            id = "stories",
+            title = "短篇",
+            format = "epub",
+            pages = (1..8).map { BookPage(it, "一段故事。") },
+            structure = BookStructure(
+                pageRoles = emptyMap(),
+                sections = emptyList(),
+                source = HeadingSource.MANUAL.name,
+                tocNodes = nodes,
+            ),
+        )
+        val choice = ReadingMethodSelector.choose(ReadingMethodSignalsReader.fromBook(book))
+        assertEquals(ReadingMethod.DURING, choice.method)
+        assertEquals(
+            "全书 8 则短篇，没有章末题。读到一节就停一下，用自己的话说刚刚读到的意思。",
+            choice.reason,
+        )
+        assertFalse(choice.reason.startsWith("这本看不出"))
+    }
+
+    @Test
+    fun lectureSlidesCiteThePageCount() {
+        val book = Textbook(
+            id = "slides",
+            title = "Week 1",
+            format = "pdf",
+            pages = (1..40).map { BookPage(it, "a point on this slide") },
+            structure = BookStructure(
+                pageRoles = emptyMap(),
+                sections = emptyList(),
+                source = HeadingSource.PDF_OUTLINE.name,
+                tocNodes = listOf(
+                    BookTocNode("c", null, 0, 1, TocNodeKind.CHAPTER, "1", "Week 1", 1, 40, source = HeadingSource.PDF_OUTLINE),
+                ),
+            ),
+        )
+        val choice = ReadingMethodSelector.choose(
+            ReadingMethodSignalsReader.fromBook(book, sourceName = "Week1-Lecture-Slides.pdf"),
+        )
+        assertEquals(ReadingMethod.DURING, choice.method)
+        assertEquals(
+            "这是讲义，共 40 页，没有章末题。读完一节停一下，用自己的话说这一节的要点。",
+            choice.reason,
+        )
+    }
+
+    @Test
+    fun answerPagesAndNumberedChapterEndProblemsCount() {
+        val answers = BookTocNode(
+            "ans", null, 2, 1, TocNodeKind.BACK_MATTER, null, "Answers to the Exercises",
+            3, 3, source = HeadingSource.PDF_OUTLINE,
+        )
+        val chapter = BookTocNode(
+            "ch", null, 1, 1, TocNodeKind.CHAPTER, "1", "Supply",
+            1, 2, source = HeadingSource.PDF_OUTLINE,
+        )
+        val problems = """
+            1. Why does rent rise when demand grows today?
+            2. Who receives the payment in this case?
+            3. How would a tax change the result here?
+            4. What happens if the supply of land is fixed?
+        """.trimIndent()
+        val book = Textbook(
+            id = "textbook-shape",
+            title = "Supply",
+            format = "pdf",
+            pages = listOf(
+                BookPage(1, "a = 1\nb = 2\nc = 3\nd = 4\n"),
+                BookPage(2, problems),
+                BookPage(3, "The worked results sit on this page."),
+            ),
+            structure = BookStructure(
+                pageRoles = emptyMap(),
+                sections = emptyList(),
+                source = HeadingSource.PDF_OUTLINE.name,
+                tocNodes = listOf(chapter, answers),
+                nativeBodyStart = BookPageAnchor(1),
+            ),
+        )
+        val signals = ReadingMethodSignalsReader.fromBook(book)
+        assertTrue(signals.exerciseSections >= 2, "answer page and numbered chapter-end problems, got ${signals.exerciseSections}")
+        val choice = ReadingMethodSelector.choose(signals)
+        assertEquals(ReadingMethod.BEFORE, choice.method)
+        assertTrue(choice.reason.contains("处章末练习"))
+        assertFalse(choice.reason.contains("看不出"))
+    }
+
+    @Test
+    fun companionChipIsNotASecondReadingMethod() {
+        val label = studyModeTriggerLabel("逐节精读", compact = true, noun = "伴读", badge = "学法：逐节精读")
+        assertEquals("伴读：逐节精读 ▾", label)
+        assertFalse("学法" in label)
+        val shelf = studyModeTriggerLabel("逐节精读", compact = true, noun = "学法", badge = "学法：逐节精读")
+        assertTrue(shelf.startsWith("学法："))
+    }
+
     private data class Case(val file: String, val signals: ReadingMethodSignals, val method: ReadingMethod, val reason: String)
 
     private fun sig(

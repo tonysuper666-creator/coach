@@ -1930,7 +1930,7 @@ internal class TextbookLibrary(
         return StagedBookImport(book(id), alreadyExisted = false)
     }
 
-    private fun sourceFilename(bookId: String): String? = database().use { db ->
+    internal fun sourceFilename(bookId: String): String? = database().use { db ->
         if (!BookSchemaMigration.tableColumns(db, "books").contains("source_filename")) return@use null
         db.prepareStatement("SELECT source_filename FROM books WHERE id=?").use { sql ->
             sql.setString(1, bookId)

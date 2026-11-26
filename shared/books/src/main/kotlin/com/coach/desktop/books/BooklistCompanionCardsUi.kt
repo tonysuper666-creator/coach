@@ -39,10 +39,11 @@ internal fun CrossBookCompanionSection(
     modifier: Modifier = Modifier,
     board: ConceptSayingsBoard? = null,
     checking: Boolean = false,
+    notice: String? = null,
     onOpenConcept: (conceptId: String) -> Unit = {},
 ) {
     val visibleCards = cards.take(ConceptStore.MAX_COMPANION_CARDS_PER_SECTION)
-    if (visibleCards.isEmpty() && board == null && !checking) return
+    if (visibleCards.isEmpty() && board == null && !checking && notice.isNullOrBlank()) return
 
     val colors = CoachTheme.colors
     val badgeShape = RoundedCornerShape(CoachV7.Radius.s)
@@ -91,7 +92,7 @@ internal fun CrossBookCompanionSection(
                         modifier = Modifier
                             .weight(1f)
                             .clip(badgeShape)
-                            .clickable(role = Role.Button, onClickLabel = "看其他书怎么说") {
+                            .clickable(role = Role.Button, onClickLabel = "别的书怎么说") {
                                 onOpenConcept(card.conceptId)
                             }
                             .pointerHoverIcon(PointerIcon.Hand)
@@ -160,8 +161,8 @@ internal fun CrossBookCompanionSection(
                 }
             }
         }
-        if (board != null || checking) {
-            ConceptSayingsBoardPane(board, checking, colors.dark, onJumpToBookPage)
+        if (board != null || checking || !notice.isNullOrBlank()) {
+            ConceptSayingsBoardPane(board, checking, notice, colors.dark, onJumpToBookPage)
         }
     }
 }
@@ -170,15 +171,16 @@ internal fun CrossBookCompanionSection(
 private fun ConceptSayingsBoardPane(
     board: ConceptSayingsBoard?,
     checking: Boolean,
+    notice: String?,
     dark: Boolean,
     onJumpToBookPage: (bookId: String, page: Int, quoteAnchor: String?, offsetUtf16: Int) -> Unit,
 ) {
     val colors = CoachTheme.colors
-    if (board == null && !checking) return
+    if (board == null && !checking && notice.isNullOrBlank()) return
     Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.7f))
         Text(
-            "其他书怎么说",
+            "别的书怎么说",
             style = MaterialTheme.typography.labelMedium,
             color = v7Pine(),
             modifier = Modifier.testTag("concept-sayings-title"),
@@ -189,6 +191,14 @@ private fun ConceptSayingsBoardPane(
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.fgSecondary,
                 modifier = Modifier.testTag("concept-sayings-checking"),
+            )
+        }
+        if (!notice.isNullOrBlank()) {
+            Text(
+                notice,
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.fgPrimary,
+                modifier = Modifier.testTag("concept-sayings-notice"),
             )
         }
         if (board != null) {

@@ -90,6 +90,7 @@ internal object ChapterConceptExtractor {
         "those", "though", "three", "through", "thus", "too", "two", "under", "until", "upon", "use",
         "used", "using", "very", "was", "way", "well", "were", "what", "when", "where", "whether",
         "which", "while", "who", "whom", "whose", "why", "will", "within", "without", "would", "yet",
+        "across", "toward", "towards", "onto", "via", "versus", "amid", "alongside",
         // Generic academic/editorial waste words (proposal §4.1)
         "market", "markets", "price", "prices", "policy", "policies", "system", "systems", "study",
         "studies", "result", "results", "chapter", "chapters", "section", "sections", "table", "tables",
@@ -174,6 +175,7 @@ internal object ChapterConceptExtractor {
         "compared", "contrary", "simple", "unlike", "whereas", "although", "because", "therefore",
         "thus", "hence", "furthermore", "moreover", "instead", "rather", "often", "usually", "always",
         "never", "sometimes", "rapidly", "strongly", "substantially", "entire", "total", "average",
+        "transfer", "transfers", "transferred", "transferring",
     )
 
     private val EN_WORD_SPAN_RE = Regex("""[A-Za-z][A-Za-z'-]{1,}""")
@@ -219,6 +221,21 @@ internal object ChapterConceptExtractor {
         return false
     }
 
+    /**
+     * 半截概念：短语停在动词或介词上，例如「adjustment transfers」。
+     * 完整名词短语（risk adjustment、adverse selection）不是半截。
+     */
+    internal fun looksLikeFragment(raw: String): Boolean {
+        val norm = normalizeConceptTerm(raw)
+        val words = norm.split(' ').filter(String::isNotBlank)
+        if (words.size < 2) return false
+        val last = words.last()
+        val stemmed = stemWord(last)
+        if (last in EN_COMMON_VERBS || stemmed in EN_COMMON_VERBS) return true
+        if (last in EN_STOPWORDS || stemmed in EN_STOPWORDS) return true
+        return false
+    }
+
     internal fun normalizeConceptTerm(raw: String): String {
         val collapsed = raw.trim()
             .replace('\u2019', '\'')
@@ -250,19 +267,32 @@ internal object ChapterConceptExtractor {
         return true
     }
 
+    private fun continuesContentRun(text: String, matches: List<MatchResult>, index: Int): Boolean {
+        if (index <= 0) return false
+        val prev = matches[index - 1]
+        val cur = matches[index]
+        val between = text.substring(prev.range.last + 1, cur.range.first)
+        if (between.isEmpty() || between.any { it != ' ' && it != '\t' }) return false
+        return isContentWord(prev.value)
+    }
+
     private fun extractCandidateTermsFromLine(text: String): List<Pair<String, Int>> {
         val out = mutableListOf<Pair<String, Int>>()
         val glueWords = setOf("of", "the", "and")
         val matches = EN_WORD_SPAN_RE.findAll(text).toList()
 
         // 1. Sliding content-word noun phrases (2-word, 3-word, and "X of Y" / "X of the Y" academic phrases).
+        // Phrases only start at the left edge of a content run, so "risk adjustment transfers"
+        // keeps "risk adjustment" and drops the half-phrase "adjustment transfers".
         for (i in matches.indices) {
             val first = matches[i]
             if (!isContentWord(first.value)) continue
+            val leftEdge = !continuesContentRun(text, matches, i)
             // Single long domain word (>= 9 chars, e.g. "coinsurance", "exclusivity", "curiosities", "repository").
-            if (first.value.length >= 9 && first.value.none(Char::isDigit) && !isGenericStopConcept(first.value)) {
+            if (leftEdge && first.value.length >= 9 && first.value.none(Char::isDigit) && !isGenericStopConcept(first.value)) {
                 out += first.value to first.range.first
             }
+            if (!leftEdge) continue
             var contentCount = 1
             var prevEnd = first.range.last
             for (j in i + 1 until minOf(matches.size, i + 5)) {
@@ -278,7 +308,7 @@ internal object ChapterConceptExtractor {
                     contentCount++
                     if (contentCount in 2..3) {
                         val phrase = text.substring(first.range.first, cur.range.last + 1)
-                        if (!isGenericStopConcept(phrase)) {
+                        if (!isGenericStopConcept(phrase) && !looksLikeFragment(phrase)) {
                             out += phrase to first.range.first
                         }
                     }

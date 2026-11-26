@@ -296,6 +296,11 @@ internal object ConceptStore {
                     "DELETE FROM concept_sayings WHERE concept_id NOT IN (SELECT concept_id FROM concept_entities)",
                 ).use { it.executeUpdate() }
             }
+            if (BookSchemaMigration.tableExists(db, "concept_saying_holds")) {
+                db.prepareStatement(
+                    "DELETE FROM concept_saying_holds WHERE concept_id NOT IN (SELECT concept_id FROM concept_entities)",
+                ).use { it.executeUpdate() }
+            }
             db.commit()
         } catch (failure: Throwable) {
             runCatching { db.rollback() }
@@ -686,6 +691,51 @@ internal object ConceptStore {
                     PRIMARY KEY (concept_id, input_hash, book_id)
                 )""".trimIndent(),
             )
+            st.executeUpdate(
+                """CREATE TABLE IF NOT EXISTS concept_saying_holds (
+                    concept_id TEXT NOT NULL,
+                    input_hash TEXT NOT NULL,
+                    hold_until INTEGER NOT NULL,
+                    PRIMARY KEY (concept_id, input_hash)
+                )""".trimIndent(),
+            )
+        }
+    }
+
+    /** 服务端没有这条路由、返回空或失败后，短时间内同一概念不再请求。 */
+    fun rememberSayingHold(db: Connection, conceptId: String, inputHash: String, holdUntilEpochMs: Long) {
+        ensureSayingsTable(db)
+        db.prepareStatement(
+            """INSERT INTO concept_saying_holds(concept_id, input_hash, hold_until)
+               VALUES(?,?,?)
+               ON CONFLICT(concept_id, input_hash) DO UPDATE SET hold_until=excluded.hold_until""".trimIndent(),
+        ).use { s ->
+            s.setString(1, conceptId)
+            s.setString(2, inputHash)
+            s.setLong(3, holdUntilEpochMs)
+            s.executeUpdate()
+        }
+    }
+
+    fun sayingHoldUntil(db: Connection, conceptId: String, inputHash: String): Long? {
+        if (!BookSchemaMigration.tableExists(db, "concept_saying_holds")) return null
+        return db.prepareStatement(
+            "SELECT hold_until FROM concept_saying_holds WHERE concept_id=? AND input_hash=?",
+        ).use { s ->
+            s.setString(1, conceptId)
+            s.setString(2, inputHash)
+            s.executeQuery().use { r -> if (r.next()) r.getLong(1) else null }
+        }
+    }
+
+    fun clearSayingHold(db: Connection, conceptId: String, inputHash: String) {
+        if (!BookSchemaMigration.tableExists(db, "concept_saying_holds")) return
+        db.prepareStatement(
+            "DELETE FROM concept_saying_holds WHERE concept_id=? AND input_hash=?",
+        ).use { s ->
+            s.setString(1, conceptId)
+            s.setString(2, inputHash)
+            s.executeUpdate()
         }
     }
 
@@ -965,6 +1015,7 @@ internal object ConceptStore {
                     s.executeBatch()
                 }
             }
+            clearSayingHold(db, board.conceptId, board.inputHash)
             db.commit()
         } catch (failure: Throwable) {
             runCatching { db.rollback() }

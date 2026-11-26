@@ -296,6 +296,131 @@ class ConceptSayingsTest {
         }
     }
 
+    @Test fun selectionMatchesNameAliasInflectionAndContainingPhrase() {
+        val names = listOf(
+            ConceptNameRef("concept-1", "Adverse Selection", listOf("hidden information")),
+            ConceptNameRef("concept-2", "risk adjustment", listOf("风险调整")),
+        )
+        assertEquals("concept-1", ConceptSayingLogic.matchConcept("adverse selections", names))
+        assertEquals("concept-1", ConceptSayingLogic.matchConcept("the adverse selection problem", names))
+        assertEquals("concept-1", ConceptSayingLogic.matchConcept("hidden information here", names))
+        assertEquals("concept-2", ConceptSayingLogic.matchConcept("风险调整", names))
+        assertEquals("concept-2", ConceptSayingLogic.matchConcept("risk adjustment transfers", names))
+        assertTrue(ConceptSayingLogic.canAskOtherBooks("coinsurance"))
+        assertTrue(ConceptSayingLogic.canAskOtherBooks("风险调整"))
+        assertFalse(ConceptSayingLogic.canAskOtherBooks("a"))
+        assertFalse(ConceptSayingLogic.canAskOtherBooks("adverse selection appears inside a much longer paragraph"))
+        assertNull(ConceptSayingLogic.matchConcept("a", names))
+        assertNull(ConceptSayingLogic.matchConcept("adverse selection appears inside a much longer paragraph", names))
+    }
+
+    @Test fun failedSayingRequestIsRememberedAndNotSentAgain() = runBlocking {
+        val board = ConceptSayingsBoard(
+            conceptId = "concept-1",
+            conceptName = "premium signal",
+            anchorBookId = "book-a",
+            inputHash = "abc",
+            columns = emptyList(),
+            pending = true,
+            candidates = listOf(
+                candidate("book-a", "m-a", "alpha theory stays on the page", anchor = true),
+                candidate("book-b", "m-b", "beta evidence stays on the page"),
+            ),
+        )
+        var fetches = 0
+        var unavailable = 0
+        val failed = settleConceptSayings(
+            board,
+            fetch = {
+                fetches++
+                null
+            },
+            save = { _, _ -> error("failure must not be cached as a saying") },
+            reload = { board.copy(pending = false) },
+            delayMillis = {},
+            remoteAllowed = true,
+            onUnavailable = { unavailable++ },
+        )
+        assertEquals(1, fetches)
+        assertEquals(1, unavailable)
+        assertTrue(failed.pending)
+        val now = 1_000_000L
+        val until = now + ConceptSayingLogic.RETRY_HOLD_MS
+        assertFalse(ConceptSayingLogic.mayRequestConceptSayings(board, true, until, now))
+        assertTrue(ConceptSayingLogic.mayRequestConceptSayings(board, true, until, until))
+        assertEquals(ConceptSayingLogic.RETRY_LATER, "稍后再试")
+
+        val root = Files.createTempDirectory("coach-sayings-hold-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val bookA = library.importBook(write(root, "book-a.md", chapter("Alpha theory says private signals raise the premium.")))
+            val bookB = library.importBook(write(root, "book-b.md", chapter("Beta evidence says informed buyers push the premium down.")))
+            val conceptId = "concept-hold"
+            val chapterA = BookChapterResolver.chapters(bookA).first()
+            val chapterB = BookChapterResolver.chapters(bookB).first()
+            library.setChapterManualReadState(bookA.id, chapterA.tocNodeId, chapterA.pagesTotal, true)
+            library.setChapterManualReadState(bookB.id, chapterB.tocNodeId, chapterB.pagesTotal, true)
+            library.upsertCollection(MaterialCollectionRecord("list-hold", CollectionKind.BOOKLIST, "synthetic hold"))
+            library.saveAlignedConcepts(
+                "list-hold",
+                listOf(ConceptEntityRecord(conceptId, "list-hold", "premium signal")),
+                listOf(
+                    mention(bookA, conceptId, "m-a", chapterA.tocNodeId, "Alpha theory says private signals raise the premium.", "甲书抬高保费。"),
+                    mention(bookB, conceptId, "m-b", chapterB.tocNodeId, "Beta evidence says informed buyers push the premium down.", "乙书压低保费。"),
+                ),
+                listOf(link("list-hold", conceptId, "m-a", "m-b", ConceptRelationType.OPPOSING_VIEW, 0.92)),
+            )
+            val live = library.conceptSayings(conceptId, bookA.id)
+            assertNotNull(live)
+            assertTrue(live.pending)
+            library.rememberSayingHold(conceptId, live.inputHash, until)
+            assertEquals(until, library.sayingHoldUntil(conceptId, live.inputHash))
+            assertFalse(ConceptSayingLogic.mayRequestConceptSayings(live, true, library.sayingHoldUntil(conceptId, live.inputHash), now))
+            var second = 0
+            settleConceptSayings(
+                live,
+                fetch = { second++; null },
+                save = { _, _ -> second += 100 },
+                reload = { live },
+                delayMillis = {},
+                remoteAllowed = false,
+            )
+            assertEquals(0, second)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun adjustmentTransfersIsNotExtractedAsAConcept() {
+        assertTrue(ChapterConceptExtractor.looksLikeFragment("adjustment transfers"))
+        assertFalse(ChapterConceptExtractor.looksLikeFragment("risk adjustment"))
+        assertFalse(ChapterConceptExtractor.looksLikeFragment("adverse selection"))
+        val root = Files.createTempDirectory("coach-fragment-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val book = library.importBook(
+                write(
+                    root,
+                    "fragment.md",
+                    """
+                    # Chapter 1 Risk Pools
+
+                    Compulsory participation combined with risk adjustment transfers mitigates adverse selection across competing insurers.
+                    Moral hazard increases healthcare utilization once coinsurance drops below marginal cost.
+                    Actuarial fairness requires pooled premiums to reflect average expected claims across the entire risk pool.
+                    Rothschild-Stiglitz screening uses deductible contracts to separate low-risk and high-risk consumers in equilibrium.
+                    """.trimIndent(),
+                ),
+            )
+            val (extracted, _) = ChapterConceptExtractor.extractForBook(book)
+            val terms = extracted.map { it.normalizedTerm }
+            assertTrue(terms.none { it == "adjustment transfer" || it == "adjustment transfers" || it.endsWith(" transfer") }, terms.toString())
+            assertTrue(terms.any { it == "risk adjustment" || it.startsWith("risk adjustment") }, terms.toString())
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
     private fun candidate(
         bookId: String,
         mentionId: String,

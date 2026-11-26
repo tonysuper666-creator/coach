@@ -2903,6 +2903,14 @@ internal class TextbookLibrary(
         ConceptStore.saveConceptSayings(db, board, parsed)
     }
 
+    @Synchronized fun rememberSayingHold(conceptId: String, inputHash: String, holdUntilEpochMs: Long) = database().use { db ->
+        ConceptStore.rememberSayingHold(db, conceptId, inputHash, holdUntilEpochMs)
+    }
+
+    @Synchronized fun sayingHoldUntil(conceptId: String, inputHash: String): Long? = database().use { db ->
+        ConceptStore.sayingHoldUntil(db, conceptId, inputHash)
+    }
+
     /** 读取全局「伴读讲解与提问」开关持久化状态；关闭时所有书单对齐均严禁发送正文到远端。 */
     @Synchronized fun isReadingAiExplainEnabled(): Boolean = database().use { db ->
         if (!BookSchemaMigration.tableExists(db, "reading_settings")) return@use true

@@ -995,7 +995,7 @@ internal fun ImmersiveSelectionPill(
                 modifier = Modifier.testTag("selection-action-other-books"),
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
             ) {
-                Text("其他书", style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary, maxLines = 1, softWrap = false)
+                Text("别的书怎么说", style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary, maxLines = 1, softWrap = false)
             }
         }
         V7TextButton(

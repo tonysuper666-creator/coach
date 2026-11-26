@@ -132,6 +132,9 @@ internal data class ConceptSayingsBoard(
 
 internal object ConceptSayingLogic {
     const val ONLY_THIS_BOOK = ConceptSayingsBoard.ONLY_THIS_BOOK
+    const val RETRY_LATER = "稍后再试"
+    const val NO_MATCH = "这几本书里还对不上这个说法。"
+    const val RETRY_HOLD_MS = 10 * 60_000L
 
     fun inputHash(conceptId: String, candidates: List<SayingCandidate>): String {
         val body = buildString {
@@ -149,15 +152,41 @@ internal object ConceptSayingLogic {
         return sha256(body).take(32)
     }
 
+    /** 选中的是一个词或短语，才提供「别的书怎么说」。整段文字不查。 */
+    fun canAskOtherBooks(selected: String): Boolean {
+        val key = normalize(selected)
+        return key.length in 2..40 && key.any { it.isLetter() }
+    }
+
+    /**
+     * 按概念名和同义说法匹配。选中文字不必和概念名一字不差：
+     * 多出来的词、词尾单复数、写在别名里的说法都可以。
+     * 整段（超过 40 字）和单字母仍然对不上。
+     */
     fun matchConcept(selected: String, names: List<ConceptNameRef>): String? {
         val key = normalize(selected)
         if (key.length !in 2..40) return null
-        val hits = names.mapNotNull { ref ->
-            val labels = listOf(ref.name) + ref.aliases
-            val matched = labels.map { normalize(it) }.filter { it.length >= 2 }
-            if (key in matched) ref.conceptId to matched.maxOf { it.length } else null
+        val stemmedKey = stemPhrase(key)
+        var bestId: String? = null
+        var bestScore = 0
+        for (ref in names) {
+            val labels = (listOf(ref.name) + ref.aliases).map { normalize(it) }.filter { it.length >= 2 }
+            for (label in labels) {
+                val stemmedLabel = stemPhrase(label)
+                val score = when {
+                    key == label || stemmedKey == stemmedLabel -> 1_000 + label.length
+                    containsPhrase(key, label) || containsPhrase(stemmedKey, stemmedLabel) -> 500 + label.length
+                    stemmedKey.length >= 4 && (containsPhrase(label, key) || containsPhrase(stemmedLabel, stemmedKey)) ->
+                        200 + stemmedKey.length
+                    else -> 0
+                }
+                if (score > bestScore) {
+                    bestScore = score
+                    bestId = ref.conceptId
+                }
+            }
         }
-        return hits.maxByOrNull { it.second }?.first
+        return bestId
     }
 
     /**
@@ -266,12 +295,37 @@ internal object ConceptSayingLogic {
         return cut
     }
 
-    /** 伴读讲解关闭，或本机已经核对过、或没有第二本书时，不把原文发去远端。 */
-    fun mayRequestConceptSayings(board: ConceptSayingsBoard?, aiExplainEnabled: Boolean): Boolean =
-        aiExplainEnabled && board != null && board.pending && board.candidates.size >= 2
+    /** 伴读讲解关闭、本机已经核对过、没有第二本书，或短时间内刚失败过时，不把原文发去远端。 */
+    fun mayRequestConceptSayings(
+        board: ConceptSayingsBoard?,
+        aiExplainEnabled: Boolean,
+        holdUntilEpochMs: Long? = null,
+        nowEpochMs: Long = 0L,
+    ): Boolean {
+        if (!aiExplainEnabled || board == null || !board.pending || board.candidates.size < 2) return false
+        if (holdUntilEpochMs != null && nowEpochMs < holdUntilEpochMs) return false
+        return true
+    }
 
     private fun normalize(raw: String): String =
         raw.trim().lowercase().replace(Regex("\\s+"), " ")
+
+    private fun stemPhrase(raw: String): String =
+        raw.split(' ').filter { it.isNotBlank() }.joinToString(" ") { stemToken(it) }
+
+    private fun stemToken(word: String): String = when {
+        word.length >= 6 && word.endsWith("ies") -> word.dropLast(3) + "y"
+        word.length >= 5 && word.endsWith("s") && !word.endsWith("ss") && !word.endsWith("us") && !word.endsWith("is") ->
+            word.dropLast(1)
+        else -> word
+    }
+
+    private fun containsPhrase(haystack: String, needle: String): Boolean {
+        if (needle.length < 2 || haystack.length < needle.length) return false
+        val cjk = needle.any { it in '\u4e00'..'\u9fff' } || haystack.any { it in '\u4e00'..'\u9fff' }
+        if (cjk) return needle in haystack
+        return " $needle " in " $haystack "
+    }
 
     private fun sha256(input: String): String =
         MessageDigest.getInstance("SHA-256")
@@ -292,20 +346,29 @@ internal suspend fun settleConceptSayings(
     delayMillis: suspend (Long) -> Unit,
     remoteAllowed: Boolean,
     maxPolls: Int = 4,
+    onUnavailable: suspend () -> Unit = {},
 ): ConceptSayingsBoard {
     if (!ConceptSayingLogic.mayRequestConceptSayings(board, remoteAllowed)) return board
     val request = board.toRequest()
     var polls = 0
     while (polls < maxPolls) {
         polls++
-        val response = runCatching { fetch(request) }.getOrNull() ?: return board
+        val response = runCatching { fetch(request) }.getOrNull()
+        if (response == null) {
+            onUnavailable()
+            return board
+        }
         val pending = (response["pending"] as? JsonPrimitive)?.booleanOrNull == true
         if (pending) {
             val wait = (response["retryAfterMs"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull() ?: 15_000L
             delayMillis(wait.coerceIn(1_000L, 20_000L))
             continue
         }
-        val parsed = ConceptSayingLogic.parse(response, board.candidates) ?: return board
+        val parsed = ConceptSayingLogic.parse(response, board.candidates)
+        if (parsed == null) {
+            onUnavailable()
+            return board
+        }
         save(board, parsed)
         return reload() ?: board
     }

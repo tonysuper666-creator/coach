@@ -2539,12 +2539,72 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 }
             }
         }
-        val resolved = pack ?: CourseAutoAligner.buildOfflineTopicPack(detail, topic, pagesByBook)
+        val merged = ExamPointDrillLocal.preserve(
+            pack ?: CourseAutoAligner.buildOfflineTopicPack(detail, topic, pagesByBook),
+            topic.pack,
+        )
+        val resolved = merged.drill?.let { merged.copy(drill = ExamPointDrillLocal.verify(it, pagesByBook)) } ?: merged
         library.withCourseDatabase { db ->
             CourseStore.saveTopicPack(db, topicId, resolved, topic.packSourcesHash.orEmpty())
         }
         val refreshed = library.courseDetail(courseId)
         mutable.update { it.copy(activeCourseDetail = refreshed) }
+    }
+
+    suspend fun generateExamPointDrills(courseId: String, explainer: BookExplainer?) = action(showBusy = false) {
+        mutable.update { it.copy(courseBusy = true) }
+        try {
+            if (explainer == null) {
+                mutable.update { it.copy(courseNotice = "出题需要联网，请先配对学习服务。") }
+                return@action
+            }
+            runCatching { explainer.load() }
+            if (explainer.identity == null) {
+                mutable.update { it.copy(courseNotice = "出题需要联网，请先配对学习服务。") }
+                return@action
+            }
+            val detail = library.courseDetail(courseId)
+            val points = detail.examinableTopics.filter { it.weekLabel == CourseExamPoints.LABEL && it.sources.isNotEmpty() }
+            if (points.isEmpty()) {
+                mutable.update { it.copy(courseNotice = "这门课还没有可出题的考点。") }
+                return@action
+            }
+            var lastError: String? = null
+            points.forEachIndexed { index, point ->
+                mutable.update { it.copy(courseNotice = "正在为考点出题（${index + 1}/${points.size}）") }
+                val pagesByBook = library.withCourseDatabase { db ->
+                    point.sources.associate { source -> source.bookId to CourseStore.loadPagesForBook(db, source.bookId) }
+                }
+                val request = CourseAutoAligner.buildTopicPackRequest(detail, point, pagesByBook)
+                val reply = explainer.examPointDrill(request)
+                val body = reply.body
+                if (body == null) {
+                    lastError = reply.error ?: "出题没有返回"
+                    return@forEachIndexed
+                }
+                val decoded = ExamPointDrillLocal.decode(body) ?: run {
+                    lastError = "出题结果无法读取"
+                    return@forEachIndexed
+                }
+                val verified = ExamPointDrillLocal.verify(decoded, pagesByBook)
+                val base = point.pack ?: CourseAutoAligner.buildOfflineTopicPack(detail, point, pagesByBook)
+                library.withCourseDatabase { db ->
+                    CourseStore.saveTopicPack(db, point.topicId, base.copy(drill = verified), point.packSourcesHash.orEmpty())
+                }
+            }
+            val refreshed = library.courseDetail(courseId)
+            val summary = ExamPointDrillLocal.report(
+                refreshed.examinableTopics.filter { it.weekLabel == CourseExamPoints.LABEL && it.sources.isNotEmpty() },
+            ).summary()
+            mutable.update {
+                it.copy(
+                    activeCourseDetail = refreshed,
+                    courseNotice = if (lastError == null) summary else "$summary。有考点未返回。",
+                )
+            }
+        } finally {
+            mutable.update { it.copy(courseBusy = false) }
+        }
     }
 
     suspend fun runCourseHandwrittenVision(courseId: String, bookId: String, explainer: BookExplainer?) = action {

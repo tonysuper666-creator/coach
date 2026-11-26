@@ -74,6 +74,7 @@ class LearningMigrationTest {
                     sql.execute("INSERT INTO margin_whisper_audit(whisper_id,book_id,toc_node_id,page,rule,collapsed_text,expanded_text,pdf_page_anchor,trigger_evidence_json,created_at) VALUES('w','$book','toc',4,'rule','a','b',4,'[]',1)")
                     sql.execute("INSERT INTO collection_materials(collection_id,material_id,added_at) VALUES('c','$book',1)")
                     sql.execute("INSERT INTO course_topic_sources(topic_id,book_id,start_page,end_page,source_role) VALUES('t','$book',1,4,'PRIMARY')")
+                    sql.execute("INSERT INTO exam_daily_state(course_id,daily_minutes,pins_json,updated_at) VALUES('c',90,'[]',1)")
                     // Simulate the previous schema before the user has ever enabled learning sync.
                     sql.execute("ALTER TABLE book_ask_turns DROP COLUMN write_id")
                     sql.execute("ALTER TABLE book_ask_turns DROP COLUMN answer_status")

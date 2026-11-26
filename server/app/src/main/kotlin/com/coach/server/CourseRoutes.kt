@@ -31,6 +31,7 @@ internal fun Route.courseRoutes(
     visionService: CourseVisionService? = null,
     literatureGuide: LiteratureGuideService? = null,
     literatureComparison: LiteratureComparisonService? = null,
+    examPointDrills: ExamPointDrillPipeline? = null,
 ) {
     val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -178,6 +179,55 @@ internal fun Route.courseRoutes(
             } catch (e: Exception) {
                 call.respondText(
                     buildJsonObject { put("error", e.message ?: "专题包生成暂时不可用，请稍后重试。") }.toString(),
+                    ContentType.Application.Json,
+                    HttpStatusCode.ServiceUnavailable,
+                )
+            }
+        }
+    }
+
+    post("/v1/library/course/exam-point-drill") {
+        call.withReaderConnection {
+            if (call.attributes.getOrNull(observedFriend) != null) {
+                call.respondText(
+                    buildJsonObject { put("error", "考点出题只在自己的电脑上做。") }.toString(),
+                    ContentType.Application.Json,
+                    HttpStatusCode.Forbidden,
+                )
+                return@withReaderConnection
+            }
+            val pipeline = examPointDrills ?: return@withReaderConnection call.respondText(
+                buildJsonObject { put("error", "考点出题服务暂未开启。") }.toString(),
+                ContentType.Application.Json,
+                HttpStatusCode.ServiceUnavailable,
+            )
+            try {
+                val bodyBytes = call.receiveChannel().readRemaining(4L * 1024 * 1024 + 1).readByteArray()
+                if (bodyBytes.size > 4 * 1024 * 1024) {
+                    throw MockError(HttpStatusCode.PayloadTooLarge, "本考点上传的原文片段过大，请缩小单次范围。")
+                }
+                val input = json.parseToJsonElement(bodyBytes.decodeToString()).jsonObject
+                val body = pipeline.generate(input)
+                call.respondText(body.toString(), ContentType.Application.Json)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: MockError) {
+                call.respondText(buildJsonObject { put("error", e.message) }.toString(), ContentType.Application.Json, e.status)
+            } catch (_: IllegalArgumentException) {
+                call.respondText(
+                    buildJsonObject { put("error", "考点出题请求参数无效。") }.toString(),
+                    ContentType.Application.Json,
+                    HttpStatusCode.BadRequest,
+                )
+            } catch (_: kotlinx.serialization.SerializationException) {
+                call.respondText(
+                    buildJsonObject { put("error", "考点出题请求格式不对。") }.toString(),
+                    ContentType.Application.Json,
+                    HttpStatusCode.BadRequest,
+                )
+            } catch (_: Exception) {
+                call.respondText(
+                    buildJsonObject { put("error", "考点出题暂时不可用，请稍后重试。") }.toString(),
                     ContentType.Application.Json,
                     HttpStatusCode.ServiceUnavailable,
                 )

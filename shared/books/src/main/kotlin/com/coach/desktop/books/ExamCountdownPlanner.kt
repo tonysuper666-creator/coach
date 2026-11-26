@@ -123,9 +123,24 @@ internal object ExamCountdownPlanner {
     ): ExamCountdownPlan {
         val safeBudget = dailyBudgetMinutes.coerceIn(45, 240)
         val parsedExamDate = parseExamDate(examDateRaw)
-        val daysRemaining = parsedExamDate?.let { exam ->
-            ChronoUnit.DAYS.between(today, exam).toInt().coerceAtLeast(1)
+        val rawDays = parsedExamDate?.let { exam -> ChronoUnit.DAYS.between(today, exam).toInt() }
+        if (rawDays != null && rawDays < 0) {
+            return ExamCountdownPlan(
+                courseId = courseId,
+                examDate = parsedExamDate.toString(),
+                daysRemaining = rawDays,
+                phase = CountdownPhase.FINAL_MOCK,
+                fsrsDailyCap = CountdownPhase.FINAL_MOCK.fsrsDailyCap,
+                dailyBudgetMinutes = safeBudget,
+                overdueAlertCount = 0,
+                rankedTopics = emptyList(),
+                dailySlots = emptyList(),
+                todayFocusTopicId = null,
+                headerSummaryLine = "考试已过",
+                primaryCtaLabel = "考试已过",
+            )
         }
+        val daysRemaining = rawDays?.coerceAtLeast(1)
         val phase = phaseFor(daysRemaining)
         val fsrsCap = phase.fsrsDailyCap
         val examinable = topics.filter { it.examStatus == CourseTopicStatus.EXAMINABLE }

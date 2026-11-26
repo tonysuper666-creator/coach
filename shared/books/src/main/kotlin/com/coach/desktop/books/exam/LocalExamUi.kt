@@ -56,8 +56,10 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import java.math.BigDecimal
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 
 private fun points(value: Long): String = BigDecimal.valueOf(value, 2).stripTrailingZeros().toPlainString()
 
@@ -259,6 +261,13 @@ internal fun CourseMockHubPane(
                     modifier = Modifier.testTag("course-mock-generate-btn"),
                 ) {
                     Text("生成并开始限时模考")
+                }
+                PrimaryButton(
+                    onClick = { scope.launch { controller.startFromQuestionBank(detail) } },
+                    enabled = !ui.busy,
+                    modifier = Modifier.testTag("course-mock-bank-btn"),
+                ) {
+                    Text("用题库组一套计时卷")
                 }
             }
 
@@ -506,6 +515,33 @@ private fun LocalExamPage(
                         modifier = Modifier.testTag("local-exam-total-score"),
                     )
                     Text("参考答案尚未独立核对，结果仅供对照。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+                }
+            }
+            if (isCourseMock && library != null) {
+                val losses = ExamBankMock.topLosses(ExamBankMock.scorePaper(paperObj, result))
+                if (losses.isNotEmpty()) {
+                    var scheduled by remember(attempt.str("mockId")) { mutableStateOf(false) }
+                    PaperCard(Modifier.fillMaxWidth().testTag("course-mock-losses")) {
+                        Text("丢分最多的考点", style = MaterialTheme.typography.titleMedium)
+                        losses.forEach { loss ->
+                            Text("${loss.title}，丢了 ${points(loss.lost)} 分", style = MaterialTheme.typography.bodyMedium)
+                        }
+                        PrimaryButton(
+                            onClick = {
+                                val courseId = paperObj.str("courseId").ifBlank { ui.courseId.orEmpty() }
+                                scope.launch {
+                                    withContext(Dispatchers.IO) {
+                                        val exam = ExamDailyHome.examDate(library, courseId)
+                                        val days = exam?.let { ChronoUnit.DAYS.between(LocalDate.now(), it).toInt() }
+                                        ExamDailyHome.schedulePins(library, courseId, LocalDate.now(), days, losses.map { it.topicId })
+                                    }
+                                    scheduled = true
+                                }
+                            },
+                            enabled = !ui.busy && !scheduled && paperObj.str("courseId").ifBlank { ui.courseId.orEmpty() }.isNotBlank(),
+                            modifier = Modifier.testTag("course-mock-schedule-losses"),
+                        ) { Text(if (scheduled) "已排进接下来几天" else "排进接下来几天") }
+                    }
                 }
             }
         } else Text("答案尚未独立核对。可以随时返回课程，再继续这次作答。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)

@@ -13,6 +13,7 @@ import androidx.compose.ui.unit.dp
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 internal val windowsToday = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
@@ -26,10 +27,44 @@ internal fun TodayCard(
     val question by produceState<BookAskDraft?>(null, library, ui.catalog) {
         value = withContext(Dispatchers.IO) { library?.askDraft() }
     }
+    val scope = rememberCoroutineScope()
+    var budgetRevision by remember { mutableIntStateOf(0) }
+    val exam by produceState<ExamDailyHomeView?>(null, library, budgetRevision) {
+        value = withContext(Dispatchers.IO) { library?.let { ExamDailyHome.load(it) } }
+    }
     val count = ui.todayQueue.cards.size
     val colors = CoachTheme.colors
     PaperCard(Modifier.testTag("home-focus-card"), color = colors.surface1) {
         Text("今天", modifier = Modifier.testTag("home-focus-title"), style = MaterialTheme.typography.titleLarge, fontFamily = LocalV7Fonts.current.display)
+        exam?.let { view ->
+            Text(
+                "${view.courseTitle} · ${view.tasks.header}",
+                modifier = Modifier.testTag("home-exam-countdown"),
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(view.tasks.taskLine(), modifier = Modifier.testTag("home-exam-tasks"), style = MaterialTheme.typography.bodyMedium)
+            if (view.tasks.pointsWithoutQuestions.isNotEmpty()) {
+                val names = view.tasks.pointsWithoutQuestions.joinToString("、") { view.titles[it] ?: it }
+                Text("这些考点还没有题：$names", modifier = Modifier.testTag("home-exam-gap"), style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+            }
+            if (library != null) {
+                Text("每天最多 ${view.tasks.budgetMinutes} 分钟", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(30, 60, 90, 120).forEach { minutes ->
+                        PaperButton(
+                            onClick = {
+                                scope.launch {
+                                    withContext(Dispatchers.IO) { ExamDailyHome.setBudget(library, view.courseId, minutes) }
+                                    budgetRevision++
+                                }
+                            },
+                            enabled = !ui.busy,
+                            modifier = Modifier.testTag("home-exam-minutes-$minutes"),
+                        ) { Text("$minutes 分钟") }
+                    }
+                }
+            }
+        }
         if (focus != null) {
             val chapter = ui.book?.takeIf { it.id == focus.id }?.lessons?.firstOrNull {
                 focus.readingPage in it.firstPage..it.lastPage
@@ -67,7 +102,7 @@ internal fun TodayCard(
             Text("接着问 · ${draft.text}", Modifier.fillMaxWidth().clickable(enabled = !ui.busy) { onQuestion(draft) }
                 .padding(vertical = 8.dp).testTag("today-question"), maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        if (focus == null && count == 0 && question == null) {
+        if (focus == null && count == 0 && question == null && exam == null) {
             CoachCardMeta(HOME_REVIEW_EMPTY_MESSAGE, Modifier.testTag("home-review-done"))
         }
     }

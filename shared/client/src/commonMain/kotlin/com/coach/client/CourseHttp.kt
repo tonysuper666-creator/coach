@@ -1,5 +1,7 @@
 package com.coach.client
 
+import io.ktor.client.request.parameter
+
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.HttpClientEngineConfig
@@ -238,6 +240,38 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         http.get("$base/v1/public/status").status.value
     } catch (e: kotlinx.coroutines.CancellationException) { throw e }
       catch (_: Exception) { null }
+
+    suspend fun learningProfile(): JsonObject? {
+        val reply = http.get("$base/learning-sync/profile")
+        return if (reply.status.isSuccess()) Json.parseToJsonElement(reply.bodyAsText()).jsonObject else null
+    }
+
+    suspend fun learningChanges(epoch: String?, after: Long, stream: String): JsonObject? {
+        val reply = http.get("$base/learning-sync/changes") {
+            parameter("stream",stream)
+            parameter("after", after)
+            epoch?.let { parameter("epoch", it) }
+        }
+        return if (reply.status.isSuccess()) Json.parseToJsonElement(reply.bodyAsText()).jsonObject else null
+    }
+
+    suspend fun learningSnapshot(epoch: String, token: String?, after: Long): JsonObject? {
+        val reply = http.get("$base/learning-sync/snapshot") {
+            parameter("epoch",epoch)
+            parameter("after",after)
+            token?.let { parameter("snapshotId",it) }
+        }
+        if (reply.status.value == 410) return buildJsonObject { put("expired",true) }
+        return if (reply.status.isSuccess()) Json.parseToJsonElement(reply.bodyAsText()).jsonObject else null
+    }
+
+    suspend fun pushLearningChange(operation: JsonObject): JsonObject? {
+        val reply = http.post("$base/learning-sync/push") {
+            contentType(ContentType.Application.Json)
+            setBody(operation.toString())
+        }
+        return if (reply.status.isSuccess()) Json.parseToJsonElement(reply.bodyAsText()).jsonObject else null
+    }
 
     /** Probe server capability for unified book upload (TON-1823). Never falls back to legacy fragments. */
     suspend fun unifiedBooksCapability(role: String): UnifiedServerCapability = try {

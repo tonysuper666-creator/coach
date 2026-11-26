@@ -60,11 +60,18 @@ class SableSessions internal constructor(
     private class Verification(var checked: Long? = null) { val lock = Mutex() }
     private val checks = ConcurrentHashMap<String, Verification>()
 
-    suspend fun exchange(token: String): DeviceCredential? {
+    internal fun forget(devices: List<String>) {
+        devices.forEach(checks::remove)
+    }
+
+    suspend fun exchange(token: String, books: UnifiedBookPipeline? = null): DeviceCredential? {
         val id = lookup(token) ?: return null
-        val credential = actor.execute {
+        suspend fun issue() = actor.execute {
             sableCredential(id.sub, id.username) { device, friend -> vault.seal(device, friend, token) }
-        } ?: return null
+        }
+        val credential = (if (books == null) issue() else {
+            books.withActiveAccount(UnifiedBookScope.fromSableFriend(com.coach.store.sableFriendName(id.sub))) { issue() }
+        }) ?: return null
         checks[credential.deviceId] = Verification(now())
         return credential
     }

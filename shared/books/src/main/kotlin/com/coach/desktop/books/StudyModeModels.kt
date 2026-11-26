@@ -523,7 +523,7 @@ internal data class WholeBookMapMeta(
 internal object StudyModeStore {
     private val jsonParser = Json { ignoreUnknownKeys = true; isLenient = true }
 
-    private const val DDL = """
+    internal const val PREFERENCES_DDL = """
         CREATE TABLE IF NOT EXISTS book_study_preferences(
             book_id TEXT PRIMARY KEY,
             study_mode TEXT NOT NULL,
@@ -564,7 +564,7 @@ internal object StudyModeStore {
         DriverManager.getConnection("jdbc:sqlite:${libraryDir.resolve("library.sqlite")}").apply {
             createStatement().use {
                 it.execute("PRAGMA busy_timeout=5000")
-                it.execute(DDL.trimIndent())
+                it.execute(PREFERENCES_DDL.trimIndent())
                 it.execute(PACKS_DDL.trimIndent())
                 it.execute(BOOK_MAP_META_DDL.trimIndent())
             }

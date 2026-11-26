@@ -15,6 +15,16 @@ import kotlinx.serialization.decodeFromString
 
 class DeviceAuthorizationException : IllegalStateException("Device pairing required")
 
+/** The server returned an HTTP status. Connection failures are false. 401 is reported separately as [DeviceAuthorizationException]. */
+fun reachedCoachHttpStatus(error: Throwable): Boolean {
+    var current: Throwable? = error
+    while (current != null) {
+        if (current is ResponseException) return true
+        current = current.cause
+    }
+    return false
+}
+
 /** 服务端永久拒收这条命令（格式、设备不符、超过大小上限）：重发也不会成功，不能挡住后面的同步。 */
 class CommandRefused(val status: Int) : IllegalStateException("Command refused: HTTP $status")
 

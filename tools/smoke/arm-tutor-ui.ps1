@@ -934,7 +934,10 @@ function Test-WholeLesson {
 # and misses the white word on that pill (run 45779598059 still showed 导入文件).
 function Find-DarkImportPill([string]$name) {
     $path = Join-Path $OutDir "$name.png"
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    if (-not (Test-Path -LiteralPath $path)) {
+        Write-Host "DARKPILL missing $path"
+        return $null
+    }
     $bmp = [Drawing.Bitmap]::new($path)
     try {
         $w = $bmp.Width
@@ -955,12 +958,21 @@ function Find-DarkImportPill([string]$name) {
                     $run = 0
                 }
             }
+            if ($run -ge 60 -and $run -le 180) {
+                $hits += ,([pscustomobject]@{ X = [int]($runStart + ($run / 2)); Y = $y })
+            }
         }
-        if (@($hits).Count -lt 6) { return $null }
+        if (@($hits).Count -lt 6) {
+            Write-Host "DARKPILL hits=$(@($hits).Count) ${w}x${h}"
+            return $null
+        }
         $xs = @($hits | ForEach-Object { $_.X })
         $xmin = ($xs | Measure-Object -Minimum).Minimum
         $xmax = ($xs | Measure-Object -Maximum).Maximum
-        if (($xmax - $xmin) -gt 40) { return $null }
+        if (($xmax - $xmin) -gt 40) {
+            Write-Host "DARKPILL spread=$($xmax - $xmin) hits=$(@($hits).Count)"
+            return $null
+        }
         $ys = @($hits | ForEach-Object { $_.Y })
         return [pscustomobject]@{
             X = [int](($xs | Measure-Object -Average).Average)

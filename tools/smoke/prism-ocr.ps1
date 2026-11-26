@@ -221,11 +221,19 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
             }
         }
         if (-not $invoked) {
-            $pill = Find-DarkImportPill 'installed-window-printwindow'
-            if ($pill) {
-                Click-At $pill.X $pill.Y | Out-Null
-                Write-Output "Opened import via the dark pill $($pill.X),$($pill.Y)"
-                $invoked = $true
+            # The first PrintWindow can land before the empty shelf paints. OCR above
+            # already waited; take a new frame and look for the black import pill.
+            foreach ($try in 1..4) {
+                Save-OwnWindow 'shelf-for-pill.png'
+                $pill = Find-DarkImportPill 'shelf-for-pill'
+                if ($pill) {
+                    Click-At $pill.X $pill.Y | Out-Null
+                    Write-Output "Opened import via the dark pill $($pill.X),$($pill.Y) try=$try"
+                    $invoked = $true
+                    break
+                }
+                Write-Output "DARKPILL miss try=$try"
+                Start-Sleep -Milliseconds 400
             }
         }
         if (-not $invoked) {

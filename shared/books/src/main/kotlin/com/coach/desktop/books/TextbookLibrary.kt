@@ -2165,8 +2165,12 @@ internal class TextbookLibrary(
             for (page in source.pages) {
                 val index = page.number - 1
                 if (index !in 0 until count) continue
-                folios[index] = LiteraturePdfLayout.extract(pdf, page.number)
-                    .mapNotNull { LiteraturePrintedPages.parseFolio(it.printedPage) }
+                val regions = LiteraturePdfLayout.extract(pdf, page.number)
+                folios[index] = (
+                    LiteraturePdfLayout.consumeEdgeFolios(page.number) +
+                        regions.flatMap { LiteraturePrintedPages.headerCandidates(it.text) } +
+                        regions.mapNotNull { LiteraturePrintedPages.parseFolio(it.printedPage) }
+                    ).distinct()
             }
             LiteraturePrintedPages.resolve(folios, List(count) { labels.getOrNull(it) })
         }

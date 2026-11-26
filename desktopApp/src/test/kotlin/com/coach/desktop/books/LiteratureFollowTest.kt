@@ -39,6 +39,16 @@ class LiteratureFollowTest {
             listOf(listOf(20), listOf(21), emptyList(), emptyList()),
             listOf(20, 21, 22, 23),
         ))
+        assertEquals(listOf(147, 148, null, 150), LiteraturePrintedPages.resolve(
+            listOf(listOf(147), emptyList(), listOf(999), listOf(150)),
+            emptyList(),
+        ))
+        assertEquals(listOf(147, 148, 149, 150), LiteraturePrintedPages.resolve(
+            listOf(listOf(147), emptyList(), emptyList(), listOf(150)),
+            listOf(100, 101, 102, 103),
+        ))
+        assertEquals(listOf(147), LiteraturePrintedPages.headerCandidates("The Historical Journal 147\nThe body starts here."))
+        assertEquals(emptyList(), LiteraturePrintedPages.headerCandidates("The Historical Journal 2002\nThe body starts here."))
         assertEquals("第 20 页", LiteraturePrintedPages.display(2, 20))
         assertEquals("PDF 第 2 页", LiteraturePrintedPages.display(2, null))
         assertFalse("印刷第" in LiteraturePrintedPages.display(2, 20))
@@ -73,6 +83,114 @@ class LiteratureFollowTest {
         assertEquals(listOf("Introduction", "The Argument", "Conclusion"), sections.map { it.title })
         assertTrue(sections.all { "Journal" !in it.title && "HUNTER" !in it.title })
         assertTrue(sections.all { it.sentences.isNotEmpty() })
+    }
+
+    @Test fun captionsNotesAndSplitHeadersAreNotSections() {
+        val book = paper(
+            """
+            The Historical Journal
+            Fig. 1 The cabinet
+            The keeper argued that the repository preserved provenance across decades.
+            Witnesses confirmed that written evidence stayed intact during inspections.
+            """.trimIndent(),
+            """
+            The Historical Journal
+            confirmed the provenance12
+            However the archive argued that custody changed after the second inspection.
+            Patrons recorded the missing labels before the committee adjourned for summer.
+            """.trimIndent(),
+            """
+            T h e H i s t o r i c a l
+            The society retained duplicate minutes so later readers could check the chain.
+            Therefore the register claimed that evidence confirmed provenance beyond doubt.
+            """.trimIndent(),
+            """
+            The Historical Journal
+            Notes
+            Smith, Title (London, 1989), pp. 12-14.
+            The keeper argued that the repository preserved provenance across the last decade.
+            """.trimIndent(),
+        )
+        val candidates = LiteraturePassages.extractCandidates(book)
+        val sections = LiteratureSections.build(book, candidates)
+        val titles = sections.map { it.title }
+        assertTrue(sections.isNotEmpty(), titles.toString())
+        assertTrue(titles.none { title ->
+            val lower = title.lowercase()
+            "fig" in lower || "notes" in lower || "historical" in lower
+        }, titles.toString())
+        assertTrue(sections.none { section -> section.sentences.any { "pp." in it.quote } }, titles.toString())
+        assertTrue(titles.all { it == "提出问题" || it == "转折" || it == "收束" || it.startsWith("第 ") }, titles.toString())
+    }
+
+    @Test fun aSentenceContinuedOnTheNextPageIsNotAStop() {
+        val book = paper(
+            "The keeper argued that the repository preserved provenance across the opening inspection without a stop",
+            """
+            Preserved provenance across the later inspections and stayed intact.
+            The keeper argued that the repository preserved provenance across decades.
+            However the archive argued that custody changed after the second inspection.
+            Therefore the register claimed that evidence confirmed provenance beyond doubt.
+            Witnesses confirmed that written evidence stayed intact during inspections.
+            Readers still cite the register when they reconstruct that custody.
+            """.trimIndent(),
+        )
+        val candidates = LiteraturePassages.extractCandidates(book)
+        val sections = LiteratureSections.build(book, candidates)
+        val quotes = sections.flatMap { it.sentences }.map { it.quote }
+        assertTrue(quotes.isNotEmpty())
+        assertTrue(quotes.none { it.startsWith("Preserved provenance") })
+        assertTrue(quotes.any { it.startsWith("The keeper argued") })
+    }
+
+    @Test fun onlyAnAbstractHeadingStagesTheRest() {
+        val book = paper(
+            """
+            The Historical Journal
+            Abstract
+            The keeper argued that the repository preserved provenance across decades.
+            Witnesses confirmed that written evidence stayed intact during inspections.
+            """.trimIndent(),
+            """
+            The Historical Journal
+            Confirmed The Provenance12
+            However the archive argued that custody changed after the second inspection.
+            Patrons recorded the missing labels before the committee adjourned for summer.
+            Members compared each specimen with the custody ledger before the annual meeting.
+            """.trimIndent(),
+            """
+            The Historical Journal
+            Therefore the register claimed that evidence confirmed provenance beyond doubt.
+            The society retained duplicate minutes so later readers could check the chain.
+            Clerks copied the accession numbers into a second volume that winter.
+            Scholars still cite that inventory when they reconstruct the collection.
+            """.trimIndent(),
+        )
+        val sections = LiteratureSections.build(book, LiteraturePassages.extractCandidates(book))
+        val titles = sections.map { it.title }
+        assertEquals("Abstract", titles.first(), titles.toString())
+        assertTrue(titles.none { "Provenance" in it || "12" in it }, titles.toString())
+        assertTrue(titles.drop(1).all { it == "提出问题" || it == "转折" || it == "收束" || it.startsWith("第 ") }, titles.toString())
+        assertTrue(sections.first().sentences.none { it.quote.startsWith("However") })
+    }
+
+    @Test fun catalogLineIsNotASectionTitle() {
+        val book = paper(
+            """
+            Published in print: 23 September 2004
+            This version: 2006
+            The keeper argued that the repository preserved provenance across decades.
+            Witnesses confirmed that written evidence stayed intact during inspections.
+            However the archive argued that custody changed after the second inspection.
+            Therefore the register claimed that evidence confirmed provenance beyond doubt.
+            Readers still cite the register when they reconstruct that custody.
+            Scholars can still trace each object back to the original shelf mark.
+            """.trimIndent(),
+        )
+        val sections = LiteratureSections.build(book, LiteraturePassages.extractCandidates(book))
+        val titles = sections.map { it.title }
+        assertTrue(titles.none { "published" in it.lowercase() || "version" in it.lowercase() }, titles.toString())
+        assertTrue(titles.all { it == "提出问题" || it == "转折" || it == "收束" || it.startsWith("第 ") }, titles.toString())
     }
 
     @Test fun paperWithoutHeadingsSplitsIntoArgumentStages() {
@@ -143,6 +261,8 @@ class LiteratureFollowTest {
             assertTrue(literatureFolio.pages.all { page -> page.guideRegions.all { it.printedPage == null } })
             assertEquals(listOf(20, 21, 22, 23), library.literaturePageNumbers(folio.id))
             assertEquals(listOf(null, null), library.literaturePageNumbers(jstor.id))
+            val headerLine = library.importBook(headerLinePdf(root))
+            assertEquals(listOf(20, 21, null, 23), library.literaturePageNumbers(headerLine.id))
 
             val facingPaper = LiteratureFollow.load(library, facing.id)
             assertTrue(facingPaper.sections.all { section ->
@@ -285,6 +405,17 @@ class LiteratureFollowTest {
         }
         sentences.map { lines ->
             listOf("The Historical Journal" to 740f) + lines.mapIndexed { index, line -> line to (680f - index * 28f) }
+        }
+    }
+
+    private fun headerLinePdf(root: Path): Path = pdf(root, "Header_Line.pdf", "Header Line", labelStart = 90) { _ ->
+        (0 until 4).map { index ->
+            val printed = if (index == 2) 99 else 20 + index
+            listOf(
+                "The Historical Journal $printed" to 740f,
+                "The keeper argued that the repository preserved provenance across decades." to 680f,
+                "Witnesses confirmed that written evidence stayed intact during inspections." to 656f,
+            )
         }
     }
 

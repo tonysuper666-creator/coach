@@ -2982,6 +2982,7 @@ internal fun TextbookReader(
 
         // 9. 统一顶部轻提示队列（报错 / 出处警告 / 坏页 / 断开连接），同一时刻最多显示一条，均可关闭，且不与选段胶囊抢位。
         val noticeText = sourceWarning
+            ?: ui.literatureQuoteMiss
             ?: (if (viewSaveError) "视图设置暂未保存，下次切换将重试。" else null)
             ?: (if (markError) "高亮暂未保存，请重试。" else null)
             ?: (if (chosen != null && learnableSelection == null) "选段超过 4000 字，请缩窄范围后再问。" else null)

@@ -93,6 +93,8 @@ internal data class LibraryUi(
     val uploadStatuses: Map<String, BookUploadEntry> = emptyMap(),
     /** Follow-route quote highlight. Stays after the reader consumes [pendingCourseJump]. */
     val literatureQuoteHighlight: BookPassage? = null,
+    /** Set when a follow-route jump cannot highlight the sentence on the reader page. */
+    val literatureQuoteMiss: String? = null,
 )
 
 internal class TextbookController(val library: TextbookLibrary, var structureProvider: BookStructureProvider? = null) {
@@ -2311,6 +2313,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 prompt = null,
                 review = null,
                 pendingCourseJump = null,
+                literatureQuoteMiss = null,
                 keepAskTabOpen = false,
                 activeCourseId = courseId,
                 activeCourseTopicId = null,
@@ -2360,6 +2363,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 review = null,
                 pendingCourseJump = passage,
                 literatureQuoteHighlight = passage,
+                literatureQuoteMiss = if (passage == null) LITERATURE_QUOTE_MISS else null,
                 keepAskTabOpen = false,
                 activeCourseId = courseId,
                 activeCourseTopicId = null,

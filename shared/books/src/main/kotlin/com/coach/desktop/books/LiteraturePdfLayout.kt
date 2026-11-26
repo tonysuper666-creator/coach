@@ -1317,6 +1317,19 @@ internal object LiteraturePdfLayout {
     }
 
     private val noteLabel = Regex("""(?:\d{1,3}[.)]?|\[\d{1,3}]|[*†‡§])""")
+    private val edgeFolios = ThreadLocal<MutableMap<Int, MutableList<Int>>>()
+
+    /** Arabic page digits seen on the header or footer of [page] during the latest [extract] on this thread. */
+    fun consumeEdgeFolios(page: Int): List<Int> {
+        val found = edgeFolios.get()?.remove(page).orEmpty()
+        return found.distinct()
+    }
+
+    private fun rememberEdgeFolios(page: Int, values: List<Int>) {
+        if (values.isEmpty()) return
+        val map = edgeFolios.get() ?: mutableMapOf<Int, MutableList<Int>>().also { edgeFolios.set(it) }
+        map.getOrPut(page) { mutableListOf() }.addAll(values)
+    }
 
     private fun insideCropBox(position: BookPdfTextPosition, crop: BookPdfRectangle): Boolean {
         val tm = position.textMatrix
@@ -1333,6 +1346,7 @@ internal object LiteraturePdfLayout {
                                             val addedNoteWords: Int)
 
     fun extract(pdf: BookPdfDocument, page: Int, trace: ((FootnoteLayoutTrace) -> Unit)? = null): List<GuideRegion> {
+        edgeFolios.get()?.remove(page)
         val pdfPage = pdf.getPage(page - 1)
         val crop = pdfPage.cropBox
         val graphics = pageGraphics(pdfPage)
@@ -1582,9 +1596,27 @@ internal object LiteraturePdfLayout {
             val lines = rows.mapNotNull { row -> row.words.filter { it in members }.takeIf { it.isNotEmpty() } }
             if (lines.isEmpty()) return@mapNotNull null
             val edgeLines = (lines.take(2) + lines.takeLast(2))
+            val wideFolios = mutableListOf<Int>()
+            for (line in edgeLines) {
+                val tokens = line.map { it.text.trim() }.filter { it.isNotEmpty() }
+                if (tokens.isEmpty()) continue
+                fun take(token: String, alone: Boolean) {
+                    val match = folio.matchEntire(token) ?: return
+                    val raw = match.groupValues[1]
+                    if (!raw.all(Char::isDigit)) return
+                    val value = raw.toIntOrNull() ?: return
+                    if (value !in 1..9999) return
+                    if (!alone && value in 1500..2099) return
+                    wideFolios += value
+                }
+                take(tokens.joinToString(" "), tokens.size == 1)
+                take(tokens.first(), tokens.size == 1)
+                if (tokens.size > 1) take(tokens.last(), alone = false)
+            }
+            rememberEdgeFolios(page, wideFolios)
             val label = edgeLines.firstNotNullOfOrNull { line ->
                 folio.matchEntire(line.joinToString(" ") { it.text })?.groupValues?.get(1)
-            } ?: edgeLines.firstNotNullOfOrNull { line ->
+            } ?: wideFolios.firstOrNull()?.toString() ?: edgeLines.firstNotNullOfOrNull { line ->
                 val candidates = listOf(line.first() to line.getOrNull(1), line.last() to line.getOrNull(line.lastIndex - 1))
                 candidates.firstOrNull { (w, neighbor) ->
                     folio.matches(w.text) && neighbor != null &&

@@ -22,13 +22,41 @@ internal data class FollowPaper(
     val printedByPdfPage: List<Int?>,
 )
 
+/** Shown on the reader when a follow-route quote does not remap onto that page. */
+internal const val LITERATURE_QUOTE_MISS = "无法确认原句：这一页对不上这句原文，所以没有高亮。"
+
 /** Printed-page chain for the follow route. PDF labels are used only after a folio on the page has been checked. */
 internal object LiteraturePrintedPages {
     private val arabicFolio = Regex("""(?i)^(?:p(?:age)?\.?\s*)?(\d{1,4})$""")
+    private val edgeToken = Regex("""(?i)^(?:p(?:age)?\.?\s*)?(\d{1,4})$""")
 
     fun parseFolio(raw: String?): Int? {
         val match = arabicFolio.matchEntire(raw?.trim().orEmpty()) ?: return null
         return match.groupValues[1].toIntOrNull()?.takeIf { it in 1..9999 }
+    }
+
+    /** Leading or trailing page digits on the first and last lines. A year glued to a header is not a folio. */
+    fun headerCandidates(text: String): List<Int> {
+        val lines = text.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+        if (lines.isEmpty()) return emptyList()
+        val edges = (lines.take(2) + lines.takeLast(2)).distinct()
+        val found = mutableListOf<Int>()
+        for (line in edges) {
+            val tokens = line.split(Regex("""\s+""")).filter(String::isNotEmpty)
+            if (tokens.isEmpty()) continue
+            considerToken(tokens.first(), tokens.size == 1)?.let { found += it }
+            if (tokens.size > 1) considerToken(tokens.last(), alone = false)?.let { found += it }
+            if (tokens.size == 1) parseFolio(line)?.let { found += it }
+        }
+        return found.distinct()
+    }
+
+    private fun considerToken(token: String, alone: Boolean): Int? {
+        val match = edgeToken.matchEntire(token.trim().trim { it == ',' || it == '.' || it == ';' || it == ':' }) ?: return null
+        val value = match.groupValues[1].toIntOrNull() ?: return null
+        if (value !in 1..9999) return null
+        if (!alone && value in 1500..2099) return null
+        return value
     }
 
     fun display(pdfPage: Int, printed: Int?): String =
@@ -37,40 +65,26 @@ internal object LiteraturePrintedPages {
     fun resolve(folioOptions: List<List<Int>>, labels: List<Int?>): List<Int?> {
         val count = folioOptions.size
         if (count == 0) return emptyList()
-        val trusted = arrayOfNulls<Int>(count)
         fun options(index: Int): List<Int> =
             folioOptions.getOrNull(index).orEmpty().filter { it in 1..9999 }.distinct()
-        fun agrees(index: Int, value: Int): Boolean {
-            if (options(index - 1).any { it == value - 1 } || options(index + 1).any { it == value + 1 }) return true
-            if (options(index - 1).isEmpty() && options(index - 2).any { it == value - 2 }) return true
-            if (options(index + 1).isEmpty() && options(index + 2).any { it == value + 2 }) return true
-            return false
-        }
-        for (index in 0 until count) {
-            trusted[index] = options(index).firstOrNull { agrees(index, it) }
-        }
-        var extended = true
-        while (extended) {
-            extended = false
-            for (index in 0 until count) {
-                if (trusted[index] != null) continue
+        val hits = mutableListOf<Pair<Int, Int>>()
+        for (index in 0 until count) for (value in options(index)) hits += index to value
+        val chain = longestIncreasingChain(hits)
+        val trusted = arrayOfNulls<Int>(count)
+        val blocked = BooleanArray(count)
+        if (chain != null) {
+            val anchorIndex = chain.first().first
+            val anchorValue = chain.first().second
+            val lastIndex = chain.last().first
+            for (index in anchorIndex..lastIndex) {
+                val expected = anchorValue + (index - anchorIndex)
                 val choices = options(index)
-                if (choices.isEmpty()) continue
-                val fromLeft = trusted.getOrNull(index - 1)?.let { left -> choices.firstOrNull { it == left + 1 } }
-                val fromRight = trusted.getOrNull(index + 1)?.let { right -> choices.firstOrNull { it == right - 1 } }
-                val picked = fromLeft ?: fromRight ?: continue
-                trusted[index] = picked
-                extended = true
+                when {
+                    expected in choices -> trusted[index] = expected
+                    choices.isEmpty() -> trusted[index] = expected
+                    else -> blocked[index] = true
+                }
             }
-        }
-        for (index in 1 until count - 1) {
-            if (trusted[index] != null) continue
-            val left = trusted[index - 1] ?: continue
-            val right = trusted[index + 1] ?: continue
-            if (right - left != 2) continue
-            val expected = left + 1
-            val choices = options(index)
-            if (choices.isEmpty() || expected in choices) trusted[index] = expected
         }
         if (trusted.all { it == null }) return List(count) { null }
         val labelsDisagree = (0 until count).any { index ->
@@ -84,7 +98,7 @@ internal object LiteraturePrintedPages {
         while (grew) {
             grew = false
             for (index in 0 until count) {
-                if (resolved[index] != null) continue
+                if (resolved[index] != null || blocked[index]) continue
                 val label = labels.getOrNull(index)?.takeIf { it in 1..9999 } ?: continue
                 val left = resolved.getOrNull(index - 1)
                 val right = resolved.getOrNull(index + 1)
@@ -96,14 +110,43 @@ internal object LiteraturePrintedPages {
         }
         return resolved.toList()
     }
+
+    /** Longest run where the printed number rises by exactly one per PDF page. One bad page does not drop the run. */
+    private fun longestIncreasingChain(hits: List<Pair<Int, Int>>): List<Pair<Int, Int>>? {
+        var best: List<Pair<Int, Int>> = emptyList()
+        var bestSpan = -1
+        for ((anchorIndex, anchorValue) in hits) {
+            val chain = hits.mapNotNull { (index, value) ->
+                if (value - anchorValue == index - anchorIndex) index to value else null
+            }.distinctBy { it.first }.sortedBy { it.first }
+            if (chain.size < 2) continue
+            val span = chain.last().first - chain.first().first
+            if (chain.size > best.size || (chain.size == best.size && span > bestSpan)) {
+                best = chain
+                bestSpan = span
+            }
+        }
+        return best.takeIf { it.size >= 2 }
+    }
 }
 
 internal object LiteratureSections {
     private val keywordHeading = Regex(
-        """(?i)^(?:abstract|introduction|background|discussion|method(?:s|ology)?|results?|conclusions?|summary|引言|导言|摘要|背景|方法|结果|讨论|结论|小结|(?:[IVX]+\.|\d+(?:\.\d+)*[.)])\s+\p{L}.{0,80})$""",
+        """(?i)^(?:abstract|introduction|background|discussion|method(?:s|ology)?|results?|conclusions?|summary|引言|导言|摘要|背景|方法|结果|讨论|结论|小结|结语|(?:[IVX]+\.|\d+(?:\.\d+)*[.)])\s+\p{L}.{0,80})$""",
     )
+    private val numberedPrefix = Regex("""(?i)^(?:[IVX]+\.|\d+(?:\.\d+)*[.)])\s+""")
+    private val abstractLine = Regex("""(?i)^(?:abstract|summary|摘要|概要)\s*[:：]?$""")
     private val endPunct = Regex("""[.!?。！？][”’"')\]]*$""")
     private val bibliography = Regex("""(?i)^(?:references|bibliography|works cited|endnotes|notes and references|参考文献|尾注)\s*[:：]?$""")
+    private val notesBoundary = Regex(
+        """(?i)^(?:endnotes?|footnotes?|notes(?:\s+to\s+(?:pages?|chapters?|the\s+text))?|参考文献|尾注|注释)\s*[:：]?$""",
+    )
+    private val caption = Regex("""(?i)^(?:fig(?:ure)?s?|plates?|tables?|illus(?:tration)?s?|captions?|图|表|插图)\b""")
+    private val catalog = Regex(
+        """(?i)published in print|oxford dictionary|dictionary of national biography|this version|stable url|©|(?:1[5-9]\d{2}|20\d{2})\s*[–—-]\s*(?:1[5-9]\d{2}|20\d{2})""",
+    )
+    private val attachedNote = Regex("""\p{L}\d{1,3}\b|[\u00B2\u00B3\u00B9\u2070-\u2079]|\[\d{1,3}]|\(\d{1,3}\)""")
+    private val trailingDigits = Regex("""\d{1,3}$""")
     private val smallWords = setOf("of", "the", "in", "and", "a", "to", "for", "on", "or", "by")
     private val discourse = Regex("""(?i)\b(?:however|therefore|in contrast|in conclusion)\b|然而|因此""")
     private val contrastStart = Regex("""(?i)^(?:however|in contrast)\b|^然而""")
@@ -114,9 +157,30 @@ internal object LiteratureSections {
 
     fun build(book: Textbook, candidates: List<GuideExcerpt>): List<FollowSection> {
         if (candidates.isEmpty()) return emptyList()
-        val headed = assignHeadings(book, candidates)
-        if (headed != null) return headed
-        return argumentStages(book.id, candidates)
+        val notes = notesStart(book)
+        val usable = candidates.filter { excerpt ->
+            beforeNotes(excerpt.anchor.pdfPage, excerpt.anchor.startUtf16, notes) && !isPageContinuation(book, excerpt, candidates)
+        }
+        if (usable.isEmpty()) return emptyList()
+        val marks = headingMarks(book, runningHeaders(book)).filter { beforeNotes(it.pdfPage, it.offset, notes) }
+        val bodyMarks = marks.filter { !abstractLine.matches(it.title) }
+        if (bodyMarks.size >= 2) {
+            val headed = assignHeadings(book.id, usable, marks)
+            if (headed != null) return headed
+        }
+        val abstract = marks.firstOrNull { abstractLine.matches(it.title) }
+        if (abstract != null && bodyMarks.isEmpty()) {
+            val abs = abstractSentences(usable, abstract)
+            val absAt = abs.map { it.anchor.pdfPage to it.anchor.startUtf16 }.toSet()
+            val rest = usable.filter { (it.anchor.pdfPage to it.anchor.startUtf16) !in absAt }
+            val sections = mutableListOf<FollowSection>()
+            if (abs.isNotEmpty()) {
+                sections += FollowSection(abstract.title, abs.map { FollowSentence(book.id, it.anchor.pdfPage, it.anchor.quoteAnchor) })
+            }
+            if (rest.isNotEmpty()) sections += argumentStages(book.id, rest)
+            if (sections.isNotEmpty()) return sections
+        }
+        return argumentStages(book.id, usable)
     }
 
     fun pickStop(sentences: List<FollowSentence>, accepts: (FollowSentence) -> Boolean): FollowSentence? {
@@ -133,8 +197,7 @@ internal object LiteratureSections {
         return value
     }
 
-    private fun assignHeadings(book: Textbook, candidates: List<GuideExcerpt>): List<FollowSection>? {
-        val marks = headingMarks(book, runningHeaders(book))
+    private fun assignHeadings(bookId: String, candidates: List<GuideExcerpt>, marks: List<HeadingMark>): List<FollowSection>? {
         if (marks.isEmpty()) return null
         val titles = mutableListOf<String>()
         val buckets = mutableListOf<MutableList<FollowSentence>>()
@@ -151,7 +214,7 @@ internal object LiteratureSections {
                 current = bucket
                 markIndex++
             }
-            val sentence = FollowSentence(book.id, page, candidate.anchor.quoteAnchor)
+            val sentence = FollowSentence(bookId, page, candidate.anchor.quoteAnchor)
             val active = current
             if (active == null) {
                 val opening = preface ?: mutableListOf<FollowSentence>().also { preface = it }
@@ -190,12 +253,37 @@ internal object LiteratureSections {
     }
 
     private fun isBodyHeading(line: String, headers: Set<String>): Boolean {
-        if (line.length !in 4..80 || endPunct.containsMatchIn(line)) return false
-        if (bibliography.matches(line)) return false
+        if (line.isEmpty() || endPunct.containsMatchIn(line)) return false
+        if (bibliography.matches(line) || notesBoundary.matches(line)) return false
         if (LiteraturePrintedPages.parseFolio(line) != null) return false
         if (LiteraturePassages.isBibliographicFootnote(line)) return false
-        if (headerKey(line) in headers) return false
-        return keywordHeading.matches(line) || isTitleCase(line)
+        if (headerKey(line) in headers || collapsedHeaderKey(line) in headers) return false
+        if (isOcrGarbage(line) || caption.containsMatchIn(line) || catalog.containsMatchIn(line)) return false
+        if (hasNoteMarker(line) || line.contains(',') || line.contains(';') || line.contains('；') || line.contains('，')) return false
+        val han = line.count { it.code in 0x3400..0x9fff }
+        if (han >= 2 && line.length <= 20 && line.none { it.isDigit() }) return true
+        if (line.length !in 4..80) return false
+        if (keywordHeading.matches(line)) {
+            if (numberedPrefix.containsMatchIn(line)) return titleLikeRemainder(line)
+            return true
+        }
+        return isTitleCase(line) && line.split(Regex("""\s+""")).count { it.isNotEmpty() } in 1..8
+    }
+
+    private fun titleLikeRemainder(line: String): Boolean {
+        val rest = numberedPrefix.replace(line, "").trim()
+        if (rest.length !in 2..60 || hasNoteMarker(rest) || rest.any { it == '.' || it == '!' || it == '?' }) return false
+        return isTitleCase(rest) && rest.split(Regex("""\s+""")).count { it.isNotEmpty() } <= 8
+    }
+
+    private fun hasNoteMarker(line: String): Boolean =
+        attachedNote.containsMatchIn(line) || trailingDigits.containsMatchIn(line)
+
+    private fun isOcrGarbage(line: String): Boolean {
+        val tokens = line.split(Regex("""\s+""")).filter { it.isNotEmpty() }
+        if (tokens.size >= 4 && tokens.count { it.length == 1 } * 2 >= tokens.size) return true
+        val letters = line.count { it.isLetter() }
+        return letters * 5 < line.length * 3
     }
 
     private fun isTitleCase(line: String): Boolean {
@@ -210,7 +298,9 @@ internal object LiteratureSections {
         val perPage = book.pages.map { page ->
             page.guideRegions.flatMap { region ->
                 val lines = region.text.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
-                (lines.take(2) + lines.takeLast(2)).map(::headerKey).filter { it.length >= 4 }
+                (lines.take(2) + lines.takeLast(2)).flatMap { line ->
+                    listOf(headerKey(line), collapsedHeaderKey(line))
+                }.filter { it.length >= 4 }
             }.toSet()
         }
         val counts = mutableMapOf<String, Int>()
@@ -221,6 +311,62 @@ internal object LiteratureSections {
 
     private fun headerKey(line: String): String =
         line.lowercase().replace(Regex("""\d+"""), "").replace(Regex("""\s+"""), " ").trim()
+
+    /** OCR sometimes splits a running header into single letters. Collapse that form so it still counts. */
+    private fun collapsedHeaderKey(line: String): String {
+        val parts = headerKey(line).split(" ").filter { it.isNotEmpty() }
+        if (parts.size < 4 || parts.count { it.length == 1 } * 2 < parts.size) return ""
+        return parts.joinToString("")
+    }
+
+    private data class PageOffset(val page: Int, val offset: Int)
+
+    private fun notesStart(book: Textbook): PageOffset? {
+        val cutoff = book.pages.size / 3
+        for (page in book.pages) {
+            if (page.number <= cutoff) continue
+            var base = 0
+            for (region in page.guideRegions) {
+                var offset = 0
+                for (raw in region.text.lines()) {
+                    if (notesBoundary.matches(raw.trim())) return PageOffset(page.number, base + offset)
+                    offset += raw.length + 1
+                }
+                base += region.text.length + 2
+            }
+        }
+        return null
+    }
+
+    private fun beforeNotes(page: Int, offset: Int, notes: PageOffset?): Boolean {
+        if (notes == null) return true
+        return page < notes.page || (page == notes.page && offset < notes.offset)
+    }
+
+    private fun isPageContinuation(book: Textbook, excerpt: GuideExcerpt, candidates: List<GuideExcerpt>): Boolean {
+        val page = excerpt.anchor.pdfPage
+        if (page <= 1) return false
+        val first = candidates.filter { it.anchor.pdfPage == page }.minOfOrNull { it.anchor.startUtf16 } ?: return false
+        if (excerpt.anchor.startUtf16 != first || excerpt.anchor.startUtf16 > 220) return false
+        val prev = book.pages.firstOrNull { it.number == page - 1 } ?: return false
+        val last = prev.guideRegions.asSequence()
+            .flatMap { it.text.lineSequence() }
+            .map(String::trim)
+            .lastOrNull { it.isNotEmpty() }
+            ?: return false
+        if (last.length < 40) return false
+        val end = last.last()
+        return end != '.' && end != '!' && end != '?' && end != '。' && end != '！' && end != '？'
+    }
+
+    private fun abstractSentences(candidates: List<GuideExcerpt>, mark: HeadingMark): List<GuideExcerpt> {
+        val after = candidates.filter { excerpt ->
+            val page = excerpt.anchor.pdfPage
+            page > mark.pdfPage || (page == mark.pdfPage && excerpt.anchor.startUtf16 >= mark.offset)
+        }
+        val samePage = after.takeWhile { it.anchor.pdfPage == mark.pdfPage }
+        return samePage.take(8)
+    }
 
     private fun argumentStages(bookId: String, candidates: List<GuideExcerpt>): List<FollowSection> {
         val sentences = candidates.map { FollowSentence(bookId, it.anchor.pdfPage, it.anchor.quoteAnchor) }

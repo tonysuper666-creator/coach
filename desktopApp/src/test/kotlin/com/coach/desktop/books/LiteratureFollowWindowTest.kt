@@ -18,6 +18,7 @@ import java.nio.file.Files
 import javax.swing.SwingUtilities
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 @OptIn(InternalComposeUiApi::class, ExperimentalComposeUiApi::class, ComposeToolingApi::class)
@@ -66,6 +67,7 @@ class LiteratureFollowWindowTest {
                 state.screen == BookScreen.READER && state.literatureQuoteHighlight != null
             }
             val highlight = assertNotNull(controller.state.value.literatureQuoteHighlight)
+            assertNull(controller.state.value.literatureQuoteMiss)
             val readerPage = requireNotNull(library.book(book.id).page(highlight.page))
             assertEquals(readerPage.text.substring(highlight.start, highlight.end), highlight.text)
             val acceptable = sentences.map { LiteratureTextNorm.normalize(it.quote) }.toSet()

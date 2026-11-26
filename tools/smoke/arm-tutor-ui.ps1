@@ -176,13 +176,27 @@ function Nudge-Onto([int]$screenX, [int]$screenY) {
     return Get-TutorCursor
 }
 
-function Move-TutorPointer([int]$screenX, [int]$screenY, [bool]$absoluteOk) {
-    $pt = $null
-    if ($absoluteOk) { $pt = Send-AbsoluteMove $screenX $screenY }
-    if (-not $absoluteOk -or -not $pt -or [Math]::Abs($pt.X - $screenX) -gt 4 -or [Math]::Abs($pt.Y - $screenY) -gt 4) {
-        $pt = Nudge-Onto $screenX $screenY
+# Absolute mouse_event on this runner updates GetCursorPos and still does not post
+# WM_MOUSEMOVE (run 45770791380: the cursor walked the glyph line, Compose saw a click).
+# Park just left of the target, then walk the last pixels with relative moves.
+function Post-MoveAt([int]$screenX, [int]$screenY) {
+    [void](Send-AbsoluteMove ($screenX - 8) $screenY)
+    foreach ($n in 1..8) {
+        [WD]::mouse_event(0x0001, 1, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 12
+    }
+    $pt = Get-TutorCursor
+    if ([Math]::Abs($pt.X - $screenX) -gt 6 -or [Math]::Abs($pt.Y - $screenY) -gt 3) {
+        [void](Send-AbsoluteMove ($screenX - 1) $screenY)
+        [WD]::mouse_event(0x0001, 1, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 20
+        $pt = Get-TutorCursor
     }
     return $pt
+}
+
+function Move-TutorPointer([int]$screenX, [int]$screenY, [bool]$absoluteOk) {
+    return Post-MoveAt $screenX $screenY
 }
 
 # Window-relative, same coordinate space as Click-At. Logs the cursor that Windows
@@ -192,21 +206,19 @@ function Drag-TutorLine([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
         $r = Get-Rect
         $sx1 = $r.L + $x1; $sy1 = $r.T + $y1
         $sx2 = $r.L + $x2; $sy2 = $r.T + $y2
-        $probe = Send-AbsoluteMove $sx1 $sy1
-        $absoluteOk = ([Math]::Abs($probe.X - $sx1) -le 4 -and [Math]::Abs($probe.Y - $sy1) -le 4)
-        if (-not $absoluteOk) { $probe = Nudge-Onto $sx1 $sy1 }
-        Write-Output "DRAG absOk=$absoluteOk start=$($probe.X),$($probe.Y) target=$sx1,$sy1"
+        $probe = Post-MoveAt $sx1 $sy1
+        Write-Output "DRAG start=$($probe.X),$($probe.Y) target=$sx1,$sy1"
         Start-Sleep -Milliseconds 80
         [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
         $logged = New-Object System.Collections.Generic.List[string]
         try {
-            $steps = 16
+            $steps = 10
             for ($i = 1; $i -le $steps; $i++) {
                 $x = [int]($sx1 + ($sx2 - $sx1) * $i / $steps)
                 $y = [int]($sy1 + ($sy2 - $sy1) * $i / $steps)
-                $pt = Move-TutorPointer $x $y $absoluteOk
+                $pt = Post-MoveAt $x $y
                 [void]$logged.Add("$($pt.X),$($pt.Y)")
-                Start-Sleep -Milliseconds 70
+                Start-Sleep -Milliseconds 40
             }
         } finally {
             [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
@@ -342,8 +354,12 @@ function Open-SelectionToolbar([string]$name) {
         $row = $rows[[Math]::Min($drag - 1, @($rows).Count - 1)]
         $y = [int]$row.Y
         if ($drag -eq 3) { $y = [int]$row.Y - 4 }
-        Write-Output "DRAG row $drag y=$y x=$($row.X1)..$($row.X2)"
-        Drag-TutorLine ([int]($row.X1 + 6)) $y ([int]($row.X2 - 6)) $y
+        # Stay inside the text. A down in the left 14% is the page-turn edge.
+        $span = [int]$row.X2 - [int]$row.X1
+        $x1 = [int]$row.X1 + [int]($span * 0.22)
+        $x2 = [int]$row.X2 - [int]($span * 0.22)
+        Write-Output "DRAG row $drag y=$y x=$x1..$x2"
+        Drag-TutorLine $x1 $y $x2 $y
         foreach ($spin in 1..4) {
             Start-Sleep -Milliseconds 400
             $shot = @(Read-TutorFrame "$name-selected$drag-$spin")

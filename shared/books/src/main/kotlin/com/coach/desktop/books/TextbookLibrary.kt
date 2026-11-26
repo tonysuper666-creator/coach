@@ -96,6 +96,7 @@ internal class TextbookLibrary(
                 if (db != null) backfillReviews(db) else database().use(::backfillReviews)
             },
         )
+        database().use(::installLibraryRecordTimes)
     }
     private fun database(): Connection = DriverManager.getConnection("jdbc:sqlite:${directory.resolve("library.sqlite")}").apply {
         createStatement().use { it.execute("PRAGMA busy_timeout=5000") }

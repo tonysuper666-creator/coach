@@ -27,6 +27,7 @@ internal fun exportObsidianVault(
 ): ObsidianExportOutcome {
     if (!Files.isDirectory(directory)) return ObsidianExportOutcome.Refused("这个文件夹不存在")
     if (directoryInsideGit(directory)) return ObsidianExportOutcome.Refused("请选 Git 仓库以外的文件夹")
+    val ignoreCase = filesystemIgnoresCase(directory)
     val ids = libraryRecordIds
     val exportable = records.filter { it.kind != LibraryKind.HIGHLIGHT }
     val byBook = exportable.groupBy { it.bookId }
@@ -51,7 +52,7 @@ internal fun exportObsidianVault(
     for (bookId in heads.keys.sorted()) {
         if (bookId in targets) continue
         if (bookId !in byBook) continue
-        val stem = freshStem(heads.getValue(bookId).title, bookId, usedNames)
+        val stem = freshStem(heads.getValue(bookId).title, bookId, usedNames, ignoreCase)
         val path = directory.resolve("$stem.md")
         targets[bookId] = path
         usedNames += path.fileName.toString()
@@ -72,7 +73,7 @@ internal fun exportObsidianVault(
             skipped += 1
             continue
         }
-        val text = stitchObsidian(previous, frontmatter(head, ids, now), managed)
+        val text = stitchObsidian(previous, frontmatter(head, ids, now, previous), managed)
         writeAtomically(path, text)
         written += 1
     }
@@ -81,6 +82,20 @@ internal fun exportObsidianVault(
 
 internal fun directoryInsideGit(path: Path): Boolean =
     generateSequence(path.toAbsolutePath()) { it.parent }.any { Files.exists(it.resolve(".git")) }
+
+/** 这个目录上，大小写不同的文件名会不会指到同一个文件。 */
+internal fun filesystemIgnoresCase(directory: Path): Boolean {
+    val name = "CoachCase" + java.lang.Long.toUnsignedString(System.nanoTime(), 36)
+    val probe = directory.resolve(name)
+    return try {
+        Files.writeString(probe, "")
+        Files.exists(directory.resolve(name.lowercase()))
+    } catch (_: Exception) {
+        false
+    } finally {
+        runCatching { Files.deleteIfExists(probe) }
+    }
+}
 
 internal fun obsidianFileStem(title: String): String {
     val cleaned = buildString {
@@ -99,13 +114,14 @@ internal fun wikiLink(stem: String, title: String): String {
 private fun headFromRecords(bookId: String, rows: List<LibraryRecord>): LibraryBookHead =
     LibraryBookHead(bookId, rows.first().bookTitle, rows.first().author)
 
-private fun freshStem(title: String, bookId: String, used: Set<String>): String {
+private fun freshStem(title: String, bookId: String, used: Set<String>, ignoreCase: Boolean): String {
+    fun taken(stem: String): Boolean = used.any { it.equals("$stem.md", ignoreCase = ignoreCase) }
     val base = obsidianFileStem(title)
-    if ("$base.md" !in used) return base
-    val suffix = bookId.take(6).ifBlank { "2" }
+    if (!taken(base)) return base
+    val suffix = bookId.take(8).ifBlank { "2" }
     var stem = "$base $suffix"
     var n = 2
-    while ("$stem.md" in used) {
+    while (taken(stem)) {
         stem = "$base $suffix $n"
         n += 1
     }
@@ -202,14 +218,41 @@ internal fun linkBookMentions(text: String, others: List<Pair<String, String>>):
     return out.toString()
 }
 
-private fun frontmatter(head: LibraryBookHead, ids: LibraryRecordIdScheme, now: Instant): String = buildString {
+private val ownedFrontmatterKeys = setOf("title", "author", "exported_at", "coach_record_id", "coach_id_scheme")
+
+private fun frontmatter(head: LibraryBookHead, ids: LibraryRecordIdScheme, now: Instant, previous: String?): String = buildString {
     appendLine("---")
     appendLine("title: ${yamlQuote(head.title)}")
     appendLine("author: ${yamlQuote(head.author)}")
     appendLine("exported_at: ${yamlQuote(DateTimeFormatter.ISO_INSTANT.format(now))}")
     appendLine("coach_record_id: ${yamlQuote(ids.book(head.id))}")
     appendLine("coach_id_scheme: ${yamlQuote(ids.name)}")
+    val extra = userFrontmatter(previous)
+    if (extra.isNotEmpty()) {
+        appendLine(extra)
+    }
     appendLine("---")
+}
+
+private fun userFrontmatter(previous: String?): String {
+    if (previous == null) return ""
+    val normalized = previous.removePrefix("\uFEFF").replace("\r\n", "\n")
+    if (!normalized.startsWith("---\n")) return ""
+    val end = normalized.indexOf("\n---\n", 4)
+    if (end < 0) return ""
+    val kept = ArrayList<String>()
+    var skip = false
+    for (line in normalized.substring(4, end).lines()) {
+        if (line.isEmpty()) {
+            if (!skip) kept += line
+            continue
+        }
+        if (line.first() != ' ' && line.first() != '\t') {
+            skip = line.substringBefore(':').trim() in ownedFrontmatterKeys
+        }
+        if (!skip) kept += line
+    }
+    return kept.joinToString("\n").trim('\n')
 }
 
 private fun yamlQuote(value: String): String {

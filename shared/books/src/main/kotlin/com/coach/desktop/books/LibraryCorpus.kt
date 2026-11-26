@@ -154,18 +154,45 @@ internal fun searchLibrary(db: Connection, query: LibraryQuery): List<LibraryRec
     ensureCorpusTable(db)
     val text = query.text.trim()
     val tokens = text.split(Regex("\\s+")).filter { it.isNotBlank() }
-    val match = if (text.isNotEmpty() && BookSchemaMigration.tableExists(db, "library_corpus_fts")) trigramMatch(tokens) else null
+    val match = if (tokens.isNotEmpty() && BookSchemaMigration.tableExists(db, "library_corpus_fts")) trigramMatch(tokens) else null
     val limit = query.limit.coerceIn(1, 500_000)
-    val fetch = if (tokens.size > 1) (limit * 8).coerceAtMost(2000) else limit
     val rows = if (match != null) {
-        runCatching { queryRecords(db, query, match, instr = null, fetch) }.getOrElse {
-            queryRecords(db, query, match = null, instr = tokens.maxByOrNull { it.length }, fetch)
+        runCatching { queryRecords(db, query, match, tokens, limit) }.getOrElse {
+            queryRecords(db, query, match = null, tokens, limit)
         }
     } else {
-        queryRecords(db, query, match = null, instr = tokens.maxByOrNull { it.length }, fetch)
+        queryRecords(db, query, match = null, tokens, limit)
     }
     if (tokens.isEmpty()) return rows
-    return rows.filter { record -> tokens.all { record.body.contains(it, ignoreCase = true) } }.take(limit)
+    return rows.filter { record -> tokens.all { token -> record.body.contains(token, ignoreCase = true) } }
+}
+
+/** 新写入的批注和高亮记下时间。已有行的新列保持空，时间仍算未知。 */
+internal fun installLibraryRecordTimes(db: Connection) {
+    stampCreatedAt(db, "book_notes", "book_notes_stamp_created", "book = NEW.book AND id = NEW.id")
+    stampCreatedAt(
+        db,
+        "book_highlights",
+        "book_highlights_stamp_created",
+        "book = NEW.book AND page = NEW.page AND start = NEW.start AND end = NEW.end",
+    )
+}
+
+private fun stampCreatedAt(db: Connection, table: String, trigger: String, identity: String) {
+    if (!BookSchemaMigration.tableExists(db, table)) return
+    BookSchemaMigration.ensureColumn(db, table, "created_at", "INTEGER")
+    db.createStatement().use {
+        it.execute(
+            """CREATE TRIGGER IF NOT EXISTS $trigger
+               AFTER INSERT ON $table
+               FOR EACH ROW
+               WHEN NEW.created_at IS NULL
+               BEGIN
+                 UPDATE $table SET created_at = CAST(strftime('%s','now') AS INTEGER) * 1000
+                 WHERE $identity AND created_at IS NULL;
+               END""",
+        )
+    }
 }
 
 internal fun listLibraryRecords(db: Connection): List<LibraryRecord> =
@@ -215,8 +242,9 @@ private fun loadNotes(
     add: (LibraryRecord) -> Unit,
 ) {
     if (!BookSchemaMigration.tableExists(db, "book_notes")) return
+    val created = if ("created_at" in BookSchemaMigration.tableColumns(db, "book_notes")) "created_at" else "NULL"
     db.prepareStatement(
-        "SELECT book, id, page, start, end, quote, note FROM book_notes WHERE deleted=0",
+        "SELECT book, id, page, start, end, quote, note, $created FROM book_notes WHERE deleted=0",
     ).use { sql ->
         sql.executeQuery().use { rows ->
             while (rows.next()) {
@@ -226,7 +254,8 @@ private fun loadNotes(
                 val quote = notesOneLine(rows.getString(6).orEmpty())
                 val page = rows.getInt(3).takeIf { it > 0 }
                 val detail = bullet("我写的" to note, "选中的原句" to quote)
-                add(record(ids, LibraryKind.ANNOTATION, rows.getString(2), book, page, rows.intOrNull(4), rows.intOrNull(5), note, quote, detail, null))
+                val at = rows.longOrNull(8)?.takeIf { it > 0L }
+                add(record(ids, LibraryKind.ANNOTATION, rows.getString(2), book, page, rows.intOrNull(4), rows.intOrNull(5), note, quote, detail, at))
             }
         }
     }
@@ -239,7 +268,8 @@ private fun loadHighlights(
     add: (LibraryRecord) -> Unit,
 ) {
     if (!BookSchemaMigration.tableExists(db, "book_highlights")) return
-    db.prepareStatement("SELECT book, page, start, end, quote FROM book_highlights").use { sql ->
+    val created = if ("created_at" in BookSchemaMigration.tableColumns(db, "book_highlights")) "created_at" else "NULL"
+    db.prepareStatement("SELECT book, page, start, end, quote, $created FROM book_highlights").use { sql ->
         sql.executeQuery().use { rows ->
             while (rows.next()) {
                 val book = books[rows.getString(1)] ?: continue
@@ -250,7 +280,8 @@ private fun loadHighlights(
                 val end = rows.getInt(4)
                 val detail = bullet("选中的原句" to quote)
                 val raw = "${book.id}:$page:$start:$end"
-                add(record(ids, LibraryKind.HIGHLIGHT, raw, book, page.takeIf { it > 0 }, start, end, quote, quote, detail, null))
+                val at = rows.longOrNull(6)?.takeIf { it > 0L }
+                add(record(ids, LibraryKind.HIGHLIGHT, raw, book, page.takeIf { it > 0 }, start, end, quote, quote, detail, at))
             }
         }
     }
@@ -359,7 +390,7 @@ private fun loadMistakes(
                 val page = sourcePageForLesson(lesson, emptyMap(), toc[book.id].orEmpty())
                 val detail = bullet("题干" to stem, "我的答案" to mine, "正解" to correct, "状态" to state)
                 val at = times["${book.id}|$lesson|$mode"]
-                add(record(ids, LibraryKind.MISTAKE, "$lesson:$mode", book, page, null, null, stem, "", detail, at))
+                add(record(ids, LibraryKind.MISTAKE, "${book.id}:$lesson:$mode", book, page, null, null, stem, "", detail, at))
             }
         }
     }
@@ -509,7 +540,7 @@ private fun trigramMatch(tokens: List<String>): String? {
     return parts.joinToString(" AND ")
 }
 
-private fun queryRecords(db: Connection, query: LibraryQuery, match: String?, instr: String?, fetch: Int): List<LibraryRecord> {
+private fun queryRecords(db: Connection, query: LibraryQuery, match: String?, tokens: List<String>, fetch: Int): List<LibraryRecord> {
     val sql = buildString {
         append(
             """SELECT c.record_key, c.id_scheme, c.kind, c.book_id, c.book_title, c.author, c.page,
@@ -519,7 +550,7 @@ private fun queryRecords(db: Connection, query: LibraryQuery, match: String?, in
         if (match != null) append("JOIN library_corpus_fts ON library_corpus_fts.rowid = c.rowid ")
         append("WHERE 1=1 ")
         if (match != null) append("AND library_corpus_fts MATCH ? ")
-        if (instr != null) append("AND instr(lower(c.body), lower(?)) > 0 ")
+        repeat(tokens.size) { append("AND instr(lower(c.body), lower(?)) > 0 ") }
         if (query.bookId != null) append("AND c.book_id = ? ")
         if (!query.bookTitleContains.isNullOrBlank()) append("AND c.book_title LIKE ? ESCAPE '\\' ")
         if (query.kind != null) append("AND c.kind = ? ")
@@ -529,7 +560,7 @@ private fun queryRecords(db: Connection, query: LibraryQuery, match: String?, in
     return db.prepareStatement(sql).use { statement ->
         var index = 1
         if (match != null) statement.setString(index++, match)
-        if (instr != null) statement.setString(index++, instr)
+        for (token in tokens) statement.setString(index++, token)
         if (query.bookId != null) statement.setString(index++, query.bookId)
         if (!query.bookTitleContains.isNullOrBlank()) statement.setString(index++, likeContains(query.bookTitleContains))
         if (query.kind != null) statement.setString(index++, query.kind.name)

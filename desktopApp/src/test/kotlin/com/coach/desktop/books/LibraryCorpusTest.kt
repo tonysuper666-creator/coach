@@ -116,6 +116,140 @@ class LibraryCorpusTest {
         assertTrue(outcome is ObsidianExportOutcome.Refused)
     }
 
+    @Test fun everyTokenFiltersBeforeTheLimit() {
+        val root = Files.createTempDirectory("library-tokens-")
+        val library = TextbookLibrary(root.resolve("library"), todayCardEnabled = false)
+        DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+            db.autoCommit = false
+            db.createStatement().use { it.executeUpdate("INSERT INTO books(id,title,format,touched) VALUES('b1','合成书','md',1)") }
+            db.prepareStatement(
+                """INSERT INTO book_notes(book,id,version,page,start,end,quote,note,text_sha256,revision,last_mutation_id,deleted)
+                   VALUES('b1',?,'v1',1,0,1,'句',?,'sha',1,'m',0)""",
+            ).use { sql ->
+                repeat(800) { index ->
+                    sql.setString(1, "n$index")
+                    sql.setString(2, if (index == 0) "opportunity 稀 唯一" else "opportunity 笔记 $index")
+                    sql.addBatch()
+                }
+                sql.executeBatch()
+            }
+            db.createStatement().use { it.executeUpdate("UPDATE book_notes SET created_at=1 WHERE id='n0'") }
+            db.commit()
+        }
+        openLibraryCorpus(library.directory).use { connection ->
+            syncLibraryCorpus(connection)
+            val hits = searchLibrary(connection, LibraryQuery(text = "opportunity 稀", limit = 80))
+            assertEquals(listOf("legacy-v1:annotation:n0"), hits.map { it.key })
+        }
+    }
+
+    @Test fun sameLessonInTwoBooksBothStayInTheIndex() {
+        val root = Files.createTempDirectory("library-mistake-key-")
+        val library = TextbookLibrary(root.resolve("library"), todayCardEnabled = false)
+        DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+            db.createStatement().use { sql ->
+                sql.executeUpdate("INSERT INTO books(id,title,format,touched) VALUES('a','甲书','md',1)")
+                sql.executeUpdate("INSERT INTO books(id,title,format,touched) VALUES('b','乙书','md',1)")
+                sql.executeUpdate(
+                    """INSERT INTO book_reviews(
+                        book,lesson,mode,book_title,lesson_title,prompt,reference,solution,options,wrong_text,answer_text,revealed,completed,guessed
+                    ) VALUES('a','lesson-1','CHOICE','甲书','节','题干','','正确','[]','错误','错误',1,0,0)""",
+                )
+                sql.executeUpdate(
+                    """INSERT INTO book_reviews(
+                        book,lesson,mode,book_title,lesson_title,prompt,reference,solution,options,wrong_text,answer_text,revealed,completed,guessed
+                    ) VALUES('b','lesson-1','CHOICE','乙书','节','题干','','正确','[]','错误','错误',1,0,0)""",
+                )
+            }
+        }
+        openLibraryCorpus(library.directory).use { connection ->
+            val sync = syncLibraryCorpus(connection)
+            assertEquals(2, sync.count)
+            val keys = searchLibrary(connection, LibraryQuery(kind = LibraryKind.MISTAKE, limit = 10)).map { it.key }.toSet()
+            assertEquals(setOf("legacy-v1:mistake:a:lesson-1:CHOICE", "legacy-v1:mistake:b:lesson-1:CHOICE"), keys)
+        }
+    }
+
+    @Test fun keepsUserYamlAndSeparateFilesWhenNamesDifferOnlyByCase() {
+        val root = Files.createTempDirectory("library-yaml-")
+        val library = TextbookLibrary(root.resolve("library"), todayCardEnabled = false)
+        DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+            db.createStatement().use { sql ->
+                sql.executeUpdate("INSERT INTO books(id,title,format,touched) VALUES('s1','Sample','md',1)")
+                sql.executeUpdate("INSERT INTO books(id,title,format,touched) VALUES('s2','sample','md',1)")
+                sql.executeUpdate(
+                    """INSERT INTO book_notes(book,id,version,page,start,end,quote,note,text_sha256,revision,last_mutation_id,deleted)
+                       VALUES('s1','n1','v1',1,0,1,'句','Sample 批注','sha',1,'m',0)""",
+                )
+                sql.executeUpdate(
+                    """INSERT INTO book_notes(book,id,version,page,start,end,quote,note,text_sha256,revision,last_mutation_id,deleted)
+                       VALUES('s2','n2','v1',1,0,1,'句','sample 批注','sha',1,'m2',0)""",
+                )
+            }
+        }
+        val vault = Files.createTempDirectory("obsidian-case-")
+        val first = export(Fixture(library), vault, Instant.parse("2026-11-26T08:00:00Z"))
+        assertEquals(2, first.written)
+        val files = Files.newDirectoryStream(vault, "*.md").use { stream -> stream.toList() }
+        assertEquals(2, files.size)
+        val sample = files.first { Files.readString(it).contains("coach_record_id: \"legacy-v1:book:s1\"") }
+        val other = files.first { it != sample }
+        val otherBytes = Files.readAllBytes(other)
+        Files.writeString(sample, Files.readString(sample).replaceFirst("---\n", "---\ntags:\n  - 我的标签\n") + "我自己加的一行\n")
+        openLibraryCorpus(library.directory).use { connection ->
+            connection.createStatement().use { it.executeUpdate("UPDATE book_notes SET note='改过的批注' WHERE id='n1'") }
+        }
+        export(Fixture(library), vault, Instant.parse("2026-11-26T10:00:00Z"))
+        val rewritten = Files.readString(sample)
+        assertTrue(rewritten.contains("tags:"), rewritten)
+        assertTrue(rewritten.contains("我的标签"), rewritten)
+        assertTrue(rewritten.contains("我自己加的一行"), rewritten)
+        assertTrue(rewritten.contains("改过的批注"), rewritten)
+        assertTrue(otherBytes.contentEquals(Files.readAllBytes(other)))
+    }
+
+    @Test fun newNotesAndHighlightsKeepTimeWhileOldRowsStayUnknown() {
+        val root = Files.createTempDirectory("library-times-")
+        val library = TextbookLibrary(root.resolve("library"), todayCardEnabled = false)
+        val started = System.currentTimeMillis() - 5_000
+        DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+            db.createStatement().use { sql ->
+                sql.executeUpdate("INSERT INTO books(id,title,format,touched) VALUES('b1','甲书','md',1)")
+                sql.executeUpdate("INSERT INTO pages(book,page,text) VALUES('b1',2,'page')")
+                sql.executeUpdate(
+                    """INSERT INTO book_notes(book,id,version,page,start,end,quote,note,text_sha256,revision,last_mutation_id,deleted)
+                       VALUES('b1','old','v1',2,0,1,'句','旧批注','sha',1,'m',0)""",
+                )
+                sql.executeUpdate("UPDATE book_notes SET created_at=NULL WHERE id='old'")
+                sql.executeUpdate("INSERT INTO book_highlights(book,page,start,end,quote) VALUES('b1',2,4,6,'旧高亮')")
+                sql.executeUpdate("UPDATE book_highlights SET created_at=NULL WHERE quote='旧高亮'")
+            }
+        }
+        val saved = library.saveNote(
+            "b1",
+            BookNoteRecord("new", "v1", 2, 0, 1, "句", "新批注", "sha", 0L),
+            0L,
+            "mut-new",
+        )
+        assertTrue(saved is BookNoteWriteResult.Saved)
+        library.setHighlight(BookPassage("b1", 2, 0, 2, "新高亮"), true)
+        openLibraryCorpus(library.directory).use { connection ->
+            syncLibraryCorpus(connection)
+            val rows = searchLibrary(connection, LibraryQuery(limit = 20))
+            assertEquals(null, rows.single { it.primary == "旧批注" }.atMs)
+            assertEquals(null, rows.single { it.primary == "旧高亮" }.atMs)
+            val note = rows.single { it.primary == "新批注" }
+            val highlight = rows.single { it.primary == "新高亮" }
+            assertTrue(note.atMs != null && note.atMs!! >= started)
+            assertTrue(highlight.atMs != null && highlight.atMs!! >= started)
+            val recent = searchLibrary(connection, LibraryQuery(sinceMs = started, limit = 20))
+            assertTrue(recent.any { it.primary == "新批注" })
+            assertTrue(recent.any { it.primary == "新高亮" })
+            assertTrue(recent.none { it.primary == "旧批注" })
+            assertTrue(recent.none { it.primary == "旧高亮" })
+        }
+    }
+
     private fun export(fixture: Fixture, vault: java.nio.file.Path, now: Instant): ObsidianExportOutcome.Done {
         openLibraryCorpus(fixture.library.directory).use { connection ->
             syncLibraryCorpus(connection)
@@ -167,6 +301,8 @@ class LibraryCorpusTest {
                     """INSERT INTO book_upload_queue(account_key,local_book_id,file_sha256,format,title,state,error_message,updated_at)
                        VALUES('DEVICE-SECRET-9f3a','b1','abc','md','甲书','FAILED','http://secret.example/pair',1)""",
                 )
+                sql.executeUpdate("UPDATE book_notes SET created_at=NULL")
+                sql.executeUpdate("UPDATE book_highlights SET created_at=NULL")
             }
         }
         return Fixture(library)

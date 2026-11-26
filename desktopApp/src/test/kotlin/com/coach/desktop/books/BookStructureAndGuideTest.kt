@@ -367,8 +367,11 @@ class BookStructureAndGuideTest {
             val consent = ExplainConsent(library.directory).apply { allow(epub.id) }
             val explainer = GuidedFakeExplainer(root.resolve("home"))
             assertEquals("epub", epub.format)
-            runSkikoComposeUiTest(size = Size(1080f, 820f), density = Density(1f)) {
+            // Logical content size of the 1280-pixel Windows repro at 150% scaling.
+            runSkikoComposeUiTest(size = Size(854f, 536f), density = Density(1f)) {
                 var activePage by mutableStateOf(epub.lessons.first().firstPage)
+                val readLibrary = CollectionQaVirtualCollections.READ_LIBRARY_ID
+                val sessions = mutableStateMapOf(readLibrary to CollectionQaSessionState(scope = CollectionAskScope.COLLECTION))
                 setContent {
                     val focus = remember { FocusRequester() }
                     CoachTheme(darkTheme = false) {
@@ -384,6 +387,8 @@ class BookStructureAndGuideTest {
                                 onBack = {},
                                 onLearn = {},
                                 explainProvider = explainer,
+                                collectionQaSessions = sessions,
+                                onUpdateCollectionQaSession = { id, state -> sessions[id] = state },
                             )
                         }
                     }
@@ -402,7 +407,11 @@ class BookStructureAndGuideTest {
                 }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("selection-explain-toolbar").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithTag("selection-action-split").performClick()
+                runOnIdle { assertEquals(CollectionAskScope.SECTION, sessions.getValue(readLibrary).scope) }
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("inline-explain-turn-0").fetchSemanticsNodes().isNotEmpty() }
+                val bounds = onNodeWithTag("companion-answer-history").getUnclippedBoundsInRoot()
+                val historyHeight = bounds.bottom - bounds.top
+                assertTrue(historyHeight >= 70.dp, "Expected room for an answer and citation, got $historyHeight")
                 assertEquals("split", explainer.selectionCalls.last().first)
                 assertEquals(epub.lessons.first().breadcrumb, explainer.selectionCalls.last().second?.location)
             }

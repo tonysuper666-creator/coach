@@ -374,6 +374,42 @@ def cost(model: str, usage: dict, batch: bool = False) -> int:
     return int(result.to_integral_value(rounding=ROUND_CEILING))
 
 
+def stream_usage(provider, model, served, reported):
+    if not isinstance(served, str) or not (served == model or served.startswith(model + "-")):
+        raise ApiFailure("api_model_mismatch")
+    if not isinstance(reported, dict):
+        raise ApiFailure("invalid_usage")
+    usage = dict(reported)
+    if provider == "anthropic":
+        if usage.get("cache_creation_input_tokens", 0):
+            raise ApiFailure("unexpected_cache_write")
+        cached = usage.get("cache_read_input_tokens", 0)
+        if type(cached) is not int or cached < 0:
+            raise ApiFailure("invalid_usage")
+        if "input_tokens" in usage:
+            if type(usage["input_tokens"]) is not int or usage["input_tokens"] < 0:
+                raise ApiFailure("invalid_usage")
+            usage["input_tokens"] += cached
+        usage["cached_tokens"] = cached
+    else:
+        usage["cached_tokens"] = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
+    return usage
+
+
+def interrupted_charge(provider, model, served, reported, input_bound, output_bound, output_final):
+    """Price received counters and bound only tokens the provider could still have billed."""
+    usage = stream_usage(provider, model, served, reported)
+    observed = {**usage, "input_tokens": usage.get("input_tokens", 0), "output_tokens": usage.get("output_tokens", 0)}
+    known_cost = cost(model, observed)
+    bounded = dict(observed)
+    if "input_tokens" not in usage or (provider == "openai" and not output_final):
+        bounded["input_tokens"] = max(input_bound, observed["input_tokens"])
+    if not output_final or "output_tokens" not in usage:
+        bounded["output_tokens"] = max(output_bound, observed["output_tokens"])
+    total = cost(model, bounded)
+    return bounded, total, total - known_cost
+
+
 class ApiRouter:
     def __init__(
         self,
@@ -497,6 +533,10 @@ class ApiRouter:
         async with gate.slot(bulk=bulk):
             reservation = self.ledger.reserve(provider, key, maximum, friend=friend, device=device, tokens=input_bound + output_limit)
             possibly_billed = False
+            interrupted = False
+            stream_opened = False
+            final_usage = False
+            served, usage = None, {}
             settled = False
             try:
                 yield {"kind": "attempt", "model": model}
@@ -539,7 +579,7 @@ class ApiRouter:
                     payload = {"model": model, "instructions": system, "input": oai_input, "max_output_tokens": output_limit,
                                "stream": True, "store": False, "service_tier": "default"}
                 stream_kwargs = {"timeout": httpx.Timeout(60, connect=5)} if validated_images else {}
-                text, usage, served, finish, ended = [], {}, None, None, False
+                text, finish, ended = [], None, False
                 started = self._clock()
                 async with asyncio.timeout(175):
                     for attempt in range(len(self.retry_429_delays) + 1):
@@ -580,6 +620,7 @@ class ApiRouter:
                                     # Never read an error message containing a key, source text or prompt.
                                     raise ApiFailure(f"api_http_{response.status_code}")
                                 else:
+                                    stream_opened = True
                                     async for line in response.aiter_lines():
                                         if not line.startswith("data:"):
                                             continue
@@ -602,14 +643,19 @@ class ApiRouter:
                                             elif kind == "message_delta":
                                                 usage.update(event.get("usage", {}))
                                                 finish = event.get("delta", {}).get("stop_reason")
+                                                final_usage = bool(finish) and "output_tokens" in event.get("usage", {})
                                             elif kind == "message_stop":
                                                 ended = True
                                                 break
                                             elif kind == "error":
+                                                interrupted = True
                                                 raise ApiFailure("api_stream_error")
                                         else:
-                                            if kind == "response.created":
+                                            if kind in ("response.created", "response.in_progress"):
                                                 served = event["response"].get("model")
+                                                usage.update(event["response"].get("usage") or {})
+                                                if kind == "response.in_progress":
+                                                    continue
                                                 yield {"kind": "meta", "served_by": served or model}
                                             elif kind == "response.output_text.delta":
                                                 delta = event["delta"]
@@ -620,28 +666,30 @@ class ApiRouter:
                                                 result = event["response"]
                                                 served = result.get("model")
                                                 usage = result.get("usage") or {}
-                                                usage["cached_tokens"] = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
+                                                final_usage = True
                                                 finish = "end_turn" if kind == "response.completed" else "max_tokens"
                                                 ended = True
                                                 break
                                             elif kind in ("error", "response.failed"):
+                                                interrupted = True
+                                                if kind == "response.failed":
+                                                    result = event.get("response") or {}
+                                                    served = result.get("model", served)
+                                                    if result.get("usage"):
+                                                        usage = result["usage"]
+                                                        final_usage = True
                                                 raise ApiFailure("api_stream_error")
                         if retry_delay is None:
                             break
                         if retry_delay > 0:
                             await self._sleep(retry_delay)
                 if not ended:
+                    interrupted = True
                     raise ApiFailure("api_no_terminal")
-                if not isinstance(served, str) or not (served == model or served.startswith(model + "-")):
-                    raise ApiFailure("api_model_mismatch")
-                if provider == "anthropic":
-                    # No cache_control is sent; any unexpected write usage closes this route.
-                    if usage.get("cache_creation_input_tokens", 0):
-                        raise ApiFailure("unexpected_cache_write")
-                    if type(usage.get("input_tokens")) is not int or usage["input_tokens"] < 0:
-                        raise ApiFailure("missing_usage")
-                    usage["cached_tokens"] = usage.get("cache_read_input_tokens", 0)
-                    usage["input_tokens"] = usage.get("input_tokens", -1) + usage["cached_tokens"]
+                if usage and not final_usage:
+                    interrupted = True
+                    raise ApiFailure("missing_usage")
+                usage = stream_usage(provider, model, served, usage)
                 actual = cost(model, usage)
                 settled = True  # On a ledger I/O failure keep its authoritative record.
                 self.ledger.settle(provider, reservation, actual, usage=usage)
@@ -650,15 +698,29 @@ class ApiRouter:
                 yield {"kind": "complete", "text": "".join(text), "served_by": served,
                        "usage": {"prompt_tokens": usage["input_tokens"], "completion_tokens": usage["output_tokens"],
                                  "total_tokens": usage["input_tokens"] + usage["output_tokens"]}}
+            except (asyncio.CancelledError, GeneratorExit):
+                interrupted = True
+                raise
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as error:
                 possibly_billed = False
                 raise ApiFailure("api_" + type(error).__name__) from None
             except (httpx.HTTPError, TimeoutError, ValueError, KeyError, TypeError, AttributeError, OSError) as error:
+                interrupted = stream_opened and isinstance(error, (httpx.HTTPError, TimeoutError, OSError))
                 raise ApiFailure("api_" + type(error).__name__) from None
             finally:
                 if not settled:
-                    if possibly_billed:
-                        self.ledger.settle(provider, reservation, maximum, estimated=True,
-                                           usage={"input_tokens": input_bound, "output_tokens": output_limit})
-                    else:
+                    if not possibly_billed:
                         self.ledger.settle(provider, reservation, 0, rejected=True)
+                    elif interrupted and isinstance(usage, dict) and usage.keys().isdisjoint(("input_tokens", "output_tokens")):
+                        self.ledger.defer_interrupted(reservation, input_bound, output_limit)
+                    else:
+                        bounded = {"input_tokens": input_bound, "output_tokens": output_limit}
+                        total = estimate = maximum
+                        if interrupted:
+                            try:
+                                bounded, total, estimate = interrupted_charge(
+                                    provider, model, served, usage, input_bound, output_limit, final_usage)
+                            except (ApiFailure, TypeError, ValueError, AttributeError):
+                                # Malformed receipts and unexpected models cannot reduce the guard.
+                                pass
+                        self.ledger.settle(provider, reservation, total, usage=bounded, estimated_microusd=estimate)

@@ -22,6 +22,10 @@ import time
 MONTHLY_GRANTS = json.loads(Path(__file__).with_name("model_routes.json").read_text())["monthly_grants_usd"]
 
 
+# A disconnected stream may have been billed. Keep its bounded exposure through expiry.
+INTERRUPTED_USAGE_GRACE_SECONDS = 15 * 60
+
+
 class Denied(Exception):
     """A content-free reason safe for diagnostics."""
 
@@ -162,6 +166,12 @@ class CreditLedger:
                     for pending in daily["reserved"].values():
                         require(all(type(pending[k]) is int and pending[k] >= 0 for k in ("tokens", "microusd")))
                         require(isinstance(pending["device"], str))
+            for token, entry in data.get("interrupted_streams", {}).items():
+                cycle_id, month = entry["cycle"], entry["month"]
+                provider = cycle_id.split(":", 1)[0]
+                require(provider in data["months"][month] and cycle_id == f"{provider}:{month}")
+                require(token in data["cycles"][cycle_id]["reserved"])
+                require(all(type(entry[k]) is int and entry[k] >= 0 for k in ("expires_at", "input_tokens", "output_tokens")))
             return data
         except (OSError, ValueError, KeyError, AttributeError, TypeError):
             raise Denied("ledger_unreadable") from None
@@ -198,6 +208,7 @@ class CreditLedger:
         with self.locked():
             data = self.read()
             now = self.clock()
+            self._expire_interrupted(data, now)
             month = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m")
             limit = grant_limit_micros(provider)
             cycle_id = f"{provider}:{month}"
@@ -253,45 +264,88 @@ class CreditLedger:
             self.save(data)
             return cycle_id, month, token
 
-    def settle(self, provider: str, reservation, actual: int, *, idempotent=False, usage=None, rejected=False, estimated=False):
+    def defer_interrupted(self, reservation, input_bound, output_bound):
+        """Only a closed stream with no usage receipt is eligible. Batch and legacy holds have no marker."""
+        cycle_id, month, token = reservation
         with self.locked():
             data = self.read()
-            cycle_id, month, token = reservation
-            cycle = data["cycles"][cycle_id]
-            if idempotent and token not in cycle["reserved"]:
-                # A Batch poll can replay after a crash following the ledger commit.
-                # Rewrite summaries too if their previous write was interrupted.
+            require(token in data["cycles"][cycle_id]["reserved"])
+            entries = data.setdefault("interrupted_streams", {})
+            entries.setdefault(token, {"cycle": cycle_id, "month": month,
+                                      "expires_at": int(self.clock()) + INTERRUPTED_USAGE_GRACE_SECONDS,
+                                      "input_tokens": input_bound, "output_tokens": output_bound})
+            self.save(data)
+
+    def _expire_interrupted(self, data, now):
+        entries = data.get("interrupted_streams", {})
+        expired = [token for token, entry in entries.items() if entry["expires_at"] <= now]
+        for token in expired:
+            entry = entries.pop(token)
+            cycle_id, month = entry["cycle"], entry["month"]
+            provider = cycle_id.split(":", 1)[0]
+            bound = data["cycles"][cycle_id]["reserved"][token]
+            self._apply_charge(data, provider, (cycle_id, month, token), bound,
+                               entry, rejected=False, estimate=bound)
+        if expired:
+            self.save(data)
+        return len(expired)
+
+    def expire_interrupted(self):
+        with self.locked():
+            return self._expire_interrupted(self.read(), self.clock())
+
+    def settle(self, provider: str, reservation, actual: int, *, idempotent=False, usage=None, rejected=False,
+               estimated=False, estimated_microusd=0):
+        with self.locked():
+            data = self.read()
+            cycle_id, _, token = reservation
+            reserved = data["cycles"][cycle_id]["reserved"]
+            if idempotent and token not in reserved:
+                # Retry a Batch summary write after the authoritative commit.
                 self.save(data)
                 return
-            reserved = cycle["reserved"].pop(token)
-            if actual < 0 or (rejected and (estimated or actual != 0)) or (estimated and actual != reserved):
+            if estimated and actual != reserved[token]:
                 raise Denied("invalid_usage")
-            for days in data.get("friends", {}).values():
-                for daily in days.values():
-                    pending = daily["reserved"].pop(token, None)
-                    if pending is None or rejected:
-                        continue
-                    if usage is None or any(type(usage.get(k)) is not int or usage[k] < 0 for k in ("input_tokens", "output_tokens")):
-                        raise Denied("invalid_usage")
-                    daily["calls"] += 1
-                    daily["input_tokens"] += usage["input_tokens"]
-                    daily["output_tokens"] += usage["output_tokens"]
-                    daily["spent_microusd"] += actual
-                    device = daily["devices"].setdefault(pending["device"], {"calls": 0, "input_tokens": 0, "output_tokens": 0, "spent_microusd": 0})
-                    for k, v in (("calls", 1), ("input_tokens", usage["input_tokens"]), ("output_tokens", usage["output_tokens"]), ("spent_microusd", actual)):
-                        device[k] += v
-                    if usage["input_tokens"] + usage["output_tokens"] > pending["tokens"]:
-                        cycle["limit"] = 0
-            cycle["spent"] += actual
-            summary = data["months"][month][provider]
-            summary["reserved_microusd"] -= reserved
-            summary["spent_microusd"] += actual
-            if not rejected:
-                summary["calls"] += 1
-            if estimated:
-                # A conservative debit, separately identifiable for billing reconciliation.
-                summary["estimated_microusd"] = summary.get("estimated_microusd", 0) + actual
-            # An unexpected price/usage change fails closed for subsequent calls.
-            if actual > reserved:
-                cycle["limit"] = 0
+            estimate = actual if estimated else estimated_microusd
+            self._apply_charge(data, provider, reservation, actual, usage, rejected, estimate)
+            data.get("interrupted_streams", {}).pop(token, None)
             self.save(data)
+
+    @staticmethod
+    def _apply_charge(data, provider, reservation, actual, usage, rejected, estimate):
+        cycle_id, month, token = reservation
+        cycle = data["cycles"][cycle_id]
+        reserved = cycle["reserved"].pop(token)
+        if type(actual) is not int or type(estimate) is not int or not 0 <= estimate <= actual or (rejected and actual != 0):
+            raise Denied("invalid_usage")
+        for days in data.get("friends", {}).values():
+            for daily in days.values():
+                pending = daily["reserved"].pop(token, None)
+                if pending is None or rejected:
+                    continue
+                if usage is None or any(type(usage.get(k)) is not int or usage[k] < 0 for k in ("input_tokens", "output_tokens")):
+                    raise Denied("invalid_usage")
+                daily["calls"] += 1
+                daily["input_tokens"] += usage["input_tokens"]
+                daily["output_tokens"] += usage["output_tokens"]
+                daily["spent_microusd"] += actual
+                device = daily["devices"].setdefault(pending["device"], {"calls": 0, "input_tokens": 0, "output_tokens": 0, "spent_microusd": 0})
+                for k, v in (("calls", 1), ("input_tokens", usage["input_tokens"]), ("output_tokens", usage["output_tokens"]), ("spent_microusd", actual)):
+                    device[k] += v
+                if estimate:
+                    for account in (daily, device):
+                        account["estimated_microusd"] = account.get("estimated_microusd", 0) + estimate
+                if usage["input_tokens"] + usage["output_tokens"] > pending["tokens"]:
+                    cycle["limit"] = 0
+        cycle["spent"] += actual
+        summary = data["months"][month][provider]
+        summary["reserved_microusd"] -= reserved
+        summary["spent_microusd"] += actual
+        if not rejected:
+            summary["calls"] += 1
+        if estimate:
+            # A conservative debit, separately identifiable for billing reconciliation.
+            summary["estimated_microusd"] = summary.get("estimated_microusd", 0) + estimate
+        # An unexpected price/usage change fails closed for subsequent calls.
+        if actual > reserved:
+            cycle["limit"] = 0

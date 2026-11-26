@@ -521,43 +521,6 @@ internal fun SingleBookCompanionPanel(
                     .testTag("companion-module-body"),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                val summarySection = proseGroup?.sections?.firstOrNull { it.id == currentSection?.id }
-                val endOffset = summarySection?.blocks?.lastOrNull()?.end?.minus(1)
-                if (readingExplanation && LocalReadingSectionSummary.current && summarySection != null && endOffset != null &&
-                    currentPage == summarySection.lastPage && (wholeOriginalPageVisible || currentPageOffset >= endOffset ||
-                        visiblePageRanges.orEmpty().any { endOffset in it })) {
-                    var dismissed by remember(edition, summarySection.id) { mutableStateOf(false) }
-                    if (!dismissed) {
-                        val pack = (packState as? CompanionPackState.Ready)?.pack
-                        val questions = pack?.optionalPractice.orEmpty().withIndex().filter { (_, quiz) ->
-                            quiz.sectionId == summarySection.id && quiz.options.size >= 2 && quiz.correctOption in quiz.options
-                        }.take(2)
-                        val points = pack?.keyPoints.orEmpty().filter { it.sectionId == summarySection.id }.map { it.summary }
-                        SectionEndSummaryCard(
-                            section = summarySection,
-                            summaryLines = points.ifEmpty { StudyCoachCourse.localSectionSummary(summarySection) },
-                            practices = questions.map { (_, q) -> Practice(q.stem, q.anchor?.quoteAnchor.orEmpty(), q.correctOption, q.options) },
-                            answers = questions.mapIndexedNotNull { i, (_, q) ->
-                                draft.practiceSelections[q.id]?.takeIf { q.id in draft.practiceSubmitted }?.let {
-                                    i to PracticeAnswer(text = it, revealed = true, understood = it == q.correctOption)
-                                }
-                            }.toMap(),
-                            onAnswer = { i, practice, answer ->
-                                val (packIndex, q) = questions[i]
-                                updateDraft {
-                                    it.copy(
-                                        practiceSelections = if (answer.revealed) it.practiceSelections + (q.id to answer.text)
-                                            else it.practiceSelections - q.id,
-                                        practiceSubmitted = if (answer.revealed) it.practiceSubmitted + q.id else it.practiceSubmitted - q.id,
-                                    )
-                                }
-                                onCommitQuizAnswer(summarySection, 100 + packIndex, practice, answer.copy(understood = answer.text == q.correctOption))
-                            },
-                            onOpenMainline = onOpenSectionMainline?.let { open -> { open(currentSectionIndex) } },
-                            onDismiss = { dismissed = true },
-                        )
-                    }
-                }
                 if (readingExplanation) {
                     val chapter = remember(book, currentPage, currentPageOffset) {
                         BookChapterResolver.chapterForPage(book, currentPage, currentPageOffset)
@@ -599,6 +562,45 @@ internal fun SingleBookCompanionPanel(
                         }
                     }
                     if (!pageOnly && modeError != null) RetrievedPageLinks(modeSourcePages, { "第 $it 页" }, onJumpPage)
+                }
+                // The section-end card is tall. It follows the page explanation so a last-page
+                // summary cannot cover 「讲的是」 and the page card at the top of the drawer.
+                val summarySection = proseGroup?.sections?.firstOrNull { it.id == currentSection?.id }
+                val endOffset = summarySection?.blocks?.lastOrNull()?.end?.minus(1)
+                if (readingExplanation && LocalReadingSectionSummary.current && summarySection != null && endOffset != null &&
+                    currentPage == summarySection.lastPage && (wholeOriginalPageVisible || currentPageOffset >= endOffset ||
+                        visiblePageRanges.orEmpty().any { endOffset in it })) {
+                    var dismissed by remember(edition, summarySection.id) { mutableStateOf(false) }
+                    if (!dismissed) {
+                        val pack = (packState as? CompanionPackState.Ready)?.pack
+                        val questions = pack?.optionalPractice.orEmpty().withIndex().filter { (_, quiz) ->
+                            quiz.sectionId == summarySection.id && quiz.options.size >= 2 && quiz.correctOption in quiz.options
+                        }.take(2)
+                        val points = pack?.keyPoints.orEmpty().filter { it.sectionId == summarySection.id }.map { it.summary }
+                        SectionEndSummaryCard(
+                            section = summarySection,
+                            summaryLines = points.ifEmpty { StudyCoachCourse.localSectionSummary(summarySection) },
+                            practices = questions.map { (_, q) -> Practice(q.stem, q.anchor?.quoteAnchor.orEmpty(), q.correctOption, q.options) },
+                            answers = questions.mapIndexedNotNull { i, (_, q) ->
+                                draft.practiceSelections[q.id]?.takeIf { q.id in draft.practiceSubmitted }?.let {
+                                    i to PracticeAnswer(text = it, revealed = true, understood = it == q.correctOption)
+                                }
+                            }.toMap(),
+                            onAnswer = { i, practice, answer ->
+                                val (packIndex, q) = questions[i]
+                                updateDraft {
+                                    it.copy(
+                                        practiceSelections = if (answer.revealed) it.practiceSelections + (q.id to answer.text)
+                                            else it.practiceSelections - q.id,
+                                        practiceSubmitted = if (answer.revealed) it.practiceSubmitted + q.id else it.practiceSubmitted - q.id,
+                                    )
+                                }
+                                onCommitQuizAnswer(summarySection, 100 + packIndex, practice, answer.copy(understood = answer.text == q.correctOption))
+                            },
+                            onOpenMainline = onOpenSectionMainline?.let { open -> { open(currentSectionIndex) } },
+                            onDismiss = { dismissed = true },
+                        )
+                    }
                 }
                 if (chapterGroup == null) {
                     if (pageOnly) bottomContent?.invoke() else CoachEmptyState(

@@ -319,8 +319,12 @@ internal object ExplainWire {
             if (page != block.page || anchor.isBlank()) return ExplainResult.Refused("这次回答的出处无法核对。")
             Citation(anchor, block.id, block.page)
         }
-        // A reply without a verified block reference is a refusal message, never an explanation.
-        if (citations.isEmpty()) return ExplainResult.Refused("这一句书里没有更多可依据的内容。可以问「这段话在说什么？」或「前后两段有什么联系？」")
+        // A reply without a verified block reference is a refusal, never an explanation.
+        // Keep the service's own sentence when it sent one; the fixed line is only the blank fallback.
+        if (citations.isEmpty()) {
+            val message = text.trim().ifBlank { "这一句书里没有更多可依据的内容。可以问「这段话在说什么？」或「前后两段有什么联系？」" }
+            return ExplainResult.Refused(message)
+        }
         if (text.isBlank()) return ExplainResult.Refused("这次没有得到可核对的讲解。")
         val elapsed = (body["elapsedMs"] as? JsonPrimitive)?.longOrNull ?: 0L
         return ExplainResult.Done(Explanation(text, citations, elapsed))

@@ -158,10 +158,18 @@ internal fun PageExplanation(
                 return@produceState
             }
             if (explainer.loaded && explainer.identity != null) {
-                val res = try {
+                val positionRefusal = ExplainResult.Refused("这一页的段落位置无法核对，可以选中一段再问。")
+                suspend fun ask(): ExplainResult = try {
                     explainer.explainLesson(blocks, book.pages.maxOf { it.number })
                 } catch (_: IllegalArgumentException) {
-                    ExplainResult.Refused("这一页的段落位置无法核对，可以选中一段再问。")
+                    positionRefusal
+                }
+                // A fast empty-source refusal is one transient reply. Ask once more before painting it,
+                // and leave the card on 「正在讲解这一页…」 until that reply arrives. A paragraph that
+                // cannot be located is local and is not asked again. Manual 「重试」 is a new pass.
+                var res = ask()
+                if (attempt == 0 && res !== positionRefusal && res is ExplainResult.Refused && res.trouble.retry) {
+                    res = ask()
                 }
                 if (res is ExplainResult.Done && library != null) {
                     val toCache = CachedSectionGuide(

@@ -142,6 +142,7 @@ internal fun planBookChapters(
     pdf: Boolean = false,
     tocNodes: List<BookTocNode> = emptyList(),
     forceAuthoritativeTocHeadings: Boolean = false,
+    bodyStart: BookPageAnchor? = null,
     checkCancelled: () -> Unit = {},
 ): BookChapterPlan {
     val source = pages.joinToString("") { it.text }
@@ -188,18 +189,25 @@ internal fun planBookChapters(
         }
         (base + indent) to title
     }).distinctBy { it.first }.sortedBy { it.first }
-    // Physical-page metadata belongs to the following heading. Keep its source
-    // coordinates, without manufacturing a separate preamble sheet for it.
+    val bodyBoundary = bodyStart?.let { anchor ->
+        starts.firstOrNull { (_, page) -> page.number == anchor.importPage && anchor.offsetUtf16 in page.text.indices }
+            ?.let { (base, page) -> base + safeBookBoundary(page.text, anchor.offsetUtf16) }
+    }
+    // Physical-page metadata belongs to the following heading unless the body
+    // explicitly starts later, between the metadata and the heading.
     val chapterStarts = headings.map { (heading, title) ->
         val base = starts.last { it.first <= heading }.first
         val prefix = source.substring(base, heading)
         val start = if (prefix.lineSequence().all { it.isBlank() || physicalPageMarkerRegex.matches(it.trim()) }) base else heading
-        Triple(start, heading, title)
+        Triple(bodyBoundary?.takeIf { it in start..heading } ?: start, heading, title)
     }.distinctBy { it.first }
     // Isolate Project Gutenberg boilerplate headers/footers on their own sheets so opening at bodyStart
     // never mixes English Gutenberg license boilerplate onto the first body page.
     val boilerplateBreaks = gutenbergBoilerplateBoundaries(source)
-    val boundaries = (listOf(0) + chapterStarts.map { it.first } + boilerplateBreaks + source.length).distinct().sorted()
+    // An EPUB landmark can start at prose on the same import page as the preface.
+    // Give that offset its own sheet while keeping the earlier source navigable.
+    val boundaries = (listOfNotNull(0, bodyBoundary) + chapterStarts.map { it.first } + boilerplateBreaks + source.length)
+        .distinct().sorted()
     val textChapters = if (source.isEmpty()) listOf(BookChapter(0, 0, null, 0)) else boundaries.zipWithNext { start, end ->
         val heading = chapterStarts.firstOrNull { it.first == start }
         BookChapter(start, end, heading?.third, heading?.second ?: start)
@@ -220,10 +228,11 @@ internal fun nearChapterLayoutPages(
     maxPages: Int = 64,
     pdf: Boolean = false,
     tocNodes: List<BookTocNode> = emptyList(),
+    bodyStart: BookPageAnchor? = null,
     checkCancelled: () -> Unit = {},
 ): BookNearLayoutWindow {
     if (pages.isEmpty()) return BookNearLayoutWindow(emptyList(), false)
-    val plan = planBookChapters(pages, pdf, tocNodes, checkCancelled = checkCancelled)
+    val plan = planBookChapters(pages, pdf, tocNodes, bodyStart = bodyStart, checkCancelled = checkCancelled)
     val anchorIndex = pages.indexOfFirst { it.number == anchor.importPage }.takeIf { it >= 0 }
         ?: pages.indexOfLast { it.number < anchor.importPage }.coerceAtLeast(0)
     val (anchorBase, anchorPage) = plan.starts[anchorIndex]
@@ -251,11 +260,13 @@ internal class BookPageLayouter(
         tocNodes: List<BookTocNode> = emptyList(),
         forceAuthoritativeTocHeadings: Boolean = false,
         openerExtraHeightPx: Int = 0,
+        bodyStart: BookPageAnchor? = null,
         checkCancelled: () -> Unit = {},
     ): List<BookLaidPage> {
         require(widthPx > 0 && bodyHeightPx > 0)
         if (pages.all { it.text.isEmpty() && it.illustrations.isEmpty() }) return emptyList()
-        val plan = planBookChapters(pages, pdf, tocNodes, forceAuthoritativeTocHeadings, checkCancelled)
+        val plan = planBookChapters(pages, pdf, tocNodes, forceAuthoritativeTocHeadings,
+            bodyStart = bodyStart, checkCancelled = checkCancelled)
         val source = plan.source
         val starts = plan.starts
         val leadingImages = plan.leadingImages

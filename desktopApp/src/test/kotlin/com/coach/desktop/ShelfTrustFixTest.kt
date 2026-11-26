@@ -47,6 +47,18 @@ class ShelfTrustFixTest {
         onNodeWithTag(tag).fetchSemanticsNode().config.getOrNull(SemanticsProperties.Text)
             ?.joinToString("") { it.text }.orEmpty()
 
+    private fun saveUnfinished(library: TextbookLibrary, book: Textbook, block: SourceBlock) {
+        library.saveAskDraft(book.id, BookAskDraft(book.id, block.page, checkNotNull(library.lastQuestion(book.id)),
+            null, block.id, block.start, block.end, null))
+    }
+
+    private fun ComposeUiTest.assertAsk(text: String, legacyExcerpt: String) {
+        if (windowsToday) {
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("today-question").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("today-question").assertTextContains(text, substring = true)
+        } else onNodeWithTag("home-focus-meta").assertTextContains(legacyExcerpt, substring = true)
+    }
+
     @Test fun hexIdentifiersNeverLeakIntoContinueCardOrMasteryMeta() {
         val root = Files.createTempDirectory("coach-ton1822-hex-")
         try {
@@ -97,8 +109,8 @@ class ShelfTrustFixTest {
                 assertTrue("第 1 页" in meta, "Expected page number in meta: $meta")
                 assertTrue("第一章 需求与供给" in meta, "Expected chapter title in meta: $meta")
 
-                val emptyReview = nodeText("home-review-done")
-                assertEquals("还没有要复习的。做错的题会在这里出现。", emptyReview)
+                if (windowsToday) onNodeWithTag("home-review-card").assertDoesNotExist()
+                else assertEquals("还没有要复习的。做错的题会在这里出现。", nodeText("home-review-done"))
                 onAllNodesWithText("今日复习已完成", substring = true).assertCountEquals(0)
                 capture("01-home-clean-and-honest-review")
             }
@@ -131,6 +143,7 @@ class ShelfTrustFixTest {
             }
 
             assertEquals(longQuestion, library.lastQuestion(book.id))
+            saveUnfinished(library, book, block)
 
             // Reopen fresh controller (simulating return to shelf / app restart).
             val reopened = TextbookController(TextbookLibrary(library.directory))
@@ -139,7 +152,7 @@ class ShelfTrustFixTest {
                 ready(reopened) { it.initialized && it.screen == BookScreen.HOME }
 
                 val meta = nodeText("home-focus-meta")
-                assertTrue(meta.startsWith("上次问：为什么医疗保险会带来道德…"), "Unexpected ask meta: $meta")
+                assertAsk(longQuestion, "上次问：为什么医疗保险会带来道德…")
                 assertFalse(hexTokenRe.containsMatchIn(meta), "Meta must not leak hex: $meta")
                 capture("02-home-last-question-excerpt")
             }
@@ -229,6 +242,7 @@ class ShelfTrustFixTest {
             runBlocking {
                 explainer.explainSelection(kind = "ask", chosen = blockA, question = "这个例子说明什么？")
             }
+            saveUnfinished(library, bookA, blockA)
 
             val c = TextbookController(library)
             runSkikoComposeUiTest(size = Size(1280f, 820f), density = Density(1f)) {
@@ -236,7 +250,7 @@ class ShelfTrustFixTest {
                 ready(c) { it.initialized && it.screen == BookScreen.HOME }
 
                 // Initially focus is bookA with its asked question.
-                assertTrue(nodeText("home-focus-meta").contains("上次问：这个例子说明什么？"))
+                assertAsk("这个例子说明什么？", "上次问：这个例子说明什么？")
 
                 // Multi-drop two new books and choose "分开单放".
                 c.launchDroppedBooks(listOf(bookBFile, bookCFile))
@@ -252,7 +266,7 @@ class ShelfTrustFixTest {
                 // Switching back to bookA still displays bookA's own question.
                 runBlocking { c.select(bookA.id) }
                 ready(c) { it.book?.id == bookA.id }
-                assertTrue(nodeText("home-focus-meta").contains("上次问：这个例子说明什么？"))
+                assertAsk("这个例子说明什么？", "上次问：这个例子说明什么？")
             }
         } finally {
             root.toFile().deleteRecursively()
@@ -292,6 +306,7 @@ class ShelfTrustFixTest {
             runBlocking {
                 explainer.explainSelection(kind = "ask", chosen = block, question = "为什么边际替代率递减会导致凸性？")
             }
+            saveUnfinished(library, book, block)
 
             // Reopen fresh controller from SQLite (cold restart).
             val reopened = TextbookController(TextbookLibrary(library.directory))
@@ -300,7 +315,7 @@ class ShelfTrustFixTest {
                 ready(reopened) { it.initialized && it.screen == BookScreen.HOME }
 
                 val meta = nodeText("home-focus-meta")
-                assertTrue(meta.contains("上次问：为什么边际替代率递减会导…"), "Expected question excerpt alongside draft: $meta")
+                assertAsk("为什么边际替代率递减会导致凸性？", "上次问：为什么边际替代率递减会导…")
                 assertTrue(meta.contains("练习草稿已保存"), "Expected saved practice draft indicator: $meta")
                 assertTrue(reopened.state.value.activePracticeDraft?.hasMeaningfulDraft() == true)
                 capture("04-home-draft-and-question")

@@ -41,7 +41,7 @@ import com.coach.ui.v7.V7TextButton
 import com.coach.ui.v7.paperShadow
 import com.coach.ui.v7.v7FocusRing
 
-private const val HOME_REVIEW_EMPTY_MESSAGE = "还没有要复习的。做错的题会在这里出现。"
+internal const val HOME_REVIEW_EMPTY_MESSAGE = "还没有要复习的。做错的题会在这里出现。"
 
 @Composable
 internal fun BookImportProgressBar(
@@ -128,6 +128,7 @@ internal fun LibraryHome(
     @Suppress("UNUSED_PARAMETER") onExportNotes: ((Textbook, Int) -> Unit)? = null,
     onOpenBook: (String) -> Unit = onSelect,
     onOpenReviews: () -> Unit = {},
+    onOpenAskDraft: (BookAskDraft) -> Unit = {},
     onNewCourse: () -> Unit = {},
     onNewBooklist: () -> Unit = {},
     onOpenCollection: (CollectionSummary) -> Unit = {},
@@ -138,6 +139,7 @@ internal fun LibraryHome(
 ) {
     val colors = CoachTheme.colors
     val scroll = rememberScrollState()
+    val showToday = library?.todayCardEnabled ?: windowsToday
     val rightScroll = rememberScrollState()
     val density = LocalDensity.current
     var sheetOriginLeftDp by remember { mutableStateOf<Float?>(null) }
@@ -164,7 +166,7 @@ internal fun LibraryHome(
         ) {
             if (isEmpty) {
                 // 空态首页：居中单栏，唯一主钮「导入文件」+ 3 张可点引导卡（加顶栏 ＋ / 设置，共 6 个零死路入口）。
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Box(Modifier.fillMaxSize(), contentAlignment = if (showToday) Alignment.TopCenter else Alignment.Center) {
                     Column(
                         Modifier.fillMaxWidth().verticalScroll(scroll)
                             .padding(horizontal = CoachV7.Space.s4, vertical = CoachV7.Space.s5)
@@ -172,6 +174,7 @@ internal fun LibraryHome(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(CoachV7.Space.s5),
                     ) {
+                        if (showToday) TodayCard(ui, library, onOpenBook, onOpenReviews, onOpenAskDraft)
                         CoachEmptyState(
                             title = "把要读的书或课程材料放进来。",
                             hint = "直接把文件拖进窗口，或选择下面一种方式开始。",
@@ -243,7 +246,7 @@ internal fun LibraryHome(
                                 )
                             }
                         }
-                        CoachCardMeta(
+                        if (!showToday) CoachCardMeta(
                             HOME_REVIEW_EMPTY_MESSAGE,
                             Modifier.testTag("home-review-done"),
                         )
@@ -254,7 +257,11 @@ internal fun LibraryHome(
                 val focusSummary = focusBook?.let { b -> ui.catalog.firstOrNull { it.id == b.id } } ?: ui.catalog.firstOrNull()
                 val focusCollection = if (focusBook == null) activeCollections.firstOrNull() else null
 
-                val focusAndReviewBlock: @Composable () -> Unit = {
+                val focusAndReviewBlock: @Composable () -> Unit = focus@{
+                    if (showToday) {
+                        TodayCard(ui, library, onOpenBook, onOpenReviews, onOpenAskDraft)
+                        return@focus
+                    }
                     // 1. 顶部焦点卡：全屏唯一 PrimaryButton（「继续」）+ 就地学法切换器（≤2 击开非默认学法）。
                     if (focusBook != null) {
                         var focusPref by remember(focusBook.id, library) {

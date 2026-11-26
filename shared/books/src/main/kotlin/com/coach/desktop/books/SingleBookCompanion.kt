@@ -478,14 +478,15 @@ internal object ChapterProgressStore {
         }
     }
 
-    fun loadCachedPack(db: Connection, bookId: String, chapterId: String): BookCompanionPack? {
+    fun loadCachedPack(db: Connection, bookId: String, chapterId: String, asOf: Long = Long.MAX_VALUE): BookCompanionPack? {
         if (!BookSchemaMigration.tableExists(db, "book_section_cache")) return null
         return db.prepareStatement(
-            "SELECT payload FROM book_section_cache WHERE book=? AND section_id=? AND kind=?",
+            "SELECT payload FROM book_section_cache WHERE book=? AND section_id=? AND kind=? AND updated_at<=?",
         ).use { s ->
             s.setString(1, bookId)
             s.setString(2, chapterId)
             s.setString(3, COMPANION_CACHE_KIND)
+            s.setLong(4, asOf)
             s.executeQuery().use { r ->
                 if (!r.next()) null else runCatching {
                     CompanionJson.decodePack(r.getString(1))

@@ -636,6 +636,7 @@ internal fun SingleBookCompanionPanel(
                         pack = readyPack,
                         draft = draft,
                         onUpdateDraft = { updateDraft(it) },
+                        onDiagnosticAnswer = onCommitPretestAnswer ?: onCommitQuizAnswer,
                         onUpdateInquiry = { q ->
                             val normalized = q.trim()
                             if (normalized != studyPreference.inquiryQuestion.trim()) {
@@ -772,7 +773,7 @@ internal fun SingleBookCompanionPanel(
                                         commit(
                                             sec,
                                             idx,
-                                            Practice(quiz.stem, quiz.anchor?.quoteAnchor.orEmpty(), quiz.correctOption, quiz.options),
+                                            Practice(quiz.stem, quiz.anchor?.quoteAnchor.orEmpty(), quiz.correctOption, quiz.options, quiz.anchor?.pdfPage),
                                             PracticeAnswer(text = chosen, revealed = true, guessed = guessed),
                                         )
                                     }
@@ -837,7 +838,7 @@ internal fun SingleBookCompanionPanel(
                                         onCommitQuizAnswer(
                                             sec,
                                             100 + idx,
-                                            Practice(quiz.stem, quiz.anchor?.quoteAnchor.orEmpty(), quiz.correctOption, quiz.options),
+                                            Practice(quiz.stem, quiz.anchor?.quoteAnchor.orEmpty(), quiz.correctOption, quiz.options, quiz.anchor?.pdfPage),
                                             PracticeAnswer(text = chosen, revealed = true, understood = chosen == quiz.correctOption, guessed = guessed),
                                         )
                                     }

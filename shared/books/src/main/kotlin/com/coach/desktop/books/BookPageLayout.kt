@@ -280,7 +280,7 @@ internal class BookPageLayouter(
             if (page.illustrations.isEmpty()) return@flatMap emptyList()
             val segments = BookIllustrationLayout.segment(page.text, page.illustrations, hideReplacedSourceText = true)
             val visible = segments.filterIsInstance<BookPageSegment.Text>()
-            segments.filterIsInstance<BookPageSegment.Illustration>().flatMap { segment ->
+            segments.filterIsInstance<BookPageSegment.Illustration>().flatMap visual@{ segment ->
                 val item = segment.illustration
                 val offset = BookIllustrationAnchors.snapToValidUtf16Boundary(page.text, item.anchorOffset)
                 val at = base + offset
@@ -300,12 +300,16 @@ internal class BookPageLayouter(
                     else null
                 val replacement = (cropEnd ?: captionEnd)?.takeIf { base + it <= chapters[owner].end }
                     ?.let { BookPageSlice(page.number, offset, it) }
+                // A replacement crossing a chapter or another anchor cannot occupy a
+                // single place in the reading flow. Keep its source paragraph visible.
+                if (item.sourceStart != null && item.kind != PageVisualKind.ILLUSTRATION && replacement == null)
+                    return@visual emptyList()
                 val marked = highlights[page.number].orEmpty().any { r ->
                     if (replacement == null) offset in r else r.first < replacement.endUtf16 && r.last >= offset
                 }
                 val event = VisualEvent(owner, at, item, replacement, marked)
                 val rows = if (item.kind == PageVisualKind.TABLE) {
-                    tableRows[item] ?: item.table?.takeIf { it.valid(item.height, page.text) }?.layout()
+                    tableRows[item] ?: item.table?.takeIf { it.valid(item.height, page.text) }?.layout(replacement?.endUtf16)
                 } else null
                 if (rows == null) listOf(event)
                 else tableEvents(event, rows, page.text, highlights[page.number].orEmpty(), widthPx, bodyHeightPx)

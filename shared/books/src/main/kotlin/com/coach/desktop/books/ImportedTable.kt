@@ -6,12 +6,24 @@ import java.nio.ByteBuffer
 /** Pixel bottoms refer to the saved crop. Row zero is the printed header.
  * Source ranges are half-open offsets in the immutable text of the physical page. */
 internal data class ImportedTableRow(val bottomPx: Int, val source: ReaderTextRange)
-internal data class ImportedTable(val rows: List<ImportedTableRow>, val bodyFontPx: Float, val tableFontPx: Float) {
-    fun layout() = BookTableRows(rows.first().bottomPx,
-        rows.drop(1).map { BookTableRow(it.bottomPx, it.source.endUtf16) }, bodyFontPx, tableFontPx)
+internal data class ImportedTable(val rows: List<ImportedTableRow>, val bodyFontPx: Float, val tableFontPx: Float,
+    val headerTopPx: Int = 0, val dataBottomPx: Int = rows.lastOrNull()?.bottomPx ?: 0) {
+    fun layout(replacementEnd: Int? = null): BookTableRows {
+        val data = (1..rows.lastIndex).map { index ->
+            val row = rows[index]
+            val end = if (index == rows.lastIndex) replacementEnd ?: row.source.endUtf16 else row.source.endUtf16
+            BookTableRow(row.bottomPx, end)
+        }
+        return BookTableRows(rows.first().bottomPx, data, bodyFontPx, tableFontPx)
+    }
+
+    fun anchoredAt(anchor: Int, start: Int?, end: Int?): Boolean =
+        rows.first().source.startUtf16 == anchor || (headerTopPx > 0 && start == anchor && end != null &&
+            anchor <= rows.first().source.startUtf16 && end >= rows.last().source.endUtf16)
 
     fun valid(height: Int, text: String? = null): Boolean {
         if (rows.size !in 3..MAX_ROWS || rows.last().bottomPx != height ||
+            headerTopPx !in 0 until rows.first().bottomPx || dataBottomPx <= rows[rows.lastIndex - 1].bottomPx || dataBottomPx > height ||
             !bodyFontPx.isFinite() || bodyFontPx <= 0 || !tableFontPx.isFinite() || tableFontPx <= 0) return false
         var bottom = 0
         var end = 0
@@ -26,10 +38,12 @@ internal data class ImportedTable(val rows: List<ImportedTableRow>, val bodyFont
         return true
     }
 
-    fun encode(): ByteArray = ByteBuffer.allocate(12 + 12 * rows.size).apply {
-        putInt(1)
+    fun encode(): ByteArray = ByteBuffer.allocate(20 + 12 * rows.size).apply {
+        putInt(2)
         putFloat(bodyFontPx)
         putFloat(tableFontPx)
+        putInt(headerTopPx)
+        putInt(dataBottomPx)
         for (row in rows) {
             putInt(row.bottomPx)
             putInt(row.source.startUtf16)
@@ -41,11 +55,15 @@ internal data class ImportedTable(val rows: List<ImportedTableRow>, val bodyFont
         const val MAX_ROWS = 256
 
         fun decode(bytes: ByteArray?, height: Int): ImportedTable? {
-            if (bytes == null || bytes.size !in 48..(12 + 12 * MAX_ROWS) || bytes.size % 12 != 0) return null
+            if (bytes == null || bytes.size !in 48..(20 + 12 * MAX_ROWS)) return null
             val buffer = ByteBuffer.wrap(bytes)
-            if (buffer.int != 1) return null
+            val version = buffer.int
+            if (version !in 1..2) return null
             val body = buffer.float
             val cell = buffer.float
+            val top = if (version == 2) buffer.int else 0
+            val bottomOfData = if (version == 2) buffer.int else height
+            if (buffer.remaining() % 12 != 0) return null
             val rows = mutableListOf<ImportedTableRow>()
             while (buffer.hasRemaining()) {
                 val bottom = buffer.int
@@ -54,7 +72,7 @@ internal data class ImportedTable(val rows: List<ImportedTableRow>, val bodyFont
                 if (start < 0 || end <= start) return null
                 rows += ImportedTableRow(bottom, ReaderTextRange(start, end))
             }
-            return ImportedTable(rows, body, cell).takeIf { it.valid(height) }
+            return ImportedTable(rows, body, cell, top, bottomOfData).takeIf { it.valid(height) }
         }
     }
 }

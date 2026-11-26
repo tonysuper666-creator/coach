@@ -11,6 +11,23 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class BookPageLayoutTest {
+    @Test fun conflictingReplacementKeepsTheTextAndTheOtherVisualAnchor() = runSkikoComposeUiTest(density = Density(1f)) {
+        val text = "Before the heading, value and footnote. After."
+        val start = text.indexOf("heading")
+        val table = BookIllustration(1, start, "a".repeat(64), "png", 240, 170, kind = PageVisualKind.TABLE,
+            sourceRegion = com.coach.domain.reader.ReaderRect(.1, .1, .5, .3), sourceStart = start, sourceEnd = text.indexOf(" After"))
+        val figure = BookIllustration(1, text.indexOf("value"), "b".repeat(64), "png", 80, 60, order = 1)
+        var sheets = emptyList<BookLaidPage>()
+        setContent { CoachTheme {
+            val layouter = BookPageLayouter(rememberTextMeasurer(), LocalDensity.current, BookPageTypography(
+                MaterialTheme.typography.bodyLarge, SpanStyle(), SpanStyle(), 40.sp, 32.sp, 12.sp, 32.sp))
+            sheets = layouter.layout(listOf(BookPage(1, text, illustrations = listOf(table, figure))), 310, 390)
+        } }
+        waitForIdle()
+        assertEquals(listOf(figure), sheets.flatMap { it.visuals }.map { it.item })
+        assertEquals(text, sheets.flatMap { it.runs }.joinToString("") { originalBookSelection(it.text) })
+    }
+
     @Test fun ordinaryTableUsesSavedRowsAndRepeatsItsHeader() = runSkikoComposeUiTest(density = Density(1f)) {
         val text = "列\n甲😀\n乙\n丙\n丁"
         val table = ImportedTable(listOf(

@@ -1052,12 +1052,13 @@ private fun TableRowLinks(book: Textbook, item: BookIllustration, band: BookTabl
         val height = constraints.maxHeight
         val headerHeight = band.drawnHeaderHeight(height)
         Column {
-            var top = 0
+            var top = (headerHeight.toLong() * table.headerTopPx / band.headerBottom).toInt()
+            if (top > 0) Spacer(Modifier.height(with(LocalDensity.current) { top.toDp() }))
             for (index in 0..lastRow) {
                 if (index in 1..precedingRow) continue
                 val row = rows[index]
                 val bottom = if (index == 0) headerHeight else headerHeight +
-                    ((row.bottomPx - band.startY).toLong() * (height - headerHeight) / (band.endY - band.startY)).toInt()
+                    ((minOf(row.bottomPx, table.dataBottomPx) - band.startY).toLong() * (height - headerHeight) / (band.endY - band.startY)).toInt()
                 if (bottom > top) {
                     val label = if (index == 0) "查看原页表头" else "查看原页第 ${index} 行数据"
                     Spacer(Modifier.fillMaxWidth().height(with(LocalDensity.current) { (bottom - top).toDp() })

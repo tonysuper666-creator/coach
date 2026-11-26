@@ -65,7 +65,7 @@ internal object PdfBookImages {
             if (!intersects(expanded, label.box)) candidates += Candidate(expanded, label, false)
         }
         val result = enclosed.map { old ->
-            if (old.table != null) return@map old
+            if (old.table != null || old.sourceStart != null) return@map old
             val label = old.sourceRegion?.let(::caption)?.text ?: old.caption
             ExtractedIllustration(old.page, old.anchorOffset, old.bytes, old.extension, old.width, old.height,
                 label, old.kind, old.sourceStart, old.sourceEnd, old.sourceRegion)

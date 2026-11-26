@@ -1494,7 +1494,8 @@ internal class TextbookLibrary(
     fun pdfIllustrationsForPages(bookId: String, pages: Collection<Int>): Map<Int, List<BookIllustration>> {
         if (pages.isEmpty()) return emptyMap()
         return database().use { db ->
-            BookIllustrationStore.loadByPage(db, bookId, pages.min()..pages.max()).filterKeys { it in pages }
+            val stored = BookIllustrationStore.loadByPage(db, bookId, pages.min()..pages.max())
+            pages.associateWith { stored[it].orEmpty() }
         }
     }
 
@@ -1509,7 +1510,8 @@ internal class TextbookLibrary(
         val ready = database().use { db ->
             db.prepareStatement("""SELECT p.text FROM pages p JOIN books b ON b.id=p.book
                 WHERE p.book=? AND p.page=? AND b.format='pdf' AND p.ocr=0 AND p.ocr_pending=0 AND p.text_pending=0
-                AND NOT EXISTS(SELECT 1 FROM book_visual_pages v WHERE v.book=p.book AND v.page=p.page)""").use { query ->
+                AND NOT EXISTS(SELECT 1 FROM book_visual_pages v
+                    WHERE v.book=p.book AND v.page=p.page AND v.layout_version >= 1)""").use { query ->
                 query.setString(1, bookId)
                 requested.mapNotNull { number ->
                     query.setInt(2, number)
@@ -1527,9 +1529,11 @@ internal class TextbookLibrary(
             try {
                 // Acquire the SQLite writer before checking assets and quotas. An overlapping visit,
                 // a reviewed import, or a changed page between extraction and commit takes precedence.
-                val claimed = db.prepareStatement("""INSERT OR IGNORE INTO book_visual_pages(book,page,extracted_at)
-                    SELECT p.book,p.page,? FROM pages p WHERE p.book=? AND p.page=? AND p.text=?
-                    AND p.ocr=0 AND p.ocr_pending=0 AND p.text_pending=0""").use { claim ->
+                val claimed = db.prepareStatement("""INSERT INTO book_visual_pages(book,page,extracted_at,layout_version)
+                    SELECT p.book,p.page,?,1 FROM pages p WHERE p.book=? AND p.page=? AND p.text=?
+                    AND p.ocr=0 AND p.ocr_pending=0 AND p.text_pending=0
+                    ON CONFLICT(book,page) DO UPDATE SET extracted_at=excluded.extracted_at,layout_version=excluded.layout_version
+                    WHERE book_visual_pages.layout_version < excluded.layout_version""").use { claim ->
                     claim.setLong(1, System.currentTimeMillis())
                     claim.setString(2, bookId)
                     ready.filter { page ->
@@ -1540,6 +1544,17 @@ internal class TextbookLibrary(
                     }
                 }
                 val texts = claimed.associate { it.number to it.text }
+                // Earlier native tables stored row links but no replacement range. Only native
+                // extraction creates table_rows. User-reviewed assets have no such metadata.
+                db.prepareStatement("""DELETE FROM book_illustrations WHERE book=? AND page=?
+                    AND kind='TABLE' AND table_rows IS NOT NULL AND source_start IS NULL AND source_end IS NULL""").use { remove ->
+                    remove.setString(1, bookId)
+                    for (page in claimed) {
+                        remove.setInt(2, page.number)
+                        remove.addBatch()
+                    }
+                    remove.executeBatch()
+                }
                 val stored = BookIllustrationStore.loadByPage(db, bookId, requested.min()..requested.max())
                 val fresh = crops.filter { item ->
                     item.page in texts && stored[item.page].orEmpty().none { old ->

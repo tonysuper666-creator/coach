@@ -13,7 +13,11 @@ internal fun importedPdfVisuals(pdf: BookPdfDocument, pages: List<BookPage>, con
         // progressive reader, such special layouts enter through an explicit crop review.
         val enclosed = if (includeLayoutCandidates) PdfBoxedVisuals.extract(pdf, page, control) else emptyList()
         val tables = PdfPrintedTables.extract(pdf, page, control, enclosed)
-        for (crop in PdfBookImages.extract(pdf, page, enclosed + tables, control, includeLayoutCandidates)) {
+        val captioned = PdfCaptionedBlocks.extract(pdf, page, tables, control)
+        val preserved = enclosed.filter { old ->
+            captioned.none { PdfBookImages.intersects(it.sourceRegion!!, old.sourceRegion!!) }
+        }
+        for (crop in PdfBookImages.extract(pdf, page, preserved + captioned, control, includeLayoutCandidates)) {
             if (visuals.size >= FormatBookImages.MAX_IMAGES || visualBytes + crop.bytes.size > FormatBookImages.MAX_TOTAL) break
             visuals += crop
             visualBytes += crop.bytes.size

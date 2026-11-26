@@ -243,7 +243,7 @@ internal object BookIllustrationAnchors {
             }
             if (item.table != null) {
                 require(item.kind == PageVisualKind.TABLE && item.table.valid(item.height, pageText) &&
-                    item.anchorOffset == item.table.rows.first().source.startUtf16) { "表格行界或出处与本页不符。" }
+                    item.table.anchoredAt(item.anchorOffset, item.sourceStart, item.sourceEnd)) { "表格行界或出处与本页不符。" }
             }
             if (item.sourceStart != null || item.sourceEnd != null) {
                 val start = requireNotNull(item.sourceStart) { "裁图替换区间缺少起始偏移。" }
@@ -562,7 +562,7 @@ internal object BookIllustrationStore {
                         sourceRegion = region,
                         table = if (kind == PageVisualKind.TABLE && "table_rows" in columns)
                             ImportedTable.decode(rows.getBytes("table_rows"), height)?.takeIf {
-                                it.rows.first().source.startUtf16 == anchor
+                                it.anchoredAt(anchor, sourceStart, sourceEnd)
                             } else null,
                     )
                     grouped.getOrPut(page) { mutableListOf() }.add(illustration)

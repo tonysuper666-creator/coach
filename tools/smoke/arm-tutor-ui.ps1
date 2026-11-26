@@ -248,7 +248,25 @@ function Test-PassageQuestion {
     $question = 'What does this passage mean?'
     Send-Keys $question
     Send-Keys '{ENTER}'
-    $null = Find-TutorLabel '04-answer' @('Passageanswer', '再和原文核对', '自己的话') -1
+    # chi_sim turns "Passage answer. 可以用自己的话解释…" into one unreadable line.
+    # The loopback records kind=ask only for this exact question.
+    $answer = $null
+    $deadline = (Get-Date).AddSeconds(20)
+    $eventPath = Join-Path $OutDir 'tutor-events.jsonl'
+    do {
+        $shot = @(Read-TutorFrame '04-answer')
+        foreach ($label in @('Passageanswer', '再和原文核对', '自己的话')) {
+            $answer = Find-Text $shot $label
+            if ($answer) { break }
+        }
+        if ($answer) { break }
+        if ((Test-Path -LiteralPath $eventPath) -and (Select-String -LiteralPath $eventPath -Pattern '"kind": "ask"' -Quiet)) {
+            $answer = $true
+            break
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    if (-not $answer) { throw "Missing 'Passageanswer / 再和原文核对 / 自己的话' in 04-answer" }
     $null = Find-TutorLabel '04-answer-source' @('出处') -1
     Send-Keys '{ESC}'
 }

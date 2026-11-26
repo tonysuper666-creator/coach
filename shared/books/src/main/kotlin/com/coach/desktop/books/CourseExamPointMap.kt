@@ -33,6 +33,7 @@ internal fun CourseExamPointMap(
     detail: CourseDetailSnapshot,
     onRealign: () -> Unit,
     onPractice: (CourseTopicEntry) -> Unit,
+    onGenerateExamDrills: (() -> Unit)? = null,
 ) {
     val mastery = detail.countdownPlan?.rankedTopics.orEmpty().filter { it.hasPracticeEvidence }
         .associate { it.topicId to (it.pMastery * it.projectedRetrievability).coerceIn(0.0, 1.0) }
@@ -73,6 +74,8 @@ internal fun CourseExamPointMap(
                         Text(point.title, style = MaterialTheme.typography.labelLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         val techniques = detail.pastPaperTechniques[point.topicId].orEmpty()
                         if (techniques.isNotEmpty()) Text(techniques.joinToString("、") { it.label }, style = MaterialTheme.typography.bodySmall)
+                        val drillLine = ExamPointDrillLocal.statusLine(point.pack?.drill)
+                        if (drillLine != null) Text(drillLine, style = MaterialTheme.typography.bodySmall)
                     }
                     if (value != null) {
                         Box(Modifier.width(80.dp).height(6.dp).clip(RoundedCornerShape(3.dp)).background(colors.borderSubtle)) {
@@ -87,5 +90,9 @@ internal fun CourseExamPointMap(
         if (points.size > 5) V7TextButton(onClick = { expanded = !expanded }) {
             Text(if (expanded) "收起" else "查看全部 ${points.size} 个考点")
         }
+        if (onGenerateExamDrills != null) V7TextButton(
+            onClick = onGenerateExamDrills,
+            modifier = Modifier.testTag("exam-point-drill-generate"),
+        ) { Text("为考点出题") }
     }
 }

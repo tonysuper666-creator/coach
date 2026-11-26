@@ -101,7 +101,10 @@ internal fun CourseCompanionPanel(
             }
         }
 
-        if (practiceFirst) CourseEssayPractice(courseContext, activeBookId, activePage, onJumpCitation, onSavePracticeDraft)
+        if (practiceFirst) {
+            courseContext.pack?.drill?.let { CourseTeachingDrill(it, onJumpCitation) }
+            CourseEssayPractice(courseContext, activeBookId, activePage, onJumpCitation, onSavePracticeDraft)
+        }
 
         if (courseContext.examProfile.isExam &&
             (courseContext.examProfile.examDateTentative || courseContext.examProfile.examFormatTentative)
@@ -464,6 +467,60 @@ private fun CourseEssayPractice(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun CourseTeachingDrill(
+    drill: ExamPointDrill,
+    onJumpCitation: (CourseCitationRef) -> Unit,
+) {
+    val colors = CoachTheme.colors
+    Column(
+        Modifier.fillMaxWidth().testTag("course-teaching-drill"),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text("先做题，再看讲解", style = MaterialTheme.typography.titleMedium, color = colors.fgPrimary)
+        if (drill.choices.isEmpty()) {
+            Text(
+                drill.emptyReason ?: "这个考点还没有可用的题",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgSecondary,
+            )
+        }
+        for (choice in drill.choices) {
+            var picked by remember(choice.id) { mutableStateOf<String?>(null) }
+            Text(choice.stem, style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
+            for (opt in choice.options) {
+                V7TextButton(
+                    onClick = { picked = opt.letter },
+                    modifier = Modifier.testTag("drill-${choice.id}-${opt.letter}"),
+                ) { Text("${opt.letter}. ${opt.text}") }
+                if (picked != null) {
+                    Text(
+                        "${if (opt.correct) "对" else "错"} · ${opt.reason}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (opt.correct) colors.successFg else colors.fgSecondary,
+                    )
+                    V7TextButton(onClick = { onJumpCitation(opt.citation) }) {
+                        Text(formatCitationLabel(opt.citation))
+                    }
+                }
+            }
+        }
+        val essay = drill.essay
+        if (essay != null) {
+            Text("论述提纲", style = MaterialTheme.typography.titleMedium, color = colors.fgPrimary)
+            Text(essay.thesis, style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
+            for (paragraph in essay.paragraphs) {
+                Text(paragraph.claim, style = MaterialTheme.typography.bodySmall, color = colors.fgPrimary)
+                V7TextButton(onClick = { onJumpCitation(paragraph.citation) }) {
+                    Text(formatCitationLabel(paragraph.citation))
+                }
+            }
+        } else if (drill.essayMissing) {
+            Text("论述提纲未通过核对", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
         }
     }
 }

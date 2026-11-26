@@ -481,6 +481,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                     }
                                 },
                                 onRealign = { run { controller.realignCourse(detail.courseId, explainer) } },
+                                onGenerateExamDrills = { run { controller.generateExamPointDrills(detail.courseId, explainer) } },
                                 onUpdateMaterialAssignment = { bookId, weekNum, role ->
                                     run { controller.updateCourseMaterialAssignment(detail.courseId, bookId, weekNum, role) }
                                 },

@@ -1012,4 +1012,209 @@ class UnifiedBookUploadQueueTest {
             root.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun cancellingRestoreMidDownloadDeletesTempFileAndResetsCloudCardState() = runBlocking {
+        val root = Files.createTempDirectory("coach-restore-cancel-")
+        try {
+            val lib = TextbookLibrary(root.resolve("library"))
+            val fullBytes = "# Chapter 1\nSynthetic book content for cancellation cleanup verification.\n".toByteArray()
+            val expectedSha = MessageDigest.getInstance("SHA-256").digest(fullBytes).joinToString("") { "%02x".format(it) }
+            val remoteBook = RemoteShelfBook(
+                shelfBookId = "sb_cancel_00000000000001",
+                sha256 = expectedSha,
+                title = "Cancel Cleanup Book",
+                format = "md",
+                sizeBytes = fullBytes.size.toLong(),
+                createdAt = 1L,
+                updatedAt = 2L,
+                jobState = BookUploadState.READY,
+                progressPct = 100,
+                stageLabel = "整理完成",
+            )
+            var attempt = 0
+            val wrotePartial = CompletableDeferred<Path>()
+            val hangForever = CompletableDeferred<Unit>()
+            val remote = object : UnifiedBookRemoteClient {
+                override suspend fun activeAccountKey(): String = "sable-alpha"
+                override suspend fun checkCapability(): UnifiedBookCapability = UnifiedBookCapability.Supported("sable-alpha")
+                override suspend fun uploadBook(
+                    file: Path,
+                    format: String,
+                    title: String,
+                    sha256: String,
+                    onProgress: (Int) -> Unit,
+                ): UnifiedBookUploadOutcome = UnifiedBookUploadOutcome.Failed("unused")
+
+                override suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome =
+                    UnifiedBookStatusOutcome.Ready(BookUploadState.READY, 100, "整理完成")
+
+                override suspend fun deleteBook(shelfBookId: String): UnifiedBookDeleteOutcome =
+                    UnifiedBookDeleteOutcome.Deleted
+
+                override suspend fun listRemoteBooks(): UnifiedBookListOutcome =
+                    UnifiedBookListOutcome.Ready(listOf(remoteBook))
+
+                override suspend fun downloadBookOriginal(
+                    shelfBookId: String,
+                    destination: Path,
+                    expectedSha256: String,
+                    onProgress: (Int) -> Unit,
+                ): UnifiedBookDownloadOutcome {
+                    attempt++
+                    return if (attempt == 1) {
+                        Files.write(destination, ByteArray(1024) { 0x41 })
+                        onProgress(25)
+                        wrotePartial.complete(destination)
+                        hangForever.await()
+                        UnifiedBookDownloadOutcome.Offline
+                    } else {
+                        Files.write(destination, fullBytes)
+                        onProgress(100)
+                        UnifiedBookDownloadOutcome.Downloaded(expectedSha, fullBytes.size.toLong())
+                    }
+                }
+            }
+            val coordinator = UnifiedBookUploadCoordinator(lib) { remote }
+            coordinator.syncOnce()
+            assertEquals(1, coordinator.remoteShelfBooks.value.size)
+
+            // Launch restore in a shelf-like coroutine and cancel it after 1,024 bytes are written.
+            val shelfJob = launch(Dispatchers.Default) {
+                coordinator.downloadAndImport(remoteBook)
+            }
+            val tempFile = wrotePartial.await()
+            assertEquals(1024L, Files.size(tempFile))
+            assertEquals(remoteBook.shelfBookId, coordinator.restoringShelfBookId.value)
+
+            shelfJob.cancel()
+            shelfJob.join()
+
+            assertFalse(Files.exists(tempFile), "Cancelled restore must delete partial temp file")
+            assertFalse(Files.exists(tempFile.parent), "Cancelled restore must delete temp directory")
+            assertNull(coordinator.restoringShelfBookId.value, "Cancelled restore must reset restoringShelfBookId")
+            assertEquals(0, coordinator.restoreProgressPct.value)
+
+            // Cloud card is clickable again and succeeds on retry.
+            val importedId = coordinator.downloadAndImport(remoteBook)
+            assertEquals(expectedSha, importedId)
+            assertNull(coordinator.restoringShelfBookId.value)
+            assertTrue(coordinator.remoteShelfBooks.value.isEmpty())
+            assertEquals(remoteBook.shelfBookId, lib.readUploadEntry("sable-alpha", expectedSha)?.serverShelfBookId)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun switchingAccountDuringRestoreCancelsAndNeverWritesBindingToNewAccount() = runBlocking {
+        val root = Files.createTempDirectory("coach-restore-account-switch-")
+        try {
+            val lib = TextbookLibrary(root.resolve("library"))
+            val bookBytesA = "# Chapter 1\nAccount Alpha book pulled back during account switch.\n".toByteArray()
+            val shaA = MessageDigest.getInstance("SHA-256").digest(bookBytesA).joinToString("") { "%02x".format(it) }
+            val remoteBookA = RemoteShelfBook(
+                shelfBookId = "sb_alpha_00000000000001",
+                sha256 = shaA,
+                title = "Alpha Pullback Book",
+                format = "md",
+                sizeBytes = bookBytesA.size.toLong(),
+                createdAt = 1L,
+                updatedAt = 2L,
+                jobState = BookUploadState.READY,
+                progressPct = 100,
+                stageLabel = "整理完成",
+            )
+            var activeKey = "sable-alpha"
+            var pauseDownload = true
+            val downloadStarted = CompletableDeferred<Path>()
+            val downloadGate = CompletableDeferred<Unit>()
+            val remote = object : UnifiedBookRemoteClient {
+                override suspend fun activeAccountKey(): String = activeKey
+                override suspend fun checkCapability(): UnifiedBookCapability = UnifiedBookCapability.Supported(activeKey)
+                override suspend fun uploadBook(
+                    file: Path,
+                    format: String,
+                    title: String,
+                    sha256: String,
+                    onProgress: (Int) -> Unit,
+                ): UnifiedBookUploadOutcome = UnifiedBookUploadOutcome.Failed("unused")
+
+                override suspend fun fetchStatus(shelfBookId: String): UnifiedBookStatusOutcome =
+                    UnifiedBookStatusOutcome.Ready(BookUploadState.READY, 100, "整理完成")
+
+                override suspend fun deleteBook(shelfBookId: String): UnifiedBookDeleteOutcome =
+                    UnifiedBookDeleteOutcome.Deleted
+
+                override suspend fun listRemoteBooks(): UnifiedBookListOutcome =
+                    UnifiedBookListOutcome.Ready(if (activeKey == "sable-alpha") listOf(remoteBookA) else emptyList())
+
+                override suspend fun downloadBookOriginal(
+                    shelfBookId: String,
+                    destination: Path,
+                    expectedSha256: String,
+                    onProgress: (Int) -> Unit,
+                ): UnifiedBookDownloadOutcome {
+                    Files.write(destination, bookBytesA)
+                    if (pauseDownload) {
+                        downloadStarted.complete(destination)
+                        downloadGate.await()
+                    }
+                    return UnifiedBookDownloadOutcome.Downloaded(shaA, bookBytesA.size.toLong())
+                }
+            }
+
+            val coordinator = UnifiedBookUploadCoordinator(lib) { remote }
+            coordinator.syncOnce()
+            assertEquals("sable-alpha", coordinator.currentAccountKey())
+
+            // Case 1: Account switches mid-download -> active restore is cancelled, temp cleaned, zero bindings written.
+            val midDownloadJob = launch(Dispatchers.Default) {
+                coordinator.downloadAndImport(remoteBookA)
+            }
+            val midTempFile = downloadStarted.await()
+            activeKey = "sable-beta"
+            coordinator.onSessionChanged("sable-beta")
+            midDownloadJob.join()
+            assertFalse(Files.exists(midTempFile))
+            assertTrue(lib.catalog().isEmpty())
+            assertNull(lib.readUploadEntry("sable-alpha", shaA))
+            assertNull(lib.readUploadEntry("sable-beta", shaA))
+            assertNull(coordinator.restoringShelfBookId.value)
+
+            // Case 2: Account switches AFTER download & SHA verification, right before local import/queue commit ->
+            // commit must abort and never write Alpha's shelf binding under Beta's account.
+            activeKey = "sable-alpha"
+            pauseDownload = false
+            coordinator.onSessionChanged("sable-alpha")
+            coordinator.syncOnce()
+
+            val reachedCommit = CompletableDeferred<String>()
+            val releaseCommit = CompletableDeferred<Unit>()
+            coordinator.beforeRestoreCommitForTest = { _, pinnedAccount ->
+                reachedCommit.complete(pinnedAccount)
+                releaseCommit.await()
+            }
+
+            val preCommitJob = launch(Dispatchers.Default) {
+                coordinator.downloadAndImport(remoteBookA)
+            }
+            assertEquals("sable-alpha", reachedCommit.await())
+
+            activeKey = "sable-beta"
+            coordinator.onSessionChanged("sable-beta")
+            coordinator.syncOnce()
+            assertEquals("sable-beta", coordinator.currentAccountKey())
+
+            releaseCommit.complete(Unit)
+            preCommitJob.join()
+
+            assertTrue(lib.catalog().isEmpty(), "Stale restore must not import after account switch")
+            assertNull(lib.readUploadEntry("sable-beta", shaA), "Must never bind Alpha's book to Beta")
+            assertNull(lib.readUploadEntry("sable-alpha", shaA))
+            assertNull(coordinator.restoringShelfBookId.value)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
 }

@@ -750,4 +750,87 @@ class UnifiedBookPipelineTest {
             assertEquals(1, h.unified.processCount(sha))
         }
     }
+
+    @Test
+    fun accountDeletionBlocksInFlightUploadCommitAndRetriesFailedDirCleanup() = runBlocking {
+        Harness(UnifiedBookConfig(enabled = true, autoProcess = false)).use { h ->
+            val alice = h.exchangeSable(TOK_ALPHA_1)
+            val bob = h.exchangeSable(TOK_BETA_1)
+            val carol = h.exchangeSable(TOK_GAMMA_1)
+
+            val sharedBytes = "# Chapter 1\nShared book kept for Bob after Alice deletes account.".toByteArray()
+            val lateBytes = "# Chapter 1\nLate in-flight upload that must never commit after delete.".toByteArray()
+            val lateSha = sha256Hex(lateBytes)
+            val carolBytes = "# Chapter 1\nCarol book for failed directory cleanup retry.".toByteArray()
+            val carolSha = sha256Hex(carolBytes)
+
+            assertEquals(200, h.upload(alice, sharedBytes, format = "md", title = "Shared A").statusCode())
+            val shelfBob = parse(h.upload(bob, sharedBytes, format = "md", title = "Shared B")).str("shelfBookId")
+
+            val aliceDeviceId = alice.str("deviceId")
+            val carolDeviceId = carol.str("deviceId")
+            val aliceScope = UnifiedBookScope.fromCall(aliceDeviceId, h.actor.execute { friendName(aliceDeviceId) })
+            val carolScope = UnifiedBookScope.fromCall(carolDeviceId, h.actor.execute { friendName(carolDeviceId) })
+
+            val reachedCommit = CompletableDeferred<Unit>()
+            val allowCommit = CompletableDeferred<Unit>()
+            h.unified.beforeUploadCommitForTest = { _, sha ->
+                if (sha == lateSha) {
+                    reachedCommit.complete(Unit)
+                    allowCommit.await()
+                }
+            }
+
+            // Start an upload for Alice that pauses right after streaming, before committing refs/blob.
+            val inFlightUpload = async(Dispatchers.IO) {
+                h.upload(alice, lateBytes, format = "md", title = "Late Upload", declaredSha = lateSha)
+            }
+            reachedCommit.await()
+
+            // Delete Alice's account while the upload is still in flight.
+            val delAlice = h.request("/v1/account", "DELETE", credential = alice)
+            assertEquals(200, delAlice.statusCode(), delAlice.body())
+            assertTrue(parse(delAlice)["deleted"]!!.jsonPrimitive.boolean)
+            assertFalse(Files.exists(h.unified.accountShelfFile(aliceScope).parent))
+
+            // Release the paused upload: commit must be rejected with 401 and leave zero refs/blobs/account dir.
+            allowCommit.complete(Unit)
+            val lateRes = inFlightUpload.await()
+            assertEquals(401, lateRes.statusCode(), lateRes.body())
+            assertEquals(0, h.unified.sharedRefCount(lateSha))
+            assertFalse(Files.exists(h.unified.blobPathForVerify(lateSha)))
+            assertFalse(Files.exists(h.unified.accountShelfFile(aliceScope).parent))
+            assertEquals(1, h.unified.sharedBlobCount())
+            val tmpEntries = Files.list(h.root.resolve("unified-books/shared/tmp")).use { it.toList() }
+            assertTrue(tmpEntries.isEmpty(), "Expected no residual upload temp files, found $tmpEntries")
+            assertEquals(200, h.requestBytes("/v1/books/$shelfBob/original", credential = bob).statusCode())
+
+            // Simulate directory cleanup failure on Carol's account deletion:
+            // must return 503 (NOT 200), remain DELETING (blocking uploads), and finish cleanly on retry.
+            h.unified.beforeUploadCommitForTest = null
+            assertEquals(200, h.upload(carol, carolBytes, format = "md", title = "Carol Book").statusCode())
+            h.unified.accountDirDeleterForTest = { false }
+            val failedDelete = h.request("/v1/account", "DELETE", credential = carol)
+            assertEquals(503, failedDelete.statusCode(), failedDelete.body())
+            assertEquals("account_dir_cleanup_failed", parse(failedDelete).str("code"))
+            assertEquals("DELETING", h.unified.accountDeletionStateForTest(carolScope))
+            assertTrue(Files.exists(h.unified.accountShelfFile(carolScope).parent))
+            assertTrue(h.unified.isTrashed(carolSha))
+
+            // While stuck in DELETING, new uploads for Carol are blocked with 401.
+            val blockedUpload = h.upload(carol, lateBytes, format = "md", title = "Blocked While Deleting")
+            assertEquals(401, blockedUpload.statusCode(), blockedUpload.body())
+            assertEquals("account_deleted", parse(blockedUpload).str("code"))
+            assertEquals(0, h.unified.sharedRefCount(lateSha))
+
+            // Once the directory can be removed, retry DELETE /v1/account succeeds and revokes Carol's session.
+            h.unified.accountDirDeleterForTest = null
+            val retryDelete = h.request("/v1/account", "DELETE", credential = carol)
+            assertEquals(200, retryDelete.statusCode(), retryDelete.body())
+            assertTrue(parse(retryDelete)["deleted"]!!.jsonPrimitive.boolean)
+            assertEquals("DELETED", h.unified.accountDeletionStateForTest(carolScope))
+            assertFalse(Files.exists(h.unified.accountShelfFile(carolScope).parent))
+            assertEquals(401, h.request("/v1/books", credential = carol).statusCode())
+        }
+    }
 }

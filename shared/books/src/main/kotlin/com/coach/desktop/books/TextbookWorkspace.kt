@@ -80,6 +80,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     val explainer = remember(controller.library, explainProvider) { explainProvider ?: BookExplainer(library = controller.library) }
     val collectionQaSessions = remember { mutableStateMapOf<String, CollectionQaSessionState>() }
     var guideCourse by remember { mutableStateOf<String?>(null) }
+    var comparisonCourse by remember { mutableStateOf<String?>(null) }
     val aiEnabled = LocalReadingAiExplain.current
     val currentAiEnabled by rememberUpdatedState(aiEnabled)
     val booklistJudge = remember(explainer) {
@@ -401,7 +402,12 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         )
                         ui.screen == BookScreen.COURSE && ui.activeCourseDetail != null -> {
                             val detail = checkNotNull(ui.activeCourseDetail)
-                            if (guideCourse == detail.courseId) {
+                            if (comparisonCourse == detail.courseId) {
+                                LiteratureComparisonPane(detail, controller.library, explainer,
+                                    onBack = { comparisonCourse = null }) { source ->
+                                    run { controller.jumpToLiteraturePage(detail.courseId, source.book.id, source.anchor.pdfPage) }
+                                }
+                            } else if (guideCourse == detail.courseId) {
                                 LiteratureGuidePane(detail, controller.library, explainer,
                                     onBack = { guideCourse = null }) { source ->
                                     run { controller.jumpToLiteraturePage(detail.courseId, source.book.id, source.anchor.pdfPage) }
@@ -411,7 +417,10 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 busy = ui.busy || ui.courseBusy,
                                 notice = ui.courseNotice,
                                 onOpenLiteratureGuide = if (!originalPdfTouchEnabled) {
-                                    { guideCourse = detail.courseId }
+                                    { comparisonCourse = null; guideCourse = detail.courseId }
+                                } else null,
+                                onOpenLiteratureComparison = if (!originalPdfTouchEnabled) {
+                                    { guideCourse = null; comparisonCourse = detail.courseId }
                                 } else null,
                                 onBack = { run { controller.back() } },
                                 onOpenTopic = { topic -> run { controller.openCourseTopic(detail.courseId, topic.topicId, explainer) } },

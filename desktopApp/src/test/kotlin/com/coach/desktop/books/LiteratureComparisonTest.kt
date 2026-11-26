@@ -1,0 +1,201 @@
+package com.coach.desktop.books
+
+import java.nio.file.Files
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+class LiteratureComparisonTest {
+    private val pageOcr = LiteratureOcrVerifier { book, pdfPage -> book.page(pdfPage)?.text.orEmpty() }
+
+    @Test fun threeSyntheticPdfsProduceGroundedTableAndOutline() {
+        withPapers(3) { books ->
+            val input = LiteratureComparisonInput(books)
+            val request = input.request()
+            assertEquals("literatureComparison", request["kind"]?.jsonPrimitive?.content)
+            val outcome = input.verify(comparisonReply(request, outlineCount = 4), pageOcr)
+            val table = requireNotNull(outcome.table)
+            assertEquals(3, table.rows.size)
+            assertEquals(12, table.audit().tableCells)
+            assertEquals(4, table.audit().outlinePoints)
+            assertEquals(0, table.audit().pendingCites)
+            assertEquals(1.0, table.audit().passRate)
+            val claim = table.rows.first().claim
+            assertNotNull(claim.source)
+            assertTrue(claim.text != claim.source.anchor.quoteAnchor)
+            assertTrue(claim.source.anchor.quoteAnchor in table.toMarkdown())
+            val edited = table.editClaim(books.first().id, "改成课堂讨论用的主张。")
+            assertTrue("改成课堂讨论用的主张。" in edited.toMarkdown())
+            assertNotNull(edited.rows.first().claim.source)
+        }
+    }
+
+    @Test fun sixSyntheticPdfsKeepPendingCellInsteadOfInventing() {
+        withPapers(6) { books ->
+            val input = LiteratureComparisonInput(books)
+            val request = input.request()
+            val failed = books.last().id
+            val outcome = input.verify(comparisonReply(request, failMethodOf = failed, outlineCount = 3), pageOcr)
+            val table = requireNotNull(outcome.table)
+            assertEquals(6, table.rows.size)
+            assertEquals(24, table.audit().tableCells)
+            assertEquals(3, table.audit().outlinePoints)
+            val method = table.rows.last().method
+            assertEquals(COMPARISON_PENDING, method.text)
+            assertNull(method.source)
+            assertTrue(method.pending)
+            assertTrue(table.audit().pendingCites >= 1)
+            assertTrue(table.audit().passRate < 1.0)
+            assertTrue(COMPARISON_PENDING in table.toMarkdown())
+            val copied = input.verify(comparisonReply(request, copyClaimOf = books.first().id, outlineCount = 3), pageOcr).table
+            assertEquals(COMPARISON_PENDING, requireNotNull(copied).rows.first().claim.text)
+        }
+    }
+
+    @Test fun mismatchedOcrMarksTheCellPending() {
+        withPapers(3) { books ->
+            val input = LiteratureComparisonInput(books)
+            val blank = LiteratureOcrVerifier { _, _ -> "unrelated scan noise" }
+            val table = requireNotNull(input.verify(comparisonReply(input.request()), blank).table)
+            assertTrue(table.rows.all { it.claim.pending && it.claim.source == null })
+            assertEquals(COMPARISON_PENDING, table.rows.first().claim.text)
+        }
+    }
+
+    @Test fun onePaperDoesNotBuildATable() {
+        withPapers(1) { books ->
+            val error = assertFailsWith<IllegalArgumentException> { LiteratureComparisonInput(books) }
+            assertEquals(comparisonRefusal(1), error.message)
+        }
+        assertTrue("没有出表" in comparisonRefusal(0))
+    }
+
+    @Test fun invalidReplyIsNotFilledIn() {
+        withPapers(3) { books ->
+            val outcome = LiteratureComparisonInput(books).verify(buildJsonObject { put("invalidComparison", true) }, pageOcr)
+            assertNull(outcome.table)
+            assertTrue("没有硬填" in outcome.notice)
+        }
+    }
+
+    @Test fun editsRoundTripThroughTheLocalStore() {
+        val root = Files.createTempDirectory("cmp-store-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"), lazyPdfExtras = false)
+            val imported = (1..3).map { library.importBook(LiteratureGuideFixture.pdf(root, it)) }
+            val books = imported.map { library.literatureBook(it.id) }
+            val course = library.withCourseDatabase { db ->
+                CourseStore.createCourse(db, "对比", CourseExamProfile(), books.map { it.id }).first
+            }
+            val table = requireNotNull(
+                LiteratureComparisonInput(books).verify(comparisonReply(LiteratureComparisonInput(books).request(), outlineCount = 4), pageOcr).table,
+            ).editClaim(books.first().id, "存下来的主张。")
+            library.withCourseDatabase { LiteratureComparisonStore.save(it, course, books.map { it.id }, table) }
+            val loaded = library.withCourseDatabase { LiteratureComparisonStore.load(it, course, LiteratureComparisonStore.digest(books.map { it.id })) }
+            val restored = LiteratureComparisonInput.restore(requireNotNull(loaded?.stored), books)
+            assertEquals("存下来的主张。", requireNotNull(restored).rows.first().claim.text)
+            assertNotNull(restored.rows.first().claim.source)
+            library.withCourseDatabase { LiteratureComparisonStore.forgetBook(it, books.first().id) }
+            assertNull(library.withCourseDatabase { LiteratureComparisonStore.latest(it, course) })
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    private fun withPapers(count: Int, block: (List<Textbook>) -> Unit) {
+        val root = Files.createTempDirectory("cmp-pdf-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"), lazyPdfExtras = false)
+            val books = (1..count).map { index ->
+                library.literatureBook(library.importBook(LiteratureGuideFixture.pdf(root, index)).id)
+            }
+            block(books)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+}
+
+internal fun comparisonReply(
+    request: JsonObject,
+    failMethodOf: String? = null,
+    copyClaimOf: String? = null,
+    outlineCount: Int = 4,
+): JsonObject {
+    val blocks = request.getValue("blocks").jsonArray.map { it.jsonObject }
+    val byBook = blocks.groupBy { it.getValue("bookId").jsonPrimitive.content }
+    val ids = request.getValue("papers").jsonArray.map { it.jsonObject.getValue("bookId").jsonPrimitive.content }
+    return buildJsonObject {
+        put("rows", buildJsonArray {
+            ids.forEachIndexed { index, id ->
+                val refs = byBook.getValue(id)
+                val claimRef = refs.first()
+                val methodRef = refs.getOrElse(1) { claimRef }
+                val other = ids[(index + 1) % ids.size]
+                val claimText = if (id == copyClaimOf) claimRef.getValue("text").jsonPrimitive.content
+                else "这篇用自己的话概括了主张，不复述原句。"
+                add(buildJsonObject {
+                    put("bookId", id)
+                    put("claim", buildJsonObject {
+                        put("text", claimText)
+                        put("ref", claimRef.getValue("ref"))
+                    })
+                    put("method", buildJsonObject {
+                        put("text", "方法是对照样本并记录差异。")
+                        put("ref", if (id == failMethodOf) JsonPrimitive(9999) else methodRef.getValue("ref"))
+                    })
+                    put("concepts", buildJsonArray {
+                        add(buildJsonObject {
+                            put("text", "遮阴下的生长")
+                            put("ref", refs.last().getValue("ref"))
+                        })
+                    })
+                    put("relations", buildJsonArray {
+                        add(buildJsonObject {
+                            put("otherBookId", other)
+                            put("kind", when (index % 3) {
+                                0 -> "support"
+                                1 -> "refute"
+                                else -> "supplement"
+                            })
+                            put("text", "它和另一篇在证据上互相参照。")
+                            put("ref", claimRef.getValue("ref"))
+                        })
+                    })
+                })
+            }
+        })
+        put("outline", buildJsonArray {
+            repeat(outlineCount) { n ->
+                val left = ids[n % ids.size]
+                val right = ids[(n + 1) % ids.size]
+                add(buildJsonObject {
+                    put("thesis", "论点 ${n + 1}：样本条件改变了生长速度。")
+                    put("supports", buildJsonArray {
+                        add(buildJsonObject {
+                            put("bookId", left)
+                            put("ref", byBook.getValue(left).first().getValue("ref"))
+                        })
+                    })
+                    put("opposes", buildJsonArray {
+                        add(buildJsonObject {
+                            put("bookId", right)
+                            put("ref", byBook.getValue(right).first().getValue("ref"))
+                        })
+                    })
+                })
+            }
+        })
+    }
+}

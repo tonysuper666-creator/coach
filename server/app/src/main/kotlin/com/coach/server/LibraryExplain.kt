@@ -147,6 +147,7 @@ fun Application.libraryExplainRoutes(
     courseVisionService: CourseVisionService? = null,
     unifiedBooks: UnifiedBookPipeline? = null,
     literatureGuide: LiteratureGuideService? = null,
+    literatureComparison: LiteratureComparisonService? = null,
 ) {
     val companionJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     routing {
@@ -382,7 +383,7 @@ fun Application.libraryExplainRoutes(
             library = library,
             friends = friends,
             alignPipeline = courseAlignPipeline,
-            topicPipeline = courseTopicPipeline, literatureGuide = literatureGuide,
+            topicPipeline = courseTopicPipeline, literatureGuide = literatureGuide, literatureComparison = literatureComparison,
             visionService = courseVisionService,
         )
     }

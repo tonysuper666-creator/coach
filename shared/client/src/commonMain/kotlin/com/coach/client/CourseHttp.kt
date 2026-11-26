@@ -18,6 +18,7 @@ import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.prepareGet
 import io.ktor.client.request.preparePost
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
@@ -35,6 +36,7 @@ import io.ktor.http.encodeURLParameter
 import io.ktor.http.encodeURLPathPart
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.ByteWriteChannel
+import io.ktor.utils.io.readAvailable
 import io.ktor.utils.io.readUTF8Line
 import io.ktor.utils.io.writeFully
 import com.coach.domain.reviewqueue.QueueAvailability
@@ -339,6 +341,98 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
                 statusCode = status,
                 code = code,
             )
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        MockReply(null, "等待联网", retryable = true, code = "offline")
+    }
+
+    /** Streams the account's verified original book bytes from the server for cross-device pullback. */
+    suspend fun downloadUnifiedBookOriginal(
+        shelfBookId: String,
+        onChunk: suspend (buf: ByteArray, offset: Int, len: Int, serverSha256: String?, contentLength: Long?) -> Unit,
+    ): MockReply = try {
+        http.prepareGet("$base/v1/books/${shelfBookId.encodeURLPathPart()}/original") {
+            timeout { requestTimeoutMillis = 600_000L; socketTimeoutMillis = 120_000L }
+        }.execute { response ->
+            val status = response.status.value
+            when {
+                status == 401 -> MockReply(null, "授权已失效", statusCode = 401, code = "unauthorized")
+                status == 404 -> {
+                    val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+                    val code = parsed?.s("code")?.ifBlank { null } ?: "not_found"
+                    MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "书架中找不到这本书。", statusCode = 404, code = code)
+                }
+                response.status.isSuccess() -> {
+                    val sha = response.headers["X-Coach-Book-Sha256"]?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+                    val len = response.headers[HttpHeaders.ContentLength]?.trim()?.toLongOrNull()
+                    val channel = response.bodyAsChannel()
+                    val buf = ByteArray(65_536)
+                    var total = 0L
+                    while (true) {
+                        val n = channel.readAvailable(buf, 0, buf.size)
+                        if (n < 0) break
+                        if (n == 0) continue
+                        onChunk(buf, 0, n, sha, len)
+                        total += n
+                    }
+                    MockReply(
+                        buildJsonObject {
+                            if (sha != null) put("sha256", sha)
+                            put("sizeBytes", len ?: total)
+                        },
+                        null,
+                        statusCode = status,
+                    )
+                }
+                else -> {
+                    val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+                    MockReply(
+                        null,
+                        parsed?.s("error")?.ifBlank { null } ?: "下载原文件失败，请稍后重试。",
+                        retryable = status >= 500 || status == 408 || status == 429,
+                        statusCode = status,
+                        code = parsed?.s("code")?.ifBlank { null },
+                    )
+                }
+            }
+        }
+    } catch (_: HttpRequestTimeoutException) {
+        MockReply(null, "等待联网", retryable = true, code = "offline")
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        MockReply(null, "等待联网", retryable = true, code = "offline")
+    }
+
+    suspend fun unifiedBookArtifact(shelfBookId: String): MockReply = try {
+        val response = http.get("$base/v1/books/${shelfBookId.encodeURLPathPart()}/artifact")
+        val status = response.status.value
+        val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+        val code = parsed?.s("code")?.ifBlank { null }
+        when {
+            status == 401 -> MockReply(null, "授权已失效", statusCode = 401, code = "unauthorized")
+            status == 404 -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "书架中找不到这本书。", statusCode = 404, code = code ?: "not_found")
+            status == 409 -> MockReply(parsed, parsed?.s("error")?.ifBlank { null } ?: "这本书还在整理中。", retryable = true, statusCode = 409, code = code ?: "not_ready")
+            response.status.isSuccess() && parsed != null -> MockReply(parsed, null, statusCode = status)
+            else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "无法获取书籍结构。", retryable = status >= 500, statusCode = status, code = code)
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        MockReply(null, "等待联网", retryable = true, code = "offline")
+    }
+
+    suspend fun deleteUnifiedAccount(): MockReply = try {
+        val response = http.delete("$base/v1/account")
+        val status = response.status.value
+        val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+        when {
+            status == 401 -> MockReply(null, "授权已失效", statusCode = 401, code = "unauthorized")
+            status == 404 -> MockReply(null, "等待服务支持", statusCode = 404, code = "unsupported")
+            response.status.isSuccess() -> MockReply(parsed ?: buildJsonObject { put("deleted", true) }, null, statusCode = status)
+            else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "删号失败，请稍后重试。", retryable = status >= 500, statusCode = status)
         }
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e

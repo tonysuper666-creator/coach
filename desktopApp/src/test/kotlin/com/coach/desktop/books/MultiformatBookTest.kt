@@ -90,6 +90,34 @@ class MultiformatBookTest {
         }
     }
 
+    @Test fun contentWinsOverRenamedFilesAndKnownBytesReuseTheExistingBook() {
+        val root = Files.createTempDirectory("coach-renamed-format-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"), lazyPdfExtras = true)
+            val kf8 = Files.move(fixture(root, "lesson.azw3"), root.resolve("kf8.txt"))
+            val mobi = Files.move(fixture(root, "lesson.mobi"), root.resolve("palm.azw3"))
+            val html = Files.writeString(root.resolve("article.srt"),
+                "<main><h1>Observation</h1><p>Synthetic contents. 😀</p></main>")
+            val pkText = Files.writeString(root.resolve("plain.txt"), "PK 在这里是笔记里的缩写。")
+            for ((file, expectedFormat) in listOf(kf8 to "azw3", mobi to "mobi", html to "html", pkText to "txt")) {
+                val imported = library.stageBookImportTier0(file)
+                assertFalse(imported.alreadyExisted)
+                assertEquals(expectedFormat, imported.book.format)
+                assertTrue(imported.book.pages.first().text.isNotBlank())
+                assertTrue(Files.exists(library.directory.resolve("${imported.book.id}.$expectedFormat")))
+            }
+
+            val source = fixture(root, "gb18030.txt")
+            val first = library.stageBookImport(source)
+            val renamed = Files.move(source, root.resolve("same-bytes.pdf"))
+            val repeated = library.stageBookImportTier0(renamed)
+            assertTrue(repeated.alreadyExisted)
+            assertEquals(first.book, repeated.book)
+            assertEquals(5, library.catalog().size)
+            assertTrue(Files.list(library.directory).use { paths -> paths.noneMatch { it.fileName.toString().startsWith(".import-") } })
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun damagedProtectedUnsafeAndOversizedFilesGiveActionableErrorsWithoutPartialImports() {
         val root = Files.createTempDirectory("coach-rejected-format-")
         try {

@@ -25,6 +25,8 @@ import java.util.List;
 import java.util.Map;
 
 import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.nio.file.Path;
 
 /**
  * Record 0 of a Mobipocket book: the 16-byte PalmDOC header, the {@code MOBI} header
@@ -146,6 +148,7 @@ final class MobiHeader {
     private static final int HEADER_WITH_TRAILING_FLAGS = 0xE4;
     private static final int CODEPAGE_CP1252 = 1252;
     private static final int CODEPAGE_UTF8 = 65001;
+    private static final int KF8_FILE_VERSION = 8;
 
     /**
      * The Windows primary language id in the header's locale, to ISO 639-1. The region in
@@ -390,7 +393,23 @@ final class MobiHeader {
     }
 
     boolean isKf8() {
-        return fileVersion >= 8;
+        return fileVersion >= KF8_FILE_VERSION;
+    }
+
+    static boolean isKf8(Path path) throws IOException {
+        try (var file = new RandomAccessFile(path.toFile(), "r")) {
+            file.seek(PalmDatabase.HEADER_SIZE);
+            long record = Integer.toUnsignedLong(file.readInt());
+            if (record < PalmDatabase.HEADER_SIZE + Integer.BYTES || record + MIN_RECORD_0 > file.length()) {
+                throw new IOException("Invalid first Kindle record");
+            }
+            file.seek(record + MOBI_OFFSET);
+            byte[] magic = new byte[MOBI.length];
+            file.readFully(magic);
+            if (!PalmDatabase.hasMagic(magic, 0, MOBI)) throw new IOException("Missing MOBI header");
+            file.seek(record + FILE_VERSION_FIELD);
+            return file.readInt() >= KF8_FILE_VERSION;
+        }
     }
 
     /** EXTH 524, else the language of the header's locale, else null. */

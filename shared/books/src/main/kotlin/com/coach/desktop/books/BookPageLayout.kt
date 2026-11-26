@@ -25,12 +25,30 @@ internal fun bookSpread(widthDp: Float, columnDp: Float, mode: BookPageMode, was
     BookPageMode.Auto -> widthDp >= 2 * (columnDp + 112) + 48 - if (wasSpread) 24 else 0
 }
 
-/** 沉浸式纯读按最小可读栏宽（约 540dp/栏）自动分栏，且每栏不超过 720dp，占满整个可用阅读视口。 */
+/** 沉浸式纯读像一本摊开的书：最多两页对开，纸铺满阅读视口；每页行宽另由 [bookImmersiveTextDp] 封顶。 */
 internal fun bookImmersiveColumns(widthDp: Float, columnDp: Float, mode: BookPageMode, wasColumns: Int): Int {
     if (mode == BookPageMode.Single) return 1
     val twoColumnMin = if (mode == BookPageMode.Spread) 760f else (1080f - if (wasColumns > 1) 24f else 0f)
-    if (widthDp < twoColumnMin) return 1
-    return maxOf(2, kotlin.math.ceil(widthDp / 720f).toInt())
+    return if (widthDp < twoColumnMin) 1 else 2
+}
+
+/** 沉浸式每页最宽行宽；页再宽，多出来的都给页边。 */
+internal const val BOOK_IMMERSIVE_MAX_TEXT_DP = 720f
+
+/**
+ * 沉浸式每页文字行宽 = min(页宽 − 最小页边, 720dp)。[maxTextDp] 是换算到排版坐标里的 720dp：
+ * Windows 翻页读把整页按基线网格放大到视口，屏幕上的行宽要的是放大以后不超过 720dp。
+ */
+internal fun bookImmersiveTextDp(sheetDp: Float, minMarginsDp: Float, maxTextDp: Float = BOOK_IMMERSIVE_MAX_TEXT_DP): Float =
+    minOf(sheetDp - minMarginsDp, maxTextDp).coerceAtLeast(1f)
+
+/**
+ * 行宽封顶后多出来的宽度怎么分到两侧页边，返回 (外侧加宽, 书脊侧加宽)。
+ * 单页左右各一半；对开时外侧拿 2/3、书脊侧拿 1/3，两页书脊侧合起来和外侧一样宽，外侧不窄于书脊侧。
+ */
+internal fun bookImmersiveExtraMargins(extraDp: Float, spread: Boolean): Pair<Float, Float> {
+    val extra = extraDp.coerceAtLeast(0f)
+    return if (spread) Pair(extra * 2f / 3f, extra / 3f) else Pair(extra / 2f, extra / 2f)
 }
 
 internal data class BookPageTypography(

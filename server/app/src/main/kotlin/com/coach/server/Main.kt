@@ -179,6 +179,8 @@ fun main(args: Array<String>): Unit = runBlocking {
     val sable = publicPort?.let { SableSessions(actor, data.resolveSibling("${data.fileName}-sable-credentials")) }
     val friends = FriendAccess(data.resolve("friends"), sableSessions = sable)
     val unifiedBooks = UnifiedBookPipeline(data.resolve("unified-books"), UnifiedBookConfig.fromEnv())
+    // Installed before the startup recovery so it finishes interrupted account deletions the same way the route does.
+    unifiedBooks.installAccountDataFinalizer(actor, friends)
     if (unifiedBooks.enabled) {
         runCatching { unifiedBooks.reconcilePendingDeletes() }
     }

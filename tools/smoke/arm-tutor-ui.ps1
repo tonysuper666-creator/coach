@@ -324,9 +324,9 @@ if (-not ('ArmTouch' -as [type])) {
 using System;
 using System.Runtime.InteropServices;
 public static class ArmTouch {
-    public const uint Down = 0x00016006;
-    public const uint Update = 0x00026006;
-    public const uint Up = 0x00046002;
+    public const uint Down = 0x00010006;
+    public const uint Update = 0x00020006;
+    public const uint Up = 0x00040002;
     static bool ready;
     static uint frame;
     [StructLayout(LayoutKind.Explicit, Size = 144)]
@@ -438,15 +438,16 @@ function Send-TutorTouchDrag([int]$sx1, [int]$sy1, [int]$sx2, [int]$sy2) {
         $size = [ArmTouch]::Bytes()
         $ready = [ArmTouch]::Init()
     } catch {
-        Write-Output "TOUCHINIT fail $($_.Exception.Message)"
+        Write-Host "TOUCHINIT fail $($_.Exception.Message)"
         return $false
     }
-    Write-Output "TOUCHINIT size=$size ptr=$([IntPtr]::Size) ready=$ready"
+    Write-Host "TOUCHINIT size=$size ptr=$([IntPtr]::Size) ready=$ready"
     if ([IntPtr]::Size -ne 8 -or $size -ne 144 -or $ready -le 0) { return $false }
-    $down = [ArmTouch]::Send([ArmTouch]::Down, $sx1, $sy1, 1)
+    $down = [ArmTouch]::Send([ArmTouch]::Down, $sx1, $sy1, 0)
     $hold = 0
     $move = 0
     $up = 0
+    $still = ($sx1 -eq $sx2 -and $sy1 -eq $sy2)
     try {
         if ($down -gt 0) {
             foreach ($i in 1..4) {
@@ -454,7 +455,9 @@ function Send-TutorTouchDrag([int]$sx1, [int]$sy1, [int]$sx2, [int]$sy2) {
                 $hold = [ArmTouch]::Send([ArmTouch]::Update, $sx1, $sy1, 0)
                 if ($hold -le 0) { break }
             }
-            if ($hold -gt 0) {
+            if ($hold -gt 0 -and $still) {
+                $move = $hold
+            } elseif ($hold -gt 0) {
                 foreach ($i in 1..12) {
                     $x = [int]($sx1 + ($sx2 - $sx1) * $i / 12)
                     $y = [int]($sy1 + ($sy2 - $sy1) * $i / 12)
@@ -465,9 +468,9 @@ function Send-TutorTouchDrag([int]$sx1, [int]$sy1, [int]$sx2, [int]$sy2) {
             }
         }
     } finally {
-        if ($down -gt 0) { $up = [ArmTouch]::Send([ArmTouch]::Up, $sx2, $sy2, 2) }
+        if ($down -gt 0) { $up = [ArmTouch]::Send([ArmTouch]::Up, $sx2, $sy2, 0) }
     }
-    Write-Output "TOUCHDRAG down=$down hold=$hold move=$move up=$up"
+    Write-Host "TOUCHDRAG down=$down hold=$hold move=$move up=$up still=$still"
     return ($down -gt 0 -and $hold -gt 0 -and $move -gt 0 -and $up -gt 0)
 }
 
@@ -551,7 +554,8 @@ function Drag-TutorLine([int]$x1, [int]$y1, [int]$x2, [int]$y2, [string]$how) {
         $sx1 = $r.L + $x1; $sy1 = $r.T + $y1
         $sx2 = $r.L + $x2; $sy2 = $r.T + $y2
         $touched = $false
-        if ($how -ne 'relative') { $touched = Send-TutorTouchDrag $sx1 $sy1 $sx2 $sy2 }
+        if ($how -ne 'relative') { $touched = [bool](Send-TutorTouchDrag $sx1 $sy1 $sx2 $sy2) }
+        Write-Host "TOUCHUSED $touched"
         if (-not $touched) { Send-TutorRelativeDrag $sx1 $sy1 $sx2 $sy2 }
     }
 }
@@ -690,9 +694,15 @@ function Open-SelectionToolbar([string]$name) {
         $x2 = [Math]::Min($pageR, [int]$row.X2 - 8)
         if (($x2 - $x1) -lt 70) { throw "Ink line is too short to drag ($name x=$x1..$x2)" }
         $y = [int]$row.Y
-        $how = if ($drag -lt 3) { 'touch' } else { 'relative' }
-        Write-Output "DRAG row $drag how=$how y=$y x=$x1..$x2"
-        Drag-TutorLine $x1 $y $x2 $y $how
+        if ($drag -eq 1) {
+            $mid = [int](($x1 + $x2) / 2)
+            Write-Output "DRAG row $drag how=hold y=$y x=$mid"
+            Drag-TutorLine $mid $y $mid $y 'touch'
+        } else {
+            $how = if ($drag -eq 2) { 'touch' } else { 'relative' }
+            Write-Output "DRAG row $drag how=$how y=$y x=$x1..$x2"
+            Drag-TutorLine $x1 $y $x2 $y $how
+        }
         foreach ($spin in 1..4) {
             Start-Sleep -Milliseconds 400
             $shot = @(Read-TutorFrame "$name-selected$drag-$spin")

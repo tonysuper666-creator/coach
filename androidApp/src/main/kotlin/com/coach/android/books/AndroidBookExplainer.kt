@@ -529,6 +529,24 @@ internal class BookExplainer(private val library: TextbookLibrary? = null) {
         }
     }
 
+    suspend fun alignConceptSayings(requestJson: JsonObject): JsonObject? {
+        val paired = identity ?: return null
+        val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library")
+        return try {
+            val reply = withContext(Dispatchers.IO) { http.alignConceptSayings(requestJson) }
+            if (reply.statusCode == 401) {
+                markRevoked()
+                null
+            } else reply.body
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        } finally {
+            http.close()
+        }
+    }
+
     suspend fun alignBooklistConcepts(requestJson: JsonObject): JsonObject? {
         val paired = identity ?: return null
         val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library")

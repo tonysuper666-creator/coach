@@ -20,7 +20,7 @@ from api_budget import Denied, atomic_json
 from api_route import ApiFailure, cost, route, vendor
 
 GUIDE_TASK = "literature_guide"
-TASKS = frozenset({GUIDE_TASK, "gen_mcq", "repair_mcq_sources", "blind_review",
+TASKS = frozenset({GUIDE_TASK, "concept_sayings", "gen_mcq", "repair_mcq_sources", "blind_review",
                    "gen_constructed", "repair_constructed_sources", "review_constructed",
                    "BOOK_SECTION_BATCH", "BOOK_EXERCISE_HINTS", "BOOK_MATH_VERIFY", "BOOK_MATH_REPAIR",
                    "practice_grade", "practice_diagnose", "practice_variant", "course_mock_item",

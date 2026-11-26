@@ -3,7 +3,9 @@ package com.coach.desktop.books
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -32,12 +34,15 @@ import com.coach.ui.v7.PaperCard
 @Composable
 internal fun CrossBookCompanionSection(
     cards: List<CrossBookCompanionCard>,
-    onJumpToBookPage: (bookId: String, page: Int, quoteAnchor: String?) -> Unit,
+    onJumpToBookPage: (bookId: String, page: Int, quoteAnchor: String?, offsetUtf16: Int) -> Unit,
     onMuteConcept: (conceptId: String) -> Unit,
     modifier: Modifier = Modifier,
+    board: ConceptSayingsBoard? = null,
+    checking: Boolean = false,
+    onOpenConcept: (conceptId: String) -> Unit = {},
 ) {
     val visibleCards = cards.take(ConceptStore.MAX_COMPANION_CARDS_PER_SECTION)
-    if (visibleCards.isEmpty()) return
+    if (visibleCards.isEmpty() && board == null && !checking) return
 
     val colors = CoachTheme.colors
     val badgeShape = RoundedCornerShape(CoachV7.Radius.s)
@@ -46,19 +51,21 @@ internal fun CrossBookCompanionSection(
         modifier = modifier.fillMaxWidth().padding(top = 6.dp).testTag("crossbook-companion-section"),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.7f))
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                "书单联动",
-                style = MaterialTheme.typography.labelMedium,
-                color = v7Pine(),
-                modifier = Modifier.testTag("crossbook-section-title"),
-            )
-            CoachCardMeta("仅关联已读章节 · 点 × 静音该主题")
+        if (visibleCards.isNotEmpty()) {
+            HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.7f))
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    "书单联动",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = v7Pine(),
+                    modifier = Modifier.testTag("crossbook-section-title"),
+                )
+                CoachCardMeta("仅关联已读章节 · 点 × 静音该主题")
+            }
         }
 
         for (card in visibleCards) {
@@ -81,7 +88,14 @@ internal fun CrossBookCompanionSection(
                         color = colors.fgPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(badgeShape)
+                            .clickable(role = Role.Button, onClickLabel = "看其他书怎么说") {
+                                onOpenConcept(card.conceptId)
+                            }
+                            .pointerHoverIcon(PointerIcon.Hand)
+                            .testTag("crossbook-open-${card.conceptId}"),
                     )
                     Text(
                         card.relationType.label,
@@ -134,7 +148,7 @@ internal fun CrossBookCompanionSection(
                             .background(v7Pine().copy(alpha = 0.08f))
                             .border(1.dp, v7Pine().copy(alpha = 0.28f), badgeShape)
                             .clickable(role = Role.Button) {
-                                onJumpToBookPage(card.otherBookId, card.otherPage, card.otherQuoteAnchor)
+                                onJumpToBookPage(card.otherBookId, card.otherPage, card.otherQuoteAnchor, card.otherOffsetUtf16)
                             }
                             .pointerHoverIcon(PointerIcon.Hand)
                             .padding(horizontal = 8.dp, vertical = 3.dp)
@@ -146,5 +160,125 @@ internal fun CrossBookCompanionSection(
                 }
             }
         }
+        if (board != null || checking) {
+            ConceptSayingsBoardPane(board, checking, colors.dark, onJumpToBookPage)
+        }
+    }
+}
+
+@Composable
+private fun ConceptSayingsBoardPane(
+    board: ConceptSayingsBoard?,
+    checking: Boolean,
+    dark: Boolean,
+    onJumpToBookPage: (bookId: String, page: Int, quoteAnchor: String?, offsetUtf16: Int) -> Unit,
+) {
+    val colors = CoachTheme.colors
+    if (board == null && !checking) return
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.7f))
+        Text(
+            "其他书怎么说",
+            style = MaterialTheme.typography.labelMedium,
+            color = v7Pine(),
+            modifier = Modifier.testTag("concept-sayings-title"),
+        )
+        if (checking) {
+            Text(
+                "正在核对各书说法，核对完留在本机。",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgSecondary,
+                modifier = Modifier.testTag("concept-sayings-checking"),
+            )
+        }
+        if (board != null) {
+            Column(
+                Modifier.fillMaxWidth().testTag("concept-sayings-${board.conceptId}"),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (board.onlyThisBook) {
+                    Text(
+                        ConceptSayingsBoard.ONLY_THIS_BOOK,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.fgPrimary,
+                        modifier = Modifier.testTag("concept-sayings-only-one"),
+                    )
+                }
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    for (column in board.columns) {
+                        SayingColumnCard(column, dark, onJumpToBookPage)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SayingColumnCard(
+    column: ConceptSayingColumn,
+    dark: Boolean,
+    onJumpToBookPage: (bookId: String, page: Int, quoteAnchor: String?, offsetUtf16: Int) -> Unit,
+) {
+    val colors = CoachTheme.colors
+    val badgeShape = RoundedCornerShape(CoachV7.Radius.s)
+    val stanceColor = when (column.stance) {
+        SayingStance.SAME -> v7Pine()
+        SayingStance.ANGLE -> colors.fgSecondary
+        SayingStance.CONFLICT -> if (dark) CoachV7.Dark.zhu else CoachV7.Light.zhu
+    }
+    PaperCard(
+        modifier = Modifier.width(200.dp).testTag("concept-saying-col-${column.bookId}"),
+        contentPadding = PaddingValues(10.dp),
+        contentSpacing = 6.dp,
+    ) {
+        Text(
+            column.bookTitle,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = colors.fgPrimary,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            column.stance.label,
+            style = MaterialTheme.typography.labelSmall,
+            color = stanceColor,
+            maxLines = 1,
+            softWrap = false,
+            modifier = Modifier
+                .clip(badgeShape)
+                .background(stanceColor.copy(alpha = 0.08f))
+                .border(1.dp, stanceColor.copy(alpha = 0.28f), badgeShape)
+                .padding(horizontal = 6.dp, vertical = 2.dp)
+                .testTag("concept-saying-stance-${column.bookId}"),
+        )
+        Text(
+            column.statement,
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.fgPrimary,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            column.quoteAnchor,
+            style = MaterialTheme.typography.labelSmall,
+            color = stanceColor,
+            maxLines = 4,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .clip(badgeShape)
+                .background(stanceColor.copy(alpha = 0.08f))
+                .border(1.dp, stanceColor.copy(alpha = 0.28f), badgeShape)
+                .clickable(role = Role.Button, onClickLabel = "跳到原文") {
+                    onJumpToBookPage(column.bookId, column.page, column.quoteAnchor, column.offsetUtf16)
+                }
+                .pointerHoverIcon(PointerIcon.Hand)
+                .padding(horizontal = 8.dp, vertical = 3.dp)
+                .testTag("concept-saying-quote-${column.bookId}"),
+        )
     }
 }

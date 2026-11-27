@@ -73,6 +73,7 @@ internal class TextbookLibrary(
     private val pdfScrollModeCache = ConcurrentHashMap<String, Boolean>()
     private val textScrollModeCache = ConcurrentHashMap<String, Boolean>()
     private val readSpotCache = ConcurrentHashMap<String, CachedValue<Pair<Int, Int>?>>()
+    private val quoteJumps = ConcurrentHashMap<String, BookPassage>()
     private val pageHighlightRawCache = ConcurrentHashMap<Pair<String, Int>, List<Triple<Int, Int, String>>>()
     private val textViewWrites = Mutex()
     private val textLayerLock = Any()
@@ -594,6 +595,15 @@ internal class TextbookLibrary(
         }
         readSpotCache[bookId] = CachedValue(page to offsetUtf16)
     }
+
+    /** 库里点开一条时，下一回打开这本书要高亮的原句。对不上的由打开时丢掉。 */
+    fun stageQuoteJump(passage: BookPassage) {
+        quoteJumps[passage.book] = passage
+    }
+
+    fun peekQuoteJump(bookId: String): BookPassage? = quoteJumps[bookId]
+
+    fun consumeQuoteJump(bookId: String): BookPassage? = quoteJumps.remove(bookId)
 
     private val aspectCache = ConcurrentHashMap<String, Map<Int, Float>>()
 

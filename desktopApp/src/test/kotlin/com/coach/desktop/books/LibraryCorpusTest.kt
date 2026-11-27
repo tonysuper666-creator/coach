@@ -3,9 +3,11 @@ package com.coach.desktop.books
 import java.nio.file.Files
 import java.sql.DriverManager
 import java.time.Instant
+import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class LibraryCorpusTest {
@@ -248,6 +250,249 @@ class LibraryCorpusTest {
             assertTrue(recent.none { it.primary == "旧批注" })
             assertTrue(recent.none { it.primary == "旧高亮" })
         }
+    }
+
+    @Test fun comparisonOutlineAndSayingsStayGroundedAndExportOnce() {
+        val root = Files.createTempDirectory("library-study-")
+        var vault: java.nio.file.Path? = null
+        try {
+            val library = TextbookLibrary(root.resolve("library"), lazyPdfExtras = false, todayCardEnabled = false)
+            val imported = (1..3).map { library.importBook(LiteratureGuideFixture.pdf(root, it)) }
+            val books = imported.map { library.literatureBook(it.id) }
+            val course = library.withCourseDatabase { db ->
+                CourseStore.createCourse(db, "对比", CourseExamProfile(), books.map { it.id }).first
+            }
+            val input = LiteratureComparisonInput(books)
+            val verified = input.verify(
+                comparisonReply(input.request(), failMethodOf = books.last().id, outlineCount = 4),
+                LiteratureOcrVerifier { book, pdfPage -> book.page(pdfPage)?.text.orEmpty() },
+            )
+            val table = requireNotNull(verified.table)
+            assertEquals(1, table.audit().pendingCites)
+            library.withCourseDatabase { LiteratureComparisonStore.save(it, course, books.map { book -> book.id }, table) }
+
+            val flower = "flowering plants"
+            val faster = "faster growth"
+            val left = phraseAt(books[0], flower)
+            val spanLeft = phraseAt(books[0], faster)
+            val spanRight = phraseAt(books[1], faster)
+            library.withCourseDatabase { db ->
+                db.createStatement().use { sql ->
+                    sql.executeUpdate(
+                        """CREATE TABLE IF NOT EXISTS concept_sayings (
+                            concept_id TEXT NOT NULL,
+                            input_hash TEXT NOT NULL,
+                            book_id TEXT NOT NULL,
+                            mention_id TEXT NOT NULL,
+                            book_title TEXT NOT NULL,
+                            statement TEXT NOT NULL,
+                            stance TEXT NOT NULL,
+                            page INTEGER NOT NULL,
+                            offset_utf16 INTEGER NOT NULL,
+                            quote_anchor TEXT NOT NULL,
+                            kept INTEGER NOT NULL,
+                            updated_at INTEGER NOT NULL,
+                            PRIMARY KEY (concept_id, input_hash, book_id)
+                        )""",
+                    )
+                }
+                db.prepareStatement(
+                    """INSERT INTO concept_entities(concept_id, collection_id, canonical_name, aliases_json, muted, shared_note)
+                       VALUES(?,?,?,?,?,?)""",
+                ).use { sql ->
+                    fun entity(id: String, name: String, muted: Int) {
+                        sql.setString(1, id)
+                        sql.setString(2, course)
+                        sql.setString(3, name)
+                        sql.setString(4, "[]")
+                        sql.setInt(5, muted)
+                        sql.setString(6, "")
+                        sql.addBatch()
+                    }
+                    entity("shade-growth", "遮阴生长", 0)
+                    entity("mention-span", "样本生长", 0)
+                    entity("muted-one", "静音概念", 1)
+                    sql.executeBatch()
+                }
+                db.prepareStatement(
+                    """INSERT INTO concept_sayings(
+                        concept_id, input_hash, book_id, mention_id, book_title, statement, stance,
+                        page, offset_utf16, quote_anchor, kept, updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ).use { sql ->
+                    sql.setString(1, "shade-growth")
+                    sql.setString(2, "hash-shade")
+                    sql.setString(3, books[0].id)
+                    sql.setString(4, "say-shade")
+                    sql.setString(5, books[0].title)
+                    sql.setString(6, "独有说法遮阴对照句")
+                    sql.setString(7, "SAME")
+                    sql.setInt(8, left.first)
+                    sql.setInt(9, left.second)
+                    sql.setString(10, flower)
+                    sql.setInt(11, 1)
+                    sql.setLong(12, 1_700_000_000_000L)
+                    sql.executeUpdate()
+                }
+                db.prepareStatement(
+                    """INSERT INTO concept_mentions(
+                        mention_id, concept_id, book_id, page, offset_utf16, quote_anchor, mention_role, claim_summary
+                    ) VALUES(?,?,?,?,?,?,?,?)""",
+                ).use { sql ->
+                    fun mention(id: String, concept: String, book: String, page: Int, start: Int, quote: String, claim: String) {
+                        sql.setString(1, id)
+                        sql.setString(2, concept)
+                        sql.setString(3, book)
+                        sql.setInt(4, page)
+                        sql.setInt(5, start)
+                        sql.setString(6, quote)
+                        sql.setString(7, "PRIMARY_DEF")
+                        sql.setString(8, claim)
+                        sql.addBatch()
+                    }
+                    mention("span-left", "mention-span", books[0].id, spanLeft.first, spanLeft.second, faster, "独有提及跨书样本")
+                    mention("span-right", "mention-span", books[1].id, spanRight.first, spanRight.second, faster, "独有提及跨书样本")
+                    mention("muted-mention", "muted-one", books[0].id, left.first, 0, "MUTEDTOKENZ9", "MUTEDTOKENZ9")
+                    sql.executeBatch()
+                }
+            }
+
+            lateinit var jumpHit: LibraryRecord
+            openLibraryCorpus(library.directory).use { connection ->
+                syncLibraryCorpus(connection)
+                val pages = HashMap<Pair<String, Int>, String>()
+                connection.createStatement().use { sql ->
+                    sql.executeQuery("SELECT book, page, text FROM pages").use { rows ->
+                        while (rows.next()) pages[rows.getString(1) to rows.getInt(2)] = rows.getString(3).orEmpty()
+                    }
+                }
+                fun assertOnPage(record: LibraryRecord) {
+                    val page = record.page
+                    val start = record.startUtf16
+                    val end = record.endUtf16
+                    if (page == null || start == null || end == null) return
+                    val text = checkNotNull(pages[record.bookId to page]) { record.key }
+                    assertEquals(text.substring(start, end), record.quote, record.key)
+                }
+                val comparisons = searchLibrary(connection, LibraryQuery(kind = LibraryKind.COMPARISON, limit = 200))
+                val grounded = comparisons.filter { it.startUtf16 != null && it.quote.isNotBlank() }
+                val pending = comparisons.filter { COMPARISON_PENDING in (libraryDetailValues(it.detail)[LibraryStudyFields.CITE].orEmpty()) }
+                assertTrue(grounded.size >= 10, "grounded=${grounded.size}")
+                assertEquals(1, pending.size)
+                pending.forEach { hit ->
+                    assertEquals("", hit.quote)
+                    assertEquals(null, hit.page)
+                    assertEquals(null, hit.startUtf16)
+                    assertEquals(null, hit.endUtf16)
+                    assertTrue(hit.primary.isNotBlank())
+                }
+                comparisons.forEach(::assertOnPage)
+                assertEquals(comparisons.size, comparisons.map { it.key }.distinct().size)
+
+                val claims = searchLibrary(connection, LibraryQuery(text = "这篇用自己的话概括了主张", limit = 20))
+                assertEquals(3, claims.size)
+                assertTrue(claims.all { it.kind == LibraryKind.COMPARISON })
+                claims.forEach(::assertOnPage)
+
+                val outlines = searchLibrary(connection, LibraryQuery(text = "生长速度", limit = 20))
+                assertTrue(outlines.isNotEmpty())
+                assertTrue(outlines.all { it.kind == LibraryKind.OUTLINE })
+                assertTrue(outlines.all { it.quote.isNotBlank() && it.startUtf16 != null })
+                outlines.forEach(::assertOnPage)
+
+                val saying = searchLibrary(connection, LibraryQuery(text = "独有说法遮阴对照句")).single()
+                assertEquals(LibraryKind.SAYING, saying.kind)
+                assertEquals(flower, saying.quote)
+                assertOnPage(saying)
+                assertTrue(saying.detail.contains("说法一致"))
+
+                val mentions = searchLibrary(connection, LibraryQuery(text = "独有提及跨书样本", limit = 10))
+                assertEquals(2, mentions.size)
+                assertTrue(mentions.all { it.kind == LibraryKind.SAYING && it.detail.contains("尚未对照") })
+                mentions.forEach(::assertOnPage)
+                assertTrue(searchLibrary(connection, LibraryQuery(text = "MUTEDTOKENZ9")).isEmpty())
+
+                jumpHit = grounded.first()
+                assertTrue(stageLibraryJump(library, jumpHit))
+                assertFalse(stageLibraryJump(library, pending.single()))
+                assertTrue(stageLibraryJump(library, jumpHit))
+            }
+
+            val controller = TextbookController(library)
+            runBlocking {
+                controller.openBook(jumpHit.bookId)
+                assertEquals(null, controller.state.value.error)
+                val passage = assertNotNull(controller.state.value.pendingCourseJump)
+                assertEquals(jumpHit.bookId, passage.book)
+                assertEquals(jumpHit.page, passage.page)
+                assertEquals(jumpHit.startUtf16, passage.start)
+                assertEquals(jumpHit.endUtf16, passage.end)
+                assertEquals(jumpHit.quote, passage.text)
+                controller.jumpToMockSourcePage(
+                    course,
+                    jumpHit.bookId,
+                    jumpHit.page ?: error("page"),
+                    jumpHit.quote,
+                    BookCompanionAnchor(
+                        pdfPage = jumpHit.page ?: error("page"),
+                        blockId = "cell",
+                        startUtf16 = jumpHit.startUtf16 ?: error("start"),
+                        endUtf16 = jumpHit.endUtf16 ?: error("end"),
+                        quoteAnchor = jumpHit.quote,
+                    ),
+                )
+                assertEquals(null, controller.state.value.error)
+                assertEquals(jumpHit.quote, controller.state.value.pendingCourseJump?.text)
+                assertTrue(stageLibraryJump(library, jumpHit.copy(quote = "这句不在这一页上")))
+                controller.openBook(jumpHit.bookId)
+                assertEquals(null, controller.state.value.pendingCourseJump)
+            }
+
+            vault = Files.createTempDirectory("obsidian-study-")
+            val vaultDir = vault ?: error("vault")
+            val first = export(Fixture(library), vaultDir, Instant.parse("2026-11-26T08:00:00Z"))
+            assertEquals(3, first.written)
+            assertEquals(0, first.skipped)
+            val files = Files.newDirectoryStream(vaultDir, "*.md").use { stream -> stream.toList() }
+            assertEquals(3, files.size)
+            val comparison = files.first { Files.readString(it).contains(":comparison:") }
+            val comparisonText = Files.readString(comparison)
+            assertTrue(comparisonText.contains("| 文献 | 主张 | 方法 / 证据 | 关键概念 | 与其他几篇的关系 |"))
+            assertTrue(comparisonText.contains("# 综述提纲"))
+            assertTrue(comparisonText.contains("生长速度"))
+            assertTrue(comparisonText.contains(COMPARISON_PENDING))
+            assertTrue(comparisonText.contains("这篇用自己的话概括了主张"))
+            val sayingFile = files.first { Files.readString(it).contains("独有说法遮阴对照句") }
+            val sayingText = Files.readString(sayingFile)
+            assertTrue(sayingText.contains(":concept:shade-growth"))
+            assertTrue(sayingText.contains(flower))
+            assertTrue(sayingText.contains("PDF 第"))
+            val mentionFile = files.first { it != comparison && it != sayingFile }
+            assertTrue(Files.readString(mentionFile).contains(":concept:mention-span"))
+            assertTrue(Files.readString(mentionFile).contains("尚未对照"))
+
+            val names = files.map { it.fileName.toString() }.sorted()
+            Files.writeString(comparison, comparisonText + "我自己加的一行\n")
+            val second = export(Fixture(library), vaultDir, Instant.parse("2026-11-26T09:00:00Z"))
+            assertEquals(0, second.written)
+            assertTrue(second.skipped >= 1)
+            val again = Files.newDirectoryStream(vaultDir, "*.md").use { stream -> stream.map { it.fileName.toString() }.sorted() }
+            assertEquals(names, again)
+            val kept = Files.readString(comparison)
+            assertTrue(kept.contains("我自己加的一行"))
+            assertTrue(kept.contains(OBSIDIAN_MANAGED_BEGIN))
+            assertTrue(kept.startsWith("---"))
+        } finally {
+            root.toFile().deleteRecursively()
+            vault?.toFile()?.deleteRecursively()
+        }
+    }
+
+    private fun phraseAt(book: Textbook, phrase: String): Pair<Int, Int> {
+        val page = book.pages.firstOrNull { phrase in it.text } ?: error("页上没有「$phrase」")
+        val start = page.text.indexOf(phrase)
+        check(page.text.indexOf(phrase, start + phrase.length) < 0) { "「$phrase」在同一页出现了多次" }
+        return page.number to start
     }
 
     private fun export(fixture: Fixture, vault: java.nio.file.Path, now: Instant): ObsidianExportOutcome.Done {

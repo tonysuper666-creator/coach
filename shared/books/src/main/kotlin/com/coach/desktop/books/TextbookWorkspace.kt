@@ -447,7 +447,15 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             if (comparisonCourse == detail.courseId) {
                                 LiteratureComparisonPane(detail, controller.library, explainer,
                                     onBack = { comparisonCourse = null }) { source ->
-                                    run { controller.jumpToLiteraturePage(detail.courseId, source.book.id, source.anchor.pdfPage) }
+                                    run {
+                                        controller.jumpToMockSourcePage(
+                                            detail.courseId,
+                                            source.book.id,
+                                            source.anchor.pdfPage,
+                                            source.anchor.quoteAnchor,
+                                            source.anchor,
+                                        )
+                                    }
                                 }
                             } else if (guideCourse == detail.courseId) {
                                 LiteratureGuidePane(detail, controller.library, explainer,

@@ -156,8 +156,8 @@ internal fun MyLibraryScreen(
                                     when (result) {
                                         is ObsidianExportOutcome.Refused -> result.message
                                         is ObsidianExportOutcome.Done -> when {
-                                            result.written == 0 && result.skipped == 0 -> "没有要导出的批注、问答或错题"
-                                            else -> "已写入 ${result.written} 本，${result.skipped} 本没有变化"
+                                            result.written == 0 && result.skipped == 0 -> "没有要导出的批注、问答、错题、对比或说法"
+                                            else -> "已写入 ${result.written} 个文件，${result.skipped} 个没有变化"
                                         }
                                     }
                                 },
@@ -180,7 +180,7 @@ internal fun MyLibraryScreen(
         LibraryField(
             value = text,
             onValueChange = { text = it },
-            placeholder = "搜批注、问题、错题，中英文都可以",
+            placeholder = "搜批注、问题、错题、对比、提纲和说法",
             tag = "library-search",
             modifier = Modifier.padding(top = 12.dp).focusRequester(focus),
         )
@@ -216,7 +216,7 @@ internal fun MyLibraryScreen(
         when {
             !ready && failed == null -> CoachLoadingDots(label = "正在整理我的库…", modifier = Modifier.testTag("library-loading"))
             failed == null && hits.isEmpty() && !searching -> Text(
-                "还没有对得上的批注、高亮、问答或错题。",
+                "还没有对得上的批注、高亮、问答、错题、对比、提纲或说法。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = colors.fgSecondary,
                 modifier = Modifier.testTag("library-empty"),
@@ -290,7 +290,16 @@ private fun LibraryHitCard(hit: LibraryRecord, onOpen: () -> Unit) {
         color = colors.surface1,
     ) {
         Text(
-            "${hit.kind.label} · ${hit.bookTitle} · ${notesPageLabel(hit.page)} · ${libraryWhenLabel(hit.atMs)}",
+            buildString {
+                append(hit.kind.label)
+                append(" · ")
+                append(hit.bookTitle)
+                append(" · ")
+                append(notesPageLabel(hit.page))
+                if (libraryCitePending(hit)) append(" · 出处待查")
+                append(" · ")
+                append(libraryWhenLabel(hit.atMs))
+            },
             style = MaterialTheme.typography.labelMedium,
             color = colors.fgSecondary,
             maxLines = 1,
@@ -310,6 +319,9 @@ private fun LibraryHitCard(hit: LibraryRecord, onOpen: () -> Unit) {
 }
 
 private fun libraryHitTag(key: String): String = "library-hit-" + key.replace(Regex("[^A-Za-z0-9_-]"), "-")
+
+private fun libraryCitePending(hit: LibraryRecord): Boolean =
+    libraryDetailValues(hit.detail)[LibraryStudyFields.CITE]?.any { COMPARISON_PENDING in it } == true
 
 private fun libraryWhenLabel(atMs: Long?): String {
     if (atMs == null || atMs <= 0L) return "时间未记下"

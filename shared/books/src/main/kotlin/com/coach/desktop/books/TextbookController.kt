@@ -1265,9 +1265,13 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         var selectedPendingId: String? = null
         action {
             val loaded = library.book(id)
-            val book = if (targetPage != null && loaded.page(targetPage) != null) {
-                loaded.copy(readingPage = targetPage)
-            } else loaded
+            val staged = library.peekQuoteJump(id)
+            val stagedPage = staged?.page?.takeIf { loaded.page(it) != null }
+            val book = when {
+                stagedPage != null -> loaded.copy(readingPage = stagedPage)
+                targetPage != null && loaded.page(targetPage) != null -> loaded.copy(readingPage = targetPage)
+                else -> loaded
+            }
             if (book.indexState != "READY") selectedPendingId = book.id
             library.save(book)
             library.closeReview()
@@ -1279,11 +1283,15 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             val pathSaved = library.learningPath(book.id) != null
             val ladder = library.ladder(book.id)
             val draft = library.latestChapterPracticeDraft(book.id)
-            val resumePage = if (!library.todayCardEnabled && targetPage == null && draft != null && draft.hasMeaningfulDraft() && book.page(draft.page) != null) {
-                draft.page
-            } else book.readingPage
+            val resumePage = when {
+                stagedPage != null -> stagedPage
+                !library.todayCardEnabled && targetPage == null && draft != null && draft.hasMeaningfulDraft() && book.page(draft.page) != null -> draft.page
+                else -> book.readingPage
+            }
             val activeBook = if (resumePage != book.readingPage) book.copy(readingPage = resumePage) else book
             val lastQ = loadLastQuestion(activeBook.id)
+            val jump = library.consumeQuoteJump(id)
+            val passage = groundedLibraryPassage(activeBook, jump)
             mutable.update { current ->
                 current.copy(
                     catalog = catalog,
@@ -1307,6 +1315,11 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     initialized = true,
                     activePracticeDraft = draft,
                     lastBookQuestion = lastQ,
+                    pendingCourseJump = when {
+                        passage != null -> passage
+                        jump != null -> null
+                        else -> current.pendingCourseJump
+                    },
                 )
             }
         }
@@ -1314,6 +1327,15 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         if (pendingId != null && !indexingJobs.containsKey(pendingId)) {
             launchTier1Indexing(pendingId, waitForFirstRender = true)
         }
+    }
+
+    /** 库里记下的原句还在这一页上，才拿去高亮。对不上就什么都不标。 */
+    private fun groundedLibraryPassage(book: Textbook, jump: BookPassage?): BookPassage? {
+        if (jump == null || jump.book != book.id) return null
+        val text = book.page(jump.page)?.text ?: return null
+        if (jump.start !in 0 until jump.end || jump.end > text.length) return null
+        if (text.substring(jump.start, jump.end) != jump.text) return null
+        return jump
     }
 
     /**

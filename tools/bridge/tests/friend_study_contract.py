@@ -2,6 +2,7 @@
 
 The rows live in fixtures/friend-study-requests.json; FriendBridgeContractTest (server) checks the server still sends them.
 """
+import asyncio
 import json
 from pathlib import Path
 import sys
@@ -50,6 +51,30 @@ class FriendStudyContract(unittest.TestCase):
         for change in ({"background": False}, {"model": "claude-sonnet-5-5"}, {"batch_key": False}):
             with self.subTest(change), self.assertRaises(bridge.BridgeError):
                 bridge.build_req(*request(dict(sayings, **change)))
+
+    def test_owner_concept_sayings_keep_the_key_jobs_were_stored_under(self):
+        sayings = next(row for row in ROWS if row["name"] == "concept_sayings")
+        seen = []
+
+        async def capture(key, *args, **kwargs):
+            seen.append(key)
+            raise bridge.ApiFailure("batch_submit_ambiguous")  # no fallback for either caller
+
+        original = bridge.API_BATCH.run
+        bridge.API_BATCH.run = capture
+        try:
+            for friend in (None, FRIEND):
+                body, headers = request(sayings, friend=friend)
+                if friend is None:
+                    headers.pop("x-coach-friend")
+                    headers.pop("x-coach-friend-device")
+                req = bridge.build_req(body, headers)
+                asyncio.run(bridge.dispatch_batch(req, req.model, None))
+        finally:
+            bridge.API_BATCH.run = original
+        owner_key, friend_key = seen
+        self.assertEqual("a" * 64, owner_key)
+        self.assertNotEqual("a" * 64, friend_key)
 
 
 if __name__ == "__main__":

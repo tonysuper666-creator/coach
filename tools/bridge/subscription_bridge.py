@@ -50,7 +50,7 @@ from api_route import (
     route as api_model, vendor as api_vendor,
 )
 from api_budget import Denied
-from api_batch import BatchRouter, BatchPending, TASKS as BATCH_TASKS, GUIDE_TASK, FRIEND_BATCH_TASKS, FRIEND_BATCH_LABELS
+from api_batch import BatchRouter, BatchPending, TASKS as BATCH_TASKS, GUIDE_TASK, FRIEND_BATCH_LABELS, friend_batch_task
 
 # ---------- 路径与配置（全部在 Coach 目录里） ----------
 
@@ -1403,7 +1403,7 @@ def build_req(body: dict, headers: Any) -> ReqCtx:
     traffic = "test" if tag == "test" else "user" if tag == "user" and trusted else "unknown"
     friend = headers.get("x-coach-friend")
     friend_device = headers.get("x-coach-friend-device")
-    friend_batch = (headers.get("x-coach-task") or "") in FRIEND_BATCH_TASKS
+    friend_batch = friend_batch_task(headers.get("x-coach-task") or "", friend)
     if friend_batch and not (background and model == "claude-haiku-5-5" and not body.get("stream")
                       and not body.get("tools") and not spec_data.images
                       and re.fullmatch(r"[a-f0-9]{64}", headers.get("x-coach-batch-key", ""))
@@ -1463,7 +1463,7 @@ async def dispatch_batch(req: ReqCtx, model: str, effort: str | None) -> Outcome
     """Only durable background supply jobs opt in; interactive calls stay synchronous."""
     try:
         key = req.batch_key
-        if req.task in FRIEND_BATCH_TASKS:
+        if friend_batch_task(req.task, req.friend_id):
             # Namespace the durable result by its authenticated audience, including on replay.
             key = hashlib.sha256(f"{req.friend_id}:{req.friend_device}:{key}".encode()).hexdigest()
         result = await API_BATCH.run(key, req.task, model, req.spec_data.system,
@@ -1482,7 +1482,7 @@ async def dispatch_batch(req: ReqCtx, model: str, effort: str | None) -> Outcome
         reason = str(error) if isinstance(error, (ApiFailure, Denied)) else "batch_state_io"
         req.api_fallback = reason
         write_log(request_id=req.request_id, task=req.task, event="api_fallback", reason=reason)
-        if req.task in FRIEND_BATCH_TASKS or reason == "batch_submit_ambiguous":
+        if friend_batch_task(req.task, req.friend_id) or reason == "batch_submit_ambiguous":
             # A batch may already exist upstream: neither the cross-vendor API backup nor the
             # subscription CLI may generate this job a second time, in any mode.
             req.transport = "api"

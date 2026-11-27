@@ -35,6 +35,9 @@ class FriendAccess(private val directory: Path,
     internal var sable: SableSessions? = sableSessions
     private val stores = ConcurrentHashMap<String, ImportedBookSources>()
     internal fun imports(name: String) = stores.computeIfAbsent(friendId(name)) { ImportedBookSources(directory.resolve(it).resolve("imports")) }
+    private val outsideErasers = java.util.concurrent.CopyOnWriteArrayList<(String) -> Unit>()
+    /** Per-account rows kept outside [directory] (the shared course OCR cache) are erased with the account; a failure keeps the deletion pending for retry. */
+    internal fun eraseOnAccountDeletion(eraser: (friendName: String) -> Unit) { outsideErasers += eraser }
     @Synchronized internal fun deleteAccountData(name: String) {
         val id = friendId(name)
         fun hasOverride(file: Path): Boolean {
@@ -56,6 +59,7 @@ class FriendAccess(private val directory: Path,
                 if (process.isAlive) process.destroyForcibly().waitFor()
             }
         }
+        outsideErasers.forEach { it(name) }
         stores.remove(id)
         val root = directory.resolve(id)
         if (Files.exists(root) && (!root.toFile().deleteRecursively() || Files.exists(root))) {

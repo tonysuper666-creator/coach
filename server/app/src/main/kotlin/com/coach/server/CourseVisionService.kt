@@ -203,6 +203,16 @@ class CourseVisionService(
     /** Cache rows belong to one account: the owner, or one friend (by hashed id). */
     internal fun cacheScope(friend: String?): String = friend?.let { "friend:${friendId(it)}" } ?: "owner"
 
+    /** Account deletion: removes every transcript cached for this friend; other accounts keep theirs. */
+    internal fun eraseAccount(friend: String) {
+        database().use { db ->
+            db.prepareStatement("DELETE FROM vision_cache_scoped WHERE scope=?").use { sql ->
+                sql.setString(1, cacheScope(friend))
+                sql.executeUpdate()
+            }
+        }
+    }
+
     fun lookupCached(pageSha256: String, friend: String? = null): Pair<String, String>? = database().use { db ->
         db.prepareStatement("SELECT text, model FROM vision_cache_scoped WHERE scope=? AND page_sha256=?").use { sql ->
             sql.setString(1, cacheScope(friend))

@@ -1,5 +1,12 @@
 package com.coach.server
 
+import com.coach.core.LedgerActor
+import com.coach.store.LedgerStore
+import com.coach.store.sableFriendName
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -69,6 +76,36 @@ class CourseVisionCacheIsolationTest {
             assertEquals(listOf<String?>("甲"), transport.calls)
         } finally {
             dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun deletingAnAccountErasesItsTranscriptsAndKeepsOtherAccounts() = runBlocking {
+        val root = Files.createTempDirectory("coach-vision-erase-")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val actor = LedgerActor(scope, LedgerStore(root.resolve("ledger")))
+        try {
+            val data = root.resolve("data")
+            val friends = FriendAccess(data.resolve("friends"), root.resolve("state"), root.resolve("config.json"))
+            val books = UnifiedBookPipeline(data.resolve("unified-books"), UnifiedBookConfig(enabled = true, autoProcess = false))
+            val service = CourseVisionService(data.resolve("course-vision"), transport = Recorder())
+            friends.eraseOnAccountDeletion(service::eraseAccount)
+            books.installAccountDataFinalizer(actor, friends)
+            val leaving = sableFriendName("vision-erase-leaving")
+            val staying = sableFriendName("vision-erase-staying")
+            service.recognizeBatch(input(), friend = leaving, device = "leaving-pc")
+            service.recognizeBatch(input(), friend = staying, device = "staying-pc")
+            service.recognizeBatch(input())
+            val accountScope = UnifiedBookScope.fromCall("leaving-pc", leaving)
+            val epoch = books.beginAccountDeletion(accountScope, leaving)
+            books.deleteAccount(accountScope, expectedDeletionEpoch = epoch)
+            assertEquals("DELETED", books.accountDeletionStateForTest(accountScope))
+            assertNull(service.lookupCached(sha, leaving))
+            assertEquals("transcript for $staying", service.lookupCached(sha, staying)?.first)
+            assertEquals("transcript for owner", service.lookupCached(sha)?.first)
+        } finally {
+            actor.close()
+            scope.cancel()
+            root.toFile().deleteRecursively()
         }
     }
 }

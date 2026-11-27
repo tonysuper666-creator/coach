@@ -567,7 +567,7 @@ internal fun checkedReaderPayload(payload: String, pack: SourcePack,
         ?: return reject(ReaderFormatReason.PAYLOAD_JSON)
     if (root.keys != setOf("paragraphs")) return reject(ReaderFormatReason.ROOT_FIELDS)
     val paragraphs = root["paragraphs"] as? JsonArray ?: return reject(ReaderFormatReason.ROOT_FIELDS)
-    if (paragraphs.isEmpty()) return "依据不足，无法确认。" to JsonArray(emptyList())
+    if (paragraphs.isEmpty()) return ReaderTransientReply.INSUFFICIENT to JsonArray(emptyList())
     if (paragraphs.size !in 1..maxParagraphs) return reject(ReaderFormatReason.PARAGRAPH_COUNT)
     val rendered = paragraphs.map { value ->
         val paragraph = value as? JsonObject ?: return reject(ReaderFormatReason.PARAGRAPH_FIELDS)

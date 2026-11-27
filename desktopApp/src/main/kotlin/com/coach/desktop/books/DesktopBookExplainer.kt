@@ -874,7 +874,9 @@ private const val CANCEL_NOTICE_MS = 3_000L
  * TON-1963: the service answers HTTP 200 with no sources and one of [ReaderTransientReply.retryable] when a single
  * model attempt broke off (no first token, the stream stalled, the bridge failed, the JSON was unreadable, or the
  * service was full). The same question usually succeeds on a fresh attempt, so ask once more under a new request id
- * before showing the refusal. Every other result, including the total-time limit, is returned as it is.
+ * before showing the refusal. [ReaderTransientReply.INSUFFICIENT] (the model returned no paragraphs, usually within
+ * a second or two) can repeat on a supported passage, so it may be asked up to two more times. Every other result,
+ * including the total-time limit, is returned as it is. At most three attempts in all, each under its own id.
  */
 internal suspend fun retryTransientOnce(
     requestId: String,
@@ -882,9 +884,21 @@ internal suspend fun retryTransientOnce(
     newRequestId: () -> String = { UUID.randomUUID().toString().replace("-", "") },
     attempt: suspend (requestId: String) -> ExplainResult,
 ): ExplainResult {
-    val first = attempt(requestId)
-    val refusal = (first as? ExplainResult.Refused)?.message?.trim() ?: return first
-    if (!ReaderTransientReply.isRetryable(refusal)) return first
-    if (refusal == ReaderTransientReply.BUSY) delay(busyPauseMs)
-    return attempt(newRequestId())
+    var result = attempt(requestId)
+    var retries = 0
+    while (true) {
+        val refusal = (result as? ExplainResult.Refused)?.message?.trim() ?: return result
+        val again = when {
+            refusal == ReaderTransientReply.INSUFFICIENT -> retries < INSUFFICIENT_RETRIES
+            ReaderTransientReply.isRetryable(refusal) -> retries < 1
+            else -> false
+        }
+        if (!again) return result
+        if (refusal == ReaderTransientReply.BUSY) delay(busyPauseMs)
+        retries++
+        result = attempt(newRequestId())
+    }
 }
+
+/** Extra tries for an empty answer; the wfs p11 explain refused twice running before it answered. */
+private const val INSUFFICIENT_RETRIES = 2

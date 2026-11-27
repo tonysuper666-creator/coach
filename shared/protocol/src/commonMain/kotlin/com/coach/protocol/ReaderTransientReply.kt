@@ -15,6 +15,12 @@ object ReaderTransientReply {
     /** Too many readers waiting at once; a short pause before the second try. */
     const val BUSY = "追问正在处理，请稍后手动重试。"
     const val TOTAL_TIMEOUT = "讲解已达到本次总时长上限，已停止。可继续阅读或手动重试。"
+    /**
+     * The model answered with no paragraphs. On a passage the pages do support this is a flaky early stop (seen on
+     * the same sentence twice running, then answered on the third try), so the client asks up to two more times
+     * before believing it. It stays outside [retryable], whose sentences get a single extra try.
+     */
+    const val INSUFFICIENT = "依据不足，无法确认。"
 
     /** The total-time limit is not listed: a second full attempt would only double the wait. */
     val retryable: Set<String> = setOf(FIRST_TIMEOUT, GAP_TIMEOUT, UNFINISHED, UNCHECKABLE, UNAVAILABLE, BUSY)

@@ -154,6 +154,54 @@ class ExplainAnchorRecoveryTest {
         }
     }
 
+    @Test fun emptyAnswerTwiceRunningIsAskedAgainUntilTheThirdTryAnswers() = runBlocking {
+        val root = folder.root.toPath()
+        val library = TextbookLibrary(root.resolve("library"))
+        val book = library.importBook(Files.writeString(root.resolve("one.txt"), "Samples settle within a day."))
+        ExplainConsent(library.directory).allow(book.id)
+        val block = book.lessons.first().blocks.first { !it.heading }
+        val ids = CopyOnWriteArrayList<String>()
+        val http = server { path, body ->
+            if (path != "/v1/library/explain") return@server null
+            ids += body!!.getValue("requestId").jsonPrimitive.content
+            // The page-11 explain: two quick empty answers, then a real one on the third try.
+            if (ids.size <= 2) """{"text":"${ReaderTransientReply.INSUFFICIENT}","sources":[],"elapsedMs":1100}"""
+            else answer(body.getValue("blocks").jsonArray, ::pageOf)
+        }
+        try {
+            val explainer = explainer(root, library, "http://127.0.0.1:${http.address.port}")
+            val result = explainer.explainSelection("explain", block, requestId = "first-try")
+            assertQuotesOnTheirPages(book, listOf(block), result)
+            assertEquals(3, ids.size, "两次空答后第三次拿到讲解")
+            assertEquals("first-try", ids[0])
+            assertEquals(3, ids.distinct().size, "每次重试都换新请求号")
+        } finally { http.stop(0) }
+    }
+
+    @Test fun emptyAnswerStopsAfterThreeTriesAndIsShownAsItIs() = runBlocking {
+        var calls = 0
+        val ids = mutableListOf<String>()
+        var next = 0
+        val result = retryTransientOnce("a", newRequestId = { "r${++next}" }) { id ->
+            calls++; ids += id; ExplainResult.Refused(ReaderTransientReply.INSUFFICIENT)
+        }
+        assertEquals(3, calls, "空答最多问三次，不无限重试")
+        assertEquals(listOf("a", "r1", "r2"), ids)
+        assertEquals(ReaderTransientReply.INSUFFICIENT, (result as ExplainResult.Refused).message)
+
+        calls = 0
+        retryTransientOnce("a", busyPauseMs = 0) { calls++
+            ExplainResult.Refused(if (calls == 1) ReaderTransientReply.GAP_TIMEOUT else ReaderTransientReply.INSUFFICIENT)
+        }
+        assertEquals(3, calls, "中断后再遇空答，总共仍不超过三次")
+
+        calls = 0
+        retryTransientOnce("a", busyPauseMs = 0) { calls++
+            ExplainResult.Refused(if (calls == 1) ReaderTransientReply.INSUFFICIENT else ReaderTransientReply.GAP_TIMEOUT)
+        }
+        assertEquals(2, calls, "其他中断句仍只多问一次")
+    }
+
     @Test fun retryStopsAfterOneMoreAttemptAndNeverRepeatsTheTotalLimit() = runBlocking {
         var calls = 0
         val twice = retryTransientOnce("a", busyPauseMs = 0, newRequestId = { "b" }) { id ->

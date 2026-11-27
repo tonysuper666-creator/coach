@@ -23,12 +23,20 @@ NETWORK_TRANSFER_RE = re.compile(
     r"Could not (?:GET|HEAD|download|transfer)\b", re.IGNORECASE
 )
 
+CONFIG_ERROR_MARKERS = (
+    "is a core gradle plugin",
+    "cannot be specified with a version number",
+    "available for offline mode",
+    "invalid plugin request",
+)
+
 REPO_NETWORK_MARKERS = (
     "plugins.gradle.org",
     "repo.maven.apache.org",
     "dl.google.com",
     "services.gradle.org",
     "gradle central plugin repository",
+    "could not resolve plugin artifact",
     "timed out",
     "connection reset",
     "unknownhostexception",
@@ -41,23 +49,38 @@ REPO_NETWORK_MARKERS = (
 
 
 def is_plugin_repo_unavailable(output: str) -> bool:
-    """Return True only when Gradle failed due to plugin/dependency repo unavailability, never on test failures."""
+    """Return True only when Gradle failed due to plugin/dependency repo unavailability."""
     if "There were failing tests" in output or TEST_TASK_FAILED_RE.search(output):
         return False
 
     lower = output.lower()
-    if PLUGIN_NOT_FOUND_RE.search(output) or ERROR_RESOLVING_PLUGIN_RE.search(output):
-        return True
-    if "could not resolve plugin artifact" in lower:
-        return True
-    if "plugin repositories" in lower and (
-        "could not resolve" in lower or any(m in lower for m in REPO_NETWORK_MARKERS)
+    if any(marker in lower for marker in CONFIG_ERROR_MARKERS):
+        return False
+
+    has_repo_network_marker = any(marker in lower for marker in REPO_NETWORK_MARKERS)
+
+    if PLUGIN_NOT_FOUND_RE.search(output) and (
+        "could not resolve plugin artifact" in lower
+        or ("plugin repositories" in lower and ("could not resolve" in lower or has_repo_network_marker))
     ):
         return True
+
+    if ERROR_RESOLVING_PLUGIN_RE.search(output) and (
+        has_repo_network_marker
+        or NETWORK_TRANSFER_RE.search(output)
+        or ("plugin repositories" in lower and "could not resolve" in lower)
+    ):
+        return True
+
+    if "could not resolve plugin artifact" in lower:
+        return True
+
     if "services.gradle.org/distributions/" in lower and "Welcome to Gradle" not in output:
         return True
-    if NETWORK_TRANSFER_RE.search(output) and any(m in lower for m in REPO_NETWORK_MARKERS):
+
+    if NETWORK_TRANSFER_RE.search(output) and has_repo_network_marker:
         return True
+
     return False
 
 

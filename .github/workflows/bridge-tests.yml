@@ -24,23 +24,18 @@ jobs:
       # 这些测试会读 server/*/src/main/kotlin，所以要完整检出后在仓库根目录跑；全离线，不碰任何密钥。
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cache/pip
-            /tmp/bridge-venv
-          key: ${{ runner.os }}-bridge-deps-${{ hashFiles('tools/bridge/requirements.txt') }}
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-bridge-pip-${{ hashFiles('tools/bridge/requirements.txt') }}
           restore-keys: |
-            ${{ runner.os }}-bridge-deps-
+            ${{ runner.os }}-bridge-pip-
       - name: Install bridge requirements
         run: |
-          if /tmp/bridge-venv/bin/python -c "import fastapi, uvicorn, pydantic, httpx" 2>/dev/null; then
-            echo "Using cached bridge virtualenv"
-            exit 0
-          fi
           delays=(5 15 30)
           attempt=0
           while true; do
             rm -rf /tmp/bridge-venv
             if python3 -m venv /tmp/bridge-venv && /tmp/bridge-venv/bin/python -m pip install --disable-pip-version-check -q -r tools/bridge/requirements.txt; then
+              /tmp/bridge-venv/bin/python -m pip freeze
               exit 0
             fi
             if [ "$attempt" -ge "${#delays[@]}" ]; then

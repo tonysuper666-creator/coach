@@ -389,7 +389,25 @@ class ExamPointDrillTest {
         }.toString()
 
         val gen = script(haiku) { mixedDrafts }
-        val check = script(gpt) { votes(listOf("c1" to "A"), quote = secondQuote) }
+        val check = script(gpt) {
+            buildJsonObject {
+                put("answers", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "c1")
+                        put("letter", "A")
+                        put("onTopic", true)
+                        put("support", cite("tb", secondQuote))
+                    })
+                    add(buildJsonObject {
+                        put("id", "c3")
+                        put("letter", "A")
+                        put("onTopic", false)
+                        put("support", cite("tb", tidalQuote))
+                    })
+                })
+                put("essay", buildJsonArray {})
+            }.toString()
+        }
         val body = ExamPointDrillPipeline(gen, check).generate(topicInput)
         assertEquals(1, body.arr("choices").size)
         assertEquals("c1", body.arr("choices")[0].jsonObject.str("id"))
@@ -398,6 +416,66 @@ class ExamPointDrillTest {
         assertEquals(1, discards.int("off_topic"))
         assertEquals(1, discards.int("duplicate_question"))
         assertEquals(1, discards.int("source_mismatch"))
+    }
+
+    @Test
+    fun chineseQuestionForEnglishTopicPassesLocallyAndIsJudgedSemanticallyByChecker() = runBlocking {
+        // Quote describes the experiment's year-two outcome without repeating literal words "insurance" or "experiment".
+        val bodyQuote = "Participants showed no statistically significant reduction in blood pressure or cholesterol after two years."
+        val blocks = buildJsonArray {
+            add(block("tb", "CORE_TEXTBOOK", bodyQuote, "Synthetic Textbook", page = 54))
+        }
+        val topicInput = buildJsonObject {
+            put("topicId", "point-exp")
+            put("topicTitle", "Synthetic Regional Coverage Experiment")
+            put("sourcesHash", "src-zh")
+            put("examFormat", "只考选择题")
+            put("blocks", blocks)
+        }
+        val gen = script(haiku) {
+            buildJsonObject {
+                put("choices", buildJsonArray {
+                    add(choiceObj(
+                        "c1",
+                        "在该地区覆盖试点满两年后，关于参与者的生理健康指标，哪项结论符合教材？",
+                        "A",
+                        "血压与胆固醇未出现统计学上显著的下降。",
+                        bodyQuote,
+                    ))
+                })
+                put("essay", kotlinx.serialization.json.JsonNull)
+            }.toString()
+        }
+        val check = script(gpt) {
+            buildJsonObject {
+                put("answers", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "c1")
+                        put("letter", "A")
+                        put("onTopic", true)
+                        put("support", cite("tb", bodyQuote))
+                    })
+                })
+                put("essay", buildJsonArray {})
+            }.toString()
+        }
+        val body = ExamPointDrillPipeline(gen, check).generate(topicInput)
+        assertEquals(1, body.arr("choices").size)
+        assertEquals(0, body.obj("discards").int("off_topic"))
+        assertEquals(1, check.prompts.size)
+    }
+
+    @Test
+    fun serverPrepareStopsExerciseTailAtNumericChapterHeading() {
+        val blocks = listOf(
+            CourseMaterialTextBlock("b1", "tb", "Book", "CORE_TEXTBOOK", 1, 55, 0,
+                "2.6 Exercises\nDetermine whether each of the following statements is true, false, or unclear.\n1. False claim."),
+            CourseMaterialTextBlock("b2", "tb", "Book", "CORE_TEXTBOOK", 1, 56, 0,
+                "3 Demand for energy: the thermal model\nThermal inertia slows indoor temperature swings during peak tariffs."),
+        )
+        val (kept, reason) = ExamPointDrillGate.prepare(blocks)
+        assertNull(reason)
+        assertEquals(listOf(56), kept.map { it.page })
     }
 
     private fun choiceObj(

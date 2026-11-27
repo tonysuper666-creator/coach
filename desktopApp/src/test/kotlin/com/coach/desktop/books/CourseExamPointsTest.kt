@@ -306,4 +306,168 @@ class CourseExamPointsTest {
             dir.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun numericChapterHeadingStopsExerciseStrippingAndKeepsSubsequentChapters() {
+        // Synthetic textbook whose chapter headers are "<number> <title>" (e.g. "3 Demand for energy: ...")
+        // with end-of-chapter "2.6 Exercises" followed immediately by Chapter 3 and Chapter 4.
+        val pages = listOf(
+            BookPage(10, "2 Price sensitivity in energy markets\n2.1 Measuring demand\nPrice elasticity: Measures how quantity demanded responds to price changes across households."),
+            BookPage(11, "2.6 Exercises\nDetermine whether each of the following statements is true, false, or unclear.\n1. Price elasticity is always zero for every good.\n2. Suppose price doubles. (a) Compute revenue. (b) Explain your answer."),
+            BookPage(12, "3. Evaluate whether subsidies flatten demand curves?\n4. Compare two imaginary grids and explain which one wastes less power?\n5. Suppose a fictional utility sets flat rates. (a) Derive surplus. (b) Discuss equity."),
+            BookPage(13, "3 Demand for energy: the thermal model\n3.1 Thermal storage basics\nThermal inertia: Ability of building mass to slow indoor temperature swings during peak tariffs."),
+            BookPage(14, "3.2 Peak load shifting\nLoad shifting: Moving flexible appliance demand away from high-cost evening hours into off-peak windows."),
+            BookPage(15, "3.5 Exercises\nTrue, False, or Unclear\n1. Thermal inertia disappears when roofs are insulated."),
+            BookPage(16, "4 Supply constraints and grid balancing\n4.1 Reserve margins\nReserve margin: Spare generation capacity held ready above forecast peak load to prevent outages."),
+        )
+        // Even WITHOUT explicit chapterStartPages, numeric headings "3 Demand..." and "4 Supply..." must terminate exercise tails!
+        val cleaned = CourseExamPoints.cleanTextbookPagesByNumber(pages)
+        assertTrue(10 in cleaned, "Chapter 2 body page 10 must stay")
+        assertFalse(11 in cleaned, "Chapter 2 exercise page 11 must be stripped")
+        assertFalse(12 in cleaned, "Chapter 2 exercise continuation page 12 must be stripped")
+        assertTrue(13 in cleaned, "Chapter 3 opening page 13 ('3 Demand for energy...') must NOT be stripped")
+        assertTrue(14 in cleaned, "Chapter 3 body page 14 must NOT be stripped")
+        assertFalse(15 in cleaned, "Chapter 3 exercise page 15 must be stripped")
+        assertTrue(16 in cleaned, "Chapter 4 opening page 16 ('4 Supply constraints...') must NOT be stripped")
+
+        // Also verify CourseAutoAligner.buildTopicPackRequest keeps Chapter 3 & 4 blocks for exam points!
+        val teachingPages = pages.map { ExamTeachingPage("tb", it.number, CourseMaterialRole.CORE_TEXTBOOK, it.text) } +
+            listOf(ExamTeachingPage("slides", 1, CourseMaterialRole.LECTURE_SLIDES, "Week 2 covers Thermal inertia and Reserve margin."))
+        val identified = CourseExamPoints.identifyFromPages("numeric-chapters", teachingPages)
+        val names = identified.map { it.title }.toSet()
+        assertTrue("Thermal inertia" in names, "Chapter 3 exam point must be identified: $names")
+        assertTrue("Load shifting" in names, "Chapter 3 section point must be identified: $names")
+        assertTrue("Reserve margin" in names, "Chapter 4 exam point must be identified: $names")
+
+        val thermalTopic = CourseTopicEntry(
+            topicId = "pt-thermal",
+            collectionId = "c",
+            weekLabel = CourseExamPoints.LABEL,
+            weekNum = null,
+            ord = 1,
+            title = "Thermal inertia",
+            examStatus = CourseTopicStatus.EXAMINABLE,
+            userLocked = false,
+            sources = listOf(CourseTopicSourceLink("pt-thermal", "tb", "Synthetic Textbook", "pdf", CourseMaterialRole.CORE_TEXTBOOK, 1, startPage = 13, endPage = 13)),
+        )
+        val detail = CourseDetailSnapshot("c", "Energy", CourseExamProfile(examEnabled = true), emptyList(), listOf(thermalTopic), emptyList(), emptyList())
+        val req = CourseAutoAligner.buildTopicPackRequest(detail, thermalTopic, mapOf("tb" to pages))
+        val blocks = req["blocks"] as kotlinx.serialization.json.JsonArray
+        assertEquals(1, blocks.size, "buildTopicPackRequest must include Chapter 3 textbook page 13")
+        assertTrue(blocks.toString().contains("Thermal inertia"))
+    }
+
+    @Test
+    fun alignLocallyIgnoresOverviewSlidesAndCrossRefsAndExcludesUntaughtAndUncoveredChapters() {
+        val dir = Files.createTempDirectory("coach-align-precision-")
+        try {
+            val library = TextbookLibrary(dir.resolve("lib"), lazyPdfExtras = false)
+            val tbPath = dir.resolve("Precision-Textbook.pdf")
+            val pageSpecs = listOf(
+                1 to listOf("1 Foundations of Grid Economics", "Grid dispatch: Matching electricity generation to real-time demand."),
+                2 to listOf("12 Storage and Innovation", "12.1 Lifecycle of a Battery", "Battery cycling: Repeated charge and discharge degradation in stationary storage."),
+                3 to listOf("15 Regional Interconnectors", "Untaught interconnector flow: Cross-border transmission scheduled for week nine."),
+                4 to listOf("16 Offshore Wind Pricing", "Untaught offshore auction: Future capacity auction scheduled for week ten."),
+                5 to listOf("21 Geothermal Extensions", "Uncovered geothermal basin: Optional topic outside the exam scope."),
+            )
+            PDDocument().use { pdf ->
+                pdf.documentInformation.title = "Grid Economics Textbook"
+                val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+                val outline = PDDocumentOutline().also { pdf.documentCatalog.documentOutline = it }
+                val pdfPages = mutableMapOf<Int, PDPage>()
+                for ((num, lines) in pageSpecs) {
+                    val page = PDPage()
+                    pdf.addPage(page)
+                    pdfPages[num] = page
+                    PDPageContentStream(pdf, page).use { out ->
+                        out.beginText()
+                        out.setFont(font, 11f)
+                        out.newLineAtOffset(40f, 700f)
+                        for (line in lines) {
+                            out.showText(line)
+                            out.newLineAtOffset(0f, -18f)
+                        }
+                        out.endText()
+                    }
+                }
+                fun addOutline(parent: PDOutlineItem?, title: String, pageNum: Int): PDOutlineItem {
+                    val item = PDOutlineItem().apply {
+                        this.title = title
+                        destination = PDPageFitDestination().apply { page = pdfPages[pageNum] }
+                    }
+                    if (parent == null) outline.addLast(item) else parent.addLast(item)
+                    return item
+                }
+                addOutline(null, "1 Foundations of Grid Economics", 1)
+                val ch12 = addOutline(null, "12 Storage and Innovation", 2)
+                addOutline(ch12, "12.1 Lifecycle of a Battery", 2)
+                addOutline(null, "15 Regional Interconnectors", 3)
+                addOutline(null, "16 Offshore Wind Pricing", 4)
+                addOutline(null, "21 Geothermal Extensions", 5)
+                pdf.save(tbPath.toFile())
+            }
+
+            val handbookPath = dir.resolve("Course-Handbook.md")
+            Files.writeString(handbookPath, """
+                # Course Handbook
+                Week 1: Grid Dispatch Basics (Chapter 1)
+                Week 6: Stationary Energy Storage
+                Week 9: Regional Interconnectors (Chapter 15)
+                Week 10: Offshore Wind Pricing (Chapter 16)
+            """.trimIndent())
+
+            // W1 slides include a "Course Schedule" slide listing Weeks 1-10 and Chapters 1, 12, 15, 16!
+            val w1Slides = dir.resolve("Week1-Slides.pptx")
+            writeSlides(w1Slides, listOf(
+                "Week 1 Grid Dispatch Basics",
+                "Course Schedule\nWeek 1: Ch 1\nWeek 6: Ch 12\nWeek 9: Ch 15\nWeek 10: Ch 16",
+                "Grid dispatch balances load every minute.",
+            ))
+            // W6 slides include a cross-reference ("See Chapter 21") plus slide title "Lifecycle of a Battery"
+            val w6Slides = dir.resolve("Week6-Slides.pptx")
+            writeSlides(w6Slides, listOf(
+                "Week 6 Energy Storage",
+                "See Chapter 21 for optional geothermal extensions and see Chapter 15 for interconnectors.",
+                "Lifecycle of a Battery\nBattery cycling determines replacement cost.",
+            ))
+
+            val tbId = library.stageBookImport(tbPath).book.id
+            val hbId = library.stageBookImport(handbookPath).book.id
+            val w1Id = library.stageBookImport(w1Slides).book.id
+            val w6Id = library.stageBookImport(w6Slides).book.id
+
+            val detail = library.withCourseDatabase { db ->
+                val (cid, _) = CourseStore.createCourse(
+                    db,
+                    "Grid Economics",
+                    CourseExamProfile(examEnabled = true),
+                    listOf(tbId, hbId, w1Id, w6Id),
+                )
+                CourseAutoAligner.alignLocally(db, cid)
+            }
+
+            val w1Topic = detail.examinableTopics.first { it.weekNum == 1 }
+            val w6Topic = detail.examinableTopics.first { it.weekNum == 6 }
+            assertEquals(listOf(1), w1Topic.sources.filter { it.bookId == tbId }.map { it.startPage },
+                "W1 must ONLY attach Chapter 1, never steal Ch 15/16 from Course Schedule slide")
+            assertEquals(listOf(2), w6Topic.sources.filter { it.bookId == tbId }.map { it.startPage },
+                "W6 must attach Chapter 12 via section title and never steal Ch 15 or Ch 21 via cross-ref")
+            assertTrue(detail.excludedTopics.any { it.title.contains("Geothermal") },
+                "Uncovered Chapter 21 must be excluded")
+            assertTrue(detail.pendingTopics.any { it.weekNum == 9 && it.sources.any { s -> s.startPage == 3 } })
+            assertTrue(detail.pendingTopics.any { it.weekNum == 10 && it.sources.any { s -> s.startPage == 4 } })
+
+            val pointTitles = detail.examinableTopics
+                .filter { it.weekLabel == CourseExamPoints.LABEL }
+                .map { it.title }
+                .toSet()
+            assertTrue("Grid dispatch" in pointTitles)
+            assertTrue("Battery cycling" in pointTitles)
+            assertFalse("Untaught interconnector flow" in pointTitles)
+            assertFalse("Untaught offshore auction" in pointTitles)
+            assertFalse("Uncovered geothermal basin" in pointTitles)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
 }

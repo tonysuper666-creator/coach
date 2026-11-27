@@ -17,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.PointerIcon
@@ -514,7 +515,12 @@ internal fun SingleBookCompanionPanel(
             }
         }
 
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        val sayingsScroll = remember { CompanionScrollAnchor() }
+        sayingsScroll.scroll = scroll
+        Box(
+            Modifier.weight(1f).fillMaxWidth().onGloballyPositioned { sayingsScroll.viewport = it },
+        ) {
+            CompositionLocalProvider(LocalCompanionScrollAnchor provides sayingsScroll) {
             Column(
                 Modifier
                     .fillMaxSize()
@@ -901,6 +907,7 @@ internal fun SingleBookCompanionPanel(
                     )
                 }
                 bottomContent?.invoke()
+            }
             }
             if (scroll.maxValue > 0) {
                 BookScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 6.dp))

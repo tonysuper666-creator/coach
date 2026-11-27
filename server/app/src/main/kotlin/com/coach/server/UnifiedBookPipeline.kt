@@ -1352,6 +1352,110 @@ class UnifiedBookPipeline internal constructor(
         data class Ready(val book: UnifiedShelfBook, val artifactJson: JsonObject) : ArtifactLookupResult
     }
 
+    /** Schema 3 always writes skippedPages. Older ready artifacts do not, so the next open rebuilds them. */
+    private fun artifactMissesBadPageRecord(artifact: JsonObject): Boolean {
+        if ("skippedPages" !in artifact) return true
+        val schema = (artifact["schema"] as? JsonPrimitive)?.content?.toIntOrNull()
+        return schema == null || schema < UnifiedBookArtifact.SCHEMA_VERSION
+    }
+
+    /**
+     * Opening a book that was processed before bad pages were recorded rebuilds the skeleton
+     * from the stored file. The job stays ready. A failed rebuild leaves the old artifact in place.
+     */
+    internal suspend fun readProcessedArtifactForOpen(scope: UnifiedBookScope, shelfBookId: String): ArtifactLookupResult {
+        val first = readProcessedArtifact(scope, shelfBookId)
+        if (first !is ArtifactLookupResult.Ready || !artifactMissesBadPageRecord(first.artifactJson)) return first
+        try {
+            backfillStaleBadPageRecord(first.book)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Exception) {
+            return first
+        }
+        return when (val refreshed = readProcessedArtifact(scope, shelfBookId)) {
+            is ArtifactLookupResult.Ready -> refreshed
+            else -> first
+        }
+    }
+
+    private suspend fun backfillStaleBadPageRecord(book: UnifiedShelfBook) {
+        val sha256 = book.sha256
+        val parserVersion = book.job.parserVersion
+        val version = book.job.publishedVersion?.takeIf { it.isNotBlank() } ?: parserVersion
+        val blobMeta = shaLock(sha256).withLock {
+            val file = blobPath(sha256)
+            if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) return@withLock null
+            val artifactFile = artifactFilePath(sha256, version)
+            val current = runCatching {
+                LedgerJson.parseToJsonElement(Files.readString(artifactFile, StandardCharsets.UTF_8)).jsonObject
+            }.getOrNull()
+            if (current != null && !artifactMissesBadPageRecord(current)) return@withLock null
+            registryDb().use { db ->
+                if (countRefs(db, sha256) <= 0) return@use null
+                val job = readJob(db, sha256, parserVersion)
+                if (job?.state != "ready") return@use null
+                db.prepareStatement(
+                    "SELECT format FROM shared_blobs WHERE sha256=? AND state='ACTIVE'",
+                ).use { sql ->
+                    sql.setString(1, sha256)
+                    sql.executeQuery().use { rs -> if (rs.next()) rs.getString(1) to file else null }
+                }
+            }
+        } ?: return
+        val (format, blobFile) = blobMeta
+        var tempArtifact: Path? = null
+        val artifact = processor.process(
+            blobFile = blobFile,
+            format = format,
+            title = sha256.take(12),
+            sha256 = sha256,
+            parserVersion = parserVersion,
+        ) { _, _ -> }
+        val staged = privateFiles.file(artifactsDir.resolve(".artifact-${UUID.randomUUID()}.json"))
+        tempArtifact = staged
+        try {
+            Files.writeString(staged, artifact.toJson().toString(), StandardCharsets.UTF_8)
+            privateFiles.file(staged)
+            shaLock(sha256).withLock {
+                val targetFile = artifactFilePath(sha256, version)
+                val stillStale = registryDb().use { db ->
+                    val job = readJob(db, sha256, parserVersion)
+                    job?.state == "ready" && countRefs(db, sha256) > 0
+                } && runCatching {
+                    val parsed = LedgerJson.parseToJsonElement(Files.readString(targetFile, StandardCharsets.UTF_8)).jsonObject
+                    artifactMissesBadPageRecord(parsed)
+                }.getOrDefault(true)
+                if (!stillStale || !Files.isRegularFile(blobPath(sha256), LinkOption.NOFOLLOW_LINKS)) {
+                    runCatching { Files.deleteIfExists(staged) }
+                    return@withLock
+                }
+                val targetDir = privateFiles.directory(artifactDir(sha256, version))
+                moveAtomically(staged, targetDir.resolve(SKELETON_ARTIFACT_FILENAME))
+                privateFiles.file(targetFile)
+                val now = config.clock()
+                registryDb().use { db ->
+                    db.prepareStatement(
+                        """UPDATE processing_jobs
+                           SET process_count = process_count + 1, updated_at = ?
+                           WHERE sha256=? AND parser_version=? AND state='ready'""".trimIndent(),
+                    ).use { sql ->
+                        sql.setLong(1, now)
+                        sql.setString(2, sha256)
+                        sql.setString(3, parserVersion)
+                        sql.executeUpdate()
+                    }
+                }
+            }
+        } catch (cancel: CancellationException) {
+            tempArtifact.let { runCatching { Files.deleteIfExists(it) } }
+            throw cancel
+        } catch (error: Exception) {
+            tempArtifact.let { runCatching { Files.deleteIfExists(it) } }
+            throw error
+        }
+    }
+
     internal fun readProcessedArtifact(scope: UnifiedBookScope, shelfBookId: String): ArtifactLookupResult {
         val book = shelfBookStatus(scope, shelfBookId) ?: return ArtifactLookupResult.NotFound
         val activeRef = registryDb().use { db ->
@@ -2493,7 +2597,7 @@ fun Application.unifiedBookRoutes(
             }
             val scope = UnifiedBookScope.fromCall(device, friend)
             val shelfBookId = call.parameters["id"].orEmpty()
-            when (val result = withContext(Dispatchers.IO) { pipeline.readProcessedArtifact(scope, shelfBookId) }) {
+            when (val result = withContext(Dispatchers.IO) { pipeline.readProcessedArtifactForOpen(scope, shelfBookId) }) {
                 UnifiedBookPipeline.ArtifactLookupResult.NotFound -> call.respondText(
                     json("code" to "not_found", "error" to "书架中找不到这本书。").toString(),
                     ContentType.Application.Json,

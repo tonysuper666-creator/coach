@@ -1,0 +1,35 @@
+name: Bridge tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bridge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      # 这些测试会读 server/*/src/main/kotlin，所以要完整检出后在仓库根目录跑；全离线，不碰任何密钥。
+      - name: Install bridge requirements
+        run: |
+          python3 -m venv /tmp/bridge-venv
+          /tmp/bridge-venv/bin/python -m pip install --disable-pip-version-check -q -r tools/bridge/requirements.txt
+      - name: Run bridge tests
+        run: |
+          set -e
+          for t in api_routing batch_routing friends friend_usage exam_protection; do
+            echo "::group::$t"
+            /tmp/bridge-venv/bin/python tools/bridge/tests/$t.py
+            echo "::endgroup::"
+          done

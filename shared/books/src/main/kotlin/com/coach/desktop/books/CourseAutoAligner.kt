@@ -233,19 +233,66 @@ internal object CourseAutoAligner {
             }
         }
 
-        // Precompute authoritative syllabus chapter assignments per week so one week never steals another week's chapters.
+        // Phase 1: Precompute authoritative Syllabus/Handbook chapter ownership across ALL weeks (taught & pending),
+        // matching by explicit chapter number, exact chapter title, title keywords, or section phrase in the syllabus.
+        // A chapter directly assigned by the syllabus to week(s) (e.g. Ch 16 -> W10 pending) cannot be stolen by another week's slides.
         val syllabusChaptersByWeek = syllabusByWeek.mapValues { (_, block) -> extractChapterNumbers(block.fullText) }
-        val chapterOwnersFromSyllabus = HashMap<Int, MutableSet<Int>>()
-        for ((wk, chNums) in syllabusChaptersByWeek) {
-            for (chNum in chNums) chapterOwnersFromSyllabus.getOrPut(chNum) { mutableSetOf() }.add(wk)
+        val syllabusNormByWeek = syllabusByWeek.mapValues { (_, block) -> CourseExamPoints.normalize(block.fullText) }
+        val syllabusKeywordsByWeek = syllabusByWeek.mapValues { (_, block) -> keywordsOf(block.fullText) }
+        val syllabusBestWeeksByChapter = HashMap<Triple<String, Int, String>, Set<Int>>()
+        for (ch in textbookChapters) {
+            val chKey = Triple(ch.bookId, ch.startPage, ch.title)
+            val cleanChTitle = ch.title
+                .replace(Regex("""(?i)^(?:chapter\s+\d+|第\s*\d+\s*章|\d{1,2})[\s.:：—\-]+"""), "")
+                .trim()
+            val normChTitle = CourseExamPoints.normalize(cleanChTitle)
+            val specificTitleKw = (ch.keywords - genericCourseWords).ifEmpty { ch.keywords }
+            val scores = HashMap<Int, Int>()
+            for ((wk, _) in syllabusByWeek) {
+                val explicit = ch.chapterNum != null && ch.chapterNum in syllabusChaptersByWeek[wk].orEmpty()
+                val normSyl = syllabusNormByWeek[wk].orEmpty()
+                val kwSyl = syllabusKeywordsByWeek[wk].orEmpty()
+                val exactTitle = normChTitle.length >= 8 && normChTitle in normSyl
+                val titleHits = specificTitleKw.count { it in kwSyl }
+                val kwMatch = titleHits >= 2 && titleHits * 2 >= specificTitleKw.size
+                val secMatch = ch.sectionTitles.any { secTitle ->
+                    val stripped = secTitle.replace(Regex("""^\d{1,2}(?:\.\d{1,2})+\s+"""), "").trim()
+                    val normSec = CourseExamPoints.normalize(stripped)
+                    normSec.length >= 12 && normSec in normSyl
+                }
+                val score = when {
+                    explicit -> 100
+                    exactTitle -> 90
+                    kwMatch -> 80
+                    secMatch -> 70
+                    else -> 0
+                }
+                if (score > 0) scores[wk] = score
+            }
+            if (scores.isNotEmpty()) {
+                val best = scores.values.max()
+                syllabusBestWeeksByChapter[chKey] = scores.filterValues { it == best }.keys.toSet()
+            }
         }
 
         val coveredChapterKeys = mutableSetOf<Triple<String, Int, String>>()
         val weeksWithMaterials = resolvedMaterials.mapNotNull { it.weekNum }.toSortedSet()
         val allWeeks = (weeksWithMaterials + syllabusByWeek.keys).toSortedSet()
 
-        val topics = mutableListOf<CourseTopicPlan>()
-        for (wk in allWeeks) {
+        // Pre-scan week materials so we can also prevent weak passing slide mentions from stealing chapters
+        // strongly matched to another week.
+        data class WeekScan(
+            val wk: Int,
+            val matsForWeek: List<CourseMaterialEntry>,
+            val status: CourseTopicStatus,
+            val weekTitle: String,
+            val syllabusChapters: Set<Int>,
+            val slideReadingChapters: Set<Int>,
+            val focusedWeekKeywords: Set<String>,
+            val slideTitlesNorm: List<String>,
+            val slideTitlesJoined: String,
+        )
+        val weekScans = allWeeks.map { wk ->
             val matsForWeek = current.materials.filter {
                 val spec = specByBook[it.bookId]
                 val role = spec?.role ?: it.role
@@ -344,18 +391,86 @@ internal object CourseAutoAligner {
                 }
             }
 
-            // Focused keywords ONLY from the syllabus week entry and material titles (never 600 body words!).
             val focusedWeekKeywords = primaryTitleText.flatMap { keywordsOf(it) }.toSet()
-            val slideTitlesJoined = slideTitlesNorm.joinToString("\n")
-
             val status = if (hasPrimaryTeachingMaterial || matsForWeek.isNotEmpty()) {
                 CourseTopicStatus.EXAMINABLE
             } else {
                 CourseTopicStatus.PENDING_MATERIALS
             }
+            WeekScan(
+                wk = wk,
+                matsForWeek = matsForWeek,
+                status = status,
+                weekTitle = weekTitle,
+                syllabusChapters = syllabusChapters,
+                slideReadingChapters = slideReadingChapters,
+                focusedWeekKeywords = focusedWeekKeywords,
+                slideTitlesNorm = slideTitlesNorm,
+                slideTitlesJoined = slideTitlesNorm.joinToString("\n"),
+            )
+        }
 
+        // Phase 2: Assign each chapter to its authoritative week(s):
+        // - If syllabus matched the chapter (Phase 1), ONLY those syllabus-owned weeks receive it.
+        // - Otherwise, assign to the highest-scoring slide-matched week(s) so passing mentions in earlier weeks do not steal it.
+        val chaptersByWeek = HashMap<Int, MutableList<TextbookChapterRange>>()
+        for (ch in textbookChapters) {
+            val chKey = Triple(ch.bookId, ch.startPage, ch.title)
+            val syllabusOwners = syllabusBestWeeksByChapter[chKey].orEmpty()
+            if (syllabusOwners.isNotEmpty()) {
+                for (wk in syllabusOwners) {
+                    val scan = weekScans.firstOrNull { it.wk == wk } ?: continue
+                    val explicitSyllabusMatch = ch.chapterNum != null && ch.chapterNum in scan.syllabusChapters
+                    val excludedByHint = !explicitSyllabusMatch && ch.keywords.any { it in excludedHints }
+                    if (!excludedByHint) {
+                        coveredChapterKeys += chKey
+                        chaptersByWeek.getOrPut(wk) { mutableListOf() }.add(ch)
+                    }
+                }
+                continue
+            }
+            val cleanChTitle = ch.title
+                .replace(Regex("""(?i)^(?:chapter\s+\d+|第\s*\d+\s*章|\d{1,2})[\s.:：—\-]+"""), "")
+                .trim()
+            val normChTitle = CourseExamPoints.normalize(cleanChTitle)
+            val specificTitleKw = (ch.keywords - genericCourseWords).ifEmpty { ch.keywords }
+            val slideScores = HashMap<Int, Int>()
+            for (scan in weekScans) {
+                val explicitSlide = ch.chapterNum != null && ch.chapterNum in scan.slideReadingChapters
+                val exactTitle = normChTitle.length >= 8 && scan.slideTitlesNorm.any { normChTitle in it }
+                val titleHits = specificTitleKw.count { it in scan.focusedWeekKeywords }
+                val titleKw = titleHits >= 2 && titleHits * 2 >= specificTitleKw.size
+                val sectionMatched = ch.sectionTitles.any { secTitle ->
+                    val stripped = secTitle.replace(Regex("""^\d{1,2}(?:\.\d{1,2})+\s+"""), "").trim()
+                    val normSec = CourseExamPoints.normalize(stripped)
+                    normSec.length >= 12 && normSec in scan.slideTitlesJoined
+                }
+                val excludedByHint = ch.keywords.any { it in excludedHints } && !titleKw && !sectionMatched
+                if (excludedByHint) continue
+                val score = when {
+                    exactTitle -> 90
+                    sectionMatched && explicitSlide -> 85
+                    titleKw -> 80
+                    sectionMatched -> 75
+                    explicitSlide -> 70
+                    else -> 0
+                }
+                if (score > 0) slideScores[scan.wk] = score
+            }
+            if (slideScores.isNotEmpty()) {
+                val best = slideScores.values.max()
+                val winners = slideScores.filterValues { it == best }.keys
+                for (wk in winners) {
+                    coveredChapterKeys += chKey
+                    chaptersByWeek.getOrPut(wk) { mutableListOf() }.add(ch)
+                }
+            }
+        }
+
+        val topics = mutableListOf<CourseTopicPlan>()
+        for (scan in weekScans) {
             val links = mutableListOf<CourseTopicLinkPlan>()
-            for (m in matsForWeek) {
+            for (m in scan.matsForWeek) {
                 val effRole = specByBook[m.bookId]?.role ?: m.role
                 links += CourseTopicLinkPlan(
                     bookId = m.bookId,
@@ -363,57 +478,26 @@ internal object CourseAutoAligner {
                     startPage = firstChapterByBook[m.bookId]?.startPage ?: 1,
                     endPage = m.pageCount.coerceAtLeast(1),
                     role = effRole,
-                    scopeNote = "第 $wk 周",
+                    scopeNote = "第 ${scan.wk} 周",
                 )
             }
-            for (ch in textbookChapters) {
-                val syllabusOwners = ch.chapterNum?.let { chapterOwnersFromSyllabus[it] }.orEmpty()
-                val assignedElsewhereBySyllabus = syllabusOwners.isNotEmpty() && wk !in syllabusOwners
-
-                val explicitSyllabusMatch = ch.chapterNum != null && ch.chapterNum in syllabusChapters
-                val explicitSlideMatch = !assignedElsewhereBySyllabus && ch.chapterNum != null && ch.chapterNum in slideReadingChapters
-
-                val cleanChTitle = ch.title
-                    .replace(Regex("""(?i)^(?:chapter\s+\d+|第\s*\d+\s*章|\d{1,2})[\s.:：—\-]+"""), "")
-                    .trim()
-                val normChTitle = CourseExamPoints.normalize(cleanChTitle)
-                val exactTitlePhraseMatch = !assignedElsewhereBySyllabus &&
-                    normChTitle.length >= 8 &&
-                    slideTitlesNorm.any { normChTitle in it }
-
-                val specificTitleKw = (ch.keywords - genericCourseWords).ifEmpty { ch.keywords }
-                val titleHits = specificTitleKw.count { it in focusedWeekKeywords }
-                val titleKeywordMatch = !assignedElsewhereBySyllabus &&
-                    titleHits >= 2 &&
-                    titleHits * 2 >= specificTitleKw.size
-
-                // High-precision section match: exact normalized section phrase (len >= 12) in a slide title or syllabus block.
-                val sectionMatched = !assignedElsewhereBySyllabus && ch.sectionTitles.any { secTitle ->
-                    val stripped = secTitle.replace(Regex("""^\d{1,2}(?:\.\d{1,2})+\s+"""), "").trim()
-                    val normSec = CourseExamPoints.normalize(stripped)
-                    normSec.length >= 12 && normSec in slideTitlesJoined
-                }
-
-                val excludedByHint = !explicitSyllabusMatch && ch.keywords.any { it in excludedHints } && !titleKeywordMatch && !sectionMatched
-                if ((explicitSyllabusMatch || explicitSlideMatch || exactTitlePhraseMatch || titleKeywordMatch || sectionMatched) && !excludedByHint) {
-                    coveredChapterKeys += Triple(ch.bookId, ch.startPage, ch.title)
-                    links += CourseTopicLinkPlan(
-                        bookId = ch.bookId,
-                        tocNodeId = ch.tocNodeId,
-                        startPage = ch.startPage,
-                        endPage = ch.endPage,
-                        role = CourseMaterialRole.CORE_TEXTBOOK,
-                        scopeNote = if (status == CourseTopicStatus.PENDING_MATERIALS) "尚未上课（预习） · ${ch.title}" else ch.title,
-                    )
-                }
+            for (ch in chaptersByWeek[scan.wk].orEmpty()) {
+                links += CourseTopicLinkPlan(
+                    bookId = ch.bookId,
+                    tocNodeId = ch.tocNodeId,
+                    startPage = ch.startPage,
+                    endPage = ch.endPage,
+                    role = CourseMaterialRole.CORE_TEXTBOOK,
+                    scopeNote = if (scan.status == CourseTopicStatus.PENDING_MATERIALS) "尚未上课（预习） · ${ch.title}" else ch.title,
+                )
             }
             topics += CourseTopicPlan(
-                weekLabel = CourseStore.formatWeekLabel(wk),
-                weekNum = wk,
-                ord = wk * 10,
-                title = weekTitle,
-                examStatus = status,
-                examWeight = if (status == CourseTopicStatus.EXAMINABLE) 1.0 else 0.5,
+                weekLabel = CourseStore.formatWeekLabel(scan.wk),
+                weekNum = scan.wk,
+                ord = scan.wk * 10,
+                title = scan.weekTitle,
+                examStatus = scan.status,
+                examWeight = if (scan.status == CourseTopicStatus.EXAMINABLE) 1.0 else 0.5,
                 sources = links.distinctBy { Triple(it.bookId, it.startPage, it.endPage) },
             )
         }

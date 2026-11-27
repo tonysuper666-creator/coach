@@ -15,14 +15,16 @@ internal object LiteraturePassages {
     private val coursepackCoverHeader = Regex("""(?im)^(?:book\s+title|book\s+author(?:\(s\))?|pub\.?\s*year|isbn|publisher|course\s+code|reading\s+list)\s*:""")
     private val note = Regex("""^(?:\[\d{1,3}]|\d{1,3}[.)]|[*†‡])\s+\S""")
     private val bottomBareNote = Regex("""^\d{1,3}\s+[A-Z\p{IsHan}]""")
-    private val bibliography = Regex("""(?i)^(?:references|bibliography|works cited|endnotes|notes and references|参考文献|尾注)\s*[:：]?$""")
+    private val bibliography = Regex("""(?i)^(?:\d+(?:\.\d+)*\.?\s+|[IVX]+\.?\s+)?(?:references|bibliography|works cited|endnotes|notes and references|参考文献|尾注)\s*[:：]?$""")
     // Shared with sectioning (TON-1898): a notes heading, not a sentence that merely mentions notes.
     private val notesBoundary = Regex(
         """(?i)^(?:endnotes?|footnotes?|notes(?:\s+to\s+(?:pages?|chapters?|the\s+text))?|参考文献|尾注|注释)\s*[:：]?$""",
     )
     private val bareNoteNumber = Regex("""^\d{1,3}[.)]?$""")
     private val noteNumberAtStart = Regex("""^(?:\[(\d{1,3})]|(?:(\d{1,3}))[.)]?)(?:\s|$)""")
-    private val heading = Regex("""(?i)^(?:abstract|introduction|background|discussion|method(?:s|ology)?|results?|conclusions?|summary|引言|导言|摘要|背景|方法|结果|讨论|结论|小结|(?:[IVX]+\.|\d+(?:\.\d+)*[.)])\s+\p{L}.{1,80})$""")
+    private val heading = Regex("""(?i)^(?:abstract|introduction|background|discussion|method(?:s|ology)?|results?|conclusions?|summary|appendix(?:\s+[A-Z0-9]+)?|引言|导言|摘要|背景|方法|结果|讨论|结论|小结|(?:[IVX]+\.|\d+(?:\.\d+)*[.)])\s+\p{L}.{1,80})$""")
+    private val standaloneAbstract = Regex("""(?i)^(?:abstract|摘要)\s*[.:：]?$""")
+    private val inlineAbstractLead = Regex("""(?i)^abstract\s*(?:[.:—–-]\s*|\s+(?=[A-Z]))""")
     private val end = Regex("""[.!?。！？][”’"')\]]*$""")
     private val folio = Regex("""(?i)^(?:page\s*)?(?:\d+|[ivxlcdm]{1,6})$""")
     private val argument = Regex("""(?i)\b(?:argue|argues|argued|propose|because|therefore|however|whereas|suggests?|conclude|consequently|demonstrates?|explains?|evidence|defined?|central|thesis|claim|claims)\b|因此|然而|本文|表明|说明|认为|关键|核心""")
@@ -209,9 +211,20 @@ internal object LiteraturePassages {
             val pageCandidates = mutableListOf<Candidate>()
             var base = 0
             var dropPageTop = continuesPreviousPage(book, page.number, 0)
+            var skipSection = false
             for (region in page.guideRegions) {
                 val regionLines = region.text.lines()
-                if (isFootnoteBlock(regionLines)) continue
+                if (isFootnoteBlock(regionLines)) {
+                    base += region.text.length + 2
+                    continue
+                }
+                // On page 1 of an academic paper, drop title/author/affiliation/email header lines above Abstract.
+                val abstractLineIdx = if (page.number == 1) {
+                    regionLines.indexOfFirst { rawLine ->
+                        val t = rawLine.trim()
+                        standaloneAbstract.matches(t) || inlineAbstractLead.containsMatchIn(t)
+                    }.takeIf { it in 1..60 } ?: -1
+                } else -1
                 var start = -1
                 var finish = 0
                 var skipFirst = false
@@ -250,16 +263,69 @@ internal object LiteraturePassages {
                 }
                 var offset = 0
                 var footnotes = false
+                var inCaption = false
+                var captionDelimited = false
+                var prevCaptionEnded = false
                 for ((index, raw) in regionLines.withIndex()) {
                     val line = raw.trim()
+                    if (index < abstractLineIdx) {
+                        offset += raw.length + 1
+                        continue
+                    }
                     val bottom = index >= regionLines.size / 2
                     val isEdge = index < 3 || index >= regionLines.size - 3
                     val isHeading = (heading.matches(line) && !end.containsMatchIn(line)) ||
+                        standaloneAbstract.matches(line) ||
                         (line.length in 4..70 && !end.containsMatchIn(line) &&
                             regionLines.getOrNull(index - 1).isNullOrBlank() && regionLines.getOrNull(index + 1).isNullOrBlank() &&
                             line.split(' ').all { it.firstOrNull()?.isUpperCase() == true || it in listOf("of", "the", "in", "and", "a", "to") })
+                    val isBackMatter = isBackMatterHeading(line)
+                    val isSkipHeading = LiteratureScaffoldNoise.isSkipSectionHeading(line)
+                    val isInlineSkip = LiteratureScaffoldNoise.isInlineSkipSectionStart(line)
+                    if (inCaption) {
+                        val breakCaption = line.isBlank() || isBackMatter || isSkipHeading || isHeading ||
+                            (captionDelimited && prevCaptionEnded && line.firstOrNull()?.isLowerCase() == true) ||
+                            (!captionDelimited && prevCaptionEnded)
+                        if (breakCaption) {
+                            inCaption = false
+                            if (captionDelimited && prevCaptionEnded && line.firstOrNull()?.isLowerCase() == true) {
+                                skipFirst = true
+                            }
+                        } else {
+                            prevCaptionEnded = endsSentence(line)
+                            offset += raw.length + 1
+                            continue
+                        }
+                    }
+                    val delimitedCap = LiteratureScaffoldNoise.isDelimitedCaptionStart(line) ||
+                        LiteratureScaffoldNoise.isSubfigureCaptionLine(regionLines, index)
+                    val undelimitedCap = !delimitedCap && LiteratureScaffoldNoise.isUndelimitedCaptionStart(line)
+                    val abstractMatch = if (page.number == 1) inlineAbstractLead.find(raw) else null
                     when {
                         backMatter -> break
+                        isBackMatter -> {
+                            finishParagraph()
+                            skipSection = false
+                            if (page.number > notesOpen) backMatter = true
+                        }
+                        isSkipHeading || isInlineSkip -> {
+                            finishParagraph()
+                            skipSection = true
+                        }
+                        isHeading -> {
+                            finishParagraph()
+                            skipSection = false
+                        }
+                        skipSection -> {
+                            // Inside Acknowledgments / Funding / Ethics / Declarations section.
+                        }
+                        delimitedCap || undelimitedCap -> {
+                            finishParagraph()
+                            inCaption = true
+                            captionDelimited = delimitedCap
+                            prevCaptionEnded = endsSentence(line)
+                        }
+                        LiteratureScaffoldNoise.isKeywordsOrMetaLine(line) -> finishParagraph()
                         isBareNoteNumber(line) && bottom -> {
                             finishParagraph()
                             footnotes = true
@@ -267,14 +333,17 @@ internal object LiteraturePassages {
                         line.isBlank() || folio.matches(line) || isDownloadBanner(line) ||
                             isBibliographicFootnote(line) ||
                             (isEdge && edgeKey(line) in edges && (!end.containsMatchIn(line) || line.length < 45)) -> finishParagraph()
-                        isBackMatterHeading(line) -> {
-                            finishParagraph()
-                            if (page.number > notesOpen) backMatter = true
-                        }
-                        isHeading -> finishParagraph()
                         note.containsMatchIn(line) || (bottom && bottomBareNote.containsMatchIn(line)) -> {
                             finishParagraph()
                             if (bottom) footnotes = true
+                        }
+                        abstractMatch != null && !footnotes -> {
+                            finishParagraph()
+                            val bodyStart = offset + abstractMatch.range.last + 1
+                            if (bodyStart < offset + raw.length) {
+                                start = bodyStart
+                                finish = offset + raw.length
+                            }
                         }
                         !footnotes -> {
                             if (start < 0) start = offset
@@ -288,8 +357,9 @@ internal object LiteraturePassages {
             }
             // Drop coursepack cover / copyright notice pages: >= 2 copyright term hits and < 3 body sentences
             // (or heavy copyright notice cover on page 1 with >= 4 copyright hits and <= 6 sentences).
+            // Never drop the final body sentences on a page that transitions into back-matter References (ISBN citations).
             val copyrightHits = copyrightPageTerm.findAll(page.text).count()
-            if (copyrightHits >= 2 && (pageCandidates.size < 3 || (page.number == 1 && copyrightHits >= 4 && pageCandidates.size <= 6))) continue
+            if (!backMatter && copyrightHits >= 2 && (pageCandidates.size < 3 || (page.number == 1 && copyrightHits >= 4 && pageCandidates.size <= 6))) continue
             candidates += pageCandidates
         }
         if (candidates.isEmpty()) return emptyList()

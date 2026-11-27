@@ -81,15 +81,15 @@ class RunGradleWithRetryTests(unittest.TestCase):
         self.assertEqual(calls, 1)
         self.assertEqual(sleeps, [])
 
-    def test_retries_plugin_failure_with_increasing_delays_and_reports_repo_unavailable(self):
+    def _run_always_failing(self, log):
         calls = 0
         sleeps = []
 
         def fake_runner(cmd, stream):
             nonlocal calls
             calls += 1
-            stream(PLUGIN_FAILURE_LOG)
-            return 1, PLUGIN_FAILURE_LOG
+            stream(log)
+            return 1, log
 
         logs = []
         code = mod.run_with_retry(
@@ -99,10 +99,46 @@ class RunGradleWithRetryTests(unittest.TestCase):
             sleeper=sleeps.append,
             out=logs.append,
         )
+        return code, calls, sleeps, "".join(logs)
+
+    def test_plugin_not_found_without_network_evidence_retries_but_keeps_gradle_reason(self):
+        # Shape of the real incident logs (runs 46020209331 / 46033429740):
+        # identical to a typo, so retry, but do not claim the repo was down.
+        code, calls, sleeps, joined = self._run_always_failing(PLUGIN_FAILURE_LOG)
         self.assertEqual(code, 1)
         self.assertEqual(calls, 4)  # 1 initial + 3 retries
         self.assertEqual(sleeps, [10, 25, 60])
-        joined = "".join(logs)
+        self.assertIn("Gradle 插件解析失败，不是测试失败", joined)
+        self.assertIn("以上方 Gradle 报错为准", joined)
+        self.assertNotIn("插件仓库不可用", joined)
+
+    def test_misspelled_plugin_in_empty_local_repo_is_not_blamed_on_repo(self):
+        # QA repro: plugin repo points at a readable, empty local Maven dir.
+        log = """
+* What went wrong:
+Plugin [id: 'qa.misspelled', version: '1.0'] was not found in any of the following sources:
+
+- Gradle Core Plugins (plugin is not in 'org.gradle' namespace)
+- Included Builds (No included builds contain this plugin)
+- Plugin Repositories (could not resolve plugin artifact 'qa.misspelled:qa.misspelled.gradle.plugin:1.0')
+  Searched in the following repositories:
+    maven(file:/tmp/empty-repo/)
+"""
+        code, calls, sleeps, joined = self._run_always_failing(log)
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, 4)
+        self.assertIn("Gradle 插件解析失败，不是测试失败", joined)
+        self.assertNotIn("插件仓库不可用", joined)
+
+    def test_plugin_failure_with_network_evidence_reports_repo_unavailable(self):
+        log = PLUGIN_FAILURE_LOG + """
+   > Could not GET 'https://plugins.gradle.org/m2/org/jetbrains/kotlin/multiplatform/org.jetbrains.kotlin.multiplatform.gradle.plugin/2.4.0/org.jetbrains.kotlin.multiplatform.gradle.plugin-2.4.0.pom'.
+      > Connect to plugins.gradle.org:443 failed: Connect timed out
+"""
+        code, calls, sleeps, joined = self._run_always_failing(log)
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, 4)
+        self.assertEqual(sleeps, [10, 25, 60])
         self.assertIn("插件仓库不可用，不是代码问题", joined)
 
     def test_recovers_on_second_retry(self):
@@ -184,12 +220,13 @@ class RunGradleWithRetryTests(unittest.TestCase):
             proj = Path(tmp)
             (proj / "settings.gradle").write_text('rootProject.name = "tmp"\n', encoding="utf-8")
             (proj / "build.gradle").write_text("plugins { id 'java' version '1' }\n", encoding="utf-8")
-            shutil.copy2(repo_root / "gradlew", proj / "gradlew")
+            wrapper = "gradlew.bat" if os.name == "nt" else "gradlew"
+            shutil.copy2(repo_root / wrapper, proj / wrapper)
             shutil.copytree(repo_root / "gradle", proj / "gradle")
             env = dict(os.environ)
             env["GRADLE_RETRY_DELAYS"] = "1,2,3"
             res = subprocess.run(
-                [sys.executable, str(script), str(proj / "gradlew"), "help", "--offline"],
+                [sys.executable, str(script), str(proj / wrapper), "help", "--offline"],
                 cwd=proj,
                 env=env,
                 capture_output=True,

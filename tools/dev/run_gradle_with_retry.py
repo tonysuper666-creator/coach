@@ -30,6 +30,27 @@ CONFIG_ERROR_MARKERS = (
     "invalid plugin request",
 )
 
+# Only these count as evidence that the repository itself was unreachable.
+# A bare "plugin was not found" looks the same for an outage and for a typo in
+# the plugin id/version, so it is retried but never blamed on the repository.
+NETWORK_EVIDENCE_MARKERS = (
+    "timed out",
+    "connection reset",
+    "connection refused",
+    "unknownhostexception",
+    "connectexception",
+    "noroutetohostexception",
+    "sockettimeoutexception",
+    "sslhandshakeexception",
+    "received status code 5",
+    "received status code 429",
+)
+NETWORK_EVIDENCE_RE = re.compile(
+    r"Could not (?:GET|HEAD|download|transfer)\b"
+    r"|Downloading https://services\.gradle\.org/distributions/",
+    re.IGNORECASE,
+)
+
 REPO_NETWORK_MARKERS = (
     "plugins.gradle.org",
     "repo.maven.apache.org",
@@ -84,6 +105,14 @@ def is_plugin_repo_unavailable(output: str) -> bool:
     return False
 
 
+def has_network_evidence(output: str) -> bool:
+    """Return True only when the log explicitly shows a network/repository outage."""
+    lower = output.lower()
+    return any(m in lower for m in NETWORK_EVIDENCE_MARKERS) or bool(
+        NETWORK_EVIDENCE_RE.search(output)
+    )
+
+
 def parse_delays(raw: str | None) -> tuple[int, ...]:
     if not raw:
         return DEFAULT_DELAYS
@@ -129,15 +158,21 @@ def run_with_retry(
         if attempt < max_retries:
             delay = delays[attempt]
             out(
-                f"::warning::Gradle 插件/依赖仓库解析失败，将在 {delay}s 后自动重试"
+                f"::warning::Gradle 插件或依赖解析失败，将在 {delay}s 后自动重试"
                 f"（第 {attempt + 1}/{max_retries} 次）。\n"
             )
             sleeper(delay)
         else:
-            out(
-                f"::error::插件仓库不可用，不是代码问题（自动重试 {max_retries} 次后仍无法解析 Gradle 插件或依赖）。\n"
-            )
-            out("插件仓库不可用，不是代码问题\n")
+            if has_network_evidence(output):
+                out(
+                    f"::error::插件仓库不可用，不是代码问题（自动重试 {max_retries} 次后仍连不上 Gradle 插件或依赖仓库）。\n"
+                )
+                out("插件仓库不可用，不是代码问题\n")
+            else:
+                out(
+                    f"::error::Gradle 插件解析失败，不是测试失败（已自动重试 {max_retries} 次）。"
+                    "日志里没有网络错误，原因以上方 Gradle 报错为准：先核对插件 id 和版本，无误再重跑。\n"
+                )
             return code
     return 1
 

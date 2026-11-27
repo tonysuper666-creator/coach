@@ -1054,6 +1054,7 @@ internal object CourseAutoAligner {
             put("examDateTentative", detail.examProfile.examDateTentative)
             put("examFormatTentative", detail.examProfile.examFormatTentative)
             put("examFormat", detail.examProfile.examFormat)
+            put("outputLanguage", "zh")
             put("examTechniques", buildJsonArray { detail.pastPaperTechniques[topic.topicId].orEmpty().forEach { add(JsonPrimitive(it.name)) } })
             put("blocks", blocks)
         }

@@ -16,6 +16,9 @@ internal object CourseExamPoints {
     private val explicitSectionPrefix = Regex("""(?i)^(?:(?:chapter|section|lecture|week)\s+\d|第[一二三四五六七八九十\d]+[章节周])""")
     private val pureNumericTickLine = Regex("""^[\(\[]?[-−+$£€¥]?\d+(?:[.,]\d+)?%?(?:[\)\]])?$""")
     private val definition = Regex("""^([^:：]{2,64})[:：]\s*(\S.*)$""")
+    private val bulletDefinition = Regex(
+        """^[•▪◦‣–—-]\s+([A-Z][A-Za-z0-9\s\-–—/]{4,56}?)(?:\s*\([A-Z]{2,8}\))?\s*[.:：—–-]\s+([A-Za-z\u4e00-\u9fff].{12,})$""",
+    )
     private val numericLeadValue = Regex("""^[\(\[]?[-−+$£€¥]?\d""")
     private val latinWord = Regex("""[A-Za-z]+""")
     private val whitespace = Regex("""[\s\p{Z}]+""")
@@ -32,7 +35,7 @@ internal object CourseExamPoints {
     private val tableMetaSuffixNoise = Regex("""(?i)\s+(?:source|sources|note|notes|table|figure|fig\.?|panel|column|row)$""")
     private val numericCohortLabelNoise = Regex("""(?i)^(?:ages?|years?|months?|days?|grades?|groups?|cohorts?|panels?|periods?|waves?|quartiles?|quintiles?|deciles?)\s+\d""")
     private val parentheticalUnitCohortNoise = Regex("""(?i)\(\s*\d+(?:\s*[-–—]\s*\d+)?\s*(?:yrs?|years?|mos?|months?|wks?|weeks?|days?|hrs?|hours?|mins?|%|kg|mg|cm|mm)\s*\)""")
-    private val conditionalLeadNoise = Regex("""(?i)^(?:if|unless|whether|whereas|although|though|because|however|therefore|moreover|furthermore|nevertheless|meanwhile|otherwise)\s+""")
+    private val conditionalLeadNoise = Regex("""(?i)^(?:if|unless|whether|whereas|although|though|because|however|therefore|moreover|furthermore|nevertheless|meanwhile|otherwise|but)\s+""")
     private val conversationalLeadNoise = Regex("""(?i)^(?:let\s+us|let's|consider\s+(?:the|two|three|a|an|how|why|what)|suppose\s+(?:that|a|an|we)|assume\s+(?:that|a|an|we)|imagine\s+(?:that|a|an)|think\s+about|notice\s+that|note\s+that|recall\s+that|remember\s+that|those\s+(?:in|who|with|conceived|born|aged)\b|(?:a\s+)?special\s+note\s+for)\b""")
     private val truncatedTrailingWordNoise = Regex("""(?i)\s+(?:the|a|an|of|for|and|or|to|in|on|at|by|from|with|into|onto|upon|as|than|that|which|who|whose|where|when|while|between|among|under|over|through|during|without|within|against|about|across|after|before|toward|towards)$""")
     private val leadingEdgeCounterNoise = Regex("""^(?:\d{1,3}\s*/\s*\d{1,3}|\d{1,3}[.)]?)\s+""")
@@ -40,7 +43,8 @@ internal object CourseExamPoints {
     private val edgeSeparatorTrim = Regex("""^[\s\-–—|·•:：,，/]+|[\s\-–—|·•:：,，/]+$""")
     private val functionCallNoise = Regex("""^[A-Za-z]{1,2}\([^)]{1,20}\)$""")
     private val journalCitationNoise = Regex("""(?i)(?:,\s*\d{1,4}\(\d{1,4}\)|\b(?:journal|quarterly|review)\s+of\b.{0,40}\d)""")
-    private val sentenceVerbNoise = Regex("""(?i)\b(?:is|are|was|were|has|have|had|can|could|will|would|should|must|does|do|did|getting|becoming|leads|makes|causes|shows|starts|begins|involves|depends|requires|implies|suggests|indicates|assumes)\b""")
+    // Case-sensitive lowercase verbs so uppercase acronyms/variables (e.g. "IS" in "IH–IS") are never misread as verbs.
+    private val sentenceVerbNoise = Regex("""\b(?:is|are|was|were|has|have|had|can|could|will|would|should|must|does|do|did|getting|becoming|leads|makes|causes|shows|starts|begins|involves|depends|requires|implies|suggests|indicates|assumes|relies|satisfies|prevents|allows|enables|creates|produces|reduces|increases|decreases|determines|explains|describes)\b""")
     private val nonTopicLabel = Regex(
         """(?i)^(?:example|examples|note|notes|side\s*note|sidebar|aside|figure|fig\.?|table|box|source|sources|step|steps|case|cases|question|questions|problem|problems|exercise|exercises|answer|answers|solution|solutions|hint|hints|remark|remarks|proof|equation|eq\.?|formula|definition|def\.?|theorem|lemma|proposition|corollary|assumption|assumptions|chart|graph|panel|exhibit|diagram|warning|tip|recall|key|true|false|unclear|uncertain|appendix|part|chapter|section|unit|module|lecture|week)(?:\s+[a-z0-9]+(?:\.[a-z0-9]+)*)?$""",
     )
@@ -485,17 +489,18 @@ internal object CourseExamPoints {
         return lines.any { it.length >= 20 }
     }
 
-    private fun isSubstantiveDefinitionBody(rhs: String): Boolean {
+    /**
+     * True when the right-hand side of a `LHS: RHS` line is a numeric table cell (e.g. "-0.22", "-2.27 (or -1.6)")
+     * rather than a prose definition, math expression (e.g. "U(E[X]) > E[U(X)]"), or alphabetic slide subtitle.
+     */
+    private fun isNumericTableRowValue(rhs: String): Boolean {
         val trimmed = rhs.trim()
-        if (trimmed.isEmpty()) return false
+        if (trimmed.isEmpty()) return true
         val cjkCount = cjkChar.findAll(trimmed).count()
-        if (cjkCount >= 6) return true
+        if (cjkCount >= 3) return false
         val alphaWords = latinWord.findAll(trimmed).count()
-        if (numericLeadValue.containsMatchIn(trimmed) && alphaWords < 4) return false
-        if (alphaWords < 3 && cjkCount < 4) return false
-        val nonWs = trimmed.count { !it.isWhitespace() }
-        val letters = trimmed.count(Char::isLetter)
-        return nonWs > 0 && letters * 100 >= nonWs * 55
+        if (alphaWords == 0) return true
+        return numericLeadValue.containsMatchIn(trimmed) && alphaWords < 3
     }
 
     fun isValidExamPointTitle(
@@ -504,6 +509,7 @@ internal object CourseExamPoints {
         defined: Boolean,
         numbered: Boolean,
         markdown: Boolean,
+        officialTocSection: Boolean = false,
     ): Boolean {
         if (heading.length !in 2..64) return false
         if (heading.any { it in "。！？!?；;.:：" }) return false
@@ -540,8 +546,8 @@ internal object CourseExamPoints {
         if (!hasCjk) {
             val words = heading.split(whitespace)
             if (words.size > 8) return false
-            if (!markdown && !defined && !numbered && words.size > 7) return false
-            if (words.size >= 5 && sentenceVerbNoise.containsMatchIn(heading)) return false
+            if (!officialTocSection && !markdown && !defined && !numbered && words.size > 7) return false
+            if (!officialTocSection && words.size >= 6 && sentenceVerbNoise.containsMatchIn(heading)) return false
         }
         return true
     }
@@ -601,7 +607,7 @@ internal object CourseExamPoints {
                         val cleanTitle = rawTitle.replace(sectionNumber, "").trim().trimEnd(':', '：', '-', '–', '—').trim()
                         val normTitle = normalize(cleanTitle)
                         if (normTitle.length < 2 || normTitle in boilerplate) return@mapNotNull null
-                        ExamSectionSpan(normTitle, node.startPage..node.endPage.coerceAtLeast(node.startPage))
+                        ExamSectionSpan(cleanTitle, normTitle, node.startPage..node.endPage.coerceAtLeast(node.startPage))
                     }
                 if (spans.isNotEmpty()) sectionSpansByBook[mat.bookId] = spans
             }
@@ -695,17 +701,62 @@ internal object CourseExamPoints {
             }
         }
         val repeatingTextbookEdgesByBook = textbookEdgeFreqByBook.filterValues { it >= 3 }.keys
-        // Slide top headers only count as banners when spanning >= 3 slides AND >= 35% of that deck, or >= 3 decks.
+        // Slide top headers only count as banners when spanning >= 3 slides AND >= 35% of that deck,
+        // or repeating >= 2 times within each of >= 3 distinct slide decks (so cross-cutting topics
+        // mentioned once per lecture across 3 decks are never suppressed).
         val repeatingSlideTopByBook = topEdgeFreqByBook.filter { (bookAndEdge, count) ->
             val deckPages = pageCountByBook[bookAndEdge.first] ?: 1
             count >= 3 && count * 100 >= deckPages * 35
         }.keys
         val repeatingSlideBottomByBook = bottomEdgeFreqByBook.filterValues { it >= 3 }.keys
-        val repeatingSlideTopAcrossDecks = slideTopEdgeBooks.filterValues { it.size >= 3 }.keys
+        val repeatingSlideTopAcrossDecks = slideTopEdgeBooks.filter { (edge, books) ->
+            books.count { b -> (topEdgeFreqByBook[b to edge] ?: 0) >= 2 } >= 3
+        }.keys
         val repeatingSlideBottomAcrossDecks = slideBottomEdgeBooks.filterValues { it.size >= 2 }.keys
+
+        val cleanedTextbookPagesByBook = bodyPages
+            .filter { it.role == CourseMaterialRole.CORE_TEXTBOOK }
+            .groupBy({ it.bookId }, { it.page })
+            .mapValues { (_, pgs) -> pgs.toSet() }
+        // Narrative prose lines in the textbook (excluding numeric table rows & chart ticks) let us confirm
+        // whether a term has dedicated textbook body discussion before suppressing it via slide/table heuristics.
+        val textbookProseLines = bodyPages
+            .asSequence()
+            .filter { it.role == CourseMaterialRole.CORE_TEXTBOOK }
+            .flatMap { it.text.lineSequence() }
+            .map(String::trim)
+            .filter { line ->
+                line.length >= 45 &&
+                    !pureNumericTickLine.matches(line) &&
+                    (cjkChar.findAll(line).count() >= 12 || latinWord.findAll(line).count() >= 7)
+            }
+            .map(::normalize)
+            .toList()
+        val textbookProseCache = HashMap<String, Boolean>()
+        fun hasDedicatedTextbookProse(key: String): Boolean = textbookProseCache.getOrPut(key) {
+            if (key.length < 4) return@getOrPut false
+            val pat = termPattern(key)
+            textbookProseLines.any { pat.containsMatchIn(it) }
+        }
 
         val titles = linkedMapOf<String, String>()
         val textbookStrong = mutableSetOf<String>()
+        val officialTocSectionKeys = HashSet<String>()
+        // 1. Seed official textbook TOC SECTION/SUBSECTION titles on cleaned body pages FIRST.
+        //    Even if the same phrase also appears inside a table cell elsewhere, its textbook section guarantees retention.
+        for ((bookId, spans) in sectionSpansByBook) {
+            val available = cleanedTextbookPagesByBook[bookId].orEmpty()
+            for (span in spans) {
+                if (span.pages.none { it in available }) continue
+                if (!isValidExamPointTitle(span.title, span.title, defined = false, numbered = true, markdown = false, officialTocSection = true)) {
+                    continue
+                }
+                titles.putIfAbsent(span.normalizedTitle, span.title)
+                textbookStrong += span.normalizedTitle
+                officialTocSectionKeys += span.normalizedTitle
+            }
+        }
+
         val indexed = mutableListOf<ExamTeachingPage>()
         for (page in bodyPages) {
             val lines = page.text.lineSequence().map(String::trim)
@@ -731,39 +782,47 @@ internal object CourseExamPoints {
                     (page.bookId to stripped) in repeatingTextbookEdgesByBook
             }
             for ((index, line) in lines.withIndex()) {
-                if (isSlideLike && isRepeatingSlideEdge(line)) continue
-                val defMatch = definition.matchEntire(line)
-                val defined = defMatch != null && isSubstantiveDefinitionBody(defMatch.groupValues[2])
+                val bulletMatch = if (!isSlideLike) bulletDefinition.matchEntire(line) else null
+                val defMatch = if (bulletMatch == null) definition.matchEntire(line) else null
+                val numericTableDef = defMatch != null && isNumericTableRowValue(defMatch.groupValues[2])
+                if (numericTableDef) {
+                    // Allow a slide title like "Transition to outpatient care: 1980-2000" ONLY when the LHS
+                    // is explicitly discussed in textbook body prose; reject table rows like "All care: -0.22".
+                    val lhsClean = defMatch!!.groupValues[1].replace(sectionNumber, "").trim().trimEnd(':', '：', '-', '–', '—').trim()
+                    val lhsKey = normalize(lhsClean)
+                    if (!(isSlideLike && index == 0 && (lhsKey in officialTocSectionKeys || hasDedicatedTextbookProse(lhsKey)))) {
+                        continue
+                    }
+                }
+                val defined = bulletMatch != null || (defMatch != null && !numericTableDef)
                 val markdown = line.startsWith("#")
                 val numbered = sectionNumber.containsMatchIn(line)
                 // On textbook pages, only skip bare unnumbered/undefined running headers — never ban real chapter/section definitions.
                 if (!isSlideLike && !defined && !numbered && !markdown && isRepeatingTextbookEdge(line)) continue
-                // Skip bare numeric chart/table axis labels surrounded by pure numeric tick lines (e.g. "100.0 All medical").
+                // Skip bare numeric chart/table axis labels surrounded by pure numeric tick lines (e.g. "150.0 All medical").
                 if (numbered && !defined && !markdown && !explicitSectionPrefix.containsMatchIn(line)) {
                     val neighborhood = lines.subList(maxOf(0, index - 3), minOf(lines.size, index + 4))
                     val numericTickNeighbors = neighborhood.count { it != line && pureNumericTickLine.matches(it) }
                     if (numericTickNeighbors >= 3) continue
                 }
                 val heading = when {
+                    bulletMatch != null -> bulletMatch.groupValues[1]
                     markdown -> line.trimStart('#', ' ')
-                    defined -> defMatch!!.groupValues[1]
+                    defMatch != null -> defMatch.groupValues[1]
                     numbered || index == 0 -> line
                     else -> continue
                 }.replace(sectionNumber, "").trim().trimEnd(':', '：', '-', '–', '—').trim()
                 val key = normalize(heading)
-                if (isSlideLike && isRepeatingSlideEdge(heading)) continue
+                val bodyBacked = key in officialTocSectionKeys || hasDedicatedTextbookProse(key)
+                if (isSlideLike && !bodyBacked && (isRepeatingSlideEdge(line) || isRepeatingSlideEdge(heading))) continue
                 if (!isSlideLike && !defined && !numbered && !markdown && isRepeatingTextbookEdge(heading)) continue
-                if (!isValidExamPointTitle(line, heading, defined, numbered, markdown)) continue
+                if (!isValidExamPointTitle(line, heading, defined, numbered, markdown, officialTocSection = key in officialTocSectionKeys)) continue
                 titles.putIfAbsent(key, heading)
                 if (page.role == CourseMaterialRole.CORE_TEXTBOOK && (defined || numbered || markdown)) textbookStrong += key
             }
             indexed += page.copy(text = normalize(page.text))
         }
 
-        val cleanedTextbookPagesByBook = bodyPages
-            .filter { it.role == CourseMaterialRole.CORE_TEXTBOOK }
-            .groupBy({ it.bookId }, { it.page })
-            .mapValues { (_, pgs) -> pgs.toSet() }
         val sectionRangesByKey = HashMap<String, MutableList<Pair<String, IntRange>>>()
         for ((bookId, spans) in sectionSpansByBook) {
             for (span in spans) {
@@ -853,9 +912,12 @@ internal object CourseExamPoints {
 }
 
 internal data class ExamSectionSpan(
+    val title: String,
     val normalizedTitle: String,
     val pages: IntRange,
-)
+) {
+    constructor(normalizedTitle: String, pages: IntRange) : this(normalizedTitle, normalizedTitle, pages)
+}
 
 internal data class ExamTeachingPage(
     val bookId: String,

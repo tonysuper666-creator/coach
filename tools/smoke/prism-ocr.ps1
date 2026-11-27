@@ -231,7 +231,7 @@ function Test-InstalledScan([string]$OutDir, [string]$Fixture) {
             $candidates = Get-CimInstance Win32_Process -Filter "Name='LearningCoach.exe' AND (ProcessId=$($app.Id) OR ParentProcessId=$($app.Id))" |
                 Where-Object ExecutablePath -eq $exe
             $window = $candidates | ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue } |
-                Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -eq 'LearningCoach' } | Select-Object -First 1
+                Where-Object { $_.MainWindowHandle -ne 0 -and (Test-CoachWindowTitle $_.MainWindowTitle) } | Select-Object -First 1
         } while (-not $window -and (Get-Date) -lt $deadline)
         if (-not $window) { throw 'Installed app window did not appear' }
         if (-not $Winbox) {

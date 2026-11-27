@@ -164,8 +164,10 @@ function Test-TasteExplanation($lines, $verdict, $button) {
     foreach ($line in $lines) {
         $box = Get-LineBox $line
         if ($box.Y1 -le $verdict.Y2 -or ($button -and $box.Y2 -ge $button.Y1)) { continue }
-        $text = $line.Text -replace '\s', ''
-        if ($text -match '[\p{L}]' -and $text -notmatch '^(设置|LearningCoach|开始读这本书)$') { return $true }
+        $rawText = ([string]$line.Text).Trim()
+        $text = $rawText -replace '\s', ''
+        if ($text -match '[\p{L}]' -and -not (Test-CoachWindowTitle $rawText) -and
+            $text -notmatch '^(设置|LearningCoach(?:\d+(?:\.\d+)+(?:-[0-9A-Za-z.-]+)?|dev)?|开始读这本书)$') { return $true }
     }
     return $false
 }

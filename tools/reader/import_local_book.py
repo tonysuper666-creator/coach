@@ -12,6 +12,8 @@ import sqlite3
 import tempfile
 
 FORMATS = {'pdf', 'epub', 'txt', 'md', 'docx', 'pptx', 'html', 'mobi', 'azw3', 'rtf', 'odt', 'png', 'jpg'}
+MAX_ORIGINAL_MB = 512
+MAX_ORIGINAL_BYTES = MAX_ORIGINAL_MB * 1024 * 1024
 
 
 def digest(path):
@@ -65,7 +67,7 @@ def import_local_book(desktop, book, library, *, document_id, course, explain_so
     if len(snapshot) > 32 * 1024 * 1024:
         raise ValueError('saved page snapshot exceeds 32 MB')
     source = (desktop / f'{book}.{format_}').resolve(strict=True)
-    if not source.is_relative_to(desktop) or not source.is_file() or not 0 < source.stat().st_size <= 256 * 1024 * 1024:
+    if not source.is_relative_to(desktop) or not source.is_file() or not 0 < source.stat().st_size <= MAX_ORIGINAL_BYTES:
         raise ValueError('invalid original')
     library = Path(library).expanduser().resolve()
     if any((parent / '.git').exists() for parent in (library, *library.parents)):
@@ -89,8 +91,8 @@ def import_local_book(desktop, book, library, *, document_id, course, explain_so
                 copied = 0
                 for block in iter(lambda: input_file.read(65536), b''):
                     copied += len(block)
-                    if copied > 256 * 1024 * 1024:
-                        raise ValueError('original exceeds 256 MB')
+                    if copied > MAX_ORIGINAL_BYTES:
+                        raise ValueError(f'original exceeds {MAX_ORIGINAL_MB} MB')
                     output.write(block)
                 output.flush()
                 os.fsync(output.fileno())

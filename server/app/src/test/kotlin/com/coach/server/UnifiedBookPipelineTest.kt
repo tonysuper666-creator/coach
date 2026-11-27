@@ -380,6 +380,14 @@ class UnifiedBookPipelineTest {
     }
 
     @Test
+    fun defaultUploadLimitIs512MbAndFitsDefaultAccountQuota() {
+        assertEquals(512L * 1024L * 1024L, UnifiedBookConfig.DEFAULT_MAX_FILE_BYTES)
+        val cfg = UnifiedBookConfig.fromEnv { null }
+        assertEquals(512L * 1024L * 1024L, cfg.maxFileBytes)
+        assertTrue(cfg.accountQuotaBytes >= cfg.maxFileBytes)
+    }
+
+    @Test
     fun uploadEnforcesFileLimitAccountQuotaAndDiskHeadroomWithHumanReadableErrors() {
         var fakeFreeSpace = 10_000L
         val cfg = UnifiedBookConfig(

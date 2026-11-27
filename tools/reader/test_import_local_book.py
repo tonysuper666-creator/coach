@@ -5,8 +5,10 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 
-from import_local_book import import_local_book
+import import_local_book as import_local_book_mod
+from import_local_book import MAX_ORIGINAL_BYTES, import_local_book
 
 
 class LocalBookImportTest(unittest.TestCase):
@@ -93,6 +95,26 @@ class LocalBookImportTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.bind()
         self.assertFalse(self.library.exists())
+
+    def test_original_size_limit_is_512_mb_and_rejects_oversize(self):
+        self.assertEqual(512 * 1024 * 1024, MAX_ORIGINAL_BYTES)
+        with mock.patch.object(import_local_book_mod, 'MAX_ORIGINAL_BYTES', len(b'Synthetic scan original') - 1):
+            with self.assertRaises(ValueError):
+                self.bind()
+        self.assertFalse((self.library / 'local-books.json').exists())
+
+        oversize_book = hashlib.sha256(b'oversize-placeholder').hexdigest()
+        oversize_path = self.desktop / f'{oversize_book}.pdf'
+        with oversize_path.open('wb') as f:
+            f.truncate(MAX_ORIGINAL_BYTES + 1)
+        with closing(sqlite3.connect(self.desktop / 'library.sqlite')) as db, db:
+            db.execute('INSERT INTO books VALUES(?,?,?)', (oversize_book, 'Oversize Textbook', 'pdf'))
+            db.execute('INSERT INTO pages VALUES(?,?,?,?)', (oversize_book, 1, 'Page 1', 0))
+        with self.assertRaises(ValueError):
+            import_local_book(self.desktop, oversize_book, self.library,
+                              document_id='oversize', course='SYNTHETIC',
+                              explain_source_id='existing-source')
+        self.assertFalse((self.library / 'local-books.json').exists())
 
 
 if __name__ == '__main__':

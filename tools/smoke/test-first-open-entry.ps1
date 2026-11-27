@@ -1,5 +1,5 @@
 ﻿# Replay steps 1-2 against synthetic OCR frames. A click changes the screen only at the expected position.
-param([string]$LegacyWorker)
+param([string]$LegacyWorker, [string]$AfterPickerOcr)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Win-Drive.ps1')
 $source = Get-Content (Join-Path $PSScriptRoot 'friend-path-worker.ps1') -Encoding UTF8 -Raw
@@ -37,7 +37,16 @@ function Open-Step2ImportMenu($lines,$attempt) {
 }
 function Choose-File($title, $book) {
     if ($script:view -ne 'picker' -or $title -ne $dialogTitle) { return $false }
-    $script:view = if ($route -eq '1.1.1') { 'added' } elseif ($route -ne 'first') { 'reader' } elseif ($fault -eq 'unavailable') { 'hold' } else { 'question' }
+    $script:view = if ($route -eq '1.1.1') { 'added' } elseif ($route -ne 'first') { 'reader' } else {
+        switch ($fault) {
+            'unavailable' { 'hold' }
+            'retryImport' { 'importFailed' }
+            'readOnly' { 'readOnly' }
+            'offlineThenQuestion' { 'offlineHome' }
+            'stuckOnHome' { 'offlineHome' }
+            default { 'question' }
+        }
+    }
     return $true
 }
 function Get-HudCounter { if ($script:view -eq 'reader') { @{ Text = '1/8' } } }
@@ -66,13 +75,20 @@ function Shot($step,$tag) {
             else { Row '为一门课备考' 60; Row '导入文件' 200 }
         }
         added { Row '教材已加入书架' 120; Row '先读' 200 }
+        offlineHome {
+            foreach ($text in $offlineHomeText) { Row $text 100 }
+            if ($fault -eq 'offlineThenQuestion') { $script:view = 'loading' }
+        }
+        loading { Row '正在用开头几章出第一道题，大约 1 分钟。' 100; $script:view = 'question' }
         question { Row '选一个答案。做完就能看到讲解。' 60; Row '题干' 160 }
         options { Row '选项甲' 180; Row '选项乙' 240; Row '看讲解' 290 }
         selected { Row '● 选项乙' 240; Row '看讲解' 290 }
         explanation { Row '这题选的是另一项。' 80; Row '水冷却到冰点会凝固。' 120 }
         next { Row '开始读这本书' 290 }
         empty { Row '对了。' 80; Row '开始读这本书' 290; Row '设置' 350 }
-        hold { Row '再试一次' 120; Row '先翻开这本书' 200 }
+        hold { Row '再 试 一 次' 120 }
+        importFailed { Row '再放一次' 200 }
+        readOnly { Row '先翻开这本书' 200 }
         reader { Row '书架' 60 }
         shelf {
             Row 'LearningCoach' 50; Row '设置' 50 700
@@ -102,13 +118,19 @@ function Replay($route, $fault, $expectedFailure, [switch]$Installed) {
     }
     "PASS $route $fault (installed=$([bool]$Installed))"
 }
+$offlineHomeText = @('放进一本书，马上做第一道题。', '现在没联网。书可以先放进来；出题和讲解要联网，连上后点再试一次。', '放进一本书')
+if ($AfterPickerOcr) { $offlineHomeText = Get-Content -LiteralPath $AfterPickerOcr -Encoding UTF8 }
 Replay first '' ''
 Replay first '' '' -Installed
 Replay installedShelf '' '' -Installed
 Replay first wrongBook '没有在首页确认目标书名和同卡进度' -Installed
 Replay existing '' ''
 Replay legacyImport '' ''
-Replay first unavailable '未进入可作答的首题'
+Replay first offlineThenQuestion ''
+Replay first stuckOnHome '240 秒仍在空书架'
+Replay first unavailable '出现「再试一次」按钮'
+Replay first retryImport '出现「再放一次」按钮'
+Replay first readOnly '出现「先翻开这本书」按钮'
 Replay first empty '未同时验证'
 Replay first noReader '未确认阅读器'
 if (Get-HomeImportLabel @((Row '放进一本书，马上做第一道题。' 60))) { throw 'Heading matched the button' }

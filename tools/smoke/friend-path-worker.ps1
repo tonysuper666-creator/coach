@@ -172,10 +172,22 @@ function Test-TasteExplanation($lines, $verdict, $button) {
 
 function Complete-FirstTaste {
     $point = Scroll-Point 0.5 0.7
-    $ready = Await-Text 2 'taste-question' @('选一个答案', '看讲解', '再试一次', '再放一次', '先翻开这本书') 240
-    if (-not $ready -or (Has $script:Last @('再试一次', '再放一次', '先翻开这本书'))) {
-        Fail 2 '未进入可作答的首题，见 2-taste-question.png'
-    }
+    # 选书框关闭后首页可能仍在显示离线说明；说明正文里的「再试一次」不是重试按钮。
+    $deadline = (Get-Date).AddSeconds(240)
+    $tag = 'taste-after-picker'
+    do {
+        $lines = Shot 2 $tag
+        foreach ($action in '再放一次', '再试一次', '先翻开这本书') {
+            if (Find-Exact $lines $action) { Fail 2 "未进入可作答的首题，出现「$action」按钮，见 2-$tag.png" }
+        }
+        if ((Find-Text $lines '选一个答案') -or (Find-Exact $lines '看讲解')) { break }
+        if ((Get-Date) -ge $deadline) {
+            if (Find-Exact $lines '放进一本书') { Fail 2 "选书后 240 秒仍在空书架，见 2-$tag.png" }
+            Fail 2 "选书后 240 秒未进入可作答的首题，见 2-$tag.png"
+        }
+        Start-Sleep -Seconds 2
+        $tag = 'taste-question'
+    } while ($true)
     $option = $null
     foreach ($attempt in 1..16) {
         $lines = Shot 2 "taste-options$attempt"

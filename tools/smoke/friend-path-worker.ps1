@@ -1580,6 +1580,16 @@ try {
         $tries++
         Hover $midX $hoverY; Start-Sleep -Milliseconds 600
         $lines = Shot 2 $(if ($tries -eq 1) { 'imported' } else { "imported$tries" })
+        # 只有云端书卡时，顶栏导入仍可能触发首次做题引导；以选书后的真实页面为准。
+        if (-not $firstOpen -and ((Find-Text $lines '选一个答案') -or
+            (Find-Text $lines '正在用开头几章') -or (Find-Exact $lines '看讲解') -or
+            (Find-Exact $lines '再放一次') -or (Find-Exact $lines '再试一次') -or
+            (Find-Exact $lines '先翻开这本书'))) {
+            $firstOpen = $true
+            Complete-FirstTaste
+            $deadline = (Get-Date).AddSeconds(150)
+            continue
+        }
         $c = Get-HudCounter $script:LastPng
         if ($c) { $readerPage = $c.Text } elseif (-not $firstOpen) { $shelfHit = Find-Step2HomeBook $lines $BookTitle }
         if (-not $readerPage -and -not $shelfHit) { Start-Sleep -Seconds 2 }

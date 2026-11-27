@@ -37,7 +37,7 @@ function Open-Step2ImportMenu($lines,$attempt) {
 }
 function Choose-File($title, $book) {
     if ($script:view -ne 'picker' -or $title -ne $dialogTitle) { return $false }
-    $script:view = if ($route -eq '1.1.1') { 'added' } elseif ($route -ne 'first') { 'reader' } else {
+    $script:view = if ($route -eq '1.1.1') { 'added' } elseif ($route -ne 'first' -and $fault -ne 'syncFirstTaste') { 'reader' } else {
         switch ($fault) {
             'unavailable' { 'hold' }
             'retryImport' { 'importFailed' }
@@ -119,7 +119,7 @@ function Replay($route, $fault, $expectedFailure, [switch]$Installed) {
         if ($failure -notlike "*$expectedFailure*" -or ($script:passes -join ',') -ne '1') { throw "$route/$fault : $failure (view=$script:view clicks=$script:clicks)" }
     } else {
         if ($failure -or ($script:passes -join ',') -ne '1,2') { throw "$route/$fault : $failure (view=$script:view clicks=$script:clicks)" }
-        $expected = if ($route -eq 'first') { 'home@210,options@250,selected@300,next@300,reader@70' } elseif ($route -eq '1.1.1') { 'home@210' } elseif ($route -in @('installedShelf', 'syncShelf')) { 'menu,reader@70' } else { 'home@210,reader@70' }
+        $expected = if ($fault -eq 'syncFirstTaste') { 'menu,options@250,selected@300,next@300,reader@70' } elseif ($route -eq 'first') { 'home@210,options@250,selected@300,next@300,reader@70' } elseif ($route -eq '1.1.1') { 'home@210' } elseif ($route -in @('installedShelf', 'syncShelf')) { 'menu,reader@70' } else { 'home@210,reader@70' }
         if (($script:clicks -join ',') -ne $expected) { throw "$route wrong clicks: $script:clicks" }
     }
     "PASS $route $fault (installed=$([bool]$Installed))"
@@ -131,6 +131,7 @@ Replay first '' '' -Installed
 Replay installedShelf '' '' -Installed
 Replay syncShelf '' '' -Installed
 Replay syncShelf duringConfirm '' -Installed
+Replay syncShelf syncFirstTaste '' -Installed
 Replay first wrongBook '没有在首页确认目标书名和同卡进度' -Installed
 Replay existing '' ''
 Replay legacyImport '' ''

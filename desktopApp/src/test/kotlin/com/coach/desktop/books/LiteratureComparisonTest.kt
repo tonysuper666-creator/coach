@@ -118,8 +118,51 @@ class LiteratureComparisonTest {
             assertTrue(row.claim.pending && row.claim.source == null)
             assertTrue(row.method.pending)
             assertTrue(row.concepts.all { it.pending })
-            assertTrue(row.relations.isEmpty() || row.relations.all { it.cell.pending })
+            assertTrue(row.relations.isNotEmpty())
+            assertTrue(row.relations.all { it.noDialogue && it.cell.text == COMPARISON_NO_DIALOGUE && !it.cell.pending })
             assertTrue(!table.rows.single { it.bookId == books[0].id }.claim.pending)
+        }
+    }
+
+    @Test fun omittedRelationSaysThePapersDoNotAddressEachOther() {
+        withPapers(3) { books ->
+            val input = LiteratureComparisonInput(books)
+            val request = input.request()
+            val table = requireNotNull(
+                input.verify(comparisonReply(request, outlineCount = 3, writeRelation = { index -> index == 0 }), pageOcr).table,
+            )
+            assertEquals(0, table.audit().pendingCites)
+            val cited = table.rows[0].relations.single { !it.noDialogue }
+            assertEquals(books[1].id, cited.otherBookId)
+            assertNotNull(cited.cell.source)
+            assertEquals(ComparisonRelationKind.SUPPORT, cited.kind)
+            val quiet = table.rows[0].relations.single { it.noDialogue }
+            assertEquals(books[2].id, quiet.otherBookId)
+            assertEquals(COMPARISON_NO_DIALOGUE, quiet.cell.text)
+            assertTrue(table.rows.drop(1).all { row -> row.relations.all { it.noDialogue } })
+            assertTrue(COMPARISON_NO_DIALOGUE in table.toMarkdown())
+            assertTrue(COMPARISON_PENDING !in table.toMarkdown())
+            val restored = LiteratureComparisonInput.restore(LiteratureComparisonInput.toStoredJson(table), books)
+            val again = requireNotNull(restored).rows[1].relations
+            assertTrue(again.all { it.noDialogue && !it.cell.pending && it.cell.text == COMPARISON_NO_DIALOGUE })
+        }
+    }
+
+    @Test fun unverifiedRelationStaysPending() {
+        withPapers(2) { books ->
+            val input = LiteratureComparisonInput(books)
+            val table = requireNotNull(
+                input.verify(
+                    comparisonReply(input.request(), outlineCount = 3, failRelationOf = books[0].id),
+                    pageOcr,
+                ).table,
+            )
+            val bad = table.rows[0].relations.single()
+            assertTrue(bad.cell.pending)
+            assertEquals(COMPARISON_PENDING, bad.cell.text)
+            assertTrue(!bad.noDialogue)
+            val kept = table.rows[1].relations.single()
+            assertTrue(!kept.cell.pending && !kept.noDialogue)
         }
     }
 
@@ -182,6 +225,8 @@ internal fun comparisonReply(
     failMethodOf: String? = null,
     copyClaimOf: String? = null,
     outlineCount: Int = 4,
+    writeRelation: (Int) -> Boolean = { true },
+    failRelationOf: String? = null,
     relationKind: ((index: Int) -> String)? = null,
 ): JsonObject {
     val blocks = request.getValue("blocks").jsonArray.map { it.jsonObject }
@@ -235,6 +280,7 @@ internal fun comparisonReply(
                         })
                     })
                     put("relations", buildJsonArray {
+                        if (!writeRelation(index)) return@buildJsonArray
                         add(buildJsonObject {
                             put("otherBookId", other)
                             put("kind", relationKind?.invoke(index) ?: when (index % 3) {
@@ -243,7 +289,7 @@ internal fun comparisonReply(
                                 else -> "supplement"
                             })
                             put("text", "它和另一篇在证据上互相参照。")
-                            put("ref", claimRef.getValue("ref"))
+                            put("ref", if (id == failRelationOf) JsonPrimitive(9999) else claimRef.getValue("ref"))
                         })
                     })
                 })

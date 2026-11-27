@@ -85,6 +85,26 @@ if (-not $preflight.Clean) {
     exit 2
 }
 Note 'preflight ok'
+# TON-1942: a dead tailnet must not be recorded as a product failure. Probe each persona's paired server first.
+foreach ($pid2 in @($Personas -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+    $cred = Join-Path 'D:\agent\personas' ($pid2 + '\home-r2\Coach\client\pairing\credentials.properties')
+    if (-not (Test-Path -LiteralPath $cred)) { continue }
+    $line = Select-String -LiteralPath $cred -Pattern '^server=' | Select-Object -First 1
+    if (-not $line) { continue }
+    $server = ($line.Line -replace '^server=', '').Replace([string][char]92, '')
+    $reach = $false
+    try {
+        $req = [Net.HttpWebRequest]::Create($server.TrimEnd('/') + '/v1/health'); $req.Timeout = 8000
+        try { $req.GetResponse().Close(); $reach = $true } catch [Net.WebException] { if ($_.Exception.Response) { $reach = $true } }
+    } catch { }
+    if (-not $reach) {
+        @{ dirty = $true; exitCode = 2; reason = "SERVICE_UNREACHABLE $pid2"; time = [DateTime]::UtcNow.ToString('o') } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutDir 'environment-dirty.json') -Encoding UTF8
+        Note "ENVIRONMENT_DIRTY service unreachable ($pid2); check tailscale before blaming the product"
+        $global:LASTEXITCODE = 2
+        exit 2
+    }
+}
 function Get-ClientPids([switch]$Mine) {
     if ($script:PersonaPid -and (Get-Process -Id $script:PersonaPid -ErrorAction SilentlyContinue)) { @($script:PersonaPid) } else { @() }
 }
@@ -254,7 +274,7 @@ function Get-FailCode([string]$blob) {
     if ($blob -match '额度|配额') { return 'quota' }
     if ($blob -match '依据不足|无法确认|拒答') { return 'refusal' }
     if ($blob -match '对不上') { return 'source' }
-    if ($blob -match '连不上|暂时不可用') { return 'other' }
+    if ($blob -match '连不上|暂时不可用|需要联网') { return 'other' }
     return $null
 }
 function Wait-Ai([string]$shot, [int]$seconds) {

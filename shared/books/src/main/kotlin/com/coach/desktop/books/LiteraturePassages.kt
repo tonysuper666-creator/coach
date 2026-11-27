@@ -221,7 +221,7 @@ internal object LiteraturePassages {
         return word.lowercase() in abbreviations
     }
 
-    private fun sentenceBounds(text: String): List<Pair<Int, Int>> {
+    private fun sentenceBounds(text: String, region: GuideRegion? = null, offset: Int = 0): List<Pair<Int, Int>> {
         val bounds = ArrayList<Pair<Int, Int>>()
         var start = 0
         var i = 0
@@ -229,7 +229,9 @@ internal object LiteraturePassages {
             val ch = text[i]
             val hard = ch == '!' || ch == '?' || ch == '。' || ch == '！' || ch == '？'
             val closes = ch == '.' && !isAbbreviationPeriod(text, i) && !staysInside(text, i) && closerFollows(text, i)
-            if (hard || closes) {
+            val wordEnd = offset + i + 1
+            val visibleStop = region?.scannedStops?.contains(wordEnd) == true
+            if (hard && region?.raisedCallouts?.contains(wordEnd) != true || closes || visibleStop) {
                 var bound = i + 1
                 while (bound < text.length && text[bound] in "”’\"')]") bound++
                 if (text.substring(start, bound).isNotBlank()) bounds += start to bound
@@ -345,15 +347,22 @@ internal object LiteraturePassages {
                     !isBackMatterHeading(line) && !isFootnoteSentence(line)
             }
 
-    fun bodySentence(excerpt: GuideExcerpt): Boolean = bodySentence(excerpt.anchor.quoteAnchor, excerpt.region.measured)
+    fun bodySentence(excerpt: GuideExcerpt): Boolean {
+        val region = excerpt.region
+        val anchor = excerpt.anchor
+        val page = excerpt.book.page(anchor.pdfPage)
+        val visibleStop = region.scannedStops.isNotEmpty() && page != null &&
+            anchor.endUtf16 - regionBase(page, region) in region.scannedStops
+        return bodySentence(anchor.quoteAnchor, region.measured, visibleStop)
+    }
 
-    fun bodySentence(s: String, measured: Boolean = false): Boolean {
+    fun bodySentence(s: String, measured: Boolean = false, visibleStop: Boolean = false): Boolean {
         val compact = compactSpace.replace(s, " ").trim()
         val limit = if (containsAbbreviationPeriod(compact)) ABBREVIATED_SENTENCE_MAX else BODY_SENTENCE_MAX
         return compact.length in 6..limit &&
             !LiteratureScaffoldNoise.rejectsSentence(compact) &&
             !hasControlOrBrokenChar(s) &&
-            end.containsMatchIn(compact) &&
+            (visibleStop || end.containsMatchIn(compact)) &&
             !publisher.containsMatchIn(s) &&
             !(if (measured) isBibliographicFootnote(s) else note.containsMatchIn(s) || isFootnoteSentence(s)) &&
             compact.dropWhile { it in "“‘\"'([" }.firstOrNull()?.isLowerCase() != true &&
@@ -433,7 +442,7 @@ internal object LiteraturePassages {
                     val paragraph = region.text.substring(start, finish)
                     val dropLead = skipFirst
                     var lead = dropLead
-                    for ((a, b) in sentenceBounds(paragraph)) {
+                    for ((a, b) in sentenceBounds(paragraph, region, start)) {
                         var from = a
                         val noteLead = leadingNote.find(paragraph.substring(a, b))
                         if (noteLead != null && noteLead.range.first == 0) from = a + noteLead.value.length
@@ -450,7 +459,7 @@ internal object LiteraturePassages {
                             if (!pageTopTail && !blankTail &&
                                 !rejectedFootnote(quote, page.text, at, region, localStart, localEnd) &&
                                 !region.overlapsWideGap(localStart, localEnd) &&
-                                bodySentence(quote, region.measured) &&
+                                bodySentence(quote, region.measured, localEnd in region.scannedStops) &&
                                 region.containsSentence(quote)
                             ) {
                                 pageCandidates += Candidate(page, region, at, quote)

@@ -19,6 +19,8 @@ On #696 at `b7f9a746` the unmodified product recovered 75 of 79 body sentences (
 
 The Pollock labels follow the printed sentence boundaries, using the words actually present in the OCR layer, including recognition errors. Both pages were checked against the facsimile. The body denominator includes every complete single-page sentence. The opening and closing cross-page fragments cannot be single-page anchors. Marginal summaries and running matter are labeled separately from the footnotes. The frozen layer lets all CI hosts exercise searchable scans without installing an OCR engine.
 
+With the two Pollock pages added, the classifier at `30cff15f` recovered 1/29 scan body sentences and returned four footnote candidates. The combined baseline was 80/108 body sentences and four footnote candidates.
+
 ## Private PDF acceptance
 
 On the machine holding the originals, annotate all sentences and non-body fragments on each selected page. Store one UTF-8 TSV per input file named `<SHA-256 of original PDF bytes>.tsv` in a local directory. Columns are role, one-based PDF page, zero-based UTF-16 start, exclusive UTF-16 end, and lowercase SHA-256 of the exact UTF-8 encoded substring of `literatureBook` page text. Omit a header. This uses the same page text and offsets as the application's guide anchors.

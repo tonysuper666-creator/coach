@@ -31,6 +31,26 @@ class LiteratureGoldTest {
         }
     }
 
+    @Test fun scanFootnoteWithOrdinaryProseIsRejectedBeforeOcr() {
+        val root = Files.createTempDirectory("literature-scan-footer")
+        try {
+            val path = Path.of(checkNotNull(javaClass.getResource("/literature-gold/pollock.pdf")).toURI())
+            val library = TextbookLibrary(root)
+            val book = library.literatureBook(library.importBook(path).id)
+            val page = book.pages.first()
+            val quote = "But these dates are uncertain."
+            val region = page.guideRegions.single { quote in it.text }
+            val start = page.text.indexOf(quote)
+            val anchor = BookCompanionAnchor(page.number, "scan-probe", start, start + quote.length, quote)
+            val (_, reason) = LiteratureCitationCheck.check(listOf(GuideExcerpt(book, anchor, region)), 0, book.id) { _, _ ->
+                error("Scan footnote reached OCR")
+            }
+            kotlin.test.assertEquals(LiteraturePassages.FOOTNOTE_REJECTION, reason)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
     // Keep punctuation and every word: a truncated or joined body sentence is a miss.
     private fun key(value: String) = Normalizer.normalize(value, Normalizer.Form.NFKC)
         .replace(Regex("""(?<=\p{L})-\s*\n\s*(?=\p{Ll})"""), "")
@@ -58,6 +78,8 @@ class LiteratureGoldTest {
                 val candidates = pool.map { it.anchor.pdfPage to key(it.anchor.quoteAnchor) }.toMutableList()
                 val bodies = rows.filter { it.role == "body" }
                 totalBody += bodies.size
+                val previousMisses = misses.size
+                val previousLeaks = leaks
                 for (body in bodies) {
                     if (!candidates.remove(body.page to body.sentence)) misses += "$file p${body.page} ${body.sentence}"
                 }
@@ -68,6 +90,8 @@ class LiteratureGoldTest {
                             (it.sentence.contains(text) || words.windowed(4).any { w -> w.joinToString(" ") in it.sentence }) }) leaks++
                     extras += "$file p$page $text"
                 }
+                val recovered = bodies.size - (misses.size - previousMisses)
+                println("$file body $recovered/${bodies.size}; note leaks ${leaks - previousLeaks}; unexpected ${candidates.size}")
                 for ((i, excerpt) in pool.withIndex()) {
                     val (_, reason) = LiteratureCitationCheck.check(pool, i, book.id) { b, p -> b.page(p)!!.text }
                     assertTrue(reason == "ok", "$file ${excerpt.anchor.pdfPage} $reason")

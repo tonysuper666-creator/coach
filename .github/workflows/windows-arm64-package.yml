@@ -172,6 +172,26 @@ jobs:
           "msi_bytes=$bytes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
           "release_version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
           "sable_login=$sable" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+      - name: Encrypt release candidate before upload
+        # Artifacts of a public repository can be downloaded by any signed-in GitHub user while they are retained.
+        # A release MSI embeds the private friend origin and update channel, so only ciphertext may leave the runner:
+        # a fresh AES-256 key encrypts the MSI, and that key is wrapped with the release public key whose private half
+        # exists only on the release Mac (tools/release/arm64-candidate.pub.pem).
+        if: ${{ inputs.private_friend_url == 'true' }}
+        shell: bash
+        env:
+          MSI_NAME: ${{ steps.prepare.outputs.msi_name }}
+        run: |
+          set -euo pipefail
+          cd candidate
+          [[ -f "$MSI_NAME" ]] || { echo "missing $MSI_NAME" >&2; exit 1; }
+          key="$RUNNER_TEMP/candidate.key"
+          openssl rand -out "$key" 32
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in "$MSI_NAME" -out "$MSI_NAME.enc" -pass "file:$key"
+          openssl pkeyutl -encrypt -pubin -inkey ../tools/release/arm64-candidate.pub.pem \
+            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -in "$key" -out "$MSI_NAME.key.enc"
+          rm -f "$MSI_NAME" "$key"
+          ls -l
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-arm64-package-candidate

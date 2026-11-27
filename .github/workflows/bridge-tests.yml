@@ -28,7 +28,7 @@ jobs:
       - name: Run bridge tests
         run: |
           set -e
-          for t in api_routing batch_routing friends friend_usage exam_protection friend_study_contract test_price_floor test_raise_coach_share; do
+          for t in api_routing batch_routing friends friend_usage exam_protection friend_study_contract test_price_floor test_raise_coach_share test_monthly_grant_plan; do
             echo "::group::$t"
             /tmp/bridge-venv/bin/python tools/bridge/tests/$t.py
             echo "::endgroup::"

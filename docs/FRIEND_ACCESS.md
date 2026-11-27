@@ -62,7 +62,7 @@ app revoke-friend '朋友甲'
 
 ## 赠额保护监控的部署与停用
 
-`tools/bridge/friend_spend_watch.py` 在文件锁下核对本月已结费用、未决预留和拒绝记录，写入 TON-740 的 `coach.api-spend`。线是整份免费额度，即 Anthropic $200、OpenAI $500；Coach 能用的是其中扣掉分配计划里 `other_writers_microusd` 的那份。触线时记为 `warn`，相同状态保留起始时间。记录仅含状态、时间和费用摘要。
+`tools/bridge/friend_spend_watch.py` 在文件锁下核对本月已结费用、未决预留和拒绝记录，写入 TON-740 的 `coach.api-spend`。线是整份免费额度，即 Anthropic $200、OpenAI $500；Coach 能用的就是整份（李政 11-27：「用到所有赠额消失为止」），分配计划不给别的应用留份。每个月的计划由桥在当月第一笔预留时当场写好（整份赠额、Coach 一份，只算当月自己的花费），`coach-grant-plan.timer` 只是提前写、顺便核对；上个月的晚到结算记在上个月。触线时记为 `warn`，相同状态保留起始时间。记录仅含状态、时间和费用摘要。
 
 触线时默认在 TON-1691 登记一次待决定事项，由主会话交李政决定是否另行授权自费。已有待答事项时保留它，下次检查再尝试。免费额度用完就停，自费需要另行授权。
 

@@ -56,6 +56,38 @@ def grant_limit_micros(provider):
     return micros(MONTHLY_GRANTS[provider])
 
 
+def month_plan(provider, now, state: Path) -> dict:
+    """The plan every Coach ledger uses from the first second of each UTC month (TON-740, 李政 11-27:
+    "use it until the whole grant is gone"): one Coach share equal to the month's whole grant, nothing
+    for other writers, measured against that month's own recorded spend. Deterministic, so the bridge
+    and the timer write byte-identical files whichever comes first."""
+    d = datetime.fromtimestamp(now, timezone.utc)
+    start = datetime(d.year, d.month, 1, tzinfo=timezone.utc)
+    following = datetime(d.year + (d.month == 12), d.month % 12 + 1, 1, tzinfo=timezone.utc)
+    grant = micros(MONTHLY_GRANTS[provider])
+    return {"version": 1, "provider": provider, "basis": "month",
+            "start_utc": int(start.timestamp()), "end_utc": int(following.timestamp()),
+            "grant_microusd": grant, "other_writers_microusd": 0,
+            "ledgers": [{"host": socket.gethostname(), "state": str(Path(state).resolve()),
+                         "limit_microusd": grant, "prior_settled_microusd": 0}]}
+
+
+def plan_step(plan, expected) -> str:
+    """What this month's first reservation does with the plan on disk: "current" (already this month's
+    whole-grant plan), "explicit" (written for this month by hand: stands), "shared" (several ledgers:
+    runs to its own end, never rewritten) or "replace" (Coach's only ledger, from an earlier month)."""
+    if plan == expected:
+        return "current"
+    if plan["start_utc"] >= expected["start_utc"]:
+        return "explicit"
+    ids = [(w["host"], w["state"]) for w in plan["ledgers"]]
+    return "replace" if ids == [(w["host"], w["state"]) for w in expected["ledgers"]] else "shared"
+
+
+def plan_digest(plan) -> str:
+    return hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
+
+
 def settled_total(data, provider):
     recorded = {cid.split(":", 1)[1]: cycle["spent"] for cid, cycle in data["cycles"].items()
                 if cid.startswith(provider + ":")}
@@ -88,10 +120,25 @@ class CreditLedger:
     def __init__(self, state: Path, clock=time.time):
         self.state, self.clock = state, clock
 
+    def current_plan(self, provider, now):
+        """This month's plan, called under the ledger lock. When the plan on disk began before this month
+        and names this ledger as Coach's only one, the whole-grant month plan replaces it there and then
+        (one atomic write), so a new month never waits for the timer. A plan that starts this month stands
+        as written; a shared plan of several ledgers runs to its own end; a missing one denies."""
+        expected = month_plan(provider, now, self.state)
+        path = self.state / f"grant-allocation-{provider}.json"
+        plan = json.loads(path.read_text())
+        step = plan_step(plan, expected)
+        if step == "replace":
+            atomic_json(path, expected)
+            return expected, True
+        return plan, step == "current"
+
     def allocation(self, provider, now, data):
-        """The same immutable plan is installed at every participating ledger."""
+        """(share, used, period, holds) under this ledger's plan: the same immutable plan is installed at
+        every participating ledger. `holds` are the pending reservations that count against `share`."""
         try:
-            plan = json.loads((self.state / f"grant-allocation-{provider}.json").read_text())
+            plan, derived = self.current_plan(provider, now)
             start, end = plan["start_utc"], plan["end_utc"]
             require(type(start) is int and type(end) is int and start <= now < end)
             require(plan["provider"] == provider and plan["version"] == 1)
@@ -122,23 +169,38 @@ class CreditLedger:
                 elif (re.fullmatch(r"[0-9]{4}-[0-9]{2}", month) and month >= first_month
                       and not (provider == "anthropic" and ceiling == micros(150))):
                     share = min(share, ceiling)
-            # Settlement of a reservation from before the window increases this
-            # total too. The audited opening baseline excludes all pending usage.
-            # Use the larger record per month. Older key-specific cycle ids can
-            # lack a month mapping; conservatively count them in addition.
-            settled = settled_total(data, provider)
-            estimated = sum(month.get(provider, {}).get("estimated_microusd", 0) for month in data["months"].values())
-            require(baseline <= settled - estimated)
-            digest = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
-            pin = self.state / f"grant-window-{provider}.json"
-            if pin.exists():
-                previous = json.loads(pin.read_text())
-                require(previous["digest"] == digest or previous["end_utc"] <= start)
+            cycles = [c for cid, c in data["cycles"].items() if cid.startswith(provider + ":")]
+            if plan.get("basis") == "month":
+                # A month's grant is measured against that month's own spend and holds. An older hold
+                # settles, estimate included, into its own month; nothing moves in or out of this one.
+                require(baseline == 0 and first_month == datetime.fromtimestamp(end - 1, timezone.utc).strftime("%Y-%m"))
+                cycle = data["cycles"].get(f"{provider}:{first_month}", {"spent": 0, "reserved": {}})
+                summary = data["months"].get(first_month, {}).get(provider, {})
+                used = max(cycle["spent"], summary.get("spent_microusd", 0))
+                cycles = [cycle]
             else:
+                # Settlement of a reservation from before the window increases this
+                # total too. The audited opening baseline excludes all pending usage.
+                # Use the larger record per month. Older key-specific cycle ids can
+                # lack a month mapping; conservatively count them in addition.
+                settled = settled_total(data, provider)
+                estimated = sum(month.get(provider, {}).get("estimated_microusd", 0) for month in data["months"].values())
+                require(baseline <= settled - estimated)
+                used = settled - baseline
+            digest = plan_digest(plan)
+            pin = self.state / f"grant-window-{provider}.json"
+            try:
+                previous = json.loads(pin.read_text()) if pin.exists() else {}
+            except ValueError:
+                if not derived:
+                    raise
                 previous = {}
+            # The derived month plan is legitimate by construction, so it is pinned whatever the old pin says.
+            require(derived or previous == {} or previous["digest"] == digest or previous["end_utc"] <= start)
             if previous.get("digest") != digest:
                 atomic_json(pin, {"digest": digest, "end_utc": end})
-            return share, settled - baseline, f"{provider}-{start}-{end}"
+            holds = sum(sum(c["reserved"].values()) for c in cycles)
+            return share, used, f"{provider}-{start}-{end}", holds
         except (KeyError, TypeError, ValueError, OverflowError, OSError, AttributeError):
             raise Denied("grant_allocation_unavailable") from None
 
@@ -252,13 +314,12 @@ class CreditLedger:
                 cycle["limit"] = limit
             else:
                 cycle["limit"] = min(cycle["limit"], limit)
-            # Unknown usage survives month rollover and migration from the earlier
-            # evidence-based ledger; starting a new month must not erase a call.
-            pending = sum(sum(c["reserved"].values()) for cid, c in data["cycles"].items() if cid.startswith(provider + ":"))
+            # Unknown usage survives month rollover and migration from the earlier evidence-based
+            # ledger; starting a new month must not erase a call. Which holds count is the plan's rule.
             summary = data["months"].setdefault(month, {}).setdefault(provider, {"spent_microusd": 0, "reserved_microusd": 0, "calls": 0})
             ceiling = cycle["limit"]
             used = max(cycle["spent"], summary["spent_microusd"])
-            share, settled, period = self.allocation(provider, now, data)
+            share, settled, period, pending = self.allocation(provider, now, data)
             before_holds = min(ceiling - used, share - settled)
             remaining = before_holds - pending
             ceiling = min(ceiling, share)

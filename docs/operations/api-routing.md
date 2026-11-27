@@ -60,8 +60,9 @@ Atomic, fsynced `api-credit-ledger.json` is authoritative. Calendar summaries
 `calls` per provider. One dollar is 1,000,000 microdollars. Coach reserves at most
 the whole configured monthly API grant, including all unresolved reservations
 (TON-740: usage inside the free grant is recorded, never throttled). The nominal
-Anthropic $200 and OpenAI $500 grants allow $200 and $500 respectively; Coach's own
-share is the grant minus `other_writers_microusd`. A request is refused as
+Anthropic $200 and OpenAI $500 grants allow $200 and $500 respectively, and Coach's
+share is the whole grant: 李政 (2026-11-27) "use it until the whole grant is gone", so
+plans leave nothing for other writers (`other_writers_microusd` is 0). A request is refused as
 `free_grant_exhausted` only when settled spend plus its own upper-bound price passes
 that share. When other calls' temporary holds fill the rest, the request queues
 (`BRIDGE_RESERVATION_WAIT_SEC`, default 30 s) and then answers `reservations_busy`
@@ -122,7 +123,23 @@ ledger. Obtain its window and gross grant from the provider's actual grant recor
 Count every other writer's settled spend, unresolved reservations and enforceable
 future allowance in `other_writers_microusd`. Historical average spend does not
 bound future usage. Leave the allocation absent until these amounts reconcile.
-A missing, expired, inconsistent or unrecognized allocation denies new API calls.
+A missing, inconsistent or unrecognized allocation denies new API calls, and so does an
+expired one shared by several ledgers.
+
+Each calendar month gets its own plan (TON-740), and the bridge never waits for
+anyone to install it. When a reservation finds that the plan on disk began before
+this month and names this ledger as Coach's only one, it writes `month_plan` in its
+place, under the ledger lock, in one atomic write, and pins it: `basis: "month"`, the
+month's first second (UTC) to the next month's, one Coach share equal to the whole
+grant, `other_writers_microusd` 0 and no baseline. Such a plan is measured against the
+month's own spend and holds only. A reservation from an earlier month still settles,
+estimate included, into that month and never into this one. `monthly_grant_plan.py`
+(`systemd/coach-grant-plan.timer`, from the release `coach.service` is running) writes
+the same plan with the same function under the same lock a little earlier and reports
+what is left; whichever comes first writes byte-identical files and the other changes
+nothing. A plan written for this month by hand stands as written. A plan shared by
+several ledgers is never rewritten: it runs to its own end and then denies, because
+each ledger deriving a whole-grant plan would add up to more than the grant.
 
 The file contains `version: 1`, `provider`, integer Unix seconds `start_utc`
 (inclusive) and `end_utc` (exclusive), `grant_microusd`, `other_writers_microusd`

@@ -1,0 +1,12 @@
+[Unit]
+Description=Write each month's Coach plan ahead of the bridge and report what is left (the bridge writes it itself if this has not run)
+
+[Timer]
+OnCalendar=*-*-01 00:00:05 UTC
+OnCalendar=*-*-* *:00/10:30 UTC
+AccuracySec=1s
+Persistent=true
+Unit=coach-grant-plan.service
+
+[Install]
+WantedBy=timers.target

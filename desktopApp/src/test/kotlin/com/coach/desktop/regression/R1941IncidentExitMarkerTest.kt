@@ -15,6 +15,7 @@ import com.coach.desktop.books.TextbookLibrary
 import com.coach.desktop.incident.IncidentLog
 import com.coach.desktop.incident.IncidentPromptLayer
 import com.coach.desktop.incident.IncidentStore
+import com.coach.desktop.incident.PendingOffer
 import java.io.File
 import java.net.URLClassLoader
 import java.nio.file.Files
@@ -35,10 +36,17 @@ internal object R1941SessionChild {
         when (args[1]) {
             // Hard kill / power cut: the parent ends this process with TerminateProcess.
             "kill" -> { println("ready"); System.out.flush(); Thread.sleep(120_000) }
+            // A copy that keeps running while another copy of the app starts and closes.
+            "hold" -> { println("ready offer=${IncidentLog.currentOffer() != null}"); System.out.flush(); Thread.sleep(120_000) }
             // Windows ending the process at logoff or shutdown, or Ctrl+C: the JVM runs its shutdown hooks.
             "hooks" -> System.exit(3)
             // The app closed itself: the same call runCoachApplication makes after the window loop returns.
-            "close" -> { IncidentLog.markStartedSessionClean(); System.exit(0) }
+            "close" -> {
+                println("offer=${IncidentLog.currentOffer() != null}")
+                System.out.flush()
+                IncidentLog.markStartedSessionClean()
+                System.exit(0)
+            }
         }
     }
 }
@@ -49,28 +57,106 @@ internal object R1941SessionChild {
  */
 @OptIn(ExperimentalTestApi::class)
 class R1941IncidentExitMarkerTest {
-    private fun runChild(dir: Path, mode: String) {
+    private fun startChild(dir: Path, mode: String): Process {
         val classpath = (generateSequence(javaClass.classLoader) { it.parent }.filterIsInstance<URLClassLoader>()
             .flatMap { it.urLs.asSequence() }.map { File(it.toURI()).path }.toList() +
             System.getProperty("java.class.path").split(File.pathSeparator)).distinct().joinToString(File.pathSeparator)
         val args = dir.resolveSibling("${dir.fileName}.args")
         Files.writeString(args, "-cp\n\"" + classpath.replace("\\", "/") + "\"\n")
-        val child = ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+        return ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
             "-Djava.awt.headless=true", "@$args", R1941SessionChild::class.java.name, dir.toString(), mode)
             .redirectErrorStream(true).start()
+    }
+
+    private fun runChild(dir: Path, mode: String): String {
+        val child = startChild(dir, mode)
         try {
+            var output = ""
             if (mode == "kill") {
                 val line = child.inputStream.bufferedReader().readLine()
                 assertEquals("ready", line)
                 assertTrue(Files.readString(dir.resolve("session.txt")).startsWith("open\n"))
                 child.destroyForcibly()
+            } else {
+                output = child.inputStream.bufferedReader().readText()
             }
             assertTrue(child.waitFor(60, TimeUnit.SECONDS), "child $mode did not end")
             if (mode == "hooks") assertEquals(3, child.exitValue())
-            if (mode == "close") assertEquals(0, child.exitValue(), child.inputStream.bufferedReader().readText())
+            if (mode == "close") assertEquals(0, child.exitValue(), output)
+            return output
         } finally {
             if (child.isAlive) child.destroyForcibly().waitFor()
-            Files.deleteIfExists(args)
+            Files.deleteIfExists(dir.resolveSibling("${dir.fileName}.args"))
+        }
+    }
+
+    /**
+     * QA 退回复现：同一目录先开 A 并保持运行，再开 B，B 不能提示；B 正常关闭后强杀 A，下次打开必须提示。
+     * 原先 session.txt 只有一条记录：B 开时把仍在运行的 A 当成异常退出，B 关时又把 A 的记录盖成 clean。
+     */
+    @Test fun secondCopyNeitherFlagsTheRunningFirstNorHidesItsLaterKill() {
+        val root = Files.createTempDirectory("coach-r1941-two-")
+        val dir = Files.createDirectories(root.resolve("shared"))
+        val holder = startChild(dir, "hold")
+        try {
+            assertEquals("ready offer=false", holder.inputStream.bufferedReader().readLine())
+            val second = runChild(dir, "close")
+            assertTrue(second.contains("offer=false"), "the second copy must not report the running first one: $second")
+            val marker = Files.readString(dir.resolve("session.txt"))
+            assertTrue(marker.startsWith("open\n") && marker.contains("\n${holder.pid()}\n"), "the first copy's entry must stay: $marker")
+            assertTrue(dir.toFile().listFiles().orEmpty().none { it.name.contains("unclean_exit") })
+
+            holder.destroyForcibly()
+            assertTrue(holder.waitFor(60, TimeUnit.SECONDS))
+            val offer = IncidentStore(dir).beginSession()
+            assertNotNull(offer, "killing the first copy after the second closed must offer the prompt")
+            assertTrue(offer.text.contains("kind: unclean_exit"))
+        } finally {
+            if (holder.isAlive) holder.destroyForcibly().waitFor()
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    /** The same rules in every order, with process liveness under the test's control. */
+    @Test fun eachCopyOnlyClosesItsOwnEntry() {
+        val dir = Files.createTempDirectory("coach-r1941-order-")
+        try {
+            val running = mutableSetOf<Long>()
+            fun open(pid: Long): Pair<IncidentStore, PendingOffer?> {
+                val store = IncidentStore(dir, pid = { pid }, processStart = { pid * 10 }, alive = { p, s -> p in running && s == p * 10 })
+                val offer = store.beginSession()
+                running += pid
+                return store to offer
+            }
+            fun IncidentStore.close(pid: Long) { markClean(); running -= pid }
+
+            // A runs, B opens and closes, then A is killed: the next start offers.
+            val (a, first) = open(1); assertNull(first)
+            val (b, second) = open(2); assertNull(second, "A is still running")
+            b.close(2)
+            running -= 1
+            val (c, third) = open(3); assertNotNull(third, "A was killed")
+            c.close(3)
+            val (d, fourth) = open(4); assertNull(fourth, "every copy before this one has been handled")
+            d.close(4)
+            assertTrue(Files.readString(dir.resolve("session.txt")).startsWith("clean\n"))
+
+            // A runs, B opens and is killed, then A closes normally: the next start still offers for B.
+            val (e, fifth) = open(5); assertNull(fifth)
+            val (_, sixth) = open(6); assertNull(sixth)
+            running -= 6
+            e.close(5)
+            assertTrue(Files.readString(dir.resolve("session.txt")).contains("\n6\n"), "B's open entry must survive A's close")
+            val (f, seventh) = open(7); assertNotNull(seventh, "B was killed")
+            f.close(7)
+
+            // A pid now used by a process that started later is not the copy that wrote the entry.
+            val (_, eighth) = open(8); assertNull(eighth)
+            val reused = IncidentStore(dir, pid = { 9 }, processStart = { 90 }, alive = { p, s -> p == 8L && s == 81L })
+            assertNotNull(reused.beginSession(), "pid 8 belongs to another process now")
+            assertTrue(a.incidentFiles().isNotEmpty())
+        } finally {
+            dir.toFile().deleteRecursively()
         }
     }
 

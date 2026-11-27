@@ -266,6 +266,24 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
                 "today" to it.friendName?.let { name -> runCatching { friends?.status(name, it.id) }.getOrNull() }) }
             call.respondText(JsonArray(devices).toString(), ContentType.Application.Json)
         }
+        get("/v1/session") {
+            val device = call.attributes[observedDevice]
+            val friend = call.attributes.getOrNull(observedFriend)
+            val sable = friend != null && com.coach.store.isSableFriend(friend)
+            val display = if (sable) friends?.sable?.display(device) else null
+            call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+            call.respondText(json("method" to if (sable) "Sable" else "配对码",
+                "nickname" to display?.nickname.orEmpty(), "maskedEmail" to display?.maskedEmail.orEmpty()).toString(),
+                ContentType.Application.Json)
+        }
+        delete("/v1/session") {
+            val device = call.attributes[observedDevice]
+            if (device == adminDevice) return@delete call.respond(HttpStatusCode.Forbidden)
+            actor.execute { revokeDevice(device) }
+            friends?.sable?.forget(listOf(device))
+            pushes.emit("revoked")
+            call.respond(HttpStatusCode.NoContent)
+        }
         get("/v1/public/status") {
             val name = call.attributes.getOrNull(observedFriend) ?: return@get call.respond(HttpStatusCode.Forbidden)
             val device = call.attributes[observedDevice]

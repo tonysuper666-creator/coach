@@ -1,5 +1,7 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import java.util.Properties
+import java.time.LocalDate
+import java.time.ZoneOffset
 plugins {
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.kotlin.compose)
@@ -189,12 +191,15 @@ val notesCore by tasks.registering(Zip::class) {
 }
 sourceSets.main { resources.srcDir(notesCore.map { it.destinationDirectory }) }
 val coachVersionDir = layout.buildDirectory.dir("generated/coach-version")
+val buildDateUtc = LocalDate.now(ZoneOffset.UTC).toString()
 val writeCoachVersion by tasks.registering {
     inputs.property("version", releaseVersion)
+    inputs.property("buildDateUtc", buildDateUtc)
     outputs.dir(coachVersionDir)
     doLast {
         val dir = coachVersionDir.get().asFile
         dir.mkdirs()
+        dir.resolve("coach-build-date.txt").writeText(buildDateUtc)
         dir.resolve("coach-version.txt").writeText(releaseVersion)
     }
 }

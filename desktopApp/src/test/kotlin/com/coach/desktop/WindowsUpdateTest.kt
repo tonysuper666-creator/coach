@@ -23,6 +23,13 @@ class WindowsUpdateTest {
         assertNull(update.candidate(json(arch = "arm64")))
     }
 
+    @Test fun manualCheckDistinguishesCurrentFromMissingOrInvalidPackage() {
+        assertNull(update.candidate(json("1.9.0"), requireCompatible = true))
+        assertEquals("1.10.0", update.candidate(json(), requireCompatible = true)?.version)
+        assertFails { update.candidate(json(arch = "arm64"), requireCompatible = true) }
+        assertFails { update.candidate(json("invalid"), requireCompatible = true) }
+    }
+
     @Test fun x64ProcessUnderPrismUpdatesToNativeArm64() {
         val kernel = object : UpdateKernel32 {
             override fun GetCurrentProcess(): Pointer = Pointer.createConstant(-1L)

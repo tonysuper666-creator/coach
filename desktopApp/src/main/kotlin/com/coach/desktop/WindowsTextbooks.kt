@@ -82,6 +82,7 @@ internal fun WindowsTextbookGate(
     settings: DesktopConnectionSettings,
     sableIssuer: String = com.coach.client.SABLE_ORIGIN,
     darkTheme: Boolean = windowsThemeOverride(System.getProperty("coach.windows.theme")) ?: isSystemInDarkTheme(),
+    offerReports: Boolean = true,
     content: @Composable (DesktopIdentity) -> Unit,
 ) {
     val pairing = remember(settings) { DesktopPairing(settings) }
@@ -132,6 +133,7 @@ internal fun WindowsTextbookGate(
     val paired = identity
     var hostManagesPrompt by remember { mutableStateOf(false) }
     val currentPaired by rememberUpdatedState(paired)
+    val reportsEnabled by rememberUpdatedState(offerReports)
     val currentDarkTheme by rememberUpdatedState(darkTheme)
     val promptState = remember { IncidentPromptState(scope) }
     LaunchedEffect(paired) {
@@ -141,7 +143,7 @@ internal fun WindowsTextbookGate(
         IncidentPromptHost(
             onHostMounted = { hostManagesPrompt = it },
             prompt = {
-                IncidentExitPrompt(
+                if (reportsEnabled) IncidentExitPrompt(
                     identity = currentPaired,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                     darkTheme = currentDarkTheme,
@@ -164,6 +166,13 @@ internal fun WindowsTextbookGate(
         }
         CompositionLocalProvider(
             LocalBookRelogin provides onRelogin,
+            LocalLogout provides { switching ->
+                withContext(Dispatchers.IO) { pairing.logout(paired) }
+                if (identity === paired) {
+                    revokedReason = if (switching) "请登录要切换到的账号。" else "已退出登录。"
+                    identity = null
+                }
+            },
             LocalIncidentPromptHost provides promptHost,
         ) {
             key(paired.credentials.deviceId, paired.credentials.token) {
@@ -211,7 +220,7 @@ internal fun WindowsTextbookGate(
             }
         }
     }
-    if (initialized && (paired == null || !hostManagesPrompt)) {
+    if (offerReports && initialized && (paired == null || !hostManagesPrompt)) {
         IncidentExitPrompt(paired, Modifier.align(Alignment.TopCenter).padding(top = 8.dp), darkTheme, state = promptState)
     }
     }
@@ -231,7 +240,7 @@ internal fun runWindowsTextbooks() {
         val closeGuard = remember(scope) {
             TextbookCloseGuard({ saveDrafts() }, scope, ::exitApplication)
         }
-        Window(onCloseRequest = closeGuard::requestClose, title = "LearningCoach", icon = AppIcon.window(),
+        Window(onCloseRequest = closeGuard::requestClose, title = "LearningCoach ${com.coach.desktop.incident.coachVersion()}", icon = AppIcon.window(),
             state = rememberWindowState(
                 width = initialBounds.width.dp, height = initialBounds.height.dp,
                 position = WindowPosition.Absolute(initialBounds.x.dp, initialBounds.y.dp),
@@ -243,7 +252,9 @@ internal fun runWindowsTextbooks() {
                 ),
             ) {
             WindowsReadingMinimum(window)
-            WindowsTextbookGate(settings) { identity ->
+            val reportPreference = remember { settings.clientDirectory.resolve("disable-report-offers") }
+            var offerReports by remember { mutableStateOf(!Files.exists(reportPreference)) }
+            WindowsTextbookGate(settings, offerReports = offerReports) { identity ->
                 val profiles = remember(directory) { LearningProfiles(directory) }
                 val profile = if (LearningJournal.enabled || profiles.hasProfiles) {
                     val selected by produceState<LearningProfile?>(null,identity) {
@@ -271,45 +282,77 @@ internal fun runWindowsTextbooks() {
                         }
                         onDispose { saveDrafts = { true } }
                     }
+                    val sync = remember(profile) { SyncDisplay(profile.directory) }
+                    LearningSyncEffect(identity, profile, sync)
+                    var updateRequest by remember { mutableIntStateOf(0) }
+                    var updateResult by remember { mutableStateOf("") }
                     val updates = rememberWindowsUpdateSession(
                         libraryDir = profile.directory,
+                        checkRequest = updateRequest,
+                        onResult = { updateResult = it },
                         save = {
                             controller.state.first { !it.busy }
                             saveDrafts()
                         },
                         close = ::exitApplication,
                     )
-                    LearningSyncEffect(identity,profile)
-                    WindowsTextbookHost(
-                        controller = controller,
-                        drafts = drafts,
-                        exams = exams,
-                        onRollback = updates::rollback,
-                        rollbackStatus = updates.rollbackStatus,
-                        rollbackBusy = updates.rollbackBusy,
-                        updateBanner = { idle -> UpdateBanner(updates, idle) },
-                        chooseReviewedBlocks = { pickReviewedBlocks(window) },
-                        chooseBooks = {
-                            withContext(Dispatchers.Swing) {
-                                val dialog = FileDialog(window, "导入文件 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)
-                                dialog.isMultipleMode = true
-                                try {
-                                    dialog.isVisible = true
-                                    dialog.files.map { it.toPath() }
-                                } finally { dialog.dispose() }
+                    val logout = LocalLogout.current
+                    CompositionLocalProvider(
+                        LocalAccountSettings provides {
+                            AccountSection(identity, settings.clientDirectory) { switching ->
+                                check(saveDrafts()) { "save" }
+                                logout(switching)
                             }
                         },
-                        chooseBook = {
-                            withContext(Dispatchers.Swing) {
-                                val dialog = FileDialog(window, "导入文件 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)
-                                try {
-                                    dialog.isVisible = true
-                                    dialog.file?.let { Path.of(dialog.directory, it) }
-                                } finally { dialog.dispose() }
+                        LocalDataSettings provides {
+                            DataSection(profile, sync, updateResult, onCheck = {
+                                updateResult = "正在检查更新…"
+                                updateRequest++
+                            }, offerReports = offerReports, onReports = { enabled ->
+                                Files.createDirectories(settings.clientDirectory)
+                                if (enabled) Files.deleteIfExists(reportPreference)
+                                else Files.writeString(reportPreference, "")
+                                offerReports = enabled
+                            })
+                            updates.ready?.let { release ->
+                                TextButton(updates::install, enabled = !updates.busy && !updates.rollbackBusy) {
+                                    Text("立即更新到 ${release.version}")
+                                }
                             }
+                            if (updates.message.isNotEmpty()) Text(updates.message)
                         },
-                        firstOpenGuide = true,
-                    )
+                    ) {
+                        WindowsTextbookHost(
+                            controller = controller,
+                            drafts = drafts,
+                            exams = exams,
+                            onRollback = updates::rollback,
+                            rollbackStatus = updates.rollbackStatus,
+                            rollbackBusy = updates.rollbackBusy || updates.busy,
+                            updateBanner = { idle -> UpdateBanner(updates, idle) },
+                            chooseReviewedBlocks = { pickReviewedBlocks(window) },
+                            chooseBooks = {
+                                withContext(Dispatchers.Swing) {
+                                    val dialog = FileDialog(window, "导入文件 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)
+                                    dialog.isMultipleMode = true
+                                    try {
+                                        dialog.isVisible = true
+                                        dialog.files.map { it.toPath() }
+                                    } finally { dialog.dispose() }
+                                }
+                            },
+                            chooseBook = {
+                                withContext(Dispatchers.Swing) {
+                                    val dialog = FileDialog(window, "导入文件 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)
+                                    try {
+                                        dialog.isVisible = true
+                                        dialog.file?.let { Path.of(dialog.directory, it) }
+                                    } finally { dialog.dispose() }
+                                }
+                            },
+                            firstOpenGuide = true,
+                        )
+                    }
                 }
             }
             TextbookCloseWarning(closeGuard)
@@ -397,7 +440,7 @@ private fun windowsBookController(directory: Path): TextbookController {
 }
 
 @Composable
-private fun LearningSyncEffect(identity: DesktopIdentity, profile: LearningProfile) {
+private fun LearningSyncEffect(identity: DesktopIdentity, profile: LearningProfile, status: SyncDisplay) {
     profile.scope?.takeIf { LearningJournal.enabled }?.let { account ->
         LaunchedEffect(identity,profile) {
             val credentials = identity.credentials
@@ -406,12 +449,19 @@ private fun LearningSyncEffect(identity: DesktopIdentity, profile: LearningProfi
             try {
                 while (isActive) {
                     try {
-                        withContext(Dispatchers.IO) {
-                            LearningTransfer(profile.directory.resolve("library.sqlite"),false).sync(account,remote,profile.epoch) { isActive }
-                            LearningTransfer(profile.directory.resolve("exams.sqlite"),true).sync(account,remote,profile.epoch) { isActive }
+                        val confirmed = withContext(Dispatchers.IO) {
+                            val library = LearningTransfer(profile.directory.resolve("library.sqlite"),false).sync(account,remote,profile.epoch) { isActive }
+                            val exams = LearningTransfer(profile.directory.resolve("exams.sqlite"),true).sync(account,remote,profile.epoch) { isActive }
+                            if (library && exams) status.confirm() else null
                         }
+                        status.record(confirmed)
                     } catch (cancel: CancellationException) { throw cancel }
                     catch (failure: Exception) {
+                        status.failure = when (failure) {
+                            is java.io.IOException -> "连接失败，请检查网络。"
+                            is java.sql.SQLException -> "暂时无法读写本机学习数据。"
+                            else -> "同步未完成，稍后会自动重试。"
+                        }
                         // The outbox keeps the change. The record stays on this computer until the user sends it.
                         runCatching { IncidentHooks.syncFailed("${failure.javaClass.name} ${failure.message.orEmpty()}") }
                     }

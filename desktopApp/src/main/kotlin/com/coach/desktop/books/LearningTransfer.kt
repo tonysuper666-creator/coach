@@ -95,9 +95,9 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
         }
     }
 
-    suspend fun sync(scope: String, remote: LearningRemote, profileEpoch: String? = null, current: () -> Boolean) {
+    suspend fun sync(scope: String, remote: LearningRemote, profileEpoch: String? = null, current: () -> Boolean): Boolean {
         require(scope.matches(Regex("sable-[0-9a-f]{64}")))
-        if (!current()) return
+        if (!current()) return false
         val state = write { db ->
             val owner = meta(db,"owner")
             if (owner != null && owner != scope) return@write null
@@ -110,13 +110,13 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
                 rows.getString(1)
             } }
             Triple(meta(db,"epoch"),meta(db,"cursor")?.toLong() ?: 0,stream)
-        } ?: return
-        if (profileEpoch != null && state.first != null && profileEpoch != state.first) return
-        val first = remote.changes(state.first ?: profileEpoch,state.second,state.third) ?: return
-        if (!current() || first["scope"]?.jsonPrimitive?.content != scope) return
+        } ?: return false
+        if (profileEpoch != null && state.first != null && profileEpoch != state.first) return false
+        val first = remote.changes(state.first ?: profileEpoch,state.second,state.third) ?: return false
+        if (!current() || first["scope"]?.jsonPrimitive?.content != scope) return false
         val epoch = first.getValue("epoch").jsonPrimitive.content
         val transport = first.getValue("transportEpoch").jsonPrimitive.content
-        if ((state.first != null && state.first != epoch) || (profileEpoch != null && profileEpoch != epoch)) return
+        if ((state.first != null && state.first != epoch) || (profileEpoch != null && profileEpoch != epoch)) return false
         val bound = write { db ->
             val existing = meta(db,"epoch")
             if (existing != null && existing != epoch) return@write false
@@ -128,13 +128,13 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
             save(db,"epoch",epoch)
             true
         }
-        if (!bound) return
+        if (!bound) return false
         var uploaded = false
         while (current()) {
             val operation = write { db -> next(db,epoch) } ?: break
-            val ack = LearningChunkTransfer.push(operation,scope,transport,remote,current) ?: return
+            val ack = LearningChunkTransfer.push(operation,scope,transport,remote,current) ?: return false
             if (!current() || ack["scope"]?.jsonPrimitive?.content != scope || ack["epoch"]?.jsonPrimitive?.content != epoch ||
-                ack["seq"] != operation["seq"]) return
+                ack["seq"] != operation["seq"]) return false
             write { db ->
                 db.prepareStatement("UPDATE learning_sync_outbox SET acknowledged=1 WHERE seq=? AND acknowledged=0").use { q ->
                     q.setLong(1,operation.getValue("seq").jsonPrimitive.long)
@@ -149,9 +149,9 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
             uploaded = true
         }
         var cursor = state.second
-        val checkpoint = if (uploaded) remote.changes(epoch,cursor,state.third) ?: return else first
+        val checkpoint = if (uploaded) remote.changes(epoch,cursor,state.third) ?: return false else first
         if (!current() || checkpoint["scope"]?.jsonPrimitive?.content != scope || checkpoint["epoch"]?.jsonPrimitive?.content != epoch ||
-            checkpoint["transportEpoch"]?.jsonPrimitive?.content != transport) return
+            checkpoint["transportEpoch"]?.jsonPrimitive?.content != transport) return false
         val backed = checkpoint.getValue("backedThrough").jsonPrimitive.long
         write { db ->
             db.prepareStatement("DELETE FROM learning_sync_outbox WHERE acknowledged=1 AND seq<=?").use { q ->
@@ -161,13 +161,13 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
         val needsSnapshot = checkpoint["snapshotRequired"]?.jsonPrimitive?.booleanOrNull == true ||
             write { meta(it,"restore_required") } == "1" ||
             (cursor == 0L && write { meta(it,"snapshot_done") } == null)
-        if (needsSnapshot) cursor = restore(scope,epoch,transport,remote,cursor,current) ?: return
-        var page = if (needsSnapshot) remote.changes(epoch,cursor,state.third) ?: return else checkpoint
+        if (needsSnapshot) cursor = restore(scope,epoch,transport,remote,cursor,current) ?: return false
+        var page = if (needsSnapshot) remote.changes(epoch,cursor,state.third) ?: return false else checkpoint
         while (current()) {
             if (page["scope"]?.jsonPrimitive?.content != scope || page["epoch"]?.jsonPrimitive?.content != epoch ||
-                page["transportEpoch"]?.jsonPrimitive?.content != transport || page["snapshotRequired"]?.jsonPrimitive?.booleanOrNull == true) return
+                page["transportEpoch"]?.jsonPrimitive?.content != transport || page["snapshotRequired"]?.jsonPrimitive?.booleanOrNull == true) return false
             val wire = page.getValue("changes").jsonArray
-            val changes = LearningChunkTransfer.readPage(path,wire,epoch,transport,null,remote,current) ?: return
+            val changes = LearningChunkTransfer.readPage(path,wire,epoch,transport,null,remote,current) ?: return false
             val applied = write { db ->
                 if (!current() || (meta(db,"cursor")?.toLong() ?: 0L) != cursor) return@write false
                 db.createStatement().use { sql ->
@@ -196,9 +196,11 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
                 LearningChunkTransfer.applied(db,wire)
                 true
             }
-            if (!applied || changes.isEmpty()) return
-            page = remote.changes(epoch,cursor,state.third) ?: return
+            if (!applied) return false
+            if (changes.isEmpty()) return true
+            page = remote.changes(epoch,cursor,state.third) ?: return false
         }
+        return false
     }
 
     private fun clearStage(db: Connection) = db.createStatement().use { q ->

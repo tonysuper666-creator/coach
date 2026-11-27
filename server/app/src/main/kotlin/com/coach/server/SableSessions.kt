@@ -19,7 +19,19 @@ import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 
 internal class SableUnavailable : Exception()
-internal class SableIdentity(val sub: String, val username: String)
+internal class SableIdentity(val sub: String, val username: String, val email: String = "", val displayName: String = "") {
+    // Keep only display-safe fields in the session cache.
+    fun display() = AccountDisplay(
+        displayName.takeIf { it.isNotBlank() && it.length <= 80 && '@' !in it && it.none(Char::isISOControl) }
+            ?: username.takeUnless { '@' in it } ?: "Sable 用户",
+        (email.ifBlank { username }).let { address ->
+            val parts = address.split('@')
+            if (parts.size == 2 && parts.all { it.isNotBlank() && it.none(Char::isISOControl) } && address.length <= 254)
+                parts.first().take(1) + "***@" + parts.last() else ""
+        },
+    )
+}
+internal data class AccountDisplay(val nickname: String, val maskedEmail: String)
 internal class SableWhoami(issuer: URI = URI.create(com.coach.client.SABLE_ORIGIN)) {
     init {
         require(issuer.toString() == com.coach.client.SABLE_ORIGIN ||
@@ -40,7 +52,7 @@ internal class SableWhoami(issuer: URI = URI.create(com.coach.client.SABLE_ORIGI
                 val username = body?.str("username").orEmpty()
                 if (sub.isBlank() || sub.length > 256 || username.isBlank() || username.length > 80 ||
                     username.any(Char::isISOControl)) throw SableUnavailable()
-                SableIdentity(sub, username)
+                SableIdentity(sub, username, body?.str("email").orEmpty(), body?.str("display_name").orEmpty())
             }
             else -> throw SableUnavailable()
         }
@@ -57,8 +69,10 @@ class SableSessions internal constructor(
     constructor(actor: LedgerActor, vaultDirectory: java.nio.file.Path, issuer: URI = URI.create(com.coach.client.SABLE_ORIGIN),
         now: () -> Long = System::currentTimeMillis) : this(actor, SableVault(vaultDirectory), SableWhoami(issuer)::lookup, now)
 
-    private class Verification(var checked: Long? = null) { val lock = Mutex() }
+    private class Verification(var checked: Long? = null, @Volatile var display: AccountDisplay? = null) { val lock = Mutex() }
     private val checks = ConcurrentHashMap<String, Verification>()
+
+    internal fun display(device: String) = checks[device]?.display
 
     internal fun forget(devices: List<String>) {
         devices.forEach(checks::remove)
@@ -72,7 +86,7 @@ class SableSessions internal constructor(
         val credential = (if (books == null) issue() else {
             books.withActiveAccount(UnifiedBookScope.fromSableFriend(com.coach.store.sableFriendName(id.sub))) { issue() }
         }) ?: return null
-        checks[credential.deviceId] = Verification(now())
+        checks[credential.deviceId] = Verification(now(), id.display())
         return credential
     }
 
@@ -95,6 +109,7 @@ class SableSessions internal constructor(
                 checks.remove(device, verification)
                 HttpStatusCode.Unauthorized
             } else {
+                verification.display = id.display()
                 verification.checked = now()
                 HttpStatusCode.OK
             }

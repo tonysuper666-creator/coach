@@ -116,13 +116,20 @@ internal class WindowsUpdate(private val manifest: URI, private val installed: S
         return if (major <= 255 && minor <= 255 && patch <= 65535) (major * 256 + minor) * 65536 + patch else null
     }
 
-    internal fun candidate(json: String): WindowsRelease? {
+    internal fun candidate(json: String, requireCompatible: Boolean = false): WindowsRelease? {
         val manifestData = Json.parseToJsonElement(json).jsonObject
         val packages = manifestData["packages"]?.jsonArray?.map { it.jsonObject } ?: listOf(manifestData)
-        val data = packages.singleOrNull { it.getValue("arch").jsonPrimitive.content == arch } ?: return null
+        val data = packages.singleOrNull { it.getValue("arch").jsonPrimitive.content == arch }
+            ?: return if (requireCompatible) error("No compatible package") else null
         fun field(name: String) = data.getValue(name).jsonPrimitive.content
         val version = field("version")
-        if ((versionNumber(version) ?: return null) <= (versionNumber(installed) ?: return null)) return null
+        val available = versionNumber(version)
+        val current = versionNumber(installed)
+        if (available == null || current == null) {
+            if (requireCompatible) error("Invalid version")
+            return null
+        }
+        if (available <= current) return null
         val file = field("file")
         require(file.matches(Regex("""[A-Za-z0-9][A-Za-z0-9._-]{0,180}\.msi""")))
         val size = field("size").toLong()
@@ -164,7 +171,7 @@ internal class WindowsUpdate(private val manifest: URI, private val installed: S
         }
     }
 
-    fun check(): WindowsRelease? = candidate(readManifest())
+    fun check(): WindowsRelease? = candidate(readManifest(), requireCompatible = true)
 
     internal fun readManifest(): String = read(manifest) { stream ->
         val bytes = stream.readNBytes(16385)

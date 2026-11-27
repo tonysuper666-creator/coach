@@ -45,8 +45,13 @@ import kotlinx.serialization.json.*
 import java.nio.file.Files
 import java.nio.file.Path
 
-/** A cited source block: [blockId] is `<bookHash>:p<page>:<index>`, exactly as the library import produced it. */
-internal data class Citation(val anchor: String, val blockId: String, val page: Int)
+/**
+ * A cited source block: [blockId] is `<bookHash>:p<page>:<index>`, exactly as the library import produced it.
+ * [anchor] is the service's marker label (`S1`, `S2`…) that appears as 【S1】 in the answer text, not a quote.
+ * [quote] is the cited block's own text, copied verbatim from the page it came from, so the citation can always
+ * be found again on that page (TON-1963). Empty for citations restored from older caches.
+ */
+internal data class Citation(val anchor: String, val blockId: String, val page: Int, val quote: String = "")
 internal data class Explanation(val text: String, val citations: List<Citation>, val elapsedMs: Long)
 internal sealed interface ExplainResult {
     data class Done(val explanation: Explanation) : ExplainResult
@@ -318,8 +323,8 @@ internal object ExplainWire {
             val block = sent.firstOrNull { it.id == id } ?: return ExplainResult.Refused("这次回答的出处无法核对。")
             val page = (source["pdfPage"] as? JsonPrimitive)?.intOrNull
             val anchor = (source["anchor"] as? JsonPrimitive)?.contentOrNull.orEmpty()
-            if (page != block.page || anchor.isBlank()) return ExplainResult.Refused("这次回答的出处无法核对。")
-            Citation(anchor, block.id, block.page)
+            if (page != block.page || anchor.isBlank() || block.text.isBlank()) return ExplainResult.Refused("这次回答的出处无法核对。")
+            Citation(anchor, block.id, block.page, block.text)
         }
         // A reply without a verified block reference is a refusal, never an explanation.
         // Keep the service's own sentence when it sent one; the fixed line is only the blank fallback.

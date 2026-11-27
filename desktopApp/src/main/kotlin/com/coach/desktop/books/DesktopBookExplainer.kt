@@ -15,6 +15,10 @@ import com.coach.desktop.DesktopIdentity
 import com.coach.desktop.DesktopPairing
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
+import com.coach.protocol.ReaderTransientReply
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -400,11 +404,12 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         return ExplainWire.parseGuide(checkNotNull(body), context)
     }
 
-    private suspend fun send(input: JsonObject, context: List<SourceBlock>, requestId: String): ExplainResult {
-        val (body, refused) = sendRaw(input, context, requestId)
-        if (refused != null) return refused
-        return ExplainWire.parse(checkNotNull(body), context)
-    }
+    private suspend fun send(input: JsonObject, context: List<SourceBlock>, requestId: String): ExplainResult =
+        retryTransientOnce(requestId) { id ->
+            val wire = if (id == requestId) input else JsonObject(input + ("requestId" to JsonPrimitive(id)))
+            val (body, refused) = sendRaw(wire, context, id)
+            refused ?: ExplainWire.parse(checkNotNull(body), context)
+        }
 
     private suspend fun sendRaw(input: JsonObject, context: List<SourceBlock>, requestId: String): Pair<JsonObject?, ExplainResult.Refused?> {
         val paired = identity ?: return null to if (revoked) {
@@ -444,7 +449,9 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
                         }
                     }
                 } catch (cancelled: CancellationException) {
-                    runCatching { http.cancelLibraryExplain(requestId) }
+                    // TON-1963: this coroutine is already cancelled, so a plain suspend call would throw before
+                    // anything left the machine and the service would keep the abandoned answer running.
+                    withContext(NonCancellable) { withTimeoutOrNull(CANCEL_NOTICE_MS) { http.cancelLibraryExplain(requestId) } }
                     throw cancelled
                 } finally {
                     http.close()
@@ -858,4 +865,26 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
             openSession()?.downloadBookOriginal(shelfBookId, destination, expectedSha256, onProgress)
                 ?: UnifiedBookDownloadOutcome.Unauthorized
     }
+}
+
+/** How long a cancelled explain waits to tell the service to stop; the cancel itself never waits for the answer. */
+private const val CANCEL_NOTICE_MS = 3_000L
+
+/**
+ * TON-1963: the service answers HTTP 200 with no sources and one of [ReaderTransientReply.retryable] when a single
+ * model attempt broke off (no first token, the stream stalled, the bridge failed, the JSON was unreadable, or the
+ * service was full). The same question usually succeeds on a fresh attempt, so ask once more under a new request id
+ * before showing the refusal. Every other result, including the total-time limit, is returned as it is.
+ */
+internal suspend fun retryTransientOnce(
+    requestId: String,
+    busyPauseMs: Long = 1_500,
+    newRequestId: () -> String = { UUID.randomUUID().toString().replace("-", "") },
+    attempt: suspend (requestId: String) -> ExplainResult,
+): ExplainResult {
+    val first = attempt(requestId)
+    val refusal = (first as? ExplainResult.Refused)?.message?.trim() ?: return first
+    if (!ReaderTransientReply.isRetryable(refusal)) return first
+    if (refusal == ReaderTransientReply.BUSY) delay(busyPauseMs)
+    return attempt(newRequestId())
 }

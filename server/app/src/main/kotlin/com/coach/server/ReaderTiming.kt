@@ -2,6 +2,7 @@ package com.coach.server
 
 import com.coach.ai.*
 import com.coach.protocol.ReaderTimeoutPolicy
+import com.coach.protocol.ReaderTransientReply
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 
@@ -21,9 +22,9 @@ internal enum class ReaderTimeoutStage { FIRST, GAP, TOTAL }
 internal class ReaderTimeout(val phase: ReaderTimeoutStage) : Exception(phase.name.lowercase()) {
     val stage get() = phase.name.lowercase()
     val userText get() = when (phase) {
-        ReaderTimeoutStage.FIRST -> "讲解正文迟迟未开始，已停止等待。可继续阅读或手动重试。"
-        ReaderTimeoutStage.GAP -> "讲解正文中途停止更新，已结束本次追问。可继续阅读或手动重试。"
-        ReaderTimeoutStage.TOTAL -> "讲解已达到本次总时长上限，已停止。可继续阅读或手动重试。"
+        ReaderTimeoutStage.FIRST -> ReaderTransientReply.FIRST_TIMEOUT
+        ReaderTimeoutStage.GAP -> ReaderTransientReply.GAP_TIMEOUT
+        ReaderTimeoutStage.TOTAL -> ReaderTransientReply.TOTAL_TIMEOUT
     }
 }
 

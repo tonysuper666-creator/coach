@@ -2638,6 +2638,26 @@ internal class TextbookLibrary(
         MasteryStore.loadConcept(db, conceptKey)
     }
 
+    /** 把一次作答记到能对上原句、且属于这一章的每个概念上。对不上的候选直接丢掉。 */
+    @Synchronized fun recordConceptAnswers(
+        book: Textbook,
+        expectedChapterId: String,
+        candidates: List<ConceptQuoteCandidate>,
+        kind: ConceptAnswerKind,
+        signal: LearnerSignalType,
+        guessed: Boolean,
+        questionId: String,
+        prompt: String = "",
+    ): Int = database().use { db ->
+        ConceptMasteryMap.record(
+            db, book, expectedChapterId, candidates, kind, signal, guessed, questionId, prompt, clock.millis(),
+        )
+    }
+
+    @Synchronized fun conceptMasteryMap(book: Textbook): List<ConceptMasteryChapter> = database().use { db ->
+        ConceptMasteryMap.load(db, book)
+    }
+
     @Synchronized fun learnerEvidenceEvents(conceptKey: String? = null, bookId: String? = null): List<LearnerEvidenceEvent> = database().use { db ->
         MasteryStore.listEvidenceEvents(db, conceptKey, bookId)
     }
@@ -3271,11 +3291,40 @@ internal class TextbookLibrary(
                         fsrsStability = fsrs?.stability,
                         nowMs = now,
                     )
+                    recordLessonConcept(db, checkNotNull(source), checkNotNull(section), practice, answer, mode, score, now)
                 }
                 if (ladder != null) saveLadderRow(db, book, ladder)
                 db.commit()
             } catch (failure: Exception) { db.rollback(); throw failure }
         }
+    }
+
+    /** 做题学的一道题：原句能在这一章对上才记成概念，对不上就不进掌握图。 */
+    private fun recordLessonConcept(
+        db: java.sql.Connection,
+        book: Textbook,
+        section: BookLesson,
+        practice: Practice,
+        answer: PracticeAnswer,
+        mode: QuestionMode,
+        score: Double,
+        nowMs: Long,
+    ) {
+        val quote = practice.reference.lineSequence().map { it.trim() }.firstOrNull { it.length in 12..180 } ?: return
+        val pageNo = practice.sourcePage ?: section.firstPage
+        val chapterId = BookChapterResolver.chapterForPage(book, pageNo)?.tocNodeId ?: return
+        ConceptMasteryMap.record(
+            db = db,
+            book = book,
+            expectedChapterId = chapterId,
+            candidates = listOf(ConceptQuoteCandidate(section.title, pageNo, quote, scoreRatio = score)),
+            kind = if (mode == QuestionMode.CHOICE) ConceptAnswerKind.MCQ else ConceptAnswerKind.RUBRIC,
+            signal = LearnerSignalType.POST_QUIZ_T1,
+            guessed = answer.guessed,
+            questionId = "${section.id}:${mode.name}",
+            prompt = practice.prompt,
+            nowMs = nowMs,
+        )
     }
 
     /**

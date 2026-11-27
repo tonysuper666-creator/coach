@@ -295,11 +295,34 @@ class LiteratureGuideTest {
         assertEquals(8, folioQuotes.size, folioQuotes.joinToString("\n"))
         assertTrue(folioQuotes.any { "public record number 1" in it })
 
-        val attached = "$before\nThe repository kept a public record of the weekly meeting.12\n" +
-            "Worth noting here that later writers used a different shelf order for the public cabinets."
+        val attached = "$before\nThe repository kept a public record of the weekly meeting.2\n" +
+            "The repository therefore kept a public record for the visitors who came that season."
         val attachedQuotes = quotesOf(attached)
         assertTrue(attachedQuotes.any { "weekly meeting" in it }, attachedQuotes.joinToString("\n"))
-        assertTrue(attachedQuotes.none { "shelf order" in it }, attachedQuotes.joinToString("\n"))
+        assertTrue(attachedQuotes.any { "visitors who came" in it }, attachedQuotes.joinToString("\n"))
+        val bodyAfterNote = "The repository therefore kept a public record for the visitors who came that season."
+        val bodyStart = attached.indexOf(bodyAfterNote)
+        val bodyBook = Textbook("shape", "Shape", "pdf", listOf(BookPage(1, attached, guideRegions = listOf(GuideRegion(attached)))))
+        val (bodyHit, bodyRule) = LiteratureCitationCheck.check(
+            listOf(GuideExcerpt(bodyBook, BookCompanionAnchor(1, "body", bodyStart, bodyStart + bodyAfterNote.length, bodyAfterNote), GuideRegion(attached))),
+            0,
+            "shape",
+            exactOcr,
+        )
+        assertNotNull(bodyHit)
+        assertEquals("ok", bodyRule)
+
+        val carried = "The archive closed the public cabinet for the season. 19 The society kept a public repository for visiting scholars during that decade."
+        val carriedQuotes = quotesOf(carried)
+        assertEquals(2, carriedQuotes.size, carriedQuotes.joinToString("\n"))
+        assertTrue(carriedQuotes.all { it in carried })
+        assertTrue(carriedQuotes.none { it.trim().startsWith("19") })
+        assertTrue(carriedQuotes.any { "visiting scholars" in it })
+
+        val sig = "The plate is marked Sig. Paolo Boccone described the specimen in the field book."
+        val sigQuotes = quotesOf(sig)
+        assertEquals(1, sigQuotes.size, sigQuotes.joinToString("\n"))
+        assertTrue("Sig. Paolo" in sigQuotes.single())
     }
 
     @Test fun equalByteBudgetGuaranteesAtLeastFifteenSentencesPerPaper() {

@@ -18,7 +18,7 @@ internal object LiteraturePassages {
         """(?i)^(?:endnotes?|footnotes?|notes(?:\s+to\s+(?:pages?|chapters?|the\s+text))?|参考文献|尾注|注释)\s*[:：]?$""",
     )
     private val bareNoteNumber = Regex("""^\d{1,3}[.)]?$""")
-    private val attachedNoteEnd = Regex("""(?<!\d)[.!?。！？]\d{1,3}\s*$""")
+    private val leadingNote = Regex("""^\s*\d{1,3}\s+""")
     private val noteNumberAtStart = Regex("""^(?:\[(\d{1,3})]|(?:(\d{1,3}))[.)]?)(?:\s|$)""")
     private val heading = Regex("""(?i)^(?:abstract|introduction|background|discussion|method(?:s|ology)?|results?|conclusions?|summary|appendix(?:\s+[A-Z0-9]+)?|引言|导言|摘要|背景|方法|结果|讨论|结论|小结|(?:[IVX]+\.|\d+(?:\.\d+)*[.)])\s+\p{L}.{1,80})$""")
     private val standaloneAbstract = Regex("""(?i)^(?:abstract|摘要)\s*[.:：]?$""")
@@ -55,7 +55,7 @@ internal object LiteraturePassages {
         "ph", "tr", "mr", "mrs", "ms", "dr", "st", "jr", "sr", "prof", "vol", "vols",
         "no", "nos", "pp", "p", "cf", "ed", "eds", "fig", "figs", "al", "etc", "eg", "ie",
         "ibid", "op", "cit", "loc", "vs", "ca", "ch", "esp", "viz", "rev", "trans",
-        "dept", "univ", "inc", "ltd", "mt", "ft", "gen", "col", "capt", "sgt",
+        "dept", "univ", "inc", "ltd", "mt", "ft", "gen", "col", "capt", "sgt", "sig",
     )
     private val compactSpace = Regex("""\s+""")
 
@@ -106,8 +106,9 @@ internal object LiteraturePassages {
     }
 
     /**
-     * The span sits on the sentence after a footnote marker. A page number at the top has no
-     * finished sentence before it, so it does not mark the following body sentence.
+     * The span sits on the sentence after a footnote marker on its own line.
+     * A note number glued to the previous body sentence, such as "look.8", is a callout.
+     * The next sentence is still body text. A page number at the top is not a marker either.
      */
     fun followsFootnoteMarker(pageText: String, start: Int): Boolean {
         if (start <= 0 || start > pageText.length) return false
@@ -115,7 +116,6 @@ internal object LiteraturePassages {
         val prevIndex = priorLines.indexOfLast(String::isNotEmpty)
         if (prevIndex < 0) return false
         val prev = priorLines[prevIndex]
-        if (attachedNoteEnd.containsMatchIn(prev)) return true
         if (!isBareNoteNumber(prev)) return false
         val number = noteNumber(prev) ?: return false
         return number >= 10 && priorLines.take(prevIndex).any { endsSentence(it) }
@@ -342,10 +342,13 @@ internal object LiteraturePassages {
                     val dropLead = skipFirst
                     var lead = dropLead
                     for ((a, b) in sentenceBounds(paragraph)) {
-                        val raw = paragraph.substring(a, b)
+                        var from = a
+                        val noteLead = leadingNote.find(paragraph.substring(a, b))
+                        if (noteLead != null && noteLead.range.first == 0) from = a + noteLead.value.length
+                        val raw = paragraph.substring(from, b)
                         val quote = raw.trim()
                         if (quote.isNotEmpty()) {
-                            val localStart = start + a + raw.indexOf(quote)
+                            val localStart = start + from + raw.indexOf(quote)
                             val localEnd = localStart + quote.length
                             val at = base + localStart
                             val pageTopTail = dropPageTop && at <= 220
@@ -353,6 +356,7 @@ internal object LiteraturePassages {
                             val blankTail = lead
                             lead = false
                             if (!pageTopTail && !blankTail &&
+                                !followsFootnoteMarker(page.text, at) &&
                                 !region.overlapsWideGap(localStart, localEnd) &&
                                 bodySentence(quote) &&
                                 region.containsSentence(quote)
@@ -462,7 +466,6 @@ internal object LiteraturePassages {
                             if (start < 0) start = offset
                             finish = offset + raw.length
                             proseLines++
-                            if (bottom && attachedNoteEnd.containsMatchIn(line)) footnotes = true
                         }
                     }
                     offset += raw.length + 1

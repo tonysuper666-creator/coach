@@ -504,6 +504,29 @@ class ExamPointDrillTest {
         assertTrue(check.systems.single().contains("中文题干对英文考点，按语义判断"))
     }
 
+    @Test
+    fun serverPrepareKeepsBodyPageWithFigureSubpanelsAndQuestionsWhenNotFollowingExercises() {
+        val figureBodyPage = """
+            2.4 Experimental Evidence on Usage
+            Figure 2.5 Usage shifts across categories
+            (a) Daytime usage increased sharply. (b) Nighttime usage rose slightly. (c) Peak load stayed flat.
+            Why did daytime usage respond more strongly than peak demand?
+            Randomized lottery assignment reveals substantial price sensitivity across households.
+        """.trimIndent()
+        val blocks = listOf(
+            CourseMaterialTextBlock("b44", "tb", "Book", "CORE_TEXTBOOK", 1, 44, 0, figureBodyPage),
+            CourseMaterialTextBlock("b45", "tb", "Book", "CORE_TEXTBOOK", 1, 45, 0,
+                "Second-year follow-up confirms higher outpatient visits without significant changes in biomarkers."),
+            CourseMaterialTextBlock("b54", "tb", "Book", "CORE_TEXTBOOK", 1, 54, 0,
+                "2.6 Exercises\nDetermine whether each of the following statements is true, false, or unclear.\n1. False claim."),
+            CourseMaterialTextBlock("b55", "tb", "Book", "CORE_TEXTBOOK", 1, 55, 0,
+                "2. Suppose fees fall by half. (a) Compute volume. (b) Derive surplus. (c) Compare outcomes?"),
+        )
+        val (kept, reason) = ExamPointDrillGate.prepare(blocks)
+        assertNull(reason)
+        assertEquals(listOf(44, 45), kept.map { it.page })
+    }
+
     private fun choiceObj(
         id: String,
         stem: String,

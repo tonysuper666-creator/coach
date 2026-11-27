@@ -166,6 +166,22 @@ class LiteratureComparisonTest {
         }
     }
 
+    @Test fun virtuosoMistranslationIsRewrittenBeforeTheTableIsKept() {
+        withPapers(2) { books ->
+            val input = LiteratureComparisonInput(books)
+            val table = requireNotNull(
+                input.verify(
+                    comparisonReply(input.request(), outlineCount = 3, badTermOf = books[0].id),
+                    pageOcr,
+                ).table,
+            )
+            val claim = table.rows[0].claim
+            assertEquals("模型把这群人叫做鉴赏家。", claim.text)
+            assertTrue(!claim.pending)
+            assertTrue("虚拳客" !in table.toMarkdown())
+        }
+    }
+
     @Test fun onePaperDoesNotBuildATable() {
         withPapers(1) { books ->
             val error = assertFailsWith<IllegalArgumentException> { LiteratureComparisonInput(books) }
@@ -227,6 +243,7 @@ internal fun comparisonReply(
     outlineCount: Int = 4,
     writeRelation: (Int) -> Boolean = { true },
     failRelationOf: String? = null,
+    badTermOf: String? = null,
     relationKind: ((index: Int) -> String)? = null,
 ): JsonObject {
     val blocks = request.getValue("blocks").jsonArray.map { it.jsonObject }
@@ -261,8 +278,11 @@ internal fun comparisonReply(
                 val claimRef = refs.first()
                 val methodRef = refs.getOrElse(1) { claimRef }
                 val other = ids[(index + 1) % ids.size]
-                val claimText = if (id == copyClaimOf) claimRef.getValue("text").jsonPrimitive.content
-                else "这篇用自己的话概括了主张，不复述原句。"
+                val claimText = when {
+                    id == badTermOf -> "模型把这群人叫做虚拳客。"
+                    id == copyClaimOf -> claimRef.getValue("text").jsonPrimitive.content
+                    else -> "这篇用自己的话概括了主张，不复述原句。"
+                }
                 add(buildJsonObject {
                     put("bookId", id)
                     put("claim", buildJsonObject {

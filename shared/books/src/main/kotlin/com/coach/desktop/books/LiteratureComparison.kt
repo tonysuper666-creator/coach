@@ -384,7 +384,7 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
         bookId: String,
         cite: (Int?, String) -> GuideExcerpt?,
     ): ComparisonCell {
-        val text = (raw?.get("text") as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+        val text = polishTerms((raw?.get("text") as? JsonPrimitive)?.contentOrNull?.trim().orEmpty())
         val ref = (raw?.get("ref") as? JsonPrimitive)?.intOrNull
         if (!acceptableProse(text, 80)) return pendingCell()
         val source = cite(ref, bookId) ?: return pendingCell()
@@ -422,7 +422,7 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
             val obj = element as? JsonObject ?: return@forEach
             seen++
             if (points.size >= 6) return@forEach
-            val thesis = (obj["thesis"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+            val thesis = polishTerms((obj["thesis"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty())
             if (!acceptableProse(thesis, 120)) return@forEach
             points += OutlinePoint(
                 thesis = thesis,
@@ -522,7 +522,8 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
             }
             fun cell(obj: JsonObject?): ComparisonCell? {
                 if (obj == null) return null
-                val text = (obj["text"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty().ifBlank { COMPARISON_PENDING }
+                val text = polishTerms((obj["text"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty())
+                    .ifBlank { COMPARISON_PENDING }
                 val storedPending = (obj["pending"] as? JsonPrimitive)?.booleanOrNull == true
                 val source = resolve(obj["source"] as? JsonObject)
                 val pending = storedPending || source == null
@@ -585,7 +586,7 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
                 val supports = sides("supports") ?: return@mapNotNull null
                 val opposes = sides("opposes") ?: return@mapNotNull null
                 OutlinePoint(
-                    thesis = (obj["thesis"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty(),
+                    thesis = polishTerms((obj["thesis"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()),
                     supports = supports,
                     opposes = opposes,
                 )
@@ -617,6 +618,8 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
 }
 
 private fun pendingCell() = ComparisonCell(COMPARISON_PENDING, null, pending = true)
+
+private fun polishTerms(text: String) = text.replace("虚拳客", "鉴赏家")
 
 private fun acceptableProse(text: String, limit: Int): Boolean =
     text.isNotBlank() && text.length <= limit && LiteraturePassages.substantive(text) && !LiteraturePassages.hasLeakedRef(text)

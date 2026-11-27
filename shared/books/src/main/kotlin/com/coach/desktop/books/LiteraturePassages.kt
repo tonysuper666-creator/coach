@@ -506,7 +506,17 @@ internal object LiteraturePassages {
                     val marker = isBareNoteNumber(line) || note.containsMatchIn(line) ||
                         (bottom && bottomBareNote.containsMatchIn(line)) ||
                         (bottomBareNote.containsMatchIn(line) && number >= 10 && afterBody)
-                    val footnoteLine = line.isNotEmpty() && (isFootnoteSentence(line) || marker)
+                    val open = if (start >= 0) region.text.substring(start, finish.coerceAtMost(region.text.length)) else ""
+                    val unfinished = start >= 0 && open.isNotBlank() && !endsSentence(open)
+                    val nextLine = regionLines.getOrNull(index + 1)?.trim().orEmpty()
+                    val nextIsNote = nextLine.isEmpty() || isFootnoteSentence(nextLine) || isBareNoteNumber(nextLine) ||
+                        note.containsMatchIn(nextLine) || bottomBareNote.containsMatchIn(nextLine)
+                    // A superscript note mark is its own line when its baseline sits above the words it follows.
+                    // That line is not the note. The sentence keeps going, including when the next word is capitalized.
+                    val superscriptInsideSentence = unfinished && isBareNoteNumber(line) && number >= 10 && !nextIsNote
+                    val continuesOpenSentence = unfinished && !marker
+                    val footnoteLine = line.isNotEmpty() && !continuesOpenSentence && !superscriptInsideSentence &&
+                        (isFootnoteSentence(line) || marker)
                     when {
                         backMatter -> break
                         isBackMatter -> {
@@ -532,6 +542,7 @@ internal object LiteraturePassages {
                             prevCaptionEnded = endsSentence(line)
                         }
                         LiteratureScaffoldNoise.isKeywordsOrMetaLine(line) -> finishParagraph()
+                        superscriptInsideSentence -> Unit
                         footnoteLine -> {
                             finishParagraph()
                             footnoteLines++

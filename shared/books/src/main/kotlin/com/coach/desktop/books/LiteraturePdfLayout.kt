@@ -528,7 +528,7 @@ internal data class GuideRegion(
     val printedPage: String? = null,
     val sourceOrder: String = text,
     val wideGapRanges: List<IntRange> = emptyList(),
-    /** Character spans in the note zone: bottom of the column, smaller than body, after a rule or a large gap. */
+    /** Character spans in the note zone: below a separator line, and smaller than the body. */
     val footnoteRanges: List<IntRange> = emptyList(),
 ) {
     private val continuous by lazy { LiteratureTextNorm.normalize(sourceOrder) }
@@ -542,6 +542,7 @@ internal object LiteraturePdfLayout {
     private data class Word(val text: String, val x: Float, val right: Float, val y: Float, val height: Float)
     private data class Row(val y: Float, val words: MutableList<Word> = mutableListOf())
     private data class DrawnRule(val displayY: Float, val minX: Float, val maxX: Float)
+    private data class RuleSub(val minX: Double, val minY: Double, val maxX: Double, val maxY: Double)
     private val folio = Regex("""(?i)^(?:p(?:age)?\.?\s*)?(\d{1,4}|[ivxlcdm]{1,6})$""")
     private val textRule = Regex("""^[_\-=–—―\s]{4,}$""")
 
@@ -558,11 +559,10 @@ internal object LiteraturePdfLayout {
     )
 
     /**
-     * Note zone: the trailing run of smaller-than-body lines that reaches the bottom of the
-     * column, after a large gap or a rule. A long note can start above the midline; cutting at
-     * 55% of the column left the upper lines of that run unmarked, and the lines below them are
-     * only a normal note-leading apart, so the whole note stayed in the candidate pool.
-     * Equal-size body text is never in the zone. A short body-sized folio under the note is not the zone.
+     * Note zone: lines below a separator that are smaller than the body.
+     * A separator is a drawn rule or a text rule. A gap, or sitting near the bottom, is not one.
+     * Body above the rule stays body, including a block that is smaller than a heading.
+     * A long note can start above the midline when the rule does. A short body-sized folio is not the zone.
      */
     internal fun layoutFootnoteRanges(
         lines: List<FootnoteLine>,
@@ -574,46 +574,64 @@ internal object LiteraturePdfLayout {
         val top = lines.minOf { it.y }
         val span = lines.maxOf { it.y } - top
         if (span < bodyHeight * 4f) return emptyList()
-        val smallerThanBody = bodyHeight * 0.92f
-        fun blank(index: Int) = lines[index].rule || lines[index].end <= lines[index].start
-        fun previousContent(index: Int): Int? {
-            var cursor = index - 1
-            while (cursor >= 0) {
-                if (!blank(cursor)) return cursor
-                cursor--
+        val readingSize = readingBodySize(lines, bodyHeight)
+        val smallerThanBody = readingSize * 0.92f
+        val margin = readingSize * 0.1f
+        fun content(line: FootnoteLine) = !line.rule && line.end > line.start
+        fun folio(line: FootnoteLine) = line.size >= smallerThanBody && line.end - line.start <= 8
+        // Body must sit above the rule, and every content line below it must be smaller
+        // (a short body-sized folio does not count). A rule with body under it is a heading rule.
+        fun notesOnlyBelow(y: Float): Boolean {
+            var seenSmall = false
+            for (line in lines) {
+                if (!content(line) || line.y <= y + margin) continue
+                if (folio(line)) continue
+                if (line.size < smallerThanBody) {
+                    seenSmall = true
+                    continue
+                }
+                return false
             }
-            return null
+            return seenSmall
         }
-        fun separated(prevIndex: Int, index: Int): Boolean {
-            val prev = lines[prevIndex]
-            val line = lines[index]
-            if (line.y - prev.y > bodyHeight * 1.6f) return true
-            val low = prev.y + bodyHeight * 0.25f
-            val high = line.y - bodyHeight * 0.1f
-            if (high > low && separatorYs.any { it in low..high }) return true
-            return ((prevIndex + 1) until index).any { lines[it].rule }
-        }
-        fun trailingFolio(index: Int): Boolean {
-            val line = lines[index]
-            if (blank(index)) return true
-            if (line.size < smallerThanBody) return false
-            return line.end - line.start <= 8
-        }
-        var anchor = lines.lastIndex
-        while (anchor >= 0 && trailingFolio(anchor)) anchor--
-        if (anchor < 0 || lines[anchor].size >= smallerThanBody) return emptyList()
-        var tail = anchor
-        while (tail > 0 && (blank(tail - 1) || lines[tail - 1].size < smallerThanBody)) tail--
-        val prev = previousContent(tail) ?: return emptyList()
-        val firstNote = (tail..anchor).first { !blank(it) }
-        if (!separated(prev, firstNote)) return emptyList()
+        val ruleYs = ArrayList<Float>(separatorYs.size + lines.size)
+        ruleYs.addAll(separatorYs)
+        for (line in lines) if (line.rule) ruleYs.add(line.y)
+        val ruleY = ruleYs.filter { y ->
+            val aboveBody = lines.any { line ->
+                content(line) && line.y < y - margin && line.size >= smallerThanBody
+            }
+            aboveBody && notesOnlyBelow(y)
+        }.maxOrNull() ?: return emptyList()
         val ranges = mutableListOf<IntRange>()
-        for (index in tail until lines.size) {
-            val line = lines[index]
-            if (blank(index) || line.size >= smallerThanBody) continue
+        for (line in lines) {
+            if (!content(line) || line.y <= ruleY + margin) continue
+            if (line.size >= smallerThanBody) continue
             ranges += line.start until line.end
         }
         return ranges
+    }
+
+    /**
+     * Size of the reading text. The most common size in the upper part of the column,
+     * so a few larger headings do not become the body and a long note run does not either.
+     * [fallback] is the column median, used when the upper part is too small to judge.
+     */
+    internal fun readingBodySize(lines: List<FootnoteLine>, fallback: Float): Float {
+        val content = lines.filter { !it.rule && it.end > it.start && it.size > 0f }
+        if (content.size < 4 || fallback <= 0f) return fallback
+        val top = content.minOf { it.y }
+        val span = content.maxOf { it.y } - top
+        if (span < fallback * 4f) return fallback
+        val cut = top + span * 0.60f
+        val upper = content.filter { it.y <= cut }
+        val sample = if (upper.size >= 4) upper else content
+        val best = sample.groupBy { kotlin.math.round(it.size * 2f).toInt() }
+            .maxWithOrNull(compareBy<Map.Entry<Int, List<FootnoteLine>>> { it.value.size }.thenBy { it.key })
+            ?: return fallback
+        val size = best.key / 2f
+        if (size < fallback * 0.75f || size > fallback * 1.60f) return fallback
+        return size
     }
 
     /**
@@ -706,7 +724,6 @@ internal object LiteraturePdfLayout {
         rows.forEach { it.words.sortBy(Word::x) }
         val positiveHeights = words.map { it.height }.filter { it > 0f }.sorted()
         val bodyHeight = if (positiveHeights.isNotEmpty()) positiveHeights[positiveHeights.size / 2] else 10f
-        val proseHeight = proseBodyHeight(words.map { it.y to it.height }, bodyHeight)
 
         // Search vertical gutter across the actual visible word span (handles both cropped scans and IEEE/ACL 2-column papers).
         val halfGap = maxOf(3f, minOf(bodyHeight * 0.65f, spanWidth * 0.008f))
@@ -869,7 +886,7 @@ internal object LiteraturePdfLayout {
             val separatorYs = drawnRules
                 .filter { it.maxX >= columnMinX && it.minX <= columnMaxX }
                 .map { it.displayY }
-            val footnoteRanges = layoutFootnoteRanges(builtLines, proseHeight, separatorYs)
+            val footnoteRanges = layoutFootnoteRanges(builtLines, bodyHeight, separatorYs)
             val reference = object : BookPdfStripper() {
                 override fun processTextPosition(position: BookPdfTextPosition) {
                     if (!insideCropBox(position, crop)) return
@@ -886,7 +903,12 @@ internal object LiteraturePdfLayout {
         }
     }
 
-    /** Thin wide strokes. Display Y matches yDirAdj (top-down). A bad page yields no rules, and the gap test still applies. */
+    /**
+     * Thin wide strokes, including rules drawn inside a form.
+     * Display Y matches yDirAdj: crop height minus the crop-adjusted user Y, which is upperRightY minus raw user Y.
+     * Each subpath is judged on its own, so a rule that shares a path with a taller stroke is still found.
+     * A bad page yields no rules. Without a rule the note zone stays empty.
+     */
     private fun horizontalRules(pdfPage: BookPdfPage): List<DrawnRule> {
         if (Math.floorMod(pdfPage.rotation, 360) != 0) return emptyList()
         val crop = pdfPage.cropBox
@@ -894,6 +916,7 @@ internal object LiteraturePdfLayout {
         return try {
             val found = mutableListOf<DrawnRule>()
             object : BookPdfGraphicsEngine(pdfPage) {
+                private val subs = mutableListOf<RuleSub>()
                 private var minX = 0.0
                 private var minY = 0.0
                 private var maxX = 0.0
@@ -901,23 +924,49 @@ internal object LiteraturePdfLayout {
                 private var open = false
                 private var current = newBookPdfPoint()
                 private var subpath = newBookPdfPoint()
+                private fun closeSub() {
+                    if (!open) return
+                    subs += RuleSub(minX, minY, maxX, maxY)
+                    open = false
+                }
+                private fun begin(x: Double, y: Double) {
+                    if (!x.isFinite() || !y.isFinite()) return
+                    closeSub()
+                    minX = x
+                    maxX = x
+                    minY = y
+                    maxY = y
+                    open = true
+                }
                 private fun point(x: Double, y: Double) {
                     if (!x.isFinite() || !y.isFinite()) return
                     if (!open) {
-                        minX = x
-                        maxX = x
-                        minY = y
-                        maxY = y
-                        open = true
-                    } else {
-                        minX = minOf(minX, x)
-                        maxX = maxOf(maxX, x)
-                        minY = minOf(minY, y)
-                        maxY = maxOf(maxY, y)
+                        begin(x, y)
+                        return
                     }
+                    minX = minOf(minX, x)
+                    maxX = maxOf(maxX, x)
+                    minY = minOf(minY, y)
+                    maxY = maxOf(maxY, y)
+                }
+                private fun commit() {
+                    closeSub()
+                    for (sub in subs) {
+                        val width = sub.maxX - sub.minX
+                        val height = sub.maxY - sub.minY
+                        if (width >= 24.0 && height <= 3.0 && width >= height * 8.0) {
+                            val center = ((sub.minY + sub.maxY) / 2.0).toFloat()
+                            found += DrawnRule(crop.upperRightY - center, sub.minX.toFloat(), sub.maxX.toFloat())
+                        }
+                    }
+                    subs.clear()
+                }
+                private fun discard() {
+                    open = false
+                    subs.clear()
                 }
                 override fun moveTo(x: Float, y: Float) {
-                    point(x.toDouble(), y.toDouble())
+                    begin(x.toDouble(), y.toDouble())
                     current = newBookPdfPoint(x, y)
                     subpath = current
                 }
@@ -931,30 +980,42 @@ internal object LiteraturePdfLayout {
                     lineTo(x3, y3)
                 }
                 override fun appendRectangle(a: BookPdfPoint, b: BookPdfPoint, c: BookPdfPoint, d: BookPdfPoint) {
-                    listOf(a, b, c, d).forEach { point(it.x, it.y) }
+                    closeSub()
+                    val xs = listOf(a.x, b.x, c.x, d.x).map { it.toDouble() }
+                    val ys = listOf(a.y, b.y, c.y, d.y).map { it.toDouble() }
+                    subs += RuleSub(xs.min(), ys.min(), xs.max(), ys.max())
                     current = newBookPdfPoint(a.x.toFloat(), a.y.toFloat())
                     subpath = current
                 }
-                private fun paint() {
-                    if (open) {
-                        val width = maxX - minX
-                        val height = maxY - minY
-                        if (width >= 36.0 && height <= 2.5) {
-                            val center = ((minY + maxY) / 2.0).toFloat()
-                            found += DrawnRule(crop.upperRightY - center, minX.toFloat(), maxX.toFloat())
-                        }
-                    }
-                    open = false
-                }
-                override fun strokePath() = paint()
-                override fun fillPath(windingRule: BookPdfFillRule) = paint()
-                override fun fillAndStrokePath(windingRule: BookPdfFillRule) = paint()
-                override fun endPath() { open = false }
+                override fun strokePath() = commit()
+                override fun fillPath(windingRule: BookPdfFillRule) = commit()
+                override fun fillAndStrokePath(windingRule: BookPdfFillRule) = commit()
+                override fun endPath() = discard()
                 override fun closePath() { current = subpath }
                 override fun getCurrentPoint(): BookPdfPoint = current
                 override fun clip(windingRule: BookPdfFillRule) {}
                 override fun shadingFill(shadingName: BookPdfName) {}
-                override fun showForm(form: BookPdfForm) {}
+                override fun showForm(form: BookPdfForm) {
+                    val saved = subs.toList()
+                    val savedOpen = open
+                    val savedMinX = minX
+                    val savedMinY = minY
+                    val savedMaxX = maxX
+                    val savedMaxY = maxY
+                    subs.clear()
+                    open = false
+                    try {
+                        super.showForm(form)
+                    } finally {
+                        subs.clear()
+                        subs.addAll(saved)
+                        open = savedOpen
+                        minX = savedMinX
+                        minY = savedMinY
+                        maxX = savedMaxX
+                        maxY = savedMaxY
+                    }
+                }
                 override fun drawImage(image: BookPdfImage) {}
             }.processPage(pdfPage)
             found

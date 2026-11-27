@@ -374,19 +374,21 @@ class LiteratureGuideTest {
         assertEquals("ok", bodyRule)
     }
 
-    @Test fun layoutFootnoteRangesNeedBottomSmallerTypeAndASeparator() {
+    @Test fun layoutFootnoteRangesNeedASeparatorAndSmallerTypeBelowIt() {
         val body = (0 until 8).map { i ->
             LiteraturePdfLayout.FootnoteLine(y = 40f + i * 12f, size = 10f, start = i * 20, end = i * 20 + 18)
         }
         val note = LiteraturePdfLayout.FootnoteLine(y = 156f, size = 8f, start = 200, end = 240)
         val noteNext = LiteraturePdfLayout.FootnoteLine(y = 166f, size = 8f, start = 241, end = 280)
-        val ranges = LiteraturePdfLayout.layoutFootnoteRanges(body + note + noteNext, bodyHeight = 10f)
-        assertTrue(ranges.any { 200 in it && 239 in it }, ranges.toString())
-        assertTrue(ranges.any { 241 in it }, ranges.toString())
-        assertTrue(ranges.none { it.first < 200 }, ranges.toString())
+        // A gap under the body is not a separator. The same lines stay body until a rule is present.
+        assertTrue(LiteraturePdfLayout.layoutFootnoteRanges(body + note + noteNext, bodyHeight = 10f).isEmpty())
+        val ruledNotes = LiteraturePdfLayout.layoutFootnoteRanges(body + note + noteNext, 10f, listOf(146f))
+        assertTrue(ruledNotes.any { 200 in it && 239 in it }, ruledNotes.toString())
+        assertTrue(ruledNotes.any { 241 in it }, ruledNotes.toString())
+        assertTrue(ruledNotes.none { it.first < 200 }, ruledNotes.toString())
 
         val sameSize = LiteraturePdfLayout.FootnoteLine(y = 156f, size = 10f, start = 200, end = 240)
-        assertTrue(LiteraturePdfLayout.layoutFootnoteRanges(body + sameSize, 10f).isEmpty())
+        assertTrue(LiteraturePdfLayout.layoutFootnoteRanges(body + sameSize, 10f, listOf(146f)).isEmpty())
 
         val tight = LiteraturePdfLayout.FootnoteLine(y = 136f, size = 8f, start = 200, end = 240)
         assertTrue(LiteraturePdfLayout.layoutFootnoteRanges(body + tight, 10f).isEmpty())
@@ -394,6 +396,7 @@ class LiteratureGuideTest {
         val ruled = LiteraturePdfLayout.FootnoteLine(y = 124f, size = 8f, start = 200, end = 240)
         val byRule = LiteraturePdfLayout.layoutFootnoteRanges(body.dropLast(1) + ruled, 10f, listOf(118f))
         assertTrue(byRule.any { 200 in it }, byRule.toString())
+        assertTrue(byRule.none { it.first < 200 }, byRule.toString())
 
         val ruleLine = LiteraturePdfLayout.FootnoteLine(y = 118f, size = 10f, start = 180, end = 190, rule = true)
         val afterRule = LiteraturePdfLayout.FootnoteLine(y = 126f, size = 8f, start = 200, end = 240)
@@ -401,7 +404,25 @@ class LiteratureGuideTest {
         assertTrue(byTextRule.any { 200 in it }, byTextRule.toString())
         assertTrue(byTextRule.none { 180 in it }, byTextRule.toString())
 
-        // A note block that starts above the old 55% cut still reaches the bottom, so the whole run is a note.
+        // Smaller lines above the rule stay body. The rule is the line between that block and the notes.
+        val quote = (0 until 3).map { i ->
+            LiteraturePdfLayout.FootnoteLine(y = 136f + i * 10f, size = 9f, start = 700 + i * 30, end = 724 + i * 30)
+        }
+        val belowQuote = listOf(
+            LiteraturePdfLayout.FootnoteLine(y = 180f, size = 8f, start = 200, end = 240),
+            LiteraturePdfLayout.FootnoteLine(y = 190f, size = 8f, start = 241, end = 280),
+        )
+        val quoteRanges = LiteraturePdfLayout.layoutFootnoteRanges(body + quote + belowQuote, 10f, listOf(170f))
+        assertTrue(quoteRanges.any { 200 in it } && quoteRanges.any { 241 in it }, quoteRanges.toString())
+        assertTrue(quoteRanges.none { range -> quote.any { it.start in range } }, quoteRanges.toString())
+
+        val heading = (0 until 2).map { i ->
+            LiteraturePdfLayout.FootnoteLine(y = 16f + i * 16f, size = 14f, start = i * 12, end = i * 12 + 8)
+        }
+        val underHeading = LiteraturePdfLayout.layoutFootnoteRanges(heading + body, 10f, listOf(48f))
+        assertTrue(underHeading.isEmpty(), underHeading.toString())
+
+        // A note block that starts above the old 55% cut is still a note when the rule is above it.
         val longNotes = (0 until 10).map { i ->
             LiteraturePdfLayout.FootnoteLine(y = 150f + i * 12f, size = 8f, start = 1000 + i * 40, end = 1030 + i * 40)
         }
@@ -409,7 +430,8 @@ class LiteratureGuideTest {
         val longSpan = longPage.maxOf { it.y } - longPage.minOf { it.y }
         val oldBottomCut = longPage.minOf { it.y } + longSpan * 0.55f
         assertTrue(longNotes.first().y < oldBottomCut, "note block starts above the old bottom cut")
-        val longRanges = LiteraturePdfLayout.layoutFootnoteRanges(longPage, 10f)
+        assertTrue(LiteraturePdfLayout.layoutFootnoteRanges(longPage, 10f).isEmpty())
+        val longRanges = LiteraturePdfLayout.layoutFootnoteRanges(longPage, 10f, listOf(140f))
         assertTrue(longRanges.any { longNotes.first().start in it }, longRanges.toString())
         assertTrue(longRanges.any { longNotes.last().start in it }, longRanges.toString())
         assertTrue(longRanges.none { it.first < 1000 }, longRanges.toString())
@@ -418,10 +440,10 @@ class LiteratureGuideTest {
         val afterMiddle = (0 until 4).map { i ->
             LiteraturePdfLayout.FootnoteLine(y = 100f + i * 12f, size = 10f, start = 500 + i * 20, end = 518 + i * 20)
         }
-        assertTrue(LiteraturePdfLayout.layoutFootnoteRanges(body.take(3) + middle + afterMiddle, 10f).isEmpty())
+        assertTrue(LiteraturePdfLayout.layoutFootnoteRanges(body.take(3) + middle + afterMiddle, 10f, listOf(74f)).isEmpty())
 
         val folio = LiteraturePdfLayout.FootnoteLine(y = 280f, size = 10f, start = 1400, end = 1403)
-        val withFolio = LiteraturePdfLayout.layoutFootnoteRanges(longPage + folio, 10f)
+        val withFolio = LiteraturePdfLayout.layoutFootnoteRanges(longPage + folio, 10f, listOf(140f))
         assertTrue(withFolio.any { longNotes.first().start in it }, withFolio.toString())
         assertTrue(withFolio.none { 1400 in it }, withFolio.toString())
 
@@ -466,6 +488,24 @@ class LiteratureGuideTest {
         val plain = "The repository kept a public record " + "for the visitors who came ".repeat(28) + "before the season closed."
         assertTrue(plain.length > 650, "length=${plain.length}")
         assertTrue(quotesOf(plain).isEmpty(), quotesOf(plain).joinToString("\n"))
+
+        // The closing quote can sit before the period, and the note digits can be their own line.
+        val quoteThenPeriod = "The keeper was not the clerk of the R. Society when the list cited Ph.Tr. N.143 before the public business of that society\u2019.12"
+        val periodQuotes = quotesOf(quoteThenPeriod)
+        assertEquals(1, periodQuotes.size, periodQuotes.joinToString("\n"))
+        assertTrue("N.143" in periodQuotes.single() && periodQuotes.single().endsWith("\u2019."))
+        assertFalse(periodQuotes.single().last().isDigit())
+
+        val head = "The keeper was not the clerk of the R."
+        val tail = "Society when the list cited Ph.Tr. N.143 before the public business of that society\u2019."
+        val following = "Visitors described the cabinets in enough detail to reconstruct the early arrangement."
+        val split = "$head\n58\n$tail\n\n$following"
+        val splitQuotes = quotesOf(split)
+        val citedSplit = splitQuotes.single { "N.143" in it }
+        assertTrue("clerk of the R." in citedSplit && "Society when" in citedSplit, citedSplit)
+        assertTrue(citedSplit.endsWith("\u2019."), citedSplit)
+        assertFalse("Visitors described" in citedSplit, citedSplit)
+        assertTrue(splitQuotes.any { "Visitors described" in it && "N.143" !in it }, splitQuotes.joinToString("\n"))
     }
 
     @Test fun equalByteBudgetGuaranteesAtLeastFifteenSentencesPerPaper() {

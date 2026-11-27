@@ -291,6 +291,7 @@ internal fun runWindowsTextbooks() {
                                 } finally { dialog.dispose() }
                             }
                         },
+                        firstOpenGuide = true,
                     )
                     WindowsUpdatePrompt(save = {
                         controller.state.first { !it.busy }
@@ -355,7 +356,12 @@ internal fun TextbookCloseWarning(guard: TextbookCloseGuard) {
 @Composable
 internal fun WindowsTextbooksContent(directory: Path, chooseBook: suspend () -> Path?) {
     val controller = remember(directory) { windowsBookController(directory) }
-    WindowsTextbookHost(controller, chooseReviewedBlocks = { pickReviewedBlocks(null) }, chooseBook = chooseBook)
+    WindowsTextbookHost(
+        controller,
+        chooseReviewedBlocks = { pickReviewedBlocks(null) },
+        chooseBook = chooseBook,
+        firstOpenGuide = true,
+    )
 }
 
 private suspend fun pickReviewedBlocks(owner: java.awt.Frame?): List<Path> = withContext(Dispatchers.Swing) {

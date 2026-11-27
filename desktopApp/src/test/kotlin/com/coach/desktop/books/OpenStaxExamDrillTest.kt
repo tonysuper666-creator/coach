@@ -31,8 +31,8 @@ class OpenStaxExamDrillTest {
             try {
                 val source = Files.newDirectoryStream(Path.of(corpus, "textbooks", "openstax-$slug"), "*.pdf")
                     .use { it.single() }
-                val library = TextbookLibrary(directory, lazyPdfExtras = false)
-                val book = library.stageBookImport(source).book
+                val library = TextbookLibrary(directory, lazyPdfExtras = true)
+                val book = library.indexBookTier1(library.stageBookImportTier0(source).book.id)
                 val detail = library.withCourseDatabase { db ->
                     val (course, _) = CourseStore.createCourse(db, slug, CourseExamProfile(examEnabled = true), listOf(book.id))
                     CourseAutoAligner.alignLocally(db, course)

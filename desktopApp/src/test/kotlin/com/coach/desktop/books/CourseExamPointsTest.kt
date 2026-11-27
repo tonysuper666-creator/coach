@@ -63,6 +63,7 @@ class CourseExamPointsTest {
                 val (course, _) = CourseStore.createCourse(db, "Astronomy", CourseExamProfile(examEnabled = true), listOf(bookId))
                 val detail = CourseAutoAligner.alignLocally(db, course)
                 val points = detail.examinableTopics.filter { it.weekLabel == CourseExamPoints.LABEL }
+                assertTrue(CourseStore.isChapterTopicLabel(detail.examinableTopics.first().weekLabel))
                 assertEquals(mapOf("Tidal locking" to 1, "Orbital resonance" to 2),
                     points.associate { it.title to it.sources.single().startPage })
                 assertTrue(points.all { it.sources.single().bookId == bookId })

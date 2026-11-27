@@ -402,9 +402,7 @@ internal object LiteratureQuiz {
         ) {
             return (null to "offset_mismatch:page=${anchor.pdfPage}").also { refOutcomes[ref] = it }
         }
-        if (LiteraturePassages.isFootnoteSentence(anchor.quoteAnchor) ||
-            LiteraturePassages.followsFootnoteMarker(pageText, anchor.startUtf16)
-        ) {
+        if (LiteraturePassages.rejectedFootnote(excerpt)) {
             return (null to LiteraturePassages.FOOTNOTE_REJECTION).also { refOutcomes[ref] = it }
         }
         if (!LiteraturePassages.bodySentence(anchor.quoteAnchor)) {
@@ -449,15 +447,13 @@ internal object LiteratureQuiz {
     private fun quizCandidates(excerpts: List<GuideExcerpt>): List<GuideExcerpt> {
         val dropPages = excerpts.groupBy { it.book.id to it.anchor.pdfPage }
             .filter { (_, items) ->
-                val notes = items.count { isFooterCitation(it.anchor.quoteAnchor) }
+                val notes = items.count { LiteraturePassages.rejectedFootnote(it) }
                 notes >= 3 && notes * 2 >= items.size
             }.keys
         return excerpts.filter {
-            (it.book.id to it.anchor.pdfPage) !in dropPages && !isFooterCitation(it.anchor.quoteAnchor)
+            (it.book.id to it.anchor.pdfPage) !in dropPages && !LiteraturePassages.rejectedFootnote(it)
         }
     }
-
-    private fun isFooterCitation(quote: String): Boolean = LiteraturePassages.isFootnoteSentence(quote)
 
     private fun firstClause(why: String) =
         why.trim().split(Regex("[。！？；.!?]")).firstOrNull { it.isNotBlank() }?.trim().orEmpty()

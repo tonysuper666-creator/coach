@@ -319,15 +319,87 @@ class LiteratureGuideTest {
         assertTrue(carriedQuotes.none { it.trim().startsWith("19") })
         assertTrue(carriedQuotes.any { "visiting scholars" in it })
 
-        val sig = "The plate is marked Sig. Paolo Boccone described the specimen in the field book."
+        val sig = "The plate is marked Sig. A later keeper described the specimen in the field book."
         val sigQuotes = quotesOf(sig)
         assertEquals(1, sigQuotes.size, sigQuotes.joinToString("\n"))
-        assertTrue("Sig. Paolo" in sigQuotes.single())
+        assertTrue("Sig. A later keeper" in sigQuotes.single())
 
-        val phil = "The society published Phil. Collections, after the manner of the public transactions, remained on the open shelf."
+        val phil = "The list ends with the item published Phil. Records, after the manner of the Ph. Transactions. A later keeper was not the secretary of that society."
         val philQuotes = quotesOf(phil)
-        assertEquals(1, philQuotes.size, philQuotes.joinToString("\n"))
-        assertTrue("published Phil. Collections" in philQuotes.single())
+        assertTrue(philQuotes.none { it.startsWith("Records,") }, philQuotes.joinToString("\n"))
+        assertTrue(philQuotes.any { "published Phil. Records" in it && "Ph. Transactions." in it }, philQuotes.joinToString("\n"))
+        assertTrue(philQuotes.any { "later keeper was not the secretary" in it }, philQuotes.joinToString("\n"))
+
+        val glued = "The label read approx.more notes in the field book before the season closed."
+        val gluedQuotes = quotesOf(glued)
+        assertEquals(1, gluedQuotes.size, gluedQuotes.joinToString("\n"))
+        assertTrue("approx.more" in gluedQuotes.single())
+
+        val quoted = "The list ends with one item published Phil. Records, after the manner of the Ph. Transactions.' A later keeper was not the secretary of that society."
+        val quotedQuotes = quotesOf(quoted)
+        assertEquals(1, quotedQuotes.size, quotedQuotes.joinToString("\n"))
+        assertTrue("published Phil." in quotedQuotes.single() && "later keeper" in quotedQuotes.single())
+    }
+
+    @Test fun layoutFootnoteZoneDropsTheBottomNoteAndKeepsTheBodyAfterACallout() {
+        val body = "The repository kept a public record and later writers returned to that record."
+        val afterCallout = "The repository therefore kept a public record for the visitors who came that season."
+        val proseNote = "It remains useful to record that the same cabinets stayed in the smaller room."
+        val text = "$body" + "8\n$afterCallout\n\n$proseNote"
+        val noteStart = text.indexOf(proseNote)
+        val region = GuideRegion(text, footnoteRanges = listOf(noteStart until noteStart + proseNote.length))
+        val book = Textbook("shape", "Shape", "pdf", listOf(BookPage(1, text, guideRegions = listOf(region))))
+        val quotes = LiteraturePassages.extractCandidates(book).map { it.anchor.quoteAnchor }
+        assertTrue(quotes.any { "visitors who came" in it }, quotes.joinToString("\n"))
+        assertTrue(quotes.none { it.trim().startsWith("8") || "smaller room" in it }, quotes.joinToString("\n"))
+        val noteExcerpt = GuideExcerpt(
+            book,
+            BookCompanionAnchor(1, "note", noteStart, noteStart + proseNote.length, proseNote),
+            region,
+        )
+        val (noteHit, noteRule) = LiteratureCitationCheck.check(listOf(noteExcerpt), 0, "shape", exactOcr)
+        assertNull(noteHit)
+        assertTrue(noteRule.startsWith("footer_note:"), noteRule)
+        assertTrue("页脚" in noteRule, noteRule)
+        val bodyQuote = quotes.first { "visitors who came" in it }
+        val bodyStart = text.indexOf(bodyQuote)
+        assertTrue(bodyStart >= 0, quotes.joinToString("\n"))
+        val bodyExcerpt = GuideExcerpt(
+            book,
+            BookCompanionAnchor(1, "body", bodyStart, bodyStart + bodyQuote.length, bodyQuote),
+            region,
+        )
+        val (bodyHit, bodyRule) = LiteratureCitationCheck.check(listOf(bodyExcerpt), 0, "shape", exactOcr)
+        assertNotNull(bodyHit)
+        assertEquals("ok", bodyRule)
+    }
+
+    @Test fun layoutFootnoteRangesNeedBottomSmallerTypeAndASeparator() {
+        val body = (0 until 8).map { i ->
+            LiteraturePdfLayout.FootnoteLine(y = 40f + i * 12f, size = 10f, start = i * 20, end = i * 20 + 18)
+        }
+        val note = LiteraturePdfLayout.FootnoteLine(y = 156f, size = 8f, start = 200, end = 240)
+        val noteNext = LiteraturePdfLayout.FootnoteLine(y = 166f, size = 8f, start = 241, end = 280)
+        val ranges = LiteraturePdfLayout.layoutFootnoteRanges(body + note + noteNext, bodyHeight = 10f)
+        assertTrue(ranges.any { 200 in it && 239 in it }, ranges.toString())
+        assertTrue(ranges.any { 241 in it }, ranges.toString())
+        assertTrue(ranges.none { it.first < 200 }, ranges.toString())
+
+        val sameSize = LiteraturePdfLayout.FootnoteLine(y = 156f, size = 10f, start = 200, end = 240)
+        assertTrue(LiteraturePdfLayout.layoutFootnoteRanges(body + sameSize, 10f).isEmpty())
+
+        val tight = LiteraturePdfLayout.FootnoteLine(y = 136f, size = 8f, start = 200, end = 240)
+        assertTrue(LiteraturePdfLayout.layoutFootnoteRanges(body + tight, 10f).isEmpty())
+
+        val ruled = LiteraturePdfLayout.FootnoteLine(y = 124f, size = 8f, start = 200, end = 240)
+        val byRule = LiteraturePdfLayout.layoutFootnoteRanges(body.dropLast(1) + ruled, 10f, listOf(118f))
+        assertTrue(byRule.any { 200 in it }, byRule.toString())
+
+        val ruleLine = LiteraturePdfLayout.FootnoteLine(y = 118f, size = 10f, start = 180, end = 190, rule = true)
+        val afterRule = LiteraturePdfLayout.FootnoteLine(y = 126f, size = 8f, start = 200, end = 240)
+        val byTextRule = LiteraturePdfLayout.layoutFootnoteRanges(body.dropLast(1) + ruleLine + afterRule, 10f)
+        assertTrue(byTextRule.any { 200 in it }, byTextRule.toString())
+        assertTrue(byTextRule.none { 180 in it }, byTextRule.toString())
     }
 
     @Test fun equalByteBudgetGuaranteesAtLeastFifteenSentencesPerPaper() {

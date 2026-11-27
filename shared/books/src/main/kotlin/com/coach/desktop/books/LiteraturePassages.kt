@@ -18,7 +18,7 @@ internal object LiteraturePassages {
         """(?i)^(?:endnotes?|footnotes?|notes(?:\s+to\s+(?:pages?|chapters?|the\s+text))?|参考文献|尾注|注释)\s*[:：]?$""",
     )
     private val bareNoteNumber = Regex("""^\d{1,3}[.)]?$""")
-    private val leadingNote = Regex("""^\s*\d{1,3}\s+""")
+    private val leadingNote = Regex("""^\s*\d{1,3}(?=\s+\p{Lu}|\p{Lu})""")
     private val noteNumberAtStart = Regex("""^(?:\[(\d{1,3})]|(?:(\d{1,3}))[.)]?)(?:\s|$)""")
     private val heading = Regex("""(?i)^(?:abstract|introduction|background|discussion|method(?:s|ology)?|results?|conclusions?|summary|appendix(?:\s+[A-Z0-9]+)?|引言|导言|摘要|背景|方法|结果|讨论|结论|小结|(?:[IVX]+\.|\d+(?:\.\d+)*[.)])\s+\p{L}.{1,80})$""")
     private val standaloneAbstract = Regex("""(?i)^(?:abstract|摘要)\s*[.:：]?$""")
@@ -52,10 +52,10 @@ internal object LiteraturePassages {
         """(?i)(?:\bpp?\.\s*\d+(?:\s*[-–—]\s*\d+)?|(?:1[5-9]\d{2}|20\d{2})\)?,?\s+(?:pp?\.\s*)?\d{1,4})\s*[.。]?\s*$""",
     )
     private val abbreviations = setOf(
-        "ph", "tr", "mr", "mrs", "ms", "dr", "st", "jr", "sr", "prof", "vol", "vols",
+        "ph", "phil", "tr", "mr", "mrs", "ms", "dr", "st", "jr", "sr", "prof", "vol", "vols",
         "no", "nos", "pp", "p", "cf", "ed", "eds", "fig", "figs", "al", "etc", "eg", "ie",
         "ibid", "op", "cit", "loc", "vs", "ca", "ch", "esp", "viz", "rev", "trans",
-        "dept", "univ", "inc", "ltd", "mt", "ft", "gen", "col", "capt", "sgt", "sig", "phil",
+        "dept", "univ", "inc", "ltd", "mt", "ft", "gen", "col", "capt", "sgt", "sig",
     )
     private val compactSpace = Regex("""\s+""")
 
@@ -106,6 +106,51 @@ internal object LiteraturePassages {
     }
 
     /**
+     * Footer, endnote, or a span the PDF layout marked as the note zone.
+     * Candidate extraction and citation checks both call this, so a sentence that entered
+     * the pool is not later rejected for the same reason.
+     */
+    fun rejectedFootnote(
+        quote: String,
+        pageText: String,
+        pageOffset: Int,
+        region: GuideRegion,
+        localStart: Int,
+        localEnd: Int,
+    ): Boolean = isFootnoteSentence(quote) ||
+        followsFootnoteMarker(pageText, pageOffset) ||
+        region.overlapsFootnote(localStart, localEnd)
+
+    fun rejectedFootnote(excerpt: GuideExcerpt): Boolean {
+        val anchor = excerpt.anchor
+        val page = excerpt.book.page(anchor.pdfPage)
+        val base = if (page == null) 0 else regionBase(page, excerpt.region)
+        return rejectedFootnote(
+            anchor.quoteAnchor,
+            page?.text.orEmpty(),
+            anchor.startUtf16,
+            excerpt.region,
+            anchor.startUtf16 - base,
+            anchor.endUtf16 - base,
+        )
+    }
+
+    /** Page text joins guide regions with a blank line, so a quote's page offset is base plus its region offset. */
+    fun regionBase(page: BookPage, region: GuideRegion): Int {
+        var base = 0
+        for (candidate in page.guideRegions) {
+            if (candidate === region) return base
+            base += candidate.text.length + 2
+        }
+        base = 0
+        for (candidate in page.guideRegions) {
+            if (candidate.text == region.text && candidate.footnoteRanges == region.footnoteRanges) return base
+            base += candidate.text.length + 2
+        }
+        return 0
+    }
+
+    /**
      * The span sits on the sentence after a footnote marker on its own line.
      * A note number glued to the previous body sentence, such as "look.8", is a callout.
      * The next sentence is still body text. A page number at the top is not a marker either.
@@ -138,7 +183,7 @@ internal object LiteraturePassages {
         return !isAbbreviationPeriod(trimmed, trimmed.length - 1)
     }
 
-    /** Periods inside Ph.Tr., p. 21, and initials are not sentence boundaries. */
+    /** Periods inside Ph.Tr., Phil., Sig., p. 21, and initials are not sentence boundaries. */
     private fun isAbbreviationPeriod(text: String, period: Int): Boolean {
         if (period <= 0 || period >= text.length || text[period] != '.') return false
         var i = period - 1
@@ -156,7 +201,7 @@ internal object LiteraturePassages {
         while (i < text.length) {
             val ch = text[i]
             val hard = ch == '!' || ch == '?' || ch == '。' || ch == '！' || ch == '？'
-            val closes = ch == '.' && !isAbbreviationPeriod(text, i) && closerFollows(text, i)
+            val closes = ch == '.' && !isAbbreviationPeriod(text, i) && !staysInside(text, i) && closerFollows(text, i)
             if (hard || closes) {
                 var bound = i + 1
                 while (bound < text.length && text[bound] in "”’\"')]") bound++
@@ -170,6 +215,19 @@ internal object LiteraturePassages {
         }
         if (start < text.length && text.substring(start).isNotBlank()) bounds += start to text.length
         return bounds
+    }
+
+    /**
+     * A period glued to a lowercase letter, a continuing digit, or a quote is not a cut.
+     * "meeting.12" still ends: those digits are a note mark and are stripped from the next sentence.
+     */
+    private fun staysInside(text: String, period: Int): Boolean {
+        val next = period + 1
+        if (next >= text.length) return false
+        val ch = text[next]
+        if (ch.isLowerCase()) return true
+        if (ch == '\'' || ch == '"' || ch == '\u2018' || ch == '\u2019' || ch == '\u201C' || ch == '\u201D') return true
+        return ch.isDigit() && noteDigitsAfter(text, next) == 0
     }
 
     private fun closerFollows(text: String, period: Int): Boolean {
@@ -356,7 +414,7 @@ internal object LiteraturePassages {
                             val blankTail = lead
                             lead = false
                             if (!pageTopTail && !blankTail &&
-                                !followsFootnoteMarker(page.text, at) &&
+                                !rejectedFootnote(quote, page.text, at, region, localStart, localEnd) &&
                                 !region.overlapsWideGap(localStart, localEnd) &&
                                 bodySentence(quote) &&
                                 region.containsSentence(quote)

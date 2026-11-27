@@ -303,6 +303,19 @@ class LiteratureQuizTest {
             .first { it.getValue("questionIndex").jsonPrimitive.int == 0 }
             .getValue("because").jsonPrimitive.content
         assertTrue("页脚" in because && "footer_note：footer_note" !in because, because)
+
+        val prose = "It remains useful to record that the same cabinets stayed in the smaller room."
+        val kept = "Plot one contained flowering plants during the survey."
+        val page = "$kept\n$prose"
+        val start = page.indexOf(prose)
+        val region = GuideRegion(page, footnoteRanges = listOf(start until start + prose.length))
+        val laidOut = Textbook("hand", "Hand", "pdf", listOf(BookPage(1, page, guideRegions = listOf(region))))
+        val forced = GuideExcerpt(laidOut, BookCompanionAnchor(1, "hand", start, start + prose.length, prose), region)
+        val layoutReject = LiteratureQuiz.verify(listOf(forced), choice(), ocr)
+        assertEquals("footer_note", layoutReject.failures.single().rule)
+        assertTrue("页脚" in layoutReject.failures.single().detail, layoutReject.failures.single().detail)
+        assertTrue(LiteraturePassages.extractCandidates(laidOut).none { "smaller room" in it.anchor.quoteAnchor })
+        assertTrue(LiteraturePassages.extractCandidates(laidOut).any { "flowering plants" in it.anchor.quoteAnchor })
     }
 
     private fun handInput(): LiteratureInput = LiteratureInput(

@@ -528,16 +528,85 @@ internal data class GuideRegion(
     val printedPage: String? = null,
     val sourceOrder: String = text,
     val wideGapRanges: List<IntRange> = emptyList(),
+    /** Character spans in the note zone: bottom of the column, smaller than body, after a rule or a large gap. */
+    val footnoteRanges: List<IntRange> = emptyList(),
 ) {
     private val continuous by lazy { LiteratureTextNorm.normalize(sourceOrder) }
     fun containsSentence(quote: String) = LiteratureTextNorm.normalize(quote) in continuous
     fun overlapsWideGap(start: Int, end: Int): Boolean = wideGapRanges.any { r -> r.first < end && start <= r.last }
+    fun overlapsFootnote(start: Int, end: Int): Boolean =
+        footnoteRanges.any { start < it.last + 1 && end > it.first }
 }
 
 internal object LiteraturePdfLayout {
     private data class Word(val text: String, val x: Float, val right: Float, val y: Float, val height: Float)
     private data class Row(val y: Float, val words: MutableList<Word> = mutableListOf())
+    private data class DrawnRule(val displayY: Float, val minX: Float, val maxX: Float)
     private val folio = Regex("""(?i)^(?:p(?:age)?\.?\s*)?(\d{1,4}|[ivxlcdm]{1,6})$""")
+    private val textRule = Regex("""^[_\-=–—―\s]{4,}$""")
+
+    /**
+     * One measured line. [start] and [end] are offsets in the column text; a rule or a skipped
+     * glyph has [start] == [end]. [y] grows downward, in the same space as PDFBox yDirAdj.
+     */
+    internal data class FootnoteLine(
+        val y: Float,
+        val size: Float,
+        val start: Int,
+        val end: Int,
+        val rule: Boolean = false,
+    )
+
+    /**
+     * Note zone: a run of lines at the bottom of the column, smaller than the body, and separated
+     * from the body by a large gap or by a rule. Equal-size body text is never in the zone.
+     */
+    internal fun layoutFootnoteRanges(
+        lines: List<FootnoteLine>,
+        bodyHeight: Float,
+        separatorYs: List<Float> = emptyList(),
+    ): List<IntRange> {
+        if (bodyHeight <= 0f || lines.isEmpty()) return emptyList()
+        if (lines.count { !it.rule && it.end > it.start } < 2) return emptyList()
+        val top = lines.minOf { it.y }
+        val span = lines.maxOf { it.y } - top
+        if (span < bodyHeight * 4f) return emptyList()
+        val smallerThanBody = bodyHeight * 0.92f
+        val bottomCut = top + span * 0.55f
+        fun previousContent(index: Int): Int? {
+            var cursor = index - 1
+            while (cursor >= 0) {
+                val line = lines[cursor]
+                if (!line.rule && line.end > line.start) return cursor
+                cursor--
+            }
+            return null
+        }
+        fun separated(prevIndex: Int, index: Int): Boolean {
+            val prev = lines[prevIndex]
+            val line = lines[index]
+            if (line.y - prev.y > bodyHeight * 1.6f) return true
+            val low = prev.y + bodyHeight * 0.25f
+            val high = line.y - bodyHeight * 0.1f
+            if (high > low && separatorYs.any { it in low..high }) return true
+            return ((prevIndex + 1) until index).any { lines[it].rule }
+        }
+        val start = lines.indices.firstOrNull { index ->
+            val line = lines[index]
+            if (line.rule || line.end <= line.start) return@firstOrNull false
+            if (line.size >= smallerThanBody || line.y < bottomCut) return@firstOrNull false
+            val prev = previousContent(index) ?: return@firstOrNull false
+            separated(prev, index)
+        } ?: return emptyList()
+        val ranges = mutableListOf<IntRange>()
+        for (index in start until lines.size) {
+            val line = lines[index]
+            if (line.rule || line.end <= line.start) continue
+            if (line.size >= smallerThanBody) break
+            ranges += line.start until line.end
+        }
+        return ranges
+    }
 
     private fun insideCropBox(position: BookPdfTextPosition, crop: BookPdfRectangle): Boolean {
         val tm = position.textMatrix
@@ -552,6 +621,7 @@ internal object LiteraturePdfLayout {
     fun extract(pdf: BookPdfDocument, page: Int): List<GuideRegion> {
         val pdfPage = pdf.getPage(page - 1)
         val crop = pdfPage.cropBox
+        val drawnRules = horizontalRules(pdfPage)
         val words = mutableListOf<Word>()
         val stripper = object : ReadingOrderStripper() {
             override fun writeString(text: String, textPositions: List<BookPdfTextPosition>) {
@@ -738,12 +808,14 @@ internal object LiteraturePdfLayout {
             }
 
             val wideGapRanges = mutableListOf<IntRange>()
+            val builtLines = mutableListOf<FootnoteLine>()
             val text = buildString {
                 var previousY: Float? = null
                 for ((li, line) in lines.withIndex()) {
                     val y = line.first().y
                     val size = line.map { it.height }.sorted()[line.size / 2]
                     if (size < bodyHeight * 0.80f) {
+                        builtLines += FootnoteLine(y, size, length, length)
                         if (isNotEmpty()) append("\n\n")
                         continue
                     }
@@ -759,11 +831,19 @@ internal object LiteraturePdfLayout {
                     }
                     val lineEnd = length
                     if (hasWideGap && lineEnd > lineStart) wideGapRanges += lineStart until lineEnd
+                    val lineText = substring(lineStart, lineEnd)
+                    builtLines += FootnoteLine(y, size, lineStart, lineEnd, rule = textRule.matches(lineText.trim()))
                     append('\n')
                     previousY = y
                 }
             }.trimEnd()
             if (text.isBlank()) return@mapNotNull null
+            val columnMinX = column.minOf { it.x }
+            val columnMaxX = column.maxOf { it.right }
+            val separatorYs = drawnRules
+                .filter { it.maxX >= columnMinX && it.minX <= columnMaxX }
+                .map { it.displayY }
+            val footnoteRanges = layoutFootnoteRanges(builtLines, bodyHeight, separatorYs)
             val reference = object : BookPdfStripper() {
                 override fun processTextPosition(position: BookPdfTextPosition) {
                     if (!insideCropBox(position, crop)) return
@@ -776,7 +856,85 @@ internal object LiteraturePdfLayout {
                     }
                 }
             }.apply { startPage = page; endPage = page; sortByPosition = true }.getText(pdf)
-            GuideRegion(text, label, reference, wideGapRanges)
+            GuideRegion(text, label, reference, wideGapRanges, footnoteRanges)
+        }
+    }
+
+    /** Thin wide strokes. Display Y matches yDirAdj (top-down). A bad page yields no rules, and the gap test still applies. */
+    private fun horizontalRules(pdfPage: BookPdfPage): List<DrawnRule> {
+        if (Math.floorMod(pdfPage.rotation, 360) != 0) return emptyList()
+        val crop = pdfPage.cropBox
+        if (crop.width <= 0f || crop.height <= 0f) return emptyList()
+        return try {
+            val found = mutableListOf<DrawnRule>()
+            object : BookPdfGraphicsEngine(pdfPage) {
+                private var minX = 0.0
+                private var minY = 0.0
+                private var maxX = 0.0
+                private var maxY = 0.0
+                private var open = false
+                private var current = newBookPdfPoint()
+                private var subpath = newBookPdfPoint()
+                private fun point(x: Double, y: Double) {
+                    if (!x.isFinite() || !y.isFinite()) return
+                    if (!open) {
+                        minX = x
+                        maxX = x
+                        minY = y
+                        maxY = y
+                        open = true
+                    } else {
+                        minX = minOf(minX, x)
+                        maxX = maxOf(maxX, x)
+                        minY = minOf(minY, y)
+                        maxY = maxOf(maxY, y)
+                    }
+                }
+                override fun moveTo(x: Float, y: Float) {
+                    point(x.toDouble(), y.toDouble())
+                    current = newBookPdfPoint(x, y)
+                    subpath = current
+                }
+                override fun lineTo(x: Float, y: Float) {
+                    point(x.toDouble(), y.toDouble())
+                    current = newBookPdfPoint(x, y)
+                }
+                override fun curveTo(x1: Float, y1: Float, x2: Float, y2: Float, x3: Float, y3: Float) {
+                    point(x1.toDouble(), y1.toDouble())
+                    point(x2.toDouble(), y2.toDouble())
+                    lineTo(x3, y3)
+                }
+                override fun appendRectangle(a: BookPdfPoint, b: BookPdfPoint, c: BookPdfPoint, d: BookPdfPoint) {
+                    listOf(a, b, c, d).forEach { point(it.x, it.y) }
+                    current = newBookPdfPoint(a.x.toFloat(), a.y.toFloat())
+                    subpath = current
+                }
+                private fun paint() {
+                    if (open) {
+                        val width = maxX - minX
+                        val height = maxY - minY
+                        if (width >= 36.0 && height <= 2.5) {
+                            val center = ((minY + maxY) / 2.0).toFloat()
+                            found += DrawnRule(crop.upperRightY - center, minX.toFloat(), maxX.toFloat())
+                        }
+                    }
+                    open = false
+                }
+                override fun strokePath() = paint()
+                override fun fillPath(windingRule: BookPdfFillRule) = paint()
+                override fun fillAndStrokePath(windingRule: BookPdfFillRule) = paint()
+                override fun endPath() { open = false }
+                override fun closePath() { current = subpath }
+                override fun getCurrentPoint(): BookPdfPoint = current
+                override fun clip(windingRule: BookPdfFillRule) {}
+                override fun shadingFill(shadingName: BookPdfName) {}
+                override fun showForm(form: BookPdfForm) {}
+                override fun drawImage(image: BookPdfImage) {}
+            }.processPage(pdfPage)
+            found
+        } catch (e: Exception) {
+            if (e is java.util.concurrent.CancellationException) throw e
+            emptyList()
         }
     }
 

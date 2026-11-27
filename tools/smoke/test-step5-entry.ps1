@@ -904,12 +904,74 @@ $switchKeyPoints = [scriptblock]::Create($src.Substring($loopStart, $loopEnd - $
 $winW = 2160; $winH = 1350; $midX = 1080
 $script:screen = $step5SelfTest; $script:queue = $null; $script:clicks.Clear()
 $script:onClick = { $script:screen = $step5Page }
-& $switchKeyPoints
+. $switchKeyPoints
 Check 'step5-clicks-keypoint-before-recognizing-page' ($script:clicks.Count -eq 1 -and $script:clicks[0] -eq '1624,561') "clicks=$($script:clicks -join '|')"
 $script:screen = $step5SelfTest; $script:clicks.Clear(); $script:onClick = $null
 $switchError = ''
-try { & $switchKeyPoints } catch { $switchError = $_.Exception.Message }
+try { . $switchKeyPoints } catch { $switchError = $_.Exception.Message }
 Check 'step5-stops-if-keypoint-never-opens' ($script:clicks.Count -eq 3 -and $switchError -like '*未能从抽屉模块条切到*') "clicks=$($script:clicks.Count)"
+
+# 54. 第 5 步模块条 OCR 粘连（25422758 / 5-key-tab-find1..3）：同排「要点」+ 单块「自测推导」+「练习习题」仍能定位并切到要点；
+#     正文与提示语仍被纯词判据与区域过滤排除；若严格判据 Test-Step5KeyPointView 已确认在「要点」则无需重复点击，直接继续核查出处。
+$gluedSelfTest = @(
+    (New-Line '6．7 Example' 700 70 160 22),
+    (New-Line '要点' 1600 550 48 22),
+    (New-Line '自测推导' 1660 550 96 22),
+    (New-Line '练习习题' 1770 550 96 22),
+    (New-Line '读前自测' 1600 610 120 22)
+)
+$gluedHit = Find-Step5KeyPointTab $gluedSelfTest 2160 1350
+Check 'step5-keypoint-tab-accepts-glued-selftest-and-practice' ([bool]$gluedHit -and $gluedHit.X -eq 1624 -and $gluedHit.Y -eq 561) "hit=$($gluedHit.X),$($gluedHit.Y)"
+
+$gluedNarrow = @(
+    (New-Line '要点' 40 280 48 22),
+    (New-Line '自测推导' 100 280 96 22),
+    (New-Line '练习习题' 208 280 96 22)
+)
+$gluedNarrowHit = Find-Step5KeyPointTab $gluedNarrow 752 552
+Check 'step5-keypoint-tab-accepts-glued-strip-in-narrow-drawer' ([bool]$gluedNarrowHit -and $gluedNarrowHit.X -eq 64 -and $gluedNarrowHit.Y -eq 291) "hit=$($gluedNarrowHit.X),$($gluedNarrowHit.Y)"
+
+$gluedSingleLine = @((New-Line '要点自测推导' 1600 550 180 22))
+$gluedSingleHit = Find-Step5KeyPointTab $gluedSingleLine 2160 1350
+Check 'step5-keypoint-tab-accepts-single-glued-strip-line' ([bool]$gluedSingleHit -and $gluedSingleHit.X -ge 1600 -and $gluedSingleHit.X -lt 1660) "x=$($gluedSingleHit.X)"
+Check 'step5-keypoint-tab-rejects-reversed-glued-strip' ($null -eq (Find-Step5KeyPointTab @((New-Line '自测要点' 1600 550 96 22)) 2160 1350)) 'reversed strip accepted'
+
+$gluedPromptNoise = @((New-Line '要点' 1600 550 48 22), (New-Line '自测推导说明' 1660 550 130 22))
+Check 'step5-keypoint-tab-rejects-prompt-with-module-words' ($null -eq (Find-Step5KeyPointTab $gluedPromptNoise 2160 1350)) 'prompt text accepted as strip'
+$outsideGlued = @((New-Line '要点' 200 550 48 22), (New-Line '自测推导' 260 550 96 22))
+Check 'step5-keypoint-tab-rejects-glued-strip-outside-drawer' ($null -eq (Find-Step5KeyPointTab $outsideGlued 2160 1350)) 'outside glued strip accepted'
+
+$script:screen = $gluedSelfTest; $script:queue = $null; $script:clicks.Clear()
+$script:onClick = { $script:screen = $step5Page }
+. $switchKeyPoints
+Check 'step5-glued-strip-clicks-keypoint-and-reaches-view' ($keyView -and $script:clicks.Count -eq 1 -and $script:clicks[0] -eq '1624,561') "keyView=$keyView clicks=$($script:clicks -join '|')"
+
+$bodyMisreadSelfTest = @(
+    (New-Line '6．7 Example' 700 70 160 22),
+    (New-Line '讲的是：第 150 页' 200 550 200 22),
+    (New-Line '要点' 1600 550 48 22),
+    (New-Line '自测推导' 1660 550 96 22),
+    (New-Line '读前自测' 1600 610 120 22)
+)
+Check 'step5-body-misread-outside-drawer-not-keypoint-view' (-not (Test-Step5KeyPointView $bodyMisreadSelfTest 2160 1350)) 'left body misread as keypoint view'
+$script:screen = $bodyMisreadSelfTest; $script:queue = $null; $script:clicks.Clear()
+$script:onClick = { $script:screen = $step5Page }
+. $switchKeyPoints
+Check 'step5-body-misread-still-clicks-keypoint-tab' ($keyView -and $script:clicks.Count -eq 1 -and $script:clicks[0] -eq '1624,561') "keyView=$keyView clicks=$($script:clicks -join '|')"
+
+$alreadyKeyPointGlued = @(
+    (New-Line '要点' 1600 550 48 22),
+    (New-Line '自测推导' 1660 550 96 22),
+    (New-Line '练习习题' 1770 550 96 22),
+    (New-Line '讲的是：第 154 页' 1600 610 200 22)
+)
+$script:screen = $alreadyKeyPointGlued; $script:queue = $null; $script:clicks.Clear(); $script:onClick = $null
+. $switchKeyPoints
+Check 'step5-already-on-keypoint-view-proceeds-without-click' ($keyView -and $script:clicks.Count -eq 0) "keyView=$keyView clicks=$($script:clicks.Count)"
+
+$script:screen = $step5Chapter; $script:queue = $null; $script:clicks.Clear(); $script:onClick = $null
+. $switchKeyPoints
+Check 'step5-already-on-chapter-keypoint-proceeds-without-strip' ($keyView -and $script:clicks.Count -eq 0) "keyView=$keyView clicks=$($script:clicks.Count)"
 
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"

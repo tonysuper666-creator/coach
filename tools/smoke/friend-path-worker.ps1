@@ -1061,17 +1061,30 @@ function Ensure-CompanionDrawerOpen(
     }
     [pscustomobject]@{ Tab = $tab; Lines = $lines }
 }
-# 只认抽屉模块条上与「自测」同排的独立「要点」，不能点击正文或顶栏中的同名文字。
+# 只认抽屉模块条上与「自测」同排的「要点」（沿用 Find-Step6ModuleStrip 的纯模块词识别，兼容 OCR 粘连如「自测推导」「练习习题」），不能点击正文或顶栏中的同名文字。
 function Find-Step5KeyPointTab($lines, [int]$winW, [int]$winH) {
     $keys = @(); $tests = @()
     foreach ($line in @($lines)) {
         $t = ([string]$line.Text -replace '\s', '')
-        if ($t -notmatch '^(?:要点|自测|推导|练习|习题)$') { continue }
-        $p = Get-LineClick $line
-        if (-not $p) { continue }
-        if ($winW -ge 1000 -and $p.X -lt ($winW * 0.5)) { continue }
-        if ($p.Y -lt ($winH * 0.20) -or $p.Y -gt ($winH * 0.90)) { continue }
-        if ($t -eq '要点') { $keys += $p } elseif ($t -eq '自测') { $tests += $p }
+        if (-not $t -or $t -notmatch '^(?:要点|自测|推导|练习|习题)+$') { continue }
+        $box = Get-LineBox $line
+        if ($box.X2 -lt $box.X1) { continue }
+        foreach ($word in @('要点', '自测')) {
+            if (-not $t.Contains($word)) { continue }
+            $p = Find-Text @($line) $word
+            if (-not $p) { continue }
+            # 若 OCR 把多个模块词整块粘成同一个 Word 框，按字符区间切出目标词位置，保证「要点」点在左侧且同排顺序可判。
+            if ($t.Length -gt $word.Length -and $p.X1 -eq $box.X1 -and $p.X2 -eq $box.X2) {
+                $idx = $t.IndexOf($word)
+                $span = $p.X2 - $p.X1
+                $sx1 = [int]($p.X1 + $span * $idx / $t.Length)
+                $sx2 = [int]($p.X1 + $span * ($idx + $word.Length) / $t.Length)
+                $p = [pscustomobject]@{ X = [int](($sx1 + $sx2) / 2); Y = $p.Y; X1 = $sx1; X2 = $sx2; Y1 = $p.Y1; Y2 = $p.Y2 }
+            }
+            if ($winW -ge 1000 -and $p.X -lt ($winW * 0.5)) { continue }
+            if ($p.Y -lt ($winH * 0.20) -or $p.Y -gt ($winH * 0.90)) { continue }
+            if ($word -eq '要点') { $keys += $p } else { $tests += $p }
+        }
     }
     foreach ($key in $keys) {
         foreach ($test in $tests) {
@@ -2249,11 +2262,12 @@ try {
         }
         if (-not $switched) { Fail 5 '点了抽屉里的「讲解」页签，内容还停在「提问」（见 5-explain-tab-on*.png）' }
         Note '步骤5 已切到伴读抽屉的「讲解」页签'
-        # 「讲解」会保留上次的模块（例如自测）；先点模块条的「要点」，确认内容确实切过去。
+        # 「讲解」会保留上次的模块（例如自测）；先确认已在「要点」，否则点模块条的「要点」并确认内容切过去。
         $keyView = $false
         foreach ($attempt in 1..3) {
             Hover $midX ([int]($winH * 0.50)); Start-Sleep -Milliseconds 700
             $lines = Shot 5 "key-tab-find$attempt"
+            if (Test-Step5KeyPointView $lines $winW $winH) { $keyView = $true; break }
             $keyTab = Find-Step5KeyPointTab $lines $winW $winH
             if (-not $keyTab) { Start-Sleep -Seconds 1; continue }
             $null = Click-At $keyTab.X $keyTab.Y

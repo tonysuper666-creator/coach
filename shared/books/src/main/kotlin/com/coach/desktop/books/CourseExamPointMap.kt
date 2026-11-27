@@ -34,6 +34,7 @@ internal fun CourseExamPointMap(
     onRealign: () -> Unit,
     onPractice: (CourseTopicEntry) -> Unit,
     onGenerateExamDrills: (() -> Unit)? = null,
+    drillProgress: ExamDrillProgress? = null,
 ) {
     val mastery = detail.countdownPlan?.rankedTopics.orEmpty().filter { it.hasPracticeEvidence }
         .associate { it.topicId to (it.pMastery * it.projectedRetrievability).coerceIn(0.0, 1.0) }
@@ -41,6 +42,12 @@ internal fun CourseExamPointMap(
         .sortedWith(compareBy({ mastery[it.topicId] ?: Double.POSITIVE_INFINITY }, { it.ord }))
     val colors = CoachTheme.colors
     var expanded by remember(detail.courseId) { mutableStateOf(false) }
+    val persistedDone = remember(points) { points.count { ExamPointDrillLocal.isCompleted(it) } }
+    val activeProgress = drillProgress?.takeIf { it.courseId == detail.courseId && it.total > 0 }
+    val completedCount = activeProgress?.completed?.coerceIn(0, activeProgress.total) ?: persistedDone
+    val totalCount = activeProgress?.total ?: points.size
+    val isRunning = activeProgress?.running == true
+    val showProgressBar = totalCount > 0 && (isRunning || completedCount in 1 until totalCount)
     Column(Modifier.fillMaxWidth().testTag("course-exam-point-map"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("考点地图", style = MaterialTheme.typography.titleMedium)
         if (points.isEmpty()) {
@@ -54,6 +61,24 @@ internal fun CourseExamPointMap(
             "这些考点还没有练习记录，点一个开始。"
         }
         Text(hint, style = MaterialTheme.typography.bodySmall)
+        if (showProgressBar) {
+            val fraction = (completedCount.toFloat() / totalCount.toFloat()).coerceIn(0f, 1f)
+            val progressLabel = if (isRunning) {
+                val parallelNote = if (activeProgress.inFlight > 1) " · 并行 ${activeProgress.inFlight} 路" else ""
+                "出题进度：$completedCount/$totalCount$parallelNote"
+            } else {
+                "已保存进度：$completedCount/$totalCount · 重开后可接着出"
+            }
+            Column(
+                Modifier.fillMaxWidth().padding(vertical = 4.dp).testTag("exam-point-drill-progress"),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(progressLabel, style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+                Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(colors.borderSubtle)) {
+                    Box(Modifier.fillMaxWidth(fraction).height(6.dp).background(colors.actionPrimary))
+                }
+            }
+        }
         for (point in if (expanded) points else points.take(5)) {
             val value = mastery[point.topicId]
             val status = when {
@@ -90,9 +115,18 @@ internal fun CourseExamPointMap(
         if (points.size > 5) V7TextButton(onClick = { expanded = !expanded }) {
             Text(if (expanded) "收起" else "查看全部 ${points.size} 个考点")
         }
-        if (onGenerateExamDrills != null) V7TextButton(
-            onClick = onGenerateExamDrills,
-            modifier = Modifier.testTag("exam-point-drill-generate"),
-        ) { Text("为考点出题") }
+        if (onGenerateExamDrills != null) {
+            val buttonLabel = when {
+                isRunning -> "正在出题（$completedCount/$totalCount）…"
+                completedCount in 1 until totalCount -> "继续为考点出题（已完成 $completedCount/$totalCount）"
+                totalCount > 0 && completedCount >= totalCount -> "考点已全部出题（$totalCount/$totalCount）"
+                else -> "为考点出题"
+            }
+            V7TextButton(
+                onClick = onGenerateExamDrills,
+                enabled = !isRunning,
+                modifier = Modifier.testTag("exam-point-drill-generate"),
+            ) { Text(buttonLabel) }
+        }
     }
 }

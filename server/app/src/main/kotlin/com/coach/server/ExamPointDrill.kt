@@ -11,7 +11,6 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /**
@@ -20,7 +19,8 @@ import kotlinx.serialization.json.put
  * Haiku 5.5 Batch writes the items. A GPT model on the bridge answers them
  * without seeing the key, the reasons, or the writer's citations. A mismatch
  * gets one more ask. Anything still inconsistent is not stored.
- * Past-paper text never enters the prompt. Textbook spans outrank slides.
+ * Past-paper text, TOC pages, and end-of-chapter exercises never enter the prompt.
+ * Textbook spans outrank slides.
  */
 object ExamPointDrillLimits {
     const val GENERATOR_MODEL: String = BridgeClient.HAIKU
@@ -58,6 +58,8 @@ data class SupportVote(
     val letter: String? = null,
     val supported: Boolean? = null,
     val citation: JsonObject? = null,
+    val onTopic: Boolean = true,
+    val duplicate: Boolean = false,
 )
 
 data class ExamPointAdmission(
@@ -92,6 +94,61 @@ object ExamPointDrillGate {
     private val essayFormat = Regex("""论述|简答|essay|discuss|short\s+answer""", RegexOption.IGNORE_CASE)
     private val choiceOnlyFormat = Regex("""只考选择|选择题|multiple[\s-]*choice|\bmcq\b""", RegexOption.IGNORE_CASE)
 
+    private val tocHeadingLine = Regex(
+        """^(?:Brief\s+Contents|Detailed\s+Contents|Contents|Table\s+of\s+Contents|List\s+of\s+(?:Figures|Tables|Boxes|Illustrations)|目\s*录|总\s*目\s*录|简\s*目)$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val indexHeadingLine = Regex(
+        """^(?:Index|Subject\s+Index|Author\s+Index|Name\s+Index|索\s*引|主题索引|人名索引)$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val indexEntryLine = Regex(
+        """^.{2,70}?[,，、]\s*(?:p\.?\s*)?\d{1,5}(?:\s*[-–—,，、]\s*\d{1,5})*\s*$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val trailingPageNum = Regex("""^(.+?\S)(?:\s*[…⋯]+|\s*(?:[.．·•\-–—_]\s*){2,}|\s+)(\d{1,4}|[ivxlcdm]{1,5})\s*$""")
+    private val tocTailExcludedWord = Regex(
+        """(?i)(?:^|\s)(?:in|of|at|to|by|for|from|on|with|and|or|as|than|over|under|between|about|after|before|year|years|age|chapter|section|table|figure|fig\.?|box|part|week|step|equation|eq\.?|definition|theorem|example|question|problem|exercise|case|model|stage|phase|level|type|class|grade|tier|group)$""",
+    )
+    private val exerciseHeadingLine = Regex(
+        """^(?:#{1,6}\s*)?(?:\d+(?:\.\d+)*\s+)?(?:Exercises(?:\s+and\s+Problems)?|Chapter\s+Exercises|End[- ]of[- ]Chapter\s+(?:Exercises|Questions|Problems)|Review\s+Questions|Study\s+Questions|Discussion\s+Questions|Practice\s+Questions|Comprehension\s+Questions|Analytical\s+(?:Problems|Questions)|Numerical\s+(?:Problems|Questions)|Problems(?:\s+and\s+Applications)?|Questions\s+and\s+Problems|Essay\s+Questions|Short\s+Answer\s+Questions|Multiple\s+Choice\s+Questions|Self[- ]Test|Check\s+Your\s+Understanding|True\s*,\s*False\s*,?\s*(?:or\s+)?(?:Unclear|Uncertain)|True\s+or\s+False|章末习题|本章习题|课后习题|习题|思考题|复习思考题|练习题|判断题|简答题|计算题|案例分析题)\s*[:：.]?$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val exerciseInstructionLine = Regex(
+        """(?i)(?:(?:state|determine|decide|indicate|explain|evaluate)\s+whether\s+(?:each\s+of\s+)?(?:the\s+following\s+)?statements?\s+(?:is|are)\s+true\s*,?\s*false|\btrue\s*,\s*false\s*,?\s*(?:or\s+)?(?:unclear|uncertain)\b|判断下列(?:说法|陈述|命题)是否正确)""",
+    )
+    private val chapterBoundaryLine = Regex(
+        """^(?:#{1,6}\s*)?(?:(?:Chapter|Part|Unit)\s+(?:\d{1,2}|[IVXLC]+)\b|第\s*[0-9一二三四五六七八九十百千]+\s*[章节篇])""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val numberedItemLine = Regex("""^\s*(?:\d{1,2}[.)]|(?:Question|Problem|Exercise)\s+\d{1,2}[.:]?)\s+\S""", RegexOption.IGNORE_CASE)
+    private val exercisePromptLead = Regex(
+        """(?i)^\s*(?:\d{1,2}[.)]\s+)?(?:Explain|Discuss|Compare|Contrast|Calculate|Compute|Suppose|Assume|Consider|Evaluate|Determine|Show\s+that|Prove|Derive|Draw|Graph|Sketch|Use|Why|How|What|Which|Is\s+it|Are\s+the|True\s+or\s+false|Does|Do|Can|Could|Would|Should|Briefly|Illustrate|Analyze|Analyse)\b""",
+    )
+    private val subPartMarker = Regex("""(?m)(?:^|\s)(?:\([a-e]\)|[a-e]\.)\s+[A-Z]""")
+
+    private val tocQuestionStemRegex = Regex(
+        """(?i)(?:(?:哪一|第几)\s*[章节页部分].{0,12}(?:讲|讨论|介绍|涵盖|涉及|位于|出现)|(?:教材|本书|目录).{0,10}(?:哪一|第几)\s*[章节页]|\b(?:which|what)\s+(?:chapter|section|subsection|part|page)\b.{0,35}\b(?:covers?|discusses?|presents?|introduces?|explains?|contains?|deals?\s+with|focuses?\s+on|addresses?)\b|\btable\s+of\s+contents\b)""",
+    )
+    private val cjkRegex = Regex("""[\u4E00-\u9FFF]""")
+    private val enWordRegex = Regex("""[a-z0-9]+""")
+    private val topicGenericWords = setOf(
+        "the", "and", "for", "with", "from", "into", "that", "this", "these", "those", "under", "over",
+        "care", "health", "model", "models", "theory", "effect", "effects", "policy", "system", "systems",
+        "market", "markets", "analysis", "economics", "economic", "hypothesis", "principle", "concept",
+        "method", "approach", "process", "factor", "factors", "level", "rate", "type", "form", "case",
+        "study", "chapter", "section", "overview", "introduction", "basic", "general", "simple", "real",
+    )
+    private val stemStopWords = setOf(
+        "the", "and", "for", "with", "from", "into", "that", "this", "these", "those", "which", "what",
+        "why", "how", "when", "where", "who", "does", "do", "did", "is", "are", "was", "were", "be",
+        "been", "being", "can", "could", "would", "should", "will", "may", "might", "best", "most",
+        "following", "statement", "statements", "according", "textbook", "chapter", "true", "false",
+        "correct", "incorrect", "describes", "explains", "defines", "definition", "about", "under",
+        "when", "while", "because", "therefore", "however", "between", "among", "not", "only", "all",
+    )
+    private val parentheticalAliasRegex = Regex("""\(([A-Za-z][A-Za-z0-9-]{1,10})\)""")
+
     fun essayEligible(examFormat: String, techniques: List<String>): Boolean {
         val named = techniques.map { it.trim().uppercase() }.filter { it.isNotEmpty() }
         if (named.any { it in essayTechniques }) return true
@@ -100,22 +157,129 @@ object ExamPointDrillGate {
         return !choiceOnlyFormat.containsMatchIn(examFormat)
     }
 
+    fun isTocOrIndexBlock(text: String): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return true
+        val lines = trimmed.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+        if (lines.isEmpty()) return true
+        val hasTocHeading = lines.take(4).any { tocHeadingLine.matches(it.trimStart('#', ' ')) }
+        val tocLineCount = lines.count(::hasTrailingPageNumber)
+        val proseLines = lines.count { it.length >= 110 && (it.contains(". ") || it.contains('。')) && !hasTrailingPageNumber(it) }
+        if (hasTocHeading && (tocLineCount >= 2 || proseLines == 0)) return true
+        if (tocLineCount >= 4 && proseLines <= 1 && tocLineCount * 100 >= lines.size * 45) return true
+        if (tocLineCount >= 6 && proseLines <= 2 && tocLineCount * 100 >= lines.size * 35) return true
+        val hasIndexHeading = lines.take(3).any { indexHeadingLine.matches(it.trimStart('#', ' ')) }
+        val indexCount = lines.count { indexEntryLine.matches(it) }
+        if (hasIndexHeading && (indexCount >= 2 || proseLines == 0)) return true
+        if (indexCount >= 4 && indexCount * 10 >= lines.size * 5) return true
+        return false
+    }
+
+    private fun hasTrailingPageNumber(rawLine: String): Boolean {
+        val line = rawLine.trim()
+        val m = trailingPageNum.matchEntire(line) ?: return false
+        val prefix = m.groupValues[1].trim()
+        val pageTok = m.groupValues[2]
+        if (prefix.length < 2 || prefix.none(Char::isLetter)) return false
+        if (prefix.last() in setOf('。', '！', '？', '.', '!', '?', '=', '+', '-', '/', ':', '：')) return false
+        val num = pageTok.toIntOrNull()
+        if (num != null) {
+            if (num in 1900..2099 || num == 0) return false
+            if (tocTailExcludedWord.containsMatchIn(prefix)) return false
+            return true
+        }
+        return pageTok.all { it in "ivxlcdm" } && !tocTailExcludedWord.containsMatchIn(prefix)
+    }
+
+    fun stripExerciseText(text: String): String {
+        val rawLines = text.lines()
+        val cutIndex = rawLines.indexOfFirst { line ->
+            val trimmed = line.trim()
+            trimmed.isNotEmpty() && (exerciseHeadingLine.matches(trimmed) || exerciseInstructionLine.containsMatchIn(trimmed))
+        }
+        if (cutIndex >= 0) {
+            val before = rawLines.subList(0, cutIndex).joinToString("\n").trim()
+            return if (before.count { !it.isWhitespace() } >= 30) before else ""
+        }
+        if (looksLikeExerciseBlock(text)) return ""
+        return text
+    }
+
+    private fun looksLikeExerciseBlock(text: String): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return false
+        if (exerciseInstructionLine.containsMatchIn(trimmed)) return true
+        val lines = trimmed.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+        val numbered = lines.filter { numberedItemLine.containsMatchIn(it) }
+        if (numbered.size < 3) return false
+        val promptLike = numbered.count { it.endsWith("?") || exercisePromptLead.containsMatchIn(it) }
+        val hasSubParts = subPartMarker.findAll(trimmed).count() >= 2
+        val questionMarks = trimmed.count { it == '?' || it == '？' }
+        return promptLike >= 2 || (hasSubParts && questionMarks >= 2) || questionMarks >= 4
+    }
+
     fun prepare(blocks: List<CourseMaterialTextBlock>): Pair<List<CourseMaterialTextBlock>, String?> {
         var droppedPastExam = false
-        val kept = blocks.mapNotNull { block ->
+        var droppedToc = false
+        var droppedExercise = false
+        val sorted = blocks.sortedWith(compareBy({ it.authorityRank }, { it.bookId }, { it.page }))
+        val kept = mutableListOf<CourseMaterialTextBlock>()
+        var currentTextbook: String? = null
+        var lastTextbookPage = -1
+        var inExerciseTail = false
+        for (block in sorted) {
             if (block.role.equals("PAST_EXAM", ignoreCase = true) || CourseQualityGates.isPastExamTitle(block.bookTitle)) {
                 droppedPastExam = true
-                null
-            } else {
-                block
+                continue
             }
-        }.sortedWith(compareBy({ it.authorityRank }, { it.page }, { it.bookId }))
+            if (isTocOrIndexBlock(block.text)) {
+                droppedToc = true
+                continue
+            }
+            if (block.role == "CORE_TEXTBOOK") {
+                val consecutive = block.bookId == currentTextbook && block.page in lastTextbookPage..(lastTextbookPage + 2)
+                if (!consecutive) inExerciseTail = false
+                currentTextbook = block.bookId
+                lastTextbookPage = block.page
+                val startsChapter = block.text.lineSequence().map(String::trim).filter(String::isNotEmpty)
+                    .take(4).any { chapterBoundaryLine.containsMatchIn(it) }
+                if (startsChapter) inExerciseTail = false
+                if (inExerciseTail) {
+                    droppedExercise = true
+                    continue
+                }
+                val stripped = stripExerciseText(block.text)
+                if (stripped != block.text) {
+                    inExerciseTail = true
+                    if (stripped.isBlank()) {
+                        droppedExercise = true
+                        continue
+                    }
+                    kept += block.copy(text = stripped)
+                    continue
+                }
+            } else if (exerciseInstructionLine.containsMatchIn(block.text)) {
+                val stripped = stripExerciseText(block.text)
+                if (stripped.isBlank()) {
+                    droppedExercise = true
+                    continue
+                }
+                kept += block.copy(text = stripped)
+                continue
+            }
+            kept += block
+        }
+        val ordered = kept.sortedWith(compareBy({ it.authorityRank }, { it.page }, { it.bookId }))
         val reason = when {
-            kept.isNotEmpty() -> null
+            ordered.isNotEmpty() -> null
+            droppedToc && !droppedExercise && !droppedPastExam -> "材料只有目录页，无法出题"
+            droppedExercise && !droppedPastExam -> "材料只有章末习题，不能作为教材结论出题"
+            droppedPastExam && !droppedToc && !droppedExercise -> "只有往年题，不能进题库"
+            droppedToc -> "材料只有目录页，无法出题"
             droppedPastExam -> "只有往年题，不能进题库"
             else -> "没有可引用的教材或讲义"
         }
-        return kept to reason
+        return ordered to reason
     }
 
     fun parseDrafts(raw: JsonObject): List<ChoiceDraft> {
@@ -160,6 +324,8 @@ object ExamPointDrillGate {
             id to SupportVote(
                 letter = obj.str("letter").trim().uppercase().ifBlank { null },
                 citation = obj["support"] as? JsonObject ?: obj["citation"] as? JsonObject,
+                onTopic = (obj["onTopic"] as? JsonPrimitive)?.booleanOrNull ?: true,
+                duplicate = (obj["duplicate"] as? JsonPrimitive)?.booleanOrNull ?: false,
             )
         }.toMap()
         val essay = (raw["essay"] as? JsonArray).orEmpty().map { el ->
@@ -213,8 +379,11 @@ object ExamPointDrillGate {
         essayVotes: List<List<SupportVote>>,
         generatorModel: String,
         checkerModel: String,
+        topicTitle: String = "",
     ): ExamPointAdmission {
         val discards = linkedMapOf<String, Int>()
+        val choiceLocalDiscards = linkedMapOf<String, Int>()
+        val choiceCheckerDiscards = linkedMapOf<String, Int>()
         fun drop(reason: String) { discards[reason] = (discards[reason] ?: 0) + 1 }
         if (!generatorModel.startsWith("claude-haiku")) {
             drop("wrong_vendor")
@@ -226,28 +395,40 @@ object ExamPointDrillGate {
         val textbookIds = blocks.filter { it.role == "CORE_TEXTBOOK" }.map { it.bookId }.toSet()
         val sourceTexts = blocks.map { it.text }
         val stored = mutableListOf<JsonObject>()
+        val seenDrafts = mutableListOf<ChoiceDraft>()
         var checked = 0
         var agreed = 0
+        var choiceChecked = 0
         for (draft in drafts) {
-            val local = localChoiceFailure(draft, byPage, byBook, textbookIds, sourceTexts)
+            val local = localChoiceFailure(draft, byPage, byBook, textbookIds, sourceTexts, topicTitle)
+                ?: duplicateChoiceReason(draft, seenDrafts)
             if (local != null) {
                 drop(local)
+                choiceLocalDiscards[local] = (choiceLocalDiscards[local] ?: 0) + 1
                 continue
             }
+            seenDrafts += draft
             val history = votes[draft.id].orEmpty()
             if (!checkerOk || history.isEmpty()) {
-                drop(if (!checkerOk) "wrong_vendor" else "answer_mismatch")
+                val reason = if (!checkerOk) "wrong_vendor" else "answer_mismatch"
+                drop(reason)
+                choiceCheckerDiscards[reason] = (choiceCheckerDiscards[reason] ?: 0) + 1
                 continue
             }
             val verdicts = history.map { vote ->
                 checked += 1
+                choiceChecked += 1
                 val reason = checkerChoiceReason(draft, vote, byPage, byBook, textbookIds)
                 if (reason == null) agreed += 1
                 reason
             }
             val finalReason = verdicts.last()
-            if (finalReason == null) stored += storedChoice(draft, byPage, byBook)
-            else drop(finalReason)
+            if (finalReason == null) {
+                stored += storedChoice(draft, byPage, byBook)
+            } else {
+                drop(finalReason)
+                choiceCheckerDiscards[finalReason] = (choiceCheckerDiscards[finalReason] ?: 0) + 1
+            }
         }
         val kept = stored.take(ExamPointDrillLimits.MAX_CHOICES)
         val missing = (ExamPointDrillLimits.MIN_CHOICES - kept.size).coerceAtLeast(0)
@@ -261,8 +442,29 @@ object ExamPointDrillGate {
         }
         val emptyReason = when {
             kept.isNotEmpty() -> null
-            missing > 0 && discards.isEmpty() -> "模型没有写出可用的题"
-            else -> null
+            drafts.isEmpty() -> "模型没有写出可用的题"
+            choiceChecked > 0 -> when {
+                (choiceCheckerDiscards["answer_mismatch"] ?: 0) > 0 -> "核对全部拒掉（答案不一致）"
+                (choiceCheckerDiscards["off_topic"] ?: 0) > 0 -> "核对全部拒掉（题目偏离考点）"
+                (choiceCheckerDiscards["source_mismatch"] ?: 0) > 0 -> "核对全部拒掉（核对出处对不上原文）"
+                else -> "核对全部拒掉"
+            }
+            choiceCheckerDiscards.isNotEmpty() -> when {
+                (choiceCheckerDiscards["wrong_vendor"] ?: 0) > 0 -> "核对模型不符合要求，未入库"
+                else -> "核对全部拒掉"
+            }
+            choiceLocalDiscards.isNotEmpty() -> {
+                val top = choiceLocalDiscards.maxByOrNull { it.value }?.key
+                when (top) {
+                    "source_mismatch" -> "引用对不上原文，这些题没有留下"
+                    "toc_question" -> "生成了目录定位题，未留下"
+                    "off_topic" -> "题目偏离本考点，未留下"
+                    "recall_stem" -> "题干复述原文，未通过检查"
+                    "duplicate_question" -> "题目重复，未留下"
+                    else -> "模型没有写出可用的题"
+                }
+            }
+            else -> "模型没有写出可用的题"
         }
         return ExamPointAdmission(
             choices = JsonArray(kept),
@@ -320,19 +522,116 @@ object ExamPointDrillGate {
         byBook: Map<String, List<CourseMaterialTextBlock>>,
         textbookIds: Set<String>,
         sourceTexts: List<String>,
+        topicTitle: String = "",
     ): String? {
         if (draft.stem.isBlank() || draft.options.size != 4) return "malformed"
         if (draft.options.map { it.letter } != letters) return "malformed"
         if (draft.options.count { it.correct } != 1) return "malformed"
         if (draft.options.any { it.text.isBlank() || it.reason.isBlank() }) return "malformed"
+        if (tocQuestionStemRegex.containsMatchIn(draft.stem)) return "toc_question"
         if (!CourseQualityGates.auditZeroOverlap(listOf(draft.stem), sourceTexts).passed) return "recall_stem"
+        if (topicTitle.isNotBlank() && topicTitle != "这个考点" && !isOnTopic(draft, topicTitle)) return "off_topic"
         for (opt in draft.options) {
-            if (verifiedSupport(opt.citation, byPage, byBook, textbookIds) == null) return "source_mismatch"
+            val verified = verifiedSupport(opt.citation, byPage, byBook, textbookIds) ?: return "source_mismatch"
+            if (!isSubstantiveQuote(verified.quote)) return "source_mismatch"
         }
         return null
     }
 
-    private fun localEssayFailure(
+    internal fun duplicateChoiceReason(draft: ChoiceDraft, prior: List<ChoiceDraft>): String? {
+        if (prior.isEmpty()) return null
+        val normStem = normalizeForCompare(draft.stem)
+        val stemTokens = contentTokens(draft.stem)
+        val correctText = draft.options.firstOrNull { it.correct }?.text.orEmpty()
+        val correctTokens = contentTokens(correctText)
+        val combinedTokens = stemTokens + correctTokens
+        val correctQuote = normalizeForCompare(draft.options.firstOrNull { it.correct }?.citation?.str("quote").orEmpty())
+        for (other in prior) {
+            val otherNormStem = normalizeForCompare(other.stem)
+            if (normStem.isNotEmpty() && normStem == otherNormStem) return "duplicate_question"
+            val otherStemTokens = contentTokens(other.stem)
+            val otherCorrectText = other.options.firstOrNull { it.correct }?.text.orEmpty()
+            val otherCorrectTokens = contentTokens(otherCorrectText)
+            val correctSim = jaccard(correctTokens, otherCorrectTokens)
+            if (correctSim >= 0.45) {
+                val stemSim = jaccard(stemTokens, otherStemTokens)
+                if (stemSim >= 0.72) return "duplicate_question"
+                val combinedSim = jaccard(combinedTokens, otherStemTokens + otherCorrectTokens)
+                val otherQuote = normalizeForCompare(other.options.firstOrNull { it.correct }?.citation?.str("quote").orEmpty())
+                val sameQuote = correctQuote.length >= 20 && otherQuote.length >= 20 &&
+                    (correctQuote == otherQuote || correctQuote in otherQuote || otherQuote in correctQuote)
+                if (combinedSim >= 0.55 && sameQuote) return "duplicate_question"
+            }
+        }
+        return null
+    }
+
+    private fun isSubstantiveQuote(quote: String): Boolean {
+        val trimmed = quote.trim()
+        if (cjkRegex.containsMatchIn(trimmed)) {
+            return trimmed.count { !it.isWhitespace() } >= 8
+        }
+        val words = enWordRegex.findAll(trimmed.lowercase()).count()
+        return words >= 4 || (trimmed.length >= 24 && words >= 3)
+    }
+
+    private fun isOnTopic(draft: ChoiceDraft, topicTitle: String): Boolean {
+        val aliases = parentheticalAliasRegex.findAll(topicTitle).map { it.groupValues[1].lowercase() }.toList()
+        val strippedTitle = parentheticalAliasRegex.replace(topicTitle, " ").trim()
+        val correctOpt = draft.options.firstOrNull { it.correct }
+        val focusText = buildString {
+            append(draft.stem).append(' ')
+            for (opt in draft.options) append(opt.text).append(' ')
+            if (correctOpt != null) {
+                append(correctOpt.reason).append(' ')
+                append(correctOpt.citation?.str("quote").orEmpty())
+            }
+        }.lowercase()
+        for (alias in aliases) {
+            if (Regex("""(?<![a-z0-9])${Regex.escape(alias)}(?![a-z0-9])""").containsMatchIn(focusText)) return true
+        }
+        if (cjkRegex.containsMatchIn(strippedTitle)) {
+            val zhTerms = Regex("""[\u4E00-\u9FFF]{2,}""").findAll(strippedTitle).map { it.value }.toList()
+            if (zhTerms.isEmpty()) return true
+            if (zhTerms.any { it in focusText }) return true
+            val chars = strippedTitle.filter { it in '\u4E00'..'\u9FFF' }.toSet()
+            return chars.count { it in focusText } * 2 >= chars.size
+        }
+        val allWords = enWordRegex.findAll(strippedTitle.lowercase()).map { it.value }.filter { it.length >= 3 }.toList()
+        val distinctive = allWords.filter { it.length >= 4 && it !in topicGenericWords }.distinct()
+            .ifEmpty { allWords.distinct() }
+        if (distinctive.isEmpty()) return true
+        val hits = distinctive.count { tok ->
+            val stem = if (tok.length >= 6 && tok.endsWith("s")) tok.dropLast(1) else tok
+            stem in focusText
+        }
+        val required = when {
+            distinctive.size <= 2 -> 1
+            else -> 2
+        }
+        return hits >= required
+    }
+
+    private fun normalizeForCompare(text: String): String =
+        text.lowercase().replace(Regex("""[^\p{L}\p{N}]+"""), " ").trim()
+
+    private fun contentTokens(text: String): Set<String> = buildSet {
+        enWordRegex.findAll(text.lowercase()).forEach { m ->
+            val w = m.value
+            if (w.length >= 2 && w !in stemStopWords) add(w)
+        }
+        val zh = text.filter { it in '\u4E00'..'\u9FFF' }
+        for (i in 0 until (zh.length - 1)) add(zh.substring(i, i + 2))
+    }
+
+    private fun jaccard(a: Set<String>, b: Set<String>): Double {
+        if (a.isEmpty() || b.isEmpty()) return 0.0
+        val inter = a.count { it in b }
+        val union = a.size + b.size - inter
+        return if (union == 0) 0.0 else inter.toDouble() / union.toDouble()
+    }
+
+    internal fun localEssayFailure(
         essay: EssayDraft?,
         byPage: Map<Pair<String, Int>, List<CourseMaterialTextBlock>>,
         byBook: Map<String, List<CourseMaterialTextBlock>>,
@@ -345,7 +644,8 @@ object ExamPointDrillGate {
         val prose = listOf(essay.thesis) + essay.paragraphs.map { it.claim }
         if (!CourseQualityGates.auditZeroOverlap(prose, sourceTexts).passed) return "recall_stem"
         for (paragraph in essay.paragraphs) {
-            if (verifiedSupport(paragraph.citation, byPage, byBook, textbookIds) == null) return "source_mismatch"
+            val verified = verifiedSupport(paragraph.citation, byPage, byBook, textbookIds) ?: return "source_mismatch"
+            if (!isSubstantiveQuote(verified.quote)) return "source_mismatch"
         }
         return null
     }
@@ -357,6 +657,8 @@ object ExamPointDrillGate {
         byBook: Map<String, List<CourseMaterialTextBlock>>,
         textbookIds: Set<String>,
     ): String? {
+        if (!vote.onTopic) return "off_topic"
+        if (vote.duplicate) return "duplicate_question"
         val key = draft.options.single { it.correct }.letter
         if (!vote.letter.equals(key, ignoreCase = true)) return "answer_mismatch"
         if (verifiedSupport(vote.citation, byPage, byBook, textbookIds) != null) return null
@@ -502,14 +804,20 @@ class ExamPointDrillPipeline(
         val indexes = citationIndex(kept)
         val sourceTexts = kept.map { it.text }
         val textbookIds = kept.filter { it.role == "CORE_TEXTBOOK" }.map { it.bookId }.toSet()
-        val failedIds = drafts.filter {
-            ExamPointDrillGate.localChoiceFailure(it, indexes.byPage, indexes.byBook, textbookIds, sourceTexts) != null
-        }.map { it.id }
-        val essayNeedsRewrite = essayWanted && essayLocalNeedsRewrite(essay, indexes, textbookIds, sourceTexts)
+        val failedReasons = linkedMapOf<String, String>()
+        val firstSeen = mutableListOf<ChoiceDraft>()
+        for (draft in drafts) {
+            val reason = ExamPointDrillGate.localChoiceFailure(draft, indexes.byPage, indexes.byBook, textbookIds, sourceTexts, topicTitle)
+                ?: ExamPointDrillGate.duplicateChoiceReason(draft, firstSeen)
+            if (reason != null) failedReasons[draft.id] = reason else firstSeen += draft
+        }
+        val failedIds = failedReasons.keys.toList()
+        val essayNeedsRewrite = essayWanted &&
+            ExamPointDrillGate.localEssayFailure(essay, indexes.byPage, indexes.byBook, textbookIds, sourceTexts) != null
         if (failedIds.isNotEmpty() || essayNeedsRewrite) {
             val repair = generator.generateSection(
                 systemPrompt = generatorSystem(essayWanted),
-                userPrompt = repairPrompt(topicTitle, kept, essayWanted, failedIds, essayNeedsRewrite),
+                userPrompt = repairPrompt(topicTitle, kept, essayWanted, failedIds, essayNeedsRewrite, failedReasons),
                 task = "exam_point_drill",
                 batchKey = "drill-repair-$topicId-$scope",
                 maxTokens = ExamPointDrillLimits.MAX_TOKENS,
@@ -523,10 +831,15 @@ class ExamPointDrillPipeline(
                 if (essayNeedsRewrite) essay = ExamPointDrillGate.parseEssay(repaired) ?: essay
             }
         }
-        val ready = drafts.filter {
-            ExamPointDrillGate.localChoiceFailure(it, indexes.byPage, indexes.byBook, textbookIds, sourceTexts) == null
+        val ready = mutableListOf<ChoiceDraft>()
+        for (draft in drafts) {
+            val reason = ExamPointDrillGate.localChoiceFailure(draft, indexes.byPage, indexes.byBook, textbookIds, sourceTexts, topicTitle)
+                ?: ExamPointDrillGate.duplicateChoiceReason(draft, ready)
+            if (reason == null) ready += draft
         }
-        val essayReady = essay?.takeUnless { essayLocalNeedsRewrite(it, indexes, textbookIds, sourceTexts) }
+        val essayReady = essay?.takeUnless {
+            ExamPointDrillGate.localEssayFailure(it, indexes.byPage, indexes.byBook, textbookIds, sourceTexts) != null
+        }
         val votes = linkedMapOf<String, MutableList<SupportVote>>()
         val essayVotes = mutableListOf<List<SupportVote>>()
         var checkerModel = ""
@@ -564,6 +877,7 @@ class ExamPointDrillPipeline(
             essayVotes = essayVotes,
             generatorModel = first.model,
             checkerModel = checkerModel,
+            topicTitle = topicTitle,
         ).toJson()
     }
 
@@ -576,10 +890,11 @@ class ExamPointDrillPipeline(
     ): BatchTransportReply = checker.generateSection(
         systemPrompt = """
             你看不到标准答案，也不要猜测出题人的意图。只根据材料独立作答。
-            每道单选给出 letter，并在 support 里抄一处逐字支持该选项的原句（bookId、page、quote）。
+            每道单选给出 letter，并在 support 里抄一处逐字支持该选项的原句（bookId、page、quote）；同时判断这道题是否真正考查当前考点 topicTitle 本身（而不是同页无关概念、目录定位题或章末习题），若偏题则设 onTopic 为 false；若与本组前面某道题重复考查同一个定义，设 duplicate 为 true。
+            绝不能把章末习题、判断题待判陈述（True/False/Unclear）或分析题题设当作教材结论出处。
             有教材时 support 必须来自 CORE_TEXTBOOK。同一句两边都有时，bookId 填教材。
             论述提纲的每个要点按顺序给出：有原句支撑则 supported 为 true 并附 support，否则 supported 为 false。
-            只输出 JSON：{"answers":[{"id":"...","letter":"A","support":{"bookId":"...","page":1,"quote":"..."}}],"essay":[{"supported":true,"support":{"bookId":"...","page":1,"quote":"..."}}]}
+            只输出 JSON：{"answers":[{"id":"...","letter":"A","onTopic":true,"duplicate":false,"support":{"bookId":"...","page":1,"quote":"..."}}],"essay":[{"supported":true,"support":{"bookId":"...","page":1,"quote":"..."}}]}
         """.trimIndent(),
         userPrompt = buildJsonObject {
             put("topicTitle", topicTitle)
@@ -590,19 +905,6 @@ class ExamPointDrillPipeline(
         batchKey = batchKey,
         maxTokens = ExamPointDrillLimits.MAX_TOKENS,
     )
-
-    private fun essayLocalNeedsRewrite(
-        essay: EssayDraft?,
-        indexes: CitationIndex,
-        textbookIds: Set<String>,
-        sourceTexts: List<String>,
-    ): Boolean {
-        if (essay == null || essay.thesis.isBlank() || essay.paragraphs.size !in 2..6) return true
-        if (essay.paragraphs.any { it.claim.isBlank() }) return true
-        val prose = listOf(essay.thesis) + essay.paragraphs.map { it.claim }
-        if (!CourseQualityGates.auditZeroOverlap(prose, sourceTexts).passed) return true
-        return essay.paragraphs.any { verifiedSupport(it.citation, indexes.byPage, indexes.byBook, textbookIds) == null }
-    }
 
     private fun choiceNeedsRecheck(
         draft: ChoiceDraft,
@@ -624,25 +926,16 @@ class ExamPointDrillPipeline(
         ExamPointDrillGate.checkerEssaySupportOk(round[index], indexes.byPage, indexes.byBook, textbookIds)
     }
 
-    private fun verifiedSupport(
-        raw: JsonObject?,
-        byPage: Map<Pair<String, Int>, List<CourseMaterialTextBlock>>,
-        byBook: Map<String, List<CourseMaterialTextBlock>>,
-        textbookIds: Set<String>,
-    ): CourseVerifiedCitation? {
-        if (raw == null) return null
-        val verified = CourseQualityGates.verifyCitation(raw, byPage, byBook) ?: return null
-        if (textbookIds.isNotEmpty() && verified.bookId !in textbookIds) return null
-        return verified
-    }
-
     private fun generatorSystem(essayWanted: Boolean) = """
         你在为备考写教学题。题干考理解，不考原句复述，不得连续摘抄材料里 8 个英文词或 12 个汉字。
-        写 5 道单选题。每题恰好 4 个选项，字母固定为 A、B、C、D，恰好一个 correct 为 true。
-        每个选项写一句对或错的理由，并给 citation：bookId、page、startUtf16、endUtf16、quote。quote 必须是材料里的连续原文。
+        每道题必须直接考查 topicTitle（当前考点本身），严禁拿同页出现的其他概念或定义凑数。如果材料里关于当前考点本身的实质内容不足，宁可少写（如写 3 道，或确实无内容时返回空数组 []），也不要偏题。
+        写 3 到 5 道单选题，各题必须考查当前考点的不同角度（例如：核心机制、适用前提/边界、与相近概念区分、实证含义、情境应用），禁止多道题重复考同一个定义。
+        严禁出「哪一节/哪一章/第几页讲 X」这类目录定位题；严禁把章末习题、判断题（True/False/Unclear）的待判陈述或分析题题设当作教材结论出处。
+        每题恰好 4 个选项，字母固定为 A、B、C、D，恰好一个 correct 为 true。
+        每个选项（包括正确项和 3 个错项）都要写一句忠实于原文的对错理由 reason，不能凭空加入原文没提到的判断或概念；并给 citation：bookId、page、startUtf16、endUtf16、quote。quote 必须是材料里能直接支撑该条 reason 的完整连续原句或子句（不要只摘一两个词）。
         材料里有 CORE_TEXTBOOK 时，引用只能来自教材，不能引用课件或讲义。
         不要使用往年题，不要输出材料里没有的页码。
-        ${if (essayWanted) "另外写一份论述提纲：thesis，2 到 6 个 paragraphs，每段 claim 同样挂一处教材原句。论点用自己的话，不要照抄原文。" else "不要写论述提纲，essay 设为 null。"}
+        ${if (essayWanted) "另外写一份论述提纲：thesis，2 到 6 个 paragraphs，每段 claim 紧扣当前考点并挂一处完整教材原句。论点用自己的话，不要照抄原文。" else "不要写论述提纲，essay 设为 null。"}
         只输出 JSON：{"choices":[{"id":"c1","stem":"...","options":[{"letter":"A","text":"...","correct":false,"reason":"...","citation":{"bookId":"...","page":1,"startUtf16":0,"endUtf16":1,"quote":"..."}}]}],"essay":null}
     """.trimIndent()
 
@@ -658,11 +951,15 @@ class ExamPointDrillPipeline(
         essayWanted: Boolean,
         ids: List<String>,
         essay: Boolean,
+        reasons: Map<String, String> = emptyMap(),
     ) = buildJsonObject {
         put("topicTitle", topicTitle)
         put("essay", essayWanted && essay)
         put("rewriteChoiceIds", JsonArray(ids.map { JsonPrimitive(it) }))
-        put("note", "这些题的出处对不上或题干不像理解题。请只重写点名的题。不要假设哪个选项该对。")
+        if (reasons.isNotEmpty()) {
+            put("failureReasons", buildJsonObject { reasons.forEach { (id, r) -> put(id, r) } })
+        }
+        put("note", "这些题存在出处对不上、引文过短、偏离当前考点、与前题重复、目录定位或复述原文的问题。请只重写点名的题，确保紧扣当前考点本身、与其余题考查不同角度，且每个选项的理由都有完整原文支持。不要假设哪个选项该对。")
         put("materials", materialsJson(blocks))
     }.toString()
 

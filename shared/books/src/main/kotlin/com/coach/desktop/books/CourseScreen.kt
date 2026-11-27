@@ -124,6 +124,7 @@ internal fun CourseScreen(
     onOpenLiteratureGuide: (() -> Unit)? = null,
     onOpenLiteratureComparison: (() -> Unit)? = null,
     onGenerateExamDrills: (() -> Unit)? = null,
+    drillProgress: ExamDrillProgress? = null,
 ) {
     val colors = CoachTheme.colors
     val isExam = detail.isExam
@@ -354,6 +355,7 @@ internal fun CourseScreen(
                     onRealign = onRealign,
                     onPractice = onOpenTopic,
                     onGenerateExamDrills = onGenerateExamDrills,
+                    drillProgress = drillProgress,
                 )
 
                 // Visible, editable record of the user's exam & syllabus answers

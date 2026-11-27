@@ -8,23 +8,38 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.nio.file.Path
 import java.nio.file.Files
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 internal enum class BookScreen { HOME, COURSE, COURSE_MOCK, BOOKLIST, READER, LEARNING, REVIEWS, REVIEWING }
 internal enum class BookPrompt { IMPORTED, START, AFTER_READING, QUESTIONS }
 internal enum class MultiDropAction { COURSE, BOOKLIST, SEPARATE }
 internal data class PendingMultiDrop(val paths: List<Path>, val onStaged: () -> Unit = {})
 internal data class BookIndexProgress(val bookId: String, val page: Int, val total: Int)
+internal data class ExamDrillProgress(
+    val courseId: String,
+    val completed: Int,
+    val total: Int,
+    val failed: Int = 0,
+    val inFlight: Int = 0,
+    val running: Boolean = true,
+)
 internal data class LibraryUi(
     val catalog: List<BookSummary> = emptyList(), val book: Textbook? = null,
     val collections: List<CollectionSummary> = emptyList(),
@@ -65,6 +80,8 @@ internal data class LibraryUi(
     /** 最近一次拖进课程的文件和认定的类型，供当场改错。 */
     val courseIntake: CourseIntakeReceipt? = null,
     val courseBusy: Boolean = false,
+    /** 并行批量为考点出题时的实时进度，支持中途关闭重开后接着出。 */
+    val examDrillProgress: ExamDrillProgress? = null,
     /** 当前打开的书单 ID（从书单进入阅读器时保留上下文，返回时回到该书单页）。 */
     val activeBooklistId: String? = null,
     /** 书单后台正在执行两阶段共同主题对齐时为 true。 */
@@ -105,6 +122,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     private val pageSaveLock = Mutex()
     private val indexingControls = ConcurrentHashMap<String, BookImportControl>()
     private val indexingJobs = ConcurrentHashMap<String, Job>()
+    private val activeExamDrillCourses = ConcurrentHashMap.newKeySet<String>()
+    private val examDrillSaveLock = Mutex()
 
     init {
         backgroundScope.launch {
@@ -2576,60 +2595,173 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         mutable.update { it.copy(activeCourseDetail = refreshed) }
     }
 
-    suspend fun generateExamPointDrills(courseId: String, explainer: BookExplainer?) = action(showBusy = false) {
-        mutable.update { it.copy(courseBusy = true) }
+    suspend fun generateExamPointDrills(
+        courseId: String,
+        explainer: BookExplainer?,
+        concurrency: Int = DEFAULT_DRILL_CONCURRENCY,
+    ) {
+        if (!activeExamDrillCourses.add(courseId)) return
         try {
             if (explainer == null) {
                 mutable.update { it.copy(courseNotice = "出题需要联网，请先配对学习服务。") }
-                return@action
+                return
             }
             runCatching { explainer.load() }
             if (explainer.identity == null) {
                 mutable.update { it.copy(courseNotice = "出题需要联网，请先配对学习服务。") }
-                return@action
+                return
             }
-            val detail = library.courseDetail(courseId)
+            val detail = withContext(Dispatchers.IO) { library.courseDetail(courseId) }
             val points = detail.examinableTopics.filter { it.weekLabel == CourseExamPoints.LABEL && it.sources.isNotEmpty() }
             if (points.isEmpty()) {
                 mutable.update { it.copy(courseNotice = "这门课还没有可出题的考点。") }
-                return@action
+                return
             }
-            var lastError: String? = null
-            points.forEachIndexed { index, point ->
-                mutable.update { it.copy(courseNotice = "正在为考点出题（${index + 1}/${points.size}）") }
-                val pagesByBook = library.withCourseDatabase { db ->
-                    point.sources.associate { source -> source.bookId to CourseStore.loadPagesForBook(db, source.bookId) }
+            val (alreadyDone, pending) = points.partition { ExamPointDrillLocal.isCompleted(it) }
+            if (pending.isEmpty()) {
+                val summary = ExamPointDrillLocal.report(points).summary()
+                mutable.update {
+                    it.copy(
+                        activeCourseDetail = if (it.activeCourseId == courseId) detail else it.activeCourseDetail,
+                        examDrillProgress = ExamDrillProgress(courseId, points.size, points.size, running = false),
+                        courseNotice = "全部考点已完成出题：$summary",
+                    )
                 }
-                val request = CourseAutoAligner.buildTopicPackRequest(detail, point, pagesByBook)
-                val reply = explainer.examPointDrill(request)
-                val body = reply.body
-                if (body == null) {
-                    lastError = reply.error ?: "出题没有返回"
-                    return@forEachIndexed
-                }
-                val decoded = ExamPointDrillLocal.decode(body) ?: run {
-                    lastError = "出题结果无法读取"
-                    return@forEachIndexed
-                }
-                val verified = ExamPointDrillLocal.verify(decoded, pagesByBook)
-                val base = point.pack ?: CourseAutoAligner.buildOfflineTopicPack(detail, point, pagesByBook)
+                return
+            }
+
+            val allBookIds = pending.flatMap { it.sources.map { s -> s.bookId } }.distinct()
+            val pagesByBook = withContext(Dispatchers.IO) {
                 library.withCourseDatabase { db ->
-                    CourseStore.saveTopicPack(db, point.topicId, base.copy(drill = verified), point.packSourcesHash.orEmpty())
+                    allBookIds.associateWith { bookId -> CourseStore.loadPagesForBook(db, bookId, maxPages = Int.MAX_VALUE) }
                 }
             }
-            val refreshed = library.courseDetail(courseId)
+            val workerCount = concurrency.coerceIn(1, 16)
+            val semaphore = Semaphore(workerCount)
+            val completedCount = AtomicInteger(alreadyDone.size)
+            val failedCount = AtomicInteger(0)
+            val inFlightCount = AtomicInteger(0)
+            val lastError = AtomicReference<String?>(null)
+
+            fun publishProgress(running: Boolean) {
+                val done = completedCount.get()
+                val fail = failedCount.get()
+                val active = inFlightCount.get()
+                val progress = ExamDrillProgress(courseId, done, points.size, fail, active, running)
+                mutable.update { cur ->
+                    cur.copy(
+                        examDrillProgress = progress,
+                        courseNotice = if (running) {
+                            "正在并行出题（$done/${points.size}，当前并行 $active 路${if (fail > 0) "，失败 $fail" else ""}）"
+                        } else cur.courseNotice,
+                    )
+                }
+            }
+
+            publishProgress(running = true)
+            coroutineScope {
+                pending.map { point ->
+                    async(Dispatchers.IO) {
+                        semaphore.withPermit {
+                            inFlightCount.incrementAndGet()
+                            publishProgress(running = true)
+                            try {
+                                val pointPages = point.sources.map { it.bookId }.distinct()
+                                    .associateWith { pagesByBook[it].orEmpty() }
+                                val request = CourseAutoAligner.buildTopicPackRequest(detail, point, pointPages)
+                                val reply = explainer.examPointDrill(request)
+                                val body = reply.body
+                                if (body == null) {
+                                    lastError.set(reply.error ?: "出题没有返回")
+                                    failedCount.incrementAndGet()
+                                    return@withPermit
+                                }
+                                val decoded = ExamPointDrillLocal.decode(body)
+                                if (decoded == null) {
+                                    lastError.set("出题结果无法读取")
+                                    failedCount.incrementAndGet()
+                                    return@withPermit
+                                }
+                                val verified = ExamPointDrillLocal.verify(decoded, pointPages)
+                                val base = point.pack ?: CourseAutoAligner.buildOfflineTopicPack(detail, point, pointPages)
+                                examDrillSaveLock.withLock {
+                                    library.withCourseDatabase { db ->
+                                        CourseStore.saveTopicPack(
+                                            db,
+                                            point.topicId,
+                                            base.copy(drill = verified),
+                                            point.packSourcesHash.orEmpty(),
+                                        )
+                                    }
+                                }
+                                val doneNow = completedCount.incrementAndGet()
+                                if (doneNow == points.size || doneNow % 4 == 0 || points.size <= 12) {
+                                    val partial = runCatching { library.courseDetail(courseId) }.getOrNull()
+                                    if (partial != null) {
+                                        mutable.update { cur ->
+                                            if (cur.activeCourseId == courseId) cur.copy(activeCourseDetail = partial) else cur
+                                        }
+                                    }
+                                }
+                            } finally {
+                                inFlightCount.decrementAndGet()
+                                publishProgress(running = true)
+                            }
+                        }
+                    }
+                }.awaitAll()
+            }
+
+            val refreshed = withContext(Dispatchers.IO) { library.courseDetail(courseId) }
             val summary = ExamPointDrillLocal.report(
                 refreshed.examinableTopics.filter { it.weekLabel == CourseExamPoints.LABEL && it.sources.isNotEmpty() },
             ).summary()
-            mutable.update {
-                it.copy(
-                    activeCourseDetail = refreshed,
-                    courseNotice = if (lastError == null) summary else "$summary。有考点未返回。",
+            val err = lastError.get()
+            mutable.update { cur ->
+                cur.copy(
+                    activeCourseDetail = if (cur.activeCourseId == courseId || cur.activeCourseDetail?.courseId == courseId) refreshed else cur.activeCourseDetail,
+                    examDrillProgress = ExamDrillProgress(
+                        courseId = courseId,
+                        completed = completedCount.get(),
+                        total = points.size,
+                        failed = failedCount.get(),
+                        inFlight = 0,
+                        running = false,
+                    ),
+                    courseNotice = if (err == null) summary else "$summary。有 ${failedCount.get()} 个考点未返回，再次点击可继续补出。",
                 )
             }
+        } catch (cancelled: CancellationException) {
+            withContext(NonCancellable) {
+                val partial = runCatching { withContext(Dispatchers.IO) { library.courseDetail(courseId) } }.getOrNull()
+                mutable.update { cur ->
+                    val done = partial?.examinableTopics
+                        ?.filter { it.weekLabel == CourseExamPoints.LABEL && it.sources.isNotEmpty() }
+                        ?.count { ExamPointDrillLocal.isCompleted(it) }
+                        ?: cur.examDrillProgress?.completed ?: 0
+                    val total = partial?.examinableTopics
+                        ?.count { it.weekLabel == CourseExamPoints.LABEL && it.sources.isNotEmpty() }
+                        ?: cur.examDrillProgress?.total ?: 0
+                    cur.copy(
+                        activeCourseDetail = if (partial != null && cur.activeCourseId == courseId) partial else cur.activeCourseDetail,
+                        examDrillProgress = if (total > 0) ExamDrillProgress(courseId, done, total, running = false) else null,
+                    )
+                }
+            }
+            throw cancelled
         } finally {
-            mutable.update { it.copy(courseBusy = false) }
+            activeExamDrillCourses.remove(courseId)
+            mutable.update { cur ->
+                val p = cur.examDrillProgress
+                if (p != null && p.courseId == courseId && p.running) {
+                    cur.copy(examDrillProgress = p.copy(inFlight = 0, running = false))
+                } else cur
+            }
         }
+    }
+
+    companion object {
+        const val DEFAULT_DRILL_CONCURRENCY: Int = 8
     }
 
     suspend fun runCourseHandwrittenVision(courseId: String, bookId: String, explainer: BookExplainer?) = action {

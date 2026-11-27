@@ -86,11 +86,21 @@ internal object ExamPointDrillLocal {
         return listOfNotNull(choicePart, essayPart).joinToString(" · ")
     }
 
+    fun isCompleted(point: CourseTopicEntry): Boolean {
+        val pack = point.pack ?: return false
+        val drill = pack.drill ?: return false
+        if (!point.packSourcesHash.isNullOrBlank() && pack.generatedFromHash.isNotBlank() &&
+            pack.generatedFromHash != point.packSourcesHash
+        ) return false
+        return drill.choices.isNotEmpty() || !drill.emptyReason.isNullOrBlank() || drill.checked > 0 || drill.discards.isNotEmpty()
+    }
+
     fun preserve(next: CourseTopicPack, previous: CourseTopicPack?): CourseTopicPack =
         if (next.drill == null && previous?.drill != null) next.copy(drill = previous.drill) else next
 
     fun verify(drill: ExamPointDrill, pagesByBook: Map<String, List<BookPage>>): ExamPointDrill {
-        var dropped = 0
+        var droppedChoices = 0
+        var droppedEssay = 0
         val kept = drill.choices.mapNotNull { choice ->
             val verified = choice.options.map { opt ->
                 CourseClientGates.verifySingleCitation(opt.citation, pagesByBook[opt.citation.bookId].orEmpty())
@@ -98,7 +108,7 @@ internal object ExamPointDrillLocal {
             if (verified.all { it != null }) {
                 choice.copy(options = choice.options.zip(verified) { opt, citation -> opt.copy(citation = citation!!) })
             } else {
-                dropped += 1
+                droppedChoices += 1
                 null
             }
         }
@@ -115,9 +125,10 @@ internal object ExamPointDrillLocal {
             } else {
                 essay = null
                 essayMissing = true
-                dropped += 1
+                droppedEssay += 1
             }
         }
+        val dropped = droppedChoices + droppedEssay
         val discards = if (dropped == 0) {
             drill.discards
         } else {
@@ -127,7 +138,9 @@ internal object ExamPointDrillLocal {
         val emptyReason = when {
             kept.isNotEmpty() -> null
             !drill.emptyReason.isNullOrBlank() -> drill.emptyReason
-            else -> "引用对不上原文，这些题没有留下"
+            droppedChoices > 0 -> "引用对不上原文，这些题没有留下"
+            drill.checked > 0 -> "核对全部拒掉"
+            else -> "模型没有写出可用的题"
         }
         return drill.copy(
             choices = kept,

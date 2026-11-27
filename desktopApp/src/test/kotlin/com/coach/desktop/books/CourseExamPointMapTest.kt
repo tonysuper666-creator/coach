@@ -76,4 +76,56 @@ class CourseExamPointMapTest {
             }
         }
     }
+
+    @Test
+    fun progressBarAndResumeButtonReflectActiveAndSavedProgress() {
+        val quote = "Supply shifts when input costs fall."
+        val cit = CourseCitationRef("book", "教材", CourseMaterialRole.CORE_TEXTBOOK, 1, 0, quote.length, quote = quote)
+        val completedDrill = ExamPointDrill(
+            choices = listOf(TeachingChoice("c1", "Why?", listOf("A", "B", "C", "D").map {
+                TeachingChoiceOption(it, "opt $it", it == "A", "why", cit)
+            })),
+            essay = null, missingChoices = 2, essayMissing = false, discards = emptyMap(),
+            checked = 1, agreed = 1, emptyReason = null,
+        )
+        val points = (0 until 5).map { i ->
+            CourseTopicEntry(
+                topicId = "point-$i", collectionId = "course", weekLabel = CourseExamPoints.LABEL,
+                weekNum = null, ord = i, title = "合成考点 $i", examStatus = CourseTopicStatus.EXAMINABLE,
+                userLocked = false,
+                sources = listOf(CourseTopicSourceLink("point-$i", "book", "教材", "pdf", CourseMaterialRole.CORE_TEXTBOOK, 1)),
+                pack = if (i < 2) CourseTopicPack("point-$i", "s", "", drill = completedDrill) else null,
+            )
+        }
+        val detail = CourseDetailSnapshot("course", "合成课程", CourseExamProfile(examEnabled = true), emptyList(), points, emptyList(), emptyList())
+        // 1. Saved partial progress after reopen (2/5 done)
+        runSkikoComposeUiTest(size = Size(920f, 940f)) {
+            setContent {
+                CoachTheme(false) {
+                    Surface(modifier = Modifier.padding(16.dp)) {
+                        CourseExamPointMap(detail = detail, onRealign = {}, onPractice = {}, onGenerateExamDrills = {}, drillProgress = null)
+                    }
+                }
+            }
+            onNodeWithTag("exam-point-drill-progress").assertIsDisplayed()
+            onNodeWithText("已保存进度：2/5 · 重开后可接着出", useUnmergedTree = true).assertIsDisplayed()
+            onNodeWithText("继续为考点出题（已完成 2/5）", useUnmergedTree = true).assertIsDisplayed()
+        }
+        // 2. Active parallel progress (3/5 running with 4 workers)
+        runSkikoComposeUiTest(size = Size(920f, 940f)) {
+            setContent {
+                CoachTheme(false) {
+                    Surface(modifier = Modifier.padding(16.dp)) {
+                        CourseExamPointMap(
+                            detail = detail, onRealign = {}, onPractice = {}, onGenerateExamDrills = {},
+                            drillProgress = ExamDrillProgress("course", completed = 3, total = 5, inFlight = 4, running = true),
+                        )
+                    }
+                }
+            }
+            onNodeWithTag("exam-point-drill-progress").assertIsDisplayed()
+            onNodeWithText("出题进度：3/5 · 并行 4 路", useUnmergedTree = true).assertIsDisplayed()
+            onNodeWithText("正在出题（3/5）…", useUnmergedTree = true).assertIsDisplayed()
+        }
+    }
 }

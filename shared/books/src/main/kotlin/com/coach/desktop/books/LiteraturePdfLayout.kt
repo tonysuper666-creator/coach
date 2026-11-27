@@ -405,7 +405,7 @@ internal object LiteraturePdfLayout {
         val pdfPage = pdf.getPage(page - 1)
         val crop = pdfPage.cropBox
         val words = mutableListOf<Word>()
-        val stripper = object : BookPdfStripper() {
+        val stripper = object : ReadingOrderStripper() {
             override fun writeString(text: String, textPositions: List<BookPdfTextPosition>) {
                 var start = 0f
                 var end = 0f

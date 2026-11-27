@@ -538,6 +538,7 @@ internal fun SectionEndSummaryCard(
     onOpenMainline: (() -> Unit)? = null,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    summaryMaxLines: Int = 2,
 ) {
     val colors = CoachTheme.colors
     var quizOpen by remember(section.id) { mutableStateOf(false) }
@@ -567,7 +568,8 @@ internal fun SectionEndSummaryCard(
         ) {
             Column(Modifier.fillMaxWidth().testTag("section-end-summary-lines"), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 shownLines.forEach { line ->
-                    Text("· $line", style = MaterialTheme.typography.bodySmall, color = colors.fgPrimary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text("· $line", style = MaterialTheme.typography.bodySmall, color = colors.fgPrimary,
+                        maxLines = summaryMaxLines, overflow = TextOverflow.Ellipsis)
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {

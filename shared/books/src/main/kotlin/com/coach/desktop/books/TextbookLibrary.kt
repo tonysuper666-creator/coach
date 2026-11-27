@@ -463,9 +463,7 @@ internal class TextbookLibrary(
                 catch (_: IllegalArgumentException) { null }
                 if (restored != null) return@readCached restored
             }
-            val extracted = PdfPageTextExtraction.extract(pdf, page.number)
-            // Older books may have a different text layer. Attach nothing unless all offsets still agree.
-            if (extracted.unit.text != page.text) return@readCached null
+            val extracted = PdfPageTextExtraction.extractMatching(pdf, page) ?: return@readCached null
             database().use { db ->
                 BookPageTextBoxStore.saveInTransaction(db, book.id, mapOf(page.number to page.text), listOf(extracted.pageLayout()))
             }

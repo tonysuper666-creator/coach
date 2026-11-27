@@ -31,7 +31,8 @@ internal data class BookTocNode(
 )
 
 private val BookTocNode.usesSourceOffset: Boolean
-    get() = source == HeadingSource.EPUB_TOC || source == HeadingSource.MANUAL || source == HeadingSource.TEXT_LAYOUT
+    get() = source == HeadingSource.EPUB_TOC || source == HeadingSource.MANUAL || source == HeadingSource.TEXT_LAYOUT ||
+        (startOffset > 0 && (source == HeadingSource.PDF_OUTLINE || source == HeadingSource.TYPOGRAPHY))
 
 /**
  * AI/study chunk (`book_study_chunks`) mapped onto a canonical TOC leaf node.
@@ -371,8 +372,11 @@ internal object BookTocWaterfall {
         val byPage = allBlocks.groupBy { it.page }
 
         // Stage A: External outline (PDF Outline / EPUB TOC / Word styles)
+        val pageByNumber = pages.associateBy { it.number }
         val stageARaw = externalOutline.filter { it.page in 1..totalPages }.map {
-            RawCandidate(it.title, it.level, it.page, null, it.source, startOffset = it.startOffset)
+            val offset = if (it.source == HeadingSource.PDF_OUTLINE && it.startOffset == 0)
+                pdfHeadingOffset(pageByNumber[it.page]?.text.orEmpty(), it.title) else it.startOffset
+            RawCandidate(it.title, it.level, it.page, null, it.source, startOffset = offset)
         }
         val stageANodes = buildCanonicalNodes(bookId, totalPages, stageARaw, confidence = 1.0)
         if (stageARaw.isNotEmpty()) {
@@ -1082,17 +1086,27 @@ internal object BookTocWaterfall {
         val candidates = mutableListOf<RawCandidate>()
         var usedTypo = false
 
-        for (page in activePages) {
+        val referenceHeadings = setOf("references", "bibliography", "works cited", "author contributions", "参考文献")
+        val headingPages = if (format == "pdf" && bodyPages.isNotEmpty()) pages.filter {
+            val role = pageRoles[it.number] ?: BookPageRole.BODY
+            role == BookPageRole.BODY || role == BookPageRole.REFERENCES
+        } else activePages
+        for (page in headingPages) {
             val lines = typographyLines[page.number]
             if (!lines.isNullOrEmpty()) {
+                val abstractIndex = if (format == "pdf" && page.number == 1)
+                    lines.indexOfFirst { it.text.equals("Abstract", ignoreCase = true) } else -1
                 for (idx in lines.indices) {
                     val line = lines[idx]
                     val cleaned = cleanTocTitle(line.text)
-                    if (cleaned.isEmpty()) continue
+                    if (cleaned.isEmpty() || idx < abstractIndex) continue
+                    if (format == "pdf" && cleaned.none(Char::isLetter)) continue
+                    if (pageRoles[page.number] == BookPageRole.REFERENCES && cleaned.lowercase() !in referenceHeadings) continue
                     val enlarged = bodyMedianPt > 0.0 && line.fontSizePt >= bodyMedianPt * 1.18
                     val slightlyEnlarged = bodyMedianPt > 0.0 && line.fontSizePt >= bodyMedianPt * 1.05
                     val prominent = enlarged || (line.bold && (bodyMedianPt <= 0.0 || line.fontSizePt >= bodyMedianPt * 0.98))
-                    if (isRejectedHeadingCandidate(cleaned, repeatingEdges, prominent)) continue
+                    val edgeKeys = if (format != "pdf" || line.yNorm < 0.10 || line.yNorm > 0.90) repeatingEdges else emptySet()
+                    if (isRejectedHeadingCandidate(cleaned, edgeKeys, prominent)) continue
                     if (page.number == 1 && !prominent && !isAcademicOrNumberedHeading(cleaned)) continue
 
                     val matchedRule = BookStructurePlanner.matchHeadingRule(cleaned, false)
@@ -1111,10 +1125,12 @@ internal object BookTocWaterfall {
                     if (accepted) {
                         if (enlarged || line.bold) usedTypo = true
                         val level = matchedRule?.level ?: inferAcademicLevel(cleaned, if (enlarged) 1 else 2)
-                        candidates += RawCandidate(cleaned, level, page.number, null, if (usedTypo) HeadingSource.TYPOGRAPHY else HeadingSource.HEADING_RULE)
+                        candidates += RawCandidate(cleaned, level, page.number, null,
+                            if (usedTypo) HeadingSource.TYPOGRAPHY else HeadingSource.HEADING_RULE,
+                            startOffset = if (format == "pdf") pdfHeadingOffset(page.text, line.text) else 0)
                     }
                 }
-            } else {
+            } else if (pageRoles[page.number] != BookPageRole.REFERENCES) {
                 // No PDF font info (OCR / synthetic text): use strict negative-filtered block headings.
                 for (block in byPage[page.number].orEmpty()) {
                     val firstLine = cleanTocTitle(block.text.lineSequence().firstOrNull().orEmpty())
@@ -1201,6 +1217,14 @@ internal object BookTocWaterfall {
             .replace(Regex("""\s*[\(\[（【](?:cont\.?|continued|\d+/\d+)[\)\]）】]\s*$""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""\s*\(\d+\)\s*$"""), "")
             .trim()
+
+    private fun pdfHeadingOffset(text: String, title: String): Int {
+        if (title.isBlank() || title.length > 300) return 0
+        val words = title.trim().split(Regex("""\s+""")).joinToString("""\s+""", transform = Regex::escape)
+        // The bookmark may omit the printed section number. Only trust a complete heading line.
+        val heading = Regex("""(?im)^[\t ]*(?:\d+(?:\.\d+)*\.?[\t ]+)?$words[\t ]*\r?$""")
+        return heading.findAll(text).take(2).singleOrNull()?.range?.first ?: 0
+    }
 
     private fun isAcademicOrNumberedHeading(line: String): Boolean {
         if (SUBSECTION_3.matches(line) || SECTION_2.matches(line) || APPENDIX_TITLE.matches(line)) return true

@@ -11,6 +11,8 @@ import org.apache.pdfbox.pdmodel.common.PDRectangle
 import org.apache.pdfbox.pdmodel.common.PDStream
 import org.apache.pdfbox.pdmodel.font.PDType1Font
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDDocumentOutline
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem
 import org.apache.pdfbox.rendering.PDFRenderer
 import org.apache.pdfbox.text.PDFTextStripper
 import org.apache.pdfbox.util.Matrix
@@ -33,6 +35,102 @@ class PdfPageTextTest {
     private fun baseline(document: PDDocument, page: Int): String = TextbookExtraction.clean(
         PDFTextStripper().apply { startPage = page; endPage = page; sortByPosition = true; paragraphEnd = "\n\n" }
             .getText(document))
+
+    @Test fun recurringMarginsAreRemovedOnlyAtTheirPrintedPosition() {
+        PDDocument().use { doc ->
+            for (n in 1..4) {
+                val page = PDPage(); doc.addPage(page)
+                PDPageContentStream(doc, page).use { out ->
+                    out.text(40f, 758f, "Journal of Reading")
+                    out.text(40f, 640f, "Section $n", 16f)
+                    out.text(40f, 580f, "Journal of Reading")
+                    out.text(40f, 36f, "Publication information     $n / 4")
+                    out.text(40f, 22f, "Journal")
+                    out.text(300f, 22f, "$n")
+                    out.text(425f, 22f, "Publisher")
+                }
+            }
+            val fast = PdfPageTextExtraction.extractPlainTextAndTypography(doc, 2)
+            val exact = PdfPageTextExtraction.extract(doc, 2)
+            assertEquals(fast.text, exact.unit.text)
+            assertEquals(fast.text, PdfPageTextExtraction.extractPlainText(doc, 2))
+            assertEquals(listOf("Section 2", "Journal of Reading"), fast.lines.map { it.text })
+            assertFalse("Publication" in fast.text)
+            assertEquals(1, Regex("Journal of Reading").findAll(fast.text).count())
+            assertFalse(LiteraturePdfLayout.extract(doc, 2).any { "Publication" in it.text })
+        }
+    }
+
+    @Test fun readsEachColumnAfterTheSpanningHeadingWithMatchingQuoteOffsets() {
+        PDDocument().use { doc ->
+            val page = PDPage(); doc.addPage(page)
+            PDPageContentStream(doc, page).use { out ->
+                out.text(160f, 720f, "This full width heading crosses the gutter", 16f)
+                for (i in 1..4) {
+                    out.text(322f, 695f - 16f * i, "Right paragraph number $i.")
+                    out.text(45f, 692f - 16f * i, "Left paragraph number $i.")
+                }
+            }
+            val text = PdfPageTextExtraction.extractPlainText(doc, 1)
+            val fast = PdfPageTextExtraction.extractPlainTextAndTypography(doc, 1)
+            val exact = PdfPageTextExtraction.extract(doc, 1)
+            assertEquals(text, exact.unit.text)
+            assertEquals(text, fast.text)
+            val leftEnd = text.indexOf("Left paragraph number 4.")
+            val rightStart = text.indexOf("Right paragraph number 1.")
+            assertTrue(leftEnd > text.indexOf("heading") && rightStart > leftEnd)
+            assertEquals("Left paragraph number 4.", fast.lines[4].text)
+            assertTrue(exact.unit.spans.single { it.range.startUtf16 == rightStart }.geometry.boxes.single().x > 0.5)
+            val previous = baseline(doc, 1)
+            assertNotEquals(text, previous)
+            assertEquals(previous, PdfPageTextExtraction.extractMatching(doc, BookPage(1, previous))?.unit?.text)
+        }
+    }
+
+    @Test fun paperTitleWrapperExposesSectionBookmarksAndSamePageOffsets() {
+        PDDocument().use { doc ->
+            val page = PDPage(); doc.addPage(page)
+            doc.documentInformation.title = "An example paper"
+            val outline = PDDocumentOutline()
+            doc.documentCatalog.documentOutline = outline
+            val wrapper = PDOutlineItem().apply { title = doc.documentInformation.title; setDestination(page) }
+            outline.addLast(wrapper)
+            for (label in listOf("Introduction", "Methods")) {
+                wrapper.addLast(PDOutlineItem().apply { title = label; setDestination(page) })
+            }
+            val items = extractBookPdfOutline(doc)
+            assertEquals(listOf("Introduction", "Methods"), items.map { it.title })
+            assertTrue(items.all { it.level == 1 })
+            val text = "1 Introduction\n\nA complete opening paragraph introduces the subject.\n\n2 Methods\n\nA different paragraph explains the method."
+            val plan = BookTocWaterfall.plan("paper", wrapper.title, "pdf", listOf(BookPage(1, text)), items)
+            assertEquals(listOf(0, text.indexOf("2 Methods")), plan.tocNodes.map { it.startOffset })
+        }
+    }
+
+    @Test fun pdfSummaryUsesCompleteSentencesAcrossPrintedLineBreaks() {
+        val text = "a continuation from the previous page.\nThe first complete sentence extends across\n" +
+            "a printed line and retains its original ending. An unfinished last line"
+        val lesson = BookLesson("part", "Section", listOf(SourceBlock("p", 2, 0, text.length, false, text)))
+        assertEquals(listOf("The first complete sentence extends across a printed line and retains its original ending."),
+            StudyCoachCourse.localSectionSummary(lesson, "pdf"))
+    }
+
+    @Test fun typographyUsesPrintedSizeWhenTheTextMatrixScalesAOnePointFont() {
+        PDDocument().use { doc ->
+            val page = PDPage(); doc.addPage(page)
+            PDPageContentStream(doc, page).use { out ->
+                for ((y, size, label) in listOf(Triple(620f, 14f, "Topic"), Triple(593f, 10f, "Body text"))) {
+                    out.beginText()
+                    out.setFont(font, 1f)
+                    out.setTextMatrix(Matrix(size, 0f, 0f, size, 40f, y))
+                    out.showText(label)
+                    out.endText()
+                }
+            }
+            val lines = PdfPageTextExtraction.extractPlainTextAndTypography(doc, 1).lines
+            assertEquals(listOf(14.0, 10.0), lines.map { it.fontSizePt })
+        }
+    }
 
     @Test fun complexPageHasExactlyTheExistingTextAndEveryVisibleCharacterHasAGlyphBox() {
         PDDocument().use { document ->

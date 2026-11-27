@@ -1,10 +1,13 @@
 package com.coach.desktop.incident
 
 import com.coach.domain.IncidentRedactor
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 import java.util.ArrayDeque
@@ -22,6 +25,8 @@ internal class IncidentStore(
     private val uploadBytes: Int = 256 * 1024,
     private val clock: () -> Instant = Instant::now,
     private val pid: () -> Long = { ProcessHandle.current().pid() },
+    private val processStart: () -> Long? = { currentProcessStart() },
+    private val alive: (pid: Long, processStart: Long) -> Boolean = ::processStillRunning,
 ) {
     private val operations = ArrayDeque<String>()
     private var sequence = 0L
@@ -69,29 +74,49 @@ internal class IncidentStore(
 
     fun recordSyncFailure(detail: String) = record("sync_failure", "sync_push", detail)
 
-    /** Previous process did not exit cleanly. Returns the text that would be sent, or null. */
+    /**
+     * Previous process did not exit cleanly. Returns the text that would be sent, or null.
+     *
+     * Several copies of the app can share one incident directory, so session.txt keeps one open entry per
+     * process. An open entry whose process is gone is an unclean exit; one whose process still runs stays (TON-1941).
+     */
     @Synchronized
     fun beginSession(): PendingOffer? {
         Files.createDirectories(root)
         note("app_start")
-        val previous = readSession()
-        val offer = if (previous != null && previous.open && previous.pid != pid()) {
-            if (incidentFiles().none { it.epoch >= previous.startedAt }) {
-                record("unclean_exit", "app_start", "上次进程没有正常退出。")
-            }
-            pack(unconsented())
-        } else null
-        writeSession(open = true)
-        sessionStarted = true
-        return offer
+        return withSessionLock {
+            val mine = pid()
+            val start = processStart()
+            val others = readSessions().filter { it.open && !it.isProcess(mine, start) }
+            val running = others.filter { it.pid != null && it.processStart != null && alive(it.pid, it.processStart) }
+            val ended = others - running.toSet()
+            val offer = if (ended.isNotEmpty()) {
+                // Only a record still waiting for an answer covers this exit; one already sent or declined
+                // belongs to an earlier exit, so this exit gets its own record and prompt (TON-1941).
+                val pending = unconsented()
+                if (ended.any { marker -> pending.none { it.epoch >= marker.startedAt } }) {
+                    record("unclean_exit", "app_start", "上次进程没有正常退出。")
+                }
+                pack(unconsented())
+            } else null
+            writeSessions(running + SessionMarker(true, clock().toEpochMilli(), mine, start))
+            sessionStarted = true
+            offer
+        }
     }
 
+    /** Drops only this process's entry; entries of other copies stay for their own close or the next start. */
     @Synchronized
     fun markClean() {
         if (!sessionStarted || !Files.isDirectory(root)) return
-        val current = readSession()
-        if (current != null && current.pid != null && current.pid != pid()) return
-        writeSession(open = false)
+        withSessionLock {
+            val mine = pid()
+            val start = processStart()
+            val open = readSessions().filter { it.open }
+            if (open.none { it.isProcess(mine, start) }) return@withSessionLock
+            val rest = open.filter { !it.isProcess(mine, start) }
+            writeSessions(rest.ifEmpty { listOf(SessionMarker(false, clock().toEpochMilli(), mine, start)) })
+        }
     }
 
     @Synchronized
@@ -178,23 +203,79 @@ internal class IncidentStore(
         }
     }
 
-    private fun readSession(): SessionMarker? {
+    /** Entries back to back: "open" or "clean", then startedAt, pid and the process start time, one per line. */
+    private fun readSessions(): List<SessionMarker> {
         val file = root.resolve("session.txt")
-        if (!Files.isRegularFile(file)) return null
-        val lines = Files.readAllLines(file)
-        val state = lines.firstOrNull()?.trim().orEmpty()
-        val started = lines.getOrNull(1)?.trim()?.toLongOrNull() ?: return null
-        val process = lines.getOrNull(2)?.trim()?.toLongOrNull()
-        return SessionMarker(open = state == "open", startedAt = started, pid = process)
+        if (!Files.isRegularFile(file)) return emptyList()
+        val markers = ArrayList<SessionMarker>()
+        var state: String? = null
+        val values = ArrayList<Long?>()
+        fun flush() {
+            val started = values.getOrNull(0)
+            if (state != null && started != null) {
+                markers += SessionMarker(state == "open", started, values.getOrNull(1), values.getOrNull(2))
+            }
+            values.clear()
+        }
+        for (raw in Files.readAllLines(file)) {
+            val line = raw.trim()
+            if (line.isEmpty()) continue
+            if (line == "open" || line == "clean") {
+                flush()
+                state = line
+            } else {
+                values += line.toLongOrNull()
+            }
+        }
+        flush()
+        return markers
     }
 
-    private fun writeSession(open: Boolean) {
-        val body = (if (open) "open" else "clean") + "\n" + clock().toEpochMilli() + "\n" + pid() + "\n"
-        Files.writeString(root.resolve("session.txt"), body)
+    private fun writeSessions(markers: List<SessionMarker>) {
+        val body = markers.joinToString("") { marker ->
+            (if (marker.open) "open" else "clean") + "\n" + marker.startedAt + "\n" + (marker.pid ?: "") + "\n" +
+                (marker.processStart?.let { "$it\n" } ?: "")
+        }
+        // Replace the marker whole and flush it: a power cut right after start must leave "open", not an empty file.
+        val target = root.resolve("session.txt")
+        val temp = root.resolve("session.txt.part")
+        FileChannel.open(temp, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING).use { channel ->
+            val bytes = ByteBuffer.wrap(body.toByteArray(Charsets.UTF_8))
+            while (bytes.hasRemaining()) channel.write(bytes)
+            channel.force(true)
+        }
+        try {
+            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING)
+        }
     }
 
-    private data class SessionMarker(val open: Boolean, val startedAt: Long, val pid: Long?)
+    /** Copies of the app starting or closing at the same moment take turns on session.txt. */
+    private fun <T> withSessionLock(block: () -> T): T = synchronized(SESSION_LOCK) {
+        FileChannel.open(root.resolve("session.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { channel ->
+            channel.lock().use { block() }
+        }
+    }
+
+    private data class SessionMarker(val open: Boolean, val startedAt: Long, val pid: Long?, val processStart: Long?) {
+        /** Same pid and, when both sides know it, the same start time: a reused pid is another process. */
+        fun isProcess(otherPid: Long, otherStart: Long?) =
+            pid == otherPid && (processStart == null || otherStart == null || processStart == otherStart)
+    }
 }
+
+/** One JVM holds one file lock per file; stores in the same process wait on this first. */
+private val SESSION_LOCK = Any()
+
+internal fun currentProcessStart(): Long? =
+    ProcessHandle.current().info().startInstant().map { it.toEpochMilli() }.orElse(null)
+
+/** A pid alone can be reused by an unrelated program, so the start time has to match as well. */
+internal fun processStillRunning(pid: Long, processStart: Long): Boolean =
+    ProcessHandle.of(pid).map { handle ->
+        handle.isAlive && handle.info().startInstant().map { it.toEpochMilli() == processStart }.orElse(false)
+    }.orElse(false)
 
 internal data class IncidentFile(val name: String, val epoch: Long, val bytes: Long)
 

@@ -80,6 +80,7 @@ internal fun MyLibraryScreen(
     var failed by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf<String?>(null) }
     var hits by remember { mutableStateOf<List<LibraryRecord>>(emptyList()) }
+    var obsidian by remember { mutableStateOf(ObsidianSyncView()) }
     var reload by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
     LaunchedEffect(reload) {
@@ -105,12 +106,15 @@ internal fun MyLibraryScreen(
                             kind = kind,
                             sinceMs = since,
                         ),
-                    )
+                    ) to loadObsidianSyncView(db)
                 }
             }
         }
         searching = false
-        found.onSuccess { hits = it }.onFailure { failed = "没有搜成" }
+        found.onSuccess {
+            hits = it.first
+            obsidian = it.second
+        }.onFailure { failed = "没有搜成" }
     }
     Column(
         Modifier
@@ -147,7 +151,9 @@ internal fun MyLibraryScreen(
                                 runCatching {
                                     openLibraryCorpus(library.directory).use { db ->
                                         syncLibraryCorpus(db)
-                                        exportObsidianVault(path, listLibraryRecords(db), listLibraryBooks(db), Instant.now(clock))
+                                        val outcome = exportObsidianVault(path, listLibraryRecords(db), listLibraryBooks(db), Instant.now(clock))
+                                        if (outcome is ObsidianExportOutcome.Done) rememberObsidianExportBaseline(path, db)
+                                        outcome
                                     }
                                 }
                             }
@@ -173,6 +179,45 @@ internal fun MyLibraryScreen(
                 modifier = Modifier.testTag("library-export"),
                 ringInside = true,
             ) { Text("导出到 Obsidian") }
+            V7TextButton(
+                onClick = {
+                    when (bookPickObsidianDirectory(
+                        dialogTitle = "选择 Obsidian 库",
+                        approveButtonText = "同步这个库",
+                    ) { path ->
+                        scope.launch {
+                            if (path == null) {
+                                status = "没有选择文件夹"
+                                return@launch
+                            }
+                            status = "正在同步…"
+                            val outcome = withContext(Dispatchers.IO) {
+                                runCatching {
+                                    openLibraryCorpus(library.directory).use { db ->
+                                        syncObsidianVault(path, db)
+                                    }
+                                }
+                            }
+                            status = outcome.fold(
+                                onSuccess = { result ->
+                                    when (result) {
+                                        is ObsidianSyncOutcome.Refused -> result.message
+                                        is ObsidianSyncOutcome.Done -> obsidianSyncStatus(result.report)
+                                    }
+                                },
+                                onFailure = { "没有同步成" },
+                            )
+                            reload += 1
+                        }
+                    }) {
+                        ObsidianPick.Scheduled -> status = "正在选择文件夹…"
+                        ObsidianPick.Busy -> status = "文件夹窗口已经开着"
+                        ObsidianPick.Unsupported -> status = "和 Obsidian 同步目前只在 Windows 上用"
+                    }
+                },
+                modifier = Modifier.padding(start = 8.dp).testTag("library-sync"),
+                ringInside = true,
+            ) { Text("从 Obsidian 同步") }
         }
         if (status != null) {
             Text(status.orEmpty(), style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.padding(top = 6.dp).testTag("library-status"))
@@ -213,6 +258,48 @@ internal fun MyLibraryScreen(
             color = colors.fgSecondary,
             modifier = Modifier.padding(top = 8.dp, bottom = 8.dp).testTag(if (failed != null) "library-failed" else "library-count"),
         )
+        val tokens = text.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        fun shows(note: ObsidianLooseNote): Boolean = tokens.all { token ->
+            note.title.contains(token, ignoreCase = true) || note.body.contains(token, ignoreCase = true)
+        }
+        if (obsidian.conflicts.isNotEmpty()) {
+            Column(Modifier.widthIn(max = 880.dp).padding(bottom = 8.dp).testTag("library-obsidian-conflict"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (conflict in obsidian.conflicts) {
+                    PaperCard(color = colors.surface1) {
+                        Text("两边都改了，两份都留着", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
+                        Text(conflict.title, style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("库里：${conflict.coachText}", style = MaterialTheme.typography.bodySmall, color = colors.fgPrimary, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        Text("Obsidian：${conflict.obsidianText}", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
+        val unmatched = obsidian.unmatched.filter(::shows)
+        if (unmatched.isNotEmpty()) {
+            Column(Modifier.widthIn(max = 880.dp).padding(bottom = 8.dp).testTag("library-obsidian-unmatched")) {
+                Text("这些笔记没有挂上", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
+                for (note in unmatched) {
+                    Text(note.title, style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+        val conceptOnly = obsidian.conceptOnly.filter(::shows)
+        if (conceptOnly.isNotEmpty()) {
+            Column(Modifier.widthIn(max = 880.dp).padding(bottom = 8.dp).testTag("library-obsidian-concept")) {
+                Text("挂到概念上，没有原句", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
+                for (note in conceptOnly) {
+                    Text("${note.title} · ${note.body}", style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+        if (obsidian.deletedTitles.isNotEmpty()) {
+            Text(
+                "已在 Obsidian 删除：" + obsidian.deletedTitles.joinToString("、"),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgSecondary,
+                modifier = Modifier.padding(bottom = 8.dp).testTag("library-obsidian-removed"),
+            )
+        }
         when {
             !ready && failed == null -> CoachLoadingDots(label = "正在整理我的库…", modifier = Modifier.testTag("library-loading"))
             failed == null && hits.isEmpty() && !searching -> Text(
@@ -223,7 +310,7 @@ internal fun MyLibraryScreen(
             )
             else -> LazyColumn(Modifier.weight(1f).widthIn(max = 880.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(hits, key = { it.key }) { hit ->
-                    LibraryHitCard(hit) {
+                    LibraryHitCard(hit, deletedInObsidian = hit.key in obsidian.deletedKeys) {
                         stageLibraryJump(library, hit)
                         onOpenBook(hit.bookId)
                     }
@@ -280,7 +367,7 @@ private fun FilterChip(label: String, selected: Boolean, tag: String, onClick: (
 }
 
 @Composable
-private fun LibraryHitCard(hit: LibraryRecord, onOpen: () -> Unit) {
+private fun LibraryHitCard(hit: LibraryRecord, deletedInObsidian: Boolean, onOpen: () -> Unit) {
     val colors = CoachTheme.colors
     PaperCard(
         Modifier
@@ -299,6 +386,7 @@ private fun LibraryHitCard(hit: LibraryRecord, onOpen: () -> Unit) {
                 if (libraryCitePending(hit)) append(" · 出处待查")
                 append(" · ")
                 append(libraryWhenLabel(hit.atMs))
+                if (deletedInObsidian) append(" · 已在 Obsidian 删除")
             },
             style = MaterialTheme.typography.labelMedium,
             color = colors.fgSecondary,

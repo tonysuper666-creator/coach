@@ -749,6 +749,8 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     } catch (e: kotlinx.coroutines.CancellationException) { throw e }
       catch (_: Exception) { MockReply(null, "需要联网才能核对各书说法，已保留本机结果。", retryable = true, code = "offline") }
 
+    // CI negative probe for TON-1943; never merged.
+    suspend fun unregisteredProbe() = http.get("$base/v9/unregistered-probe")
     suspend fun cancelLibraryExplain(id: String) {
         runCatching { http.post("$base/v1/library/explain/cancel") {
             setBody(TextContent(buildJsonObject { put("requestId", id) }.toString(), ContentType.Application.Json)) } }

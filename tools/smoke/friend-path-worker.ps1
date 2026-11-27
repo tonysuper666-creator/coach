@@ -493,10 +493,10 @@ function Click-Until([int]$n, [scriptblock]$Find, [scriptblock]$Done, [string]$w
 # 11-21 04:26 L4 点完交锁后 3 ms 就被别路抢走前台，选书框根本没开，Choose-File 只会干等 20 秒判失败。
 # 所以没弹框就按新一帧重新定位再点；框开过以后的失败（路径没填进去、回车没关掉）不重点——
 # 那种情况 Choose-File 自己会关框并报原因，再点一下反而可能点在残留的框上。
-function Click-Until-Dialog([int]$n, [string]$label, [scriptblock]$IsOpen, [int]$sec = 40, [int]$tries = 4, [int]$findSec = 15, [int]$openSec = 6) {
+function Click-Until-Dialog([int]$n, [string]$label, [scriptblock]$IsOpen, [int]$sec = 40, [int]$tries = 4, [int]$findSec = 15, [int]$openSec = 6, [bool]$exact = $false) {
     $m = $null; $deadline = (Get-Date).AddSeconds($findSec)
     do {
-        $m = Find-Text (Shot $n 'find') $label
+        $lines = Shot $n 'find'; $m = if ($exact) { Find-Exact $lines $label } else { Find-Text $lines $label }
         if (-not $m) { Start-Sleep -Seconds 2 }
     } while (-not $m -and (Get-Date) -lt $deadline)
     if (-not $m) { Fail $n "屏幕上找不到「$label」" }
@@ -505,7 +505,7 @@ function Click-Until-Dialog([int]$n, [string]$label, [scriptblock]$IsOpen, [int]
         if (& $IsOpen) { return }
         if ($try -gt 1) {
             # 上一轮点空了：光标可能被别路挪走，按新一帧重新定位。
-            $m = Find-Text (Shot $n 'dialog-find') $label
+            $lines = Shot $n 'dialog-find'; $m = if ($exact) { Find-Exact $lines $label } else { Find-Text $lines $label }
             if (-not $m) { Fail $n "点了 $($try - 1) 次「$label」，选书框都没出来，按钮也找不到了" }
         }
         Click-At $m.X $m.Y
@@ -1175,7 +1175,7 @@ try {
     # + 三张路线卡（为一门课备考 / 单读一本书 / 读一组书）；库里有书时首屏是焦点卡
     # （封面、书名、「上次停在第 N / M 页」、「继续」）。1.1.1 的书架行和侧栏都没有了，
     # 这两种首页都算窗口起来了，认任何一句结构性文字即可。
-    $m = Await-Text 1 'start' @('导入文件', '单读一本书', '为一门课备考', '上次停在', '读到第') 30
+    $m = Await-Text 1 'start' @('放进一本书', '导入文件', '单读一本书', '为一门课备考', '上次停在', '读到第') 30
     if (-not $m) {
         # 服务端拒过一次（配对被吊销 / 401）以后客户端会退回登录页：那一帧是「登录 LearningCoach /
         # Sable 账号登录 / 没有 sable 账号？用配对码」，首页的一个锚点都没有。这不是首页认错了，
@@ -1183,7 +1183,7 @@ try {
         if ((Find-Text $script:Last '登录') -or (Find-Text $script:Last '配对码')) {
             Fail 1 '客户端停在登录页：窗口里是「登录 LearningCoach / 没有 sable 账号？用配对码」，没有 2.0 首页可认（要先在这台机器上配对）'
         }
-        Fail 1 '窗口出来了，但 30 秒内没读出 2.0 首页（导入文件 / 单读一本书 / 为一门课备考）'
+        Fail 1 '窗口出来了，但 30 秒内没读出首页（放进一本书 / 导入文件 / 单读一本书 / 为一门课备考）'
     }
     if ($launchSw) { Note ("起窗完成：编译结束后 {0:N2} 秒" -f $launchSw.Elapsed.TotalSeconds) }
     Pass 1 '客户端窗口出现，2.0 首页可见'
@@ -1193,8 +1193,56 @@ try {
     # 「导入文件 · <可读格式>」，所以按钮和框都认「导入文件」这个前缀。
     # 只认原生选书框弹出来：四路同时开框时这一下可能在交锁后 3 ms 被别路抢前台吞掉（11-21 04:26 L4），
     # 框根本没开，Choose-File 干等 20 秒才判失败。没弹框就重定位再点，弹过框以后的失败交给 Choose-File 报。
-    Click-Until-Dialog 2 '导入文件' { (Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero }
+    # 首开标题也含「放进一本书」，必须整行匹配独立按钮，不点标题。
+    $firstOpen = ($null -ne (Find-Exact $script:Last '放进一本书')) -or ($null -ne (Find-Text $script:Last '放进一本书，马上做第一道题'))
+    $importLabel = if ($firstOpen) { '放进一本书' } else { '导入文件' }
+    Click-Until-Dialog 2 $importLabel { (Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero } 40 4 15 6 $firstOpen
     if (-not (Choose-File '导入文件' $Book)) { Fail 2 $script:ChooseFileWhy }
+    if ($firstOpen) {
+        # 首题必须真的选答并出现讲解；不能把「先翻开这本书」当成功路径。
+        $r = Get-Rect; $tasteX = [int](($r.R - $r.L) / 2); $tasteY = [int](($r.B - $r.T) * 0.7)
+        $deadline = (Get-Date).AddSeconds(240); $option = $null; $sawQuestion = $false; $i = 0
+        while (-not $option -and (Get-Date) -lt $deadline) {
+            $i++; $lines = Shot 2 "taste-question$i"
+            if (Has $lines @('服务这会儿正忙', '现在没联网', '还没出成题', '这次没出成题')) { Fail 2 '首题未生成，见 2-taste-question*.png' }
+            if (Has $lines @('选一个答案', '看讲解')) { $sawQuestion = $true }
+            if ($sawQuestion) {
+                foreach ($line in $lines) {
+                    if ($line.Text -match '^\s*(?:[○◯〇]|[A-D][.、:：)）])\s*\S') { $b = Get-LineBox $line; $option = [pscustomobject]@{ X = [int](($b.X1 + $b.X2) / 2); Y = $b.Y }; break }
+                }
+            }
+            if (-not $option) { if ($sawQuestion) { Scroll-At $tasteX $tasteY -2 }; Start-Sleep -Seconds 2 }
+        }
+        if (-not $option) { Fail 2 '240 秒内未识别到首题选项，见 2-taste-question*.png' }
+        Click-At $option.X $option.Y; Start-Sleep -Milliseconds 800
+        $submit = $null
+        foreach ($try in 1..6) {
+            $lines = Shot 2 "taste-submit$try"; $submit = Find-Exact $lines '看讲解'
+            if ($submit) { break }
+            Scroll-At $tasteX $tasteY -3; Start-Sleep -Milliseconds 600
+        }
+        if (-not $submit) { Fail 2 '选答后找不到「看讲解」，见 2-taste-submit*.png' }
+        Click-At $submit.X $submit.Y; Start-Sleep -Seconds 1
+        Scroll-At $tasteX $tasteY 10; Start-Sleep -Milliseconds 600
+        $told = $false; $explanation = $false; $continue = $null
+        foreach ($try in 1..12) {
+            $lines = Shot 2 "taste-explanation$try"
+            $verdict = Has $lines @('对了。', '这题选的是另一项')
+            if ($verdict) {
+                $told = $true
+                foreach ($line in $lines) {
+                    $box = Get-LineBox $line
+                    if ($box.Y1 -gt $verdict.Y2 -and $line.Text.Trim() -and $line.Text -notmatch '开始读这本书') { $explanation = $true }
+                }
+            }
+            $continue = Find-Exact $lines '开始读这本书'
+            if ($told -and $explanation -and $continue) { break }
+            if ($told -and $explanation) { Scroll-At $tasteX $tasteY -3 }
+            Start-Sleep -Milliseconds 800
+        }
+        if (-not $told -or -not $explanation -or -not $continue) { Fail 2 '首题讲解或「开始读这本书」未确认，见 2-taste-explanation*.png' }
+        Click-At $continue.X $continue.Y; Start-Sleep -Seconds 1
+    }
     # 2.0 导入收尾直接把阅读器打开（TextbookController.launchImport 每条收尾都置 screen = READER），
     # 首页也不再弹「教材已加入书架 / 先读」卡。所以第 2 步分两半认：
     #   · 书真进来了：阅读器底栏读出页号（导入后就停在这本书的第 1 页）；
@@ -1221,6 +1269,7 @@ try {
         if (-not $readerPage -and -not $shelfHit) { Start-Sleep -Seconds 2 }
     }
     if (-not $readerPage -and -not $shelfHit) { Fail 2 '选了书但 150 秒内既没进阅读器，书架里也没出现这本书' }
+    if ($firstOpen -and -not $readerPage) { Fail 2 '首题讲解后未确认阅读器底栏页码，见 2-imported*.png' }
     # 退回书架认这本书的行：指针贴上缘把顶栏叫出来，返回键在最左边。
     $row = $null
     if ($readerPage) {

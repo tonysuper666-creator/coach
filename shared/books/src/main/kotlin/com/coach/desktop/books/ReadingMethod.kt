@@ -56,6 +56,10 @@ internal data class ReadingMethodSignals(
     val forReview: Boolean = false,
     /** True when the numbers came from the book's own structure, so the reason can cite them. */
     val grounded: Boolean = false,
+    /** Chapter nodes whose titles are 第N章 / 第N节 / 第N篇, not story titles. */
+    val numberedChapters: Int = 0,
+    /** PDF whose sampled pages are mostly unread or recognized only by OCR, with no chapter skeleton. */
+    val thinText: Boolean = false,
 )
 
 internal data class ReadingMethodChoice(val method: ReadingMethod, val reason: String)
@@ -114,7 +118,8 @@ internal object ReadingMethodSelector {
             noExercises &&
             fewFormulas
         if ((signals.literatureCues > 0 || shortLiterary) && signals.chapterCount >= 2) {
-            return "全书 ${signals.chapterCount} 则短篇，没有章末题。读到一节就停一下，用自己的话说刚刚读到的意思。"
+            val noun = if (signals.numberedChapters * 2 >= signals.chapterCount) "章" else "则短篇"
+            return "全书 ${signals.chapterCount} $noun，没有章末题。读到一节就停一下，用自己的话说刚刚读到的意思。"
         }
         if (signals.literatureCues > 0 || shortLiterary) {
             return "这是文学作品，读到一节就停一下，用自己的话说刚刚读到的意思。"
@@ -122,6 +127,9 @@ internal object ReadingMethodSelector {
         if (signals.historyCues >= 2 && signals.literatureCues == 0 && noExercises && fewFormulas) {
             val chapters = if (signals.chapterCount > 0) "全书 ${signals.chapterCount} 章，" else ""
             return "这是历史书，${chapters}没有章末题。读到一节就停一下，用自己的话说这段讲了什么。"
+        }
+        if (signals.thinText && signals.chapterCount < 2 && noExercises && signals.pageCount > 0) {
+            return "这是扫描版，共 ${signals.pageCount} 页，正文还没认出。读到一节就停一下，用自己的话说刚刚读到的意思。"
         }
         return "这本看不出成套的习题和公式，读到一节就停下来，用自己的话说。"
     }
@@ -347,6 +355,9 @@ internal object ReadingMethodSignalsReader {
     private val argumentCue = Regex("""(?i)treatise|essay|discourse|inquiry|论著|学说""")
     private val literatureCue = Regex("""(?i)novel|poem|poetry|fiction|小说|散文|杂文""")
     private val lectureKind = Regex("""(?i)lecture|slides?""")
+    private val numberedChapterTitle = Regex(
+        """^第\s*[零〇一二三四五六七八九十百千万两兩0-9]{1,4}\s*[章节篇]""",
+    )
 
     fun fromBook(book: Textbook, materialKind: String? = null, sourceName: String? = null): ReadingMethodSignals {
         val titles = book.tocNodes.map { it.title }
@@ -385,8 +396,9 @@ internal object ReadingMethodSignalsReader {
             val problemPage = page.number in chapterEnds && nonempty >= 4 && numbered >= 4 && numbered * 2 >= nonempty
             if (heading || problemPage) bodyExercisePages.add(page.number)
         }
-        val chapters = book.tocNodes.count { it.kind == TocNodeKind.CHAPTER }.takeIf { it > 0 }
-            ?: titles.size
+        val chapterNodes = book.tocNodes.filter { it.kind == TocNodeKind.CHAPTER }
+        val chapters = chapterNodes.size.takeIf { it > 0 } ?: titles.size
+        val numberedChapters = chapterNodes.count { numberedChapterTitle.containsMatchIn(it.title.trim()) }
         val lecture = book.format.equals("pptx", ignoreCase = true) ||
             (materialKind != null && lectureKind.containsMatchIn(materialKind)) ||
             lectureKind.containsMatchIn(book.title) ||
@@ -402,6 +414,19 @@ internal object ReadingMethodSignalsReader {
             format = book.format,
             lecture = lecture,
             grounded = true,
+            numberedChapters = numberedChapters,
+            thinText = thinPdfText(book),
         )
+    }
+
+    /** First 24 PDF pages: fewer than a quarter have 20 non-space characters, or most pages came from OCR. */
+    private fun thinPdfText(book: Textbook): Boolean {
+        if (!book.format.equals("pdf", ignoreCase = true) || book.pages.isEmpty()) return false
+        val mostlyOcr = book.pages.count { it.ocr } * 2 >= book.pages.size
+        if (mostlyOcr) return true
+        val probe = book.pages.take(24)
+        if (probe.size < 3) return false
+        val readable = probe.count { page -> page.text.count { !it.isWhitespace() } >= 20 }
+        return readable * 4 < probe.size
     }
 }

@@ -348,7 +348,9 @@ internal class LiteratureInput(
                 refOutcomes[ref] = res
                 return res
             }
-            if (LiteraturePassages.isFootnoteSentence(a.quoteAnchor)) {
+            if (LiteraturePassages.isFootnoteSentence(a.quoteAnchor) ||
+                LiteraturePassages.followsFootnoteMarker(pageText, a.startUtf16)
+            ) {
                 val res = null to LiteraturePassages.FOOTNOTE_REJECTION
                 refOutcomes[ref] = res
                 return res

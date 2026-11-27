@@ -18,6 +18,7 @@ internal object LiteraturePassages {
         """(?i)^(?:endnotes?|footnotes?|notes(?:\s+to\s+(?:pages?|chapters?|the\s+text))?|参考文献|尾注|注释)\s*[:：]?$""",
     )
     private val bareNoteNumber = Regex("""^\d{1,3}[.)]?$""")
+    private val attachedNoteEnd = Regex("""(?<!\d)[.!?。！？]\d{1,3}\s*$""")
     private val noteNumberAtStart = Regex("""^(?:\[(\d{1,3})]|(?:(\d{1,3}))[.)]?)(?:\s|$)""")
     private val heading = Regex("""(?i)^(?:abstract|introduction|background|discussion|method(?:s|ology)?|results?|conclusions?|summary|appendix(?:\s+[A-Z0-9]+)?|引言|导言|摘要|背景|方法|结果|讨论|结论|小结|(?:[IVX]+\.|\d+(?:\.\d+)*[.)])\s+\p{L}.{1,80})$""")
     private val standaloneAbstract = Regex("""(?i)^(?:abstract|摘要)\s*[.:：]?$""")
@@ -104,6 +105,22 @@ internal object LiteraturePassages {
             bibliographyPageEnd.containsMatchIn(t)
     }
 
+    /**
+     * The span sits on the sentence after a footnote marker. A page number at the top has no
+     * finished sentence before it, so it does not mark the following body sentence.
+     */
+    fun followsFootnoteMarker(pageText: String, start: Int): Boolean {
+        if (start <= 0 || start > pageText.length) return false
+        val priorLines = pageText.substring(0, start).lineSequence().map(String::trim).toList()
+        val prevIndex = priorLines.indexOfLast(String::isNotEmpty)
+        if (prevIndex < 0) return false
+        val prev = priorLines[prevIndex]
+        if (attachedNoteEnd.containsMatchIn(prev)) return true
+        if (!isBareNoteNumber(prev)) return false
+        val number = noteNumber(prev) ?: return false
+        return number >= 10 && priorLines.take(prevIndex).any { endsSentence(it) }
+    }
+
     /** Notes heading. Sectioning should call this instead of keeping its own copy. */
     fun isNotesHeading(line: String): Boolean = notesBoundary.matches(line.trim())
 
@@ -144,8 +161,9 @@ internal object LiteraturePassages {
                 var bound = i + 1
                 while (bound < text.length && text[bound] in "”’\"')]") bound++
                 if (text.substring(start, bound).isNotBlank()) bounds += start to bound
-                start = bound
-                i = bound
+                val noteDigits = noteDigitsAfter(text, bound)
+                start = bound + noteDigits
+                i = start
             } else {
                 i++
             }
@@ -157,7 +175,22 @@ internal object LiteraturePassages {
     private fun closerFollows(text: String, period: Int): Boolean {
         var j = period + 1
         while (j < text.length && text[j] in "”’\"')]") j++
-        return j >= text.length || text[j].isWhitespace()
+        return j >= text.length || text[j].isWhitespace() || noteDigitsAfter(text, j) > 0
+    }
+
+    /** Digits glued to a sentence end, as in "meeting.12", are a note mark, not "3.14". */
+    private fun noteDigitsAfter(text: String, index: Int): Int {
+        var mark = index - 1
+        while (mark >= 0 && text[mark] in "”’\"')]") mark--
+        if (mark > 0 && text[mark] == '.' && text[mark - 1].isDigit()) return 0
+        var j = index
+        var digits = 0
+        while (j < text.length && text[j].isDigit() && digits < 3) {
+            digits++
+            j++
+        }
+        if (digits == 0) return 0
+        return if (j >= text.length || text[j].isWhitespace()) digits else 0
     }
 
     fun isBareNoteNumber(line: String): Boolean = bareNoteNumber.matches(line.trim())
@@ -371,8 +404,13 @@ internal object LiteraturePassages {
                         LiteratureScaffoldNoise.isSubfigureCaptionLine(regionLines, index)
                     val undelimitedCap = !delimitedCap && LiteratureScaffoldNoise.isUndelimitedCaptionStart(line)
                     val abstractMatch = if (page.number == 1) inlineAbstractLead.find(raw) else null
+                    val number = noteNumber(line) ?: 0
+                    val afterBody = !isEdge &&
+                        region.text.substring(0, offset.coerceAtMost(region.text.length)).lineSequence().any { endsSentence(it) }
+                    val midBare = isBareNoteNumber(line) && number >= 10 && afterBody
                     val marker = isBareNoteNumber(line) || note.containsMatchIn(line) ||
-                        (bottom && bottomBareNote.containsMatchIn(line))
+                        (bottom && bottomBareNote.containsMatchIn(line)) ||
+                        (bottomBareNote.containsMatchIn(line) && number >= 10 && afterBody)
                     val footnoteLine = line.isNotEmpty() && (isFootnoteSentence(line) || marker)
                     when {
                         backMatter -> break
@@ -402,7 +440,7 @@ internal object LiteraturePassages {
                         footnoteLine -> {
                             finishParagraph()
                             footnoteLines++
-                            if (bottom && marker) footnotes = true
+                            if ((bottom && marker) || midBare) footnotes = true
                         }
                         line.isBlank() -> {
                             if (start >= 0) {
@@ -424,6 +462,7 @@ internal object LiteraturePassages {
                             if (start < 0) start = offset
                             finish = offset + raw.length
                             proseLines++
+                            if (bottom && attachedNoteEnd.containsMatchIn(line)) footnotes = true
                         }
                     }
                     offset += raw.length + 1

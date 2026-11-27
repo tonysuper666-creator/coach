@@ -267,6 +267,39 @@ class LiteratureGuideTest {
         val mixedQuotes = quotesOf(mixed)
         assertTrue(mixedQuotes.any { "public record" in it }, mixedQuotes.joinToString("\n"))
         assertTrue(mixedQuotes.none { "p. 21" in it || "see V." in it || "on whom see" in it }, mixedQuotes.joinToString("\n"))
+
+        val before = (1..8).joinToString("\n") { n ->
+            "The repository kept a public record number $n across the whole season."
+        }
+        val tail = (1..14).joinToString("\n") { n ->
+            "Visitors described cabinet number $n in enough detail to reconstruct the arrangement."
+        }
+        val noteSentence = "The later note says the keeper left the public cabinets open for visitors."
+        val noted = "$before\n56\n$noteSentence\n$tail"
+        val notedQuotes = quotesOf(noted)
+        assertTrue(notedQuotes.any { "public record number 1" in it }, notedQuotes.joinToString("\n"))
+        assertTrue(notedQuotes.none { "public cabinets open" in it }, notedQuotes.joinToString("\n"))
+        val noteStart = noted.indexOf(noteSentence)
+        val noteBook = Textbook("shape", "Shape", "pdf", listOf(BookPage(1, noted, guideRegions = listOf(GuideRegion(noted)))))
+        val (noteHit, noteRule) = LiteratureCitationCheck.check(
+            listOf(GuideExcerpt(noteBook, BookCompanionAnchor(1, "n56", noteStart, noteStart + noteSentence.length, noteSentence), GuideRegion(noted))),
+            0,
+            "shape",
+            exactOcr,
+        )
+        assertNull(noteHit)
+        assertTrue(noteRule.startsWith("footer_note:"))
+        assertTrue(noteRule.substringAfter(':') != "footer_note")
+
+        val folioQuotes = quotesOf("21\n$before")
+        assertEquals(8, folioQuotes.size, folioQuotes.joinToString("\n"))
+        assertTrue(folioQuotes.any { "public record number 1" in it })
+
+        val attached = "$before\nThe repository kept a public record of the weekly meeting.12\n" +
+            "Worth noting here that later writers used a different shelf order for the public cabinets."
+        val attachedQuotes = quotesOf(attached)
+        assertTrue(attachedQuotes.any { "weekly meeting" in it }, attachedQuotes.joinToString("\n"))
+        assertTrue(attachedQuotes.none { "shelf order" in it }, attachedQuotes.joinToString("\n"))
     }
 
     @Test fun equalByteBudgetGuaranteesAtLeastFifteenSentencesPerPaper() {

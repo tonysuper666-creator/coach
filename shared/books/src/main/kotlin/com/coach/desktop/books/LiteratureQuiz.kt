@@ -402,7 +402,9 @@ internal object LiteratureQuiz {
         ) {
             return (null to "offset_mismatch:page=${anchor.pdfPage}").also { refOutcomes[ref] = it }
         }
-        if (LiteraturePassages.isFootnoteSentence(anchor.quoteAnchor)) {
+        if (LiteraturePassages.isFootnoteSentence(anchor.quoteAnchor) ||
+            LiteraturePassages.followsFootnoteMarker(pageText, anchor.startUtf16)
+        ) {
             return (null to LiteraturePassages.FOOTNOTE_REJECTION).also { refOutcomes[ref] = it }
         }
         if (!LiteraturePassages.bodySentence(anchor.quoteAnchor)) {

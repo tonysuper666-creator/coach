@@ -18,6 +18,9 @@ internal class EpubNavigation(packagePath: String, opf: Element, read: (String) 
     private val licenseLabelRegex = Regex("""(?i)^(?:The Full )?Project Gutenberg.*License.*$""")
     private val noteHeaderRegex = Regex("""^[□■※*\s]*(?:注\s*釋|注\s*释|附\s*注)[:：︰]?$""")
     private val bareChineseNumeralRegex = Regex("""^[一二三四五六七八九十百〇零]+$""")
+    private val authorCreditRegex = Regex("""^(?:[\p{IsHan}]{1,6}\s+)?[\p{IsHan}]{2,6}[著撰]$""")
+    private val calendarNoiseRegex = Regex("""^(?:◎.*|正[東西南北]|閏[正一二三四五六七八九十百]+|太初元年.*)$""")
+    private val shijiPartTitleRegex = Regex("""^(?:本紀|表|書|世家|列傳)$""")
     private val numberedChineseChapterRegex = Regex("""^第\s*[零〇一二三四五六七八九十百千万两0-9]+\s*[章节回篇].*$""")
     private val prefaceSuffixRegex = Regex("""(?:自\s*序|序\s*言?|前\s*言|代\s*序|导\s*言|導\s*言|引\s*言)$""")
     private val headingForbiddenPunctuation = "。！？，、；：︰:;,.!?“”‘’\"'「」『』…—()（）[]【】﹝﹞<>"
@@ -72,7 +75,7 @@ internal class EpubNavigation(packagePath: String, opf: Element, read: (String) 
             .mapNotNullTo(bodyTargets) { target(packageUri, it.getAttribute("href")) }
         val candidateNav = navEntries.ifEmpty { ncxEntries }
         val nonLicenseNav = candidateNav.filterNot { licenseLabelRegex.matches(it.label) }
-        if (nonLicenseNav.isNotEmpty() && nonLicenseNav.all { it.label.length >= 25 }) {
+        if (nonLicenseNav.isEmpty() || nonLicenseNav.all { it.label.length >= 25 }) {
             inferSpineHeadings(opf, manifest, read)
         }
         for (destination in navEntries.map { it.target } + ncxEntries.map { it.target } + inferredEntries.map { it.target } + bodyTargets) {
@@ -169,7 +172,7 @@ internal class EpubNavigation(packagePath: String, opf: Element, read: (String) 
         val entries = resolvedEntries()
         val nonLicense = entries.filterNot { licenseLabelRegex.matches(it.label) }
         val resolvedInferred = inferredEntries.filter { it.target in destinations }
-        if (nonLicense.isNotEmpty() && nonLicense.all(::copiedParagraph) && resolvedInferred.isNotEmpty()) {
+        if ((nonLicense.isEmpty() || nonLicense.all(::copiedParagraph)) && resolvedInferred.isNotEmpty()) {
             val preservedBackMatter = entries.filter { licenseLabelRegex.matches(it.label) }
             return (resolvedInferred + preservedBackMatter).map { entry ->
                 val anchor = destinations.getValue(entry.target)
@@ -201,7 +204,7 @@ internal class EpubNavigation(packagePath: String, opf: Element, read: (String) 
         val entries = resolvedEntries()
         if (entries.isEmpty()) return afterBoilerplate.values.firstOrNull()
         val nonLicense = entries.filterNot { licenseLabelRegex.matches(it.label) }
-        if (nonLicense.isNotEmpty() && nonLicense.all(::copiedParagraph) && inferredEntries.any { it.target in destinations }) {
+        if ((nonLicense.isEmpty() || nonLicense.all(::copiedParagraph)) && inferredEntries.any { it.target in destinations }) {
             return null
         }
         return entries.firstOrNull()?.takeIf(::copiedParagraph)?.let { afterBoilerplate[it.target.member] }
@@ -268,18 +271,33 @@ internal class EpubNavigation(packagePath: String, opf: Element, read: (String) 
             }
             walk(doc)
         }
+        if (bookTitle.isNotEmpty()) {
+            val prefixedCount = inferredEntries.count { it.label.startsWith("$bookTitle ") }
+            if (prefixedCount >= 5) {
+                inferredEntries.retainAll { entry ->
+                    entry.label.startsWith("$bookTitle ") ||
+                        shijiPartTitleRegex.matches(entry.label) ||
+                        prefaceSuffixRegex.containsMatchIn(entry.label)
+                }
+            }
+        }
     }
 
     private fun isStandaloneSpineHeading(txt: String, bookTitle: String, normBookTitle: String): Boolean {
         if (txt.length !in 1..18) return false
         if (txt.any { it in headingForbiddenPunctuation }) return false
-        if (noteHeaderRegex.matches(txt) || bareChineseNumeralRegex.matches(txt)) return false
+        if (noteHeaderRegex.matches(txt) || bareChineseNumeralRegex.matches(txt) ||
+            authorCreditRegex.matches(txt) || calendarNoiseRegex.matches(txt)
+        ) {
+            return false
+        }
         if (gutenbergCreditLine.matches(txt) || licenseLabelRegex.matches(txt)) return false
         val norm = cleanBookTitleForCompare(txt)
         if (norm.isEmpty()) return false
         if (normBookTitle.isNotEmpty()) {
             if (norm == normBookTitle) return false
-            if (bookTitle in txt && !prefaceSuffixRegex.containsMatchIn(txt) && txt.length <= bookTitle.length + 6) {
+            val isBookPrefixedVolume = txt.startsWith("$bookTitle ") && txt.removePrefix("$bookTitle ").trim().length >= 2
+            if (!isBookPrefixedVolume && bookTitle in txt && !prefaceSuffixRegex.containsMatchIn(txt) && txt.length <= bookTitle.length + 6) {
                 return false
             }
         }

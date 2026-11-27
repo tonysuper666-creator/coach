@@ -97,6 +97,8 @@ internal object BookText {
     }
 
     private val heading = Regex("(?im)^(?:#{1,6}\\s+[^\\r\\n]+|第\\s*[零〇一二三四五六七八九十百千万两0-9]+\\s*[章节篇][^\\r\\n]*|(?:Chapter|Section)\\s+(?:[0-9]+|[IVXLC]+)\\b[^\\r\\n]*)$")
+    private val shijiPartLine = Regex("""^(?:本紀|表|書|世家|列傳)$""")
+    private val shijiVolumeLine = Regex("""^史記\s+(?![\p{IsHan}]{2,6}[著撰]$)[\p{IsHan}]{2,18}$""")
 
     // A line-start chapter already splits the book. Only a wall of text with several
     // sentence-bound 第N章 markers (GBK dumps) needs those markers lifted onto their own lines.
@@ -108,9 +110,43 @@ internal object BookText {
     )
 
     internal fun exposeInlineNumberedChapters(text: String): String {
-        if (lineStartNumberedChapter.containsMatchIn(text)) return text
+        if (heading.containsMatchIn(text) || lineStartNumberedChapter.containsMatchIn(text)) return text
         if (inlineNumberedChapter.findAll(text).count() < 3) return text
         return inlineNumberedChapter.replace(text) { "\n\n${it.groupValues[1]}\n" }
+    }
+
+    private fun isolatedBookVolumeStarts(cleaned: String): List<Int> {
+        val lines = cleaned.split('\n')
+        val volumeOffsets = mutableListOf<Int>()
+        val partOffsets = mutableListOf<Int>()
+        var offset = 0
+        for (i in lines.indices) {
+            val raw = lines[i]
+            val trimmed = raw.trim()
+            val prevBlank = i == 0 || lines[i - 1].isBlank()
+            val nextBlank = i == lines.lastIndex || lines[i + 1].isBlank()
+            if (prevBlank && nextBlank) {
+                when {
+                    shijiVolumeLine.matches(trimmed) -> volumeOffsets += offset
+                    shijiPartLine.matches(trimmed) -> partOffsets += offset
+                }
+            }
+            offset += raw.length + 1
+        }
+        if (volumeOffsets.size < 5) return emptyList()
+        // If a PART divider immediately precedes a volume heading, start the chunk at the PART divider
+        // so the divider stays with the first volume of that part instead of dangling on the previous volume.
+        val merged = mutableListOf<Int>()
+        val usedParts = HashSet<Int>()
+        for (vol in volumeOffsets) {
+            val precedingPart = partOffsets.lastOrNull { it < vol && vol - it <= 32 }
+            if (precedingPart != null && usedParts.add(precedingPart)) {
+                merged += precedingPart
+            } else {
+                merged += vol
+            }
+        }
+        return merged
     }
 
     /** Optional section provenance uses offsets in clean(text), before its outer trim. */
@@ -119,7 +155,9 @@ internal object BookText {
         val leading = normalized.length - normalized.trimStart().length
         val cleaned = normalized.trim()
         require(cleaned.isNotBlank()) { "教材中没有可读取的文字。" }
-        val starts = (listOf(0) + heading.findAll(cleaned).map { it.range.first }).distinct().sorted()
+        val explicitStarts = heading.findAll(cleaned).map { it.range.first }.toList()
+        val volumeStarts = if (explicitStarts.isEmpty()) isolatedBookVolumeStarts(cleaned) else emptyList()
+        val starts = (listOf(0) + explicitStarts + volumeStarts).distinct().sorted()
         return starts.flatMapIndexed { i, start ->
             val raw = cleaned.substring(start, starts.getOrNull(i + 1) ?: cleaned.length)
             val local = TextbookExtraction.paginate(raw.trim())
@@ -130,7 +168,10 @@ internal object BookText {
 
     fun explicitHeadings(text: String) = heading.findAll(text)
 
-    fun chapterTitle(text: String): String? = heading.find(text)?.value?.trim()?.trimStart('#')?.trim()?.take(150)
+    fun chapterTitle(text: String): String? {
+        heading.find(text)?.value?.trim()?.trimStart('#')?.trim()?.take(150)?.let { return it }
+        return text.lineSequence().map(String::trim).firstOrNull { shijiVolumeLine.matches(it) }?.take(150)
+    }
 }
 
 /** Bounded reads only; no archive entry is extracted to disk or fetched from a URL. */

@@ -283,8 +283,13 @@ internal fun TextbookReader(
         val request = ++inlineRequest
         val secIdx = guideController.sectionIndexForAnchor(target.page, target.start).takeIf { it >= 0 } ?: currentSectionIndex
         val section = guideController.contextForSection(secIdx)
-        val secCtx = if (visibleContext != null) section?.copy(sectionBlocks = visibleContext)
+        val classicalCtx = ClassicalAnnotationLayer.buildExplainContext(book, target, book.lessons.getOrNull(secIdx))
+        val baseCtx = if (visibleContext != null) section?.copy(sectionBlocks = visibleContext)
             else inlineThread?.takeIf { it.selection == target }?.context ?: section
+        val secCtx = if (classicalCtx != null) {
+            baseCtx?.copy(annotationContext = classicalCtx)
+                ?: ExplainSectionContext(book.title, null, null, listOf(target), classicalCtx)
+        } else baseCtx
         if (action == SelectionExplainAction.ASK && questionText == null) {
             inlineThread = (inlineThread?.takeIf { it.selection == target }
                 ?: InlineExplainThread(target, secCtx)).copy(askingOpen = true, loading = false, error = null)
@@ -1956,6 +1961,17 @@ internal fun TextbookReader(
                                     targetPage.text.substring(anchor.startUtf16, anchor.endUtf16) == anchor.quoteAnchor
                                 ) {
                                     BookPassage(book.id, anchor.pdfPage, anchor.startUtf16, anchor.endUtf16, anchor.quoteAnchor)
+                                } else if (targetPage != null && anchor.quoteAnchor.isNotBlank()) {
+                                    val gate = SentenceCitationGate.verifyOrSnapAnchor(anchor.quoteAnchor, targetPage.text)
+                                    if (gate.verified && gate.startUtf16 in 0 until gate.endUtf16 && gate.endUtf16 <= targetPage.text.length) {
+                                        BookPassage(
+                                            book.id,
+                                            anchor.pdfPage,
+                                            gate.startUtf16,
+                                            gate.endUtf16,
+                                            targetPage.text.substring(gate.startUtf16, gate.endUtf16),
+                                        )
+                                    } else null
                                 } else null
                                 if (exactPassage != null) {
                                     handleCitationJump(exactPassage)

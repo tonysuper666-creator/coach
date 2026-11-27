@@ -153,6 +153,7 @@ internal object StudyCoachCourse {
                 if (i >= len) break
                 pending.setLength(0)
                 var pendingStart = i
+                var skipLeadingNewline = false
                 fun flush() {
                     if (pending.isNotBlank()) {
                         val full = pending.toString()
@@ -199,6 +200,7 @@ internal object StudyCoachCourse {
                         )
                     } else {
                         if (pending.isEmpty()) pendingStart = lineStart
+                        else if (skipLeadingNewline) skipLeadingNewline = false
                         else pending.append('\n')
                         pending.append(text, lineStart, lineEnd)
                     }
@@ -207,7 +209,33 @@ internal object StudyCoachCourse {
                         i + 1 < len && text[i] == '\r' && text[i + 1] == '\n' -> i + 2
                         else -> -1
                     }
-                    if (nextStart < 0 || nextStart >= len || text[nextStart] == '\r' || text[nextStart] == '\n') break
+                    if (nextStart < 0 || nextStart >= len) break
+                    val nextIsBlank = text[nextStart] == '\r' || text[nextStart] == '\n'
+                    if (nextIsBlank) {
+                        // Keep standalone classical passage numbers (e.g. "一之一") attached to the immediately
+                        // following quote paragraph on the same page, preserving exact UTF-16 slices.
+                        val pendingNum = pending.toString().trim()
+                        if (ClassicalAnnotationLayer.isClassicalChapterNumberLine(pendingNum)) {
+                            var afterBlank = nextStart
+                            while (afterBlank < len && (text[afterBlank] == '\r' || text[afterBlank] == '\n')) afterBlank++
+                            if (afterBlank < len) {
+                                val nextLineEnd = text.indexOf('\n', afterBlank).let { if (it < 0) len else it }
+                                    .let { if (it > afterBlank && text[it - 1] == '\r') it - 1 else it }
+                                var nt = afterBlank
+                                while (nt < nextLineEnd && text[nt] <= ' ') nt++
+                                val nextIsHeading = (nextLineEnd - afterBlank) <= 150 && nt < nextLineEnd &&
+                                    mightMatchCourseHeading(text, nt, nextLineEnd) &&
+                                    heading.matches(text.substring(afterBlank, nextLineEnd).trim())
+                                if (!nextIsHeading && (nextLineEnd - pendingStart) <= 2400) {
+                                    pending.append(text, lineEnd, afterBlank)
+                                    skipLeadingNewline = true
+                                    i = afterBlank
+                                    continue
+                                }
+                            }
+                        }
+                        break
+                    }
                     var k = nextStart
                     while (k < len && (text[k] == ' ' || text[k] == '\t' || text[k] == '\u000B' || text[k] == '\u000C')) k++
                     if (k < len && (text[k] == '\n' || (text[k] == '\r' && k + 1 < len && text[k + 1] == '\n'))) break

@@ -185,12 +185,32 @@ private fun ChapterOpenAnswerBody(
                 val point = question.points.firstOrNull { it.page == page && it.quoteAnchor == quote }
                     ?: question.points.firstOrNull { it.id == attempt.items.getOrNull(0)?.id }
                 if (point != null) {
+                    val block = blocks.firstOrNull { it.id == point.blockId }
+                    val resolvedRange = if (block != null && point.startUtf16 in 0 until block.start) {
+                        val inBlock = block.text.indexOf(point.quoteAnchor)
+                        if (inBlock >= 0) {
+                            val absStart = block.start + inBlock
+                            absStart to (absStart + point.quoteAnchor.length)
+                        } else {
+                            point.startUtf16 to point.endUtf16
+                        }
+                    } else if (block != null && point.startUtf16 == 0 && block.start > 0) {
+                        val inBlock = block.text.indexOf(point.quoteAnchor)
+                        if (inBlock >= 0) {
+                            val absStart = block.start + inBlock
+                            absStart to (absStart + point.quoteAnchor.length)
+                        } else {
+                            point.startUtf16 to point.endUtf16
+                        }
+                    } else {
+                        point.startUtf16 to point.endUtf16
+                    }
                     onOpenAnchor(
                         BookCompanionAnchor(
                             pdfPage = point.page,
                             blockId = point.blockId,
-                            startUtf16 = point.startUtf16,
-                            endUtf16 = point.endUtf16,
+                            startUtf16 = resolvedRange.first,
+                            endUtf16 = resolvedRange.second,
                             quoteAnchor = point.quoteAnchor,
                         ),
                     )

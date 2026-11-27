@@ -145,8 +145,9 @@ fun Application.practiceGradeRoutes(
                         val id = (o["id"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
                         val page = (o["page"] as? JsonPrimitive)?.intOrNull ?: 0
                         val text = (o["text"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                        val startUtf16 = ((o["startUtf16"] as? JsonPrimitive)?.intOrNull ?: 0).coerceAtLeast(0)
                         if (id.isBlank() || page <= 0 || text.isBlank()) null
-                        else ChapterOpenSourceBlock(id, page, text.take(900))
+                        else ChapterOpenSourceBlock(id, page, text.take(900), startUtf16)
                     }
                     val pack = activeService.generateChapterOpen(bookId, chapterId, blocks, friend, device)
                     val body = buildJsonObject {

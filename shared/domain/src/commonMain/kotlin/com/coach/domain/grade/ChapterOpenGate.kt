@@ -36,6 +36,7 @@ data class ChapterOpenSourceBlock(
     val id: String,
     val page: Int,
     val text: String,
+    val startUtf16: Int = 0,
 )
 
 data class ChapterOpenRawPoint(
@@ -160,14 +161,20 @@ object ChapterOpenGate {
             if (copiesSource(claim, block.text)) continue
             val placed = placeAnchor(anchor, block.text) ?: continue
             seen += id
+            val baseStart = if (block.startUtf16 > 0) {
+                block.startUtf16
+            } else {
+                block.id.substringAfter(":p${block.page}:", "").toIntOrNull()?.coerceAtLeast(0) ?: 0
+            }
+            val startUtf16 = baseStart + placed.second
             accepted += ChapterOpenAcceptedPoint(
                 id = id,
                 claim = claim,
                 blockId = block.id,
                 page = block.page,
                 quoteAnchor = placed.first,
-                startUtf16 = placed.second,
-                endUtf16 = placed.second + placed.first.length,
+                startUtf16 = startUtf16,
+                endUtf16 = startUtf16 + placed.first.length,
             )
         }
         return accepted
@@ -261,13 +268,75 @@ object ChapterOpenGate {
         if (raw.length < 4 || text.isEmpty()) return null
         if (raw.length <= 40) {
             val at = text.indexOf(raw)
-            return if (at >= 0) raw to at else null
+            if (at >= 0) return raw to at
+        } else {
+            for (len in 40 downTo 4) {
+                val slice = raw.substring(0, len).trimEnd()
+                if (slice.length < 4) continue
+                val at = text.indexOf(slice)
+                if (at >= 0) return slice to at
+            }
         }
-        for (len in 40 downTo 4) {
-            val slice = raw.substring(0, len).trimEnd()
-            if (slice.length < 4) continue
-            val at = text.indexOf(slice)
-            if (at >= 0) return slice to at
+        return placeAnchorNormalized(raw, text)
+    }
+
+    private fun placeAnchorNormalized(raw: String, text: String): Pair<String, Int>? {
+        val hasCjk = raw.any { it.code in 0x4E00..0x9FFF || it.code in 0x3400..0x4DBF }
+        val normText = StringBuilder(text.length)
+        val normToRaw = IntArray(text.length)
+        var prevSpace = false
+        for (i in text.indices) {
+            val ch = text[i]
+            if (ch.isWhitespace()) {
+                if (!hasCjk && normText.isNotEmpty() && !prevSpace) {
+                    normToRaw[normText.length] = i
+                    normText.append(' ')
+                    prevSpace = true
+                }
+            } else {
+                normToRaw[normText.length] = i
+                normText.append(ch)
+                prevSpace = false
+            }
+        }
+        val normAnchor = buildString(raw.length) {
+            var space = false
+            for (ch in raw) {
+                if (ch.isWhitespace()) {
+                    if (!hasCjk && isNotEmpty() && !space) {
+                        append(' ')
+                        space = true
+                    }
+                } else {
+                    append(ch)
+                    space = false
+                }
+            }
+        }.trim()
+        if (normAnchor.length < 4 || normText.isEmpty()) return null
+        val haystack = normText.toString()
+        val maxLen = minOf(normAnchor.length, 40)
+        for (len in maxLen downTo 4) {
+            val needle = normAnchor.substring(0, len).trimEnd()
+            if (needle.length < 4) continue
+            val atNorm = haystack.indexOf(needle)
+            if (atNorm < 0) continue
+            val rawStart = normToRaw[atNorm]
+            var rawEnd = normToRaw[atNorm + needle.length - 1] + 1
+            if (rawEnd - rawStart > 40) {
+                var shrunkLen = needle.length - 1
+                while (shrunkLen >= 4) {
+                    val candidateEnd = normToRaw[atNorm + shrunkLen - 1] + 1
+                    if (candidateEnd - rawStart <= 40) {
+                        rawEnd = candidateEnd
+                        break
+                    }
+                    shrunkLen--
+                }
+                if (rawEnd - rawStart > 40 || shrunkLen < 4) continue
+            }
+            val exactSlice = text.substring(rawStart, rawEnd)
+            if (exactSlice.length in 4..40) return exactSlice to rawStart
         }
         return null
     }

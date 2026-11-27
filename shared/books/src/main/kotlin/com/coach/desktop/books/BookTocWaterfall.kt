@@ -65,7 +65,7 @@ internal object BookTocWaterfall {
         RegexOption.IGNORE_CASE,
     )
     private val BACK_MATTER_TITLE = Regex(
-        """^(?:Bibliography|References|Works\s+Cited|(?:Author|Subject|Name|General)\s+Index|Index|Glossary|Endnotes|参考文献|引用文献|索\s*引|主题索引|人名索引|后\s*记)$""",
+        """^(?:Bibliography|References|Works\s+Cited|(?:Author|Subject|Name|General)\s+Index|Index|Glossary|Endnotes|参考文献|引用文献|索\s*引|主题索引|人名索引|后\s*记|跋|[\p{IsHan}]{1,6}跋|經典釋文|[\p{IsHan}]{2,10}音義|注\s*釋|註\s*釋)$""",
         RegexOption.IGNORE_CASE,
     )
     private val APPENDIX_TITLE = Regex(
@@ -73,7 +73,7 @@ internal object BookTocWaterfall {
         RegexOption.IGNORE_CASE,
     )
     private val PART_PREFIX = Regex(
-        """^(?:Part\s+([IVXLC]+|\d+)(?:[:：\.\s\-–—]+(.*))?|([IVXLC]+)\s*[:：]\s*(.+)|第([一二三四五六七八九十百千0-9]+)[编篇部](?:[\s：:·\-—]+(.*))?)$""",
+        """^(?:Part\s+([IVXLC]+|\d+)(?:[:：\.\s\-–—]+(.*))?|([IVXLC]+)\s*[:：]\s*(.+)|第([一二三四五六七八九十百千0-9]+)[编篇部](?:[\s：:·\-—]+(.*))?|(?:.{1,18}?《[^》]{1,20}》\s*)?([上中下][篇卷]))$""",
         RegexOption.IGNORE_CASE,
     )
     private val BOOK_PREFIX = Regex("""(?i)^Book\s+([IVXLC]+|\d+)[.:]\s+.+$""")
@@ -99,7 +99,9 @@ internal object BookTocWaterfall {
     private val CHAPTER_LEADING_NUM = Regex(
         """^(\d{1,2})[.:：]?\s+(.+)$""",
     )
-    private val CN_CHAPTER_PREFIX = Regex("""^(第[一二三四五六七八九十百千0-9]+章)(?:[\s：:·\-—]*(.*))?$""")
+    private val CN_CHAPTER_PREFIX = Regex("""^(第?[零〇一二三四五六七八九十百千0-9]+章)(?:[\s：:·\-—]*(.*))?$""")
+    private val CN_EXPLICIT_CHAPTER = Regex("""^(第[零〇一二三四五六七八九十百千0-9]+章|[零〇一二三四五六七八九十百千]+章)$""")
+    private val CN_COLLATION_SUBSECTION = Regex("""^(?:校勘記|校勘记)$""")
     private val CN_SECTION_PREFIX = Regex("""^(第[一二三四五六七八九十百千0-9]+[节讲课单元])(?:[\s：:·\-—]+(.*))?$""")
     private val CN_NUM_L1 = Regex("""^([一二三四五六七八九十百]+)[、.．]\s*(.+)$""")
     private val CN_NUM_L2 = Regex("""^([（(][一二三四五六七八九十0-9]+[）)])\s*(.+)$""")
@@ -268,7 +270,7 @@ internal object BookTocWaterfall {
         }
         BOOK_PREFIX.matchEntire(cleaned)?.let { return ClassifiedOutline(TocNodeKind.PART, it.groupValues[1], cleaned) }
         PART_PREFIX.matchEntire(cleaned)?.let { m ->
-            val label = listOf(m.groupValues[1], m.groupValues[3], m.groupValues[5]).firstOrNull { it.isNotEmpty() }
+            val label = listOf(m.groupValues[1], m.groupValues[3], m.groupValues[5], m.groupValues[6]).firstOrNull { it.isNotEmpty() }
             return ClassifiedOutline(TocNodeKind.PART, label, cleaned)
         }
         BARE_PART_ROMAN_WITH_TITLE.matchEntire(cleaned)?.let { m ->
@@ -303,8 +305,11 @@ internal object BookTocWaterfall {
                 return ClassifiedOutline(TocNodeKind.CHAPTER, m.groupValues[1], cleaned, chapterNumberHint = chNum)
             }
         }
+        if (CN_COLLATION_SUBSECTION.matches(cleaned) && rawLevel >= 2) {
+            return ClassifiedOutline(TocNodeKind.SUBSECTION, null, cleaned)
+        }
         CN_CHAPTER_PREFIX.matchEntire(cleaned)?.let { m ->
-            val kind = if (rawLevel >= 2) TocNodeKind.SECTION else TocNodeKind.CHAPTER
+            val kind = if (rawLevel >= 2 && !CN_EXPLICIT_CHAPTER.matches(m.groupValues[1])) TocNodeKind.SECTION else TocNodeKind.CHAPTER
             return ClassifiedOutline(kind, m.groupValues[1], cleaned)
         }
         CN_NUM_L1.matchEntire(cleaned)?.let { m ->
@@ -330,7 +335,7 @@ internal object BookTocWaterfall {
         val raw = externalOutline.map {
             RawCandidate(it.title, it.level, it.page.coerceIn(1, totalPages.coerceAtLeast(1)), null, it.source, startOffset = it.startOffset)
         }
-        val tocNodes = buildCanonicalNodes(bookId, totalPages.coerceAtLeast(1), raw, confidence = if (raw.isNotEmpty()) 1.0 else 0.0)
+        val tocNodes = buildCanonicalNodes(bookId, totalPages.coerceAtLeast(1), raw, confidence = if (raw.isNotEmpty()) 1.0 else 0.0, bookTitle = title)
         val firstBodyPage = BookBoundaries.firstChapter(tocNodes)?.startPage
         val pageRoles = buildMap {
             for (p in 1..totalPages.coerceAtLeast(1)) {
@@ -378,7 +383,7 @@ internal object BookTocWaterfall {
                 pdfHeadingOffset(pageByNumber[it.page]?.text.orEmpty(), it.title) else it.startOffset
             RawCandidate(it.title, it.level, it.page, null, it.source, startOffset = offset)
         }
-        val stageANodes = buildCanonicalNodes(bookId, totalPages, stageARaw, confidence = 1.0)
+        val stageANodes = buildCanonicalNodes(bookId, totalPages, stageARaw, confidence = 1.0, bookTitle = bookTitle)
         if (stageARaw.isNotEmpty()) {
             val refinedRoles = refinePageRolesWithToc(pages, initialRoles, stageANodes, byPage, nativeBodyStart = nativeBodyStart)
             val (chunks, sections, lessons) = buildStudyChunks(bookId, bookTitle, pages, refinedRoles, stageANodes, byPage, nativeBodyStart)
@@ -398,7 +403,7 @@ internal object BookTocWaterfall {
 
         // Stage C: Typography clustering + strict negative filters (slides, academic papers, scanned OCR)
         val effectiveTypo = typographyLines.ifEmpty { deriveTypographyFromLayouts(pages) }
-        val stageC = runStageC(bookId, pages, initialRoles, byPage, effectiveTypo, repeatingEdges, totalPages, format)
+        val stageC = runStageC(bookId, bookTitle, pages, initialRoles, byPage, effectiveTypo, repeatingEdges, totalPages, format)
         val finalNodes = stageC.nodes
         val finalConf = stageC.confidence
         val finalSource = stageC.source
@@ -536,6 +541,7 @@ internal object BookTocWaterfall {
         totalPages: Int,
         candidates: List<RawCandidate>,
         confidence: Double,
+        bookTitle: String = "",
     ): List<BookTocNode> {
         if (candidates.isEmpty()) return emptyList()
         data class ClassifiedItem(
@@ -543,19 +549,59 @@ internal object BookTocWaterfall {
             val info: ClassifiedOutline,
         )
         val epub = candidates.first().source == HeadingSource.EPUB_TOC
-        val firstExplicitChapter = if (epub) candidates.indexOfFirst { cand ->
+        val chroniclePartMode = candidates.count { it.rawTitle.startsWith("史記 ") } >= 5
+        val normTitleCompare = normalizeComparable(bookTitle.replace(Regex("""[（(][^）)]*[）)]"""), ""))
+        val firstCand = candidates.firstOrNull()
+        val bodyFollowing = candidates.drop(1).filter { !BACK_MATTER_TITLE.matches(cleanTocTitle(it.rawTitle)) }
+        val soleLeadingH1Rule = !epub && firstCand != null && firstCand.rawLevel == 1 &&
+            firstCand.source == HeadingSource.HEADING_RULE &&
+            bodyFollowing.size >= 3 &&
+            bodyFollowing.all { it.rawLevel >= 2 } &&
+            cleanTocTitle(firstCand.rawTitle).let { t ->
+                !CHAPTER_EXPLICIT.matches(t) && !CN_CHAPTER_PREFIX.matches(t) && !PART_PREFIX.matches(t)
+            }
+        val matchesBookTitleH1 = !epub && normTitleCompare.isNotEmpty() && firstCand?.let { first ->
+            first.rawLevel == 1 &&
+                (normalizeComparable(first.rawTitle) == normTitleCompare ||
+                    normalizeComparable(first.rawTitle.replace(Regex("""[（(][^）)]*[）)]"""), "")) == normTitleCompare)
+        } == true && candidates.drop(1).any { it.rawLevel >= 2 }
+        val hasH1BookTitle = matchesBookTitleH1 || soleLeadingH1Rule
+        val minSubLevel = candidates.drop(if (hasH1BookTitle) 1 else 0)
+            .filter { !BACK_MATTER_TITLE.matches(cleanTocTitle(it.rawTitle)) }
+            .minOfOrNull { it.rawLevel } ?: 1
+        val shiftHierarchy = !epub && (hasH1BookTitle || (minSubLevel >= 2 && candidates.all { it.source == HeadingSource.HEADING_RULE }))
+        val effectiveCandidates = if (shiftHierarchy) {
+            val shift = (minSubLevel - 1).coerceAtLeast(1)
+            candidates.mapIndexed { idx, cand ->
+                if (hasH1BookTitle && idx == 0) cand.copy(explicitKind = TocNodeKind.FRONT_MATTER)
+                else cand.copy(rawLevel = (cand.rawLevel - shift).coerceAtLeast(1))
+            }
+        } else candidates
+
+        val firstExplicitChapter = if (epub) effectiveCandidates.indexOfFirst { cand ->
             classifyOutlineLabel(cand.rawTitle, cand.rawLevel).let { info ->
                 info.kind == TocNodeKind.CHAPTER && info.numberLabel != null
             } || (cand.rawLevel <= 3 && ROMAN_CHAPTER.matches(cand.rawTitle))
         } else -1
-        val lastExplicitChapter = if (firstExplicitChapter >= 0) candidates.indexOfLast {
+        val lastExplicitChapter = if (firstExplicitChapter >= 0) effectiveCandidates.indexOfLast {
             (classifyOutlineLabel(it.rawTitle, it.rawLevel).let { info ->
                 info.kind == TocNodeKind.CHAPTER && info.numberLabel != null
             }) || (it.rawLevel <= 3 && ROMAN_CHAPTER.matches(it.rawTitle))
         } else -1
-        val filtered = candidates.mapIndexedNotNull { index, cand ->
+        var seenChapter = false
+        var inBackMatter = false
+        val filtered = effectiveCandidates.mapIndexedNotNull { index, cand ->
             val classified = classifyOutlineLabel(cand.rawTitle, cand.rawLevel)
             val info = when {
+                chroniclePartMode && ClassicalAnnotationLayer.isShijiPartTitle(classified.title) ->
+                    classified.copy(kind = TocNodeKind.PART)
+                chroniclePartMode && classified.title.startsWith("史記 ") ->
+                    classified.copy(kind = TocNodeKind.CHAPTER)
+                !epub && inBackMatter && classified.kind != TocNodeKind.BACK_MATTER ->
+                    classified.copy(kind = TocNodeKind.BACK_MATTER)
+                !epub && seenChapter && cand.rawLevel == 1 && classified.kind == TocNodeKind.FRONT_MATTER &&
+                    cand.source == HeadingSource.HEADING_RULE ->
+                    classified.copy(kind = TocNodeKind.CHAPTER)
                 !epub -> classified
                 classified.title == "正文" -> classified.copy(kind = TocNodeKind.SECTION)
                 cand.rawLevel <= 3 && ROMAN_CHAPTER.matches(cand.rawTitle) ->
@@ -565,9 +611,11 @@ internal object BookTocWaterfall {
                         else if (index > lastExplicitChapter) TocNodeKind.BACK_MATTER else TocNodeKind.SECTION)
                 else -> classified
             }
-            if (info.isScaffoldNoise || info.title.isEmpty()) null
-            else if (cand.explicitKind != null) ClassifiedItem(cand, info.copy(kind = cand.explicitKind))
-            else ClassifiedItem(cand, info)
+            val finalInfo = if (cand.explicitKind != null) info.copy(kind = cand.explicitKind) else info
+            if (finalInfo.kind == TocNodeKind.CHAPTER) seenChapter = true
+            if (finalInfo.kind == TocNodeKind.BACK_MATTER) inBackMatter = true
+            if (finalInfo.isScaffoldNoise || finalInfo.title.isEmpty()) null
+            else ClassifiedItem(cand, finalInfo)
         }
         if (filtered.isEmpty()) return emptyList()
 
@@ -1049,8 +1097,46 @@ internal object BookTocWaterfall {
         return if (titles.size >= 3) found else emptyList()
     }
 
+    private val isolatedPrefixedVolumeTitle = Regex(
+        """(?:\A|\n[\t \p{Zs}]*\n)[\t \p{Zs}]*(史記\s+[\p{IsHan}]{2,18}|本紀|表|書|世家|列傳)[\t \p{Zs}]*(?=\n[\t \p{Zs}]*\n|\n?\z)""",
+    )
+
+    private fun textChronicleVolumeHeadings(pages: List<BookPage>): List<RawCandidate> {
+        val found = mutableListOf<RawCandidate>()
+        var volumeCount = 0
+        for (page in pages) {
+            val endOfWork = BookBoundaries.gutenbergEndOffset(page.text)
+            val body = endOfWork?.let { page.text.substring(0, it) } ?: page.text
+            for (match in isolatedPrefixedVolumeTitle.findAll(body)) {
+                val group = match.groups[1] ?: continue
+                val title = group.value.trim()
+                if (Regex("""^史記\s+[\p{IsHan}]{2,6}[著撰]$""").matches(title)) continue
+                val isPart = ClassicalAnnotationLayer.isShijiPartTitle(title)
+                if (!isPart) volumeCount++
+                found += RawCandidate(
+                    rawTitle = title,
+                    rawLevel = if (isPart) 1 else 2,
+                    page = page.number,
+                    printedPage = null,
+                    source = HeadingSource.TEXT_LAYOUT,
+                    explicitKind = if (isPart) TocNodeKind.PART else TocNodeKind.CHAPTER,
+                    startOffset = group.range.first,
+                )
+            }
+            if (endOfWork != null) {
+                found += RawCandidate(
+                    "License", 1, page.number, null,
+                    HeadingSource.TEXT_LAYOUT, TocNodeKind.BACK_MATTER, endOfWork,
+                )
+                break
+            }
+        }
+        return if (volumeCount >= 5) found else emptyList()
+    }
+
     private fun runStageC(
         bookId: String,
+        bookTitle: String,
         pages: List<BookPage>,
         pageRoles: Map<Int, BookPageRole>,
         byPage: Map<Int, List<SourceBlock>>,
@@ -1060,9 +1146,9 @@ internal object BookTocWaterfall {
         format: String,
     ): StageCResult {
         if (format == "txt") {
-            val headings = textCollectionHeadings(pages)
+            val headings = textCollectionHeadings(pages).ifEmpty { textChronicleVolumeHeadings(pages) }
             if (headings.isNotEmpty()) {
-                return StageCResult(buildCanonicalNodes(bookId, totalPages, headings, 0.9), HeadingSource.TEXT_LAYOUT, 0.9)
+                return StageCResult(buildCanonicalNodes(bookId, totalPages, headings, 0.9, bookTitle), HeadingSource.TEXT_LAYOUT, 0.9)
             }
         }
         val bodyPages = pages.filter { (pageRoles[it.number] ?: BookPageRole.BODY) == BookPageRole.BODY }
@@ -1133,10 +1219,11 @@ internal object BookTocWaterfall {
             } else if (pageRoles[page.number] != BookPageRole.REFERENCES) {
                 // No PDF font info (OCR / synthetic text): use strict negative-filtered block headings.
                 for (block in byPage[page.number].orEmpty()) {
-                    val firstLine = cleanTocTitle(block.text.lineSequence().firstOrNull().orEmpty())
+                    val rawFirstLine = block.text.lineSequence().firstOrNull().orEmpty().trim()
+                    val firstLine = cleanTocTitle(rawFirstLine)
                     if (firstLine.isEmpty()) continue
                     if (!block.heading && isRejectedHeadingCandidate(firstLine, repeatingEdges, false)) continue
-                    val matched = BookStructurePlanner.matchHeadingRule(firstLine, block.heading)
+                    val matched = BookStructurePlanner.matchHeadingRule(rawFirstLine, block.heading)
                     val isAcademicName = firstLine.lowercase().trimEnd(':') in ACADEMIC_NAMED_HEADINGS
                     if (matched != null) {
                         candidates += RawCandidate(matched.title, matched.level, page.number, null, HeadingSource.HEADING_RULE, startOffset = block.start)
@@ -1152,7 +1239,7 @@ internal object BookTocWaterfall {
             val fallbackSource = if (format == "docx") HeadingSource.WORD_STYLE else HeadingSource.FALLBACK_LENGTH
             return StageCResult(emptyList(), fallbackSource, 0.0)
         }
-        val nodes = buildCanonicalNodes(bookId, totalPages, filtered, confidence = 0.90)
+        val nodes = buildCanonicalNodes(bookId, totalPages, filtered, confidence = 0.90, bookTitle = bookTitle)
         val coveredBodyPages = activePages.count { p -> nodes.any { p.number in it.startPage..it.endPage } }
         val coverage = coveredBodyPages.toDouble() / activePages.size.coerceAtLeast(1)
         val bodyNodesCount = nodes.count { it.kind in BODY_NODE_KINDS }
@@ -1411,9 +1498,13 @@ internal object BookTocWaterfall {
                 val anchoredNodes = pageNodes.filter { node ->
                     node.usesSourceOffset && node.id !in consumedNodes && node.startOffset <= block.start
                 }
+                var anchoredHeadingMatched = false
                 for (node in anchoredNodes.sortedBy { it.startOffset }) {
                     currentNodeIdx = bodyNodes.indexOf(node)
                     activateNode(node)
+                    if (!block.heading && titlesMatch(cleanTocTitle(block.text), node.title)) {
+                        anchoredHeadingMatched = true
+                    }
                 }
                 val matchedNode = pageNodes.firstOrNull { node ->
                     !node.usesSourceOffset && node.id !in consumedNodes &&
@@ -1434,7 +1525,7 @@ internal object BookTocWaterfall {
                             activateNode(nextNode)
                         }
                     }
-                    ensureFallbackGroup().blocks += block
+                    ensureFallbackGroup().blocks += if (anchoredHeadingMatched) block.copy(heading = true) else block
                 }
             }
         } else {
